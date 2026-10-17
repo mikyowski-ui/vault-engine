@@ -164,6 +164,7 @@ dependencies = [
  "clap",
  "tempfile",
  "vault-formats",
+ "vault-vm",
 ]
 
 [[package]]
@@ -2227,6 +2228,9 @@ dependencies = [
 [[package]]
 name = "vault-vm"
 version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "version_check"

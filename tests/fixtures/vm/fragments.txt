@@ -1,0 +1,12 @@
+# name | instruction bytes | expected stack bytes (payload before tag)
+subtract | C0 01 00 00 00 07 C0 01 00 00 00 03 80 3A | 00 00 00 04 C0 01
+divide-negative | C0 01 FF FF FF F9 C0 01 00 00 00 03 80 3C | FF FF FF FE C0 01
+float-truncate | A0 01 BF E0 00 00 80 44 | FF FF FF FF C0 01
+static-string | 90 01 00 00 00 06 | 00 00 00 06 90 01
+not-negative-zero | A0 01 80 00 00 00 80 45 | 00 00 00 00 C0 01
+raw-negate | A0 01 3F C0 00 00 80 46 | C0 40 00 00 C0 01
+promote-positive-limit | C0 01 00 00 00 00 C0 01 7F FF FF FF 80 39 | 4F 00 00 00 A0 01
+retain-positive-limit | C0 01 7F FF FF FF C0 01 00 00 00 00 80 39 | 7F FF FF FF C0 01
+float-bitwise-quirk | A0 01 3F 80 00 01 C0 01 FF FF FF FF 80 40 | 3F 80 00 00 C0 01
+changing-discard | C0 01 00 00 00 07 C0 01 00 00 00 00 C0 01 00 00 00 02 80 2E | 00 00 00 07 C0 01
+true-loop | C0 01 00 00 00 12 C0 01 00 00 00 01 80 30 | 00 00 00 12 C0 01

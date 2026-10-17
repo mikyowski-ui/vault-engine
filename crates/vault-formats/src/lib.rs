@@ -3,17 +3,25 @@
 mod binary;
 pub mod font;
 pub mod frm;
+pub mod geometry;
 pub mod lst;
+pub mod map;
 pub mod msg;
 pub mod palette;
+pub mod pro;
+pub mod pro_catalog;
 pub mod vfs;
 
 pub use binary::{MAX_ASSET_BYTES, ParseError};
 pub use font::{Font, FontKind};
 pub use frm::FrmArchive;
+pub use geometry::HexGrid;
 pub use lst::{LstKind, LstTable};
+pub use map::MapFile;
 pub use msg::{MsgCatalog, TextMode};
 pub use palette::Palette;
+pub use pro::Prototype;
+pub use pro_catalog::LocalPrototypeCatalog;
 pub use vfs::{LocalDirProvider, Vfs, VfsError, VfsPath};
 
 /// Validate a supported asset. Unknown extensions return `None`.
@@ -28,9 +36,18 @@ pub fn validate_asset(path: &VfsPath, bytes: &[u8]) -> Option<Result<(), ParseEr
         "aaf" => Font::parse_aaf(bytes).map(|_| ()),
         "lst" => LstTable::parse(bytes, LstKind::for_path(path)).map(|_| ()),
         "msg" => MsgCatalog::parse(bytes).map(|_| ()),
+        "pro" => Prototype::parse(bytes).map(|_| ()),
         _ => return None,
     })
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod world_tests;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/formats/support.rs"]
+pub(crate) mod fixture_assets;

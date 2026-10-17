@@ -1,13 +1,17 @@
 use std::{error::Error, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
-use vault_formats::{LocalDirProvider, MAX_ASSET_BYTES, Vfs, validate_asset};
+use vault_formats::{
+    LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, Vfs, validate_asset,
+};
+use vault_vm::IntProgram;
 
 const EXTENSIONS: [&str; 9] = [
     "frm", "pal", "fon", "aaf", "pro", "map", "int", "msg", "lst",
 ];
-const VALIDATED: [&str; 12] = [
-    "pal", "frm", "fr0", "fr1", "fr2", "fr3", "fr4", "fr5", "lst", "fon", "aaf", "msg",
+const VALIDATED: [&str; 15] = [
+    "pal", "frm", "fr0", "fr1", "fr2", "fr3", "fr4", "fr5", "lst", "fon", "aaf", "msg", "pro",
+    "map", "int",
 ];
 
 #[derive(Parser)]
@@ -16,13 +20,14 @@ struct Args {
     /// Unpacked directory containing art/, data/, color.pal, fonts, etc.
     #[arg(long, value_name = "PATH")]
     corpus_dir: PathBuf,
-    /// Parse all PAL, FRM/FR0-FR5, LST, FON, AAF and MSG assets.
+    /// Parse all supported formats, resolving MAP object subtypes through proto/ lists.
     #[arg(long)]
     validate_formats: bool,
 }
 
 fn audit(args: Args) -> Result<(), Box<dyn Error>> {
     let vfs = LocalDirProvider::mount(args.corpus_dir)?;
+    let prototypes = LocalPrototypeCatalog::new(&vfs);
     let mut counts = [0_u64; EXTENSIONS.len()];
     let mut total = 0_u64;
     let mut passed = [0_u64; VALIDATED.len()];
@@ -43,10 +48,16 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
             let result = vfs
                 .read_bounded(path.as_str(), MAX_ASSET_BYTES)
                 .map_err(|error| error.to_string())
-                .and_then(|bytes| {
-                    validate_asset(path, &bytes)
+                .and_then(|bytes| match path.extension() {
+                    Some("map") => MapFile::parse(&bytes, &prototypes)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                    Some("int") => IntProgram::parse(&bytes)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                    _ => validate_asset(path, &bytes)
                         .expect("supported extension")
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| error.to_string()),
                 });
             match result {
                 Ok(()) => passed[index] += 1,

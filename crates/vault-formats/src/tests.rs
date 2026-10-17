@@ -4,8 +4,7 @@ use crate::{
     palette::{CYCLE_RANGES, PaletteCycler},
 };
 
-#[path = "../../../tests/fixtures/formats/support.rs"]
-mod fixtures;
+use crate::fixture_assets as fixtures;
 
 #[test]
 fn spec001_palette_values_transparency_and_tables() {
@@ -778,7 +777,7 @@ fn validation_dispatch_covers_every_supported_extension() {
             .unwrap()
             .unwrap();
     }
-    assert!(validate_asset(&VfsPath::new("unknown.pro").unwrap(), b"").is_none());
+    assert!(validate_asset(&VfsPath::new("unknown.dat").unwrap(), b"").is_none());
     assert_eq!(
         LstKind::for_path(&VfsPath::new("data/custom.lst").unwrap()),
         LstKind::Raw

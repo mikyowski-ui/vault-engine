@@ -1,5 +1,11 @@
 mod input;
+mod map_preview;
 mod preview;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/formats/support.rs"]
+pub(crate) mod fixture_assets;
 
 use std::{error::Error, process::ExitCode, sync::Arc};
 
@@ -38,7 +44,8 @@ struct Shell {
     smoke_test: bool,
     frame_presented: bool,
     failure: Option<AppError>,
-    preview: Option<preview::Preview>,
+    preview: Option<preview::AssetPreview>,
+    pointer: Option<[f64; 2]>,
 }
 
 impl Shell {
@@ -68,12 +75,34 @@ impl Shell {
         match preview.image() {
             Ok(image) => {
                 if let Some(renderer) = &mut self.renderer {
-                    renderer.set_image(&image, &preview.palette.rgba8());
+                    renderer.set_image(&image, &preview.palette().rgba8());
                 }
                 window.set_title(&preview.title());
                 window.request_redraw();
             }
             Err(error) => self.fail(event_loop, error),
+        }
+        if let Some(pointer) = self.pointer {
+            self.log_hover(event_loop, pointer);
+        }
+    }
+
+    fn log_hover(&mut self, event_loop: &ActiveEventLoop, point: [f64; 2]) {
+        let hover = self
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.image_position(point))
+            .and_then(|pixel| self.preview.as_mut()?.hover(pixel));
+        if let Some(hover) = hover {
+            self.log(
+                event_loop,
+                InputCommand::MapHover {
+                    elevation: hover.elevation,
+                    hex: hover.hex,
+                    floor_square: hover.floor,
+                    roof_square: hover.roof,
+                },
+            );
         }
     }
 }
@@ -86,7 +115,7 @@ impl ApplicationHandler for Shell {
         let attributes = Window::default_attributes()
             .with_title(self.preview.as_ref().map_or_else(
                 || "Vault Engine — Indexed Color Test".to_owned(),
-                preview::Preview::title,
+                preview::AssetPreview::title,
             ))
             .with_inner_size(LogicalSize::new(960, 640));
         let window = match event_loop.create_window(attributes) {
@@ -105,7 +134,7 @@ impl ApplicationHandler for Shell {
                     size.width,
                     size.height,
                     &image,
-                    &preview.palette.rgba8(),
+                    &preview.palette().rgba8(),
                 ))?)
             } else {
                 Ok(pollster::block_on(Renderer::new(
@@ -173,6 +202,8 @@ impl ApplicationHandler for Shell {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.pointer = Some([position.x, position.y]);
+                self.log_hover(event_loop, [position.x, position.y]);
                 self.log(
                     event_loop,
                     InputCommand::PointerMoved {

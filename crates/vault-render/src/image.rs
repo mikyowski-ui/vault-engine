@@ -2,9 +2,7 @@
 use vault_formats::{Font, FontKind, FrmArchive, Palette, frm::FrmFrame};
 
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/formats/support.rs"]
-mod fixtures;
+use crate::fixture_assets as fixtures;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImageError {
@@ -81,6 +79,29 @@ impl IndexedImage {
         }
         self.pixels
             .get_mut(y as usize * self.width as usize + x as usize)
+    }
+
+    /// Unscaled palette-keyed blit, clipped before iteration. Map projection
+    /// supplies the image corner; tile footprints never rescale the art.
+    pub fn blit(&mut self, frame: &FrmFrame, origin: [i64; 2]) {
+        let [left, top] = origin;
+        let width = i64::from(frame.width);
+        let height = i64::from(frame.height);
+        if left >= i64::from(self.width)
+            || top >= i64::from(self.height)
+            || left <= -width
+            || top <= -height
+        {
+            return;
+        }
+        for y in top.max(0)..(top + height).min(i64::from(self.height)) {
+            for x in left.max(0)..(left + width).min(i64::from(self.width)) {
+                let color = frame.pixels()[((y - top) * width + x - left) as usize];
+                if color != 0 {
+                    self.pixels[y as usize * self.width as usize + x as usize] = color;
+                }
+            }
+        }
     }
 
     /// UI rectangle centering: no world shifts or accumulated animation movement.

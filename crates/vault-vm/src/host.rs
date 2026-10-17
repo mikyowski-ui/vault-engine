@@ -1,0 +1,149 @@
+use crate::{Value, Vm, VmError};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalValue {
+    Value(Value),
+    String(Vec<u8>),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedProcedure {
+    pub owner: u32,
+    pub address: u32,
+    pub arguments: u32,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchMode {
+    Attached,
+    Replace,
+    Spawn,
+    Independent,
+}
+
+/// No wall clock, filesystem, or global process registry is implicit in execution.
+/// Game/library extensions and program ownership are supplied explicitly by the host.
+pub trait VmHost {
+    fn now_ms(&self) -> u32 {
+        0
+    }
+    fn extension(&mut self, opcode: u16, _vm: &mut Vm) -> Result<(), VmError> {
+        Err(VmError::Opcode(opcode))
+    }
+    fn program_mut(&mut self, _id: u32) -> Result<&mut Vm, VmError> {
+        Err(VmError::Host("program reference".into()))
+    }
+    fn launch(
+        &mut self,
+        _name: &[u8],
+        _mode: LaunchMode,
+        _parent: Option<u32>,
+        _critical: bool,
+    ) -> Result<u32, VmError> {
+        Err(VmError::Host("program launch".into()))
+    }
+    fn purge(&mut self, _id: u32) -> Result<(), VmError> {
+        Ok(())
+    }
+    fn wait_ready(
+        &mut self,
+        _reference: u32,
+        _start: u32,
+        _deadline: u32,
+    ) -> Result<bool, VmError> {
+        Err(VmError::Host("wait predicate".into()))
+    }
+    fn export_variable(&mut self, _owner: u32, _name: &[u8]) -> Result<(), VmError> {
+        Err(VmError::Host("variable registry".into()))
+    }
+    fn fetch_variable(&mut self, name: &[u8]) -> Result<ExternalValue, VmError> {
+        Err(VmError::Symbol(String::from_utf8_lossy(name).into()))
+    }
+    fn store_variable(&mut self, name: &[u8], _value: ExternalValue) -> Result<(), VmError> {
+        Err(VmError::Symbol(String::from_utf8_lossy(name).into()))
+    }
+    fn export_procedure(
+        &mut self,
+        _name: &[u8],
+        _procedure: ExportedProcedure,
+    ) -> Result<(), VmError> {
+        Err(VmError::Host("procedure registry".into()))
+    }
+    fn import_procedure(&mut self, name: &[u8]) -> Result<ExportedProcedure, VmError> {
+        Err(VmError::Symbol(String::from_utf8_lossy(name).into()))
+    }
+}
+
+/// A deterministic shared export registry; applications may wrap it with their
+/// program store, asset loader, and extension dispatcher.
+#[derive(Debug, Default)]
+pub struct BasicHost {
+    pub milliseconds: u32,
+    variables: BTreeMap<Vec<u8>, (u32, ExternalValue)>,
+    procedures: BTreeMap<Vec<u8>, ExportedProcedure>,
+}
+fn key(name: &[u8]) -> Vec<u8> {
+    name.iter().map(u8::to_ascii_lowercase).collect()
+}
+fn registration(name: &[u8]) -> Vec<u8> {
+    key(&name[..name.len().min(31)])
+}
+fn symbol(name: &[u8]) -> VmError {
+    VmError::Symbol(String::from_utf8_lossy(name).into())
+}
+impl VmHost for BasicHost {
+    fn now_ms(&self) -> u32 {
+        self.milliseconds
+    }
+    fn export_variable(&mut self, owner: u32, name: &[u8]) -> Result<(), VmError> {
+        let key = registration(name);
+        if let Some((other, _)) = self.variables.get(&key) {
+            if *other != owner {
+                return Err(symbol(name));
+            }
+        } else {
+            self.variables
+                .insert(key, (owner, ExternalValue::Value(Value::integer(0))));
+        }
+        Ok(())
+    }
+    fn fetch_variable(&mut self, name: &[u8]) -> Result<ExternalValue, VmError> {
+        self.variables
+            .get(&key(name))
+            .map(|(_, value)| value.clone())
+            .ok_or_else(|| symbol(name))
+    }
+    fn store_variable(&mut self, name: &[u8], value: ExternalValue) -> Result<(), VmError> {
+        self.variables
+            .get_mut(&key(name))
+            .ok_or_else(|| symbol(name))?
+            .1 = value;
+        Ok(())
+    }
+    fn export_procedure(
+        &mut self,
+        name: &[u8],
+        procedure: ExportedProcedure,
+    ) -> Result<(), VmError> {
+        let key = registration(name);
+        if self
+            .procedures
+            .get(&key)
+            .is_some_and(|old| old.owner != procedure.owner)
+        {
+            return Err(symbol(name));
+        }
+        self.procedures.insert(key, procedure);
+        Ok(())
+    }
+    fn import_procedure(&mut self, name: &[u8]) -> Result<ExportedProcedure, VmError> {
+        self.procedures
+            .get(&key(name))
+            .cloned()
+            .ok_or_else(|| symbol(name))
+    }
+    fn purge(&mut self, id: u32) -> Result<(), VmError> {
+        self.variables.retain(|_, (owner, _)| *owner != id);
+        self.procedures.retain(|_, procedure| procedure.owner != id);
+        Ok(())
+    }
+}

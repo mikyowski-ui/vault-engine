@@ -40,6 +40,12 @@ pub enum InputCommand {
         width: u32,
         height: u32,
     },
+    MapHover {
+        elevation: u8,
+        hex: Option<i32>,
+        floor_square: Option<i32>,
+        roof_square: Option<i32>,
+    },
     Quit,
 }
 

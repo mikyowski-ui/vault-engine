@@ -10,11 +10,25 @@ use winit::keyboard::KeyCode;
 #[derive(clap::Args, Debug, Default)]
 pub struct PreviewArgs {
     /// Mount a loose directory for sprite preview.
-    #[arg(long, requires = "preview_frm", value_name = "PATH")]
+    #[arg(long, requires = "preview_asset", value_name = "PATH")]
     pub corpus_dir: Option<PathBuf>,
     /// Sprite path relative to the case-insensitive VFS root.
-    #[arg(long, requires = "corpus_dir", value_name = "VFS_PATH")]
+    #[arg(
+        long,
+        requires = "corpus_dir",
+        group = "preview_asset",
+        value_name = "VFS_PATH"
+    )]
     pub preview_frm: Option<String>,
+    /// Map path relative to the VFS root; arrows pan, R toggles roofs, 0-2 select elevation.
+    #[arg(
+        long,
+        requires = "corpus_dir",
+        group = "preview_asset",
+        conflicts_with = "preview_frm",
+        value_name = "VFS_PATH"
+    )]
+    pub preview_map: Option<String>,
     /// Font path (default: font0.aaf, font0.fon, then another root font).
     #[arg(long, requires = "preview_frm", value_name = "VFS_PATH")]
     pub font: Option<String>,
@@ -36,6 +50,43 @@ pub struct Preview {
     frame: usize,
 }
 
+pub enum AssetPreview {
+    Sprite(Box<Preview>),
+    Map(Box<crate::map_preview::MapPreview>),
+}
+impl AssetPreview {
+    pub fn image(&self) -> AppResult<IndexedImage> {
+        match self {
+            Self::Sprite(preview) => Ok(preview.image()?),
+            Self::Map(preview) => preview.image(),
+        }
+    }
+    pub fn palette(&self) -> &Palette {
+        match self {
+            Self::Sprite(preview) => &preview.palette,
+            Self::Map(preview) => &preview.palette,
+        }
+    }
+    pub fn title(&self) -> String {
+        match self {
+            Self::Sprite(preview) => preview.title(),
+            Self::Map(preview) => preview.title(),
+        }
+    }
+    pub fn step(&mut self, key: KeyCode) -> bool {
+        match self {
+            Self::Sprite(preview) => preview.step(key),
+            Self::Map(preview) => preview.step(key),
+        }
+    }
+    pub fn hover(&mut self, point: [i32; 2]) -> Option<vault_render::map::MapHover> {
+        match self {
+            Self::Sprite(_) => None,
+            Self::Map(preview) => preview.hover(point),
+        }
+    }
+}
+
 fn parse_asset<T>(
     vfs: &LocalDirProvider,
     path: &str,
@@ -46,7 +97,23 @@ fn parse_asset<T>(
 }
 
 impl PreviewArgs {
-    pub fn load(&self) -> AppResult<Option<Preview>> {
+    pub fn load(&self) -> AppResult<Option<AssetPreview>> {
+        if let Some(path) = &self.preview_map {
+            let vfs = LocalDirProvider::mount(
+                self.corpus_dir
+                    .as_ref()
+                    .ok_or("--preview-map requires --corpus-dir")?,
+            )?;
+            return Ok(Some(AssetPreview::Map(Box::new(
+                crate::map_preview::MapPreview::load(&vfs, path)?,
+            ))));
+        }
+        Ok(self
+            .load_sprite()?
+            .map(|preview| AssetPreview::Sprite(Box::new(preview))))
+    }
+
+    fn load_sprite(&self) -> AppResult<Option<Preview>> {
         let Some(path) = &self.preview_frm else {
             return Ok(None);
         };
@@ -166,9 +233,7 @@ impl Preview {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/formats/support.rs"]
-mod fixtures;
+use crate::fixture_assets as fixtures;
 
 #[cfg(test)]
 mod tests {
@@ -185,8 +250,9 @@ mod tests {
                 font: Some(font.into()),
                 msg: Some("text/english/game/preview.msg".into()),
                 message_id: Some(1),
+                ..Default::default()
             };
-            let mut preview = args.load().unwrap().unwrap();
+            let mut preview = args.load_sprite().unwrap().unwrap();
             assert_eq!(preview.direction, 5);
             assert_eq!(preview.message, b"AB A B");
             assert_eq!(
@@ -206,7 +272,7 @@ mod tests {
             preview_frm: Some("art/items/animated.frm".into()),
             ..Default::default()
         };
-        let mut preview = args.load().unwrap().unwrap();
+        let mut preview = args.load_sprite().unwrap().unwrap();
         preview.step(KeyCode::ArrowDown);
         assert_eq!(preview.frame, 1);
         preview.step(KeyCode::ArrowUp);

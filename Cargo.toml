@@ -22,6 +22,7 @@ publish = false
 vault-core = { path = "crates/vault-core" }
 vault-formats = { path = "crates/vault-formats" }
 vault-render = { path = "crates/vault-render" }
+vault-vm = { path = "crates/vault-vm" }
 bytemuck = "1.24"
 cap-std = "4.0.3"
 clap = { version = "4.5", features = ["derive"] }

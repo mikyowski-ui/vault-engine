@@ -69,6 +69,27 @@ impl<'a> Reader<'a> {
         ))
     }
 
+    pub fn word(&mut self) -> Result<u32, ParseError> {
+        self.be_i32().map(|value| value as u32)
+    }
+
+    pub fn words<const N: usize>(&mut self) -> Result<[i32; N], ParseError> {
+        let mut words = [0; N];
+        for word in &mut words {
+            *word = self.be_i32()?;
+        }
+        Ok(words)
+    }
+
+    pub fn count(&mut self, name: &str, limit: usize) -> Result<usize, ParseError> {
+        let value = self.be_i32()?;
+        let count = self.nonnegative(value, name)?;
+        if count > limit {
+            return Err(self.error(format!("{name} exceeds {limit}")));
+        }
+        Ok(count)
+    }
+
     pub fn le_i32(&mut self) -> Result<i32, ParseError> {
         Ok(i32::from_le_bytes(
             self.take(4)?.try_into().expect("fixed slice"),

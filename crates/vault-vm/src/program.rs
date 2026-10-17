@@ -1,0 +1,281 @@
+use std::collections::BTreeMap;
+
+pub const MAX_PROGRAM_BYTES: usize = 64 * 1024 * 1024;
+pub const TIMED: u32 = 1;
+pub const CONDITIONAL: u32 = 2;
+pub const IMPORT: u32 = 4;
+pub const EXPORT: u32 = 8;
+pub const CRITICAL: u32 = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("INT at byte {offset:#x}: {message}")]
+pub struct IntError {
+    pub offset: usize,
+    pub message: String,
+}
+impl IntError {
+    pub(crate) fn new(offset: usize, message: impl Into<String>) -> Self {
+        Self {
+            offset,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Procedure {
+    pub name_offset: u32,
+    pub name: Vec<u8>,
+    pub flags: u32,
+    pub deadline: u32,
+    pub condition: u32,
+    pub body: u32,
+    pub arguments: u32,
+}
+#[derive(Debug, Clone)]
+pub struct IntProgram {
+    pub(crate) image: Vec<u8>,
+    pub(crate) boundaries: Vec<bool>,
+    pub(crate) procedures: Vec<Procedure>,
+    identifiers: BTreeMap<u32, Vec<u8>>,
+    literals: BTreeMap<u32, Vec<u8>>,
+    pub identifier_origin: usize,
+    pub literal_origin: usize,
+    pub code_start: usize,
+}
+
+fn word(bytes: &[u8], at: usize) -> Result<u32, IntError> {
+    let end = at
+        .checked_add(4)
+        .ok_or_else(|| IntError::new(at, "offset overflow"))?;
+    Ok(u32::from_be_bytes(
+        bytes
+            .get(at..end)
+            .ok_or_else(|| IntError::new(at, "truncated word"))?
+            .try_into()
+            .expect("fixed word"),
+    ))
+}
+fn count(bytes: &[u8], at: usize) -> Result<usize, IntError> {
+    let n = word(bytes, at)? as i32;
+    usize::try_from(n).map_err(|_| IntError::new(at, "negative count/offset"))
+}
+fn strings(
+    bytes: &[u8],
+    origin: usize,
+    absent: bool,
+) -> Result<(BTreeMap<u32, Vec<u8>>, usize), IntError> {
+    if absent && word(bytes, origin)? == u32::MAX {
+        return Ok((BTreeMap::new(), origin + 4));
+    }
+    let length = count(bytes, origin)?;
+    let end = origin
+        .checked_add(4)
+        .and_then(|start| start.checked_add(length))
+        .ok_or_else(|| IntError::new(origin, "table size overflow"))?;
+    if end > bytes.len() {
+        return Err(IntError::new(origin, "table exceeds image"));
+    }
+    let mut pos = origin + 4;
+    let mut result = BTreeMap::new();
+    while pos < end {
+        if end - pos < 2 {
+            return Err(IntError::new(pos, "truncated string length"));
+        }
+        let size = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        pos += 2;
+        if size == 0 || size > end - pos {
+            return Err(IntError::new(pos, "invalid string extent"));
+        }
+        let data = &bytes[pos..pos + size];
+        let nul = data
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or_else(|| IntError::new(pos, "string is not NUL terminated"))?;
+        result.insert((pos - origin) as u32, data[..nul].to_vec());
+        pos += size;
+    }
+    if word(bytes, end)? != u32::MAX {
+        return Err(IntError::new(end, "missing table terminator"));
+    }
+    Ok((result, end + 4))
+}
+pub(crate) fn instruction_length(word: u16) -> usize {
+    if word & 0x3ff == 1 { 6 } else { 2 }
+}
+pub(crate) fn valid_word(word: u16) -> bool {
+    if word & 0x3ff == 1 {
+        matches!(word, 0x8001 | 0xc001 | 0xa001 | 0x9001 | 0x9801)
+    } else {
+        (0x8000..=0x8155).contains(&word)
+    }
+}
+impl IntProgram {
+    pub fn parse(bytes: &[u8]) -> Result<Self, IntError> {
+        if bytes.len() > MAX_PROGRAM_BYTES {
+            return Err(IntError::new(0, "program exceeds 64 MiB limit"));
+        }
+        let n = count(bytes, 42)?;
+        if n > 65536 {
+            return Err(IntError::new(42, "procedure count exceeds resource limit"));
+        }
+        let identifier_origin = 46 + n * 24;
+        let (identifiers, literal_origin) = strings(bytes, identifier_origin, false)?;
+        let (literals, code_start) = strings(bytes, literal_origin, true)?;
+        let mut procedures = Vec::new();
+        for index in 0..n {
+            let at = 46 + 24 * index;
+            let name_offset = word(bytes, at)?;
+            let name = identifiers
+                .get(&name_offset)
+                .ok_or_else(|| IntError::new(at, "name reference is not a string start"))?
+                .clone();
+            let arguments = count(bytes, at + 20)?;
+            if arguments > 341 {
+                return Err(IntError::new(
+                    at + 20,
+                    "argument count exceeds stack capacity",
+                ));
+            }
+            procedures.push(Procedure {
+                name_offset,
+                name,
+                flags: word(bytes, at + 4)?,
+                deadline: word(bytes, at + 8)?,
+                condition: count(bytes, at + 12)? as u32,
+                body: count(bytes, at + 16)? as u32,
+                arguments: arguments as u32,
+            });
+        }
+        let mut boundaries = vec![false; bytes.len()];
+        for (start, end) in [(0, 42), (code_start, bytes.len())] {
+            let mut at = start;
+            while at < end {
+                if end - at < 2 {
+                    return Err(IntError::new(at, "truncated instruction"));
+                }
+                let op = u16::from_be_bytes([bytes[at], bytes[at + 1]]);
+                if !valid_word(op) {
+                    return Err(IntError::new(at, format!("invalid instruction {op:#06x}")));
+                }
+                let size = instruction_length(op);
+                if end - at < size {
+                    return Err(IntError::new(at, "truncated immediate"));
+                }
+                // Identifier-consuming instructions use the raw payload even
+                // when it was pushed with a string tag. Resolve/bound references
+                // at their consumer, rather than assuming every 9001 targets T.
+                boundaries[at] = true;
+                at += size;
+            }
+        }
+        for (index, procedure) in procedures.iter().enumerate() {
+            for (field, address) in [
+                (16, Some(procedure.body)),
+                (
+                    12,
+                    (procedure.condition != 0).then_some(procedure.condition),
+                ),
+            ] {
+                let Some(address) = address else {
+                    continue;
+                };
+                if !boundaries.get(address as usize).copied().unwrap_or(false) {
+                    return Err(IntError::new(
+                        46 + 24 * index + field,
+                        format!(
+                            "procedure {} address {address:#x} is not an instruction boundary (image length {:#x})",
+                            if field == 16 { "body" } else { "condition" },
+                            bytes.len()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            image: bytes.to_vec(),
+            boundaries,
+            procedures,
+            identifiers,
+            literals,
+            identifier_origin,
+            literal_origin,
+            code_start,
+        })
+    }
+    pub fn image(&self) -> &[u8] {
+        &self.image
+    }
+    pub fn procedures(&self) -> &[Procedure] {
+        &self.procedures
+    }
+    pub fn identifier(&self, offset: u32) -> Option<&[u8]> {
+        self.identifiers.get(&offset).map(Vec::as_slice)
+    }
+    pub fn literal(&self, offset: u32) -> Option<&[u8]> {
+        self.literals.get(&offset).map(Vec::as_slice)
+    }
+    pub fn find_procedure(&self, name: &[u8], include_root: bool) -> Option<usize> {
+        self.procedures
+            .iter()
+            .enumerate()
+            .skip(usize::from(!include_root))
+            .find(|(_, procedure)| procedure.name.eq_ignore_ascii_case(name))
+            .map(|(index, _)| index)
+    }
+    pub fn lifecycle_entry(&self, event: Lifecycle) -> Result<Option<usize>, IntError> {
+        let index = self.find_procedure(event.name(), true).unwrap_or(0);
+        if index != 0 {
+            return Ok(Some(index));
+        }
+        if matches!(event, Lifecycle::MapEnter | Lifecycle::MapUpdate) {
+            return Ok(None);
+        }
+        if self.procedures.len() > 1 {
+            Ok(Some(1))
+        } else {
+            Err(IntError::new(42, "missing lifecycle fallback procedure 1"))
+        }
+    }
+    pub(crate) fn schedule(&mut self, index: usize, flags: u32, deadline: u32, condition: u32) {
+        let procedure = &mut self.procedures[index];
+        procedure.flags = flags;
+        procedure.deadline = deadline;
+        procedure.condition = condition;
+        for (offset, value) in [(4, flags), (8, deadline), (12, condition)] {
+            let at = 46 + 24 * index + offset;
+            self.image[at..at + 4].copy_from_slice(&value.to_be_bytes());
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+    Start,
+    MapEnter,
+    MapUpdate,
+    Talk,
+    LookAt,
+    Description,
+}
+impl Lifecycle {
+    pub fn name(self) -> &'static [u8] {
+        match self {
+            Self::Start => b"start",
+            Self::MapEnter => b"map_enter_p_proc",
+            Self::MapUpdate => b"map_update_p_proc",
+            Self::Talk => b"talk_p_proc",
+            Self::LookAt => b"look_at_p_proc",
+            Self::Description => b"description_p_proc",
+        }
+    }
+    pub fn event(self) -> u32 {
+        match self {
+            Self::Start => 1,
+            Self::MapEnter => 15,
+            Self::MapUpdate => 23,
+            Self::Talk => 11,
+            Self::LookAt => 21,
+            Self::Description => 3,
+        }
+    }
+}

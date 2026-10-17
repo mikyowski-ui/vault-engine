@@ -4,21 +4,23 @@ A Rust clean-room engine workspace. Phase 0 establishes the crate boundaries,
 loose-directory asset access, deterministic core primitives, and graphics shell.
 Phase 1 (`P1-02` / `P1-03`) adds approved PAL, FRM/FR0–FR5, LST, FON, AAF, and MSG
 parsers, format auditing, and an interactive sprite/font/message preview.
+Phases 2 and 3 Core (`P2-02`, `P2-03`, `P3-02`) add PRO/MAP parsing, isometric
+geometry, the INT loader/core VM, and map preview.
 
 `AGENTS.md` is the repository's implementation policy. Format behavior follows
-`specs/approved/SPEC-001-pal-frm-lst.md` and `SPEC-002-fonts-and-msg.md`. DAT
-archives, bytecode execution, and gameplay await later phases. No original game
+`specs/approved/SPEC-001-pal-frm-lst.md` through `SPEC-004-int-vm.md`. DAT
+archives and game-specific VM extensions/gameplay await later phases. No original game
 data is needed to build, test, or run the synthetic shell and preview fixtures.
 
 ## Workspace
 
 | Package | Responsibility |
 | --- | --- |
-| `vault-formats` | VFS, palette/sprite/list/font/message parsers |
+| `vault-formats` | VFS, asset/prototype/map parsers, projection and picking |
 | `vault-core` | Generational entity handles, command/event IDs, save envelope |
-| `vault-vm` | Library scaffold for the bytecode VM |
+| `vault-vm` | INT loader, two-stack core interpreter, explicit host interfaces |
 | `vault-guidance` | Library scaffold for progression and diagnostic hooks |
-| `vault-render` | Integer index texture, palette lookup, sprite/text composition |
+| `vault-render` | Indexed sprite/text/map composition and palette rendering |
 | `vault-debug` | Library scaffold for inspectors and asset browsing |
 | `vault-platform` | Desktop shell, asset preview, input command logging |
 | `xtask` | Engineering gate runner |
@@ -83,12 +85,18 @@ The CLI prints total mounted files and counts for `.frm`, `.pal`, `.fon`, `.aaf`
 `.pro`, `.map`, `.int`, `.msg`, and `.lst`, including zero counts. It traverses the
 VFS namespace without parsing file contents. Invalid arguments or mounts exit
 unsuccessfully with a diagnostic. With `--validate-formats`, the tool additionally
-parses every `.pal`, `.frm`, `.fr0`–`.fr5`, `.lst`, `.fon`, `.aaf`, and `.msg`,
+parses every `.pal`, `.frm`, `.fr0`–`.fr5`, `.lst`, `.fon`, `.aaf`, `.msg`,
+`.pro`, `.map`, and `.int`,
 prints per-format pass/fail counts, and reports failing paths, formats, byte
 offsets, and reasons on stderr. Any failure produces a nonzero exit after the
 remaining assets have been checked. Phase 0's `loose/` markers are deliberately
 not valid binary formats; use `tests/fixtures/formats/materialize.py` for a valid
 synthetic corpus.
+
+MAP validation resolves item/scenery state trailers through the mounted
+`proto/<category>/<category>.lst` and `.pro` files. Missing dependencies are
+reported as map validation failures. INT validation parses images without
+executing game extensions.
 
 Mount the directory whose immediate children include `art`, `data`, `maps`,
 `premade`, `proto`, `scripts`, `sound`, `text`, root `color.pal`, and font files
@@ -149,14 +157,48 @@ MSG below `text/` in VFS order and its lowest ID with nonempty text. Explicit
 missing/invalid assets or message IDs produce an error. Text remains raw bytes
 mapped to font glyphs; the viewer does not assume UTF-8 or change languages.
 
+## Map preview
+
+```sh
+cargo xtask fixtures --output target/world-corpus
+cargo run -p asset-audit -- --corpus-dir target/world-corpus --validate-formats
+cargo run -p vault-platform -- --corpus-dir target/world-corpus \
+  --preview-map maps/synthetic.map
+# Present one map frame and exit:
+cargo run -p vault-platform -- --corpus-dir target/world-corpus \
+  --preview-map maps/synthetic.map --smoke-test
+```
+
+The fixture output directory must be empty. `--preview-map` and `--preview-frm`
+are mutually exclusive. Arrow keys pan, **R** toggles roofs, and **0**, **1**, **2**
+select elevations. Hover records on stdout include hex, floor-square, roof-square,
+and elevation coordinates; picking reverses the displayed image's scale and
+letterbox offset before applying the specification's inverse projection.
+
+The map view uses a 640×380 logical viewport. Floor/roof images use the exact
+square projection; roofs are 96 logical pixels above their floor. Objects use
+hex centers, stored displacement, directional FRM shifts, and bottom-center
+alignment. Tile images are not resized to the diamond footprint. Hidden objects,
+hidden/blank tiles, and inventory children are excluded from placed-object drawing.
+Flat objects precede upright objects; remaining object order is deterministic by
+anchor position and ID. The complete indexed scene scales with the window.
+
+Assets resolve through the corresponding category's ART list and low-12-bit
+index. Explicit filenames are used directly. The approved specs do not define
+the full critter animation filename codec: a bare stem uses the first available
+matching FRM (or directional FR0–FR5), with a structured warning. If the requested
+frame is unavailable in that representation, frame zero is reported and displayed.
+This is an asset-preview fallback, not a claim of complete animation/FID decoding.
+Missing required art is an error, and cached map art is limited to 256 MiB.
+
 ## Format safety and compatibility
 
 All parsers forbid unsafe code and accept at most 64 MiB per asset. Audit/preview
 reads enforce this limit before allocation and during reads. Font metrics are
 limited to 4096 pixels, FON directories to 256 byte codes, and text tables to
 1,000,000 entries. Diagnostics include the format and byte offset. Tests exercise
-all section-4 fixtures from both specifications, their prescribed mutations,
-every truncated binary prefix, and deterministic mutation/random-byte fuzz cases.
+all section-4 fixtures from the approved specifications, prescribed mutations,
+required-data truncation, and deterministic mutation/random-byte fuzz cases.
 
 - `Palette` accepts the complete 33,536-byte RGB-plus-RGB555 base layout without
   a discriminator, as well as an optional four-byte tag/padding. A `CWEN` tag
@@ -210,6 +252,74 @@ synthetic fixtures; original corpus data is not included in tests.
 The preview assumes same-coordinate destination sampling for AAF blends, as in
 the approved synthetic fixture. The specification leaves original-executable
 sampling order unresolved; this implementation does not claim to resolve it.
+
+## Prototypes, maps, and geometry
+
+`Prototype` dispatches all six categories from the PID's full high byte. Items
+and scenery have unaligned subtype payloads, and tile/miscellaneous prefixes have
+their own lengths. Every known subtype is typed; unknown subtypes are rejected.
+`consumed_len` excludes tolerated trailing bytes, including the scenery writer
+suffix. Basic, extended, critter, lock, container, map, script, and combat flags
+have separate types and preserve uninterpreted bits.
+
+`MapFile::parse` takes a `PrototypeLookup` provider. `LocalPrototypeCatalog` resolves
+one-based prototype-list entries, caches subtype/default information, and uses
+the selected file's PID to decode it. Maps retain embedded MVAR/LVAR pools for
+later engine initialization; no campaign GVAR array or invented GAM parser is
+involved. Negative header pool counts consume zero words. Tile omission flags
+omit only the corresponding tile block, and roof-hide bits clear on loaded tiles.
+
+All 16 script slots in each block are decoded using their individual category,
+including padding slots. Active occupancy, local slices, and unique active script
+IDs are checked. Object trees are consumed depth-first, quantities represent
+one child tree, and enclosing elevations/owners are restored. Script bindings,
+outlines, critter flags, stock ammunition, and exit-grid art receive the specified
+loading adjustments. Obsolete pointer words never become offsets or live pointers.
+Limits are 100,000 scripts, 100,000 total objects including children, and inventory
+depth 64. Counts and actual read extents are checked before allocation.
+
+`HexGrid` provides bounded neighbors, border-stop stepping, both distance
+definitions, camera centering, and integer hex/floor/roof projection/picking.
+Negative inverse coordinates use floor division. The recovered angular walk
+returns an error when it leaves the grid or fails to converge, including the
+documented `(0,199)` boundary defect; only the explicit `-1` sentinel gives 9999.
+
+## Core VM
+
+`IntProgram` validates the 42-byte executable bootstrap region, procedure records,
+identifier/literal records and terminators, and complete instruction boundaries.
+Procedure addresses are absolute image offsets and must select executable
+instruction boundaries; an address exactly at EOF is rejected, not treated
+as an implicit empty procedure. Identifier-consuming operations resolve
+their raw operand against the identifier table even if pushed with a string tag;
+literal bounds are enforced when a value is consumed as a string. The image is
+bounded to 64 MiB, procedure count to 65,536, and declared arguments to stack capacity.
+
+`Vm` implements all 76 core dispatch slots, including distinct raw/type-dependent
+truth rules, asymmetric integer-addition promotion, changing-limit discard,
+float-bitwise conversion, context returns, mutable scheduling metadata, and the
+recovered wait predicate. Both stacks have 2048 bytes and fit 341 tagged values.
+Frames and globals use byte bases, with checked live-slot access. Strings are
+interned per program with an 8 MiB content budget; cross-program transfers copy text.
+
+`update` uses ten instructions by default. Critical state can continue beyond the
+ordinary budget; a separate 100,000-instruction hard limit prevents an unbounded
+critical invocation. Arithmetic cases whose results are undefined in the spec
+(overflowing subtraction/multiplication/negation, invalid float-to-int conversions,
+and nonfinite float-to-text conversions) return explicit VM errors.
+
+`VmHost` supplies time, shared exports, program ownership/launching, wait predicates,
+and extension opcodes `0x804C..=0x8155`. `BasicHost` supplies a deterministic clock
+value and case-insensitive export registries. No process-global state or filesystem
+access is implicit in execution. Host calls and external return contexts are
+available explicitly; the unsafe imported-call argument-transfer path is rejected
+with `ImportedAbi` because SPEC-004 does not define a safe executable ABI for it.
+
+Lifecycle resolution preserves the generic index-1 fallback and the separate
+map-enter/map-update presence checks. Scheduled conditions execute against the
+real VM/host and can have side effects; no pure-procedure flag is invented.
+Timed deadlines use strict unsigned comparison, condition flags take precedence,
+and firing/canceling clears the specified metadata words.
 
 ## Core contracts
 

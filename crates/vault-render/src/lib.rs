@@ -3,6 +3,12 @@
 use wgpu::util::{DeviceExt, TextureDataOrder};
 
 pub mod image;
+pub mod map;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/formats/support.rs"]
+pub(crate) mod fixture_assets;
 pub use image::{ImageError, IndexedImage, TextStyle, compose_preview};
 
 const SPRITE_SIDE: u32 = 16;
@@ -189,6 +195,32 @@ impl Renderer {
         if self.drawable {
             self.resize(self.config.width, self.config.height);
         }
+    }
+
+    /// Inverse of the centered image quad, for pointer picking in scene pixels.
+    pub fn image_position(&self, point: [f64; 2]) -> Option<[i32; 2]> {
+        if !self.drawable || point.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        let available = (self.config.width as f64 / self.image_size[0] as f64)
+            .min(self.config.height as f64 / self.image_size[1] as f64)
+            * 0.75;
+        let scale = if available >= 1.0 {
+            available.floor()
+        } else {
+            available
+        };
+        let left = (self.config.width as f64 - self.image_size[0] as f64 * scale) / 2.0;
+        let top = (self.config.height as f64 - self.image_size[1] as f64 * scale) / 2.0;
+        let result = [
+            ((point[0] - left) / scale).floor(),
+            ((point[1] - top) / scale).floor(),
+        ];
+        (result[0] >= 0.0
+            && result[1] >= 0.0
+            && result[0] < self.image_size[0] as f64
+            && result[1] < self.image_size[1] as f64)
+            .then_some(result.map(|value| value as i32))
     }
 
     /// Return true only when a frame was submitted and presented.

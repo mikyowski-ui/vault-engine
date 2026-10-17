@@ -2,7 +2,52 @@ use std::process::Command;
 
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/formats/support.rs"]
-mod fixtures;
+mod fixture_assets;
+use fixture_assets as fixtures;
+
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/vm/support.rs"]
+mod vm;
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/world/support.rs"]
+mod world;
+
+#[test]
+fn validates_maps_with_prototype_lists_and_int_images() {
+    let temp = tempfile::tempdir().unwrap();
+    world::write_corpus(temp.path());
+    std::fs::write(temp.path().join("scripts/synthetic.int"), vm::program()).unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+            .arg("--corpus-dir")
+            .arg(temp.path())
+            .arg("--validate-formats")
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 40 passed, 0 failed"));
+    std::fs::write(
+        temp.path().join("proto/items/synthetic.pro"),
+        &world::container()[..64],
+    )
+    .unwrap();
+    let mut bad = vm::program();
+    bad[0x56..0x5a].copy_from_slice(&0x200_u32.to_be_bytes());
+    std::fs::write(temp.path().join("scripts/synthetic.int"), bad).unwrap();
+    let output = run();
+    assert!(!output.status.success());
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(errors.contains("FAIL maps/synthetic.map: MAP"));
+    assert!(errors.contains("FAIL proto/items/synthetic.pro: PRO"));
+    assert!(errors.contains("FAIL scripts/synthetic.int: INT"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 37 passed, 3 failed"));
+}
 
 #[test]
 fn validates_all_formats_and_reports_multiple_failures_without_stopping() {

@@ -1,0 +1,5 @@
+# name | bytes | error
+underflow | 80 1A | underflow
+zero-divisor | C0 01 00 00 00 01 C0 01 00 00 00 00 80 3C | division
+bad-high-bit | 00 00 | opcode
+dispatch-out-of-bounds | 81 56 | opcode
