@@ -108,6 +108,10 @@ fn spec004_errors_structural_boundaries_and_stack_capacity() {
             "opcode" => matches!(error, VmError::Opcode(_)),
             _ => false,
         });
+        if parts[2] == "division" {
+            // Both operands are consumed before the zero-divisor error.
+            assert_eq!(vm.value_stack.byte_len(), 0);
+        }
         assert!(vm.status.contains(VmStatus::ENDED) && vm.status.contains(VmStatus::ERROR));
     }
     for (offset, value) in [

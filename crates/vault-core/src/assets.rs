@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 use vault_formats::{
     Font, FontKind, FontSet, FrmArchive, GamFile, GamSection, GcdFile, LocalDirProvider,
     LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype, Vfs,
-    pro::Category,
+    VfsPath, pro::Category,
 };
 use vault_vm::IntProgram;
 
@@ -12,6 +12,12 @@ use vault_vm::IntProgram;
 pub trait WorldAssets {
     fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError>;
     fn program(&self, index: i32) -> Result<(String, IntProgram), WorldError>;
+    /// SPEC-004 launch operand: a program filename, resolved below `scripts/`.
+    fn program_by_name(&self, _name: &[u8]) -> Result<(String, IntProgram), WorldError> {
+        Err(WorldError::Invalid(
+            "program launch resources unavailable".into(),
+        ))
+    }
     fn local_count(&self, _index: i32) -> usize {
         0
     }
@@ -196,6 +202,21 @@ impl WorldAssets for VfsWorldAssets {
         self.programs
             .borrow_mut()
             .insert(index, (path.clone(), program.clone()));
+        Ok((path, program))
+    }
+    fn program_by_name(&self, name: &[u8]) -> Result<(String, IntProgram), WorldError> {
+        let name = std::str::from_utf8(name)
+            .ok()
+            .filter(|name| name.is_ascii())
+            .ok_or_else(|| WorldError::Invalid("program filename is not ASCII".into()))?;
+        let path = VfsPath::new(name)
+            .map_err(|error| WorldError::Invalid(format!("program filename: {error}")))?;
+        let path = if path.as_str().starts_with("scripts/") {
+            path.to_string()
+        } else {
+            format!("scripts/{path}")
+        };
+        let program = IntProgram::parse(&self.read(&path)?)?;
         Ok((path, program))
     }
     fn local_count(&self, index: i32) -> usize {

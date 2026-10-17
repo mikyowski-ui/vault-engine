@@ -13,7 +13,8 @@ use vault_formats::{
     pro::{BasicFlags, Category, ItemData, Light, LockFlags, PrototypeData},
 };
 use vault_vm::{
-    BasicHost, ExportedProcedure, ExternalValue, RunOutcome, Value, Vm, VmError, VmHost,
+    BasicHost, ExportedProcedure, ExternalValue, LaunchMode, RunOutcome, Value, Vm, VmError,
+    VmHost, VmStatus,
     extensions::{self, PushKind},
 };
 
@@ -74,6 +75,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
 impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn prototype(&self, pid: u32) -> Result<std::sync::Arc<vault_formats::Prototype>, WorldError> {
         (**self).prototype(pid)
+    }
+    fn program_by_name(&self, name: &[u8]) -> Result<(String, vault_vm::IntProgram), WorldError> {
+        (**self).program_by_name(name)
     }
     fn program(&self, index: i32) -> Result<(String, vault_vm::IntProgram), WorldError> {
         (**self).program(index)
@@ -587,8 +591,45 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.clock.advance(ticks)?;
         self.process_queue()
     }
+    /// SPEC-004 interpreter pass: each loaded program, in identifier order,
+    /// polls its timed/conditional procedures (firing at most one, as a
+    /// deferred host call) and then runs its ordinary ten-instruction budget.
+    /// Programs blocked on a child or a wait predicate do not advance here;
+    /// ended/stopped flows stay ended unless a deferred call was prepared.
+    pub fn update_programs(&mut self) -> Result<(), WorldError> {
+        for id in self.programs.keys().copied().collect::<Vec<_>>() {
+            if self.active.contains(&id) {
+                continue;
+            }
+            let Some(mut vm) = self.programs.remove(&id) else {
+                continue;
+            };
+            if vm
+                .status
+                .contains(VmStatus::ATTACHED | VmStatus::SPAWN_BLOCKED)
+            {
+                self.programs.insert(id, vm);
+                continue;
+            }
+            self.active.insert(id);
+            let result = if vm.status.contains(VmStatus::WAITING) {
+                vm.update(self).map(|_| ())
+            } else {
+                vm.poll_scheduled(self, u32::MAX)
+                    .and_then(|_| vm.update(self))
+                    .map(|_| ())
+            };
+            self.active.remove(&id);
+            self.programs.insert(id, vm);
+            if let Err(error) = result {
+                self.world.diagnostic(format!("program {id}: {error}"));
+            }
+        }
+        self.drain_requests()
+    }
     pub fn tick(&mut self, now_ms: u64) -> Result<bool, WorldError> {
         self.world.elapsed_ms = now_ms;
+        self.update_programs()?;
         let (queue, update) = self.world.clock.background(
             now_ms,
             self.world.combat,
@@ -1411,6 +1452,37 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
         self.registry.purge(id)?;
         self.library.cleanup(id);
         Ok(())
+    }
+    /// SPEC-004 0x8008-0x800B: start a fresh program image (no stack cloning).
+    /// The interpreter pass runs its bootstrap; the VM blocks an attached or
+    /// spawning parent. A replacement inherits the old program's parent link.
+    fn launch(
+        &mut self,
+        name: &[u8],
+        mode: LaunchMode,
+        parent: Option<u32>,
+        critical: bool,
+    ) -> Result<u32, VmError> {
+        let (path, program) = self.assets.program_by_name(name)?;
+        let mut vm = Vm::new(program);
+        vm.id = self.next_program;
+        self.next_program = self
+            .next_program
+            .checked_add(1)
+            .ok_or_else(|| VmError::Host("program identifiers exhausted".into()))?;
+        self.registry.register_program(vm.id, path.as_bytes());
+        vm.parent = parent;
+        if critical {
+            vm.status.0 |= VmStatus::CRITICAL;
+        }
+        if mode == LaunchMode::Replace
+            && let Some(caller) = parent.and_then(|parent| self.programs.get_mut(&parent))
+        {
+            caller.child = Some(vm.id);
+        }
+        let id = vm.id;
+        self.programs.insert(id, vm);
+        Ok(id)
     }
     fn wait_ready(&mut self, reference: u32, _start: u32, _deadline: u32) -> Result<bool, VmError> {
         if reference == 2 {

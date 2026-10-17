@@ -7,7 +7,10 @@ use crate::{
     world::WorldTrace,
     *,
 };
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    sync::Arc,
+};
 use vault_formats::{FrmArchive, GcdFile, MapFile, Prototype, pro::Category};
 use vault_vm::{
     IntProgram, RunOutcome, Value, Vm, VmError,
@@ -16,6 +19,9 @@ use vault_vm::{
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/state/support.rs"]
 mod fixture;
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/vm/support.rs"]
+mod vm_fixture;
 
 #[derive(Default)]
 struct Dice {
@@ -344,6 +350,13 @@ impl WorldAssets for Assets {
     fn frame(&self, _path: &str) -> Result<Arc<FrmArchive>, WorldError> {
         Ok(Arc::new(
             FrmArchive::parse(&fixture::animated_frame(12, 20, &[1, 2])).unwrap(),
+        ))
+    }
+    fn program_by_name(&self, name: &[u8]) -> Result<(String, IntProgram), WorldError> {
+        assert_eq!(name, b"Hello");
+        Ok((
+            "scripts/child.int".into(),
+            IntProgram::parse(&vm_fixture::program()).unwrap(),
         ))
     }
     fn font_number(&self, number: i32) -> Option<Arc<vault_formats::Font>> {
@@ -815,4 +828,110 @@ fn spec003_saved_maps_retain_embedded_mvars_and_report_out_of_range_access() {
     assert!(host.world.effects.iter().any(
         |effect| matches!(effect, WorldEffect::Diagnostic(text) if text.contains("MVAR read"))
     ));
+}
+
+/// A program image whose procedure 1 record carries scheduling metadata.
+fn scheduled_image(flags: u32, deadline: u32) -> (IntProgram, u32) {
+    let (mut bytes, condition) = vm_fixture::scheduled_program(1);
+    let record = 46 + 24;
+    for (offset, value) in [(4, flags), (8, deadline), (12, condition)] {
+        bytes[record + offset..record + offset + 4].copy_from_slice(&value.to_be_bytes());
+    }
+    (IntProgram::parse(&bytes).unwrap(), condition)
+}
+
+#[test]
+fn spec004_host_tick_fires_scheduled_procedures_and_launches_programs() {
+    use vault_vm::{VmHost, VmStatus, procedure_flags};
+    let (mut host, base, _) = host(&[b"Hello", b"Continue"]);
+    let install = |host: &mut WorldHost<Assets>, flags: u32, deadline: u32| {
+        let mut vm = Vm::new(scheduled_image(flags, deadline).0);
+        vm.id = 77;
+        // A loaded program whose own flow has already ended.
+        vm.status.0 |= VmStatus::ENDED;
+        host.programs.insert(77, vm);
+    };
+    // Timed: the deadline comparison is strict, and firing clears the whole
+    // flag word; the deferred trampoline then restores the saved context.
+    install(
+        &mut host,
+        procedure_flags::TIMED | procedure_flags::EXPORT,
+        2100,
+    );
+    host.tick(2100).unwrap();
+    assert_ne!(host.programs[&77].program.procedures()[1].flags, 0);
+    host.tick(2101).unwrap();
+    let vm = &host.programs[&77];
+    assert_eq!(vm.program.procedures()[1].flags, 0);
+    assert!(vm.status.contains(VmStatus::ENDED));
+    assert_eq!(
+        (vm.return_stack.byte_len(), vm.value_stack.byte_len()),
+        (0, 0)
+    );
+    // Conditional: the stream runs against the real host (it exports a
+    // variable) and its nonzero predicate fires the procedure.
+    assert!(host.registry.fetch_variable(b"main").is_err());
+    install(&mut host, procedure_flags::CONDITIONAL, 0);
+    host.tick(2102).unwrap();
+    assert_eq!(host.programs[&77].program.procedures()[1].flags, 0);
+    assert!(host.registry.fetch_variable(b"main").is_ok());
+    // A program blocked on a child neither polls nor runs.
+    install(&mut host, procedure_flags::TIMED, 0);
+    host.programs.get_mut(&77).unwrap().status.0 |= VmStatus::ATTACHED;
+    host.tick(5000).unwrap();
+    assert_eq!(
+        host.programs[&77].program.procedures()[1].flags,
+        procedure_flags::TIMED
+    );
+    host.programs.remove(&77);
+
+    let launch = |host: &mut WorldHost<Assets>, opcode: u16, parent: Option<u32>| {
+        let mut vm = Vm::fragment(
+            base.program.clone(),
+            &[fixture::literal(6), fixture::instruction(opcode)].concat(),
+        )
+        .unwrap();
+        vm.id = 900;
+        vm.parent = parent;
+        let before: BTreeSet<_> = host.programs.keys().copied().collect();
+        let outcome = vm.run(host, 100).unwrap();
+        let created: Vec<_> = host
+            .programs
+            .keys()
+            .copied()
+            .filter(|id| !before.contains(id))
+            .collect();
+        assert_eq!(created.len(), 1);
+        (vm, outcome, created[0])
+    };
+    // 0x800B starts a fresh independent program; the interpreter pass runs its
+    // bootstrap one ordinary ten-instruction budget at a time until it ends.
+    let (_, outcome, child) = launch(&mut host, 0x800b, None);
+    assert_eq!(outcome, RunOutcome::FragmentEnd);
+    assert_eq!(host.programs[&child].parent, None);
+    let mut ticks = 0;
+    while !host.programs[&child].status.contains(VmStatus::ENDED) {
+        host.tick(6000 + ticks).unwrap();
+        ticks += 1;
+        assert!(ticks < 1000, "launched bootstrap must finish");
+    }
+    assert!(ticks > 1);
+    // 0x8008 blocks the parent while its fresh child is attached.
+    let (parent, outcome, child) = launch(&mut host, 0x8008, None);
+    assert_eq!(outcome, RunOutcome::Blocked);
+    assert_eq!(
+        (parent.child, host.programs[&child].parent),
+        (Some(child), Some(900))
+    );
+    // 0x8009 ends the old program and transfers its parent association,
+    // including the grandparent's child link.
+    let mut grandparent = Vm::new(base.program.clone());
+    grandparent.id = 500;
+    grandparent.child = Some(900);
+    host.programs.insert(500, grandparent);
+    let (old, outcome, replacement) = launch(&mut host, 0x8009, Some(500));
+    assert_eq!(outcome, RunOutcome::Ended);
+    assert!(old.status.contains(VmStatus::ENDED));
+    assert_eq!(host.programs[&replacement].parent, Some(500));
+    assert_eq!(host.programs[&500].child, Some(replacement));
 }
