@@ -76,6 +76,20 @@ fn spec006_gcd_fields_normalization_and_bounds() {
     assert_eq!(sheet.tags, [0, 14, -1, -1]);
     assert_eq!(sheet.traits, [-1, -1]);
     assert_eq!(sheet.name_bytes(), b"Fixture Six");
+    // Age 25, gender 0, no remaining points; body/reward/kill and flags zero.
+    assert_eq!(
+        (sheet.base[33], sheet.base[34], sheet.remaining_points),
+        (25, 0, 0)
+    );
+    assert_eq!(
+        (
+            sheet.body,
+            sheet.experience_reward,
+            sheet.kill_category,
+            sheet.flags
+        ),
+        (0, 0, 0, 0)
+    );
     for end in 0..bytes.len() {
         assert!(GcdFile::parse(&bytes[..end]).is_err());
     }

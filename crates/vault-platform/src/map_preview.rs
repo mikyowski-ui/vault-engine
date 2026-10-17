@@ -176,7 +176,10 @@ impl MapPreview {
         let font = assets.font().ok();
         let mut host = WorldHost::new(WorldState::new(character, seed)?, assets);
         host.interactive_dialogue = true;
-        host.load_campaign()?;
+        // A preview can run without campaign globals; the failure is reported.
+        if let Err(error) = host.load_campaign() {
+            tracing::warn!(%error, "campaign initializer unavailable");
+        }
         host.load_map(path.as_str())?;
         let map = host.world.render_snapshot();
         let art = MapSprites::load(&host.assets.vfs, &map)?;
@@ -206,6 +209,9 @@ impl MapPreview {
                     tracing::warn!(%error,"world diagnostic");
                     self.status = error.into_bytes();
                 }
+                // The preview has no audio backend, so speech playback ends
+                // immediately; the head then leaves its speech phase.
+                WorldEffect::Speech(_) => self.host.speech_finished(),
                 WorldEffect::DefaultAction { action, target } => {
                     let name = self
                         .host

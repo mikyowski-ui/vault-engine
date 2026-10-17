@@ -5,7 +5,7 @@ use crate::{
     host::{AnimationSequence, HostResult, WorldHost},
     queue::EventKind,
     rng::{self, RandomSource},
-    world::{ObjectRef, ScriptEvent, WorldObject},
+    world::{ObjectRef, WorldObject},
 };
 use vault_formats::{
     HexGrid,
@@ -287,15 +287,11 @@ impl<A: WorldAssets> WorldHost<A> {
                     && (0..6).contains(&orientation);
                 if op == 0x80a8 {
                     if valid {
-                        let changed = self.world.elevation != elevation as u8;
-                        self.world.elevation = elevation as u8;
+                        self.world.set_current_elevation(elevation as u8);
                         self.world.camera_hex = hex as i32;
                         self.world.map.header.entry_hex = hex as i32;
                         self.world.map.header.entry_elevation = elevation as u8;
                         self.world.map.header.entry_orientation = orientation as u8;
-                        if changed && self.world.map_script.is_some() {
-                            self.world.broadcast(ScriptEvent::MapUpdate, 0);
-                        }
                     } else {
                         self.world.diagnostic("map start/camera selection failed");
                     }

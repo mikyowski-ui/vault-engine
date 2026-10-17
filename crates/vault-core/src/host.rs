@@ -205,11 +205,18 @@ impl<A: WorldAssets> WorldHost<A> {
             .and_then(|sid| self.world.scripts.get(&sid))
             .map_or(0, |s| s.target)
     }
+    /// A campaign initializer that opens replaces the array (a missing marker
+    /// yields an empty array); an open failure reports failure and leaves any
+    /// prior array intact.
     pub fn load_campaign(&mut self) -> Result<(), WorldError> {
         self.world.trace.push(WorldTrace::InventoryRefresh);
-        if let Some(gam) = self.assets.gam("data/vault13.gam", GamSection::Campaign)? {
-            self.world.gvars = Some(gam.values);
-        }
+        let gam = self
+            .assets
+            .gam("data/vault13.gam", GamSection::Campaign)?
+            .ok_or_else(|| {
+                WorldError::Invalid("campaign initializer data/vault13.gam did not open".into())
+            })?;
+        self.world.gvars = Some(gam.values);
         Ok(())
     }
     pub fn load_map(&mut self, path: &str) -> Result<(), WorldError> {
@@ -315,7 +322,7 @@ impl<A: WorldAssets> WorldHost<A> {
             )?;
             self.world.map_script = Some(sid);
             self.world.spatial_enabled = false;
-            self.dispatch(ScriptRequest {
+            let result = self.dispatch(ScriptRequest {
                 script: sid,
                 event: ScriptEvent::MapEnter,
                 source: 0,
@@ -323,8 +330,9 @@ impl<A: WorldAssets> WorldHost<A> {
                 fixed,
                 action: -1,
                 only_present: false,
-            })?;
+            });
             self.world.spatial_enabled = true;
+            self.report_load_dispatch(result);
         }
         self.world.trace.push(WorldTrace::LoadStep(7));
         if let Some(player) = self.world.get_mut(self.world.player) {
@@ -337,7 +345,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.background_enabled = true;
         self.world.trace.push(WorldTrace::LoadStep(8));
         for script in self.world.script_order.clone() {
-            self.dispatch(ScriptRequest {
+            let result = self.dispatch(ScriptRequest {
                 script,
                 event: ScriptEvent::Start,
                 source: 0,
@@ -345,12 +353,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 fixed: 0,
                 action: -1,
                 only_present: false,
-            })?;
+            });
+            self.report_load_dispatch(result);
         }
         self.world.spatial_enabled = false;
         for script in self.world.script_order.clone() {
             if Some(script) != self.world.map_script {
-                self.dispatch(ScriptRequest {
+                let result = self.dispatch(ScriptRequest {
                     script,
                     event: ScriptEvent::MapEnter,
                     source: 0,
@@ -358,7 +367,8 @@ impl<A: WorldAssets> WorldHost<A> {
                     fixed,
                     action: -1,
                     only_present: true,
-                })?;
+                });
+                self.report_load_dispatch(result);
             }
         }
         self.world.spatial_enabled = true;
@@ -513,6 +523,23 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         Ok(())
     }
+    /// A script that cannot be loaded/dispatched during map entry is reported;
+    /// the remaining load stages (startup broadcasts, updates, timers) still run.
+    fn report_load_dispatch(&mut self, result: Result<DispatchResult, WorldError>) {
+        if let Err(error) = result {
+            self.world
+                .diagnostic(format!("map-load script request: {error}"));
+        }
+    }
+    /// Talking-head speech playback completed (the presentation layer owns
+    /// audio): release it, show speech frame zero, and allow a new fidget.
+    pub fn speech_finished(&mut self) {
+        if self.world.dialogue.speech.take().is_some()
+            && let Some(head) = &mut self.world.dialogue.head
+        {
+            head.speech_end();
+        }
+    }
     pub fn map_update(&mut self) -> Result<(), WorldError> {
         let previous = self.world.spatial_enabled;
         self.world.spatial_enabled = false;
@@ -521,7 +548,10 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.spatial_enabled = previous;
         result
     }
-    pub fn process_queue(&mut self) -> Result<(), WorldError> {
+    /// SPEC-006 queue pass: snapshot the clock once, remove each due event
+    /// before handling it, and stop the pass at the first nonzero handler
+    /// result (later due events stay pending). Returns that result, or zero.
+    pub fn process_queue(&mut self) -> Result<i32, WorldError> {
         let snapshot = self.world.clock.ticks;
         let mut count = 0;
         while let Some(event) = self.world.queue.pop_due(snapshot) {
@@ -530,54 +560,73 @@ impl<A: WorldAssets> WorldHost<A> {
                 return Err(WorldError::Invalid("queue dispatch limit exceeded".into()));
             }
             self.world.trace.push(WorldTrace::QueueFired(event.id));
-            match event.kind {
-                EventKind::Script { script, parameter } => {
-                    if self.world.scripts.contains_key(&script) {
-                        self.world.request(ScriptRequest {
-                            script,
-                            event: ScriptEvent::Timed,
-                            source: 0,
-                            target: 0,
-                            fixed: parameter,
-                            action: -1,
-                            only_present: false,
-                        });
-                        self.drain_requests()?;
-                    }
-                }
-                EventKind::MapUpdate => {
-                    self.map_update()?;
-                    self.world
-                        .queue
-                        .retain(|event| event.kind != EventKind::MapUpdate);
-                    self.world.queue.insert(
-                        self.world.clock.ticks,
-                        600,
-                        0,
-                        EventKind::MapUpdate,
-                    )?;
-                }
-                EventKind::Midnight => {
-                    let refs: Vec<_> = self.world.iter().map(|(r, _)| r).collect();
-                    for reference in refs {
-                        if let Some(object) = self.world.get_mut(reference)
-                            && let Some(mut lock) = object.lock()
-                        {
-                            lock.0 &= !LockFlags::JAMMED.0;
-                            object.set_lock(lock);
-                        }
-                    }
-                    self.world.queue.retain(|event| {
-                        !matches!(event.kind, EventKind::MapUpdate | EventKind::Midnight)
-                    });
-                    self.world.enqueue_map_timers()?;
-                }
-                EventKind::Poison | EventKind::Radiation | EventKind::Other(_) => self
-                    .world
-                    .diagnostic(format!("timed maintenance event {:?}", event.kind)),
+            let result = self.handle_event(event)?;
+            if result != 0 {
+                return Ok(result);
             }
         }
-        Ok(())
+        Ok(0)
+    }
+    /// Handler results: the specs define the stop rule but no handler-specific
+    /// nonzero values. This host reports 1 when a script timer's dispatch
+    /// requested a map transition (the condition under which SPEC-008 says a
+    /// nonzero handler returns travel/rest to a map); all others report 0.
+    fn handle_event(&mut self, event: crate::queue::TimedEvent) -> Result<i32, WorldError> {
+        match event.kind {
+            EventKind::Script { script, parameter } => {
+                if self.world.scripts.contains_key(&script) {
+                    let transitions = self.map_transitions();
+                    self.world.request(ScriptRequest {
+                        script,
+                        event: ScriptEvent::Timed,
+                        source: 0,
+                        target: 0,
+                        fixed: parameter,
+                        action: -1,
+                        only_present: false,
+                    });
+                    self.drain_requests()?;
+                    if self.map_transitions() > transitions {
+                        return Ok(1);
+                    }
+                }
+            }
+            EventKind::MapUpdate => {
+                self.map_update()?;
+                self.world
+                    .queue
+                    .retain(|event| event.kind != EventKind::MapUpdate);
+                self.world
+                    .queue
+                    .insert(self.world.clock.ticks, 600, 0, EventKind::MapUpdate)?;
+            }
+            EventKind::Midnight => {
+                let refs: Vec<_> = self.world.iter().map(|(r, _)| r).collect();
+                for reference in refs {
+                    if let Some(object) = self.world.get_mut(reference)
+                        && let Some(mut lock) = object.lock()
+                    {
+                        lock.0 &= !LockFlags::JAMMED.0;
+                        object.set_lock(lock);
+                    }
+                }
+                self.world.queue.retain(|event| {
+                    !matches!(event.kind, EventKind::MapUpdate | EventKind::Midnight)
+                });
+                self.world.enqueue_map_timers()?;
+            }
+            EventKind::Poison | EventKind::Radiation | EventKind::Other(_) => self
+                .world
+                .diagnostic(format!("timed maintenance event {:?}", event.kind)),
+        }
+        Ok(0)
+    }
+    fn map_transitions(&self) -> usize {
+        self.world
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, WorldEffect::MapTransition { .. }))
+            .count()
     }
     pub fn advance_time(&mut self, ticks: i32) -> Result<(), WorldError> {
         let mut ticks = i64::from(ticks);
@@ -592,7 +641,8 @@ impl<A: WorldAssets> WorldHost<A> {
             ticks -= 864000;
         }
         self.world.clock.advance(ticks)?;
-        self.process_queue()
+        // Each pass's nonzero stop only ends that pass; time still advances.
+        self.process_queue().map(|_| ())
     }
     /// SPEC-004 interpreter pass: each loaded program, in identifier order,
     /// polls its timed/conditional procedures (firing at most one, as a
@@ -867,6 +917,26 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.drain_requests()
     }
+    /// NPC reaction inputs: player reputation is the player's sheet value;
+    /// campaign counters come from configured campaign-global indices (SPEC-006
+    /// names them but not their indices), else the host-supplied values.
+    pub fn reputation_inputs(&self) -> crate::dialogue::Reputation {
+        let mut inputs = self.world.reputation;
+        if let Some(sheet) = self.world.player_sheet() {
+            inputs.value = sheet.reputation;
+        }
+        if let (Some(indices), Some(gvars)) =
+            (self.world.rules.reputation_globals, &self.world.gvars)
+        {
+            let read = |index: usize| gvars.get(index).copied().unwrap_or(0);
+            inputs.child_killer = read(indices.child_killer);
+            inputs.bad_monsters = read(indices.bad_monsters);
+            inputs.good_monsters = read(indices.good_monsters);
+            inputs.champion = read(indices.champion);
+            inputs.berserker = read(indices.berserker);
+        }
+        inputs
+    }
     pub(crate) fn reaction(&mut self, object: ObjectRef) -> i32 {
         let Some(sid) = self.world.script_for(object) else {
             return -1;
@@ -877,7 +947,7 @@ impl<A: WorldAssets> WorldHost<A> {
         let charisma = self.world.player_stat(3);
         let presence = self.world.perk(Perk::Presence);
         let cult = self.world.perk(Perk::CultOfPersonality) > 0;
-        let reputation = self.world.reputation;
+        let reputation = self.reputation_inputs();
         self.world
             .lvars
             .get_mut(base..base + 4)
@@ -980,12 +1050,16 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         // SPEC-003 §2.6: talk is granted to critters by category and to other
         // objects only by extended flag 0x4000.
-        let talkable = object.category() == Category::Critter
-            || object.prototype.as_ref().is_some_and(|p| p.permits_talk());
+        // SPEC-006 §3.8: the ordinary talk action is restricted to a player
+        // actor and critter target (SPEC-003's 0x4000 permission predicate is
+        // `Prototype::permits_talk`, not a widening of this path).
         if action == ObjectAction::Talk {
-            if actor != self.world.player || !talkable || self.world.combat {
+            if actor != self.world.player
+                || object.category() != Category::Critter
+                || self.world.combat
+            {
                 return Err(WorldError::Invalid(
-                    "talk requires the player, a talkable target, and no combat".into(),
+                    "talk requires the player and a critter outside combat".into(),
                 ));
             }
             if self.world.distance(actor, target) >= 9 {

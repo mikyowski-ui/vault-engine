@@ -254,6 +254,14 @@ fn spec006_queue_iq_reaction_and_art_vectors() {
     animation.react(49);
     animation.tick(100, 2, 10, &mut Dice::default()).unwrap();
     assert_eq!(animation.art_id().unwrap(), 0x08030007);
+    // After all transition frames play, the head becomes good and then
+    // chooses a good fidget (selector 1).
+    animation.tick(200, 2, 10, &mut Dice::default()).unwrap();
+    animation.tick(300, 2, 10, &mut Dice::new(&[10])).unwrap();
+    assert_eq!(
+        (animation.mood, animation.phase, animation.animation),
+        (Mood::Good, HeadPhase::Fidget, 1)
+    );
     assert_eq!(
         PHONEMES,
         [
@@ -1089,4 +1097,167 @@ fn spec005_named_handlers_are_busy_until_their_hit_runs() {
     library.release_named(7, 2);
     assert_eq!(library.callbacks(), [(7, 3)]);
     assert!(library.named[1].is_none());
+}
+
+#[test]
+fn spec006_live_queue_stop_elevation_updates_speech_reputation_and_campaign_failure() {
+    use fixture::{instruction, push, returning};
+    let (mut host, _, _) = host(&[b"Hello", b"Continue"]);
+    // A timed procedure that requests a map transition.
+    host.assets.program = IntProgram::parse(&fixture::program(
+        &[b"Hello"],
+        &[
+            (b"start", returning(Vec::new())),
+            (
+                b"timed_event_p_proc",
+                returning([push(0), push(1), instruction(0x80e4)].concat()),
+            ),
+        ],
+    ))
+    .unwrap();
+    let owner = host.world.player;
+    let sid = host.world.add_script(owner, 0, 4, 4).unwrap();
+    host.world.queue = TimedQueue::default();
+    host.world.clock.set(1000);
+    for _ in 0..3 {
+        host.world
+            .queue
+            .insert(
+                1000,
+                10,
+                owner,
+                EventKind::Script {
+                    script: sid,
+                    parameter: 0,
+                },
+            )
+            .unwrap();
+    }
+    host.world.clock.set(1009);
+    assert_eq!(host.process_queue().unwrap(), 0);
+    assert_eq!(host.world.queue.events().count(), 3);
+    // At 1010: A's first request only runs the bootstrap (result 0); B's
+    // timed procedure requests a transition (nonzero), so C stays pending.
+    host.world.clock.set(1010);
+    assert_eq!(host.process_queue().unwrap(), 1);
+    assert_eq!(host.world.queue.events().count(), 1);
+    assert!(host.world.effects.iter().any(|effect| matches!(
+        effect,
+        WorldEffect::MapTransition {
+            index: 0,
+            parameter: 1
+        }
+    )));
+
+    // Elevation changes request a map update only with a current map script.
+    host.world.requests.clear();
+    host.world.map_script = None;
+    host.world.move_object(owner, 20100, 2, false).unwrap();
+    assert!(host.world.requests.is_empty());
+    host.world.map_script = Some(sid);
+    host.world.move_object(owner, 20100, 0, false).unwrap();
+    assert!(
+        host.world
+            .requests
+            .iter()
+            .any(|request| request.script == sid && request.event == ScriptEvent::MapUpdate)
+    );
+    let requested = host.world.requests.len();
+    host.world.move_object(owner, 20101, 0, false).unwrap();
+    assert_eq!(
+        host.world.requests.len(),
+        requested,
+        "same elevation: no update"
+    );
+    host.world.requests.clear();
+
+    // Speech completion draws speech frame zero and sets the idle counter to 3.
+    let definition = HeadDefinition {
+        index: 7,
+        stem: "synth".into(),
+        counts: [3; 3],
+    };
+    let mut head = TalkingHead::new(definition, Mood::Neutral, 0, &mut Dice::new(&[77])).unwrap();
+    head.phoneme(9).unwrap();
+    host.world.dialogue.head = Some(head);
+    host.world.dialogue.speech = Some(b"voice".to_vec());
+    host.speech_finished();
+    let head = host.world.dialogue.head.as_ref().unwrap();
+    assert_eq!(
+        (head.frame, head.idle_seconds, head.phase),
+        (0, 3, HeadPhase::Waiting)
+    );
+    assert!(host.world.dialogue.speech.is_none());
+
+    // Reaction inputs: the player's sheet reputation and configured globals.
+    host.world.player_sheet_mut().unwrap().reputation = 7;
+    host.world.gvars = Some((0..10).collect());
+    host.world.rules.reputation_globals = Some(crate::world::ReputationGlobals {
+        child_killer: 3,
+        bad_monsters: 4,
+        good_monsters: 5,
+        champion: 6,
+        berserker: 7,
+    });
+    let inputs = host.reputation_inputs();
+    assert_eq!(
+        (
+            inputs.value,
+            inputs.child_killer,
+            inputs.bad_monsters,
+            inputs.good_monsters,
+            inputs.champion,
+            inputs.berserker
+        ),
+        (7, 3, 4, 5, 6, 7)
+    );
+
+    // A campaign initializer that fails to open reports failure and keeps
+    // the prior array.
+    let dir = tempfile::tempdir().unwrap();
+    fixture::write_corpus(dir.path());
+    std::fs::remove_file(dir.path().join("data/vault13.gam")).unwrap();
+    let assets = VfsWorldAssets::new(
+        Arc::new(vault_formats::LocalDirProvider::mount(dir.path()).unwrap()),
+        "english",
+    )
+    .unwrap();
+    let mut campaign = WorldHost::new(WorldState::empty(1).unwrap(), assets);
+    campaign.world.gvars = Some(vec![5, 6]);
+    assert!(campaign.load_campaign().is_err());
+    assert_eq!(campaign.world.gvars, Some(vec![5, 6]));
+}
+
+#[test]
+fn spec006_spatials_are_elevation_specific() {
+    let (mut host, _, _) = host(&[b"Hello", b"Continue"]);
+    let owner = host.world.player;
+    let sid = host.world.add_script(owner, 0, 1, 0).unwrap();
+    host.world.scripts.get_mut(&sid).unwrap().spatial = Some((2010, 0, 1));
+    host.world.requests.clear();
+    // The same tile numbers at another elevation do not match.
+    host.world.move_object(owner, 2009, 1, true).unwrap();
+    host.world.move_object(owner, 2011, 1, true).unwrap();
+    assert!(
+        host.world
+            .requests
+            .iter()
+            .all(|r| r.event != ScriptEvent::Spatial)
+    );
+    // Tile 2412 (distance 3) does not match; 2011 on elevation 0 does. (A move
+    // that changes only elevation keeps the tile, so it performs no check.)
+    host.world.move_object(owner, 2412, 0, true).unwrap();
+    assert!(
+        host.world
+            .requests
+            .iter()
+            .all(|r| r.event != ScriptEvent::Spatial)
+    );
+    host.world.move_object(owner, 2011, 0, true).unwrap();
+    assert!(
+        host.world
+            .requests
+            .iter()
+            .any(|r| r.script == sid && r.event == ScriptEvent::Spatial && r.source == owner)
+    );
 }

@@ -180,8 +180,19 @@ impl WorldObject {
         }
     }
 }
+/// Campaign-global indices of the NPC reaction counters. SPEC-006 names these
+/// counters without assigning indices, so the host supplies them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReputationGlobals {
+    pub child_killer: usize,
+    pub bad_monsters: usize,
+    pub good_monsters: usize,
+    pub champion: usize,
+    pub berserker: usize,
+}
 #[derive(Debug, Clone, Default)]
 pub struct WorldRules {
+    pub reputation_globals: Option<ReputationGlobals>,
     pub perk_ids: BTreeMap<i32, Perk>,
     pub event_codes: BTreeMap<ScriptEvent, i32>,
     pub xp_thresholds: Vec<i32>,
@@ -970,13 +981,23 @@ impl WorldState {
         object.raw.elevation = elevation;
         if reference == self.player {
             self.camera_hex = hex;
-            self.elevation = elevation;
+            self.set_current_elevation(elevation);
         }
         self.rebuild_lighting();
         if animated && previous != Some(hex) {
             self.check_spatials(reference);
         }
         Ok(())
+    }
+    /// SPEC-006 §3.5: a later change of the current elevation requests a map
+    /// update when a current map script exists. (Map loading assigns the entry
+    /// elevation directly, before any map script, and so takes no update path.)
+    pub fn set_current_elevation(&mut self, elevation: u8) {
+        let changed = self.elevation != elevation;
+        self.elevation = elevation;
+        if changed && self.map_script.is_some() {
+            self.broadcast(ScriptEvent::MapUpdate, 0);
+        }
     }
     pub fn check_spatials(&mut self, mover: ObjectRef) {
         if !self.spatial_enabled || self.cursor_objects.contains(&mover) {
