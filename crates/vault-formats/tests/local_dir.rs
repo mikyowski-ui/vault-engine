@@ -49,6 +49,20 @@ fn root_assets_and_nested_assets_are_case_insensitive() {
 }
 
 #[test]
+fn bounded_reads_allow_exact_lengths_and_reject_oversized_assets() {
+    let provider = LocalDirProvider::mount(fixture()).unwrap();
+    let bytes = provider.read("color.pal").unwrap();
+    assert_eq!(
+        provider.read_bounded("color.pal", bytes.len()).unwrap(),
+        bytes
+    );
+    assert!(matches!(
+        provider.read_bounded("color.pal", bytes.len() - 1),
+        Err(VfsError::FileTooLarge { .. })
+    ));
+}
+
+#[test]
 fn normalization_is_idempotent_and_rejects_ambiguous_or_escaping_paths() {
     let provider = LocalDirProvider::mount(fixture()).unwrap();
     let normalized = VfsPath::new(r"ArT\Items\Test.FRM").unwrap();

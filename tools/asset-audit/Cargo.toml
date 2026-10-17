@@ -9,5 +9,8 @@ publish.workspace = true
 clap.workspace = true
 vault-formats.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

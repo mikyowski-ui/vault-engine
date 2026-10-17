@@ -1,0 +1,19 @@
+[
+  {"input":"","ids":[]},
+  {"input":"Outside prose without braces","ids":[]},
+  {"input":"{0}{}{}","ids":[0]},
+  {"input":"{-7}{}{x}","ids":[-7]},
+  {"input":"{+}{}{x}","ids":[0]},
+  {"input":"{-}{}{x}","ids":[0]},
+  {"input":"{01}{}{x}","ids":[1]},
+  {"input":"{}{}{x}","ids":[],"error":true},
+  {"input":"{ 1}{}{x}","ids":[],"error":true},
+  {"input":"{1 }{}{x}","ids":[],"error":true},
+  {"input":"{0x10}{}{x}","ids":[],"error":true},
+  {"input":"{1}{}","ids":[],"error":true},
+  {"input":"{1}{}{abc","ids":[],"error":true},
+  {"input":"# }","ids":[],"error":true},
+  {"input":"{1}{}{ok}}","ids":[1],"error":true},
+  {"input":"{1}{}{ok}{","ids":[1],"error":true},
+  {"input":"{1}{}{ok} trailing annotation","ids":[1]}
+]

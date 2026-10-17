@@ -2,6 +2,9 @@
 
 use wgpu::util::{DeviceExt, TextureDataOrder};
 
+pub mod image;
+pub use image::{ImageError, IndexedImage, TextStyle, compose_preview};
+
 const SPRITE_SIDE: u32 = 16;
 
 #[derive(Debug, thiserror::Error)]
@@ -25,6 +28,7 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     viewport_buffer: wgpu::Buffer,
+    image_size: [u32; 2],
     drawable: bool,
 }
 
@@ -35,6 +39,31 @@ impl Renderer {
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
+    ) -> Result<Self, RendererError> {
+        let indices = include_str!("../../../tests/fixtures/render/indices.hex")
+            .split_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).expect("committed synthetic sprite"))
+            .collect();
+        let image = IndexedImage::from_pixels(SPRITE_SIDE, SPRITE_SIDE, indices)
+            .expect("synthetic image dimensions");
+        let palette = std::array::from_fn(|index| {
+            let index = index as u16;
+            [
+                (((index >> 5) & 7) * 255 / 7) as u8,
+                (((index >> 2) & 7) * 255 / 7) as u8,
+                ((index & 3) * 255 / 3) as u8,
+                255,
+            ]
+        });
+        Self::new_with_image(target, width, height, &image, &palette).await
+    }
+
+    pub async fn new_with_image(
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        width: u32,
+        height: u32,
+        image: &IndexedImage,
+        palette: &[[u8; 4]; 256],
     ) -> Result<Self, RendererError> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
         let surface = instance.create_surface(target)?;
@@ -88,74 +117,20 @@ impl Renderer {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: None,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
             multiview: None,
             cache: None,
         });
-        let indices: Vec<u8> = include_str!("../../../tests/fixtures/render/indices.hex")
-            .split_whitespace()
-            .map(|byte| u8::from_str_radix(byte, 16).expect("committed synthetic sprite"))
-            .collect();
-        assert_eq!(indices.len(), (SPRITE_SIDE * SPRITE_SIDE) as usize);
-        let sprite = texture(
-            &device,
-            &queue,
-            "synthetic sprite indices",
-            SPRITE_SIDE,
-            SPRITE_SIDE,
-            wgpu::TextureFormat::R8Uint,
-            &indices,
-        );
-        // Synthetic RGB332 palette; no proprietary palette or format assumptions.
-        let palette: Vec<u8> = (0_u16..256)
-            .flat_map(|index| {
-                [
-                    (((index >> 5) & 7) * 255 / 7) as u8,
-                    (((index >> 2) & 7) * 255 / 7) as u8,
-                    ((index & 3) * 255 / 3) as u8,
-                    255,
-                ]
-            })
-            .collect();
-        let palette = texture(
-            &device,
-            &queue,
-            "synthetic 256-color palette",
-            256,
-            1,
-            wgpu::TextureFormat::Rgba8UnormSrgb,
-            &palette,
-        );
         let viewport_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("sprite viewport"),
             contents: bytemuck::cast_slice(&[1.0_f32, 1.0, 0.0, 0.0]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("indexed sprite resources"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(
-                        &sprite.create_view(&Default::default()),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(
-                        &palette.create_view(&Default::default()),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: viewport_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let bind_group =
+            image_bind_group(&device, &queue, &pipeline, &viewport_buffer, image, palette);
         let mut renderer = Self {
             surface,
             device,
@@ -164,6 +139,7 @@ impl Renderer {
             pipeline,
             bind_group,
             viewport_buffer,
+            image_size: [image.width(), image.height()],
             drawable: false,
         };
         renderer.resize(width, height);
@@ -179,20 +155,40 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        // Integer pixel scaling keeps the test sprite sharp; tiny windows may
-        // downscale. Preserve the square sprite's aspect ratio on every resize.
-        let available_scale = width.min(height) as f32 * 0.75 / SPRITE_SIDE as f32;
+        // Integer pixel scaling when it fits, otherwise aspect-preserving downscale.
+        let available_scale = (width as f32 / self.image_size[0] as f32)
+            .min(height as f32 / self.image_size[1] as f32)
+            * 0.75;
         let scale = if available_scale >= 1.0 {
             available_scale.floor()
         } else {
             available_scale
         };
-        let side = scale * SPRITE_SIDE as f32;
         self.queue.write_buffer(
             &self.viewport_buffer,
             0,
-            bytemuck::cast_slice(&[side / width as f32, side / height as f32, 0.0, 0.0]),
+            bytemuck::cast_slice(&[
+                scale * self.image_size[0] as f32 / width as f32,
+                scale * self.image_size[1] as f32 / height as f32,
+                0.0,
+                0.0,
+            ]),
         );
+    }
+
+    pub fn set_image(&mut self, image: &IndexedImage, palette: &[[u8; 4]; 256]) {
+        self.bind_group = image_bind_group(
+            &self.device,
+            &self.queue,
+            &self.pipeline,
+            &self.viewport_buffer,
+            image,
+            palette,
+        );
+        self.image_size = [image.width(), image.height()];
+        if self.drawable {
+            self.resize(self.config.width, self.config.height);
+        }
     }
 
     /// Return true only when a frame was submitted and presented.
@@ -249,6 +245,56 @@ impl Renderer {
         frame.present();
         Ok(true)
     }
+}
+
+fn image_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &wgpu::RenderPipeline,
+    viewport: &wgpu::Buffer,
+    image: &IndexedImage,
+    rgba: &[[u8; 4]; 256],
+) -> wgpu::BindGroup {
+    let sprite = texture(
+        device,
+        queue,
+        "sprite indices",
+        image.width(),
+        image.height(),
+        wgpu::TextureFormat::R8Uint,
+        image.pixels(),
+    );
+    let palette = texture(
+        device,
+        queue,
+        "256-color palette",
+        256,
+        1,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        bytemuck::cast_slice(rgba),
+    );
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("indexed sprite resources"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(
+                    &sprite.create_view(&Default::default()),
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(
+                    &palette.create_view(&Default::default()),
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: viewport.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 fn texture(

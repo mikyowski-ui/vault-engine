@@ -9,6 +9,7 @@ publish.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+vault-formats.workspace = true
 wgpu.workspace = true
 
 [lints]

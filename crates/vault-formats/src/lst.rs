@@ -1,0 +1,203 @@
+//! Consumer-specific bounded line reads; blank and comment-like lines keep IDs.
+use crate::{
+    ParseError, VfsPath,
+    binary::{MAX_ENTRIES, Reader},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LstKind {
+    Raw,
+    Art,
+    Script,
+    Prototype,
+}
+
+impl LstKind {
+    pub fn for_path(path: &VfsPath) -> Self {
+        if path.as_str().starts_with("art/") {
+            Self::Art
+        } else if path.as_str() == "scripts/scripts.lst" {
+            Self::Script
+        } else if path.as_str().starts_with("proto/") {
+            Self::Prototype
+        } else {
+            Self::Raw
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LstEntry {
+    pub raw: Vec<u8>,
+    pub name: Option<Vec<u8>>,
+    pub alias: Option<i32>,
+    pub head_counts: Option<[i32; 3]>,
+    pub local_vars: Option<i32>,
+}
+
+impl LstEntry {
+    pub fn critter_alias(&self, default_art_index: i32) -> i32 {
+        self.alias.unwrap_or(default_art_index)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LstTable {
+    kind: LstKind,
+    entries: Vec<LstEntry>,
+    lf_count: usize,
+}
+
+fn decimal_prefix(bytes: &[u8], offset: usize) -> Result<i32, ParseError> {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let bytes = &bytes[start..];
+    let sign = usize::from(
+        bytes
+            .first()
+            .is_some_and(|byte| matches!(byte, b'+' | b'-')),
+    );
+    let length = bytes[sign..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if length == 0 {
+        return Ok(0);
+    }
+    std::str::from_utf8(&bytes[..sign + length])
+        .expect("ASCII decimal")
+        .parse()
+        .map_err(|_| ParseError::new("LST", offset, "decimal metadata exceeds i32"))
+}
+
+impl LstTable {
+    pub fn parse(bytes: &[u8], kind: LstKind) -> Result<Self, ParseError> {
+        Reader::new(bytes, "LST")?;
+        let limit = match kind {
+            LstKind::Art => 199,
+            LstKind::Script => 259,
+            LstKind::Prototype => 255,
+            LstKind::Raw => usize::MAX,
+        };
+        let mut entries = Vec::new();
+        let mut position = 0;
+        let mut lf_count = 0;
+        while position < bytes.len() {
+            if entries.len() == MAX_ENTRIES {
+                return Err(ParseError::new("LST", position, "entry limit exceeded"));
+            }
+            let offset = position;
+            let mut raw = Vec::new();
+            while position < bytes.len() && raw.len() < limit {
+                let mut byte = bytes[position];
+                position += 1;
+                if byte == b'\r' && bytes.get(position) == Some(&b'\n') {
+                    byte = b'\n';
+                    position += 1;
+                }
+                if byte == 0 {
+                    return Err(ParseError::new(
+                        "LST",
+                        position - 1,
+                        "embedded NUL has no supported name semantics",
+                    ));
+                }
+                raw.push(byte);
+                if byte == b'\n' {
+                    lf_count += 1;
+                    break;
+                }
+            }
+            let name = match kind {
+                LstKind::Raw => None,
+                LstKind::Art => Some(
+                    raw.iter()
+                        .copied()
+                        .take_while(|byte| !b" ,;\t\n".contains(byte))
+                        .take(12)
+                        .collect(),
+                ),
+                LstKind::Prototype => Some(
+                    raw.iter()
+                        .copied()
+                        .take_while(|byte| !b" \n".contains(byte))
+                        .collect(),
+                ),
+                LstKind::Script => raw.iter().position(|byte| *byte == b'.').map(|dot| {
+                    let mut name = raw[..dot].to_vec();
+                    name.extend_from_slice(b".int");
+                    name
+                }),
+            };
+            let alias = if kind == LstKind::Art {
+                raw.iter()
+                    .position(|byte| *byte == b',')
+                    .map(|comma| decimal_prefix(&raw[comma + 1..], offset + comma + 1))
+                    .transpose()?
+            } else {
+                None
+            };
+            let local_vars = if kind == LstKind::Script {
+                raw.iter()
+                    .position(|byte| *byte == b'#')
+                    .and_then(|hash| {
+                        raw[hash + 1..]
+                            .windows(11)
+                            .position(|window| window == b"local_vars=")
+                            .map(|at| hash + 1 + at + 11)
+                    })
+                    .map(|start| decimal_prefix(&raw[start..], offset + start))
+                    .transpose()?
+            } else {
+                None
+            };
+            entries.push(LstEntry {
+                raw,
+                name,
+                alias,
+                head_counts: alias.map(|count| [count; 3]),
+                local_vars,
+            });
+        }
+        Ok(Self {
+            kind,
+            entries,
+            lf_count,
+        })
+    }
+
+    pub fn entries(&self) -> &[LstEntry] {
+        &self.entries
+    }
+    pub fn bookkeeping_len(&self) -> usize {
+        match self.kind {
+            LstKind::Script => self.lf_count + 1,
+            LstKind::Prototype => self.lf_count + 2,
+            _ => self.entries.len(),
+        }
+    }
+    pub fn art_id(&self, id: u32) -> Option<&LstEntry> {
+        (self.kind == LstKind::Art)
+            .then(|| self.entries.get((id & 0xfff) as usize))
+            .flatten()
+    }
+    pub fn script_id(&self, id: u32) -> Option<&LstEntry> {
+        (self.kind == LstKind::Script)
+            .then(|| self.entries.get((id & 0xffffff) as usize))
+            .flatten()
+    }
+    pub fn map_script_reference(&self, reference: i32) -> Option<&LstEntry> {
+        if self.kind != LstKind::Script || reference <= 0 {
+            return None;
+        }
+        self.entries.get((reference - 1) as usize)
+    }
+    pub fn prototype_id(&self, id: u32) -> Option<&LstEntry> {
+        if self.kind != LstKind::Prototype {
+            return None;
+        }
+        self.entries.get((id & 0xffffff).checked_sub(1)? as usize)
+    }
+}

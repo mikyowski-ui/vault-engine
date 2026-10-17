@@ -89,6 +89,8 @@ pub enum VfsError {
     UnsupportedEntry(PathBuf),
     #[error("non-UTF-8 filename: {0:?}")]
     NonUtf8Name(PathBuf),
+    #[error("asset {path:?} exceeds the {max_bytes}-byte read limit")]
+    FileTooLarge { path: PathBuf, max_bytes: usize },
     #[error("filesystem error at {path:?}: {source}")]
     Io {
         path: PathBuf,
@@ -213,29 +215,44 @@ impl LocalDirProvider {
         }
         Ok(())
     }
-}
 
-impl Vfs for LocalDirProvider {
-    fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+    /// Bound allocation before reading, and enforce the limit if the file grows.
+    pub fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
         let path = VfsPath::new(path)?;
         let native_path = self.files.get(&path).ok_or(VfsError::NotFound(path))?;
         self.check_components(native_path)?;
         // Use the capability for the actual open, not an ambient/canonical path.
-        let mut file = self
+        let file = self
             .root
             .open(native_path)
             .map_err(|error| io_error(native_path, error))?;
-        if !file
+        let metadata = file
             .metadata()
-            .map_err(|error| io_error(native_path, error))?
-            .is_file()
-        {
+            .map_err(|error| io_error(native_path, error))?;
+        if !metadata.is_file() {
             return Err(VfsError::UnsupportedEntry(native_path.clone()));
         }
+        let too_large = || VfsError::FileTooLarge {
+            path: native_path.clone(),
+            max_bytes,
+        };
+        if metadata.len() > max_bytes as u64 {
+            return Err(too_large());
+        }
         let mut contents = Vec::new();
-        file.read_to_end(&mut contents)
+        file.take((max_bytes as u64).saturating_add(1))
+            .read_to_end(&mut contents)
             .map_err(|error| io_error(native_path, error))?;
+        if contents.len() > max_bytes {
+            return Err(too_large());
+        }
         Ok(contents)
+    }
+}
+
+impl Vfs for LocalDirProvider {
+    fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        self.read_bounded(path, usize::MAX)
     }
 
     fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {

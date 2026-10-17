@@ -1,4 +1,5 @@
 mod input;
+mod preview;
 
 use std::{error::Error, process::ExitCode, sync::Arc};
 
@@ -20,11 +21,13 @@ type AppError = Box<dyn Error + Send + Sync>;
 type AppResult<T> = Result<T, AppError>;
 
 #[derive(Parser)]
-#[command(about = "Vault Engine synthetic indexed-color desktop shell")]
+#[command(about = "Vault Engine indexed-color shell and loose-asset sprite preview")]
 struct Args {
     /// Present one frame and exit successfully (requires a desktop and GPU backend).
     #[arg(long)]
     smoke_test: bool,
+    #[command(flatten)]
+    preview: preview::PreviewArgs,
 }
 
 #[derive(Default)]
@@ -35,6 +38,7 @@ struct Shell {
     smoke_test: bool,
     frame_presented: bool,
     failure: Option<AppError>,
+    preview: Option<preview::Preview>,
 }
 
 impl Shell {
@@ -53,13 +57,37 @@ impl Shell {
     }
 }
 
+impl Shell {
+    fn preview_key(&mut self, event_loop: &ActiveEventLoop, window: &Window, key: KeyCode) {
+        let Some(preview) = &mut self.preview else {
+            return;
+        };
+        if !preview.step(key) {
+            return;
+        }
+        match preview.image() {
+            Ok(image) => {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_image(&image, &preview.palette.rgba8());
+                }
+                window.set_title(&preview.title());
+                window.request_redraw();
+            }
+            Err(error) => self.fail(event_loop, error),
+        }
+    }
+}
+
 impl ApplicationHandler for Shell {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_some() {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("Vault Engine — Indexed Color Test")
+            .with_title(self.preview.as_ref().map_or_else(
+                || "Vault Engine — Indexed Color Test".to_owned(),
+                preview::Preview::title,
+            ))
             .with_inner_size(LogicalSize::new(960, 640));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -69,7 +97,25 @@ impl ApplicationHandler for Shell {
             }
         };
         let size = window.inner_size();
-        match pollster::block_on(Renderer::new(window.clone(), size.width, size.height)) {
+        let renderer = (|| -> AppResult<Renderer> {
+            if let Some(preview) = &self.preview {
+                let image = preview.image()?;
+                Ok(pollster::block_on(Renderer::new_with_image(
+                    window.clone(),
+                    size.width,
+                    size.height,
+                    &image,
+                    &preview.palette.rgba8(),
+                ))?)
+            } else {
+                Ok(pollster::block_on(Renderer::new(
+                    window.clone(),
+                    size.width,
+                    size.height,
+                ))?)
+            }
+        })();
+        match renderer {
             Ok(renderer) => self.renderer = Some(renderer),
             Err(error) => {
                 self.fail(event_loop, error);
@@ -118,6 +164,9 @@ impl ApplicationHandler for Shell {
                         repeat: event.repeat,
                     },
                 );
+                if pressed && let PhysicalKey::Code(key) = event.physical_key {
+                    self.preview_key(event_loop, &window, key);
+                }
                 if pressed && event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
                     self.log(event_loop, InputCommand::Quit);
                     event_loop.exit();
@@ -208,12 +257,14 @@ impl ApplicationHandler for Shell {
 }
 
 fn run(args: Args) -> AppResult<()> {
+    let preview = args.preview.load()?;
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut shell = Shell {
         smoke_test: args.smoke_test,
         ..Default::default()
     };
+    shell.preview = preview;
     event_loop.run_app(&mut shell)?;
     if let Some(error) = shell.failure {
         return Err(error);

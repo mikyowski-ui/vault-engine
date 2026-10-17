@@ -162,6 +162,7 @@ name = "asset-audit"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "tempfile",
  "vault-formats",
 ]
 
@@ -2186,6 +2187,7 @@ name = "vault-formats"
 version = "0.1.0"
 dependencies = [
  "cap-std",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
 ]
@@ -2202,9 +2204,11 @@ dependencies = [
  "pollster",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "vault-core",
+ "vault-formats",
  "vault-render",
  "winit",
 ]
@@ -2216,6 +2220,7 @@ dependencies = [
  "bytemuck",
  "thiserror 2.0.21",
  "tracing",
+ "vault-formats",
  "wgpu",
 ]
 

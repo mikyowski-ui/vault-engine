@@ -13,8 +13,12 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 vault-core.workspace = true
+vault-formats.workspace = true
 vault-render.workspace = true
 winit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
