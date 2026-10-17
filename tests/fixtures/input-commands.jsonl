@@ -1,0 +1,3 @@
+{"command_id":1,"kind":"key","physical_key":"KeyA","pressed":true,"repeat":false}
+{"command_id":2,"kind":"pointer_moved","x":10.5,"y":20.0}
+{"command_id":3,"kind":"quit"}

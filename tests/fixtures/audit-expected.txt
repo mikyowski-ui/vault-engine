@@ -1,0 +1,11 @@
+Mounted files: 11
+extension	files
+.frm	1
+.pal	1
+.fon	1
+.aaf	1
+.pro	1
+.map	1
+.int	1
+.msg	1
+.lst	1

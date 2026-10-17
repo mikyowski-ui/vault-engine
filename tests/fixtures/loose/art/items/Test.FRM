@@ -1,0 +1,1 @@
+Synthetic frame marker.

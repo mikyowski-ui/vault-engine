@@ -1,0 +1,244 @@
+use std::{
+    collections::BTreeMap,
+    fmt,
+    io::{self, Read},
+    path::{Path, PathBuf},
+};
+
+use cap_std::{ambient_authority, fs::Dir};
+
+/// A canonical, relative asset path: lowercase ASCII with `/` separators.
+///
+/// Both slash styles are accepted on input. Empty components, `.`/`..`,
+/// absolute/drive/UNC paths, control characters, Windows special characters,
+/// device names, and trailing dots/spaces are rejected rather than repaired.
+/// Restricting names to ASCII gives identical case folding on every platform.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VfsPath(String);
+
+impl VfsPath {
+    pub fn new(path: &str) -> Result<Self, VfsError> {
+        let invalid = |reason| VfsError::InvalidPath {
+            path: path.to_owned(),
+            reason,
+        };
+        if path.is_empty() || !path.is_ascii() {
+            return Err(invalid("expected a nonempty ASCII path"));
+        }
+        if path
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || b"<>:\"|?*".contains(&byte))
+        {
+            return Err(invalid("control or reserved character"));
+        }
+        let normalized = path.replace('\\', "/").to_ascii_lowercase();
+        for component in normalized.split('/') {
+            if component.is_empty() || component == "." || component == ".." {
+                return Err(invalid("empty, absolute, or traversal component"));
+            }
+            if component.ends_with(['.', ' ']) {
+                return Err(invalid("component ends in a dot or space"));
+            }
+            let stem = component.split('.').next().expect("nonempty component");
+            if matches!(stem, "con" | "prn" | "aux" | "nul")
+                || ((stem.starts_with("com") || stem.starts_with("lpt"))
+                    && stem.len() == 4
+                    && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+            {
+                return Err(invalid("reserved device name"));
+            }
+        }
+        Ok(Self(normalized))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Lowercase extension without a leading dot.
+    pub fn extension(&self) -> Option<&str> {
+        self.0
+            .rsplit('/')
+            .next()?
+            .rsplit_once('.')
+            .map(|(_, ext)| ext)
+    }
+}
+
+impl fmt::Display for VfsPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum VfsError {
+    #[error("invalid VFS path {path:?}: {reason}")]
+    InvalidPath { path: String, reason: &'static str },
+    #[error("asset not found: {0}")]
+    NotFound(VfsPath),
+    #[error("case-insensitive path collision at {path}: {first:?} and {second:?}")]
+    CaseCollision {
+        path: VfsPath,
+        first: PathBuf,
+        second: PathBuf,
+    },
+    #[error("symlinks are not allowed inside a loose mount: {0:?}")]
+    Symlink(PathBuf),
+    #[error("unsupported filesystem entry: {0:?}")]
+    UnsupportedEntry(PathBuf),
+    #[error("non-UTF-8 filename: {0:?}")]
+    NonUtf8Name(PathBuf),
+    #[error("filesystem error at {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+fn io_error(path: &Path, source: io::Error) -> VfsError {
+    VfsError::Io {
+        path: path.to_owned(),
+        source,
+    }
+}
+
+/// Read-only, object-safe asset access shared by loose and future archive providers.
+pub trait Vfs: Send + Sync {
+    /// Read a file using the same strict normalization as `VfsPath::new`.
+    fn read(&self, path: &str) -> Result<Vec<u8>, VfsError>;
+
+    /// Walk all mounted files in canonical lexical order (directories excluded).
+    fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_>;
+}
+
+/// A snapshot of the namespace of an unpacked game directory.
+///
+/// Root files and arbitrary subdirectories are indexed; no extension or folder
+/// allowlist is applied. Remount to discover added or renamed files. Contents
+/// are read on demand. Files/directories that collide after case folding, links,
+/// and special files cause mount failure instead of ambiguous or partial results.
+///
+/// All filesystem operations after mounting are relative to an open directory
+/// capability. Even if the tree changes between checking and opening a path,
+/// the operation cannot follow a symlink outside that capability. The selected
+/// root stays anchored if its ambient path is renamed or replaced.
+#[derive(Debug)]
+pub struct LocalDirProvider {
+    root: Dir,
+    files: BTreeMap<VfsPath, PathBuf>,
+}
+
+impl LocalDirProvider {
+    pub fn mount(root: impl AsRef<Path>) -> Result<Self, VfsError> {
+        let root_path = root.as_ref();
+        let root = Dir::open_ambient_dir(root_path, ambient_authority())
+            .map_err(|error| io_error(root_path, error))?;
+        let mut files = BTreeMap::new();
+        let mut seen = BTreeMap::new();
+        let mut pending = vec![PathBuf::new()];
+
+        while let Some(directory) = pending.pop() {
+            let entries = if directory.as_os_str().is_empty() {
+                root.entries()
+            } else {
+                root.read_dir(&directory)
+            }
+            .map_err(|error| io_error(&directory, error))?;
+            let mut entries = entries
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| io_error(&directory, error))?;
+            entries.sort_by_key(|entry| entry.file_name());
+
+            for entry in entries {
+                let name = entry.file_name();
+                let native_path = directory.join(&name);
+                let name = name
+                    .to_str()
+                    .ok_or_else(|| VfsError::NonUtf8Name(native_path.clone()))?;
+                // A literal backslash in a Unix filename must not become a
+                // virtual directory separator.
+                if name.contains('\\') {
+                    return Err(VfsError::InvalidPath {
+                        path: name.to_owned(),
+                        reason: "filename contains a separator",
+                    });
+                }
+                let path = VfsPath::new(
+                    native_path
+                        .to_str()
+                        .ok_or_else(|| VfsError::NonUtf8Name(native_path.clone()))?,
+                )?;
+                if let Some(first) = seen.insert(path.clone(), native_path.clone()) {
+                    return Err(VfsError::CaseCollision {
+                        path,
+                        first,
+                        second: native_path,
+                    });
+                }
+                let kind = root
+                    .symlink_metadata(&native_path)
+                    .map_err(|error| io_error(&native_path, error))?
+                    .file_type();
+                if kind.is_symlink() {
+                    return Err(VfsError::Symlink(native_path));
+                } else if kind.is_dir() {
+                    pending.push(native_path);
+                } else if kind.is_file() {
+                    files.insert(path, native_path);
+                } else {
+                    return Err(VfsError::UnsupportedEntry(native_path));
+                }
+            }
+        }
+        Ok(Self { root, files })
+    }
+
+    fn check_components(&self, path: &Path) -> Result<(), VfsError> {
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            let kind = self
+                .root
+                .symlink_metadata(&prefix)
+                .map_err(|error| io_error(&prefix, error))?
+                .file_type();
+            if kind.is_symlink() {
+                return Err(VfsError::Symlink(prefix));
+            }
+            if !(kind.is_file() || kind.is_dir()) {
+                return Err(VfsError::UnsupportedEntry(prefix));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Vfs for LocalDirProvider {
+    fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        let path = VfsPath::new(path)?;
+        let native_path = self.files.get(&path).ok_or(VfsError::NotFound(path))?;
+        self.check_components(native_path)?;
+        // Use the capability for the actual open, not an ambient/canonical path.
+        let mut file = self
+            .root
+            .open(native_path)
+            .map_err(|error| io_error(native_path, error))?;
+        if !file
+            .metadata()
+            .map_err(|error| io_error(native_path, error))?
+            .is_file()
+        {
+            return Err(VfsError::UnsupportedEntry(native_path.clone()));
+        }
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)
+            .map_err(|error| io_error(native_path, error))?;
+        Ok(contents)
+    }
+
+    fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {
+        Box::new(self.files.keys())
+    }
+}
