@@ -445,6 +445,6 @@ These are instruction fragments, **not complete `.INT` files**. Run each indepen
 For the value-stack capacity boundary, execute 341 copies of `C0 01 00 00 00 00` under a fragment harness: they fit in 2046 stack bytes. A 342nd complete push raises stack overflow. This construction is a byte count and repeat rule, not an abbreviated complete script image.
 
 ## 5. Clean-Room Verification Checklist
-- [ ] Zero C/C++ code snippets or struct definitions included
-- [ ] All multi-byte integer endianness explicitly stated
-- [ ] Synthetic test vectors included
+- [x] Zero C/C++ code snippets or struct definitions included
+- [x] All multi-byte integer endianness explicitly stated
+- [x] Synthetic test vectors included

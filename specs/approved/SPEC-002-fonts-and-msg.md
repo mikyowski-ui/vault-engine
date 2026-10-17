@@ -408,6 +408,6 @@ For length boundaries, form the exact prefix `{30}{}{`, then the specified numbe
 For the storage-specific end-of-file case, use bytes `1A 7B 31 7D 7B 7D 7B 78 7D`. Archive-backed input preserves `1A` as ignored outside-field data and loads ID 1; the reference Windows loose-file text stream stops at the initial `1A` and finishes successfully with no records.
 
 ## 5. Clean-Room Verification Checklist
-- [ ] Zero C/C++ code snippets or struct definitions included
-- [ ] All multi-byte integer endianness explicitly stated
-- [ ] Synthetic test vectors included
+- [x] Zero C/C++ code snippets or struct definitions included
+- [x] All multi-byte integer endianness explicitly stated
+- [x] Synthetic test vectors included
