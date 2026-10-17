@@ -634,6 +634,6 @@ With campaign index 101 zero, the water-chip quest is still visible and active. 
 For rest, assume the Pip-Boy has just opened with zero credited minutes, no queue interruption, a player included in the party, and healing rate 1. A single three-hour request gives A 0.6875 and K 13.75: thirteen executed hour steps credit `13 x trunc(180 / 13.75) = 169` minutes. Game time advances 108000 ticks, but no healing trigger occurs. Eighteen ten-minute requests **without closing the Pip-Boy** credit 180 minutes and trigger one healing-rate unit over the same three game hours. A one-HP deficit under until-healed can consequently require repeated three-hour phases rather than the naive three-hour estimate.
 
 ## 5. Clean-Room Verification Checklist
-- [ ] Zero C/C++ code snippets or struct definitions included
-- [ ] All multi-byte integer endianness explicitly stated
-- [ ] Synthetic test vectors included
+- [x] Zero C/C++ code snippets or struct definitions included
+- [x] All multi-byte integer endianness explicitly stated
+- [x] Synthetic test vectors included

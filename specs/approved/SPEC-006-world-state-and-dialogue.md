@@ -583,6 +583,6 @@ For a spatial centered at tile 2010, elevation zero, radius 1, moves to tiles 20
 For the queue, enqueue A, B, then C at current tick 1000 with delays 10 each. A processing pass at 1009 dispatches none. At 1010, A returning zero is followed by B; if B returns nonzero, C remains pending until another pass, even though C is already due. A periodic map update processed late at tick 2633 reschedules for 3233, not for an earlier nominal cadence boundary.
 
 ## 5. Clean-Room Verification Checklist
-- [ ] Zero C/C++ code snippets or struct definitions included
-- [ ] All multi-byte integer endianness explicitly stated
-- [ ] Synthetic test vectors included
+- [x] Zero C/C++ code snippets or struct definitions included
+- [x] All multi-byte integer endianness explicitly stated
+- [x] Synthetic test vectors included
