@@ -8,7 +8,7 @@ use vault_core::{
     assets::{VfsWorldAssets, WorldAssets},
 };
 use vault_formats::{
-    Font, FrmArchive, HexGrid, LocalDirProvider, LstKind, LstTable, MAX_ASSET_BYTES, MapFile,
+    ArtCatalog, Fid, Font, FrmArchive, HexGrid, LocalDirProvider, MAX_ASSET_BYTES, MapFile,
     Palette, Vfs, VfsPath,
     pro::{BasicFlags, Category},
 };
@@ -77,52 +77,28 @@ impl MapSprites {
                 ));
             }
         }
-        let mut lists = BTreeMap::new();
+        let catalog = ArtCatalog::load(vfs)?;
+        let files: BTreeSet<&str> = vfs.files().map(VfsPath::as_str).collect();
         let mut archives: BTreeMap<String, Arc<FrmArchive>> = BTreeMap::new();
         let mut bindings = BTreeMap::new();
         let mut bytes_loaded = 0_u64;
-        for (category, fid, orientation) in needed {
-            let folder = category.directory();
-            if let std::collections::btree_map::Entry::Vacant(entry) = lists.entry(category) {
-                let bytes =
-                    vfs.read_bounded(&format!("art/{folder}/{folder}.lst"), MAX_ASSET_BYTES)?;
-                entry.insert(LstTable::parse(&bytes, LstKind::Art)?);
-            }
-            let name = lists[&category]
-                .art_id(fid)
-                .and_then(|entry| entry.name.as_deref())
-                .filter(|name| !name.is_empty())
-                .ok_or_else(|| {
-                    format!("art/{folder}/{folder}.lst has no art index {}", fid & 0xfff)
-                })?;
-            let name = std::str::from_utf8(name)?;
-            let base = VfsPath::new(&format!("art/{folder}/{name}"))?.to_string();
-            let resolved = if base.ends_with(".frm")
-                || matches!(
-                    VfsPath::new(&base)?.extension(),
-                    Some("fr0" | "fr1" | "fr2" | "fr3" | "fr4" | "fr5")
-                ) {
-                base
+        for key @ (category, id, _) in needed {
+            // Tile squares store a bare list index; objects store a complete FID,
+            // whose own category bits select the art directory and codec.
+            let fid = if category == Category::Tile {
+                Fid::new(4, id as u16, 0, 0, 0)
             } else {
-                // SPEC-001/003 do not define the critter animation suffix codec.
-                // Choose a deterministic available representation, and report it.
-                let split = format!("fr{orientation}");
-                let path = vfs
-                    .files()
-                    .find(|path| {
-                        path.as_str().starts_with(&base) && path.extension() == Some("frm")
-                    })
-                    .or_else(|| {
-                        vfs.files().find(|path| {
-                            path.as_str().starts_with(&base)
-                                && path.extension() == Some(split.as_str())
-                        })
-                    })
-                    .ok_or_else(|| format!("no sprite for art stem {base}"))?
-                    .to_string();
-                tracing::warn!(art_id=fid,stem=%base,sprite=%path,"animation filename encoding is unspecified; using available stem art");
-                path
+                Fid(id)
             };
+            let resolved = catalog
+                .path(fid)
+                .map_err(|error| format!("art identifier {:#010x}: {error}", fid.0))?;
+            let resolved = VfsPath::new(&resolved)?.to_string();
+            if category != Category::Tile && !files.contains(resolved.as_str()) {
+                // The reference has no guaranteed final fallback resource.
+                tracing::warn!(art_id = fid.0, sprite = %resolved, "object art is missing; not drawn");
+                continue;
+            }
             let archive = if let Some(archive) = archives.get(&resolved) {
                 archive.clone()
             } else {
@@ -137,7 +113,7 @@ impl MapSprites {
                 archives.insert(resolved, archive.clone());
                 archive
             };
-            bindings.insert((category, fid, orientation), archive);
+            bindings.insert(key, archive);
         }
         let art = MapSprites { bindings };
         for object in map.objects.elevations.iter().flatten() {

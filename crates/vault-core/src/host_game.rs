@@ -68,17 +68,31 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.emit(WorldEffect::Animation {
             opcode: word,
             values: values.clone(),
-            sound,
+            sound: sound.clone(),
         });
         if let Some(sequence) = &mut self.building_animation {
             if sequence.commands.len() < 64 {
+                if let Some(sound) = sound {
+                    sequence.sounds.insert(sequence.commands.len(), sound);
+                }
                 sequence.commands.push((word, values));
+            } else {
+                self.world
+                    .diagnostic("animation sequence is full; registration dropped");
             }
         } else if self.animations.len() < 32 {
-            self.animations.push(AnimationSequence {
+            let mut sequence = AnimationSequence {
                 flags: 1,
                 commands: vec![(word, values)],
-            });
+                ..Default::default()
+            };
+            if let Some(sound) = sound {
+                sequence.sounds.insert(0, sound);
+            }
+            self.animations.push(sequence);
+        } else {
+            self.world
+                .diagnostic("animation sequence list is full; sequence dropped");
         }
     }
     fn clear_animation(&mut self, object: ObjectRef) {
@@ -94,10 +108,38 @@ impl<A: WorldAssets> WorldHost<A> {
             return Ok(());
         }
         self.clear_animation(object);
-        let target = self
-            .world
-            .get_mut(object)
-            .ok_or_else(|| VmError::Host("invalid killed object".into()))?;
+        let art = vault_formats::Fid(
+            self.world
+                .get(object)
+                .ok_or_else(|| VmError::Host("invalid killed object".into()))?
+                .raw
+                .art_id,
+        );
+        let orientation = self.world.get(object).map_or(0, |o| o.raw.orientation);
+        let fid = |host: &Self, animation: u8| {
+            if art.category() == 1 {
+                host.assets.construct_fid(
+                    1,
+                    art.base(),
+                    animation,
+                    art.weapon(),
+                    vault_formats::Fid::selector_for_orientation(orientation),
+                )
+            } else {
+                (art.0 & !0x00ff0000) | (u32::from(animation) << 16)
+            }
+        };
+        // SPEC-007 §3.8: in direct/static-death callers, static codes 51-63
+        // revert to forced fall-back 20 without maximum violence or art.
+        let mut animation = (animation & 255) as u8;
+        if (51..=63).contains(&animation)
+            && (self.world.violence.unwrap_or(2) < 3
+                || self.assets.object_art(fid(self, animation)).is_err())
+        {
+            animation = 20;
+        }
+        let art_id = fid(self, animation);
+        let target = self.world.get_mut(object).expect("checked object");
         if let Some(sheet) = &mut target.character {
             sheet.current_hp = 0;
         }
@@ -106,8 +148,10 @@ impl<A: WorldAssets> WorldHost<A> {
             state.results.0 |= 0x80;
             state.maneuvers = 0;
         }
-        target.raw.art_id = (target.raw.art_id & !0x00ff0000) | ((animation as u32 & 255) << 16);
+        target.raw.art_id = art_id;
         target.opponent = 0;
+        self.world.queue.remove_object(object);
+        self.present_corpse(object, animation)?;
         if object == self.self_object(vm) {
             vm.status.0 |= 0x100;
         }
@@ -202,21 +246,7 @@ impl<A: WorldAssets> WorldHost<A> {
         let values: Vec<_> = call.args.iter().map(|arg| arg.int()).collect();
         let result = match op {
             0x80a1 => {
-                let context = self.world.context(self.world.player);
-                let bonus = self.world.rules.xp_bonus_percent;
-                let thresholds = self.world.rules.xp_thresholds.clone();
-                if let Some(sheet) = self.world.player_sheet_mut() {
-                    let gain = i64::from(call.int(0)) * (100 + i64::from(bonus)) / 100;
-                    sheet.experience =
-                        (i64::from(sheet.experience) + gain).clamp(0, i64::from(i32::MAX)) as i32;
-                    while sheet.level < 21
-                        && thresholds
-                            .get(sheet.level as usize)
-                            .is_some_and(|threshold| sheet.experience >= *threshold)
-                    {
-                        sheet.advance_level(context);
-                    }
-                }
+                self.world.give_experience(call.int(0));
                 None
             }
             0x80a2 => {
@@ -660,6 +690,13 @@ impl<A: WorldAssets> WorldHost<A> {
                             max,
                             mode,
                         });
+                        self.world.pending_combat = Some(crate::combat_state::CombatRequest {
+                            attacker,
+                            defender,
+                            accuracy,
+                            damage: [min, max],
+                            flags: mode,
+                        });
                     }
                 }
                 vm.status.0 &= !0x20;
@@ -764,19 +801,17 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x80dc => {
+                // SPEC-005/SPEC-007: both references and a placed target, the
+                // perception test, then a stride-16 ray whose first reported
+                // movement blocker is the target itself.
                 let (target, observer) = (call.uint(0), call.uint(1));
-                let visible = target != 0
-                    && observer != 0
-                    && self.object(target)?.raw.hex.is_some()
-                    && self.world.distance(observer, target)
-                        <= self
-                            .object(observer)?
-                            .character
-                            .as_ref()
-                            .map_or(0, |c| c.stat(1, self.world.context(observer)))
-                            * 5
-                    && self.world.line_clear(observer, target, false);
-                integer(i32::from(visible))
+                if target == 0 || observer == 0 {
+                    self.world
+                        .diagnostic("obj_can_see_obj requires two objects");
+                    integer(0)
+                } else {
+                    integer(i32::from(self.world.can_see(observer, target)))
+                }
             }
             0x80de => {
                 self.start_dialogue(vm, call.uint(3), call.int(2), call.int(1), call.int(0))?;
@@ -846,23 +881,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x80e5 | 0x80e6 => None,
-            0x80e7 => integer(
-                if call.uint(0) != 0
-                    && self
-                        .building_animation
-                        .as_ref()
-                        .is_none_or(|s| s.commands.len() < 64)
-                    && self.animations.iter().any(|sequence| {
-                        sequence.commands.iter().any(|(op, args)| {
-                            !matches!(*op, 0x80cc | 0x80cd | 0x813b) && args.contains(&call.int(0))
-                        })
-                    })
-                {
-                    -1
-                } else {
-                    0
-                },
-            ),
+            0x80e7 => integer(if self.animation_busy(call.uint(0)) {
+                -1
+            } else {
+                0
+            }),
             0x80e8 => {
                 self.change_hp(call.uint(1), call.int(0))?;
                 integer(0)
@@ -927,13 +950,37 @@ impl<A: WorldAssets> WorldHost<A> {
                 if call.uint(2) == 0 || self.object(call.uint(2))?.category() != Category::Critter {
                     return Ok(None);
                 }
-                let amount = call.int(1).checked_neg().ok_or(VmError::Arithmetic)?;
-                self.change_hp(call.uint(2), amount)?;
-                self.world.emit(WorldEffect::Animation {
-                    opcode: op,
-                    values: values.clone(),
-                    sound: None,
-                });
+                // Fixed amount as both damage bounds: through the victim's DT
+                // then DR for the low-byte damage type unless 0x100 bypasses
+                // armor; 0x200 suppresses the animation request.
+                let (flags, victim) = (call.int(0) as u32, call.uint(2));
+                let damage = if flags & 0x100 != 0 {
+                    call.int(1).max(0)
+                } else {
+                    let context = self.world.context(victim);
+                    let kind = (flags & 0xff) as usize;
+                    let sheet = self.object(victim)?.character.as_ref();
+                    let armor = |base: usize| {
+                        if kind < 7 {
+                            sheet.map_or(0, |s| i64::from(s.stat(base + kind, context)))
+                        } else {
+                            0
+                        }
+                    };
+                    let mut value = i64::from(call.int(1)) - armor(17);
+                    if value > 0 {
+                        value -= value * armor(24) / 100;
+                    }
+                    value.clamp(0, i64::from(i32::MAX)) as i32
+                };
+                self.damage_critter(victim, None, damage, 0)?;
+                if flags & 0x200 == 0 {
+                    self.world.emit(WorldEffect::Animation {
+                        opcode: op,
+                        values: values.clone(),
+                        sound: None,
+                    });
+                }
                 vm.status.0 &= !0x20;
                 None
             }
@@ -1124,7 +1171,10 @@ impl<A: WorldAssets> WorldHost<A> {
                         }
                         let chosen = candidates.into_iter().find(|hex| {
                             (0..40000).contains(hex)
-                                && !self.world.blocked(*hex, call.int(0) as u8, call.uint(2))
+                                && self
+                                    .world
+                                    .movement_blocker(*hex, call.int(0) as u8, call.uint(2))
+                                    .is_none()
                         });
                         let success = chosen.is_some_and(|hex| {
                             self.world
@@ -1353,15 +1403,19 @@ impl<A: WorldAssets> WorldHost<A> {
                         1 => {
                             self.building_animation = Some(AnimationSequence {
                                 flags: call.int(0),
-                                commands: Vec::new(),
+                                ..Default::default()
                             })
                         }
                         2 => self.clear_animation(call.uint(0)),
                         3 => {
-                            if let Some(sequence) = self.building_animation.take()
-                                && self.animations.len() < 32
-                            {
-                                self.animations.push(sequence);
+                            if let Some(sequence) = self.building_animation.take() {
+                                if self.animations.len() < 32 {
+                                    self.animations.push(sequence);
+                                } else {
+                                    self.world.diagnostic(
+                                        "animation sequence list is full; sequence dropped",
+                                    );
+                                }
                             }
                         }
                         _ => {}
@@ -1689,10 +1743,19 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             0x813a => {
                 if let Some(object) = self.world.get(call.uint(1)) {
-                    let fid = (object.raw.art_id & !0x00ff0000) | ((call.uint(0) & 255) << 16);
+                    // Weapon animation zero; the raw orientation (not orientation
+                    // plus one) is the constructor's requested selector.
+                    let art = vault_formats::Fid(object.raw.art_id);
+                    let fid = self.assets.construct_fid(
+                        art.category(),
+                        art.base(),
+                        call.uint(0) as u8,
+                        0,
+                        object.raw.orientation,
+                    );
                     integer(
                         self.assets
-                            .object_art(object.category(), fid, object.raw.orientation)
+                            .object_art(fid)
                             .ok()
                             .map_or(0, |art| i32::from(art.action_frame)),
                     )
@@ -1815,12 +1878,9 @@ impl<A: WorldAssets> WorldHost<A> {
                     .get(call.uint(0))
                     .filter(|o| o.raw.elevation == self.world.elevation)
                 {
-                    if let Ok(art) = self.assets.object_art(
-                        object.category(),
-                        object.raw.art_id,
-                        object.raw.orientation,
-                    ) && let Some(frame) =
-                        art.frame(object.raw.orientation as usize, object.raw.frame)
+                    if let Ok(art) = self.assets.object_art(object.raw.art_id)
+                        && let Some(frame) =
+                            art.frame(object.raw.orientation as usize, object.raw.frame)
                     {
                         let origin = if let Some(hex) = object.raw.hex {
                             let center = HexGrid::centered(self.world.camera_hex, 640, 380)

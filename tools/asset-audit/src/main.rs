@@ -1,8 +1,10 @@
-use std::{error::Error, path::PathBuf, process::ExitCode};
+use std::{collections::BTreeSet, error::Error, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use vault_formats::{
-    LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, Prototype, Vfs, VfsPath,
+    ArtCatalog, Fid, LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, Prototype,
+    Vfs, VfsPath,
+    map::MapObject,
     pro::{BasicFlags, ItemData, PrototypeData},
     validate_asset,
 };
@@ -25,6 +27,10 @@ struct Args {
     /// Parse all supported formats, resolving MAP object subtypes through proto/ lists.
     #[arg(long)]
     validate_formats: bool,
+    /// Resolve every PRO/MAP art identifier through the SPEC-007 filename codec
+    /// and require the selected file to exist.
+    #[arg(long)]
+    validate_art_ids: bool,
     /// Re-serialize every PRO and MAP through the SPEC-003 writers.
     #[arg(long)]
     validate_writers: bool,
@@ -96,6 +102,76 @@ fn check_writer(
         return Err("MAP writer lost saved objects or retained scripts".into());
     }
     Ok(())
+}
+
+/// Art identifiers carried by a prototype; -1 marks an absent optional image.
+fn prototype_art(prototype: &Prototype) -> Vec<(&'static str, u32)> {
+    let mut art = vec![("art", prototype.art_id)];
+    match &prototype.data {
+        PrototypeData::Item(item) => {
+            art.push(("inventory art", item.inventory_art));
+            if let ItemData::Armor(armor) = &item.data {
+                art.push(("male armor art", armor.male_art as u32));
+                art.push(("female armor art", armor.female_art as u32));
+            }
+        }
+        PrototypeData::Critter(critter) => art.push(("head art", critter.head_art)),
+        _ => {}
+    }
+    art.retain(|(_, fid)| *fid != u32::MAX);
+    art
+}
+
+fn map_art(object: &MapObject, art: &mut Vec<(&'static str, u32)>) {
+    art.push(("object art", object.art_id));
+    for child in &object.inventory {
+        map_art(&child.object, art);
+    }
+}
+
+/// Per source (`.pro`, `.map`): identifiers whose decoded file exists, whose
+/// decoded file is absent from this corpus, and that the codec rejects.
+fn audit_art_ids(vfs: &LocalDirProvider) -> Result<[[u64; 3]; 2], Box<dyn Error>> {
+    let catalog = ArtCatalog::load(vfs)?;
+    let prototypes = LocalPrototypeCatalog::new(vfs);
+    let files: BTreeSet<&str> = vfs.files().map(VfsPath::as_str).collect();
+    let mut counts = [[0; 3]; 2];
+    for path in vfs.files() {
+        let (source, art) = match path.extension() {
+            Some("pro") => {
+                let bytes = vfs.read_bounded(path.as_str(), MAX_ASSET_BYTES)?;
+                (0, prototype_art(&Prototype::parse(&bytes)?))
+            }
+            Some("map") => {
+                let bytes = vfs.read_bounded(path.as_str(), MAX_ASSET_BYTES)?;
+                let map = MapFile::parse(&bytes, &prototypes)?;
+                let mut art = Vec::new();
+                for object in map.objects.elevations.iter().flatten() {
+                    map_art(object, &mut art);
+                }
+                (1, art)
+            }
+            _ => continue,
+        };
+        for (field, fid) in art {
+            match catalog
+                .path(Fid(fid))
+                .map_err(|error| error.to_string())
+                .and_then(|art| VfsPath::new(&art).map_err(|error| error.to_string()))
+            {
+                Ok(art) if files.contains(art.as_str()) => counts[source][0] += 1,
+                Ok(art) => {
+                    counts[source][1] += 1;
+                    eprintln!("MISSING {path}: {field} {fid:#010x}: {art}");
+                }
+                Err(error) => {
+                    counts[source][2] += 1;
+                    eprintln!("FAIL {path}: {field} {fid:#010x}: {error}");
+                }
+            }
+        }
+    }
+    Ok(counts)
 }
 
 fn audit(args: Args) -> Result<(), Box<dyn Error>> {
@@ -191,6 +267,19 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
         );
         if failures != 0 {
             return Err(format!("{failures} writer round trip(s) failed").into());
+        }
+    }
+    if args.validate_art_ids {
+        let counts = audit_art_ids(&vfs)?;
+        println!("art-id source\tresolved\tmissing\tinvalid");
+        for (source, [resolved, missing, invalid]) in ["pro", "map"].iter().zip(counts) {
+            println!(".{source}\t{resolved}\t{missing}\t{invalid}");
+        }
+        let [resolved, missing, invalid] =
+            std::array::from_fn(|column| counts[0][column] + counts[1][column]);
+        println!("Art identifiers: {resolved} resolved, {missing} missing, {invalid} invalid");
+        if invalid != 0 {
+            return Err(format!("{invalid} art identifier(s) cannot be decoded").into());
         }
     }
     Ok(())

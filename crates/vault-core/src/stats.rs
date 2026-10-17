@@ -47,6 +47,20 @@ pub enum Perk {
     Empathy,
     NightVision,
     Awareness,
+    // Perks consumed by SPEC-007/SPEC-008 rules without stat-bonus effects.
+    BonusMove,
+    Sharpshooter,
+    BonusHthAttacks,
+    BonusRateOfFire,
+    BonusRangedDamage,
+    Slayer,
+    Sniper,
+    SilentDeath,
+    HeaveHo,
+    QuickPockets,
+    Explorer,
+    Scout,
+    Pathfinder,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {

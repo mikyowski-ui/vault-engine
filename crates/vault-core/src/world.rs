@@ -36,6 +36,10 @@ pub enum ScriptEvent {
     UseObject,
     Pickup,
     Talk,
+    /// SPEC-007 combat invocations (fixed parameter 4 turn, 5 join check).
+    Combat,
+    Damage,
+    Destroy,
 }
 impl ScriptEvent {
     pub fn name(self) -> &'static [u8] {
@@ -53,6 +57,9 @@ impl ScriptEvent {
             Self::UseObject => b"use_obj_on_p_proc",
             Self::Pickup => b"pickup_p_proc",
             Self::Talk => b"talk_p_proc",
+            Self::Combat => b"combat_p_proc",
+            Self::Damage => b"damage_p_proc",
+            Self::Destroy => b"destroy_p_proc",
         }
     }
     pub fn documented_code(self) -> Option<i32> {
@@ -190,8 +197,18 @@ pub struct ReputationGlobals {
     pub champion: usize,
     pub berserker: usize,
 }
+/// Weapon properties named by SPEC-007; the prototype's numeric weapon-perk
+/// codes are supplied by the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeaponPerk {
+    LongRange,
+    Accurate,
+    Penetrate,
+    Knockback,
+}
 #[derive(Debug, Clone, Default)]
 pub struct WorldRules {
+    pub weapon_perks: BTreeMap<i32, WeaponPerk>,
     pub reputation_globals: Option<ReputationGlobals>,
     pub perk_ids: BTreeMap<i32, Perk>,
     pub event_codes: BTreeMap<ScriptEvent, i32>,
@@ -321,6 +338,17 @@ pub struct WorldState {
     pub loading: bool,
     pub restoring: bool,
     pub combat: bool,
+    /// Whether the player's sneaking is currently working (perception rule).
+    pub sneak_working: bool,
+    /// The player's per-turn free-movement pool (twice Bonus Move rank).
+    pub free_movement: i32,
+    /// Player kill counters by kill category 0-14.
+    pub kills: [i32; 15],
+    /// Kill experience accumulated during combat, awarded at cleanup.
+    pub combat_experience: i32,
+    pub combat_state: crate::combat_state::CombatState,
+    /// A scripted combat request awaiting the host's next update.
+    pub pending_combat: Option<crate::combat_state::CombatRequest>,
     pub combat_quit: bool,
     pub combat_actor: ObjectRef,
     pub ui_disabled: bool,
@@ -435,6 +463,12 @@ impl WorldState {
             loading: false,
             restoring: false,
             combat: false,
+            sneak_working: false,
+            free_movement: 0,
+            kills: [0; 15],
+            combat_experience: 0,
+            combat_state: Default::default(),
+            pending_combat: None,
             combat_quit: false,
             combat_actor: 0,
             ui_disabled: false,
@@ -556,6 +590,25 @@ impl WorldState {
     pub fn player_stat(&self, index: usize) -> i32 {
         self.player_sheet()
             .map_or(0, |sheet| sheet.stat(index, self.context(self.player)))
+    }
+    /// Add player experience with the configured bonus/clamps, advancing
+    /// levels through the configured thresholds.
+    pub fn give_experience(&mut self, amount: i32) {
+        let context = self.context(self.player);
+        let bonus = self.rules.xp_bonus_percent;
+        let thresholds = self.rules.xp_thresholds.clone();
+        if let Some(sheet) = self.player_sheet_mut() {
+            let gain = i64::from(amount) * (100 + i64::from(bonus)) / 100;
+            sheet.experience =
+                (i64::from(sheet.experience) + gain).clamp(0, i64::from(i32::MAX)) as i32;
+            while sheet.level < 21
+                && thresholds
+                    .get(sheet.level as usize)
+                    .is_some_and(|threshold| sheet.experience >= *threshold)
+            {
+                sheet.advance_level(context);
+            }
+        }
     }
     pub fn perk(&self, perk: Perk) -> u32 {
         self.player_sheet().map_or(0, |sheet| sheet.rank(perk))
@@ -1131,45 +1184,6 @@ impl WorldState {
             }
         }
     }
-    pub fn blocked(&self, hex: i32, elevation: u8, except: ObjectRef) -> bool {
-        self.iter().any(|(reference, object)| {
-            reference != except
-                && object.alive()
-                && object.raw.hex == Some(hex)
-                && object.raw.elevation == elevation
-                && object.raw.flags.0 & (BasicFlags::HIDDEN.0 | BasicFlags::NONBLOCKING.0) == 0
-        })
-    }
-    pub fn line_clear(&self, from: ObjectRef, to: ObjectRef, light: bool) -> bool {
-        let (Some(a), Some(b)) = (self.get(from), self.get(to)) else {
-            return false;
-        };
-        let (Some(start), Some(end)) = (a.raw.hex, b.raw.hex) else {
-            return false;
-        };
-        if a.raw.elevation != b.raw.elevation {
-            return false;
-        }
-        let line = hex_line(start, end);
-        let flag = if light {
-            BasicFlags::LIGHT_THROUGH
-        } else {
-            BasicFlags::PROJECTILE_THROUGH
-        };
-        line.iter()
-            .skip(1)
-            .take(line.len().saturating_sub(2))
-            .all(|hex| {
-                !self.iter().any(|(r, o)| {
-                    r != from
-                        && r != to
-                        && o.raw.elevation == a.raw.elevation
-                        && o.raw.hex == Some(*hex)
-                        && !o.raw.flags.contains(BasicFlags::HIDDEN)
-                        && !o.raw.flags.contains(flag)
-                })
-            })
-    }
     pub fn visible_light(&self, reference: ObjectRef) -> i32 {
         let Some(object) = self.get(reference) else {
             return self.ambient;
@@ -1509,7 +1523,7 @@ impl WorldState {
         self.queue.retain(|event| match event.kind {
             EventKind::Poison | EventKind::Radiation => true,
             EventKind::Script { .. } | EventKind::MapUpdate | EventKind::Midnight => false,
-            EventKind::Other(_) => !approve(event),
+            EventKind::Knockout | EventKind::Other(_) => !approve(event),
         });
     }
 }

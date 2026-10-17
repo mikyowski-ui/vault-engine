@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeSet, VecDeque},
     sync::Arc,
 };
-use vault_formats::{FrmArchive, GcdFile, MapFile, Prototype, pro::Category};
+use vault_formats::{Fid, FrmArchive, GcdFile, MapFile, Prototype, pro::Category};
 use vault_vm::{
     IntProgram, RunOutcome, Value, Vm, VmError,
     extensions::{self, Rule},
@@ -365,6 +365,11 @@ impl WorldAssets for Assets {
         Ok((
             "scripts/child.int".into(),
             IntProgram::parse(&vm_fixture::program()).unwrap(),
+        ))
+    }
+    fn object_art(&self, _fid: u32) -> Result<Arc<FrmArchive>, WorldError> {
+        Ok(Arc::new(
+            FrmArchive::parse(&fixture::animated_frame(12, 20, &[1, 2])).unwrap(),
         ))
     }
     fn palette(&self, name: &[u8]) -> Result<vault_formats::Palette, WorldError> {
@@ -1259,5 +1264,238 @@ fn spec006_spatials_are_elevation_specific() {
             .requests
             .iter()
             .any(|r| r.script == sid && r.event == ScriptEvent::Spatial && r.source == owner)
+    );
+}
+
+#[test]
+fn spec005_critter_damage_uses_armor_unless_bypassed() {
+    use fixture::{instruction, push};
+    let (mut host, base, _) = host(&[b"Hello", b"Continue"]);
+    let me = host.world.player;
+    let sheet = host.world.get_mut(me).unwrap().character.as_mut().unwrap();
+    sheet.base[17] = 4;
+    sheet.base[24] = 25;
+    let hp = |host: &WorldHost<Assets>| match &host.world.get(me).unwrap().raw.state {
+        vault_formats::map::ObjectState::Critter(state) => state.hp,
+        _ => unreachable!(),
+    };
+    let set_hp = |host: &mut WorldHost<Assets>, value: i32| {
+        if let vault_formats::map::ObjectState::Critter(state) =
+            &mut host.world.get_mut(me).unwrap().raw.state
+        {
+            state.hp = value;
+        }
+    };
+    let damage = |host: &mut WorldHost<Assets>, amount: i32, flags: i32| {
+        host.world.effects.clear();
+        let code = [
+            push(me as i32),
+            push(amount),
+            push(flags),
+            instruction(0x80ef),
+        ]
+        .concat();
+        run_fragment(host, &base, &code).unwrap();
+    };
+    set_hp(&mut host, 100);
+    // Normal type: 20 - DT 4 = 16, then 16 - trunc(16 * 25 / 100) = 12.
+    damage(&mut host, 20, 0);
+    assert_eq!(hp(&host), 88);
+    assert!(
+        host.world
+            .effects
+            .iter()
+            .any(|e| matches!(e, WorldEffect::Animation { .. }))
+    );
+    // 0x100 bypasses armor; 0x200 suppresses the animation request.
+    damage(&mut host, 20, 0x300);
+    assert_eq!(hp(&host), 68);
+    assert!(
+        !host
+            .world
+            .effects
+            .iter()
+            .any(|e| matches!(e, WorldEffect::Animation { .. }))
+    );
+    // Armor cannot turn small damage into healing.
+    damage(&mut host, 3, 0);
+    assert_eq!(hp(&host), 68);
+}
+
+#[test]
+fn spec005_registered_sequences_execute_retire_and_clear_busy() {
+    use fixture::{instruction, literal, push};
+    let (mut host, base, _) = host(&[b"Hello", b"Continue"]);
+    let me = host.world.player as i32;
+    let busy = |host: &mut WorldHost<Assets>| {
+        let code = [push(me), instruction(0x80e7)].concat();
+        let mut vm = run_fragment(host, &base, &code).unwrap();
+        vm.value_stack.pop().unwrap()
+    };
+    let begin = |flags: i32| [push(1), push(flags), instruction(0x810e)].concat();
+    let end = [push(3), push(0), instruction(0x810e)].concat();
+    // A registered walk to hex 20103 on the object's elevation.
+    let code = [
+        begin(1),
+        push(me),
+        push(20103),
+        push(-1),
+        instruction(0x8113),
+        end.clone(),
+    ]
+    .concat();
+    run_fragment(&mut host, &base, &code).unwrap();
+    assert_eq!(busy(&mut host), Value::integer(-1));
+    let mut now = 1000;
+    let mut visited = Vec::new();
+    while !host.animations.is_empty() {
+        host.tick(now).unwrap();
+        visited.push(host.world.get(host.world.player).unwrap().raw.hex.unwrap());
+        now += 100;
+        assert!(now < 10_000, "sequence must retire");
+    }
+    assert_eq!(
+        host.world.get(host.world.player).unwrap().raw.hex,
+        Some(20103)
+    );
+    // One adjacent hex per frame step along the planned route.
+    let mut path = vec![20100];
+    path.extend(visited.iter().copied());
+    path.dedup();
+    assert!(path.len() >= 4);
+    for pair in path.windows(2) {
+        assert_eq!(
+            vault_formats::HexGrid::lattice_distance(pair[0], pair[1]).unwrap(),
+            1
+        );
+    }
+    // Retired: no longer busy, and the critter returned to standing.
+    assert_eq!(busy(&mut host), Value::integer(0));
+    assert_eq!(
+        Fid(host.world.get(host.world.player).unwrap().raw.art_id).animation(),
+        0
+    );
+
+    // Forward animation 20 with a two-frame sprite ends on static art 48,
+    // after a nonnegative delay of two frame steps; flag 4 keeps that art.
+    let code = [
+        begin(1 | 4),
+        push(me),
+        push(20),
+        push(2),
+        instruction(0x810f),
+        end.clone(),
+    ]
+    .concat();
+    run_fragment(&mut host, &base, &code).unwrap();
+    let mut steps = 0;
+    while !host.animations.is_empty() {
+        host.tick(now).unwrap();
+        now += 100;
+        steps += 1;
+        assert!(steps < 20);
+    }
+    assert_eq!(
+        steps,
+        2 + 3,
+        "two waiting steps, first frame, second frame, end"
+    );
+    assert_eq!(
+        Fid(host.world.get(host.world.player).unwrap().raw.art_id).animation(),
+        48
+    );
+
+    // Reverse playback shows the frames in descending order.
+    let code = [
+        begin(1 | 4),
+        push(me),
+        push(1),
+        push(0),
+        instruction(0x8110),
+        end.clone(),
+    ]
+    .concat();
+    run_fragment(&mut host, &base, &code).unwrap();
+    host.tick(now).unwrap();
+    assert_eq!(host.world.get(host.world.player).unwrap().raw.frame, 1);
+    host.tick(now + 100).unwrap();
+    assert_eq!(host.world.get(host.world.player).unwrap().raw.frame, 0);
+    host.tick(now + 200).unwrap();
+    now += 300;
+    assert!(host.animations.is_empty());
+
+    // Sound cues emit their name and never count as busy; neither does a
+    // lone standing action.
+    let code = [
+        begin(1),
+        push(me),
+        literal(6),
+        push(0),
+        instruction(0x813b),
+        end.clone(),
+    ]
+    .concat();
+    run_fragment(&mut host, &base, &code).unwrap();
+    assert_eq!(busy(&mut host), Value::integer(0));
+    host.world.effects.clear();
+    host.tick(now).unwrap();
+    assert!(
+        host.world
+            .effects
+            .iter()
+            .any(|e| matches!(e, WorldEffect::Sound(name) if name == b"Hello"))
+    );
+    let code = [push(me), instruction(0x80cc)].concat();
+    run_fragment(&mut host, &base, &code).unwrap();
+    assert_eq!(host.animations.len(), 1);
+    assert_eq!(busy(&mut host), Value::integer(0));
+}
+
+#[test]
+fn spec007_static_death_correction_corpses_and_inventory_drop() {
+    use fixture::{instruction, push};
+    let (mut host, base, _) = host(&[b"Hello", b"Continue"]);
+    let kill = |host: &mut WorldHost<Assets>, victim: u32, animation: i32| {
+        let code = [push(victim as i32), push(animation), instruction(0x80ed)].concat();
+        run_fragment(host, &base, &code).unwrap();
+        host.world.get(victim).unwrap().clone()
+    };
+    let spawn = |host: &mut WorldHost<Assets>| {
+        let prototype = host.assets.prototype.clone();
+        host.world.spawn(prototype, 20120, 1).unwrap()
+    };
+    // Static code 61 without maximum violence reverts to forced fall-back 20.
+    host.world.violence = Some(2);
+    let first = spawn(&mut host);
+    let corpse = kill(&mut host, first, 61);
+    assert_eq!(Fid(corpse.raw.art_id).animation(), 20);
+    assert!(
+        corpse
+            .raw
+            .flags
+            .contains(vault_formats::pro::BasicFlags::NONBLOCKING)
+    );
+    assert!(
+        corpse
+            .raw
+            .flags
+            .contains(vault_formats::pro::BasicFlags::FLAT)
+    );
+    // With maximum violence and available art the static code is kept.
+    host.world.violence = Some(3);
+    let second = spawn(&mut host);
+    assert_eq!(Fid(kill(&mut host, second, 61).raw.art_id).animation(), 61);
+    // Final animation 31 drops the inventory onto the corpse's hex.
+    let third = spawn(&mut host);
+    let item = host
+        .world
+        .spawn(host.assets.prototype.clone(), 1, 0)
+        .unwrap();
+    host.world.add_item(third, item, 1, true).unwrap();
+    kill(&mut host, third, 31);
+    let dropped = host.world.get(item).unwrap();
+    assert_eq!(
+        (dropped.owner, dropped.raw.hex, dropped.raw.elevation),
+        (None, Some(20120), 1)
     );
 }

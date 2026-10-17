@@ -3,7 +3,12 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
-    Script { script: u32, parameter: i32 },
+    Script {
+        script: u32,
+        parameter: i32,
+    },
+    /// Knockout wake-up for the event's owner object.
+    Knockout,
     MapUpdate,
     Midnight,
     Poison,

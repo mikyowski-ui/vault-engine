@@ -1,6 +1,7 @@
 //! Bounded clean-room parsers based on approved SPEC-001 and SPEC-002.
 
 mod binary;
+pub mod fid;
 pub mod font;
 pub mod frm;
 pub mod gam;
@@ -15,6 +16,7 @@ pub mod pro_catalog;
 pub mod vfs;
 
 pub use binary::{MAX_ASSET_BYTES, ParseError};
+pub use fid::{ArtCatalog, Fid, FidError};
 pub use font::{Font, FontKind, FontSet, TextFlags};
 pub use frm::FrmArchive;
 pub use gam::{GamFile, GamSection};
@@ -58,6 +60,8 @@ pub fn validate_asset(path: &VfsPath, bytes: &[u8]) -> Option<Result<(), ParseEr
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod fid_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]

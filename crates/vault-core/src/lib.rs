@@ -1,18 +1,27 @@
 //! Deterministic, platform-independent engine foundations.
 
 pub mod assets;
+pub mod combat;
+pub mod combat_state;
+pub mod critical;
 pub mod dialogue;
 pub mod handles;
 pub mod host;
+mod host_animation;
+mod host_combat;
 mod host_game;
+mod host_movement;
 pub mod library;
 pub mod queue;
 pub mod rng;
+pub mod routing;
 pub mod save;
 pub mod sequence;
 pub mod stats;
 pub mod world;
 pub use host::WorldHost;
+pub use host_combat::{Refusal, Spray, spray_budgets};
+pub use host_movement::{Movement, StepOutcome};
 pub use world::{ObjectAction, ObjectRef, ScriptEvent, WorldEffect, WorldRules, WorldState};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -45,6 +54,8 @@ impl From<WorldError> for vault_vm::VmError {
 pub use rng::{ParkMiller, RandomSource, RngState};
 pub use stats::{CharacterSheet, Perk, StatContext, Trait};
 
+#[cfg(test)]
+mod combat_tests;
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/formats/support.rs"]

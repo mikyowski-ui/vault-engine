@@ -135,10 +135,12 @@ pub fn write_corpus(root: &std::path::Path) {
         )
         .unwrap();
         std::fs::create_dir_all(root.join(format!("art/{folder}"))).unwrap();
-        let names = if category == 4 {
-            b"tile.frm\nblank.frm\ntile.frm\n".as_slice()
-        } else {
-            b"sample.frm\n"
+        // Critter rows are stems plus an alias; SPEC-007 appends the animation
+        // suffix (stand, no weapon: `aa`). Other categories list filenames.
+        let (names, file) = match category {
+            1 => (b"sample,0\n".as_slice(), "sampleaa.frm"),
+            4 => (b"tile.frm\nblank.frm\ntile.frm\n".as_slice(), "tile.frm"),
+            _ => (b"sample.frm\n".as_slice(), "sample.frm"),
         };
         std::fs::write(root.join(format!("art/{folder}/{folder}.lst")), names).unwrap();
         let (width, height, color) = if category == 4 {
@@ -147,14 +149,7 @@ pub fn write_corpus(root: &std::path::Path) {
             (12, 20, 15 + category as u8)
         };
         std::fs::write(
-            root.join(format!(
-                "art/{folder}/{}",
-                if category == 4 {
-                    "tile.frm"
-                } else {
-                    "sample.frm"
-                }
-            )),
+            root.join(format!("art/{folder}/{file}")),
             frm(width, height, color),
         )
         .unwrap();

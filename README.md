@@ -8,10 +8,13 @@ Phases 2 and 3 Core (`P2-02`, `P2-03`, `P3-02`) add PRO/MAP parsing, isometric
 geometry, the INT loader/core VM, and map preview.
 Phase 3 Host and Phase 4 (`P3-03`, `P4-02`, `P4-03`) add the host opcode catalog,
 GAM/GCD resources, world state, character statistics, shuffled RNG, and interactive
-script-driven dialogue.
+script-driven dialogue. The SPEC-007 phase adds the complete art-identifier codec,
+hex routing, rays/perception, and combat resolution and turns, and closes the
+remaining SPEC-001–006 behaviors (see "Spec completion notes" below).
 
 `AGENTS.md` is the repository's implementation policy. Format behavior follows
-`specs/approved/SPEC-001-pal-frm-lst.md` through `SPEC-006-world-state-and-dialogue.md`.
+`specs/approved/SPEC-001-pal-frm-lst.md` through
+`SPEC-007-critter-fid-pathfinding-combat.md`.
 No original game
 data is needed to build, test, or run the synthetic shell and preview fixtures.
 
@@ -82,7 +85,19 @@ cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game
 cargo run -p asset-audit -- --corpus-dir tests/fixtures/loose
 # Validate every supported asset and report all failures:
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-formats
+# Resolve every PRO/MAP art identifier through the SPEC-007 codec:
+cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-art-ids
+# Round-trip every PRO/MAP through the SPEC-003 writers:
+cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-writers
 ```
+
+`--validate-art-ids` reports, per source, identifiers whose decoded file exists,
+decodable identifiers whose file is absent from the mounted corpus (`MISSING`
+lines; not fatal, since the reference guarantees no fallback resource), and
+identifiers the codec rejects (`FAIL`; nonzero exit). `--validate-writers` requires
+PRO output to equal the consumed input with the documented weapon-bound exchange
+and 24-byte scenery suffix, and MAP output to be a parse/write fixpoint that keeps
+every saved object and retained script.
 
 The CLI prints total mounted files and counts for `.frm`, `.pal`, `.fon`, `.aaf`,
 `.pro`, `.map`, `.int`, `.msg`, and `.lst`, including zero counts. It traverses the
@@ -204,13 +219,16 @@ hidden/blank tiles, and inventory children are excluded from placed-object drawi
 Flat objects precede upright objects; remaining object order is deterministic by
 anchor position and ID. The complete indexed scene scales with the window.
 
-Assets resolve through the corresponding category's ART list and low-12-bit
-index. Explicit filenames are used directly. The approved specs do not define
-the full critter animation filename codec: a bare stem uses the first available
-matching FRM (or directional FR0–FR5), with a structured warning. If the requested
-frame is unavailable in that representation, frame zero is reported and displayed.
-This is an asset-preview fallback, not a claim of complete animation/FID decoding.
-Missing required art is an error, and cached map art is limited to 256 MiB.
+Object and tile art resolves through the SPEC-007 codec (`ArtCatalog`): the FID's
+own category selects the list, critters append the two-letter animation/weapon
+suffix and the selector's `.frm`/`.fr0`–`.fr6` extension, heads append their
+selector/variant, and other categories use the list name verbatim. A decodable
+object FID whose file is absent is logged and not drawn; codec failures are errors.
+If the requested frame is unavailable, frame zero is reported and displayed.
+Cached map art is limited to 256 MiB. Floor index 1 is drawn like any floor (only
+roof index 1 is exempt). Palette cycling runs in the shell and follows the world's
+cycling state (for example, disabled during dialogue); script-loaded palettes
+replace the display palette.
 
 ## Format safety and compatibility
 
@@ -410,6 +428,79 @@ Audio, movies, general managed-window drawing, combat requests, and unspecified
 item/medical defaults are typed host presentation/action requests. The map preview
 implements world interaction and GDialog rendering, not media decoding or a full
 combat/medical subsystem.
+
+## Art identifiers, routing, and combat (SPEC-007)
+
+`Fid` packs base/weapon/animation/category/selector fields; `ArtCatalog` parses the
+category lists and implements the exact critter suffix table (weapon codes 0-10
+checked before every branch, single alias substitution for animations
+27/29/30/33/55/57/58/64, weapon actions requiring a weapon), head suffixes, and the
+constructor's directional fallback (only critter animations 20-35 except 33 probe
+the requested selector, then `.fr0` once; the original base is retained).
+
+`routing` implements the heuristic best-first route search exactly as recovered:
+seen-on-insertion, first-vacant frontier slots, 50 per hex plus 10 per direction
+change outside combat (initial direction 0), 1999-entry frontier/expanded caps,
+and an 800-byte backtrack that keeps the last steps. The movement blocker covers
+critter/scenery/wall art on the hex plus multihex neighbors; non-player
+biped/robotic critters auto-open unlocked doors. Rays use pixel Bresenham between
+hex centers with stride sampling, the 200-sample cap, and projectile-through
+filtering at stride 32; the first eligible object on a hex masks the others.
+`obj_can_see_obj` combines the sector perception rule with a stride-16 ray whose
+first blocker must be the target (the ignored reference is explicitly null).
+Move-to-object/tile planning shortens routes and derives the recovered replan
+destination; execution opens usable doors, rebuilds blocked routes with a strict
+goal, and charges 1/4/8 AP per hex (free movement first) in combat.
+
+`combat` holds the explicit attack arithmetic: AP costs and ranges, the exact hit
+chance (no lower cap; ammunition AC/DR/multiplier/divisor are not consumed), the
+first-day-gated critical upgrade and forced upgrades, the 864 critical-success
+entries and failure masks (compiled from the approved specification at build
+time), per-round DT/DR damage, knockback with the double-decrement displacement,
+burst/continuous sprays (budgets, direct trials, side rays, extra targets at
+normal scale), death-animation selection with the inverted rear fallback, and
+corpse rules. `combat_state` implements initialization, the first unsorted pass,
+the round sweep, turns, explicit end requests, automatic ending, and cleanup.
+Critical-failure self damage is computed but committed only to an attacker already
+marked dead, as recovered. AI behavior is unspecified, so NPC turns and danger
+targets come from a host-supplied `CombatAi` (default: none). The weapon-splash
+helper adds no victims (its setup is absent in the reference), and the miss-impact
+fallback beyond grenade scatter is not specified enough to simulate.
+
+Registered animation sequences now execute: commands run in order, one frame step
+at a time (the art's frame interval, 10 FPS without art); nonnegative delays wait
+that many frame steps; moves follow SPEC-007 routes with unlimited AP; forward
+death animations end on their static art; completed sequences retire (returning
+critters to standing unless flag 4), so `anim_busy` reports `-1` only while a
+nontrivial registration is active.
+
+## Spec completion notes
+
+These close behaviors that the earlier phases left open:
+
+- SPEC-001: the gamma display formula (`display_channel`), an opaque display
+  palette (index 0 is transparent only in blits), cycler fade suspension, and
+  `FrameCursor` forward/reverse displacement accumulation.
+- SPEC-002: `FontSet` startup search (FON 0-9, AAF 0-15), per-subsystem defaults,
+  numbered selection (FON 0-9, AAF 100-110) that never replaces the current font
+  with a missing slot, `setfont`, and the numeric text-flag word.
+- SPEC-003: asymmetric `Prototype::write` and `MapFile::write` (darkness 1,
+  recomputed omission bits, grid-order top-level saving without temporary or
+  unplaced objects, `NO_SAVE` scripts omitted, temporary inventory children
+  refused), extended-flag interaction permissions, and out-of-range MVAR/LVAR
+  diagnostics. The roof-hide flood fill is named but not specified, and unknown
+  item/scenery subtypes are still rejected rather than read without payload.
+- SPEC-004: scheduled procedures fire from the host's interpreter pass, and
+  `launch` starts attached, replacing, spawned, and independent programs.
+- SPEC-005: executing animation sequences, armor-aware `critter_damage`, the exact
+  `obj_can_see_obj`, fleeing-target rejection, `anim` 1000 controls, loaded
+  palette tables, retained button graphics, named-event busy state, and
+  consistent 31-byte export keys. Sound-name byte formats are not specified
+  completely, so they remain a host codec.
+- SPEC-006: elevation-change map updates, speech completion, the queue
+  stop-on-nonzero rule, reputation inputs (campaign indices supplied by
+  `WorldRules`), talk reachability/12-tile checks, campaign-open failure, and
+  map-load script failures as diagnostics.
 
 ## Core contracts
 

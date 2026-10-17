@@ -26,8 +26,16 @@ pub struct CallTrace {
 }
 #[derive(Debug, Clone, Default)]
 pub struct AnimationSequence {
+    /// Request flags: 1 unreserved, 2 reserved, 4 suppress standing, 512
+    /// insignificant.
     pub flags: i32,
     pub commands: Vec<(u16, Vec<i32>)>,
+    /// Index of the executing command.
+    pub cursor: usize,
+    /// Execution state of the current command.
+    pub progress: crate::host_animation::CommandProgress,
+    /// Sound-cue names by command index.
+    pub sounds: BTreeMap<usize, Vec<u8>>,
 }
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DispatchResult {
@@ -36,10 +44,9 @@ pub struct DispatchResult {
     pub pending: bool,
 }
 struct Interaction {
-    actor: ObjectRef,
     target: ObjectRef,
     action: ObjectAction,
-    path: VecDeque<i32>,
+    movement: crate::Movement,
     next_ms: u64,
 }
 struct PresentationState {
@@ -62,6 +69,8 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     program_scripts: BTreeMap<u32, u32>,
     active: BTreeSet<u32>,
     next_program: u32,
+    /// NPC combat policy; SPEC-007 leaves AI behavior to the host.
+    pub combat_ai: Box<dyn crate::combat_state::CombatAi>,
     pub building_animation: Option<AnimationSequence>,
     pub animations: Vec<AnimationSequence>,
     pub last_object_name: Vec<u8>,
@@ -136,11 +145,19 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     }
     fn object_art(
         &self,
-        category: Category,
         fid: u32,
-        orientation: u8,
     ) -> Result<std::sync::Arc<vault_formats::FrmArchive>, WorldError> {
-        (**self).object_art(category, fid, orientation)
+        (**self).object_art(fid)
+    }
+    fn construct_fid(
+        &self,
+        category: u8,
+        base: u16,
+        animation: u8,
+        weapon: u8,
+        selector: u8,
+    ) -> u32 {
+        (**self).construct_fid(category, base, animation, weapon, selector)
     }
     fn font_number(&self, number: i32) -> Option<std::sync::Arc<vault_formats::Font>> {
         (**self).font_number(number)
@@ -163,6 +180,7 @@ impl<A: WorldAssets> WorldHost<A> {
             program_scripts: BTreeMap::new(),
             active: BTreeSet::new(),
             next_program: 1,
+            combat_ai: Box::new(crate::combat_state::NoAi),
             building_animation: None,
             animations: Vec::new(),
             last_object_name: b"<Critter>".to_vec(),
@@ -615,6 +633,15 @@ impl<A: WorldAssets> WorldHost<A> {
                 });
                 self.world.enqueue_map_timers()?;
             }
+            EventKind::Knockout => {
+                // Waking clears the knockout status bit of a living critter.
+                if let Some(ObjectState::Critter(state)) =
+                    self.world.get_mut(event.object).map(|o| &mut o.raw.state)
+                    && state.results.0 & crate::critical::effect::DEAD == 0
+                {
+                    state.results.0 &= !crate::critical::effect::KNOCKED_OUT;
+                }
+            }
             EventKind::Poison | EventKind::Radiation | EventKind::Other(_) => self
                 .world
                 .diagnostic(format!("timed maintenance event {:?}", event.kind)),
@@ -683,6 +710,19 @@ impl<A: WorldAssets> WorldHost<A> {
     pub fn tick(&mut self, now_ms: u64) -> Result<bool, WorldError> {
         self.world.elapsed_ms = now_ms;
         self.update_programs()?;
+        let mut changed_by_animation = false;
+        if self.step_animations(now_ms)? {
+            changed_by_animation = true;
+        }
+        // SPEC-007: service scripted combat requests and advance turns until
+        // the player must act (host-configured AI drives NPC turns).
+        if self.service_combat_request()? || self.world.combat {
+            let mut ai =
+                std::mem::replace(&mut self.combat_ai, Box::new(crate::combat_state::NoAi));
+            let progress = self.advance_combat(&mut *ai);
+            self.combat_ai = ai;
+            progress?;
+        }
         let (queue, update) = self.world.clock.background(
             now_ms,
             self.world.combat,
@@ -697,35 +737,31 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.callbacks.extend(self.library.callbacks());
         self.drain_requests()?;
-        let mut changed = false;
+        let mut changed = changed_by_animation;
         if !self.world.dialogue.open
             && let Some(mut interaction) = self.interactions.pop_front()
         {
             if now_ms >= interaction.next_ms {
-                let next = interaction.path.pop_front();
-                if let Some(hex) = next {
-                    let elevation = self
-                        .world
-                        .get(interaction.actor)
-                        .map_or(self.world.elevation, |object| object.raw.elevation);
-                    if self.world.blocked(hex, elevation, interaction.actor) {
-                        self.world.diagnostic("interaction path became blocked");
-                    } else {
-                        self.world
-                            .move_object(interaction.actor, hex, elevation, true)?;
+                let actor = interaction.movement.actor;
+                match self.step_movement(&mut interaction.movement)? {
+                    crate::StepOutcome::Moved | crate::StepOutcome::Replanned
+                        if !interaction.movement.finished() =>
+                    {
                         self.drain_requests()?;
                         changed = true;
-                        if interaction.path.is_empty() {
-                            if let Err(error) = self.action(
-                                interaction.actor,
-                                interaction.target,
-                                interaction.action,
-                            ) {
-                                self.world.diagnostic(error.to_string());
-                            }
-                        } else {
-                            interaction.next_ms = now_ms + 100;
-                            self.interactions.push_front(interaction);
+                        interaction.next_ms = now_ms + 100;
+                        self.interactions.push_front(interaction);
+                    }
+                    crate::StepOutcome::Stopped => {
+                        self.world.diagnostic("interaction route is blocked");
+                    }
+                    _ => {
+                        self.drain_requests()?;
+                        changed = true;
+                        if let Err(error) =
+                            self.action(actor, interaction.target, interaction.action)
+                        {
+                            self.world.diagnostic(error.to_string());
                         }
                     }
                 }
@@ -1062,12 +1098,26 @@ impl<A: WorldAssets> WorldHost<A> {
                     "talk requires the player and a critter outside combat".into(),
                 ));
             }
-            if self.world.distance(actor, target) >= 9 {
+            if self.world.object_distance(actor, target) >= 9 {
                 return self.approach(actor, target, action, 8);
             }
-            if !self.world.line_clear(actor, target, false) {
+            // Post-movement: an unobstructed shot line (SPEC-007 shot query).
+            if self.world.shot(actor, target).hard_obstruction {
                 return Err(WorldError::Invalid(
-                    "talk requires an unobstructed line".into(),
+                    "talk requires an unobstructed shot line".into(),
+                ));
+            }
+            // Dialogue entry: tile-distance limit 12 and a reachability path.
+            let reachable = match (
+                self.world.get(actor).and_then(|o| o.raw.hex),
+                self.world.get(target).and_then(|o| o.raw.hex),
+            ) {
+                (Some(from), Some(to)) => !self.world.route(actor, from, to, false).is_empty(),
+                _ => false,
+            };
+            if self.world.distance(actor, target) > 12 || !reachable {
+                return Err(WorldError::Invalid(
+                    "talk target is beyond 12 tiles or unreachable".into(),
                 ));
             }
             let sid = self
@@ -1394,84 +1444,39 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.map_update()
     }
+    /// SPEC-007 move-to-object approach; the action re-checks its distance
+    /// rule once the shortened route completes.
     fn approach(
         &mut self,
         actor: ObjectRef,
         target: ObjectRef,
         action: ObjectAction,
-        range: i32,
+        _range: i32,
     ) -> Result<(), WorldError> {
-        let a = self
-            .world
-            .get(actor)
-            .ok_or_else(|| WorldError::Invalid("missing actor".into()))?;
-        let b = self
-            .world
-            .get(target)
-            .ok_or_else(|| WorldError::Invalid("missing target".into()))?;
+        let (Some(a), Some(b)) = (self.world.get(actor), self.world.get(target)) else {
+            return Err(WorldError::Invalid(
+                "missing interaction actor/target".into(),
+            ));
+        };
         if a.raw.elevation != b.raw.elevation {
             return Err(WorldError::Invalid(
                 "interaction is on another elevation".into(),
             ));
         }
-        let (start, end) = (
-            a.raw
-                .hex
-                .ok_or_else(|| WorldError::Invalid("unplaced actor".into()))?,
-            b.raw
-                .hex
-                .ok_or_else(|| WorldError::Invalid("unplaced target".into()))?,
-        );
-        let blocked: BTreeSet<_> = self
-            .world
-            .iter()
-            .filter(|(r, o)| {
-                *r != actor
-                    && o.raw.elevation == a.raw.elevation
-                    && o.alive()
-                    && o.raw.flags.0 & (BasicFlags::HIDDEN.0 | BasicFlags::NONBLOCKING.0) == 0
-            })
-            .filter_map(|(_, o)| o.raw.hex)
-            .collect();
-        let mut previous = vec![-1; 40000];
-        previous[start as usize] = start;
-        let mut queue = VecDeque::from([start]);
-        let mut found = None;
-        while let Some(hex) = queue.pop_front() {
-            if vault_formats::HexGrid::lattice_distance(hex, end)
-                .is_ok_and(|distance| distance <= range)
-            {
-                found = Some(hex);
-                break;
-            }
-            for direction in 0..6 {
-                if let Ok(Some(next)) = vault_formats::HexGrid::neighbor(hex, direction)
-                    && previous[next as usize] == -1
-                    && !blocked.contains(&next)
-                {
-                    previous[next as usize] = hex;
-                    queue.push_back(next);
-                }
-            }
-        }
-        let mut at =
-            found.ok_or_else(|| WorldError::Invalid("interaction target is unreachable".into()))?;
-        let mut path = VecDeque::new();
-        while at != start {
-            path.push_front(at);
-            at = previous[at as usize];
-        }
-        if path.is_empty() {
+        let movement = self
+            .plan_to_object(actor, target)
+            .ok_or_else(|| WorldError::Invalid("unplaced interaction actor/target".into()))?;
+        if movement.directions.is_empty() {
             return Err(WorldError::Invalid(
-                "interaction cannot satisfy its distance rule".into(),
+                "interaction target is unreachable".into(),
             ));
         }
-        self.interactions.retain(|pending| pending.actor != actor);
+        self.interactions
+            .retain(|pending| pending.movement.actor != actor);
         self.interactions.push_back(Interaction {
-            actor,
             target,
             action,
-            path,
+            movement,
             next_ms: self.world.elapsed_ms + 100,
         });
         Ok(())

@@ -1,9 +1,9 @@
 use crate::{WorldError, dialogue::HeadDefinition};
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 use vault_formats::{
-    Font, FontKind, FontSet, FrmArchive, GamFile, GamSection, GcdFile, LocalDirProvider,
-    LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype, Vfs,
-    VfsPath, pro::Category,
+    ArtCatalog, Fid, Font, FontKind, FontSet, FrmArchive, GamFile, GamSection, GcdFile,
+    LocalDirProvider, LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES, MapFile,
+    MsgCatalog, Prototype, Vfs, VfsPath, pro::Category,
 };
 use vault_vm::IntProgram;
 
@@ -78,13 +78,21 @@ pub trait WorldAssets {
             "sound naming requires the host's animation/material catalog".into(),
         ))
     }
-    fn object_art(
-        &self,
-        _category: Category,
-        _fid: u32,
-        _orientation: u8,
-    ) -> Result<Arc<FrmArchive>, WorldError> {
+    /// Load the art selected by a complete SPEC-007 identifier.
+    fn object_art(&self, _fid: u32) -> Result<Arc<FrmArchive>, WorldError> {
         Err(WorldError::Invalid("object art unavailable".into()))
+    }
+    /// SPEC-007 constructor. Without art resources every existence probe
+    /// fails, which encodes selector 0.
+    fn construct_fid(
+        &self,
+        category: u8,
+        base: u16,
+        animation: u8,
+        weapon: u8,
+        _selector: u8,
+    ) -> u32 {
+        Fid::new(category, base, animation, weapon, 0).0
     }
 }
 pub struct VfsWorldAssets {
@@ -95,6 +103,7 @@ pub struct VfsWorldAssets {
     programs: RefCell<BTreeMap<i32, (String, IntProgram)>>,
     frames: RefCell<BTreeMap<String, Arc<FrmArchive>>>,
     frame_bytes: RefCell<usize>,
+    art: RefCell<Option<Arc<ArtCatalog>>>,
     fonts: RefCell<Option<Arc<FontSet>>>,
 }
 impl VfsWorldAssets {
@@ -116,8 +125,18 @@ impl VfsWorldAssets {
             programs: RefCell::new(BTreeMap::new()),
             frames: RefCell::new(BTreeMap::new()),
             frame_bytes: RefCell::new(0),
+            art: RefCell::new(None),
             fonts: RefCell::new(None),
         })
+    }
+    /// Category art lists, parsed once on first use.
+    pub fn art_catalog(&self) -> Result<Arc<ArtCatalog>, WorldError> {
+        if let Some(catalog) = self.art.borrow().as_ref() {
+            return Ok(catalog.clone());
+        }
+        let catalog = Arc::new(ArtCatalog::load(&*self.vfs)?);
+        *self.art.borrow_mut() = Some(catalog.clone());
+        Ok(catalog)
     }
     /// SPEC-002 startup font search, performed once on first use.
     pub fn font_set(&self) -> Arc<FontSet> {
@@ -125,6 +144,9 @@ impl VfsWorldAssets {
             .borrow_mut()
             .get_or_insert_with(|| Arc::new(FontSet::load(&*self.vfs)))
             .clone()
+    }
+    fn exists(&self, path: &str) -> bool {
+        VfsPath::new(path).is_ok_and(|path| self.vfs.files().any(|file| *file == path))
     }
     pub fn read(&self, path: &str) -> Result<Vec<u8>, WorldError> {
         self.vfs
@@ -302,34 +324,31 @@ impl WorldAssets for VfsWorldAssets {
         *self.frame_bytes.borrow_mut() = total;
         Ok(frame)
     }
-    fn object_art(
-        &self,
-        category: Category,
-        fid: u32,
-        orientation: u8,
-    ) -> Result<Arc<FrmArchive>, WorldError> {
+    fn object_art(&self, fid: u32) -> Result<Arc<FrmArchive>, WorldError> {
         let path = self
-            .art_name(category.directory(), (fid & 0xfff) as i32)?
-            .to_ascii_lowercase();
-        if path.ends_with(".frm") {
-            return self.frame(&path);
+            .art_catalog()?
+            .path(Fid(fid))
+            .map_err(|error| WorldError::Invalid(format!("art {fid:#010x}: {error}")))?;
+        self.frame(&path.to_ascii_lowercase())
+    }
+    fn construct_fid(
+        &self,
+        category: u8,
+        base: u16,
+        animation: u8,
+        weapon: u8,
+        selector: u8,
+    ) -> u32 {
+        match self.art_catalog() {
+            Ok(catalog) => {
+                catalog
+                    .construct(category, base, animation, weapon, selector, |path| {
+                        self.exists(path)
+                    })
+                    .0
+            }
+            Err(_) => Fid::new(category, base, animation, weapon, 0).0,
         }
-        let extension = format!("fr{orientation}");
-        let resolved = self
-            .vfs
-            .files()
-            .find(|candidate| {
-                candidate.as_str().starts_with(&path) && candidate.extension() == Some("frm")
-            })
-            .or_else(|| {
-                self.vfs.files().find(|candidate| {
-                    candidate.as_str().starts_with(&path)
-                        && candidate.extension() == Some(extension.as_str())
-                })
-            })
-            .ok_or_else(|| WorldError::Invalid("no available art representation".into()))?
-            .to_string();
-        self.frame(&resolved)
     }
     fn background_path(&self, index: i32) -> Result<String, WorldError> {
         self.art_name("backgrnd", index)

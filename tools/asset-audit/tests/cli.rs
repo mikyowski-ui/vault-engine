@@ -164,6 +164,62 @@ fn missing_argument_and_invalid_mount_exit_unsuccessfully() {
 }
 
 #[test]
+fn resolves_art_identifiers_and_separates_missing_from_invalid() {
+    let temp = tempfile::tempdir().unwrap();
+    world::write_corpus(temp.path());
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+            .arg("--corpus-dir")
+            .arg(temp.path())
+            .arg("--validate-art-ids")
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains(".pro\t8\t0\t0"), "{text}");
+    assert!(text.contains(".map\t5\t0\t0"), "{text}");
+    assert!(text.contains("Art identifiers: 13 resolved, 0 missing, 0 invalid"));
+
+    // A decodable identifier whose file is absent is reported, not fatal.
+    std::fs::remove_file(temp.path().join("art/critters/sampleaa.frm")).unwrap();
+    let output = run();
+    assert!(output.status.success());
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(errors.contains(
+        "MISSING proto/critters/synthetic.pro: art 0x01000000: art/critters/sampleaa.frm"
+    ));
+    assert!(errors.contains("MISSING maps/synthetic.map: object art 0x01000000"));
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Art identifiers: 11 resolved, 2 missing, 0 invalid")
+    );
+
+    // Weapon code 11 fails the codec before suffix selection.
+    let mut critter = world::prototype(1, 0);
+    world::word(&mut critter, 8, 0x0100B000);
+    std::fs::write(temp.path().join("proto/critters/synthetic.pro"), critter).unwrap();
+    let output = run();
+    assert!(!output.status.success());
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        errors.contains(
+            "FAIL proto/critters/synthetic.pro: art 0x0100b000: critter weapon-animation code 11"
+        ),
+        "{errors}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Art identifiers: 11 resolved, 1 missing, 1 invalid")
+    );
+}
+
+#[test]
 fn round_trips_prototypes_and_maps_through_the_spec003_writers() {
     let temp = tempfile::tempdir().unwrap();
     world::write_corpus(temp.path());
