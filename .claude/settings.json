@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "../local-corpus"
+    ],
+    "allow": [
+      "Bash(cargo *)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ],
+    "deny": [
+      "WebSearch",
+      "WebFetch",
+      "Read(../research-vault/**)",
+      "Edit(../local-corpus/**)",
+      "Write(../local-corpus/**)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "denyRead": [
+        "../research-vault"
+      ],
+      "denyWrite": [
+        "../local-corpus",
+        "../research-vault"
+      ]
+    },
+    "network": {
+      "allowedDomains": [
+        "crates.io",
+        "static.crates.io",
+        "index.crates.io"
+      ]
+    }
+  }
+}
