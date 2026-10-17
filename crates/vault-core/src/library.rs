@@ -427,7 +427,16 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 self.library.window_mut(vm.window)?.text.extend(value);
             }
-            0x8075 => self.library.font = call.int(0),
+            0x8075 => {
+                // SPEC-002: selecting a missing slot keeps the previous font.
+                let number = call.int(0);
+                if self.assets.font_number(number).is_some() {
+                    self.library.font = number;
+                } else {
+                    self.world
+                        .diagnostic(format!("font {number} is not loaded; font unchanged"));
+                }
+            }
             0x8076 => self.library.text_flags = call.int(0),
             0x8077 => self.library.text_color = color()?,
             0x8078 => self.library.highlight = color()?,

@@ -346,6 +346,11 @@ impl WorldAssets for Assets {
             FrmArchive::parse(&fixture::animated_frame(12, 20, &[1, 2])).unwrap(),
         ))
     }
+    fn font_number(&self, number: i32) -> Option<Arc<vault_formats::Font>> {
+        (number == 101).then(|| {
+            Arc::new(vault_formats::Font::parse_aaf(&crate::fixture_assets::aaf()).unwrap())
+        })
+    }
 }
 fn host(strings: &[&[u8]]) -> (WorldHost<Assets>, Vm, u32) {
     let assets = Assets::new(strings);
@@ -752,4 +757,23 @@ fn interactive_dialogue_runs_real_callbacks_and_restores_map() {
     host.world.remove_item(host.world.player, item, 1).unwrap();
     assert_eq!(host.world.get(item).unwrap().raw.hex, Some(1));
     assert_eq!(host.world.inventory_count(host.world.player, 1), 2);
+}
+
+#[test]
+fn spec002_setfont_selects_only_loaded_font_numbers() {
+    let (mut host, base, _) = host(&[b"Hello", b"Continue"]);
+    let set = |host: &mut WorldHost<Assets>, number: i32| {
+        let mut vm = Vm::fragment(base.program.clone(), &0x8075_u16.to_be_bytes()).unwrap();
+        vm.value_stack.push(Value::integer(number)).unwrap();
+        vm.run(host, 10).unwrap();
+    };
+    assert_eq!(host.library.font, 0);
+    set(&mut host, 101);
+    assert_eq!(host.library.font, 101);
+    // A missing slot keeps the previous selection and raises no VM error.
+    set(&mut host, 104);
+    assert_eq!(host.library.font, 101);
+    assert!(host.world.effects.iter().any(
+        |effect| matches!(effect, WorldEffect::Diagnostic(text) if text.contains("font 104"))
+    ));
 }

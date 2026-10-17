@@ -309,3 +309,118 @@ impl Font {
         }
     }
 }
+
+/// FON startup search suffixes; selection numbers equal the suffix.
+pub const FON_SUFFIXES: std::ops::RangeInclusive<u8> = 0..=9;
+/// AAF startup search suffixes.
+pub const AAF_SUFFIXES: std::ops::RangeInclusive<u8> = 0..=15;
+/// Registered AAF selection numbers; number `100 + n` selects `font<n>.aaf`.
+pub const AAF_SELECTION: std::ops::RangeInclusive<i32> = 100..=110;
+
+/// SPEC-002 §3.1 font subsystems. Fonts resolve at the asset root. Each
+/// subsystem defaults to its lowest successfully loaded suffix; an absent or
+/// invalid file is never synthesized from another one.
+#[derive(Debug, Clone, Default)]
+pub struct FontSet {
+    fon: std::collections::BTreeMap<u8, std::sync::Arc<Font>>,
+    aaf: std::collections::BTreeMap<u8, std::sync::Arc<Font>>,
+    current: Option<i32>,
+}
+
+impl FontSet {
+    /// Try every startup suffix; files that are absent or fail to parse are
+    /// simply not loaded.
+    pub fn load(vfs: &dyn crate::Vfs) -> Self {
+        let present: std::collections::BTreeSet<&str> =
+            vfs.files().map(crate::VfsPath::as_str).collect();
+        let mut set = Self::default();
+        let load = |name: String, parse: fn(&[u8]) -> Result<Font, ParseError>| {
+            present
+                .contains(name.as_str())
+                .then(|| vfs.read(&name).ok())
+                .flatten()
+                .filter(|bytes| bytes.len() <= crate::MAX_ASSET_BYTES)
+                .and_then(|bytes| parse(&bytes).ok())
+                .map(std::sync::Arc::new)
+        };
+        for suffix in FON_SUFFIXES {
+            if let Some(font) = load(format!("font{suffix}.fon"), Font::parse_fon) {
+                set.fon.insert(suffix, font);
+            }
+        }
+        for suffix in AAF_SUFFIXES {
+            if let Some(font) = load(format!("font{suffix}.aaf"), Font::parse_aaf) {
+                set.aaf.insert(suffix, font);
+            }
+        }
+        set
+    }
+    pub fn insert(&mut self, kind: FontKind, suffix: u8, font: Font) {
+        let fonts = match kind {
+            FontKind::Bitmap => &mut self.fon,
+            FontKind::Antialiased => &mut self.aaf,
+        };
+        fonts.insert(suffix, std::sync::Arc::new(font));
+    }
+    /// The subsystem's initial choice, its lowest loaded suffix; `None`
+    /// reports that subsystem's initialization failure.
+    pub fn default_font(&self, kind: FontKind) -> Option<(u8, &std::sync::Arc<Font>)> {
+        match kind {
+            FontKind::Bitmap => &self.fon,
+            FontKind::Antialiased => &self.aaf,
+        }
+        .iter()
+        .next()
+        .map(|(suffix, font)| (*suffix, font))
+    }
+    /// A loaded font by selection number: FON 0-9, or registered AAF 100-110.
+    pub fn get(&self, number: i32) -> Option<&std::sync::Arc<Font>> {
+        if let Ok(suffix) = u8::try_from(number)
+            && FON_SUFFIXES.contains(&suffix)
+        {
+            self.fon.get(&suffix)
+        } else if AAF_SELECTION.contains(&number) {
+            self.aaf.get(&((number - 100) as u8))
+        } else {
+            None
+        }
+    }
+    /// Select a font number. A missing slot leaves the previous selection
+    /// (bitmap and metrics) unchanged and returns `false`.
+    pub fn select(&mut self, number: i32) -> bool {
+        let available = self.get(number).is_some();
+        if available {
+            self.current = Some(number);
+        }
+        available
+    }
+    pub fn current_number(&self) -> Option<i32> {
+        self.current
+    }
+    pub fn current(&self) -> Option<&std::sync::Arc<Font>> {
+        self.current.and_then(|number| self.get(number))
+    }
+}
+
+/// Numeric text-drawing word: low eight bits select the foreground palette
+/// index; `0x10000` shadow, `0x20000` underline, `0x40000` monospaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextFlags {
+    pub foreground: u8,
+    pub shadow: bool,
+    pub underline: bool,
+    pub monospaced: bool,
+}
+impl TextFlags {
+    pub const SHADOW: u32 = 0x10000;
+    pub const UNDERLINE: u32 = 0x20000;
+    pub const MONOSPACED: u32 = 0x40000;
+    pub fn from_word(word: u32) -> Self {
+        Self {
+            foreground: (word & 0xff) as u8,
+            shadow: word & Self::SHADOW != 0,
+            underline: word & Self::UNDERLINE != 0,
+            monospaced: word & Self::MONOSPACED != 0,
+        }
+    }
+}

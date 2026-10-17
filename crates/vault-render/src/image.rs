@@ -19,7 +19,7 @@ pub struct IndexedImage {
     pub(crate) pixels: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextStyle {
     pub foreground: u8,
     pub monospaced: bool,
@@ -34,6 +34,18 @@ impl Default for TextStyle {
             monospaced: false,
             underline: false,
             shadow: false,
+        }
+    }
+}
+
+/// SPEC-002 numeric drawing word: low byte color, shadow/underline/monospaced bits.
+impl From<vault_formats::TextFlags> for TextStyle {
+    fn from(flags: vault_formats::TextFlags) -> Self {
+        Self {
+            foreground: flags.foreground,
+            monospaced: flags.monospaced,
+            underline: flags.underline,
+            shadow: flags.shadow,
         }
     }
 }
@@ -277,6 +289,38 @@ pub fn compose_preview(
 mod tests {
     use super::*;
     use vault_formats::frm::FrameCursor;
+
+    #[test]
+    fn spec002_numeric_flag_word_selects_drawing_options() {
+        let style = TextStyle::from(vault_formats::TextFlags::from_word(0x0006_0109));
+        assert_eq!(
+            style,
+            TextStyle {
+                foreground: 9,
+                monospaced: true,
+                underline: true,
+                shadow: false,
+            }
+        );
+        // Drawing with the decoded word matches drawing with explicit options.
+        let palette = Palette::parse(&fixtures::palette()).unwrap();
+        let font = Font::parse_fon(&fixtures::fon()).unwrap();
+        let draw = |style: TextStyle| {
+            let mut image = IndexedImage::new(40, 20).unwrap();
+            image.draw_text(&font, &palette, b"AB", [1, 1], 38, style);
+            image
+        };
+        assert_eq!(
+            draw(style).pixels(),
+            draw(TextStyle {
+                foreground: 9,
+                monospaced: true,
+                underline: true,
+                shadow: false,
+            })
+            .pixels()
+        );
+    }
 
     #[test]
     fn spec001_fixtures_b_and_c_draw_through_world_rectangles() {

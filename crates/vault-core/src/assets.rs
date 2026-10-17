@@ -1,8 +1,9 @@
 use crate::{WorldError, dialogue::HeadDefinition};
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 use vault_formats::{
-    Font, FrmArchive, GamFile, GamSection, GcdFile, LocalDirProvider, LocalPrototypeCatalog,
-    LstKind, LstTable, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype, Vfs, pro::Category,
+    Font, FontKind, FontSet, FrmArchive, GamFile, GamSection, GcdFile, LocalDirProvider,
+    LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype, Vfs,
+    pro::Category,
 };
 use vault_vm::IntProgram;
 
@@ -34,6 +35,10 @@ pub trait WorldAssets {
     }
     fn font(&self) -> Result<Arc<Font>, WorldError> {
         Err(WorldError::Invalid("font resource unavailable".into()))
+    }
+    /// A loaded font by SPEC-002 selection number (FON 0-9, AAF 100-110).
+    fn font_number(&self, _number: i32) -> Option<Arc<Font>> {
+        None
     }
     fn gam(&self, _path: &str, _section: GamSection) -> Result<Option<GamFile>, WorldError> {
         Ok(None)
@@ -80,6 +85,7 @@ pub struct VfsWorldAssets {
     programs: RefCell<BTreeMap<i32, (String, IntProgram)>>,
     frames: RefCell<BTreeMap<String, Arc<FrmArchive>>>,
     frame_bytes: RefCell<usize>,
+    fonts: RefCell<Option<Arc<FontSet>>>,
 }
 impl VfsWorldAssets {
     pub fn new(vfs: Arc<LocalDirProvider>, language: &str) -> Result<Self, WorldError> {
@@ -100,7 +106,15 @@ impl VfsWorldAssets {
             programs: RefCell::new(BTreeMap::new()),
             frames: RefCell::new(BTreeMap::new()),
             frame_bytes: RefCell::new(0),
+            fonts: RefCell::new(None),
         })
+    }
+    /// SPEC-002 startup font search, performed once on first use.
+    pub fn font_set(&self) -> Arc<FontSet> {
+        self.fonts
+            .borrow_mut()
+            .get_or_insert_with(|| Arc::new(FontSet::load(&*self.vfs)))
+            .clone()
     }
     pub fn read(&self, path: &str) -> Result<Vec<u8>, WorldError> {
         self.vfs
@@ -298,17 +312,17 @@ impl WorldAssets for VfsWorldAssets {
     fn interface_path(&self, index: i32) -> Result<String, WorldError> {
         self.art_name("intrface", index)
     }
+    /// Presentation text uses the AAF subsystem's initial font when it
+    /// initialized, otherwise the FON subsystem's.
     fn font(&self) -> Result<Arc<Font>, WorldError> {
-        for path in ["font0.aaf", "font0.fon"] {
-            if self.vfs.files().any(|p| p.as_str() == path) {
-                return Ok(Arc::new(if path.ends_with("aaf") {
-                    Font::parse_aaf(&self.read(path)?)?
-                } else {
-                    Font::parse_fon(&self.read(path)?)?
-                }));
-            }
-        }
-        Err(WorldError::Invalid("no dialogue font".into()))
+        let fonts = self.font_set();
+        [FontKind::Antialiased, FontKind::Bitmap]
+            .into_iter()
+            .find_map(|kind| fonts.default_font(kind).map(|(_, font)| font.clone()))
+            .ok_or_else(|| WorldError::Invalid("no dialogue font".into()))
+    }
+    fn font_number(&self, number: i32) -> Option<Arc<Font>> {
+        self.font_set().get(number).cloned()
     }
     fn gam(&self, path: &str, section: GamSection) -> Result<Option<GamFile>, WorldError> {
         match self.vfs.read_bounded(path, MAX_ASSET_BYTES) {

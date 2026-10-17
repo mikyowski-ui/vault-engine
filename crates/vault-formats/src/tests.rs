@@ -614,11 +614,19 @@ fn spec002_aaf_pixels_alignment_spacing_and_palette_blending() {
 #[test]
 fn spec002_msg_multiline_duplicates_and_false_comments() {
     let text = include_str!("../../../tests/fixtures/formats/messages.msg");
-    for bytes in [
+    for (bytes, strict) in [
         text.as_bytes().to_vec(),
         text.replace('\n', "\r\n").into_bytes(),
-    ] {
-        let catalog = MsgCatalog::parse(&bytes).unwrap();
+    ]
+    .into_iter()
+    .flat_map(|bytes| [(bytes.clone(), false), (bytes, true)])
+    {
+        // The authoring (strict) reader accepts the same valid fixture records.
+        let catalog = if strict {
+            MsgCatalog::parse_strict(&bytes).unwrap()
+        } else {
+            MsgCatalog::parse(&bytes).unwrap()
+        };
         assert_eq!(catalog.entries().len(), 5);
         for (id, sound, text) in [
             (2, "", " keep  spaces "),
@@ -642,10 +650,14 @@ fn spec002_msg_exact_bytes_and_acceptance_boundaries() {
     .unwrap();
     for case in cases.as_array().unwrap() {
         let bytes = fixtures::hex(case["hex"].as_str().unwrap());
-        let catalog = MsgCatalog::parse(&bytes).unwrap();
-        let message = catalog.get(case["id"].as_i64().unwrap() as i32).unwrap();
-        assert!(message.sound.is_empty());
-        assert_eq!(message.text, fixtures::hex(case["text"].as_str().unwrap()));
+        for catalog in [
+            MsgCatalog::parse(&bytes).unwrap(),
+            MsgCatalog::parse_strict(&bytes).unwrap(),
+        ] {
+            let message = catalog.get(case["id"].as_i64().unwrap() as i32).unwrap();
+            assert!(message.sound.is_empty());
+            assert_eq!(message.text, fixtures::hex(case["text"].as_str().unwrap()));
+        }
     }
     let cases: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/formats/message-boundaries.json"
@@ -879,5 +891,64 @@ fn validation_dispatch_covers_every_supported_extension() {
     assert_eq!(
         LstKind::for_path(&VfsPath::new("data/custom.lst").unwrap()),
         LstKind::Raw
+    );
+}
+
+#[test]
+fn spec002_font_startup_search_defaults_and_numbered_selection() {
+    use crate::{FontSet, TextFlags, font::FontKind};
+    let dir = tempfile::tempdir().unwrap();
+    // FON search covers suffixes 0-9 (font7 is beyond the shipped 0-5 names);
+    // AAF search covers 0-15, but only 100-110 are registered selections.
+    std::fs::write(dir.path().join("font7.fon"), fixtures::fon()).unwrap();
+    std::fs::write(dir.path().join("font2.fon"), fixtures::fon()).unwrap();
+    std::fs::write(dir.path().join("font1.fon"), b"invalid").unwrap();
+    std::fs::write(dir.path().join("font12.fon"), fixtures::fon()).unwrap();
+    std::fs::write(dir.path().join("font3.aaf"), fixtures::aaf()).unwrap();
+    std::fs::write(dir.path().join("font13.aaf"), fixtures::aaf()).unwrap();
+    let vfs = LocalDirProvider::mount(dir.path()).unwrap();
+    let mut fonts = FontSet::load(&vfs);
+    // Lowest successfully loaded suffix: the invalid font1.fon is skipped.
+    assert_eq!(fonts.default_font(FontKind::Bitmap).map(|f| f.0), Some(2));
+    assert_eq!(
+        fonts.default_font(FontKind::Antialiased).map(|f| f.0),
+        Some(3)
+    );
+    assert!(fonts.get(7).is_some() && fonts.get(12).is_none() && fonts.get(1).is_none());
+    assert!(fonts.get(103).is_some() && fonts.get(113).is_none() && fonts.get(3).is_none());
+    assert_eq!(fonts.current_number(), None);
+    assert!(fonts.select(103));
+    assert_eq!(fonts.current().unwrap().kind(), FontKind::Antialiased);
+    // A missing slot does not replace the selection with a nearby font.
+    for missing in [100, 104, 1, 5, 12, 111, -1] {
+        assert!(!fonts.select(missing));
+        assert_eq!(fonts.current_number(), Some(103));
+    }
+    assert!(fonts.select(7));
+    assert_eq!(fonts.current().unwrap().kind(), FontKind::Bitmap);
+    // No loaded fonts: each subsystem reports initialization failure.
+    let empty = tempfile::tempdir().unwrap();
+    let fonts = FontSet::load(&LocalDirProvider::mount(empty.path()).unwrap());
+    assert!(fonts.default_font(FontKind::Bitmap).is_none());
+    assert!(fonts.default_font(FontKind::Antialiased).is_none());
+
+    let flags = TextFlags::from_word(0x0007_00D7);
+    assert_eq!(
+        flags,
+        TextFlags {
+            foreground: 0xD7,
+            shadow: true,
+            underline: true,
+            monospaced: true
+        }
+    );
+    assert_eq!(
+        TextFlags::from_word(0x0002_0105),
+        TextFlags {
+            foreground: 5,
+            shadow: false,
+            underline: true,
+            monospaced: false
+        }
     );
 }

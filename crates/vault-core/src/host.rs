@@ -138,6 +138,9 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     ) -> Result<std::sync::Arc<vault_formats::FrmArchive>, WorldError> {
         (**self).object_art(category, fid, orientation)
     }
+    fn font_number(&self, number: i32) -> Option<std::sync::Arc<vault_formats::Font>> {
+        (**self).font_number(number)
+    }
 }
 impl<A: WorldAssets> WorldHost<A> {
     pub fn new(world: WorldState, assets: A) -> Self {

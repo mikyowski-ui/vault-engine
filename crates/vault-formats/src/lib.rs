@@ -15,7 +15,7 @@ pub mod pro_catalog;
 pub mod vfs;
 
 pub use binary::{MAX_ASSET_BYTES, ParseError};
-pub use font::{Font, FontKind};
+pub use font::{Font, FontKind, FontSet, TextFlags};
 pub use frm::FrmArchive;
 pub use gam::{GamFile, GamSection};
 pub use gcd::GcdFile;
