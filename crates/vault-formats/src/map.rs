@@ -1,7 +1,7 @@
 //! SPEC-003 version-19 map streams, with bounded recursive inventories.
 use crate::{
     ParseError,
-    binary::{MAX_ENTRIES, Reader},
+    binary::{MAX_ENTRIES, Reader, put_i32, put_u32},
     pro::*,
 };
 use std::collections::BTreeMap;
@@ -644,5 +644,227 @@ impl MapObject {
         for entry in &mut self.inventory {
             entry.object.restore_scripts(bindings, false);
         }
+    }
+}
+
+/// SPEC-003 writer. Writing sets darkness to 1, recomputes the elevation
+/// omission bits, saves top-level objects by traversing grid positions in
+/// each elevation (unplaced and temporary objects are not saved), and omits
+/// script instances flagged `0x8`, compacting the retained records.
+impl MapFile {
+    pub fn write(&self) -> Result<Vec<u8>, ParseError> {
+        let error = |message: &str| ParseError::new("MAP", 0, message);
+        let count = |length: usize| i32::try_from(length).map_err(|_| error("count exceeds i32"));
+        let mut objects: [Vec<&MapObject>; 3] = std::array::from_fn(|_| Vec::new());
+        for (elevation, saved) in objects.iter_mut().enumerate() {
+            *saved = self.objects.elevations[elevation]
+                .iter()
+                .filter(|object| {
+                    object.hex.is_some() && !object.flags.contains(BasicFlags::TEMPORARY)
+                })
+                .collect();
+            // Stable within a hex, so the existing per-hex order is retained.
+            saved.sort_by_key(|object| object.hex);
+        }
+        let mut flags = self.header.flags.0 & !0xe;
+        for (elevation, saved) in objects.iter().enumerate() {
+            let blank = self.tiles[elevation].as_ref().is_none_or(|tiles| {
+                tiles
+                    .iter()
+                    .all(|tile| tile.floor() == 1 && tile.roof() == 1)
+            });
+            if blank && saved.is_empty() {
+                flags |= 2 << elevation;
+            }
+        }
+        let header = &self.header;
+        let out = &mut Vec::new();
+        put_i32(out, 19);
+        out.extend_from_slice(&header.name);
+        put_i32(out, header.entry_hex);
+        put_i32(out, header.entry_elevation.into());
+        put_i32(out, header.entry_orientation.into());
+        put_i32(out, count(self.lvars.len())?);
+        put_i32(out, header.script_reference);
+        put_u32(out, flags);
+        put_i32(out, 1);
+        put_i32(out, count(self.mvars.len())?);
+        put_i32(out, header.map_number);
+        put_u32(out, header.last_visit);
+        for word in header.reserved {
+            put_i32(out, word);
+        }
+        for value in self.mvars.iter().chain(&self.lvars) {
+            put_i32(out, *value);
+        }
+        for elevation in 0..3 {
+            if flags & (2 << elevation) == 0 {
+                for index in 0..10000 {
+                    let tile = self.tile(elevation, index).expect("tile index in range");
+                    put_u32(out, tile.word);
+                }
+            }
+        }
+        for category in &self.scripts {
+            let retained: Vec<&MapScript> = category
+                .active()
+                .filter(|script| !script.flags.contains(ScriptFlags::NO_SAVE))
+                .collect();
+            put_i32(out, count(retained.len())?);
+            for block in retained.chunks(16) {
+                for slot in 0..16 {
+                    match block.get(slot) {
+                        Some(script) => script.write(out),
+                        None => out.extend_from_slice(&[0; 64]),
+                    }
+                }
+                put_i32(out, count(block.len())?);
+                put_i32(out, 0); // obsolete next-block address
+            }
+        }
+        put_i32(out, count(objects.iter().map(Vec::len).sum())?);
+        for (elevation, saved) in objects.iter().enumerate() {
+            put_i32(out, count(saved.len())?);
+            for object in saved {
+                object.write(out, elevation as u8, 0)?;
+            }
+        }
+        Ok(std::mem::take(out))
+    }
+}
+impl MapScript {
+    fn write(&self, out: &mut Vec<u8>) {
+        put_u32(out, self.id);
+        put_i32(out, self.link);
+        // The slot's own identifier selects its conditional prefix.
+        match (self.id >> 24, &self.prefix) {
+            (1, ScriptPrefix::Spatial { location, radius }) => {
+                put_u32(out, location.0);
+                put_i32(out, *radius);
+            }
+            (1, _) => out.extend_from_slice(&[0; 8]),
+            (2, ScriptPrefix::Timed(time)) => put_i32(out, *time),
+            (2, _) => out.extend_from_slice(&[0; 4]),
+            _ => {}
+        }
+        for value in [
+            self.flags.0 as i32,
+            self.file_index,
+            0, // obsolete program address
+            self.object_id,
+            self.local_base,
+            self.local_count,
+            self.result,
+            self.event,
+            self.parameter,
+            self.action,
+            self.override_default,
+            self.execution_state,
+            self.quantity,
+            self.annotations as i32,
+        ] {
+            put_i32(out, value);
+        }
+    }
+}
+impl MapObject {
+    fn write(&self, out: &mut Vec<u8>, elevation: u8, depth: usize) -> Result<(), ParseError> {
+        let error = |message: &str| ParseError::new("MAP", 0, message);
+        if depth > MAX_INVENTORY_DEPTH {
+            return Err(error("inventory depth exceeds the resource limit"));
+        }
+        if self.hex.is_some_and(|hex| !(0..40000).contains(&hex)) || self.orientation > 5 {
+            return Err(error(
+                "object hex/orientation outside the serialized domain",
+            ));
+        }
+        let frame = i32::try_from(self.frame).map_err(|_| error("object frame exceeds i32"))?;
+        let entries = i32::try_from(self.inventory.len())
+            .map_err(|_| error("inventory count exceeds i32"))?;
+        let capacity = i32::try_from(self.inventory_capacity.max(self.inventory.len()))
+            .map_err(|_| error("inventory capacity exceeds i32"))?;
+        for value in [
+            self.id as i32,
+            self.hex.unwrap_or(-1),
+            self.displacement[0],
+            self.displacement[1],
+            self.screen[0],
+            self.screen[1],
+            frame,
+            self.orientation.into(),
+            self.art_id as i32,
+            self.flags.0 as i32,
+            elevation.into(),
+            self.pid as i32,
+            self.combat_id,
+            self.light.radius,
+            self.light.intensity,
+            self.outline as i32,
+            self.script_id,
+            self.cached_script_file,
+            entries,
+            capacity,
+            0, // obsolete inventory address
+        ] {
+            put_i32(out, value);
+        }
+        match &self.state {
+            ObjectState::Critter(state) => {
+                for value in [
+                    state.reaction,
+                    state.damage,
+                    state.maneuvers as i32,
+                    state.ap,
+                    state.results.0 as i32,
+                    state.ai,
+                    state.team,
+                    state.attacker,
+                    state.hp,
+                    state.radiation,
+                    state.poison,
+                ] {
+                    put_i32(out, value);
+                }
+            }
+            ObjectState::Other { word, detail } => {
+                put_u32(out, *word);
+                let words: &[i32] = match *detail {
+                    ObjectDetail::Plain => &[],
+                    ObjectDetail::Weapon { rounds, ammo_pid } => &[rounds, ammo_pid],
+                    ObjectDetail::Ammunition(value)
+                    | ObjectDetail::Charges(value)
+                    | ObjectDetail::Key(value) => &[value],
+                    ObjectDetail::Door(flags) => &[flags.0 as i32],
+                    ObjectDetail::Stairs { map, destination } => &[map, destination.0 as i32],
+                    ObjectDetail::Elevator { kind, level } => &[kind, level],
+                    ObjectDetail::Ladder(destination) => &[destination.0 as i32],
+                    ObjectDetail::ExitGrid {
+                        map,
+                        hex,
+                        elevation,
+                        orientation,
+                    } => &[map, hex, elevation, orientation],
+                };
+                for value in words {
+                    put_i32(out, *value);
+                }
+            }
+        }
+        for entry in &self.inventory {
+            // The reference writer can emit a quantity and then omit/fail on a
+            // temporary child, corrupting the stream; refuse that state instead.
+            if entry.object.flags.contains(BasicFlags::TEMPORARY) {
+                return Err(error(
+                    "temporary object inside an inventory cannot be saved",
+                ));
+            }
+            let quantity = i32::try_from(entry.quantity)
+                .ok()
+                .filter(|quantity| *quantity > 0)
+                .ok_or_else(|| error("inventory quantity must be 1..=i32::MAX"))?;
+            put_i32(out, quantity);
+            entry.object.write(out, elevation, depth + 1)?;
+        }
+        Ok(())
     }
 }

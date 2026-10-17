@@ -136,7 +136,7 @@ pub fn write_corpus(root: &std::path::Path) {
         .unwrap();
         std::fs::create_dir_all(root.join(format!("art/{folder}"))).unwrap();
         let names = if category == 4 {
-            b"tile.frm\ntile.frm\ntile.frm\n".as_slice()
+            b"tile.frm\nblank.frm\ntile.frm\n".as_slice()
         } else {
             b"sample.frm\n"
         };
@@ -158,5 +158,10 @@ pub fn write_corpus(root: &std::path::Path) {
             frm(width, height, color),
         )
         .unwrap();
+        if category == 4 {
+            // Index 1 is the ordinary blank tile; like shipped data it is drawn
+            // but entirely transparent.
+            std::fs::write(root.join("art/tiles/blank.frm"), frm(80, 36, 0)).unwrap();
+        }
     }
 }

@@ -100,3 +100,11 @@ impl<'a> Reader<'a> {
         usize::try_from(value).map_err(|_| self.error(format!("negative {field}: {value}")))
     }
 }
+
+/// Big-endian serialization helpers shared by the SPEC-003 writers.
+pub(crate) fn put_i32(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+pub(crate) fn put_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_be_bytes());
+}

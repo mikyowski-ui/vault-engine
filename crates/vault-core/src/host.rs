@@ -933,13 +933,14 @@ impl<A: WorldAssets> WorldHost<A> {
         {
             return Err(WorldError::Invalid("tile art cannot be examined".into()));
         }
+        // SPEC-003 §2.6: talk is granted to critters by category and to other
+        // objects only by extended flag 0x4000.
+        let talkable = object.category() == Category::Critter
+            || object.prototype.as_ref().is_some_and(|p| p.permits_talk());
         if action == ObjectAction::Talk {
-            if actor != self.world.player
-                || object.category() != Category::Critter
-                || self.world.combat
-            {
+            if actor != self.world.player || !talkable || self.world.combat {
                 return Err(WorldError::Invalid(
-                    "talk requires the player and a critter outside combat".into(),
+                    "talk requires the player, a talkable target, and no combat".into(),
                 ));
             }
             if self.world.distance(actor, target) >= 9 {
@@ -972,7 +973,25 @@ impl<A: WorldAssets> WorldHost<A> {
             return Ok(());
         }
         if let ObjectAction::UseObject(item) = action {
+            if self
+                .world
+                .get(item)
+                .and_then(|item| item.prototype.as_ref())
+                .is_some_and(|prototype| !prototype.permits_use_on())
+            {
+                return Err(WorldError::Invalid(
+                    "item does not permit use on another object".into(),
+                ));
+            }
             return self.use_item_on(actor, item, target);
+        }
+        if action == ObjectAction::Use
+            && object
+                .prototype
+                .as_ref()
+                .is_some_and(|prototype| !prototype.permits_use())
+        {
+            return Err(WorldError::Invalid("object does not permit use".into()));
         }
         if action == ObjectAction::Use && object.owner == Some(actor) {
             self.world

@@ -441,3 +441,229 @@ fn world_parsers_bound_mutated_counts_and_geometry_overflow() {
     assert_eq!(grid.pick_hex([i32::MIN, i32::MAX]), None);
     assert_eq!(grid.pick_square([i32::MIN, i32::MAX], true), None);
 }
+
+#[test]
+fn spec003_extended_flag_permissions_by_flag_category_and_subtype() {
+    let with = |category: u8, subtype: usize, extended: u32| {
+        let mut bytes = fixture::prototype(category, subtype);
+        bytes[0x18..0x1c].copy_from_slice(&extended.to_be_bytes());
+        Prototype::parse(&bytes).unwrap()
+    };
+    // Containers permit use by subtype, but pickup only with 0x8000.
+    let container = with(0, 1, 0);
+    assert!(container.permits_use() && !container.permits_use_on());
+    assert!(!container.permits_pickup() && !container.permits_talk());
+    assert!(with(0, 1, 0x8000).permits_pickup());
+    // Drugs permit use-on by subtype; other items need the flags.
+    let drug = with(0, 2, 0);
+    assert!(drug.permits_use_on() && !drug.permits_use() && drug.permits_pickup());
+    let weapon = with(0, 3, 0);
+    assert!(!weapon.permits_use() && !weapon.permits_use_on() && weapon.permits_pickup());
+    assert!(with(0, 3, 0x800).permits_use() && with(0, 3, 0x1000).permits_use_on());
+    // Scenery: use by flag only, talk by 0x4000 only, never pickup.
+    let door = with(2, 0, 0);
+    assert!(!door.permits_use() && !door.permits_talk() && !door.permits_pickup());
+    assert!(with(2, 0, 0x800).permits_use() && with(2, 5, 0x4000).permits_talk());
+    // Critters talk by category; the 0x8000 pickup bit is container-only.
+    let critter = with(1, 0, 0x8000);
+    assert!(critter.permits_talk() && !critter.permits_pickup());
+}
+
+#[test]
+fn spec003_prototype_writer_round_trips_with_documented_asymmetries() {
+    // Fixture A and every category without a write-side rule round-trip exactly.
+    let container = fixture::container();
+    assert_eq!(Prototype::parse(&container).unwrap().write(), container);
+    for (category, subtype) in [
+        (0, 0),
+        (0, 2),
+        (0, 4),
+        (0, 5),
+        (0, 6),
+        (1, 0),
+        (3, 0),
+        (4, 0),
+        (5, 0),
+    ] {
+        let bytes = fixture::prototype(category, subtype);
+        assert_eq!(
+            Prototype::parse(&bytes).unwrap().write(),
+            bytes,
+            "{category}/{subtype}"
+        );
+    }
+    // Weapons read minimum at payload 0x04 / maximum at 0x08, but write the
+    // maximum first, so a save/reload exchanges the bounds.
+    let mut weapon = fixture::prototype(0, 3);
+    fixture::word(&mut weapon, 57 + 4, 2);
+    fixture::word(&mut weapon, 57 + 8, 7);
+    let parsed = Prototype::parse(&weapon).unwrap();
+    let PrototypeData::Item(Item {
+        data: ItemData::Weapon(read),
+        ..
+    }) = &parsed.data
+    else {
+        panic!("weapon")
+    };
+    assert_eq!(read.damage, [2, 7]);
+    let written = parsed.write();
+    assert_eq!(written.len(), weapon.len());
+    assert_eq!(&written[61..69], &[0, 0, 0, 7, 0, 0, 0, 2]);
+    let PrototypeData::Item(Item {
+        data: ItemData::Weapon(reread),
+        ..
+    }) = Prototype::parse(&written).unwrap().data
+    else {
+        panic!("weapon")
+    };
+    assert_eq!(reread.damage, [7, 2]);
+    // Scenery appends radius, intensity, basic flags, extended flags, script,
+    // and subtype; the reader stops before this 24-byte suffix.
+    for subtype in 0..6 {
+        let mut scenery = fixture::prototype(2, subtype);
+        fixture::word(&mut scenery, 12, 3);
+        fixture::word(&mut scenery, 16, 0x8000);
+        fixture::word(&mut scenery, 20, 0x10);
+        fixture::word(&mut scenery, 24, 0x800);
+        fixture::word(&mut scenery, 28, 9);
+        let parsed = Prototype::parse(&scenery).unwrap();
+        let written = parsed.write();
+        assert_eq!(written.len(), scenery.len() + 24);
+        assert_eq!(&written[..scenery.len()], scenery.as_slice());
+        assert_eq!(
+            &written[scenery.len()..],
+            fixture::words(&[3, 0x8000, 0x10, 0x800, 9, subtype as i32]).as_slice()
+        );
+        let reread = Prototype::parse(&written).unwrap();
+        assert_eq!(
+            (reread.consumed_len, reread.data),
+            (scenery.len(), parsed.data)
+        );
+    }
+}
+
+fn fixture_c_map() -> Vec<u8> {
+    let mut bytes = fixture::empty_map();
+    bytes.truncate(bytes.len() - 16);
+    bytes.extend(fixture::inventory());
+    bytes
+}
+
+#[test]
+fn spec003_map_writer_round_trips_and_recomputes_omission_bits() {
+    // Fixture B: flags 0x0F stay correct and darkness is already 1.
+    let empty = fixture::empty_map();
+    assert_eq!(
+        MapFile::parse(&empty, &lookup).unwrap().write().unwrap(),
+        empty
+    );
+    // Changing the stored darkness word: writing always sets it to 1.
+    let mut dark = empty.clone();
+    fixture::word(&mut dark, 0x2c, 9);
+    assert_eq!(
+        MapFile::parse(&dark, &lookup).unwrap().write().unwrap(),
+        empty
+    );
+
+    // Fixture C's elevation-0 object clears that elevation's omission bit, so a
+    // blank 40000-byte block is written; the child's stored elevation 2 becomes
+    // the enclosing elevation 0. Object counts for all elevations remain.
+    let source = fixture_c_map();
+    let map = MapFile::parse(&source, &lookup).unwrap();
+    let written = map.write().unwrap();
+    let mut expected = source[..0xf8].to_vec();
+    fixture::word(&mut expected, 0x28, 0x0d);
+    for _ in 0..10000 {
+        expected.extend(0x0001_0001_u32.to_be_bytes());
+    }
+    let mut objects = source[0xf8..].to_vec();
+    fixture::word(&mut objects, 20 + 0x8c, 0);
+    expected.extend(objects);
+    assert_eq!(written, expected);
+    let reread = MapFile::parse(&written, &lookup).unwrap();
+    assert_eq!(reread.header.flags, MapFlags(0x0d));
+    let parent = &reread.objects.elevations[0][0];
+    assert_eq!((parent.id, parent.inventory[0].quantity), (42, 3));
+    assert_eq!(parent.inventory[0].object.id, 43);
+}
+
+#[test]
+fn spec003_map_writer_grid_order_exclusions_and_script_compaction() {
+    let mut map = MapFile::parse(&fixture_c_map(), &lookup).unwrap();
+    let template = map.objects.elevations[0][0].clone();
+    let placed = |id: u32, hex: Option<i32>, flags: u32| {
+        let mut object = template.clone();
+        object.id = id;
+        object.hex = hex;
+        object.flags = BasicFlags(flags);
+        object.inventory.clear();
+        object
+    };
+    map.objects.elevations[0] = vec![
+        placed(3, Some(300), 0x10),
+        placed(1, Some(100), 0x10),
+        placed(9, Some(50), 0x14), // temporary: not saved
+        placed(8, None, 0x10),     // unplaced: not found by the grid traversal
+        placed(2, Some(200), 0x10),
+        placed(4, Some(100), 0x10), // same hex keeps its relative order
+    ];
+    map.objects.elevations[2] = vec![placed(5, Some(7), 0x14)];
+    let script = |serial: u32, flags: u32| MapScript {
+        id: (3 << 24) | serial,
+        link: 0,
+        prefix: ScriptPrefix::None,
+        stored_flags: ScriptFlags(flags),
+        flags: ScriptFlags(flags),
+        file_index: 0,
+        object_id: -1,
+        local_base: -1,
+        stored_local_count: 0,
+        local_count: 0,
+        result: 0,
+        event: 0,
+        parameter: 0,
+        action: 0,
+        override_default: 0,
+        execution_state: 0,
+        quantity: 0,
+        annotations: 0,
+        file_offset: 0,
+    };
+    let slots: Vec<_> = (1..=18)
+        .map(|serial| script(serial, if serial % 3 == 0 { 8 } else { 0 }))
+        .collect();
+    map.scripts[3] = ScriptCategory {
+        declared_count: 18,
+        blocks: vec![
+            ScriptBlock {
+                slots: slots[..16].to_vec(),
+                active: 16,
+            },
+            ScriptBlock {
+                slots: slots[16..].to_vec(),
+                active: 2,
+            },
+        ],
+    };
+    let written = map.write().unwrap();
+    let reread = MapFile::parse(&written, &lookup).unwrap();
+    let ids: Vec<_> = reread.objects.elevations[0].iter().map(|o| o.id).collect();
+    assert_eq!(ids, [1, 4, 2, 3]);
+    // Elevation 2 had only a temporary object, so its block stays omitted.
+    assert!(reread.objects.elevations[2].is_empty());
+    assert_eq!(reread.header.flags, MapFlags(0x0d));
+    assert_eq!(reread.objects.total, 4);
+    // Twelve of eighteen item scripts are retained and compacted: 12 records,
+    // one block whose four padding slots are inactive.
+    let retained: Vec<_> = reread.scripts[3]
+        .active()
+        .map(|s| s.id & 0xffffff)
+        .collect();
+    assert_eq!(retained, [1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17]);
+    assert_eq!(reread.scripts[3].blocks.len(), 1);
+    // A temporary inventory child is refused instead of corrupting the stream.
+    let mut child = map.clone();
+    child.objects.elevations[0] = vec![template.clone()];
+    child.objects.elevations[0][0].inventory[0].object.flags = BasicFlags(0x4);
+    assert!(child.write().is_err());
+}

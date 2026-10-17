@@ -1,5 +1,8 @@
 //! SPEC-003 prototype templates. Serialized addresses are never dereferenced.
-use crate::{ParseError, binary::Reader};
+use crate::{
+    ParseError,
+    binary::{Reader, put_i32, put_u32},
+};
 
 macro_rules! flags {
     ($name:ident { $($constant:ident = $value:expr),* $(,)? }) => {
@@ -444,6 +447,190 @@ impl Prototype {
             data,
             consumed_len: r.pos,
         })
+    }
+}
+
+impl Prototype {
+    /// SPEC-003 §3.1 asymmetric writer. Weapons emit maximum damage before
+    /// minimum (a save/reload can exchange the bounds), and scenery appends six
+    /// words that the reader stops before: light radius, light intensity, basic
+    /// flags, extended flags, script reference, and scenery subtype.
+    pub fn write(&self) -> Vec<u8> {
+        let out = &mut Vec::new();
+        put_u32(out, self.pid);
+        put_i32(out, self.message_base);
+        put_u32(out, self.art_id);
+        let light = self.light.unwrap_or(Light {
+            radius: 0,
+            intensity: 0,
+        });
+        if self.category != Category::Tile {
+            put_i32(out, light.radius);
+            put_i32(out, light.intensity);
+        }
+        put_u32(out, self.flags.0);
+        put_u32(out, self.extended.0);
+        let script = self.script.unwrap_or(-1);
+        if self.category != Category::Misc {
+            put_i32(out, script);
+        }
+        let words = |out: &mut Vec<u8>, values: &[i32]| {
+            for value in values {
+                put_i32(out, *value);
+            }
+        };
+        match &self.data {
+            PrototypeData::Item(item) => {
+                put_i32(out, item.data.subtype() as i32);
+                words(out, &[item.material, item.size, item.weight, item.cost]);
+                put_u32(out, item.inventory_art);
+                out.push(item.stored_byte);
+                match &item.data {
+                    ItemData::Armor(armor) => {
+                        put_i32(out, armor.armor_class);
+                        words(out, &armor.resistances);
+                        words(out, &armor.thresholds);
+                        words(out, &[armor.perk, armor.male_art, armor.female_art]);
+                    }
+                    ItemData::Container { capacity, flags } => {
+                        put_i32(out, *capacity);
+                        put_u32(out, flags.0);
+                    }
+                    ItemData::Drug(drug) => {
+                        words(out, &drug.stats);
+                        words(out, &drug.immediate);
+                        put_i32(out, drug.delay1);
+                        words(out, &drug.changes1);
+                        put_i32(out, drug.delay2);
+                        words(out, &drug.changes2);
+                        words(out, &[drug.addiction, drug.withdrawal, drug.onset]);
+                    }
+                    ItemData::Weapon(weapon) => {
+                        words(
+                            out,
+                            &[
+                                weapon.animation,
+                                weapon.damage[1],
+                                weapon.damage[0],
+                                weapon.damage_type,
+                                weapon.ranges[0],
+                                weapon.ranges[1],
+                                weapon.projectile_pid,
+                                weapon.strength,
+                                weapon.ap_cost[0],
+                                weapon.ap_cost[1],
+                                weapon.critical_failure,
+                                weapon.perk,
+                                weapon.burst,
+                                weapon.caliber,
+                                weapon.ammo_pid,
+                                weapon.capacity,
+                            ],
+                        );
+                        out.push(weapon.sound);
+                    }
+                    ItemData::Ammunition {
+                        caliber,
+                        quantity,
+                        armor_modifier,
+                        resistance_modifier,
+                        multiplier,
+                        divisor,
+                    } => words(
+                        out,
+                        &[
+                            *caliber,
+                            *quantity,
+                            *armor_modifier,
+                            *resistance_modifier,
+                            *multiplier,
+                            *divisor,
+                        ],
+                    ),
+                    ItemData::Misc {
+                        power_pid,
+                        power_type,
+                        charges,
+                    } => words(out, &[*power_pid, *power_type, *charges]),
+                    ItemData::Key { code } => put_i32(out, *code),
+                }
+            }
+            PrototypeData::Critter(critter) => {
+                put_u32(out, critter.head_art);
+                put_i32(out, critter.ai);
+                put_i32(out, critter.team);
+                put_u32(out, critter.flags.0);
+                words(out, &critter.base_stats);
+                words(out, &critter.bonus_stats);
+                words(out, &critter.skills);
+                words(
+                    out,
+                    &[critter.body, critter.experience, critter.kill_category],
+                );
+            }
+            PrototypeData::Scenery(scenery) => {
+                let subtype = scenery.data.subtype() as i32;
+                put_i32(out, subtype);
+                put_i32(out, scenery.material);
+                out.push(scenery.stored_byte);
+                match scenery.data {
+                    SceneryData::Door { state, key } => {
+                        put_u32(out, state.0);
+                        put_i32(out, key);
+                    }
+                    SceneryData::Stairs { map, destination } => {
+                        put_i32(out, map);
+                        put_u32(out, destination);
+                    }
+                    SceneryData::Elevator { kind, level } => words(out, &[kind, level]),
+                    SceneryData::LadderUp { destination }
+                    | SceneryData::LadderDown { destination } => put_u32(out, destination),
+                    SceneryData::Generic(value) => put_i32(out, value),
+                }
+                words(out, &[light.radius, light.intensity]);
+                put_u32(out, self.flags.0);
+                put_u32(out, self.extended.0);
+                words(out, &[script, subtype]);
+            }
+            PrototypeData::Wall { material } | PrototypeData::Tile { material } => {
+                put_i32(out, *material)
+            }
+            PrototypeData::Misc => {}
+        }
+        std::mem::take(out)
+    }
+}
+
+/// SPEC-003 §2.6 extended-flag interaction permissions, including the
+/// permissions granted by category or item subtype.
+impl Prototype {
+    fn item_subtype(&self) -> Option<ItemSubtype> {
+        match &self.data {
+            PrototypeData::Item(item) => Some(item.data.subtype()),
+            _ => None,
+        }
+    }
+    /// `0x800`, or any container by subtype.
+    pub fn permits_use(&self) -> bool {
+        self.extended.contains(ExtendedFlags::USE)
+            || self.item_subtype() == Some(ItemSubtype::Container)
+    }
+    /// `0x1000`, or any drug by subtype.
+    pub fn permits_use_on(&self) -> bool {
+        self.extended.contains(ExtendedFlags::USE_ON)
+            || self.item_subtype() == Some(ItemSubtype::Drug)
+    }
+    /// Critters by category; other objects only with `0x4000`.
+    pub fn permits_talk(&self) -> bool {
+        self.category == Category::Critter || self.extended.contains(ExtendedFlags::TALK)
+    }
+    /// Non-container items by subtype; containers only with `0x8000`.
+    pub fn permits_pickup(&self) -> bool {
+        match self.item_subtype() {
+            Some(ItemSubtype::Container) => self.extended.contains(ExtendedFlags::PICKUP_CONTAINER),
+            Some(_) => true,
+            None => false,
+        }
     }
 }
 

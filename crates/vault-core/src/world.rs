@@ -887,11 +887,15 @@ impl WorldState {
             return -1;
         };
         let at = base as i64 + i64::from(index);
-        usize::try_from(at)
+        let value = usize::try_from(at)
             .ok()
             .and_then(|at| self.lvars.get(at))
-            .copied()
-            .unwrap_or(0)
+            .copied();
+        if value.is_none() {
+            // SPEC-003: out-of-pool reads report an error and return zero.
+            self.diagnostic(format!("LVAR read {index} outside the local pool"));
+        }
+        value.unwrap_or(0)
     }
     pub fn set_local(&mut self, sid: Option<u32>, index: i32, value: i32) -> bool {
         let Some(sid) = sid else {

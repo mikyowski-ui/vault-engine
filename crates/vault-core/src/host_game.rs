@@ -503,13 +503,17 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 None
             }
-            0x80c3 => integer(
-                usize::try_from(call.int(0))
+            0x80c3 => {
+                let value = usize::try_from(call.int(0))
                     .ok()
                     .and_then(|i| self.world.mvars.get(i))
-                    .copied()
-                    .unwrap_or(0),
-            ),
+                    .copied();
+                if value.is_none() {
+                    self.world
+                        .diagnostic(format!("MVAR read {} out of bounds", call.int(0)));
+                }
+                integer(value.unwrap_or(0))
+            }
             0x80c4 => {
                 if let Some(slot) = usize::try_from(call.int(1))
                     .ok()

@@ -2,7 +2,9 @@ use std::{error::Error, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use vault_formats::{
-    LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, Vfs, validate_asset,
+    LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, Prototype, Vfs, VfsPath,
+    pro::{BasicFlags, ItemData, PrototypeData},
+    validate_asset,
 };
 use vault_vm::IntProgram;
 
@@ -23,6 +25,77 @@ struct Args {
     /// Parse all supported formats, resolving MAP object subtypes through proto/ lists.
     #[arg(long)]
     validate_formats: bool,
+    /// Re-serialize every PRO and MAP through the SPEC-003 writers.
+    #[arg(long)]
+    validate_writers: bool,
+}
+
+/// The SPEC-003 writer's expected PRO bytes: the consumed payload with
+/// weapon damage bounds exchanged, plus the scenery writer suffix.
+fn expected_pro(bytes: &[u8], prototype: &Prototype) -> Vec<u8> {
+    let mut expected = bytes[..prototype.consumed_len].to_vec();
+    match &prototype.data {
+        PrototypeData::Item(item) if matches!(item.data, ItemData::Weapon(_)) => {
+            let (minimum, maximum) = expected[61..69].split_at_mut(4);
+            minimum.swap_with_slice(maximum);
+        }
+        PrototypeData::Scenery(scenery) => {
+            let light = prototype.light.expect("scenery has light words");
+            for word in [
+                light.radius,
+                light.intensity,
+                prototype.flags.0 as i32,
+                prototype.extended.0 as i32,
+                prototype.script.unwrap_or(-1),
+                scenery.data.subtype() as i32,
+            ] {
+                expected.extend_from_slice(&word.to_be_bytes());
+            }
+        }
+        _ => {}
+    }
+    expected
+}
+
+fn saved_objects(map: &MapFile) -> usize {
+    map.objects
+        .elevations
+        .iter()
+        .flatten()
+        .filter(|object| object.hex.is_some() && !object.flags.contains(BasicFlags::TEMPORARY))
+        .count()
+}
+
+fn check_writer(
+    path: &VfsPath,
+    bytes: &[u8],
+    prototypes: &LocalPrototypeCatalog<'_>,
+) -> Result<(), String> {
+    let text = |error: vault_formats::ParseError| error.to_string();
+    if path.extension() == Some("pro") {
+        let prototype = Prototype::parse(bytes).map_err(text)?;
+        if prototype.write() != expected_pro(bytes, &prototype) {
+            return Err("PRO writer output differs from the documented transform".into());
+        }
+        return Ok(());
+    }
+    let map = MapFile::parse(bytes, prototypes).map_err(text)?;
+    let first = map.write().map_err(text)?;
+    let reread = MapFile::parse(&first, prototypes).map_err(text)?;
+    if reread.write().map_err(text)? != first {
+        return Err("MAP writer is not a parse/write fixpoint".into());
+    }
+    let scripts = |map: &MapFile| -> usize {
+        map.scripts
+            .iter()
+            .flat_map(|category| category.active())
+            .filter(|script| script.flags.0 & 8 == 0)
+            .count()
+    };
+    if saved_objects(&map) != reread.objects.total || scripts(&map) != scripts(&reread) {
+        return Err("MAP writer lost saved objects or retained scripts".into());
+    }
+    Ok(())
 }
 
 fn audit(args: Args) -> Result<(), Box<dyn Error>> {
@@ -85,6 +158,39 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
         );
         if failures != 0 {
             return Err(format!("{failures} asset(s) failed validation").into());
+        }
+    }
+    if args.validate_writers {
+        let mut counts = [[0_u64; 2]; 2];
+        for path in vfs.files() {
+            let source = match path.extension() {
+                Some("pro") => 0,
+                Some("map") => 1,
+                _ => continue,
+            };
+            let result = vfs
+                .read_bounded(path.as_str(), MAX_ASSET_BYTES)
+                .map_err(|error| error.to_string())
+                .and_then(|bytes| check_writer(path, &bytes, &prototypes));
+            match result {
+                Ok(()) => counts[source][0] += 1,
+                Err(error) => {
+                    counts[source][1] += 1;
+                    eprintln!("FAIL {path}: {error}");
+                }
+            }
+        }
+        println!("writer\tpassed\tfailed");
+        for (source, [passed, failed]) in ["pro", "map"].iter().zip(counts) {
+            println!(".{source}\t{passed}\t{failed}");
+        }
+        let failures = counts[0][1] + counts[1][1];
+        println!(
+            "Writers: {} passed, {failures} failed",
+            counts[0][0] + counts[1][0]
+        );
+        if failures != 0 {
+            return Err(format!("{failures} writer round trip(s) failed").into());
         }
     }
     Ok(())

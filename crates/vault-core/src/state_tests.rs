@@ -777,3 +777,42 @@ fn spec002_setfont_selects_only_loaded_font_numbers() {
         |effect| matches!(effect, WorldEffect::Diagnostic(text) if text.contains("font 104"))
     ));
 }
+
+#[test]
+fn spec003_saved_maps_retain_embedded_mvars_and_report_out_of_range_access() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture::write_corpus(dir.path());
+    let load = |flags: i32| {
+        let mut map = fixture::interactive_map();
+        fixture::world::word(&mut map, 0x24, 1);
+        fixture::world::word(&mut map, 0x28, flags);
+        std::fs::write(dir.path().join("maps/synthetic.map"), map).unwrap();
+        let assets = VfsWorldAssets::new(
+            Arc::new(vault_formats::LocalDirProvider::mount(dir.path()).unwrap()),
+            "english",
+        )
+        .unwrap();
+        let mut host = WorldHost::new(
+            WorldState::new(CharacterSheet::default(), 1).unwrap(),
+            assets,
+        );
+        host.load_campaign().unwrap();
+        host.load_map("maps/synthetic.map").unwrap();
+        host
+    };
+    // Unsaved: the map-specific .GAM replaces the binary MVAR array.
+    assert_eq!(load(0).world.mvars, [4, -1]);
+    // Saved-state bit 0: the embedded values are retained, even for a .MAP name.
+    let mut host = load(1);
+    assert_eq!(host.world.mvars, [7, -2]);
+    // Out-of-range MVAR reads give zero with a diagnostic (SPEC-003/SPEC-005).
+    host.world.effects.clear();
+    let base = Vm::new(host.programs.values().next().unwrap().program.clone());
+    let mut vm = Vm::fragment(base.program.clone(), &0x80c3_u16.to_be_bytes()).unwrap();
+    vm.value_stack.push(Value::integer(5)).unwrap();
+    vm.run(&mut host, 10).unwrap();
+    assert_eq!(vm.value_stack.pop().unwrap(), Value::integer(0));
+    assert!(host.world.effects.iter().any(
+        |effect| matches!(effect, WorldEffect::Diagnostic(text) if text.contains("MVAR read"))
+    ));
+}

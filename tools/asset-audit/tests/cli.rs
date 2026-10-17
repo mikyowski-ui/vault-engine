@@ -73,7 +73,7 @@ fn validates_maps_with_prototype_lists_and_int_images() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 40 passed, 0 failed"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 41 passed, 0 failed"));
     std::fs::write(
         temp.path().join("proto/items/synthetic.pro"),
         &world::container()[..64],
@@ -88,7 +88,7 @@ fn validates_maps_with_prototype_lists_and_int_images() {
     assert!(errors.contains("FAIL maps/synthetic.map: MAP"));
     assert!(errors.contains("FAIL proto/items/synthetic.pro: PRO"));
     assert!(errors.contains("FAIL scripts/synthetic.int: INT"));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 37 passed, 3 failed"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 38 passed, 3 failed"));
 }
 
 #[test]
@@ -161,4 +161,41 @@ fn missing_argument_and_invalid_mount_exit_unsuccessfully() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("filesystem error"));
+}
+
+#[test]
+fn round_trips_prototypes_and_maps_through_the_spec003_writers() {
+    let temp = tempfile::tempdir().unwrap();
+    world::write_corpus(temp.path());
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+            .arg("--corpus-dir")
+            .arg(temp.path())
+            .arg("--validate-writers")
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(".pro\t6\t0") && text.contains(".map\t1\t0"),
+        "{text}"
+    );
+    assert!(text.contains("Writers: 7 passed, 0 failed"));
+    std::fs::write(
+        temp.path().join("proto/walls/synthetic.pro"),
+        &world::prototype(3, 0)[..20],
+    )
+    .unwrap();
+    let output = run();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("FAIL proto/walls/synthetic.pro: PRO")
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Writers: 6 passed, 1 failed"));
 }

@@ -58,11 +58,11 @@ impl MapSprites {
         let mut needed = BTreeSet::new();
         for tiles in map.tiles.iter().flatten() {
             for tile in tiles {
-                for (index, hidden) in [
+                for (index, skip) in [
                     (tile.floor(), tile.floor_hidden()),
-                    (tile.roof(), tile.roof_hidden()),
+                    (tile.roof(), tile.roof_hidden() || tile.roof() == 1),
                 ] {
-                    if index != 1 && !hidden {
+                    if !skip {
                         needed.insert((Category::Tile, u32::from(index), 0_u8));
                     }
                 }

@@ -97,8 +97,9 @@ pub fn render_map(
         let tile = map
             .tile(view.elevation as usize, *index as usize)
             .expect("validated map grid");
-        if tile.floor() != 1
-            && !tile.floor_hidden()
+        // SPEC-003 §2.8 exempts only roof index 1 from drawing; floor index 1
+        // (the ordinary blank tile) draws its art like any other floor.
+        if !tile.floor_hidden()
             && let Some((frame, _)) = art.frame(Category::Tile, u32::from(tile.floor()), 0, 0)
         {
             image.blit(frame, *corner);
@@ -266,20 +267,22 @@ mod tests {
     use vault_formats::{FrmArchive, Prototype};
     struct Art {
         tile: FrmArchive,
+        /// Tile index 1, the ordinary blank tile.
+        blank: FrmArchive,
         object: FrmArchive,
     }
     impl MapArt for Art {
         fn frame(
             &self,
             category: Category,
-            _id: u32,
+            id: u32,
             direction: u8,
             frame: usize,
         ) -> Option<(&FrmFrame, [i16; 2])> {
-            let archive = if category == Category::Tile {
-                &self.tile
-            } else {
-                &self.object
+            let archive = match (category, id) {
+                (Category::Tile, 1) => &self.blank,
+                (Category::Tile, _) => &self.tile,
+                _ => &self.object,
             };
             Some((archive.frame(direction as usize, frame)?, [0, 0]))
         }
@@ -295,8 +298,10 @@ mod tests {
             .info())
         })
         .unwrap();
+        // As in shipped data, the blank tile's pixels are all transparent index 0.
         let art = Art {
             tile: FrmArchive::parse(&fixture::frm(80, 36, 7)).unwrap(),
+            blank: FrmArchive::parse(&fixture::frm(80, 36, 0)).unwrap(),
             object: FrmArchive::parse(&fixture::frm(2, 2, 20)).unwrap(),
         };
         let mut view = MapView::new(&map, 640, 380).unwrap();
@@ -313,5 +318,14 @@ mod tests {
         view.elevation = 1;
         let image = render_map(&map, view, &art).unwrap();
         assert!(!image.pixels().contains(&20)); // No elevation-0 objects leak into other layers.
+        // Floor index 1 is drawn like any other floor art (only roof index 1 is
+        // exempt), so an opaque blank-tile image is visible under the view.
+        let opaque = Art {
+            blank: FrmArchive::parse(&fixture::frm(80, 36, 9)).unwrap(),
+            ..art
+        };
+        let mut view = MapView::new(&map, 640, 380).unwrap();
+        view.roofs = false;
+        assert_eq!(pixel(&render_map(&map, view, &opaque).unwrap(), 256, 84), 9);
     }
 }
