@@ -751,3 +751,30 @@ fn spec005_export_ownership_reset_capacity_and_cleanup() {
     assert!(host.export_variable(2, b"overflow").is_err());
     host.export_variable(2, b"name").unwrap(); // Reset still works when the registry is full.
 }
+
+#[test]
+fn spec005_long_export_names_use_the_retained_31_byte_key() {
+    let mut host = BasicHost::default();
+    host.register_program(1, b"owner.int");
+    let long = b"a_rather_long_exported_variable_name";
+    assert!(long.len() > 31);
+    host.export_variable(1, long).unwrap();
+    // Fetching/storing with the same long name reaches the stored entry.
+    assert!(host.fetch_variable(long).is_ok());
+    host.store_variable(long, ExternalValue::Value(Value::integer(9)))
+        .unwrap();
+    assert_eq!(
+        host.fetch_variable(b"A_RATHER_LONG_EXPORTED_VARIABLE_NAME")
+            .unwrap(),
+        ExternalValue::Value(Value::integer(9))
+    );
+    // Names sharing the retained prefix collide, the documented hazard.
+    assert!(
+        host.fetch_variable(b"a_rather_long_exported_variable_other")
+            .is_ok()
+    );
+    assert!(
+        host.fetch_variable(b"a_rather_long_exported_variabl")
+            .is_err()
+    );
+}

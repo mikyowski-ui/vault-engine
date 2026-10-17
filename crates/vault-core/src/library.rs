@@ -17,6 +17,8 @@ pub struct Widget {
     pub callbacks: [u32; 4],
     pub right: [u32; 2],
     pub program: u32,
+    /// Button graphics: pressed, normal, hover; `None` is a null image.
+    pub images: [Option<Vec<u8>>; 3],
 }
 #[derive(Debug, Clone)]
 pub struct ManagedWindow {
@@ -86,6 +88,10 @@ pub struct LibraryState {
     pub current_reply: i32,
     pub palette_cycling: bool,
     pub music_paused: bool,
+    /// Palette/color tables installed by `loadpalettetable`, with a counter
+    /// that presentation layers compare to notice replacements.
+    pub palette: Option<std::sync::Arc<vault_formats::Palette>>,
+    pub palette_generation: u32,
 }
 impl Default for LibraryState {
     fn default() -> Self {
@@ -127,6 +133,8 @@ impl Default for LibraryState {
             saved_reply: 0,
             current_reply: 0,
             palette_cycling: true,
+            palette: None,
+            palette_generation: 0,
             music_paused: false,
         }
     }
@@ -187,6 +195,14 @@ impl LibraryState {
         }
         // The reference does not clear the global any-key binding here.
     }
+    /// A dispatched persistent handler finished; it can accept hits again.
+    pub fn release_named(&mut self, program: u32, procedure: u32) {
+        for entry in self.named.iter_mut().flatten() {
+            if entry.program == program && entry.procedure == procedure {
+                entry.busy = false;
+            }
+        }
+    }
     pub fn callbacks(&mut self) -> Vec<(u32, u32)> {
         let mut callbacks = Vec::new();
         for binding in &mut self.named {
@@ -196,7 +212,11 @@ impl LibraryState {
             {
                 entry.hits -= 1;
                 callbacks.push((entry.program, entry.procedure));
-                if !entry.persistent {
+                if entry.persistent {
+                    // Busy until the dispatched hit has executed: signals in
+                    // the meantime are not queued for this binding.
+                    entry.busy = true;
+                } else {
                     *binding = None;
                 }
             }
@@ -392,10 +412,14 @@ impl<A: WorldAssets> WorldHost<A> {
                 if base_tag(value) == Value::INTEGER && value.payload != u32::MAX {
                     return Err(VmError::Type(value.tag));
                 }
+                // Accepted non-S operands resolve to null text: no default path.
                 let name = text(vm, call, 0)?;
-                if !self.assets.available(&name) {
-                    return Err(error("palette resource missing"));
-                }
+                let palette = self
+                    .assets
+                    .palette(&name)
+                    .map_err(|failure| error(&format!("palette load failed: {failure}")))?;
+                self.library.palette = Some(std::sync::Arc::new(palette));
+                self.library.palette_generation = self.library.palette_generation.wrapping_add(1);
             }
             0x806f | 0x8070 => {
                 self.library.faded_out = word == 0x8070;
@@ -479,6 +503,7 @@ impl<A: WorldAssets> WorldHost<A> {
                         callbacks: [0; 4],
                         right: [0; 2],
                         program: vm.id,
+                        images: Default::default(),
                     },
                 );
                 self.world.emit(WorldEffect::Gui {
@@ -571,12 +596,14 @@ impl<A: WorldAssets> WorldHost<A> {
                         callbacks: [0; 4],
                         right: [0; 2],
                         program: vm.id,
+                        images: Default::default(),
                     },
                 );
             }
             0x8087..=0x808a => {
                 let last = call.args.len() - 1;
                 let name = key(call.text(last).unwrap_or(b""));
+                let mut images: [Option<Vec<u8>>; 3] = Default::default();
                 if word == 0x8089 {
                     if !call.args[..3].iter().any(|a| {
                         base_tag(a.value) == Value::STATIC_STRING
@@ -584,8 +611,10 @@ impl<A: WorldAssets> WorldHost<A> {
                     }) {
                         return Err(error("no valid button image operand"));
                     }
-                    for argument in &call.args[..3] {
-                        vm.host_string(argument.value)?;
+                    // Pop order is hover, normal, pressed; once one operand
+                    // passes, all three are resolved (non-strings become null).
+                    for (slot, index) in [(2, 0), (1, 1), (0, 2)] {
+                        images[slot] = vm.host_string(call.args[index].value)?.map(<[u8]>::to_vec);
                     }
                 }
                 let button = self
@@ -598,6 +627,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 match word {
                     0x8087 => button.text = call.text(0).unwrap_or(b"").to_vec(),
                     0x8088 => button.flags = call.int(0),
+                    0x8089 => button.images = images,
                     0x808a => {
                         button.callbacks = [call.uint(3), call.uint(2), call.uint(1), call.uint(0)]
                     }

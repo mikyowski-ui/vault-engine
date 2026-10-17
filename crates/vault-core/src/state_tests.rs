@@ -359,6 +359,13 @@ impl WorldAssets for Assets {
             IntProgram::parse(&vm_fixture::program()).unwrap(),
         ))
     }
+    fn palette(&self, name: &[u8]) -> Result<vault_formats::Palette, WorldError> {
+        if name == b"Hello" {
+            Ok(vault_formats::Palette::parse(&crate::fixture_assets::palette()).unwrap())
+        } else {
+            Err(WorldError::Invalid("missing palette".into()))
+        }
+    }
     fn font_number(&self, number: i32) -> Option<Arc<vault_formats::Font>> {
         (number == 101).then(|| {
             Arc::new(vault_formats::Font::parse_aaf(&crate::fixture_assets::aaf()).unwrap())
@@ -934,4 +941,152 @@ fn spec004_host_tick_fires_scheduled_procedures_and_launches_programs() {
     assert!(old.status.contains(VmStatus::ENDED));
     assert_eq!(host.programs[&replacement].parent, Some(500));
     assert_eq!(host.programs[&500].child, Some(replacement));
+}
+
+#[test]
+fn spec005_library_resources_named_events_and_request_corrections() {
+    use fixture::{instruction, literal, push};
+    let (mut host, base, _) = host(&[b"Hello", b"Continue"]);
+    // 0x8089: one valid image operand admits all three; all are resolved and
+    // retained (pressed, normal, hover), with canonical I zero as a null image.
+    let code = [
+        literal(6),
+        push(0),
+        push(0),
+        push(100),
+        push(50),
+        instruction(0x8062),
+        literal(6),
+        instruction(0x8064),
+        literal(6),
+        push(1),
+        push(2),
+        push(30),
+        push(10),
+        instruction(0x8086),
+        literal(6),
+        literal(14),
+        push(0),
+        literal(14),
+        instruction(0x8089),
+    ]
+    .concat();
+    run_fragment(&mut host, &base, &code).unwrap();
+    let button = host
+        .library
+        .windows
+        .values()
+        .next()
+        .unwrap()
+        .buttons
+        .values()
+        .next()
+        .unwrap();
+    assert_eq!(
+        button.images,
+        [Some(b"Continue".to_vec()), None, Some(b"Continue".to_vec())]
+    );
+    // 0x806E loads and installs the palette tables; a failed load is a VM error.
+    run_fragment(
+        &mut host,
+        &base,
+        &[literal(6), instruction(0x806e)].concat(),
+    )
+    .unwrap();
+    assert!(host.library.palette.is_some());
+    assert_eq!(host.library.palette_generation, 1);
+    assert!(
+        run_fragment(
+            &mut host,
+            &base,
+            &[literal(14), instruction(0x806e)].concat()
+        )
+        .is_err()
+    );
+    assert_eq!(host.library.palette_generation, 1);
+
+    // 0x810C selector 1000 sets orientation only for control below 6.
+    let me = host.world.player as i32;
+    for (control, expected) in [(3, 3), (6, 3), (9, 3), (0, 0)] {
+        let code = [push(me), push(1000), push(control), instruction(0x810c)].concat();
+        run_fragment(&mut host, &base, &code).unwrap();
+        assert_eq!(
+            host.world.get(host.world.player).unwrap().raw.orientation,
+            expected
+        );
+    }
+
+    // 0x80D0 requires a nonfleeing target; attack_setup has no such test.
+    let defender = host
+        .world
+        .spawn(host.assets.prototype.clone(), 20102, 1)
+        .unwrap();
+    let set_fleeing = |host: &mut WorldHost<Assets>, fleeing: bool| {
+        if let Some(vault_formats::map::ObjectState::Critter(state)) = host
+            .world
+            .get_mut(defender)
+            .map(|object| &mut object.raw.state)
+        {
+            state.maneuvers = if fleeing { 4 } else { 0 };
+        }
+    };
+    let attack = [
+        push(defender as i32),
+        push(0),
+        push(0),
+        push(50),
+        push(1),
+        push(10),
+        push(0),
+        push(1),
+        instruction(0x80d0),
+    ]
+    .concat();
+    let requests = |host: &WorldHost<Assets>| {
+        host.world
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, WorldEffect::Combat { .. }))
+            .count()
+    };
+    set_fleeing(&mut host, true);
+    run_fragment(&mut host, &base, &attack).unwrap();
+    assert_eq!(requests(&host), 0);
+    let setup = [push(me), push(defender as i32), instruction(0x8143)].concat();
+    run_fragment(&mut host, &base, &setup).unwrap();
+    assert_eq!(requests(&host), 1);
+    set_fleeing(&mut host, false);
+    run_fragment(&mut host, &base, &attack).unwrap();
+    assert_eq!(requests(&host), 2);
+}
+
+#[test]
+fn spec005_named_handlers_are_busy_until_their_hit_runs() {
+    let mut library = crate::library::LibraryState::default();
+    library.named[0] = Some(crate::library::NamedBinding {
+        name: b"tick".to_vec(),
+        program: 7,
+        procedure: 2,
+        persistent: true,
+        hits: 2,
+        busy: false,
+    });
+    // At most one hit per binding per pass; the handler is then busy.
+    assert_eq!(library.callbacks(), [(7, 2)]);
+    assert!(library.named[0].as_ref().unwrap().busy);
+    assert!(library.callbacks().is_empty());
+    library.release_named(7, 2);
+    assert_eq!(library.callbacks(), [(7, 2)]);
+    // One-shot events are freed after dispatch.
+    library.named[1] = Some(crate::library::NamedBinding {
+        name: b"once".to_vec(),
+        program: 7,
+        procedure: 3,
+        persistent: false,
+        hits: 1,
+        busy: false,
+    });
+    library.release_named(7, 2);
+    assert_eq!(library.callbacks(), [(7, 3)]);
+    assert!(library.named[1].is_none());
 }

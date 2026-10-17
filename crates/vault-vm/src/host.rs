@@ -120,15 +120,17 @@ impl VmHost for BasicHost {
             .insert(key, (owner, ExternalValue::Value(Value::integer(0))));
         Ok(())
     }
+    // Lookups use the same 31-byte retained key as registration, so a long
+    // exported name remains reachable (with the documented collision hazard).
     fn fetch_variable(&mut self, name: &[u8]) -> Result<ExternalValue, VmError> {
         self.variables
-            .get(&key(name))
+            .get(&registration(name))
             .map(|(_, value)| value.clone())
             .ok_or_else(|| symbol(name))
     }
     fn store_variable(&mut self, name: &[u8], value: ExternalValue) -> Result<(), VmError> {
         self.variables
-            .get_mut(&key(name))
+            .get_mut(&registration(name))
             .ok_or_else(|| symbol(name))?
             .1 = value;
         Ok(())
@@ -154,7 +156,7 @@ impl VmHost for BasicHost {
     }
     fn import_procedure(&mut self, name: &[u8]) -> Result<ExportedProcedure, VmError> {
         self.procedures
-            .get(&key(name))
+            .get(&registration(name))
             .cloned()
             .ok_or_else(|| symbol(name))
     }

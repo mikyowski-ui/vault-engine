@@ -42,6 +42,10 @@ pub trait WorldAssets {
     fn font(&self) -> Result<Arc<Font>, WorldError> {
         Err(WorldError::Invalid("font resource unavailable".into()))
     }
+    /// A palette/color-table resource requested by `loadpalettetable`.
+    fn palette(&self, _name: &[u8]) -> Result<vault_formats::Palette, WorldError> {
+        Err(WorldError::Invalid("palette resource unavailable".into()))
+    }
     /// A loaded font by SPEC-002 selection number (FON 0-9, AAF 100-110).
     fn font_number(&self, _number: i32) -> Option<Arc<Font>> {
         None
@@ -344,6 +348,11 @@ impl WorldAssets for VfsWorldAssets {
     }
     fn font_number(&self, number: i32) -> Option<Arc<Font>> {
         self.font_set().get(number).cloned()
+    }
+    fn palette(&self, name: &[u8]) -> Result<vault_formats::Palette, WorldError> {
+        let name = std::str::from_utf8(name)
+            .map_err(|_| WorldError::Invalid("palette filename is not ASCII".into()))?;
+        Ok(vault_formats::Palette::parse(&self.read(name)?)?)
     }
     fn gam(&self, path: &str, section: GamSection) -> Result<Option<GamFile>, WorldError> {
         match self.vfs.read_bounded(path, MAX_ASSET_BYTES) {

@@ -70,10 +70,22 @@ impl AssetPreview {
             Self::Map(preview) => preview.image(),
         }
     }
+    /// The active palette: a script-installed table replaces the map's.
     pub fn palette(&self) -> &Palette {
         match self {
             Self::Sprite(preview) => &preview.palette,
-            Self::Map(preview) => &preview.palette,
+            Self::Map(preview) => preview
+                .host
+                .library
+                .palette
+                .as_deref()
+                .unwrap_or(&preview.palette),
+        }
+    }
+    pub fn palette_generation(&self) -> u32 {
+        match self {
+            Self::Sprite(_) => 0,
+            Self::Map(preview) => preview.host.library.palette_generation,
         }
     }
     /// Whether the previewed world currently permits palette cycling.

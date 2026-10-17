@@ -145,6 +145,9 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn font_number(&self, number: i32) -> Option<std::sync::Arc<vault_formats::Font>> {
         (**self).font_number(number)
     }
+    fn palette(&self, name: &[u8]) -> Result<vault_formats::Palette, WorldError> {
+        (**self).palette(name)
+    }
 }
 impl<A: WorldAssets> WorldHost<A> {
     pub fn new(world: WorldState, assets: A) -> Self {
@@ -702,6 +705,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 break;
             }
             self.callback(program, procedure)?;
+            self.library.release_named(program, procedure);
             changed = true;
         }
         Ok(changed)

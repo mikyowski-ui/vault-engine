@@ -639,10 +639,13 @@ impl<A: WorldAssets> WorldHost<A> {
                         (call.int(0) == call.int(1)).then_some([call.int(1), call.int(0)]),
                     )
                 };
+                // The eight-operand words also require a nonfleeing target.
+                let fleeing = |object: &crate::world::WorldObject| matches!(&object.raw.state, ObjectState::Critter(state) if state.maneuvers & 4 != 0);
                 if attacker != 0
                     && defender != 0
                     && self.object(attacker)?.alive()
                     && self.object(defender)?.alive()
+                    && (op == 0x8143 || !fleeing(self.object(defender)?))
                 {
                     if self.world.combat {
                         let attacker = self.world.get_mut(attacker).expect("attacker");
@@ -1313,11 +1316,13 @@ impl<A: WorldAssets> WorldHost<A> {
                         .get_mut(call.uint(2))
                         .ok_or_else(|| VmError::Host("invalid animation object".into()))?;
                     match call.int(1) {
+                        // Selector 1000 sets orientation only for control below 6;
+                        // larger controls are a no-op. Negative controls are not
+                        // safely bounded by the reference, so they are ignored.
                         1000 => {
-                            if !(0..6).contains(&call.int(0)) {
-                                return Err(VmError::Host("invalid orientation".into()));
+                            if (0..6).contains(&call.int(0)) {
+                                object.raw.orientation = call.int(0) as u8;
                             }
-                            object.raw.orientation = call.int(0) as u8;
                         }
                         1010 => {
                             object.raw.frame =

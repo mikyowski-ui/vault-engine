@@ -48,12 +48,14 @@ struct Args {
 struct DisplayPalette {
     entries: [[u8; 4]; 256],
     cycler: PaletteCycler,
+    generation: u32,
 }
 impl DisplayPalette {
     fn new(palette: &Palette) -> Self {
         Self {
             entries: palette.rgba8(),
             cycler: PaletteCycler::default(),
+            generation: 0,
         }
     }
 }
@@ -217,8 +219,15 @@ impl ApplicationHandler for Shell {
         // Each loop pass is one enabled cycling poll; the world can disable it
         // (for example during dialogue) and later restore it.
         let cycled = self.display.as_mut().is_some_and(|display| {
+            // A script-loaded palette replaces the display entries; cycling
+            // phases and timers carry on from their current state.
+            let replaced = display.generation != preview.palette_generation();
+            if replaced {
+                display.generation = preview.palette_generation();
+                display.entries = preview.palette().rgba8();
+            }
             display.cycler.enabled = preview.palette_cycling();
-            display.cycler.poll(now, &mut display.entries)
+            display.cycler.poll(now, &mut display.entries) || replaced
         });
         if changed {
             if let Some(window) = self.window.clone() {
