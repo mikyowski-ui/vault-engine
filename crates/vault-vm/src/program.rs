@@ -105,7 +105,10 @@ pub(crate) fn instruction_length(word: u16) -> usize {
 }
 pub(crate) fn valid_word(word: u16) -> bool {
     if word & 0x3ff == 1 {
-        matches!(word, 0x8001 | 0xc001 | 0xa001 | 0x9001 | 0x9801)
+        matches!(
+            word,
+            0x8001 | 0xc001 | 0xc801 | 0xa001 | 0xa801 | 0x9001 | 0x9801
+        )
     } else {
         (0x8000..=0x8155).contains(&word)
     }
@@ -180,7 +183,9 @@ impl IntProgram {
                 let Some(address) = address else {
                     continue;
                 };
-                if !boundaries.get(address as usize).copied().unwrap_or(false) {
+                if address as usize != bytes.len()
+                    && !boundaries.get(address as usize).copied().unwrap_or(false)
+                {
                     return Err(IntError::new(
                         46 + 24 * index + field,
                         format!(

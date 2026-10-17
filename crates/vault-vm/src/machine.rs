@@ -120,6 +120,25 @@ impl Vm {
             _ => Err(VmError::Type(value.tag)),
         }
     }
+    /// Host string resolution inspects raw qualifier bits independently of ABI
+    /// type checks. A qualified integer can therefore address the dynamic heap.
+    pub fn host_string(&self, value: Value) -> Result<Option<&[u8]>, VmError> {
+        if value.tag & 0x0800 != 0 {
+            Ok(Some(
+                self.strings
+                    .get(&value.payload)
+                    .ok_or(VmError::StringReference(value.payload))?,
+            ))
+        } else if value.tag & 0x1000 != 0 {
+            Ok(Some(
+                self.program
+                    .literal(value.payload)
+                    .ok_or(VmError::StringReference(value.payload))?,
+            ))
+        } else {
+            Ok(None)
+        }
+    }
     pub fn intern(&mut self, text: &[u8]) -> Result<Value, VmError> {
         let text = &text[..text
             .iter()
@@ -326,7 +345,7 @@ impl Vm {
                         old.condition,
                     );
                 } else {
-                    if !self.address_valid(value) {
+                    if value as usize != self.code().len() && !self.address_valid(value) {
                         return Err(VmError::Address(value));
                     }
                     self.program.schedule(
@@ -416,9 +435,6 @@ impl Vm {
             0x8017 => {
                 let index = self.index(false)?;
                 let arguments = self.value_stack.pop()?.payload;
-                if arguments > 341 {
-                    return Err(VmError::Arguments);
-                }
                 let procedure = &self.program.procedures[index];
                 host.export_procedure(
                     &procedure.name,

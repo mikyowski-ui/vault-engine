@@ -1,0 +1,4 @@
+MAP_GLOBAL_VARS:
+first = 4;
+second = -1;
+// not_an_entry = 99;

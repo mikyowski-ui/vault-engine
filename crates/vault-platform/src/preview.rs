@@ -1,5 +1,5 @@
 use crate::AppResult;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use vault_formats::{
     Font, FrmArchive, LocalDirProvider, MAX_ASSET_BYTES, MsgCatalog, Palette, ParseError, Vfs,
     VfsPath,
@@ -29,6 +29,15 @@ pub struct PreviewArgs {
         value_name = "VFS_PATH"
     )]
     pub preview_map: Option<String>,
+    /// Player sheet for interactive map preview (otherwise a neutral default character).
+    #[arg(long, requires = "preview_map", value_name = "VFS_PATH")]
+    pub player_gcd: Option<String>,
+    /// Dialogue resource language directory; defaults to english.
+    #[arg(long, requires = "preview_map")]
+    pub language: Option<String>,
+    /// Deterministic game RNG seed; defaults to 1.
+    #[arg(long, requires = "preview_map")]
+    pub seed: Option<i32>,
     /// Font path (default: font0.aaf, font0.fon, then another root font).
     #[arg(long, requires = "preview_frm", value_name = "VFS_PATH")]
     pub font: Option<String>,
@@ -55,7 +64,7 @@ pub enum AssetPreview {
     Map(Box<crate::map_preview::MapPreview>),
 }
 impl AssetPreview {
-    pub fn image(&self) -> AppResult<IndexedImage> {
+    pub fn image(&mut self) -> AppResult<IndexedImage> {
         match self {
             Self::Sprite(preview) => Ok(preview.image()?),
             Self::Map(preview) => preview.image(),
@@ -85,6 +94,24 @@ impl AssetPreview {
             Self::Map(preview) => preview.hover(point),
         }
     }
+    pub fn click(&mut self, point: [i32; 2], right: bool) -> bool {
+        match self {
+            Self::Sprite(_) => false,
+            Self::Map(preview) => preview.click(point, right),
+        }
+    }
+    pub fn scroll(&mut self, delta: f64) -> bool {
+        match self {
+            Self::Sprite(_) => false,
+            Self::Map(preview) => preview.scroll(delta),
+        }
+    }
+    pub fn tick(&mut self, now: u64) -> AppResult<bool> {
+        match self {
+            Self::Sprite(_) => Ok(false),
+            Self::Map(preview) => preview.tick(now),
+        }
+    }
 }
 
 fn parse_asset<T>(
@@ -105,7 +132,13 @@ impl PreviewArgs {
                     .ok_or("--preview-map requires --corpus-dir")?,
             )?;
             return Ok(Some(AssetPreview::Map(Box::new(
-                crate::map_preview::MapPreview::load(&vfs, path)?,
+                crate::map_preview::MapPreview::load(
+                    Arc::new(vfs),
+                    path,
+                    self.language.as_deref().unwrap_or("english"),
+                    self.player_gcd.as_deref(),
+                    self.seed.unwrap_or(1),
+                )?,
             ))));
         }
         Ok(self

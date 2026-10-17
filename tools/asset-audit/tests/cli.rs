@@ -11,6 +11,48 @@ mod vm;
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/world/support.rs"]
 mod world;
+pub(crate) use world as fixture_world;
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/state/support.rs"]
+mod state;
+
+#[test]
+fn validates_gam_and_gcd_and_rejects_undefined_initializers() {
+    let temp = tempfile::tempdir().unwrap();
+    state::write_corpus(temp.path());
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+            .arg("--corpus-dir")
+            .arg(temp.path())
+            .arg("--validate-formats")
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains(".gam\t2\t0"));
+    assert!(text.contains(".gcd\t1\t0"));
+    std::fs::write(
+        temp.path().join("data/vault13.gam"),
+        b"GAME_GLOBAL_VARS:\nbad=;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("premade/synthetic.gcd"),
+        &state::gcd()[..427],
+    )
+    .unwrap();
+    let output = run();
+    assert!(!output.status.success());
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(errors.contains("FAIL data/vault13.gam: GAM"));
+    assert!(errors.contains("FAIL premade/synthetic.gcd: GCD"));
+}
 
 #[test]
 fn validates_maps_with_prototype_lists_and_int_images() {

@@ -1,0 +1,383 @@
+use crate::{WorldError, dialogue::HeadDefinition};
+use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
+use vault_formats::{
+    Font, FrmArchive, GamFile, GamSection, GcdFile, LocalDirProvider, LocalPrototypeCatalog,
+    LstKind, LstTable, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype, Vfs, pro::Category,
+};
+use vault_vm::IntProgram;
+
+/// Resource policy is explicit. Numeric perk IDs/XP curves and other tables not
+/// specified by SPEC-005/006 belong to WorldRules, not inferred bytecode constants.
+pub trait WorldAssets {
+    fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError>;
+    fn program(&self, index: i32) -> Result<(String, IntProgram), WorldError>;
+    fn local_count(&self, _index: i32) -> usize {
+        0
+    }
+    fn message(&self, list: i32, id: i32) -> Option<vault_formats::msg::Message>;
+    fn prototype_text(&self, _prototype: &Prototype, _description: bool) -> Option<Vec<u8>> {
+        None
+    }
+    fn head(&self, _index: i32) -> Result<HeadDefinition, WorldError> {
+        Err(WorldError::Invalid("head resource unavailable".into()))
+    }
+    fn frame(&self, _path: &str) -> Result<Arc<FrmArchive>, WorldError> {
+        Err(WorldError::Invalid("frame resource unavailable".into()))
+    }
+    fn background_path(&self, _index: i32) -> Result<String, WorldError> {
+        Err(WorldError::Invalid(
+            "background resource unavailable".into(),
+        ))
+    }
+    fn interface_path(&self, _index: i32) -> Result<String, WorldError> {
+        Err(WorldError::Invalid("interface resource unavailable".into()))
+    }
+    fn font(&self) -> Result<Arc<Font>, WorldError> {
+        Err(WorldError::Invalid("font resource unavailable".into()))
+    }
+    fn gam(&self, _path: &str, _section: GamSection) -> Result<Option<GamFile>, WorldError> {
+        Ok(None)
+    }
+    fn map(&self, _path: &str) -> Result<MapFile, WorldError> {
+        Err(WorldError::Invalid("map resource unavailable".into()))
+    }
+    fn map_index(&self, _name: &[u8]) -> Option<i32> {
+        None
+    }
+    fn available(&self, _path: &[u8]) -> bool {
+        true
+    }
+    fn files(&self, _pattern: &[u8]) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+    fn dialogue_label(&self, done: bool) -> Vec<u8> {
+        if done {
+            b"Done".to_vec()
+        } else {
+            b"Continue".to_vec()
+        }
+    }
+    fn release_dialogue_art(&self) {}
+    fn sound_name(&self, _opcode: u16, _args: &[i32]) -> Result<Vec<u8>, WorldError> {
+        Err(WorldError::Invalid(
+            "sound naming requires the host's animation/material catalog".into(),
+        ))
+    }
+    fn object_art(
+        &self,
+        _category: Category,
+        _fid: u32,
+        _orientation: u8,
+    ) -> Result<Arc<FrmArchive>, WorldError> {
+        Err(WorldError::Invalid("object art unavailable".into()))
+    }
+}
+pub struct VfsWorldAssets {
+    pub vfs: Arc<LocalDirProvider>,
+    pub language: String,
+    prototypes: RefCell<BTreeMap<u32, Arc<Prototype>>>,
+    messages: RefCell<BTreeMap<String, MsgCatalog>>,
+    programs: RefCell<BTreeMap<i32, (String, IntProgram)>>,
+    frames: RefCell<BTreeMap<String, Arc<FrmArchive>>>,
+    frame_bytes: RefCell<usize>,
+}
+impl VfsWorldAssets {
+    pub fn new(vfs: Arc<LocalDirProvider>, language: &str) -> Result<Self, WorldError> {
+        if language.is_empty()
+            || !language
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err(WorldError::Invalid(
+                "language must be a resource directory name".into(),
+            ));
+        }
+        Ok(Self {
+            vfs,
+            language: language.to_ascii_lowercase(),
+            prototypes: RefCell::new(BTreeMap::new()),
+            messages: RefCell::new(BTreeMap::new()),
+            programs: RefCell::new(BTreeMap::new()),
+            frames: RefCell::new(BTreeMap::new()),
+            frame_bytes: RefCell::new(0),
+        })
+    }
+    pub fn read(&self, path: &str) -> Result<Vec<u8>, WorldError> {
+        self.vfs
+            .read_bounded(path, MAX_ASSET_BYTES)
+            .map_err(|error| WorldError::Invalid(format!("{path}: {error}")))
+    }
+    fn list(&self, path: &str, kind: LstKind) -> Result<LstTable, WorldError> {
+        Ok(LstTable::parse(&self.read(path)?, kind)?)
+    }
+    fn art_name(&self, folder: &str, index: i32) -> Result<String, WorldError> {
+        if !(0..4096).contains(&index) {
+            return Err(WorldError::Invalid(
+                "art index outside supported range".into(),
+            ));
+        }
+        let list = self.list(&format!("art/{folder}/{folder}.lst"), LstKind::Art)?;
+        let name = list
+            .art_id(index as u32)
+            .and_then(|entry| entry.name.as_deref())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| WorldError::Invalid(format!("missing {folder} art index {index}")))?;
+        Ok(format!(
+            "art/{folder}/{}",
+            std::str::from_utf8(name)
+                .map_err(|_| WorldError::Invalid("invalid art filename".into()))?
+        ))
+    }
+    fn catalog(&self, path: &str, id: i32) -> Option<vault_formats::msg::Message> {
+        if !self.messages.borrow().contains_key(path) {
+            let catalog = MsgCatalog::parse(&self.read(path).ok()?).ok()?;
+            self.messages.borrow_mut().insert(path.into(), catalog);
+        }
+        self.messages.borrow().get(path)?.get(id).cloned()
+    }
+    pub fn gcd(&self, path: &str) -> Result<GcdFile, WorldError> {
+        Ok(GcdFile::parse(&self.read(path)?)?)
+    }
+}
+impl WorldAssets for VfsWorldAssets {
+    fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
+        if let Some(prototype) = self.prototypes.borrow().get(&pid) {
+            return Ok(prototype.clone());
+        }
+        let category = Category::from_pid(pid)?;
+        let folder = category.directory();
+        let list = self.list(&format!("proto/{folder}/{folder}.lst"), LstKind::Prototype)?;
+        let name = list
+            .prototype_id(pid)
+            .and_then(|entry| entry.name.as_deref())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| WorldError::Invalid(format!("prototype {pid:#x} has no list entry")))?;
+        let path = format!(
+            "proto/{folder}/{}",
+            std::str::from_utf8(name)
+                .map_err(|_| WorldError::Invalid("invalid prototype filename".into()))?
+        );
+        let prototype = Arc::new(Prototype::parse(&self.read(&path)?)?);
+        self.prototypes.borrow_mut().insert(pid, prototype.clone());
+        Ok(prototype)
+    }
+    fn program(&self, index: i32) -> Result<(String, IntProgram), WorldError> {
+        if let Some(program) = self.programs.borrow().get(&index) {
+            return Ok(program.clone());
+        }
+        if index < 0 {
+            return Err(WorldError::Invalid("negative script-file index".into()));
+        }
+        let list = self.list("scripts/scripts.lst", LstKind::Script)?;
+        let name = list
+            .script_id(index as u32)
+            .and_then(|entry| entry.name.as_deref())
+            .ok_or_else(|| WorldError::Invalid(format!("script index {index} missing")))?;
+        let path = format!(
+            "scripts/{}",
+            std::str::from_utf8(name)
+                .map_err(|_| WorldError::Invalid("invalid script name".into()))?
+        );
+        let program = IntProgram::parse(&self.read(&path)?)?;
+        self.programs
+            .borrow_mut()
+            .insert(index, (path.clone(), program.clone()));
+        Ok((path, program))
+    }
+    fn local_count(&self, index: i32) -> usize {
+        if index < 0 {
+            return 0;
+        }
+        self.list("scripts/scripts.lst", LstKind::Script)
+            .ok()
+            .and_then(|list| {
+                list.script_id(index as u32)
+                    .and_then(|entry| entry.local_vars)
+            })
+            .filter(|count| *count >= 0 && *count <= 1_000_000)
+            .unwrap_or(0) as usize
+    }
+    fn message(&self, list: i32, id: i32) -> Option<vault_formats::msg::Message> {
+        if list <= 0 {
+            return None;
+        }
+        let scripts = self.list("scripts/scripts.lst", LstKind::Script).ok()?;
+        let name = scripts.script_id((list - 1) as u32)?.name.as_deref()?;
+        let stem = std::str::from_utf8(name).ok()?.strip_suffix(".int")?;
+        self.catalog(&format!("text/{}/dialog/{stem}.msg", self.language), id)
+    }
+    fn prototype_text(&self, prototype: &Prototype, description: bool) -> Option<Vec<u8>> {
+        if prototype.message_base == -1 {
+            return None;
+        }
+        let stem = match prototype.category {
+            Category::Item => "item",
+            Category::Critter => "crit",
+            Category::Scenery => "scen",
+            Category::Wall => "wall",
+            Category::Tile => "tile",
+            Category::Misc => "misc",
+        };
+        self.catalog(
+            &format!("text/{}/game/pro_{stem}.msg", self.language),
+            prototype.message_base.checked_add(i32::from(description))?,
+        )
+        .map(|message| message.text)
+    }
+    fn head(&self, index: i32) -> Result<HeadDefinition, WorldError> {
+        if !(0..4096).contains(&index) {
+            return Err(WorldError::Invalid("invalid head index".into()));
+        }
+        let list = self.list("art/heads/heads.lst", LstKind::Art)?;
+        let entry = list
+            .art_id(index as u32)
+            .ok_or_else(|| WorldError::Invalid("missing head".into()))?;
+        let stem = std::str::from_utf8(entry.name.as_deref().unwrap_or(b""))
+            .map_err(|_| WorldError::Invalid("invalid head stem".into()))?;
+        let counts = entry
+            .head_counts
+            .ok_or_else(|| WorldError::Invalid("head has no fidget counts".into()))?;
+        Ok(HeadDefinition {
+            index: index as u16,
+            stem: stem.into(),
+            counts,
+        })
+    }
+    fn frame(&self, path: &str) -> Result<Arc<FrmArchive>, WorldError> {
+        if let Some(frame) = self.frames.borrow().get(path) {
+            return Ok(frame.clone());
+        }
+        let bytes = self.read(path)?;
+        let total = self
+            .frame_bytes
+            .borrow()
+            .checked_add(bytes.len())
+            .ok_or(WorldError::Arithmetic)?;
+        if total > 256 * 1024 * 1024 {
+            return Err(WorldError::Invalid(
+                "dialogue art cache limit exceeded".into(),
+            ));
+        }
+        let frame = Arc::new(FrmArchive::parse(&bytes)?);
+        self.frames.borrow_mut().insert(path.into(), frame.clone());
+        *self.frame_bytes.borrow_mut() = total;
+        Ok(frame)
+    }
+    fn object_art(
+        &self,
+        category: Category,
+        fid: u32,
+        orientation: u8,
+    ) -> Result<Arc<FrmArchive>, WorldError> {
+        let path = self
+            .art_name(category.directory(), (fid & 0xfff) as i32)?
+            .to_ascii_lowercase();
+        if path.ends_with(".frm") {
+            return self.frame(&path);
+        }
+        let extension = format!("fr{orientation}");
+        let resolved = self
+            .vfs
+            .files()
+            .find(|candidate| {
+                candidate.as_str().starts_with(&path) && candidate.extension() == Some("frm")
+            })
+            .or_else(|| {
+                self.vfs.files().find(|candidate| {
+                    candidate.as_str().starts_with(&path)
+                        && candidate.extension() == Some(extension.as_str())
+                })
+            })
+            .ok_or_else(|| WorldError::Invalid("no available art representation".into()))?
+            .to_string();
+        self.frame(&resolved)
+    }
+    fn background_path(&self, index: i32) -> Result<String, WorldError> {
+        self.art_name("backgrnd", index)
+    }
+    fn interface_path(&self, index: i32) -> Result<String, WorldError> {
+        self.art_name("intrface", index)
+    }
+    fn font(&self) -> Result<Arc<Font>, WorldError> {
+        for path in ["font0.aaf", "font0.fon"] {
+            if self.vfs.files().any(|p| p.as_str() == path) {
+                return Ok(Arc::new(if path.ends_with("aaf") {
+                    Font::parse_aaf(&self.read(path)?)?
+                } else {
+                    Font::parse_fon(&self.read(path)?)?
+                }));
+            }
+        }
+        Err(WorldError::Invalid("no dialogue font".into()))
+    }
+    fn gam(&self, path: &str, section: GamSection) -> Result<Option<GamFile>, WorldError> {
+        match self.vfs.read_bounded(path, MAX_ASSET_BYTES) {
+            Ok(bytes) => Ok(Some(GamFile::parse(&bytes, section)?)),
+            Err(vault_formats::VfsError::NotFound(_)) => Ok(None),
+            Err(error) => Err(WorldError::Invalid(error.to_string())),
+        }
+    }
+    fn map(&self, path: &str) -> Result<MapFile, WorldError> {
+        let saved = path.strip_suffix(".map").map(|stem| format!("{stem}.sav"));
+        if let Some(saved) = saved
+            && let Ok(bytes) = self.read(&saved)
+            && let Ok(map) = MapFile::parse(&bytes, &LocalPrototypeCatalog::new(&self.vfs))
+        {
+            return Ok(map);
+        }
+        Ok(MapFile::parse(
+            &self.read(path)?,
+            &LocalPrototypeCatalog::new(&self.vfs),
+        )?)
+    }
+    fn map_index(&self, name: &[u8]) -> Option<i32> {
+        let text = std::str::from_utf8(name).ok()?.to_ascii_lowercase();
+        for path in self
+            .vfs
+            .files()
+            .filter(|path| path.extension() == Some("map"))
+        {
+            let file = path.as_str().rsplit('/').next()?;
+            if file == text || file.strip_suffix(".map") == Some(text.as_str()) {
+                let bytes = self.read(path.as_str()).ok()?;
+                return Some(i32::from_be_bytes(bytes.get(0x34..0x38)?.try_into().ok()?));
+            }
+        }
+        None
+    }
+    fn available(&self, path: &[u8]) -> bool {
+        std::str::from_utf8(path).ok().is_some_and(|path| {
+            self.vfs
+                .files()
+                .any(|candidate| candidate.as_str().eq_ignore_ascii_case(path))
+        })
+    }
+    fn files(&self, pattern: &[u8]) -> Vec<Vec<u8>> {
+        let Ok(pattern) = std::str::from_utf8(pattern) else {
+            return Vec::new();
+        };
+        let (prefix, suffix) = pattern.split_once('*').unwrap_or((pattern, ""));
+        self.vfs
+            .files()
+            .filter(|path| {
+                path.as_str().starts_with(&prefix.to_ascii_lowercase())
+                    && path.as_str().ends_with(&suffix.to_ascii_lowercase())
+            })
+            .take(10000)
+            .map(|path| path.as_str().as_bytes().to_vec())
+            .collect()
+    }
+    fn release_dialogue_art(&self) {
+        self.frames.borrow_mut().retain(|path, _| {
+            !["art/heads/", "art/backgrnd/", "art/intrface/"]
+                .iter()
+                .any(|prefix| path.starts_with(prefix))
+        });
+        *self.frame_bytes.borrow_mut() = self
+            .frames
+            .borrow()
+            .values()
+            .map(|frame| frame.stored_frame_area_len() as usize + 62)
+            .sum();
+    }
+}

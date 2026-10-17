@@ -1,5 +1,6 @@
 //! Deterministic, bounded implementation of approved SPEC-004.
 mod arithmetic;
+pub mod extensions;
 mod host;
 mod machine;
 mod program;

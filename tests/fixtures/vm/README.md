@@ -16,6 +16,9 @@ stack boundaries, context-return variants, external string copying, scheduling,
 registry ownership, host program control, and undefined imported-call rejection.
 Additional tests cover typed identifier operands, deterministic mutation smoke
 tests, and arithmetic/truthiness quirks outside the minimum vectors.
+Procedure body/condition offsets exactly at EOF are now accepted as metadata
+stubs; separate mutations verify that executing them raises a VM address error
+and that offsets beyond EOF still fail parsing.
 
 The fixture is compiled game-style bytecode written specifically for these tests;
 it contains no original script, game logic, or decompiled source.

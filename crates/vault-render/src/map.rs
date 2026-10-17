@@ -173,6 +173,89 @@ pub fn render_map(
     Ok(image)
 }
 
+/// Pick the frontmost nontransparent object pixel. Roof pixels occlude picking.
+pub fn pick_object(
+    map: &MapFile,
+    view: MapView,
+    art: &impl MapArt,
+    point: [i32; 2],
+) -> Option<u32> {
+    if view.elevation > 2 {
+        return None;
+    }
+    let sample = |frame: &FrmFrame, origin: [i64; 2]| {
+        let x = i64::from(point[0]) - origin[0];
+        let y = i64::from(point[1]) - origin[1];
+        x >= 0
+            && y >= 0
+            && x < i64::from(frame.width)
+            && y < i64::from(frame.height)
+            && frame.pixels()[(y * i64::from(frame.width) + x) as usize] != 0
+    };
+    if view.roofs {
+        for square in 0..10000 {
+            let tile = map.tile(view.elevation as usize, square)?;
+            if tile.roof() != 1
+                && !tile.roof_hidden()
+                && let Some((frame, _)) = art.frame(Category::Tile, u32::from(tile.roof()), 0, 0)
+                && sample(frame, view.grid.square_corner(square as i32, true)?)
+            {
+                return None;
+            }
+        }
+    }
+    let mut selected = None;
+    for object in &map.objects.elevations[view.elevation as usize] {
+        if object.flags.contains(BasicFlags::HIDDEN) {
+            continue;
+        }
+        let category = Category::from_pid(object.pid).ok()?;
+        let Some((frame, shift)) =
+            art.frame(category, object.art_id, object.orientation, object.frame)
+        else {
+            continue;
+        };
+        let (origin, anchor) = if let Some(hex) = object.hex {
+            let center = view.grid.hex_center(hex).ok()?;
+            let anchor = [
+                center[0] + i64::from(shift[0]) + i64::from(object.displacement[0]),
+                center[1] + i64::from(shift[1]) + i64::from(object.displacement[1]),
+            ];
+            (
+                [
+                    anchor[0] - i64::from(frame.width / 2),
+                    anchor[1] - i64::from(frame.height) + 1,
+                ],
+                anchor,
+            )
+        } else {
+            let origin = object.screen.map(i64::from);
+            (
+                origin,
+                [
+                    origin[0] + i64::from(frame.width / 2),
+                    origin[1] + i64::from(frame.height) - 1,
+                ],
+            )
+        };
+        if sample(frame, origin) {
+            let key = (
+                !object.flags.contains(BasicFlags::FLAT),
+                anchor[1],
+                anchor[0],
+                object.id,
+            );
+            if selected
+                .as_ref()
+                .is_none_or(|(previous, _)| key > *previous)
+            {
+                selected = Some((key, object.id));
+            }
+        }
+    }
+    selected.map(|(_, id)| id)
+}
+
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/world/support.rs"]

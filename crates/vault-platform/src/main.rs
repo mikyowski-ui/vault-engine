@@ -6,8 +6,15 @@ mod preview;
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/formats/support.rs"]
 pub(crate) mod fixture_assets;
+#[cfg(test)]
+pub(crate) use map_preview::fixture as fixture_world;
 
-use std::{error::Error, process::ExitCode, sync::Arc};
+use std::{
+    error::Error,
+    process::ExitCode,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use clap::Parser;
 use input::InputCommand;
@@ -17,7 +24,7 @@ use vault_render::Renderer;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{ElementState, MouseScrollDelta, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
@@ -46,6 +53,7 @@ struct Shell {
     failure: Option<AppError>,
     preview: Option<preview::AssetPreview>,
     pointer: Option<[f64; 2]>,
+    started: Option<Instant>,
 }
 
 impl Shell {
@@ -65,13 +73,20 @@ impl Shell {
 }
 
 impl Shell {
-    fn preview_key(&mut self, event_loop: &ActiveEventLoop, window: &Window, key: KeyCode) {
+    fn preview_key(&mut self, event_loop: &ActiveEventLoop, window: &Window, key: KeyCode) -> bool {
+        let Some(preview) = &mut self.preview else {
+            return false;
+        };
+        if !preview.step(key) {
+            return false;
+        }
+        self.refresh_preview(event_loop, window);
+        true
+    }
+    fn refresh_preview(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
         let Some(preview) = &mut self.preview else {
             return;
         };
-        if !preview.step(key) {
-            return;
-        }
         match preview.image() {
             Ok(image) => {
                 if let Some(renderer) = &mut self.renderer {
@@ -112,6 +127,7 @@ impl ApplicationHandler for Shell {
         if self.renderer.is_some() {
             return;
         }
+        self.started.get_or_insert_with(Instant::now);
         let attributes = Window::default_attributes()
             .with_title(self.preview.as_ref().map_or_else(
                 || "Vault Engine — Indexed Color Test".to_owned(),
@@ -127,7 +143,7 @@ impl ApplicationHandler for Shell {
         };
         let size = window.inner_size();
         let renderer = (|| -> AppResult<Renderer> {
-            if let Some(preview) = &self.preview {
+            if let Some(preview) = &mut self.preview {
                 let image = preview.image()?;
                 Ok(pollster::block_on(Renderer::new_with_image(
                     window.clone(),
@@ -162,6 +178,29 @@ impl ApplicationHandler for Shell {
         self.window = None;
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !matches!(self.preview, Some(preview::AssetPreview::Map(_))) {
+            return;
+        }
+        let Some(started) = self.started else {
+            return;
+        };
+        let now = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let update = self.preview.as_mut().expect("map preview").tick(now);
+        match update {
+            Ok(true) => {
+                if let Some(window) = self.window.clone() {
+                    self.refresh_preview(event_loop, &window);
+                }
+            }
+            Ok(false) => {}
+            Err(error) => self.fail(event_loop, error),
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(16),
+        ));
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -193,10 +232,13 @@ impl ApplicationHandler for Shell {
                         repeat: event.repeat,
                     },
                 );
-                if pressed && let PhysicalKey::Code(key) = event.physical_key {
-                    self.preview_key(event_loop, &window, key);
-                }
-                if pressed && event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
+                let handled = pressed
+                    && if let PhysicalKey::Code(key) = event.physical_key {
+                        self.preview_key(event_loop, &window, key)
+                    } else {
+                        false
+                    };
+                if pressed && !handled && event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
                     self.log(event_loop, InputCommand::Quit);
                     event_loop.exit();
                 }
@@ -220,6 +262,18 @@ impl ApplicationHandler for Shell {
                         pressed: state == ElementState::Pressed,
                     },
                 );
+                if state == ElementState::Pressed
+                    && matches!(button, MouseButton::Left | MouseButton::Right)
+                    && let Some(pixel) = self
+                        .pointer
+                        .and_then(|point| self.renderer.as_ref()?.image_position(point))
+                    && self
+                        .preview
+                        .as_mut()
+                        .is_some_and(|preview| preview.click(pixel, button == MouseButton::Right))
+                {
+                    self.refresh_preview(event_loop, &window);
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (x, y, unit) = match delta {
@@ -227,6 +281,13 @@ impl ApplicationHandler for Shell {
                     MouseScrollDelta::PixelDelta(position) => (position.x, position.y, "pixels"),
                 };
                 self.log(event_loop, InputCommand::Wheel { x, y, unit });
+                if self
+                    .preview
+                    .as_mut()
+                    .is_some_and(|preview| preview.scroll(y))
+                {
+                    self.refresh_preview(event_loop, &window);
+                }
             }
             WindowEvent::Focused(focused) => self.log(event_loop, InputCommand::Focus { focused }),
             WindowEvent::ModifiersChanged(modifiers) => {

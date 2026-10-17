@@ -9,3 +9,5 @@ extension	files
 .int	1
 .msg	1
 .lst	1
+.gam	0
+.gcd	1

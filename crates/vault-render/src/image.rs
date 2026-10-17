@@ -73,6 +73,37 @@ impl IndexedImage {
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
+    pub fn pixels_mut(&mut self) -> &mut [u8] {
+        &mut self.pixels
+    }
+    pub fn fill_rect(&mut self, rect: [i32; 4], color: u8) {
+        let [x, y, width, height] = rect;
+        for row in
+            y.max(0)..(i64::from(y) + i64::from(height)).clamp(0, i64::from(self.height)) as i32
+        {
+            for col in
+                x.max(0)..(i64::from(x) + i64::from(width)).clamp(0, i64::from(self.width)) as i32
+            {
+                if let Some(pixel) = self.pixel_mut(i64::from(col), i64::from(row)) {
+                    *pixel = color;
+                }
+            }
+        }
+    }
+    pub fn copy_image(&mut self, source: &IndexedImage, origin: [i32; 2]) {
+        for y in 0..source.height {
+            let target_y = i64::from(origin[1]) + i64::from(y);
+            if target_y < 0 || target_y >= i64::from(self.height) {
+                continue;
+            }
+            for x in 0..source.width {
+                let target_x = i64::from(origin[0]) + i64::from(x);
+                if let Some(pixel) = self.pixel_mut(target_x, target_y) {
+                    *pixel = source.pixels[(y * source.width + x) as usize];
+                }
+            }
+        }
+    }
     fn pixel_mut(&mut self, x: i64, y: i64) -> Option<&mut u8> {
         if x < 0 || y < 0 || x >= i64::from(self.width) || y >= i64::from(self.height) {
             return None;

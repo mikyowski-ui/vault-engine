@@ -78,8 +78,20 @@ pub trait VmHost {
 #[derive(Debug, Default)]
 pub struct BasicHost {
     pub milliseconds: u32,
-    variables: BTreeMap<Vec<u8>, (u32, ExternalValue)>,
+    variables: BTreeMap<Vec<u8>, (Vec<u8>, ExternalValue)>,
     procedures: BTreeMap<Vec<u8>, ExportedProcedure>,
+    filenames: BTreeMap<u32, Vec<u8>>,
+}
+impl BasicHost {
+    pub fn register_program(&mut self, id: u32, filename: &[u8]) {
+        self.filenames.insert(id, key(filename));
+    }
+    fn owner(&self, id: u32) -> Vec<u8> {
+        self.filenames
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("program-{id}").into_bytes())
+    }
 }
 fn key(name: &[u8]) -> Vec<u8> {
     name.iter().map(u8::to_ascii_lowercase).collect()
@@ -96,14 +108,16 @@ impl VmHost for BasicHost {
     }
     fn export_variable(&mut self, owner: u32, name: &[u8]) -> Result<(), VmError> {
         let key = registration(name);
+        let owner = self.owner(owner);
         if let Some((other, _)) = self.variables.get(&key) {
             if *other != owner {
                 return Err(symbol(name));
             }
-        } else {
-            self.variables
-                .insert(key, (owner, ExternalValue::Value(Value::integer(0))));
+        } else if self.variables.len() == 1013 {
+            return Err(symbol(name));
         }
+        self.variables
+            .insert(key, (owner, ExternalValue::Value(Value::integer(0))));
         Ok(())
     }
     fn fetch_variable(&mut self, name: &[u8]) -> Result<ExternalValue, VmError> {
@@ -125,6 +139,9 @@ impl VmHost for BasicHost {
         procedure: ExportedProcedure,
     ) -> Result<(), VmError> {
         let key = registration(name);
+        if !self.procedures.contains_key(&key) && self.procedures.len() == 1013 {
+            return Err(symbol(name));
+        }
         if self
             .procedures
             .get(&key)
@@ -142,8 +159,8 @@ impl VmHost for BasicHost {
             .ok_or_else(|| symbol(name))
     }
     fn purge(&mut self, id: u32) -> Result<(), VmError> {
-        self.variables.retain(|_, (owner, _)| *owner != id);
         self.procedures.retain(|_, procedure| procedure.owner != id);
+        self.filenames.remove(&id);
         Ok(())
     }
 }

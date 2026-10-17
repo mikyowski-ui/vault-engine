@@ -112,7 +112,6 @@ fn spec004_errors_structural_boundaries_and_stack_capacity() {
     }
     for (offset, value) in [
         (0x56, 0x200_u32),
-        (0x56, 0x11a), // Exactly EOF is not an executable empty procedure.
         (0x76, 7),
         (42, u32::MAX),
         (0x2e, 7),
@@ -135,6 +134,30 @@ fn spec004_errors_structural_boundaries_and_stack_capacity() {
     assert_eq!(vm.value_stack.byte_len(), 2046);
     let mut vm = fragment(&[0xc0, 1, 0]);
     assert!(matches!(finish(&mut vm), Err(VmError::Truncated(_))));
+}
+
+#[test]
+fn trailing_procedure_stubs_load_but_cannot_execute() {
+    for field in [0x56, 0x52] {
+        let mut bytes = fixture::program();
+        let end = bytes.len() as u32;
+        bytes[field..field + 4].copy_from_slice(&end.to_be_bytes());
+        if field == 0x52 {
+            bytes[0x4a..0x4e].copy_from_slice(&procedure_flags::CONDITIONAL.to_be_bytes());
+        }
+        let program = IntProgram::parse(&bytes).unwrap();
+        let mut vm = Vm::new(program);
+        let result = if field == 0x56 {
+            finish(&mut vm).map(|_| ())
+        } else {
+            vm.poll_scheduled(&mut BasicHost::default(), 100)
+                .map(|_| ())
+        };
+        assert_eq!(result, Err(VmError::Address(end)));
+        assert!(vm.status.contains(VmStatus::ERROR));
+        bytes[field..field + 4].copy_from_slice(&(end + 1).to_be_bytes());
+        assert!(IntProgram::parse(&bytes).is_err());
+    }
 }
 #[test]
 fn arithmetic_types_strings_truthiness_and_undefined_overflow() {
@@ -688,4 +711,39 @@ fn bounded_loader_and_instruction_mutation_smoke() {
         vm.hard_instruction_limit = 32;
         let _ = vm.run(&mut BasicHost::default(), 8);
     }
+}
+
+#[test]
+fn spec005_export_ownership_reset_capacity_and_cleanup() {
+    let mut host = BasicHost::default();
+    host.register_program(1, b"scripts/one.int");
+    host.register_program(2, b"SCRIPTS/ONE.INT");
+    host.register_program(3, b"scripts/other.int");
+    host.export_variable(1, b"Name").unwrap();
+    host.store_variable(b"name", ExternalValue::Value(Value::integer(9)))
+        .unwrap();
+    host.export_variable(2, b"NAME").unwrap();
+    assert_eq!(
+        host.fetch_variable(b"name").unwrap(),
+        ExternalValue::Value(Value::integer(0))
+    );
+    assert!(host.export_variable(3, b"name").is_err());
+    host.export_procedure(
+        b"name",
+        ExportedProcedure {
+            owner: 1,
+            address: 0,
+            arguments: 0,
+        },
+    )
+    .unwrap();
+    host.purge(1).unwrap();
+    assert!(host.fetch_variable(b"name").is_ok());
+    assert!(host.import_procedure(b"name").is_err());
+    for index in 1..1013 {
+        host.export_variable(2, format!("var{index}").as_bytes())
+            .unwrap();
+    }
+    assert!(host.export_variable(2, b"overflow").is_err());
+    host.export_variable(2, b"name").unwrap(); // Reset still works when the registry is full.
 }

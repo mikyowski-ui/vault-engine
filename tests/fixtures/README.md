@@ -8,10 +8,14 @@ All files here were authored for Vault Engine. None contain original game assets
   synthetic map-preview recipes.
 - `vm/`: SPEC-004 complete program, isolated fragments, error vectors, and VM
   context/scheduling recipes.
+- `host/`: all SPEC-005 extension bytecode fragments and expected stack bytes.
+- `state/`: SPEC-006 GAM/GCD vectors, world/RNG/stat/dialogue tests, and interactive
+  synthetic corpus generation.
 - `loose/`: plain-text markers with mixed-case game-style paths and extensions.
   All eight top-level game directories and root palette/font paths are represented.
   The markers test VFS access and audit traversal; they are **not valid legacy
-  binary assets**. There is one of each audited extension plus two other files.
+  binary assets**. This is the original Phase 0 filename/count fixture; later
+  format validators intentionally reject its binary marker contents.
 - `audit-expected.txt`: expected CLI counts for that loose directory.
 - `core/entities.json`: synthetic entity payloads for generational handle tests.
 - `core/sequences.txt`: interleaved command/event allocation and restore scenario.

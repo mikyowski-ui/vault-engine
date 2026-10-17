@@ -11,11 +11,14 @@ use clap::{Parser, Subcommand};
 pub(crate) mod fixture_assets;
 
 #[allow(dead_code)]
+#[path = "../../../tests/fixtures/world/support.rs"]
+pub(crate) mod fixture_world;
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/state/support.rs"]
+mod state;
+#[allow(dead_code)]
 #[path = "../../../tests/fixtures/vm/support.rs"]
 mod vm;
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/world/support.rs"]
-mod world;
 
 #[derive(Parser)]
 #[command(about = "Vault Engine workspace verification")]
@@ -80,8 +83,8 @@ fn materialize(output: &Path) -> Result<(), Box<dyn Error>> {
         return Err("fixture output directory must be empty".into());
     }
     std::fs::create_dir_all(output)?;
-    world::write_corpus(output);
-    std::fs::write(output.join("scripts/synthetic.int"), vm::program())?;
+    state::write_corpus(output);
+    std::fs::write(output.join("scripts/core-fixture.int"), vm::program())?;
     println!("Synthetic corpus written to {}", output.display());
     Ok(())
 }

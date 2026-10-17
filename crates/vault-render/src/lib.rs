@@ -2,6 +2,7 @@
 
 use wgpu::util::{DeviceExt, TextureDataOrder};
 
+pub mod dialogue;
 pub mod image;
 pub mod map;
 

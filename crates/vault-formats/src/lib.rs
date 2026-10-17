@@ -3,6 +3,8 @@
 mod binary;
 pub mod font;
 pub mod frm;
+pub mod gam;
+pub mod gcd;
 pub mod geometry;
 pub mod lst;
 pub mod map;
@@ -15,6 +17,8 @@ pub mod vfs;
 pub use binary::{MAX_ASSET_BYTES, ParseError};
 pub use font::{Font, FontKind};
 pub use frm::FrmArchive;
+pub use gam::{GamFile, GamSection};
+pub use gcd::GcdFile;
 pub use geometry::HexGrid;
 pub use lst::{LstKind, LstTable};
 pub use map::MapFile;
@@ -37,6 +41,16 @@ pub fn validate_asset(path: &VfsPath, bytes: &[u8]) -> Option<Result<(), ParseEr
         "lst" => LstTable::parse(bytes, LstKind::for_path(path)).map(|_| ()),
         "msg" => MsgCatalog::parse(bytes).map(|_| ()),
         "pro" => Prototype::parse(bytes).map(|_| ()),
+        "gcd" => GcdFile::parse(bytes).map(|_| ()),
+        "gam" => GamFile::parse(
+            bytes,
+            if path.as_str() == "data/vault13.gam" {
+                GamSection::Campaign
+            } else {
+                GamSection::Map
+            },
+        )
+        .map(|_| ()),
         _ => return None,
     })
 }
@@ -44,6 +58,8 @@ pub fn validate_asset(path: &VfsPath, bytes: &[u8]) -> Option<Result<(), ParseEr
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod state_tests;
 #[cfg(test)]
 mod world_tests;
 

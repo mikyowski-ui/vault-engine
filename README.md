@@ -6,10 +6,13 @@ Phase 1 (`P1-02` / `P1-03`) adds approved PAL, FRM/FR0–FR5, LST, FON, AAF, and
 parsers, format auditing, and an interactive sprite/font/message preview.
 Phases 2 and 3 Core (`P2-02`, `P2-03`, `P3-02`) add PRO/MAP parsing, isometric
 geometry, the INT loader/core VM, and map preview.
+Phase 3 Host and Phase 4 (`P3-03`, `P4-02`, `P4-03`) add the host opcode catalog,
+GAM/GCD resources, world state, character statistics, shuffled RNG, and interactive
+script-driven dialogue.
 
 `AGENTS.md` is the repository's implementation policy. Format behavior follows
-`specs/approved/SPEC-001-pal-frm-lst.md` through `SPEC-004-int-vm.md`. DAT
-archives and game-specific VM extensions/gameplay await later phases. No original game
+`specs/approved/SPEC-001-pal-frm-lst.md` through `SPEC-006-world-state-and-dialogue.md`.
+No original game
 data is needed to build, test, or run the synthetic shell and preview fixtures.
 
 ## Workspace
@@ -17,10 +20,10 @@ data is needed to build, test, or run the synthetic shell and preview fixtures.
 | Package | Responsibility |
 | --- | --- |
 | `vault-formats` | VFS, asset/prototype/map parsers, projection and picking |
-| `vault-core` | Generational entity handles, command/event IDs, save envelope |
+| `vault-core` | Authoritative world, host services, stats/RNG, dialogue, save foundations |
 | `vault-vm` | INT loader, two-stack core interpreter, explicit host interfaces |
 | `vault-guidance` | Library scaffold for progression and diagnostic hooks |
-| `vault-render` | Indexed sprite/text/map composition and palette rendering |
+| `vault-render` | Indexed sprite/text/map/dialogue composition and palette rendering |
 | `vault-debug` | Library scaffold for inspectors and asset browsing |
 | `vault-platform` | Desktop shell, asset preview, input command logging |
 | `xtask` | Engineering gate runner |
@@ -86,7 +89,7 @@ The CLI prints total mounted files and counts for `.frm`, `.pal`, `.fon`, `.aaf`
 VFS namespace without parsing file contents. Invalid arguments or mounts exit
 unsuccessfully with a diagnostic. With `--validate-formats`, the tool additionally
 parses every `.pal`, `.frm`, `.fr0`–`.fr5`, `.lst`, `.fon`, `.aaf`, `.msg`,
-`.pro`, `.map`, and `.int`,
+`.pro`, `.map`, `.int`, `.gam`, and `.gcd`,
 prints per-format pass/fail counts, and reports failing paths, formats, byte
 offsets, and reasons on stderr. Any failure produces a nonzero exit after the
 remaining assets have been checked. Phase 0's `loose/` markers are deliberately
@@ -160,13 +163,13 @@ mapped to font glyphs; the viewer does not assume UTF-8 or change languages.
 ## Map preview
 
 ```sh
-cargo xtask fixtures --output target/world-corpus
-cargo run -p asset-audit -- --corpus-dir target/world-corpus --validate-formats
-cargo run -p vault-platform -- --corpus-dir target/world-corpus \
+cargo xtask fixtures --output target/state-corpus
+cargo run -p asset-audit -- --corpus-dir target/state-corpus --validate-formats
+cargo run -p vault-platform -- --corpus-dir target/state-corpus \
   --preview-map maps/synthetic.map
-# Present one map frame and exit:
-cargo run -p vault-platform -- --corpus-dir target/world-corpus \
-  --preview-map maps/synthetic.map --smoke-test
+# The second fixture opens a no-head dialogue during startup for GPU verification:
+cargo run -p vault-platform -- --corpus-dir target/state-corpus \
+  --preview-map maps/dialogue.map --smoke-test
 ```
 
 The fixture output directory must be empty. `--preview-map` and `--preview-frm`
@@ -174,6 +177,24 @@ are mutually exclusive. Arrow keys pan, **R** toggles roofs, and **0**, **1**, *
 select elevations. Hover records on stdout include hex, floor-square, roof-square,
 and elevation coordinates; picking reverses the displayed image's scale and
 letterbox offset before applying the specification's inverse projection.
+
+Click an object to select/look at it; right-click a critter to talk. The action
+strip and **L/D/U/P/T** keys route look, description, use, pickup, and talk through
+the authoritative world and object scripts. Approaches move one hex per animation
+step and run spatial checks. Pickup updates inventory and removes the world
+representation only after insertion succeeds.
+
+Dialogue uses the actual script reply/options and callback procedure indices.
+Click an option or use **1–9**; **0** selects the documented dummy no-callback
+choice. **Space/up/down** navigate reply pages, the wheel scrolls options, and
+**Escape** closes dialogue before closing the application. Head animation continues
+while the world background clock is suspended. The synthetic Guide demonstrates
+two nodes with a real VM callback.
+
+`--player-gcd <VFS_PATH>`, `--language <directory>`, and `--seed <integer>` select
+the player sheet, language, and deterministic RNG initialization. Defaults are
+a neutral character, English, and seed 1. Seed -1 requires explicit host entropy
+and is not silently derived from a wall clock.
 
 The map view uses a 640×380 logical viewport. Floor/roof images use the exact
 square projection; roofs are 96 logical pixels above their floor. Objects use
@@ -289,8 +310,10 @@ documented `(0,199)` boundary defect; only the explicit `-1` sentinel gives 9999
 `IntProgram` validates the 42-byte executable bootstrap region, procedure records,
 identifier/literal records and terminators, and complete instruction boundaries.
 Procedure addresses are absolute image offsets and must select executable
-instruction boundaries; an address exactly at EOF is rejected, not treated
-as an implicit empty procedure. Identifier-consuming operations resolve
+instruction boundaries, with one loading exception: a procedure body/condition
+may equal the exact image length to represent an unused trailing stub. Jumping,
+calling, or evaluating a condition at EOF still raises a runtime address error;
+addresses beyond EOF remain parse errors. Identifier-consuming operations resolve
 their raw operand against the identifier table even if pushed with a string tag;
 literal bounds are enforced when a value is consumed as a string. The image is
 bounded to 64 MiB, procedure count to 65,536, and declared arguments to stack capacity.
@@ -320,6 +343,73 @@ map-enter/map-update presence checks. Scheduled conditions execute against the
 real VM/host and can have side effects; no pure-procedure flag is invented.
 Timed deadlines use strict unsigned comparison, condition flags take precedence,
 and firing/canceling clears the specified metadata words.
+
+## World state and host extensions
+
+`GamFile` applies the exact 16-byte section comparisons and 257-byte translated
+chunks. Names do not affect indices, only column-zero `//` is a comment, and later
+section headings remain data. Missing markers yield an empty initializer. An
+assignment with no decimal prefix or an overflowing integer is rejected instead
+of exposing the reference's uninitialized/undefined value.
+
+`GcdFile` decodes all 428 bytes with checked tags/traits, name termination, and
+raw SPECIAL bounds. `player_normalized()` applies player-only EMP/body/reward/
+kill-category changes; `CharacterSheet::from_gcd` then recomputes derived bases
+and performs the bounded initial healing request.
+
+`CharacterSheet` separates trait-adjusted raw attributes R from effective,
+bonus-adjusted E. It implements all 16 trait selections, all listed stat/skill
+perk effects, tag investment, difficulty, equipment/addiction effects, and
+accumulated level-up HP history. Perk effects are applied on rank changes, not on
+each query. `ParkMiller` exposes a complete shuffle-state snapshot, preserves
+entry zero on reseeding, distinguishes seed/draw sign correction, and supports
+explicit startup diagnostic draws. Checks preserve the tick-864000 boundary and
+their exact number of random draws.
+
+`WorldState` owns generational entities and separate opaque VM references,
+GVAR/MVAR/LVAR storage, the ten-tick clock, ordered timed events, lighting,
+script contexts, and dialogue. Script requests distinguish their first bootstrap
+execution from later named calls. Map loading records and executes the ten
+specified stages, including full ambient before entry and player light after
+the initial map-script request. Timers use stable insertion order at equal due
+times; spatial callbacks are checked on each animated movement step with reentry
+suppressed. Inventory stack splits preserve a distinct removed representative.
+
+The extension ABI is compiled from the approved SPEC-005 table at build time.
+All 266 slots are present: 264 registered words and holes `0x807D`/`0x807E`.
+`vault-vm::extensions` preserves raw tags, uses mask `0xF7FF`, implements the
+I/S/F/U/O/N/C/T checks and variable region arity, and does not synthesize statement
+results. `WorldHost` connects the catalog to world services and managed-library
+state. Documented stubs, missing-result null paths, busy-state leaks, defective
+tokenization, sound-handle tags, and wrong-string-tag paths are explicit.
+Unsafe dereferences, nonterminating legacy paths, and undefined arithmetic are
+reported as bounded errors.
+
+Exports use separate 1013-entry registries. Variable ownership is by registered
+program filename; same-owner registration resets to integer zero. Procedure
+exports are removed on program purge, while variables survive until registry
+cleanup. Named callbacks, keyboard bindings, and script timers retain their
+separate lifetimes.
+
+`GDialog` tracks session, node processing, review, paging, callbacks, and head
+animation separately. Replies clear old options, IQ filtering happens at append
+time, options are limited to 30, review replies to 80, and reply pages to ten.
+Head/background IDs, filename suffixes, repeated-first-column fidget counts,
+reaction transitions, and the 42 phoneme mappings follow SPEC-006. The platform
+renders loaded head/background/interface art and font glyphs; no fabricated
+conversation is substituted for a missing NPC script.
+
+Host boundaries remain explicit where the approved specs do not define the
+underlying tables or media formats. `WorldRules` supplies numeric perk mappings,
+XP thresholds/bonuses, currency/medical/equipment PID roles, and numeric action
+codes not enumerated by the specs. `WorldAssets` supplies sound-name codecs and
+localized continuation labels. Absent mappings are diagnosed or rejected, rather
+than guessed from reverse-engineering sources. Unobstructed light arithmetic is
+exact; occlusion/shot lines use the engine's bounded integer hex-line policy.
+Audio, movies, general managed-window drawing, combat requests, and unspecified
+item/medical defaults are typed host presentation/action requests. The map preview
+implements world interaction and GDialog rendering, not media decoding or a full
+combat/medical subsystem.
 
 ## Core contracts
 

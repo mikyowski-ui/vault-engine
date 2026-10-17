@@ -6,12 +6,12 @@ use vault_formats::{
 };
 use vault_vm::IntProgram;
 
-const EXTENSIONS: [&str; 9] = [
-    "frm", "pal", "fon", "aaf", "pro", "map", "int", "msg", "lst",
+const EXTENSIONS: [&str; 11] = [
+    "frm", "pal", "fon", "aaf", "pro", "map", "int", "msg", "lst", "gam", "gcd",
 ];
-const VALIDATED: [&str; 15] = [
+const VALIDATED: [&str; 17] = [
     "pal", "frm", "fr0", "fr1", "fr2", "fr3", "fr4", "fr5", "lst", "fon", "aaf", "msg", "pro",
-    "map", "int",
+    "map", "int", "gam", "gcd",
 ];
 
 #[derive(Parser)]

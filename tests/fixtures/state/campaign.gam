@@ -1,0 +1,14 @@
+Preamble ignored during section search
+GAME_GLOBAL_VARS:
+// A column-zero comment consumes no index.
+alpha = 7;
+
+ beta = -2;
+alpha = 9;
+bare_label
+ ; semicolon-only text still allocates
+  // indented text still allocates
+decimal_prefix = 0x10;
+signed_prefix = +12tail;
+MAP_GLOBAL_VARS:
+after_heading = 3;

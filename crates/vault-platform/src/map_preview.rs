@@ -3,25 +3,35 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+use vault_core::{
+    CharacterSheet, ObjectAction, Perk, WorldEffect, WorldHost, WorldState,
+    assets::{VfsWorldAssets, WorldAssets},
+};
 use vault_formats::{
-    FrmArchive, LocalDirProvider, LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES,
-    MapFile, Palette, Vfs, VfsPath,
+    Font, FrmArchive, HexGrid, LocalDirProvider, LstKind, LstTable, MAX_ASSET_BYTES, MapFile,
+    Palette, Vfs, VfsPath,
     pro::{BasicFlags, Category},
 };
 use vault_render::{
-    IndexedImage,
-    map::{MapArt, MapHover, MapView, render_map},
+    IndexedImage, TextStyle,
+    dialogue::{self, ChoiceHit},
+    map::{MapArt, MapHover, MapView, pick_object, render_map},
 };
 use winit::keyboard::KeyCode;
 
 const MAX_ART_BYTES: u64 = 256 * 1024 * 1024;
 pub struct MapPreview {
-    map: MapFile,
+    pub host: WorldHost<VfsWorldAssets>,
     pub palette: Palette,
     art: MapSprites,
     pub view: MapView,
     path: String,
     last_hover: Option<MapHover>,
+    font: Option<Arc<Font>>,
+    pub selected: Option<u32>,
+    status: Vec<u8>,
+    choices: Vec<ChoiceHit>,
+    option_scroll: usize,
 }
 struct MapSprites {
     bindings: BTreeMap<(Category, u32, u8), Arc<FrmArchive>>,
@@ -43,14 +53,8 @@ impl MapArt for MapSprites {
         ))
     }
 }
-impl MapPreview {
-    pub fn load(vfs: &LocalDirProvider, path: &str) -> AppResult<Self> {
-        let path = VfsPath::new(path)?;
-        let palette = Palette::parse(&vfs.read_bounded("color.pal", MAX_ASSET_BYTES)?)?;
-        let map = MapFile::parse(
-            &vfs.read_bounded(path.as_str(), MAX_ASSET_BYTES)?,
-            &LocalPrototypeCatalog::new(vfs),
-        )?;
+impl MapSprites {
+    fn load(vfs: &LocalDirProvider, map: &MapFile) -> AppResult<Self> {
         let mut needed = BTreeSet::new();
         for tiles in map.tiles.iter().flatten() {
             for tile in tiles {
@@ -150,29 +154,246 @@ impl MapPreview {
                 );
             }
         }
-        let view = MapView::new(&map, 640, 380)?;
-        tracing::info!(map=%path,objects=map.objects.total,sprites=archives.len(),"map preview loaded");
+        Ok(art)
+    }
+}
+impl MapPreview {
+    pub fn load(
+        vfs: Arc<LocalDirProvider>,
+        path: &str,
+        language: &str,
+        character: Option<&str>,
+        seed: i32,
+    ) -> AppResult<Self> {
+        let path = VfsPath::new(path)?;
+        let palette = Palette::parse(&vfs.read_bounded("color.pal", MAX_ASSET_BYTES)?)?;
+        let assets = VfsWorldAssets::new(vfs, language)?;
+        let character = if let Some(path) = character {
+            CharacterSheet::from_gcd(&assets.gcd(path)?, Default::default())
+        } else {
+            CharacterSheet::default()
+        };
+        let font = assets.font().ok();
+        let mut host = WorldHost::new(WorldState::new(character, seed)?, assets);
+        host.interactive_dialogue = true;
+        host.load_campaign()?;
+        host.load_map(path.as_str())?;
+        let map = host.world.render_snapshot();
+        let art = MapSprites::load(&host.assets.vfs, &map)?;
+        let mut view = MapView::new(&map, 640, 380)?;
+        view.grid = HexGrid::centered(host.world.camera_hex, 640, 380)?;
+        view.elevation = host.world.elevation;
+        tracing::info!(map=%path,objects=map.objects.total,"interactive map preview loaded");
         Ok(Self {
-            map,
+            host,
             palette,
             art,
             view,
             path: path.to_string(),
             last_hover: None,
+            font,
+            selected: None,
+            status: Vec::new(),
+            choices: Vec::new(),
+            option_scroll: 0,
         })
     }
-    pub fn image(&self) -> AppResult<IndexedImage> {
-        Ok(render_map(&self.map, self.view, &self.art)?)
+    fn drain_effects(&mut self) {
+        while let Some(effect) = self.host.world.effects.pop_front() {
+            match effect {
+                WorldEffect::Message(text) => self.status = text,
+                WorldEffect::Diagnostic(error) => {
+                    tracing::warn!(%error,"world diagnostic");
+                    self.status = error.into_bytes();
+                }
+                WorldEffect::DefaultAction { action, target } => {
+                    let name = self
+                        .host
+                        .world
+                        .get(target)
+                        .map_or(b"object".as_slice(), |object| object.name.as_slice());
+                    self.status = [format!("{action:?}: ").as_bytes(), name].concat();
+                }
+                other => tracing::debug!(?other, "host presentation request"),
+            }
+        }
+    }
+    pub fn image(&mut self) -> AppResult<IndexedImage> {
+        self.drain_effects();
+        let map = self.host.world.render_snapshot();
+        if map.objects.elevations.iter().flatten().any(|object| {
+            !object.flags.contains(BasicFlags::HIDDEN)
+                && Category::from_pid(object.pid).is_ok_and(|category| {
+                    !self
+                        .art
+                        .bindings
+                        .contains_key(&(category, object.art_id, object.orientation))
+                })
+        }) {
+            self.art = MapSprites::load(&self.host.assets.vfs, &map)?;
+        }
+        let mut image = render_map(&map, self.view, &self.art)?;
+        for y in 0..image.height() {
+            for x in 0..image.width() {
+                let light = self.view.grid.pick_hex([x as i32, y as i32]).map_or(
+                    self.host.world.ambient,
+                    |hex| {
+                        self.host.world.tile_light[self.view.elevation as usize][hex as usize]
+                            .max(i64::from(self.host.world.ambient))
+                            .min(65536) as i32
+                    },
+                );
+                let index = (y * image.width() + x) as usize;
+                let color = image.pixels()[index];
+                if color != 0 {
+                    image.pixels_mut()[index] = self
+                        .palette
+                        .intensity(color, ((light as u32 * 128) / 65536) as u8);
+                }
+            }
+        }
+        if self.host.world.dialogue.open {
+            let font = self
+                .font
+                .as_ref()
+                .ok_or("dialogue requires a loaded FON/AAF font")?;
+            let layout = dialogue::compose(
+                &image,
+                &self.host.world.dialogue,
+                font,
+                &self.palette,
+                &self.host.assets,
+                self.host.world.perk(Perk::Empathy) > 0,
+                self.option_scroll,
+            )?;
+            self.host.world.dialogue.page_offsets = layout.page_offsets;
+            self.choices = layout.choices;
+            return Ok(layout.image);
+        }
+        self.choices.clear();
+        if let Some(font) = &self.font {
+            let green = self.palette.lookup_rgb5([0, 31, 0]).unwrap_or(1);
+            image.fill_rect([0, 350, 640, 30], 0);
+            for (index, label) in [
+                b"[L] Look".as_slice(),
+                b"[D] Describe",
+                b"[U] Use",
+                b"[P] Pickup",
+                b"[T] Talk",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let x = 8 + index as i32 * 126;
+                image.fill_rect(
+                    [x, 350, 118, 14],
+                    self.palette.lookup_rgb5([0, 5, 0]).unwrap_or(0),
+                );
+                image.draw_text(
+                    font,
+                    &self.palette,
+                    label,
+                    [x + 3, 353],
+                    112,
+                    TextStyle {
+                        foreground: green,
+                        ..Default::default()
+                    },
+                );
+            }
+            image.draw_text(
+                font,
+                &self.palette,
+                &self.status,
+                [8, 365],
+                624,
+                TextStyle {
+                    foreground: green,
+                    ..Default::default()
+                },
+            );
+        }
+        Ok(image)
     }
     pub fn title(&self) -> String {
         format!(
-            "Vault — {} — elevation {} — roofs {} — arrows: pan, R: roofs, 0–2: elevation",
+            "Vault — {} — elevation {} — roofs {} — click objects; L/D/U/P/T actions",
             self.path,
             self.view.elevation,
             if self.view.roofs { "on" } else { "off" }
         )
     }
     pub fn step(&mut self, key: KeyCode) -> bool {
+        if self.host.world.dialogue.open {
+            let choice = match key {
+                KeyCode::Digit1 => Some(Some(0)),
+                KeyCode::Digit2 => Some(Some(1)),
+                KeyCode::Digit3 => Some(Some(2)),
+                KeyCode::Digit4 => Some(Some(3)),
+                KeyCode::Digit5 => Some(Some(4)),
+                KeyCode::Digit6 => Some(Some(5)),
+                KeyCode::Digit7 => Some(Some(6)),
+                KeyCode::Digit8 => Some(Some(7)),
+                KeyCode::Digit9 => Some(Some(8)),
+                KeyCode::Digit0 => Some(None),
+                _ => None,
+            };
+            if let Some(index) = choice {
+                if let Err(error) = self.host.choose_dialogue(index) {
+                    self.status = error.to_string().into_bytes();
+                }
+                self.option_scroll = 0;
+                return true;
+            }
+            match key {
+                KeyCode::Escape => {
+                    if let Err(error) = self.host.close_dialogue() {
+                        self.status = error.to_string().into_bytes();
+                    }
+                    return true;
+                }
+                KeyCode::Space | KeyCode::ArrowDown => {
+                    let dialog = &mut self.host.world.dialogue;
+                    dialog.page =
+                        (dialog.page + 1).min(dialog.page_offsets.len().saturating_sub(1));
+                    dialog.page_ms = self.host.world.elapsed_ms;
+                    return true;
+                }
+                KeyCode::ArrowUp => {
+                    self.host.world.dialogue.page = self.host.world.dialogue.page.saturating_sub(1);
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+        if self.host.world.ui_disabled {
+            return false;
+        }
+        let key_number = match key {
+            KeyCode::KeyL => Some(b'L'),
+            KeyCode::KeyD => Some(b'D'),
+            KeyCode::KeyU => Some(b'U'),
+            KeyCode::KeyP => Some(b'P'),
+            KeyCode::KeyT => Some(b'T'),
+            _ => None,
+        };
+        if let Some(key) = key_number
+            && self.host.key_callback(i32::from(key))
+        {
+            return true;
+        }
+        let action = match key {
+            KeyCode::KeyL => Some(ObjectAction::LookAt),
+            KeyCode::KeyD => Some(ObjectAction::Description),
+            KeyCode::KeyU => Some(ObjectAction::Use),
+            KeyCode::KeyP => Some(ObjectAction::Pickup),
+            KeyCode::KeyT => Some(ObjectAction::Talk),
+            _ => None,
+        };
+        if let Some(action) = action {
+            self.interact(action);
+            return true;
+        }
         match key {
             KeyCode::ArrowLeft => self.view.pan(32, 0),
             KeyCode::ArrowRight => self.view.pan(-32, 0),
@@ -185,9 +406,114 @@ impl MapPreview {
             _ => return false,
         }
         self.last_hover = None;
+        self.host.world.camera_hex = self
+            .view
+            .grid
+            .pick_hex([320, 190])
+            .unwrap_or(self.host.world.camera_hex);
+        if self.host.world.elevation != self.view.elevation {
+            self.host.world.elevation = self.view.elevation;
+            if self.host.world.map_script.is_some()
+                && let Err(error) = self.host.map_update()
+            {
+                self.status = error.to_string().into_bytes();
+            }
+        }
         true
     }
+    fn interact(&mut self, action: ObjectAction) {
+        if let Some(target) = self.selected {
+            if let Err(error) = self.host.action(self.host.world.player, target, action) {
+                self.status = error.to_string().into_bytes();
+            }
+        } else {
+            self.status = b"Select an object first".to_vec();
+        }
+        self.drain_effects();
+    }
+    pub fn click(&mut self, point: [i32; 2], right: bool) -> bool {
+        if self.host.world.dialogue.open {
+            if let Some(choice) = self.choices.iter().find(|choice| choice.contains(point)) {
+                if let Err(error) = self.host.choose_dialogue(Some(choice.index)) {
+                    self.status = error.to_string().into_bytes();
+                }
+                self.option_scroll = 0;
+                return true;
+            }
+            return false;
+        }
+        if self.host.world.ui_disabled {
+            return false;
+        }
+        if (350..364).contains(&point[1]) {
+            for (index, action) in [
+                ObjectAction::LookAt,
+                ObjectAction::Description,
+                ObjectAction::Use,
+                ObjectAction::Pickup,
+                ObjectAction::Talk,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let x = 8 + index as i32 * 126;
+                if (x..x + 118).contains(&point[0]) {
+                    self.interact(action);
+                    return true;
+                }
+            }
+        }
+        let map = self.host.world.render_snapshot();
+        self.selected = pick_object(&map, self.view, &self.art, point)
+            .and_then(|id| self.host.world.reference_for_id(id));
+        if self.selected.is_some() {
+            self.interact(if right {
+                ObjectAction::Talk
+            } else {
+                ObjectAction::LookAt
+            });
+        }
+        true
+    }
+    pub fn scroll(&mut self, delta: f64) -> bool {
+        if !self.host.world.dialogue.open {
+            return false;
+        }
+        if delta < 0.0 {
+            self.option_scroll = (self.option_scroll + 1)
+                .min(self.host.world.dialogue.options.len().saturating_sub(1));
+        } else {
+            self.option_scroll = self.option_scroll.saturating_sub(1);
+        }
+        true
+    }
+    pub fn tick(&mut self, now: u64) -> AppResult<bool> {
+        let mut changed = match self.host.tick(now) {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.status = error.to_string().into_bytes();
+                tracing::warn!(%error,"world update failed");
+                true
+            }
+        };
+        if self.view.grid.pick_hex([320, 190]) != Some(self.host.world.camera_hex) {
+            self.view.grid = HexGrid::centered(self.host.world.camera_hex, 640, 380)?;
+            changed = true;
+        }
+        if self.view.elevation != self.host.world.elevation {
+            self.view.elevation = self.host.world.elevation;
+            changed = true;
+        }
+        if !self.host.world.effects.is_empty() {
+            self.drain_effects();
+            changed = true;
+        }
+        Ok(changed)
+    }
     pub fn hover(&mut self, point: [i32; 2]) -> Option<MapHover> {
+        if self.host.world.dialogue.open {
+            return None;
+        }
         let hover = self.view.hover(point);
         if self.last_hover == Some(hover) {
             return None;
@@ -200,7 +526,11 @@ impl MapPreview {
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/world/support.rs"]
-mod fixture;
+pub(crate) mod fixture;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/state/support.rs"]
+mod state_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,9 +538,9 @@ mod tests {
     fn map_preview_loads_all_categories_and_handles_camera_roofs_elevations() {
         let dir = tempfile::tempdir().unwrap();
         fixture::write_corpus(dir.path());
-        let vfs = LocalDirProvider::mount(dir.path()).unwrap();
-        let mut preview = MapPreview::load(&vfs, r"MAPS\SYNTHETIC.MAP").unwrap();
-        assert_eq!(preview.map.objects.total, 5);
+        let vfs = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+        let mut preview = MapPreview::load(vfs, r"MAPS\SYNTHETIC.MAP", "english", None, 1).unwrap();
+        assert_eq!(preview.host.world.map.objects.total, 5);
         let image = preview.image().unwrap();
         for color in [7, 15, 16, 17, 18] {
             assert!(
@@ -229,5 +559,50 @@ mod tests {
             preview.image().unwrap();
         }
         assert!(!preview.step(KeyCode::Space));
+    }
+    #[test]
+    fn clicking_npc_renders_choices_executes_callbacks_and_returns_to_map() {
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        let vfs = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+        let mut preview = MapPreview::load(
+            vfs,
+            "maps/synthetic.map",
+            "english",
+            Some("premade/synthetic.gcd"),
+            1,
+        )
+        .unwrap();
+        preview.image().unwrap();
+        assert!(preview.click([336, 170], false));
+        let selected = preview.selected.unwrap();
+        assert_eq!(
+            preview.host.world.get(selected).unwrap().category(),
+            Category::Critter
+        );
+        assert!(preview.click([336, 170], true));
+        assert!(preview.host.world.dialogue.open && preview.host.world.dialogue.waiting);
+        let image = preview.image().unwrap();
+        assert_eq!((image.width(), image.height()), (640, 480));
+        assert_eq!(preview.choices.len(), 1);
+        assert_eq!(preview.choices[0].rectangle[0..2], [127, 335]);
+        assert!(preview.click([200, 338], false));
+        assert_eq!(preview.host.world.dialogue.options[0].procedure, 0);
+        preview.image().unwrap();
+        assert!(preview.step(KeyCode::Digit1));
+        assert!(!preview.host.world.dialogue.open);
+        assert_eq!(preview.image().unwrap().height(), 380);
+        // The clickable action strip routes a real pickup into authoritative inventory.
+        preview.click([320, 185], false);
+        let item = preview.selected.unwrap();
+        assert_eq!(
+            preview.host.world.get(item).unwrap().category(),
+            Category::Item
+        );
+        preview.click([400, 355], false);
+        assert_eq!(
+            preview.host.world.get(item).unwrap().owner,
+            Some(preview.host.world.player)
+        );
     }
 }
