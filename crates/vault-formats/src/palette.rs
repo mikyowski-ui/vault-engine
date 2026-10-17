@@ -53,11 +53,15 @@ impl Palette {
         self.mapped[usize::from(index)]
     }
 
+    /// Neutral-gamma display palette. Every entry is opaque: index 0 is a
+    /// transparency key only for transparent blits, never a display alpha.
     pub fn rgba8(&self) -> [[u8; 4]; 256] {
-        std::array::from_fn(|index| {
-            let [r, g, b] = self.rgb6[index];
-            [r * 4, g * 4, b * 4, if index == 0 { 0 } else { 255 }]
-        })
+        self.display_rgba8(1.0)
+    }
+
+    /// Display palette at the configured gamma; unavailable entries stay black.
+    pub fn display_rgba8(&self, gamma: f64) -> [[u8; 4]; 256] {
+        std::array::from_fn(|index| display_rgb6(self.rgb6[index], gamma))
     }
 
     pub fn supplied_tables(&self) -> Option<&[u8]> {
@@ -117,6 +121,19 @@ impl Palette {
             _ => None,
         }
     }
+}
+
+/// SPEC-001 display conversion of one valid six-bit channel: raise it to the
+/// gamma exponent, clamp to 0..=63, discard the fraction, then multiply by 4.
+/// Gamma 1 is the neutral `x4` mapping (63 becomes 252, never 255).
+pub fn display_channel(channel: u8, gamma: f64) -> u8 {
+    // `as` truncates toward zero and maps NaN to zero.
+    (f64::from(channel).powf(gamma).clamp(0.0, 63.0) as u8) * 4
+}
+
+pub fn display_rgb6(rgb6: [u8; 3], gamma: f64) -> [u8; 4] {
+    let [r, g, b] = rgb6.map(|channel| display_channel(channel, gamma));
+    [r, g, b, 255]
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -185,6 +202,8 @@ pub const RED_PULSE_INTERVAL_MS: u64 = 33;
 pub struct PaletteCycler {
     pub enabled: bool,
     pub interval_multiplier: u32,
+    /// Display conversion applied to the cycled six-bit triples.
+    pub gamma: f64,
     last: [u64; 4],
     phase: [usize; 5],
     red: i16,
@@ -196,6 +215,7 @@ impl Default for PaletteCycler {
         Self {
             enabled: true,
             interval_multiplier: 1,
+            gamma: 1.0,
             last: [0; 4],
             phase: [0; 5],
             red: 0,
@@ -209,6 +229,15 @@ impl PaletteCycler {
     pub fn reset(&mut self) {
         self.last = [0; 4];
         self.enabled = true;
+    }
+
+    /// Palette fading disables cycling; returns the state to restore afterward.
+    pub fn suspend_for_fade(&mut self) -> bool {
+        std::mem::replace(&mut self.enabled, false)
+    }
+
+    pub fn restore_after_fade(&mut self, previous: bool) {
+        self.enabled = previous;
     }
 
     pub fn poll(&mut self, now_ms: u64, display: &mut [[u8; 4]; 256]) -> bool {
@@ -233,8 +262,8 @@ impl PaletteCycler {
             if ready[group] {
                 let count = range.colors6.len();
                 for pixel in 0..count {
-                    let [r, g, b] = range.colors6[(pixel + count - self.phase[index]) % count];
-                    display[usize::from(range.first) + pixel] = [r * 4, g * 4, b * 4, 255];
+                    let rgb6 = range.colors6[(pixel + count - self.phase[index]) % count];
+                    display[usize::from(range.first) + pixel] = display_rgb6(rgb6, self.gamma);
                 }
                 self.phase[index] = (self.phase[index] + 1) % count;
             }
@@ -244,7 +273,7 @@ impl PaletteCycler {
             if self.red == 60 || self.red == 0 {
                 self.red_step = -self.red_step;
             }
-            display[RED_PULSE_INDEX] = [self.red as u8 * 4, 0, 0, 255];
+            display[RED_PULSE_INDEX] = display_rgb6([self.red as u8, 0, 0], self.gamma);
         }
         ready.into_iter().any(|ready| ready)
     }

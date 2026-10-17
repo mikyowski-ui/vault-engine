@@ -276,6 +276,44 @@ pub fn compose_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vault_formats::frm::FrameCursor;
+
+    #[test]
+    fn spec001_fixtures_b_and_c_draw_through_world_rectangles() {
+        let at = |image: &IndexedImage, x: usize, y: usize| image.pixels()[y * 200 + x];
+        let canvas = || IndexedImage::from_pixels(200, 200, vec![9; 40000]).unwrap();
+        // Fixture B: index 0 leaves the destination unchanged; index 1 draws.
+        let archive = FrmArchive::parse(&fixtures::shared_frm()).unwrap();
+        let frame = archive.frame(0, 0).unwrap();
+        let rect = frame.world_rect([100, 100], archive.shifts[0], [0, 0]);
+        let mut image = canvas();
+        image.blit(frame, [rect.left, rect.top]);
+        assert_eq!((at(&image, 101, 99), at(&image, 102, 99)), (9, 1));
+        assert_eq!(
+            image.pixels().iter().filter(|pixel| **pixel != 9).count(),
+            1
+        );
+        // Fixture C: after entering frame 1, the top pixel is transparent and
+        // the lower pixel is index 3.
+        let archive = FrmArchive::parse(&fixtures::animated_frm()).unwrap();
+        let mut cursor = FrameCursor::default();
+        assert!(archive.advance(&mut cursor, 0) && archive.advance(&mut cursor, 0));
+        let frame = archive.frame(0, 1).unwrap();
+        let rect = frame.world_rect([100, 100], archive.shifts[0], cursor.displacement);
+        let mut image = canvas();
+        image.blit(frame, [rect.left, rect.top]);
+        assert_eq!((at(&image, 103, 99), at(&image, 103, 100)), (9, 3));
+        // Directions 2 and 3 share records but not header shifts.
+        for (direction, [x, y]) in [(2, [98, 103]), (3, [100, 100])] {
+            for (index, color) in [(0, 4), (1, 5)] {
+                let frame = archive.frame(direction, index).unwrap();
+                let rect = frame.world_rect([100, 100], archive.shifts[direction], [0, 0]);
+                let mut image = canvas();
+                image.blit(frame, [rect.left, rect.top]);
+                assert_eq!(at(&image, x, y), color);
+            }
+        }
+    }
     #[test]
     fn aaf_composites_spec002_grayscale_and_underlines_the_height_band() {
         let palette = Palette::parse(&fixtures::grayscale_palette()).unwrap();

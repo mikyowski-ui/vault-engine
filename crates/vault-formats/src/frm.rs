@@ -52,6 +52,16 @@ impl FrmFrame {
     }
 }
 
+/// An object's animation position: selecting a frame record does not itself
+/// accumulate displacement; entering/leaving frames through the archive does.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FrameCursor {
+    /// Current frame, or `None` before frame zero of a fresh pass.
+    pub frame: Option<usize>,
+    /// The object's current extra screen displacement.
+    pub displacement: [i32; 2],
+}
+
 #[derive(Debug, Clone)]
 pub struct FrmArchive {
     pub version: u32,
@@ -178,6 +188,32 @@ impl FrmArchive {
         self.sequences
             .get(*self.direction_sequences.get(direction)?)?
             .get(frame)
+    }
+    /// Forward animation: enter the cursor's next frame in `direction`, adding
+    /// that frame's displacement. Returns `false` (unchanged) past the last frame.
+    pub fn advance(&self, cursor: &mut FrameCursor, direction: usize) -> bool {
+        let next = cursor.frame.map_or(0, |frame| frame + 1);
+        let Some(frame) = self.frame(direction, next) else {
+            return false;
+        };
+        cursor.frame = Some(next);
+        cursor.displacement[0] += i32::from(frame.displacement[0]);
+        cursor.displacement[1] += i32::from(frame.displacement[1]);
+        true
+    }
+    /// Reverse animation: leave the current frame, subtracting its displacement.
+    /// Leaving frame zero returns to the position before the forward pass.
+    pub fn reverse(&self, cursor: &mut FrameCursor, direction: usize) -> bool {
+        let Some(frame) = cursor
+            .frame
+            .and_then(|current| self.frame(direction, current))
+        else {
+            return false;
+        };
+        cursor.displacement[0] -= i32::from(frame.displacement[0]);
+        cursor.displacement[1] -= i32::from(frame.displacement[1]);
+        cursor.frame = cursor.frame.and_then(|current| current.checked_sub(1));
+        true
     }
     /// Displacement for an isolated forward pass, starting before frame zero.
     pub fn accumulated_displacement(&self, direction: usize, frame: usize) -> Option<[i32; 2]> {

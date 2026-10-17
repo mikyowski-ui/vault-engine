@@ -76,6 +76,13 @@ impl AssetPreview {
             Self::Map(preview) => &preview.palette,
         }
     }
+    /// Whether the previewed world currently permits palette cycling.
+    pub fn palette_cycling(&self) -> bool {
+        match self {
+            Self::Sprite(_) => true,
+            Self::Map(preview) => preview.host.library.palette_cycling,
+        }
+    }
     pub fn title(&self) -> String {
         match self {
             Self::Sprite(preview) => preview.title(),

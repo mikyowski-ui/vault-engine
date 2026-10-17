@@ -34,6 +34,7 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    palette: wgpu::Texture,
     viewport_buffer: wgpu::Buffer,
     image_size: [u32; 2],
     drawable: bool,
@@ -136,7 +137,7 @@ impl Renderer {
             contents: bytemuck::cast_slice(&[1.0_f32, 1.0, 0.0, 0.0]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let bind_group =
+        let (bind_group, palette) =
             image_bind_group(&device, &queue, &pipeline, &viewport_buffer, image, palette);
         let mut renderer = Self {
             surface,
@@ -145,12 +146,37 @@ impl Renderer {
             config,
             pipeline,
             bind_group,
+            palette,
             viewport_buffer,
             image_size: [image.width(), image.height()],
             drawable: false,
         };
         renderer.resize(width, height);
         Ok(renderer)
+    }
+
+    /// Replace display-palette entries (for example palette cycling) in place,
+    /// leaving the uploaded index image untouched.
+    pub fn set_palette(&mut self, palette: &[[u8; 4]; 256]) {
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.palette,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(palette),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256 * 4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Zero-sized/minimized windows are never configured or drawn.
@@ -184,7 +210,7 @@ impl Renderer {
     }
 
     pub fn set_image(&mut self, image: &IndexedImage, palette: &[[u8; 4]; 256]) {
-        self.bind_group = image_bind_group(
+        (self.bind_group, self.palette) = image_bind_group(
             &self.device,
             &self.queue,
             &self.pipeline,
@@ -287,7 +313,7 @@ fn image_bind_group(
     viewport: &wgpu::Buffer,
     image: &IndexedImage,
     rgba: &[[u8; 4]; 256],
-) -> wgpu::BindGroup {
+) -> (wgpu::BindGroup, wgpu::Texture) {
     let sprite = texture(
         device,
         queue,
@@ -306,7 +332,7 @@ fn image_bind_group(
         wgpu::TextureFormat::Rgba8UnormSrgb,
         bytemuck::cast_slice(rgba),
     );
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("indexed sprite resources"),
         layout: &pipeline.get_bind_group_layout(0),
         entries: &[
@@ -327,7 +353,8 @@ fn image_bind_group(
                 resource: viewport.as_entire_binding(),
             },
         ],
-    })
+    });
+    (group, palette)
 }
 
 fn texture(
@@ -352,7 +379,7 @@ fn texture(
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         },
         TextureDataOrder::LayerMajor,

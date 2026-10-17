@@ -1,7 +1,7 @@
 use crate::*;
 use crate::{
-    frm::Rect,
-    palette::{CYCLE_RANGES, PaletteCycler},
+    frm::{FrameCursor, Rect},
+    palette::{CYCLE_RANGES, PaletteCycler, display_channel},
 };
 
 use crate::fixture_assets as fixtures;
@@ -14,7 +14,7 @@ fn spec001_palette_values_transparency_and_tables() {
     assert_eq!(
         &palette.rgba8()[..4],
         &[
-            [4, 8, 12, 0],
+            [4, 8, 12, 255],
             [252, 128, 4, 255],
             [64, 32, 16, 255],
             [0, 0, 0, 255]
@@ -67,6 +67,63 @@ fn base_palettes_need_no_tag_but_optional_extensions_must_be_complete() {
     assert!(Palette::parse(&tagged).is_err());
     tagged.extend(std::iter::repeat_n(17, 3 * 65536));
     assert_eq!(Palette::parse(&tagged).unwrap().intensity(1, 127), 17);
+}
+
+#[test]
+fn spec001_gamma_display_conversion() {
+    // Neutral gamma is exactly x4: 0, 1, 31, 32, 63 -> 0, 4, 124, 128, 252.
+    for channel in 0..=63 {
+        assert_eq!(display_channel(channel, 1.0), channel * 4);
+    }
+    // Raise, clamp to 0..=63, truncate, then x4 (not 255 * (c/63)^gamma).
+    assert_eq!(
+        [0, 1, 2, 31, 32, 63].map(|channel| display_channel(channel, 1.2)),
+        [0, 4, 8, 244, 252, 252]
+    );
+    assert_eq!(
+        [0, 2, 31, 63].map(|channel| display_channel(channel, 0.5)),
+        [0, 4, 20, 28]
+    );
+    let palette = Palette::parse(&fixtures::palette()).unwrap();
+    let display = palette.display_rgba8(1.2);
+    assert_eq!(display, {
+        let mut expected = palette.rgba8();
+        for (index, entry) in expected.iter_mut().enumerate() {
+            let rgb6 = palette.rgb6(index as u8);
+            *entry = [
+                display_channel(rgb6[0], 1.2),
+                display_channel(rgb6[1], 1.2),
+                display_channel(rgb6[2], 1.2),
+                255,
+            ];
+        }
+        expected
+    });
+    // Unavailable entries are black at any gamma; index 0 is an opaque entry.
+    assert_eq!(display[3], [0, 0, 0, 255]);
+    assert_eq!(palette.display_rgba8(0.5)[0][3], 255);
+}
+
+#[test]
+fn palette_cycle_fade_suspension_and_gamma_writes() {
+    let mut display = [[0; 4]; 256];
+    let mut cycler = PaletteCycler::default();
+    cycler.gamma = 0.5;
+    assert!(cycler.poll(200, &mut display));
+    // Slime's first six-bit triple (0,27,0) uses the same display conversion.
+    assert_eq!(display[229], [0, 20, 0, 255]);
+    let previous = cycler.suspend_for_fade();
+    assert!(previous && !cycler.enabled);
+    let faded = display;
+    assert!(!cycler.poll(10_000, &mut display));
+    assert_eq!(display, faded);
+    cycler.restore_after_fade(previous);
+    assert!(cycler.poll(10_000, &mut display));
+    // A fade that began with cycling disabled restores the disabled state.
+    cycler.enabled = false;
+    let previous = cycler.suspend_for_fade();
+    cycler.restore_after_fade(previous);
+    assert!(!cycler.enabled);
 }
 
 #[test]
@@ -189,14 +246,55 @@ fn spec001_animated_blocks_and_displacement() {
     let second = archive.accumulated_displacement(0, 1).unwrap();
     assert_eq!(first, [1, -1]);
     assert_eq!(second, [3, 0]);
-    let displacement = archive.frame(0, 1).unwrap().displacement;
+    // A fresh isolated forward pass through the engine cursor, then reversal.
+    let mut cursor = FrameCursor::default();
+    assert!(archive.advance(&mut cursor, 0));
     assert_eq!(
-        [
-            second[0] - i32::from(displacement[0]),
-            second[1] - i32::from(displacement[1])
-        ],
-        first
+        cursor,
+        FrameCursor {
+            frame: Some(0),
+            displacement: first
+        }
     );
+    let frame0_rect = Rect {
+        left: 100,
+        top: 99,
+        right: 101,
+        bottom: 99,
+    };
+    assert_eq!(
+        archive
+            .frame(0, 0)
+            .unwrap()
+            .world_rect([100, 100], archive.shifts[0], cursor.displacement),
+        frame0_rect
+    );
+    assert!(archive.advance(&mut cursor, 0));
+    assert_eq!(cursor.displacement, second);
+    assert!(!archive.advance(&mut cursor, 0), "no frame past the count");
+    assert_eq!(cursor.displacement, second);
+    // Reversing from frame 1 subtracts (2,1), restoring frame 0's rectangle.
+    assert!(archive.reverse(&mut cursor, 0));
+    assert_eq!(
+        cursor,
+        FrameCursor {
+            frame: Some(0),
+            displacement: first
+        }
+    );
+    assert_eq!(
+        archive
+            .frame(0, 0)
+            .unwrap()
+            .world_rect([100, 100], archive.shifts[0], cursor.displacement),
+        frame0_rect
+    );
+    assert!(archive.reverse(&mut cursor, 0));
+    assert_eq!(cursor, FrameCursor::default());
+    assert!(!archive.reverse(&mut cursor, 0));
+    // Selecting a frame record alone does not accumulate displacement.
+    assert!(archive.frame(0, 1).is_some());
+    assert_eq!(cursor.displacement, [0, 0]);
     assert_eq!(
         archive
             .frame(0, 1)

@@ -580,8 +580,11 @@ mod tests {
             preview.host.world.get(selected).unwrap().category(),
             Category::Critter
         );
+        assert!(preview.host.library.palette_cycling);
         assert!(preview.click([336, 170], true));
         assert!(preview.host.world.dialogue.open && preview.host.world.dialogue.waiting);
+        // The shell's cycling poll follows this flag (SPEC-001/SPEC-006).
+        assert!(!preview.host.library.palette_cycling);
         let image = preview.image().unwrap();
         assert_eq!((image.width(), image.height()), (640, 480));
         assert_eq!(preview.choices.len(), 1);
@@ -591,6 +594,7 @@ mod tests {
         preview.image().unwrap();
         assert!(preview.step(KeyCode::Digit1));
         assert!(!preview.host.world.dialogue.open);
+        assert!(preview.host.library.palette_cycling);
         assert_eq!(preview.image().unwrap().height(), 380);
         // The clickable action strip routes a real pickup into authoritative inventory.
         preview.click([320, 185], false);

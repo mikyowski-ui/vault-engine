@@ -20,6 +20,7 @@ use clap::Parser;
 use input::InputCommand;
 use tracing_subscriber::EnvFilter;
 use vault_core::SequenceIds;
+use vault_formats::{Palette, palette::PaletteCycler};
 use vault_render::Renderer;
 use winit::{
     application::ApplicationHandler,
@@ -43,6 +44,20 @@ struct Args {
     preview: preview::PreviewArgs,
 }
 
+/// SPEC-001 display palette: cycling replaces display entries, never the PAL.
+struct DisplayPalette {
+    entries: [[u8; 4]; 256],
+    cycler: PaletteCycler,
+}
+impl DisplayPalette {
+    fn new(palette: &Palette) -> Self {
+        Self {
+            entries: palette.rgba8(),
+            cycler: PaletteCycler::default(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Shell {
     renderer: Option<Renderer>,
@@ -54,6 +69,7 @@ struct Shell {
     preview: Option<preview::AssetPreview>,
     pointer: Option<[f64; 2]>,
     started: Option<Instant>,
+    display: Option<DisplayPalette>,
 }
 
 impl Shell {
@@ -90,7 +106,11 @@ impl Shell {
         match preview.image() {
             Ok(image) => {
                 if let Some(renderer) = &mut self.renderer {
-                    renderer.set_image(&image, &preview.palette().rgba8());
+                    let palette = self
+                        .display
+                        .as_ref()
+                        .map_or_else(|| preview.palette().rgba8(), |display| display.entries);
+                    renderer.set_image(&image, &palette);
                 }
                 window.set_title(&preview.title());
                 window.request_redraw();
@@ -145,12 +165,16 @@ impl ApplicationHandler for Shell {
         let renderer = (|| -> AppResult<Renderer> {
             if let Some(preview) = &mut self.preview {
                 let image = preview.image()?;
+                let palette = self
+                    .display
+                    .as_ref()
+                    .map_or_else(|| preview.palette().rgba8(), |display| display.entries);
                 Ok(pollster::block_on(Renderer::new_with_image(
                     window.clone(),
                     size.width,
                     size.height,
                     &image,
-                    &preview.palette().rgba8(),
+                    &palette,
                 ))?)
             } else {
                 Ok(pollster::block_on(Renderer::new(
@@ -179,22 +203,33 @@ impl ApplicationHandler for Shell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if !matches!(self.preview, Some(preview::AssetPreview::Map(_))) {
-            return;
-        }
-        let Some(started) = self.started else {
+        let (Some(started), Some(preview)) = (self.started, self.preview.as_mut()) else {
             return;
         };
         let now = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let update = self.preview.as_mut().expect("map preview").tick(now);
-        match update {
-            Ok(true) => {
-                if let Some(window) = self.window.clone() {
-                    self.refresh_preview(event_loop, &window);
-                }
+        let changed = match preview {
+            preview::AssetPreview::Map(_) => match preview.tick(now) {
+                Ok(changed) => changed,
+                Err(error) => return self.fail(event_loop, error),
+            },
+            preview::AssetPreview::Sprite(_) => false,
+        };
+        // Each loop pass is one enabled cycling poll; the world can disable it
+        // (for example during dialogue) and later restore it.
+        let cycled = self.display.as_mut().is_some_and(|display| {
+            display.cycler.enabled = preview.palette_cycling();
+            display.cycler.poll(now, &mut display.entries)
+        });
+        if changed {
+            if let Some(window) = self.window.clone() {
+                self.refresh_preview(event_loop, &window);
             }
-            Ok(false) => {}
-            Err(error) => self.fail(event_loop, error),
+        } else if cycled
+            && let (Some(renderer), Some(display), Some(window)) =
+                (&mut self.renderer, &self.display, &self.window)
+        {
+            renderer.set_palette(&display.entries);
+            window.request_redraw();
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(
             Instant::now() + Duration::from_millis(16),
@@ -356,6 +391,9 @@ fn run(args: Args) -> AppResult<()> {
         smoke_test: args.smoke_test,
         ..Default::default()
     };
+    shell.display = preview
+        .as_ref()
+        .map(|preview| DisplayPalette::new(preview.palette()));
     shell.preview = preview;
     event_loop.run_app(&mut shell)?;
     if let Some(error) = shell.failure {
