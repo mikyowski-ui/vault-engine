@@ -91,6 +91,8 @@ pub enum VfsError {
     NonUtf8Name(PathBuf),
     #[error("asset {path:?} exceeds the {max_bytes}-byte read limit")]
     FileTooLarge { path: PathBuf, max_bytes: usize },
+    #[error("archive error: {0}")]
+    Archive(String),
     #[error("filesystem error at {path:?}: {source}")]
     Io {
         path: PathBuf,
@@ -110,6 +112,19 @@ fn io_error(path: &Path, source: io::Error) -> VfsError {
 pub trait Vfs: Send + Sync {
     /// Read a file using the same strict normalization as `VfsPath::new`.
     fn read(&self, path: &str) -> Result<Vec<u8>, VfsError>;
+
+    /// Read with a size limit. Providers that can check sizes before reading
+    /// override this; the default bounds the returned length.
+    fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
+        let bytes = self.read(path)?;
+        if bytes.len() > max_bytes {
+            return Err(VfsError::FileTooLarge {
+                path: PathBuf::from(path),
+                max_bytes,
+            });
+        }
+        Ok(bytes)
+    }
 
     /// Walk all mounted files in canonical lexical order (directories excluded).
     fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_>;
@@ -252,7 +267,11 @@ impl LocalDirProvider {
 
 impl Vfs for LocalDirProvider {
     fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
-        self.read_bounded(path, usize::MAX)
+        LocalDirProvider::read_bounded(self, path, usize::MAX)
+    }
+
+    fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
+        LocalDirProvider::read_bounded(self, path, max_bytes)
     }
 
     fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {

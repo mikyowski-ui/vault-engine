@@ -38,6 +38,16 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// A reader without the per-asset size limit (archives bound each
+    /// extracted member instead).
+    pub fn unbounded(bytes: &'a [u8], format: &'static str) -> Self {
+        Self {
+            bytes,
+            pos: 0,
+            format,
+        }
+    }
+
     pub fn error(&self, message: impl Into<String>) -> ParseError {
         ParseError::new(self.format, self.pos, message)
     }
@@ -61,6 +71,11 @@ impl<'a> Reader<'a> {
         Ok(i16::from_be_bytes(
             self.take(2)?.try_into().expect("fixed slice"),
         ))
+    }
+
+    pub fn be_u16(&mut self) -> Result<u16, ParseError> {
+        let bytes = self.take(2)?;
+        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
     }
 
     pub fn be_i32(&mut self) -> Result<i32, ParseError> {

@@ -218,6 +218,9 @@ pub struct WorldRules {
     pub doctor_bag_pid: Option<u32>,
     pub first_aid_kit_pid: Option<u32>,
     pub equipment_effects: BTreeMap<u32, crate::stats::Effect>,
+    /// Game-calendar year for day zero; the approved specs define the
+    /// non-leap month/day calendar but no base year.
+    pub calendar_year: u16,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorldEffect {
@@ -311,7 +314,7 @@ pub struct WorldState {
     pub entities: EntityStore<WorldObject>,
     references: BTreeMap<ObjectRef, EntityId>,
     next_reference: u32,
-    next_uid: u32,
+    pub(crate) next_uid: u32,
     pub player: ObjectRef,
     pub party: BTreeSet<ObjectRef>,
     pub map: MapFile,
@@ -347,6 +350,13 @@ pub struct WorldState {
     /// Kill experience accumulated during combat, awarded at cleanup.
     pub combat_experience: i32,
     pub combat_state: crate::combat_state::CombatState,
+    /// SPEC-008 world-map component and runtime travel state.
+    pub world_map: crate::worldmap::WorldMap,
+    /// Pip-Boy credited rest minutes (reset when the Pip-Boy opens).
+    pub rest_credit: i32,
+    /// SPEC-008 working saved-map set, automap database, and carried
+    /// save components.
+    pub persistence: crate::persistence::Persistence,
     /// A scripted combat request awaiting the host's next update.
     pub pending_combat: Option<crate::combat_state::CombatRequest>,
     pub combat_quit: bool,
@@ -468,6 +478,9 @@ impl WorldState {
             kills: [0; 15],
             combat_experience: 0,
             combat_state: Default::default(),
+            world_map: Default::default(),
+            rest_credit: 0,
+            persistence: Default::default(),
             pending_combat: None,
             combat_quit: false,
             combat_actor: 0,
@@ -696,7 +709,7 @@ impl WorldState {
         }
         false
     }
-    fn import_object(
+    pub(crate) fn import_object(
         &mut self,
         mut raw: MapObject,
         owner: Option<ObjectRef>,
@@ -1521,9 +1534,12 @@ impl WorldState {
     pub fn map_exit_cleanup(&mut self, mut approve: impl FnMut(&TimedEvent) -> bool) {
         self.trace.push(WorldTrace::MapExitCleanup);
         self.queue.retain(|event| match event.kind {
-            EventKind::Poison | EventKind::Radiation => true,
+            EventKind::Poison | EventKind::Radiation { .. } => true,
             EventKind::Script { .. } | EventKind::MapUpdate | EventKind::Midnight => false,
-            EventKind::Knockout | EventKind::Other(_) => !approve(event),
+            EventKind::Knockout
+            | EventKind::Drug { .. }
+            | EventKind::Withdrawal(_)
+            | EventKind::Other(_) => !approve(event),
         });
     }
 }

@@ -1,17 +1,17 @@
 use crate::{
-    LocalDirProvider, LstKind, LstTable, MAX_ASSET_BYTES, ParseError, Prototype,
+    LstKind, LstTable, MAX_ASSET_BYTES, ParseError, Prototype, Vfs,
     pro::{Category, PrototypeInfo, PrototypeLookup},
 };
 use std::{cell::RefCell, collections::BTreeMap};
 
 /// On-demand, cached subtype resolution through one-based prototype lists.
 pub struct LocalPrototypeCatalog<'a> {
-    vfs: &'a LocalDirProvider,
+    vfs: &'a dyn Vfs,
     lists: RefCell<BTreeMap<Category, LstTable>>,
     prototypes: RefCell<BTreeMap<u32, PrototypeInfo>>,
 }
 impl<'a> LocalPrototypeCatalog<'a> {
-    pub fn new(vfs: &'a LocalDirProvider) -> Self {
+    pub fn new(vfs: &'a dyn Vfs) -> Self {
         Self {
             vfs,
             lists: RefCell::new(BTreeMap::new()),

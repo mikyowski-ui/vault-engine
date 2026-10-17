@@ -3,6 +3,13 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
+    /// SPEC-008 type 0: three stat indices and their modifiers.
+    Drug {
+        stats: [i32; 3],
+        modifiers: [i32; 3],
+    },
+    /// Type 2: start/end indication, item prototype, perk index.
+    Withdrawal([i32; 3]),
     Script {
         script: u32,
         parameter: i32,
@@ -12,8 +19,30 @@ pub enum EventKind {
     MapUpdate,
     Midnight,
     Poison,
-    Radiation,
+    /// Type 6: radiation level and healing indication.
+    Radiation {
+        level: i32,
+        healing: i32,
+    },
+    /// Other payload-free types by number (7 flare, 8 explosion, 9 item
+    /// drain, 10 sneak, 11 failed explosion).
     Other(u32),
+}
+impl EventKind {
+    /// The SPEC-008 timed-queue type number.
+    pub fn type_number(&self) -> i32 {
+        match self {
+            Self::Drug { .. } => 0,
+            Self::Knockout => 1,
+            Self::Withdrawal(_) => 2,
+            Self::Script { .. } => 3,
+            Self::Midnight => 4,
+            Self::Poison => 5,
+            Self::Radiation { .. } => 6,
+            Self::MapUpdate => 12,
+            Self::Other(kind) => *kind as i32,
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimedEvent {
@@ -56,6 +85,10 @@ impl TimedQueue {
     pub fn pop_due(&mut self, snapshot: u64) -> Option<TimedEvent> {
         let key = *self.events.first_key_value()?.0;
         (key.0 <= snapshot).then(|| self.events.remove(&key).expect("existing event"))
+    }
+    /// The earliest due tick, if any event is queued.
+    pub fn next_due(&self) -> Option<u64> {
+        self.events.first_key_value().map(|(key, _)| key.0)
     }
     pub fn remove_object(&mut self, object: u32) {
         self.events.retain(|_, event| event.object != object);

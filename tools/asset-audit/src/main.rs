@@ -1,11 +1,21 @@
-use std::{collections::BTreeSet, error::Error, path::PathBuf, process::ExitCode};
+use std::{
+    collections::BTreeSet,
+    error::Error,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    sync::Arc,
+};
 
 use clap::Parser;
+use vault_core::{
+    CharacterSheet, WorldHost, WorldState, assets::VfsWorldAssets, host_save::SaveInfo, worldmap,
+};
 use vault_formats::{
     ArtCatalog, Fid, LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, Prototype,
     Vfs, VfsPath,
     map::MapObject,
     pro::{BasicFlags, ItemData, PrototypeData},
+    savegame::SaveGame,
     validate_asset,
 };
 use vault_vm::IntProgram;
@@ -34,6 +44,11 @@ struct Args {
     /// Re-serialize every PRO and MAP through the SPEC-003 writers.
     #[arg(long)]
     validate_writers: bool,
+    /// SPEC-008: check fixed campaign indices against the initializer, enter
+    /// every map so it joins the working saved-map set, round-trip the
+    /// central save grammar, and write/read a temporary save slot.
+    #[arg(long)]
+    validate_saves: bool,
 }
 
 /// The SPEC-003 writer's expected PRO bytes: the consumed payload with
@@ -174,7 +189,112 @@ fn audit_art_ids(vfs: &LocalDirProvider) -> Result<[[u64; 3]; 2], Box<dyn Error>
     Ok(counts)
 }
 
+/// SPEC-008 corpus checks. Returns maps entered, working `.SAV` files that
+/// reparse with the saved bit, and failures.
+fn audit_saves(dir: &Path) -> Result<[u64; 3], Box<dyn Error>> {
+    let vfs = Arc::new(LocalDirProvider::mount(dir)?);
+    let prototypes = LocalPrototypeCatalog::new(&*vfs);
+    let assets = VfsWorldAssets::new(vfs.clone(), "english")?;
+    let mut host = WorldHost::new(WorldState::new(CharacterSheet::default(), 1)?, assets);
+    host.load_campaign()?;
+    let count = host.world.gvars.as_ref().map_or(0, Vec::len);
+    let highest = worldmap::TOWNS
+        .iter()
+        .flat_map(|town| {
+            town.entrance_globals
+                .iter()
+                .copied()
+                .chain([town.known_global])
+        })
+        .chain(vault_guidance::QUESTS.iter().flatten().copied())
+        .chain(vault_guidance::DISK_GLOBALS)
+        .chain([
+            worldmap::REGION_GLOBAL,
+            worldmap::ENTRY_GLOBAL,
+            worldmap::BASE_DESTROYED_GLOBAL,
+            worldmap::CATHEDRAL_DESTROYED_GLOBAL,
+            vault_guidance::WATER_CHIP_GLOBAL,
+        ])
+        .max()
+        .unwrap_or(0);
+    println!("Campaign globals: {count}; highest fixed SPEC-008 index: {highest}");
+    if highest >= count {
+        return Err(format!("campaign initializer lacks global {highest}").into());
+    }
+    let mut maps: Vec<_> = vfs
+        .files()
+        .filter(|path| path.extension() == Some("map"))
+        .map(|path| path.as_str().to_string())
+        .collect();
+    maps.sort();
+    let [mut entered, mut saved, mut failed] = [0_u64; 3];
+    for path in &maps {
+        match host.load_map(path) {
+            Ok(()) => entered += 1,
+            Err(error) => {
+                failed += 1;
+                eprintln!("FAIL {path}: {error}");
+            }
+        }
+    }
+    host.world.persist_current_map(true);
+    for (name, bytes) in &host.world.persistence.maps {
+        match MapFile::parse(bytes, &prototypes) {
+            Ok(map) if map.header.flags.0 & 1 != 0 => saved += 1,
+            Ok(_) => {
+                failed += 1;
+                eprintln!("FAIL {name}: saved-state bit clear");
+            }
+            Err(error) => {
+                failed += 1;
+                eprintln!("FAIL {name}: {error}");
+            }
+        }
+    }
+    let save = host.build_save(&SaveInfo::default())?;
+    let central = save.write()?;
+    if SaveGame::parse(&central, count, &prototypes)?.write()? != central {
+        return Err("central SAVE.DAT grammar round trip changed bytes".into());
+    }
+    println!(
+        "SAVE.DAT: {} bytes, {} manifest maps, automap {} bytes",
+        central.len(),
+        save.maps.len(),
+        save.automap_length
+    );
+    let root = tempfile::tempdir()?;
+    host.save_game(root.path(), 1, &SaveInfo::default())?;
+    let (gvars, ticks) = (host.world.gvars.clone(), host.world.clock.ticks);
+    let working: Vec<_> = host.world.persistence.maps.keys().cloned().collect();
+    host.load_game(root.path(), 1)?;
+    if host.world.gvars != gvars
+        || host.world.clock.ticks != ticks
+        || host
+            .world
+            .persistence
+            .maps
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            != working
+    {
+        return Err("save slot round trip did not restore campaign/time/map state".into());
+    }
+    println!(
+        "Save slot round trip: restored {}",
+        host.world.current_map_name().unwrap_or_default()
+    );
+    Ok([entered, saved, failed])
+}
+
 fn audit(args: Args) -> Result<(), Box<dyn Error>> {
+    if args.validate_saves {
+        let [entered, saved, failed] = audit_saves(&args.corpus_dir)?;
+        println!("Saves: {entered} maps entered, {saved} working saves, {failed} failed");
+        if failed != 0 {
+            return Err(format!("{failed} save check(s) failed").into());
+        }
+    }
     let vfs = LocalDirProvider::mount(args.corpus_dir)?;
     let prototypes = LocalPrototypeCatalog::new(&vfs);
     let mut counts = [0_u64; EXTENSIONS.len()];

@@ -458,6 +458,19 @@ impl MapObjects {
     }
 }
 impl MapObject {
+    /// One object tree outside a map stream (the save's player record):
+    /// the same record/containment grammar with no count prefixes.
+    pub(crate) fn read_tree(
+        r: &mut Reader<'_>,
+        prototypes: &impl PrototypeLookup,
+        elevation: u8,
+    ) -> Result<Self, ParseError> {
+        let mut budget = MAX_OBJECTS;
+        Self::read(r, prototypes, true, elevation, None, 0, &mut budget)
+    }
+    pub(crate) fn write_tree(&self, out: &mut Vec<u8>) -> Result<(), ParseError> {
+        self.write(out, self.elevation, 0)
+    }
     fn read(
         r: &mut Reader<'_>,
         prototypes: &impl PrototypeLookup,

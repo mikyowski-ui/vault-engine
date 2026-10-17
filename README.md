@@ -10,11 +10,14 @@ Phase 3 Host and Phase 4 (`P3-03`, `P4-02`, `P4-03`) add the host opcode catalog
 GAM/GCD resources, world state, character statistics, shuffled RNG, and interactive
 script-driven dialogue. The SPEC-007 phase adds the complete art-identifier codec,
 hex routing, rays/perception, and combat resolution and turns, and closes the
-remaining SPEC-001–006 behaviors (see "Spec completion notes" below).
+remaining SPEC-001–006 behaviors (see "Spec completion notes" below). The SPEC-008
+phase adds DAT archives and LZSS, selected-database lookup, legacy save slots with
+the working saved-map set and automap database, world travel, and Pip-Boy status
+and rest.
 
 `AGENTS.md` is the repository's implementation policy. Format behavior follows
 `specs/approved/SPEC-001-pal-frm-lst.md` through
-`SPEC-007-critter-fid-pathfinding-combat.md`.
+`SPEC-008-dat-saves-and-worldmap.md`.
 No original game
 data is needed to build, test, or run the synthetic shell and preview fixtures.
 
@@ -25,7 +28,7 @@ data is needed to build, test, or run the synthetic shell and preview fixtures.
 | `vault-formats` | VFS, asset/prototype/map parsers, projection and picking |
 | `vault-core` | Authoritative world, host services, stats/RNG, dialogue, save foundations |
 | `vault-vm` | INT loader, two-stack core interpreter, explicit host interfaces |
-| `vault-guidance` | Library scaffold for progression and diagnostic hooks |
+| `vault-guidance` | Pip-Boy holodisk and quest status from campaign globals |
 | `vault-render` | Indexed sprite/text/map/dialogue composition and palette rendering |
 | `vault-debug` | Library scaffold for inspectors and asset browsing |
 | `vault-platform` | Desktop shell, asset preview, input command logging |
@@ -89,7 +92,16 @@ cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-forma
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-art-ids
 # Round-trip every PRO/MAP through the SPEC-003 writers:
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-writers
+# SPEC-008: enter every map, round-trip SAVE.DAT, and write/read a temporary slot:
+cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-saves
 ```
+
+`--validate-saves` checks that the campaign initializer covers every fixed
+SPEC-008 campaign index (towns, entrances, quests, disks, encounter globals),
+enters each map through the world host so it joins the working saved-map set,
+requires every working `.SAV` to reparse with the saved bit, requires the central
+`SAVE.DAT` to be a byte-exact parse/write fixpoint, and writes then restores a
+save slot in a temporary directory.
 
 `--validate-art-ids` reports, per source, identifiers whose decoded file exists,
 decodable identifiers whose file is absent from the mounted corpus (`MISSING`
@@ -474,6 +486,98 @@ death animations end on their static art; completed sequences retire (returning
 critters to standing unless flag 4), so `anim_busy` reports `-1` only while a
 nontrivial registration is active.
 
+## Archives, saves, world travel, and Pip-Boy (SPEC-008)
+
+`DatArchive` reads the byte-zero root and per-directory tables (one-byte name
+lengths, big-endian words, `data_size` of at least 16) and extracts members by
+attribute word: exactly zero or `0x10` is the legacy single LZSS stream whose
+output must equal the logical length, `0x20` is raw, and `0x40` is the blocked
+form (two-byte headers; every block must produce exactly
+`min(16384, remaining)` bytes). The LZSS decoder uses the 4096-byte ring with
+4078 leading spaces, cursor `0xFEE`, LSB-first control bits, absolute 12-bit
+starts, and sequential overlapping copies. Truncated tokens, over-expansion,
+short or empty blocks, and offsets past EOF are errors rather than unbounded
+reads or loops. The reference leaves the ring tail uninitialized; it is zeroed
+per file here (and retained across that file's blocks), which only matters for
+streams that read the tail before writing it.
+`Database` and `DatProvider` implement selected-database lookup: the loose patch
+directory first, then that database's archive, with `art/critters/` selecting
+the critter database and no fallback between databases. `VfsWorldAssets` and
+`LocalPrototypeCatalog` accept any `Vfs`, so the world host runs from a loose
+directory or from `DatProvider` archives. The desktop shell's `--corpus-dir`
+still mounts a loose directory.
+
+`savegame` reads and writes the strict 30051-byte header (only the first 18
+signature bytes are compared; versions are not enforced) and all 27 ordered
+payloads with no length prefixes. The campaign count G comes from the installed
+initializer; the queue grammar uses type-dependent payloads; manifest names are
+bounded to 12 bytes before the NUL; trailing bytes are rejected. `AutomapDb`
+holds `MAPS/AUTOMAP.DB` (version 1, the 797-byte empty table with the excluded
+map set, LZSS rasters that stop at 10000 output bytes, and the `X = 200 - column`
+raster writer that spills column zero into the next row). Captures are stored as
+raw entries, since the specification defines no encoder: rewriting an entry
+shifts later offsets and the recorded length, and appending requires EOF to equal
+the recorded length.
+
+Leaving a map writes its `.SAV` image (saved bit set, live globals/locals,
+scripts, and placed objects with inventories) into an in-memory working
+saved-map set and captures its automap rasters. Entering a map prefers that image
+over the asset. The player is saved centrally. Party members travel with the
+player between maps but are written to the current map in a save slot. The
+per-load map-script instance is recreated on each entry, as in SPEC-006 step 6,
+so its previous local block is not reattached. `WorldHost::save_game` writes
+`SAVEGAME/SLOTnn/SAVE.DAT`, the manifest's `.SAV` companions, and `AUTOMAP.SAV`,
+renaming old files to `.BAK` first and restoring them if a write fails.
+`load_game` reads and validates the header, every payload, every companion, and
+the automap length before it changes any state, which is safer than the
+reference's partial loads. It then restores in the reference order: reset, game
+tick, campaign snapshot A, working set, current map, then the player and later
+components (snapshot B is ignored). An active saved combat resumes the player's
+turn without an AP refill. The saved next-identity counter is installed before
+the map load, so temporary objects cannot take saved inventory identities.
+Payloads the engine does not model are carried verbatim: preferences outside
+difficulty, combat difficulty, violence, and burning-run; movies; skill
+timestamps; interface words; the pending-perk byte; and ranks for unmapped perk
+indices. Perk ranks map through `WorldRules::perk_ids`. The platform supplies
+the thumbnail and host date/time (`SaveInfo`). The base calendar year is
+`WorldRules::calendar_year` (default 0), because the specs define only the
+non-leap month/day calendar.
+
+`worldmap` compiles the terrain, frequency, and region grids, the town table,
+and the hotspot catalog from the approved specification at build time. It
+implements the asymmetric pixel stepper (the X-major branch can finish one Y
+pixel short), binary32 W/Q travel speed (inputs that would divide by zero or go
+negative are rejected), the terrain schedules on one shared counter, the
+29-stride discovery reveal (3 x 3, or 5 x 5 with Scout, plus the west/ocean
+thresholds), 3d6 encounter classes with town suppression, special encounters
+(restarting the whole test when the drawn special is consumed), terrain-map
+redraws, globals 65/32, the town-knowledge refresh (known value exactly 1,
+byte-narrowed entrances, Vault 13's tick rule, alternate rows 12-14), buttons,
+labels, and first entry. `WorldHost::travel_iteration` runs one loop iteration:
+schedule steps and walk-mask stops, then the Q charge with queue interruption,
+discovery every third iteration, then 24-hour party healing and the encounter
+check every W iterations. Script-directed town travel skips encounters and the
+mask and charges no city time. `vault-guidance` derives holodisk lists, pages,
+and quest status from the fixed tables. Pip-Boy rest (`WorldHost::rest`)
+implements eligibility, the A/N/K step allocation, queue-interrupted steps, the
+strict final catch-up, credited minutes with three-hour healing at 180,
+until-healed (including the extra chunk after full HP), and wake-up presets.
+
+Where SPEC-008 leaves details open, this engine makes these choices:
+
+- A desert/coast iteration resets the terrain counter to zero, and the mountain
+  and city schedules treat a nonpositive counter as expired.
+- Within an iteration, steps come before the time charge, discovery, and the
+  interval check.
+- Town and destination jitter uses one signed `-16..=16` draw per axis.
+- Travel time charges never move the clock backwards.
+- The walking-mask contents are host-supplied; without a mask nothing blocks.
+- Automap capture uses objects' existing seen flags and runs at every map save.
+- Town knowledge refreshes on town entry.
+- Rest arithmetic uses binary64.
+- Map-exit script request failures are diagnostics, like map-entry failures,
+  so a missing compiled map script cannot trap transitions.
+
 ## Spec completion notes
 
 These close behaviors that the earlier phases left open:
@@ -500,7 +604,8 @@ These close behaviors that the earlier phases left open:
 - SPEC-006: elevation-change map updates, speech completion, the queue
   stop-on-nonzero rule, reputation inputs (campaign indices supplied by
   `WorldRules`), talk reachability/12-tile checks, campaign-open failure, and
-  map-load script failures as diagnostics.
+  map-load and map-exit script failures as diagnostics. Map loads now consult
+  the SPEC-008 working saved-map set before the asset lookup.
 
 ## Core contracts
 

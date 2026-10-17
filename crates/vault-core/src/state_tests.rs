@@ -1,3 +1,4 @@
+use crate::fixture_state as fixture;
 use crate::{
     assets::{VfsWorldAssets, WorldAssets},
     dialogue::*,
@@ -16,9 +17,6 @@ use vault_vm::{
     IntProgram, RunOutcome, Value, Vm, VmError,
     extensions::{self, Rule},
 };
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/state/support.rs"]
-mod fixture;
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/vm/support.rs"]
 mod vm_fixture;

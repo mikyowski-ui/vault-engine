@@ -2,8 +2,8 @@ use crate::{WorldError, dialogue::HeadDefinition};
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 use vault_formats::{
     ArtCatalog, Fid, Font, FontKind, FontSet, FrmArchive, GamFile, GamSection, GcdFile,
-    LocalDirProvider, LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES, MapFile,
-    MsgCatalog, Prototype, Vfs, VfsPath, pro::Category,
+    LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype, Vfs,
+    VfsPath, pro::Category,
 };
 use vault_vm::IntProgram;
 
@@ -96,7 +96,7 @@ pub trait WorldAssets {
     }
 }
 pub struct VfsWorldAssets {
-    pub vfs: Arc<LocalDirProvider>,
+    pub vfs: Arc<dyn Vfs>,
     pub language: String,
     prototypes: RefCell<BTreeMap<u32, Arc<Prototype>>>,
     messages: RefCell<BTreeMap<String, MsgCatalog>>,
@@ -107,7 +107,7 @@ pub struct VfsWorldAssets {
     fonts: RefCell<Option<Arc<FontSet>>>,
 }
 impl VfsWorldAssets {
-    pub fn new(vfs: Arc<LocalDirProvider>, language: &str) -> Result<Self, WorldError> {
+    pub fn new(vfs: Arc<dyn Vfs>, language: &str) -> Result<Self, WorldError> {
         if language.is_empty()
             || !language
                 .bytes()
@@ -384,13 +384,13 @@ impl WorldAssets for VfsWorldAssets {
         let saved = path.strip_suffix(".map").map(|stem| format!("{stem}.sav"));
         if let Some(saved) = saved
             && let Ok(bytes) = self.read(&saved)
-            && let Ok(map) = MapFile::parse(&bytes, &LocalPrototypeCatalog::new(&self.vfs))
+            && let Ok(map) = MapFile::parse(&bytes, &LocalPrototypeCatalog::new(&*self.vfs))
         {
             return Ok(map);
         }
         Ok(MapFile::parse(
             &self.read(path)?,
-            &LocalPrototypeCatalog::new(&self.vfs),
+            &LocalPrototypeCatalog::new(&*self.vfs),
         )?)
     }
     fn map_index(&self, name: &[u8]) -> Option<i32> {

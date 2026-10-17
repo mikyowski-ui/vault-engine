@@ -1,0 +1,268 @@
+//! SPEC-008 working save state: the saved-map set (`MAPS/*.SAV`), the
+//! automap database, the live-world area-map `.SAV` export (§2.9), and the
+//! save components this engine carries without interpreting them.
+use crate::{ObjectRef, WorldState, world::ScriptInstance};
+use std::collections::BTreeMap;
+use vault_formats::{
+    AutomapDb, automap,
+    map::{
+        InventoryEntry, MapFile, MapObject, MapScript, ObjectState, ScriptBlock, ScriptCategory,
+        ScriptPrefix,
+    },
+    pro::{MapFlags, PackedLocation, ScriptFlags},
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Persistence {
+    /// Working `MAPS/<NAME>.SAV` images keyed by uppercase file name.
+    pub maps: BTreeMap<String, Vec<u8>>,
+    /// The loaded map's working `.SAV` name, from its requested file name.
+    pub current_map: Option<String>,
+    /// Working `MAPS/AUTOMAP.DB`.
+    pub automap: AutomapDb,
+    /// Save payload 17 display flags.
+    pub automap_flags: u32,
+    /// Payload 2's water-warning/movie-status byte.
+    pub campaign_status: u8,
+    /// Perk-rank words for indices without a configured perk mapping.
+    pub perk_ranks: [i32; 64],
+    /// Preference words not modeled by world state.
+    pub preferences: [u32; 20],
+    pub pending_perk: u8,
+    pub movies: [u8; 14],
+    pub skill_uses: [[i32; 3]; 18],
+    pub interface: [i32; 4],
+}
+impl Default for Persistence {
+    fn default() -> Self {
+        Self {
+            maps: BTreeMap::new(),
+            current_map: None,
+            automap: AutomapDb::default(),
+            automap_flags: 0,
+            campaign_status: 0,
+            perk_ranks: [0; 64],
+            preferences: [0; 20],
+            pending_perk: 0,
+            movies: [0; 14],
+            skill_uses: [[0; 3]; 18],
+            interface: [0; 4],
+        }
+    }
+}
+
+/// A map resource name's working `.SAV` file name: the uppercase stem of
+/// the final path component plus `.SAV`.
+pub fn saved_map_name(name: &[u8]) -> Option<String> {
+    let name = &name[..name.iter().position(|b| *b == 0).unwrap_or(name.len())];
+    let file = std::str::from_utf8(name).ok()?.rsplit(['/', '\\']).next()?;
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    (!stem.is_empty() && stem.is_ascii()).then(|| format!("{}.SAV", stem.to_ascii_uppercase()))
+}
+
+impl WorldState {
+    /// The next object identity the allocator will try (save payload 24).
+    pub fn next_object_id(&self) -> u32 {
+        self.next_uid
+    }
+    pub fn set_next_object_id(&mut self, id: u32) {
+        self.next_uid = id.max(1);
+    }
+    /// One object's record with live HP/poison/radiation and money synced
+    /// back into the serialized state.
+    fn live_record(&self, reference: ObjectRef) -> Option<MapObject> {
+        let object = self.get(reference)?;
+        let mut raw = object.raw.clone();
+        match &mut raw.state {
+            ObjectState::Critter(state) => {
+                if let Some(sheet) = &object.character {
+                    state.hp = sheet.current_hp;
+                    state.poison = sheet.poison;
+                    state.radiation = sheet.radiation;
+                }
+            }
+            ObjectState::Other { word, .. } => {
+                if let Some(money) = object.money {
+                    *word = money as u32;
+                }
+            }
+        }
+        Some(raw)
+    }
+    /// The live object tree rooted at `reference`, inventories nested
+    /// depth-first in inventory order.
+    pub fn object_tree(&self, reference: ObjectRef) -> Option<MapObject> {
+        self.object_tree_at(reference, 0)
+    }
+    fn object_tree_at(&self, reference: ObjectRef, depth: usize) -> Option<MapObject> {
+        if depth > vault_formats::map::MAX_INVENTORY_DEPTH {
+            return None;
+        }
+        let mut raw = self.live_record(reference)?;
+        raw.inventory = self
+            .get(reference)?
+            .inventory
+            .iter()
+            .filter_map(|(child, quantity)| {
+                Some(InventoryEntry {
+                    quantity: (*quantity).max(0) as u32,
+                    object: self.object_tree_at(*child, depth + 1)?,
+                })
+            })
+            .collect();
+        raw.inventory_capacity = raw.inventory_capacity.max(raw.inventory.len());
+        Some(raw)
+    }
+    fn script_record(&self, instance: &ScriptInstance, template: Option<&MapScript>) -> MapScript {
+        let mut record = template.cloned().unwrap_or(MapScript {
+            id: instance.id,
+            link: -1,
+            prefix: ScriptPrefix::None,
+            stored_flags: ScriptFlags(0),
+            flags: ScriptFlags(0),
+            file_index: instance.file,
+            object_id: -1,
+            local_base: -1,
+            stored_local_count: 0,
+            local_count: 0,
+            result: 0,
+            event: 0,
+            parameter: 0,
+            action: 0,
+            override_default: 0,
+            execution_state: 0,
+            quantity: 0,
+            annotations: 0,
+            file_offset: 0,
+        });
+        record.flags = ScriptFlags(instance.flags);
+        record.stored_flags = record.flags;
+        record.file_index = instance.file;
+        record.object_id = self.get(instance.owner).map_or(-1, |o| o.raw.id as i32);
+        record.local_base = instance.local_base;
+        record.local_count = instance.local_count.min(i32::MAX as usize) as i32;
+        record.stored_local_count = record.local_count;
+        record.result = instance.result;
+        record.event = instance.event;
+        record.parameter = instance.fixed;
+        record.action = instance.action;
+        record.override_default = i32::from(instance.overridden);
+        if let Some((hex, elevation, radius)) = instance.spatial {
+            let unchanged = matches!(&record.prefix, ScriptPrefix::Spatial { location, .. }
+                if location.hex() as i32 == hex && location.elevation() == elevation);
+            if !unchanged {
+                record.prefix = ScriptPrefix::Spatial {
+                    location: PackedLocation(
+                        (u32::from(elevation) << 29) | (hex as u32 & 0x03ff_ffff),
+                    ),
+                    radius,
+                };
+            } else if let ScriptPrefix::Spatial { radius: stored, .. } = &mut record.prefix {
+                *stored = radius;
+            }
+        }
+        record
+    }
+    /// SPEC-008 §2.9 area-map `.SAV` image of the current map: the saved
+    /// bit set, live globals/locals, every script instance except the
+    /// per-load map script, and placed top-level objects with nested
+    /// inventories. The player (saved centrally) is excluded, as are party
+    /// members unless `include_party` (they travel with the player between
+    /// maps but are saved on the current map in a save slot).
+    pub fn export_map(&self, include_party: bool) -> MapFile {
+        let mut map = self.map.clone();
+        map.header.flags = MapFlags(map.header.flags.0 | MapFlags::SAVED.0);
+        map.mvars = self.mvars.clone();
+        map.lvars = self.lvars.clone();
+        let templates: BTreeMap<u32, &MapScript> = self
+            .map
+            .scripts
+            .iter()
+            .flat_map(ScriptCategory::active)
+            .map(|script| (script.id, script))
+            .collect();
+        let mut records: [Vec<MapScript>; 5] = Default::default();
+        for sid in &self.script_order {
+            let Some(instance) = self.scripts.get(sid) else {
+                continue;
+            };
+            let category = (*sid >> 24) as usize;
+            if Some(*sid) == self.map_script || category >= 5 {
+                continue;
+            }
+            records[category].push(self.script_record(instance, templates.get(sid).copied()));
+        }
+        map.scripts = records.map(|slots| ScriptCategory {
+            declared_count: slots.len(),
+            blocks: vec![ScriptBlock {
+                active: slots.len(),
+                slots,
+            }],
+        });
+        map.objects.elevations = std::array::from_fn(|_| Vec::new());
+        for (reference, object) in self.iter() {
+            if reference == self.player
+                || object.owner.is_some()
+                || object.raw.hex.is_none()
+                || object.raw.elevation > 2
+                || (!include_party && self.party.contains(&reference))
+            {
+                continue;
+            }
+            if let Some(tree) = self.object_tree(reference) {
+                map.objects.elevations[usize::from(object.raw.elevation)].push(tree);
+            }
+        }
+        map.objects.total = map.objects.elevations.iter().map(Vec::len).sum();
+        map
+    }
+    /// Capture the current map's automap rasters into the working database
+    /// for each elevation with tile data. Seen-object bookkeeping is taken
+    /// from the objects' existing seen flags.
+    pub fn capture_automap(&mut self) {
+        let number = self.map.header.map_number;
+        if !(0..automap::MAPS as i32).contains(&number) {
+            return;
+        }
+        let placed: Vec<MapObject> = self
+            .iter()
+            .filter(|(_, object)| object.owner.is_none() && object.raw.hex.is_some())
+            .map(|(_, object)| object.raw.clone())
+            .collect();
+        for elevation in 0..3_u8 {
+            if self.map.tiles[usize::from(elevation)].is_none() {
+                continue;
+            }
+            let raster = automap::raster_from_objects(&placed, elevation);
+            if let Err(error) =
+                self.persistence
+                    .automap
+                    .store(number as usize, usize::from(elevation), &raster)
+            {
+                self.diagnostic(format!("automap capture failed: {error}"));
+            }
+        }
+    }
+    /// The current map's working `.SAV` name: its requested file name, else
+    /// its header resource name.
+    pub fn current_map_name(&self) -> Option<String> {
+        self.persistence
+            .current_map
+            .clone()
+            .or_else(|| saved_map_name(&self.map.header.name))
+    }
+    /// Write the current map into the working saved-map set (and capture its
+    /// automap); a map without a usable resource name is not persisted.
+    pub fn persist_current_map(&mut self, include_party: bool) {
+        let Some(name) = self.current_map_name() else {
+            return;
+        };
+        match self.export_map(include_party).write() {
+            Ok(bytes) => {
+                self.persistence.maps.insert(name, bytes);
+            }
+            Err(error) => self.diagnostic(format!("saved map {name} not written: {error}")),
+        }
+        self.capture_automap();
+    }
+}

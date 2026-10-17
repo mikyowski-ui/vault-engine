@@ -11,7 +11,11 @@ mod host_animation;
 mod host_combat;
 mod host_game;
 mod host_movement;
+pub mod host_rest;
+pub mod host_save;
+mod host_travel;
 pub mod library;
+pub mod persistence;
 pub mod queue;
 pub mod rng;
 pub mod routing;
@@ -19,9 +23,11 @@ pub mod save;
 pub mod sequence;
 pub mod stats;
 pub mod world;
+pub mod worldmap;
 pub use host::WorldHost;
 pub use host_combat::{Refusal, Spray, spray_budgets};
 pub use host_movement::{Movement, StepOutcome};
+pub use host_travel::TravelOutcome;
 pub use world::{ObjectAction, ObjectRef, ScriptEvent, WorldEffect, WorldRules, WorldState};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -62,10 +68,18 @@ mod combat_tests;
 pub(crate) mod fixture_assets;
 #[cfg(test)]
 #[allow(dead_code)]
+#[path = "../../../tests/fixtures/state/support.rs"]
+pub(crate) mod fixture_state;
+#[cfg(test)]
+#[allow(dead_code)]
 #[path = "../../../tests/fixtures/world/support.rs"]
 pub(crate) mod fixture_world;
 #[cfg(test)]
+mod persistence_tests;
+#[cfg(test)]
 mod state_tests;
+#[cfg(test)]
+mod worldmap_tests;
 
 pub use handles::{EntityId, EntityStore};
 pub use sequence::{CommandId, EventId, SequenceExhausted, SequenceIds};

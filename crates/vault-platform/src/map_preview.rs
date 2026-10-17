@@ -54,7 +54,7 @@ impl MapArt for MapSprites {
     }
 }
 impl MapSprites {
-    fn load(vfs: &LocalDirProvider, map: &MapFile) -> AppResult<Self> {
+    fn load(vfs: &dyn Vfs, map: &MapFile) -> AppResult<Self> {
         let mut needed = BTreeSet::new();
         for tiles in map.tiles.iter().flatten() {
             for tile in tiles {
@@ -158,7 +158,7 @@ impl MapPreview {
         }
         host.load_map(path.as_str())?;
         let map = host.world.render_snapshot();
-        let art = MapSprites::load(&host.assets.vfs, &map)?;
+        let art = MapSprites::load(&*host.assets.vfs, &map)?;
         let mut view = MapView::new(&map, 640, 380)?;
         view.grid = HexGrid::centered(host.world.camera_hex, 640, 380)?;
         view.elevation = host.world.elevation;
@@ -212,7 +212,7 @@ impl MapPreview {
                         .contains_key(&(category, object.art_id, object.orientation))
                 })
         }) {
-            self.art = MapSprites::load(&self.host.assets.vfs, &map)?;
+            self.art = MapSprites::load(&*self.host.assets.vfs, &map)?;
         }
         let mut image = render_map(&map, self.view, &self.art)?;
         for y in 0..image.height() {

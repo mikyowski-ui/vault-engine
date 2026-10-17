@@ -163,7 +163,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "tempfile",
+ "vault-core",
  "vault-formats",
+ "vault-guidance",
  "vault-vm",
 ]
 
@@ -2199,6 +2201,9 @@ dependencies = [
 [[package]]
 name = "vault-guidance"
 version = "0.1.0"
+dependencies = [
+ "vault-formats",
+]
 
 [[package]]
 name = "vault-platform"

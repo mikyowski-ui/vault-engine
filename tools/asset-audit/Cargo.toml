@@ -7,11 +7,11 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
-vault-formats.workspace = true
-vault-vm.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
+vault-core.workspace = true
+vault-formats.workspace = true
+vault-guidance.workspace = true
+vault-vm.workspace = true
 
 [lints]
 workspace = true

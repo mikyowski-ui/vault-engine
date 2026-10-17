@@ -21,6 +21,7 @@ publish = false
 [workspace.dependencies]
 vault-core = { path = "crates/vault-core" }
 vault-formats = { path = "crates/vault-formats" }
+vault-guidance = { path = "crates/vault-guidance" }
 vault-render = { path = "crates/vault-render" }
 vault-vm = { path = "crates/vault-vm" }
 bytemuck = "1.24"

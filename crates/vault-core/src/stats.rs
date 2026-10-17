@@ -117,6 +117,8 @@ pub struct CharacterSheet {
     pub selected_perks: u8,
     pub remaining_creation: i32,
     pub body: i32,
+    /// Critter experience reward (not the player's accumulated experience).
+    pub experience_reward: i32,
     pub kill_category: i32,
 }
 impl Default for CharacterSheet {
@@ -147,6 +149,7 @@ impl Default for CharacterSheet {
             selected_perks: 0,
             remaining_creation: 0,
             body: 0,
+            experience_reward: 0,
             kill_category: 0,
         };
         sheet.recompute(StatContext::default());
@@ -185,6 +188,7 @@ impl CharacterSheet {
             bonus: critter.bonus_stats,
             invested: critter.skills,
             body: critter.body,
+            experience_reward: critter.experience,
             kill_category: critter.kill_category,
             ..Self::default()
         };

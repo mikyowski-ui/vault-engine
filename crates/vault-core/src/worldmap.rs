@@ -1,0 +1,627 @@
+//! SPEC-008 §2.7 and §3.4-§3.7 world travel: pixel coordinates over the
+//! fixed 28 x 30 cell grids, the asymmetric stepper, binary32 travel speed,
+//! terrain schedules, discovery, encounter dice, and town knowledge.
+use crate::{RandomSource, WorldError};
+use std::sync::Arc;
+use vault_formats::savegame::WorldMapSave;
+
+/// One row of the fixed Section 3.7 town table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Town {
+    pub name: &'static str,
+    /// `[column, row]` of the town's 50-pixel cell.
+    pub cell: [usize; 2],
+    pub known_global: usize,
+    pub entrance_globals: &'static [usize],
+}
+
+/// One compiled town-map hotspot; missing slots are all zero/empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hotspot {
+    pub x: i32,
+    pub y: i32,
+    pub entry: i32,
+    pub map: &'static str,
+}
+impl Hotspot {
+    pub const EMPTY: Self = Self {
+        x: 0,
+        y: 0,
+        entry: 0,
+        map: "",
+    };
+}
+
+include!(concat!(env!("OUT_DIR"), "/world_tables.rs"));
+
+pub const WORLD_SIZE: [i32; 2] = [1400, 1500];
+pub const CELL: i32 = 50;
+pub const COLUMNS: usize = 28;
+pub const ROWS: usize = 30;
+/// The saved discovery array's larger stride and row count.
+pub const STRIDE: usize = 29;
+pub const SAVED_ROWS: usize = 31;
+pub const KNOWLEDGE_ROWS: usize = 15;
+pub const ENTRANCE_SLOTS: usize = 7;
+/// The center of Vault 13's cell (16,1).
+pub const START: [i32; 2] = [825, 75];
+pub const VIEWPORT_ORIGIN: [i32; 2] = [22, 21];
+pub const VIEWPORT_SIZE: [i32; 2] = [450, 442];
+pub const SCROLL_LIMIT: [i32; 2] = [950, 1058];
+/// West/ocean reveal thresholds for rows 0-29.
+pub const WEST_REVEAL: [usize; ROWS] = [
+    0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 3, 4, 5, 5, 5, 5, 8, 11, 12, 14, 14, 17, 18, 19, 19, 20, 20,
+    20, 21,
+];
+/// A 3d6 sum strictly below this selects an encounter, by frequency class.
+pub const ENCOUNTER_BELOW: [i32; 4] = [6, 7, 9, 10];
+/// Inclusive 1-100 upper bounds, maps, and consumed bits.
+pub const SPECIAL_ENCOUNTERS: [(i32, &str, u32); 6] = [
+    (30, "FOOT.MAP", 0x01),
+    (50, "TALKCOW.MAP", 0x02),
+    (70, "USEDCAR.MAP", 0x04),
+    (80, "TARDIS.MAP", 0x08),
+    (90, "FSAUSER.MAP", 0x10),
+    (100, "COLATRUK.MAP", 0x20),
+];
+pub const ALL_SPECIALS: u32 = 0x3f;
+/// Desert, mountain, city, coast choices; empty strings are unpopulated.
+pub const TERRAIN_MAPS: [[&str; 3]; 4] = [
+    ["DESERT1.MAP", "DESERT2.MAP", "DESERT3.MAP"],
+    ["MOUNTN1.MAP", "MOUNTN2.MAP", ""],
+    ["CITY1.MAP", "", ""],
+    ["COAST1.MAP", "COAST2.MAP", ""],
+];
+/// Campaign globals written before an encounter/town/dropout map load.
+pub const REGION_GLOBAL: usize = 65;
+pub const ENTRY_GLOBAL: usize = 32;
+pub const BASE_DESTROYED_GLOBAL: usize = 17;
+pub const CATHEDRAL_DESTROYED_GLOBAL: usize = 18;
+pub const MILITARY_BASE: usize = 8;
+pub const CATHEDRAL: usize = 11;
+pub const BROTHERHOOD: usize = 7;
+/// Vault 13 exposes all four entrances at/after this game tick.
+pub const VAULT13_OPEN_TICK: u64 = 864000;
+/// Town-map presentation: picture art `156 + town`, buttons from event 514.
+pub const TOWN_PICTURE_BASE: i32 = 156;
+pub const TOWN_BUTTON_EVENT: i32 = 514;
+pub const TOWN_BUTTON_SIZE: [i32; 2] = [164, 25];
+/// Safe bound on the reference's unbounded redraw loops.
+const DRAW_LIMIT: usize = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Terrain {
+    Desert,
+    Mountain,
+    City,
+    Coast,
+}
+
+/// The playable 50-pixel cell `[column, row]` holding a world pixel.
+pub fn cell_of(position: [i32; 2]) -> Option<[usize; 2]> {
+    let [column, row] = position.map(|value| value.div_euclid(CELL));
+    ((0..COLUMNS as i32).contains(&column) && (0..ROWS as i32).contains(&row))
+        .then_some([column as usize, row as usize])
+}
+pub fn terrain(cell: [usize; 2]) -> Terrain {
+    match TERRAIN[cell[1]][cell[0]] {
+        0 => Terrain::Desert,
+        1 => Terrain::Mountain,
+        2 => Terrain::City,
+        _ => Terrain::Coast,
+    }
+}
+pub fn frequency(cell: [usize; 2]) -> u8 {
+    FREQUENCY[cell[1]][cell[0]]
+}
+pub fn region(cell: [usize; 2]) -> u8 {
+    REGION[cell[1]][cell[0]]
+}
+/// Town detection compares the cell with the fixed town locations.
+pub fn town_at(cell: [usize; 2]) -> Option<usize> {
+    TOWNS.iter().position(|town| town.cell == cell)
+}
+pub fn clamp_scroll(origin: [i32; 2]) -> [i32; 2] {
+    [
+        origin[0].clamp(0, SCROLL_LIMIT[0]),
+        origin[1].clamp(0, SCROLL_LIMIT[1]),
+    ]
+}
+/// A town destination near the cell center with independent signed 0-16
+/// pixel jitter on each axis.
+pub fn town_target(town: usize, rng: &mut impl RandomSource) -> Result<[i32; 2], WorldError> {
+    let town = TOWNS
+        .get(town)
+        .ok_or_else(|| WorldError::Invalid(format!("town {town} outside 0-11")))?;
+    let [column, row] = town.cell.map(|value| value as i32);
+    Ok([
+        CELL * column + 25 + rng.range(-16, 16)?,
+        CELL * row + 25 + rng.range(-16, 16)?,
+    ])
+}
+/// A knowledge row's hotspots in slot order, stopping at the first zero X
+/// or Y.
+pub fn hotspots(row: usize) -> impl Iterator<Item = (usize, &'static Hotspot)> {
+    HOTSPOTS
+        .get(row)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .take_while(|(_, hotspot)| hotspot.x != 0 && hotspot.y != 0)
+}
+
+/// SPEC-008 §3.4 movement: absolute differences, signs, a zero error
+/// accumulator, and a zero step count. The X-major branch's strict
+/// `error > A` comparison can finish one Y pixel short of the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stepper {
+    a: i32,
+    b: i32,
+    sign: [i32; 2],
+    error: i32,
+    count: i32,
+}
+impl Stepper {
+    pub fn new(from: [i32; 2], to: [i32; 2]) -> Self {
+        let delta = [to[0] - from[0], to[1] - from[1]];
+        Self {
+            a: delta[0].abs(),
+            b: delta[1].abs(),
+            sign: delta.map(i32::signum),
+            error: 0,
+            count: 0,
+        }
+    }
+    /// One actual movement step from `position`; `None` completes the path.
+    pub fn step(&mut self, position: [i32; 2]) -> Option<[i32; 2]> {
+        self.count += 1;
+        let [mut x, mut y] = position;
+        if self.a <= self.b {
+            if self.count > self.b {
+                return None;
+            }
+            self.error += self.a;
+            if self.error > 0 {
+                self.error -= self.b;
+                x += self.sign[0];
+            }
+            y += self.sign[1];
+        } else {
+            if self.count > self.a {
+                return None;
+            }
+            self.error += self.b;
+            if self.error > self.a {
+                self.error -= self.a;
+                y += self.sign[1];
+            }
+            x += self.sign[0];
+        }
+        Some([x, y])
+    }
+}
+
+/// W movement-loop iterations between encounter/healing checks and Q game
+/// ticks per time-charging iteration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TravelSpeed {
+    pub interval: u32,
+    pub ticks: u32,
+}
+/// Binary32 travel speed from displayed Outdoorsman (capped only above at
+/// 100) and Pathfinder ranks. Inputs that would make the reference divide by
+/// zero or convert a negative tick count are rejected, not normalized.
+pub fn travel_speed(outdoorsman: i32, pathfinder: u32) -> Result<TravelSpeed, WorldError> {
+    let skill = outdoorsman.min(100) as f32;
+    let interval = (60.0_f32 + 60.0_f32 * skill / 100.0_f32).trunc();
+    if interval < 1.0 {
+        return Err(WorldError::Invalid(
+            "travel interval is not positive for this Outdoorsman value".into(),
+        ));
+    }
+    let ticks = (864000.0_f32 / interval).trunc();
+    let ticks = (ticks * (1.0_f32 - 0.25_f32 * pathfinder as f32)).trunc();
+    if ticks < 0.0 {
+        return Err(WorldError::Invalid(
+            "Pathfinder ranks make travel time negative".into(),
+        ));
+    }
+    Ok(TravelSpeed {
+        interval: interval as u32,
+        ticks: ticks as u32,
+    })
+}
+
+/// The terrain counter shared across terrain transitions. A desert/coast
+/// iteration clears it; mountain and city schedules count it down and step
+/// when it is exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Schedule {
+    pub counter: i32,
+}
+impl Schedule {
+    /// One iteration's terrain schedule. `step` attempts one pixel step and
+    /// reports whether movement remains active. Returns whether interactive
+    /// travel charges Q this iteration.
+    pub fn iterate(&mut self, terrain: Terrain, mut step: impl FnMut() -> bool) -> bool {
+        match terrain {
+            Terrain::Desert | Terrain::Coast => {
+                step();
+                self.counter = 0;
+                true
+            }
+            Terrain::Mountain => {
+                self.counter -= 1;
+                if self.counter <= 0 {
+                    step();
+                    self.counter = 2;
+                }
+                true
+            }
+            Terrain::City => {
+                let active = step();
+                self.counter -= 1;
+                if self.counter <= 0 && active {
+                    step();
+                    self.counter = 4;
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
+}
+
+/// The fixed 1500-row, 133-byte-per-row travel walking mask (not the fog
+/// of war). Its contents are not part of the approved specification, so a
+/// host supplies it; without one nothing blocks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkMask(Vec<u8>);
+impl WalkMask {
+    pub const ROWS: usize = 1500;
+    pub const ROW_BYTES: usize = 133;
+    pub fn new(bytes: Vec<u8>) -> Result<Self, WorldError> {
+        if bytes.len() != Self::ROWS * Self::ROW_BYTES {
+            return Err(WorldError::Invalid(
+                "walking mask must be 1500 rows of 133 bytes".into(),
+            ));
+        }
+        Ok(Self(bytes))
+    }
+    /// Tested only when X is below 1064 and Y is positive; coordinates
+    /// outside the mask's rows/columns do not block.
+    pub fn blocks(&self, position: [i32; 2]) -> bool {
+        let [x, y] = position;
+        if !(0..1064).contains(&x) || y <= 0 || y as usize >= Self::ROWS {
+            return false;
+        }
+        let byte = self.0[y as usize * Self::ROW_BYTES + x as usize / 8];
+        byte & (1 << (7 - x % 8)) != 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Travel {
+    pub destination: [i32; 2],
+    pub stepper: Stepper,
+    /// Script-directed town travel: no encounter tests or walk-mask checks,
+    /// and its city branch charges no time.
+    pub scripted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encounter {
+    /// A terrain map; entry context 2 (random encounter) or 1 (dropout).
+    Terrain {
+        map: &'static str,
+        region: u8,
+        context: i32,
+    },
+    /// A special map whose consumed bit is already marked; entry context 0.
+    Special {
+        map: &'static str,
+        bit: u32,
+        region: u8,
+    },
+}
+impl Encounter {
+    pub fn map(&self) -> &'static str {
+        match self {
+            Self::Terrain { map, .. } | Self::Special { map, .. } => map,
+        }
+    }
+    pub fn region(&self) -> u8 {
+        match self {
+            Self::Terrain { region, .. } | Self::Special { region, .. } => *region,
+        }
+    }
+    pub fn context(&self) -> i32 {
+        match self {
+            Self::Terrain { context, .. } => *context,
+            Self::Special { .. } => 0,
+        }
+    }
+}
+
+/// Three independent inclusive d6 values, summed.
+pub fn roll_3d6(rng: &mut impl RandomSource) -> Result<i32, WorldError> {
+    Ok(rng.range(1, 6)? + rng.range(1, 6)? + rng.range(1, 6)?)
+}
+
+/// Ordinary terrain/dropdown map selection: redraw 0-2 until a populated
+/// choice is found.
+pub fn terrain_map(
+    terrain: Terrain,
+    rng: &mut impl RandomSource,
+) -> Result<&'static str, WorldError> {
+    let choices = &TERRAIN_MAPS[terrain as usize];
+    for _ in 0..DRAW_LIMIT {
+        let choice = choices[rng.range(0, 2)? as usize];
+        if !choice.is_empty() {
+            return Ok(choice);
+        }
+    }
+    Ok(choices[0])
+}
+
+/// One map choice in a town's knowledge row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TownButton {
+    /// The original hotspot slot, stored as the current section.
+    pub slot: usize,
+    pub event: i32,
+    /// `[x, y, width, height]`.
+    pub rect: [i32; 4],
+    pub label: i32,
+    pub map: &'static str,
+    pub entry: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TownEntry {
+    /// First entry: load the knowledge row's slot-zero map directly.
+    Direct(TownButton),
+    /// Later entry: display the town map.
+    TownMap {
+        picture: i32,
+        buttons: Vec<TownButton>,
+    },
+}
+
+fn global(gvars: &[i32], index: usize) -> i32 {
+    gvars.get(index).copied().unwrap_or(0)
+}
+
+/// The saved component plus runtime travel state that is not serialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldMap {
+    pub saved: WorldMapSave,
+    pub travel: Option<Travel>,
+    pub schedule: Schedule,
+    /// Iterations since the last encounter/healing check.
+    pub interval: u32,
+    /// Movement-loop iterations, for the every-third discovery update.
+    pub iterations: u32,
+    pub walk_mask: Option<Arc<WalkMask>>,
+}
+impl Default for WorldMap {
+    /// New-game state: Vault 13's center, town 0, section 1, town zero
+    /// enabled, and only its entrance slot zero known.
+    fn default() -> Self {
+        let mut saved = WorldMapSave {
+            towns: 1,
+            town: 0,
+            section: 1,
+            position: START.map(|value| value as u32),
+            ..WorldMapSave::default()
+        };
+        saved.entrances[0] = 1;
+        Self::from_saved(saved)
+    }
+}
+impl WorldMap {
+    pub fn from_saved(saved: WorldMapSave) -> Self {
+        Self {
+            saved,
+            travel: None,
+            schedule: Schedule::default(),
+            interval: 0,
+            iterations: 0,
+            walk_mask: None,
+        }
+    }
+    pub fn position(&self) -> [i32; 2] {
+        self.saved.position.map(|value| value as i32)
+    }
+    pub fn set_position(&mut self, position: [i32; 2]) {
+        self.saved.position = position.map(|value| value as u32);
+    }
+    pub fn cell(&self) -> Option<[usize; 2]> {
+        cell_of(self.position())
+    }
+    /// Discovery byte for a playable cell, at the saved 29-byte stride.
+    pub fn discovery(&self, cell: [usize; 2]) -> u8 {
+        self.saved.discovery[STRIDE * cell[1] + cell[0]]
+    }
+    fn discovery_mut(&mut self, cell: [usize; 2]) -> &mut u8 {
+        &mut self.saved.discovery[STRIDE * cell[1] + cell[0]]
+    }
+    /// The current cell becomes visited (2); its 3 x 3 neighborhood (5 x 5
+    /// with Scout) becomes seen (1) unless visited, clipped to the playable
+    /// grid. The west/ocean threshold then reveals the current row's cells
+    /// west of the threshold when the column is at most that threshold.
+    pub fn reveal(&mut self, scout: bool) {
+        let Some([column, row]) = self.cell() else {
+            return;
+        };
+        let radius = if scout { 2 } else { 1 };
+        for y in row.saturating_sub(radius)..=(row + radius).min(ROWS - 1) {
+            for x in column.saturating_sub(radius)..=(column + radius).min(COLUMNS - 1) {
+                let value = self.discovery_mut([x, y]);
+                if *value != 2 {
+                    *value = 1;
+                }
+            }
+        }
+        *self.discovery_mut([column, row]) = 2;
+        let threshold = WEST_REVEAL[row];
+        if column <= threshold {
+            for x in 0..threshold {
+                *self.discovery_mut([x, row]) = 2;
+            }
+        }
+    }
+    /// Initial/reset clearing visits only rows 0-28 and columns 0-27 of the
+    /// larger saved array.
+    pub fn reset_discovery(&mut self) {
+        for row in 0..ROWS - 1 {
+            self.saved.discovery[STRIDE * row..STRIDE * row + COLUMNS].fill(0);
+        }
+    }
+    pub fn town_enabled(&self, town: usize) -> bool {
+        town < 32 && self.saved.towns & (1 << town) != 0
+    }
+    pub fn entrance_known(&self, row: usize, slot: usize) -> bool {
+        row < KNOWLEDGE_ROWS
+            && slot < ENTRANCE_SLOTS
+            && self.saved.entrances[ENTRANCE_SLOTS * row + slot] != 0
+    }
+    fn set_entrance(&mut self, row: usize, slot: usize, known: bool) {
+        self.saved.entrances[ENTRANCE_SLOTS * row + slot] = u8::from(known);
+    }
+    /// Derive town and entrance knowledge from campaign globals. Entrance
+    /// globals narrow to a byte before converting to 0/1; a known-town value
+    /// must equal 1 to enable the town, reveal its cell, and enable slot 0.
+    pub fn refresh_knowledge(&mut self, gvars: &[i32], ticks: u64) {
+        for (town, row) in TOWNS.iter().enumerate().skip(1) {
+            for (slot, index) in row.entrance_globals.iter().enumerate() {
+                self.set_entrance(town, slot, global(gvars, *index) as u8 != 0);
+            }
+            if global(gvars, row.known_global) == 1 {
+                self.saved.towns |= 1 << town;
+                if self.discovery(row.cell) == 0 {
+                    *self.discovery_mut(row.cell) = 1;
+                }
+                self.set_entrance(town, 0, true);
+            }
+        }
+        self.set_entrance(0, 0, true);
+        for slot in 1..TOWNS[0].entrance_globals.len() {
+            self.set_entrance(0, slot, ticks >= VAULT13_OPEN_TICK);
+        }
+        let any = |map: &Self, town: usize, slots: std::ops::Range<usize>| {
+            slots.into_iter().any(|slot| map.entrance_known(town, slot))
+        };
+        let cathedral = global(gvars, CATHEDRAL_DESTROYED_GLOBAL) != 0
+            || any(self, CATHEDRAL, 0..ENTRANCE_SLOTS);
+        let base = global(gvars, BASE_DESTROYED_GLOBAL) != 0
+            || any(self, MILITARY_BASE, 0..ENTRANCE_SLOTS);
+        let brotherhood = any(self, BROTHERHOOD, 1..5);
+        self.set_entrance(12, 0, cathedral);
+        self.set_entrance(13, 0, base);
+        self.set_entrance(14, 0, brotherhood);
+    }
+    /// The knowledge row used for a town: destroyed Cathedral (global 18)
+    /// and Military Base (global 17) substitute alternate rows 12 and 13.
+    pub fn knowledge_row(town: usize, gvars: &[i32]) -> usize {
+        match town {
+            CATHEDRAL if global(gvars, CATHEDRAL_DESTROYED_GLOBAL) != 0 => 12,
+            MILITARY_BASE if global(gvars, BASE_DESTROYED_GLOBAL) != 0 => 13,
+            _ => town,
+        }
+    }
+    fn button(
+        town: usize,
+        row: usize,
+        ordinal: usize,
+        slot: usize,
+        hotspot: &Hotspot,
+    ) -> TownButton {
+        TownButton {
+            slot,
+            event: TOWN_BUTTON_EVENT + ordinal as i32,
+            rect: [
+                hotspot.x - 57,
+                hotspot.y - 6,
+                TOWN_BUTTON_SIZE[0],
+                TOWN_BUTTON_SIZE[1],
+            ],
+            label: match row {
+                12 => 290,
+                13 => 501,
+                _ => 200 + 10 * town as i32 + slot as i32,
+            },
+            map: hotspot.map,
+            entry: hotspot.entry,
+        }
+    }
+    /// Buttons for known slots only; event numbers use the visible
+    /// ordinal while each button keeps its original slot.
+    pub fn town_buttons(&self, town: usize, gvars: &[i32]) -> Vec<TownButton> {
+        let row = Self::knowledge_row(town, gvars);
+        hotspots(row)
+            .filter(|(slot, _)| self.entrance_known(row, *slot))
+            .enumerate()
+            .map(|(ordinal, (slot, hotspot))| Self::button(town, row, ordinal, slot, hotspot))
+            .collect()
+    }
+    /// First entry to a town whose enabled/visited bit is clear loads its
+    /// row's slot-zero map directly and sets the bit; later entry displays
+    /// the town map.
+    pub fn enter_town(&mut self, town: usize, gvars: &[i32]) -> Option<TownEntry> {
+        if town >= TOWNS.len() {
+            return None;
+        }
+        let row = Self::knowledge_row(town, gvars);
+        if !self.town_enabled(town) {
+            self.saved.towns |= 1 << town;
+            let (slot, hotspot) = hotspots(row).next()?;
+            return Some(TownEntry::Direct(Self::button(town, row, 0, slot, hotspot)));
+        }
+        Some(TownEntry::TownMap {
+            picture: TOWN_PICTURE_BASE + town as i32,
+            buttons: self.town_buttons(town, gvars),
+        })
+    }
+    /// The W-iteration encounter test at the current cell. The 3d6 draw
+    /// happens even in a town cell, which suppresses entry. A selected
+    /// encounter then tests for a special map, restarting the whole special
+    /// test when the drawn special was already consumed.
+    pub fn check_encounter(
+        &mut self,
+        rng: &mut impl RandomSource,
+        luck: i32,
+        explorer: u32,
+    ) -> Result<Option<Encounter>, WorldError> {
+        let sum = roll_3d6(rng)?;
+        let Some(cell) = self.cell() else {
+            return Ok(None);
+        };
+        if town_at(cell).is_some() || sum >= ENCOUNTER_BELOW[usize::from(frequency(cell)) & 3] {
+            return Ok(None);
+        }
+        let region = region(cell);
+        for _ in 0..DRAW_LIMIT {
+            let gate = roll_3d6(rng)? - 5 + luck + 2 * explorer.min(1 << 20) as i32;
+            if gate < 18 || self.saved.specials & ALL_SPECIALS == ALL_SPECIALS {
+                break;
+            }
+            let draw = rng.range(1, 100)?;
+            let (_, map, bit) = SPECIAL_ENCOUNTERS
+                .iter()
+                .find(|(last, ..)| draw <= *last)
+                .copied()
+                .expect("1-100 draw");
+            if self.saved.specials & bit == 0 {
+                self.saved.specials |= bit;
+                return Ok(Some(Encounter::Special { map, bit, region }));
+            }
+        }
+        Ok(Some(Encounter::Terrain {
+            map: terrain_map(terrain(cell), rng)?,
+            region,
+            context: 2,
+        }))
+    }
+}

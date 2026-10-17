@@ -241,7 +241,9 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.trace.push(WorldTrace::LoadStep(1));
         self.world.map_exit_cleanup(|_| true);
         if let Some(script) = self.world.map_script {
-            self.dispatch(ScriptRequest {
+            // Like the entry requests, a failed exit request (for example a
+            // missing compiled script) is reported; leaving still proceeds.
+            let result = self.dispatch(ScriptRequest {
                 script,
                 event: ScriptEvent::MapExit,
                 source: 0,
@@ -249,10 +251,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 fixed: 0,
                 action: -1,
                 only_present: false,
-            })?;
+            });
+            self.report_load_dispatch(result);
         }
         self.world.map.header.flags.0 |= 1;
         self.world.map.header.last_visit = self.world.clock.ticks as u32;
+        // SPEC-008: the left map joins the working saved-map set.
+        self.world.persist_current_map(false);
         self.animations.clear();
         self.interactions.clear();
         self.building_animation = None;
@@ -275,10 +280,17 @@ impl<A: WorldAssets> WorldHost<A> {
             };
         }
         self.world.trace.push(WorldTrace::LoadStep(2));
-        let (map, load_error) = match self.assets.map(path) {
+        let (map, load_error) = match self.read_map(path) {
             Ok(map) => (map, None),
             Err(error) => (empty_map(), Some(error)),
         };
+        self.world.persistence.current_map = load_error
+            .is_none()
+            .then(|| {
+                let file = path.rsplit('/').next().unwrap_or(path);
+                crate::persistence::saved_map_name(file.as_bytes())
+            })
+            .flatten();
         self.world.restoring = map.header.flags.0 & 1 != 0;
         self.world.trace.push(WorldTrace::LoadStep(3));
         self.world.import_map(map, &self.assets)?;
@@ -404,6 +416,32 @@ impl<A: WorldAssets> WorldHost<A> {
             return Err(error);
         }
         Ok(())
+    }
+    pub(crate) fn clear_program_bindings(&mut self) {
+        self.program_scripts.clear();
+        self.active.clear();
+        self.interactions.clear();
+    }
+    /// A working saved-map `.SAV` takes precedence over the asset lookup.
+    fn read_map(&self, path: &str) -> Result<vault_formats::MapFile, WorldError> {
+        let saved = path
+            .rsplit('/')
+            .next()
+            .and_then(|file| crate::persistence::saved_map_name(file.as_bytes()));
+        if let Some(bytes) = saved.and_then(|name| self.world.persistence.maps.get(&name)) {
+            let lookup = |pid| {
+                self.assets
+                    .prototype(pid)
+                    .map(|prototype| prototype.info())
+                    .map_err(|error| vault_formats::ParseError {
+                        format: "PRO",
+                        offset: 0,
+                        message: error.to_string(),
+                    })
+            };
+            return Ok(vault_formats::MapFile::parse(bytes, &lookup)?);
+        }
+        self.assets.map(path)
     }
     pub fn dispatch(&mut self, request: ScriptRequest) -> Result<DispatchResult, WorldError> {
         if !self.world.scripts_enabled {
@@ -642,7 +680,11 @@ impl<A: WorldAssets> WorldHost<A> {
                     state.results.0 &= !crate::critical::effect::KNOCKED_OUT;
                 }
             }
-            EventKind::Poison | EventKind::Radiation | EventKind::Other(_) => self
+            EventKind::Poison
+            | EventKind::Radiation { .. }
+            | EventKind::Drug { .. }
+            | EventKind::Withdrawal(_)
+            | EventKind::Other(_) => self
                 .world
                 .diagnostic(format!("timed maintenance event {:?}", event.kind)),
         }

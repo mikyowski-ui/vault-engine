@@ -255,3 +255,45 @@ fn round_trips_prototypes_and_maps_through_the_spec003_writers() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Writers: 6 passed, 1 failed"));
 }
+
+#[test]
+fn validates_spec008_working_saves_and_slot_round_trip() {
+    let temp = tempfile::tempdir().unwrap();
+    state::write_corpus(temp.path());
+    // The fixed SPEC-008 tables reach campaign index 600.
+    let campaign: String = (0..618)
+        .map(|index| format!("global_{index} = {index};\n"))
+        .collect();
+    std::fs::write(
+        temp.path().join("data/vault13.gam"),
+        format!("GAME_GLOBAL_VARS:\n{campaign}"),
+    )
+    .unwrap();
+    // Manifest names are bounded to twelve bytes (8.3 map names).
+    std::fs::rename(
+        temp.path().join("maps/synthetic.map"),
+        temp.path().join("maps/synth.map"),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+        .arg("--corpus-dir")
+        .arg(temp.path())
+        .arg("--validate-saves")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("highest fixed SPEC-008 index: 600"), "{text}");
+    assert!(
+        text.contains("Saves: 2 maps entered, 2 working saves, 0 failed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Save slot round trip: restored SYNTH.SAV"),
+        "{text}"
+    );
+}

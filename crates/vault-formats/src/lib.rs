@@ -1,6 +1,8 @@
 //! Bounded clean-room parsers based on approved SPEC-001 and SPEC-002.
 
+pub mod automap;
 mod binary;
+pub mod dat;
 pub mod fid;
 pub mod font;
 pub mod frm;
@@ -13,9 +15,12 @@ pub mod msg;
 pub mod palette;
 pub mod pro;
 pub mod pro_catalog;
+pub mod savegame;
 pub mod vfs;
 
+pub use automap::AutomapDb;
 pub use binary::{MAX_ASSET_BYTES, ParseError};
+pub use dat::{DatArchive, DatProvider, Database};
 pub use fid::{ArtCatalog, Fid, FidError};
 pub use font::{Font, FontKind, FontSet, TextFlags};
 pub use frm::FrmArchive;
@@ -61,7 +66,13 @@ pub fn validate_asset(path: &VfsPath, bytes: &[u8]) -> Option<Result<(), ParseEr
 mod tests;
 
 #[cfg(test)]
+mod automap_tests;
+#[cfg(test)]
+mod dat_tests;
+#[cfg(test)]
 mod fid_tests;
+#[cfg(test)]
+mod save_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]
