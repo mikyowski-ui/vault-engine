@@ -143,8 +143,8 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn release_dialogue_art(&self) {
         (**self).release_dialogue_art();
     }
-    fn sound_name(&self, opcode: u16, args: &[i32]) -> Result<Vec<u8>, WorldError> {
-        (**self).sound_name(opcode, args)
+    fn art_token(&self, category: u8, index: u16) -> Option<Vec<u8>> {
+        (**self).art_token(category, index)
     }
     fn object_art(
         &self,

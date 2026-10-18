@@ -90,7 +90,7 @@ impl WorldState {
             _ => None,
         }
     }
-    fn weapon_data(&self, item: ObjectRef) -> Option<&Weapon> {
+    pub(crate) fn weapon_data(&self, item: ObjectRef) -> Option<&Weapon> {
         match &self.get(item)?.prototype.as_deref()?.data {
             PrototypeData::Item(Item {
                 data: ItemData::Weapon(weapon),
@@ -1323,11 +1323,7 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             return Ok(None);
         }
-        self.world.emit(WorldEffect::WeaponSound {
-            object: critter,
-            weapon,
-            effect: ai::OUT_OF_AMMO_SOUND,
-        });
+        self.emit_weapon_sound(critter, weapon, ai::OUT_OF_AMMO_SOUND);
         self.world.emit(WorldEffect::CritterAnimation {
             object: critter,
             animation: ai::HANDS,
@@ -1385,11 +1381,7 @@ impl<A: WorldAssets> WorldHost<A> {
             self.destroy_unit(ammo)?;
         }
         if result != -1 {
-            self.world.emit(WorldEffect::WeaponSound {
-                object: critter,
-                weapon,
-                effect: ai::READY_SOUND,
-            });
+            self.emit_weapon_sound(critter, weapon, ai::READY_SOUND);
             self.world.emit(WorldEffect::CritterAnimation {
                 object: critter,
                 animation: ai::HANDS,

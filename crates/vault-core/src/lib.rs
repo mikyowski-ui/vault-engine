@@ -15,6 +15,7 @@ mod host_game;
 mod host_movement;
 pub mod host_rest;
 pub mod host_save;
+mod host_sound;
 mod host_travel;
 pub mod library;
 pub mod persistence;
@@ -80,6 +81,8 @@ pub(crate) mod fixture_state;
 pub(crate) mod fixture_world;
 #[cfg(test)]
 mod host_ai_tests;
+#[cfg(test)]
+mod host_sound_tests;
 #[cfg(test)]
 mod persistence_tests;
 #[cfg(test)]

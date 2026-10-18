@@ -300,11 +300,13 @@ pub enum WorldEffect {
         object: ObjectRef,
         animation: u8,
     },
-    /// A weapon sound request: effect 0 ready, 2 out of ammunition.
+    /// A weapon sound request (effect 0 ready, 2 out of ammunition) with
+    /// its SPEC-010 effect name.
     WeaponSound {
         object: ObjectRef,
         weapon: ObjectRef,
         effect: u8,
+        name: Vec<u8>,
     },
     Medical {
         actor: ObjectRef,

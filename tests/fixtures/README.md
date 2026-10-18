@@ -11,6 +11,7 @@ All files here were authored for Vault Engine. None contain original game assets
 - `host/`: all SPEC-005 extension bytecode fragments and expected stack bytes.
 - `state/`: SPEC-006 GAM/GCD vectors, world/RNG/stat/dialogue tests, and interactive
   synthetic corpus generation.
+- `sound/`: SPEC-010 ACM vectors A-H as offset-addressed hex streams.
 - `loose/`: plain-text markers with mixed-case game-style paths and extensions.
   All eight top-level game directories and root palette/font paths are represented.
   The markers test VFS access and audit traversal; they are **not valid legacy

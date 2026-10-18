@@ -277,7 +277,24 @@ impl<A: WorldAssets> WorldHost<A> {
                     dynamic_null()
                 } else {
                     self.object(object)?;
-                    string(self.assets.sound_name(op, &values)?)
+                    // SPEC-010 builders; "no name" (an unchecked copy in the
+                    // reference) pushes D offset zero with a diagnostic.
+                    let byte = |index| u8::try_from(call.int(index)).ok();
+                    let name = if op == 0x80a5 {
+                        byte(0).and_then(|action| self.open_sound_name(object, action))
+                    } else {
+                        byte(1).zip(byte(0)).and_then(|(animation, extra)| {
+                            self.character_sound_name(object, animation, extra)
+                        })
+                    };
+                    match name {
+                        Some(name) => string(name),
+                        None => {
+                            self.world
+                                .diagnostic(format!("opcode {op:#06x}: no sound name"));
+                            dynamic_null()
+                        }
+                    }
                 }
             }
             0x80a6 => integer(self.world.player_sheet().map_or(0, |s| match call.int(0) {
@@ -1799,11 +1816,50 @@ impl<A: WorldAssets> WorldHost<A> {
                 integer(0)
             }
             0x813e..=0x8140 | 0x8142 => {
+                // The broken wrappers resolve their I operand as text first.
                 let index = call.args.len() - 1;
-                crate::library::text(vm, call, index)?;
-                string(self.assets.sound_name(op, &values)?)
+                let base = crate::library::text(vm, call, index)?;
+                let name = match op {
+                    0x813e => Some(vault_formats::sfx::ambient_name(&base)),
+                    // The item builder calls interface naming.
+                    0x813f | 0x8140 => Some(vault_formats::sfx::interface_name(&base)),
+                    _ => u8::try_from(call.int(1)).ok().and_then(|action| {
+                        vault_formats::sfx::scenery_name(call.int(0), action, &base)
+                    }),
+                };
+                match name {
+                    Some(name) => string(name),
+                    None => {
+                        self.world
+                            .diagnostic(format!("opcode {op:#06x}: no sound name"));
+                        dynamic_null()
+                    }
+                }
             }
-            0x8141 => string(self.assets.sound_name(op, &values)?),
+            0x8141 => {
+                // Unchecked references and enums in the reference: invalid
+                // ones give no name here.
+                let (target, weapon) = (call.uint(0), call.uint(2));
+                for object in [target, weapon] {
+                    if object != 0 {
+                        self.object(object)?;
+                    }
+                }
+                let name = u8::try_from(call.int(3))
+                    .ok()
+                    .zip(u8::try_from(call.int(1)).ok())
+                    .and_then(|(effect, mode)| {
+                        self.weapon_sound_name(effect, weapon, mode, target)
+                    });
+                match name {
+                    Some(name) => string(name),
+                    None => {
+                        self.world
+                            .diagnostic(format!("opcode {op:#06x}: no sound name"));
+                        dynamic_null()
+                    }
+                }
+            }
             0x8144 => {
                 let object = call.uint(1);
                 let owner = self.object(object)?.owner;

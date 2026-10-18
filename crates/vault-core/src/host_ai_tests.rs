@@ -232,16 +232,21 @@ const CAPACITY: usize = 117;
 const AMMO_CALIBER: usize = 57;
 const AMMO_PACK: usize = 61;
 
-fn item(kind: usize, pid: u32, fields: &[(usize, i32)]) -> Arc<Prototype> {
+fn item_bytes(kind: usize, pid: u32, fields: &[(usize, i32)]) -> Vec<u8> {
     let mut bytes = fixture::prototype(0, kind);
     fixture::word(&mut bytes, 0, pid as i32);
     for (offset, value) in fields {
         fixture::word(&mut bytes, *offset, *value);
     }
-    Arc::new(Prototype::parse(&bytes).unwrap())
+    bytes
 }
+fn item(kind: usize, pid: u32, fields: &[(usize, i32)]) -> Arc<Prototype> {
+    Arc::new(Prototype::parse(&item_bytes(kind, pid, fields)).unwrap())
+}
+/// SPEC-010 weapon sound byte (file offset 0x79).
+const WEAPON_SOUND: usize = 0x79;
 /// A weapon: extended flags, AP for both modes, damage 1..`max`, both
-/// ranges, caliber 1, capacity, and cost.
+/// ranges, caliber 1, capacity, cost, and sound byte `A`.
 fn weapon(
     pid: u32,
     extended: i32,
@@ -251,7 +256,7 @@ fn weapon(
     capacity: i32,
     cost: i32,
 ) -> Arc<Prototype> {
-    item(
+    let mut bytes = item_bytes(
         3,
         pid,
         &[
@@ -268,7 +273,9 @@ fn weapon(
             (CALIBER, 1),
             (CAPACITY, capacity),
         ],
-    )
+    );
+    bytes[WEAPON_SOUND] = b'A';
+    Arc::new(Prototype::parse(&bytes).unwrap())
 }
 fn ammo(pid: u32, cost: i32, pack: i32) -> Arc<Prototype> {
     item(
@@ -1181,12 +1188,10 @@ fn spec009_fixture_j_attack_loop_through_the_world() {
         detail: loaded(0, 30),
     };
     host.ai_turn(critter, None).unwrap();
-    assert!(
-        host.world
-            .effects
-            .iter()
-            .any(|effect| matches!(effect, WorldEffect::WeaponSound { effect: 2, .. }))
-    );
+    assert!(host.world.effects.iter().any(|effect| matches!(
+        effect,
+        WorldEffect::WeaponSound { effect: 2, name, .. } if name == b"WOA1XXX1"
+    )));
     let name = String::from_utf8(host.world.get(critter).unwrap().name.clone()).unwrap();
     assert!(
         messages(&host)
@@ -1234,6 +1239,10 @@ fn spec009_fixture_j_attack_loop_through_the_world() {
             .unwrap()
             .ends_with(b"reloads Object 00000046.")
     );
+    assert!(host.world.effects.iter().any(|effect| matches!(
+        effect,
+        WorldEffect::WeaponSound { effect: 0, name, .. } if name == b"WRA1XXX1"
+    )));
     // A full magazine transfers nothing but still reloads (2 AP).
     host.world.get_mut(pistol).unwrap().raw.state = ObjectState::Other {
         word: 0,

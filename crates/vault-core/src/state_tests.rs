@@ -1602,3 +1602,87 @@ fn spec009_ai_opcodes_alert_gate_hearing_team_and_party() {
     run_fragment(&mut host, &base, &float).unwrap();
     assert_eq!(host.world.floating, [(target, 3500 + 1399)]);
 }
+
+#[test]
+fn spec010_sound_name_opcodes_use_prototype_sound_bytes() {
+    use fixture::{instruction, push};
+    let (mut host, base, _) = host(&[b"Hello"]);
+    // A container with item sound byte `B` (0x38) and a weapon with sound
+    // byte `E` (0x79); both stand on the player's elevation.
+    let spawn = |host: &mut WorldHost<Assets>,
+                 category: u8,
+                 subtype: usize,
+                 byte: usize,
+                 value: u8,
+                 hex| {
+        let mut bytes = fixture::world::prototype(category, subtype);
+        bytes[byte] = value;
+        let prototype = Arc::new(Prototype::parse(&bytes).unwrap());
+        host.world.spawn(prototype, hex, 1).unwrap() as i32
+    };
+    let container = spawn(&mut host, 0, 1, 0x38, b'B', 20102);
+    let weapon = spawn(&mut host, 0, 3, 0x79, b'E', 20104);
+    let door = spawn(&mut host, 2, 0, 0x28, b'K', 20106);
+    let name = |host: &mut WorldHost<Assets>, code: Vec<u8>| {
+        let mut vm = run_fragment(host, &base, &code).unwrap();
+        let value = vm.value_stack.pop().unwrap();
+        // D offset zero is the null result unless a string occupies it.
+        vm.string(value).ok().map(<[u8]>::to_vec)
+    };
+    // sfx_build_open_name(action, object).
+    assert_eq!(
+        name(
+            &mut host,
+            [push(container), push(1), instruction(0x80a5)].concat()
+        ),
+        Some(b"ICCNTNRB".to_vec())
+    );
+    assert_eq!(
+        name(
+            &mut host,
+            [push(door), push(2), instruction(0x80a5)].concat()
+        ),
+        Some(b"SLDOORSK".to_vec())
+    );
+    // A null object pushes D offset zero.
+    assert_eq!(
+        name(&mut host, [push(0), push(1), instruction(0x80a5)].concat()),
+        None
+    );
+    // sfx_build_weapon_name(target, hit mode, weapon, effect type): a hit on
+    // the container (material 0: `M`) with the secondary mode.
+    let weapon_name = |target: i32, mode: i32, effect: i32| {
+        [
+            push(effect),
+            push(weapon),
+            push(mode),
+            push(target),
+            instruction(0x8141),
+        ]
+        .concat()
+    };
+    assert_eq!(
+        name(&mut host, weapon_name(container, 3, 4)),
+        Some(b"WHE2MXX1".to_vec())
+    );
+    assert_eq!(
+        name(&mut host, weapon_name(0, 2, 2)),
+        Some(b"WOE1XXX1".to_vec())
+    );
+    host.world.effects.clear();
+    assert_eq!(name(&mut host, weapon_name(0, 2, 7)), None, "effect type 7");
+    assert!(matches!(
+        host.world.effects.front(),
+        Some(WorldEffect::Diagnostic(_))
+    ));
+    // sfx_build_char_name(extra, animation, object): without an art-list
+    // token there is no name.
+    let me = host.world.player as i32;
+    assert_eq!(
+        name(
+            &mut host,
+            [push(me), push(16), push(4), instruction(0x813d)].concat()
+        ),
+        None
+    );
+}

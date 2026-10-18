@@ -157,6 +157,10 @@ impl ArtCatalog {
             .art_id(u32::from(index))
             .ok_or(FidError::MissingEntry { category, index })
     }
+    /// The unaliased list token for an art index (SPEC-010 effect stems).
+    pub fn base_token(&self, category: u8, index: u16) -> Option<&[u8]> {
+        self.entry(category, index).ok()?.name.as_deref()
+    }
     fn stem(&self, category: u8, index: u16) -> Result<&str, FidError> {
         let name = self.entry(category, index)?.name.as_deref().unwrap_or(b"");
         std::str::from_utf8(name)

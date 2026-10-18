@@ -364,3 +364,151 @@ fn validates_spec009_packets_critter_resolution_and_taunt_ranges() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("last_msg"));
 }
+
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/sound/support.rs"]
+mod sound;
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[test]
+fn validates_spec010_acm_hashes_and_sfx_resolution_against_oracle_tables() {
+    let temp = tempfile::tempdir().unwrap();
+    let corpus = temp.path().join("corpus");
+    state::write_corpus(&corpus);
+    // Item sound byte `B` (0x38) on the container; the door's scenery
+    // byte (0x28) is 0.
+    for (path, offset, byte) in [
+        ("proto/items/synthetic.pro", 0x38, b'B'),
+        ("proto/scenery/synthetic.pro", 0x28, 0),
+    ] {
+        let mut bytes = std::fs::read(corpus.join(path)).unwrap();
+        bytes[offset] = byte;
+        std::fs::write(corpus.join(path), bytes).unwrap();
+    }
+    std::fs::create_dir_all(corpus.join("sound/sfx")).unwrap();
+    // Vectors A, B, and H, plus A again as the only open/close name.
+    let files = [
+        ("a.acm", 'A', &[300, -400, 0, 100][..], 1, 0),
+        ("b.acm", 'B', &[150, 300, 50, -200, -100, 0, 0], 2, 0),
+        ("h.acm", 'H', &[7, -7, 0, 0], 1, 1),
+        ("IOCNTNRB.acm", 'A', &[300, -400, 0, 100], 1, 0),
+    ];
+    let oracle = temp.path().join("oracle");
+    std::fs::create_dir_all(&oracle).unwrap();
+    let mut rows = String::from("# path\tsource sha256\t...\n");
+    for (name, vector, samples, blocks, past) in files {
+        let bytes = sound::acm(vector);
+        std::fs::write(corpus.join("sound/sfx").join(name), &bytes).unwrap();
+        let pcm: Vec<u8> = samples
+            .iter()
+            .flat_map(|sample: &i16| sample.to_le_bytes())
+            .collect();
+        let list = |samples: &[i16]| {
+            samples
+                .iter()
+                .map(i16::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let header = (bytes[12] as u16) | (bytes[13] as u16) << 8;
+        rows.push_str(&format!(
+            "sound/sfx/{}\t{}\t{}\t{}\t1\t22050\t{}\t{}\t{blocks}\t{past}\t{}\t{}\t{}\n",
+            name.to_ascii_lowercase(),
+            sha256(&bytes),
+            bytes.len(),
+            samples.len(),
+            header & 15,
+            header >> 4,
+            sha256(&pcm),
+            list(&samples[..samples.len().min(8)]),
+            list(&samples[samples.len().saturating_sub(4)..]),
+        ));
+    }
+    std::fs::write(oracle.join("acm-corpus.tsv"), &rows).unwrap();
+    std::fs::write(
+        oracle.join("acm-wrap.tsv"),
+        "# path\tindex\tshifted\temitted\n",
+    )
+    .unwrap();
+    std::fs::write(
+        oracle.join("sfx-resolution.tsv"),
+        "# kind\tcontext\trequested\tresolved\tattempts\n\
+         literal\tbutton\tiocntnrb\tIOCNTNRB\tIOCNTNRB\n\
+         alias\tprefix\tMALIEUAB\t-\tMALIEUAB > MAMTNTAB\n\
+         character\tlist 0\tSAMPLEAA\t-\tSAMPLEAA\n\
+         weapon\tcode A\tWRA1XXX1\t-\tWRA1XXX1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        oracle.join("sfx-proto-bytes.tsv"),
+        "# category\tsubtype\tsound byte\tcount\tnames\n\
+         items\t1\tB\t1\tIOCNTNRB\n\
+         scenery\t0\t0\t1\t-\n\
+         # weapon sound code (file offset 0x79) distribution: \n",
+    )
+    .unwrap();
+    let run = |flag: &str| {
+        Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+            .arg("--corpus-dir")
+            .arg(&corpus)
+            .arg("--oracle-dir")
+            .arg(&oracle)
+            .arg(flag)
+            .output()
+            .unwrap()
+    };
+    let output = run("--validate-acm");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("ACM files: 4 in corpus, 4 oracle rows"),
+        "{text}"
+    );
+    assert!(
+        text.contains("ACM decoding: 4 passed, 0 failed; 0 wrapped samples matched"),
+        "{text}"
+    );
+    let output = run("--validate-sfx");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("SFX resolution: 4 rows, 4 passed, 0 failed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("SFX prototype sound bytes: 0 failures"),
+        "{text}"
+    );
+
+    // A wrong PCM hash, or a request the builders cannot produce, fails.
+    let corrupted = rows.replacen(
+        &sha256(&[44, 1, 112, 254, 0, 0, 100, 0]),
+        &"0".repeat(64),
+        1,
+    );
+    std::fs::write(oracle.join("acm-corpus.tsv"), corrupted).unwrap();
+    let output = run("--validate-acm");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("PCM SHA-256"));
+    std::fs::write(
+        oracle.join("sfx-resolution.tsv"),
+        "weapon\tcode A\tWRB1XXX1\t-\tWRB1XXX1\n",
+    )
+    .unwrap();
+    assert!(!run("--validate-sfx").status.success());
+}

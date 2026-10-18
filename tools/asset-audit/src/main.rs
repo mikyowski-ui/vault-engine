@@ -1,3 +1,5 @@
+mod sound;
+
 use std::{
     collections::BTreeSet,
     error::Error,
@@ -58,6 +60,18 @@ struct Args {
     /// count taunt ranges without catalog lines. Only counts are printed.
     #[arg(long)]
     validate_ai: bool,
+    /// SPEC-010: decode every ACM and require each `acm-corpus.tsv` row
+    /// (source and PCM SHA-256, header values, counters, edge samples) and
+    /// every `acm-wrap.tsv` sample to match.
+    #[arg(long)]
+    validate_acm: bool,
+    /// SPEC-010: rebuild and resolve every `sfx-resolution.tsv` name and
+    /// check the `sfx-proto-bytes.tsv` prototype sound bytes.
+    #[arg(long)]
+    validate_sfx: bool,
+    /// Directory holding the SPEC-010 oracle tables.
+    #[arg(long, value_name = "PATH", default_value = "oracle/SPEC-010")]
+    oracle_dir: PathBuf,
 }
 
 /// The SPEC-003 writer's expected PRO bytes: the consumed payload with
@@ -339,6 +353,27 @@ fn audit_ai(dir: &Path) -> Result<[u64; 6], Box<dyn Error>> {
 }
 
 fn audit(args: Args) -> Result<(), Box<dyn Error>> {
+    if args.validate_acm || args.validate_sfx {
+        let vfs = LocalDirProvider::mount(&args.corpus_dir)?;
+        if args.validate_acm {
+            let [rows, passed, failed, files, wrapped] = sound::audit_acm(&vfs, &args.oracle_dir)?;
+            println!("ACM files: {files} in corpus, {rows} oracle rows");
+            println!(
+                "ACM decoding: {passed} passed, {failed} failed; {wrapped} wrapped samples matched"
+            );
+            if failed != 0 {
+                return Err(format!("{failed} ACM check(s) failed").into());
+            }
+        }
+        if args.validate_sfx {
+            let [rows, passed, failed, bytes] = sound::audit_sfx(&vfs, &args.oracle_dir)?;
+            println!("SFX resolution: {rows} rows, {passed} passed, {failed} failed");
+            println!("SFX prototype sound bytes: {bytes} failures");
+            if failed + bytes != 0 {
+                return Err(format!("{} SFX check(s) failed", failed + bytes).into());
+            }
+        }
+    }
     if args.validate_ai {
         let [packets, diagnostics, resolved, fallback, lines, empty] = audit_ai(&args.corpus_dir)?;
         println!("AI packets: {packets} parsed, {diagnostics} token diagnostics");

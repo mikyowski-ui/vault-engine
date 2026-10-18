@@ -1,5 +1,6 @@
 //! Bounded clean-room parsers based on approved SPEC-001 and SPEC-002.
 
+pub mod acm;
 pub mod ai;
 pub mod automap;
 mod binary;
@@ -17,6 +18,7 @@ pub mod palette;
 pub mod pro;
 pub mod pro_catalog;
 pub mod savegame;
+pub mod sfx;
 pub mod vfs;
 
 pub use automap::AutomapDb;
@@ -47,6 +49,7 @@ pub fn validate_asset(path: &VfsPath, bytes: &[u8]) -> Option<Result<(), ParseEr
         "fon" => Font::parse_fon(bytes).map(|_| ()),
         "aaf" => Font::parse_aaf(bytes).map(|_| ()),
         "lst" => LstTable::parse(bytes, LstKind::for_path(path)).map(|_| ()),
+        "acm" => acm::decode(bytes).map(|_| ()),
         "msg" => MsgCatalog::parse(bytes).map(|_| ()),
         "pro" => Prototype::parse(bytes).map(|_| ()),
         "gcd" => GcdFile::parse(bytes).map(|_| ()),
@@ -67,6 +70,8 @@ pub fn validate_asset(path: &VfsPath, bytes: &[u8]) -> Option<Result<(), ParseEr
 mod tests;
 
 #[cfg(test)]
+mod acm_tests;
+#[cfg(test)]
 mod ai_tests;
 #[cfg(test)]
 mod automap_tests;
@@ -76,6 +81,8 @@ mod dat_tests;
 mod fid_tests;
 #[cfg(test)]
 mod save_tests;
+#[cfg(test)]
+mod sfx_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]

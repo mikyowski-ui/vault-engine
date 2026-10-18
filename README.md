@@ -15,11 +15,14 @@ phase adds DAT archives and LZSS, selected-database lookup, legacy save slots wi
 the working saved-map set and automap database, world travel, and Pip-Boy status
 and rest. The SPEC-009 phase adds `ai.txt` packets, the combat snapshot, threat
 selection, the NPC turn (flee, healing, weapon choice, called shots, the bounded
-attack loop, reloading), team switching, random retargeting, and taunts.
+attack loop, reloading), team switching, random retargeting, and taunts. The
+SPEC-010 phase adds the exact ACM decoder, effect-name builders with the
+prototype sound bytes, the effect lookup and alias chain, speech paths, and
+relative effect volume.
 
 `AGENTS.md` is the repository's implementation policy. Format behavior follows
 `specs/approved/SPEC-001-pal-frm-lst.md` through
-`SPEC-009-combat-ai.md`.
+`SPEC-010-sound-effects-and-acm.md`.
 No original game
 data is needed to build, test, or run the synthetic shell and preview fixtures.
 
@@ -98,6 +101,9 @@ cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-write
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-saves
 # SPEC-009: load combatai.msg and data/ai.txt and resolve every critter's packet:
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-ai
+# SPEC-010: check every ACM and effect name against the oracle tables:
+cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
+    --validate-acm --validate-sfx --oracle-dir oracle/SPEC-010
 ```
 
 `--validate-ai` initializes the combat AI exactly as the host does (a missing
@@ -105,6 +111,18 @@ file, a packet without all 25 keys, or an empty table fails), then reports
 counts only: packets and token diagnostics, critter prototypes whose default
 packet resolves or falls back to entry 0, and nonempty taunt ranges with and
 without `combatai.msg` lines.
+
+`--validate-acm` requires every corpus `.acm` to have an `acm-corpus.tsv` row
+and every row to match: source SHA-256 and size, header values, block count,
+zero bytes read past EOF, the SHA-256 of the decoded s16le PCM, and the first 8
+and last 4 samples. Every wrapped sample must equal its `acm-wrap.tsv` row.
+`--validate-sfx` rebuilds each `sfx-resolution.tsv` request with the builders
+(critter-list stems and suffixes, weapon sound bytes), runs the lookup chain
+against `sound/sfx/`, and compares the attempt order and resolved stem. It also
+recounts the item (0x38), scenery (0x28), and weapon (0x79) sound bytes of every
+prototype against `sfx-proto-bytes.tsv`, including which open/close names exist.
+On the local corpus, all 2511 ACM rows (124 wrapped samples) and all 760
+resolution rows pass.
 
 `--validate-saves` checks that the campaign initializer covers every fixed
 SPEC-008 campaign index (towns, entrances, quests, disks, encounter globals),
@@ -654,6 +672,43 @@ Where SPEC-009 leaves details open, this engine makes these choices:
 - Fixture H lists R2's rating as 22. By the §3.4 rule it is `max(2, 20) + 0 = 20`.
   Either value keeps Q.
 
+## Sound effects and ACM audio (SPEC-010)
+
+`vault_formats::acm` reads the 14-byte little-endian header, then decodes the
+LSB-first bitstream with zero bytes supplied past EOF (look-ahead included).
+Each block rebuilds the asymmetric 16-bit step table and decodes every column
+code (0, 3-24, 26, 27, 29). The lifting carries persist across blocks, and the
+level-1 carries wrap to 16 bits. The +1 bias and the row chunks of
+`max(1, floor(2048 / C) - 2)` follow the spec. Output is `wrap16(e >> L)` (wrapped, not
+saturated), and decoding stops at N samples. Reserved formats, out-of-range table
+indexes, `R = 0` with samples to emit, and a block header at or past EOF are
+errors. Decoded samples are bounded by the 64 MiB asset limit, and blocks by 4 Mi
+elements. Effects and speech play mono at `acm::MIXER_RATE` (22050 Hz) whatever
+the header declares.
+
+`vault_formats::sfx` builds character, weapon, open/close, ambient, interface,
+and scenery names. It implements the lookup chain (H/N gender aliases with the
+male fallback, the case-sensitive `MALIEU`/`MAMTN2` alias), speech and narration
+paths, and the relative-volume formula. In the world host, the open/close
+builder reads the item sound byte at prototype offset 0x38 and the scenery byte
+at 0x28. Weapon names read the weapon byte at 0x79 with the target's material.
+Character names use the unaliased art-list token (`WorldAssets::art_token`).
+Opcodes `0x80A5`, `0x813D`, and `0x8141` call these builders, and the SPEC-009
+AI's ready and out-of-ammunition requests carry their names.
+`WorldHost::effect_file` resolves a name with an optional owner. `speech_file`
+uses the active talking head, and `WorldState::effect_volume` gives the relative
+volume.
+
+Where SPEC-010 leaves details open, this engine makes these choices:
+
+- "No name" results (an invalid action or effect type, a missing art-list row, a
+  failed suffix rule) push D offset zero with a diagnostic, where the reference
+  copies unchecked text.
+- A non-scenery, non-item object uses item sound byte 0 for open/close names,
+  since only item prototypes carry that byte.
+- Narration names use `/` separators in the VFS path.
+- No mixer exists yet, so the four-effect limit and attenuation are not modeled.
+
 ## Spec completion notes
 
 These close behaviors that the earlier phases left open:
@@ -675,8 +730,7 @@ These close behaviors that the earlier phases left open:
 - SPEC-005: executing animation sequences, armor-aware `critter_damage`, the exact
   `obj_can_see_obj`, fleeing-target rejection, `anim` 1000 controls, loaded
   palette tables, retained button graphics, named-event busy state, and
-  consistent 31-byte export keys. Sound-name byte formats are not specified
-  completely, so they remain a host codec.
+  consistent 31-byte export keys. Sound-name builders follow SPEC-010.
 - SPEC-006: elevation-change map updates, speech completion, the queue
   stop-on-nonzero rule, reputation inputs (campaign indices supplied by
   `WorldRules`), talk reachability/12-tile checks, campaign-open failure, and

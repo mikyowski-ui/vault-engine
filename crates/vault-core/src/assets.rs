@@ -73,10 +73,9 @@ pub trait WorldAssets {
         }
     }
     fn release_dialogue_art(&self) {}
-    fn sound_name(&self, _opcode: u16, _args: &[i32]) -> Result<Vec<u8>, WorldError> {
-        Err(WorldError::Invalid(
-            "sound naming requires the host's animation/material catalog".into(),
-        ))
+    /// The unaliased art-list token at an art index (SPEC-010 effect stems).
+    fn art_token(&self, _category: u8, _index: u16) -> Option<Vec<u8>> {
+        None
     }
     /// Load the art selected by a complete SPEC-007 identifier.
     fn object_art(&self, _fid: u32) -> Result<Arc<FrmArchive>, WorldError> {
@@ -363,6 +362,14 @@ impl WorldAssets for VfsWorldAssets {
             }
             Err(_) => Fid::new(category, base, animation, weapon, 0).0,
         }
+    }
+    fn art_token(&self, category: u8, index: u16) -> Option<Vec<u8>> {
+        Some(
+            self.art_catalog()
+                .ok()?
+                .base_token(category, index)?
+                .to_vec(),
+        )
     }
     fn art_exists(&self, fid: u32) -> bool {
         self.art_catalog()
