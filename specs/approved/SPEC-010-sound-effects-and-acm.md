@@ -11,7 +11,7 @@ This specification describes the compressed `.ACM` audio format used for sound e
 
 Evidence comes from two sources:
 
-- Static inspection of reference revision `ac9784b0735468d57ddb2025b9ca76a43a404f4c`, targeting 32-bit Windows.
+- Static inspection of reference revision `R1`, targeting 32-bit Windows.
 - Measurements over the local unpacked corpus: all **2511** `.ACM` files (864 under `sound/sfx`, 1646 under `sound/speech`, 1 under `data`), decoded by a research-side oracle that follows the rules below. The oracle tables are in `oracle/SPEC-010/` (section 4.6). No original executable was run; corpus agreement shows these rules are self-consistent with the shipped assets, not that the original game produced identical bytes.
 
 Compatibility tags follow project policy. **[Must-match]** marks behavior an implementation must reproduce exactly: decoded PCM, file layouts, name strings, and formulas. **[May-improve]** marks reference behavior that comes from memory-safety defects or unbounded loops. An implementation must not reproduce that behavior as undefined behavior; it must instead do what the tag text says (an explicit error, or a bounded result). Where a [May-improve] case never occurs in the corpus, this is stated.

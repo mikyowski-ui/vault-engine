@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes the on-disk `.FON`, `.AAF`, and `.MSG` formats and their source-derived loading, measurement, and rendering behavior. The reference is `fallout1-re` revision `ac9784b0735468d57ddb2025b9ca76a43a404f4c`, targeting 32-bit Windows/x86. It is not a specification for Windows resource fonts, Unicode fonts, or other games' similarly named files.
+This specification describes the on-disk `.FON`, `.AAF`, and `.MSG` formats and their source-derived loading, measurement, and rendering behavior. The reference is `fallout1-re` revision `R1`, targeting 32-bit Windows/x86. It is not a specification for Windows resource fonts, Unicode fonts, or other games' similarly named files.
 
 - `.FON`: `font0.fon` through `font5.fon`; font selection numbers 0 through 5. All use the same format.
 - `.AAF`: `font0.aaf` through `font4.aaf`; font selection numbers 100 through 104. All use the same format.

@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes the Windows/x86 behavior observable from `fallout1-re` revision `ac9784b0735468d57ddb2025b9ca76a43a404f4c`. It covers `color.pal`, indexed `.FRM` sprites and their `.FR0` through `.FR5` variants, and positional `.LST` name indexes. The evidence is source inspection, not execution against original game assets.
+This specification describes the Windows/x86 behavior observable from `fallout1-re` revision `R1`. It covers `color.pal`, indexed `.FRM` sprites and their `.FR0` through `.FR5` variants, and positional `.LST` name indexes. The evidence is source inspection, not execution against original game assets.
 
 Paths below are logical resource paths, whether supplied by loose files or an archive. `color.pal` is more than a 768-byte RGB palette: it also supplies a color-quantization table and may supply additional color-processing tables. This is not a specification of every file bearing a `.PAL` extension.
 

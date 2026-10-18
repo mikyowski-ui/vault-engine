@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes Fallout 1 archive indexing and LZSS, selected-database file lookup, save-slot framing and stream order, world/town-map state, Pip-Boy status/rest, and automap storage. Evidence is static inspection of reference revision `ac9784b0735468d57ddb2025b9ca76a43a404f4c`, targeting 32-bit Windows. No original archive or complete save-slot snapshot was used for byte-for-byte validation; fixtures are synthetic and source-derived behavior is not an original-executable runtime test.
+This specification describes Fallout 1 archive indexing and LZSS, selected-database file lookup, save-slot framing and stream order, world/town-map state, Pip-Boy status/rest, and automap storage. Evidence is static inspection of reference revision `R1`, targeting 32-bit Windows. No original archive or complete save-slot snapshot was used for byte-for-byte validation; fixtures are synthetic and source-derived behavior is not an original-executable runtime test.
 
 Three distinctions are essential:
 

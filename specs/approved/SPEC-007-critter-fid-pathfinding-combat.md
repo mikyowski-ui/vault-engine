@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes revision `ac9784b0735468d57ddb2025b9ca76a43a404f4c`, targeting the 32-bit Windows engine. Evidence is static inspection of art lookup, movement, ray traversal, combat, item/stat consumers, and numeric critical-effect data. Synthetic checks use independent arithmetic/state models, not original game assets or a live game session.
+This specification describes revision `R1`, targeting the 32-bit Windows engine. Evidence is static inspection of art lookup, movement, ray traversal, combat, item/stat consumers, and numeric critical-effect data. Synthetic checks use independent arithmetic/state models, not original game assets or a live game session.
 
 SPEC-001 and SPEC-003 define sprite bytes, prototype/map files, and screen/hex projection; SPEC-006 defines effective stat/skill and random-check calculations. This document adds the complete art-identifier codec and combat/routing rules. Public host mnemonics such as `obj_can_see_obj` identify observable interfaces, not native routine names.
 

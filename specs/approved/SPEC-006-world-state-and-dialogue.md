@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification covers campaign/map `.GAM` initialization, player `.GCD` sheets, SPECIAL-derived statistics and skills, random checks, map entry and action dispatch, and the reply/choice/talking-head dialogue state machine. The evidence is static inspection of reference revision `ac9784b0735468d57ddb2025b9ca76a43a404f4c`, targeting 32-bit Windows, supplemented by the adjacent local asset corpus. It is not an assertion that every recovered edge case was verified in the original executable.
+This specification covers campaign/map `.GAM` initialization, player `.GCD` sheets, SPECIAL-derived statistics and skills, random checks, map entry and action dispatch, and the reply/choice/talking-head dialogue state machine. The evidence is static inspection of reference revision `R1`, targeting 32-bit Windows, supplemented by the adjacent local asset corpus. It is not an assertion that every recovered edge case was verified in the original executable.
 
 Only public file tokens, public script vocabulary, mathematical notation, and observable state are named. The template's repository-name reference is replaced with generic wording to respect this document's stricter identifier restriction. Public names such as `map_enter_p_proc`, `start_gdialog`, and `giq_option` describe the requested script interface, not implementation routines.
 

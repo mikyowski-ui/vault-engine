@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes revision `ac9784b0735468d57ddb2025b9ca76a43a404f4c`, targeting the 32-bit Windows engine. Evidence is static inspection of the AI-packet loader, the generic INI-style configuration reader it uses, NPC combat-turn decision logic, taunt presentation, and the combat/damage/script paths that read or write AI-relevant state. A structural (non-content) audit of a locally owned `data/ai.txt` confirmed the grammar and ordering assumptions below. No original packet values or taunt texts are reproduced. Synthetic checks use independent state models, not a live game session.
+This specification describes revision `R1`, targeting the 32-bit Windows engine. Evidence is static inspection of the AI-packet loader, the generic INI-style configuration reader it uses, NPC combat-turn decision logic, taunt presentation, and the combat/damage/script paths that read or write AI-relevant state. A structural (non-content) audit of a locally owned `data/ai.txt` confirmed the grammar and ordering assumptions below. No original packet values or taunt texts are reproduced. Synthetic checks use independent state models, not a live game session.
 
 This document covers:
 

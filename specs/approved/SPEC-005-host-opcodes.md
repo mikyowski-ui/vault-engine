@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This document specifies the host instruction registrations in revision `ac9784b0735468d57ddb2025b9ca76a43a404f4c`, targeting the 32-bit Windows interpreter described in SPEC-004. The evidence is static inspection of instruction handlers and their host consumers, not measurement of an original executable. Public bytecode mnemonics below are catalog labels, not native implementation routine names or serialized strings.
+This document specifies the host instruction registrations in revision `R1`, targeting the 32-bit Windows interpreter described in SPEC-004. The evidence is static inspection of instruction handlers and their host consumers, not measurement of an original executable. Public bytecode mnemonics below are catalog labels, not native implementation routine names or serialized strings.
 
 The inclusive range `0x804C`-`0x8155` contains 266 instruction words: 83 registered general-library words, two unregistered holes, and 181 registered game words. Every word has a row in sections 2.3-2.10. A registered word can still be a stub, reject ordinary-looking operands, leave a result absent on an early return, or invoke defective host behavior.
 

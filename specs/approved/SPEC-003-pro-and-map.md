@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes the Windows/x86 resource behavior in `fallout1-re` revision `ac9784b0735468d57ddb2025b9ca76a43a404f4c`: the six prototype categories, version-19 map streams, embedded scripts and recursive object inventories, and the hex/square projection used for level rendering. It is based on static inspection of readers, writers, and consumers, not execution against original game assets. Names below describe file meanings rather than implementation identifiers.
+This specification describes the Windows/x86 resource behavior in `fallout1-re` revision `R1`: the six prototype categories, version-19 map streams, embedded scripts and recursive object inventories, and the hex/square projection used for level rendering. It is based on static inspection of readers, writers, and consumers, not execution against original game assets. Names below describe file meanings rather than implementation identifiers.
 
 `.PRO` files are templates; `.MAP` object records are instances referring to those templates. A map cannot generally be parsed in isolation: item/scenery instance lengths depend on subtype information in the referenced prototypes. Art availability and script indexes are external dependencies. A saved map using `.SAV` has the same map-stream organization; the header's saved-state flag, not merely the filename suffix, changes initialization behavior.
 
