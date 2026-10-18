@@ -106,7 +106,20 @@ cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-ai
 # SPEC-010: check every ACM and effect name against the oracle tables:
 cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
     --validate-acm --validate-sfx --oracle-dir oracle/SPEC-010
+# SPEC-011: check the item-prototype invariants and consume every drug:
+cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-items
 ```
+
+`--validate-items` checks the SPEC-011 §4.12 invariants: subtypes and reader
+lengths, drug selectors (the -2 form only in slot 0, healing through slot 1),
+delayed stages, addiction chances and withdrawal perks, the addiction-table,
+alcohol, healing, and money PIDs, armor perks and DR/DT ranges (EMP DR above
+100), magazine calibers, minimum strength, pack sizes, and the `perk.msg` name
+and description ranges. It reports the counts next to the §4.12 survey, then
+has the player consume every drug through the engine with the installed
+campaign and messages. On the local corpus, all 18 invariants pass, every survey
+count matches (242 items: 9 armor, 77 containers, 14 drugs, 43 weapons, 16
+ammunition, 77 misc, 6 keys), and the 14 drugs queue the 18 delayed stages.
 
 `--validate-ai` initializes the combat AI exactly as the host does (a missing
 file, a packet without all 25 keys, or an empty table fails), then reports
@@ -476,10 +489,10 @@ kill-category changes; `CharacterSheet::from_gcd` then recomputes derived bases
 and performs the bounded initial healing request.
 
 `CharacterSheet` separates trait-adjusted raw attributes R from effective,
-bonus-adjusted E. It implements all 16 trait selections, all listed stat/skill
-perk effects, tag investment, difficulty, equipment/addiction effects, and
-accumulated level-up HP history. Perk effects are applied on rank changes, not on
-each query. `ParkMiller` exposes a complete shuffle-state snapshot, preserves
+bonus-adjusted E. It implements all 16 trait selections, the SPEC-011 perk-effect
+mechanism (ranks, armor perks, and withdrawal perks), tag investment,
+difficulty, and accumulated level-up HP history. Perk effects are applied on
+rank changes, not on each query. `ParkMiller` exposes a complete shuffle-state snapshot, preserves
 entry zero on reseeding, distinguishes seed/draw sign correction, and supports
 explicit startup diagnostic draws. Checks preserve the tick-864000 boundary and
 their exact number of random draws.
@@ -491,7 +504,8 @@ execution from later named calls. Map loading records and executes the ten
 specified stages, including full ambient before entry and player light after
 the initial map-script request. Timers use stable insertion order at equal due
 times; spatial callbacks are checked on each animated movement step with reentry
-suppressed. Inventory stack splits preserve a distinct removed representative.
+suppressed. Inventory stack splits preserve a distinct removed representative
+(SPEC-011 §3.13).
 
 The extension ABI is compiled from the approved SPEC-005 table at build time.
 All 266 slots are present: 264 registered words and holes `0x807D`/`0x807E`.
@@ -518,9 +532,10 @@ renders loaded head/background/interface art and font glyphs; no fabricated
 conversation is substituted for a missing NPC script.
 
 Host boundaries remain explicit where the approved specs do not define the
-underlying tables or media formats. `WorldRules` supplies numeric perk mappings,
-XP thresholds/bonuses, currency/medical/equipment PID roles, and numeric action
-codes not enumerated by the specs. `WorldAssets` supplies sound-name codecs and
+underlying tables or media formats. `WorldRules` supplies the medical-kit PID
+roles, campaign reputation indices, the calendar base year, and numeric action
+codes not enumerated by the specs; it can override the SPEC-011 money PID (41)
+and weapon-perk numbers (58-61). `WorldAssets` supplies sound-name codecs and
 localized continuation labels. Absent mappings are diagnosed or rejected, rather
 than guessed from reverse-engineering sources. Unobstructed light arithmetic is
 exact; occlusion/shot lines use the engine's bounded integer hex-line policy.
@@ -625,8 +640,9 @@ turn without an AP refill. The saved next-identity counter is installed before
 the map load, so temporary objects cannot take saved inventory identities.
 Payloads the engine does not model are carried verbatim: preferences outside
 difficulty, combat difficulty, violence, and burning-run; movies; skill
-timestamps; interface words; the pending-perk byte; and ranks for unmapped perk
-indices. Perk ranks map through `WorldRules::perk_ids`. The platform supplies
+timestamps; and interface words. Component 10 holds the selected rank of each
+SPEC-011 perk index 0-63, and component 19 the reconciled level and the sheet's
+pending-perk flag. The platform supplies
 the thumbnail and host date/time (`SaveInfo`). The base calendar year is
 `WorldRules::calendar_year` (default 0), because the specs define only the
 non-leap month/day calendar.
@@ -705,9 +721,9 @@ Where SPEC-009 leaves details open, this engine makes these choices:
   -1 callbacks run in registration order when the action finishes.
 - Movement "limited to the current AP" truncates the route to that many hexes;
   each committed hex still charges its leg-dependent cost, saturating at zero.
-- No approved specification defines drug consumption or the SPEC-002 language
-  filter. `WorldHost::drug_rules` supplies consumption; without it NPC healing is
-  skipped with a diagnostic. The filter's preference state machine is tracked
+- NPC healing consumes each unit through the SPEC-011 §3.7 contract
+  (`WorldHost::consume_drug`). No approved specification defines the SPEC-002
+  language filter: its preference state machine is tracked
   (`AiState::filtered`), but catalog text is unchanged.
 - Party membership applies the 18000 object-identifier floor literally. Object
   identifiers come from map and save data and the insertion counter, so members
@@ -768,6 +784,76 @@ Where SPEC-010 leaves details open, this engine makes these choices:
   since only item prototypes carry that byte.
 - Narration names use `/` separators in the VFS path.
 - No mixer exists yet, so the four-effect limit and attenuation are not modeled.
+
+## Items, drugs, barter, and progression (SPEC-011)
+
+`vault_core::drugs` holds the pure rules: the fixed addiction table, stage slots
+(the -2 range form draws once at the first processed slot, and a skipped slot
+moves the draw on), delayed-stage scheduling, and the player's Chem Reliant, Chem
+Resistant, and Flower Child scaling. `WorldHost::consume_drug` runs §3.1:
+dead or robotic consumers give -1 with no draw; otherwise the re-dose scan, the
+immediate stage, both delayed stages (queue type 0), and the addiction roll,
+which is drawn even at 0%. NPC bonus changes apply to the critter prototype:
+`WorldState::adjust_bonus` updates every instance of the PID and records the
+arrays in `prototype_stats` for instances created later. Current HP clears the
+fleeing bit, caps at maximum HP, and kills through the kill path at or below 0.
+Poison and radiation act only on the player. The player sees `item.msg`
+gained/lost lines, or "nothing happens". Withdrawal onset and end events apply
+and remove the perk effect, print the perk description and `item.msg` 3, and stop
+the queue pass for the player (interrupting travel and rest). Map exit applies
+non-party stages and end events (§3.9). SPEC-009 healing consumes through the same
+contract. The inventory use (`use_drug`) and use-on paths follow §3.6.
+
+`vault_core::items` implements §3.13-3.16 on `WorldState`. Stacking compares PID,
+script, equipment and used flags, and instance state, ignoring ammunition rounds
+and the money amount. An added item becomes the entry's representative (ammo
+packs merge with the documented front/quantity rule). Removal clones the
+representative, resetting ammunition to full packs. Item weight and value cover
+containers, loaded weapons (whole packs; `L × cost / K`), and ammunition entries.
+`add_refusal` applies the biped carry (`>`), body-type, container (`≥`, plus the
+outermost carrier), and power-cell limits; forced transfers skip them. Reload,
+search reload, drag reload, and unload follow §3.15. Armor contributes AC, DR, DT,
+and its perk to the player only (`WorldHost::wield_object` also sets the armor
+art); an NPC's worn armor sets the flag only. A player attack below a weapon's
+minimum strength prints `combat.msg` 107, and opening the inventory in combat
+costs `4 - Quick Pockets` AP (`open_inventory`).
+
+`vault_core::progression` holds the experience table (maximum level 21), the
+Swift Learner award, level-up HP, the 64-row perk table (ranks, levels,
+requirements, effects, and the effect-only perks 53-63), eligibility, the
+character-screen reconciliation with its single pending-perk flag, and the
+chooser extras (Tag!, Mutate!, Lifegiver, Educated). `Perk` is numbered by perk
+index, so saves, `has_trait`, and `critter_add_trait` use the table directly.
+`WorldHost::give_experience` prints `stat.msg` 600 and plays `levelup` per level.
+`vault_core::barter` evaluates the binary64 price formula, the reaction modifier,
+and Master Trader. `BarterSession` (`begin_barter`, `barter_move`,
+`barter_price`, `attempt_trade`, `end_barter`) hides the merchant's armor and
+right-hand item or first weapon, applies the acceptance rules, and returns
+everything on exit.
+
+Where SPEC-011 leaves details open, or offers a safe rule, this engine makes
+these choices:
+
+- The `[May-improve]` safe rules apply. The addiction test reads the mapped
+  variable 189-194, and so does the end event's "any addiction" test. Inventory
+  use destroys a unit only on result 1. Barter uses `M_s + M_r` from the first
+  frame. The player-stat setter rejects selectors outside 0-4.
+- Stat names in the gained/lost lines are `stat.msg` 100 + selector, the
+  catalog's 38 name entries.
+- An overdose uses the kill path's fall-back death (animation 20).
+- The use-on messages 582 and 583-586 show only when the player is the actor.
+  The dead-target `roll(0, 3)` is drawn for every actor.
+- A cancelled Tag! or Mutate! sub-selection keeps the pending pick, because the
+  choice did not complete.
+- Prototype stat changes last for the session. Loading a save rebuilds the world
+  from the save and the prototype files, because SPEC-008 saves no prototypes.
+- A loaded weapon whose ammunition prototype was never seen (by object, import,
+  or reload) weighs and costs as unloaded. Unloading it creates nothing.
+- Fixture A3 says its stage delays are unchanged. A3 includes Chem Resistant,
+  and §3.3 halves delays for it, so they are halved as in A2.
+- The inventory screen's held-outside-the-list item is not modeled; the engine
+  has no inventory screen. Barter is an engine API, and the desktop does not
+  present it yet.
 
 ## Spec completion notes
 

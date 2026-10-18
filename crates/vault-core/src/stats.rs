@@ -21,55 +21,157 @@ pub enum Trait {
     Skilled,
     Gifted,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// SPEC-011 §3.22 perk indices 0-63: the save-component, script, and
+/// `perk.msg` numbering. Indices 53-63 are not selectable; drugs, armor,
+/// and weapons apply them as effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
 pub enum Perk {
+    Awareness,
+    BonusHthAttacks,
     BonusHthDamage,
+    BonusMove,
+    BonusRangedDamage,
+    BonusRateOfFire,
     EarlierSequence,
     FasterHealing,
     MoreCriticals,
-    StrongBack,
-    ActionBoy,
-    Dodger,
-    BetterCriticals,
+    NightVision,
+    Presence,
     RadResistance,
     Toughness,
-    Snakeater,
-    Lifegiver,
-    Educated,
-    Medic,
-    Ghost,
-    MasterThief,
-    MrFixit,
-    Speaker,
-    SmoothTalker,
-    Presence,
-    CultOfPersonality,
-    Empathy,
-    NightVision,
-    Awareness,
-    // Perks consumed by SPEC-007/SPEC-008 rules without stat-bonus effects.
-    BonusMove,
+    StrongBack,
     Sharpshooter,
-    BonusHthAttacks,
-    BonusRateOfFire,
-    BonusRangedDamage,
+    SilentRunning,
+    Survivalist,
+    MasterTrader,
+    Educated,
+    Healer,
+    FortuneFinder,
+    BetterCriticals,
+    Empathy,
     Slayer,
     Sniper,
     SilentDeath,
+    ActionBoy,
+    MentalBlock,
+    Lifegiver,
+    Dodger,
+    Snakeater,
+    MrFixit,
+    Medic,
+    MasterThief,
+    Speaker,
     HeaveHo,
-    QuickPockets,
+    FriendlyFoe,
+    Pickpocket,
+    Ghost,
+    CultOfPersonality,
+    Scrounger,
     Explorer,
-    Scout,
+    FlowerChild,
     Pathfinder,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Effect {
+    AnimalFriend,
+    Scout,
+    MysteriousStranger,
+    Ranger,
+    QuickPockets,
+    SmoothTalker,
+    SwiftLearner,
+    Tag,
+    Mutate,
+    NukaColaCraving,
+    BuffoutCraving,
+    MentatsCraving,
+    PsychoCraving,
+    RadawayCraving,
+    WeaponLongRange,
+    WeaponAccurate,
+    WeaponPenetrate,
+    WeaponKnockback,
     PoweredArmor,
     CombatArmor,
-    BuffoutAddiction,
-    MentatsAddiction,
-    PsychoAddiction,
-    RadAwayAddiction,
+}
+impl Perk {
+    pub const ALL: [Self; 64] = [
+        Self::Awareness,
+        Self::BonusHthAttacks,
+        Self::BonusHthDamage,
+        Self::BonusMove,
+        Self::BonusRangedDamage,
+        Self::BonusRateOfFire,
+        Self::EarlierSequence,
+        Self::FasterHealing,
+        Self::MoreCriticals,
+        Self::NightVision,
+        Self::Presence,
+        Self::RadResistance,
+        Self::Toughness,
+        Self::StrongBack,
+        Self::Sharpshooter,
+        Self::SilentRunning,
+        Self::Survivalist,
+        Self::MasterTrader,
+        Self::Educated,
+        Self::Healer,
+        Self::FortuneFinder,
+        Self::BetterCriticals,
+        Self::Empathy,
+        Self::Slayer,
+        Self::Sniper,
+        Self::SilentDeath,
+        Self::ActionBoy,
+        Self::MentalBlock,
+        Self::Lifegiver,
+        Self::Dodger,
+        Self::Snakeater,
+        Self::MrFixit,
+        Self::Medic,
+        Self::MasterThief,
+        Self::Speaker,
+        Self::HeaveHo,
+        Self::FriendlyFoe,
+        Self::Pickpocket,
+        Self::Ghost,
+        Self::CultOfPersonality,
+        Self::Scrounger,
+        Self::Explorer,
+        Self::FlowerChild,
+        Self::Pathfinder,
+        Self::AnimalFriend,
+        Self::Scout,
+        Self::MysteriousStranger,
+        Self::Ranger,
+        Self::QuickPockets,
+        Self::SmoothTalker,
+        Self::SwiftLearner,
+        Self::Tag,
+        Self::Mutate,
+        Self::NukaColaCraving,
+        Self::BuffoutCraving,
+        Self::MentatsCraving,
+        Self::PsychoCraving,
+        Self::RadawayCraving,
+        Self::WeaponLongRange,
+        Self::WeaponAccurate,
+        Self::WeaponPenetrate,
+        Self::WeaponKnockback,
+        Self::PoweredArmor,
+        Self::CombatArmor,
+    ];
+    /// The perk with a numeric index; anything outside 0-63 is none.
+    pub fn from_index(index: i32) -> Option<Self> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| Self::ALL.get(index).copied())
+    }
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+    /// Indices 0-52 can be chosen; 53-63 are effect-only.
+    pub const fn selectable(self) -> bool {
+        (self as u8) < 53
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatContext {
@@ -114,7 +216,8 @@ pub struct CharacterSheet {
     pub karma: i32,
     pub unspent_skills: i32,
     pub reconciled_level: i32,
-    pub selected_perks: u8,
+    /// SPEC-011 §3.21 pending-perk byte (a flag, not a counter).
+    pub pending_perk: bool,
     pub remaining_creation: i32,
     pub body: i32,
     /// Critter experience reward (not the player's accumulated experience).
@@ -146,7 +249,7 @@ impl Default for CharacterSheet {
             karma: 0,
             unspent_skills: 0,
             reconciled_level: 1,
-            selected_perks: 0,
+            pending_perk: false,
             remaining_creation: 0,
             body: 0,
             experience_reward: 0,
@@ -157,7 +260,7 @@ impl Default for CharacterSheet {
         sheet
     }
 }
-fn saturated(value: i64) -> i32 {
+pub(crate) fn saturated(value: i64) -> i32 {
     value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 impl CharacterSheet {
@@ -307,42 +410,25 @@ impl CharacterSheet {
             self.recompute(context);
         }
     }
+    /// Set a perk rank, applying the §3.12 effect once per gained rank and
+    /// removing it once per lost rank.
     pub fn set_perk(&mut self, perk: Perk, rank: u32, context: StatContext) {
-        let previous = *self.perks.get(&perk).unwrap_or(&0);
-        self.perks.insert(perk, rank);
-        let effect = match perk {
-            Perk::BonusHthDamage => Some((11, 2)),
-            Perk::EarlierSequence => Some((13, 2)),
-            Perk::FasterHealing => Some((14, 1)),
-            Perk::MoreCriticals => Some((15, 5)),
-            Perk::StrongBack => Some((12, 50)),
-            Perk::ActionBoy => Some((8, 1)),
-            Perk::Dodger => Some((9, 5)),
-            Perk::BetterCriticals => Some((16, 20)),
-            Perk::RadResistance => Some((31, 15)),
-            Perk::Toughness => Some((24, 10)),
-            Perk::Snakeater => Some((32, 25)),
-            _ => None,
-        };
-        if let Some((stat, amount)) = effect {
-            self.adjust_bonus(
-                stat,
-                saturated((i64::from(rank) - i64::from(previous)) * amount),
-                context,
-            );
+        let previous = self.perks.get(&perk).copied().unwrap_or(0);
+        if rank == 0 {
+            self.perks.remove(&perk);
+        } else {
+            self.perks.insert(perk, rank);
+        }
+        let ranks = i64::from(rank) - i64::from(previous);
+        for (stat, amount) in crate::progression::perk_changes(perk) {
+            self.adjust_bonus(stat, saturated(ranks * i64::from(amount)), context);
         }
     }
-    pub fn effect(&mut self, effect: Effect, apply: bool, context: StatContext) {
-        let changes: &[(usize, i32)] = match effect {
-            Effect::PoweredArmor => &[(0, 3), (31, 30)],
-            Effect::CombatArmor => &[(31, 20)],
-            Effect::BuffoutAddiction => &[(0, -2), (2, -2), (5, -3)],
-            Effect::MentatsAddiction => &[(4, -3), (5, -2)],
-            Effect::PsychoAddiction => &[(4, -2)],
-            Effect::RadAwayAddiction => &[(31, -20)],
-        };
-        for (index, value) in changes {
-            self.adjust_bonus(*index, if apply { *value } else { -*value }, context);
+    /// SPEC-011 §3.12 perk effect on this sheet's bonus array; removal
+    /// subtracts exactly the applied amounts, and effects stack.
+    pub fn perk_effect(&mut self, perk: Perk, apply: bool, context: StatContext) {
+        for (stat, amount) in crate::progression::perk_changes(perk) {
+            self.adjust_bonus(stat, if apply { amount } else { -amount }, context);
         }
     }
     pub fn skill(&self, index: usize, context: StatContext) -> i32 {
@@ -430,32 +516,5 @@ impl CharacterSheet {
             .current_hp
             .saturating_add(amount)
             .clamp(0, self.stat(7, context));
-    }
-    pub fn advance_level(&mut self, context: StatContext) -> bool {
-        if self.level >= 21 {
-            return false;
-        }
-        let hp =
-            saturated(2 + self.raw(2, context) / 2 + 4 * i64::from(self.rank(Perk::Lifegiver)));
-        self.heal(hp, context);
-        self.adjust_bonus(7, hp, context);
-        self.level += 1;
-        self.flags |= 8;
-        true
-    }
-    pub fn reconcile_levels(&mut self, context: StatContext) -> u32 {
-        let mut opportunities = 0;
-        while self.reconciled_level < self.level {
-            self.reconciled_level += 1;
-            let gain = (5 + 2 * self.raw(4, context) + 2 * i64::from(self.rank(Perk::Educated))
-                - if self.has_trait(Trait::Gifted) { 5 } else { 0 })
-            .max(0);
-            self.unspent_skills = saturated(i64::from(self.unspent_skills) + gain).clamp(0, 99);
-            let interval = if self.has_trait(Trait::Skilled) { 4 } else { 3 };
-            if self.reconciled_level % interval == 0 && self.selected_perks < 7 {
-                opportunities += 1;
-            }
-        }
-        opportunities
     }
 }

@@ -2,23 +2,29 @@
 
 pub mod ai;
 pub mod assets;
+pub mod barter;
 pub mod combat;
 pub mod combat_state;
 pub mod critical;
 pub mod dialogue;
+pub mod drugs;
 pub mod handles;
 pub mod host;
 mod host_ai;
 mod host_animation;
 mod host_combat;
+mod host_drugs;
 mod host_game;
+mod host_items;
 mod host_movement;
 pub mod host_rest;
 pub mod host_save;
 mod host_sound;
 mod host_travel;
+pub mod items;
 pub mod library;
 pub mod persistence;
+pub mod progression;
 pub mod queue;
 pub mod rng;
 pub mod routing;
@@ -66,11 +72,19 @@ pub use stats::{CharacterSheet, Perk, StatContext, Trait};
 #[cfg(test)]
 mod ai_tests;
 #[cfg(test)]
+mod barter_tests;
+#[cfg(test)]
 mod combat_tests;
+#[cfg(test)]
+mod drugs_tests;
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/formats/support.rs"]
 pub(crate) mod fixture_assets;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/items/support.rs"]
+pub(crate) mod fixture_items;
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/state/support.rs"]
@@ -84,7 +98,11 @@ mod host_ai_tests;
 #[cfg(test)]
 mod host_sound_tests;
 #[cfg(test)]
+mod items_tests;
+#[cfg(test)]
 mod persistence_tests;
+#[cfg(test)]
+mod progression_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]

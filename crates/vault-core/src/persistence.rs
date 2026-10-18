@@ -12,7 +12,7 @@ use vault_formats::{
     pro::{MapFlags, PackedLocation, ScriptFlags},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Persistence {
     /// Working `MAPS/<NAME>.SAV` images keyed by uppercase file name.
     pub maps: BTreeMap<String, Vec<u8>>,
@@ -24,33 +24,12 @@ pub struct Persistence {
     pub automap_flags: u32,
     /// Payload 2's water-warning/movie-status byte.
     pub campaign_status: u8,
-    /// Perk-rank words for indices without a configured perk mapping.
-    pub perk_ranks: [i32; 64],
     /// Preference words not modeled by world state.
     pub preferences: [u32; 20],
-    pub pending_perk: u8,
     pub movies: [u8; 14],
     pub skill_uses: [[i32; 3]; 18],
     pub interface: [i32; 4],
 }
-impl Default for Persistence {
-    fn default() -> Self {
-        Self {
-            maps: BTreeMap::new(),
-            current_map: None,
-            automap: AutomapDb::default(),
-            automap_flags: 0,
-            campaign_status: 0,
-            perk_ranks: [0; 64],
-            preferences: [0; 20],
-            pending_perk: 0,
-            movies: [0; 14],
-            skill_uses: [[0; 3]; 18],
-            interface: [0; 4],
-        }
-    }
-}
-
 /// A map resource name's working `.SAV` file name: the uppercase stem of
 /// the final path component plus `.SAV`.
 pub fn saved_map_name(name: &[u8]) -> Option<String> {

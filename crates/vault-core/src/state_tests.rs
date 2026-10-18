@@ -194,7 +194,10 @@ fn spec006_player_stats_all_skills_traits_perks_and_hp_history() {
     );
     sheet.traits = [Trait::Skilled as i32, Trait::Gifted as i32];
     sheet.level = 4;
-    assert_eq!(sheet.reconcile_levels(context), 1);
+    assert!(
+        sheet.reconcile_levels(context),
+        "level 4 grants the Skilled pick"
+    );
     assert_eq!(sheet.unspent_skills, 36); // 5 + 2*6 - 5, three levels; no invented Skilled +5.
     sheet.invested[0] = -7;
     assert_eq!(sheet.skill(0, context), -7);
@@ -782,12 +785,14 @@ fn interactive_dialogue_runs_real_callbacks_and_restores_map() {
     host.action(host.world.player, item, ObjectAction::Pickup)
         .unwrap();
     assert_eq!(host.world.get(item).unwrap().owner, Some(host.world.player));
+    // SPEC-011 §3.13: re-adding the representative is a successful no-op.
     host.world
         .add_item(host.world.player, item, 2, true)
         .unwrap();
+    assert_eq!(host.world.inventory_count(host.world.player, 1), 1);
     host.world.remove_item(host.world.player, item, 1).unwrap();
     assert_eq!(host.world.get(item).unwrap().raw.hex, Some(1));
-    assert_eq!(host.world.inventory_count(host.world.player, 1), 2);
+    assert_eq!(host.world.inventory_count(host.world.player, 1), 0);
 }
 
 #[test]
@@ -1688,4 +1693,85 @@ fn spec010_sound_name_opcodes_use_prototype_sound_bytes() {
         ),
         None
     );
+}
+
+#[test]
+fn spec011_progression_and_barter_opcodes() {
+    use fixture::{instruction, push};
+    let (mut host, base, _) = host(&[b"Hello"]);
+    let me = host.world.player;
+    // give_exp_points applies Swift Learner and the level loop, playing
+    // the level-up sound once per level.
+    host.world
+        .player_sheet_mut()
+        .unwrap()
+        .perks
+        .insert(Perk::SwiftLearner, 1);
+    run_fragment(
+        &mut host,
+        &base,
+        &[push(2900), instruction(0x80a1)].concat(),
+    )
+    .unwrap();
+    let sheet = host.world.player_sheet().unwrap();
+    assert_eq!((sheet.experience, sheet.level), (3045, 3));
+    let sounds = host
+        .world
+        .effects
+        .iter()
+        .filter(
+            |e| matches!(e, WorldEffect::SoundEffect { name, owner: None } if name == b"levelup"),
+        )
+        .count();
+    assert_eq!(sounds, 2);
+    // has_trait kind 0 reads ranks by SPEC-011 perk number.
+    let has = |host: &mut WorldHost<Assets>, perk: i32| {
+        let code = [push(0), push(me as i32), push(perk), instruction(0x80f3)].concat();
+        run_fragment(host, &base, &code)
+            .unwrap()
+            .value_stack
+            .pop()
+            .unwrap()
+    };
+    assert_eq!(has(&mut host, 50), Value::integer(1), "Swift Learner");
+    assert_eq!(has(&mut host, 0), Value::integer(0));
+    // critter_add_trait kind 0 uses the chooser's eligibility test and
+    // fails silently; either way it pushes -1.
+    let add = |host: &mut WorldHost<Assets>, perk: i32| {
+        let code = [
+            push(me as i32),
+            push(0),
+            push(perk),
+            push(1),
+            instruction(0x8102),
+        ]
+        .concat();
+        run_fragment(host, &base, &code)
+            .unwrap()
+            .value_stack
+            .pop()
+            .unwrap()
+    };
+    assert_eq!(add(&mut host, 0), Value::integer(-1));
+    assert_eq!(add(&mut host, 23), Value::integer(-1));
+    let sheet = host.world.player_sheet().unwrap();
+    assert_eq!(
+        (sheet.rank(Perk::Awareness), sheet.rank(Perk::Slayer)),
+        (1, 0),
+        "Awareness (level 3, PE 5) passes; Slayer (level 18) does not"
+    );
+    assert_eq!(add(&mut host, 0), Value::integer(-1));
+    assert_eq!(
+        host.world.player_sheet().unwrap().rank(Perk::Awareness),
+        1,
+        "maximum rank 1"
+    );
+    // gdialog_barter replaces the script modifier and requests barter;
+    // gdialog_set_barter_mod replaces it alone.
+    host.world.dialogue.open = true;
+    run_fragment(&mut host, &base, &[push(-20), instruction(0x8129)].concat()).unwrap();
+    assert_eq!(host.world.dialogue.barter_modifier, -20);
+    assert!(host.world.dialogue.pending_barter);
+    run_fragment(&mut host, &base, &[push(7), instruction(0x814e)].concat()).unwrap();
+    assert_eq!(host.world.dialogue.barter_modifier, 7);
 }

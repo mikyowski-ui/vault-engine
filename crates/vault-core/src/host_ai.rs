@@ -7,8 +7,8 @@
 use crate::{
     Movement, ObjectRef, RandomSource, StepOutcome, WorldEffect, WorldError, WorldState,
     ai::{
-        self, AttackEnv, CalledShot, DrugRules, HealingInventory, InventoryWeapon, ModeWeapon,
-        Switched, Taunt, TauntCallback, ThreatView, WeaponChoice, intent,
+        self, AttackEnv, CalledShot, HealingInventory, InventoryWeapon, ModeWeapon, Switched,
+        Taunt, TauntCallback, ThreatView, WeaponChoice, intent,
     },
     assets::WorldAssets,
     combat::{Attack, Resolution, weapon_skill},
@@ -58,12 +58,12 @@ impl WorldState {
             .is_some_and(|object| object.raw.id >= ai::PARTY_ID_FLOOR)
             && (critter == self.player || self.party.contains(&critter))
     }
-    fn effective(&self, critter: ObjectRef, stat: usize) -> i32 {
+    pub(crate) fn effective(&self, critter: ObjectRef, stat: usize) -> i32 {
         self.get(critter)
             .and_then(|object| object.character.as_ref())
             .map_or(0, |sheet| sheet.stat(stat, self.context(critter)))
     }
-    fn body_type(&self, critter: ObjectRef) -> i32 {
+    pub(crate) fn body_type(&self, critter: ObjectRef) -> i32 {
         self.get(critter)
             .and_then(|object| object.character.as_ref())
             .map_or(0, |sheet| sheet.body)
@@ -76,7 +76,7 @@ impl WorldState {
         self.critter_state(critter)
             .is_some_and(|state| state.results.0 & effect::KNOCKED_OUT != 0)
     }
-    fn action_points(&self, critter: ObjectRef) -> i32 {
+    pub(crate) fn action_points(&self, critter: ObjectRef) -> i32 {
         self.critter_state(critter).map_or(0, |state| state.ap)
     }
     fn add_intent(&mut self, critter: ObjectRef, bits: u32) {
@@ -84,7 +84,7 @@ impl WorldState {
             state.maneuvers |= bits;
         }
     }
-    fn item_subtype(&self, item: ObjectRef) -> Option<ItemSubtype> {
+    pub(crate) fn item_subtype(&self, item: ObjectRef) -> Option<ItemSubtype> {
         match &self.get(item)?.prototype.as_deref()?.data {
             PrototypeData::Item(data) => Some(data.data.subtype()),
             _ => None,
@@ -112,7 +112,7 @@ impl WorldState {
             })
     }
     /// Loaded rounds and ammunition PID of a weapon instance.
-    fn loaded(&self, weapon: ObjectRef) -> (i32, i32) {
+    pub(crate) fn loaded(&self, weapon: ObjectRef) -> (i32, i32) {
         match self.get(weapon).map(|object| &object.raw.state) {
             Some(ObjectState::Other {
                 detail: ObjectDetail::Weapon { rounds, ammo_pid },
@@ -121,7 +121,7 @@ impl WorldState {
             _ => (0, -1),
         }
     }
-    fn ammo_rounds(&self, ammo: ObjectRef) -> i32 {
+    pub(crate) fn ammo_rounds(&self, ammo: ObjectRef) -> i32 {
         match self.get(ammo).map(|object| &object.raw.state) {
             Some(ObjectState::Other {
                 detail: ObjectDetail::Ammunition(rounds),
@@ -130,7 +130,7 @@ impl WorldState {
             _ => 0,
         }
     }
-    fn set_ammo_rounds(&mut self, ammo: ObjectRef, rounds: i32) {
+    pub(crate) fn set_ammo_rounds(&mut self, ammo: ObjectRef, rounds: i32) {
         if let Some(object) = self.get_mut(ammo) {
             let word = match object.raw.state {
                 ObjectState::Other { word, .. } => word,
@@ -762,8 +762,8 @@ impl<A: WorldAssets> WorldHost<A> {
         self.run_taunts();
         Ok(true)
     }
-    /// §3.7 healing for a biped below half its maximum HP, through the
-    /// host's drug rules. Without configured rules healing is skipped.
+    /// §3.7 healing for a biped below half its maximum HP, consuming each
+    /// unit through the SPEC-011 §3.7 drug-use contract.
     pub(crate) fn ai_heal(&mut self, critter: ObjectRef) -> Result<(), WorldError> {
         if self.world.body_type(critter) != 0 {
             return Ok(());
@@ -772,21 +772,13 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.world.hit_points(critter).unwrap_or(0) >= half {
             return Ok(());
         }
-        let Some(mut rules) = self.drug_rules.take() else {
-            self.world
-                .diagnostic("no drug-consumption rules are configured; NPC healing is skipped");
-            return Ok(());
-        };
-        let result = ai::heal(
+        ai::heal(
             &mut Healing {
                 host: self,
                 critter,
-                rules: &mut *rules,
             },
             half,
-        );
-        self.drug_rules = Some(rules);
-        result
+        )
     }
 
     /// §3.9 usability of `weapon` in `mode`: arms, critter art for the
@@ -895,15 +887,7 @@ impl<A: WorldAssets> WorldHost<A> {
         critter: ObjectRef,
         weapon: ObjectRef,
     ) -> Option<ObjectRef> {
-        self.world
-            .get(critter)?
-            .inventory
-            .iter()
-            .map(|(item, _)| *item)
-            .find(|item| {
-                self.world.item_subtype(*item) == Some(ItemSubtype::Ammunition)
-                    && self.world.reload_permitted(weapon, *item)
-            })
+        self.world.first_compatible_ammo(critter, weapon)
     }
     /// §3.9 inventory search (bipeds and robots), optionally with the raw
     /// primary AP check, folding weapon preference in inventory order.
@@ -1337,39 +1321,9 @@ impl<A: WorldAssets> WorldHost<A> {
         self.unwield(critter);
         Ok(Some(self.switch_weapon(critter, target)?))
     }
-    /// The standard reload rule: transfer up to the free magazine space,
-    /// set the weapon's ammunition PID, and return the rounds left in the
-    /// ammunition (unchanged for a full magazine), or -1 if not permitted.
+    /// The standard reload rule (SPEC-011 §3.15), as on the world state.
     pub fn reload_weapon(&mut self, weapon: ObjectRef, ammo: ObjectRef) -> i32 {
-        if !self.world.reload_permitted(weapon, ammo) {
-            return -1;
-        }
-        let capacity = self.world.weapon_data(weapon).map_or(0, |gun| gun.capacity);
-        let (loaded, _) = self.world.loaded(weapon);
-        let mut left = self.world.ammo_rounds(ammo);
-        if loaded < capacity {
-            let transfer = (capacity - loaded).min(left).max(0);
-            let pid = self
-                .world
-                .get(ammo)
-                .map_or(-1, |object| object.raw.pid as i32);
-            if let Some(object) = self.world.get_mut(weapon) {
-                let word = match object.raw.state {
-                    ObjectState::Other { word, .. } => word,
-                    ObjectState::Critter(_) => 0,
-                };
-                object.raw.state = ObjectState::Other {
-                    word,
-                    detail: ObjectDetail::Weapon {
-                        rounds: loaded + transfer,
-                        ammo_pid: pid,
-                    },
-                };
-            }
-            left -= transfer;
-            self.world.set_ammo_rounds(ammo, left);
-        }
-        left
+        self.world.reload_weapon(weapon, ammo)
     }
     /// §3.13 reload by the AI: an emptied ammunition unit is destroyed (the
     /// rest of a stack keeps full per-unit rounds); a permitted reload plays
@@ -1399,43 +1353,9 @@ impl<A: WorldAssets> WorldHost<A> {
         Ok(())
     }
     /// Destroy one unit of an inventory stack; the remaining units keep a
-    /// full per-unit round count.
+    /// full per-unit round count (SPEC-011 §3.13 removal).
     fn destroy_unit(&mut self, item: ObjectRef) -> Result<(), WorldError> {
-        if let Some(owner) = self.world.get(item).and_then(|object| object.owner) {
-            // Only a stack with units left keeps an entry in this slot.
-            let slot = self.world.get(owner).and_then(|object| {
-                object
-                    .inventory
-                    .iter()
-                    .position(|(entry, count)| *entry == item && *count > 1)
-            });
-            self.world.remove_item(owner, item, 1)?;
-            let pack = match self
-                .world
-                .get(item)
-                .and_then(|object| object.prototype.as_deref())
-            {
-                Some(prototype) => match &prototype.data {
-                    PrototypeData::Item(Item {
-                        data: ItemData::Ammunition { quantity, .. },
-                        ..
-                    }) => Some(*quantity),
-                    _ => None,
-                },
-                None => None,
-            };
-            if let (Some(slot), Some(pack)) = (slot, pack)
-                && let Some((rest, _)) = self
-                    .world
-                    .get(owner)
-                    .and_then(|object| object.inventory.get(slot).copied())
-                && rest != item
-            {
-                self.world.set_ammo_rounds(rest, pack);
-            }
-        }
-        self.world.erase(item);
-        Ok(())
+        self.world.destroy_unit(item)
     }
 }
 
@@ -1443,7 +1363,6 @@ impl<A: WorldAssets> WorldHost<A> {
 struct Healing<'a, A: WorldAssets> {
     host: &'a mut WorldHost<A>,
     critter: ObjectRef,
-    rules: &'a mut dyn DrugRules,
 }
 impl<A: WorldAssets> HealingInventory for Healing<'_, A> {
     type Unit = ObjectRef;
@@ -1478,8 +1397,7 @@ impl<A: WorldAssets> HealingInventory for Healing<'_, A> {
         }
     }
     fn consume(&mut self, unit: &ObjectRef) -> Result<bool, WorldError> {
-        self.rules
-            .consume(&mut self.host.world, self.critter, *unit)
+        Ok(self.host.consume_drug(self.critter, *unit)? == 1)
     }
     fn restore(&mut self, unit: ObjectRef) -> Result<(), WorldError> {
         self.host.world.add_item(self.critter, unit, 1, true)

@@ -98,7 +98,7 @@ impl WorldState {
             burst: weapon.burst,
             two_handed: prototype.extended.contains(ExtendedFlags::TWO_HANDED),
             big_gun: prototype.extended.contains(ExtendedFlags::BIG_GUN),
-            perk: self.rules.weapon_perks.get(&weapon.perk).copied(),
+            perk: self.rules.weapon_perk(weapon.perk),
             rounds,
             capacity: weapon.capacity,
         })
@@ -815,6 +815,16 @@ impl<A: WorldAssets> WorldHost<A> {
         let request = self.apply_request(attacker, defender, &mut attack);
         if let Err(refusal) = self.world.preflight(attacker, defender, &attack) {
             return Ok(Err(refusal));
+        }
+        // SPEC-011 §3.11: the player is warned when the weapon's minimum
+        // strength exceeds effective ST (the hit chance pays 20 per point).
+        if attack.attacker_player
+            && attack
+                .weapon
+                .as_ref()
+                .is_some_and(|weapon| weapon.min_strength > attack.strength)
+        {
+            self.print_game("combat.msg", 107, &[]);
         }
         let mut rng = std::mem::take(&mut self.world.rng);
         let outcome = self.resolve_attack(attacker, defender, &attack, &mut rng);

@@ -2,7 +2,7 @@
 //! companion `<map>.SAV` files and `AUTOMAP.SAV`, best-effort `.BAK`
 //! backups, and the restore order (current map before later components).
 use crate::{
-    ObjectRef, WorldError, WorldState,
+    ObjectRef, Perk, WorldError, WorldState,
     assets::WorldAssets,
     combat_state::CombatState,
     critical::state,
@@ -223,13 +223,8 @@ impl<A: WorldAssets> WorldHost<A> {
             }
         };
         let carried = &world.persistence;
-        let perks = std::array::from_fn(|index| {
-            world
-                .rules
-                .perk_ids
-                .get(&(index as i32))
-                .map_or(carried.perk_ranks[index], |perk| sheet.rank(*perk) as i32)
-        });
+        // SPEC-011 §2.5: selected ranks only, by perk index.
+        let perks = std::array::from_fn(|index| sheet.rank(Perk::ALL[index]) as i32);
         let mut preferences = carried.preferences;
         preferences[0] = world.difficulty as u32;
         if let Some(combat) = world.combat_difficulty {
@@ -301,7 +296,7 @@ impl<A: WorldAssets> WorldHost<A> {
             automap_flags: carried.automap_flags,
             preferences,
             reconciled_level: sheet.reconciled_level,
-            pending_perk: carried.pending_perk,
+            pending_perk: u8::from(sheet.pending_perk),
             world_map: world.world_map.saved.clone(),
             movies: carried.movies,
             skill_uses: carried.skill_uses,
@@ -454,7 +449,6 @@ impl<A: WorldAssets> WorldHost<A> {
         world.elevation = save.player.elevation;
         world.sneak_working = save.sneak_working != 0;
         world.kills = save.kills;
-        world.persistence.perk_ranks = save.perks;
         world.persistence.automap_flags = save.automap_flags;
         world.persistence.preferences = save.preferences;
         world.difficulty = save.preferences[0] as i32;
@@ -463,7 +457,6 @@ impl<A: WorldAssets> WorldHost<A> {
         world.running_burning = save.preferences[4] as i32;
         world.ai.combat_taunts = Some(save.preferences[6] as i32);
         world.ai.language_filter = Some(save.preferences[7] as i32);
-        world.persistence.pending_perk = save.pending_perk;
         world.world_map = WorldMap::from_saved(save.world_map.clone());
         world.persistence.movies = save.movies;
         world.persistence.skill_uses = save.skill_uses;
@@ -535,7 +528,6 @@ impl<A: WorldAssets> WorldHost<A> {
             ObjectState::Critter(state) => (state.hp, state.poison, state.radiation),
             ObjectState::Other { .. } => (0, 0, 0),
         };
-        let rules = self.world.rules.perk_ids.clone();
         let object = self
             .world
             .get_mut(player)
@@ -562,11 +554,9 @@ impl<A: WorldAssets> WorldHost<A> {
         sheet.traits = save.traits;
         // Ranks only: stored bonus words already include perk effects.
         sheet.perks.clear();
-        for (index, perk) in rules {
-            if let Some(rank) = usize::try_from(index).ok().and_then(|i| save.perks.get(i))
-                && *rank > 0
-            {
-                sheet.perks.insert(perk, *rank as u32);
+        for (perk, rank) in Perk::ALL.into_iter().zip(save.perks) {
+            if rank > 0 {
+                sheet.perks.insert(perk, rank as u32);
             }
         }
         [
@@ -577,6 +567,7 @@ impl<A: WorldAssets> WorldHost<A> {
             sheet.karma,
         ] = save.progression;
         sheet.reconciled_level = save.reconciled_level;
+        sheet.pending_perk = save.pending_perk != 0;
         sheet.current_hp = hp;
         sheet.poison = poison;
         sheet.radiation = radiation;

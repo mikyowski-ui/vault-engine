@@ -379,6 +379,8 @@ impl GDialog {
         self.program = program;
         self.head = head;
         self.pending_barter = false;
+        // SPEC-011 §3.17: the script barter modifier resets per dialogue.
+        self.barter_modifier = 0;
         Ok(())
     }
     pub fn background_art(&self) -> u32 {

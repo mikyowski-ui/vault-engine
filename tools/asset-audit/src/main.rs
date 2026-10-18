@@ -1,3 +1,4 @@
+mod items;
 mod sound;
 
 use std::{
@@ -72,6 +73,12 @@ struct Args {
     /// Directory holding the SPEC-010 oracle tables.
     #[arg(long, value_name = "PATH", default_value = "oracle/SPEC-010")]
     oracle_dir: PathBuf,
+    /// SPEC-011 §4.12: check the item-prototype invariants (drug selectors
+    /// and stages, addiction table, armor perks and DR/DT ranges, weapon
+    /// calibers and strength, pack sizes, money) and the `perk.msg` ranges,
+    /// then consume every drug through the engine as the player.
+    #[arg(long)]
+    validate_items: bool,
 }
 
 /// The SPEC-003 writer's expected PRO bytes: the consumed payload with
@@ -372,6 +379,22 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
             if failed + bytes != 0 {
                 return Err(format!("{} SFX check(s) failed", failed + bytes).into());
             }
+        }
+    }
+    if args.validate_items {
+        let vfs = LocalDirProvider::mount(&args.corpus_dir)?;
+        let audit = items::audit_items(&vfs)?;
+        audit.report();
+        if audit.failed() != 0 {
+            return Err(format!("{} item invariant(s) failed", audit.failed()).into());
+        }
+        let [consumed, queued, healed, failed] = items::consume_drugs(&args.corpus_dir)?;
+        println!(
+            "Drug consumption: {consumed} consumed, {queued} delayed stages queued, \
+             {healed} healed, {failed} failed"
+        );
+        if failed != 0 {
+            return Err(format!("{failed} drug consumption check(s) failed").into());
         }
     }
     if args.validate_ai {

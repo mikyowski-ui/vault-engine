@@ -512,3 +512,147 @@ fn validates_spec010_acm_hashes_and_sfx_resolution_against_oracle_tables() {
     .unwrap();
     assert!(!run("--validate-sfx").status.success());
 }
+
+#[test]
+fn validates_spec011_item_invariants_and_reports_violations() {
+    let temp = tempfile::tempdir().unwrap();
+    let items = temp.path().join("proto/items");
+    std::fs::create_dir_all(&items).unwrap();
+    let write = |pid: u32, bytes: &[u8]| {
+        std::fs::write(items.join(format!("{pid:08}.pro")), bytes).unwrap();
+    };
+    let drug = |pid: u32, selectors: [i32; 3], addiction: i32, perk: i32| {
+        let mut bytes = world::prototype(0, 2);
+        world::word(&mut bytes, 0, pid as i32);
+        for (slot, selector) in selectors.into_iter().enumerate() {
+            world::word(&mut bytes, 0x39 + 4 * slot, selector);
+        }
+        world::word(&mut bytes, 0x45, 5);
+        world::word(&mut bytes, 0x71, addiction);
+        world::word(&mut bytes, 0x75, perk);
+        bytes
+    };
+    for pid in [40, 144] {
+        write(pid, &drug(pid, [35, -1, -1], 0, -1));
+    }
+    for pid in [106, 87, 53, 110, 48] {
+        write(pid, &drug(pid, [0, -1, -1], 10, 54));
+    }
+    for pid in [124, 125] {
+        write(pid, &drug(pid, [0, -1, -1], 0, -1));
+    }
+    let mut money = world::prototype(0, 5);
+    world::word(&mut money, 0, 41);
+    world::word(&mut money, 0x30, 1);
+    write(41, &money);
+    for (pid, text) in [
+        (
+            0x400,
+            include_str!("../../../tests/fixtures/items/drug-A.pro.hex"),
+        ),
+        (
+            0x401,
+            include_str!("../../../tests/fixtures/items/drug-B.pro.hex"),
+        ),
+        (
+            0x500,
+            include_str!("../../../tests/fixtures/items/ammo-X.pro.hex"),
+        ),
+        (
+            0x501,
+            include_str!("../../../tests/fixtures/items/weapon-W.pro.hex"),
+        ),
+        (
+            0x502,
+            include_str!("../../../tests/fixtures/items/armor-A.pro.hex"),
+        ),
+        (
+            0x503,
+            include_str!("../../../tests/fixtures/items/armor-B.pro.hex"),
+        ),
+        (
+            0x504,
+            include_str!("../../../tests/fixtures/items/container.pro.hex"),
+        ),
+    ] {
+        write(pid, &fixtures::sparse(text));
+    }
+    // The item list maps each one-based PID index to its file.
+    let list: String = (1..=0x504).map(|pid| format!("{pid:08}.pro\n")).collect();
+    std::fs::write(items.join("items.lst"), list).unwrap();
+    let game = temp.path().join("text/english/game");
+    std::fs::create_dir_all(&game).unwrap();
+    let perks: String = (101..=164)
+        .chain(201..=264)
+        .map(|id| format!("{{{id}}}{{}}{{perk text {id}}}\n"))
+        .collect();
+    std::fs::write(game.join("perk.msg"), perks).unwrap();
+    // The engine check consumes each drug with campaign variables and the
+    // stage messages installed.
+    std::fs::create_dir_all(temp.path().join("data")).unwrap();
+    std::fs::write(
+        temp.path().join("data/vault13.gam"),
+        include_bytes!("../../../tests/fixtures/state/campaign.gam"),
+    )
+    .unwrap();
+    std::fs::write(
+        game.join("item.msg"),
+        "{1}{}{gained %d %s}\n{2}{}{lost %d %s}\n{3}{}{over}\n{10}{}{nothing}\n",
+    )
+    .unwrap();
+    let stats: String = (100..=137)
+        .map(|id| format!("{{{id}}}{{}}{{stat {id}}}\n"))
+        .collect();
+    std::fs::write(game.join("stat.msg"), stats).unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+            .arg("--corpus-dir")
+            .arg(temp.path())
+            .arg("--validate-items")
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("Item invariants: 18 passed, 0 failed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Item prototypes: 17 (armor 2, container 1, drug 11, weapon 1, ammunition 1, misc 1, key 0)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("range-form drugs: 1 (§4.12 survey reported 2)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Drug consumption: 11 consumed, 2 delayed stages queued, 3 healed, 0 failed"),
+        "{text}"
+    );
+    // EMP DR at or below 100 and an addictive drug without a withdrawal
+    // perk both violate the invariants.
+    let mut armour = fixtures::sparse(include_str!(
+        "../../../tests/fixtures/items/armor-A.pro.hex"
+    ));
+    world::word(&mut armour, 0x39 + 4 * (1 + 5), 50);
+    write(0x502, &armour);
+    write(106, &drug(106, [0, -1, -1], 10, -1));
+    let output = run();
+    assert!(!output.status.success());
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        errors.contains("FAIL armor DR is 0-90 (EMP above 100)"),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("FAIL addictive drugs name withdrawal perks 53-57"),
+        "{errors}"
+    );
+    assert!(errors.contains("2 item invariant(s) failed"), "{errors}");
+}

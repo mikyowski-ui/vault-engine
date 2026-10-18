@@ -624,7 +624,7 @@ impl<A: WorldAssets> WorldHost<A> {
         if living && !self.world.combat_quit {
             let experience = std::mem::take(&mut self.world.combat_experience);
             if experience > 0 {
-                self.world.give_experience(experience);
+                self.give_experience(experience);
             }
         }
         self.world.combat_experience = 0;

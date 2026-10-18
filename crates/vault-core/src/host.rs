@@ -71,9 +71,6 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     next_program: u32,
     /// NPC combat policy: the built-in SPEC-009 packet AI by default.
     pub combat_ai: Box<dyn crate::combat_state::CombatAi>,
-    /// Drug consumption for NPC healing; no approved specification defines
-    /// it, so healing is skipped until the host supplies rules.
-    pub drug_rules: Option<Box<dyn crate::ai::DrugRules>>,
     pub building_animation: Option<AnimationSequence>,
     pub animations: Vec<AnimationSequence>,
     pub last_object_name: Vec<u8>,
@@ -196,7 +193,6 @@ impl<A: WorldAssets> WorldHost<A> {
             active: BTreeSet::new(),
             next_program: 1,
             combat_ai: Box::new(crate::combat_state::PacketAi),
-            drug_rules: None,
             building_animation: None,
             animations: Vec::new(),
             last_object_name: b"<Critter>".to_vec(),
@@ -255,7 +251,8 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     pub fn load_map(&mut self, path: &str) -> Result<(), WorldError> {
         self.world.trace.push(WorldTrace::LoadStep(1));
-        self.world.map_exit_cleanup(|_| true);
+        let leaving = self.world.map_exit_cleanup(|_| true);
+        self.leave_map_events(leaving)?;
         if let Some(script) = self.world.map_script {
             // Like the entry requests, a failed exit request (for example a
             // missing compiled script) is reported; leaving still proceeds.
@@ -642,7 +639,9 @@ impl<A: WorldAssets> WorldHost<A> {
     /// Handler results: the specs define the stop rule but no handler-specific
     /// nonzero values. This host reports 1 when a script timer's dispatch
     /// requested a map transition (the condition under which SPEC-008 says a
-    /// nonzero handler returns travel/rest to a map); all others report 0.
+    /// nonzero handler returns travel/rest to a map), for every withdrawal
+    /// event of the player, and for a drug stage that left the player dead
+    /// (SPEC-011 §3.3, §3.8); all others report 0.
     fn handle_event(&mut self, event: crate::queue::TimedEvent) -> Result<i32, WorldError> {
         match event.kind {
             EventKind::Script { script, parameter } => {
@@ -696,11 +695,12 @@ impl<A: WorldAssets> WorldHost<A> {
                     state.results.0 &= !crate::critical::effect::KNOCKED_OUT;
                 }
             }
-            EventKind::Poison
-            | EventKind::Radiation { .. }
-            | EventKind::Drug { .. }
-            | EventKind::Withdrawal(_)
-            | EventKind::Other(_) => self
+            // SPEC-011 §3.3 and §3.8 handlers report their own stop rule.
+            EventKind::Drug { stats, modifiers } => {
+                return self.drug_event(event.object, stats, modifiers);
+            }
+            EventKind::Withdrawal(payload) => return self.withdrawal_event(event.object, payload),
+            EventKind::Poison | EventKind::Radiation { .. } | EventKind::Other(_) => self
                 .world
                 .diagnostic(format!("timed maintenance event {:?}", event.kind)),
         }
@@ -1493,6 +1493,15 @@ impl<A: WorldAssets> WorldHost<A> {
         };
         if result.pending {
             return Ok(());
+        }
+        let drug = self
+            .world
+            .item_data(item)
+            .is_some_and(|data| matches!(data.data, ItemData::Drug(_)));
+        if !result.overridden && drug {
+            // SPEC-011 §3.6: the built-in drug use on a target.
+            self.use_drug_on(actor, item, target)?;
+            return self.map_update();
         }
         if !result.overridden {
             self.world.emit(WorldEffect::DefaultAction {

@@ -8,7 +8,7 @@ pub enum EventKind {
         stats: [i32; 3],
         modifiers: [i32; 3],
     },
-    /// Type 2: start/end indication, item prototype, perk index.
+    /// Type 2: kind (1 onset, 0 end), drug PID, withdrawal perk index.
     Withdrawal([i32; 3]),
     Script {
         script: u32,
@@ -89,6 +89,11 @@ impl TimedQueue {
     /// The earliest due tick, if any event is queued.
     pub fn next_due(&self) -> Option<u64> {
         self.events.first_key_value().map(|(key, _)| key.0)
+    }
+    /// Remove one event by identity.
+    pub fn remove(&mut self, id: u64) -> Option<TimedEvent> {
+        let key = *self.events.iter().find(|(_, event)| event.id == id)?.0;
+        self.events.remove(&key)
     }
     pub fn remove_object(&mut self, object: u32) {
         self.events.retain(|_, event| event.object != object);

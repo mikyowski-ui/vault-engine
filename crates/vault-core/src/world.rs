@@ -206,18 +206,39 @@ pub enum WeaponPerk {
     Penetrate,
     Knockback,
 }
+impl WeaponPerk {
+    /// SPEC-011 §3.22 weapon perk numbers 58-61.
+    pub fn from_perk(perk: i32) -> Option<Self> {
+        match Perk::from_index(perk)? {
+            Perk::WeaponLongRange => Some(Self::LongRange),
+            Perk::WeaponAccurate => Some(Self::Accurate),
+            Perk::WeaponPenetrate => Some(Self::Penetrate),
+            Perk::WeaponKnockback => Some(Self::Knockback),
+            _ => None,
+        }
+    }
+}
+impl WorldRules {
+    pub fn money_pid(&self) -> u32 {
+        self.currency_pid.unwrap_or(crate::items::MONEY_PID)
+    }
+    pub fn weapon_perk(&self, perk: i32) -> Option<WeaponPerk> {
+        self.weapon_perks
+            .get(&perk)
+            .copied()
+            .or_else(|| WeaponPerk::from_perk(perk))
+    }
+}
 #[derive(Debug, Clone, Default)]
 pub struct WorldRules {
+    /// Weapon-perk overrides; SPEC-011 §3.22 numbers 58-61 apply otherwise.
     pub weapon_perks: BTreeMap<i32, WeaponPerk>,
     pub reputation_globals: Option<ReputationGlobals>,
-    pub perk_ids: BTreeMap<i32, Perk>,
     pub event_codes: BTreeMap<ScriptEvent, i32>,
-    pub xp_thresholds: Vec<i32>,
-    pub xp_bonus_percent: i32,
+    /// Money PID override; SPEC-011 §3.16 PID 41 applies otherwise.
     pub currency_pid: Option<u32>,
     pub doctor_bag_pid: Option<u32>,
     pub first_aid_kit_pid: Option<u32>,
-    pub equipment_effects: BTreeMap<u32, crate::stats::Effect>,
     /// Game-calendar year for day zero; the approved specs define the
     /// non-leap month/day calendar but no base year.
     pub calendar_year: u16,
@@ -415,6 +436,12 @@ pub struct WorldState {
     pub dialogue: GDialog,
     pub reputation: Reputation,
     pub rules: WorldRules,
+    /// Prototypes seen this session, by PID (ammunition terms of loaded
+    /// weapons; new ammunition objects from unloading).
+    pub(crate) prototypes: BTreeMap<u32, Arc<Prototype>>,
+    /// Live critter-prototype stat arrays (base, bonus) changed this
+    /// session: SPEC-011 §3.2 bonus arrays belong to the prototype.
+    pub prototype_stats: BTreeMap<u32, ([i32; 35], [i32; 35])>,
     pub effects: VecDeque<WorldEffect>,
     pub trace: Vec<WorldTrace>,
     pub elapsed_ms: u64,
@@ -540,6 +567,8 @@ impl WorldState {
             dialogue: GDialog::default(),
             reputation: Reputation::default(),
             rules: WorldRules::default(),
+            prototypes: BTreeMap::new(),
+            prototype_stats: BTreeMap::new(),
             effects: VecDeque::new(),
             trace: Vec::new(),
             elapsed_ms: 0,
@@ -593,6 +622,11 @@ impl WorldState {
             .next_reference
             .checked_add(1)
             .ok_or(WorldError::Arithmetic)?;
+        if let Some(prototype) = &object.prototype {
+            self.prototypes
+                .entry(prototype.pid)
+                .or_insert_with(|| prototype.clone());
+        }
         let key = self.entities.insert(object);
         self.references.insert(reference, key);
         Ok(reference)
@@ -647,23 +681,25 @@ impl WorldState {
         self.player_sheet()
             .map_or(0, |sheet| sheet.stat(index, self.context(self.player)))
     }
-    /// Add player experience with the configured bonus/clamps, advancing
-    /// levels through the configured thresholds.
-    pub fn give_experience(&mut self, amount: i32) {
+    /// SPEC-011 §3.20 player experience award (Swift Learner, clamping,
+    /// and level advancement); returns the levels gained. The host prints
+    /// and plays each level-up.
+    pub fn give_experience(&mut self, amount: i32) -> u32 {
         let context = self.context(self.player);
-        let bonus = self.rules.xp_bonus_percent;
-        let thresholds = self.rules.xp_thresholds.clone();
-        if let Some(sheet) = self.player_sheet_mut() {
-            let gain = i64::from(amount) * (100 + i64::from(bonus)) / 100;
-            sheet.experience =
-                (i64::from(sheet.experience) + gain).clamp(0, i64::from(i32::MAX)) as i32;
-            while sheet.level < 21
-                && thresholds
-                    .get(sheet.level as usize)
-                    .is_some_and(|threshold| sheet.experience >= *threshold)
-            {
-                sheet.advance_level(context);
-            }
+        let levels = self
+            .player_sheet_mut()
+            .map_or(0, |sheet| sheet.add_experience(amount, context));
+        self.sync_hit_points(self.player);
+        levels
+    }
+    /// Copy a sheet's current HP (after sheet-level healing) into the
+    /// critter's instance record.
+    pub fn sync_hit_points(&mut self, critter: ObjectRef) {
+        if let Some(object) = self.get_mut(critter)
+            && let Some(hp) = object.character.as_ref().map(|sheet| sheet.current_hp)
+            && let ObjectState::Critter(state) = &mut object.raw.state
+        {
+            state.hp = hp;
         }
     }
     pub fn perk(&self, perk: Perk) -> u32 {
@@ -761,9 +797,19 @@ impl WorldState {
         let children = std::mem::take(&mut raw.inventory);
         let prototype = assets.prototype(raw.pid).ok();
         let mut character = match prototype.as_deref().map(|p| &p.data) {
-            Some(PrototypeData::Critter(critter)) => Some(CharacterSheet::from_critter(critter)),
+            Some(PrototypeData::Critter(critter)) => Some(self.critter_sheet(raw.pid, critter)),
             _ => None,
         };
+        if let ObjectState::Other {
+            detail: ObjectDetail::Weapon { ammo_pid, .. },
+            ..
+        } = raw.state
+            && let Ok(ammo) = u32::try_from(ammo_pid)
+            && !self.prototypes.contains_key(&ammo)
+            && let Ok(prototype) = assets.prototype(ammo)
+        {
+            self.remember_prototype(prototype);
+        }
         if let Some(sheet) = &mut character
             && let ObjectState::Critter(state) = &raw.state
         {
@@ -779,7 +825,7 @@ impl WorldState {
             .as_deref()
             .and_then(|p| assets.prototype_text(p, true))
             .unwrap_or_default();
-        let money = (self.rules.currency_pid == Some(raw.pid)).then_some(match raw.state {
+        let money = (self.rules.money_pid() == raw.pid).then_some(match raw.state {
             ObjectState::Other { word, .. } => word as i32,
             _ => 0,
         });
@@ -817,9 +863,26 @@ impl WorldState {
         if !(0..40000).contains(&hex) || elevation > 2 {
             return Err(WorldError::Invalid("invalid placement".into()));
         }
+        let reference = self.instantiate(prototype)?;
+        let object = self.get_mut(reference).expect("instantiated object");
+        object.raw.hex = Some(hex);
+        object.raw.elevation = elevation;
+        self.rebuild_lighting();
+        Ok(reference)
+    }
+    /// A critter's sheet from its prototype, with any stat arrays this
+    /// session changed on that prototype.
+    fn critter_sheet(&self, pid: u32, critter: &vault_formats::pro::Critter) -> CharacterSheet {
+        let mut sheet = CharacterSheet::from_critter(critter);
+        if let Some((base, bonus)) = self.prototype_stats.get(&pid) {
+            (sheet.base, sheet.bonus) = (*base, *bonus);
+            sheet.current_hp = sheet.stat(7, StatContext::default());
+        }
+        sheet
+    }
+    /// A new unplaced, unowned instance of a prototype.
+    pub fn instantiate(&mut self, prototype: Arc<Prototype>) -> Result<ObjectRef, WorldError> {
         let mut raw = object_record(prototype.pid, 0);
-        raw.hex = Some(hex);
-        raw.elevation = elevation;
         raw.art_id = prototype.art_id;
         // Only persistent presentation/blocking bits propagate from a prototype.
         raw.flags = BasicFlags(prototype.flags.0 & 0xb00fd818);
@@ -828,7 +891,7 @@ impl WorldState {
             intensity: 0,
         });
         let character = if let PrototypeData::Critter(critter) = &prototype.data {
-            let sheet = CharacterSheet::from_critter(critter);
+            let sheet = self.critter_sheet(prototype.pid, critter);
             raw.state = ObjectState::Critter(CritterState {
                 reaction: 0,
                 damage: 0,
@@ -873,7 +936,7 @@ impl WorldState {
             raw.state = ObjectState::Other { word: 0, detail };
             None
         };
-        let money = (self.rules.currency_pid == Some(prototype.pid)).then_some(0);
+        let money = (self.rules.money_pid() == prototype.pid).then_some(0);
         let reference = self.insert(WorldObject {
             name: format!("Object {:08X}", prototype.pid).into_bytes(),
             description: Vec::new(),
@@ -886,7 +949,6 @@ impl WorldState {
             active: true,
             opponent: 0,
         })?;
-        self.rebuild_lighting();
         Ok(reference)
     }
     pub fn erase(&mut self, reference: ObjectRef) {
@@ -1310,50 +1372,75 @@ impl WorldState {
         }
         None
     }
-    pub fn inventory_weight(&self, owner: ObjectRef) -> i64 {
-        self.get(owner).map_or(0, |object| {
-            object
-                .inventory
-                .iter()
-                .map(|(item, quantity)| {
-                    self.get(*item).map_or(0, |object| {
-                        (i64::from(object.weight()) + self.inventory_weight(*item))
-                            * i64::from(*quantity)
-                    })
-                })
-                .sum()
-        })
-    }
-    fn armour_effect(&mut self, owner: ObjectRef, item: ObjectRef, apply: bool) {
-        let Some(prototype) = self.get(item).and_then(|o| o.prototype.clone()) else {
+    /// SPEC-011 §3.10 armor contribution, for the player only: AC, DR and
+    /// DT added (or removed) unclamped, then the armor perk's effect. NPC
+    /// protection never comes from worn armor.
+    pub(crate) fn armour_effect(&mut self, owner: ObjectRef, item: ObjectRef, apply: bool) {
+        if owner != self.player {
+            return;
+        }
+        let Some(armour) = self.item_data(item).and_then(|data| match &data.data {
+            ItemData::Armor(armour) => Some(armour.clone()),
+            _ => None,
+        }) else {
             return;
         };
-        let context = self.context(owner);
-        let extra = self.rules.equipment_effects.get(&prototype.pid).copied();
-        if let Some(sheet) = self.get_mut(owner).and_then(|o| o.character.as_mut()) {
-            let sign = if apply { 1 } else { -1 };
-            if let PrototypeData::Item(vault_formats::pro::Item {
-                data: ItemData::Armor(armour),
-                ..
-            }) = &prototype.data
+        let sign = if apply { 1 } else { -1 };
+        self.adjust_bonus(owner, 9, armour.armor_class.saturating_mul(sign));
+        for index in 0..7 {
+            self.adjust_bonus(
+                owner,
+                24 + index,
+                armour.resistances[index].saturating_mul(sign),
+            );
+            self.adjust_bonus(
+                owner,
+                17 + index,
+                armour.thresholds[index].saturating_mul(sign),
+            );
+        }
+        self.perk_effect(owner, armour.perk, apply);
+    }
+    /// Add `delta` to a bonus-array stat. The player's array is its own;
+    /// an NPC's lives on its prototype (SPEC-011 §3.2), so the change
+    /// applies to every critter sharing the PID, including ones created
+    /// later in this session.
+    pub fn adjust_bonus(&mut self, critter: ObjectRef, index: usize, delta: i32) {
+        let context = self.context(critter);
+        let player = self.player;
+        let Some(object) = self.get_mut(critter) else {
+            return;
+        };
+        let pid = object.raw.pid;
+        let Some(sheet) = object.character.as_mut() else {
+            return;
+        };
+        sheet.adjust_bonus(index, delta, context);
+        if critter == player {
+            return;
+        }
+        let shared = (sheet.base, sheet.bonus);
+        self.prototype_stats.insert(pid, shared);
+        for (reference, key) in &self.references {
+            if *reference == critter || *reference == player {
+                continue;
+            }
+            if let Some(object) = self.entities.get_mut(*key)
+                && object.raw.pid == pid
+                && let Some(sheet) = object.character.as_mut()
             {
-                sheet.adjust_bonus(9, armour.armor_class.saturating_mul(sign), context);
-                for index in 0..7 {
-                    sheet.adjust_bonus(
-                        17 + index,
-                        armour.thresholds[index].saturating_mul(sign),
-                        context,
-                    );
-                    sheet.adjust_bonus(
-                        24 + index,
-                        armour.resistances[index].saturating_mul(sign),
-                        context,
-                    );
-                }
+                (sheet.base, sheet.bonus) = shared;
             }
-            if let Some(effect) = extra {
-                sheet.effect(effect, apply, context);
-            }
+        }
+    }
+    /// SPEC-011 §3.12 perk effect (rank, armor, or withdrawal) on a
+    /// critter's bonus array; an index outside 0-63 does nothing.
+    pub fn perk_effect(&mut self, critter: ObjectRef, perk: i32, apply: bool) {
+        let Some(perk) = Perk::from_index(perk) else {
+            return;
+        };
+        for (stat, amount) in crate::progression::perk_changes(perk) {
+            self.adjust_bonus(critter, stat, if apply { amount } else { -amount });
         }
     }
     pub fn equip(
@@ -1395,185 +1482,6 @@ impl WorldState {
         }
         Ok(())
     }
-    pub fn add_item(
-        &mut self,
-        owner: ObjectRef,
-        item: ObjectRef,
-        quantity: i32,
-        force: bool,
-    ) -> Result<(), WorldError> {
-        if quantity <= 0 || owner == item || self.get(owner).is_none() || self.get(item).is_none() {
-            return Err(WorldError::Invalid("invalid inventory addition".into()));
-        }
-        let mut ancestor = Some(owner);
-        for depth in 0..=64 {
-            if ancestor == Some(item) || depth == 64 {
-                return Err(WorldError::Invalid("inventory cycle/depth".into()));
-            }
-            ancestor = ancestor.and_then(|reference| self.get(reference)?.owner);
-            if ancestor.is_none() {
-                break;
-            }
-        }
-        let item_owner = self.get(item).and_then(|o| o.owner);
-        if item_owner.is_some() && (!force || item_owner != Some(owner)) {
-            return Err(WorldError::Invalid("item already owned".into()));
-        }
-        if !force {
-            let extra =
-                i64::from(self.get(item).expect("checked item").weight()) * i64::from(quantity);
-            if let Some(sheet) = self.get(owner).and_then(|o| o.character.as_ref())
-                && self.inventory_weight(owner) + extra
-                    > i64::from(sheet.stat(12, self.context(owner)))
-            {
-                return Err(WorldError::Invalid("carry capacity exceeded".into()));
-            }
-            if let Some(PrototypeData::Item(vault_formats::pro::Item {
-                data: ItemData::Container { capacity, .. },
-                ..
-            })) = self
-                .get(owner)
-                .and_then(|o| o.prototype.as_deref())
-                .map(|p| &p.data)
-            {
-                let used: i64 = self
-                    .get(owner)
-                    .expect("owner")
-                    .inventory
-                    .iter()
-                    .map(|(reference, count)| {
-                        self.get(*reference)
-                            .and_then(|o| o.prototype.as_deref())
-                            .map_or(0, |p| match &p.data {
-                                PrototypeData::Item(item) => {
-                                    i64::from(item.size) * i64::from(*count)
-                                }
-                                _ => 0,
-                            })
-                    })
-                    .sum();
-                let size = self
-                    .get(item)
-                    .and_then(|o| o.prototype.as_deref())
-                    .map_or(0, |p| match &p.data {
-                        PrototypeData::Item(item) => item.size,
-                        _ => 0,
-                    });
-                if used + i64::from(size) * i64::from(quantity) > i64::from(*capacity) {
-                    return Err(WorldError::Invalid("container size exceeded".into()));
-                }
-            }
-        }
-        let inventory = &mut self.get_mut(owner).expect("owner").inventory;
-        if let Some((_, count)) = inventory
-            .iter_mut()
-            .find(|(reference, _)| *reference == item)
-        {
-            *count = count.checked_add(quantity).ok_or(WorldError::Arithmetic)?;
-        } else {
-            inventory.push((item, quantity));
-        }
-        let object = self.get_mut(item).expect("item");
-        object.owner = Some(owner);
-        object.raw.hex = None;
-        Ok(())
-    }
-    pub fn remove_item(
-        &mut self,
-        owner: ObjectRef,
-        item: ObjectRef,
-        quantity: i32,
-    ) -> Result<(), WorldError> {
-        if quantity <= 0 {
-            return Err(WorldError::Invalid("nonpositive removal".into()));
-        }
-        let object = self
-            .get(owner)
-            .ok_or_else(|| WorldError::Invalid("missing inventory owner".into()))?;
-        let slot = object
-            .inventory
-            .iter()
-            .position(|(r, _)| *r == item)
-            .ok_or_else(|| WorldError::Invalid("item is not carried".into()))?;
-        if object.inventory[slot].1 < quantity {
-            return Err(WorldError::Invalid("not enough inventory quantity".into()));
-        }
-        let remaining = object.inventory[slot].1 - quantity;
-        let replacement = if remaining > 0 {
-            let mut created = Vec::new();
-            match self.clone_inventory_tree(item, Some(owner), &mut created) {
-                Ok(reference) => Some(reference),
-                Err(error) => {
-                    for reference in created.into_iter().rev() {
-                        self.erase(reference);
-                    }
-                    return Err(error);
-                }
-            }
-        } else {
-            None
-        };
-        if self
-            .get(item)
-            .is_some_and(|o| o.raw.flags.contains(BasicFlags::WORN))
-        {
-            self.armour_effect(owner, item, false);
-        }
-        let inventory = &mut self.get_mut(owner).expect("owner").inventory;
-        if let Some(replacement) = replacement {
-            inventory[slot] = (replacement, remaining);
-        } else {
-            inventory.remove(slot);
-        }
-        if let Some(item) = self.get_mut(item) {
-            item.owner = None;
-            item.raw.hex = Some(1);
-            item.raw.elevation = 0;
-            item.raw.flags.0 &= !0x07000000;
-            if item.money.is_some() {
-                item.money = Some(quantity);
-            }
-        }
-        Ok(())
-    }
-    fn clone_inventory_tree(
-        &mut self,
-        original: ObjectRef,
-        owner: Option<ObjectRef>,
-        created: &mut Vec<ObjectRef>,
-    ) -> Result<ObjectRef, WorldError> {
-        let mut object = self
-            .get(original)
-            .cloned()
-            .ok_or_else(|| WorldError::Invalid("missing inventory tree".into()))?;
-        let children = std::mem::take(&mut object.inventory);
-        object.raw.id = 0;
-        object.raw.script_id = -1;
-        object.raw.flags.0 &= !0x07000000;
-        object.owner = owner;
-        let reference = self.insert(object)?;
-        created.push(reference);
-        for (child, quantity) in children {
-            let cloned = self.clone_inventory_tree(child, Some(reference), created)?;
-            self.get_mut(reference)
-                .expect("clone")
-                .inventory
-                .push((cloned, quantity));
-        }
-        Ok(reference)
-    }
-    pub fn caps(&self, owner: ObjectRef) -> i32 {
-        self.get(owner).map_or(0, |o| {
-            o.inventory.iter().fold(0_i32, |sum, (item, count)| {
-                sum.saturating_add(if self.get(*item).is_some_and(|o| o.money.is_some()) {
-                    *count
-                } else {
-                    0
-                })
-                .saturating_add(self.caps(*item))
-            })
-        })
-    }
     pub fn enqueue_map_timers(&mut self) -> Result<(), WorldError> {
         self.queue.insert(
             self.clock.ticks,
@@ -1587,16 +1495,30 @@ impl WorldState {
         }
         Ok(())
     }
-    pub fn map_exit_cleanup(&mut self, mut approve: impl FnMut(&TimedEvent) -> bool) {
+    /// SPEC-006 queue clearing on map exit. Drug-stage and withdrawal
+    /// events of party members (the player always is one) stay queued;
+    /// those of other owners are removed and returned in queue order for
+    /// the SPEC-011 §3.9 exit handlers.
+    pub fn map_exit_cleanup(
+        &mut self,
+        mut approve: impl FnMut(&TimedEvent) -> bool,
+    ) -> Vec<TimedEvent> {
         self.trace.push(WorldTrace::MapExitCleanup);
+        let (player, party) = (self.player, self.party.clone());
+        let mut leaving = Vec::new();
         self.queue.retain(|event| match event.kind {
             EventKind::Poison | EventKind::Radiation { .. } => true,
             EventKind::Script { .. } | EventKind::MapUpdate | EventKind::Midnight => false,
-            EventKind::Knockout
-            | EventKind::Drug { .. }
-            | EventKind::Withdrawal(_)
-            | EventKind::Other(_) => !approve(event),
+            EventKind::Drug { .. } | EventKind::Withdrawal(_) => {
+                let kept = event.object == player || party.contains(&event.object);
+                if !kept {
+                    leaving.push(event.clone());
+                }
+                kept
+            }
+            EventKind::Knockout | EventKind::Other(_) => !approve(event),
         });
+        leaving
     }
 }
 

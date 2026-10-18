@@ -155,7 +155,6 @@ fn spec008_save_slot_round_trip_restores_the_world() {
     let dir = corpus();
     let root = tempfile::tempdir().unwrap();
     let mut host = host(dir.path());
-    host.world.rules.perk_ids.insert(5, Perk::Awareness);
     host.load_map("maps/second.map").unwrap();
     host.load_map("maps/synth.map").unwrap();
     let player = host.world.player;

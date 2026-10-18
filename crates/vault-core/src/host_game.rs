@@ -1,5 +1,5 @@
 use crate::{
-    ObjectAction, Perk, WorldEffect,
+    ObjectAction, Perk, WorldEffect, WorldError,
     assets::WorldAssets,
     dialogue::{DialogueOption, DialogueText},
     host::{AnimationSequence, HostResult, WorldHost},
@@ -10,7 +10,7 @@ use crate::{
 use vault_formats::{
     HexGrid,
     map::ObjectState,
-    pro::{BasicFlags, Category, ItemData, LockFlags, PrototypeData},
+    pro::{BasicFlags, Category, LockFlags, PrototypeData},
 };
 use vault_vm::{
     ExternalValue, Value, Vm, VmError,
@@ -107,11 +107,24 @@ impl<A: WorldAssets> WorldHost<A> {
         if object == 0 {
             return Ok(());
         }
+        self.kill_critter(object, animation)?;
+        if object == self.self_object(vm) {
+            vm.status.0 |= 0x100;
+        }
+        Ok(())
+    }
+    /// The kill path: animations cleared, dead status and zero HP, the
+    /// death art, queued events removed, and the corpse presented.
+    pub(crate) fn kill_critter(
+        &mut self,
+        object: ObjectRef,
+        animation: i32,
+    ) -> Result<(), WorldError> {
         self.clear_animation(object);
         let art = vault_formats::Fid(
             self.world
                 .get(object)
-                .ok_or_else(|| VmError::Host("invalid killed object".into()))?
+                .ok_or_else(|| WorldError::Invalid("invalid killed object".into()))?
                 .raw
                 .art_id,
         );
@@ -151,11 +164,7 @@ impl<A: WorldAssets> WorldHost<A> {
         target.raw.art_id = art_id;
         target.opponent = 0;
         self.world.queue.remove_object(object);
-        self.present_corpse(object, animation)?;
-        if object == self.self_object(vm) {
-            vm.status.0 |= 0x100;
-        }
-        Ok(())
+        self.present_corpse(object, animation)
     }
     fn destroy(&mut self, vm: &mut Vm, object: ObjectRef) -> Result<(), VmError> {
         let owned = self.object(object)?.owner.is_some();
@@ -176,25 +185,15 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.rebuild_lighting();
         Ok(())
     }
+    fn worn(&self, item: ObjectRef) -> bool {
+        self.world
+            .get(item)
+            .is_some_and(|object| object.raw.flags.contains(BasicFlags::WORN))
+    }
     fn poison_or_radiation(&mut self, object: ObjectRef, amount: i32, radiation: bool) {
-        if object != self.world.player {
+        if !self.world.adjust_exposure(object, amount, radiation) {
             self.world
                 .diagnostic("only player poison/radiation is adjustable");
-            return;
-        }
-        let resistance = self.world.player_stat(if radiation { 31 } else { 32 });
-        let adjustment = if amount > 0 {
-            i64::from(amount) - i64::from(amount) * i64::from(resistance) / 100
-        } else {
-            i64::from(amount)
-        };
-        if let Some(sheet) = self.world.player_sheet_mut() {
-            let slot = if radiation {
-                &mut sheet.radiation
-            } else {
-                &mut sheet.poison
-            };
-            *slot = (i64::from(*slot) + adjustment).clamp(0, i64::from(i32::MAX)) as i32;
         }
     }
     fn proto_data(&mut self, pid: u32, member: i32) -> HostResult {
@@ -246,7 +245,7 @@ impl<A: WorldAssets> WorldHost<A> {
         let values: Vec<_> = call.args.iter().map(|arg| arg.int()).collect();
         let result = match op {
             0x80a1 => {
-                self.world.give_experience(call.int(0));
+                self.give_experience(call.int(0));
                 None
             }
             0x80a2 => {
@@ -767,13 +766,16 @@ impl<A: WorldAssets> WorldHost<A> {
                     return Err(VmError::Host("unsafe pickup without script context".into()));
                 }
                 if item != 0 && actor != 0 {
+                    let worn = self.worn(item);
                     let result = if op == 0x80d6 {
                         self.world.add_item(actor, item, 1, false)
                     } else {
                         self.world.remove_item(actor, item, 1)
                     };
-                    if let Err(error) = result {
-                        self.world.diagnostic(error.to_string());
+                    match result {
+                        Err(error) => self.world.diagnostic(error.to_string()),
+                        Ok(()) if worn => self.refresh_armor_art(actor),
+                        Ok(()) => {}
                     }
                 }
                 None
@@ -785,13 +787,16 @@ impl<A: WorldAssets> WorldHost<A> {
                     (call.uint(0), call.uint(1), 1)
                 };
                 if item != 0 && owner != 0 {
+                    let worn = self.worn(item);
                     let result = if op == 0x80d9 {
                         self.world.remove_item(owner, item, quantity)
                     } else {
                         self.world.add_item(owner, item, quantity, op == 0x8116)
                     };
-                    if let Err(error) = result {
-                        self.world.diagnostic(error.to_string());
+                    match result {
+                        Err(error) => self.world.diagnostic(error.to_string()),
+                        Ok(()) if worn => self.refresh_armor_art(owner),
+                        Ok(()) => {}
                     }
                 }
                 None
@@ -803,9 +808,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     && self.object(critter)?.category() == Category::Critter
                 {
                     self.object(item)?;
-                    let flag=if self.world.get(item).and_then(|o|o.prototype.as_ref()).is_some_and(|p|matches!(&p.data,PrototypeData::Item(item) if matches!(item.data,ItemData::Armor(_)))) {BasicFlags::WORN.0}
-                        else if critter==self.world.player&&self.world.active_hand==0 {BasicFlags::LEFT_HAND.0} else {BasicFlags::RIGHT_HAND.0};
-                    if let Err(error) = self.world.equip(critter, item, flag) {
+                    if let Err(error) = self.wield_object(critter, item) {
                         self.world.diagnostic(error.to_string());
                     }
                 }
@@ -1045,11 +1048,7 @@ impl<A: WorldAssets> WorldHost<A> {
                             if selector < 0 {
                                 return Err(VmError::Host("negative perk index".into()));
                             } else {
-                                self.world
-                                    .rules
-                                    .perk_ids
-                                    .get(&selector)
-                                    .map_or(0, |perk| self.world.perk(*perk))
+                                Perk::from_index(selector).map_or(0, |perk| self.world.perk(perk))
                                     as i32
                             }
                         }
@@ -1222,16 +1221,14 @@ impl<A: WorldAssets> WorldHost<A> {
             0x8102 => {
                 if call.uint(3) != 0 && self.object(call.uint(3))?.category() == Category::Critter {
                     match (call.int(2), call.int(1)) {
+                        // SPEC-011 §3.21: the chooser's eligibility test; a
+                        // failing perk is silently not added.
                         (0, selector) => {
                             let context = self.world.context(self.world.player);
-                            if let Some(perk) = self.world.rules.perk_ids.get(&selector).copied() {
-                                if let Some(sheet) = self.world.player_sheet_mut() {
-                                    let rank = sheet.rank(perk).saturating_add(1);
-                                    sheet.set_perk(perk, rank, context);
-                                }
-                            } else {
-                                self.world
-                                    .diagnostic("numeric perk effect mapping is not configured");
+                            if let Some(perk) = Perk::from_index(selector)
+                                && let Some(sheet) = self.world.player_sheet_mut()
+                            {
+                                sheet.add_perk_rank(perk, context);
                             }
                         }
                         (1, 5) => {
@@ -1511,8 +1508,11 @@ impl<A: WorldAssets> WorldHost<A> {
                         .find(|(r, _)| *r == item)
                         .map_or(0, |(_, n)| *n)
                         .min(call.int(0));
-                    if let Err(error) = self.world.remove_item(owner, item, amount) {
-                        self.world.diagnostic(error.to_string());
+                    let worn = self.worn(item);
+                    match self.world.remove_item(owner, item, amount) {
+                        Err(error) => self.world.diagnostic(error.to_string()),
+                        Ok(()) if worn => self.refresh_armor_art(owner),
+                        Ok(()) => {}
                     }
                     integer(amount)
                 }
@@ -1631,9 +1631,14 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x8128 => integer(i32::from(self.world.combat)),
+            // SPEC-011 §3.17: the parameter replaces the script barter
+            // modifier and barter is requested.
             0x8129 => {
                 if self.world.dialogue.open {
-                    self.world.dialogue.pending_barter = call.int(0) != 0;
+                    self.world.dialogue.barter_modifier = call.int(0);
+                    self.world.dialogue.pending_barter = true;
+                } else {
+                    self.world.diagnostic("gdialog_barter: no dialogue is open");
                 }
                 None
             }
@@ -1727,14 +1732,11 @@ impl<A: WorldAssets> WorldHost<A> {
                         integer(-1)
                     } else if amount == 0 {
                         integer(0)
-                    } else if let Some(pid) = self.world.rules.currency_pid {
+                    } else {
+                        let pid = self.world.rules.money_pid();
                         if amount > 0 {
-                            let reference = if let Some(reference) = self.world.carried(owner, pid)
-                            {
-                                reference
-                            } else {
-                                self.world.spawn(self.assets.prototype(pid)?, 1, 0)?
-                            };
+                            // New money stacks into a carried money entry.
+                            let reference = self.world.instantiate(self.assets.prototype(pid)?)?;
                             if let Some(item) = self.world.get_mut(reference) {
                                 item.money = Some(0);
                             }
@@ -1742,6 +1744,7 @@ impl<A: WorldAssets> WorldHost<A> {
                                 if self.world.add_item(owner, reference, amount, true).is_ok() {
                                     0
                                 } else {
+                                    self.world.erase(reference);
                                     -1
                                 },
                             )
@@ -1771,9 +1774,6 @@ impl<A: WorldAssets> WorldHost<A> {
                             }
                             integer(if remaining == 0 { 0 } else { -1 })
                         }
-                    } else {
-                        self.world.diagnostic("currency PID is not configured");
-                        integer(-1)
                     }
                 }
             }
@@ -1914,11 +1914,15 @@ impl<A: WorldAssets> WorldHost<A> {
                 if source != 0 && destination != 0 && source != destination {
                     let inventory = self.object(source)?.inventory.clone();
                     self.object(destination)?;
+                    let worn = inventory.iter().any(|(item, _)| self.worn(*item));
                     for (item, count) in inventory {
                         self.world.remove_item(source, item, count)?;
                         if let Err(error) = self.world.add_item(destination, item, count, true) {
                             self.world.diagnostic(error.to_string());
                         }
+                    }
+                    if worn {
+                        self.refresh_armor_art(source);
                     }
                 }
                 None

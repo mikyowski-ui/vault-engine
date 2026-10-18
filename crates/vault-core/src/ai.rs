@@ -4,7 +4,7 @@
 //! called-shot selection (with their exact random draws), flee candidates,
 //! taunt ranges, and the healing and bounded attack loops. The live world
 //! supplies the environments (`host_ai`).
-use crate::{ObjectRef, RandomSource, WorldError, WorldState, rng::stat_check};
+use crate::{ObjectRef, RandomSource, WorldError, rng::stat_check};
 use std::sync::Arc;
 use vault_formats::{
     Font, MsgCatalog,
@@ -67,19 +67,6 @@ pub struct TauntCallback {
     pub font: i32,
     pub color: i32,
     pub outline: i32,
-}
-
-/// Drug consumption ("the normal drug-consumption rules" of §3.7) is not
-/// defined by any approved specification, so the host supplies it.
-pub trait DrugRules {
-    /// Consume `drug` (already removed from inventory) for `critter`;
-    /// `false` reports failure.
-    fn consume(
-        &mut self,
-        world: &mut WorldState,
-        critter: ObjectRef,
-        drug: ObjectRef,
-    ) -> Result<bool, WorldError>;
 }
 
 /// Intent bits (the SPEC-005 maneuver word).
@@ -563,7 +550,7 @@ pub trait HealingInventory {
     fn entry(&self, position: usize) -> Option<Option<u32>>;
     /// Remove one unit from the stack at `position`.
     fn take_one(&mut self, position: usize) -> Option<Self::Unit>;
-    /// Normal drug consumption; false reports failure.
+    /// SPEC-011 §3.7 drug consumption; false reports failure (-1).
     fn consume(&mut self, unit: &Self::Unit) -> Result<bool, WorldError>;
     /// Force the unit back into inventory after a failed consumption.
     fn restore(&mut self, unit: Self::Unit) -> Result<(), WorldError>;

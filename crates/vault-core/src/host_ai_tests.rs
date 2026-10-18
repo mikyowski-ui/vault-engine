@@ -3,7 +3,7 @@
 //! generator.
 use crate::{
     CharacterSheet, ObjectRef, RandomSource, WorldEffect, WorldError, WorldHost, WorldState,
-    ai::{DrugRules, Taunt, intent},
+    ai::{Taunt, intent},
     assets::WorldAssets,
     combat::Resolution,
     combat_state::{CombatRequest, PacketAi},
@@ -1000,25 +1000,6 @@ fn spec009_fixture_g_taunt_requests_buffers_and_display() {
 }
 const LOCATION_TORSO: u8 = location::TORSO;
 
-/// Drug rules for Fixture I: success heals `heal` HP.
-struct Stimpaks {
-    heal: Option<i32>,
-}
-impl DrugRules for Stimpaks {
-    fn consume(
-        &mut self,
-        world: &mut WorldState,
-        critter: ObjectRef,
-        _drug: ObjectRef,
-    ) -> Result<bool, WorldError> {
-        let Some(heal) = self.heal else {
-            return Ok(false);
-        };
-        let hp = world.hit_points(critter).unwrap() + heal;
-        set_hp(world, critter, hp);
-        Ok(true)
-    }
-}
 fn stimpak_count(world: &WorldState, critter: ObjectRef) -> i32 {
     world
         .get(critter)
@@ -1029,60 +1010,65 @@ fn stimpak_count(world: &WorldState, critter: ObjectRef) -> i32 {
         .map(|(_, count)| *count)
         .sum()
 }
+/// SPEC-011 drug payload (file 0x39): selectors, then immediate amounts;
+/// both delayed stages and the addiction chance stay zero.
+fn drug(pid: u32, selectors: [i32; 3], immediate: [i32; 3]) -> Arc<Prototype> {
+    let fields: Vec<_> = (0..3)
+        .flat_map(|slot| {
+            [
+                (0x39 + 4 * slot, selectors[slot]),
+                (0x45 + 4 * slot, immediate[slot]),
+            ]
+        })
+        .collect();
+    item(2, pid, &fields)
+}
 
 #[test]
 fn spec009_fixture_i_healing_loop_through_inventory() {
-    for heal in [Some(8), None] {
-        let mut world = world();
-        // Effective max HP 41, so B = 20; HP 15, AP 5.
-        let critter = npc(&mut world, 20300, 1, 0, &[(7, 41)]);
-        set_hp(&mut world, critter, 15);
-        state(&mut world, critter).ap = 5;
-        carry(
-            &mut world,
-            critter,
-            item(2, 0x35, &[]),
-            1,
-            ObjectDetail::Plain,
-        );
-        carry(
-            &mut world,
-            critter,
-            item(2, crate::ai::STIMPAK, &[]),
-            2,
-            ObjectDetail::Plain,
-        );
-        let mut host = ai_host(world, AiAssets::default());
-        // Without configured drug rules healing is skipped entirely.
-        host.ai_heal(critter).unwrap();
-        assert_eq!(host.world.critter_state(critter).unwrap().ap, 5);
-        host.drug_rules = Some(Box::new(Stimpaks { heal }));
-        host.world.effects.clear();
-        host.ai_heal(critter).unwrap();
-        let state = host.world.critter_state(critter).unwrap();
-        match heal {
-            Some(_) => {
-                assert_eq!((state.hp, state.ap), (23, 3));
-                assert_eq!(stimpak_count(&host.world, critter), 1);
-                let name =
-                    String::from_utf8(host.world.get(critter).unwrap().name.clone()).unwrap();
-                assert_eq!(
-                    messages(&host),
-                    [format!("{name} uses Object 00000028.").into_bytes()]
-                );
-                assert!(host.world.effects.iter().any(|effect| matches!(
-                    effect,
-                    WorldEffect::CritterAnimation { animation: 11, .. }
-                )));
-            }
-            None => {
-                // AP 5 -> 3 -> 1; each unit is forced back.
-                assert_eq!((state.hp, state.ap), (15, 1));
-                assert_eq!(stimpak_count(&host.world, critter), 2);
-                assert!(messages(&host).is_empty());
-            }
-        }
-    }
+    let mut world = world();
+    // Effective max HP 41, so B = 20; HP 15, AP 5.
+    let critter = npc(&mut world, 20300, 1, 0, &[(7, 41)]);
+    set_hp(&mut world, critter, 15);
+    state(&mut world, critter).ap = 5;
+    carry(
+        &mut world,
+        critter,
+        item(2, 0x35, &[]),
+        1,
+        ObjectDetail::Plain,
+    );
+    // A stimpak heals 8 through the SPEC-011 §3.7 consumption contract.
+    carry(
+        &mut world,
+        critter,
+        drug(crate::ai::STIMPAK, [35, -1, -1], [8, 0, 0]),
+        2,
+        ObjectDetail::Plain,
+    );
+    let mut host = ai_host(world, AiAssets::default());
+    let mut expected = host.world.rng.clone();
+    expected.range(1, 100).unwrap();
+    host.ai_heal(critter).unwrap();
+    let state = host.world.critter_state(critter).unwrap();
+    assert_eq!((state.hp, state.ap), (23, 3));
+    assert_eq!(stimpak_count(&host.world, critter), 1);
+    assert_eq!(
+        host.world.rng.state(),
+        expected.state(),
+        "only the 0% addiction draw"
+    );
+    let name = String::from_utf8(host.world.get(critter).unwrap().name.clone()).unwrap();
+    assert_eq!(
+        messages(&host),
+        [format!("{name} uses Object 00000028.").into_bytes()]
+    );
+    assert!(
+        host.world
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, WorldEffect::CritterAnimation { animation: 11, .. }))
+    );
 }
 
 /// An NPC with a loaded pistol (primary 4 AP, damage 1, range 20) facing
