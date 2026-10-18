@@ -84,16 +84,14 @@ impl<A: WorldAssets> WorldHost<A> {
         if !self.world.combat {
             return true;
         }
-        let cost = 4 - self.world.perk(Perk::QuickPockets) as i32;
+        let cost = crate::combat::inventory_entry_cost(self.world.perk(Perk::QuickPockets));
         let player = self.world.player;
         let ap = self.world.action_points(player);
-        if cost > 0 && cost > ap {
+        if cost > ap {
             self.print_game("inventry.msg", 19, &[]);
             return false;
         }
-        if cost > 0
-            && let Some(state) = self.world.critter_state_mut(player)
-        {
+        if let Some(state) = self.world.critter_state_mut(player) {
             state.ap -= cost;
         }
         true

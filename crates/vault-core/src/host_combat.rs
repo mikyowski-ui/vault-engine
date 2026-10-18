@@ -284,18 +284,23 @@ impl<A: WorldAssets> WorldHost<A> {
         {
             *rounds = rounds.saturating_sub(resolution.ammo).max(0);
         }
-        if resolution.attacker_flags != 0 && attack.attacker_pid != PROTECTED_PID {
+        // SPEC-007 §3.6 safe rule: attacker self-damage and its flags are
+        // committed when the attacker is not marked dead (the reference tests
+        // the opposite condition).
+        let living = self
+            .world
+            .critter_state(attacker)
+            .is_some_and(|state| state.results.0 & effect::DEAD == 0);
+        if resolution.attacker_flags != 0 && attack.attacker_pid != PROTECTED_PID && living {
             let lose_turn = resolution.attacker_flags & effect::LOSE_TURN != 0;
-            if let Some(state) = self.world.critter_state_mut(attacker) {
-                // The recovered self-damage commit requires an attacker that is
-                // already marked dead; a living attacker keeps its HP.
-                if state.results.0 & effect::DEAD != 0 {
-                    state.hp = state.hp.saturating_sub(resolution.self_damage);
-                }
-                state.results.0 |= resolution.attacker_flags & effect::PERSISTENT;
-                if lose_turn {
-                    state.ap = 0;
-                }
+            self.damage_critter(
+                attacker,
+                None,
+                resolution.self_damage,
+                resolution.attacker_flags,
+            )?;
+            if lose_turn && let Some(state) = self.world.critter_state_mut(attacker) {
+                state.ap = 0;
             }
         }
         if attack.defender_pid != PROTECTED_PID {
@@ -416,7 +421,7 @@ impl<A: WorldAssets> WorldHost<A> {
         Ok(())
     }
     /// Knockback along the attacker-to-defender orientation; a blocker at
-    /// distance j limits displacement to `j - 2` (recovered double decrement).
+    /// distance j limits displacement to `j - 1` (the §3.8 safe rule).
     fn knock_back(
         &mut self,
         attacker: ObjectRef,
@@ -852,8 +857,10 @@ impl<A: WorldAssets> WorldHost<A> {
 }
 
 /// The scripted request's adjustments before sequencing: clamp defender
-/// damage to the request bounds and write both override words to the defender
-/// flags (the last wins). Already computed knockback/death flags are kept.
+/// damage to the request bounds, then write the override words to the
+/// attacker and defender flags (the SPEC-007 §3.6 safe rule; the reference
+/// writes both to the defender, the last winning). Already computed
+/// knockback/death flags are kept.
 pub fn adjust_for_request(
     request: &crate::combat_state::CombatRequest,
     resolution: &mut Resolution,
@@ -862,9 +869,8 @@ pub fn adjust_for_request(
     if minimum <= maximum {
         resolution.damage = resolution.damage.clamp(minimum, maximum);
     }
-    if let Some(words) = request.flags {
-        for word in words {
-            resolution.defender_flags = word as u32;
-        }
+    if let Some([attacker, defender]) = request.flags {
+        resolution.attacker_flags = attacker as u32;
+        resolution.defender_flags = defender as u32;
     }
 }

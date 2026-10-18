@@ -97,8 +97,10 @@ fn spec007_tier_columns_failure_masks_and_location_adjustments() {
     assert_eq!(critical::failure_mask(0, 3), Some(0x80002));
     assert_eq!(critical::failure_mask(3, 2), Some(0xc000));
     assert_eq!(critical::failure_mask(6, 4), Some(0x9400));
-    assert_eq!(critical::failure_mask(7, 0), None);
-    assert_eq!(critical::failure_mask(-1, 0), None);
+    // Safe rule: a table number outside 0-6 uses table 0.
+    assert_eq!(critical::failure_mask(7, 3), Some(0x80002));
+    assert_eq!(critical::failure_mask(-1, 3), Some(0x80002));
+    assert_eq!(critical::failure_mask(0, 5), None);
     // Half adjustments for melee truncate toward zero.
     assert_eq!(
         critical::location_adjustment(location::EYES, false),
@@ -171,6 +173,34 @@ fn npc(world: &mut WorldState, body: i32) -> ObjectRef {
     world.get_mut(player).unwrap().raw.hex = Some(0);
     world.get_mut(player).unwrap().raw.elevation = 2;
     place(world, critter(body), 20100)
+}
+
+#[test]
+fn spec007_long_routes_keep_their_first_800_steps_from_the_source() {
+    // A one-hex-wide serpentine corridor: legs on even columns 10, 12, ...
+    // from row 10 to row 190, joined by one odd-column hex at alternate ends.
+    let mut corridor = std::collections::BTreeSet::new();
+    for leg in 0..6 {
+        let column = 10 + 2 * leg;
+        for row in 10..=190 {
+            corridor.insert(column + 200 * row);
+        }
+        let end = if leg % 2 == 0 { 190 } else { 10 };
+        corridor.insert(column + 1 + 200 * end);
+    }
+    let (source, goal) = (10 + 200 * 10, 20 + 200 * 190);
+    let route = routing::find_route(
+        source,
+        goal,
+        true,
+        true,
+        |hex| (!corridor.contains(&hex)).then_some(()),
+        |_| false,
+    );
+    assert_eq!(route.len(), 800);
+    let hexes = routing::route_hexes(source, &route);
+    assert!(hexes.iter().all(|hex| corridor.contains(hex)));
+    assert!(!hexes.contains(&goal));
 }
 
 #[test]
@@ -629,15 +659,16 @@ fn spec007_fixture_c_critical_variant_and_boundaries() {
     );
     assert_eq!((resolution.ammo, resolution.damage), (6, 0));
 
-    // Melee damage 35 gives computed knockback 3; a blocker at distance j
-    // permits j - 2 because of the double decrement.
+    // Melee damage 35 gives computed knockback 3; under the §3.8 safe rule
+    // a blocker at distance j permits j - 1 (reference values 0 and 1).
     let mut melee = fixture_c();
     melee.weapon.as_mut().unwrap().mode = attack_mode::SWING;
     assert_eq!(melee.knockback(35), 3);
     assert_eq!(knockback_displacement(3, |_| false), 3);
-    assert_eq!(knockback_displacement(3, |distance| distance == 2), 0);
-    assert_eq!(knockback_displacement(3, |distance| distance == 3), 1);
+    assert_eq!(knockback_displacement(3, |distance| distance == 2), 1);
+    assert_eq!(knockback_displacement(3, |distance| distance == 3), 2);
     assert_eq!(knockback_displacement(3, |distance| distance == 1), 0);
+    assert_eq!(knockback_displacement(0, |_| true), 0);
 
     // Before tick 864000 no upgrade draw is made, but Sniper still promotes
     // a ranged success on D10 <= Luck.
@@ -804,14 +835,14 @@ fn spec007_death_animation_choice_tree_and_fallbacks() {
         .animation(all),
         45
     );
-    // Inverted rear fallback: fall-front art present returns 20, absent 21.
+    // Safe-rule rear fallback: fall-front art present returns 21, absent 20.
     let rear = DeathChoice {
         orientations: [3, 3],
         damage: 15,
         ..base
     };
-    assert_eq!(rear.animation(|code| code == 21), 20);
-    assert_eq!(rear.animation(|_| false), 21);
+    assert_eq!(rear.animation(|code| code == 21), 21);
+    assert_eq!(rear.animation(|_| false), 20);
     // A front fallback is always 20, whether or not its art exists.
     assert_eq!(DeathChoice { damage: 15, ..base }.animation(|_| false), 20);
     // Blood presentation and corpse rules.
@@ -1198,11 +1229,12 @@ fn spec007_aimed_shot_availability_and_grenade_scatter() {
         kinds.weapon.as_mut().unwrap().damage_type = kind;
         assert!(!kinds.aimed_shot_available(), "damage type {kind}");
     }
-    // The recovered plasma-throw check never restricts.
+    // Safe rule: a plasma throw weapon cannot aim (the reference's check
+    // never restricts).
     let mut plasma = fixture_c();
     plasma.weapon.as_mut().unwrap().mode = attack_mode::THROW;
     plasma.weapon.as_mut().unwrap().damage_type = 3;
-    assert!(plasma.aimed_shot_available());
+    assert!(!plasma.aimed_shot_available());
     // Availability and cost are separate: forcing aim still adds 1 AP.
     let mut forced = fast.clone();
     forced.location = location::EYES;
@@ -1485,9 +1517,13 @@ fn spec007_scripted_request_starts_combat_and_adjusts_the_first_attack() {
         )
         .unwrap()
         .unwrap();
-    // Damage clamped to [0, 5]; both override words written, the last wins.
+    // Damage clamped to [0, 5]; under the safe rule the override words go
+    // to the attacker and defender flags (the reference's last word wins).
     assert!(resolution.damage <= 5);
-    assert_eq!(resolution.defender_flags, 0x102);
+    assert_eq!(
+        (resolution.attacker_flags, resolution.defender_flags),
+        (0x100, 0x102)
+    );
     assert_eq!(
         host.world.hit_points(defender).unwrap(),
         hp - resolution.damage

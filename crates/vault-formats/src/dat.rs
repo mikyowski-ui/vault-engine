@@ -222,8 +222,9 @@ impl DatArchive {
     }
 }
 
-/// An LZSS ring: positions 0-4077 refill with spaces at each block start; the
-/// final eighteen are zero for a fresh file and otherwise retain prior bytes.
+/// An LZSS ring: at each compressed block start positions 0-4077 refill with
+/// spaces and, under the SPEC-008 §3.1 safe rule, the final eighteen with
+/// zero (the reference's first-use state; later blocks retain prior bytes).
 struct Ring {
     data: [u8; RING],
 }
@@ -234,6 +235,7 @@ impl Ring {
     /// Decode an entire compressed input, bounding output to `limit`.
     fn decode(&mut self, input: &[u8], limit: usize) -> Result<Vec<u8>, ParseError> {
         self.data[..RING_START].fill(b' ');
+        self.data[RING_START..].fill(0);
         let mut cursor = RING_START;
         let mut output = Vec::new();
         let mut position = 0;
@@ -283,7 +285,8 @@ impl Ring {
 
 /// Decode a `0x40` block stream to exactly `length` bytes. Each block must
 /// produce `min(16384, remaining)` bytes; a zero-length or nonprogressing
-/// block, a truncated body, or trailing blocks are rejected.
+/// block or a truncated body is rejected, and bytes after the last needed
+/// block are not read.
 pub fn decode_blocks(body: &[u8], length: usize) -> Result<Vec<u8>, ParseError> {
     let mut output = Vec::with_capacity(length.min(MAX_ASSET_BYTES));
     let mut position = 0;

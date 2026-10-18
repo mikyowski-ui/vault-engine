@@ -47,7 +47,7 @@ pub struct CombatRequest {
     pub accuracy: i32,
     /// Defender damage bounds applied before sequencing.
     pub damage: [i32; 2],
-    /// The equal override pair, both written to the defender-flags field.
+    /// The equal override pair: attacker flags, then defender flags.
     pub flags: Option<[i32; 2]>,
 }
 impl Default for CombatState {
@@ -168,6 +168,25 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.world.combat {
             return Ok(false);
         }
+        // SPEC-007 §3.3 safe rule: begin only when every supplied (non-null)
+        // participant is on the current elevation; the reference admits the
+        // request when either one is.
+        let elevation = self
+            .world
+            .get(self.world.player)
+            .map_or(self.world.elevation, |o| o.raw.elevation);
+        let here = |participant: ObjectRef| {
+            participant == 0
+                || self
+                    .world
+                    .get(participant)
+                    .is_some_and(|object| object.raw.elevation == elevation)
+        };
+        if !(here(request.attacker) && here(request.defender)) {
+            self.world
+                .diagnostic("combat request participant is not on the current elevation");
+            return Ok(false);
+        }
         self.start_combat(request.attacker, request.defender)?;
         self.world.combat_state.request = Some(request);
         // SPEC-009 §3.6: the first turn's requested target and accuracy.
@@ -176,8 +195,8 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// The requested attack's adjustments: accuracy before resolution, then
     /// damage clamped to the request bounds and the override pair written to
-    /// the defender flags (the last word wins). Knockback and death flags
-    /// already computed are not rerun.
+    /// the attacker and defender flags. Knockback and death flags already
+    /// computed are not rerun.
     pub fn apply_request(
         &mut self,
         attacker: ObjectRef,
@@ -251,7 +270,8 @@ impl<A: WorldAssets> WorldHost<A> {
         if attacker != self.world.player && defender != self.world.player {
             order.push(self.world.player);
         }
-        // No deduplication is applied for a same-object initiating pair.
+        // A same-object initiating pair is listed once (the SPEC-007 §3.3
+        // safe rule): the second search finds it already active.
         for participant in order {
             if let Some(position) = combat.list[combat.active..]
                 .iter()

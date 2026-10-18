@@ -50,7 +50,8 @@ fn validates_gam_and_gcd_and_rejects_undefined_initializers() {
     let output = run();
     assert!(!output.status.success());
     let errors = String::from_utf8_lossy(&output.stderr);
-    assert!(errors.contains("FAIL data/vault13.gam: GAM"));
+    // A value-less assignment stores zero under the SPEC-006 safe rule.
+    assert!(!errors.contains("vault13.gam"));
     assert!(errors.contains("FAIL premade/synthetic.gcd: GCD"));
 }
 

@@ -30,7 +30,8 @@ fn text(bytes: &[u8]) -> &[u8] {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveHeader {
     pub signature: [u8; 24],
-    /// Major and minor; the writer emits 1.1 and the reader does not enforce it.
+    /// Major and minor; the writer emits 1.1 and, under the SPEC-008 §2.4
+    /// safe rule, the reader rejects any other version.
     pub version: [u16; 2],
     pub release: u8,
     pub name: [u8; 32],
@@ -88,6 +89,9 @@ impl SaveHeader {
             return Err(ParseError::new("SAVE", 0, "save signature mismatch"));
         }
         let version = [r.be_u16()?, r.be_u16()?];
+        if version != [1, 1] {
+            return Err(ParseError::new("SAVE", 0x18, "save version is not 1.1"));
+        }
         let release = r.take(1)?[0];
         let name = r.take(32)?.try_into().expect("name");
         let description = r.take(30)?.try_into().expect("description");

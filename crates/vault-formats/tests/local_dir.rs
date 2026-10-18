@@ -132,12 +132,26 @@ fn mount_rejects_file_and_directory_case_collisions() {
 }
 
 #[test]
-fn namespace_is_a_snapshot_and_missing_or_non_directory_roots_fail() {
+fn namespace_is_a_snapshot_reads_are_live_and_missing_or_non_directory_roots_fail() {
     let temp = tempfile::tempdir().unwrap();
     copy_tree(fixture(), temp.path());
     let vfs = LocalDirProvider::mount(temp.path()).unwrap();
     fs::copy(temp.path().join("COLOR.PAL"), temp.path().join("new.pal")).unwrap();
-    assert!(matches!(vfs.read("new.pal"), Err(VfsError::NotFound(_))));
+    // The listing is the mount-time snapshot, but a read that misses it
+    // consults the live directory (SPEC-008 §3.2 safe rule).
+    assert!(!vfs.files().any(|path| path.as_str() == "new.pal"));
+    assert_eq!(
+        vfs.read("NEW.PAL").unwrap(),
+        fs::read(temp.path().join("COLOR.PAL")).unwrap()
+    );
+    assert!(matches!(vfs.read("absent.pal"), Err(VfsError::NotFound(_))));
+    // Live lookups still refuse case-folded ambiguity.
+    fs::copy(temp.path().join("COLOR.PAL"), temp.path().join("NEW.pal")).unwrap();
+    assert!(matches!(
+        vfs.read("new.pal"),
+        Err(VfsError::CaseCollision { .. })
+    ));
+    fs::remove_file(temp.path().join("NEW.pal")).unwrap();
     assert_eq!(
         LocalDirProvider::mount(temp.path())
             .unwrap()

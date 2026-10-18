@@ -219,41 +219,73 @@ fn arithmetic_types_strings_truthiness_and_undefined_overflow() {
         finish(&mut vm).unwrap();
         assert_eq!(vm.value_stack.top().unwrap(), Value::integer(expected));
     }
+    // SPEC-004 §3.5 safe rules: an operation that would consume its
+    // operands and push nothing raises a type error, and the float-to-integer
+    // conversion rejects both string tags.
     for opcode in [0x803a, 0x803b, 0x803c, 0x803d, 0x8040, 0x8041, 0x8042] {
         let mut vm = fragment(&op(opcode));
         let string = vm.intern(b"left").unwrap();
         vm.value_stack.push(string).unwrap();
         vm.value_stack.push(Value::integer(2)).unwrap();
-        finish(&mut vm).unwrap();
-        assert_eq!(vm.value_stack.byte_len(), 0);
+        assert_eq!(finish(&mut vm), Err(VmError::Type(string.tag)));
     }
     let mut vm = fragment(&op(0x8044));
     let string = vm.intern(b"dynamic").unwrap();
     vm.value_stack.push(string).unwrap();
-    finish(&mut vm).unwrap();
-    assert_eq!(vm.value_stack.top().unwrap(), string);
-    for (opcode, a, b) in [
-        (0x803a, i32::MIN, 1),
-        (0x803b, i32::MAX, 2),
-        (0x803c, i32::MIN, -1),
+    assert_eq!(finish(&mut vm), Err(VmError::Type(string.tag)));
+    // Integer results wrap modulo 2^32.
+    for (opcode, a, b, expected) in [
+        (0x803a, i32::MIN, 1, i32::MAX),
+        (0x803b, i32::MAX, 2, -2),
+        (0x803c, i32::MIN, -1, i32::MIN),
     ] {
         let mut vm = fragment(&op(opcode));
         for value in [a, b] {
             vm.value_stack.push(Value::integer(value)).unwrap();
         }
-        assert_eq!(finish(&mut vm), Err(VmError::Arithmetic));
+        finish(&mut vm).unwrap();
+        assert_eq!(vm.value_stack.top().unwrap(), Value::integer(expected));
     }
-    for value in [f32::NAN, f32::INFINITY, 2147483648.0] {
+    let mut vm = fragment(&op(0x8046));
+    vm.value_stack.push(Value::integer(i32::MIN)).unwrap();
+    finish(&mut vm).unwrap();
+    assert_eq!(vm.value_stack.top().unwrap(), Value::integer(i32::MIN));
+    // Out-of-range and NaN conversions give 80 00 00 00.
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 2147483648.0] {
         let mut vm = fragment(&op(0x8044));
         vm.value_stack.push(Value::float(value)).unwrap();
-        assert_eq!(finish(&mut vm), Err(VmError::Arithmetic));
+        finish(&mut vm).unwrap();
+        assert_eq!(vm.value_stack.top().unwrap(), Value::integer(i32::MIN));
     }
+    let mut vm = fragment(&op(0x8040));
+    vm.value_stack
+        .push(Value {
+            tag: Value::FLOAT,
+            payload: 0x7fffffff,
+        })
+        .unwrap();
+    vm.value_stack.push(Value::integer(-1)).unwrap();
+    finish(&mut vm).unwrap();
+    assert_eq!(vm.value_stack.top().unwrap(), Value::integer(i32::MIN));
     let mut vm = fragment(&op(0x803d));
     let value = vm.intern(b"nonnumeric").unwrap();
     vm.value_stack.push(value).unwrap();
     vm.value_stack.push(Value::float(0.0)).unwrap();
-    assert_eq!(finish(&mut vm).unwrap(), RunOutcome::FragmentEnd);
-    assert_eq!(vm.value_stack.byte_len(), 0);
+    assert_eq!(finish(&mut vm), Err(VmError::Type(value.tag)));
+    // Nonfinite floats format as nan, inf, and -inf.
+    for (float, expected) in [
+        (f32::NAN, &b"Anan"[..]),
+        (f32::INFINITY, b"Ainf"),
+        (f32::NEG_INFINITY, b"A-inf"),
+    ] {
+        let mut vm = fragment(&op(0x8039));
+        let left = vm.intern(b"A").unwrap();
+        vm.value_stack.push(left).unwrap();
+        vm.value_stack.push(Value::float(float)).unwrap();
+        finish(&mut vm).unwrap();
+        let top = vm.value_stack.top().unwrap();
+        assert_eq!(vm.string(top).unwrap(), expected);
+    }
 }
 #[test]
 fn slots_transfers_and_frame_validation_preserve_tags() {
@@ -274,7 +306,19 @@ fn slots_transfers_and_frame_validation_preserve_tags() {
     assert_eq!(vm.g, 0);
     assert_eq!(vm.value_stack.byte_len(), 18);
     assert_eq!(vm.return_stack.byte_len(), 0);
+    // Stores keep the stored value's tag; every slot index must be an
+    // integer (SPEC-004 §3.1 safe rule).
     for opcode in [0x8013, 0x8031] {
+        let mut vm = fragment(&op(opcode));
+        vm.g = 0;
+        vm.f = 0;
+        for value in [Value::integer(0), Value::float(2.5), Value::integer(0)] {
+            vm.value_stack.push(value).unwrap();
+        }
+        finish(&mut vm).unwrap();
+        assert_eq!(vm.value_stack.top().unwrap(), Value::float(2.5));
+    }
+    for opcode in [0x8012, 0x8013, 0x8031, 0x802b] {
         let mut vm = fragment(&op(opcode));
         vm.g = 0;
         vm.f = 0;
@@ -288,8 +332,7 @@ fn slots_transfers_and_frame_validation_preserve_tags() {
         ] {
             vm.value_stack.push(value).unwrap();
         }
-        finish(&mut vm).unwrap();
-        assert_eq!(vm.value_stack.top().unwrap(), Value::float(2.5));
+        assert_eq!(finish(&mut vm), Err(VmError::Type(0x8001)));
     }
     let mut vm = fragment(&op(0x8032));
     vm.f = 0;
@@ -507,7 +550,8 @@ fn program_control_host_extensions_wait_quirk_and_instruction_limits() {
     vm.run(&mut host, 2).unwrap();
     vm.status.0 |= VmStatus::WAITING;
     host.milliseconds = 11;
-    assert_eq!(vm.run(&mut host, 100).unwrap(), RunOutcome::Waiting);
+    // A wait first checked after its deadline is released (§3.3 safe rule).
+    assert_eq!(vm.run(&mut host, 100).unwrap(), RunOutcome::FragmentEnd);
     let mut vm = fragment(&[op(0x804a), op(0x8000), op(0x804b)].concat());
     assert_eq!(vm.run(&mut host, 1).unwrap(), RunOutcome::FragmentEnd);
     let mut vm = fragment(&[op(0x8002), push(2), op(0x8004)].concat());

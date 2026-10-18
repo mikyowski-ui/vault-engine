@@ -30,7 +30,7 @@ pub enum VmError {
     Symbol(String),
     #[error("host operation is unavailable: {0}")]
     Host(String),
-    #[error("imported-call argument ABI is undefined in SPEC-004")]
+    #[error("imported calls are rejected (SPEC-004 §3.6 safe rule)")]
     ImportedAbi,
     #[error("instruction hard limit exceeded")]
     InstructionLimit,

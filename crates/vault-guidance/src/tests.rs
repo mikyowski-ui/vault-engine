@@ -65,11 +65,11 @@ fn spec008_fixture_quest_thresholds_water_chip_and_numbering() {
         ]
     );
     assert_eq!(quest_locations(&gvars), [(0, 700), (3, 730)]);
-    // The location pass inspects global zero through padded slots and can
-    // advertise empty groups; the detail pass stops at the sentinel.
+    // Safe rule: the location pass stops at the zero sentinel like the
+    // detail pass, so global zero cannot advertise empty groups.
     gvars[0] = 5;
     let listed: Vec<_> = quest_locations(&gvars).iter().map(|(t, _)| *t).collect();
-    assert_eq!(listed, (0..12).collect::<Vec<_>>());
+    assert_eq!(listed, [0, 3]);
     assert!(town_quests(1, &gvars).is_empty());
     assert_eq!(town_quests(12, &gvars), []);
 }
@@ -81,14 +81,15 @@ fn spec008_fixture_holodisk_acquisition_pages_and_markers() {
     gvars[162] = 1;
     assert_eq!(listed_disks(&gvars), [0]);
     assert_eq!(selected_disk(&gvars, 0), Some(0));
-    // A negative value is listed but skipped by the selection mapping.
+    // Safe rule: a negative value is neither listed nor selected.
     gvars[163] = -1;
     gvars[161] = 1;
-    assert_eq!(listed_disks(&gvars), [0, 1, 2]);
+    assert_eq!(listed_disks(&gvars), [0, 2]);
     assert_eq!(selected_disk(&gvars, 1), Some(2));
     assert_eq!(selected_disk(&gvars, 2), None);
 
-    // Exactly 35 body records then **END-DISK**: last page index 1.
+    // Exactly 35 body records then **END-DISK**: under the safe rule the
+    // last page index is 0 (the reference exposes an empty page 1).
     let mut entries = vec![(400, "Synthetic Disk".to_string())];
     for record in 0..35 {
         let text = if record == 3 {
@@ -103,7 +104,7 @@ fn spec008_fixture_holodisk_acquisition_pages_and_markers() {
     let disk = holodisk(0, &catalog(&refs)).unwrap();
     assert_eq!(disk.title, b"Synthetic Disk");
     assert_eq!(disk.records.len(), 35);
-    assert_eq!(disk.last_page, 1);
+    assert_eq!(disk.last_page, 0);
     assert_eq!(disk.page(0).len(), 35);
     assert!(disk.page(1).is_empty());
     assert_eq!(disk.records[3], DiskLine::Paragraph);

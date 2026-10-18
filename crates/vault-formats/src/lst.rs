@@ -31,7 +31,13 @@ pub struct LstEntry {
     pub raw: Vec<u8>,
     pub name: Option<Vec<u8>>,
     pub alias: Option<i32>,
+    /// The reference head-list counts: the first count after the comma,
+    /// repeated for all three moods.
     pub head_counts: Option<[i32; 3]>,
+    /// The first, second, and third comma-separated counts (good, neutral,
+    /// bad) for the SPEC-006 §3.11 safe rule; a missing or overflowing later
+    /// column repeats the first count.
+    pub head_columns: Option<[i32; 3]>,
     pub local_vars: Option<i32>,
 }
 
@@ -45,7 +51,6 @@ impl LstEntry {
 pub struct LstTable {
     kind: LstKind,
     entries: Vec<LstEntry>,
-    lf_count: usize,
 }
 
 fn decimal_prefix(bytes: &[u8], offset: usize) -> Result<i32, ParseError> {
@@ -83,7 +88,6 @@ impl LstTable {
         };
         let mut entries = Vec::new();
         let mut position = 0;
-        let mut lf_count = 0;
         while position < bytes.len() {
             if entries.len() == MAX_ENTRIES {
                 return Err(ParseError::new("LST", position, "entry limit exceeded"));
@@ -106,7 +110,6 @@ impl LstTable {
                 }
                 raw.push(byte);
                 if byte == b'\n' {
-                    lf_count += 1;
                     break;
                 }
             }
@@ -153,30 +156,39 @@ impl LstTable {
             } else {
                 None
             };
+            let head_columns = alias.map(|first| {
+                let mut columns = [first; 3];
+                let mut rest = raw.splitn(4, |byte| *byte == b',').skip(2);
+                for column in &mut columns[1..] {
+                    if let Some(count) = rest
+                        .next()
+                        .and_then(|text| decimal_prefix(text, offset).ok())
+                    {
+                        *column = count;
+                    }
+                }
+                columns
+            });
             entries.push(LstEntry {
                 raw,
                 name,
                 alias,
                 head_counts: alias.map(|count| [count; 3]),
+                head_columns,
                 local_vars,
             });
         }
-        Ok(Self {
-            kind,
-            entries,
-            lf_count,
-        })
+        Ok(Self { kind, entries })
     }
 
     pub fn entries(&self) -> &[LstEntry] {
         &self.entries
     }
+    /// The entry count, derived from successful bounded reads for every
+    /// kind (SPEC-001 §3.4 safe rule; the reference's script and prototype
+    /// bookkeeping counts LF + 1 and LF + 2 are not reproduced).
     pub fn bookkeeping_len(&self) -> usize {
-        match self.kind {
-            LstKind::Script => self.lf_count + 1,
-            LstKind::Prototype => self.lf_count + 2,
-            _ => self.entries.len(),
-        }
+        self.entries.len()
     }
     pub fn art_id(&self, id: u32) -> Option<&LstEntry> {
         (self.kind == LstKind::Art)

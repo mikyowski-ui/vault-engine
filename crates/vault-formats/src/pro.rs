@@ -59,10 +59,19 @@ impl BasicFlags {
     }
 }
 impl ExtendedFlags {
-    /// Verified attack-mode numbers are 0..=8; unknown bits remain preserved.
-    pub fn attack_modes(self) -> Option<[u8; 2]> {
-        let modes = [(self.0 & 15) as u8, ((self.0 >> 4) & 15) as u8];
-        modes.iter().all(|mode| *mode <= 8).then_some(modes)
+    fn raw_attack_modes(self) -> [u8; 2] {
+        [(self.0 & 15) as u8, ((self.0 >> 4) & 15) as u8]
+    }
+    /// Primary and secondary attack modes 0..=8. Under the SPEC-003 §2.6
+    /// safe rule a nibble of 9-15 reads as mode 0 (none); unknown bits
+    /// remain preserved in the word.
+    pub fn attack_modes(self) -> [u8; 2] {
+        self.raw_attack_modes()
+            .map(|mode| if mode <= 8 { mode } else { 0 })
+    }
+    /// Whether either nibble holds an invalid mode 9-15, for diagnostics.
+    pub fn invalid_attack_mode(self) -> bool {
+        self.raw_attack_modes().iter().any(|mode| *mode > 8)
     }
 }
 
@@ -451,10 +460,9 @@ impl Prototype {
 }
 
 impl Prototype {
-    /// SPEC-003 §3.1 asymmetric writer. Weapons emit maximum damage before
-    /// minimum (a save/reload can exchange the bounds), and scenery appends six
-    /// words that the reader stops before: light radius, light intensity, basic
-    /// flags, extended flags, script reference, and scenery subtype.
+    /// SPEC-003 §3.1 writer in reader order, under the safe rules: weapons
+    /// write minimum damage before maximum (the reference exchanges them), and
+    /// scenery omits the reference's six-word suffix, which readers tolerate.
     pub fn write(&self) -> Vec<u8> {
         let out = &mut Vec::new();
         put_u32(out, self.pid);
@@ -510,8 +518,8 @@ impl Prototype {
                             out,
                             &[
                                 weapon.animation,
-                                weapon.damage[1],
                                 weapon.damage[0],
+                                weapon.damage[1],
                                 weapon.damage_type,
                                 weapon.ranges[0],
                                 weapon.ranges[1],
@@ -587,10 +595,6 @@ impl Prototype {
                     | SceneryData::LadderDown { destination } => put_u32(out, destination),
                     SceneryData::Generic(value) => put_i32(out, value),
                 }
-                words(out, &[light.radius, light.intensity]);
-                put_u32(out, self.flags.0);
-                put_u32(out, self.extended.0);
-                words(out, &[script, subtype]);
             }
             PrototypeData::Wall { material } | PrototypeData::Tile { material } => {
                 put_i32(out, *material)

@@ -1,6 +1,7 @@
 //! SPEC-008 §2.4/§2.5/§3.3 save slots: `SAVEGAME/SLOTnn/SAVE.DAT` with its
-//! companion `<map>.SAV` files and `AUTOMAP.SAV`, best-effort `.BAK`
-//! backups, and the restore order (current map before later components).
+//! companion `<map>.SAV` files and `AUTOMAP.SAV`, staged writes committed
+//! only after every file succeeds, and the restore order (current map
+//! before later components).
 use crate::{
     ObjectRef, Perk, WorldError, WorldState,
     assets::WorldAssets,
@@ -311,9 +312,12 @@ impl<A: WorldAssets> WorldHost<A> {
             ],
         })
     }
-    /// Write a slot: existing central/companion files are first renamed to
-    /// `.BAK` (best effort), restored if writing fails, and removed after
-    /// success. This is not an atomic multi-file transaction.
+    /// Write a slot under the SPEC-008 §3.3 safe rule: every file is first
+    /// written to a temporary `<name>.TMP`, so a failure leaves the old slot
+    /// untouched. Only then is the slot committed: the old central and
+    /// companion files are renamed to `.BAK`, the staged files are renamed
+    /// into place (restoring the backups if that fails), and the backups are
+    /// removed.
     pub fn save_game(&mut self, root: &Path, slot: u8, info: &SaveInfo) -> Result<(), WorldError> {
         let dir = slot_directory(root, slot)?;
         let save = self.build_save(info)?;
@@ -326,6 +330,17 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.persistence.automap.bytes().to_vec(),
         ));
         fs::create_dir_all(&dir).map_err(|error| io(&dir, error))?;
+        let staged = |name: &str| dir.join(format!("{name}.TMP"));
+        let staging = files.iter().try_for_each(|(name, bytes)| {
+            let path = staged(name);
+            fs::write(&path, bytes).map_err(|error| io(&path, error))
+        });
+        if let Err(error) = staging {
+            for (name, _) in &files {
+                let _ = fs::remove_file(staged(name));
+            }
+            return Err(error);
+        }
         let mut backups = Vec::new();
         for entry in fs::read_dir(&dir).map_err(|error| io(&dir, error))? {
             let Ok(path) = entry.map(|entry| entry.path()) else {
@@ -342,11 +357,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 backups.push(path);
             }
         }
-        let mut written = Vec::new();
-        let result = files.iter().try_for_each(|(name, bytes)| {
+        let mut committed = Vec::new();
+        let result = files.iter().try_for_each(|(name, _)| {
             let path = dir.join(name);
-            written.push(path.clone());
-            fs::write(&path, bytes).map_err(|error| io(&path, error))
+            fs::rename(staged(name), &path).map_err(|error| io(&path, error))?;
+            committed.push(path);
+            Ok(())
         });
         match result {
             Ok(()) => {
@@ -356,8 +372,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 Ok(())
             }
             Err(error) => {
-                for path in written {
+                for path in committed {
                     let _ = fs::remove_file(path);
+                }
+                for (name, _) in &files {
+                    let _ = fs::remove_file(staged(name));
                 }
                 for path in backups {
                     let _ = fs::rename(backup_name(&path), &path);
@@ -387,7 +406,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 .map_err(|_| WorldError::Invalid("save manifest name is not ASCII".into()))?
                 .to_ascii_uppercase();
             let path = slot_file(&dir, &name)?;
-            maps.insert(name, fs::read(&path).map_err(|error| io(&path, error))?);
+            let bytes = fs::read(&path).map_err(|error| io(&path, error))?;
+            // SPEC-008 §3.3 safe rule: every companion map is validated
+            // before any working state changes.
+            vault_formats::MapFile::parse(&bytes, &lookup)?;
+            maps.insert(name, bytes);
         }
         let automap_path = slot_file(&dir, AUTOMAP_FILE)?;
         let automap = fs::read(&automap_path).map_err(|error| io(&automap_path, error))?;
@@ -465,21 +488,20 @@ impl<A: WorldAssets> WorldHost<A> {
         world.active_hand = save.interface[2];
         world.set_next_object_id(save.next_item_id.max(1) as u32);
         world.queue = Default::default();
+        // SPEC-008 §2.6: an identifier that matches no object leaves the
+        // event without an owner.
         for record in &save.queue {
+            let kind = event_kind(record)?;
             let object = match record.owner {
-                -2 => Some(0),
-                id => world.reference_for_id(id as u32),
+                -2 => 0,
+                id => world.reference_for_id(id as u32).unwrap_or_else(|| {
+                    world.diagnostic(format!(
+                        "timed event owner {id} is not on the restored map; restored without an owner"
+                    ));
+                    0
+                }),
             };
-            match (object, event_kind(record)) {
-                (Some(object), Ok(kind)) => {
-                    world.queue.insert(u64::from(record.due), 0, object, kind)?;
-                }
-                (None, _) => world.diagnostic(format!(
-                    "timed event owner {} is not on the restored map",
-                    record.owner
-                )),
-                (_, Err(error)) => return Err(error),
-            }
+            world.queue.insert(u64::from(record.due), 0, object, kind)?;
         }
         world.party.clear();
         for id in &save.party {

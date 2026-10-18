@@ -1,4 +1,7 @@
-use crate::{WorldError, dialogue::HeadDefinition};
+use crate::{
+    WorldError,
+    dialogue::{HeadDefinition, Mood, selectable_fidgets},
+};
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 use vault_formats::{
     ArtCatalog, Fid, Font, FontKind, FontSet, FrmArchive, GamFile, GamSection, GcdFile,
@@ -221,6 +224,13 @@ impl WorldAssets for VfsWorldAssets {
                 .map_err(|_| WorldError::Invalid("invalid prototype filename".into()))?
         );
         let prototype = Arc::new(Prototype::parse(&self.read(&path)?)?);
+        // SPEC-003 §3.1 safe rule: the stored PID must be the requested one.
+        if prototype.pid != pid {
+            return Err(WorldError::Invalid(format!(
+                "{path} stores prototype {:#x}, not {pid:#x}",
+                prototype.pid
+            )));
+        }
         self.prototypes.borrow_mut().insert(pid, prototype.clone());
         Ok(prototype)
     }
@@ -312,14 +322,33 @@ impl WorldAssets for VfsWorldAssets {
             .ok_or_else(|| WorldError::Invalid("missing head".into()))?;
         let stem = std::str::from_utf8(entry.name.as_deref().unwrap_or(b""))
             .map_err(|_| WorldError::Invalid("invalid head stem".into()))?;
-        let counts = entry
+        let first = entry
             .head_counts
             .ok_or_else(|| WorldError::Invalid("head has no fidget counts".into()))?;
-        Ok(HeadDefinition {
+        let mut head = HeadDefinition {
             index: index as u16,
             stem: stem.into(),
-            counts,
-        })
+            counts: first,
+        };
+        // SPEC-006 §3.11 safe rule: each mood reads its own column when
+        // every fidget file it can select exists; otherwise it keeps the
+        // reference's first-column count.
+        let columns = entry.head_columns.unwrap_or(first);
+        for (slot, mood) in [Mood::Good, Mood::Neutral, Mood::Bad]
+            .into_iter()
+            .enumerate()
+        {
+            let variants = selectable_fidgets(columns[slot]);
+            if !variants.is_empty()
+                && variants.iter().all(|variant| {
+                    head.path(mood.fidget(), *variant)
+                        .is_ok_and(|path| self.exists(&path))
+                })
+            {
+                head.counts[slot] = columns[slot];
+            }
+        }
+        Ok(head)
     }
     fn frame(&self, path: &str) -> Result<Arc<FrmArchive>, WorldError> {
         if let Some(frame) = self.frames.borrow().get(path) {

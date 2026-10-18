@@ -124,12 +124,12 @@ fn checked(vm: &Vm, value: Value, rule: Rule) -> Result<Argument, VmError> {
                     _ => return Err(bad()),
                 }
             } else {
-                f32::from_bits(value.payload)
+                // SPEC-005 §3.1 safe rule: a nonfinite channel reads as 0;
+                // consumers clamp the truncated channel to 0-31.
+                Some(f32::from_bits(value.payload))
+                    .filter(|channel| channel.is_finite())
+                    .unwrap_or(0.0)
             });
-            let scaled = arg.channel.unwrap() * 31.0;
-            if !scaled.is_finite() || !(-2147483648.0..2147483648.0).contains(&(scaled as f64)) {
-                return Err(VmError::Arithmetic);
-            }
         }
     }
     Ok(arg)

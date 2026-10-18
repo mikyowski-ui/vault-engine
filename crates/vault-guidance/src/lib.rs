@@ -20,15 +20,16 @@ fn global(gvars: &[i32], index: usize) -> i32 {
     gvars.get(index).copied().unwrap_or(0)
 }
 
-/// Ordinals enumerated in the title list: any nonzero acquisition value.
+/// Ordinals enumerated in the title list. Under the SPEC-008 §3.8 safe rule
+/// only positive acquisition values count, as in selection (the reference
+/// lists any nonzero value).
 pub fn listed_disks(gvars: &[i32]) -> Vec<usize> {
     (0..DISK_GLOBALS.len())
-        .filter(|ordinal| global(gvars, DISK_GLOBALS[*ordinal]) != 0)
+        .filter(|ordinal| global(gvars, DISK_GLOBALS[*ordinal]) > 0)
         .collect()
 }
-/// List selection maps the n-th row to the n-th disk with a **positive**
-/// value, so a negative acquisition value makes the list and the selected
-/// disk disagree, as in the reference.
+/// List selection maps the n-th row to the n-th disk with a positive value,
+/// so the list and the selected disk always agree.
 pub fn selected_disk(gvars: &[i32], row: usize) -> Option<usize> {
     (0..DISK_GLOBALS.len())
         .filter(|ordinal| global(gvars, DISK_GLOBALS[*ordinal]) > 0)
@@ -48,8 +49,8 @@ pub struct Holodisk {
     pub title: Vec<u8>,
     /// Records before `**END-DISK**`, at most 35 per page.
     pub records: Vec<DiskLine>,
-    /// `floor(records / 35)`: an exact multiple of 35 exposes an extra empty
-    /// final page.
+    /// `floor((records - 1) / 35)`, at least 0: under the SPEC-008 §3.8 safe
+    /// rule an exact multiple of 35 exposes no extra empty final page.
     pub last_page: usize,
 }
 impl Holodisk {
@@ -105,7 +106,7 @@ pub fn holodisk(ordinal: usize, messages: &MsgCatalog) -> Result<Holodisk, DiskE
             return Ok(Holodisk {
                 ordinal,
                 title,
-                last_page: records.len() / RECORDS_PER_PAGE,
+                last_page: records.len().saturating_sub(1) / RECORDS_PER_PAGE,
                 records,
             });
         }
@@ -148,16 +149,17 @@ pub struct QuestEntry {
     pub state: QuestState,
 }
 
-/// Location-list pass: a town is listed when any of its nine positions is
-/// visible. This pass does not stop at the zero sentinel, so padded slots
-/// inspect campaign global zero; a positive value there advertises an
-/// otherwise empty group.
+/// Location-list pass: a town is listed when any of its positions before
+/// the zero sentinel is visible. Under the SPEC-008 §3.8 safe rule this pass
+/// stops at the sentinel like the others, so padded slots never inspect
+/// campaign global zero.
 pub fn quest_locations(gvars: &[i32]) -> Vec<(usize, i32)> {
     QUESTS
         .iter()
         .enumerate()
         .filter(|(_, row)| {
             row.iter()
+                .take_while(|index| **index != 0)
                 .any(|index| quest_state(*index, global(gvars, *index)) != QuestState::Hidden)
         })
         .map(|(town, _)| (town, LOCATION_TITLE_BASE + 10 * town as i32))

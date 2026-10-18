@@ -419,9 +419,26 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         Ok(None)
     }
-    /// Resolution plus the SPEC-007 random-target follow-up: a replacement
-    /// defender takes a torso hit at normal damage, with the critical marker
-    /// cleared. Returns the victim and its profile when one was found.
+    /// SPEC-007 §3.7 accidental target for a single-shot ranged miss, under
+    /// the safe rule that accepts the selected non-through critter (the
+    /// reference's inverted test never accepts one): the first obstacle of the
+    /// stride-32 shot ray toward the defender, which skips projectile-through
+    /// objects, when it is a critter other than the defender.
+    pub fn accidental_target(&self, attacker: ObjectRef, defender: ObjectRef) -> Option<ObjectRef> {
+        let from = self.world.get(attacker)?.raw.hex?;
+        let to = self.world.get(defender)?.raw.hex?;
+        let obstacle = self
+            .world
+            .ray(attacker, from, to, 32, Some(attacker))
+            .obstacle?;
+        (obstacle != defender && Fid(self.world.get(obstacle)?.raw.art_id).category() == 1)
+            .then_some(obstacle)
+    }
+    /// Resolution plus the SPEC-007 follow-ups: a random-target critical
+    /// failure, or (safe rule) an ordinary single-shot ranged miss that meets
+    /// an accidental target. The replacement defender takes a torso hit at
+    /// normal damage, with the critical marker cleared. Returns the victim
+    /// and its profile when one was found.
     pub(crate) fn resolve_attack(
         &self,
         attacker: ObjectRef,
@@ -441,10 +458,17 @@ impl<A: WorldAssets> WorldHost<A> {
                 extras: Vec::new(),
             }
         };
-        if !spray.main.retarget {
-            return Ok((spray, None));
-        }
-        let Some(victim) = self.random_target(attacker, defender, attack.hit_mode, rng)? else {
+        let victim = if spray.main.retarget {
+            self.random_target(attacker, defender, attack.hit_mode, rng)?
+        } else if !spraying
+            && spray.main.code == 1
+            && attack.subtype() == Some(crate::combat::Subtype::Ranged)
+        {
+            self.accidental_target(attacker, defender)
+        } else {
+            None
+        };
+        let Some(victim) = victim else {
             return Ok((spray, None));
         };
         let mut profile = self.world.attack_profile(

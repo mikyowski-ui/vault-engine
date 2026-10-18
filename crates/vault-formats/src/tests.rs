@@ -342,9 +342,8 @@ fn frm_rejects_unsafe_offsets_sizes_counts_and_truncation_but_retains_signed_tim
         (0x22, vec![0, 0, 0, 1]),
         (0x2a, vec![0, 0, 0, 29]),
         (0x2e, vec![0, 0, 0, 0]), // nonadjacent reuse
-        (0x3a, vec![0, 0, 0, 0]),
         (0x3e, vec![0xff, 0xff]),
-        (0x40, vec![0, 0]),
+        (0x40, vec![0xff, 0xff]),
         (0x42, vec![0x7f, 0xff, 0xff, 0xff]),
         (0x42, vec![0, 0, 0, 1]),
         (0x22, vec![0xff; 4]),
@@ -391,15 +390,47 @@ fn split_animations_count_one_stored_sequence_and_ignore_the_unsplit_size_excess
             "accepted truncated split frame at {end}"
         );
     }
-    let mut undersized = bytes.clone();
-    undersized[0x3a..0x3e].copy_from_slice(&27_u32.to_be_bytes());
-    assert!(FrmArchive::parse(&undersized).is_err());
-    let mut exact = bytes;
-    exact[0x3a..0x3e].copy_from_slice(&28_u32.to_be_bytes());
-    assert!(FrmArchive::parse(&exact).is_ok());
+    // The declared total is metadata only: no total is enforced.
+    for area in [27, 28, -1] {
+        let mut declared = bytes.clone();
+        declared[0x3a..0x3e].copy_from_slice(&i32::to_be_bytes(area));
+        assert_eq!(FrmArchive::parse(&declared).unwrap().frame_area_len, area);
+    }
     let mut multi = fixtures::animated_frm();
     multi[0x3a..0x3e].copy_from_slice(&55_u32.to_be_bytes());
-    assert!(FrmArchive::parse(&multi).is_err());
+    let multi = FrmArchive::parse(&multi).unwrap();
+    assert_eq!(
+        (multi.frame_area_len, multi.stored_frame_area_len()),
+        (55, 54)
+    );
+}
+
+#[test]
+fn frm_safe_rule_accepts_empty_and_oversized_payloads() {
+    // One frame per direction: a 2 x 1 frame with a 3-byte payload, then the
+    // next frame starts after the declared count; a 0 x 0 frame is valid.
+    let mut bytes = Vec::new();
+    for word in [4_u32.to_be_bytes(), [0, 10, 0, 0]] {
+        bytes.extend(word);
+    }
+    bytes.extend(2_i16.to_be_bytes());
+    bytes.extend([0; 24 + 24]);
+    bytes.extend(28_i32.to_be_bytes());
+    for (width, height, payload) in [(2_i16, 1_i16, &[5_u8, 6, 7][..]), (0, 0, &[][..])] {
+        bytes.extend(width.to_be_bytes());
+        bytes.extend(height.to_be_bytes());
+        bytes.extend((payload.len() as i32).to_be_bytes());
+        bytes.extend([0; 4]);
+        bytes.extend(payload);
+    }
+    let archive = FrmArchive::parse(&bytes).unwrap();
+    assert_eq!(archive.frame(0, 0).unwrap().pixels(), &[5, 6]);
+    let empty = archive.frame(0, 1).unwrap();
+    assert_eq!(
+        (empty.width, empty.height, empty.file_offset),
+        (0, 0, 0x3e + 15)
+    );
+    assert!(empty.pixels().is_empty());
 }
 
 #[test]
@@ -463,8 +494,9 @@ fn spec001_lst_positions_consumer_ids_and_crlf() {
         );
         assert_eq!(scripts.map_script_reference(1), scripts.script_id(0));
         assert!(scripts.map_script_reference(0).is_none());
-        assert_eq!(scripts.bookkeeping_len(), 3);
-        assert_eq!(proto.bookkeeping_len(), 5);
+        // Entry counts come from successful reads, not LF + 1 / LF + 2.
+        assert_eq!(scripts.bookkeeping_len(), scripts.entries().len());
+        assert_eq!(proto.bookkeeping_len(), 3);
     }
 }
 
@@ -487,6 +519,11 @@ fn lst_bounded_reads_metadata_and_unusual_whitespace() {
         Some(b"abcdefghijkl".as_slice())
     );
     assert_eq!(art.entries()[1].head_counts, Some([2, 2, 2]));
+    assert_eq!(art.entries()[1].head_columns, Some([2, 3, 4]));
+    let heads = LstTable::parse(b"a,5\nb,2,x\nc\n", LstKind::Art).unwrap();
+    assert_eq!(heads.entries()[0].head_columns, Some([5, 5, 5]));
+    assert_eq!(heads.entries()[1].head_columns, Some([2, 0, 2]));
+    assert_eq!(heads.entries()[2].head_columns, None);
     assert_eq!(art.entries()[2].name.as_deref(), Some(b"//note".as_slice()));
     let proto = LstTable::parse(b"a\tb;#x,\r\n", LstKind::Prototype).unwrap();
     assert_eq!(
@@ -506,7 +543,7 @@ fn lst_bounded_reads_metadata_and_unusual_whitespace() {
     assert_eq!(script.entries()[1].local_vars, Some(-12));
     let empty = LstTable::parse(b"", LstKind::Script).unwrap();
     assert!(empty.entries().is_empty());
-    assert_eq!(empty.bookkeeping_len(), 1);
+    assert_eq!(empty.bookkeeping_len(), 0);
 }
 
 #[test]

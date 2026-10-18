@@ -196,6 +196,145 @@ impl<A: WorldAssets> WorldHost<A> {
                 .diagnostic("only player poison/radiation is adjustable");
         }
     }
+    /// The `attack`/`attack_setup` request body (SPEC-005 §3.5). A null
+    /// `attack_setup` defender is a no-op with a diagnostic (safe rule).
+    fn attack_request(&mut self, vm: &Vm, op: u16, call: &HostCall) -> Result<(), VmError> {
+        let (attacker, defender, accuracy, min, max, mode) = if op == 0x8143 {
+            if call.uint(0) == 0 {
+                self.world.diagnostic("attack_setup: null defender");
+                return Ok(());
+            }
+            (call.uint(1), call.uint(0), 0, 0, i32::MAX, None)
+        } else {
+            (
+                self.self_object(vm),
+                call.uint(7),
+                call.int(4),
+                call.int(3),
+                call.int(2),
+                (call.int(0) == call.int(1)).then_some([call.int(1), call.int(0)]),
+            )
+        };
+        // The eight-operand words also require a nonfleeing target.
+        let fleeing = |object: &crate::world::WorldObject| matches!(&object.raw.state, ObjectState::Critter(state) if state.maneuvers & 4 != 0);
+        if attacker != 0
+            && defender != 0
+            && self.object(attacker)?.alive()
+            && self.object(defender)?.alive()
+            && (op == 0x8143 || !fleeing(self.object(defender)?))
+        {
+            if self.world.combat {
+                // SPEC-009: with alert clear, set it and reference the
+                // target directly (no reaction change).
+                let attacker = self.world.get_mut(attacker).expect("attacker");
+                if let ObjectState::Critter(state) = &mut attacker.raw.state
+                    && state.maneuvers & 1 == 0
+                {
+                    state.maneuvers |= 1;
+                    attacker.opponent = defender;
+                }
+            } else {
+                self.world.emit(WorldEffect::Combat {
+                    attacker,
+                    defender,
+                    accuracy,
+                    min,
+                    max,
+                    mode,
+                });
+                self.world.pending_combat = Some(crate::combat_state::CombatRequest {
+                    attacker,
+                    defender,
+                    accuracy,
+                    damage: [min, max],
+                    flags: mode,
+                });
+            }
+        }
+        Ok(())
+    }
+    /// The `critter_damage` body: the fixed amount as both damage bounds.
+    fn critter_damage(&mut self, op: u16, call: &HostCall, values: &[i32]) -> Result<(), VmError> {
+        if call.uint(2) == 0 || self.object(call.uint(2))?.category() != Category::Critter {
+            return Ok(());
+        }
+        // Fixed amount as both damage bounds: through the victim's DT
+        // then DR for the low-byte damage type unless 0x100 bypasses
+        // armor; 0x200 suppresses the animation request.
+        let (flags, victim) = (call.int(0) as u32, call.uint(2));
+        let damage = if flags & 0x100 != 0 {
+            call.int(1).max(0)
+        } else {
+            let context = self.world.context(victim);
+            let kind = (flags & 0xff) as usize;
+            let sheet = self.object(victim)?.character.as_ref();
+            let armor = |base: usize| {
+                if kind < 7 {
+                    sheet.map_or(0, |s| i64::from(s.stat(base + kind, context)))
+                } else {
+                    0
+                }
+            };
+            let mut value = i64::from(call.int(1)) - armor(17);
+            if value > 0 {
+                value -= value * armor(24) / 100;
+            }
+            value.clamp(0, i64::from(i32::MAX)) as i32
+        };
+        self.damage_critter(victim, None, damage, 0)?;
+        if flags & 0x200 == 0 {
+            self.world.emit(WorldEffect::Animation {
+                opcode: op,
+                values: values.to_vec(),
+                sound: None,
+            });
+        }
+        Ok(())
+    }
+    /// `turn_off_objs_in_area` / `turn_on_objs_in_area` under the SPEC-005
+    /// §3.4 safe rules: reversed hex bounds are swapped and each pass
+    /// advances one elevation, so the call terminates. A placed object
+    /// matches with a hex between the bounds and
+    /// `trunc((hex - first) / 200) <= trunc(last / 200) - trunc(first / 200)`.
+    fn area_visibility(&mut self, hide: bool, hexes: [i32; 2], elevations: [i32; 2]) {
+        let [first, last] = if hexes[0] > hexes[1] {
+            [hexes[1], hexes[0]]
+        } else {
+            hexes
+        };
+        let low = elevations[0].min(elevations[1]).max(0);
+        let high = elevations[0].max(elevations[1]).min(2);
+        let rows = last / 200 - first / 200;
+        let mut changed = false;
+        for elevation in low..=high {
+            let matching: Vec<ObjectRef> = self
+                .world
+                .iter()
+                .filter(|(_, object)| {
+                    object.owner.is_none()
+                        && i32::from(object.raw.elevation) == elevation
+                        && object.raw.hex.is_some_and(|hex| {
+                            (first..=last).contains(&hex) && (hex - first) / 200 <= rows
+                        })
+                        && object.raw.flags.contains(BasicFlags::HIDDEN) != hide
+                })
+                .map(|(reference, _)| reference)
+                .collect();
+            for reference in matching {
+                if let Some(object) = self.world.get_mut(reference) {
+                    if hide {
+                        object.raw.flags.0 |= BasicFlags::HIDDEN.0;
+                    } else {
+                        object.raw.flags.0 &= !BasicFlags::HIDDEN.0;
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.world.rebuild_lighting();
+        }
+    }
     fn proto_data(&mut self, pid: u32, member: i32) -> HostResult {
         let Ok(prototype) = self.assets.prototype(pid) else {
             return Ok(integer(0));
@@ -208,11 +347,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 .assets
                 .prototype_text(&prototype, member == 2)
                 .unwrap_or_default();
-            if prototype.category == Category::Misc && member == 2 {
-                // Opaque host text reference, deliberately not a VM string offset.
-                let reference = self.opaque_text(text)?;
-                return Ok(integer(reference as i32));
-            }
+            // SPEC-005 §3.6 safe rule: the miscellaneous description is D
+            // like the other categories (the reference returns I bits).
             return Ok(string(text));
         }
         let common = match member {
@@ -264,14 +400,15 @@ impl<A: WorldAssets> WorldHost<A> {
                 });
                 None
             }
+            // Safe rule: a null operand always names `<Critter>` (the
+            // reference reuses the last cached name).
             0x80a4 => {
                 if call.uint(0) != 0 {
-                    self.last_object_name = self.object(call.uint(0))?.name.clone();
+                    string(self.object(call.uint(0))?.name.clone())
                 } else {
-                    self.world
-                        .diagnostic("obj_name: null object reuses cached name");
+                    self.world.diagnostic("obj_name: null object");
+                    string(b"<Critter>".to_vec())
                 }
-                string(self.last_object_name.clone())
             }
             0x80a5 | 0x813d => {
                 let object = call.uint(if op == 0x80a5 { 1 } else { 2 });
@@ -289,12 +426,18 @@ impl<A: WorldAssets> WorldHost<A> {
                             self.character_sound_name(object, animation, extra)
                         })
                     };
+                    // Safe rule for `sfx_build_char_name`: unavailable art or
+                    // name pushes empty D text.
                     match name {
                         Some(name) => string(name),
                         None => {
                             self.world
                                 .diagnostic(format!("opcode {op:#06x}: no sound name"));
-                            dynamic_null()
+                            if op == 0x813d {
+                                string(Vec::new())
+                            } else {
+                                dynamic_null()
+                            }
                         }
                     }
                 }
@@ -472,11 +615,23 @@ impl<A: WorldAssets> WorldHost<A> {
                 if self.world.restoring {
                     integer(0)
                 } else {
-                    let prototype = self.assets.prototype(call.uint(3))?;
-                    let default_script = prototype.script.unwrap_or(-1);
+                    // SPEC-005 §2.5 safe rule: when no object can be created,
+                    // push I zero and skip the script replacement.
                     let hex = if call.int(2) == -1 { 0 } else { call.int(2) };
-                    let elevation = u8::try_from(call.int(1)).map_err(|_| VmError::Arithmetic)?;
-                    let object = self.world.spawn(prototype.clone(), hex, elevation)?;
+                    let created = self.assets.prototype(call.uint(3)).and_then(|prototype| {
+                        let elevation = u8::try_from(call.int(1))
+                            .map_err(|_| WorldError::Invalid("elevation outside 0-255".into()))?;
+                        let object = self.world.spawn(prototype.clone(), hex, elevation)?;
+                        Ok((prototype, object))
+                    });
+                    let (prototype, object) = match created {
+                        Ok(created) => created,
+                        Err(error) => {
+                            self.world.diagnostic(format!("create_object_sid: {error}"));
+                            return Ok(integer(0));
+                        }
+                    };
+                    let default_script = prototype.script.unwrap_or(-1);
                     if let Some(target) = self.world.get_mut(object) {
                         target.name = self
                             .assets
@@ -487,7 +642,8 @@ impl<A: WorldAssets> WorldHost<A> {
                             .prototype_text(&prototype, true)
                             .unwrap_or_default();
                     }
-                    let file = if call.int(0) == -1 {
+                    // Script number 0 is treated like -1 (§3.4 safe rule).
+                    let file = if matches!(call.int(0), -1 | 0) {
                         if default_script == -1 {
                             None
                         } else {
@@ -515,10 +671,9 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
             }
             0x80b8 | 0x8154 => {
+                // The debug text is emitted literally (SPEC-005 §3.1 safe
+                // rule), never as a native format.
                 let text = call.text(0).unwrap_or(b"").to_vec();
-                if self.world.debug_messages && text.contains(&b'%') {
-                    return Err(VmError::Host("unsafe native debug-format string".into()));
-                }
                 if op == 0x80b8 || self.world.debug_messages {
                     self.world.emit(WorldEffect::Message(text));
                 }
@@ -544,7 +699,8 @@ impl<A: WorldAssets> WorldHost<A> {
             0x80c1 => integer(self.world.local(self.sid(vm), call.int(0))),
             0x80c2 => {
                 if !self.world.set_local(self.sid(vm), call.int(1), call.int(0)) {
-                    self.world.diagnostic("LVAR write out of pool");
+                    self.world
+                        .diagnostic("LVAR write outside the script's slice");
                 }
                 None
             }
@@ -667,60 +823,17 @@ impl<A: WorldAssets> WorldHost<A> {
                     .diagnostic("animate_jump is unsupported and consumes no operands");
                 None
             }
+            // SPEC-005 §3.5 safe rule: the host-busy bit is cleared on every
+            // return path, including the active-dialogue early return.
             0x80d0 | 0x80dd | 0x8143 => {
                 vm.status.0 |= 0x20;
-                if self.world.dialogue.open {
-                    return Ok(None);
-                }
-                let (attacker, defender, accuracy, min, max, mode) = if op == 0x8143 {
-                    (call.uint(1), call.uint(0), 0, 0, i32::MAX, None)
+                let result = if self.world.dialogue.open {
+                    Ok(())
                 } else {
-                    (
-                        self.self_object(vm),
-                        call.uint(7),
-                        call.int(4),
-                        call.int(3),
-                        call.int(2),
-                        (call.int(0) == call.int(1)).then_some([call.int(1), call.int(0)]),
-                    )
+                    self.attack_request(vm, op, call)
                 };
-                // The eight-operand words also require a nonfleeing target.
-                let fleeing = |object: &crate::world::WorldObject| matches!(&object.raw.state, ObjectState::Critter(state) if state.maneuvers & 4 != 0);
-                if attacker != 0
-                    && defender != 0
-                    && self.object(attacker)?.alive()
-                    && self.object(defender)?.alive()
-                    && (op == 0x8143 || !fleeing(self.object(defender)?))
-                {
-                    if self.world.combat {
-                        // SPEC-009: with alert clear, set it and reference the
-                        // target directly (no reaction change).
-                        let attacker = self.world.get_mut(attacker).expect("attacker");
-                        if let ObjectState::Critter(state) = &mut attacker.raw.state
-                            && state.maneuvers & 1 == 0
-                        {
-                            state.maneuvers |= 1;
-                            attacker.opponent = defender;
-                        }
-                    } else {
-                        self.world.emit(WorldEffect::Combat {
-                            attacker,
-                            defender,
-                            accuracy,
-                            min,
-                            max,
-                            mode,
-                        });
-                        self.world.pending_combat = Some(crate::combat_state::CombatRequest {
-                            attacker,
-                            defender,
-                            accuracy,
-                            damage: [min, max],
-                            flags: mode,
-                        });
-                    }
-                }
                 vm.status.0 &= !0x20;
+                result?;
                 None
             }
             0x80d1 => None,
@@ -747,14 +860,13 @@ impl<A: WorldAssets> WorldHost<A> {
             } else {
                 self.object(call.uint(0))?.raw.hex.unwrap_or(-1)
             }),
+            // A negative orientation also gives -1 (SPEC-005 §3.4 safe rule).
             0x80d5 => {
-                if call.int(2) == -1 || call.int(1) >= 6 || call.int(0) == 0 {
+                if call.int(2) == -1 || !(0..6).contains(&call.int(1)) || call.int(0) == 0 {
                     integer(-1)
                 } else {
-                    let orientation = u8::try_from(call.int(1))
-                        .map_err(|_| VmError::Host("negative orientation is unsafe".into()))?;
                     integer(
-                        HexGrid::step(call.int(2), orientation, call.int(0))
+                        HexGrid::step(call.int(2), call.int(1) as u8, call.int(0))
                             .map_err(|e| VmError::Host(e.to_string()))?,
                     )
                 }
@@ -762,8 +874,11 @@ impl<A: WorldAssets> WorldHost<A> {
             0x80d6 | 0x80d7 => {
                 let item = call.uint(0);
                 let actor = self.target(vm);
+                // Safe rule: with no script for the program, diagnose and
+                // return without action.
                 if op == 0x80d6 && item != 0 && self.sid(vm).is_none() {
-                    return Err(VmError::Host("unsafe pickup without script context".into()));
+                    self.world.diagnostic("pickup_obj without a script context");
+                    return Ok(None);
                 }
                 if item != 0 && actor != 0 {
                     let worn = self.worn(item);
@@ -858,9 +973,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x80e1 | 0x80e2 => {
-                return Err(VmError::Host(
-                    "legacy area-visibility loop does not terminate".into(),
-                ));
+                self.area_visibility(
+                    op == 0x80e1,
+                    [call.int(1), call.int(0)],
+                    [call.int(3), call.int(2)],
+                );
+                None
             }
             0x80e3 => {
                 if call.uint(1) != 0 && !self.world.restoring {
@@ -911,20 +1029,20 @@ impl<A: WorldAssets> WorldHost<A> {
             } else {
                 0
             }),
+            // A null object pushes I zero with no effect (safe rule).
             0x80e8 => {
-                self.change_hp(call.uint(1), call.int(0))?;
+                if call.uint(1) != 0 {
+                    self.change_hp(call.uint(1), call.int(0))?;
+                }
                 integer(0)
             }
             0x80e9 => {
                 self.world.ambient_percent(call.int(0));
                 None
             }
-            0x80ea => {
-                integer(i32::try_from(self.world.clock.ticks).map_err(|_| VmError::Arithmetic)?)
-            }
-            0x80eb => integer(
-                i32::try_from(self.world.clock.ticks / 10).map_err(|_| VmError::Arithmetic)?,
-            ),
+            // Time arithmetic wraps as 32-bit two's complement (safe rule).
+            0x80ea => integer(self.world.clock.ticks as u32 as i32),
+            0x80eb => integer((self.world.clock.ticks as u32 / 10) as i32),
             0x80ec => integer(if call.uint(0) == 0 {
                 0
             } else {
@@ -970,43 +1088,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 None
             }
+            // SPEC-005 §3.5 safe rule: the host-busy bit is cleared on every
+            // return path, including the null/non-critter early return.
             0x80ef => {
                 vm.status.0 |= 0x20;
-                if call.uint(2) == 0 || self.object(call.uint(2))?.category() != Category::Critter {
-                    return Ok(None);
-                }
-                // Fixed amount as both damage bounds: through the victim's DT
-                // then DR for the low-byte damage type unless 0x100 bypasses
-                // armor; 0x200 suppresses the animation request.
-                let (flags, victim) = (call.int(0) as u32, call.uint(2));
-                let damage = if flags & 0x100 != 0 {
-                    call.int(1).max(0)
-                } else {
-                    let context = self.world.context(victim);
-                    let kind = (flags & 0xff) as usize;
-                    let sheet = self.object(victim)?.character.as_ref();
-                    let armor = |base: usize| {
-                        if kind < 7 {
-                            sheet.map_or(0, |s| i64::from(s.stat(base + kind, context)))
-                        } else {
-                            0
-                        }
-                    };
-                    let mut value = i64::from(call.int(1)) - armor(17);
-                    if value > 0 {
-                        value -= value * armor(24) / 100;
-                    }
-                    value.clamp(0, i64::from(i32::MAX)) as i32
-                };
-                self.damage_critter(victim, None, damage, 0)?;
-                if flags & 0x200 == 0 {
-                    self.world.emit(WorldEffect::Animation {
-                        opcode: op,
-                        values: values.clone(),
-                        sound: None,
-                    });
-                }
+                let result = self.critter_damage(op, call, &values);
                 vm.status.0 &= !0x20;
+                result?;
                 None
             }
             0x80f0 => {
@@ -1031,12 +1119,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 None
             }
-            0x80f2 => integer(
-                call.int(0)
-                    .max(0)
-                    .checked_mul(10)
-                    .ok_or(VmError::Arithmetic)?,
-            ),
+            0x80f2 => integer(call.int(0).max(0).wrapping_mul(10)),
             0x80f3 => {
                 let (selector, object, kind) = (call.int(0), call.uint(1), call.int(2));
                 if object == 0 {
@@ -1044,27 +1127,17 @@ impl<A: WorldAssets> WorldHost<A> {
                 } else {
                     let target = self.object(object)?;
                     let result = match kind {
-                        0 => {
-                            if selector < 0 {
-                                return Err(VmError::Host("negative perk index".into()));
-                            } else {
-                                Perk::from_index(selector).map_or(0, |perk| self.world.perk(perk))
-                                    as i32
-                            }
-                        }
-                        2 => {
-                            if selector < 0 {
-                                return Err(VmError::Host("negative trait index".into()));
-                            } else {
-                                i32::from(
-                                    selector < 16
-                                        && self
-                                            .world
-                                            .player_sheet()
-                                            .is_some_and(|s| s.traits.contains(&selector)),
-                                )
-                            }
-                        }
+                        // A negative perk or trait index gives 0 (safe rule).
+                        0 if selector < 0 => 0,
+                        0 => Perk::from_index(selector).map_or(0, |perk| self.world.perk(perk))
+                            as i32,
+                        2 => i32::from(
+                            (0..16).contains(&selector)
+                                && self
+                                    .world
+                                    .player_sheet()
+                                    .is_some_and(|s| s.traits.contains(&selector)),
+                        ),
                         1 => match selector {
                             5 => {
                                 if let ObjectState::Critter(s) = &target.raw.state {
@@ -1100,18 +1173,23 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 None
             }
+            // SPEC-005 §2.6 safe rule: 1 only for two non-null objects on
+            // the same elevation, both placed, when the perception test
+            // passes (the reference's guard is inverted).
             0x80f5 => {
-                // The inverted null guard: valid operands return 0 without a
-                // hearing test; a null operand (unsafe in the reference)
-                // returns 0 with a diagnostic.
-                if call.uint(0) == 0 || call.uint(1) == 0 {
+                let (first, second) = (call.uint(1), call.uint(0));
+                if first == 0 || second == 0 {
                     self.world
                         .diagnostic("obj_can_hear_obj with a null operand returns 0");
+                    integer(0)
                 } else {
-                    self.object(call.uint(0))?;
-                    self.object(call.uint(1))?;
+                    let (hearer, heard) = (self.object(first)?, self.object(second)?);
+                    let placed = hearer.raw.hex.is_some() && heard.raw.hex.is_some();
+                    let level = hearer.raw.elevation == heard.raw.elevation;
+                    integer(i32::from(
+                        placed && level && self.world.can_perceive(first, second),
+                    ))
                 }
-                integer(0)
             }
             0x80f6 => integer(self.world.clock.hhmm()),
             0x80f7 => integer(
@@ -1179,9 +1257,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 None
             }
+            // SPEC-005 §2.8 safe rules: null operands push the row's null
+            // result instead of leaving the caller's stack short.
             0x80ff => {
                 if call.uint(2) == 0 {
-                    None
+                    self.world
+                        .diagnostic("critter_attempt_placement: null object");
+                    integer(-1)
                 } else {
                     let old = self.object(call.uint(2))?.raw.elevation;
                     if !(0..3).contains(&call.int(0)) {
@@ -1256,7 +1338,7 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             0x8103 => {
                 if call.uint(3) == 0 {
-                    None
+                    integer(-1)
                 } else {
                     self.object(call.uint(3))?;
                     integer(-1)
@@ -1280,6 +1362,10 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             0x8106 => {
                 let owner = call.uint(1);
+                if owner == 0 {
+                    self.world.diagnostic("critter_inven_obj: null critter");
+                    return Ok(integer(0));
+                }
                 let object = self.object(owner)?;
                 if object.category() != Category::Critter {
                     integer(0)
@@ -1492,7 +1578,7 @@ impl<A: WorldAssets> WorldHost<A> {
             0x8117 => {
                 let (item, owner) = (call.uint(1), call.uint(2));
                 if item == 0 || owner == 0 {
-                    None
+                    integer(0)
                 } else {
                     let amount = self
                         .object(owner)?
@@ -1561,14 +1647,20 @@ impl<A: WorldAssets> WorldHost<A> {
                     procedure: call.uint(1),
                     reaction: call.int(0),
                 };
-                if op == 0x8121 {
+                let added = if op == 0x8121 {
                     let iq = self.world.player_stat(4);
                     let smooth = self.world.perk(Perk::SmoothTalker);
                     self.world
                         .dialogue
-                        .iq_option(option, call.int(4), iq, smooth)?;
+                        .iq_option(option, call.int(4), iq, smooth)
+                        .map(|_| ())
                 } else {
-                    self.world.dialogue.add_option(option)?;
+                    self.world.dialogue.add_option(option)
+                };
+                // A rejected thirty-first option is a diagnostic, so the
+                // script still reaches its `gsay_end`.
+                if let Err(error) = added {
+                    self.world.diagnostic(error.to_string());
                 }
                 None
             }
@@ -1833,8 +1925,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
             }
             0x8141 => {
-                // Unchecked references and enums in the reference: invalid
-                // ones give no name here.
+                // Safe rule: an out-of-range effect type (0-4) or hit mode
+                // (0-7) is a VM error.
+                if !(0..=4).contains(&call.int(3)) || !(0..=7).contains(&call.int(1)) {
+                    return Err(VmError::Host(
+                        "sfx_build_weapon_name: effect or hit mode out of range".into(),
+                    ));
+                }
                 let (target, weapon) = (call.uint(0), call.uint(2));
                 for object in [target, weapon] {
                     if object != 0 {
@@ -1858,6 +1955,9 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             0x8144 => {
                 let object = call.uint(1);
+                if object == 0 {
+                    return Ok(integer(0));
+                }
                 let owner = self.object(object)?.owner;
                 let count = if let Some(owner) = owner {
                     let count = self
@@ -1939,7 +2039,19 @@ impl<A: WorldAssets> WorldHost<A> {
                     .copied()
                     .unwrap_or(0) as i32,
             ),
-            0x814c => integer(rotation(call.int(1), call.int(0))?),
+            // An invalid hex pushes 0 with a diagnostic (safe rule).
+            0x814c => {
+                if [call.int(1), call.int(0)]
+                    .iter()
+                    .all(|hex| (0..40000).contains(hex))
+                {
+                    integer(rotation(call.int(1), call.int(0))?)
+                } else {
+                    self.world
+                        .diagnostic("rotation_to_tile: hex outside 0-39999");
+                    integer(0)
+                }
+            }
             0x814e => {
                 self.world.dialogue.barter_modifier = call.int(0);
                 None

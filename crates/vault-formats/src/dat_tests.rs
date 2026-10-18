@@ -121,6 +121,18 @@ fn spec008_fixture_lzss_outer_blocks_and_dictionary_reset() {
     let decoded = decode_blocks(&payload, 16387).unwrap();
     assert!(decoded[..16384].iter().all(|byte| *byte == b'A'));
     assert_eq!(&decoded[16384..], b"   ");
+    // A compressed block that writes the ring tail, then a block whose first
+    // match reads the tail before writing it: the safe rule zeroes the tail
+    // at every compressed block start (the reference would read "AAA").
+    let mut payload = vec![0x48, 0x00];
+    for _ in 0..2048 {
+        payload.push(0xff);
+        payload.extend([0x41; 8]);
+    }
+    payload.extend([0x00, 0x03, 0x00, 0xee, 0xf0]);
+    let decoded = decode_blocks(&payload, 16387).unwrap();
+    assert!(decoded[..16384].iter().all(|byte| *byte == b'A'));
+    assert_eq!(&decoded[16384..], [0, 0, 0]);
     // A short non-final block is not a valid streaming layout.
     let mut short = vec![0x80, 0x03, 0x58, 0x59, 0x5a];
     short.extend([0x80, 0x03, 0x58, 0x59, 0x5a]);

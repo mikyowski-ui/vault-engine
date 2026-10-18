@@ -54,6 +54,8 @@ impl MapPreview {
                 }
             }
         }
+        // Every queued movie has ended: release a waiting `playmovie`.
+        self.host.movie_finished();
     }
     /// Cleanup: back to the previous screen, then the next queued movie.
     /// The desktop does not present script palette fades, so the game

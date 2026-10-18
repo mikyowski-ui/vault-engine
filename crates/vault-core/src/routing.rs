@@ -134,12 +134,14 @@ pub fn find_route<B>(
     }
 }
 
-/// Collect incoming directions back toward the source, at most 800 bytes,
-/// then reverse; a longer route keeps its last 800 steps.
+/// Collect incoming directions back toward the source, then reverse. Under
+/// the SPEC-007 §3.1 safe rule a route longer than 800 steps keeps its first
+/// 800 steps from the source (the reference keeps the last 800).
 fn backtrack(goal: RouteNode, expanded: &[RouteNode]) -> Vec<u8> {
     let mut directions = Vec::new();
     let mut node = goal;
-    while node.parent != -1 && directions.len() < MAX_ROUTE {
+    // Each expanded node is visited at most once on the parent chain.
+    while node.parent != -1 && directions.len() <= expanded.len() {
         directions.push(node.direction);
         let Some(parent) = expanded.iter().find(|entry| entry.hex == node.parent) else {
             break;
@@ -147,6 +149,7 @@ fn backtrack(goal: RouteNode, expanded: &[RouteNode]) -> Vec<u8> {
         node = *parent;
     }
     directions.reverse();
+    directions.truncate(MAX_ROUTE);
     directions
 }
 
@@ -174,7 +177,8 @@ pub struct Ray {
     /// hex was blocked or a 201st sample was attempted.
     pub count: usize,
     pub samples: Vec<RaySample>,
-    /// The obstacle-output slot after traversal.
+    /// The obstacle-output slot after traversal; cleared when the sample
+    /// cap is reached, which ends a caller's cover/retry loop.
     pub obstacle: Option<ObjectRef>,
 }
 
@@ -242,8 +246,10 @@ pub fn cast_ray(
         counter += 1;
         if counter == stride {
             if ray.samples.len() == MAX_RAY_SAMPLES {
-                // The cap leaves the obstacle slot unchanged.
+                // SPEC-007 §3.2 safe rule: the cap clears the obstacle output
+                // (the reference leaves the caller's slot unchanged).
                 ray.count = 0;
+                ray.obstacle = None;
                 return ray;
             }
             ray.samples.push(sample(x, y));
@@ -278,6 +284,7 @@ pub fn cast_ray(
     if counter > 0 {
         if ray.samples.len() == MAX_RAY_SAMPLES {
             ray.count = 0;
+            ray.obstacle = None;
             return ray;
         }
         ray.samples.push(sample(x, y));

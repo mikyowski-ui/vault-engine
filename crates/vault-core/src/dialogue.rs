@@ -124,22 +124,37 @@ pub struct TalkingHead {
     pub frame: usize,
     pub idle_seconds: i32,
     pub last_fidget_ms: u64,
+    /// A pending safe-rule diagnostic for the host to report.
+    pub diagnostic: Option<String>,
+    /// Set once the host has reported this head's art as unavailable.
+    pub missing_art: Option<String>,
     frame_ms: u64,
     idle_ms: u64,
     wait_ms: u64,
     pending: Option<(u8, Mood)>,
     destination: Option<Mood>,
 }
+/// The fidget variants `choose_fidget` can select for an available count:
+/// 1 through the count for counts 1-3, otherwise the count itself; none
+/// for a count of zero or less.
+pub fn selectable_fidgets(count: i32) -> Vec<i32> {
+    match count {
+        ..=0 => Vec::new(),
+        1..=3 => (1..=count).collect(),
+        _ => vec![count],
+    }
+}
+/// The fidget variant for an available count. The draw is always taken;
+/// under the SPEC-006 §3.11 safe rule a count of zero or less selects no
+/// fidget (`None`).
 pub fn choose_fidget(
     count: i32,
     idle: &mut i32,
     rng: &mut impl RandomSource,
-) -> Result<i32, WorldError> {
-    if count <= 0 {
-        return Err(WorldError::Invalid("invalid fidget count".into()));
-    }
+) -> Result<Option<i32>, WorldError> {
     let draw = rng.range(1, 100)?.saturating_add(*idle / 2);
-    Ok(match count {
+    Ok(Some(match count {
+        ..=0 => return Ok(None),
         1 => 1,
         2 => {
             if draw < 68 {
@@ -159,7 +174,7 @@ pub fn choose_fidget(
             }
         }
         _ => count,
-    })
+    }))
 }
 impl TalkingHead {
     pub fn new(
@@ -170,13 +185,27 @@ impl TalkingHead {
     ) -> Result<Self, WorldError> {
         let mut idle = 0;
         let variant = choose_fidget(definition.count(mood), &mut idle, rng)?;
+        // With no fidget the head starts waiting on its speech frame zero.
+        let diagnostic = variant
+            .is_none()
+            .then(|| format!("head {} has no fidget art to select", definition.index));
         Ok(Self {
             definition,
             mood,
-            phase: HeadPhase::Fidget,
-            animation: mood.fidget(),
-            variant,
+            phase: if variant.is_some() {
+                HeadPhase::Fidget
+            } else {
+                HeadPhase::Waiting
+            },
+            animation: if variant.is_some() {
+                mood.fidget()
+            } else {
+                mood.speech()
+            },
+            variant: variant.unwrap_or(0),
             frame: 0,
+            diagnostic,
+            missing_art: None,
             idle_seconds: idle,
             last_fidget_ms: now,
             frame_ms: now,
@@ -185,6 +214,19 @@ impl TalkingHead {
             pending: None,
             destination: None,
         })
+    }
+    /// A fidget choice for the current mood, recording a diagnostic when
+    /// none can be selected.
+    fn fidget(&mut self, rng: &mut impl RandomSource) -> Result<Option<i32>, WorldError> {
+        let count = self.definition.count(self.mood);
+        let variant = choose_fidget(count, &mut self.idle_seconds, rng)?;
+        if variant.is_none() {
+            self.diagnostic = Some(format!(
+                "head {} fidget count {count} selects no fidget",
+                self.definition.index
+            ));
+        }
+        Ok(variant)
     }
     pub fn art_id(&self) -> Result<u32, WorldError> {
         self.definition.art_id(
@@ -253,17 +295,18 @@ impl TalkingHead {
             if now.saturating_sub(self.last_fidget_ms) < self.wait_ms {
                 return Ok(false);
             }
-            self.variant = choose_fidget(
-                self.definition.count(self.mood),
-                &mut self.idle_seconds,
-                rng,
-            )?;
+            let chosen = self.fidget(rng)?;
+            self.last_fidget_ms = now;
+            self.wait_ms = rng.range(4, 7)? as u64 * 1000;
+            let Some(variant) = chosen else {
+                // No fidget: keep the current frame and keep waiting.
+                return Ok(false);
+            };
+            self.variant = variant;
             self.animation = self.mood.fidget();
             self.phase = HeadPhase::Fidget;
             self.frame = 0;
-            self.last_fidget_ms = now;
             self.frame_ms = now;
-            self.wait_ms = rng.range(4, 7)? as u64 * 1000;
             return Ok(true);
         }
         let interval = 1000 / u64::from(if fps == 0 { 10 } else { fps as u16 });
@@ -276,14 +319,17 @@ impl TalkingHead {
             self.frame = 0;
             if self.phase == HeadPhase::Transition {
                 self.mood = self.destination.take().unwrap_or(self.mood);
-                self.variant = choose_fidget(
-                    self.definition.count(self.mood),
-                    &mut self.idle_seconds,
-                    rng,
-                )?;
-                self.animation = self.mood.fidget();
-                self.phase = HeadPhase::Fidget;
                 self.last_fidget_ms = now;
+                if let Some(variant) = self.fidget(rng)? {
+                    self.variant = variant;
+                    self.animation = self.mood.fidget();
+                    self.phase = HeadPhase::Fidget;
+                } else {
+                    // No fidget: keep the transition's final frame.
+                    self.frame = frames - 1;
+                    self.phase = HeadPhase::Waiting;
+                    self.idle_ms = now;
+                }
             } else {
                 self.phase = HeadPhase::Waiting;
                 self.last_fidget_ms = now;
@@ -391,9 +437,10 @@ impl GDialog {
         self.resolved_options.clear();
         self.review_cursor = 0;
     }
-    pub fn set_reply(&mut self, program: u32, text: DialogueText) -> Result<(), WorldError> {
-        if matches!(&text,DialogueText::Literal(text) if text.len()>899) {
-            return Err(WorldError::Invalid("reply exceeds 899 bytes".into()));
+    /// A literal reply is truncated to 899 bytes (SPEC-006 §3.10 safe rule).
+    pub fn set_reply(&mut self, program: u32, mut text: DialogueText) -> Result<(), WorldError> {
+        if let DialogueText::Literal(text) = &mut text {
+            text.truncate(899);
         }
         if self
             .review
@@ -419,14 +466,15 @@ impl GDialog {
         self.resolved_options.clear();
         Ok(())
     }
-    pub fn add_option(&mut self, option: DialogueOption) -> Result<(), WorldError> {
+    /// SPEC-006 §3.10 safe rules: the thirty-first and later options are
+    /// rejected before any option state is written, and literal option text
+    /// is truncated to 897 content bytes.
+    pub fn add_option(&mut self, mut option: DialogueOption) -> Result<(), WorldError> {
         if self.options.len() == 30 {
             return Err(WorldError::Invalid("dialogue option limit is 30".into()));
         }
-        if matches!(&option.text,DialogueText::Literal(text) if text.len()>897) {
-            return Err(WorldError::Invalid(
-                "option exceeds 897 content bytes".into(),
-            ));
+        if let DialogueText::Literal(text) = &mut option.text {
+            text.truncate(897);
         }
         self.options.push(option);
         Ok(())

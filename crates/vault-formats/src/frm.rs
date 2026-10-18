@@ -69,8 +69,9 @@ pub struct FrmArchive {
     pub action_frame: i16,
     pub shifts: [[i16; 2]; 6],
     pub offsets: [u32; 6],
-    /// Header metadata. Split animations may retain the larger unsplit total.
-    pub frame_area_len: u32,
+    /// Declared header metadata, never a read boundary: split animations
+    /// may retain the larger unsplit total, and no total is enforced.
+    pub frame_area_len: i32,
     stored_frame_area_len: u32,
     frame_count: usize,
     direction_sequences: [usize; 6],
@@ -100,8 +101,7 @@ impl FrmArchive {
             let value = reader.be_i32()?;
             *offset = reader.nonnegative(value, "direction offset")? as u32;
         }
-        let area = reader.be_i32()?;
-        let frame_area_len = reader.nonnegative(area, "frame area length")? as u32;
+        let frame_area_len = reader.be_i32()?;
         let mut direction_sequences = [0; 6];
         let mut sequences = Vec::new();
         for direction in 0..6 {
@@ -117,18 +117,22 @@ impl FrmArchive {
             let mut frames = Vec::new();
             for _ in 0..frame_count {
                 let file_offset = reader.pos;
+                // §3.3 safe rule: negative dimensions or payload sizes, and
+                // payloads smaller than width × height, are rejected. The
+                // next record still starts after the declared byte count.
                 let width = reader.be_i16()?;
                 let height = reader.be_i16()?;
-                if width <= 0 || height <= 0 {
-                    return Err(reader.error("frame dimensions must be positive"));
+                if width < 0 || height < 0 {
+                    return Err(reader.error("frame dimensions must not be negative"));
                 }
                 let size = reader.be_i32()?;
                 let size = reader.nonnegative(size, "pixel byte count")?;
-                if size != width as usize * height as usize {
-                    return Err(reader.error("pixel byte count does not equal width × height"));
+                let area = width as usize * height as usize;
+                if size < area {
+                    return Err(reader.error("pixel byte count is smaller than width × height"));
                 }
                 let displacement = [reader.be_i16()?, reader.be_i16()?];
-                let pixels = reader.take(size)?.to_vec();
+                let pixels = reader.take(size)?[..area].to_vec();
                 frames.push(FrmFrame {
                     width: width as u16,
                     height: height as u16,
@@ -140,17 +144,10 @@ impl FrmArchive {
             direction_sequences[direction] = sequences.len();
             sequences.push(frames);
         }
-        let stored_frame_area_len = (reader.pos - 62) as u32;
         // The six slots describe shared blocks, not six mandatory sequences.
-        // Split FR0–FR5 assets keep the unsplit animation's declared area total.
-        // Reads are bounded by actual bytes; never allocate or seek using that total.
-        if stored_frame_area_len > frame_area_len
-            || (sequences.len() != 1 && stored_frame_area_len != frame_area_len)
-        {
-            return Err(
-                reader.error("declared frame area length does not cover the stored sequences")
-            );
-        }
+        // Reads are bounded by actual bytes; the declared total is never used
+        // to allocate or seek, and (as in the reference) it is not checked.
+        let stored_frame_area_len = (reader.pos - 62) as u32;
         Ok(Self {
             version,
             fps,

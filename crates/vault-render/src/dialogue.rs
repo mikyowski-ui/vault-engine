@@ -8,8 +8,6 @@ pub enum DialogueRenderError {
     Image(#[from] ImageError),
     #[error(transparent)]
     Resource(#[from] WorldError),
-    #[error("dialogue text exceeds ten reply pages")]
-    Pages,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct ChoiceHit {
@@ -137,19 +135,18 @@ pub fn compose(
         if let Some(frame) = background.frame(0, 0) {
             image.blit(frame, [126, 14]);
         }
-        let art = assets.frame(&head.path()?)?;
-        let frame = art
-            .frame(0, head.frame)
-            .ok_or_else(|| WorldError::Invalid("head frame outside selected art".into()))?;
-        image.blit(frame, frame.centered_origin([126, 14], [388, 200]));
+        // SPEC-006 §3.11 safe rule: missing head art draws no head frame.
+        let art = head.path().ok().and_then(|path| assets.frame(&path).ok());
+        if let Some(frame) = art.as_ref().and_then(|art| art.frame(0, head.frame)) {
+            image.blit(frame, frame.centered_origin([126, 14], [388, 200]));
+        }
     }
     let green = palette.lookup_rgb5([0, 31, 0]).unwrap_or(1);
     let reply_lines = lines(font, &dialogue.resolved_reply, 379);
     let per_page = (58 / font.line_height().max(1)).max(1) as usize;
+    // Every page of the reply is kept (SPEC-006 §3.10 safe rule), so the
+    // remembered-page list never overflows.
     let pages = reply_lines.chunks(per_page).collect::<Vec<_>>();
-    if pages.len() > 10 {
-        return Err(DialogueRenderError::Pages);
-    }
     let page = dialogue.page.min(pages.len() - 1);
     text_block(
         &mut image,

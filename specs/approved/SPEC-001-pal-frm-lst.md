@@ -11,7 +11,14 @@ This specification describes the Windows/x86 behavior observable from `fallout1-
 
 Paths below are logical resource paths, whether supplied by loose files or an archive. `color.pal` is more than a 768-byte RGB palette: it also supplies a color-quantization table and may supply additional color-processing tables. This is not a specification of every file bearing a `.PAL` extension.
 
-The inspected revision reads art indexes from `art/<category>/<category>.lst`, script indexes from `scripts/scripts.lst`, and prototype indexes from `proto/<category>/<category>.lst`. No literal `data/*.lst` consumer is present. Consequently, a file merely placed under `data/` has no established parser or ID base in this revision; the consumer, not the extension or directory name, determines those rules. The data-tree indexes actually supported by the inspected readers are distinguished below rather than assigning an invented universal `data/` rule.
+The inspected revision reads art indexes from `art/<category>/<category>.lst`, script indexes from `scripts/scripts.lst`, and prototype indexes from `proto/<category>/<category>.lst`. No literal `data/*.lst` consumer is present. Consequently, a file merely placed under `data/` has no established parser or ID base in this revision; the consumer, not the extension or directory name, determines those rules. The data-tree indexes actually supported by the inspected readers are distinguished below rather than assigning an invented universal `data/` rule. `[Must-match]`
+
+**Compatibility tags.** Every documented quirk carries one tag:
+
+- `[Must-match]`: gameplay-visible behavior, data grammar, formula, ordering, or random-draw sequence. A clean-room engine must reproduce it exactly.
+- `[May-improve]`: reference memory-safety defects, undefined behavior, uninitialized reads, stale state, presentation-only transients, or a lookup that reads the wrong table in an obviously unintended way. A clean-room engine may apply the stated safe rule. It should keep every other observable behavior. An engine that wants bit-exact parity may offer a compatibility switch that keeps the reference behavior.
+
+Plain byte-layout tables carry one tag for the whole table.
 
 Evidence locations, relative to `fallout1-re/`:
 
@@ -34,7 +41,7 @@ Evidence locations, relative to `fallout1-re/`:
 
 ### 2.1 `color.pal`
 
-All offsets are from the file's first byte. An RGB entry is three unsigned 8-bit storage bytes in red, green, blue order; valid channel values are 0 through 63. There is no palette header, entry count, alpha channel, or per-entry padding.
+All offsets are from the file's first byte. An RGB entry is three unsigned 8-bit storage bytes in red, green, blue order; valid channel values are 0 through 63. There is no palette header, entry count, alpha channel, or per-entry padding. The table below is one layout rule. `[Must-match]`
 
 | File offset | Byte length | Representation | Meaning |
 | --- | ---: | --- | --- |
@@ -45,15 +52,15 @@ All offsets are from the file's first byte. An RGB entry is three unsigned 8-bit
 | `0x18304` | 65536 | Unsigned 8-bit palette indexes | Present for recognized discriminator: 256 by 256 additive-mix results |
 | `0x28304` | 65536 | Unsigned 8-bit palette indexes | Present for recognized discriminator: 256 by 256 multiplicative-mix results |
 
-The RGB555 lookup address is `0x0300 + 1024 * red5 + 32 * green5 + blue5`, with each five-bit channel in 0 through 31. Red occupies the most significant five bits of the 15-bit lookup index; blue occupies the least significant five bits. Conversion of a valid palette channel to five bits discards its least significant bit, equivalent to `floor(channel / 2)`. Lookup outputs are palette indexes, not RGB triples.
+The RGB555 lookup address is `0x0300 + 1024 * red5 + 32 * green5 + blue5`, with each five-bit channel in 0 through 31. Red occupies the most significant five bits of the 15-bit lookup index; blue occupies the least significant five bits. Conversion of a valid palette channel to five bits discards its least significant bit, equivalent to `floor(channel / 2)`. Lookup outputs are palette indexes, not RGB triples. `[Must-match]`
 
-Each extended table is row-major, with byte address `table start + 256 * row + column`. In the intensity table the row selects the input palette index and the column the intensity level; in either mix table the row and column select the two input palette indexes.
+Each extended table is row-major, with byte address `table start + 256 * row + column`. In the intensity table the row selects the input palette index and the column the intensity level; in either mix table the row and column select the two input palette indexes. `[Must-match]`
 
-The recognized discriminator's file bytes are `43 57 45 4E` (ASCII `CWEN`). Its numeric value spells `NEWC` when written most-significant byte first, but literal file bytes `4E 45 57 43` do not select the extension on x86. This word does not use the big-endian rule used by FRM files. When the discriminator does not match, intensity and mixing tables are generated instead of read. The complete extended layout ends at exclusive offset `0x38304` (230148 bytes); the base RGB-plus-lookup area ends at exclusive offset `0x8300` (33536 bytes).
+The recognized discriminator's file bytes are `43 57 45 4E` (ASCII `CWEN`). Its numeric value spells `NEWC` when written most-significant byte first, but literal file bytes `4E 45 57 43` do not select the extension on x86. This word does not use the big-endian rule used by FRM files. When the discriminator does not match, intensity and mixing tables are generated instead of read. The complete extended layout ends at exclusive offset `0x38304` (230148 bytes); the base RGB-plus-lookup area ends at exclusive offset `0x8300` (33536 bytes). `[Must-match]`
 
 ### 2.2 `.FRM` and `.FR0` through `.FR5`: shared 62-byte header
 
-Every multi-byte sprite integer is big-endian, including frame records. Signed integers use two's-complement interpretation. The reference interprets all 16-bit header quantities as signed, even those which describe positive counts or dimensions. For interoperable ordinary sprites, dimensions and frame counts are positive and do not exceed 32767; offsets and displacements may be negative only where their meanings allow it.
+Every multi-byte sprite integer is big-endian, including frame records. Signed integers use two's-complement interpretation. The reference interprets all 16-bit header quantities as signed, even those which describe positive counts or dimensions. For interoperable ordinary sprites, dimensions and frame counts are positive and do not exceed 32767; offsets and displacements may be negative only where their meanings allow it. The header table below is one layout rule. `[Must-match]`
 
 | Header offset | Byte length | Representation | Meaning |
 | --- | ---: | --- | --- |
@@ -67,7 +74,7 @@ Every multi-byte sprite integer is big-endian, including frame records. Signed i
 | `0x3A` | 4 | Signed 32-bit big-endian | Declared frame-area byte count; expected nonnegative, not a read boundary enforced by the loader |
 | `0x3E` | Variable | Frame records | Beginning of the frame-data area |
 
-The six X values are contiguous, followed by all six Y values: the file does not interleave X/Y pairs. For direction d, the X, Y, and area-offset fields begin at `0x0A + 2 * d`, `0x16 + 2 * d`, and `0x22 + 4 * d`, respectively.
+The six X values are contiguous, followed by all six Y values: the file does not interleave X/Y pairs. For direction d, the X, Y, and area-offset fields begin at `0x0A + 2 * d`, `0x16 + 2 * d`, and `0x22 + 4 * d`, respectively. The direction numbering and suffix table below is one rule. `[Must-match]`
 
 | Direction number | Facing | Direction-specific extension |
 | ---: | --- | --- |
@@ -80,7 +87,7 @@ The six X values are contiguous, followed by all six Y values: the file does not
 
 ### 2.3 Per-frame records
 
-These offsets are relative to the beginning of one frame record, not the file header.
+These offsets are relative to the beginning of one frame record, not the file header. The table below is one layout rule. `[Must-match]`
 
 | Relative offset | Byte length | Representation | Meaning |
 | --- | ---: | --- | --- |
@@ -91,17 +98,17 @@ These offsets are relative to the beginning of one frame record, not the file he
 | `0x0A` | 2 | Signed 16-bit big-endian | Frame Y displacement |
 | `0x0C` | Declared pixel-data byte count | Unsigned 8-bit palette indexes | Raw pixels, left to right within a row, rows top to bottom |
 
-There is no compression, row padding, embedded palette, alpha plane, or alignment padding between frames. Ordinary valid frames have `pixel-data byte count = width * height`. The pixel at zero-based column x and row y occupies relative byte `12 + y * width + x`. The next frame begins immediately after the declared pixel-data byte count, not after an independently recalculated area.
+There is no compression, row padding, embedded palette, alpha plane, or alignment padding between frames. Ordinary valid frames have `pixel-data byte count = width * height`. The pixel at zero-based column x and row y occupies relative byte `12 + y * width + x`. The next frame begins immediately after the declared pixel-data byte count, not after an independently recalculated area. `[Must-match]`
 
 The logical record address for frame f in direction d is:
 
-- `62 + direction area offset + sum of (12 + pixel-data byte count) for frames 0 through f - 1`.
+- `62 + direction area offset + sum of (12 + pixel-data byte count) for frames 0 through f - 1`. `[Must-match]`
 - For frame 0 the sum is empty and therefore zero.
 - The declared total frame-area byte count includes frame-record headers and pixel bytes of stored sequences, not the 62-byte file header. Shared sequences need not be counted six times.
 
 ### 2.4 `.LST` text and ID representation
 
-These are byte-oriented text files, not binary arrays of stored IDs. There is no header, count word, or explicit ID attached to a name. Normal input is ASCII with LF (`0A`) or CRLF (`0D 0A`) line endings. Text-mode reading converts CRLF to LF. A lone CR is not an ordinary line terminator or one of the delimiters listed below. There is no UTF-8 BOM removal.
+These are byte-oriented text files, not binary arrays of stored IDs. There is no header, count word, or explicit ID attached to a name. Normal input is ASCII with LF (`0A`) or CRLF (`0D 0A`) line endings. Text-mode reading converts CRLF to LF. A lone CR is not an ordinary line terminator or one of the delimiters listed below. There is no UTF-8 BOM removal. The line-boundary table below is one rule. `[Must-match]`
 
 | Byte position / unit | Representation | Meaning |
 | --- | --- | --- |
@@ -111,7 +118,7 @@ These are byte-oriented text files, not binary arrays of stored IDs. There is no
 | Empty file | No successful line reads | No actual entries |
 | Final LF without further bytes | Terminator only | Does not create an additional entry |
 
-Line selection occurs before name/comment interpretation. Blank lines and comment-like lines therefore consume positions. More exactly, a position is one successful bounded line read: unusually long physical lines split into multiple positions. The limits below include a returned LF but exclude the terminating in-memory text terminator, which is not a file byte.
+Line selection occurs before name/comment interpretation. Blank lines and comment-like lines therefore consume positions. More exactly, a position is one successful bounded line read: unusually long physical lines split into multiple positions. The limits below include a returned LF but exclude the terminating in-memory text terminator, which is not a file byte. `[Must-match]`
 
 | Consumer | Maximum bytes per read | Name extraction | Mapping from physical position p, counted from 1 |
 | --- | ---: | --- | --- |
@@ -119,23 +126,23 @@ Line selection occurs before name/comment interpretation. Blank lines and commen
 | `scripts/scripts.lst` | 259 | Prefix before the first dot; replace the suffix with `.int`; no dot means name lookup fails | Runtime script index `p - 1`; applicable script-reference low 24 bits already contain this zero-based index |
 | `proto/<category>/<category>.lst` | 255 | Prefix before the first space or LF; no other generic delimiter | Prototype identifier's low 24 bits select p directly: first entry is 1 |
 
-These physical-position formulas assume lines fit in one read. For split lines, substitute the successful-read position for p. Prototype index 0 is not an entry in these lists. A map's positive script-reference field is separately one-based: reference 1 becomes runtime script index 0, reference 2 becomes index 1. A nonpositive map script reference does not attach a map script. Do not subtract one from an already zero-based prototype/object script reference.
+These physical-position formulas assume lines fit in one read. For split lines, substitute the successful-read position for p. Prototype index 0 is not an entry in these lists. A map's positive script-reference field is separately one-based: reference 1 becomes runtime script index 0, reference 2 becomes index 1. A nonpositive map script reference does not attach a map script. Do not subtract one from an already zero-based prototype/object script reference. `[Must-match]`
 
-Art categories, in category-number order 0 through 10, are `items`, `critters`, `scenery`, `walls`, `tiles`, `misc`, `intrface`, `inven`, `heads`, `backgrnd`, and `skilldex`. Each has its own index namespace; a prototype ID is not an art-list index.
+Art categories, in category-number order 0 through 10, are `items`, `critters`, `scenery`, `walls`, `tiles`, `misc`, `intrface`, `inven`, `heads`, `backgrnd`, and `skilldex`. Each has its own index namespace; a prototype ID is not an art-list index. `[Must-match]`
 
 ## 3. Behavioral Rules & Edge Cases
 
 ### 3.1 Palette validity, RGB scaling, and transparency
 
-- A palette entry is valid for color mapping only when all three stored channels are at most 63. If any channel exceeds 63, the entire entry becomes `(0, 0, 0)` and is marked unavailable for color mapping. Values are not individually clamped to 63 or treated as already-eight-bit RGB.
-- At neutral gamma the observed display conversion for each valid six-bit channel is multiplication by 4. Thus six-bit values `0, 1, 31, 32, 63` become eight-bit values `0, 4, 124, 128, 252`. The output storage domain is 0 through 255, but this conversion only produces 0 through 252. Full-range normalization to 255, rounding `255 * channel / 63`, and bit replication are not the reference behavior.
-- With non-neutral gamma, first raise the six-bit channel to the configured gamma exponent, clamp the result to 0 through 63, discard its fractional part, then multiply by 4 for display. Gamma 1 is neutral. The PAL bytes themselves remain six-bit quantities.
-- Sprite pixel index 0 is the transparent key in transparent blits and world-object pixel hit testing: it leaves the destination unchanged and is not a solid hit, irrespective of entry 0's RGB triple. No alpha byte exists in either file. A nonzero index whose RGB triple is black is not thereby transparent. Opaque blits can still copy index 0.
-- The palette reader checks opening the file but does not consistently check the byte counts returned by palette/table reads. A 768-byte palette-only file or a truncated lookup/discriminator/table region is not a reliably validated `color.pal`; no deterministic missing-byte defaults are established. Do not equate a missing discriminator with an explicit nonmatching four-byte discriminator.
+- A palette entry is valid for color mapping only when all three stored channels are at most 63. If any channel exceeds 63, the entire entry becomes `(0, 0, 0)` and is marked unavailable for color mapping. Values are not individually clamped to 63 or treated as already-eight-bit RGB. `[Must-match]`
+- At neutral gamma the observed display conversion for each valid six-bit channel is multiplication by 4. Thus six-bit values `0, 1, 31, 32, 63` become eight-bit values `0, 4, 124, 128, 252`. The output storage domain is 0 through 255, but this conversion only produces 0 through 252. Full-range normalization to 255, rounding `255 * channel / 63`, and bit replication are not the reference behavior. `[Must-match]`
+- With non-neutral gamma, first raise the six-bit channel to the configured gamma exponent, clamp the result to 0 through 63, discard its fractional part, then multiply by 4 for display. Gamma 1 is neutral. The PAL bytes themselves remain six-bit quantities. `[Must-match]`
+- Sprite pixel index 0 is the transparent key in transparent blits and world-object pixel hit testing: it leaves the destination unchanged and is not a solid hit, irrespective of entry 0's RGB triple. No alpha byte exists in either file. A nonzero index whose RGB triple is black is not thereby transparent. Opaque blits can still copy index 0. `[Must-match]`
+- The palette reader checks opening the file but does not consistently check the byte counts returned by palette/table reads. A 768-byte palette-only file or a truncated lookup/discriminator/table region is not a reliably validated `color.pal`; no deterministic missing-byte defaults are established. Do not equate a missing discriminator with an explicit nonmatching four-byte discriminator. `[May-improve]`: reject with a diagnostic any `color.pal` shorter than `0x8304` bytes, or shorter than `0x38304` bytes when the discriminator matches.
 
 ### 3.2 Palette cycling
 
-All index ranges are inclusive. Cycling replaces display-palette entries; sprite pixel indexes and the on-disk palette do not change. The sequences below are the six-bit RGB triples actually used after initial conversion of the built-in cycle colors.
+All index ranges are inclusive. Cycling replaces display-palette entries; sprite pixel indexes and the on-disk palette do not change. The sequences below are the six-bit RGB triples actually used after initial conversion of the built-in cycle colors. The table below is one rule. `[Must-match]`
 
 | Index range | Effect | Base interval, milliseconds | Initial sequence of six-bit RGB triples |
 | --- | --- | ---: | --- |
@@ -146,26 +153,26 @@ All index ranges are inclusive. Cycling replaces display-palette entries; sprite
 | 248-253 | Shoreline | 200 | `(20,15,10) (18,14,10) (16,13,9) (15,12,9) (13,11,8) (12,10,8)` |
 | 254 | Pulsing red marker | 33 | Red channel `4, 8, ... 60, 56, ... 0, 4, ...`; green and blue remain 0 |
 
-The first due update of a rotating range writes the initial sequence; each following due update rotates it right by one RGB entry. The red marker begins internally at zero and its first due update writes 4. Its maximum six-bit red value is 60, not 63.
+The first due update of a rotating range writes the initial sequence; each following due update rotates it right by one RGB entry. The red marker begins internally at zero and its first due update writes 4. Its maximum six-bit red value is 60, not 63. `[Must-match]`
 
-Cycling defaults to enabled, with interval multiplier 1. Each effective interval is the table interval multiplied by the configured speed factor. A due check performs one update and resets that group's timestamp to the current time: it does not replay every missed interval after a long pause. Factor 0 makes each group due on every enabled poll; the setting is not positively range-validated.
+Cycling defaults to enabled, with interval multiplier 1. Each effective interval is the table interval multiplied by the configured speed factor. A due check performs one update and resets that group's timestamp to the current time: it does not replay every missed interval after a long pause. Factor 0 makes each group due on every enabled poll; the setting is not positively range-validated. `[Must-match]`
 
-The three 200-millisecond ranges share a timer. The other intervals have separate timers. Disabled cycling performs no updates. Reset clears timing baselines and enables cycling but does not rewind the rotating phases or red pulse state. Palette fading temporarily disables cycling and restores its previous enabled state afterward. Each changed poll submits entries 229 through 255 inclusive, but no cycle modifies entry 255 itself. Entries 0 through 228 are outside these cycle writes.
+The three 200-millisecond ranges share a timer. The other intervals have separate timers. Disabled cycling performs no updates. Reset clears timing baselines and enables cycling but does not rewind the rotating phases or red pulse state. Palette fading temporarily disables cycling and restores its previous enabled state afterward. Each changed poll submits entries 229 through 255 inclusive, but no cycle modifies entry 255 itself. Entries 0 through 228 are outside these cycle writes. `[Must-match]`
 
 ### 3.3 Sprite sequence loading and direction-specific files
 
-- A `.FR0` through `.FR5` file has the same complete header and frame-record layout as `.FRM`. The extension is not another field in the file and does not imply a shortened header. In critter filename selection, selector 0 requests `.FRM`; selectors 1 through 6 request `.FR0` through `.FR5`, respectively. These one-based filename selectors are distinct from zero-based direction numbers.
-- A direction-specific file can contain one sequence with all six area offsets equal to zero. Access still uses the selected direction's offset and X/Y shifts; the loader does not automatically populate only one header slot based on the suffix. Identical offsets share pixels but need not share shifts.
-- Logical addressing is relative to byte 62, but actual file reads are sequential. The loader starts immediately after the header, reads one sequence for direction 0, and reads another sequence only when a direction's offset differs from the immediately preceding direction's offset. Every sequence read contains the header's number of frames.
-- There is no file seek to each declared offset. For normal interoperable files, the first offset is zero and successive distinct direction blocks are packed consecutively in traversal order. Equal adjacent offsets reuse the previous block without another read. A repeated nonadjacent offset is not globally deduplicated: it triggers another read and can overwrite the earlier block in memory. Gaps, reordered blocks, or offsets pretending to seek elsewhere do not have ordinary address-table semantics.
-- A frame is located by walking each preceding record's declared payload size plus 12 bytes. No check enforces equality of that size to width times height. No check enforces version 4, a positive frame count, a matching total-area byte count, or safe offset bounds. Short header/frame reads cause loading failure, but malformed lengths/offsets can instead cause unsafe behavior. A defensive independent reader should reject such input rather than promise equivalent memory faults.
-- Valid frame indexes are 0 through frame count minus 1; valid directions are 0 through 5. The frame count is a count, not the last frame index.
+- A `.FR0` through `.FR5` file has the same complete header and frame-record layout as `.FRM`. The extension is not another field in the file and does not imply a shortened header. In critter filename selection, selector 0 requests `.FRM`; selectors 1 through 6 request `.FR0` through `.FR5`, respectively. These one-based filename selectors are distinct from zero-based direction numbers. `[Must-match]`
+- A direction-specific file can contain one sequence with all six area offsets equal to zero. Access still uses the selected direction's offset and X/Y shifts; the loader does not automatically populate only one header slot based on the suffix. Identical offsets share pixels but need not share shifts. `[Must-match]`
+- Logical addressing is relative to byte 62, but actual file reads are sequential. The loader starts immediately after the header, reads one sequence for direction 0, and reads another sequence only when a direction's offset differs from the immediately preceding direction's offset. Every sequence read contains the header's number of frames. `[Must-match]`
+- There is no file seek to each declared offset. For normal interoperable files, the first offset is zero and successive distinct direction blocks are packed consecutively in traversal order. Equal adjacent offsets reuse the previous block without another read. `[Must-match]` A repeated nonadjacent offset is not globally deduplicated: it triggers another read and can overwrite the earlier block in memory. Gaps, reordered blocks, or offsets pretending to seek elsewhere do not have ordinary address-table semantics. `[May-improve]`: require direction 0's offset to be zero and each later offset to equal either the previous direction's offset or the end of the previously read block; otherwise reject the file with a diagnostic.
+- A frame is located by walking each preceding record's declared payload size plus 12 bytes. No check enforces equality of that size to width times height. The version word is accepted without validation. `[Must-match]` No check enforces version 4, a positive frame count, a matching total-area byte count, or safe offset bounds. Short header/frame reads cause loading failure, but malformed lengths/offsets can instead cause unsafe behavior. A defensive independent reader should reject such input rather than promise equivalent memory faults. `[May-improve]`: reject with a diagnostic a nonpositive frame count, negative width, height, or payload size, a payload size smaller than width times height, or any record or declared offset extending beyond the file.
+- Valid frame indexes are 0 through frame count minus 1; valid directions are 0 through 5. The frame count is a count, not the last frame index. `[Must-match]`
 
 ### 3.4 FPS and action timing
 
-Stored FPS 0 means 10 FPS. Otherwise the signed stored value is used, without a positive-range clamp. Ordinary animation timing uses integer `1000 / effective FPS` milliseconds per frame, discarding the fractional part: 12 FPS gives 83 milliseconds. Some combat walking playback adds configured speed to FPS before division, so file FPS is not an unconditional wall-clock guarantee.
+Stored FPS 0 means 10 FPS. Otherwise the signed stored value is used, without a positive-range clamp. Ordinary animation timing uses integer `1000 / effective FPS` milliseconds per frame, discarding the fractional part: 12 FPS gives 83 milliseconds. Some combat walking playback adds configured speed to FPS before division, so file FPS is not an unconditional wall-clock guarantee. `[Must-match]`
 
-The action-frame value is returned and used unchanged as a frame-step delay for effects such as attack contact sounds and pickup interactions. It is not decremented from a presumed one-based frame number. In the ordinary nonnegative case, 0 adds no frame-step delay and 1 delays by one step. The loader does not clamp it to the number of frames or interpret it as a frame-area offset. Negative values remain negative; the animation scheduler treats negative queued delays as waiting for preceding activity, not as unsigned frame indexes.
+The action-frame value is returned and used unchanged as a frame-step delay for effects such as attack contact sounds and pickup interactions. It is not decremented from a presumed one-based frame number. In the ordinary nonnegative case, 0 adds no frame-step delay and 1 delays by one step. The loader does not clamp it to the number of frames or interpret it as a frame-area offset. Negative values remain negative; the animation scheduler treats negative queued delays as waiting for preceding activity, not as unsigned frame indexes. `[Must-match]`
 
 ### 3.5 Anchor, bottom-center alignment, and frame displacement
 
@@ -175,24 +182,24 @@ Coordinates increase to the right and downward. In world-object drawing, the anc
 - Vertical bottom-center = anchor Y + direction Y shift + current Y displacement.
 - Left = horizontal bottom-center minus `floor(width / 2)`.
 - Top = vertical bottom-center minus height plus 1.
-- Right = left plus width minus 1; bottom = vertical bottom-center. Rectangle endpoints are inclusive.
+- Right = left plus width minus 1; bottom = vertical bottom-center. Rectangle endpoints are inclusive. `[Must-match]`
 
-Thus the local anchor before shifts is pixel coordinate `(floor(width / 2), height - 1)`, not the top-left or geometric center of the rectangle. An odd width uses its middle column; an even width uses the column immediately right of the midpoint between its middle columns.
+Thus the local anchor before shifts is pixel coordinate `(floor(width / 2), height - 1)`, not the top-left or geometric center of the rectangle. An odd width uses its middle column; an even width uses the column immediately right of the midpoint between its middle columns. `[Must-match]`
 
-Per-frame X/Y values are displacement increments, not absolute top-left coordinates or substitutes for the six header shifts. During forward animation, entering a frame adds that frame's displacement to the object's current displacement; reversing subtracts the displacement of the frame being left. For an isolated forward pass beginning before frame 0 with zero extra displacement, the displacement at frame f is the sum of frame displacements 0 through f inclusive. World movement, animation transitions, and existing object displacement can change that initial condition. Simply selecting a frame record does not itself perform this accumulation, and drawing does not add its displacement a second time.
+Per-frame X/Y values are displacement increments, not absolute top-left coordinates or substitutes for the six header shifts. During forward animation, entering a frame adds that frame's displacement to the object's current displacement; reversing subtracts the displacement of the frame being left. For an isolated forward pass beginning before frame 0 with zero extra displacement, the displacement at frame f is the sum of frame displacements 0 through f inclusive. World movement, animation transitions, and existing object displacement can change that initial condition. Simply selecting a frame record does not itself perform this accumulation, and drawing does not add its displacement a second time. `[Must-match]`
 
-A sprite used as a mouse cursor uses direction 0 and hotspot `(floor(width / 2) minus direction X shift, height minus 1 minus direction Y shift)`, without automatically summing per-frame displacements. An unscaled preview that fits its destination box instead centers the pixel rectangle in both axes: left/top equal the box's left/top plus half the unused width/height, with integer truncation. Such previews ignore world anchors and direction shifts. Therefore bottom-center world placement is not a universal rule for every UI use of the same pixels.
+A sprite used as a mouse cursor uses direction 0 and hotspot `(floor(width / 2) minus direction X shift, height minus 1 minus direction Y shift)`, without automatically summing per-frame displacements. An unscaled preview that fits its destination box instead centers the pixel rectangle in both axes: left/top equal the box's left/top plus half the unused width/height, with integer truncation. Such previews ignore world anchors and direction shifts. Therefore bottom-center world placement is not a universal rule for every UI use of the same pixels. `[Must-match]`
 
 ### 3.6 LST comments, whitespace, metadata, and boundary cases
 
-- There is no common comment-removal or whitespace-trimming pass. Art names end at the first space, comma, semicolon, TAB, or LF, even inside a purported name. Leading space/TAB/semicolon/comma therefore produces an empty name, not a skipped line. A semicolon can introduce ignored trailing text, but a semicolon-only comment still consumes an index. `#` and `//` have no special art-list comment meaning. Case is preserved; duplicate names keep distinct positions.
-- Art names are truncated to 12 bytes after delimiter handling. Critter entries may be stems rather than filenames, with animation and extension selected separately. The first comma's following decimal integer is also read separately as critter alias metadata; absent comma uses the default character art index, initially 0. That alias is zero-based. Ordinary name extraction does not mean every comma tail is globally ignored.
-- Head-list entries have a separate metadata read. In this inspected revision, when a comma is present, the first decimal count after it supplies all three reaction/fidget counts; later comma-separated counts are not independently reached. For example, a tail `,2,3,4` yields counts `(2,2,2)`. This describes the observed reader, not a corrected CSV interpretation.
-- Script lines are selected by zero-based position without skipping blanks or comment lines. For name lookup, the first dot anywhere in the line ends the stem; leading whitespace is preserved, and `.int` replaces the remainder. A comment line containing a dot can therefore produce a name, whereas a blank line or any line without a dot fails name lookup.
-- A separate script-metadata read examines text following the first `#`; the case-sensitive literal token `local_vars=` supplies a following decimal local-variable count. This is annotation handling, not a general comment grammar. Decimal parsing allows leading whitespace and an optional sign, stops at the first nondecimal character, and produces zero if no digits are parsed. This annotation handling does not remove the line from the index.
-- Prototype name extraction recognizes only space and LF. TAB, comma, semicolon, `#`, and `//` are not generic delimiters/comments for this reader. Leading space yields an empty filename. All lines still consume their one-based positions.
-- Actual art entry counts use successful bounded reads. Script bookkeeping instead records LF count plus 1, even with a trailing LF or an empty file; that does not make a final phantom line readable. Prototype allocation bookkeeping records LF count plus 2 in this revision, independently of its actual readable entries.
-- Prototype EOF handling is not a reliable bounds check: for a nonempty list, a request exactly one successful-read position beyond the end can return the last line's name again. It does not establish an extra actual entry. Empty-list lookup and malformed binary/text inputs do not have a dependable compatibility result; an independent implementation should distinguish these defects from supported ID mappings.
+- There is no common comment-removal or whitespace-trimming pass. Art names end at the first space, comma, semicolon, TAB, or LF, even inside a purported name. Leading space/TAB/semicolon/comma therefore produces an empty name, not a skipped line. A semicolon can introduce ignored trailing text, but a semicolon-only comment still consumes an index. `#` and `//` have no special art-list comment meaning. Case is preserved; duplicate names keep distinct positions. `[Must-match]`
+- Art names are truncated to 12 bytes after delimiter handling. Critter entries may be stems rather than filenames, with animation and extension selected separately. The first comma's following decimal integer is also read separately as critter alias metadata; absent comma uses the default character art index, initially 0. That alias is zero-based. Ordinary name extraction does not mean every comma tail is globally ignored. `[Must-match]`
+- Head-list entries have a separate metadata read. In this inspected revision, when a comma is present, the first decimal count after it supplies all three reaction/fidget counts; later comma-separated counts are not independently reached. For example, a tail `,2,3,4` yields counts `(2,2,2)`. This describes the observed reader, not a corrected CSV interpretation. The reader cuts the text at the first comma and then searches the already-terminated remainder, so it never advances to the second or third count. `[May-improve]`: apply the head-list safe rule in SPEC-006 §3.11 (read the first, second, and third comma-separated decimal counts as the good, neutral, and bad fidget counts, verify every selectable fidget file exists, and otherwise keep the first count).
+- Script lines are selected by zero-based position without skipping blanks or comment lines. For name lookup, the first dot anywhere in the line ends the stem; leading whitespace is preserved, and `.int` replaces the remainder. A comment line containing a dot can therefore produce a name, whereas a blank line or any line without a dot fails name lookup. `[Must-match]`
+- A separate script-metadata read examines text following the first `#`; the case-sensitive literal token `local_vars=` supplies a following decimal local-variable count. This is annotation handling, not a general comment grammar. Decimal parsing allows leading whitespace and an optional sign, stops at the first nondecimal character, and produces zero if no digits are parsed. This annotation handling does not remove the line from the index. `[Must-match]`
+- Prototype name extraction recognizes only space and LF. TAB, comma, semicolon, `#`, and `//` are not generic delimiters/comments for this reader. Leading space yields an empty filename. All lines still consume their one-based positions. `[Must-match]`
+- Actual art entry counts use successful bounded reads. Script bookkeeping instead records LF count plus 1, even with a trailing LF or an empty file; that does not make a final phantom line readable. Prototype allocation bookkeeping records LF count plus 2 in this revision, independently of its actual readable entries. No supported lookup in this revision consults either bookkeeping count. `[May-improve]`: derive any entry count from successful bounded reads.
+- Prototype EOF handling is not a reliable bounds check: for a nonempty list, a request exactly one successful-read position beyond the end can return the last line's name again. It does not establish an extra actual entry. Empty-list lookup and malformed binary/text inputs do not have a dependable compatibility result; an independent implementation should distinguish these defects from supported ID mappings. `[May-improve]`: fail the lookup for any position beyond the last successful read, for an empty list, and for a list file that cannot be opened.
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
@@ -302,7 +309,7 @@ one.pro
 two.pro ;note
 ```
 
-Expected supported prototype mapping: low-24-bit ID 1 selects `one.pro`, ID 2 selects an empty name, and ID 3 selects `two.pro`. ID 0 does not mean the first entry. The reference's EOF defect can repeat `two.pro` for ID 4; a validated implementation must not count that as a fourth line.
+Expected supported prototype mapping: low-24-bit ID 1 selects `one.pro`, ID 2 selects an empty name, and ID 3 selects `two.pro`. ID 0 does not mean the first entry. The reference's EOF defect can repeat `two.pro` for ID 4; a validated implementation must not count that as a fourth line. `[May-improve]`: ID 4 fails the lookup.
 
 Script text, with both lines LF-terminated:
 
@@ -317,3 +324,8 @@ Expected runtime script index 0 resolves to `first.int` with local-variable coun
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
 - [x] Synthetic test vectors included
+- [x] Every documented quirk tagged `[Must-match]` or `[May-improve]`
+- [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
+- [x] Spec linter run against `fallout1-re` symbols with no findings
+
+Verification notes: `tools/spec_lint.py` gives 0 errors. Its 25 plain-word warnings were reviewed and are benign. They are this spec's own formula words ("start", "column", "data", "byte", "count", "width", "height", "direction", "offset", "frames") and the public art category directory names (items, critters, scenery, tiles, misc). The fenced blocks are synthetic hex dumps and text-list vectors. Tag count: 39 `[Must-match]`, 7 `[May-improve]`.

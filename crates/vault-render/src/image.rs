@@ -150,7 +150,7 @@ impl IndexedImage {
     /// UI rectangle centering: no world shifts or accumulated animation movement.
     /// Nearest-neighbor fit, with at most 4x magnification.
     pub fn draw_frame(&mut self, frame: &FrmFrame, origin: [u32; 2], size: [u32; 2]) {
-        if size.contains(&0) {
+        if size.contains(&0) || frame.width == 0 || frame.height == 0 {
             return;
         }
         let fw = u64::from(frame.width);

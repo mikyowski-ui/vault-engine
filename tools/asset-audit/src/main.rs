@@ -90,33 +90,6 @@ struct Args {
     movie_oracle_dir: PathBuf,
 }
 
-/// The SPEC-003 writer's expected PRO bytes: the consumed payload with
-/// weapon damage bounds exchanged, plus the scenery writer suffix.
-fn expected_pro(bytes: &[u8], prototype: &Prototype) -> Vec<u8> {
-    let mut expected = bytes[..prototype.consumed_len].to_vec();
-    match &prototype.data {
-        PrototypeData::Item(item) if matches!(item.data, ItemData::Weapon(_)) => {
-            let (minimum, maximum) = expected[61..69].split_at_mut(4);
-            minimum.swap_with_slice(maximum);
-        }
-        PrototypeData::Scenery(scenery) => {
-            let light = prototype.light.expect("scenery has light words");
-            for word in [
-                light.radius,
-                light.intensity,
-                prototype.flags.0 as i32,
-                prototype.extended.0 as i32,
-                prototype.script.unwrap_or(-1),
-                scenery.data.subtype() as i32,
-            ] {
-                expected.extend_from_slice(&word.to_be_bytes());
-            }
-        }
-        _ => {}
-    }
-    expected
-}
-
 fn saved_objects(map: &MapFile) -> usize {
     map.objects
         .elevations
@@ -134,8 +107,9 @@ fn check_writer(
     let text = |error: vault_formats::ParseError| error.to_string();
     if path.extension() == Some("pro") {
         let prototype = Prototype::parse(bytes).map_err(text)?;
-        if prototype.write() != expected_pro(bytes, &prototype) {
-            return Err("PRO writer output differs from the documented transform".into());
+        // The safe-rule writer reproduces exactly the bytes the reader consumed.
+        if prototype.write() != bytes[..prototype.consumed_len] {
+            return Err("PRO writer output differs from the consumed bytes".into());
         }
         return Ok(());
     }

@@ -188,8 +188,8 @@ pub struct Resolution {
     pub rounds: i32,
     /// Ammunition scheduled for consumption at cleanup.
     pub ammo: i32,
-    /// Computed critical-failure self damage (committed only if the attacker
-    /// is already dead, per the recovered guard).
+    /// Computed critical-failure self damage (committed to a living attacker
+    /// under the SPEC-007 §3.6 safe rule).
     pub self_damage: i32,
     pub knockback: i32,
     /// A random-target critical failure asks the caller for another target.
@@ -437,8 +437,8 @@ impl Attack {
         }
     }
     /// Normal aimed-shot availability: not for a player with Fast Shot, not
-    /// for burst/continuous animation, and not for explosion/fire/EMP damage.
-    /// (The recovered plasma-throw comparison never restricts anything.)
+    /// for burst/continuous animation, not for explosion/fire/EMP damage,
+    /// and (SPEC-007 §3.4 safe rule) not for a plasma throw weapon.
     pub fn aimed_shot_available(&self) -> bool {
         let kind = self
             .weapon
@@ -450,6 +450,7 @@ impl Attack {
                 kind,
                 damage_type::EXPLOSION | damage_type::FIRE | damage_type::EMP
             )
+            && !(self.mode() == attack_mode::THROW && kind == damage_type::PLASMA)
     }
     /// Single-shot or ordinary melee/unarmed attack (burst/continuous fire
     /// uses [`Attack::resolve_spray`]).
@@ -569,7 +570,7 @@ impl Attack {
             .map_or(0, |weapon| weapon.failure_table);
         let column = critical::failure_column(rng.range(1, 100)? - 5 * (self.luck - 5));
         let mask = critical::failure_mask(table, column)
-            .ok_or_else(|| WorldError::Invalid("critical-failure table must be 0-6".into()))?;
+            .ok_or_else(|| WorldError::Invalid("critical-failure column must be 0-4".into()))?;
         if mask == 0 {
             return Ok(());
         }
@@ -635,29 +636,24 @@ pub const RELOAD_COST: i32 = 2;
 pub const ITEM_USE_COST: i32 = 2;
 /// Standing up; below 3 AP the remaining AP drop to zero.
 pub const STAND_UP_COST: i32 = 3;
-/// Opening the player inventory in combat, charged once on entry. The
-/// wrapper does not clamp a negative malformed cost.
+/// Opening the player inventory in combat, charged once on entry; under the
+/// SPEC-007 §3.4 safe rule the cost is clamped at 0.
 pub fn inventory_entry_cost(quick_pockets: u32) -> i32 {
-    4 - quick_pockets as i32
+    (4 - quick_pockets as i32).max(0)
 }
 /// Knockout wake-up delay in ticks for an effective Endurance.
 pub fn knockout_delay(endurance: i32) -> i64 {
     10 * (35 - 3 * i64::from(endurance))
 }
 
-/// Knockback displacement with blockers checked at increasing distance. A
-/// blocker at distance j decrements before breaking and again after the
-/// loop, so displacement is at most `j - 2` (clamped at zero), as recovered.
+/// Knockback displacement with blockers checked at increasing distance.
+/// The §3.8 safe rule stops one hex short of the first blocker, so a
+/// blocker at distance j permits `j - 1` (the reference's double decrement
+/// permits `j - 2`); with no blocker the computed distance is used.
 pub fn knockback_displacement(computed: i32, mut blocked: impl FnMut(i32) -> bool) -> i32 {
-    let mut distance = 1;
-    while distance <= computed {
-        if blocked(distance) {
-            distance -= 1;
-            break;
-        }
-        distance += 1;
-    }
-    (distance - 1).max(0)
+    (1..=computed)
+        .find(|distance| blocked(*distance))
+        .map_or(computed.max(0), |distance| distance - 1)
 }
 
 /// Inputs to the attack-driven death-animation choice.
@@ -695,12 +691,13 @@ impl DeathChoice {
     pub fn from_front(&self) -> bool {
         matches!(self.orientations[0].abs_diff(self.orientations[1]), 2..=4)
     }
-    /// Minimum-violence/art validation, with the recovered inverted rear
-    /// fallback (20 when fall-front art exists, 21 when it does not).
+    /// Minimum-violence/art validation. A front hit falls back to 20; under
+    /// the SPEC-007 §3.8 safe rule a rear hit falls back to 21 when
+    /// fall-front art exists and 20 otherwise (the reference inverts this).
     fn validate(&self, desired: u8, minimum: i32, art: &impl Fn(u8) -> bool) -> u8 {
         if self.violence >= minimum && art(desired) {
             desired
-        } else if self.from_front() || art(21) {
+        } else if self.from_front() || !art(21) {
             20
         } else {
             21

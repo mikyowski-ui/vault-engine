@@ -54,8 +54,15 @@ impl PrototypeLookup for LocalPrototypeCatalog<'_> {
         let path = format!("proto/{folder}/{name}");
         let prototype = Prototype::parse(&self.read(&path)?)?;
         // The list selects the file; its own PID selects its serialized layout.
-        // Alias list entries need not repeat that file's PID. Map decoding still
-        // checks that the resolved subtype belongs to the requested category.
+        // SPEC-003 §3.1 safe rule: a stored PID that differs from the
+        // requested PID is rejected.
+        if prototype.pid != pid {
+            return Err(ParseError::new(
+                "PRO lookup",
+                0,
+                format!("{path} stores PID {:#010x}, not {pid:#010x}", prototype.pid),
+            ));
+        }
         let info = prototype.info();
         self.prototypes.borrow_mut().insert(pid, info);
         Ok(info)

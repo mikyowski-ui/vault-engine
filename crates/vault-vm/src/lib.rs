@@ -10,6 +10,7 @@ pub mod procedure_flags {
     pub use crate::program::{CONDITIONAL, CRITICAL, EXPORT, IMPORT, TIMED};
 }
 
+pub use arithmetic::float_text;
 pub use host::{BasicHost, ExportedProcedure, ExternalValue, LaunchMode, VmHost};
 pub use machine::{RunOutcome, Vm, VmStatus};
 pub use program::{IntError, IntProgram, Lifecycle, Procedure};

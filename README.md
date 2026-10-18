@@ -170,9 +170,9 @@ save slot in a temporary directory.
 decodable identifiers whose file is absent from the mounted corpus (`MISSING`
 lines; not fatal, since the reference guarantees no fallback resource), and
 identifiers the codec rejects (`FAIL`; nonzero exit). `--validate-writers` requires
-PRO output to equal the consumed input with the documented weapon-bound exchange
-and 24-byte scenery suffix, and MAP output to be a parse/write fixpoint that keeps
-every saved object and retained script.
+PRO output to equal the consumed input exactly (the safe-rule writer keeps reader
+order and omits the reference's scenery suffix), and MAP output to be a parse/write
+fixpoint that keeps every saved object and retained script.
 
 The CLI prints total mounted files and counts for `.frm`, `.pal`, `.fon`, `.aaf`,
 `.pro`, `.map`, `.int`, `.msg`, and `.lst`, including zero counts. It traverses the
@@ -219,9 +219,12 @@ Unicode names are rejected to keep case folding identical across host platforms.
 Mounts reject symlinks inside the tree, special files, and case collisions in
 either files or directories. Reads check for replacement symlinks and use
 `cap-std` directory capabilities, so confinement holds even across filesystem
-races and renames of the mount's ambient path. A mount snapshots names, returns
-them in lexical order, and reads current contents on demand. Remount after
-adding/renaming files; stable file contents require an unchanged corpus.
+races and renames of the mount's ambient path. A mount snapshots names and lists
+them in lexical order; remount to list added or renamed files. Reads use current
+contents, and a read that misses the snapshot resolves the path against the live
+directory (case-insensitively, with the same symlink and collision checks), so a
+stale index never hides a file added later (SPEC-008 §3.2 safe rule). Stable file
+contents require an unchanged corpus.
 
 Keep local proprietary data outside the repository or in ignored `corpus/`.
 
@@ -425,14 +428,14 @@ required-data truncation, and deterministic mutation/random-byte fuzz cases.
   tables are retained, and generated intensity is evaluated lazily. `PaletteCycler`
   implements the specified shared timers, rotations, red pulse, and reset rules.
 - `FrmArchive` accepts arbitrary version words and preserves signed timing.
-  Adjacent equal direction offsets share records. Defensive validation requires
-  packed sequential blocks, positive counts/dimensions, and exact pixel sizes.
-  The number of stored sequences comes from the shared offset slots; the header
-  always has six slots, with no separate orientation-count field. Single-sequence
-  split animations may retain a larger declared area from the unsplit animation.
-  `stored_frame_area_len()` reports the actual bytes read. Undersized declarations
-  and mismatches in multi-sequence files are rejected, along with unsafe
-  gap/reordering/reuse cases.
+  Adjacent equal direction offsets share records. The SPEC-001 §3.3 safe rule
+  requires packed sequential blocks (direction 0 at offset zero), a positive frame
+  count, nonnegative dimensions and payload sizes, and payloads of at least
+  width x height bytes; the next record starts after the declared payload. The
+  number of stored sequences comes from the shared offset slots; the header
+  always has six slots, with no separate orientation-count field. The declared
+  total area is metadata only and is not checked (split animations retain the
+  unsplit total); `stored_frame_area_len()` reports the actual bytes read.
   Trailing bytes after the frame area are ignored. World rectangles, cursor
   hotspots, preview centering, and cumulative displacement are separate operations.
 - `LstTable` requires a consumer (`Art`, `Script`, `Prototype`, or `Raw`). Bounded
@@ -497,9 +500,11 @@ depth 64. Counts and actual read extents are checked before allocation.
 
 `HexGrid` provides bounded neighbors, border-stop stepping, both distance
 definitions, camera centering, and integer hex/floor/roof projection/picking.
-Negative inverse coordinates use floor division. The recovered angular walk
-returns an error when it leaves the grid or fails to converge, including the
-documented `(0,199)` boundary defect; only the explicit `-1` sentinel gives 9999.
+Negative inverse coordinates use floor division. Under the SPEC-003 §3.5 safe
+rule `angular_distance` returns the axial lattice distance for every valid pair;
+the reference's walk (`angular_walk`) agrees wherever it stays on the grid and
+leaves it for pairs such as `(0,199)`. Only the explicit `-1` sentinel gives 9999.
+Multi-step movement with an orientation outside 0-5 returns the starting hex.
 
 ## Core VM
 
@@ -515,24 +520,30 @@ literal bounds are enforced when a value is consumed as a string. The image is
 bounded to 64 MiB, procedure count to 65,536, and declared arguments to stack capacity.
 
 `Vm` implements all 76 core dispatch slots, including distinct raw/type-dependent
-truth rules, asymmetric integer-addition promotion, changing-limit discard,
-float-bitwise conversion, context returns, mutable scheduling metadata, and the
-recovered wait predicate. Both stacks have 2048 bytes and fit 341 tagged values.
+truth rules, asymmetric integer-addition promotion, float-bitwise conversion,
+context returns, and mutable scheduling metadata. Under the SPEC-004 safe rules
+`0x802E` discards exactly its counted values (the fixed-count rule; the reference
+reuses each popped payload as the next bound) and a timed wait releases on its
+first readiness check. Both stacks have 2048 bytes and fit 341 tagged values.
 Frames and globals use byte bases, with checked live-slot access. Strings are
 interned per program with an 8 MiB content budget; cross-program transfers copy text.
 
 `update` uses ten instructions by default. Critical state can continue beyond the
 ordinary budget; a separate 100,000-instruction hard limit prevents an unbounded
-critical invocation. Arithmetic cases whose results are undefined in the spec
-(overflowing subtraction/multiplication/negation, invalid float-to-int conversions,
-and nonfinite float-to-text conversions) return explicit VM errors.
+critical invocation. The SPEC-004 §3.5 safe rules define the remaining cases:
+integer subtraction, multiplication, negation, and division wrap modulo 2^32
+(`MIN / -1` is `MIN`), out-of-range or NaN float-to-integer conversions give
+`80 00 00 00`, nonfinite floats format as `nan`, `inf`, and `-inf`, and every
+operation that would consume its operands and push nothing (a string on the left
+of arithmetic or bitwise operators, a string in the float-to-integer conversion)
+raises a VM type error, as does a non-integer slot index or frame count.
 
 `VmHost` supplies time, shared exports, program ownership/launching, wait predicates,
 and extension opcodes `0x804C..=0x8155`. `BasicHost` supplies a deterministic clock
 value and case-insensitive export registries. No process-global state or filesystem
 access is implicit in execution. Host calls and external return contexts are
-available explicitly; the unsafe imported-call argument-transfer path is rejected
-with `ImportedAbi` because SPEC-004 does not define a safe executable ABI for it.
+available explicitly; imported calls are rejected with `ImportedAbi`, the reject
+choice the SPEC-004 §3.6 safe rule allows.
 
 Lifecycle resolution preserves the generic index-1 fallback and the separate
 map-enter/map-update presence checks. Scheduled conditions execute against the
@@ -544,9 +555,9 @@ and firing/canceling clears the specified metadata words.
 
 `GamFile` applies the exact 16-byte section comparisons and 257-byte translated
 chunks. Names do not affect indices, only column-zero `//` is a comment, and later
-section headings remain data. Missing markers yield an empty initializer. An
-assignment with no decimal prefix or an overflowing integer is rejected instead
-of exposing the reference's uninitialized/undefined value.
+section headings remain data. Missing markers yield an empty initializer. Under
+the SPEC-006 §2.1 safe rule an assignment with no convertible number stores zero
+and an overflowing decimal is clamped to the signed 32-bit range.
 
 `GcdFile` decodes all 428 bytes with checked tags/traits, name termination, and
 raw SPECIAL bounds. `player_normalized()` applies player-only EMP/body/reward/
@@ -577,10 +588,11 @@ All 266 slots are present: 264 registered words and holes `0x807D`/`0x807E`.
 `vault-vm::extensions` preserves raw tags, uses mask `0xF7FF`, implements the
 I/S/F/U/O/N/C/T checks and variable region arity, and does not synthesize statement
 results. `WorldHost` connects the catalog to world services and managed-library
-state. Documented stubs, missing-result null paths, busy-state leaks, defective
-tokenization, sound-handle tags, and wrong-string-tag paths are explicit.
-Unsafe dereferences, nonterminating legacy paths, and undefined arithmetic are
-reported as bounded errors.
+state. Documented stubs, defective tokenization, and wrong-string-tag paths are
+explicit; the SPEC-005 `[May-improve]` rows apply their safe rules (listed
+below under "SPEC-001 to SPEC-008 safe rules"), so null operands push the row's
+null result, the host-busy bit is cleared on every return path, area visibility
+terminates, and time arithmetic wraps at 32 bits.
 
 Exports use separate 1013-entry registries. Variable ownership is by registered
 program filename; same-owner registration resets to integer zero. Procedure
@@ -590,8 +602,10 @@ separate lifetimes.
 
 `GDialog` tracks session, node processing, review, paging, callbacks, and head
 animation separately. Replies clear old options, IQ filtering happens at append
-time, options are limited to 30, review replies to 80, and reply pages to ten.
-Head/background IDs, filename suffixes, repeated-first-column fidget counts,
+time, options are limited to 30 (a thirty-first is a diagnostic), review replies
+to 80, and literal replies and options are truncated to 899 and 897 bytes; every
+reply page is remembered. Head/background IDs, filename suffixes, own-column
+fidget counts (kept only when every selectable fidget file exists),
 reaction transitions, and the 42 phoneme mappings follow SPEC-006. The platform
 renders loaded head/background/interface art and font glyphs; no fabricated
 conversation is substituted for a missing NPC script.
@@ -621,11 +635,13 @@ the requested selector, then `.fr0` once; the original base is retained).
 `routing` implements the heuristic best-first route search exactly as recovered:
 seen-on-insertion, first-vacant frontier slots, 50 per hex plus 10 per direction
 change outside combat (initial direction 0), 1999-entry frontier/expanded caps,
-and an 800-byte backtrack that keeps the last steps. The movement blocker covers
+and an 800-byte backtrack that, under the SPEC-007 §3.1 safe rule, keeps the
+first 800 steps from the source. The movement blocker covers
 critter/scenery/wall art on the hex plus multihex neighbors; non-player
 biped/robotic critters auto-open unlocked doors. Rays use pixel Bresenham between
 hex centers with stride sampling, the 200-sample cap, and projectile-through
 filtering at stride 32; the first eligible object on a hex masks the others.
+Reaching the sample cap clears the obstacle output (safe rule).
 `obj_can_see_obj` combines the sector perception rule with a stride-16 ray whose
 first blocker must be the target (the ignored reference is explicitly null).
 Move-to-object/tile planning shortens routes and derives the recovered replan
@@ -636,16 +652,19 @@ goal, and charges 1/4/8 AP per hex (free movement first) in combat.
 chance (no lower cap; ammunition AC/DR/multiplier/divisor are not consumed), the
 first-day-gated critical upgrade and forced upgrades, the 864 critical-success
 entries and failure masks (compiled from the approved specification at build
-time), per-round DT/DR damage, knockback with the double-decrement displacement,
+time), per-round DT/DR damage, knockback that stops one hex short of the first
+blocker (safe rule; the reference's double decrement stops two short),
 burst/continuous sprays (budgets, direct trials, side rays, extra targets at
-normal scale), death-animation selection with the inverted rear fallback, and
-corpse rules. `combat_state` implements initialization, the first unsorted pass,
-the round sweep, turns, explicit end requests, automatic ending, and cleanup.
-Critical-failure self damage is computed but committed only to an attacker already
-marked dead, as recovered. AI behavior is unspecified, so NPC turns and danger
-targets come from a host-supplied `CombatAi` (default: none). The weapon-splash
-helper adds no victims (its setup is absent in the reference), and the miss-impact
-fallback beyond grenade scatter is not specified enough to simulate.
+normal scale), death-animation selection (a rear hit falls back to 21 when
+fall-front art exists, else 20, under the safe rule), and corpse rules.
+`combat_state` implements initialization, the first unsorted pass, the round
+sweep, turns, explicit end requests, automatic ending, and cleanup. Critical-
+failure self damage and its flags are committed to a living attacker (safe rule).
+AI behavior is unspecified, so NPC turns and danger targets come from a
+host-supplied `CombatAi` (default: none). The weapon-splash helper adds no victims
+(its setup is absent in the reference), and the miss-impact fallback beyond
+grenade scatter is not specified enough to simulate. A single-shot ranged miss
+can hit an accidental target under the safe rule (see the next section).
 
 Registered animation sequences now execute: commands run in order, one frame step
 at a time (the art's frame interval, 10 FPS without art); nonnegative delays wait
@@ -665,9 +684,9 @@ form (two-byte headers; every block must produce exactly
 4078 leading spaces, cursor `0xFEE`, LSB-first control bits, absolute 12-bit
 starts, and sequential overlapping copies. Truncated tokens, over-expansion,
 short or empty blocks, and offsets past EOF are errors rather than unbounded
-reads or loops. The reference leaves the ring tail uninitialized; it is zeroed
-per file here (and retained across that file's blocks), which only matters for
-streams that read the tail before writing it.
+reads or loops. The reference leaves the ring tail uninitialized; under the
+SPEC-008 §3.1 safe rule it is zeroed at the start of every compressed block,
+which only matters for streams that read the tail before writing it.
 `Database` and `DatProvider` implement selected-database lookup: the loose patch
 directory first, then that database's archive, with `art/critters/` selecting
 the critter database and no fallback between databases. `VfsWorldAssets` and
@@ -676,7 +695,8 @@ directory or from `DatProvider` archives. The desktop shell's `--corpus-dir`
 still mounts a loose directory.
 
 `savegame` reads and writes the strict 30051-byte header (only the first 18
-signature bytes are compared; versions are not enforced) and all 27 ordered
+signature bytes are compared; a version other than 1.1 is rejected under the
+SPEC-008 §2.4 safe rule) and all 27 ordered
 payloads with no length prefixes. The campaign count G comes from the installed
 initializer; the queue grammar uses type-dependent payloads; manifest names are
 bounded to 12 bytes before the NUL; trailing bytes are rejected. `AutomapDb`
@@ -694,11 +714,13 @@ over the asset. The player is saved centrally. Party members travel with the
 player between maps but are written to the current map in a save slot. The
 per-load map-script instance is recreated on each entry, as in SPEC-006 step 6,
 so its previous local block is not reattached. `WorldHost::save_game` writes
-`SAVEGAME/SLOTnn/SAVE.DAT`, the manifest's `.SAV` companions, and `AUTOMAP.SAV`,
-renaming old files to `.BAK` first and restoring them if a write fails.
-`load_game` reads and validates the header, every payload, every companion, and
-the automap length before it changes any state, which is safer than the
-reference's partial loads. It then restores in the reference order: reset, game
+`SAVEGAME/SLOTnn/SAVE.DAT`, the manifest's `.SAV` companions, and `AUTOMAP.SAV`
+under the SPEC-008 §3.3 safe rule: every file is staged as `<name>.TMP`, and only
+after all succeed are the old files renamed to `.BAK`, the staged files renamed
+into place (restoring the backups if that fails), and the backups removed.
+`load_game` reads and validates the header, every payload, every companion map
+(parsed in full), and the automap before it changes any state. A timed event
+whose owner identifier matches no restored object is restored without an owner. It then restores in the reference order: reset, game
 tick, campaign snapshot A, working set, current map, then the player and later
 components (snapshot B is ignored). An active saved combat resumes the player's
 turn without an AP refill. The saved next-identity counter is installed before
@@ -715,13 +737,15 @@ non-leap month/day calendar.
 `worldmap` compiles the terrain, frequency, and region grids, the town table,
 and the hotspot catalog from the approved specification at build time. It
 implements the asymmetric pixel stepper (the X-major branch can finish one Y
-pixel short), binary32 W/Q travel speed (inputs that would divide by zero or go
-negative are rejected), the terrain schedules on one shared counter, the
+pixel short), W/Q travel speed (binary32, with the Pathfinder factor in binary64;
+Outdoorsman is clamped below at 0 and Pathfinder ranks to 0-4 under the safe
+rule), the terrain schedules on one shared counter, the
 29-stride discovery reveal (3 x 3, or 5 x 5 with Scout, plus the west/ocean
 thresholds), 3d6 encounter classes with town suppression, special encounters
 (restarting the whole test when the drawn special is consumed), terrain-map
 redraws, globals 65/32, the town-knowledge refresh (known value exactly 1,
-byte-narrowed entrances, Vault 13's tick rule, alternate rows 12-14), buttons,
+full 32-bit entrance tests under the safe rule, Vault 13's tick rule, alternate
+rows 12-14), buttons,
 labels, and first entry. `WorldHost::travel_iteration` runs one loop iteration:
 schedule steps and walk-mask stops, then the Q charge with queue interruption,
 discovery every third iteration, then 24-hour party healing and the encounter
@@ -997,6 +1021,87 @@ these choices:
 - Movies play modally, so `play_gmovie`'s suspension of dialogue background
   processing is the modal wait itself.
 
+## SPEC-001 to SPEC-008 safe rules
+
+The audited SPEC-001 to SPEC-008 revisions tag every quirk `[Must-match]` or
+`[May-improve]`. The engine applies the stated `[May-improve]` safe rules,
+including:
+
+- SPEC-001: FRM payload/dimension/offset rejections (above); LST entry counts
+  come from successful bounded reads; head lists read the good, neutral, and bad
+  fidget counts from their own columns, keeping a column only when every fidget
+  file it can select exists and otherwise the first-column count.
+- SPEC-002: selecting an unloaded font is a no-op; the AAF maximum-cell metric
+  is `H + S` whatever Q; MSG and font validation as described above.
+- SPEC-003: PIDs with nonzero bits 28-31, stored PIDs that differ from the
+  requested PID, unknown subtypes, and malformed script/object counts are
+  rejected; attack-mode nibbles 9-15 read as mode 0; the PRO writer keeps reader
+  order (minimum then maximum damage, no scenery suffix); a map entry
+  orientation outside 0-5 reads as 0 with a diagnostic; LVAR access is bounded
+  to the script's own slice and system/map scripts cannot write locals;
+  temporary inventory children are skipped when writing.
+- SPEC-004: the arithmetic, conversion, slot-index, discard, and wait rules
+  above.
+- SPEC-005: `saystart` indexes after incrementing; `sayreplyflags` sets reply
+  flags; `printrect` truncates to 79 bytes and prints nothing for an unsupported
+  tag; `playmovie` waits until playback ends (the desktop now plays library
+  movies and reports their end); non-S region names and button images are
+  rejected or treated as no image; `addbuttonrightproc` targets the button;
+  `tokenize` returns I zero for an absent match and never passes the terminator;
+  `obj_name` of null is `<Critter>`; `create_object_sid` pushes 0 when nothing is
+  created and treats script number 0 like -1; `tile_num_in_direction` gives -1
+  for a negative orientation; `pickup_obj` without a script is a diagnostic;
+  `turn_off/on_objs_in_area` swap reversed hex bounds and advance one elevation
+  per pass; `obj_can_hear_obj` tests both objects and perception;
+  `critter_attempt_placement`, `critter_inven_obj`, `rm_mult_objs_from_inven`,
+  `destroy_mult_objs`, `critter_heal`, and `critter_rm_trait` push their null
+  results; `rotation_to_tile` gives 0 for an invalid hex; `start_gdialog`
+  derives the mood from self without a prior target; `attack`, `attack_setup`
+  (a null defender is a no-op), and `critter_damage` clear the busy bit on
+  every path; `game_ticks` and the time opcodes wrap at 32 bits; debug text is
+  literal; `sfx_build_char_name` pushes empty text when unavailable and
+  `sfx_build_weapon_name` rejects out-of-range effects and hit modes; negative
+  perk/trait indexes give 0; nonfinite color channels read 0 and channels clamp
+  to 0-31; named-event names truncate to 31; stray sound handles are no-ops; the
+  any-key binding is cleared with its program.
+- SPEC-006: GAM values (above); literal reply/option truncation, the
+  thirty-first option as a diagnostic, and unbounded reply paging; a head
+  outside the list, a fidget count of zero or less, or missing head art selects
+  no fidget, keeps the current frame, and is diagnosed (the fidget draw is still
+  taken); a range whose width does not fit 1 through 2147483647 consumes one
+  draw and returns its first bound.
+- SPEC-007: failure tables outside 0-6 use table 0; routes keep their first 800
+  steps; the ray sample cap clears the obstacle; combat begins only when every
+  supplied participant is on the current elevation; the inventory entry cost is
+  clamped at 0; plasma throw weapons cannot aim; the request override words go
+  to the attacker and defender flags; knockback, the rear death fallback, and
+  attacker self-damage as above. On a single-shot ranged miss, the first
+  non-through critter other than the defender on the stride-32 shot ray (the
+  `obj_can_see_obj`/cover ray) is accepted as the accidental target and takes a
+  torso hit at normal damage, like a random-target critical failure.
+- SPEC-008: the ring tail, version check, staged saves, companion validation,
+  travel clamps, entrance test, and live loose reads above; discovery resets
+  clear all 31 x 29 bytes; holodisk last pages use `floor((n - 1) / 35)`; only
+  positive acquisition values list a disk; every quest pass stops at the zero
+  sentinel; an until-healed rest with a nonpositive healing rate does nothing.
+
+Deliberate exceptions and gaps:
+
+- The SPEC-001 §3.2 rule rejecting a `color.pal` shorter than `0x8304` bytes
+  is not applied: every corpus palette (19 files, `color.pal` included) is the
+  33,536-byte base layout without a discriminator, and `[May-improve]` rules are
+  optional.
+- MSG loading keeps the tolerant recovery described above (`parse_strict`
+  applies the SPEC-002 rules), and `TextMode::WindowsLoose` remains the
+  reference-behavior switch for loose-file Ctrl-Z.
+- SPEC-005's optional rule rejecting invalid nonzero object references with the
+  row's null result is not applied; such references remain VM errors.
+- SPEC-007's selection and damage of the accidental target are not specified;
+  the rule above is this engine's choice. The `[Must-match]` one-in-four
+  punch-to-kick cosmetic draw is not modeled, because the spec gives neither its
+  bounds nor its place in the draw sequence.
+- The SPEC-003 mapper inventory-repair mode is omitted, as the safe rule allows.
+
 ## Spec completion notes
 
 These close behaviors that the earlier phases left open:
@@ -1007,12 +1112,12 @@ These close behaviors that the earlier phases left open:
 - SPEC-002: `FontSet` startup search (FON 0-9, AAF 0-15), per-subsystem defaults,
   numbered selection (FON 0-9, AAF 100-110) that never replaces the current font
   with a missing slot, `setfont`, and the numeric text-flag word.
-- SPEC-003: asymmetric `Prototype::write` and `MapFile::write` (darkness 1,
-  recomputed omission bits, grid-order top-level saving without temporary or
-  unplaced objects, `NO_SAVE` scripts omitted, temporary inventory children
-  refused), extended-flag interaction permissions, and out-of-range MVAR/LVAR
-  diagnostics. The roof-hide flood fill is named but not specified, and unknown
-  item/scenery subtypes are still rejected rather than read without payload.
+- SPEC-003: `Prototype::write` and `MapFile::write` (darkness 1, recomputed
+  omission bits, grid-order top-level saving without temporary or unplaced
+  objects, `NO_SAVE` scripts omitted, temporary inventory children skipped),
+  extended-flag interaction permissions, and out-of-range MVAR/LVAR diagnostics.
+  The roof-hide flood fill is named but not specified; unknown item/scenery
+  subtypes are rejected, as the safe rule now states.
 - SPEC-004: scheduled procedures fire from the host's interpreter pass, and
   `launch` starts attached, replacing, spawned, and independent programs.
 - SPEC-005: executing animation sequences, armor-aware `critter_damage`, the exact

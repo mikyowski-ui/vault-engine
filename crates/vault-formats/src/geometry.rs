@@ -39,8 +39,13 @@ impl HexGrid {
             .copied()
             .ok_or(GeometryError::Orientation)
     }
+    /// Multi-step movement with the border stop. Under the SPEC-003 §3.4
+    /// safe rule an orientation outside 0-5 returns the starting hex.
     pub fn step(mut hex: i32, orientation: u8, count: i32) -> Result<i32, GeometryError> {
-        Self::delta(Self::coordinates(hex)?[0], orientation)?;
+        Self::coordinates(hex)?;
+        if orientation > 5 {
+            return Ok(hex);
+        }
         for _ in 0..count.max(0) {
             let [c, r] = Self::coordinates(hex)?;
             if c == 0 || r == 0 || c == 199 || r == 199 {
@@ -60,7 +65,16 @@ impl HexGrid {
         let dr = ar - (ac + 1) / 2 - (br - (bc + 1) / 2);
         Ok(dq.abs().max(dr.abs()).max((dq + dr).abs()))
     }
-    pub fn angular_distance(mut a: i32, b: i32) -> Result<i32, GeometryError> {
+    /// Hex distance. The -1 sentinel gives 9999; under the SPEC-003 §3.5
+    /// safe rule every pair of valid hexes gives the axial lattice distance,
+    /// which equals the reference walk wherever that walk stays on the grid.
+    pub fn angular_distance(a: i32, b: i32) -> Result<i32, GeometryError> {
+        Self::lattice_distance(a, b)
+    }
+    /// The reference's screen-angle walk, which can leave the grid (for
+    /// example from 0 to 199, or from 5225 to 4558) and then has no defined
+    /// result; kept to verify that it agrees with the lattice distance.
+    pub fn angular_walk(mut a: i32, b: i32) -> Result<i32, GeometryError> {
         if a == -1 || b == -1 {
             return Ok(9999);
         }

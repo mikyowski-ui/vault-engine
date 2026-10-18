@@ -51,8 +51,10 @@ fn spec003_container_unaligned_payload_and_flag_namespaces() {
         BasicFlags(0xffff_ffff).translucency(),
         Some(Translucency::Opaque)
     );
-    assert_eq!(ExtendedFlags(0x98).attack_modes(), None);
-    assert_eq!(ExtendedFlags(0x87).attack_modes(), Some([7, 8]));
+    assert_eq!(ExtendedFlags(0x98).attack_modes(), [8, 0]);
+    assert!(ExtendedFlags(0x98).invalid_attack_mode());
+    assert_eq!(ExtendedFlags(0x87).attack_modes(), [7, 8]);
+    assert!(!ExtendedFlags(0x87).invalid_attack_mode());
     let packed = PackedLocation(20100 | (5 << 26) | (2 << 29));
     assert_eq!(
         (packed.hex(), packed.orientation(), packed.elevation()),
@@ -117,6 +119,15 @@ fn spec003_empty_map_variable_order_and_omissions() {
         ),
         (20100, 0, 0)
     );
+    assert!(map.diagnostics.is_empty());
+    // Safe rule: an entry orientation outside 0-5 reads as 0, diagnosed.
+    for orientation in [6, -1] {
+        let mut bad = bytes.clone();
+        fixture::word(&mut bad, 0x1c, orientation);
+        let map = MapFile::parse(&bad, &lookup).unwrap();
+        assert_eq!(map.header.entry_orientation, 0);
+        assert_eq!(map.diagnostics.len(), 1);
+    }
     assert_eq!(
         (map.header.map_number, map.header.map_script_index()),
         (7, None)
@@ -326,6 +337,7 @@ fn geometry_fixture_and_inverse_corner_boundaries() {
         assert_eq!(grid.pick_hex([x, y]), Some(hex));
         assert_eq!(HexGrid::lattice_distance(20100, hex).unwrap(), distance);
         assert_eq!(HexGrid::angular_distance(20100, hex).unwrap(), distance);
+        assert_eq!(HexGrid::angular_walk(20100, hex).unwrap(), distance);
     }
     for (direction, hex) in [20099, 20299, 20300, 20301, 20101, 19900]
         .into_iter()
@@ -345,10 +357,17 @@ fn geometry_fixture_and_inverse_corner_boundaries() {
     assert_eq!(HexGrid::neighbor(0, 2).unwrap(), Some(200));
     assert_eq!(HexGrid::neighbor(199, 4).unwrap(), None);
     assert_eq!(HexGrid::lattice_distance(-1, -1).unwrap(), 9999);
-    assert_eq!(
-        HexGrid::angular_distance(0, 199),
-        Err(GeometryError::AngularWalk)
-    );
+    // The reference walk leaves the grid for these valid pairs; the safe
+    // rule returns the lattice distance instead.
+    for (a, b, distance) in [(0, 199, 199), (5225, 4558, 133)] {
+        assert_eq!(HexGrid::angular_walk(a, b), Err(GeometryError::AngularWalk));
+        assert_eq!(HexGrid::angular_distance(a, b).unwrap(), distance);
+        assert_eq!(HexGrid::lattice_distance(a, b).unwrap(), distance);
+    }
+    assert_eq!(HexGrid::angular_distance(-1, 5), Ok(9999));
+    assert_eq!(HexGrid::angular_distance(40000, 5), Err(GeometryError::Hex));
+    // An orientation outside 0-5 returns the starting hex.
+    assert_eq!(HexGrid::step(20100, 6, 3).unwrap(), 20100);
     assert_eq!(grid.pick_hex([319, 182]), Some(19900));
     assert_eq!(grid.pick_hex([320, 182]), Some(20100));
     assert_eq!(grid.pick_hex([321, 182]), Some(20099));
@@ -373,7 +392,8 @@ fn vfs_prototype_lists_resolve_names_and_synthetic_map() {
         PrototypeKind::Item(ItemSubtype::Container)
     );
     assert!(catalog.lookup(0).is_err());
-    assert_eq!(catalog.lookup(1).unwrap(), catalog.lookup(2).unwrap());
+    // Entry 2 names a file whose stored PID is 1: rejected (safe rule).
+    assert!(catalog.lookup(2).is_err());
     let map = MapFile::parse(&vfs.read("maps/synthetic.map").unwrap(), &catalog).unwrap();
     assert_eq!(map.objects.total, 5);
     assert!(map.tiles.iter().all(Option::is_some));
@@ -470,7 +490,7 @@ fn spec003_extended_flag_permissions_by_flag_category_and_subtype() {
 }
 
 #[test]
-fn spec003_prototype_writer_round_trips_with_documented_asymmetries() {
+fn spec003_prototype_writer_round_trips_in_reader_order() {
     // Fixture A and every category without a write-side rule round-trip exactly.
     let container = fixture::container();
     assert_eq!(Prototype::parse(&container).unwrap().write(), container);
@@ -492,8 +512,8 @@ fn spec003_prototype_writer_round_trips_with_documented_asymmetries() {
             "{category}/{subtype}"
         );
     }
-    // Weapons read minimum at payload 0x04 / maximum at 0x08, but write the
-    // maximum first, so a save/reload exchanges the bounds.
+    // Weapons read minimum at payload 0x04 / maximum at 0x08; the safe-rule
+    // writer keeps that order, so a save/reload keeps the bounds.
     let mut weapon = fixture::prototype(0, 3);
     fixture::word(&mut weapon, 57 + 4, 2);
     fixture::word(&mut weapon, 57 + 8, 7);
@@ -506,19 +526,10 @@ fn spec003_prototype_writer_round_trips_with_documented_asymmetries() {
         panic!("weapon")
     };
     assert_eq!(read.damage, [2, 7]);
-    let written = parsed.write();
-    assert_eq!(written.len(), weapon.len());
-    assert_eq!(&written[61..69], &[0, 0, 0, 7, 0, 0, 0, 2]);
-    let PrototypeData::Item(Item {
-        data: ItemData::Weapon(reread),
-        ..
-    }) = Prototype::parse(&written).unwrap().data
-    else {
-        panic!("weapon")
-    };
-    assert_eq!(reread.damage, [7, 2]);
-    // Scenery appends radius, intensity, basic flags, extended flags, script,
-    // and subtype; the reader stops before this 24-byte suffix.
+    assert_eq!(parsed.write(), weapon);
+    // Scenery omits the reference writer's 24-byte suffix (radius,
+    // intensity, flags, extended flags, script, subtype); readers still
+    // tolerate it after the consumed payload.
     for subtype in 0..6 {
         let mut scenery = fixture::prototype(2, subtype);
         fixture::word(&mut scenery, 12, 3);
@@ -527,14 +538,10 @@ fn spec003_prototype_writer_round_trips_with_documented_asymmetries() {
         fixture::word(&mut scenery, 24, 0x800);
         fixture::word(&mut scenery, 28, 9);
         let parsed = Prototype::parse(&scenery).unwrap();
-        let written = parsed.write();
-        assert_eq!(written.len(), scenery.len() + 24);
-        assert_eq!(&written[..scenery.len()], scenery.as_slice());
-        assert_eq!(
-            &written[scenery.len()..],
-            fixture::words(&[3, 0x8000, 0x10, 0x800, 9, subtype as i32]).as_slice()
-        );
-        let reread = Prototype::parse(&written).unwrap();
+        assert_eq!(parsed.write(), scenery);
+        let mut suffixed = scenery.clone();
+        suffixed.extend(fixture::words(&[3, 0x8000, 0x10, 0x800, 9, subtype as i32]));
+        let reread = Prototype::parse(&suffixed).unwrap();
         assert_eq!(
             (reread.consumed_len, reread.data),
             (scenery.len(), parsed.data)
@@ -661,9 +668,19 @@ fn spec003_map_writer_grid_order_exclusions_and_script_compaction() {
         .collect();
     assert_eq!(retained, [1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17]);
     assert_eq!(reread.scripts[3].blocks.len(), 1);
-    // A temporary inventory child is refused instead of corrupting the stream.
+    // A temporary inventory child is skipped entirely (safe rule): no
+    // quantity, no record, and only the written entries are counted.
     let mut child = map.clone();
     child.objects.elevations[0] = vec![template.clone()];
+    let entries = template.inventory.len();
     child.objects.elevations[0][0].inventory[0].object.flags = BasicFlags(0x4);
-    assert!(child.write().is_err());
+    let reread = MapFile::parse(&child.write().unwrap(), &lookup).unwrap();
+    let parent = &reread.objects.elevations[0][0];
+    assert_eq!(parent.inventory.len(), entries - 1);
+    assert!(
+        parent
+            .inventory
+            .iter()
+            .all(|entry| !entry.object.flags.contains(BasicFlags::TEMPORARY))
+    );
 }

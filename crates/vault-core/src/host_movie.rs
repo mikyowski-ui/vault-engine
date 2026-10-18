@@ -50,6 +50,12 @@ impl<A: WorldAssets> WorldHost<A> {
         }));
         true
     }
+    /// The presentation layer finished every queued movie: a library movie
+    /// started by `playmovie` has ended, which releases its waiting program
+    /// (SPEC-005 §3.2 safe rule).
+    pub fn movie_finished(&mut self) {
+        self.library.movie_playing = false;
+    }
     /// §3.13 `play_gmovie`: the table flags (plus `0x02` for indexes 3 and 4
     /// without a loaded map). An index outside 0..13 is a failed play
     /// (safe rule); a failed play is a diagnostic only.

@@ -126,13 +126,13 @@ fn spec008_fixture_travel_speed_binary32() {
     assert_eq!(speed(100, 0), Some((120, 7200)));
     assert_eq!(speed(50, 1), Some((90, 7200)));
     assert_eq!(speed(100, 2), Some((120, 3600)));
-    // Capped only above.
     assert_eq!(speed(250, 0), Some((120, 7200)));
     assert_eq!(speed(33, 0), Some((79, 10936)));
-    assert_eq!(speed(-50, 0), Some((30, 28800)));
-    // Unsafe inputs are rejected rather than normalized.
-    assert_eq!(speed(-100, 0), None);
-    assert_eq!(speed(50, 5), None);
+    assert_eq!(speed(100, 4), Some((120, 0)));
+    // Safe rule: Outdoorsman clamps below at 0 and Pathfinder to 0-4.
+    assert_eq!(speed(-50, 0), Some((60, 14400)));
+    assert_eq!(speed(-100, 0), Some((60, 14400)));
+    assert_eq!(speed(50, 5), Some((90, 0)));
 }
 
 #[test]
@@ -300,14 +300,14 @@ fn spec008_fixture_discovery_stride_scout_and_west_reveal() {
     west.reveal(false);
     assert_eq!((west.discovery([0, 10]), west.discovery([1, 10])), (2, 2));
     assert_eq!(west.discovery([2, 10]), 1);
-    // Reset clears only rows 0-28, columns 0-27.
+    // Safe rule: reset clears all 31 x 29 bytes, including the last
+    // playable row and the padding.
     let mut reset = WorldMap::default();
     reset.saved.discovery.fill(1);
     reset.reset_discovery();
     assert_eq!(reset.discovery([27, 28]), 0);
-    assert_eq!(reset.discovery([0, 29]), 1);
-    assert_eq!(reset.saved.discovery[28], 1);
-    assert_eq!(reset.saved.discovery[898], 1);
+    assert_eq!(reset.discovery([0, 29]), 0);
+    assert!(reset.saved.discovery.iter().all(|cell| *cell == 0));
 }
 
 #[test]
@@ -397,7 +397,7 @@ fn spec008_town_knowledge_entrances_and_alternate_rows() {
         (0, 1, 1)
     );
     assert!(map.entrance_known(0, 0) && !map.entrance_known(0, 1));
-    // Known value must equal 1; entrances narrow to a byte first.
+    // Known value must equal 1; entrances test the full 32-bit value.
     gvars[68] = 1;
     gvars[71] = 2;
     gvars[567] = 256;
@@ -406,7 +406,7 @@ fn spec008_town_knowledge_entrances_and_alternate_rows() {
     assert!(map.town_enabled(2) && !map.town_enabled(3));
     assert_eq!(map.discovery([21, 1]), 1);
     assert!(map.entrance_known(2, 0));
-    assert!(!map.entrance_known(2, 1) && map.entrance_known(2, 2));
+    assert!(map.entrance_known(2, 1) && map.entrance_known(2, 2));
     // Vault 13: slot zero only before tick 864000, all four at/after it.
     assert!(!map.entrance_known(0, 3));
     map.refresh_knowledge(&gvars, 864000);
@@ -599,7 +599,7 @@ fn spec008_fixture_until_healed_repeats_three_hour_phases() {
         RestOutcome::Completed
     );
     assert_eq!(host.world.clock.ticks, start);
-    // A zero healing rate has no safe completion guarantee.
+    // Safe rule: a nonpositive healing rate performs no rest at all.
     let player = host.world.player;
     host.world
         .get_mut(player)
@@ -609,7 +609,11 @@ fn spec008_fixture_until_healed_repeats_three_hour_phases() {
         .unwrap()
         .bonus[14] = -100;
     set_hp(&mut host, 1);
-    assert!(host.rest(RestRequest::UntilHealed, &mut || false).is_err());
+    assert_eq!(
+        rest(&mut host, RestRequest::UntilHealed),
+        RestOutcome::Completed
+    );
+    assert_eq!(host.world.clock.ticks, start);
 }
 
 #[test]

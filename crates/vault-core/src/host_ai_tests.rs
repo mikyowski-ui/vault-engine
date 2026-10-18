@@ -1460,6 +1460,62 @@ fn spec009_team_switching_and_random_retarget() {
     );
 }
 
+/// Every draw returns its upper bound: a D100 miss and maximum damage.
+struct High;
+impl RandomSource for High {
+    fn range(&mut self, first: i32, last: i32) -> Result<i32, WorldError> {
+        Ok(last.max(first))
+    }
+}
+
+#[test]
+fn spec007_ranged_miss_hits_the_accidental_non_through_critter() {
+    let mut world = world();
+    let player = world.player;
+    world.get_mut(player).unwrap().raw.hex = Some(0);
+    let attacker = npc(&mut world, 20100 + 2 * 200, 1, 0, &[]);
+    world.get_mut(attacker).unwrap().raw.orientation = 2;
+    let bystander = npc(&mut world, 20100 + 3 * 200, 2, 0, &[]);
+    let defender = npc(&mut world, 20100 + 5 * 200, 2, 0, &[]);
+    let gun = carry(
+        &mut world,
+        attacker,
+        weapon(60, 0x06, 4, 8, 20, 10, 100),
+        1,
+        loaded(10, 30),
+    );
+    world
+        .equip(attacker, gun, BasicFlags::RIGHT_HAND.0)
+        .unwrap();
+    state(&mut world, attacker).ap = 8;
+    let mut assets = AiAssets::default();
+    assets.prototypes.insert(30, ammo(30, 0, 10));
+    let mut host = ai_host(world, assets);
+    assert_eq!(host.accidental_target(attacker, defender), Some(bystander));
+    // A missed shot hits the bystander, torso, at normal damage.
+    let attack = host
+        .world
+        .attack_profile(
+            attacker,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::TORSO,
+            false,
+        )
+        .unwrap();
+    let (spray, victim) = host
+        .resolve_attack(attacker, defender, &attack, &mut High)
+        .unwrap();
+    assert_eq!(spray.main.code, 1);
+    assert_ne!(spray.main.defender_flags & effect::HIT, 0);
+    assert!(spray.main.damage > 0);
+    assert_eq!(victim.map(|(victim, _)| victim), Some(bystander));
+    // A projectile-through critter is skipped, and the defender itself is
+    // never an accidental target.
+    host.world.get_mut(bystander).unwrap().raw.flags = BasicFlags::PROJECTILE_THROUGH;
+    assert_eq!(host.accidental_target(attacker, defender), None);
+}
+
 #[test]
 fn spec009_explosion_attribution_and_noticed_drops() {
     let mut world = world();

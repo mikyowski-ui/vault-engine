@@ -234,8 +234,9 @@ impl Font {
                     .unwrap_or(0)
                     + self.spacing
             }
-            FontKind::Antialiased if self.space_width > 0 => self.height + self.spacing,
-            FontKind::Antialiased => self.line_height(),
+            // H + S; SPEC-002 §3.1 safe rule for a zero or negative Q, which
+            // the reference measures as H + L.
+            FontKind::Antialiased => self.height + self.spacing,
         }
     }
     /// Stop at NUL; high-bit codes are handled safely as unsigned byte indices.
@@ -385,8 +386,10 @@ impl FontSet {
             None
         }
     }
-    /// Select a font number. A missing slot leaves the previous selection
-    /// (bitmap and metrics) unchanged and returns `false`.
+    /// Select a font number. Under the §3.1 safe rule, selecting an unloaded
+    /// number is a no-op: the current number, subsystem, bitmap, and metrics
+    /// stay unchanged (the reference switches subsystem and reported number
+    /// inside a registered range), and `false` is returned.
     pub fn select(&mut self, number: i32) -> bool {
         let available = self.get(number).is_some();
         if available {

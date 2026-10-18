@@ -195,6 +195,8 @@ pub struct MapFile {
     pub scripts: [ScriptCategory; 5],
     pub objects: MapObjects,
     pub consumed_len: usize,
+    /// Safe-rule substitutions made while reading (not serialized).
+    pub diagnostics: Vec<String>,
 }
 
 fn pool(r: &mut Reader<'_>, count: i32) -> Result<Vec<i32>, ParseError> {
@@ -308,7 +310,18 @@ impl MapFile {
             return Err(r.error("entry hex outside grid"));
         }
         let entry_elevation = r.count("entry elevation", 2)? as u8;
-        let entry_orientation = r.count("entry orientation", 5)? as u8;
+        // SPEC-003 §3.2 safe rule: an orientation outside 0-5 reads as 0.
+        let mut diagnostics = Vec::new();
+        let orientation = r.be_i32()?;
+        let entry_orientation = u8::try_from(orientation)
+            .ok()
+            .filter(|orientation| *orientation <= 5)
+            .unwrap_or_else(|| {
+                diagnostics.push(format!(
+                    "map entry orientation {orientation} is outside 0-5; using 0"
+                ));
+                0
+            });
         let stored_local_count = r.be_i32()?;
         let script_reference = r.be_i32()?;
         let flags = MapFlags(r.word()?);
@@ -382,6 +395,7 @@ impl MapFile {
             scripts,
             objects,
             consumed_len: r.pos,
+            diagnostics,
         })
     }
     pub fn tile(&self, elevation: usize, index: usize) -> Option<TilePair> {
@@ -792,9 +806,16 @@ impl MapObject {
             ));
         }
         let frame = i32::try_from(self.frame).map_err(|_| error("object frame exceeds i32"))?;
-        let entries = i32::try_from(self.inventory.len())
-            .map_err(|_| error("inventory count exceeds i32"))?;
-        let capacity = i32::try_from(self.inventory_capacity.max(self.inventory.len()))
+        // SPEC-003 §3.3 safe rule: a temporary inventory child is skipped
+        // entirely (no quantity, no record) and only written entries count.
+        let kept: Vec<_> = self
+            .inventory
+            .iter()
+            .filter(|entry| !entry.object.flags.contains(BasicFlags::TEMPORARY))
+            .collect();
+        let entries =
+            i32::try_from(kept.len()).map_err(|_| error("inventory count exceeds i32"))?;
+        let capacity = i32::try_from(self.inventory_capacity.max(kept.len()))
             .map_err(|_| error("inventory capacity exceeds i32"))?;
         for value in [
             self.id as i32,
@@ -863,14 +884,7 @@ impl MapObject {
                 }
             }
         }
-        for entry in &self.inventory {
-            // The reference writer can emit a quantity and then omit/fail on a
-            // temporary child, corrupting the stream; refuse that state instead.
-            if entry.object.flags.contains(BasicFlags::TEMPORARY) {
-                return Err(error(
-                    "temporary object inside an inventory cannot be saved",
-                ));
-            }
+        for entry in kept {
             let quantity = i32::try_from(entry.quantity)
                 .ok()
                 .filter(|quantity| *quantity > 0)

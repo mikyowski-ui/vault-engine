@@ -134,13 +134,14 @@ pub fn failure_column(score: i32) -> usize {
     }
 }
 
-/// Critical-failure mask. The reference has no safe clamp for an invalid
-/// table number, so one outside 0-6 has no defined mask.
+/// Critical-failure mask for a column 0-4. Under the SPEC-007 §2.4 safe
+/// rule a table number outside 0-6 uses table 0.
 pub fn failure_mask(table: i32, column: usize) -> Option<u32> {
-    CRITICAL_FAILURE
-        .get(usize::try_from(table).ok()?)
-        .and_then(|row| row.get(column))
-        .copied()
+    let row = usize::try_from(table)
+        .ok()
+        .and_then(|table| CRITICAL_FAILURE.get(table))
+        .unwrap_or(&CRITICAL_FAILURE[0]);
+    row.get(column).copied()
 }
 
 /// Critical-success effect for a victim matrix (0-14, or [`PLAYER_MATRIX`]),

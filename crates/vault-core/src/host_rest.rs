@@ -253,10 +253,13 @@ impl<A: WorldAssets> WorldHost<A> {
                     session.finished = Some(RestOutcome::Completed);
                     return Ok(session);
                 }
+                // SPEC-008 §3.9 safe rule: a nonpositive healing rate
+                // performs no until-healed rest.
                 if rate <= 0 {
-                    return Err(WorldError::Invalid(
-                        "until-healed rest needs a positive healing rate".into(),
-                    ));
+                    self.world
+                        .diagnostic("until-healed rest skipped: the healing rate is not positive");
+                    session.finished = Some(RestOutcome::Completed);
+                    return Ok(session);
                 }
                 session.plan = Plan::Chunks {
                     estimate: 3 * deficit / rate,

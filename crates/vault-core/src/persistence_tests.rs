@@ -325,6 +325,11 @@ fn spec008_slot_loading_validates_companions_before_changing_state() {
     fs::remove_file(slot.join("SYNTH.SAV")).unwrap();
     assert!(host.load_game(root.path(), 2).is_err());
     check_unchanged(&host);
+    // A truncated companion map is rejected before any state changes.
+    fs::write(slot.join("SYNTH.SAV"), &map[..map.len() - 4]).unwrap();
+    assert!(host.load_game(root.path(), 2).is_err());
+    check_unchanged(&host);
+    fs::remove_file(slot.join("SYNTH.SAV")).unwrap();
     // Companion names match case-insensitively.
     fs::write(slot.join("synth.sav"), &map).unwrap();
     // A truncated central file.
@@ -342,7 +347,7 @@ fn spec008_slot_loading_validates_companions_before_changing_state() {
 }
 
 #[test]
-fn spec008_failed_slot_write_restores_backups() {
+fn spec008_failed_slot_write_leaves_the_old_slot_untouched() {
     let dir = corpus();
     let root = tempfile::tempdir().unwrap();
     let mut host = host(dir.path());
@@ -351,19 +356,42 @@ fn spec008_failed_slot_write_restores_backups() {
     host.save_game(root.path(), 4, &SaveInfo::default())
         .unwrap();
     let slot = slot_directory(root.path(), 4).unwrap();
-    let central = fs::read(slot.join("SAVE.DAT")).unwrap();
-    // SECOND.SAV becomes an unrenameable directory, so its write fails.
-    fs::remove_file(slot.join("SECOND.SAV")).unwrap();
-    fs::create_dir_all(slot.join("SECOND.SAV/blocker")).unwrap();
-    fs::create_dir_all(slot.join("SECOND.BAK/blocker")).unwrap();
+    let snapshot = |slot: &std::path::Path| {
+        let mut files: Vec<_> = fs::read_dir(slot)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_file())
+            .map(|path| (path.clone(), fs::read(path).unwrap()))
+            .collect();
+        files.sort();
+        files
+    };
+    let before = snapshot(&slot);
+    // SECOND.SAV.TMP is a directory, so staging that companion fails; the
+    // safe-rule writer then leaves every committed file byte-identical.
+    fs::create_dir_all(slot.join("SECOND.SAV.TMP/blocker")).unwrap();
     host.world.clock.set(999_999);
     assert!(
         host.save_game(root.path(), 4, &SaveInfo::default())
             .is_err()
     );
-    assert_eq!(fs::read(slot.join("SAVE.DAT")).unwrap(), central);
-    assert!(!slot.join("SAVE.BAK").exists());
-    assert!(slot.join("SYNTH.SAV").is_file() && slot.join("AUTOMAP.SAV").is_file());
+    assert_eq!(snapshot(&slot), before);
+    // Once staging succeeds, the slot is replaced and no backups remain.
+    fs::remove_dir_all(slot.join("SECOND.SAV.TMP")).unwrap();
+    host.save_game(root.path(), 4, &SaveInfo::default())
+        .unwrap();
+    let central = before
+        .iter()
+        .find(|(path, _)| path.ends_with("SAVE.DAT"))
+        .unwrap();
+    assert_ne!(fs::read(slot.join("SAVE.DAT")).unwrap(), central.1);
+    assert!(fs::read_dir(&slot).unwrap().all(|entry| {
+        entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_some_and(|e| e != "BAK" && e != "TMP")
+    }));
 }
 
 #[test]
@@ -528,4 +556,35 @@ fn spec008_world_host_runs_from_selected_dat_databases() {
     assert!(host.assets.object_art(art).is_ok());
     host.load_map("maps/second.map").unwrap();
     assert!(host.world.persistence.maps.contains_key("SYNTH.SAV"));
+}
+
+#[test]
+fn spec008_timed_event_with_a_missing_owner_restores_without_one() {
+    let dir = corpus();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let player = host.world.player;
+    let now = host.world.clock.ticks;
+    host.world
+        .queue
+        .insert(now, 600, player, EventKind::Other(9))
+        .unwrap();
+    let mut save = host.build_save(&SaveInfo::default()).unwrap();
+    let record = save
+        .queue
+        .iter_mut()
+        .find(|record| record.kind == 9)
+        .unwrap();
+    record.owner = 999_999;
+    let maps = host.world.persistence.maps.clone();
+    let automap = host.world.persistence.automap.clone();
+    host.apply_save(save, maps, automap).unwrap();
+    let restored: Vec<_> = host
+        .world
+        .queue
+        .events()
+        .filter(|event| event.kind == EventKind::Other(9))
+        .map(|event| (event.due, event.object))
+        .collect();
+    assert_eq!(restored, [(now + 600, 0)]);
 }

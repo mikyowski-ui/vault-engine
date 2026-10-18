@@ -247,9 +247,12 @@ impl Vm {
         }
         Ok(index)
     }
+    /// A variable slot; every index must be integer-tagged (the SPEC-004
+    /// §3.1 safe rule extends the local-fetch check to the other accesses).
     fn slot(&self, base: i32, index: Value) -> Result<usize, VmError> {
+        let index = index.integer_value()?;
         let base = usize::try_from(base).map_err(|_| VmError::Slot)?;
-        let index = usize::try_from(index.payload as i32).map_err(|_| VmError::Slot)?;
+        let index = usize::try_from(index).map_err(|_| VmError::Slot)?;
         base.checked_add(index.checked_mul(6).ok_or(VmError::Slot)?)
             .ok_or(VmError::Slot)
     }
@@ -407,9 +410,6 @@ impl Vm {
             0x8011 => self.status.0 |= VmStatus::STOPPED,
             0x8012 | 0x8032 => {
                 let index = self.value_stack.pop()?;
-                if word == 0x8032 {
-                    index.integer_value()?;
-                }
                 let slot = self.slot(if word == 0x8032 { self.f } else { self.g }, index)?;
                 self.value_stack.push(self.value_stack.get(slot)?)?;
             }
@@ -518,7 +518,7 @@ impl Vm {
                 .value_stack
                 .truncate(usize::try_from(self.f).map_err(|_| VmError::Slot)?)?,
             0x802b => {
-                let count = self.value_stack.pop()?.payload as i32;
+                let count = self.value_stack.pop()?.integer_value()?;
                 let base = (self.value_stack.byte_len() as i64) - i64::from(count) * 6;
                 if count < 0 || base < 0 || base > self.value_stack.byte_len() as i64 {
                     return Err(VmError::Slot);
@@ -532,12 +532,12 @@ impl Vm {
                 self.value_stack
                     .push(Value::integer(self.program.procedures[index].body as i32))?;
             }
+            // SPEC-004 §3.2 safe rule: discard exactly the counted values
+            // (the reference reuses each popped payload as the next bound).
             0x802e => {
-                let mut count = self.value_stack.pop()?.integer_value()?;
-                let mut k = 0;
-                while k < count {
-                    count = self.value_stack.pop()?.payload as i32;
-                    k += 1;
+                let count = self.value_stack.pop()?.integer_value()?;
+                for _ in 0..count.max(0) {
+                    self.value_stack.pop()?;
                 }
             }
             0x802f | 0x8030 => {
@@ -599,8 +599,10 @@ impl Vm {
                 return Ok(RunOutcome::Blocked);
             }
             if self.status.contains(VmStatus::WAITING) {
+                // SPEC-004 §3.3 safe rule: a timed wait releases on its first
+                // readiness check, so a late check cannot hang the program.
                 let ready = if self.wait_predicate == 1 {
-                    Ok(host.now_ms() <= self.wait_deadline)
+                    Ok(true)
                 } else {
                     host.wait_ready(self.wait_predicate, self.wait_start, self.wait_deadline)
                 };

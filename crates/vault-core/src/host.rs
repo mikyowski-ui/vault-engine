@@ -1,7 +1,7 @@
 use crate::{
     ObjectAction, ObjectRef, Perk, ScriptEvent, WorldEffect, WorldError, WorldRules, WorldState,
     assets::WorldAssets,
-    dialogue::{DialogueText, Mood, TalkingHead, npc_reaction},
+    dialogue::{DialogueText, HeadDefinition, Mood, TalkingHead, npc_reaction},
     library::LibraryState,
     queue::EventKind,
     world::{ScriptRequest, WorldObject, WorldTrace, empty_map, object_record},
@@ -73,11 +73,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub combat_ai: Box<dyn crate::combat_state::CombatAi>,
     pub building_animation: Option<AnimationSequence>,
     pub animations: Vec<AnimationSequence>,
-    pub last_object_name: Vec<u8>,
     pub floating_style: i32,
     dialogue_waiters: Vec<u32>,
     dialogue_callbacks: Vec<u32>,
-    host_text: BTreeMap<u32, Vec<u8>>,
     interactions: VecDeque<Interaction>,
     presentation: Option<PresentationState>,
 }
@@ -198,25 +196,15 @@ impl<A: WorldAssets> WorldHost<A> {
             combat_ai: Box::new(crate::combat_state::PacketAi),
             building_animation: None,
             animations: Vec::new(),
-            last_object_name: b"<Critter>".to_vec(),
             floating_style: 1,
             dialogue_waiters: Vec::new(),
             dialogue_callbacks: Vec::new(),
-            host_text: BTreeMap::new(),
             interactions: VecDeque::new(),
             presentation: None,
         }
     }
     pub fn rules(&mut self, rules: WorldRules) {
         self.world.rules = rules;
-    }
-    pub(crate) fn opaque_text(&mut self, text: Vec<u8>) -> Result<u32, VmError> {
-        if self.host_text.len() >= 65536 || text.len() > 1023 {
-            return Err(VmError::Host("host text registry limit".into()));
-        }
-        let reference = 0x40000000 + self.host_text.len() as u32;
-        self.host_text.insert(reference, text);
-        Ok(reference)
     }
     pub fn bind_program(&mut self, vm: &Vm, script: u32) {
         self.program_scripts.insert(vm.id, script);
@@ -308,6 +296,9 @@ impl<A: WorldAssets> WorldHost<A> {
             })
             .flatten();
         self.world.restoring = map.header.flags.0 & 1 != 0;
+        for message in &map.diagnostics {
+            self.world.diagnostic(message.clone());
+        }
         self.world.trace.push(WorldTrace::LoadStep(3));
         self.world.import_map(map, &self.assets)?;
         self.world.trace.push(WorldTrace::LoadStep(4));
@@ -717,19 +708,22 @@ impl<A: WorldAssets> WorldHost<A> {
             .filter(|effect| matches!(effect, WorldEffect::MapTransition { .. }))
             .count()
     }
+    /// `game_time_advance`: events are processed after each full day and
+    /// once more after the signed remainder. Under the SPEC-005 §3.7 safe
+    /// rule the clock arithmetic wraps as 32-bit two's complement, so a
+    /// negative remainder moves the clock back.
     pub fn advance_time(&mut self, ticks: i32) -> Result<(), WorldError> {
-        let mut ticks = i64::from(ticks);
-        if ticks < 0 {
-            return Err(WorldError::Invalid(
-                "negative explicit time advance is undefined".into(),
-            ));
-        }
+        let mut ticks = ticks;
+        let advance = |host: &mut Self, delta: i32| {
+            let wrapped = (host.world.clock.ticks as u32).wrapping_add_signed(delta);
+            host.world.clock.set(u64::from(wrapped));
+        };
         while ticks >= 864000 {
-            self.world.clock.advance(864000)?;
+            advance(self, 864000);
             self.process_queue()?;
             ticks -= 864000;
         }
-        self.world.clock.advance(ticks)?;
+        advance(self, ticks);
         // Each pass's nonzero stop only ends that pass; time still advances.
         self.process_queue().map(|_| ())
     }
@@ -831,9 +825,25 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.interactions.push_front(interaction);
             }
         }
+        // SPEC-006 §3.11 safe rule: missing head art keeps the current frame
+        // and is diagnosed once, rather than failing the update.
         if let Some(head) = &mut self.world.dialogue.head {
-            let art = self.assets.frame(&head.path()?)?;
-            changed = head.tick(now_ms, art.frame_count(), art.fps, &mut self.world.rng)?;
+            let art = head.path().and_then(|path| self.assets.frame(&path));
+            let mut diagnostic = head.diagnostic.take();
+            match art {
+                Ok(art) => {
+                    changed = head.tick(now_ms, art.frame_count(), art.fps, &mut self.world.rng)?;
+                    diagnostic = diagnostic.or_else(|| head.diagnostic.take());
+                }
+                Err(error) if head.missing_art.is_none() => {
+                    head.missing_art = Some(error.to_string());
+                    diagnostic = Some(format!("talking-head art unavailable: {error}"));
+                }
+                Err(_) => {}
+            }
+            if let Some(message) = diagnostic {
+                self.world.diagnostic(message);
+            }
         }
         if self.world.dialogue.waiting
             && self.world.dialogue.page_offsets.len() > 1
@@ -927,12 +937,8 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.dialogue.resolved_reply = text;
         self.world.dialogue.resolved_options.clear();
         for (index, option) in self.world.dialogue.options.clone().iter().enumerate() {
-            let (text, _) = self.text_resource(&option.text, true, index == 0)?;
-            if text.len() > 897 {
-                return Err(WorldError::Invalid(
-                    "resolved option exceeds 897 bytes".into(),
-                ));
-            }
+            let (mut text, _) = self.text_resource(&option.text, true, index == 0)?;
+            text.truncate(897);
             self.world
                 .dialogue
                 .resolved_options
@@ -1042,6 +1048,16 @@ impl<A: WorldAssets> WorldHost<A> {
         let Ok(base) = self.world.ensure_locals(sid) else {
             return -1;
         };
+        // The standard layout needs four locals in the script's own slice;
+        // missing local storage yields -1.
+        if self
+            .world
+            .scripts
+            .get(&sid)
+            .is_none_or(|script| script.local_count < 4)
+        {
+            return -1;
+        }
         let charisma = self.world.player_stat(3);
         let presence = self.world.perk(Perk::Presence);
         let cult = self.world.perk(Perk::CultOfPersonality) > 0;
@@ -1071,14 +1087,26 @@ impl<A: WorldAssets> WorldHost<A> {
         let head = if head == -1 {
             None
         } else {
-            if self.world.dialogue.target == 0 {
-                return Err(WorldError::Invalid(
-                    "head reaction requires the previous dialogue target".into(),
-                ));
-            }
-            let mood = Mood::from_reaction(self.reaction(self.world.dialogue.target));
+            // SPEC-005 §3.3 safe rule: with no dialogue target yet, the mood
+            // comes from the new self target.
+            let source = match self.world.dialogue.target {
+                0 => owner,
+                target => target,
+            };
+            let mood = Mood::from_reaction(self.reaction(source));
+            // SPEC-006 §3.11 safe rule: a head outside the list selects no
+            // fidget art and is diagnosed; the session still opens.
+            let definition = self.assets.head(head).unwrap_or_else(|error| {
+                self.world
+                    .diagnostic(format!("head {head} is unavailable: {error}"));
+                HeadDefinition {
+                    index: (head & 0xfff) as u16,
+                    stem: String::new(),
+                    counts: [0; 3],
+                }
+            });
             Some(TalkingHead::new(
-                self.assets.head(head)?,
+                definition,
                 mood,
                 self.world.elapsed_ms,
                 &mut self.world.rng,
@@ -1646,7 +1674,9 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
     }
     fn wait_ready(&mut self, reference: u32, _start: u32, _deadline: u32) -> Result<bool, VmError> {
         if reference == 2 {
-            Ok(self.library.dialogue_depth > 0 || self.library.movie_playing)
+            // SPEC-005 §3.2 safe rule: wait until playback ends (the
+            // reference's predicate has the opposite polarity).
+            Ok(!self.library.movie_playing)
         } else {
             Err(VmError::Host("unknown wait predicate".into()))
         }

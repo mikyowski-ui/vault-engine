@@ -76,16 +76,16 @@ impl ParkMiller {
     }
 }
 impl RandomSource for ParkMiller {
+    /// Every call consumes one draw. Reversed bounds return the first bound
+    /// (`[Must-match]`); under the SPEC-006 §3.4 safe rule, so does any range
+    /// whose width does not fit in 1 through 2147483647.
     fn range(&mut self, first: i32, last: i32) -> Result<i32, WorldError> {
-        if first > last {
-            self.draw();
+        let width = i64::from(last) - i64::from(first) + 1;
+        let draw = self.draw();
+        if !(1..=i64::from(i32::MAX)).contains(&width) {
             return Ok(first);
         }
-        let span = i64::from(last) - i64::from(first) + 1;
-        if span > i64::from(i32::MAX) {
-            return Err(WorldError::Arithmetic);
-        }
-        Ok((i64::from(first) + i64::from(self.draw()) % span) as i32)
+        Ok((i64::from(first) + i64::from(draw) % width) as i32)
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -208,24 +208,16 @@ pub struct TravelSpeed {
     pub interval: u32,
     pub ticks: u32,
 }
-/// Binary32 travel speed from displayed Outdoorsman (capped only above at
-/// 100) and Pathfinder ranks. Inputs that would make the reference divide by
-/// zero or convert a negative tick count are rejected, not normalized.
+/// Travel speed from displayed Outdoorsman (capped above at 100) and
+/// Pathfinder ranks: W and the division in binary32, the Pathfinder factor in
+/// binary64. Under the SPEC-008 §3.4 safe rule Outdoorsman is clamped below
+/// at 0 and Pathfinder to 0-4, so W is at least 60 and Q at least 0.
 pub fn travel_speed(outdoorsman: i32, pathfinder: u32) -> Result<TravelSpeed, WorldError> {
-    let skill = outdoorsman.min(100) as f32;
+    let skill = outdoorsman.clamp(0, 100) as f32;
+    let ranks = pathfinder.min(4);
     let interval = (60.0_f32 + 60.0_f32 * skill / 100.0_f32).trunc();
-    if interval < 1.0 {
-        return Err(WorldError::Invalid(
-            "travel interval is not positive for this Outdoorsman value".into(),
-        ));
-    }
     let ticks = (864000.0_f32 / interval).trunc();
-    let ticks = (ticks * (1.0_f32 - 0.25_f32 * pathfinder as f32)).trunc();
-    if ticks < 0.0 {
-        return Err(WorldError::Invalid(
-            "Pathfinder ranks make travel time negative".into(),
-        ));
-    }
+    let ticks = (f64::from(ticks) * (1.0 - 0.25 * f64::from(ranks))).trunc();
     Ok(TravelSpeed {
         interval: interval as u32,
         ticks: ticks as u32,
@@ -472,12 +464,11 @@ impl WorldMap {
             }
         }
     }
-    /// Initial/reset clearing visits only rows 0-28 and columns 0-27 of the
-    /// larger saved array.
+    /// New-game reset: under the SPEC-008 §3.5 safe rule every byte of the
+    /// 31 x 29 saved array is cleared (the reference visits only rows 0-28,
+    /// columns 0-27).
     pub fn reset_discovery(&mut self) {
-        for row in 0..ROWS - 1 {
-            self.saved.discovery[STRIDE * row..STRIDE * row + COLUMNS].fill(0);
-        }
+        self.saved.discovery.fill(0);
     }
     pub fn town_enabled(&self, town: usize) -> bool {
         town < 32 && self.saved.towns & (1 << town) != 0
@@ -490,13 +481,14 @@ impl WorldMap {
     fn set_entrance(&mut self, row: usize, slot: usize, known: bool) {
         self.saved.entrances[ENTRANCE_SLOTS * row + slot] = u8::from(known);
     }
-    /// Derive town and entrance knowledge from campaign globals. Entrance
-    /// globals narrow to a byte before converting to 0/1; a known-town value
-    /// must equal 1 to enable the town, reveal its cell, and enable slot 0.
+    /// Derive town and entrance knowledge from campaign globals. Under the
+    /// SPEC-008 §3.7 safe rule an entrance global is tested as a full 32-bit
+    /// value (the reference narrows it to a byte); a known-town value must
+    /// equal 1 to enable the town, reveal its cell, and enable slot 0.
     pub fn refresh_knowledge(&mut self, gvars: &[i32], ticks: u64) {
         for (town, row) in TOWNS.iter().enumerate().skip(1) {
             for (slot, index) in row.entrance_globals.iter().enumerate() {
-                self.set_entrance(town, slot, global(gvars, *index) as u8 != 0);
+                self.set_entrance(town, slot, global(gvars, *index) != 0);
             }
             if global(gvars, row.known_global) == 1 {
                 self.saved.towns |= 1 << town;

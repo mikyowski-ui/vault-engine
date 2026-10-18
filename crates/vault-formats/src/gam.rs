@@ -69,33 +69,12 @@ impl GamFile {
                 .position(|b| matches!(b, b';' | 0))
                 .unwrap_or(chunk.len());
             let line = &chunk[..end];
-            let value = if let Some(equal) = line.iter().position(|b| *b == b'=') {
-                let text = line[equal + 1..].trim_ascii_start();
-                let sign = usize::from(text.first().is_some_and(|b| matches!(b, b'+' | b'-')));
-                let digits = text[sign..]
-                    .iter()
-                    .take_while(|b| b.is_ascii_digit())
-                    .count();
-                if digits == 0 {
-                    return Err(ParseError::new(
-                        "GAM",
-                        offset + equal + 1,
-                        "assignment has no defined numeric value",
-                    ));
-                }
-                std::str::from_utf8(&text[..sign + digits])
-                    .expect("ASCII decimal")
-                    .parse::<i32>()
-                    .map_err(|_| {
-                        ParseError::new(
-                            "GAM",
-                            offset + equal + 1,
-                            "decimal initializer exceeds i32",
-                        )
-                    })?
-            } else {
-                0
-            };
+            // SPEC-006 §2.1 safe rule: an assignment with no convertible
+            // number stores zero, and an overflowing decimal is clamped.
+            let value = line
+                .iter()
+                .position(|b| *b == b'=')
+                .map_or(0, |equal| crate::ai::decimal_prefix(&line[equal + 1..]).0);
             result.values.push(value);
         }
         Ok(result)

@@ -54,10 +54,13 @@ fn spec008_fixture_complete_save_header() {
     let mut terminated = bytes.clone();
     terminated[0x11] = b'!';
     assert!(SaveHeader::parse(&terminated).is_err());
-    // Another version still passes this header reader.
-    let mut versioned = bytes.clone();
-    versioned[0x19] = 9;
-    assert_eq!(SaveHeader::parse(&versioned).unwrap().version, [9, 1]);
+    // Safe rule: a version other than 1.1 is rejected (the reference's
+    // header reader accepts it).
+    for at in [0x19, 0x1b] {
+        let mut versioned = bytes.clone();
+        versioned[at] = 9;
+        assert!(SaveHeader::parse(&versioned).is_err());
+    }
     // A strict validator rejects a missing reserved tail.
     assert!(SaveHeader::parse(&bytes[..0x74e3]).is_err());
 }

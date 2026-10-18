@@ -69,6 +69,7 @@ pub struct LibraryState {
     pub dialogue_depth: i32,
     pub start_position: i32,
     pub reply_title: Option<Vec<u8>>,
+    pub reply_flags: u16,
     pub option_flags: u16,
     pub reply_color: [i32; 3],
     pub option_color: [i32; 3],
@@ -115,6 +116,7 @@ impl Default for LibraryState {
             dialogue_depth: -1,
             start_position: 0,
             reply_title: None,
+            reply_flags: 0,
             option_flags: 0,
             reply_color: [31; 3],
             option_color: [31; 3],
@@ -158,13 +160,7 @@ pub(crate) fn formatted(vm: &Vm, value: Value) -> Result<Option<Vec<u8>>, VmErro
                 .to_vec(),
         ),
         Value::INTEGER => Some((value.payload as i32).to_string().into_bytes()),
-        Value::FLOAT => {
-            let value = f32::from_bits(value.payload);
-            if !value.is_finite() {
-                return Err(VmError::Arithmetic);
-            }
-            Some(format!("{value:.5}").into_bytes())
-        }
+        Value::FLOAT => Some(vault_vm::float_text(f32::from_bits(value.payload))),
         _ => None,
     })
 }
@@ -193,7 +189,11 @@ impl LibraryState {
                 *binding = None;
             }
         }
-        // The reference does not clear the global any-key binding here.
+        // SPEC-005 §3.1 safe rule: the any-key binding is cleared with its
+        // owning program (the reference leaves it).
+        if self.any_key.is_some_and(|(owner, _)| owner == program) {
+            self.any_key = None;
+        }
     }
     /// A dispatched persistent handler finished; it can accept hits again.
     pub fn release_named(&mut self, program: u32, procedure: u32) {
@@ -235,7 +235,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 call.args[1].channel.ok_or(VmError::Arithmetic)?,
                 call.args[0].channel.ok_or(VmError::Arithmetic)?,
             ]
-            .map(|value| (value * 31.0).trunc() as i32))
+            .map(|value| ((value * 31.0).trunc() as i32).clamp(0, 31)))
         };
         match word {
             0x804c => {
@@ -245,12 +245,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 vm.status.0 |= 0x20;
                 vm.status.0 &= !0x20;
             }
+            // SPEC-005 §3.2 safe rule: the new slot is indexed only after
+            // the depth increments, so the initial depth -1 is safe.
             0x804e | 0x804f => {
                 self.library.start_position = if word == 0x804e { 0 } else { call.int(0) };
-                if self.library.dialogue_depth < 0 {
-                    return Err(error("unsafe initial library dialogue depth; use GDialog"));
-                }
-                self.library.dialogue_depth += 1;
+                self.library.dialogue_depth = self.library.dialogue_depth.saturating_add(1);
             }
             0x8050 => self.library.reply_title = call.args[0].text.clone(),
             0x8051 => {
@@ -307,7 +306,10 @@ impl<A: WorldAssets> WorldHost<A> {
                         .ok_or(VmError::Arithmetic)?,
                 ))));
             }
-            0x805f | 0x8060 => self.library.option_flags = call.uint(0) as u16,
+            // Safe rule: `sayreplyflags` stores reply flags (the reference
+            // changes the option flags).
+            0x805f => self.library.reply_flags = call.uint(0) as u16,
+            0x8060 => self.library.option_flags = call.uint(0) as u16,
             0x8061 => {
                 if base_tag(call.args[0].value) == 0x4000 {
                     return Err(VmError::Type(call.args[0].value.tag));
@@ -444,15 +446,17 @@ impl<A: WorldAssets> WorldHost<A> {
                 if call.int(0) > 2 {
                     return Err(error("invalid printrect alignment"));
                 }
-                let value = formatted(vm, call.args[2].value)?
-                    .ok_or_else(|| error("unsafe printrect tag"))?;
-                if value.len() >= 80 {
-                    return Err(error("printrect text exceeds safe buffer"));
-                }
+                // Safe rule: an unsupported tag prints nothing, and the text
+                // is truncated to the 79 bytes the 80-byte area holds.
+                let Some(mut value) = formatted(vm, call.args[2].value)? else {
+                    return Ok(None);
+                };
+                value.truncate(79);
                 self.library.window_mut(vm.window)?.text.extend(value);
             }
             0x8075 => {
-                // SPEC-002: selecting a missing slot keeps the previous font.
+                // SPEC-002 §3.1 safe rule: selecting an unloaded font is a
+                // no-op that keeps the current number, bitmap, and metrics.
                 let number = call.int(0);
                 if self.assets.font_number(number).is_some() {
                     self.library.font = number;
@@ -478,11 +482,26 @@ impl<A: WorldAssets> WorldHost<A> {
                     return Err(error("movie playback failed"));
                 }
                 self.library.movie_playing = true;
+                self.world
+                    .emit(WorldEffect::Movie(crate::movie::MovieRequest {
+                        index: None,
+                        flags: 0,
+                        path: String::from_utf8_lossy(&name).into_owned(),
+                        subtitles: None,
+                        fades: None,
+                    }));
                 vm.wait_predicate = 2;
                 vm.status.0 |= 0x10;
             }
             0x807b => self.library.movie_flags = call.uint(0),
             0x807f => {
+                // SPEC-005 §3.1 safe rule: a name operand that is not S is a
+                // VM type error.
+                if let Some(arg) = call.args.last()
+                    && base_tag(arg.value) != Value::STATIC_STRING
+                {
+                    return Err(VmError::Type(arg.value.tag));
+                }
                 let name = call
                     .args
                     .last()
@@ -512,7 +531,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     texts: vec![Some(name.to_vec())],
                 });
             }
-            0x8080 | 0x8081 | 0x8082 | 0x808b => {
+            0x8080..=0x8082 => {
                 let name = call.text(call.args.len() - 1).unwrap_or(b"");
                 let region = self
                     .library
@@ -600,7 +619,9 @@ impl<A: WorldAssets> WorldHost<A> {
                     },
                 );
             }
-            0x8087..=0x808a => {
+            // `addbuttonrightproc` (0x808B) attaches to the named button under
+            // the SPEC-005 §3.1 safe rule (the reference uses a region).
+            0x8087..=0x808b => {
                 let last = call.args.len() - 1;
                 let name = key(call.text(last).unwrap_or(b""));
                 let mut images: [Option<Vec<u8>>; 3] = Default::default();
@@ -611,10 +632,13 @@ impl<A: WorldAssets> WorldHost<A> {
                     }) {
                         return Err(error("no valid button image operand"));
                     }
-                    // Pop order is hover, normal, pressed; once one operand
-                    // passes, all three are resolved (non-strings become null).
+                    // Pop order is hover, normal, pressed. Safe rule: each
+                    // operand that is not S is no image.
                     for (slot, index) in [(2, 0), (1, 1), (0, 2)] {
-                        images[slot] = vm.host_string(call.args[index].value)?.map(<[u8]>::to_vec);
+                        let value = call.args[index].value;
+                        if base_tag(value) == Value::STATIC_STRING {
+                            images[slot] = vm.host_string(value)?.map(<[u8]>::to_vec);
+                        }
                     }
                 }
                 let button = self
@@ -631,6 +655,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     0x808a => {
                         button.callbacks = [call.uint(3), call.uint(2), call.uint(1), call.uint(0)]
                     }
+                    0x808b => button.right = [call.uint(1), call.uint(0)],
                     _ => {}
                 }
             }
@@ -643,11 +668,10 @@ impl<A: WorldAssets> WorldHost<A> {
                 ))
             }
             0x8090 => self.callbacks.push_back((vm.id, call.uint(0))), // Initial region hit checker is false.
+            // Named-event names are truncated to 31 characters (safe rule).
             0x8092 | 0x8093 => {
-                let name = key(call.text(1).unwrap_or(b""));
-                if name.len() > 31 {
-                    return Err(error("named-event name exceeds safe limit"));
-                }
+                let mut name = key(call.text(1).unwrap_or(b""));
+                name.truncate(31);
                 let slot = self
                     .library
                     .named
@@ -666,7 +690,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
             }
             0x8094 | 0x8095 => {
-                let name = key(call.text(0).unwrap_or(b""));
+                let mut name = key(call.text(0).unwrap_or(b""));
+                name.truncate(31);
                 if let Some(slot) = self
                     .library
                     .named
@@ -733,11 +758,10 @@ impl<A: WorldAssets> WorldHost<A> {
             0x8099..=0x809d => {
                 let handle = call.uint(0);
                 self.library.sound_trace.push((word, handle));
-                if handle != u32::MAX {
-                    if handle & 0xffffffe0 != 0xa0000000 {
-                        return Err(error("invalid library sound handle"));
-                    }
-                    let slot = (handle & 31) as usize;
+                // Safe rule: a handle whose stripped slot is outside 0-31 (or
+                // empty) is a no-op, like -1.
+                let slot = (handle & !0xa000_0000) as usize;
+                if handle != u32::MAX && slot < 32 {
                     if word == 0x809d {
                         self.library.sounds[slot] = None;
                     } else if let Some(sound) = &mut self.library.sounds[slot] {
@@ -786,22 +810,27 @@ impl<A: WorldAssets> WorldHost<A> {
                     ExternalValue::String,
                 )));
             }
+            // Safe rules: an absent previous match returns I zero, and no
+            // scan passes the source terminator (so delimiter 0 is safe).
             0x80a0 => {
                 let delimiter = call.int(0);
-                if !(1..=255).contains(&delimiter) {
+                if !(0..=255).contains(&delimiter) {
                     return Err(error("unsafe tokenizer delimiter"));
                 }
                 let source = call.text(2).unwrap_or(b"");
                 let delimiter = delimiter as u8;
                 let token = if let Some(previous) = call.text(1) {
-                    let start = if previous.is_empty() {
-                        0
+                    let found = if previous.is_empty() {
+                        Some(0)
                     } else {
                         source
                             .windows(previous.len())
                             .position(|part| part == previous)
-                            .ok_or_else(|| error("tokenizer previous substring missing"))?
-                    } + previous.len();
+                    };
+                    let Some(found) = found else {
+                        return Ok(Some(ExternalValue::Value(Value::integer(0))));
+                    };
+                    let start = found + previous.len();
                     let Some(at) = source[start..]
                         .iter()
                         .position(|byte| *byte == delimiter)

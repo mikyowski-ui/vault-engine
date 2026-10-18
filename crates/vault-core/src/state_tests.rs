@@ -12,7 +12,10 @@ use std::{
     collections::{BTreeSet, VecDeque},
     sync::Arc,
 };
-use vault_formats::{Fid, FrmArchive, GcdFile, MapFile, Prototype, pro::Category};
+use vault_formats::{
+    Fid, FrmArchive, GcdFile, MapFile, Prototype,
+    pro::{BasicFlags, Category},
+};
 use vault_vm::{
     IntProgram, RunOutcome, Value, Vm, VmError,
     extensions::{self, Rule},
@@ -75,6 +78,17 @@ fn spec006_rng_snapshot_seed_sign_rules_and_checks() {
     let before = equal.state().clone();
     assert_eq!(equal.range(9, 9).unwrap(), 9);
     assert_ne!(&before, equal.state());
+    // Reversed bounds, and (safe rule) a width beyond 2147483647, consume
+    // exactly one draw and return the first bound.
+    for (first, last) in [(5, 2), (i32::MIN, i32::MAX), (-1, i32::MAX)] {
+        let mut ranged = ParkMiller::from_state(before.clone()).unwrap();
+        let mut drawn = ParkMiller::from_state(before.clone()).unwrap();
+        assert_eq!(ranged.range(first, last).unwrap(), first);
+        drawn.draw();
+        assert_eq!(ranged.state(), drawn.state());
+    }
+    let mut widest = ParkMiller::from_state(before.clone()).unwrap();
+    assert!((0..=i32::MAX - 1).contains(&widest.range(0, i32::MAX - 1).unwrap()));
     for (draws, ticks, code, margin) in [
         (&[42, 7][..], 864000, 3, 26),
         (&[42, 8][..], 864000, 2, 26),
@@ -281,9 +295,32 @@ fn spec006_queue_iq_reaction_and_art_vectors() {
     ] {
         assert_eq!(
             choose_fidget(count, &mut 0, &mut Dice::new(&[draw])).unwrap(),
-            expected
+            Some(expected)
         );
     }
+    // Safe rule: a count of zero or less still takes its draw but selects
+    // no fidget; the head then waits on its speech frame and is diagnosed.
+    for count in [0, -2] {
+        let mut dice = Dice::new(&[40]);
+        assert_eq!(choose_fidget(count, &mut 0, &mut dice).unwrap(), None);
+        assert_eq!(dice.draws, 1);
+    }
+    let mut empty = head.clone();
+    empty.counts = [0; 3];
+    let mut waiting = TalkingHead::new(empty, Mood::Bad, 0, &mut Dice::new(&[40])).unwrap();
+    assert_eq!(
+        (waiting.phase, waiting.animation, waiting.frame),
+        (HeadPhase::Waiting, 11, 0)
+    );
+    assert!(waiting.diagnostic.take().is_some());
+    waiting.frame = 1;
+    assert!(
+        !waiting
+            .tick(20000, 3, 10, &mut Dice::new(&[40, 5]))
+            .unwrap()
+    );
+    assert_eq!((waiting.phase, waiting.frame), (HeadPhase::Waiting, 1));
+    assert!(waiting.diagnostic.is_some());
     let mut session = GDialog::default();
     session.start(1, 1, 5, None).unwrap();
     assert_eq!(session.background_art(), 0x09000005);
@@ -613,6 +650,101 @@ fn host_abi_color_qualifiers_holes_and_tokenizer_quirk() {
         assert!(vm.run(&mut host, 100).is_err());
         assert_eq!(vm.value_stack.top().unwrap(), Value::integer(77));
     }
+}
+#[test]
+fn spec005_safe_rules_for_library_and_game_opcodes() {
+    use fixture::{instruction, literal, push};
+    let (mut host, base, _) = host(&[b"one,two,three", b"xyz"]);
+    let top = |host: &mut WorldHost<Assets>, code: &[u8]| {
+        let vm = run_fragment(host, &base, code).unwrap();
+        let value = vm.value_stack.top().unwrap();
+        (value, vm.string(value).ok().map(<[u8]>::to_vec))
+    };
+    // tokenize: an absent previous match returns I zero; delimiter 0 never
+    // scans past the source terminator.
+    let absent = [
+        literal(6),
+        literal(22),
+        push(i32::from(b',')),
+        instruction(0x80a0),
+    ]
+    .concat();
+    assert_eq!(top(&mut host, &absent).0, Value::integer(0));
+    let whole = [literal(6), push(0), push(0), instruction(0x80a0)].concat();
+    assert_eq!(
+        top(&mut host, &whole).1.as_deref(),
+        Some(&b"one,two,three"[..])
+    );
+    // obj_name of null is always `<Critter>`; game_ticks wraps.
+    let name = [push(0), instruction(0x80a4)].concat();
+    assert_eq!(top(&mut host, &name).1.as_deref(), Some(&b"<Critter>"[..]));
+    let ticks = [push(i32::MAX), instruction(0x80f2)].concat();
+    assert_eq!(
+        top(&mut host, &ticks).0,
+        Value::integer(i32::MAX.wrapping_mul(10))
+    );
+    // turn_off/turn_on_objs_in_area: reversed hex bounds are swapped and the
+    // elevation loop terminates (operands pushed first elevation first).
+    let player = host.world.player;
+    let area = |opcode| {
+        [
+            push(2),
+            push(0),
+            push(20110),
+            push(20090),
+            instruction(opcode),
+        ]
+        .concat()
+    };
+    run_fragment(&mut host, &base, &area(0x80e1)).unwrap();
+    assert!(
+        host.world
+            .get(player)
+            .unwrap()
+            .raw
+            .flags
+            .contains(BasicFlags::HIDDEN)
+    );
+    run_fragment(&mut host, &base, &area(0x80e2)).unwrap();
+    assert!(
+        !host
+            .world
+            .get(player)
+            .unwrap()
+            .raw
+            .flags
+            .contains(BasicFlags::HIDDEN)
+    );
+    // A sound handle whose stripped slot is outside 0-31, or empty, is a
+    // no-op rather than a VM error.
+    for handle in [5, 0x40, 0xa000_0040_u32 as i32] {
+        run_fragment(
+            &mut host,
+            &base,
+            &[push(handle), instruction(0x8099)].concat(),
+        )
+        .unwrap();
+    }
+    // saystart at the initial depth -1 indexes the slot after incrementing;
+    // sayreplyflags stores reply flags, not option flags.
+    run_fragment(&mut host, &base, &instruction(0x804e)).unwrap();
+    assert_eq!(host.library.dialogue_depth, 0);
+    run_fragment(&mut host, &base, &[push(7), instruction(0x805f)].concat()).unwrap();
+    assert_eq!(
+        (host.library.reply_flags, host.library.option_flags),
+        (7, 0)
+    );
+    // The any-key binding is cleared with its owning program.
+    host.library.any_key = Some((base.id, 1));
+    host.library.cleanup(base.id);
+    assert_eq!(host.library.any_key, None);
+    // A nonfinite color channel reads as 0 instead of failing.
+    let mut vm = Vm::fragment(base.program.clone(), &[]).unwrap();
+    for _ in 0..3 {
+        vm.value_stack.push(Value::float(f32::NAN)).unwrap();
+    }
+    let call = extensions::decode(&mut vm, 0x8077).unwrap();
+    assert!(call.args.iter().all(|arg| arg.channel == Some(0.0)));
 }
 #[test]
 fn world_lifecycle_lighting_spatials_and_queue_order() {
@@ -1545,8 +1677,9 @@ fn spec009_ai_opcodes_alert_gate_hearing_team_and_party() {
     assert_eq!(host.world.get(me).unwrap().opponent, 0);
     assert!(host.world.pending_combat.is_none());
 
-    // obj_can_hear_obj: valid operands return 0 without a hearing test; a
-    // null operand also returns 0, with a diagnostic, instead of failing.
+    // obj_can_hear_obj (safe rule): 1 for two placed objects on one
+    // elevation that pass the perception test; a null operand returns 0
+    // with a diagnostic instead of failing.
     let hear = |host: &mut WorldHost<Assets>, a: ObjectRef, b: ObjectRef| {
         let code = [push(a as i32), push(b as i32), instruction(0x80f5)].concat();
         run_fragment(host, &base, &code)
@@ -1555,7 +1688,11 @@ fn spec009_ai_opcodes_alert_gate_hearing_team_and_party() {
             .pop()
             .unwrap()
     };
+    assert_eq!(hear(&mut host, target, me), Value::integer(1));
+    let level = host.world.get(target).unwrap().raw.elevation;
+    host.world.get_mut(target).unwrap().raw.elevation = (level + 1) % 3;
     assert_eq!(hear(&mut host, target, me), Value::integer(0));
+    host.world.get_mut(target).unwrap().raw.elevation = level;
     host.world.effects.clear();
     assert_eq!(hear(&mut host, 0, me), Value::integer(0));
     assert!(matches!(
@@ -1677,21 +1814,19 @@ fn spec010_sound_name_opcodes_use_prototype_sound_bytes() {
         name(&mut host, weapon_name(0, 2, 2)),
         Some(b"WOE1XXX1".to_vec())
     );
-    host.world.effects.clear();
-    assert_eq!(name(&mut host, weapon_name(0, 2, 7)), None, "effect type 7");
-    assert!(matches!(
-        host.world.effects.front(),
-        Some(WorldEffect::Diagnostic(_))
-    ));
+    // Safe rule: an out-of-range effect type or hit mode is a VM error.
+    for (mode, effect) in [(2, 7), (8, 1)] {
+        assert!(run_fragment(&mut host, &base, &weapon_name(0, mode, effect)).is_err());
+    }
     // sfx_build_char_name(extra, animation, object): without an art-list
-    // token there is no name.
+    // token there is no name, which pushes empty D text (safe rule).
     let me = host.world.player as i32;
     assert_eq!(
         name(
             &mut host,
             [push(me), push(16), push(4), instruction(0x813d)].concat()
         ),
-        None
+        Some(Vec::new())
     );
 }
 
@@ -1774,4 +1909,32 @@ fn spec011_progression_and_barter_opcodes() {
     assert!(host.world.dialogue.pending_barter);
     run_fragment(&mut host, &base, &[push(7), instruction(0x814e)].concat()).unwrap();
     assert_eq!(host.world.dialogue.barter_modifier, 7);
+}
+#[test]
+fn spec006_head_counts_use_own_columns_only_when_fidget_art_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let heads = dir.path().join("art/heads");
+    std::fs::create_dir_all(&heads).unwrap();
+    std::fs::write(
+        heads.join("heads.lst"),
+        b"full,1,2,3\npart,1,2,3\nfour,1,4,0\n",
+    )
+    .unwrap();
+    for name in [
+        "fullgf1", "fullnf1", "fullnf2", "fullbf1", "fullbf2", "fullbf3", "partgf1", "partnf1",
+        "partnf2", "partbf1", "partbf2", "fourgf1", "fournf4", "fourbf1",
+    ] {
+        std::fs::write(heads.join(format!("{name}.frm")), b"").unwrap();
+    }
+    let assets = VfsWorldAssets::new(
+        Arc::new(vault_formats::LocalDirProvider::mount(dir.path()).unwrap()),
+        "english",
+    )
+    .unwrap();
+    assert_eq!(assets.head(0).unwrap().counts, [1, 2, 3]);
+    // `partbf3.frm` is missing, so the bad count keeps the first column.
+    assert_eq!(assets.head(1).unwrap().counts, [1, 2, 1]);
+    // A count above 3 selects only its own variant; a zero count is never
+    // selectable and keeps the first column.
+    assert_eq!(assets.head(2).unwrap().counts, [1, 4, 1]);
 }

@@ -475,6 +475,7 @@ pub fn empty_map() -> MapFile {
             consumed_len: 0,
         },
         consumed_len: 0,
+        diagnostics: Vec::new(),
     }
 }
 pub fn object_record(pid: u32, id: u32) -> MapObject {
@@ -1069,45 +1070,60 @@ impl WorldState {
                 .checked_add(script.local_count)
                 .filter(|end| *end <= 1_000_000)
                 .ok_or(WorldError::Arithmetic)?;
+            // Allocation failure leaves the pool unchanged (§3.2 safe rule).
+            self.lvars
+                .try_reserve(script.local_count)
+                .map_err(|_| WorldError::Invalid("LVAR pool allocation failed".into()))?;
             script.local_base = self.lvars.len() as i32;
             self.lvars.resize(end, 0);
         }
         Ok(script.local_base as usize)
     }
+    /// The pool position of local `index`. Under the SPEC-003 §3.2 safe
+    /// rule an index outside the script's own slice is out of range, rather
+    /// than reaching another script's slice.
+    fn local_slot(&mut self, sid: u32, index: i32) -> Result<Option<usize>, WorldError> {
+        let base = self.ensure_locals(sid)?;
+        let count = self
+            .scripts
+            .get(&sid)
+            .map_or(0, |script| script.local_count);
+        Ok(usize::try_from(index)
+            .ok()
+            .filter(|index| *index < count)
+            .map(|index| base + index)
+            .filter(|at| *at < self.lvars.len()))
+    }
+    /// System/map scripts read -1; an unallocatable slice reads -1 with a
+    /// diagnostic, and an index outside the own slice reads 0.
     pub fn local(&mut self, sid: Option<u32>, index: i32) -> i32 {
         let Some(sid) = sid.filter(|sid| sid >> 24 != 0) else {
             return -1;
         };
-        let Ok(base) = self.ensure_locals(sid) else {
-            return -1;
-        };
-        let at = base as i64 + i64::from(index);
-        let value = usize::try_from(at)
-            .ok()
-            .and_then(|at| self.lvars.get(at))
-            .copied();
-        if value.is_none() {
-            // SPEC-003: out-of-pool reads report an error and return zero.
-            self.diagnostic(format!("LVAR read {index} outside the local pool"));
+        match self.local_slot(sid, index) {
+            Ok(Some(at)) => self.lvars[at],
+            Ok(None) => {
+                self.diagnostic(format!("LVAR read {index} outside the script's slice"));
+                0
+            }
+            Err(error) => {
+                self.diagnostic(format!("LVAR read {index}: {error}"));
+                -1
+            }
         }
-        value.unwrap_or(0)
     }
+    /// Writes outside the own slice are ignored; under the SPEC-003 §3.2 safe
+    /// rule system/map scripts are denied local writes as well as reads.
     pub fn set_local(&mut self, sid: Option<u32>, index: i32, value: i32) -> bool {
-        let Some(sid) = sid else {
+        let Some(sid) = sid.filter(|sid| sid >> 24 != 0) else {
             return false;
         };
-        let Ok(base) = self.ensure_locals(sid) else {
-            return false;
-        };
-        let at = base as i64 + i64::from(index);
-        if let Some(slot) = usize::try_from(at)
-            .ok()
-            .and_then(|at| self.lvars.get_mut(at))
-        {
-            *slot = value;
-            true
-        } else {
-            false
+        match self.local_slot(sid, index) {
+            Ok(Some(at)) => {
+                self.lvars[at] = value;
+                true
+            }
+            _ => false,
         }
     }
     pub fn request(&mut self, request: ScriptRequest) {

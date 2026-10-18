@@ -61,8 +61,20 @@ fn spec006_gam_order_markers_chunks_and_mutations() {
             count
         );
     }
-    assert!(GamFile::parse(b"MAP_GLOBAL_VARS:\nbad = ;", GamSection::Map).is_err());
-    assert!(GamFile::parse(b"MAP_GLOBAL_VARS:\nx=2147483648;", GamSection::Map).is_err());
+    // Safe rule: no convertible number stores zero; overflow clamps.
+    for (text, value) in [
+        (&b"bad = ;"[..], 0),
+        (b"x=-;", 0),
+        (b"x=2147483648;", i32::MAX),
+        (b"x=-2147483649;", i32::MIN),
+        (b"x=\x0b7;", 7),
+    ] {
+        let bytes = [&b"MAP_GLOBAL_VARS:\n"[..], text].concat();
+        assert_eq!(
+            GamFile::parse(&bytes, GamSection::Map).unwrap().values,
+            [value]
+        );
+    }
 }
 #[test]
 fn spec006_gcd_fields_normalization_and_bounds() {

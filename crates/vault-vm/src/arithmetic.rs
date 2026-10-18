@@ -7,14 +7,21 @@ fn text(vm: &Vm, value: Value) -> Result<Vec<u8>, VmError> {
     }
     match value.tag {
         Value::INTEGER => Ok((value.payload as i32).to_string().into_bytes()),
-        Value::FLOAT => {
-            let value = f32::from_bits(value.payload);
-            if !value.is_finite() {
-                return Err(VmError::Arithmetic);
-            }
-            Ok(format!("{value:.5}").into_bytes())
-        }
+        Value::FLOAT => Ok(float_text(f32::from_bits(value.payload))),
         _ => Err(VmError::Type(value.tag)),
+    }
+}
+/// Float text with exactly five fractional digits; under the SPEC-004 §3.5
+/// safe rule, NaN is `nan` and the infinities are `inf` and `-inf`.
+pub fn float_text(value: f32) -> Vec<u8> {
+    if value.is_nan() {
+        b"nan".to_vec()
+    } else if value == f32::INFINITY {
+        b"inf".to_vec()
+    } else if value == f32::NEG_INFINITY {
+        b"-inf".to_vec()
+    } else {
+        format!("{value:.5}").into_bytes()
     }
 }
 fn numeric(value: Value) -> Result<f32, VmError> {
@@ -24,11 +31,13 @@ fn numeric(value: Value) -> Result<f32, VmError> {
         _ => Err(VmError::Type(value.tag)),
     }
 }
-fn float_int(value: f32) -> Result<i32, VmError> {
-    if !value.is_finite() || !(-2147483648.0..2147483648.0).contains(&(value as f64)) {
-        return Err(VmError::Arithmetic);
+/// Truncating conversion; an out-of-range or NaN value gives the x86
+/// integer-indefinite `0x80000000` (SPEC-004 §3.5 safe rule).
+fn float_int(value: f32) -> i32 {
+    if value.is_nan() || !(-2147483648.0..2147483648.0).contains(&f64::from(value)) {
+        return i32::MIN;
     }
-    Ok(value.trunc() as i32)
+    value.trunc() as i32
 }
 fn truth(value: Value, float_bits: bool) -> Result<bool, VmError> {
     if value.is_string() {
@@ -40,11 +49,11 @@ fn truth(value: Value, float_bits: bool) -> Result<bool, VmError> {
         _ => Err(VmError::Type(value.tag)),
     }
 }
-fn bits(value: Value) -> Result<i32, VmError> {
+fn bits(value: Value) -> i32 {
     if value.tag == Value::FLOAT {
         float_int(value.payload as i32 as f32)
     } else {
-        Ok(value.payload as i32)
+        value.payload as i32
     }
 }
 pub(crate) fn execute(vm: &mut Vm, word: u16) -> Result<(), VmError> {
@@ -52,17 +61,14 @@ pub(crate) fn execute(vm: &mut Vm, word: u16) -> Result<(), VmError> {
         let value = vm.value_stack.pop()?;
         let result = match word {
             0x8043 => Value::integer(!(value.payload as i32)),
+            // Both string tags are rejected (safe rule for the dynamic tag).
             0x8044 => match value.tag {
-                Value::STATIC_STRING => return Err(VmError::Type(value.tag)),
-                Value::FLOAT => Value::integer(float_int(f32::from_bits(value.payload))?),
+                _ if value.is_string() => return Err(VmError::Type(value.tag)),
+                Value::FLOAT => Value::integer(float_int(f32::from_bits(value.payload))),
                 _ => value,
             },
             0x8045 => Value::integer(i32::from(value.payload == 0)),
-            0x8046 => Value::integer(
-                (value.payload as i32)
-                    .checked_neg()
-                    .ok_or(VmError::Arithmetic)?,
-            ),
+            0x8046 => Value::integer((value.payload as i32).wrapping_neg()),
             _ => return Err(VmError::Opcode(word)),
         };
         return vm.value_stack.push(result);
@@ -111,10 +117,9 @@ pub(crate) fn execute(vm: &mut Vm, word: u16) -> Result<(), VmError> {
                 Value::float(numeric(a)? + numeric(b)?)
             }
         }
+        // A string on the left would consume both operands and push nothing;
+        // the safe rule raises a type error instead.
         0x803a..=0x803c => {
-            if a.is_string() {
-                return Ok(());
-            }
             if a.tag != Value::INTEGER && a.tag != Value::FLOAT {
                 return Err(VmError::Type(a.tag));
             }
@@ -138,19 +143,17 @@ pub(crate) fn execute(vm: &mut Vm, word: u16) -> Result<(), VmError> {
                 if word == 0x803c && b == 0 {
                     return Err(VmError::DivisionByZero);
                 }
-                Value::integer(
-                    match word {
-                        0x803a => a.checked_sub(b),
-                        0x803b => a.checked_mul(b),
-                        _ => a.checked_div(b),
-                    }
-                    .ok_or(VmError::Arithmetic)?,
-                )
+                // Results wrap modulo 2^32 (safe rule), so MIN / -1 is MIN.
+                Value::integer(match word {
+                    0x803a => a.wrapping_sub(b),
+                    0x803b => a.wrapping_mul(b),
+                    _ => a.wrapping_div(b),
+                })
             }
         }
         0x803d => {
             if a.tag != Value::INTEGER && a.tag != Value::FLOAT {
-                return Ok(());
+                return Err(VmError::Type(a.tag));
             }
             if a.tag == Value::FLOAT || b.tag == Value::FLOAT {
                 return Err(VmError::Type(Value::FLOAT));
@@ -175,13 +178,10 @@ pub(crate) fn execute(vm: &mut Vm, word: u16) -> Result<(), VmError> {
             }))
         }
         0x8040..=0x8042 => {
-            if a.is_string() {
-                return Ok(());
-            }
             if a.tag != Value::INTEGER && a.tag != Value::FLOAT {
                 return Err(VmError::Type(a.tag));
             }
-            let (a, b) = (bits(a)?, bits(b)?);
+            let (a, b) = (bits(a), bits(b));
             Value::integer(match word {
                 0x8040 => a & b,
                 0x8041 => a | b,

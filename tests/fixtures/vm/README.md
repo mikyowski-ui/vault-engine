@@ -2,7 +2,9 @@
 
 - `program.int.hex`: every byte of section 4.1's 282-byte executable image.
 - `fragments.txt`: all eleven isolated fragments from section 4.2, with exact
-  expected payload-before-tag value-stack bytes.
+  expected payload-before-tag value-stack bytes. The counted discard uses the
+  section 3.2 fixed-count safe rule, so its stack ends empty (the reference
+  leaves integer 7).
 - `errors.txt`: all section 4.3 instruction-error cases. Slot 342 is rejected by
   the safe dispatcher instead of indexing beyond its table.
 - `support.rs`: the complete-image decoder and synthetic host-call/conditional

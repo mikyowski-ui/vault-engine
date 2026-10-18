@@ -133,8 +133,10 @@ pub trait Vfs: Send + Sync {
 /// A snapshot of the namespace of an unpacked game directory.
 ///
 /// Root files and arbitrary subdirectories are indexed; no extension or folder
-/// allowlist is applied. Remount to discover added or renamed files. Contents
-/// are read on demand. Files/directories that collide after case folding, links,
+/// allowlist is applied. [`Vfs::files`] lists the mount-time snapshot (remount
+/// to list added or renamed files), but under the SPEC-008 §3.2 safe rule a
+/// read that misses the snapshot consults the live directory, so a stale
+/// index never hides a file added later. Contents are read on demand. Files/directories that collide after case folding, links,
 /// and special files cause mount failure instead of ambiguous or partial results.
 ///
 /// All filesystem operations after mounting are relative to an open directory
@@ -231,10 +233,58 @@ impl LocalDirProvider {
         Ok(())
     }
 
+    /// Resolve a path missing from the snapshot against the live directory,
+    /// one case-insensitive component at a time through the capability.
+    /// Ambiguous case-folded names are rejected as at mount time.
+    fn resolve_live(&self, path: &VfsPath) -> Result<Option<PathBuf>, VfsError> {
+        let mut native = PathBuf::new();
+        for part in path.as_str().split('/') {
+            let entries = if native.as_os_str().is_empty() {
+                self.root.entries()
+            } else {
+                self.root.read_dir(&native)
+            };
+            let Ok(entries) = entries else {
+                return Ok(None);
+            };
+            let mut found: Option<PathBuf> = None;
+            for entry in entries {
+                let entry = entry.map_err(|error| io_error(&native, error))?;
+                let name = entry.file_name();
+                if !name
+                    .to_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(part))
+                {
+                    continue;
+                }
+                let candidate = native.join(&name);
+                if let Some(first) = found {
+                    return Err(VfsError::CaseCollision {
+                        path: path.clone(),
+                        first,
+                        second: candidate,
+                    });
+                }
+                found = Some(candidate);
+            }
+            let Some(next) = found else {
+                return Ok(None);
+            };
+            native = next;
+        }
+        Ok(Some(native))
+    }
+
     /// Bound allocation before reading, and enforce the limit if the file grows.
     pub fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
         let path = VfsPath::new(path)?;
-        let native_path = self.files.get(&path).ok_or(VfsError::NotFound(path))?;
+        let native_path = match self.files.get(&path) {
+            Some(native) => native.clone(),
+            None => self
+                .resolve_live(&path)?
+                .ok_or_else(|| VfsError::NotFound(path.clone()))?,
+        };
+        let native_path = &native_path;
         self.check_components(native_path)?;
         // Use the capability for the actual open, not an ambient/canonical path.
         let file = self
