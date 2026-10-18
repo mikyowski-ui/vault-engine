@@ -55,7 +55,9 @@ cargo xtask check
 
 On Linux the desktop shell needs a Wayland or X11 session, the corresponding
 window-system libraries (including libxkbcommon), and a Vulkan or OpenGL driver.
-Windows and macOS use winit/wgpu's native backends.
+Building its default `audio` feature also needs the ALSA development package
+(`libasound2-dev` / `alsa-lib-devel`); `--no-default-features` builds it without
+audio output. Windows and macOS use winit/wgpu/cpal's native backends.
 
 ## Desktop shell
 
@@ -214,6 +216,64 @@ then another root AAF/FON in lexical order (AAF preferred). It selects the first
 MSG below `text/` in VFS order and its lowest ID with nonempty text. Explicit
 missing/invalid assets or message IDs produce an error. Text remains raw bytes
 mapped to font glyphs; the viewer does not assume UTF-8 or change languages.
+
+## Desktop game shell (SPEC-008 to SPEC-010 integration)
+
+```sh
+# Loose files, or the SPEC-008 databases with an optional loose patch root:
+cargo run -p vault-platform -- --corpus-dir /path/to/unpacked/game --preview-map maps/v13ent.map
+cargo run -p vault-platform -- --master-dat /path/to/MASTER.DAT --critter-dat /path/to/CRITTER.DAT \
+  [--corpus-dir /path/to/patches] --preview-map maps/v13ent.map
+```
+
+`--master-dat` and `--critter-dat` mount a `DatProvider`: ordinary requests use
+the master database, and `art/critters/` requests use the critter database. Each
+consults the loose `--corpus-dir` first, with no fallback to the other archive.
+Every preview and the world host read through this namespace. Archives are read
+into memory at startup; each extracted file keeps the 64 MiB asset bound.
+
+On the local map, **W** opens the world map and **B** the Pip-Boy; script
+`world_map`/`town_map` requests open them too. Both are modal, so the local map's
+scripts and clock wait. The world map is the 450 x 442 viewport over the
+1400 x 1500 world. The specifications name no world artwork, so the view is drawn
+from the fixed terrain grid and discovery values (unknown black, seen dim,
+visited bright). It shows known towns (with the specification's town names), the
+traveller, and the destination. A click travels to a world pixel, or to a known
+town's jittered center. Travel runs at most two loop iterations per update, about
+24 updates per second, with time charges, discovery, healing, and encounters.
+Arriving in a town enters it: a first visit loads its slot-zero map, later visits
+show the town map. **Enter** enters the current town or drops out into the
+terrain here. Arrows scroll, and **Escape** returns. The town map draws interface
+art `156 + town` at (20,20) with its known entrance buttons, labelled from
+`worldmap.msg`.
+
+The Pip-Boy shows quests by location (active green, completed dimmed and struck
+through) and the holodisk list and pages, read from `pipboy.msg`. Its alarm clock
+offers the SPEC-008 rest choices. Rest advances one UI step per 50 ms through
+`WorldHost::begin_rest`/`advance_rest`, so the window stays responsive. Escape
+cancels it, and a queue interruption closes the Pip-Boy. SPEC-008 names neither
+catalog; these two hold the specified message ranges.
+
+Audio plays SPEC-010 sounds on the default device (`--no-audio` keeps it silent):
+- Effect requests resolve through the lookup chain, with the owner's gender
+  alias. They are decoded with the exact ACM decoder, cached, and played mono at
+  22050 Hz at the relative volume of their owner, at the full effect setting.
+- At most four effects play at once. A fifth request fails rather than evicting
+  one.
+- Talking-head speech plays `sound/speech/<head>/<stem>.ACM`. Its completion
+  ends the head's speech phase; without a file or device it ends at once.
+- Library sound slots play their files, loop with mode bit 1, and stop when the
+  slot stops, pauses, or is freed.
+
+The engine requests these effects:
+- `play_sfx` (no owner) and registered animation cues (owner).
+- Door open/close and container open on use, including doors that movement opens
+  automatically.
+- Weapon attack effects, and hit effects with the target's material. Unarmed
+  attacks use the punch/kick character effect, with contact on a hit.
+- The walk/run character effect when a movement starts.
+- The AI's ready and out-of-ammunition sounds.
+- Desktop buttons play the small-button press and release names.
 
 ## Map preview
 

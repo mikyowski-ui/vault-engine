@@ -1,3 +1,4 @@
+mod audio;
 mod input;
 mod map_preview;
 mod preview;
@@ -35,11 +36,16 @@ type AppError = Box<dyn Error + Send + Sync>;
 type AppResult<T> = Result<T, AppError>;
 
 #[derive(Parser)]
-#[command(about = "Vault Engine indexed-color shell and loose-asset sprite preview")]
+#[command(
+    about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives"
+)]
 struct Args {
     /// Present one frame and exit successfully (requires a desktop and GPU backend).
     #[arg(long)]
     smoke_test: bool,
+    /// Do not open an audio output device; sounds resolve but stay silent.
+    #[arg(long)]
+    no_audio: bool,
     #[command(flatten)]
     preview: preview::PreviewArgs,
 }
@@ -72,6 +78,8 @@ struct Shell {
     pointer: Option<[f64; 2]>,
     started: Option<Instant>,
     display: Option<DisplayPalette>,
+    /// The output stream, kept alive for the whole session.
+    _audio: Option<audio::Audio>,
 }
 
 impl Shell {
@@ -306,6 +314,14 @@ impl ApplicationHandler for Shell {
                         pressed: state == ElementState::Pressed,
                     },
                 );
+                if state == ElementState::Released
+                    && self
+                        .preview
+                        .as_mut()
+                        .is_some_and(preview::AssetPreview::release)
+                {
+                    self.refresh_preview(event_loop, &window);
+                }
                 if state == ElementState::Pressed
                     && matches!(button, MouseButton::Left | MouseButton::Right)
                     && let Some(pixel) = self
@@ -393,11 +409,25 @@ impl ApplicationHandler for Shell {
 }
 
 fn run(args: Args) -> AppResult<()> {
-    let preview = args.preview.load()?;
+    let mut preview = args.preview.load()?;
+    // Audio only serves an interactive world; previews of sprites need none.
+    let audio = match &mut preview {
+        Some(preview::AssetPreview::Map(map)) => {
+            let audio = if args.no_audio {
+                audio::Audio::silent()
+            } else {
+                audio::Audio::open()
+            };
+            map.audio = audio.handle();
+            Some(audio)
+        }
+        _ => None,
+    };
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut shell = Shell {
         smoke_test: args.smoke_test,
+        _audio: audio,
         ..Default::default()
     };
     shell.display = preview

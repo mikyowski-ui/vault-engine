@@ -1,16 +1,20 @@
-use crate::AppResult;
+use crate::{
+    AppResult,
+    audio::{AudioHandle, Channel},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
 use vault_core::{
-    CharacterSheet, ObjectAction, Perk, WorldEffect, WorldHost, WorldState,
+    CharacterSheet, ObjectAction, ObjectRef, Perk, WorldEffect, WorldHost, WorldState,
     assets::{VfsWorldAssets, WorldAssets},
 };
 use vault_formats::{
-    ArtCatalog, Fid, Font, FrmArchive, HexGrid, LocalDirProvider, MAX_ASSET_BYTES, MapFile,
-    Palette, Vfs, VfsPath,
+    ArtCatalog, Fid, Font, FrmArchive, HexGrid, MAX_ASSET_BYTES, MapFile, Palette, Vfs, VfsPath,
+    acm,
     pro::{BasicFlags, Category},
+    sfx,
 };
 use vault_render::{
     IndexedImage, TextStyle,
@@ -19,7 +23,108 @@ use vault_render::{
 };
 use winit::keyboard::KeyCode;
 
+mod pipboy;
+mod world;
+
 const MAX_ART_BYTES: u64 = 256 * 1024 * 1024;
+/// The effect volume setting S (SPEC-010 §3.11): the desktop plays effects
+/// at the full setting.
+const EFFECT_SETTING: i32 = 32767;
+/// Fixed interface button cues (small red button press/release).
+const BUTTON_PRESS: &[u8] = b"ib1p1xx1";
+const BUTTON_RELEASE: &[u8] = b"ib1lu1x1";
+/// Decoded samples kept in memory before the cache is cleared.
+const MAX_CACHED_SAMPLES: usize = 32 * 1024 * 1024;
+
+/// The screen in front: the local map (with dialogue), the SPEC-008 world
+/// and town maps, or the Pip-Boy.
+pub(crate) enum Screen {
+    Map,
+    World(world::WorldScreen),
+    Town(world::TownScreen),
+    PipBoy(pipboy::PipBoy),
+}
+
+/// Decoded ACM samples by VFS path; a failing path is reported once.
+#[derive(Default)]
+struct SoundBank {
+    cache: BTreeMap<String, Arc<[i16]>>,
+    samples: usize,
+    failed: BTreeSet<String>,
+}
+impl SoundBank {
+    fn load(&mut self, vfs: &dyn Vfs, path: &str) -> Option<Arc<[i16]>> {
+        if let Some(samples) = self.cache.get(path) {
+            return Some(samples.clone());
+        }
+        if self.failed.contains(path) {
+            return None;
+        }
+        let decoded = vfs
+            .read_bounded(path, MAX_ASSET_BYTES)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| acm::decode(&bytes).map_err(|error| error.to_string()));
+        match decoded {
+            Ok(decoded) => {
+                let samples: Arc<[i16]> = decoded.samples.into();
+                if self.samples + samples.len() > MAX_CACHED_SAMPLES {
+                    self.cache.clear();
+                    self.samples = 0;
+                }
+                self.samples += samples.len();
+                self.cache.insert(path.to_owned(), samples.clone());
+                Some(samples)
+            }
+            Err(error) => {
+                tracing::warn!(path, %error, "sound unavailable");
+                self.failed.insert(path.to_owned());
+                None
+            }
+        }
+    }
+}
+
+fn style(color: u8) -> TextStyle {
+    TextStyle {
+        foreground: color,
+        ..Default::default()
+    }
+}
+/// A desktop UI button: a dark panel and its label.
+fn button(image: &mut IndexedImage, font: &Font, palette: &Palette, text: &[u8], rect: [i32; 4]) {
+    image.fill_rect(rect, palette.lookup_rgb5([0, 5, 0]).unwrap_or(0));
+    image.draw_text(
+        font,
+        palette,
+        text,
+        [rect[0] + 3, rect[1] + 2],
+        (rect[2] - 6).max(0) as u32,
+        style(palette.lookup_rgb5([0, 31, 0]).unwrap_or(1)),
+    );
+}
+/// Short map labels.
+fn label(
+    image: &mut IndexedImage,
+    font: &Font,
+    palette: &Palette,
+    text: &[u8],
+    origin: [i32; 2],
+    color: u8,
+) {
+    image.draw_text(font, palette, text, origin, 160, style(color));
+}
+/// Status and panel lines.
+fn panel_text(
+    image: &mut IndexedImage,
+    font: &Font,
+    palette: &Palette,
+    text: &[u8],
+    origin: [i32; 2],
+    color: u8,
+) {
+    image.draw_text(font, palette, text, origin, 600, style(color));
+}
+
 pub struct MapPreview {
     pub host: WorldHost<VfsWorldAssets>,
     pub palette: Palette,
@@ -32,6 +137,14 @@ pub struct MapPreview {
     status: Vec<u8>,
     choices: Vec<ChoiceHit>,
     option_scroll: usize,
+    pub(crate) screen: Screen,
+    /// Audio output (silent until the shell attaches a device).
+    pub audio: AudioHandle,
+    sounds: SoundBank,
+    /// A talking-head speech voice is playing.
+    speaking: bool,
+    /// A desktop button is held: its release plays the release cue.
+    pressed: bool,
 }
 struct MapSprites {
     bindings: BTreeMap<(Category, u32, u8), Arc<FrmArchive>>,
@@ -135,7 +248,7 @@ impl MapSprites {
 }
 impl MapPreview {
     pub fn load(
-        vfs: Arc<LocalDirProvider>,
+        vfs: Arc<dyn Vfs>,
         path: &str,
         language: &str,
         character: Option<&str>,
@@ -179,7 +292,133 @@ impl MapPreview {
             status: Vec::new(),
             choices: Vec::new(),
             option_scroll: 0,
+            screen: Screen::Map,
+            audio: AudioHandle::default(),
+            sounds: SoundBank::default(),
+            speaking: false,
+            pressed: false,
         })
+    }
+    /// Back to the (possibly newly loaded) local map.
+    pub(crate) fn return_to_map(&mut self) {
+        self.screen = Screen::Map;
+        self.last_hover = None;
+        self.selected = None;
+        if let Some(name) = self.host.world.current_map_name() {
+            self.path = name;
+        }
+    }
+    /// A desktop button press: its cue, and the release cue to follow.
+    pub(crate) fn press(&mut self) {
+        self.pressed = true;
+        self.play_effect(BUTTON_PRESS, None);
+    }
+    /// The mouse button was released.
+    pub fn release(&mut self) -> bool {
+        if !std::mem::take(&mut self.pressed) {
+            return false;
+        }
+        self.play_effect(BUTTON_RELEASE, None);
+        true
+    }
+    pub(crate) fn location_name(&self, town: usize) -> Vec<u8> {
+        vault_core::worldmap::TOWNS
+            .get(town)
+            .map_or_else(Vec::new, |town| town.name.as_bytes().to_vec())
+    }
+    /// Game date and time, `MM/DD/YYYY HH:MM`.
+    pub(crate) fn clock_text(&self) -> Vec<u8> {
+        let world = &self.host.world;
+        let [month, day, year] =
+            vault_core::host_save::game_date(world.clock.ticks, world.rules.calendar_year);
+        let time = world.clock.hhmm();
+        format!(
+            "{month:02}/{day:02}/{year:04} {:02}:{:02}",
+            time / 100,
+            time % 100
+        )
+        .into_bytes()
+    }
+    /// Whether an object (or its outermost owner) lies in the displayed map
+    /// window, for SPEC-010 relative volume.
+    fn on_screen(&self, object: ObjectRef) -> bool {
+        let world = &self.host.world;
+        let mut object = object;
+        for _ in 0..64 {
+            match world.get(object).and_then(|found| found.owner) {
+                Some(owner) => object = owner,
+                None => break,
+            }
+        }
+        let Some(found) = world.get(object) else {
+            return false;
+        };
+        found.raw.elevation == self.view.elevation
+            && found
+                .raw
+                .hex
+                .and_then(|hex| self.view.grid.hex_center(hex).ok())
+                .is_some_and(|[x, y]| (-32..672).contains(&x) && (-32..412).contains(&y))
+    }
+    /// A SPEC-010 effect: resolve the name through the lookup chain (with
+    /// the owner's gender alias), decode, and play at the relative volume.
+    fn play_effect(&mut self, name: &[u8], owner: Option<ObjectRef>) {
+        let Some(path) = self.host.effect_file(name, owner) else {
+            tracing::debug!(name = %String::from_utf8_lossy(name), "no effect file");
+            return;
+        };
+        let Some(samples) = self.sounds.load(&*self.host.assets.vfs, &path) else {
+            return;
+        };
+        let on_screen = owner.is_some_and(|owner| self.on_screen(owner));
+        let volume = sfx::applied_volume(
+            self.host.world.effect_volume(owner, on_screen),
+            EFFECT_SETTING,
+        );
+        if !self
+            .audio
+            .play(samples, volume as f32 / 32767.0, Channel::Effect, false)
+        {
+            tracing::debug!(%path, "effect not played (silent output or four effects active)");
+        }
+    }
+    /// Talking-head speech: `sound/speech/<head>/<stem>.ACM`. Without a file
+    /// or output, speech finishes at once.
+    fn play_speech(&mut self, sound: &[u8]) {
+        let started = self
+            .host
+            .speech_file(sound)
+            .and_then(|path| self.sounds.load(&*self.host.assets.vfs, &path))
+            .is_some_and(|samples| self.audio.play(samples, 1.0, Channel::Speech, false));
+        if started {
+            self.speaking = true;
+        } else {
+            self.host.speech_finished();
+        }
+    }
+    /// A library sound slot: the named file with its looping mode bit.
+    fn play_library(&mut self, slot: usize, filename: &[u8], mode: i32) {
+        let path = String::from_utf8_lossy(filename).replace('\\', "/");
+        if let Some(samples) = self.sounds.load(&*self.host.assets.vfs, &path) {
+            self.audio
+                .play(samples, 1.0, Channel::Library(slot), mode & 1 != 0);
+        }
+    }
+    /// Audio follows the world: finished speech completes the head's speech
+    /// phase, and stopped, paused, or freed library slots fall silent.
+    fn update_audio(&mut self) {
+        if self.speaking && !self.audio.playing(Channel::Speech) {
+            self.speaking = false;
+            self.host.speech_finished();
+        }
+        for (slot, sound) in self.host.library.sounds.iter().enumerate() {
+            if sound
+                .as_ref()
+                .is_none_or(|sound| !sound.playing || sound.paused)
+            {
+                self.audio.stop(Channel::Library(slot));
+            }
+        }
     }
     fn drain_effects(&mut self) {
         while let Some(effect) = self.host.world.effects.pop_front() {
@@ -189,9 +428,22 @@ impl MapPreview {
                     tracing::warn!(%error,"world diagnostic");
                     self.status = error.into_bytes();
                 }
-                // The preview has no audio backend, so speech playback ends
-                // immediately; the head then leaves its speech phase.
-                WorldEffect::Speech(_) => self.host.speech_finished(),
+                WorldEffect::Speech(sound) => self.play_speech(&sound),
+                WorldEffect::StopSpeech => {
+                    self.audio.stop(Channel::Speech);
+                    self.speaking = false;
+                }
+                WorldEffect::SoundEffect { name, owner } => self.play_effect(&name, owner),
+                WorldEffect::WeaponSound { object, name, .. } => {
+                    self.play_effect(&name, Some(object))
+                }
+                WorldEffect::LibrarySound {
+                    slot,
+                    filename,
+                    mode,
+                } => self.play_library(slot, &filename, mode),
+                WorldEffect::WorldMap => self.open_world_map(),
+                WorldEffect::TownMap => self.open_town_map(),
                 WorldEffect::DefaultAction { action, target } => {
                     let name = self
                         .host
@@ -206,6 +458,14 @@ impl MapPreview {
     }
     pub fn image(&mut self) -> AppResult<IndexedImage> {
         self.drain_effects();
+        match &self.screen {
+            Screen::Map => self.map_image(),
+            Screen::World(_) => self.world_image(),
+            Screen::Town(_) => self.town_image(),
+            Screen::PipBoy(_) => self.pipboy_image(),
+        }
+    }
+    fn map_image(&mut self) -> AppResult<IndexedImage> {
         let map = self.host.world.render_snapshot();
         if map.objects.elevations.iter().flatten().any(|object| {
             !object.flags.contains(BasicFlags::HIDDEN)
@@ -302,8 +562,16 @@ impl MapPreview {
         Ok(image)
     }
     pub fn title(&self) -> String {
+        match &self.screen {
+            Screen::World(_) => {
+                return "Vault — world map — click to travel; Escape returns".into();
+            }
+            Screen::Town(_) => return "Vault — town map — choose an area; Escape returns".into(),
+            Screen::PipBoy(_) => return "Vault — Pip-Boy — Escape returns".into(),
+            Screen::Map => {}
+        }
         format!(
-            "Vault — {} — elevation {} — roofs {} — click objects; L/D/U/P/T actions",
+            "Vault — {} — elevation {} — roofs {} — click objects; L/D/U/P/T actions; W world map; B Pip-Boy",
             self.path,
             self.view.elevation,
             if self.view.roofs { "on" } else { "off" }
@@ -352,8 +620,25 @@ impl MapPreview {
                 _ => return false,
             }
         }
+        match self.screen {
+            Screen::World(_) => return self.world_key(key),
+            Screen::Town(_) => return self.town_key(key),
+            Screen::PipBoy(_) => return self.pipboy_key(key),
+            Screen::Map => {}
+        }
         if self.host.world.ui_disabled {
             return false;
+        }
+        match key {
+            KeyCode::KeyW => {
+                self.open_world_map();
+                return true;
+            }
+            KeyCode::KeyB => {
+                self.open_pipboy();
+                return true;
+            }
+            _ => {}
         }
         let key_number = match key {
             KeyCode::KeyL => Some(b'L'),
@@ -420,13 +705,21 @@ impl MapPreview {
     pub fn click(&mut self, point: [i32; 2], right: bool) -> bool {
         if self.host.world.dialogue.open {
             if let Some(choice) = self.choices.iter().find(|choice| choice.contains(point)) {
-                if let Err(error) = self.host.choose_dialogue(Some(choice.index)) {
+                let index = choice.index;
+                self.press();
+                if let Err(error) = self.host.choose_dialogue(Some(index)) {
                     self.status = error.to_string().into_bytes();
                 }
                 self.option_scroll = 0;
                 return true;
             }
             return false;
+        }
+        match self.screen {
+            Screen::World(_) => return self.world_click(point),
+            Screen::Town(_) => return self.town_click(point),
+            Screen::PipBoy(_) => return self.pipboy_click(point),
+            Screen::Map => {}
         }
         if self.host.world.ui_disabled {
             return false;
@@ -444,6 +737,7 @@ impl MapPreview {
             {
                 let x = 8 + index as i32 * 126;
                 if (x..x + 118).contains(&point[0]) {
+                    self.press();
                     self.interact(action);
                     return true;
                 }
@@ -462,7 +756,7 @@ impl MapPreview {
         true
     }
     pub fn scroll(&mut self, delta: f64) -> bool {
-        if !self.host.world.dialogue.open {
+        if !matches!(self.screen, Screen::Map) || !self.host.world.dialogue.open {
             return false;
         }
         if delta < 0.0 {
@@ -474,7 +768,18 @@ impl MapPreview {
         true
     }
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
-        let mut changed = match self.host.tick(now) {
+        // The world and Pip-Boy screens are modal: the local map's scripts
+        // and clock wait while travel or rest advances time.
+        let screen = match &self.screen {
+            Screen::Map => self.host.tick(now),
+            Screen::World(_) | Screen::Town(_) => self
+                .world_tick(now)
+                .map_err(|error| vault_core::WorldError::Invalid(error.to_string())),
+            Screen::PipBoy(_) => self
+                .pipboy_tick(now)
+                .map_err(|error| vault_core::WorldError::Invalid(error.to_string())),
+        };
+        let mut changed = match screen {
             Ok(changed) => changed,
             Err(error) => {
                 self.status = error.to_string().into_bytes();
@@ -482,6 +787,7 @@ impl MapPreview {
                 true
             }
         };
+        self.update_audio();
         if self.view.grid.pick_hex([320, 190]) != Some(self.host.world.camera_hex) {
             self.view.grid = HexGrid::centered(self.host.world.camera_hex, 640, 380)?;
             changed = true;
@@ -497,7 +803,7 @@ impl MapPreview {
         Ok(changed)
     }
     pub fn hover(&mut self, point: [i32; 2]) -> Option<MapHover> {
-        if self.host.world.dialogue.open {
+        if self.host.world.dialogue.open || !matches!(self.screen, Screen::Map) {
             return None;
         }
         let hover = self.view.hover(point);
@@ -515,11 +821,348 @@ impl MapPreview {
 pub(crate) mod fixture;
 #[cfg(test)]
 #[allow(dead_code)]
+#[path = "../../../tests/fixtures/sound/support.rs"]
+mod sound_fixture;
+#[cfg(test)]
+#[allow(dead_code)]
 #[path = "../../../tests/fixtures/state/support.rs"]
 mod state_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vault_formats::LocalDirProvider;
+
+    /// Every file under `root`, as VFS-relative paths and bytes.
+    fn files(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    found.push((relative, std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+    /// A SPEC-008 archive of raw (`0x20`) members: the root directory
+    /// table (`.` first), each directory's file table, then the payloads.
+    fn dat(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+        let mut directories: BTreeMap<String, Vec<(String, &[u8])>> = BTreeMap::new();
+        directories.entry(".".into()).or_default();
+        for (path, bytes) in files {
+            let path = path.to_ascii_uppercase().replace('/', "\\");
+            let (directory, file) = path
+                .rsplit_once('\\')
+                .map_or((".".to_owned(), path.clone()), |(d, f)| {
+                    (d.to_owned(), f.to_owned())
+                });
+            directories
+                .entry(directory)
+                .or_default()
+                .push((file, bytes));
+        }
+        let word = |out: &mut Vec<u8>, value: usize| out.extend((value as u32).to_be_bytes());
+        let mut root = Vec::new();
+        for value in [directories.len(), 0, 0, 0] {
+            word(&mut root, value);
+        }
+        for name in directories.keys() {
+            root.push(name.len() as u8);
+            root.extend(name.as_bytes());
+        }
+        let tables: usize = directories
+            .values()
+            .map(|files| {
+                16 + files
+                    .iter()
+                    .map(|(name, _)| 1 + name.len() + 16)
+                    .sum::<usize>()
+            })
+            .sum();
+        let (mut table, mut payload) = (Vec::new(), Vec::new());
+        let mut offset = root.len() + tables;
+        for files in directories.values() {
+            for value in [files.len(), 0, 16, 0] {
+                word(&mut table, value);
+            }
+            for (name, bytes) in files {
+                table.push(name.len() as u8);
+                table.extend(name.as_bytes());
+                for value in [0x20, offset, bytes.len(), bytes.len()] {
+                    word(&mut table, value);
+                }
+                payload.extend_from_slice(bytes);
+                offset += bytes.len();
+            }
+        }
+        [root, table, payload].concat()
+    }
+    fn interactive(dir: &std::path::Path) -> MapPreview {
+        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir).unwrap());
+        MapPreview::load(
+            vfs,
+            "maps/synthetic.map",
+            "english",
+            Some("premade/synthetic.gcd"),
+            1,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn dat_archives_supply_the_world_like_the_loose_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        let loose = dir.path().join("loose");
+        state_fixture::write_corpus(&loose);
+        let (critter, master): (Vec<_>, Vec<_>) = files(&loose)
+            .into_iter()
+            .partition(|(path, _)| path.starts_with("art/critters/"));
+        assert!(!critter.is_empty());
+        std::fs::write(dir.path().join("MASTER.DAT"), dat(&master)).unwrap();
+        std::fs::write(dir.path().join("CRITTER.DAT"), dat(&critter)).unwrap();
+        let patch = dir.path().join("patch");
+        std::fs::create_dir_all(patch.join("data")).unwrap();
+        std::fs::write(patch.join("data/patch.txt"), b"loose").unwrap();
+        let args = crate::preview::PreviewArgs {
+            corpus_dir: Some(patch),
+            master_dat: Some(dir.path().join("MASTER.DAT")),
+            critter_dat: Some(dir.path().join("CRITTER.DAT")),
+            preview_map: Some("maps/synthetic.map".into()),
+            player_gcd: Some("premade/synthetic.gcd".into()),
+            ..Default::default()
+        };
+        // Critter art comes from CRITTER.DAT only; the loose root comes first.
+        let vfs = args.source().unwrap();
+        assert!(vfs.read("art/critters/critters.lst").is_ok());
+        assert_eq!(vfs.read("data/patch.txt").unwrap(), b"loose");
+        assert!(vfs.read("color.pal").is_ok());
+        let crate::preview::AssetPreview::Map(mut archived) = args.load().unwrap().unwrap() else {
+            panic!("map preview");
+        };
+        let mut unpacked = interactive(&loose);
+        assert_eq!(
+            archived.image().unwrap().pixels(),
+            unpacked.image().unwrap().pixels(),
+            "archives and loose files give the same world"
+        );
+        // Without both archives the loose directory alone is the source.
+        let lone = crate::preview::PreviewArgs {
+            critter_dat: None,
+            ..args
+        };
+        assert!(lone.source().unwrap().read("color.pal").is_err());
+    }
+
+    #[test]
+    fn effects_speech_ui_and_library_sounds_reach_the_mixer() {
+        use crate::audio::EFFECT_VOICES;
+        use vault_core::dialogue::{HeadDefinition, Mood, TalkingHead};
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        std::fs::create_dir_all(dir.path().join("sound/sfx")).unwrap();
+        std::fs::create_dir_all(dir.path().join("sound/speech/synth")).unwrap();
+        for (path, vector) in [
+            ("sound/sfx/IB1P1XX1.ACM", 'A'),
+            ("sound/sfx/ib1lu1x1.acm", 'D'),
+            ("sound/sfx/MAMTNTAN.ACM", 'B'),
+            ("sound/speech/synth/hello.acm", 'H'),
+        ] {
+            std::fs::write(dir.path().join(path), sound_fixture::acm(vector)).unwrap();
+        }
+        let mut preview = interactive(dir.path());
+        let (audio, mixer) = AudioHandle::detached();
+        preview.audio = audio;
+        preview.image().unwrap();
+        let effect = |name: &[u8]| WorldEffect::SoundEffect {
+            name: name.to_vec(),
+            owner: None,
+        };
+        // Direct playback resolves through the MALIEU -> MAMTNT alias.
+        preview.host.world.effects.push_back(effect(b"MALIEUAN"));
+        preview.image().unwrap();
+        assert!(mixer.lock().unwrap().playing(Channel::Effect));
+        // At most four effects; later requests are refused, never evicting.
+        for _ in 0..5 {
+            preview.host.world.effects.push_back(effect(b"IB1P1XX1"));
+        }
+        preview.image().unwrap();
+        assert_eq!(mixer.lock().unwrap().voices(), EFFECT_VOICES);
+        mixer.lock().unwrap().stop(Channel::Effect);
+        // A desktop button plays the small-button press, then release, cue.
+        assert!(preview.click([20, 355], false));
+        assert!(preview.release());
+        assert!(!preview.release(), "only one release per press");
+        assert_eq!(mixer.lock().unwrap().voices(), 2);
+        mixer.lock().unwrap().stop(Channel::Effect);
+        // Speech without a talking head (or file) finishes at once.
+        preview
+            .host
+            .world
+            .effects
+            .push_back(WorldEffect::Speech(b"hello".to_vec()));
+        preview.image().unwrap();
+        assert!(!preview.speaking);
+        // With a head, `sound/speech/<stem>/<field>.ACM` plays until done.
+        let head = HeadDefinition {
+            index: 0,
+            stem: "synth".into(),
+            counts: [1; 3],
+        };
+        preview.host.world.dialogue.head =
+            Some(TalkingHead::new(head, Mood::Neutral, 0, &mut preview.host.world.rng).unwrap());
+        preview
+            .host
+            .world
+            .effects
+            .push_back(WorldEffect::Speech(b"hello.lip".to_vec()));
+        preview.image().unwrap();
+        assert!(preview.speaking && mixer.lock().unwrap().playing(Channel::Speech));
+        mixer
+            .lock()
+            .unwrap()
+            .fill(&mut [0.0; 16], 1, acm::MIXER_RATE);
+        preview.tick(0).unwrap();
+        assert!(!preview.speaking, "completed speech ends the speech phase");
+        preview.host.world.dialogue.head = None;
+        // A library slot loops until its slot stops.
+        preview
+            .host
+            .world
+            .effects
+            .push_back(WorldEffect::LibrarySound {
+                slot: 2,
+                filename: b"sound\\sfx\\ib1lu1x1.acm".to_vec(),
+                mode: 1,
+            });
+        preview.image().unwrap();
+        assert!(mixer.lock().unwrap().playing(Channel::Library(2)));
+        preview.tick(10).unwrap();
+        assert!(
+            !mixer.lock().unwrap().playing(Channel::Library(2)),
+            "the slot is free"
+        );
+    }
+
+    #[test]
+    fn world_map_travels_to_a_town_and_enters_an_area_from_the_town_map() {
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        std::fs::copy(
+            dir.path().join("maps/synthetic.map"),
+            dir.path().join("maps/v13ent.map"),
+        )
+        .unwrap();
+        let mut preview = interactive(dir.path());
+        preview.image().unwrap();
+        assert!(preview.step(KeyCode::KeyW));
+        let Screen::World(world) = &preview.screen else {
+            panic!("world map");
+        };
+        let scroll = world.scroll;
+        let image = preview.image().unwrap();
+        assert_eq!((image.width(), image.height()), (640, 480));
+        // Vault 13 (cell 16,1) is known from the start: travel to its center.
+        let [x, y] = [16 * 50 + 25, 50 + 25];
+        let point = [
+            vault_core::worldmap::VIEWPORT_ORIGIN[0] + x - scroll[0],
+            vault_core::worldmap::VIEWPORT_ORIGIN[1] + y - scroll[1],
+        ];
+        assert!(preview.click(point, false));
+        let start = preview.host.world.clock.ticks;
+        for update in 1..100 {
+            preview.tick(update * 50).unwrap();
+            if !matches!(preview.screen, Screen::World(_)) {
+                break;
+            }
+        }
+        // A visited town shows its town map with its known entrances.
+        let Screen::Town(town) = &preview.screen else {
+            panic!("town map after arriving");
+        };
+        assert_eq!(town.town, 0);
+        assert_eq!(town.buttons.len(), 1);
+        assert!(preview.host.world.clock.ticks >= start);
+        let rect = town.buttons[0].rect;
+        preview.image().unwrap();
+        assert!(preview.click([rect[0] + 4, rect[1] + 4], false));
+        assert!(
+            matches!(preview.screen, Screen::Map),
+            "{:?}",
+            String::from_utf8_lossy(&preview.status)
+        );
+        // The entrance's map is loaded (named by its working saved-map file).
+        assert_eq!(
+            preview.host.world.current_map_name().as_deref(),
+            Some("V13ENT.SAV")
+        );
+        assert_eq!(preview.image().unwrap().height(), 380);
+        // Escape returns from the world map without travelling.
+        assert!(preview.step(KeyCode::KeyW));
+        assert!(preview.step(KeyCode::Escape));
+        assert!(matches!(preview.screen, Screen::Map));
+    }
+
+    #[test]
+    fn pipboy_lists_quests_and_holodisks_and_rests_in_ui_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        std::fs::write(
+            dir.path().join("text/english/game/pipboy.msg"),
+            b"{400}{}{Disk Zero}\n{1000}{}{First line}\n{1001}{}{**END-PAR**}\n\
+              {1002}{}{**END-DISK**}\n{700}{}{Vault 13}\n{701}{}{Find help}\n\
+              {702}{}{Done task}\n{704}{}{Find the water chip}\n",
+        )
+        .unwrap();
+        let mut preview = interactive(dir.path());
+        let mut gvars = vec![0; 620];
+        gvars[162] = 1;
+        gvars[238] = 1;
+        gvars[309] = 2;
+        preview.host.world.gvars = Some(gvars);
+        preview.image().unwrap();
+        preview.host.world.rest_credit = 100;
+        assert!(preview.step(KeyCode::KeyB));
+        assert_eq!(preview.host.world.rest_credit, 0, "opening resets credit");
+        let image = preview.image().unwrap();
+        assert!(image.pixels().iter().any(|pixel| *pixel != 0));
+        // The holodisk list maps a row to its disk's records.
+        assert!(preview.click([30, 95], false));
+        assert!(preview.click([200, 64], false));
+        let Screen::PipBoy(pipboy) = &preview.screen else {
+            panic!("Pip-Boy");
+        };
+        let (disk, page) = pipboy.disk.as_ref().unwrap();
+        assert_eq!(
+            (disk.title.as_slice(), disk.records.len(), *page),
+            (b"Disk Zero".as_slice(), 2, 0)
+        );
+        preview.image().unwrap();
+        // The alarm clock rests ten minutes in 50 ms UI steps.
+        assert!(preview.click([30, 125], false));
+        assert!(preview.click([200, 64], false));
+        let start = preview.host.world.clock.ticks;
+        let mut now = 1000;
+        while matches!(&preview.screen, Screen::PipBoy(pipboy) if pipboy.rest.is_some()) {
+            now += 50;
+            preview.tick(now).unwrap();
+            assert!(now < 100_000, "rest finishes");
+        }
+        assert_eq!(preview.host.world.clock.ticks - start, 6000);
+        assert_eq!(preview.status, b"Rest complete");
+        preview.image().unwrap();
+        assert!(preview.step(KeyCode::Escape));
+        assert!(matches!(preview.screen, Screen::Map));
+    }
     #[test]
     fn map_preview_loads_all_categories_and_handles_camera_roofs_elevations() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,29 +1,36 @@
 use crate::AppResult;
 use std::{path::PathBuf, sync::Arc};
 use vault_formats::{
-    Font, FrmArchive, LocalDirProvider, MAX_ASSET_BYTES, MsgCatalog, Palette, ParseError, Vfs,
-    VfsPath,
+    DatArchive, DatProvider, Database, Font, FrmArchive, LocalDirProvider, MAX_ASSET_BYTES,
+    MsgCatalog, Palette, ParseError, Vfs, VfsPath,
 };
 use vault_render::{ImageError, IndexedImage, compose_preview};
 use winit::keyboard::KeyCode;
 
 #[derive(clap::Args, Debug, Default)]
 pub struct PreviewArgs {
-    /// Mount a loose directory for sprite preview.
+    /// Mount a loose directory: the whole asset source, or with DAT
+    /// archives the loose patch root both databases consult first.
     #[arg(long, requires = "preview_asset", value_name = "PATH")]
     pub corpus_dir: Option<PathBuf>,
-    /// Sprite path relative to the case-insensitive VFS root.
+    /// SPEC-008 master database archive (MASTER.DAT); requires --critter-dat.
     #[arg(
         long,
-        requires = "corpus_dir",
-        group = "preview_asset",
-        value_name = "VFS_PATH"
+        requires = "critter_dat",
+        requires = "preview_asset",
+        value_name = "PATH"
     )]
+    pub master_dat: Option<PathBuf>,
+    /// SPEC-008 critter database archive (CRITTER.DAT), selected for
+    /// `art/critters/` requests; requires --master-dat.
+    #[arg(long, requires = "master_dat", value_name = "PATH")]
+    pub critter_dat: Option<PathBuf>,
+    /// Sprite path relative to the case-insensitive VFS root.
+    #[arg(long, group = "preview_asset", value_name = "VFS_PATH")]
     pub preview_frm: Option<String>,
     /// Map path relative to the VFS root; arrows pan, R toggles roofs, 0-2 select elevation.
     #[arg(
         long,
-        requires = "corpus_dir",
         group = "preview_asset",
         conflicts_with = "preview_frm",
         value_name = "VFS_PATH"
@@ -125,6 +132,13 @@ impl AssetPreview {
             Self::Map(preview) => preview.scroll(delta),
         }
     }
+    /// A mouse release: a held desktop button plays its release cue.
+    pub fn release(&mut self) -> bool {
+        match self {
+            Self::Sprite(_) => false,
+            Self::Map(preview) => preview.release(),
+        }
+    }
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
         match self {
             Self::Sprite(_) => Ok(false),
@@ -134,7 +148,7 @@ impl AssetPreview {
 }
 
 fn parse_asset<T>(
-    vfs: &LocalDirProvider,
+    vfs: &dyn Vfs,
     path: &str,
     parser: impl FnOnce(&[u8]) -> Result<T, ParseError>,
 ) -> AppResult<T> {
@@ -143,16 +157,46 @@ fn parse_asset<T>(
 }
 
 impl PreviewArgs {
+    /// The asset namespace: SPEC-008 master and critter databases (each
+    /// consulting the optional loose root first, with no fallback to the
+    /// other archive), or a loose directory alone.
+    pub fn source(&self) -> AppResult<Arc<dyn Vfs>> {
+        let loose = self
+            .corpus_dir
+            .as_ref()
+            .map(LocalDirProvider::mount)
+            .transpose()?
+            .map(Arc::new);
+        let (Some(master), Some(critter)) = (&self.master_dat, &self.critter_dat) else {
+            let loose =
+                loose.ok_or("a preview requires --corpus-dir or --master-dat/--critter-dat")?;
+            return Ok(loose);
+        };
+        let archive = |path: &PathBuf| -> AppResult<Arc<DatArchive>> {
+            let bytes =
+                std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+            Ok(Arc::new(
+                DatArchive::parse(bytes).map_err(|error| format!("{}: {error}", path.display()))?,
+            ))
+        };
+        let master = Database {
+            loose: loose.clone(),
+            archive: Some(archive(master)?),
+        };
+        let critter = Database {
+            loose,
+            archive: Some(archive(critter)?),
+        };
+        let provider = DatProvider::new(master, critter);
+        tracing::info!(files = provider.files().count(), "DAT databases mounted");
+        Ok(Arc::new(provider))
+    }
     pub fn load(&self) -> AppResult<Option<AssetPreview>> {
         if let Some(path) = &self.preview_map {
-            let vfs = LocalDirProvider::mount(
-                self.corpus_dir
-                    .as_ref()
-                    .ok_or("--preview-map requires --corpus-dir")?,
-            )?;
+            let vfs = self.source()?;
             return Ok(Some(AssetPreview::Map(Box::new(
                 crate::map_preview::MapPreview::load(
-                    Arc::new(vfs),
+                    vfs,
                     path,
                     self.language.as_deref().unwrap_or("english"),
                     self.player_gcd.as_deref(),
@@ -169,11 +213,8 @@ impl PreviewArgs {
         let Some(path) = &self.preview_frm else {
             return Ok(None);
         };
-        let vfs = LocalDirProvider::mount(
-            self.corpus_dir
-                .as_ref()
-                .ok_or("--preview-frm requires --corpus-dir")?,
-        )?;
+        let vfs = self.source()?;
+        let vfs = &*vfs;
         let path = VfsPath::new(path)?;
         let direction = match path.extension() {
             Some("frm") => 0,
@@ -182,8 +223,8 @@ impl PreviewArgs {
             }
             _ => return Err("--preview-frm must name a .frm or .fr0–.fr5 asset".into()),
         };
-        let palette = parse_asset(&vfs, "color.pal", Palette::parse)?;
-        let archive = parse_asset(&vfs, path.as_str(), FrmArchive::parse)?;
+        let palette = parse_asset(vfs, "color.pal", Palette::parse)?;
+        let archive = parse_asset(vfs, path.as_str(), FrmArchive::parse)?;
         let font_path = self
             .font
             .clone()
@@ -204,8 +245,8 @@ impl PreviewArgs {
             .ok_or("no root .fon/.aaf font found; select one with --font")?;
         let font_path = VfsPath::new(&font_path)?;
         let font = match font_path.extension() {
-            Some("fon") => parse_asset(&vfs, font_path.as_str(), Font::parse_fon)?,
-            Some("aaf") => parse_asset(&vfs, font_path.as_str(), Font::parse_aaf)?,
+            Some("fon") => parse_asset(vfs, font_path.as_str(), Font::parse_fon)?,
+            Some("aaf") => parse_asset(vfs, font_path.as_str(), Font::parse_aaf)?,
             _ => return Err("--font must name a .fon or .aaf asset".into()),
         };
         let msg_path = self
@@ -219,7 +260,7 @@ impl PreviewArgs {
                     .map(ToString::to_string)
             })
             .ok_or("no message catalog below text/; select one with --msg")?;
-        let catalog = parse_asset(&vfs, &msg_path, MsgCatalog::parse)?;
+        let catalog = parse_asset(vfs, &msg_path, MsgCatalog::parse)?;
         let id = self
             .message_id
             .or_else(|| {

@@ -5,8 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = ["audio"]
+# Device output through cpal (ALSA on Linux); without it the desktop resolves
+# and decodes sounds but plays them silently.
+audio = ["dep:cpal"]
+
 [dependencies]
 clap.workspace = true
+cpal = { workspace = true, optional = true }
 pollster.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -14,6 +21,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 vault-core.workspace = true
 vault-formats.workspace = true
+vault-guidance.workspace = true
 vault-render.workspace = true
 winit.workspace = true
 
