@@ -13,12 +13,15 @@ pub mod gcd;
 pub mod geometry;
 pub mod lst;
 pub mod map;
+pub mod moviefx;
 pub mod msg;
+pub mod mve;
 pub mod palette;
 pub mod pro;
 pub mod pro_catalog;
 pub mod savegame;
 pub mod sfx;
+pub mod sve;
 pub mod vfs;
 
 pub use automap::AutomapDb;
@@ -79,6 +82,8 @@ mod automap_tests;
 mod dat_tests;
 #[cfg(test)]
 mod fid_tests;
+#[cfg(test)]
+mod movie_tests;
 #[cfg(test)]
 mod save_tests;
 #[cfg(test)]

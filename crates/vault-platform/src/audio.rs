@@ -2,20 +2,25 @@
 //! and SPEC-005 library sounds, played on the default output device through
 //! cpal (feature `audio`). Effects and speech are mono 16-bit at the 22050 Hz
 //! mixer rate whatever their ACM headers declare. At most four effects play at
-//! once; a fifth request fails without evicting one.
-use std::sync::{Arc, Mutex, MutexGuard};
+//! once; a fifth request fails without evicting one. A movie streams its
+//! interleaved PCM through one appendable voice at the movie's own rate.
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex, MutexGuard},
+};
 use vault_formats::acm::MIXER_RATE;
 
 /// SPEC-010 §3.9 active effect limit.
 pub const EFFECT_VOICES: usize = 4;
 
 /// What a voice belongs to: effects share the four-voice limit, speech has
-/// one voice, and each library slot has its own.
+/// one voice, each library slot has its own, and a movie has one stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
     Effect,
     Speech,
     Library(usize),
+    Movie,
 }
 
 // Without a device (feature `audio` off) only tests drain the mixer.
@@ -29,10 +34,23 @@ struct Voice {
     looping: bool,
 }
 
+/// A stream fed while it plays: interleaved samples at its own rate.
+#[cfg_attr(not(feature = "audio"), allow(dead_code))]
+struct Stream {
+    channel: Channel,
+    samples: VecDeque<i16>,
+    channels: usize,
+    rate: u32,
+    /// Position within the front frame in 32.32 fixed point.
+    position: u64,
+    gain: f32,
+}
+
 /// The voices currently playing.
 #[derive(Default)]
 pub struct Mixer {
     voices: Vec<Voice>,
+    streams: Vec<Stream>,
 }
 impl Mixer {
     /// Start a voice. Speech and library slots replace their previous
@@ -71,9 +89,52 @@ impl Mixer {
     }
     pub fn stop(&mut self, channel: Channel) {
         self.voices.retain(|voice| voice.channel != channel);
+        self.streams.retain(|stream| stream.channel != channel);
     }
     pub fn playing(&self, channel: Channel) -> bool {
         self.voices.iter().any(|voice| voice.channel == channel)
+            || self.streams.iter().any(|stream| stream.channel == channel)
+    }
+    /// Start an empty stream of `channels`-wide frames at `rate` Hz,
+    /// replacing the channel's voice or stream. An underrun plays silence
+    /// until more samples arrive.
+    pub fn open_stream(&mut self, channel: Channel, rate: u32, channels: usize, gain: f32) -> bool {
+        self.stop(channel);
+        if rate == 0 || !(1..=2).contains(&channels) {
+            return false;
+        }
+        self.streams.push(Stream {
+            channel,
+            samples: VecDeque::new(),
+            channels,
+            rate,
+            position: 0,
+            gain,
+        });
+        true
+    }
+    /// Append interleaved samples to an open stream.
+    pub fn append(&mut self, channel: Channel, samples: &[i16]) -> bool {
+        match self
+            .streams
+            .iter_mut()
+            .find(|stream| stream.channel == channel)
+        {
+            Some(stream) => {
+                stream.samples.extend(samples);
+                true
+            }
+            None => false,
+        }
+    }
+    /// Samples queued in a stream.
+    #[cfg(test)]
+    pub fn queued(&self, channel: Channel) -> usize {
+        self.streams
+            .iter()
+            .filter(|stream| stream.channel == channel)
+            .map(|stream| stream.samples.len())
+            .sum()
     }
     #[cfg(test)]
     pub fn voices(&self) -> usize {
@@ -115,6 +176,31 @@ impl Mixer {
         }
         self.voices
             .retain(|voice| voice.looping || voice.position >> 32 < voice.samples.len() as u64);
+        for stream in &mut self.streams {
+            let step = (u64::from(stream.rate) << 32) / u64::from(rate);
+            let frames = (stream.samples.len() / stream.channels) as u64;
+            for frame in out.chunks_mut(channels) {
+                let index = stream.position >> 32;
+                if index >= frames {
+                    break;
+                }
+                let at = index as usize * stream.channels;
+                let left = f32::from(stream.samples[at]) / 32768.0 * stream.gain;
+                let right =
+                    f32::from(stream.samples[at + stream.channels - 1]) / 32768.0 * stream.gain;
+                for (output, sample) in frame.iter_mut().enumerate() {
+                    *sample += match output {
+                        0 if channels > 1 => left,
+                        1 => right,
+                        _ => (left + right) / 2.0,
+                    };
+                }
+                stream.position += step;
+            }
+            let consumed = ((stream.position >> 32) as usize).min(frames as usize);
+            stream.samples.drain(..consumed * stream.channels);
+            stream.position -= (consumed as u64) << 32;
+        }
         for sample in out {
             *sample = sample.clamp(-1.0, 1.0);
         }
@@ -160,6 +246,14 @@ impl AudioHandle {
     }
     pub fn playing(&self, channel: Channel) -> bool {
         self.lock().is_some_and(|mixer| mixer.playing(channel))
+    }
+    pub fn open_stream(&self, channel: Channel, rate: u32, channels: usize, gain: f32) -> bool {
+        self.lock()
+            .is_some_and(|mut mixer| mixer.open_stream(channel, rate, channels, gain))
+    }
+    pub fn append(&self, channel: Channel, samples: &[i16]) -> bool {
+        self.lock()
+            .is_some_and(|mut mixer| mixer.append(channel, samples))
     }
 }
 
@@ -321,6 +415,34 @@ mod tests {
         mixer.fill(&mut out, 1, MIXER_RATE);
         assert_eq!(out[0], 1.0);
         assert!(out[1] > 0.99 && mixer.playing(Channel::Library(0)));
+    }
+
+    #[test]
+    fn movie_streams_play_interleaved_frames_and_wait_on_underrun() {
+        let mut mixer = Mixer::default();
+        assert!(!mixer.append(Channel::Movie, &[1]), "no stream yet");
+        assert!(mixer.open_stream(Channel::Movie, MIXER_RATE, 2, 1.0));
+        assert!(mixer.append(Channel::Movie, &[16384, -16384, 8192, 0]));
+        // Stereo frames keep their channels; an underrun is silent and the
+        // stream keeps playing.
+        let mut out = [0.0; 6];
+        mixer.fill(&mut out, 2, MIXER_RATE);
+        assert_eq!(out, [0.5, -0.5, 0.25, 0.0, 0.0, 0.0]);
+        assert!(mixer.playing(Channel::Movie));
+        assert_eq!(mixer.queued(Channel::Movie), 0);
+        mixer.append(Channel::Movie, &[-32768, 32767]);
+        let mut mono = [0.0; 1];
+        mixer.fill(&mut mono, 1, MIXER_RATE);
+        assert!(mono[0].abs() < 1e-4, "mono output mixes both channels");
+        // A mono stream at half the output rate repeats each sample.
+        assert!(mixer.open_stream(Channel::Movie, MIXER_RATE / 2, 1, 0.5));
+        mixer.append(Channel::Movie, &[16384, -16384]);
+        let mut out = [0.0; 4];
+        mixer.fill(&mut out, 1, MIXER_RATE);
+        assert_eq!(out, [0.25, 0.25, -0.25, -0.25]);
+        mixer.stop(Channel::Movie);
+        assert!(!mixer.playing(Channel::Movie));
+        assert!(!mixer.open_stream(Channel::Movie, 0, 2, 1.0));
     }
 
     #[test]

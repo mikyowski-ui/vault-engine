@@ -12,6 +12,8 @@ All files here were authored for Vault Engine. None contain original game assets
 - `state/`: SPEC-006 GAM/GCD vectors, world/RNG/stat/dialogue tests, and interactive
   synthetic corpus generation.
 - `sound/`: SPEC-010 ACM vectors A-H as offset-addressed hex streams.
+- `movie/`: SPEC-012 header, chunk-walk, subtitle, and fade vectors; the
+  synthetic movies of Fixture H are read from `oracle/SPEC-012/synthetic/`.
 - `loose/`: plain-text markers with mixed-case game-style paths and extensions.
   All eight top-level game directories and root palette/font paths are represented.
   The markers test VFS access and audit traversal; they are **not valid legacy

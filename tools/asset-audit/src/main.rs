@@ -1,4 +1,5 @@
 mod items;
+mod movies;
 mod sound;
 
 use std::{
@@ -79,6 +80,14 @@ struct Args {
     /// then consume every drug through the engine as the player.
     #[arg(long)]
     validate_items: bool,
+    /// SPEC-012: decode every `.MVE` (summary, every frame's palette and
+    /// pixel hashes with fades applied, every audio opcode) and parse every
+    /// fade file and `.SVE`, comparing each with the oracle tables.
+    #[arg(long)]
+    validate_movies: bool,
+    /// Directory holding the SPEC-012 oracle tables.
+    #[arg(long, value_name = "PATH", default_value = "oracle/SPEC-012")]
+    movie_oracle_dir: PathBuf,
 }
 
 /// The SPEC-003 writer's expected PRO bytes: the consumed payload with
@@ -379,6 +388,14 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
             if failed + bytes != 0 {
                 return Err(format!("{} SFX check(s) failed", failed + bytes).into());
             }
+        }
+    }
+    if args.validate_movies {
+        let vfs = LocalDirProvider::mount(&args.corpus_dir)?;
+        let audit = movies::audit_movies(&vfs, &args.movie_oracle_dir)?;
+        audit.report();
+        if audit.failed() != 0 {
+            return Err(format!("{} movie check(s) failed", audit.failed()).into());
         }
     }
     if args.validate_items {

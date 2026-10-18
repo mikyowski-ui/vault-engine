@@ -36,11 +36,26 @@ pub struct PreviewArgs {
         value_name = "VFS_PATH"
     )]
     pub preview_map: Option<String>,
+    /// SPEC-012: play one `.MVE` (with its `.cfg` fades, and subtitles with
+    /// --subtitles), then exit. Any key, or a click, skips it.
+    #[arg(
+        long,
+        group = "preview_asset",
+        conflicts_with_all = ["preview_frm", "preview_map"],
+        value_name = "VFS_PATH"
+    )]
+    pub play_movie: Option<String>,
+    /// SPEC-012 subtitles preference (the boil movies always show theirs).
+    #[arg(long)]
+    pub subtitles: bool,
+    /// Play the startup movies (iplogo, then intro) before the map.
+    #[arg(long, requires = "preview_map")]
+    pub startup_movies: bool,
     /// Player sheet for interactive map preview (otherwise a neutral default character).
     #[arg(long, requires = "preview_map", value_name = "VFS_PATH")]
     pub player_gcd: Option<String>,
-    /// Dialogue resource language directory; defaults to english.
-    #[arg(long, requires = "preview_map")]
+    /// Dialogue and subtitle language directory; defaults to english.
+    #[arg(long)]
     pub language: Option<String>,
     /// Deterministic game RNG seed; defaults to 1.
     #[arg(long, requires = "preview_map")]
@@ -69,12 +84,20 @@ pub struct Preview {
 pub enum AssetPreview {
     Sprite(Box<Preview>),
     Map(Box<crate::map_preview::MapPreview>),
+    Movie(Box<MoviePreview>),
+}
+
+/// A standalone movie and the black palette shown around it.
+pub struct MoviePreview {
+    pub player: crate::movie::MoviePlayer,
+    black: Palette,
 }
 impl AssetPreview {
     pub fn image(&mut self) -> AppResult<IndexedImage> {
         match self {
             Self::Sprite(preview) => Ok(preview.image()?),
             Self::Map(preview) => preview.image(),
+            Self::Movie(movie) => Ok(movie.player.image()),
         }
     }
     /// The active palette: a script-installed table replaces the map's.
@@ -87,11 +110,24 @@ impl AssetPreview {
                 .palette
                 .as_deref()
                 .unwrap_or(&preview.palette),
+            Self::Movie(movie) => &movie.black,
         }
+    }
+    /// A movie's device palette replaces the display palette while it plays.
+    pub fn display_override(&self) -> Option<[[u8; 4]; 256]> {
+        match self {
+            Self::Sprite(_) => None,
+            Self::Map(preview) => preview.display_override(),
+            Self::Movie(movie) => Some(movie.player.palette()),
+        }
+    }
+    /// A standalone movie that ended (the shell then exits).
+    pub fn finished(&self) -> bool {
+        matches!(self, Self::Movie(movie) if movie.player.finished())
     }
     pub fn palette_generation(&self) -> u32 {
         match self {
-            Self::Sprite(_) => 0,
+            Self::Sprite(_) | Self::Movie(_) => 0,
             Self::Map(preview) => preview.host.library.palette_generation,
         }
     }
@@ -99,24 +135,34 @@ impl AssetPreview {
     pub fn palette_cycling(&self) -> bool {
         match self {
             Self::Sprite(_) => true,
-            Self::Map(preview) => preview.host.library.palette_cycling,
+            // SPEC-012 §3.12: movies disable color cycling.
+            Self::Map(preview) => preview.host.library.palette_cycling && !preview.movie_active(),
+            Self::Movie(_) => false,
         }
     }
     pub fn title(&self) -> String {
         match self {
             Self::Sprite(preview) => preview.title(),
             Self::Map(preview) => preview.title(),
+            Self::Movie(movie) => format!(
+                "Vault — movie {} — any key or a click skips",
+                movie.player.request.path
+            ),
         }
     }
     pub fn step(&mut self, key: KeyCode) -> bool {
         match self {
             Self::Sprite(preview) => preview.step(key),
             Self::Map(preview) => preview.step(key),
+            Self::Movie(movie) => {
+                movie.player.key();
+                true
+            }
         }
     }
     pub fn hover(&mut self, point: [i32; 2]) -> Option<vault_render::map::MapHover> {
         match self {
-            Self::Sprite(_) => None,
+            Self::Sprite(_) | Self::Movie(_) => None,
             Self::Map(preview) => preview.hover(point),
         }
     }
@@ -124,11 +170,15 @@ impl AssetPreview {
         match self {
             Self::Sprite(_) => false,
             Self::Map(preview) => preview.click(point, right),
+            Self::Movie(movie) => {
+                movie.player.press();
+                true
+            }
         }
     }
     pub fn scroll(&mut self, delta: f64) -> bool {
         match self {
-            Self::Sprite(_) => false,
+            Self::Sprite(_) | Self::Movie(_) => false,
             Self::Map(preview) => preview.scroll(delta),
         }
     }
@@ -137,12 +187,17 @@ impl AssetPreview {
         match self {
             Self::Sprite(_) => false,
             Self::Map(preview) => preview.release(),
+            Self::Movie(movie) => {
+                movie.player.release();
+                true
+            }
         }
     }
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
         match self {
             Self::Sprite(_) => Ok(false),
             Self::Map(preview) => preview.tick(now),
+            Self::Movie(movie) => Ok(movie.player.tick(now)),
         }
     }
 }
@@ -192,21 +247,63 @@ impl PreviewArgs {
         Ok(Arc::new(provider))
     }
     pub fn load(&self) -> AppResult<Option<AssetPreview>> {
+        let language = self.language.as_deref().unwrap_or("english");
         if let Some(path) = &self.preview_map {
             let vfs = self.source()?;
-            return Ok(Some(AssetPreview::Map(Box::new(
-                crate::map_preview::MapPreview::load(
-                    vfs,
-                    path,
-                    self.language.as_deref().unwrap_or("english"),
-                    self.player_gcd.as_deref(),
-                    self.seed.unwrap_or(1),
-                )?,
+            let mut map = crate::map_preview::MapPreview::load(
+                vfs,
+                path,
+                language,
+                self.player_gcd.as_deref(),
+                self.seed.unwrap_or(1),
+            )?;
+            map.host.set_subtitles(self.subtitles);
+            if self.startup_movies {
+                map.queue_startup_movies();
+            }
+            return Ok(Some(AssetPreview::Map(Box::new(map))));
+        }
+        if let Some(path) = &self.play_movie {
+            return Ok(Some(AssetPreview::Movie(Box::new(
+                self.load_movie(path, language)?,
             ))));
         }
         Ok(self
             .load_sprite()?
             .map(|preview| AssetPreview::Sprite(Box::new(preview))))
+    }
+
+    /// A standalone movie: its table index (for the boil movies' forced
+    /// subtitles), fade file, and subtitles under `language`.
+    fn load_movie(&self, path: &str, language: &str) -> AppResult<MoviePreview> {
+        let vfs = self.source()?;
+        let file = VfsPath::new(path)?.to_string();
+        let windows = file.replace('/', "\\");
+        let index = vault_core::movie::GAME_MOVIES
+            .iter()
+            .position(|movie| file.rsplit('/').next() == Some(movie.file));
+        let exists =
+            |path: &str| VfsPath::new(path).is_ok_and(|path| vfs.files().any(|f| *f == path));
+        let subtitles =
+            Some(vault_core::movie::subtitle_path(language, &windows)).filter(|subtitles| {
+                (self.subtitles || index.is_some_and(vault_core::movie::subtitles_forced))
+                    && exists(subtitles)
+            });
+        let fades = Some(vault_core::movie::fade_path(&windows)).filter(|fades| exists(fades));
+        let style = subtitles
+            .as_ref()
+            .and_then(|_| crate::movie::SubtitleStyle::load(&*vfs, None));
+        let request = vault_core::movie::MovieRequest {
+            index,
+            flags: 0,
+            path: windows,
+            subtitles,
+            fades,
+        };
+        Ok(MoviePreview {
+            player: crate::movie::MoviePlayer::load(&*vfs, request, style)?,
+            black: Palette::parse(&[0; 0x8300])?,
+        })
     }
 
     fn load_sprite(&self) -> AppResult<Option<Preview>> {

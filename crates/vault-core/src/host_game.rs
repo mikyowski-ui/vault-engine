@@ -1483,17 +1483,10 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 None
             }
+            // SPEC-012 §3.13: the movie plays modally in the presentation
+            // layer, so dialogue background processing waits for it.
             0x8115 => {
-                if !(0..14).contains(&call.int(0)) {
-                    return Err(VmError::Host("game movie index outside table".into()));
-                }
-                let index = call.int(0);
-                let fade_out = matches!(index, 0 | 1 | 2 | 5 | 8 | 9 | 11 | 12)
-                    || (matches!(index, 3 | 4) && self.world.map.header.name[0] == 0);
-                self.world.emit(WorldEffect::Movie {
-                    index,
-                    flags: 1 | 2 | if fade_out { 4 } else { 0 },
-                });
+                self.play_gmovie(call.int(0));
                 None
             }
             0x8117 => {
@@ -1901,11 +1894,12 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             0x8146 | 0x8148 => {
                 vm.status.0 |= 0x20;
-                self.world.emit(if op == 0x8146 {
-                    WorldEffect::Slideshow
+                if op == 0x8146 {
+                    self.world.emit(WorldEffect::Slideshow);
                 } else {
-                    WorldEffect::EndMovie
-                });
+                    // SPEC-012: walkm or walkw by the player's gender.
+                    self.play_endgame_movie();
+                }
                 vm.status.0 &= !0x20;
                 None
             }

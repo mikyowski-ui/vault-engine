@@ -119,6 +119,14 @@ impl Config {
         }
         Ok(config)
     }
+    /// The section with this case-folded name.
+    pub fn section(&self, name: &[u8]) -> Option<&Section> {
+        let folded = fold(name);
+        self.sections
+            .binary_search_by(|section| fold(&section.name).cmp(&folded))
+            .ok()
+            .map(|index| &self.sections[index])
+    }
     fn insert(&mut self, name: &[u8], key: &[u8], value: &[u8]) {
         let folded = fold(name);
         let index = match self

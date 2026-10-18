@@ -1,13 +1,15 @@
 //! SPEC-008 §3.8-3.9 Pip-Boy: quest status by location and holodisks from
 //! the campaign globals with the localized Pip-Boy messages, and the alarm
 //! clock's rest choices. Rest advances one UI step per at least 50 ms so
-//! the window stays responsive; Escape cancels it.
+//! the window stays responsive; Escape cancels it. The SPEC-012 video
+//! archive lists the played movies and replays one with flags `0x0B`.
 use super::{MapPreview, Screen, button, panel_text};
 use crate::AppResult;
 use std::sync::Arc;
 use vault_core::{
     assets::WorldAssets,
     host_rest::{RestOutcome, RestRequest, RestSession},
+    movie,
 };
 use vault_formats::MsgCatalog;
 use vault_guidance::{DiskLine, Holodisk, QuestState};
@@ -16,7 +18,13 @@ use winit::keyboard::KeyCode;
 
 /// Each rest UI step waits at least 50 wall-clock milliseconds.
 const REST_STEP_MS: u64 = 50;
-const MENU: [&[u8]; 4] = [b"Status", b"Holodisks", b"Alarm clock", b"Close"];
+const MENU: [&[u8]; 5] = [
+    b"Status",
+    b"Holodisks",
+    b"Alarm clock",
+    b"Video archive",
+    b"Close",
+];
 const CONTENT: [i32; 2] = [180, 60];
 const LINE: i32 = 12;
 /// The visible alarm-menu choices.
@@ -41,6 +49,7 @@ pub(crate) enum Tab {
     Status,
     Holodisks,
     Alarm,
+    Archive,
 }
 pub(crate) struct PipBoy {
     pub tab: Tab,
@@ -121,10 +130,10 @@ impl MapPreview {
         }
         if let Some(index) = (0..MENU.len()).find(|index| inside(menu_button(*index), point)) {
             self.press();
-            if index == 3 {
+            if index == 4 {
                 self.return_to_map();
             } else if let Screen::PipBoy(pipboy) = &mut self.screen {
-                pipboy.tab = [Tab::Status, Tab::Holodisks, Tab::Alarm][index];
+                pipboy.tab = [Tab::Status, Tab::Holodisks, Tab::Alarm, Tab::Archive][index];
                 pipboy.disk = None;
             }
             return true;
@@ -190,6 +199,19 @@ impl MapPreview {
                         }
                     }
                     Err(error) => self.status = error.to_string().into_bytes(),
+                }
+                true
+            }
+            Tab::Archive => {
+                let count = movie::archive_movies(&self.host.world.persistence.movies).len();
+                let Some(index) = (0..count).find(|index| inside(row(*index), point)) else {
+                    return false;
+                };
+                self.press();
+                // Row r is selection r + 1 (selections 0 and 1 both pick
+                // the first played movie).
+                if self.host.play_archive_movie(index as i32 + 1) {
+                    self.drain_effects();
                 }
                 true
             }
@@ -329,6 +351,20 @@ impl MapPreview {
                 (Tab::Alarm, _) => {
                     for (label, _) in ALARM {
                         put(&mut image, label, green, false);
+                    }
+                }
+                (Tab::Archive, _) => {
+                    let played = movie::archive_movies(&self.host.world.persistence.movies);
+                    if played.is_empty() {
+                        put(&mut image, b"No movies have been played", dim, false);
+                    }
+                    for index in played {
+                        put(
+                            &mut image,
+                            movie::GAME_MOVIES[index].file.as_bytes(),
+                            green,
+                            false,
+                        );
                     }
                 }
             }

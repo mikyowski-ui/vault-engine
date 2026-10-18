@@ -3,12 +3,13 @@ use crate::{
     audio::{AudioHandle, Channel},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
 };
 use vault_core::{
     CharacterSheet, ObjectAction, ObjectRef, Perk, WorldEffect, WorldHost, WorldState,
     assets::{VfsWorldAssets, WorldAssets},
+    movie::MovieRequest,
 };
 use vault_formats::{
     ArtCatalog, Fid, Font, FrmArchive, HexGrid, MAX_ASSET_BYTES, MapFile, Palette, Vfs, VfsPath,
@@ -23,6 +24,10 @@ use vault_render::{
 };
 use winit::keyboard::KeyCode;
 
+mod barter;
+mod character;
+mod inventory;
+mod movies;
 mod pipboy;
 mod world;
 
@@ -37,12 +42,17 @@ const BUTTON_RELEASE: &[u8] = b"ib1lu1x1";
 const MAX_CACHED_SAMPLES: usize = 32 * 1024 * 1024;
 
 /// The screen in front: the local map (with dialogue), the SPEC-008 world
-/// and town maps, or the Pip-Boy.
+/// and town maps, the Pip-Boy, the SPEC-011 inventory, character, and
+/// barter screens, or a SPEC-012 movie.
 pub(crate) enum Screen {
     Map,
     World(world::WorldScreen),
     Town(world::TownScreen),
     PipBoy(pipboy::PipBoy),
+    Inventory(inventory::InventoryScreen),
+    Character(Box<character::CharacterScreen>),
+    Barter(Box<barter::BarterScreen>),
+    Movie(Box<movies::MovieScreen>),
 }
 
 /// Decoded ACM samples by VFS path; a failing path is reported once.
@@ -145,6 +155,8 @@ pub struct MapPreview {
     speaking: bool,
     /// A desktop button is held: its release plays the release cue.
     pressed: bool,
+    /// Game movies waiting for the one playing.
+    movies: VecDeque<MovieRequest>,
 }
 struct MapSprites {
     bindings: BTreeMap<(Category, u32, u8), Arc<FrmArchive>>,
@@ -297,6 +309,7 @@ impl MapPreview {
             sounds: SoundBank::default(),
             speaking: false,
             pressed: false,
+            movies: VecDeque::new(),
         })
     }
     /// Back to the (possibly newly loaded) local map.
@@ -315,6 +328,10 @@ impl MapPreview {
     }
     /// The mouse button was released.
     pub fn release(&mut self) -> bool {
+        if self.movie_release() {
+            self.pressed = false;
+            return true;
+        }
         if !std::mem::take(&mut self.pressed) {
             return false;
         }
@@ -442,6 +459,7 @@ impl MapPreview {
                     filename,
                     mode,
                 } => self.play_library(slot, &filename, mode),
+                WorldEffect::Movie(request) => self.queue_movie(request),
                 WorldEffect::WorldMap => self.open_world_map(),
                 WorldEffect::TownMap => self.open_town_map(),
                 WorldEffect::DefaultAction { action, target } => {
@@ -458,11 +476,16 @@ impl MapPreview {
     }
     pub fn image(&mut self) -> AppResult<IndexedImage> {
         self.drain_effects();
+        self.check_barter();
         match &self.screen {
             Screen::Map => self.map_image(),
             Screen::World(_) => self.world_image(),
             Screen::Town(_) => self.town_image(),
             Screen::PipBoy(_) => self.pipboy_image(),
+            Screen::Inventory(_) => self.inventory_image(),
+            Screen::Character(_) => self.character_image(),
+            Screen::Barter(_) => self.barter_image(),
+            Screen::Movie(_) => self.movie_image().ok_or_else(|| "no movie".into()),
         }
     }
     fn map_image(&mut self) -> AppResult<IndexedImage> {
@@ -568,16 +591,37 @@ impl MapPreview {
             }
             Screen::Town(_) => return "Vault — town map — choose an area; Escape returns".into(),
             Screen::PipBoy(_) => return "Vault — Pip-Boy — Escape returns".into(),
+            Screen::Inventory(_) => {
+                return "Vault — inventory — click an item, then an action; Escape returns".into();
+            }
+            Screen::Character(_) => {
+                return "Vault — character — Done keeps, Cancel or Escape restores".into();
+            }
+            Screen::Barter(_) => {
+                return "Vault — barter — click moves one, right-click all; Done returns".into();
+            }
+            Screen::Movie(screen) => {
+                return format!(
+                    "Vault — movie {} — any key or a click skips",
+                    screen.player.request.path
+                );
+            }
             Screen::Map => {}
         }
         format!(
-            "Vault — {} — elevation {} — roofs {} — click objects; L/D/U/P/T actions; W world map; B Pip-Boy",
+            "Vault — {} — elevation {} — roofs {} — click objects; L/D/U/P/T actions; W world map; B Pip-Boy; I inventory; C character",
             self.path,
             self.view.elevation,
             if self.view.roofs { "on" } else { "off" }
         )
     }
     pub fn step(&mut self, key: KeyCode) -> bool {
+        if self.movie_key() {
+            return true;
+        }
+        if matches!(self.screen, Screen::Barter(_)) {
+            return key == KeyCode::Escape && self.barter_key();
+        }
         if self.host.world.dialogue.open {
             let choice = match key {
                 KeyCode::Digit1 => Some(Some(0)),
@@ -624,7 +668,9 @@ impl MapPreview {
             Screen::World(_) => return self.world_key(key),
             Screen::Town(_) => return self.town_key(key),
             Screen::PipBoy(_) => return self.pipboy_key(key),
-            Screen::Map => {}
+            Screen::Inventory(_) => return self.inventory_key(key),
+            Screen::Character(_) => return self.character_key(key),
+            Screen::Barter(_) | Screen::Movie(_) | Screen::Map => {}
         }
         if self.host.world.ui_disabled {
             return false;
@@ -636,6 +682,14 @@ impl MapPreview {
             }
             KeyCode::KeyB => {
                 self.open_pipboy();
+                return true;
+            }
+            KeyCode::KeyI => {
+                self.open_inventory();
+                return true;
+            }
+            KeyCode::KeyC => {
+                self.open_character();
                 return true;
             }
             _ => {}
@@ -703,6 +757,12 @@ impl MapPreview {
         self.drain_effects();
     }
     pub fn click(&mut self, point: [i32; 2], right: bool) -> bool {
+        if self.movie_press() {
+            return true;
+        }
+        if matches!(self.screen, Screen::Barter(_)) {
+            return self.barter_click(point, right);
+        }
         if self.host.world.dialogue.open {
             if let Some(choice) = self.choices.iter().find(|choice| choice.contains(point)) {
                 let index = choice.index;
@@ -719,7 +779,9 @@ impl MapPreview {
             Screen::World(_) => return self.world_click(point),
             Screen::Town(_) => return self.town_click(point),
             Screen::PipBoy(_) => return self.pipboy_click(point),
-            Screen::Map => {}
+            Screen::Inventory(_) => return self.inventory_click(point),
+            Screen::Character(_) => return self.character_click(point),
+            Screen::Barter(_) | Screen::Movie(_) | Screen::Map => {}
         }
         if self.host.world.ui_disabled {
             return false;
@@ -778,6 +840,10 @@ impl MapPreview {
             Screen::PipBoy(_) => self
                 .pipboy_tick(now)
                 .map_err(|error| vault_core::WorldError::Invalid(error.to_string())),
+            // Movies and the inventory, character, and barter screens are
+            // modal: the world waits for them.
+            Screen::Movie(_) => Ok(self.movie_tick(now)),
+            Screen::Inventory(_) | Screen::Character(_) | Screen::Barter(_) => Ok(false),
         };
         let mut changed = match screen {
             Ok(changed) => changed,
@@ -1051,6 +1117,183 @@ mod tests {
             !mixer.lock().unwrap().playing(Channel::Library(2)),
             "the slot is free"
         );
+    }
+
+    #[test]
+    fn game_movies_play_modally_with_subtitles_and_return_to_their_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        state_fixture::write_corpus(root);
+        crate::movie::tests::movie_corpus(root);
+        let (synthetic, _, _) = crate::movie::fixture::synthetic('A');
+        std::fs::write(root.join("art/cuts/boil1.mve"), synthetic).unwrap();
+        std::fs::create_dir_all(root.join("text/english/cuts")).unwrap();
+        std::fs::write(root.join("text/english/cuts/boil1.sve"), b"1:AB\r\n").unwrap();
+        std::fs::write(root.join("font1.aaf"), state_fixture::preview_aaf()).unwrap();
+        std::fs::write(
+            root.join("art/cuts/subtitle.pal"),
+            state_fixture::preview_palette(),
+        )
+        .unwrap();
+        let mut preview = interactive(root);
+        let (audio, mixer) = AudioHandle::detached();
+        preview.audio = audio;
+        preview.image().unwrap();
+        // A boil movie: subtitles are forced; the world waits while it plays.
+        assert!(preview.host.play_game_movie(vault_core::movie::BOIL1, 0x07));
+        preview.image().unwrap();
+        assert!(preview.movie_active() && preview.display_override().is_some());
+        assert!(preview.title().contains(r"art\cuts\boil1.mve"));
+        let ticks = preview.host.world.clock.ticks;
+        let mut now = 0;
+        while !preview.tick(now).unwrap() {
+            now += 16;
+        }
+        let image = preview.image().unwrap();
+        assert_eq!((image.width(), image.height()), (640, 480));
+        // The subtitle band sits below the centered 64 x 64 frame.
+        let font = preview.host.assets.font_number(101).unwrap();
+        let band = vault_core::movie::subtitle_band(font.height() as i32, 64, 208);
+        let band_pixels =
+            &image.pixels()[band[1] as usize * 640..(band[1] + band[3]) as usize * 640];
+        assert!(
+            band_pixels.iter().any(|pixel| *pixel != 0),
+            "subtitle drawn"
+        );
+        assert!(mixer.lock().unwrap().playing(Channel::Movie));
+        for _ in 0..5 {
+            now += 16;
+            preview.tick(now).unwrap();
+        }
+        assert_eq!(
+            preview.host.world.clock.ticks, ticks,
+            "modal: the clock waits"
+        );
+        // A key skips the movie and returns to the map.
+        assert!(preview.step(KeyCode::Space));
+        assert!(!preview.movie_active() && preview.display_override().is_none());
+        assert!(!mixer.lock().unwrap().playing(Channel::Movie));
+        assert_eq!(preview.image().unwrap().height(), 380);
+        // The startup sequence: iplogo is absent, so only intro plays.
+        preview.queue_startup_movies();
+        assert!(preview.movie_active());
+        assert!(preview.title().contains("intro.mve"));
+        while preview.movie_active() {
+            now += 16;
+            preview.tick(now).unwrap();
+            assert!(now < 100_000, "the movie ends by itself");
+        }
+        assert_eq!(preview.host.world.persistence.movies[..3], [0, 0, 1]);
+        // The Pip-Boy archive lists boil1 (index 11) and replays it; a
+        // click then release skips it, back to the Pip-Boy.
+        assert!(preview.step(KeyCode::KeyB));
+        assert!(preview.click([30, 155], false), "Video archive tab");
+        assert!(preview.release());
+        preview.image().unwrap();
+        assert!(preview.click([200, 64], false));
+        assert!(preview.movie_active());
+        assert!(preview.release(), "the starting click's release");
+        assert!(
+            preview.movie_active(),
+            "a press before the movie does not skip"
+        );
+        assert!(preview.click([10, 10], false));
+        assert!(preview.release());
+        assert!(matches!(preview.screen, Screen::PipBoy(_)));
+    }
+
+    #[test]
+    fn inventory_character_and_barter_screens_drive_the_spec011_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        let mut preview = interactive(dir.path());
+        preview.image().unwrap();
+        // Pick up the synthetic item through the action strip.
+        preview.click([320, 185], false);
+        let item = preview.selected.unwrap();
+        preview.click([400, 355], false);
+        let player = preview.host.world.player;
+        assert_eq!(preview.host.world.get(item).unwrap().owner, Some(player));
+        // Inventory: the entry lists; non-weapons cannot reload; wielding
+        // puts the item in the active hand.
+        assert!(preview.step(KeyCode::KeyI));
+        assert!(matches!(preview.screen, Screen::Inventory(_)));
+        assert_eq!(preview.image().unwrap().height(), 480);
+        assert!(preview.click([30, 62], false), "first row");
+        assert!(preview.click([450, 125], false), "Reload");
+        assert_eq!(preview.status, b"That item is not a weapon");
+        assert!(preview.click([450, 95], false), "Wield");
+        let flags = preview.host.world.get(item).unwrap().raw.flags;
+        assert!(flags.contains(BasicFlags::RIGHT_HAND) || flags.contains(BasicFlags::LEFT_HAND));
+        preview.image().unwrap();
+        assert!(preview.step(KeyCode::Escape));
+        assert!(matches!(preview.screen, Screen::Map));
+        // Character: spending needs points; Cancel restores the sheet.
+        assert!(preview.step(KeyCode::KeyC));
+        preview.image().unwrap();
+        assert!(preview.click([210, 72], false), "Small Guns");
+        assert_eq!(preview.status, b"No skill points left");
+        assert!(preview.step(KeyCode::Escape));
+        preview
+            .host
+            .world
+            .player_sheet_mut()
+            .unwrap()
+            .unspent_skills = 2;
+        let invested = preview.host.world.player_sheet().unwrap().invested[0];
+        assert!(preview.step(KeyCode::KeyC));
+        assert!(preview.click([210, 72], false));
+        let sheet = preview.host.world.player_sheet().unwrap();
+        assert_eq!((sheet.invested[0], sheet.unspent_skills), (invested + 1, 1));
+        assert!(preview.click([530, 445], false), "Cancel");
+        let sheet = preview.host.world.player_sheet().unwrap();
+        assert_eq!((sheet.invested[0], sheet.unspent_skills), (invested, 2));
+        // Reaching level 3 sets the pending perk on the next visit; the
+        // chooser grants a rank and Done keeps it.
+        let sheet = preview.host.world.player_sheet_mut().unwrap();
+        sheet.level = 3;
+        assert!(preview.step(KeyCode::KeyC));
+        let Screen::Character(screen) = &preview.screen else {
+            panic!("character screen");
+        };
+        let character::Mode::Chooser(choices) = screen.mode.clone() else {
+            panic!("perk chooser at level 3");
+        };
+        assert!(!choices.is_empty());
+        preview.image().unwrap();
+        let perk = choices[0].0;
+        assert!(preview.click([210, 72], false));
+        let sheet = preview.host.world.player_sheet().unwrap();
+        assert!(sheet.rank(perk) == 1 && !sheet.pending_perk);
+        preview.image().unwrap();
+        if let Screen::Character(screen) = &preview.screen
+            && screen.mode == character::Mode::Sheet
+        {
+            assert!(preview.click([430, 445], false), "Done");
+        } else {
+            assert!(preview.step(KeyCode::Escape));
+        }
+        assert!(matches!(preview.screen, Screen::Map));
+        assert_eq!(
+            preview.host.world.player_sheet().unwrap().reconciled_level,
+            3
+        );
+        // Barter: a dialogue's pending request opens it with the target.
+        assert!(preview.click([336, 170], true));
+        assert!(preview.host.world.dialogue.open);
+        preview.host.world.dialogue.pending_barter = true;
+        preview.image().unwrap();
+        let Screen::Barter(screen) = &preview.screen else {
+            panic!("barter");
+        };
+        let offer = screen.session.offer;
+        assert!(preview.click([20, 62], true), "the player's whole entry");
+        assert!(!preview.host.world.get(offer).unwrap().inventory.is_empty());
+        preview.image().unwrap();
+        assert!(preview.click([530, 445], false), "Done");
+        assert!(!preview.host.world.dialogue.pending_barter);
+        assert_eq!(preview.host.world.get(item).unwrap().owner, Some(player));
+        assert!(matches!(preview.screen, Screen::Map) && preview.host.world.dialogue.open);
     }
 
     #[test]

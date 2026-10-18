@@ -30,7 +30,9 @@ pub struct DialogueLayout {
     pub page_offsets: Vec<usize>,
 }
 
-fn lines(font: &Font, text: &[u8], width: u32) -> Vec<(usize, usize)> {
+/// Greedy word wrap at `width` pixels: `(start, end)` byte ranges; an LF or
+/// NUL ends a line and a word wider than a line is split.
+pub(crate) fn lines(font: &Font, text: &[u8], width: u32) -> Vec<(usize, usize)> {
     let mut result = Vec::new();
     let mut start = 0;
     while start < text.len() {

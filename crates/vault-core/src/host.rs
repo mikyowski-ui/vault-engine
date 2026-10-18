@@ -131,6 +131,9 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn available(&self, path: &[u8]) -> bool {
         (**self).available(path)
     }
+    fn language(&self) -> &str {
+        (**self).language()
+    }
     fn files(&self, pattern: &[u8]) -> Vec<Vec<u8>> {
         (**self).files(pattern)
     }
@@ -685,6 +688,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     !matches!(event.kind, EventKind::MapUpdate | EventKind::Midnight)
                 });
                 self.world.enqueue_map_timers()?;
+                self.water_countdown();
             }
             EventKind::Knockout => {
                 // Waking clears the knockout status bit of a living critter.

@@ -62,6 +62,10 @@ pub trait WorldAssets {
     fn available(&self, _path: &[u8]) -> bool {
         true
     }
+    /// The `fallout.cfg` `[system]` language directory below `text/`.
+    fn language(&self) -> &str {
+        "english"
+    }
     fn files(&self, _pattern: &[u8]) -> Vec<Vec<u8>> {
         Vec::new()
     }
@@ -449,12 +453,12 @@ impl WorldAssets for VfsWorldAssets {
         }
         None
     }
+    /// Either slash style; names compare case-insensitively.
     fn available(&self, path: &[u8]) -> bool {
-        std::str::from_utf8(path).ok().is_some_and(|path| {
-            self.vfs
-                .files()
-                .any(|candidate| candidate.as_str().eq_ignore_ascii_case(path))
-        })
+        std::str::from_utf8(path).is_ok_and(|path| self.exists(path))
+    }
+    fn language(&self) -> &str {
+        &self.language
     }
     fn files(&self, pattern: &[u8]) -> Vec<Vec<u8>> {
         let Ok(pattern) = std::str::from_utf8(pattern) else {

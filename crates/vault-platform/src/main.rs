@@ -1,6 +1,7 @@
 mod audio;
 mod input;
 mod map_preview;
+mod movie;
 mod preview;
 
 #[cfg(test)]
@@ -116,10 +117,11 @@ impl Shell {
         match preview.image() {
             Ok(image) => {
                 if let Some(renderer) = &mut self.renderer {
-                    let palette = self
-                        .display
-                        .as_ref()
-                        .map_or_else(|| preview.palette().rgba8(), |display| display.entries);
+                    let palette = preview.display_override().unwrap_or_else(|| {
+                        self.display
+                            .as_ref()
+                            .map_or_else(|| preview.palette().rgba8(), |display| display.entries)
+                    });
                     renderer.set_image(&image, &palette);
                 }
                 window.set_title(&preview.title());
@@ -175,10 +177,11 @@ impl ApplicationHandler for Shell {
         let renderer = (|| -> AppResult<Renderer> {
             if let Some(preview) = &mut self.preview {
                 let image = preview.image()?;
-                let palette = self
-                    .display
-                    .as_ref()
-                    .map_or_else(|| preview.palette().rgba8(), |display| display.entries);
+                let palette = preview.display_override().unwrap_or_else(|| {
+                    self.display
+                        .as_ref()
+                        .map_or_else(|| preview.palette().rgba8(), |display| display.entries)
+                });
                 Ok(pollster::block_on(Renderer::new_with_image(
                     window.clone(),
                     size.width,
@@ -217,26 +220,31 @@ impl ApplicationHandler for Shell {
             return;
         };
         let now = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let changed = match preview {
-            preview::AssetPreview::Map(_) => match preview.tick(now) {
-                Ok(changed) => changed,
-                Err(error) => return self.fail(event_loop, error),
-            },
-            preview::AssetPreview::Sprite(_) => false,
+        let changed = match preview.tick(now) {
+            Ok(changed) => changed,
+            Err(error) => return self.fail(event_loop, error),
         };
+        if preview.finished() {
+            tracing::info!("movie finished");
+            event_loop.exit();
+            return;
+        }
         // Each loop pass is one enabled cycling poll; the world can disable it
-        // (for example during dialogue) and later restore it.
-        let cycled = self.display.as_mut().is_some_and(|display| {
-            // A script-loaded palette replaces the display entries; cycling
-            // phases and timers carry on from their current state.
-            let replaced = display.generation != preview.palette_generation();
-            if replaced {
-                display.generation = preview.palette_generation();
-                display.entries = preview.palette().rgba8();
-            }
-            display.cycler.enabled = preview.palette_cycling();
-            display.cycler.poll(now, &mut display.entries) || replaced
-        });
+        // (for example during dialogue or a movie) and later restore it. A
+        // movie's device palette is presented with its frames instead.
+        let overridden = preview.display_override().is_some();
+        let cycled = !overridden
+            && self.display.as_mut().is_some_and(|display| {
+                // A script-loaded palette replaces the display entries; cycling
+                // phases and timers carry on from their current state.
+                let replaced = display.generation != preview.palette_generation();
+                if replaced {
+                    display.generation = preview.palette_generation();
+                    display.entries = preview.palette().rgba8();
+                }
+                display.cycler.enabled = preview.palette_cycling();
+                display.cycler.poll(now, &mut display.entries) || replaced
+            });
         if changed {
             if let Some(window) = self.window.clone() {
                 self.refresh_preview(event_loop, &window);
@@ -410,15 +418,23 @@ impl ApplicationHandler for Shell {
 
 fn run(args: Args) -> AppResult<()> {
     let mut preview = args.preview.load()?;
-    // Audio only serves an interactive world; previews of sprites need none.
+    // Audio serves an interactive world or a movie; sprites need none.
+    let output = || {
+        if args.no_audio {
+            audio::Audio::silent()
+        } else {
+            audio::Audio::open()
+        }
+    };
     let audio = match &mut preview {
         Some(preview::AssetPreview::Map(map)) => {
-            let audio = if args.no_audio {
-                audio::Audio::silent()
-            } else {
-                audio::Audio::open()
-            };
+            let audio = output();
             map.audio = audio.handle();
+            Some(audio)
+        }
+        Some(preview::AssetPreview::Movie(movie)) => {
+            let audio = output();
+            movie.player.audio = audio.handle();
             Some(audio)
         }
         _ => None,

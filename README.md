@@ -18,11 +18,15 @@ selection, the NPC turn (flee, healing, weapon choice, called shots, the bounded
 attack loop, reloading), team switching, random retargeting, and taunts. The
 SPEC-010 phase adds the exact ACM decoder, effect-name builders with the
 prototype sound bytes, the effect lookup and alias chain, speech paths, and
-relative effect volume.
+relative effect volume. The SPEC-011 phase adds drugs, inventory rules, barter,
+and progression. The SPEC-012 phase adds the exact `.MVE` decoder (container,
+block video codec, palettes, DPCM audio), paced playback with movie fades and
+`.SVE` subtitles, the game movie table and `play_gmovie`, and desktop movie,
+inventory, character, and barter screens.
 
 `AGENTS.md` is the repository's implementation policy. Format behavior follows
 `specs/approved/SPEC-001-pal-frm-lst.md` through
-`SPEC-010-sound-effects-and-acm.md`.
+`SPEC-012-movies-and-subtitles.md`.
 No original game
 data is needed to build, test, or run the synthetic shell and preview fixtures.
 
@@ -108,7 +112,23 @@ cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
     --validate-acm --validate-sfx --oracle-dir oracle/SPEC-010
 # SPEC-011: check the item-prototype invariants and consume every drug:
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-items
+# SPEC-012: decode every movie, fade file, and subtitle file against the oracle:
+cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
+    --validate-movies --movie-oracle-dir oracle/SPEC-012
 ```
+
+`--validate-movies` requires every corpus `.mve` to have an `mve-summary.tsv`
+row and every row to match: file size and SHA-256, frame size, chunk, frame,
+and video-frame counts, the timer, the audio format, the decoded PCM byte
+count and SHA-256, and the block-type and opcode histograms. Every show-frame
+must match its `mve-frames.tsv` row (push range, video and suppress flags, the
+device palette, the pixels, and for movies with a fade file the palette after
+the fade hook), every track-0 audio opcode its `mve-audio.tsv` row, every
+parsed fade effect its `moviefx.tsv` row, and every `.SVE` entry its
+`sve-subtitles.tsv` row, including the frame that draws it. A fade file
+without a movie of its name (the corpus `movie.cfg` example) is reported and
+skipped. On the local corpus all 13 summaries, 8978 frames, 8085 audio
+opcodes, 18 fade effects, and 147 subtitle entries (15 files) pass.
 
 `--validate-items` checks the SPEC-011 §4.12 invariants: subtypes and reader
 lengths, drug selectors (the -2 form only in slot 0, healing through slot 1),
@@ -230,7 +250,7 @@ MSG below `text/` in VFS order and its lowest ID with nonempty text. Explicit
 missing/invalid assets or message IDs produce an error. Text remains raw bytes
 mapped to font glyphs; the viewer does not assume UTF-8 or change languages.
 
-## Desktop game shell (SPEC-008 to SPEC-010 integration)
+## Desktop game shell (SPEC-008 to SPEC-012 integration)
 
 ```sh
 # Loose files, or the SPEC-008 databases with an optional loose patch root:
@@ -287,6 +307,51 @@ The engine requests these effects:
 - The walk/run character effect when a movement starts.
 - The AI's ready and out-of-ammunition sounds.
 - Desktop buttons play the small-button press and release names.
+
+Movies (SPEC-012) play in the 640 x 480 window:
+
+```sh
+# One movie with its fade file (and subtitles with --subtitles), then exit:
+cargo run -p vault-platform -- --corpus-dir /path/to/unpacked/game \
+  --play-movie art/cuts/intro.mve --subtitles [--language french]
+# The startup movies (iplogo, then intro) before the map:
+cargo run -p vault-platform -- --corpus-dir /path/to/unpacked/game \
+  --preview-map maps/v13ent.map --startup-movies
+```
+
+- In the world, `play_gmovie`, the endgame movie, the water countdown (with a
+  host water global), and the Pip-Boy's **Video archive** tab request game
+  movies. They queue and play one at a time, modally: the world and its
+  scripts wait. Afterwards the previous screen returns.
+- One movie step runs per shell update. Sync points wait on the frame timer,
+  late frames without a palette push are dropped, and the movie's device
+  palette replaces the display palette (color cycling stops). Audio streams
+  through the mixer from the first sync point at 0.94 x the full music volume.
+- Any key skips a movie. So does a mouse button pressed during the movie,
+  once every button is released. Holding a button does not skip.
+- Subtitles use font 101 and `art/cuts/subtitle.pal` with the RGB555 white
+  text color. They are always on for the boil movies; `--subtitles` turns them
+  on for the others.
+
+On the local map, **I** opens the inventory and **C** the character screen
+(SPEC-011). Both are modal:
+- Inventory lists the player's entries with worn and held markers and
+  weights, caps, and the carried weight. The selected entry can be used (a
+  drug is consumed through §3.6; other items use the default use action),
+  wielded or worn, reloaded from the inventory, or unloaded. Opening it in
+  combat costs the §3.11 action points.
+- The character screen reconciles levels on opening. It shows SPECIAL, derived
+  statistics, skills (tagged ones starred), traits, and perks, and clicking a
+  skill spends an unspent point. When a perk is pending, the chooser lists the
+  eligible perks by name. Tag! asks for a fourth tag skill and Mutate! for a
+  trait to drop and one to take; cancelling either removes the rank. Done
+  keeps the sheet, while Cancel or Escape restores the sheet saved on opening.
+- A dialogue barter request (`gdialog_barter`) opens barter with the
+  dialogue's target. It has four columns: your items, your offer, their
+  offer, and their items. A click moves one unit and a right-click moves the
+  whole entry. **Offer** tries the trade at the §3.18 price; **Done** returns
+  the tables and the hidden equipment, then resumes the dialogue (closing a
+  session that already ended).
 
 ## Map preview
 
@@ -541,7 +606,7 @@ than guessed from reverse-engineering sources. Unobstructed light arithmetic is
 exact; occlusion/shot lines use the engine's bounded integer hex-line policy.
 Audio, movies, general managed-window drawing, combat requests, and unspecified
 item/medical defaults are typed host presentation/action requests. The map preview
-implements world interaction and GDialog rendering, not media decoding or a full
+implements world interaction, GDialog rendering, sound, and movies, not a full
 combat/medical subsystem.
 
 ## Art identifiers, routing, and combat (SPEC-007)
@@ -851,9 +916,86 @@ these choices:
   or reload) weighs and costs as unloaded. Unloading it creates nothing.
 - Fixture A3 says its stage delays are unchanged. A3 includes Chem Resistant,
   and §3.3 halves delays for it, so they are halved as in A2.
-- The inventory screen's held-outside-the-list item is not modeled; the engine
-  has no inventory screen. Barter is an engine API, and the desktop does not
-  present it yet.
+- The inventory screen's held-outside-the-list item is not modeled. The
+  desktop's inventory, character, and barter screens (see "Desktop game
+  shell") present these rules. Their skill and trait labels are built-in
+  English names, since no approved specification names their catalogs.
+
+## Movies and subtitles (SPEC-012)
+
+`vault_formats::mve` validates the 26-byte little-endian header (all twenty
+signature bytes, header size 26, version 256, `version + check = 0x1233`). It
+then reads chunk records of `L + 4` bytes (the body plus the next chunk's
+header, so a file ends with a trailing header) and processes opcodes in
+stream order. `Movie::next_event` reports timers, audio formats, sync points,
+track-0 audio (opcode 8 data, opcode 9 silence; mask bit `0x0001`), shown
+frames, and the end; video configuration, palette loads, the suppress marker,
+the decoding map, and video data take effect internally. The block decoder
+implements all sixteen types: the low-nibble-first map, one parameter stream,
+the near/far motion tables with linear source addressing (an x position past
+a row edge wraps into the neighboring row), copies four bytes at a time from
+the top, and every two- and four-color subcase. Audio restarts its predictors
+per opcode and adds the §2.8 deltas with wrapping 16-bit arithmetic.
+
+`vault_core::movie::MoviePlayback` runs a movie against host microseconds:
+`T = rate × subdivision + (subdivision >> 1)`, the same-period no-op, sync
+waits until `deadline + T/4`, late frames (more than `T/2` late, never right
+after a dropped frame), dropping only frames without a palette push, and the
+final deadline wait. Palette pushes reach the device directly or through the
+`vault_formats::moviefx` fade hook. That hook reads the fade file with the
+SPEC-009 configuration grammar, searches effects newest-loaded first, and
+writes truncating `in`/`out` levels modulo 256 over the whole palette.
+`vault_formats::sve` keeps subtitle entries in file order and draws every
+leading entry whose number is at most the frame counter after each step.
+`vault_render::movie::MovieWindow` copies displayed frames centered (432 x 320
+at 104, 80) and draws the subtitle band.
+
+`WorldHost::play_game_movie` looks the movie up (`art\cuts\<file>`), picks the
+subtitle file (`text\<language>\cuts\<name>.SVE`) and fade file, marks the
+SAVE.DAT component 22 byte, and emits `WorldEffect::Movie`. A missing movie
+(always `raekills.mve`) fails and leaves its byte unchanged. `play_gmovie`
+uses the §2.11 flags plus `0x02` for indexes 3 and 4 without a map; the
+endgame plays `walkm` or `walkw` by gender; `play_archive_movie` implements the
+Pip-Boy scan. The subtitles preference is SPEC-008 preference word 9.
+
+Where SPEC-012 leaves details open, or offers a safe rule, this engine makes
+these choices:
+
+- The `[May-improve]` safe rules apply. Timer rates use all 32 bits. Any of
+  these is a stream error that ends the movie (and any library error ends
+  it): an opcode or payload past its chunk body, video data without a map in
+  its chunk, block type 6, parameter over-reads, motion sources outside the
+  buffer, odd region widths, palette ranges past 256 entries, high-color
+  movies, height multipliers other than 1, and audio lengths shorter than
+  their predictors. New buffers are zeroed. Opcode 11 is ignored and
+  uncompressed audio copies its payload. Field mode displays normally,
+  subtitle lines are read whole, and a `play_gmovie` index outside 0-13 or an
+  empty Pip-Boy archive plays nothing.
+- §2.8's prose places -29973 at code 121; the table (and Fixture E, code 137,
+  and the oracle) put it at code 120, so codes 120-127 are negative.
+- The device audio scheduler is replaced by one stream, fed in decode order,
+  that starts at the first sync point after the audio configuration. The
+  movie volume is `trunc(0.94 x music)`. The attenuation
+  `trunc(-1000 x log2(32767 / v))`, in hundredths of a decibel, becomes gain
+  `10^(A/2000)`. The desktop has no background music, so it uses the full
+  music volume, and the music flags (`0x04`, `0x08`) have no effect.
+- A partial decode region is copied from its offset in the frame to the
+  centered frame origin. Subtitle text wraps at the window width, with each
+  line centered and the first line 2 pixels below the band top.
+- The desktop does not present script palette fades, so after a movie
+  without flag `0x02` the game palette returns at once instead of staying
+  black until the caller fades in.
+- No approved specification names the remaining-water global or the
+  world-map event triggers. The midnight countdown runs only with
+  `WorldRules::water_global`. While the water-chip quest (global 101) is at
+  most 1, it decrements the water. Then, outside dialogue, the most severe
+  threshold reached plays its movie if not yet played: boil3 at 0 or less
+  (`0x05`, then `WorldEffect::EndGame` as the quit request), boil2 at 50 or
+  less, and boil1 at 100 or less (`0x07`). The world-map events can call
+  `play_game_movie` directly. There is no main menu or new-game flow, so the
+  main-menu intro and `ovrintro` callers are not wired.
+- Movies play modally, so `play_gmovie`'s suspension of dialogue background
+  processing is the modal wait itself.
 
 ## Spec completion notes
 

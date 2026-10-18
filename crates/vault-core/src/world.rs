@@ -242,6 +242,9 @@ pub struct WorldRules {
     /// Game-calendar year for day zero; the approved specs define the
     /// non-leap month/day calendar but no base year.
     pub calendar_year: u16,
+    /// The campaign global holding the remaining water for the SPEC-012
+    /// midnight countdown; no approved specification names it.
+    pub water_global: Option<usize>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorldEffect {
@@ -263,10 +266,8 @@ pub enum WorldEffect {
     },
     Speech(Vec<u8>),
     StopSpeech,
-    Movie {
-        index: i32,
-        flags: u32,
-    },
+    /// A SPEC-012 game movie that was found and marked played.
+    Movie(crate::movie::MovieRequest),
     Fade {
         out: bool,
         duration: i32,
@@ -304,7 +305,6 @@ pub enum WorldEffect {
     Elevator(i32),
     EndGame,
     Slideshow,
-    EndMovie,
     DefaultAction {
         action: ObjectAction,
         target: ObjectRef,
