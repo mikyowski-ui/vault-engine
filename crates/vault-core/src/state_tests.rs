@@ -1497,3 +1497,108 @@ fn spec007_static_death_correction_corpses_and_inventory_drop() {
         (None, Some(20120), 1)
     );
 }
+
+#[test]
+fn spec009_ai_opcodes_alert_gate_hearing_team_and_party() {
+    use fixture::{instruction, literal, push};
+    let (mut host, base, _) = host(&[b"Hello"]);
+    let me = host.world.player;
+    let spawn = |host: &mut WorldHost<Assets>, hex| {
+        host.world
+            .spawn(host.assets.prototype.clone(), hex, 1)
+            .unwrap()
+    };
+    let target = spawn(&mut host, 20102);
+    let other = spawn(&mut host, 20104);
+    let attack = |defender: ObjectRef| {
+        [
+            push(defender as i32),
+            push(0),
+            push(0),
+            push(50),
+            push(1),
+            push(10),
+            push(0),
+            push(1),
+            instruction(0x80d0),
+        ]
+        .concat()
+    };
+    let maneuvers =
+        |host: &WorldHost<Assets>, critter| host.world.critter_state(critter).unwrap().maneuvers;
+    // In combat with alert clear: set it and reference the target directly
+    // (no combat request); with alert already set nothing changes.
+    host.world.combat = true;
+    run_fragment(&mut host, &base, &attack(target)).unwrap();
+    assert_eq!(host.world.get(me).unwrap().opponent, target);
+    assert_eq!(maneuvers(&host, me) & 1, 1);
+    host.world.get_mut(me).unwrap().opponent = 0;
+    run_fragment(&mut host, &base, &attack(other)).unwrap();
+    assert_eq!(host.world.get(me).unwrap().opponent, 0);
+    assert!(host.world.pending_combat.is_none());
+
+    // obj_can_hear_obj: valid operands return 0 without a hearing test; a
+    // null operand also returns 0, with a diagnostic, instead of failing.
+    let hear = |host: &mut WorldHost<Assets>, a: ObjectRef, b: ObjectRef| {
+        let code = [push(a as i32), push(b as i32), instruction(0x80f5)].concat();
+        run_fragment(host, &base, &code)
+            .unwrap()
+            .value_stack
+            .pop()
+            .unwrap()
+    };
+    assert_eq!(hear(&mut host, target, me), Value::integer(0));
+    host.world.effects.clear();
+    assert_eq!(hear(&mut host, 0, me), Value::integer(0));
+    assert!(matches!(
+        host.world.effects.front(),
+        Some(WorldEffect::Diagnostic(_))
+    ));
+
+    // critter_add_trait kind 1 selector 6 switches teams, clearing a last
+    // attacker on the new team; party_add switches the member to team 0.
+    let team = |host: &WorldHost<Assets>, critter| host.world.critter_state(critter).unwrap().team;
+    host.world.critter_state_mut(other).unwrap().team = 4;
+    host.world.get_mut(target).unwrap().opponent = other;
+    let add_trait = |critter: ObjectRef, value: i32| {
+        [
+            push(critter as i32),
+            push(1),
+            push(6),
+            push(value),
+            instruction(0x8102),
+        ]
+        .concat()
+    };
+    run_fragment(&mut host, &base, &add_trait(target, 4)).unwrap();
+    assert_eq!(team(&host, target), 4);
+    assert_eq!(host.world.get(target).unwrap().opponent, 0);
+    host.world.get_mut(target).unwrap().opponent = other;
+    run_fragment(&mut host, &base, &add_trait(target, 4)).unwrap();
+    assert_eq!(
+        host.world.get(target).unwrap().opponent,
+        other,
+        "an unchanged team is skipped"
+    );
+    run_fragment(
+        &mut host,
+        &base,
+        &[push(target as i32), instruction(0x8124)].concat(),
+    )
+    .unwrap();
+    assert!(host.world.party.contains(&target));
+    assert_eq!(team(&host, target), 0);
+
+    // float_msg creates a live floating text (which suppresses taunts) for
+    // the default 3500 ms plus 1399 ms per line.
+    host.world.elevation = 1;
+    let float = [
+        push(target as i32),
+        literal(6),
+        push(1),
+        instruction(0x810a),
+    ]
+    .concat();
+    run_fragment(&mut host, &base, &float).unwrap();
+    assert_eq!(host.world.floating, [(target, 3500 + 1399)]);
+}

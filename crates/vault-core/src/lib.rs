@@ -1,5 +1,6 @@
 //! Deterministic, platform-independent engine foundations.
 
+pub mod ai;
 pub mod assets;
 pub mod combat;
 pub mod combat_state;
@@ -7,6 +8,7 @@ pub mod critical;
 pub mod dialogue;
 pub mod handles;
 pub mod host;
+mod host_ai;
 mod host_animation;
 mod host_combat;
 mod host_game;
@@ -61,6 +63,8 @@ pub use rng::{ParkMiller, RandomSource, RngState};
 pub use stats::{CharacterSheet, Perk, StatContext, Trait};
 
 #[cfg(test)]
+mod ai_tests;
+#[cfg(test)]
 mod combat_tests;
 #[cfg(test)]
 #[allow(dead_code)]
@@ -74,6 +78,8 @@ pub(crate) mod fixture_state;
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/world/support.rs"]
 pub(crate) mod fixture_world;
+#[cfg(test)]
+mod host_ai_tests;
 #[cfg(test)]
 mod persistence_tests;
 #[cfg(test)]

@@ -509,37 +509,39 @@ impl WorldState {
             },
         )
     }
-    /// SPEC-007 perception predicate (no obstacle ray).
-    pub fn can_perceive(&self, observer: ObjectRef, target: ObjectRef) -> bool {
+    /// SPEC-007 §3.2 forward perception sector: the target's direction is
+    /// the observer's facing or either adjacent orientation.
+    pub fn in_forward_sector(&self, observer: ObjectRef, target: ObjectRef) -> bool {
         let (Some(watcher), Some(seen)) = (self.get(observer), self.get(target)) else {
             return false;
         };
         let (Some(from), Some(to)) = (watcher.raw.hex, seen.raw.hex) else {
             return false;
         };
+        let facing = watcher.raw.orientation;
+        rotation(from, to).is_some_and(|direction| {
+            direction == facing || direction == (facing + 1) % 6 || direction == (facing + 5) % 6
+        })
+    }
+    /// SPEC-007 perception predicate (no obstacle ray).
+    pub fn can_perceive(&self, observer: ObjectRef, target: ObjectRef) -> bool {
+        let (Some(watcher), Some(seen)) = (self.get(observer), self.get(target)) else {
+            return false;
+        };
+        if watcher.raw.hex.is_none() || seen.raw.hex.is_none() {
+            return false;
+        }
         let perception = watcher
             .character
             .as_ref()
             .map_or(0, |sheet| sheet.stat(1, self.context(observer)));
-        let sneaking = target == self.player && self.sneak_working;
-        let facing = watcher.raw.orientation;
-        let in_sector = rotation(from, to).is_some_and(|direction| {
-            direction == facing || direction == (facing + 1) % 6 || direction == (facing + 5) % 6
-        });
-        let mut maximum = if in_sector {
-            let mut forward = 5 * perception;
-            if seen.raw.flags.contains(BasicFlags::GLASS) {
-                forward /= 2;
-            }
-            forward
-        } else if self.combat {
-            2 * perception
-        } else {
-            perception
-        };
-        if sneaking {
-            maximum /= 4;
-        }
+        let maximum = crate::ai::perception_limit(
+            perception,
+            self.in_forward_sector(observer, target),
+            seen.raw.flags.contains(BasicFlags::GLASS),
+            target == self.player && self.sneak_working,
+            self.combat,
+        );
         self.object_distance(observer, target) <= maximum
     }
     /// `obj_can_see_obj`: placed target, perception, and a stride-16 ray whose

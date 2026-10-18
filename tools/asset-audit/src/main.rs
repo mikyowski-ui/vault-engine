@@ -8,7 +8,11 @@ use std::{
 
 use clap::Parser;
 use vault_core::{
-    CharacterSheet, WorldHost, WorldState, assets::VfsWorldAssets, host_save::SaveInfo, worldmap,
+    CharacterSheet, WorldHost, WorldState,
+    ai::{Taunt, taunt_range},
+    assets::VfsWorldAssets,
+    host_save::SaveInfo,
+    worldmap,
 };
 use vault_formats::{
     ArtCatalog, Fid, LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, Prototype,
@@ -49,6 +53,11 @@ struct Args {
     /// central save grammar, and write/read a temporary save slot.
     #[arg(long)]
     validate_saves: bool,
+    /// SPEC-009: load `combatai.msg` and `data/ai.txt` (every packet needs
+    /// all 25 keys), resolve each critter prototype's default AI packet, and
+    /// count taunt ranges without catalog lines. Only counts are printed.
+    #[arg(long)]
+    validate_ai: bool,
 }
 
 /// The SPEC-003 writer's expected PRO bytes: the consumed payload with
@@ -287,7 +296,55 @@ fn audit_saves(dir: &Path) -> Result<[u64; 3], Box<dyn Error>> {
     Ok([entered, saved, failed])
 }
 
+/// SPEC-009 corpus checks. Returns packets, parser diagnostics, critter
+/// prototypes resolved and falling back to entry 0, and nonempty taunt
+/// ranges with and without catalog lines.
+fn audit_ai(dir: &Path) -> Result<[u64; 6], Box<dyn Error>> {
+    let vfs = Arc::new(LocalDirProvider::mount(dir)?);
+    let assets = VfsWorldAssets::new(vfs.clone(), "english")?;
+    let mut host = WorldHost::new(WorldState::new(CharacterSheet::default(), 1)?, assets);
+    host.load_combat_ai()?;
+    let (Some(packets), Some(messages)) = (
+        host.world.ai.packets.clone(),
+        host.world.ai.messages.clone(),
+    ) else {
+        return Err("combat AI did not initialize".into());
+    };
+    let mut counts = [0_u64; 6];
+    counts[0] = packets.len() as u64;
+    counts[1] = packets.diagnostics.len() as u64;
+    for path in vfs.files() {
+        if path.extension() != Some("pro") || !path.as_str().starts_with("proto/critters/") {
+            continue;
+        }
+        let prototype = Prototype::parse(&vfs.read_bounded(path.as_str(), MAX_ASSET_BYTES)?)?;
+        if let PrototypeData::Critter(critter) = &prototype.data {
+            counts[if packets.resolve(critter.ai).1 { 2 } else { 3 }] += 1;
+        }
+    }
+    let taunts = [Taunt::Run, Taunt::Move, Taunt::Attack, Taunt::Miss]
+        .into_iter()
+        .chain((0..8).map(Taunt::Hit));
+    for taunt in taunts.collect::<Vec<_>>() {
+        for packet in &packets.packets {
+            let (start, end) = taunt_range(packet, taunt);
+            if end < start {
+                continue;
+            }
+            let lines = (start..=end).any(|id| messages.get(id).is_some());
+            counts[if lines { 4 } else { 5 }] += 1;
+        }
+    }
+    Ok(counts)
+}
+
 fn audit(args: Args) -> Result<(), Box<dyn Error>> {
+    if args.validate_ai {
+        let [packets, diagnostics, resolved, fallback, lines, empty] = audit_ai(&args.corpus_dir)?;
+        println!("AI packets: {packets} parsed, {diagnostics} token diagnostics");
+        println!("Critter AI packets: {resolved} resolved, {fallback} fall back to entry 0");
+        println!("Taunt ranges: {lines} with catalog lines, {empty} without");
+    }
     if args.validate_saves {
         let [entered, saved, failed] = audit_saves(&args.corpus_dir)?;
         println!("Saves: {entered} maps entered, {saved} working saves, {failed} failed");

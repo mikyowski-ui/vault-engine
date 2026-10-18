@@ -13,11 +13,13 @@ hex routing, rays/perception, and combat resolution and turns, and closes the
 remaining SPEC-001–006 behaviors (see "Spec completion notes" below). The SPEC-008
 phase adds DAT archives and LZSS, selected-database lookup, legacy save slots with
 the working saved-map set and automap database, world travel, and Pip-Boy status
-and rest.
+and rest. The SPEC-009 phase adds `ai.txt` packets, the combat snapshot, threat
+selection, the NPC turn (flee, healing, weapon choice, called shots, the bounded
+attack loop, reloading), team switching, random retargeting, and taunts.
 
 `AGENTS.md` is the repository's implementation policy. Format behavior follows
 `specs/approved/SPEC-001-pal-frm-lst.md` through
-`SPEC-008-dat-saves-and-worldmap.md`.
+`SPEC-009-combat-ai.md`.
 No original game
 data is needed to build, test, or run the synthetic shell and preview fixtures.
 
@@ -94,7 +96,15 @@ cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-art-i
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-writers
 # SPEC-008: enter every map, round-trip SAVE.DAT, and write/read a temporary slot:
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-saves
+# SPEC-009: load combatai.msg and data/ai.txt and resolve every critter's packet:
+cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-ai
 ```
+
+`--validate-ai` initializes the combat AI exactly as the host does (a missing
+file, a packet without all 25 keys, or an empty table fails), then reports
+counts only: packets and token diagnostics, critter prototypes whose default
+packet resolves or falls back to entry 0, and nonempty taunt ranges with and
+without `combatai.msg` lines.
 
 `--validate-saves` checks that the campaign initializer covers every fixed
 SPEC-008 campaign index (towns, entrances, quests, disks, encounter globals),
@@ -577,6 +587,72 @@ Where SPEC-008 leaves details open, this engine makes these choices:
 - Rest arithmetic uses binary64.
 - Map-exit script request failures are diagnostics, like map-entry failures,
   so a missing compiled map script cannot trap transitions.
+
+## Combat AI (SPEC-009)
+
+`vault_formats::ai` reads `data/ai.txt` with the configuration grammar: 255-byte
+line chunks, `;` truncation anywhere, `[...]` headers that end the line, the
+first `=` split, 0x20/0x09-0x0D trimming, case-folded sorted sections that exist
+only once they hold a key, merged repeats with the last value winning, and the
+first spelling kept. Every packet needs all 25 keys. Integers use decimal-prefix
+parsing; `hurt_too_much` uses the space-skipping, trailing-space-sensitive token
+grammar. Keys before any header form section `unknown` (reset per file), an
+embedded NUL is rejected, out-of-range integers saturate with a diagnostic, and a
+missing file or empty table fails initialization. Resolution scans the sorted
+table at every query and falls back to entry 0 with a diagnostic.
+
+`WorldHost::load_combat_ai` loads `combatai.msg`, then the packet table. The
+built-in `PacketAi` is the default combat policy: it runs `WorldHost::ai_turn`
+and uses the live `danger()` for the join and stop predicates. Combat start
+collects critters in ascending hex order, copies them into the snapshot, and has
+the initiating pair reference each other through the setter. Distance sorts are
+stable and persist in the snapshot; destroyed critters are swap-removed. The
+setter refuses non-critter art and writes reaction 1 into script local 0 for the
+player. Damage application alerts every perceiving snapshot entry and applies the
+setter/retaliation rules (the player's attack debit references the defender).
+The NPC turn implements forced flee, healing, the requested target with its
+accuracy bonus during the first turn, the max-distance stop, the hurt-and-
+unopposed flee, and party following; flee runs relative to the player through
+strict-goal candidates; weapon usability, preference, inventory and environment
+search, retrieval, switching, hit-mode and called-shot selection, the ten-attempt
+loop, and reloading follow the specified draw order. Random-hit critical failures
+retarget through the snapshot (torso, critical cleared, hit marked, one normal
+round). Taunts draw at the request sites, fill the two 79-byte buffers, and
+display at callback time unless a floating text exists.
+
+Where SPEC-009 leaves details open, this engine makes these choices:
+
+- NPC actions run synchronously within the turn: movement, attacks, and an
+  action's taunt callbacks complete before the next decision. Delay-0 and delay
+  -1 callbacks run in registration order when the action finishes.
+- Movement "limited to the current AP" truncates the route to that many hexes;
+  each committed hex still charges its leg-dependent cost, saturating at zero.
+- No approved specification defines drug consumption or the SPEC-002 language
+  filter. `WorldHost::drug_rules` supplies consumption; without it NPC healing is
+  skipped with a diagnostic. The filter's preference state machine is tracked
+  (`AiState::filtered`), but catalog text is unchanged.
+- Party membership applies the 18000 object-identifier floor literally. Object
+  identifiers come from map and save data and the insertion counter, so members
+  with lower identifiers never follow.
+- An unset combat-difficulty preference reads as 0 for SPEC-005's opcode and
+  SPEC-007 hit chances (as before) and as 1 for SPEC-009 called shots.
+- Wielding sets the critter's art weapon code to the weapon's animation code (the
+  "visibly holds a weapon" test reads it), and unwielding clears it; take-out
+  (38) and put-away (39) are presentation requests. AI pick-ups run the item's
+  pick-up script first and present `DefaultAction::Pickup`.
+- Team switching does not rebuild combat outlines, which have no approved
+  encoding.
+- Restoring an in-combat save rebuilds the snapshot from the restored combat
+  list, but last-attacker references are not rebuilt from saved combat
+  identifiers.
+- Explosion attribution and explosive-drop noticing are host entry points
+  (`attribute_explosion`, `notice_explosive_drop`). Nothing calls them yet:
+  SPEC-007's weapon splash adds no victims, and scripted explosions are
+  presentation requests.
+- `float_msg` texts count as floating text for taunt suppression, with the same
+  default lifetime and 200-pixel wrap.
+- Fixture H lists R2's rating as 22. By the §3.4 rule it is `max(2, 20) + 0 = 20`.
+  Either value keeps Q.
 
 ## Spec completion notes
 

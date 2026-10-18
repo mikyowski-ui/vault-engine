@@ -156,6 +156,10 @@ impl MapPreview {
         if let Err(error) = host.load_campaign() {
             tracing::warn!(%error, "campaign initializer unavailable");
         }
+        // SPEC-009 AI initialization; without it NPC combat turns are skipped.
+        if let Err(error) = host.load_combat_ai() {
+            tracing::warn!(%error, "combat AI unavailable");
+        }
         host.load_map(path.as_str())?;
         let map = host.world.render_snapshot();
         let art = MapSprites::load(&*host.assets.vfs, &map)?;

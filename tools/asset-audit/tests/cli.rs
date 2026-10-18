@@ -297,3 +297,70 @@ fn validates_spec008_working_saves_and_slot_round_trip() {
         "{text}"
     );
 }
+
+#[test]
+fn validates_spec009_packets_critter_resolution_and_taunt_ranges() {
+    let temp = tempfile::tempdir().unwrap();
+    state::write_corpus(temp.path());
+    let section: String = vault_formats::ai::KEYS
+        .iter()
+        .enumerate()
+        .map(|(index, key)| match *key {
+            "packet_num" => "packet_num=0\r\n".to_string(),
+            "hurt_too_much" => "hurt_too_much=blind ,crippled\r\n".to_string(),
+            // Range starts 1000, 1010, ..., last_msg 1119.
+            _ => format!("{key}={}\r\n", 1000 + 10 * (index as i32 - 12).max(0)),
+        })
+        .collect();
+    std::fs::write(
+        temp.path().join("data/ai.txt"),
+        format!("[Synthetic]\r\n{section}"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(temp.path().join("text/english/game")).unwrap();
+    std::fs::write(
+        temp.path().join("text/english/game/combatai.msg"),
+        b"{1000}{}{run}\n{1075}{}{torso}\n",
+    )
+    .unwrap();
+    // A second critter prototype names an undefined packet.
+    let mut other = world::prototype(1, 0);
+    world::word(&mut other, 0x24, 9);
+    std::fs::write(temp.path().join("proto/critters/other.pro"), other).unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+            .arg("--corpus-dir")
+            .arg(temp.path())
+            .arg("--validate-ai")
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("AI packets: 1 parsed, 1 token diagnostics"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Critter AI packets: 1 resolved, 1 fall back to entry 0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Taunt ranges: 2 with catalog lines, 10 without"),
+        "{text}"
+    );
+    // A packet missing a key fails initialization.
+    std::fs::write(
+        temp.path().join("data/ai.txt"),
+        format!("[Synthetic]\r\n{}", section.replace("last_msg", "last")),
+    )
+    .unwrap();
+    let output = run();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("last_msg"));
+}

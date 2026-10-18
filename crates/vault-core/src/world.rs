@@ -286,6 +286,26 @@ pub enum WorldEffect {
         font: i32,
         color: u16,
     },
+    /// A SPEC-009 combat taunt: floating text with the packet's font, text
+    /// color word, and outline index (-1 for none), wrapped at 200 pixels.
+    Taunt {
+        object: ObjectRef,
+        text: Vec<u8>,
+        font: i32,
+        color: i32,
+        outline: i32,
+    },
+    /// An AI-driven critter animation (turn, hands, pick-up, wield).
+    CritterAnimation {
+        object: ObjectRef,
+        animation: u8,
+    },
+    /// A weapon sound request: effect 0 ready, 2 out of ammunition.
+    WeaponSound {
+        object: ObjectRef,
+        weapon: ObjectRef,
+        effect: u8,
+    },
     Medical {
         actor: ObjectRef,
         target: ObjectRef,
@@ -352,6 +372,10 @@ pub struct WorldState {
     pub combat_state: crate::combat_state::CombatState,
     /// SPEC-008 world-map component and runtime travel state.
     pub world_map: crate::worldmap::WorldMap,
+    /// SPEC-009 packets, snapshot, and taunt state.
+    pub ai: crate::ai::AiState,
+    /// Live floating-text objects: owner and expiry on the host clock.
+    pub floating: Vec<(ObjectRef, u64)>,
     /// Pip-Boy credited rest minutes (reset when the Pip-Boy opens).
     pub rest_credit: i32,
     /// SPEC-008 working saved-map set, automap database, and carried
@@ -364,7 +388,9 @@ pub struct WorldState {
     pub ui_disabled: bool,
     pub mode: i32,
     pub difficulty: i32,
-    pub combat_difficulty: i32,
+    /// The configured combat-difficulty preference; each reader applies its
+    /// own default when unset (SPEC-005 opcode 0, SPEC-009 AI 1).
+    pub combat_difficulty: Option<i32>,
     pub running_burning: i32,
     pub violence: Option<i32>,
     pub recording: bool,
@@ -479,6 +505,8 @@ impl WorldState {
             combat_experience: 0,
             combat_state: Default::default(),
             world_map: Default::default(),
+            ai: Default::default(),
+            floating: Vec::new(),
             rest_credit: 0,
             persistence: Default::default(),
             pending_combat: None,
@@ -487,7 +515,7 @@ impl WorldState {
             ui_disabled: false,
             mode: 0,
             difficulty: 1,
-            combat_difficulty: 0,
+            combat_difficulty: None,
             running_burning: 1,
             violence: None,
             recording: false,
@@ -874,6 +902,19 @@ impl WorldState {
         }
         self.queue.remove_object(reference);
         self.party.remove(&reference);
+        // SPEC-009: a removed critter is swap-removed from the snapshot, and
+        // no last-attacker reference to it is retained. Combat cleanup clears
+        // every reference, so only an active combat can hold one.
+        if let Some(index) = self.ai.snapshot.iter().position(|e| *e == reference) {
+            self.ai.snapshot.swap_remove(index);
+        }
+        if self.combat {
+            for object in self.entities.values_mut() {
+                if object.opponent == reference {
+                    object.opponent = 0;
+                }
+            }
+        }
     }
     pub fn render_snapshot(&self) -> MapFile {
         let mut map = self.map.clone();

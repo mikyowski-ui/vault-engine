@@ -232,11 +232,19 @@ impl<A: WorldAssets> WorldHost<A> {
         });
         let mut preferences = carried.preferences;
         preferences[0] = world.difficulty as u32;
-        preferences[1] = world.combat_difficulty as u32;
+        if let Some(combat) = world.combat_difficulty {
+            preferences[1] = combat as u32;
+        }
         if let Some(violence) = world.violence {
             preferences[2] = violence as u32;
         }
         preferences[4] = world.running_burning as u32;
+        if let Some(taunts) = world.ai.combat_taunts {
+            preferences[6] = taunts as u32;
+        }
+        if let Some(filter) = world.ai.language_filter {
+            preferences[7] = filter as u32;
+        }
         let queue = world
             .queue
             .events()
@@ -450,9 +458,11 @@ impl<A: WorldAssets> WorldHost<A> {
         world.persistence.automap_flags = save.automap_flags;
         world.persistence.preferences = save.preferences;
         world.difficulty = save.preferences[0] as i32;
-        world.combat_difficulty = save.preferences[1] as i32;
+        world.combat_difficulty = Some(save.preferences[1] as i32);
         world.violence = Some(save.preferences[2] as i32);
         world.running_burning = save.preferences[4] as i32;
+        world.ai.combat_taunts = Some(save.preferences[6] as i32);
+        world.ai.language_filter = Some(save.preferences[7] as i32);
         world.persistence.pending_perk = save.pending_perk;
         world.world_map = WorldMap::from_saved(save.world_map.clone());
         world.persistence.movies = save.movies;
@@ -487,8 +497,15 @@ impl<A: WorldAssets> WorldHost<A> {
                 None => world.diagnostic(format!("party member {id} is not on the restored map")),
             }
         }
+        // No AI state refers to objects from before the load.
+        self.world.ai.snapshot.clear();
+        self.world.ai.callbacks.clear();
+        self.world.ai.requested = None;
         if save.combat.state & state::ACTIVE != 0 {
             self.resume_combat(&save.combat);
+        }
+        if let Err(error) = self.reevaluate_language_filter() {
+            self.world.diagnostic(format!("language filter: {error}"));
         }
         if let Some(sheet) = self.world.player_sheet_mut() {
             sheet.name = text(&save.header.name).to_vec();
@@ -606,6 +623,9 @@ impl<A: WorldAssets> WorldHost<A> {
             resumed: true,
             ..CombatState::default()
         };
+        // SPEC-009 §3.2 (improved): rebuild the snapshot from the restored
+        // list, in its restored order.
+        world.ai.snapshot = world.combat_state.list.clone();
         world.combat = true;
         world.free_movement = saved.free_movement;
         world.combat_experience = saved.experience;

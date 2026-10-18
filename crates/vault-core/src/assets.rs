@@ -94,12 +94,25 @@ pub trait WorldAssets {
     ) -> u32 {
         Fid::new(category, base, animation, weapon, 0).0
     }
+    /// The SPEC-007 existence test for the file an identifier selects.
+    fn art_exists(&self, fid: u32) -> bool {
+        self.object_art(fid).is_ok()
+    }
+    /// A raw resource by logical path (for example `data/ai.txt`).
+    fn resource(&self, path: &str) -> Result<Vec<u8>, WorldError> {
+        Err(WorldError::Invalid(format!("{path}: resource unavailable")))
+    }
+    /// A localized game message catalog (`text/<language>/game/<file>`).
+    fn game_messages(&self, file: &str) -> Result<Arc<MsgCatalog>, WorldError> {
+        Err(WorldError::Invalid(format!("{file}: messages unavailable")))
+    }
 }
 pub struct VfsWorldAssets {
     pub vfs: Arc<dyn Vfs>,
     pub language: String,
     prototypes: RefCell<BTreeMap<u32, Arc<Prototype>>>,
     messages: RefCell<BTreeMap<String, MsgCatalog>>,
+    game_catalogs: RefCell<BTreeMap<String, Arc<MsgCatalog>>>,
     programs: RefCell<BTreeMap<i32, (String, IntProgram)>>,
     frames: RefCell<BTreeMap<String, Arc<FrmArchive>>>,
     frame_bytes: RefCell<usize>,
@@ -122,6 +135,7 @@ impl VfsWorldAssets {
             language: language.to_ascii_lowercase(),
             prototypes: RefCell::new(BTreeMap::new()),
             messages: RefCell::new(BTreeMap::new()),
+            game_catalogs: RefCell::new(BTreeMap::new()),
             programs: RefCell::new(BTreeMap::new()),
             frames: RefCell::new(BTreeMap::new()),
             frame_bytes: RefCell::new(0),
@@ -349,6 +363,26 @@ impl WorldAssets for VfsWorldAssets {
             }
             Err(_) => Fid::new(category, base, animation, weapon, 0).0,
         }
+    }
+    fn art_exists(&self, fid: u32) -> bool {
+        self.art_catalog()
+            .ok()
+            .and_then(|catalog| catalog.path(Fid(fid)).ok())
+            .is_some_and(|path| self.exists(&path))
+    }
+    fn resource(&self, path: &str) -> Result<Vec<u8>, WorldError> {
+        self.read(path)
+    }
+    fn game_messages(&self, file: &str) -> Result<Arc<MsgCatalog>, WorldError> {
+        let path = format!("text/{}/game/{file}", self.language);
+        if let Some(catalog) = self.game_catalogs.borrow().get(&path) {
+            return Ok(catalog.clone());
+        }
+        let catalog = Arc::new(MsgCatalog::parse(&self.read(&path)?)?);
+        self.game_catalogs
+            .borrow_mut()
+            .insert(path, catalog.clone());
+        Ok(catalog)
     }
     fn background_path(&self, index: i32) -> Result<String, WorldError> {
         self.art_name("backgrnd", index)

@@ -674,12 +674,14 @@ impl<A: WorldAssets> WorldHost<A> {
                     && (op == 0x8143 || !fleeing(self.object(defender)?))
                 {
                     if self.world.combat {
+                        // SPEC-009: with alert clear, set it and reference the
+                        // target directly (no reaction change).
                         let attacker = self.world.get_mut(attacker).expect("attacker");
-                        if attacker.opponent == 0 {
+                        if let ObjectState::Critter(state) = &mut attacker.raw.state
+                            && state.maneuvers & 1 == 0
+                        {
+                            state.maneuvers |= 1;
                             attacker.opponent = defender;
-                            if let ObjectState::Critter(state) = &mut attacker.raw.state {
-                                state.maneuvers |= 1;
-                            }
                         }
                     } else {
                         self.world.emit(WorldEffect::Combat {
@@ -1080,11 +1082,16 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x80f5 => {
+                // The inverted null guard: valid operands return 0 without a
+                // hearing test; a null operand (unsafe in the reference)
+                // returns 0 with a diagnostic.
                 if call.uint(0) == 0 || call.uint(1) == 0 {
-                    return Err(VmError::Host("unsafe inverted null hearing guard".into()));
+                    self.world
+                        .diagnostic("obj_can_hear_obj with a null operand returns 0");
+                } else {
+                    self.object(call.uint(0))?;
+                    self.object(call.uint(1))?;
                 }
-                self.object(call.uint(0))?;
-                self.object(call.uint(1))?;
                 integer(0)
             }
             0x80f6 => integer(self.world.clock.hhmm()),
@@ -1214,11 +1221,15 @@ impl<A: WorldAssets> WorldHost<A> {
                                 state.ai = call.int(0);
                             }
                         }
+                        // SPEC-009 §3.15 team switching, skipped when unchanged.
                         (1, 6) if !self.world.restoring => {
-                            if let Some(object) = self.world.get_mut(call.uint(3))
-                                && let ObjectState::Critter(state) = &mut object.raw.state
+                            let critter = call.uint(3);
+                            if self
+                                .world
+                                .critter_state(critter)
+                                .is_some_and(|state| state.team != call.int(0))
                             {
-                                state.team = call.int(0);
+                                self.set_team(critter, call.int(0));
                             }
                         }
                         _ => {}
@@ -1331,10 +1342,13 @@ impl<A: WorldAssets> WorldHost<A> {
                         {
                             self.world.camera_hex = hex;
                         }
+                        let font = if style == -2 { 103 } else { 101 };
+                        // A live floating text suppresses SPEC-009 taunts.
+                        self.register_floating(call.uint(2), font, &text);
                         self.world.emit(WorldEffect::Floating {
                             object: call.uint(2),
                             text,
-                            font: if style == -2 { 103 } else { 101 },
+                            font,
                             color,
                         });
                     }
@@ -1576,6 +1590,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 if call.uint(0) != 0 {
                     self.object(call.uint(0))?;
                     self.world.party.insert(call.uint(0));
+                    // SPEC-009 §3.15: the new member switches to team 0.
+                    self.set_team(call.uint(0), 0);
                 }
                 None
             }
@@ -1871,7 +1887,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.world.dialogue.barter_modifier = call.int(0);
                 None
             }
-            0x814f => integer(self.world.combat_difficulty),
+            0x814f => integer(self.world.combat_difficulty.unwrap_or(0)),
             0x8150 => {
                 let visible = if let Some(object) = self
                     .world

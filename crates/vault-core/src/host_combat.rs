@@ -205,7 +205,7 @@ impl WorldState {
             defender_light: self.visible_light(defender),
             defender_hp: self.hit_points(defender).unwrap_or(target.current_hp),
             ticks: self.clock.ticks,
-            combat_difficulty: self.combat_difficulty,
+            combat_difficulty: self.combat_difficulty.unwrap_or(0),
             accuracy_bonus: 0,
         })
     }
@@ -270,6 +270,10 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Some(state) = self.world.critter_state_mut(attacker) {
             state.ap = state.ap.saturating_sub(cost).max(0);
         }
+        // SPEC-009 §3.4: the player's attack debit references the defender.
+        if attacker == self.world.player {
+            self.set_last_attacker(attacker, defender);
+        }
         // Cleanup reselects the current weapon by hit mode before consuming.
         if resolution.ammo > 0
             && let Some(item) = self.world.wielded(attacker, attack.hit_mode)
@@ -301,6 +305,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 resolution.damage,
                 resolution.defender_flags,
             )?;
+            self.after_damage(attacker, defender, true);
             // The fall (lethal or not) carries the computed knockback; a
             // nonpositive displacement animates without movement.
             if resolution.knockback > 0 {
@@ -780,6 +785,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     outcome.damage,
                     outcome.defender_flags,
                 )?;
+                self.after_damage(attacker, *object, false);
                 if outcome.knockback > 0 {
                     self.knock_back(attacker, *object, outcome.knockback)?;
                 }
@@ -791,9 +797,10 @@ impl<A: WorldAssets> WorldHost<A> {
 
 impl<A: WorldAssets> WorldHost<A> {
     /// One complete attack action: profile, the initiating request's accuracy,
-    /// preflight, single-shot or spray resolution (world generator), request
-    /// damage bounds/override flags, then application. A refusal performs
-    /// nothing and is returned in the inner result.
+    /// preflight, single-shot or spray resolution (world generator) with the
+    /// random-target replacement, request damage bounds/override flags, the
+    /// SPEC-009 taunt requests, application, then the taunt displays. A
+    /// refusal performs nothing and is returned in the inner result.
     pub fn perform_attack(
         &mut self,
         attacker: ObjectRef,
@@ -809,25 +816,25 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Err(refusal) = self.world.preflight(attacker, defender, &attack) {
             return Ok(Err(refusal));
         }
-        let spraying = matches!(
-            attack.mode(),
-            crate::combat::attack_mode::BURST | crate::combat::attack_mode::CONTINUOUS
-        );
         let mut rng = std::mem::take(&mut self.world.rng);
-        let outcome = if spraying {
-            self.resolve_spray(attacker, defender, &attack, &mut rng)
-        } else {
-            attack.resolve(&mut rng).map(|main| Spray {
-                main,
-                extras: Vec::new(),
-            })
-        };
+        let outcome = self.resolve_attack(attacker, defender, &attack, &mut rng);
         self.world.rng = rng;
-        let mut spray = outcome?;
+        let (mut spray, victim) = outcome?;
         if let Some(request) = request {
             adjust_for_request(&request, &mut spray.main);
         }
-        self.apply_spray(attacker, defender, &attack, &spray)?;
+        // A random-target victim replaces the defender and is unintended.
+        let (target, applied) = match &victim {
+            Some((victim, profile)) => (*victim, profile),
+            None => (defender, &attack),
+        };
+        self.world.ai.callbacks.clear();
+        self.attack_taunts(attacker, target, applied, &spray.main)?;
+        self.world.ai.unintended = if victim.is_some() { target } else { 0 };
+        let application = self.apply_spray(attacker, target, applied, &spray);
+        self.world.ai.unintended = 0;
+        application?;
+        self.run_taunts();
         Ok(Ok(spray.main))
     }
 }

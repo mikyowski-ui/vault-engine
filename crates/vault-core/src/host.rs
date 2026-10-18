@@ -69,8 +69,11 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     program_scripts: BTreeMap<u32, u32>,
     active: BTreeSet<u32>,
     next_program: u32,
-    /// NPC combat policy; SPEC-007 leaves AI behavior to the host.
+    /// NPC combat policy: the built-in SPEC-009 packet AI by default.
     pub combat_ai: Box<dyn crate::combat_state::CombatAi>,
+    /// Drug consumption for NPC healing; no approved specification defines
+    /// it, so healing is skipped until the host supplies rules.
+    pub drug_rules: Option<Box<dyn crate::ai::DrugRules>>,
     pub building_animation: Option<AnimationSequence>,
     pub animations: Vec<AnimationSequence>,
     pub last_object_name: Vec<u8>,
@@ -165,6 +168,18 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn palette(&self, name: &[u8]) -> Result<vault_formats::Palette, WorldError> {
         (**self).palette(name)
     }
+    fn art_exists(&self, fid: u32) -> bool {
+        (**self).art_exists(fid)
+    }
+    fn resource(&self, path: &str) -> Result<Vec<u8>, WorldError> {
+        (**self).resource(path)
+    }
+    fn game_messages(
+        &self,
+        file: &str,
+    ) -> Result<std::sync::Arc<vault_formats::MsgCatalog>, WorldError> {
+        (**self).game_messages(file)
+    }
 }
 impl<A: WorldAssets> WorldHost<A> {
     pub fn new(world: WorldState, assets: A) -> Self {
@@ -180,7 +195,8 @@ impl<A: WorldAssets> WorldHost<A> {
             program_scripts: BTreeMap::new(),
             active: BTreeSet::new(),
             next_program: 1,
-            combat_ai: Box::new(crate::combat_state::NoAi),
+            combat_ai: Box::new(crate::combat_state::PacketAi),
+            drug_rules: None,
             building_animation: None,
             animations: Vec::new(),
             last_object_name: b"<Critter>".to_vec(),

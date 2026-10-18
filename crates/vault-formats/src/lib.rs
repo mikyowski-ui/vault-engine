@@ -1,5 +1,6 @@
 //! Bounded clean-room parsers based on approved SPEC-001 and SPEC-002.
 
+pub mod ai;
 pub mod automap;
 mod binary;
 pub mod dat;
@@ -65,6 +66,8 @@ pub fn validate_asset(path: &VfsPath, bytes: &[u8]) -> Option<Result<(), ParseEr
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod ai_tests;
 #[cfg(test)]
 mod automap_tests;
 #[cfg(test)]
