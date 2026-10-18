@@ -100,6 +100,61 @@ impl<A: WorldAssets> WorldHost<A> {
         let material = sfx::material_letter(effect, self.world.sound_target(target), damage_type);
         sfx::weapon_name(effect, sound, hit_mode, material)
     }
+    /// Request a named effect owned by `owner`; no name requests nothing.
+    pub(crate) fn emit_effect(&mut self, name: Option<Vec<u8>>, owner: ObjectRef) {
+        if let Some(name) = name.filter(|name| !name.is_empty()) {
+            self.world.emit(WorldEffect::SoundEffect {
+                name,
+                owner: Some(owner),
+            });
+        }
+    }
+    /// Door and container cue: the open/close name for action 0 (open) or
+    /// 1 (close), owned by the object.
+    pub(crate) fn emit_open_sound(&mut self, object: ObjectRef, action: u8) {
+        let name = self.open_sound_name(object, action);
+        self.emit_effect(name, object);
+    }
+    /// Movement cue: the mover's walk (1) or run (19) character effect.
+    pub(crate) fn emit_movement_sound(&mut self, object: ObjectRef, run: bool) {
+        let name = self.character_sound_name(object, if run { 19 } else { 1 }, 0);
+        self.emit_effect(name, object);
+    }
+    /// Attack cues: a weapon's attack effect, then on a hit its hit effect
+    /// with the target's material (owned by the target). An unarmed attack
+    /// uses the punch or kick character effect, with the contact selector
+    /// (4) on a hit.
+    pub(crate) fn emit_attack_sounds(
+        &mut self,
+        attacker: ObjectRef,
+        target: ObjectRef,
+        hit_mode: u8,
+        hit: bool,
+    ) {
+        match self.world.wielded(attacker, hit_mode) {
+            Some(weapon) => {
+                let attack = self.weapon_sound_name(sfx::effect::ATTACK, weapon, hit_mode, 0);
+                self.emit_effect(attack, attacker);
+                if hit {
+                    let hit = self.weapon_sound_name(sfx::effect::HIT, weapon, hit_mode, target);
+                    self.emit_effect(hit, target);
+                }
+            }
+            None => {
+                let animation = if hit_mode == crate::critical::hit_mode::KICK {
+                    17
+                } else {
+                    16
+                };
+                let swing = self.character_sound_name(attacker, animation, 0);
+                self.emit_effect(swing, attacker);
+                if hit {
+                    let contact = self.character_sound_name(attacker, animation, 4);
+                    self.emit_effect(contact, attacker);
+                }
+            }
+        }
+    }
     /// Emit a weapon sound request with its effect name (ready and out of
     /// ammunition always use variant 1).
     pub(crate) fn emit_weapon_sound(&mut self, object: ObjectRef, weapon: ObjectRef, effect: u8) {

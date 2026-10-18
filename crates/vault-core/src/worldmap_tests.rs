@@ -613,6 +613,67 @@ fn spec008_fixture_until_healed_repeats_three_hour_phases() {
 }
 
 #[test]
+fn spec008_rest_sessions_step_like_the_blocking_rest() {
+    // Stepping a session one UI step at a time reaches the same state as the
+    // blocking rest: 13 hour-phase UI steps for three hours.
+    let mut stepped = traveller(0);
+    stepped.open_pipboy();
+    let start = stepped.world.clock.ticks;
+    let mut session = stepped.begin_rest(RestRequest::Hours(3)).unwrap();
+    let mut steps = 0;
+    let outcome = loop {
+        match stepped.advance_rest(&mut session).unwrap() {
+            Some(outcome) => break outcome,
+            None => steps += 1,
+        }
+    };
+    assert_eq!((outcome, steps), (RestOutcome::Completed, 13));
+    assert_eq!(session.outcome(), Some(RestOutcome::Completed));
+    assert_eq!(stepped.world.clock.ticks - start, 108000);
+    assert_eq!(stepped.world.rest_credit, 169);
+    // Until healed matches the blocking rest exactly.
+    let mut blocking = traveller(0);
+    let mut sessioned = traveller(0);
+    for host in [&mut blocking, &mut sessioned] {
+        let max = max_hp(host);
+        set_hp(host, max - 5);
+        host.open_pipboy();
+    }
+    assert_eq!(
+        rest(&mut blocking, RestRequest::UntilHealed),
+        RestOutcome::Completed
+    );
+    let mut session = sessioned.begin_rest(RestRequest::UntilHealed).unwrap();
+    while sessioned.advance_rest(&mut session).unwrap().is_none() {}
+    assert_eq!(sessioned.world.clock.ticks, blocking.world.clock.ticks);
+    assert_eq!(sessioned.world.rest_credit, blocking.world.rest_credit);
+    assert_eq!(hp(&sessioned), hp(&blocking));
+    // Cancelling (no further advance) after the first hour-phase step leaves
+    // its credit unapplied, as a cancelling UI step does.
+    let mut host = traveller(0);
+    host.open_pipboy();
+    let mut session = host.begin_rest(RestRequest::Hours(3)).unwrap();
+    assert_eq!(host.advance_rest(&mut session).unwrap(), None);
+    assert_eq!(host.world.rest_credit, 0);
+    let mut blocking = traveller(0);
+    blocking.open_pipboy();
+    assert_eq!(
+        blocking.rest(RestRequest::Hours(3), &mut || true).unwrap(),
+        RestOutcome::Cancelled
+    );
+    assert_eq!(
+        (blocking.world.clock.ticks, blocking.world.rest_credit),
+        (host.world.clock.ticks, 0)
+    );
+    // Zero-length and full-HP requests finish without a UI step.
+    let mut session = host.begin_rest(RestRequest::Minutes(0)).unwrap();
+    assert_eq!(
+        host.advance_rest(&mut session).unwrap(),
+        Some(RestOutcome::Completed)
+    );
+}
+
+#[test]
 fn spec008_rest_presets_queue_events_and_cancellation() {
     let at = |hour: u64, minute: u64| hour * 36000 + minute * 600;
     assert_eq!(minutes_until_hour(at(5, 0), 6), 60);

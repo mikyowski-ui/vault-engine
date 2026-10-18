@@ -718,7 +718,11 @@ impl<A: WorldAssets> WorldHost<A> {
                         playing: true,
                         paused: false,
                     });
-                    self.world.emit(WorldEffect::Sound(name));
+                    self.world.emit(WorldEffect::LibrarySound {
+                        slot,
+                        filename: name,
+                        mode,
+                    });
                     0xa0000000 | slot as u32
                 } else {
                     u32::MAX
@@ -750,7 +754,11 @@ impl<A: WorldAssets> WorldHost<A> {
                                 sound.playing = true;
                             }
                             0x809c if sound.playing && !sound.paused => {
-                                self.world.emit(WorldEffect::Sound(sound.filename.clone()))
+                                self.world.emit(WorldEffect::LibrarySound {
+                                    slot,
+                                    filename: sound.filename.clone(),
+                                    mode: sound.mode,
+                                })
                             }
                             _ => {}
                         }

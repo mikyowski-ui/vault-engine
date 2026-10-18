@@ -258,8 +258,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x80a3 => {
-                self.world
-                    .emit(WorldEffect::Sound(call.text(0).unwrap_or(b"").to_vec()));
+                // Direct playback: no owning object, so no gender alias.
+                self.world.emit(WorldEffect::SoundEffect {
+                    name: call.text(0).unwrap_or(b"").to_vec(),
+                    owner: None,
+                });
                 None
             }
             0x80a4 => {

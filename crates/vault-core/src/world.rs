@@ -226,7 +226,20 @@ pub struct WorldRules {
 pub enum WorldEffect {
     Diagnostic(String),
     Message(Vec<u8>),
-    Sound(Vec<u8>),
+    /// A SPEC-010 effect request, resolved through the effect lookup chain.
+    /// Animation-registered and object effects supply their owner (for the
+    /// gender alias and relative volume); direct playback supplies none.
+    SoundEffect {
+        name: Vec<u8>,
+        owner: Option<ObjectRef>,
+    },
+    /// A library sound slot (SPEC-005 §3.7) started or rewound: the named
+    /// file with the slot's mode bits.
+    LibrarySound {
+        slot: usize,
+        filename: Vec<u8>,
+        mode: i32,
+    },
     Speech(Vec<u8>),
     StopSpeech,
     Movie {

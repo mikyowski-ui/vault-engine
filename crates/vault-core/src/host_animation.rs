@@ -168,6 +168,7 @@ impl<A: WorldAssets> WorldHost<A> {
                         0x8111 | 0x8112 => self.plan_to_object(object, values[1] as ObjectRef),
                         _ => self.plan_to_tile(object, values[1], usize::MAX),
                     };
+                    self.emit_movement_sound(object, run);
                 }
                 _ => {}
             }
@@ -227,7 +228,11 @@ impl<A: WorldAssets> WorldHost<A> {
             0x813b => {
                 let sequence = &self.animations[index];
                 if let Some(sound) = sequence.sounds.get(&sequence.cursor).cloned() {
-                    self.world.emit(WorldEffect::Sound(sound));
+                    // Animation-registered effects supply their owner.
+                    self.world.emit(WorldEffect::SoundEffect {
+                        name: sound,
+                        owner: Some(object),
+                    });
                 }
                 true
             }

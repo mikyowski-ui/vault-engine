@@ -830,6 +830,8 @@ impl<A: WorldAssets> WorldHost<A> {
         };
         self.world.ai.callbacks.clear();
         self.attack_taunts(attacker, target, applied, &spray.main)?;
+        let hit = spray.main.defender_flags & effect::HIT != 0;
+        self.emit_attack_sounds(attacker, target, mode, hit);
         self.world.ai.unintended = if victim.is_some() { target } else { 0 };
         let application = self.apply_spray(attacker, target, applied, &spray);
         self.world.ai.unintended = 0;

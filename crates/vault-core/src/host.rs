@@ -1353,8 +1353,13 @@ impl<A: WorldAssets> WorldHost<A> {
                             return Err(WorldError::Invalid("door/container is locked".into()));
                         }
                         lock.0 ^= 1;
-                        object.raw.frame = usize::from(lock.0 & 1 != 0);
+                        let opened = lock.0 & 1 != 0;
+                        object.raw.frame = usize::from(opened);
                         object.set_lock(lock);
+                        // SPEC-010 open (0) or close (1) cue.
+                        self.emit_open_sound(target, u8::from(!opened));
+                    } else if object.category() == Category::Item && object.lock().is_some() {
+                        self.emit_open_sound(target, 0);
                     }
                 }
                 _ => {}
@@ -1531,6 +1536,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.interactions
             .retain(|pending| pending.movement.actor != actor);
+        self.emit_movement_sound(actor, false);
         self.interactions.push_back(Interaction {
             target,
             action,

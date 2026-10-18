@@ -202,3 +202,117 @@ fn spec010_character_names_lookup_speech_and_volume() {
     assert_eq!(host.world.effect_volume(Some(held), false), 15292);
     assert_eq!(host.world.effect_volume(Some(player), false), 32767);
 }
+
+fn effects(host: &mut WorldHost<SoundAssets>) -> Vec<(String, Option<ObjectRef>)> {
+    host.world
+        .effects
+        .drain(..)
+        .filter_map(|effect| match effect {
+            crate::WorldEffect::SoundEffect { name, owner } => {
+                Some((String::from_utf8(name).unwrap(), owner))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn spec010_cues_for_doors_containers_attacks_and_movement() {
+    use vault_formats::{
+        map::{ObjectDetail, ObjectState},
+        pro::LockFlags,
+    };
+    let mut world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+    let player = world.player;
+    // A usable door (extended flag 0x800) west of the player, and a
+    // container north-east of it.
+    let door = place(
+        &mut world,
+        prototype(2, 0, &[(0x18, 0x800)], &[(0x28, b'C')]),
+        20101,
+    );
+    world.get_mut(door).unwrap().raw.state = ObjectState::Other {
+        word: 0,
+        detail: ObjectDetail::Door(LockFlags(0)),
+    };
+    let chest = place(&mut world, prototype(0, 1, &[], &[(0x38, b'B')]), 20099);
+    // A melee club (swing, sound byte `E`) and an adjacent critter.
+    let club = place(
+        &mut world,
+        prototype(
+            0,
+            3,
+            &[(0x18, 0x03), (61, 1), (65, 2), (73, 1), (89, 3), (101, -1)],
+            &[(0x79, b'E')],
+        ),
+        0,
+    );
+    world.add_item(player, club, 1, true).unwrap();
+    let critter = place(&mut world, prototype(1, 0, &[(48 + 4 * 7, 50)], &[]), 20300);
+    let far = place(&mut world, prototype(0, 5, &[], &[]), 20900);
+    if let Some(ObjectState::Critter(state)) = world.get_mut(player).map(|o| &mut o.raw.state) {
+        state.ap = 20;
+    }
+    let mut assets = SoundAssets::default();
+    assets.tokens.insert((1, 0), b"hmjmps".to_vec());
+    let mut host = WorldHost::new(world, assets);
+
+    // Use opens, then closes, the door; using the container opens it.
+    host.action(player, door, crate::ObjectAction::Use).unwrap();
+    host.action(player, door, crate::ObjectAction::Use).unwrap();
+    host.action(player, chest, crate::ObjectAction::Use)
+        .unwrap();
+    assert_eq!(
+        effects(&mut host),
+        [
+            ("SODOORSC".to_string(), Some(door)),
+            ("SCDOORSC".to_string(), Some(door)),
+            ("IOCNTNRB".to_string(), Some(chest)),
+        ]
+    );
+    // Walking toward a distant object requests the walk effect.
+    host.action(player, far, crate::ObjectAction::Pickup)
+        .unwrap();
+    assert_eq!(effects(&mut host), [("HMJMPSAB".to_string(), Some(player))]);
+
+    // Unarmed: the punch effect, and its contact effect on a hit.
+    let mode = crate::critical::hit_mode::PUNCH;
+    let result = host
+        .perform_attack(
+            player,
+            critter,
+            mode,
+            crate::critical::location::TORSO,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    let hit = result.defender_flags & crate::critical::effect::HIT != 0;
+    let mut expected = vec![("HMJMPSAQ".to_string(), Some(player))];
+    if hit {
+        expected.push(("HMJMPSZQ".to_string(), Some(player)));
+    }
+    assert_eq!(effects(&mut host), expected);
+    // Armed: the weapon's attack effect, then its hit effect on the critter
+    // target (no material: `F`), owned by the target.
+    host.world
+        .equip(player, club, vault_formats::pro::BasicFlags::RIGHT_HAND.0)
+        .unwrap();
+    let mode = crate::critical::hit_mode::RIGHT_PRIMARY;
+    let result = host
+        .perform_attack(
+            player,
+            critter,
+            mode,
+            crate::critical::location::TORSO,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    let hit = result.defender_flags & crate::critical::effect::HIT != 0;
+    let mut expected = vec![("WAE1XXX1".to_string(), Some(player))];
+    if hit {
+        expected.push(("WHE1FXX1".to_string(), Some(critter)));
+    }
+    assert_eq!(effects(&mut host), expected);
+}

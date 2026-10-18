@@ -1441,7 +1441,10 @@ fn spec005_registered_sequences_execute_retire_and_clear_busy() {
         host.world
             .effects
             .iter()
-            .any(|e| matches!(e, WorldEffect::Sound(name) if name == b"Hello"))
+            .any(|e| matches!(
+                e,
+                WorldEffect::SoundEffect { name, owner: Some(owner) } if name == b"Hello" && *owner == me as u32
+            ))
     );
     let code = [push(me), instruction(0x80cc)].concat();
     run_fragment(&mut host, &base, &code).unwrap();

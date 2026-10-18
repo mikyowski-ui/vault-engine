@@ -33,6 +33,62 @@ pub enum RestOutcome {
     Cancelled,
 }
 
+/// An in-progress rest, advanced one UI step at a time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestSession {
+    plan: Plan,
+    wait: Option<Wait>,
+    finished: Option<RestOutcome>,
+}
+impl RestSession {
+    /// How the rest ended, once it has.
+    pub fn outcome(&self) -> Option<RestOutcome> {
+        self.finished
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Plan {
+    /// One explicit wait.
+    Once,
+    /// Until healed: estimated hours still to wait in chunks of 24.
+    Chunks { estimate: i32 },
+    /// Until healed: three-hour rests while the sampled deficit is nonzero.
+    Repeat { sampled: i32 },
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Phase {
+    Minutes,
+    Hours,
+}
+/// One explicit `H`-hour, `M`-minute wait.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Wait {
+    hours: i32,
+    minutes: i32,
+    minute_steps: f64,
+    hour_steps: f64,
+    start: f64,
+    phase: Phase,
+    step: u64,
+    pending_credit: Option<i32>,
+}
+impl Wait {
+    /// `None` for a zero-length (immediately complete) wait.
+    fn new<A: WorldAssets>(hours: i32, minutes: i32, host: &WorldHost<A>) -> Option<Self> {
+        let (_, minute_steps, hour_steps) = rest_allocation(hours, minutes)?;
+        Some(Self {
+            hours,
+            minutes,
+            minute_steps,
+            hour_steps,
+            start: host.world.clock.ticks as f64,
+            phase: Phase::Minutes,
+            step: 0,
+            pending_credit: None,
+        })
+    }
+}
+
 /// The recovered allocation for `T = 60 x H + M`: A seconds, then N
 /// minute-phase and K hour-phase step counts before truncation.
 pub fn rest_allocation(hours: i32, minutes: i32) -> Option<(f64, f64, f64)> {
@@ -101,11 +157,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// One UI step's candidate time: reaching/passing the next due event
     /// moves to that tick plus one and processes the queue; afterwards the
     /// time is set (back) to the candidate.
-    fn rest_step(
-        &mut self,
-        candidate: u64,
-        ui_step: &mut dyn FnMut() -> bool,
-    ) -> Result<Option<RestOutcome>, WorldError> {
+    fn rest_step(&mut self, candidate: u64) -> Result<Option<RestOutcome>, WorldError> {
         if let Some(due) = self.world.queue.next_due()
             && candidate >= due
         {
@@ -116,53 +168,157 @@ impl<A: WorldAssets> WorldHost<A> {
             }
         }
         self.world.clock.set(candidate);
-        Ok((ui_step()).then_some(RestOutcome::Cancelled))
+        Ok(None)
     }
-    /// An explicit H-hour, M-minute wait: the minute phase, then the hour
-    /// phase from its own start, each ending on its exact endpoint, then the
-    /// final strict catch-up pass.
-    fn rest_for(
-        &mut self,
-        hours: i32,
-        minutes: i32,
-        ui_step: &mut dyn FnMut() -> bool,
-    ) -> Result<RestOutcome, WorldError> {
-        let Some((_, minute_steps, hour_steps)) = rest_allocation(hours, minutes) else {
-            return Ok(RestOutcome::Completed);
-        };
-        let start = self.world.clock.ticks as f64;
-        let span = 600.0 * f64::from(minutes);
-        for step in 0..minute_steps.trunc() as u64 {
-            let candidate = (start + step as f64 * span / minute_steps).trunc() as u64;
-            if let Some(outcome) = self.rest_step(candidate, ui_step)? {
-                return Ok(outcome);
-            }
-        }
-        self.world.clock.set((start + span) as u64);
-        self.credit_rest(minutes);
-        let start = self.world.clock.ticks as f64;
-        let span = 36000.0 * f64::from(hours);
-        let credit = (60.0 * f64::from(hours) / hour_steps).trunc() as i32;
-        for step in 0..hour_steps.trunc() as u64 {
-            let candidate = (start + step as f64 * span / hour_steps).trunc() as u64;
-            if let Some(outcome) = self.rest_step(candidate, ui_step)? {
-                return Ok(outcome);
-            }
+    /// Advance an explicit wait to its next UI step: the minute phase, then
+    /// the hour phase from its own start, each ending on its exact endpoint,
+    /// then the final strict catch-up pass. `Ok(None)` means a UI step is
+    /// due; `Some(Completed)` ends the wait.
+    fn advance_wait(&mut self, wait: &mut Wait) -> Result<Option<RestOutcome>, WorldError> {
+        // An hour-phase step's credit applies once its UI step was not
+        // cancelled.
+        if let Some(credit) = wait.pending_credit.take() {
             self.credit_rest(credit);
         }
-        self.world.clock.set((start + span) as u64);
-        if self
-            .world
-            .queue
-            .next_due()
-            .is_some_and(|due| self.world.clock.ticks > due)
-        {
-            let result = self.process_queue()?;
-            if result != 0 {
-                return Ok(RestOutcome::Interrupted(result));
+        loop {
+            match wait.phase {
+                Phase::Minutes => {
+                    if wait.step < wait.minute_steps.trunc() as u64 {
+                        let span = 600.0 * f64::from(wait.minutes);
+                        let candidate =
+                            (wait.start + wait.step as f64 * span / wait.minute_steps).trunc();
+                        wait.step += 1;
+                        return self.rest_step(candidate as u64);
+                    }
+                    self.world
+                        .clock
+                        .set((wait.start + 600.0 * f64::from(wait.minutes)) as u64);
+                    self.credit_rest(wait.minutes);
+                    wait.start = self.world.clock.ticks as f64;
+                    wait.step = 0;
+                    wait.phase = Phase::Hours;
+                }
+                Phase::Hours => {
+                    let span = 36000.0 * f64::from(wait.hours);
+                    if wait.step < wait.hour_steps.trunc() as u64 {
+                        let candidate =
+                            (wait.start + wait.step as f64 * span / wait.hour_steps).trunc();
+                        wait.step += 1;
+                        if let Some(outcome) = self.rest_step(candidate as u64)? {
+                            return Ok(Some(outcome));
+                        }
+                        wait.pending_credit =
+                            Some((60.0 * f64::from(wait.hours) / wait.hour_steps).trunc() as i32);
+                        return Ok(None);
+                    }
+                    self.world.clock.set((wait.start + span) as u64);
+                    if self
+                        .world
+                        .queue
+                        .next_due()
+                        .is_some_and(|due| self.world.clock.ticks > due)
+                    {
+                        let result = self.process_queue()?;
+                        if result != 0 {
+                            return Ok(Some(RestOutcome::Interrupted(result)));
+                        }
+                    }
+                    return Ok(Some(RestOutcome::Completed));
+                }
             }
         }
-        Ok(RestOutcome::Completed)
+    }
+    /// Begin resting for an alarm-menu choice. A refusal, an already full
+    /// player for until-healed, or a zero-length wait finishes at once.
+    pub fn begin_rest(&mut self, request: RestRequest) -> Result<RestSession, WorldError> {
+        let mut session = RestSession {
+            plan: Plan::Once,
+            wait: None,
+            finished: None,
+        };
+        if !self.rest_allowed() {
+            session.finished = Some(RestOutcome::Refused);
+            return Ok(session);
+        }
+        match request {
+            RestRequest::Minutes(minutes) => session.wait = Wait::new(0, minutes, self),
+            RestRequest::Hours(hours) => session.wait = Wait::new(hours, 0, self),
+            RestRequest::UntilHour(hour) => {
+                let delta = minutes_until_hour(self.world.clock.ticks, hour);
+                session.wait = Wait::new(delta / 60, delta % 60, self);
+            }
+            RestRequest::UntilHealed => {
+                let (deficit, rate) = self.player_deficit();
+                if deficit == 0 {
+                    session.finished = Some(RestOutcome::Completed);
+                    return Ok(session);
+                }
+                if rate <= 0 {
+                    return Err(WorldError::Invalid(
+                        "until-healed rest needs a positive healing rate".into(),
+                    ));
+                }
+                session.plan = Plan::Chunks {
+                    estimate: 3 * deficit / rate,
+                };
+            }
+        }
+        Ok(session)
+    }
+    /// Advance a rest to its next UI step (the platform waits at least 50
+    /// ms between calls, and stops calling to cancel). `Ok(None)` means a UI
+    /// step is due; `Some` reports how the rest ended.
+    pub fn advance_rest(
+        &mut self,
+        session: &mut RestSession,
+    ) -> Result<Option<RestOutcome>, WorldError> {
+        if let Some(outcome) = session.finished {
+            return Ok(Some(outcome));
+        }
+        loop {
+            if let Some(wait) = &mut session.wait {
+                match self.advance_wait(wait)? {
+                    None => return Ok(None),
+                    Some(RestOutcome::Completed) => session.wait = None,
+                    Some(outcome) => {
+                        session.finished = Some(outcome);
+                        return Ok(Some(outcome));
+                    }
+                }
+            }
+            // The next wait of the plan, if any.
+            match session.plan {
+                Plan::Once => {
+                    session.finished = Some(RestOutcome::Completed);
+                    return Ok(Some(RestOutcome::Completed));
+                }
+                // Until-healed: estimated hours in chunks of at most 24.
+                Plan::Chunks { estimate } if estimate > 0 => {
+                    let chunk = estimate.min(24);
+                    session.plan = Plan::Chunks {
+                        estimate: estimate - chunk,
+                    };
+                    session.wait = Wait::new(chunk, 0, self);
+                }
+                // Then three-hour rests while the deficit sampled before the
+                // previous one was nonzero, so one more can follow full HP.
+                Plan::Chunks { .. } => {
+                    session.plan = Plan::Repeat {
+                        sampled: self.player_deficit().0,
+                    };
+                }
+                Plan::Repeat { sampled } if sampled != 0 => {
+                    session.plan = Plan::Repeat {
+                        sampled: self.player_deficit().0,
+                    };
+                    session.wait = Wait::new(3, 0, self);
+                }
+                Plan::Repeat { .. } => {
+                    session.finished = Some(RestOutcome::Completed);
+                    return Ok(Some(RestOutcome::Completed));
+                }
+            }
+        }
     }
     fn player_deficit(&self) -> (i32, i32) {
         let context = self.world.context(self.world.player);
@@ -183,46 +339,13 @@ impl<A: WorldAssets> WorldHost<A> {
         request: RestRequest,
         ui_step: &mut dyn FnMut() -> bool,
     ) -> Result<RestOutcome, WorldError> {
-        if !self.rest_allowed() {
-            return Ok(RestOutcome::Refused);
-        }
-        match request {
-            RestRequest::Minutes(minutes) => self.rest_for(0, minutes, ui_step),
-            RestRequest::Hours(hours) => self.rest_for(hours, 0, ui_step),
-            RestRequest::UntilHour(hour) => {
-                let delta = minutes_until_hour(self.world.clock.ticks, hour);
-                self.rest_for(delta / 60, delta % 60, ui_step)
+        let mut session = self.begin_rest(request)?;
+        loop {
+            if let Some(outcome) = self.advance_rest(&mut session)? {
+                return Ok(outcome);
             }
-            RestRequest::UntilHealed => {
-                let (deficit, rate) = self.player_deficit();
-                if deficit == 0 {
-                    return Ok(RestOutcome::Completed);
-                }
-                if rate <= 0 {
-                    return Err(WorldError::Invalid(
-                        "until-healed rest needs a positive healing rate".into(),
-                    ));
-                }
-                let mut estimate = 3 * deficit / rate;
-                while estimate > 0 {
-                    let chunk = estimate.min(24);
-                    estimate -= chunk;
-                    match self.rest_for(chunk, 0, ui_step)? {
-                        RestOutcome::Completed => {}
-                        outcome => return Ok(outcome),
-                    }
-                }
-                // Repeats while the deficit sampled before the previous
-                // chunk was nonzero, so one more chunk can follow full HP.
-                let mut sampled = self.player_deficit().0;
-                while sampled != 0 {
-                    sampled = self.player_deficit().0;
-                    match self.rest_for(3, 0, ui_step)? {
-                        RestOutcome::Completed => {}
-                        outcome => return Ok(outcome),
-                    }
-                }
-                Ok(RestOutcome::Completed)
+            if ui_step() {
+                return Ok(RestOutcome::Cancelled);
             }
         }
     }

@@ -174,6 +174,7 @@ impl<A: WorldAssets> WorldHost<A> {
             object.raw.frame = 1;
             lock.0 |= vault_formats::pro::LockFlags::OPEN.0;
             object.set_lock(lock);
+            self.emit_open_sound(door, 0);
         }
         Ok(())
     }
