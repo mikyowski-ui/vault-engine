@@ -69,6 +69,10 @@ pub struct PreviewArgs {
     /// Message ID (default: lowest ID with nonempty text).
     #[arg(long, requires = "preview_frm", allow_negative_numbers = true)]
     pub message_id: Option<i32>,
+    /// Set by a headless replay: the world's movies complete without
+    /// playback, including the startup movies queued while loading.
+    #[arg(skip)]
+    pub headless: bool,
 }
 
 pub struct Preview {
@@ -258,6 +262,9 @@ impl PreviewArgs {
                 self.seed.unwrap_or(1),
             )?;
             map.host.set_subtitles(self.subtitles);
+            if self.headless {
+                map.host.movie_policy = vault_core::movie::MoviePolicy::CompleteImmediately;
+            }
             if self.startup_movies {
                 map.queue_startup_movies();
             }

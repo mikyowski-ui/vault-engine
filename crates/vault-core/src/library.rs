@@ -481,7 +481,10 @@ impl<A: WorldAssets> WorldHost<A> {
                 if !self.assets.available(&name) {
                     return Err(error("movie playback failed"));
                 }
-                self.library.movie_playing = true;
+                // Headless, playback ends as it starts: the wait predicate
+                // below is already satisfied.
+                self.library.movie_playing =
+                    self.movie_policy == crate::movie::MoviePolicy::WaitUntilFinished;
                 self.world
                     .emit(WorldEffect::Movie(crate::movie::MovieRequest {
                         index: None,

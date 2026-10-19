@@ -1,7 +1,10 @@
 //! SPEC-008 `.DAT` archives: byte-zero directory tables, raw/LZSS/block
 //! payloads, and bounded decoding that rejects malformed streams.
-use crate::{MAX_ASSET_BYTES, ParseError, Vfs, VfsError, VfsPath, binary::Reader};
-use std::collections::BTreeMap;
+use crate::{MAX_ASSET_BYTES, ParseError, Vfs, VfsError, VfsPath};
+use std::{
+    collections::BTreeMap,
+    io::{self, Read, Seek, SeekFrom},
+};
 
 /// Logical archive block size; every non-final block must produce exactly this.
 pub const BLOCK_SIZE: usize = 16384;
@@ -68,60 +71,104 @@ pub struct DatArchive {
     index: BTreeMap<(Vec<u8>, Vec<u8>), (usize, usize)>,
 }
 
-fn prefix(r: &mut Reader<'_>) -> Result<DatTablePrefix, ParseError> {
-    let count = r.be_i32()?;
-    let capacity = r.be_i32()?;
-    let data_size = r.be_i32()?;
-    let opaque = r.word()?;
-    if count < 0 || data_size < 0 {
-        return Err(r.error("negative table count/associated size"));
+/// The directory tables read from the archive start: whole archive bytes in
+/// memory, or a file streamed without loading its payloads.
+struct TableReader<R> {
+    input: R,
+    pos: usize,
+}
+impl<R: Read> TableReader<R> {
+    fn error(&self, message: impl Into<String>) -> ParseError {
+        ParseError::new("DAT", self.pos, message)
     }
-    if count as usize > 1_000_000 {
-        return Err(r.error("table count exceeds resource limit"));
+    fn truncated(&self, count: usize) -> ParseError {
+        self.error(format!("truncated input: need {count} bytes"))
     }
-    Ok(DatTablePrefix {
-        count,
-        capacity,
-        data_size,
-        opaque,
-    })
+    fn take(&mut self, count: usize) -> Result<Vec<u8>, ParseError> {
+        let mut bytes = vec![0; count];
+        self.input
+            .read_exact(&mut bytes)
+            .map_err(|_| self.truncated(count))?;
+        self.pos += count;
+        Ok(bytes)
+    }
+    /// Discard `count` bytes without buffering them.
+    fn skip(&mut self, count: usize) -> Result<(), ParseError> {
+        let skipped = io::copy(&mut (&mut self.input).take(count as u64), &mut io::sink())
+            .map_err(|_| self.truncated(count))?;
+        if skipped != count as u64 {
+            return Err(self.truncated(count));
+        }
+        self.pos += count;
+        Ok(())
+    }
+    fn word(&mut self) -> Result<u32, ParseError> {
+        let mut bytes = [0; 4];
+        self.input
+            .read_exact(&mut bytes)
+            .map_err(|_| self.truncated(4))?;
+        self.pos += 4;
+        Ok(u32::from_be_bytes(bytes))
+    }
+    fn name(&mut self) -> Result<Vec<u8>, ParseError> {
+        let length = self.take(1)?[0] as usize;
+        self.take(length)
+    }
+    fn prefix(&mut self) -> Result<DatTablePrefix, ParseError> {
+        let count = self.word()? as i32;
+        let capacity = self.word()? as i32;
+        let data_size = self.word()? as i32;
+        let opaque = self.word()?;
+        if count < 0 || data_size < 0 {
+            return Err(self.error("negative table count/associated size"));
+        }
+        if count as usize > 1_000_000 {
+            return Err(self.error("table count exceeds resource limit"));
+        }
+        Ok(DatTablePrefix {
+            count,
+            capacity,
+            data_size,
+            opaque,
+        })
+    }
 }
 
 fn key(name: &[u8]) -> Vec<u8> {
     name.iter().map(u8::to_ascii_uppercase).collect()
 }
 
-impl DatArchive {
-    /// Archives are not bounded by the 64 MiB per-asset limit, but each
-    /// extracted file is.
-    pub fn parse(bytes: Vec<u8>) -> Result<Self, ParseError> {
-        let mut r = Reader::unbounded(&bytes, "DAT");
-        let root = prefix(&mut r)?;
+/// An archive's directory tables, without its payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatTables {
+    pub root: DatTablePrefix,
+    pub directories: Vec<DatDirectory>,
+}
+impl DatTables {
+    /// Read the root table and every file table from the archive start,
+    /// consuming nothing past the last table.
+    pub fn read(input: impl Read) -> Result<Self, ParseError> {
+        let mut r = TableReader { input, pos: 0 };
+        let root = r.prefix()?;
         let mut names = Vec::with_capacity(root.count as usize);
         for _ in 0..root.count {
-            let length = r.take(1)?[0] as usize;
-            names.push(r.take(length)?.to_vec());
-            r.take(root.data_size as usize)?;
+            names.push(r.name()?);
+            r.skip(root.data_size as usize)?;
         }
         let mut directories = Vec::with_capacity(names.len());
-        let mut index = BTreeMap::new();
         for name in names {
-            let table = prefix(&mut r)?;
+            let table = r.prefix()?;
             if (table.data_size as usize) < 16 {
                 return Err(r.error("file table associated size is below 16"));
             }
             let mut files = Vec::with_capacity(table.count as usize);
             for _ in 0..table.count {
-                let length = r.take(1)?[0] as usize;
-                let file = r.take(length)?.to_vec();
+                let file = r.name()?;
                 let attributes = r.word()?;
                 let offset = r.word()?;
                 let size = r.word()?;
                 let packed = r.word()?;
-                r.take(table.data_size as usize - 16)?;
-                index
-                    .entry((key(&name), key(&file)))
-                    .or_insert((directories.len(), files.len()));
+                r.skip(table.data_size as usize - 16)?;
                 files.push(DatEntry {
                     name: file,
                     attributes,
@@ -135,6 +182,111 @@ impl DatArchive {
                 prefix: table,
                 files,
             });
+        }
+        Ok(Self { root, directories })
+    }
+}
+
+impl DatDirectory {
+    /// A member's stored path, `directory\\file` (root `.` files bare).
+    pub fn path(&self, file: &DatEntry) -> Vec<u8> {
+        if self.name == b"." {
+            file.name.clone()
+        } else {
+            [self.name.as_slice(), b"\\", file.name.as_slice()].concat()
+        }
+    }
+}
+
+impl DatEntry {
+    /// Bytes stored at `offset`: the logical length for raw members,
+    /// otherwise the packed length.
+    pub fn stored_len(&self) -> Result<usize, ParseError> {
+        let storage = Storage::from_attributes(self.attributes).ok_or_else(|| {
+            ParseError::new(
+                "DAT",
+                self.offset as usize,
+                "unsupported attribute storage mode",
+            )
+        })?;
+        Ok(if storage == Storage::Raw {
+            self.length
+        } else {
+            self.packed
+        } as usize)
+    }
+    /// Decode this member's exact logical bytes from its stored bytes (the
+    /// `stored_len` bytes at its offset, or fewer if the archive ends).
+    pub fn decode(&self, stored: &[u8]) -> Result<Vec<u8>, ParseError> {
+        let start = self.offset as usize;
+        let error = |message: &str| ParseError::new("DAT", start, message);
+        let length = self.length as usize;
+        if length > MAX_ASSET_BYTES {
+            return Err(error("extracted file exceeds 64 MiB limit"));
+        }
+        let storage = Storage::from_attributes(self.attributes)
+            .ok_or_else(|| error("unsupported attribute storage mode"))?;
+        let body = stored
+            .get(..self.stored_len()?)
+            .ok_or_else(|| match storage {
+                Storage::Raw => error("raw payload extends beyond the archive"),
+                _ => error("packed payload extends beyond the archive"),
+            })?;
+        match storage {
+            Storage::Raw => Ok(body.to_vec()),
+            Storage::Legacy => {
+                let mut ring = Ring::new();
+                let output = ring.decode(body, length)?;
+                if output.len() != length {
+                    return Err(error("legacy stream length differs from the entry"));
+                }
+                Ok(output)
+            }
+            Storage::Blocks => decode_blocks(body, length).map_err(|mut failure| {
+                failure.offset += start;
+                failure
+            }),
+        }
+    }
+    /// Seek to this member in a streamed archive, read only its stored
+    /// bytes, and decode them.
+    pub fn read_from(&self, archive: &mut (impl Read + Seek)) -> Result<Vec<u8>, ParseError> {
+        let start = self.offset as usize;
+        let failed = |error: io::Error| ParseError::new("DAT", start, error.to_string());
+        let stored = self.stored_len()?;
+        if self.length as usize > MAX_ASSET_BYTES {
+            return Err(ParseError::new(
+                "DAT",
+                start,
+                "extracted file exceeds 64 MiB limit",
+            ));
+        }
+        archive
+            .seek(SeekFrom::Start(u64::from(self.offset)))
+            .map_err(failed)?;
+        // Growth follows the bytes actually present, so a bogus extent
+        // cannot allocate more than the archive holds.
+        let mut bytes = Vec::new();
+        archive
+            .take(stored as u64)
+            .read_to_end(&mut bytes)
+            .map_err(failed)?;
+        self.decode(&bytes)
+    }
+}
+
+impl DatArchive {
+    /// Archives are not bounded by the 64 MiB per-asset limit, but each
+    /// extracted file is.
+    pub fn parse(bytes: Vec<u8>) -> Result<Self, ParseError> {
+        let DatTables { root, directories } = DatTables::read(bytes.as_slice())?;
+        let mut index = BTreeMap::new();
+        for (d, directory) in directories.iter().enumerate() {
+            for (f, file) in directory.files.iter().enumerate() {
+                index
+                    .entry((key(&directory.name), key(&file.name)))
+                    .or_insert((d, f));
+            }
         }
         Ok(Self {
             root,
@@ -162,63 +314,14 @@ impl DatArchive {
     }
     /// Extract a file's exact logical bytes.
     pub fn extract(&self, entry: &DatEntry) -> Result<Vec<u8>, ParseError> {
-        let error = |message: &str| ParseError::new("DAT", entry.offset as usize, message);
-        let length = entry.length as usize;
-        if length > MAX_ASSET_BYTES {
-            return Err(error("extracted file exceeds 64 MiB limit"));
-        }
-        let start = entry.offset as usize;
-        let storage = Storage::from_attributes(entry.attributes)
-            .ok_or_else(|| error("unsupported attribute storage mode"))?;
-        match storage {
-            Storage::Raw => self
-                .bytes
-                .get(
-                    start
-                        ..start
-                            .checked_add(length)
-                            .ok_or_else(|| error("offset overflow"))?,
-                )
-                .map(<[u8]>::to_vec)
-                .ok_or_else(|| error("raw payload extends beyond the archive")),
-            Storage::Legacy => {
-                let body = self.packed(entry)?;
-                let mut ring = Ring::new();
-                let output = ring.decode(body, length)?;
-                if output.len() != length {
-                    return Err(error("legacy stream length differs from the entry"));
-                }
-                Ok(output)
-            }
-            Storage::Blocks => {
-                let body = self.packed(entry)?;
-                decode_blocks(body, length).map_err(|mut failure| {
-                    failure.offset += start;
-                    failure
-                })
-            }
-        }
-    }
-    fn packed(&self, entry: &DatEntry) -> Result<&[u8], ParseError> {
-        let start = entry.offset as usize;
-        let end = start
-            .checked_add(entry.packed as usize)
-            .ok_or_else(|| ParseError::new("DAT", start, "packed extent overflow"))?;
-        self.bytes.get(start..end).ok_or_else(|| {
-            ParseError::new("DAT", start, "packed payload extends beyond the archive")
-        })
+        let stored = self.bytes.get(entry.offset as usize..).unwrap_or_default();
+        entry.decode(stored)
     }
     /// Every stored path as `directory\\file` (root `.` files bare).
     pub fn paths(&self) -> impl Iterator<Item = Vec<u8>> + '_ {
-        self.directories.iter().flat_map(|directory| {
-            directory.files.iter().map(move |file| {
-                if directory.name == b"." {
-                    file.name.clone()
-                } else {
-                    [directory.name.as_slice(), b"\\", file.name.as_slice()].concat()
-                }
-            })
-        })
+        self.directories
+            .iter()
+            .flat_map(|directory| directory.files.iter().map(move |file| directory.path(file)))
     }
 }
 

@@ -91,6 +91,23 @@ controlled by `RUST_LOG` (default `info`). `WGPU_BACKEND` can select a graphics
 backend for troubleshooting. Input order is sequenced deterministically; actual
 OS event delivery is external to the simulation.
 
+A captured log replays headlessly (no window, GPU, or audio device) against the
+same preview options, then prints the final state digest as one JSON line:
+
+```sh
+cargo run -p vault-platform -- --master-dat /path/to/MASTER.DAT --critter-dat /path/to/CRITTER.DAT \
+  --preview-map maps/v13ent.map --replay-inputs session.jsonl
+# {"commands":8,"elapsed_ms":128,"state_sha256":"…"}
+```
+
+Logs have no timestamps, so each command advances a simulated 16 ms frame.
+Command identifiers must increase; replay stops at `quit` or an unconsumed
+Escape. The digest covers the central save (or its encoding error), every
+working saved map, the automap, and the presented frame with its palette.
+Replays, like every headless `WorldHost`, complete movies immediately
+(`MoviePolicy::CompleteImmediately`), so a script's `playmovie` never waits;
+the desktop map preview plays them and waits (`MoviePolicy::WaitUntilFinished`).
+
 ## Loose-directory VFS and corpus audit
 
 ```sh
@@ -115,6 +132,10 @@ cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-items
 # SPEC-012: decode every movie, fade file, and subtitle file against the oracle:
 cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
     --validate-movies --movie-oracle-dir oracle/SPEC-012
+# SPEC-008: stream every MASTER.DAT/CRITTER.DAT member and match its SHA-256 to
+# the loose file (archives default to the corpus directory's parent):
+cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-dat \
+    [--master-dat /path/to/MASTER.DAT --critter-dat /path/to/CRITTER.DAT]
 ```
 
 `--validate-movies` requires every corpus `.mve` to have an `mve-summary.tsv`

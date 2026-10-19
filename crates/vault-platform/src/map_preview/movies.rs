@@ -6,7 +6,7 @@ use super::{MapPreview, Screen};
 use crate::movie::{MoviePlayer, SubtitleStyle};
 use vault_core::{
     assets::WorldAssets,
-    movie::{self, MovieRequest, flags},
+    movie::{self, MoviePolicy, MovieRequest, flags},
 };
 use vault_render::IndexedImage;
 
@@ -24,6 +24,12 @@ impl MapPreview {
         self.drain_effects();
     }
     pub(crate) fn queue_movie(&mut self, request: MovieRequest) {
+        // Headless (a replay): nothing is presented, and the world has
+        // already treated playback as ended.
+        if self.host.movie_policy == MoviePolicy::CompleteImmediately {
+            tracing::debug!(movie = %request.path, "headless: movie completed without playback");
+            return;
+        }
         self.movies.push_back(request);
         if !matches!(self.screen, Screen::Movie(_)) {
             self.start_next_movie();

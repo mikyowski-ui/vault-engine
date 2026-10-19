@@ -23,6 +23,21 @@ pub mod flags {
     pub const PAUSE_MUSIC: u32 = 0x08;
 }
 
+/// How a library `playmovie` (SPEC-005 §3.2) waits when no presentation
+/// layer may be attached to finish it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MoviePolicy {
+    /// Headless (tests, tools, replays): the request is still emitted, but
+    /// playback counts as ended at once, so the program's wait predicate is
+    /// satisfied on its next check and a script can never hang on a movie
+    /// nobody plays.
+    #[default]
+    CompleteImmediately,
+    /// A presentation layer plays every request and reports the end through
+    /// `WorldHost::movie_finished`; the program waits until then.
+    WaitUntilFinished,
+}
+
 /// One row of the game movie table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameMovie {

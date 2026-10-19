@@ -9,7 +9,7 @@ use std::{
 use vault_core::{
     CharacterSheet, ObjectAction, ObjectRef, Perk, WorldEffect, WorldHost, WorldState,
     assets::{VfsWorldAssets, WorldAssets},
-    movie::MovieRequest,
+    movie::{MoviePolicy, MovieRequest},
 };
 use vault_formats::{
     ArtCatalog, Fid, Font, FrmArchive, HexGrid, MAX_ASSET_BYTES, MapFile, Palette, Vfs, VfsPath,
@@ -277,6 +277,8 @@ impl MapPreview {
         let font = assets.font().ok();
         let mut host = WorldHost::new(WorldState::new(character, seed)?, assets);
         host.interactive_dialogue = true;
+        // The desktop plays every movie and reports its end.
+        host.movie_policy = MoviePolicy::WaitUntilFinished;
         // A preview can run without campaign globals; the failure is reported.
         if let Err(error) = host.load_campaign() {
             tracing::warn!(%error, "campaign initializer unavailable");
@@ -892,7 +894,7 @@ mod sound_fixture;
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/state/support.rs"]
-mod state_fixture;
+pub(crate) mod state_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;

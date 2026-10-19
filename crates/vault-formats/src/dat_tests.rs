@@ -1,9 +1,9 @@
 //! SPEC-008 §4.1-4.2 archives and LZSS, and §3.2 database precedence.
 use crate::{
     DatArchive, DatProvider, Database, LocalDirProvider, Vfs,
-    dat::{Storage, decode_blocks, decode_until},
+    dat::{DatTables, Storage, decode_blocks, decode_until},
 };
-use std::sync::Arc;
+use std::{io::Cursor, sync::Arc};
 
 fn archive_bytes() -> Vec<u8> {
     crate::fixture_assets::sparse(include_str!(
@@ -93,6 +93,44 @@ fn spec008_fixture_complete_archive_tables_and_extraction() {
             DatArchive::parse(archive_bytes()[..end].to_vec()).is_err(),
             "{end}"
         );
+    }
+}
+
+#[test]
+fn spec008_streamed_tables_and_members_match_the_in_memory_archive() {
+    let bytes = archive_bytes();
+    let archive = DatArchive::parse(bytes.clone()).unwrap();
+    // The tables end where the first payload begins; nothing past them is read.
+    let mut stream = Cursor::new(bytes.clone());
+    let tables = DatTables::read(&mut stream).unwrap();
+    assert_eq!(stream.position(), 0x55);
+    assert_eq!(
+        (&tables.root, &tables.directories),
+        (&archive.root, &archive.directories)
+    );
+    let directory = &tables.directories[0];
+    let paths: Vec<_> = directory.files.iter().map(|f| directory.path(f)).collect();
+    assert_eq!(paths, archive.paths().collect::<Vec<_>>());
+    // Members are read in any order by seeking, one at a time.
+    for file in directory.files.iter().rev() {
+        assert_eq!(file.read_from(&mut stream), archive.extract(file));
+    }
+    assert_eq!(
+        directory.files[0].read_from(&mut stream).unwrap(),
+        b"ABCABCABC"
+    );
+    assert_eq!(directory.files[1].stored_len().unwrap(), 3);
+    // A member extending past the stream is rejected rather than padded.
+    let mut short = Cursor::new(bytes[..bytes.len() - 1].to_vec());
+    assert!(directory.files[1].read_from(&mut short).is_err());
+    let mut past = directory.files[0].clone();
+    past.offset = 0x200;
+    assert!(past.read_from(&mut stream).is_err());
+    past.attributes = 0x30;
+    assert!(past.stored_len().is_err());
+    // Truncated tables fail the same way streamed.
+    for end in 0..0x55 {
+        assert!(DatTables::read(&bytes[..end]).is_err(), "{end}");
     }
 }
 

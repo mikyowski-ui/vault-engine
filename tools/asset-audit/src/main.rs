@@ -1,3 +1,4 @@
+mod archives;
 mod items;
 mod movies;
 mod sound;
@@ -88,6 +89,19 @@ struct Args {
     /// Directory holding the SPEC-012 oracle tables.
     #[arg(long, value_name = "PATH", default_value = "oracle/SPEC-012")]
     movie_oracle_dir: PathBuf,
+    /// SPEC-008: stream every member of the master and critter archives
+    /// (directory tables plus one member in memory at a time), decode it,
+    /// and require its SHA-256 to match the loose corpus file at its path.
+    #[arg(long)]
+    validate_dat: bool,
+    /// Master archive for --validate-dat (default: MASTER.DAT beside the
+    /// corpus directory).
+    #[arg(long, value_name = "PATH", requires = "validate_dat")]
+    master_dat: Option<PathBuf>,
+    /// Critter archive for --validate-dat (default: CRITTER.DAT beside the
+    /// corpus directory).
+    #[arg(long, value_name = "PATH", requires = "validate_dat")]
+    critter_dat: Option<PathBuf>,
 }
 
 fn saved_objects(map: &MapFile) -> usize {
@@ -362,6 +376,22 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
             if failed + bytes != 0 {
                 return Err(format!("{} SFX check(s) failed", failed + bytes).into());
             }
+        }
+    }
+    if args.validate_dat {
+        let beside = |name: &str| args.corpus_dir.join("..").join(name);
+        let master = args
+            .master_dat
+            .clone()
+            .unwrap_or_else(|| beside("MASTER.DAT"));
+        let critter = args
+            .critter_dat
+            .clone()
+            .unwrap_or_else(|| beside("CRITTER.DAT"));
+        let audit = archives::audit_dat(&args.corpus_dir, &[&master, &critter])?;
+        audit.report();
+        if audit.failed() != 0 {
+            return Err(format!("{} archive member check(s) failed", audit.failed()).into());
         }
     }
     if args.validate_movies {

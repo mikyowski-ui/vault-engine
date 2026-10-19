@@ -1,12 +1,12 @@
 use std::io::Write;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use vault_core::{CommandId, SequenceIds};
 
 use crate::AppResult;
 
 /// Platform observations only; game-specific input bindings belong to later phases.
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InputCommand {
     Key {
@@ -25,7 +25,7 @@ pub enum InputCommand {
     Wheel {
         x: f64,
         y: f64,
-        unit: &'static str,
+        unit: WheelUnit,
     },
     Focus {
         focused: bool,
@@ -49,11 +49,27 @@ pub enum InputCommand {
     Quit,
 }
 
+/// How a wheel delta is measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WheelUnit {
+    Lines,
+    Pixels,
+}
+
 #[derive(Serialize)]
 struct Record<'a> {
     command_id: CommandId,
     #[serde(flatten)]
     command: &'a InputCommand,
+}
+
+/// One logged command, as read back for a replay.
+#[derive(Debug, Deserialize)]
+pub struct LoggedCommand {
+    pub command_id: CommandId,
+    #[serde(flatten)]
+    pub command: InputCommand,
 }
 
 /// One JSON object per line, without timestamps or debug-formatted payloads.
@@ -94,6 +110,33 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).unwrap(),
             include_str!("../../../tests/fixtures/input-commands.jsonl")
+        );
+    }
+
+    #[test]
+    fn logged_commands_read_back_with_their_ids() {
+        let log = include_str!("../../../tests/fixtures/input-commands.jsonl");
+        let commands: Vec<LoggedCommand> = log
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[1].command_id.get(), 2);
+        assert_eq!(
+            commands[1].command,
+            InputCommand::PointerMoved { x: 10.5, y: 20.0 }
+        );
+        let wheel: LoggedCommand = serde_json::from_str(
+            r#"{"command_id":4,"kind":"wheel","x":0.0,"y":-1.0,"unit":"lines"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            wheel.command,
+            InputCommand::Wheel {
+                x: 0.0,
+                y: -1.0,
+                unit: WheelUnit::Lines
+            }
         );
     }
 }

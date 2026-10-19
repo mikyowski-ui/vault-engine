@@ -227,28 +227,14 @@ impl Renderer {
 
     /// Inverse of the centered image quad, for pointer picking in scene pixels.
     pub fn image_position(&self, point: [f64; 2]) -> Option<[i32; 2]> {
-        if !self.drawable || point.iter().any(|value| !value.is_finite()) {
+        if !self.drawable {
             return None;
         }
-        let available = (self.config.width as f64 / self.image_size[0] as f64)
-            .min(self.config.height as f64 / self.image_size[1] as f64)
-            * 0.75;
-        let scale = if available >= 1.0 {
-            available.floor()
-        } else {
-            available
-        };
-        let left = (self.config.width as f64 - self.image_size[0] as f64 * scale) / 2.0;
-        let top = (self.config.height as f64 - self.image_size[1] as f64 * scale) / 2.0;
-        let result = [
-            ((point[0] - left) / scale).floor(),
-            ((point[1] - top) / scale).floor(),
-        ];
-        (result[0] >= 0.0
-            && result[1] >= 0.0
-            && result[0] < self.image_size[0] as f64
-            && result[1] < self.image_size[1] as f64)
-            .then_some(result.map(|value| value as i32))
+        image_position(
+            [self.config.width, self.config.height],
+            self.image_size,
+            point,
+        )
     }
 
     /// Return true only when a frame was submitted and presented.
@@ -386,4 +372,56 @@ fn texture(
         TextureDataOrder::LayerMajor,
         bytes,
     )
+}
+
+/// The image pixel under a point of a `surface`-sized window presenting an
+/// `image`-sized frame centered at the renderer's scale (integer when it
+/// fits in three quarters of the surface, otherwise an aspect-preserving
+/// downscale); `None` outside the frame. Headless replays use this to map
+/// logged pointer positions exactly as the desktop does.
+pub fn image_position(surface: [u32; 2], image: [u32; 2], point: [f64; 2]) -> Option<[i32; 2]> {
+    if surface.contains(&0) || image.contains(&0) || point.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let available =
+        (surface[0] as f64 / image[0] as f64).min(surface[1] as f64 / image[1] as f64) * 0.75;
+    let scale = if available >= 1.0 {
+        available.floor()
+    } else {
+        available
+    };
+    let left = (surface[0] as f64 - image[0] as f64 * scale) / 2.0;
+    let top = (surface[1] as f64 - image[1] as f64 * scale) / 2.0;
+    let result = [
+        ((point[0] - left) / scale).floor(),
+        ((point[1] - top) / scale).floor(),
+    ];
+    (result[0] >= 0.0
+        && result[1] >= 0.0
+        && result[0] < image[0] as f64
+        && result[1] < image[1] as f64)
+        .then_some(result.map(|value| value as i32))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn image_position_inverts_the_centered_scaled_quad() {
+        // 960 x 640 holds a 640 x 480 frame at scale 1, inset 160 x 80.
+        let position = |point| super::image_position([960, 640], [640, 480], point);
+        assert_eq!(position([160.0, 80.0]), Some([0, 0]));
+        assert_eq!(position([799.9, 559.9]), Some([639, 479]));
+        assert_eq!(position([159.9, 80.0]), None);
+        assert_eq!(position([800.0, 80.0]), None);
+        assert_eq!(position([f64::NAN, 80.0]), None);
+        // 2560 x 1600: integer scale 2, inset 640 x 320.
+        assert_eq!(
+            super::image_position([2560, 1600], [640, 480], [643.0, 325.0]),
+            Some([1, 2])
+        );
+        assert_eq!(
+            super::image_position([0, 640], [640, 480], [1.0, 1.0]),
+            None
+        );
+    }
 }

@@ -65,6 +65,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub programs: BTreeMap<u32, Vm>,
     pub calls: Vec<CallTrace>,
     pub interactive_dialogue: bool,
+    /// Whether `playmovie` waits for a presentation layer (headless runs
+    /// complete it immediately by default).
+    pub movie_policy: crate::movie::MoviePolicy,
     pub(crate) callbacks: VecDeque<(u32, u32)>,
     program_scripts: BTreeMap<u32, u32>,
     active: BTreeSet<u32>,
@@ -189,6 +192,7 @@ impl<A: WorldAssets> WorldHost<A> {
             programs: BTreeMap::new(),
             calls: Vec::new(),
             interactive_dialogue: false,
+            movie_policy: crate::movie::MoviePolicy::default(),
             callbacks: VecDeque::new(),
             program_scripts: BTreeMap::new(),
             active: BTreeSet::new(),

@@ -3,6 +3,7 @@ mod input;
 mod map_preview;
 mod movie;
 mod preview;
+mod replay;
 
 #[cfg(test)]
 #[allow(dead_code)]
@@ -13,6 +14,7 @@ pub(crate) use map_preview::fixture as fixture_world;
 
 use std::{
     error::Error,
+    path::PathBuf,
     process::ExitCode,
     sync::Arc,
     time::{Duration, Instant},
@@ -47,6 +49,16 @@ struct Args {
     /// Do not open an audio output device; sounds resolve but stay silent.
     #[arg(long)]
     no_audio: bool,
+    /// Replay a captured JSONL input log headlessly (no window, GPU, or
+    /// audio) against the selected preview, one simulated 16 ms frame per
+    /// command, then print the final state SHA-256 digest as JSON.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "preview_asset",
+        conflicts_with_all = ["smoke_test", "no_audio"]
+    )]
+    replay_inputs: Option<PathBuf>,
     #[command(flatten)]
     preview: preview::PreviewArgs,
 }
@@ -345,8 +357,12 @@ impl ApplicationHandler for Shell {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (x, y, unit) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (f64::from(x), f64::from(y), "lines"),
-                    MouseScrollDelta::PixelDelta(position) => (position.x, position.y, "pixels"),
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        (f64::from(x), f64::from(y), input::WheelUnit::Lines)
+                    }
+                    MouseScrollDelta::PixelDelta(position) => {
+                        (position.x, position.y, input::WheelUnit::Pixels)
+                    }
                 };
                 self.log(event_loop, InputCommand::Wheel { x, y, unit });
                 if self
@@ -416,7 +432,24 @@ impl ApplicationHandler for Shell {
     }
 }
 
-fn run(args: Args) -> AppResult<()> {
+fn run(mut args: Args) -> AppResult<()> {
+    if let Some(path) = &args.replay_inputs {
+        args.preview.headless = true;
+        let preview = args
+            .preview
+            .load()?
+            .ok_or("--replay-inputs requires a preview asset")?;
+        let log =
+            std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let report = replay::replay(preview, std::io::BufReader::new(log))?;
+        tracing::info!(
+            commands = report.commands,
+            elapsed_ms = report.elapsed_ms,
+            "replay finished"
+        );
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(());
+    }
     let mut preview = args.preview.load()?;
     // Audio serves an interactive world or a movie; sprites need none.
     let output = || {

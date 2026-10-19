@@ -391,6 +391,55 @@ fn spec012_play_gmovie_opcode_flags_failures_and_no_result() {
 }
 
 #[test]
+fn spec005_playmovie_completes_headless_and_waits_for_a_presentation_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = movie_host(dir.path());
+    let program = IntProgram::parse(&state::program(
+        &[br"art\cuts\intro"],
+        &[(b"start", state::returning(Vec::new()))],
+    ))
+    .unwrap();
+    let code = [state::literal(6), state::instruction(0x807a)].concat();
+    let path = r"art\cuts\intro.mve";
+    // Headless by default: the request is emitted (with `.mve` appended)
+    // and the program runs on instead of waiting forever.
+    assert_eq!(host.movie_policy, movie::MoviePolicy::CompleteImmediately);
+    let mut vm = Vm::fragment(program.clone(), &code).unwrap();
+    assert!(matches!(
+        vm.run(&mut host, 100),
+        Ok(RunOutcome::FragmentEnd)
+    ));
+    assert!(!host.library.movie_playing);
+    assert_eq!(requests(&mut host)[0].path, path);
+    // A presentation layer: the program waits until playback ends.
+    host.movie_policy = movie::MoviePolicy::WaitUntilFinished;
+    let mut vm = Vm::fragment(program.clone(), &code).unwrap();
+    assert!(matches!(vm.run(&mut host, 100), Ok(RunOutcome::Waiting)));
+    assert!(matches!(vm.run(&mut host, 100), Ok(RunOutcome::Waiting)));
+    assert_eq!(requests(&mut host)[0].path, path);
+    host.movie_finished();
+    assert!(matches!(
+        vm.run(&mut host, 100),
+        Ok(RunOutcome::FragmentEnd)
+    ));
+    // A missing movie is a VM error under either policy.
+    let missing = [state::literal(6), state::instruction(0x807a)].concat();
+    let program = IntProgram::parse(&state::program(
+        &[b"missing"],
+        &[(b"start", state::returning(Vec::new()))],
+    ))
+    .unwrap();
+    for policy in [
+        movie::MoviePolicy::CompleteImmediately,
+        movie::MoviePolicy::WaitUntilFinished,
+    ] {
+        host.movie_policy = policy;
+        let mut vm = Vm::fragment(program.clone(), &missing).unwrap();
+        assert!(vm.run(&mut host, 100).is_err());
+    }
+}
+
+#[test]
 fn spec012_midnight_water_countdown() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = movie_host(dir.path());
