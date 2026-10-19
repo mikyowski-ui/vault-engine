@@ -246,6 +246,24 @@ pub struct WorldRules {
     /// midnight countdown; no approved specification names it.
     pub water_global: Option<usize>,
 }
+/// SPEC-013 §3.22 a map transition request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Transition {
+    /// Map number; 0 is the world map and -1 the town map.
+    pub map: i32,
+    pub elevation: i32,
+    /// -1 or 0 keeps the map's default entrance.
+    pub hex: i32,
+    pub facing: i32,
+}
+/// SPEC-013 a deferred loot request: from the Steal default (`steal`), a
+/// container, or a critter that cannot be talked to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LootRequest {
+    pub looter: ObjectRef,
+    pub target: ObjectRef,
+    pub steal: bool,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorldEffect {
     Diagnostic(String),
@@ -342,14 +360,6 @@ pub enum WorldEffect {
         effect: u8,
         name: Vec<u8>,
     },
-    Medical {
-        actor: ObjectRef,
-        target: ObjectRef,
-        skill: i32,
-        code: i32,
-        margin: i32,
-        kit_bonus: i32,
-    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorldTrace {
@@ -419,6 +429,11 @@ pub struct WorldState {
     pub persistence: crate::persistence::Persistence,
     /// A scripted combat request awaiting the host's next update.
     pub pending_combat: Option<crate::combat_state::CombatRequest>,
+    /// SPEC-013 §3.22 the pending map transition (the last request wins).
+    pub pending_transition: Option<Transition>,
+    /// SPEC-013 §3.9/§3.16 a deferred loot or steal request for the
+    /// presentation layer's loot window.
+    pub pending_loot: Option<LootRequest>,
     pub combat_quit: bool,
     pub combat_actor: ObjectRef,
     pub ui_disabled: bool,
@@ -553,6 +568,8 @@ impl WorldState {
             rest_credit: 0,
             persistence: Default::default(),
             pending_combat: None,
+            pending_transition: None,
+            pending_loot: None,
             combat_quit: false,
             combat_actor: 0,
             ui_disabled: false,
@@ -1182,12 +1199,50 @@ impl WorldState {
         if reference == self.player {
             self.camera_hex = hex;
             self.set_current_elevation(elevation);
+            self.check_exit_grids(hex, elevation);
         }
         self.rebuild_lighting();
         if animated && previous != Some(hex) {
             self.check_spatials(reference);
         }
         Ok(())
+    }
+    /// SPEC-013 §3.22: the player moved onto `hex`: every exit grid there
+    /// requests a transition, the last one winning; a request in combat
+    /// ends combat.
+    fn check_exit_grids(&mut self, hex: i32, elevation: u8) {
+        let grid = self
+            .iter()
+            .filter(|(_, object)| {
+                crate::skills::is_exit_grid(object.raw.pid)
+                    && object.raw.hex == Some(hex)
+                    && object.raw.elevation == elevation
+            })
+            .filter_map(|(_, object)| match object.raw.state {
+                ObjectState::Other {
+                    detail:
+                        vault_formats::map::ObjectDetail::ExitGrid {
+                            map,
+                            hex,
+                            elevation,
+                            orientation,
+                        },
+                    ..
+                } => Some(Transition {
+                    map,
+                    elevation,
+                    hex,
+                    facing: orientation,
+                }),
+                _ => None,
+            })
+            .last();
+        if let Some(transition) = grid {
+            if self.combat {
+                self.combat_state.flags |= crate::critical::state::END_REQUESTED;
+            }
+            self.pending_transition = Some(transition);
+        }
     }
     /// SPEC-006 §3.5: a later change of the current elevation requests a map
     /// update when a current map script exists. (Map loading assigns the entry

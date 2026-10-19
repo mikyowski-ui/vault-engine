@@ -177,27 +177,39 @@ impl Replay {
                 }
             }
             InputCommand::Resize { width, height } => self.surface = [width, height],
+            InputCommand::Modifiers {
+                shift,
+                control,
+                alt,
+                ..
+            } => self.preview.set_modifiers([shift, control, alt]),
             InputCommand::Quit => self.stopped = true,
-            // Key releases, focus, and modifiers do not reach the preview; a
-            // logged hover is the desktop's output, recomputed here.
+            // Key releases and focus do not reach the preview; a logged
+            // hover is the desktop's output, recomputed here.
             InputCommand::Key { .. }
             | InputCommand::Focus { .. }
-            | InputCommand::Modifiers { .. }
             | InputCommand::MapHover { .. } => {}
         }
         Ok(())
     }
 
-    /// Digest the final state: for an interactive world, what a save slot
-    /// would hold (central save, working saved maps, automap); then the
-    /// presented frame and its display palette. Each part is length-prefixed.
-    pub fn finish(mut self) -> AppResult<ReplayReport> {
+    /// Digest the final state: for an interactive world (a map preview or
+    /// the game's), what a save slot would hold (central save, working saved
+    /// maps, automap); then the presented frame and its display palette. Each
+    /// part is length-prefixed. With `frame`, the final frame is also written
+    /// there as a binary PPM.
+    pub fn finish(mut self, frame: Option<&std::path::Path>) -> AppResult<ReplayReport> {
         let mut digest = Sha256::new();
         let mut part = |bytes: &[u8]| {
             digest.update((bytes.len() as u64).to_le_bytes());
             digest.update(bytes);
         };
-        if let AssetPreview::Map(map) = &mut self.preview {
+        let world = match &mut self.preview {
+            AssetPreview::Map(map) => Some(&mut **map),
+            AssetPreview::Game(game) => game.world(),
+            _ => None,
+        };
+        if let Some(map) = world {
             // Building the save first joins the current map to the working
             // set. A central save the grammar cannot encode (such as a map
             // name too long for the manifest) contributes its error instead.
@@ -228,6 +240,13 @@ impl Replay {
             .display_override()
             .unwrap_or_else(|| self.preview.palette().rgba8());
         part(palette.as_flattened());
+        if let Some(path) = frame {
+            let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
+            for index in image.pixels() {
+                ppm.extend_from_slice(&palette[usize::from(*index)][..3]);
+            }
+            std::fs::write(path, ppm).map_err(|error| format!("{}: {error}", path.display()))?;
+        }
         let state_sha256 = digest
             .finalize()
             .iter()
@@ -242,10 +261,14 @@ impl Replay {
 }
 
 /// Replay `log` against `preview` and report the final digest.
-pub fn replay(preview: AssetPreview, log: impl BufRead) -> AppResult<ReplayReport> {
+pub fn replay(
+    preview: AssetPreview,
+    log: impl BufRead,
+    frame: Option<&std::path::Path>,
+) -> AppResult<ReplayReport> {
     let mut replay = Replay::new(preview)?;
     replay.run(log)?;
-    replay.finish()
+    replay.finish(frame)
 }
 
 #[cfg(test)]
@@ -253,15 +276,16 @@ mod tests {
     use super::*;
     use crate::{map_preview::state_fixture, preview::PreviewArgs};
 
-    /// Select the synthetic NPC (window 960 x 640 shows the 640 x 380 map
-    /// at scale 1, inset 160 x 130), talk to it, click its choice (the
-    /// 640 x 480 dialogue frame is inset 160 x 80), then press 1.
+    /// The 960 x 640 window shows the 640 x 480 frame (map and interface
+    /// bar) at scale 1, inset 160 x 80. A right-click turns the movement
+    /// cursor into the arrow, whose click on the synthetic NPC talks to it;
+    /// then its choice is clicked and 1 pressed.
     const DIALOGUE_LOG: &str = r#"{"command_id":1,"kind":"focus","focused":true}
-{"command_id":2,"kind":"pointer_moved","x":496.5,"y":300.5}
-{"command_id":3,"kind":"pointer_button","button":"Left","pressed":true}
-{"command_id":4,"kind":"pointer_button","button":"Left","pressed":false}
+{"command_id":2,"kind":"pointer_moved","x":496.5,"y":250.5}
+{"command_id":3,"kind":"pointer_button","button":"Right","pressed":true}
+{"command_id":4,"kind":"pointer_button","button":"Right","pressed":false}
 
-{"command_id":5,"kind":"pointer_button","button":"Right","pressed":true}
+{"command_id":5,"kind":"pointer_button","button":"Left","pressed":true}
 {"command_id":6,"kind":"map_hover","elevation":0,"hex":null,"floor_square":null,"roof_square":null}
 {"command_id":7,"kind":"pointer_moved","x":360.5,"y":418.5}
 {"command_id":8,"kind":"pointer_button","button":"Left","pressed":true}
@@ -289,12 +313,12 @@ mod tests {
         let AssetPreview::Map(map) = &replay.preview else {
             panic!("map preview expected");
         };
-        // The right click opened the conversation; the choices closed it.
+        // The arrow click opened the conversation; the choices closed it.
         assert!(map.selected.is_some());
         assert!(!map.host.world.dialogue.open);
         assert!(map.host.library.palette_cycling);
         assert_eq!(replay.surface, INITIAL_SURFACE);
-        let first = replay.finish().unwrap();
+        let first = replay.finish(None).unwrap();
         assert_eq!((first.commands, first.elapsed_ms), (10, 10 * FRAME_MS));
         assert_eq!(first.state_sha256.len(), 64);
         let again = replay_log(dir.path(), DIALOGUE_LOG);
@@ -307,18 +331,19 @@ mod tests {
     }
 
     fn replay_log(root: &std::path::Path, log: &str) -> ReplayReport {
-        replay(args(root).load().unwrap().unwrap(), log.as_bytes()).unwrap()
+        replay(args(root).load().unwrap().unwrap(), log.as_bytes(), None).unwrap()
     }
 
     #[test]
     fn resizes_move_the_picking_geometry_and_bad_logs_fail() {
         let dir = tempfile::tempdir().unwrap();
         state_fixture::write_corpus(dir.path());
-        // At 1920 x 1280 the map is drawn at scale 2, inset 320 x 260: the
+        // At 1920 x 1280 the frame is drawn at scale 2, inset 320 x 160: the
         // NPC's window position moves accordingly.
         let log = r#"{"command_id":1,"kind":"resize","width":1920,"height":1280}
-{"command_id":2,"kind":"pointer_moved","x":993.0,"y":601.0}
-{"command_id":3,"kind":"pointer_button","button":"Left","pressed":true}
+{"command_id":2,"kind":"pointer_moved","x":993.0,"y":501.0}
+{"command_id":3,"kind":"pointer_button","button":"Right","pressed":true}
+{"command_id":4,"kind":"pointer_button","button":"Left","pressed":true}
 "#;
         let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
         replay.run(log.as_bytes()).unwrap();

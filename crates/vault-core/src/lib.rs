@@ -20,10 +20,12 @@ mod host_movement;
 mod host_movie;
 pub mod host_rest;
 pub mod host_save;
+mod host_skills;
 mod host_sound;
 mod host_travel;
 pub mod items;
 pub mod library;
+pub mod loot;
 pub mod movie;
 pub mod persistence;
 pub mod progression;
@@ -32,14 +34,19 @@ pub mod rng;
 pub mod routing;
 pub mod save;
 pub mod sequence;
+pub mod skills;
 pub mod stats;
+pub mod ui;
 pub mod world;
 pub mod worldmap;
 pub use host::WorldHost;
 pub use host_combat::{Refusal, Spray, spray_budgets};
 pub use host_movement::{Movement, StepOutcome};
 pub use host_travel::TravelOutcome;
-pub use world::{ObjectAction, ObjectRef, ScriptEvent, WorldEffect, WorldRules, WorldState};
+pub use world::{
+    LootRequest, ObjectAction, ObjectRef, ScriptEvent, Transition, WorldEffect, WorldRules,
+    WorldState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorldError {
@@ -107,6 +114,8 @@ mod movie_tests;
 mod persistence_tests;
 #[cfg(test)]
 mod progression_tests;
+#[cfg(test)]
+mod skills_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]

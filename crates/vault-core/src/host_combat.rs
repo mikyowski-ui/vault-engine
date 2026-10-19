@@ -1,7 +1,7 @@
 //! SPEC-007 world integration: attack profiles from live state, the §3.2
 //! weapon-attack preflight, and §3.6/§3.8 result application.
 use crate::{
-    ObjectRef, ScriptEvent, Trait, WorldError, WorldState,
+    ObjectRef, RandomSource, ScriptEvent, Trait, WorldError, WorldState,
     assets::WorldAssets,
     combat::{
         Attack, DeathChoice, PROTECTED_PID, PlayerModifiers, Resolution, Subtype, WeaponProfile,
@@ -9,6 +9,8 @@ use crate::{
     },
     critical::{effect, hit_mode},
     host::WorldHost,
+    host_ai::Victim,
+    host_drugs::Arg,
     queue::EventKind,
     routing::{extend_line, rotation, step},
     stats::Perk,
@@ -152,8 +154,11 @@ impl WorldState {
                 bonus_rate_of_fire: rank(Perk::BonusRateOfFire) > 0,
                 slayer: rank(Perk::Slayer) > 0,
                 sniper: rank(Perk::Sniper) > 0,
+                // SPEC-013 §3.7: Silent Death tests the sneak flag.
                 silent_death_strike: rank(Perk::SilentDeath) > 0
-                    && self.sneak_working
+                    && self
+                        .player_sheet()
+                        .is_some_and(|sheet| sheet.flags & 1 != 0)
                     && self.behind(attacker, defender)
                     && d.opponent != self.player,
             }
@@ -205,7 +210,8 @@ impl WorldState {
             defender_light: self.visible_light(defender),
             defender_hp: self.hit_points(defender).unwrap_or(target.current_hp),
             ticks: self.clock.ticks,
-            combat_difficulty: self.combat_difficulty.unwrap_or(0),
+            // SPEC-014 §2.3: combat_difficulty defaults to 1 (normal).
+            combat_difficulty: self.combat_difficulty.unwrap_or(1),
             accuracy_bonus: 0,
         })
     }
@@ -422,7 +428,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// Knockback along the attacker-to-defender orientation; a blocker at
     /// distance j limits displacement to `j - 1` (the §3.8 safe rule).
-    fn knock_back(
+    pub(crate) fn knock_back(
         &mut self,
         attacker: ObjectRef,
         defender: ObjectRef,
@@ -814,6 +820,7 @@ impl<A: WorldAssets> WorldHost<A> {
         place: u8,
         aimed: bool,
     ) -> Result<Result<Resolution, Refusal>, WorldError> {
+        let mode = self.kick_substitution(attacker, mode)?;
         let mut attack = self
             .world
             .attack_profile(attacker, defender, mode, place, aimed)?;
@@ -838,21 +845,104 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Some(request) = request {
             adjust_for_request(&request, &mut spray.main);
         }
-        // A random-target victim replaces the defender and is unintended.
-        let (target, applied) = match &victim {
-            Some((victim, profile)) => (*victim, profile),
-            None => (defender, &attack),
+        let recorded = spray.main.clone();
+        // A random-target victim replaces the defender and is unintended. A
+        // bystander replaces it too, but retaliates only across teams; a
+        // non-critter impact is applied as the miss it is.
+        let (target, applied, unintended) = match &victim {
+            Some(Victim::Random(victim, profile)) => (*victim, profile, *victim),
+            Some(Victim::Bystander(victim, profile)) => (*victim, profile, 0),
+            Some(Victim::Object(_)) | None => (defender, &attack, 0),
         };
+        if matches!(victim, Some(Victim::Object(_))) {
+            spray.main.defender_flags &= !effect::HIT;
+        }
+        self.bystander_message(attacker, defender, victim.as_ref());
         self.world.ai.callbacks.clear();
         self.attack_taunts(attacker, target, applied, &spray.main)?;
         let hit = spray.main.defender_flags & effect::HIT != 0;
         self.emit_attack_sounds(attacker, target, mode, hit);
-        self.world.ai.unintended = if victim.is_some() { target } else { 0 };
+        // Onlookers hear of the intended target, then of a critter victim.
+        if matches!(&victim, Some(Victim::Bystander(victim, _)) if *victim != defender) {
+            self.alert_onlookers(defender);
+        }
+        self.world.ai.unintended = unintended;
         let application = self.apply_spray(attacker, target, applied, &spray);
         self.world.ai.unintended = 0;
         application?;
         self.run_taunts();
-        Ok(Ok(spray.main))
+        Ok(Ok(recorded))
+    }
+    /// SPEC-007 §3.6 punch-to-kick substitution: a punch request first draws
+    /// D(1, 4); on 1, kick art for the attacker's current base index and
+    /// weapon code (animation 17, selector 0) switches the request to kick.
+    /// The probe draws nothing, and a drawn value stays consumed.
+    pub(crate) fn kick_substitution(
+        &mut self,
+        attacker: ObjectRef,
+        mode: u8,
+    ) -> Result<u8, WorldError> {
+        if mode != hit_mode::PUNCH || self.world.rng.range(1, 4)? != 1 {
+            return Ok(mode);
+        }
+        let kick = self.world.get(attacker).is_some_and(|object| {
+            let art = Fid(object.raw.art_id);
+            self.assets
+                .art_exists(Fid::new(1, art.base(), 17, art.weapon(), 0).0)
+        });
+        Ok(if kick { hit_mode::KICK } else { mode })
+    }
+    /// §3.7.1 messages: a critter victim other than the intended target is
+    /// "hit instead" (`combat.msg` base 500 player, 600 male, 700 female, plus
+    /// 8 when the intended target is the player, else 9); a non-critter
+    /// impact shows the attacker's "missed" text (515, 615 or 715).
+    fn bystander_message(
+        &mut self,
+        attacker: ObjectRef,
+        intended: ObjectRef,
+        victim: Option<&Victim>,
+    ) {
+        let base = |host: &Self, object: ObjectRef| {
+            if object == host.world.player {
+                500
+            } else if host.world.effective(object, 34) == 1 {
+                700
+            } else {
+                600
+            }
+        };
+        let name = |host: &Self, object: ObjectRef| {
+            if object == host.world.player {
+                host.game_text("combat.msg", 506).unwrap_or_default()
+            } else {
+                host.world
+                    .get(object)
+                    .map(|o| o.name.clone())
+                    .unwrap_or_default()
+            }
+        };
+        match victim {
+            Some(Victim::Bystander(victim, _)) if *victim != intended => {
+                let (victim_name, intended_name) = (name(self, *victim), name(self, intended));
+                if intended == self.world.player {
+                    let id = base(self, *victim) + 8;
+                    self.print_game("combat.msg", id, &[Arg::Text(&victim_name)]);
+                } else {
+                    let id = base(self, *victim) + 9;
+                    self.print_game(
+                        "combat.msg",
+                        id,
+                        &[Arg::Text(&victim_name), Arg::Text(&intended_name)],
+                    );
+                }
+            }
+            Some(Victim::Object(_)) => {
+                let attacker_name = name(self, attacker);
+                let id = base(self, attacker) + 15;
+                self.print_game("combat.msg", id, &[Arg::Text(&attacker_name)]);
+            }
+            _ => {}
+        }
     }
 }
 

@@ -134,6 +134,8 @@ pub fn dialogue_program(head: i32) -> Vec<u8> {
 }
 pub fn npc_prototype() -> Vec<u8> {
     let mut bytes = world::prototype(1, 0);
+    // Extended flag 0x4000: the critter can be talked to.
+    world::word(&mut bytes, 0x18, 0x4000);
     for stat in 0..7 {
         world::word(&mut bytes, 0x30 + stat * 4, 5);
     }

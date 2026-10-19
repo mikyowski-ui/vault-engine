@@ -2,6 +2,7 @@ mod archives;
 mod items;
 mod movies;
 mod sound;
+mod ui;
 
 use std::{
     collections::BTreeSet,
@@ -89,6 +90,19 @@ struct Args {
     /// Directory holding the SPEC-012 oracle tables.
     #[arg(long, value_name = "PATH", default_value = "oracle/SPEC-012")]
     movie_oracle_dir: PathBuf,
+    /// SPEC-013: the skill, Skilldex, lock, explosive, kit, poison,
+    /// radiation, loot and barter message texts, the Skilldex, Set Timer,
+    /// counter, loot, barter and elevator art sizes, and every elevator
+    /// destination map.
+    #[arg(long)]
+    validate_interactions: bool,
+    /// SPEC-014: interface art sizes and frame counts, `intrface.lst`
+    /// positions, cursor sizes and hotspots, color keys, fonts, menu, save,
+    /// options and editor messages, splash images, credits, every endgame
+    /// slide's art, palette, narration and subtitles, the premades, the
+    /// location table and the new-game map.
+    #[arg(long)]
+    validate_ui: bool,
     /// SPEC-008: stream every member of the master and critter archives
     /// (directory tables plus one member in memory at a time), decode it,
     /// and require its SHA-256 to match the loose corpus file at its path.
@@ -375,6 +389,26 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
             println!("SFX prototype sound bytes: {bytes} failures");
             if failed + bytes != 0 {
                 return Err(format!("{} SFX check(s) failed", failed + bytes).into());
+            }
+        }
+    }
+    if args.validate_interactions || args.validate_ui {
+        let vfs = LocalDirProvider::mount(&args.corpus_dir)?;
+        for (enabled, title, audit) in [
+            (
+                args.validate_interactions,
+                "Interactions",
+                ui::audit_interactions as fn(&LocalDirProvider) -> _,
+            ),
+            (args.validate_ui, "UI", ui::audit_ui),
+        ] {
+            if !enabled {
+                continue;
+            }
+            let audit = audit(&vfs)?;
+            audit.report(title);
+            if audit.failed() != 0 {
+                return Err(format!("{} {title} check(s) failed", audit.failed()).into());
             }
         }
     }

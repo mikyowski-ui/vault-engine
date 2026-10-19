@@ -95,7 +95,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 .diagnostic("animation sequence list is full; sequence dropped");
         }
     }
-    fn clear_animation(&mut self, object: ObjectRef) {
+    pub(crate) fn clear_animation(&mut self, object: ObjectRef) {
         self.animations.retain(|sequence| {
             !sequence
                 .commands
@@ -190,11 +190,20 @@ impl<A: WorldAssets> WorldHost<A> {
             .get(item)
             .is_some_and(|object| object.raw.flags.contains(BasicFlags::WORN))
     }
-    fn poison_or_radiation(&mut self, object: ObjectRef, amount: i32, radiation: bool) {
-        if !self.world.adjust_exposure(object, amount, radiation) {
-            self.world
-                .diagnostic("only player poison/radiation is adjustable");
+    /// SPEC-013 §3.19-3.20: `poison` on another critter emits its
+    /// diagnostic; `radiation_inc`/`radiation_dec` there do nothing.
+    fn poison_or_radiation(
+        &mut self,
+        object: ObjectRef,
+        amount: i32,
+        radiation: bool,
+    ) -> Result<(), WorldError> {
+        if radiation {
+            self.adjust_radiation(object, amount);
+        } else if !self.adjust_poison(object, amount)? {
+            self.world.diagnostic("only player poison is adjustable");
         }
+        Ok(())
     }
     /// The `attack`/`attack_setup` request body (SPEC-005 §3.5). A null
     /// `attack_setup` defender is a no-op with a diagnostic (safe rule).
@@ -1253,7 +1262,7 @@ impl<A: WorldAssets> WorldHost<A> {
                             call.int(0)
                         },
                         true,
-                    );
+                    )?;
                 }
                 None
             }
@@ -1464,8 +1473,12 @@ impl<A: WorldAssets> WorldHost<A> {
                     0
                 }
                 14 => i32::from(self.world.map.header.flags.0 & 1 == 0),
+                // SPEC-013 §3.21: the deferred elevator request; a type
+                // outside 0-11 fails and nothing happens.
                 15 => {
-                    self.world.emit(WorldEffect::Elevator(call.int(0)));
+                    if crate::skills::elevator(call.int(0)).is_some() {
+                        self.world.emit(WorldEffect::Elevator(call.int(0)));
+                    }
                     0
                 }
                 16 => self.world.party.len() as i32,
@@ -1681,7 +1694,7 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             0x8122 => {
                 if call.uint(1) != 0 {
-                    self.poison_or_radiation(call.uint(1), call.int(0), false);
+                    self.poison_or_radiation(call.uint(1), call.int(0), false)?;
                 }
                 None
             }
@@ -1720,8 +1733,8 @@ impl<A: WorldAssets> WorldHost<A> {
             // modifier and barter is requested.
             0x8129 => {
                 if self.world.dialogue.open {
-                    self.world.dialogue.barter_modifier = call.int(0);
-                    self.world.dialogue.pending_barter = true;
+                    // SPEC-013 §3.18: only a bartering merchant switches.
+                    self.request_barter(call.int(0));
                 } else {
                     self.world.diagnostic("gdialog_barter: no dialogue is open");
                 }

@@ -768,16 +768,17 @@ pub fn final_animation_drops_inventory(animation: u8, victim_pid: u32) -> bool {
     matches!(animation, 30 | 31) && !matches!(victim_pid, 0x01000031 | 0x01000032 | 0x01000017)
 }
 
-/// Grenade scatter: a random direction and nominal D(half target distance),
-/// using the generator's reversed-bound fallback, displacing at least 1 hex
+/// Grenade scatter (SPEC-007 §3.7.1 Stage B step 1): the nominal distance
+/// D(half target distance) first, using the generator's reversed-bound
+/// fallback and displacing at least 1 hex, then a direction 0-5
 /// (border-stopped stepping).
 pub fn grenade_scatter(
     target: i32,
     distance: i32,
     rng: &mut impl RandomSource,
 ) -> Result<i32, WorldError> {
-    let direction = rng.range(0, 5)? as u8;
     let displacement = rng.range(1, distance / 2)?.max(1);
+    let direction = rng.range(0, 5)? as u8;
     vault_formats::HexGrid::step(target, direction, displacement)
         .map_err(|error| WorldError::Invalid(error.to_string()))
 }

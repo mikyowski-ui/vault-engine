@@ -22,11 +22,17 @@ relative effect volume. The SPEC-011 phase adds drugs, inventory rules, barter,
 and progression. The SPEC-012 phase adds the exact `.MVE` decoder (container,
 block video codec, palettes, DPCM audio), paced playback with movie fades and
 `.SVE` subtitles, the game movie table and `play_gmovie`, and desktop movie,
-inventory, character, and barter screens.
+inventory, character, and barter screens. The SPEC-013 phase adds the active
+skills, kits, sneak, explosives, poison and radiation events, elevators, exit
+grids and the loot/steal window; SPEC-014 adds the game flow (splash, main menu,
+character selection and creation), the save/load and options screens, the
+interface bar, cursor modes and the endgame. The SPEC-007 revision adds the
+punch-to-kick draw and missed-shot bystanders, and the SPEC-001 revision the
+shipped 33536-byte palette form.
 
 `AGENTS.md` is the repository's implementation policy. Format behavior follows
 `specs/approved/SPEC-001-pal-frm-lst.md` through
-`SPEC-012-movies-and-subtitles.md`.
+`SPEC-014-game-flow-and-ui.md`.
 No original game
 data is needed to build, test, or run the synthetic shell and preview fixtures.
 
@@ -92,7 +98,8 @@ backend for troubleshooting. Input order is sequenced deterministically; actual
 OS event delivery is external to the simulation.
 
 A captured log replays headlessly (no window, GPU, or audio device) against the
-same preview options, then prints the final state digest as one JSON line:
+same preview options (`--game` included), then prints the final state digest as
+one JSON line; `--replay-frame frame.ppm` also writes the final frame:
 
 ```sh
 cargo run -p vault-platform -- --master-dat /path/to/MASTER.DAT --critter-dat /path/to/CRITTER.DAT \
@@ -103,7 +110,8 @@ cargo run -p vault-platform -- --master-dat /path/to/MASTER.DAT --critter-dat /p
 Logs have no timestamps, so each command advances a simulated 16 ms frame.
 Command identifiers must increase; replay stops at `quit` or an unconsumed
 Escape. The digest covers the central save (or its encoding error), every
-working saved map, the automap, and the presented frame with its palette.
+working saved map, the automap (for a map preview or the game's world), and the
+presented frame with its palette.
 Replays, like every headless `WorldHost`, complete movies immediately
 (`MoviePolicy::CompleteImmediately`), so a script's `playmovie` never waits;
 the desktop map preview plays them and waits (`MoviePolicy::WaitUntilFinished`).
@@ -129,6 +137,12 @@ cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
     --validate-acm --validate-sfx --oracle-dir oracle/SPEC-010
 # SPEC-011: check the item-prototype invariants and consume every drug:
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-items
+# SPEC-013: skill, lock, kit, explosive, poison, radiation and loot messages, window
+# art sizes and the elevator destinations:
+cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-interactions
+# SPEC-014: interface art, intrface.lst positions, cursor hotspots, color keys,
+# fonts, menu/save/options texts, splash images, credits, endgame slides, premades:
+cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-ui
 # SPEC-012: decode every movie, fade file, and subtitle file against the oracle:
 cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
     --validate-movies --movie-oracle-dir oracle/SPEC-012
@@ -289,7 +303,7 @@ consults the loose `--corpus-dir` first, with no fallback to the other archive.
 Every preview and the world host read through this namespace. Archives are read
 into memory at startup; each extracted file keeps the 64 MiB asset bound.
 
-On the local map, **W** opens the world map and **B** the Pip-Boy; script
+On the local map, **W** opens the world map and **P** the Pip-Boy; script
 `world_map`/`town_map` requests open them too. Both are modal, so the local map's
 scripts and clock wait. The world map is the 450 x 442 viewport over the
 1400 x 1500 world. The specifications name no world artwork, so the view is drawn
@@ -377,6 +391,42 @@ On the local map, **I** opens the inventory and **C** the character screen
   the tables and the hidden equipment, then resumes the dialogue (closing a
   session that already ended).
 
+## Game flow and interface (SPEC-013, SPEC-014)
+
+```sh
+cargo run -p vault-platform -- --master-dat /path/to/MASTER.DAT --critter-dat /path/to/CRITTER.DAT \
+  --game [--save-dir /path/to/saves] [--config /path/to/fallout.cfg]
+```
+
+`--game` runs the SPEC-014 flow: the splash (`art/splash/splash<n>.rix`, chosen
+from the `splash` key), `iplogo` and `intro`, then the main menu (Intro, New Game,
+Load Game, Credits, Exit; Shift with Credits shows the quotes; two idle minutes
+replay the intro). New Game opens the premade selection (**T** take, **M** modify,
+**C** create, arrows cycle, **Escape** back); Modify and Create open the editor in
+creation mode (SPECIAL plus/minus, tag and trait buttons, **N** name, **A**/**-**
+age, **S** sex, **Enter** done with the specification's validation). Taking a
+character plays `ovrintro` and starts `maps/v13ent.map` at 07:21, 5 December 2161.
+A dead player sees the death scene; `endgame_slideshow` shows the slides chosen by
+the campaign globals, and the ending plays `walkm` or `walkw` and the credits.
+Quitting returns to the menu. Palette fades are presented as instant changes.
+
+In the world, the interface bar shows the message monitor, HP/AC counters, AP
+pips in combat, the active item slot and the indicator boxes. Its buttons and the
+game-loop keys follow §3.19: **I** inventory, **Escape**/**O** options, **S** the
+Skilldex, **C** character, **P** Pip-Boy, **B** swap hands, **M** or a right-click
+cycle the cursor mode, **A** start combat, **1**-**8** skills (Sneak first), **,**
+and **.** rotate, **/** the date, **Ctrl+S**/**F4** save, **Ctrl+L**/**F5** load,
+**F6**/**F7** quick save/load, **Ctrl+P** pause, **Ctrl+Q**/**F10** quit. **Space**
+ends a combat turn. The Skilldex sets a skill's targeting mode; a click on an
+object makes the SPEC-013 skill-on request. Using a container or an untalkable
+critter, and the Steal default, open the loot window (Shift+**A** take all, arrows
+scroll, **PageUp**/**PageDown** cycle stacked bodies); the desktop sends releases
+without a position, so a drag is a press on an entry and a press on the other
+pane, with the move-items counter for stacks. `metarule` 15 opens the elevator
+panel. The options menu leads to the save/load screens (slots below `--save-dir`),
+the preferences (written to `--config`) and the quit confirmation; the automap is
+not available.
+
 ## Map preview
 
 ```sh
@@ -390,21 +440,23 @@ cargo run -p vault-platform -- --corpus-dir target/state-corpus \
 ```
 
 The fixture output directory must be empty. `--preview-map` and `--preview-frm`
-are mutually exclusive. Arrow keys pan, **R** toggles roofs, and **0**, **1**, **2**
-select elevations. Hover records on stdout include hex, floor-square, roof-square,
+are mutually exclusive. Arrow keys pan, **R** toggles roofs, and **PageUp** and
+**PageDown** change the viewed elevation. Hover records on stdout include hex, floor-square, roof-square,
 and elevation coordinates; picking reverses the displayed image's scale and
 letterbox offset before applying the specification's inverse projection.
 
-Click an object to select/look at it; right-click a critter to talk. The action
-strip and **L/D/U/P/T** keys route look, description, use, pickup, and talk through
-the authoritative world and object scripts. Approaches move one hex per animation
+A left click acts by the SPEC-014 cursor mode (see "Game flow and interface"):
+movement walks, the arrow performs the object's primary action (pick up, talk,
+loot, use or look) and selects it, the crosshair attacks; a right-click cycles
+the mode. The **L/D/U/G/T** keys route look, description, use, pickup ("get") and
+talk on the selected object through the authoritative world and object scripts. Approaches move one hex per animation
 step and run spatial checks. Pickup updates inventory and removes the world
 representation only after insertion succeeds.
 
 Dialogue uses the actual script reply/options and callback procedure indices.
 Click an option or use **1–9**; **0** selects the documented dummy no-callback
 choice. **Space/up/down** navigate reply pages, the wheel scrolls options, and
-**Escape** closes dialogue before closing the application. Head animation continues
+**Escape** closes dialogue (on the map it opens the options menu). Head animation continues
 while the world background clock is suspended. The synthetic Guide demonstrates
 two nodes with a real VM callback.
 
@@ -413,7 +465,8 @@ the player sheet, language, and deterministic RNG initialization. Defaults are
 a neutral character, English, and seed 1. Seed -1 requires explicit host entropy
 and is not silently derived from a wall clock.
 
-The map view uses a 640×380 logical viewport. Floor/roof images use the exact
+The map view uses a 640×380 logical viewport, framed with the SPEC-014
+indicator boxes and interface bar into a 640×480 image. Floor/roof images use the exact
 square projection; roofs are 96 logical pixels above their floor. Objects use
 hex centers, stored displacement, directional FRM shifts, and bottom-center
 alignment. Tile images are not resized to the diamond footprint. Hidden objects,
@@ -1150,6 +1203,32 @@ These close behaviors that the earlier phases left open:
   `WorldRules`), talk reachability/12-tile checks, campaign-open failure, and
   map-load and map-exit script failures as diagnostics. Map loads now consult
   the SPEC-008 working saved-map set before the asset lookup.
+
+- SPEC-007 R1-rev2: a punch request first draws D(1, 4) and, on 1 with kick
+  art, becomes a kick; a ranged or throw miss resolves bystanders through
+  Stage A (the line-of-fire D100s; under the safe rule a selected critter is
+  committed) and Stage B (the impact hex, with grenade scatter drawing the
+  distance before the direction), one round at numerator 2, the "instead" and
+  "missed" messages, and bystander retaliation only across teams. An unset
+  combat difficulty now counts as normal (SPEC-014 §2.3).
+- SPEC-001 R1-rev2: a 33536-byte palette is the shipped form (generated
+  tables); partial discriminators and truncated tables are rejected.
+- SPEC-013 (safe rules applied): a dead First Aid target's message is
+  displayed, a failed Doctor limb awards no experience, the palette fades back
+  after every heal, a poison cure removes its pending tick, steal checks always
+  use the root victim, a non-positive steal award is skipped, kits refuse
+  non-critters with `proto.msg` 582, elevator Cancel changes nothing and keys
+  match letters in either case, and the start level follows the player's
+  elevation. Hidden loot equipment is a session filter, so no temporary holder
+  object is created. Sneak keeps the reference recheck (no draw, for RNG parity).
+- SPEC-014 (safe rules applied): an explicit menu selection wins over a
+  simultaneous timeout, the editor's Cancel restores character points, a
+  four-tag sheet opens with no picks, save/load clicks map rows from y = 87 with
+  a fresh double-click window per click, thumbnails fill their unwritten edge,
+  the burning-guy preference is read and written under one key (accepting
+  `combat_looks`), the monitor stops at the oldest line, the action-menu
+  highlight is clamped, and a right-click from use or skill mode returns to
+  movement.
 
 ## Core contracts
 

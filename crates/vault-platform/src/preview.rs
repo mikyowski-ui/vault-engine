@@ -45,6 +45,20 @@ pub struct PreviewArgs {
         value_name = "VFS_PATH"
     )]
     pub play_movie: Option<String>,
+    /// SPEC-014 game flow: splash, start movies, main menu, character
+    /// selection and creation, then the world (requires the full corpus).
+    #[arg(
+        long,
+        group = "preview_asset",
+        conflicts_with_all = ["preview_frm", "preview_map", "play_movie"]
+    )]
+    pub game: bool,
+    /// Directory holding `SAVEGAME/SLOTnn` (default: the current directory).
+    #[arg(long, value_name = "PATH")]
+    pub save_dir: Option<PathBuf>,
+    /// `fallout.cfg` read for preferences and written when they change.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
     /// SPEC-012 subtitles preference (the boil movies always show theirs).
     #[arg(long)]
     pub subtitles: bool,
@@ -89,6 +103,7 @@ pub enum AssetPreview {
     Sprite(Box<Preview>),
     Map(Box<crate::map_preview::MapPreview>),
     Movie(Box<MoviePreview>),
+    Game(Box<crate::game::Game>),
 }
 
 /// A standalone movie and the black palette shown around it.
@@ -102,6 +117,7 @@ impl AssetPreview {
             Self::Sprite(preview) => Ok(preview.image()?),
             Self::Map(preview) => preview.image(),
             Self::Movie(movie) => Ok(movie.player.image()),
+            Self::Game(game) => game.image(),
         }
     }
     /// The active palette: a script-installed table replaces the map's.
@@ -115,6 +131,7 @@ impl AssetPreview {
                 .as_deref()
                 .unwrap_or(&preview.palette),
             Self::Movie(movie) => &movie.black,
+            Self::Game(game) => game.palette(),
         }
     }
     /// A movie's device palette replaces the display palette while it plays.
@@ -123,16 +140,40 @@ impl AssetPreview {
             Self::Sprite(_) => None,
             Self::Map(preview) => preview.display_override(),
             Self::Movie(movie) => Some(movie.player.palette()),
+            Self::Game(game) => game.display_override(),
         }
     }
-    /// A standalone movie that ended (the shell then exits).
+    /// A standalone movie that ended, a confirmed quit from a map preview,
+    /// or the game's Exit (the shell then exits).
     pub fn finished(&self) -> bool {
-        matches!(self, Self::Movie(movie) if movie.player.finished())
+        match self {
+            Self::Movie(movie) => movie.player.finished(),
+            Self::Map(preview) => preview.quit_requested,
+            Self::Game(game) => game.finished(),
+            Self::Sprite(_) => false,
+        }
+    }
+    /// SPEC-014 §3.18 brightness: the display gamma.
+    pub fn brightness(&self) -> f64 {
+        match self {
+            Self::Map(preview) => preview.preferences.brightness,
+            Self::Game(game) => game.brightness(),
+            _ => 1.0,
+        }
+    }
+    /// Held modifier keys: shift, control, alt.
+    pub fn set_modifiers(&mut self, modifiers: [bool; 3]) {
+        match self {
+            Self::Map(preview) => preview.set_modifiers(modifiers),
+            Self::Game(game) => game.set_modifiers(modifiers),
+            _ => {}
+        }
     }
     pub fn palette_generation(&self) -> u32 {
         match self {
             Self::Sprite(_) | Self::Movie(_) => 0,
             Self::Map(preview) => preview.host.library.palette_generation,
+            Self::Game(game) => game.palette_generation(),
         }
     }
     /// Whether the previewed world currently permits palette cycling.
@@ -142,6 +183,7 @@ impl AssetPreview {
             // SPEC-012 §3.12: movies disable color cycling.
             Self::Map(preview) => preview.host.library.palette_cycling && !preview.movie_active(),
             Self::Movie(_) => false,
+            Self::Game(game) => game.palette_cycling(),
         }
     }
     pub fn title(&self) -> String {
@@ -152,6 +194,7 @@ impl AssetPreview {
                 "Vault — movie {} — any key or a click skips",
                 movie.player.request.path
             ),
+            Self::Game(game) => game.title(),
         }
     }
     pub fn step(&mut self, key: KeyCode) -> bool {
@@ -162,12 +205,14 @@ impl AssetPreview {
                 movie.player.key();
                 true
             }
+            Self::Game(game) => game.step(key),
         }
     }
     pub fn hover(&mut self, point: [i32; 2]) -> Option<vault_render::map::MapHover> {
         match self {
             Self::Sprite(_) | Self::Movie(_) => None,
             Self::Map(preview) => preview.hover(point),
+            Self::Game(game) => game.hover(point),
         }
     }
     pub fn click(&mut self, point: [i32; 2], right: bool) -> bool {
@@ -178,12 +223,14 @@ impl AssetPreview {
                 movie.player.press();
                 true
             }
+            Self::Game(game) => game.click(point, right),
         }
     }
     pub fn scroll(&mut self, delta: f64) -> bool {
         match self {
             Self::Sprite(_) | Self::Movie(_) => false,
             Self::Map(preview) => preview.scroll(delta),
+            Self::Game(game) => game.scroll(delta),
         }
     }
     /// A mouse release: a held desktop button plays its release cue.
@@ -195,6 +242,7 @@ impl AssetPreview {
                 movie.player.release();
                 true
             }
+            Self::Game(game) => game.release(),
         }
     }
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
@@ -202,6 +250,7 @@ impl AssetPreview {
             Self::Sprite(_) => Ok(false),
             Self::Map(preview) => preview.tick(now),
             Self::Movie(movie) => Ok(movie.player.tick(now)),
+            Self::Game(game) => game.tick(now),
         }
     }
 }
@@ -252,6 +301,18 @@ impl PreviewArgs {
     }
     pub fn load(&self) -> AppResult<Option<AssetPreview>> {
         let language = self.language.as_deref().unwrap_or("english");
+        let save_root = self.save_dir.clone().unwrap_or_else(|| PathBuf::from("."));
+        if self.game {
+            let mut game = crate::game::Game::new(
+                self.source()?,
+                language,
+                self.seed.unwrap_or(1),
+                save_root,
+                self.config.clone(),
+            )?;
+            game.headless = self.headless;
+            return Ok(Some(AssetPreview::Game(Box::new(game))));
+        }
         if let Some(path) = &self.preview_map {
             let vfs = self.source()?;
             let mut map = crate::map_preview::MapPreview::load(
@@ -262,6 +323,8 @@ impl PreviewArgs {
                 self.seed.unwrap_or(1),
             )?;
             map.host.set_subtitles(self.subtitles);
+            map.save_root = save_root;
+            map.config_path = self.config.clone();
             if self.headless {
                 map.host.movie_policy = vault_core::movie::MoviePolicy::CompleteImmediately;
             }

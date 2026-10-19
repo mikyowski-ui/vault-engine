@@ -1,5 +1,7 @@
 mod audio;
+mod game;
 mod input;
+mod interface;
 mod map_preview;
 mod movie;
 mod preview;
@@ -59,6 +61,9 @@ struct Args {
         conflicts_with_all = ["smoke_test", "no_audio"]
     )]
     replay_inputs: Option<PathBuf>,
+    /// With --replay-inputs: also write the final frame as a binary PPM.
+    #[arg(long, value_name = "PATH", requires = "replay_inputs")]
+    replay_frame: Option<PathBuf>,
     #[command(flatten)]
     preview: preview::PreviewArgs,
 }
@@ -68,13 +73,16 @@ struct DisplayPalette {
     entries: [[u8; 4]; 256],
     cycler: PaletteCycler,
     generation: u32,
+    /// SPEC-014 §3.18 brightness: the gamma the entries were built with.
+    gamma: f64,
 }
 impl DisplayPalette {
-    fn new(palette: &Palette) -> Self {
+    fn new(palette: &Palette, gamma: f64) -> Self {
         Self {
-            entries: palette.rgba8(),
+            entries: palette.display_rgba8(gamma),
             cycler: PaletteCycler::default(),
             generation: 0,
+            gamma,
         }
     }
 }
@@ -249,10 +257,13 @@ impl ApplicationHandler for Shell {
             && self.display.as_mut().is_some_and(|display| {
                 // A script-loaded palette replaces the display entries; cycling
                 // phases and timers carry on from their current state.
-                let replaced = display.generation != preview.palette_generation();
+                let gamma = preview.brightness();
+                let replaced =
+                    display.generation != preview.palette_generation() || display.gamma != gamma;
                 if replaced {
                     display.generation = preview.palette_generation();
-                    display.entries = preview.palette().rgba8();
+                    display.gamma = gamma;
+                    display.entries = preview.palette().display_rgba8(gamma);
                 }
                 display.cycler.enabled = preview.palette_cycling();
                 display.cycler.poll(now, &mut display.entries) || replaced
@@ -376,6 +387,13 @@ impl ApplicationHandler for Shell {
             WindowEvent::Focused(focused) => self.log(event_loop, InputCommand::Focus { focused }),
             WindowEvent::ModifiersChanged(modifiers) => {
                 let modifiers = modifiers.state();
+                if let Some(preview) = &mut self.preview {
+                    preview.set_modifiers([
+                        modifiers.shift_key(),
+                        modifiers.control_key(),
+                        modifiers.alt_key(),
+                    ]);
+                }
                 self.log(
                     event_loop,
                     InputCommand::Modifiers {
@@ -441,7 +459,11 @@ fn run(mut args: Args) -> AppResult<()> {
             .ok_or("--replay-inputs requires a preview asset")?;
         let log =
             std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
-        let report = replay::replay(preview, std::io::BufReader::new(log))?;
+        let report = replay::replay(
+            preview,
+            std::io::BufReader::new(log),
+            args.replay_frame.as_deref(),
+        )?;
         tracing::info!(
             commands = report.commands,
             elapsed_ms = report.elapsed_ms,
@@ -470,6 +492,11 @@ fn run(mut args: Args) -> AppResult<()> {
             movie.player.audio = audio.handle();
             Some(audio)
         }
+        Some(preview::AssetPreview::Game(game)) => {
+            let audio = output();
+            game.audio = audio.handle();
+            Some(audio)
+        }
         _ => None,
     };
     let event_loop = EventLoop::new()?;
@@ -481,7 +508,7 @@ fn run(mut args: Args) -> AppResult<()> {
     };
     shell.display = preview
         .as_ref()
-        .map(|preview| DisplayPalette::new(preview.palette()));
+        .map(|preview| DisplayPalette::new(preview.palette(), preview.brightness()));
     shell.preview = preview;
     event_loop.run_app(&mut shell)?;
     if let Some(error) = shell.failure {

@@ -26,9 +26,15 @@ use winit::keyboard::KeyCode;
 
 mod barter;
 mod character;
+mod elevator;
+mod hud;
 mod inventory;
+mod loot;
 mod movies;
+mod options;
 mod pipboy;
+mod saveload;
+mod skilldex;
 mod world;
 
 const MAX_ART_BYTES: u64 = 256 * 1024 * 1024;
@@ -53,17 +59,24 @@ pub(crate) enum Screen {
     Character(Box<character::CharacterScreen>),
     Barter(Box<barter::BarterScreen>),
     Movie(Box<movies::MovieScreen>),
+    /// SPEC-013 windows over the world.
+    Skilldex(skilldex::SkilldexScreen),
+    Elevator(elevator::ElevatorScreen),
+    Loot(Box<loot::LootScreen>),
+    /// SPEC-014 options, pause, quit confirmation and preferences.
+    Options(options::OptionsScreen),
+    SaveLoad(Box<saveload::SaveLoadScreen>),
 }
 
 /// Decoded ACM samples by VFS path; a failing path is reported once.
 #[derive(Default)]
-struct SoundBank {
+pub(crate) struct SoundBank {
     cache: BTreeMap<String, Arc<[i16]>>,
     samples: usize,
     failed: BTreeSet<String>,
 }
 impl SoundBank {
-    fn load(&mut self, vfs: &dyn Vfs, path: &str) -> Option<Arc<[i16]>> {
+    pub(crate) fn load(&mut self, vfs: &dyn Vfs, path: &str) -> Option<Arc<[i16]>> {
         if let Some(samples) = self.cache.get(path) {
             return Some(samples.clone());
         }
@@ -153,10 +166,28 @@ pub struct MapPreview {
     sounds: SoundBank,
     /// A talking-head speech voice is playing.
     speaking: bool,
-    /// A desktop button is held: its release plays the release cue.
-    pressed: bool,
+    /// A desktop button is held: the release cue its release plays.
+    pressed: Option<&'static [u8]>,
     /// Game movies waiting for the one playing.
     movies: VecDeque<MovieRequest>,
+    /// SPEC-014 interface bar, monitor and cursor mode.
+    pub(crate) hud: hud::Hud,
+    pub preferences: vault_core::ui::options::Preferences,
+    /// `fallout.cfg`, written when preferences change.
+    pub config_path: Option<std::path::PathBuf>,
+    /// The directory holding `SAVEGAME/SLOTnn`.
+    pub save_root: std::path::PathBuf,
+    quick: vault_core::ui::saveload::QuickSlot,
+    slot_list: vault_core::ui::saveload::SlotList,
+    /// A confirmed quit: return to the main menu (or leave the preview).
+    pub quit_requested: bool,
+    /// The world's last endgame request (slideshow or ending), for the
+    /// game flow.
+    pub endgame: Option<WorldEffect>,
+    /// A slot load succeeded (the main menu's load screen reports it).
+    pub loaded: bool,
+    /// A save or load failure's Done box over the current screen.
+    notice: Option<saveload::Notice>,
 }
 struct MapSprites {
     bindings: BTreeMap<(Category, u32, u8), Arc<FrmArchive>>,
@@ -266,14 +297,24 @@ impl MapPreview {
         character: Option<&str>,
         seed: i32,
     ) -> AppResult<Self> {
-        let path = VfsPath::new(path)?;
-        let palette = Palette::parse(&vfs.read_bounded("color.pal", MAX_ASSET_BYTES)?)?;
         let assets = VfsWorldAssets::new(vfs, language)?;
         let character = if let Some(path) = character {
             CharacterSheet::from_gcd(&assets.gcd(path)?, Default::default())
         } else {
             CharacterSheet::default()
         };
+        Self::with_sheet(assets, path, character, seed)
+    }
+    /// The world for `path` with a ready player sheet (SPEC-014 §3.12's
+    /// new-game hand-off passes the selected or edited character).
+    pub fn with_sheet(
+        assets: VfsWorldAssets,
+        path: &str,
+        character: CharacterSheet,
+        seed: i32,
+    ) -> AppResult<Self> {
+        let path = VfsPath::new(path)?;
+        let palette = Palette::parse(&assets.vfs.read_bounded("color.pal", MAX_ASSET_BYTES)?)?;
         let font = assets.font().ok();
         let mut host = WorldHost::new(WorldState::new(character, seed)?, assets);
         host.interactive_dialogue = true;
@@ -310,9 +351,45 @@ impl MapPreview {
             audio: AudioHandle::default(),
             sounds: SoundBank::default(),
             speaking: false,
-            pressed: false,
+            pressed: None,
             movies: VecDeque::new(),
+            hud: hud::Hud::default(),
+            preferences: Default::default(),
+            config_path: None,
+            save_root: std::path::PathBuf::from("."),
+            quick: Default::default(),
+            slot_list: Default::default(),
+            quit_requested: false,
+            endgame: None,
+            loaded: false,
+            notice: None,
         })
+    }
+    /// Whether the save/load screen is open (the main menu's load stage).
+    pub fn load_screen_open(&self) -> bool {
+        matches!(self.screen, Screen::SaveLoad(_))
+    }
+    /// The save/load selection and quick-slot flag, which last for the
+    /// program run (SPEC-014 §3.14, §3.16).
+    pub fn slot_session(
+        &self,
+    ) -> (
+        vault_core::ui::saveload::SlotList,
+        vault_core::ui::saveload::QuickSlot,
+    ) {
+        (self.slot_list.clone(), self.quick)
+    }
+    pub fn set_slot_session(
+        &mut self,
+        slot_list: vault_core::ui::saveload::SlotList,
+        quick: vault_core::ui::saveload::QuickSlot,
+    ) {
+        self.slot_list = slot_list;
+        self.quick = quick;
+    }
+    /// Held modifiers: shift, control, alt.
+    pub fn set_modifiers(&mut self, modifiers: [bool; 3]) {
+        self.hud.modifiers = modifiers;
     }
     /// Back to the (possibly newly loaded) local map.
     pub(crate) fn return_to_map(&mut self) {
@@ -323,21 +400,25 @@ impl MapPreview {
             self.path = name;
         }
     }
-    /// A desktop button press: its cue, and the release cue to follow.
+    /// A red button press: its cue, and the release cue to follow.
     pub(crate) fn press(&mut self) {
-        self.pressed = true;
-        self.play_effect(BUTTON_PRESS, None);
+        self.press_cue(BUTTON_PRESS, BUTTON_RELEASE);
+    }
+    /// A button press with its own press and release cues.
+    pub(crate) fn press_cue(&mut self, press: &'static [u8], release: &'static [u8]) {
+        self.pressed = Some(release);
+        self.play_effect(press, None);
     }
     /// The mouse button was released.
     pub fn release(&mut self) -> bool {
         if self.movie_release() {
-            self.pressed = false;
+            self.pressed = None;
             return true;
         }
-        if !std::mem::take(&mut self.pressed) {
+        let Some(cue) = self.pressed.take() else {
             return false;
-        }
-        self.play_effect(BUTTON_RELEASE, None);
+        };
+        self.play_effect(cue, None);
         true
     }
     pub(crate) fn location_name(&self, town: usize) -> Vec<u8> {
@@ -442,7 +523,9 @@ impl MapPreview {
     fn drain_effects(&mut self) {
         while let Some(effect) = self.host.world.effects.pop_front() {
             match effect {
-                WorldEffect::Message(text) => self.status = text,
+                WorldEffect::Message(text) => self.notify(text),
+                WorldEffect::Elevator(kind) => self.open_elevator(kind),
+                WorldEffect::Slideshow | WorldEffect::EndGame => self.endgame = Some(effect),
                 WorldEffect::Diagnostic(error) => {
                     tracing::warn!(%error,"world diagnostic");
                     self.status = error.into_bytes();
@@ -479,8 +562,14 @@ impl MapPreview {
     pub fn image(&mut self) -> AppResult<IndexedImage> {
         self.drain_effects();
         self.check_barter();
-        match &self.screen {
+        self.check_loot();
+        let mut image = match &self.screen {
             Screen::Map => self.map_image(),
+            Screen::Skilldex(_) => self.skilldex_image(),
+            Screen::Elevator(_) => self.elevator_image(),
+            Screen::Loot(_) => self.loot_image(),
+            Screen::Options(_) => self.options_image(),
+            Screen::SaveLoad(_) => self.saveload_image(),
             Screen::World(_) => self.world_image(),
             Screen::Town(_) => self.town_image(),
             Screen::PipBoy(_) => self.pipboy_image(),
@@ -488,9 +577,12 @@ impl MapPreview {
             Screen::Character(_) => self.character_image(),
             Screen::Barter(_) => self.barter_image(),
             Screen::Movie(_) => self.movie_image().ok_or_else(|| "no movie".into()),
-        }
+        }?;
+        self.draw_notice(&mut image);
+        Ok(image)
     }
-    fn map_image(&mut self) -> AppResult<IndexedImage> {
+    /// The 640-by-380 map view: sprites under the world lighting.
+    pub(crate) fn map_view_image(&mut self) -> AppResult<IndexedImage> {
         let map = self.host.world.render_snapshot();
         if map.objects.elevations.iter().flatten().any(|object| {
             !object.flags.contains(BasicFlags::HIDDEN)
@@ -523,6 +615,12 @@ impl MapPreview {
                 }
             }
         }
+        Ok(image)
+    }
+    /// The map screen: a conversation's window, or the map view with the
+    /// indicator boxes and the interface bar.
+    fn map_image(&mut self) -> AppResult<IndexedImage> {
+        let image = self.map_view_image()?;
         if self.host.world.dialogue.open {
             let font = self
                 .font
@@ -542,49 +640,7 @@ impl MapPreview {
             return Ok(layout.image);
         }
         self.choices.clear();
-        if let Some(font) = &self.font {
-            let green = self.palette.lookup_rgb5([0, 31, 0]).unwrap_or(1);
-            image.fill_rect([0, 350, 640, 30], 0);
-            for (index, label) in [
-                b"[L] Look".as_slice(),
-                b"[D] Describe",
-                b"[U] Use",
-                b"[P] Pickup",
-                b"[T] Talk",
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let x = 8 + index as i32 * 126;
-                image.fill_rect(
-                    [x, 350, 118, 14],
-                    self.palette.lookup_rgb5([0, 5, 0]).unwrap_or(0),
-                );
-                image.draw_text(
-                    font,
-                    &self.palette,
-                    label,
-                    [x + 3, 353],
-                    112,
-                    TextStyle {
-                        foreground: green,
-                        ..Default::default()
-                    },
-                );
-            }
-            image.draw_text(
-                font,
-                &self.palette,
-                &self.status,
-                [8, 365],
-                624,
-                TextStyle {
-                    foreground: green,
-                    ..Default::default()
-                },
-            );
-        }
-        Ok(image)
+        Ok(self.compose_world(image))
     }
     pub fn title(&self) -> String {
         match &self.screen {
@@ -608,17 +664,31 @@ impl MapPreview {
                     screen.player.request.path
                 );
             }
+            Screen::Skilldex(_) => {
+                return "Vault — Skilldex — choose a skill; Escape cancels".into();
+            }
+            Screen::Elevator(_) => {
+                return "Vault — elevator — choose a level; Escape cancels".into();
+            }
+            Screen::Loot(_) => {
+                return "Vault — loot — click an item, then the other pane; A takes all; Escape closes".into();
+            }
+            Screen::Options(_) => return "Vault — options".into(),
+            Screen::SaveLoad(_) => {
+                return "Vault — save/load — Enter commits; Escape cancels".into();
+            }
             Screen::Map => {}
         }
         format!(
-            "Vault — {} — elevation {} — roofs {} — click objects; L/D/U/P/T actions; W world map; B Pip-Boy; I inventory; C character",
+            "Vault — {} — elevation {} — roofs {} — {} cursor; right-click cycles; L/D/U/G/T actions; W world map",
             self.path,
             self.view.elevation,
-            if self.view.roofs { "on" } else { "off" }
+            if self.view.roofs { "on" } else { "off" },
+            self.mode_name()
         )
     }
     pub fn step(&mut self, key: KeyCode) -> bool {
-        if self.movie_key() {
+        if self.movie_key() || self.notice_key(key) {
             return true;
         }
         if matches!(self.screen, Screen::Barter(_)) {
@@ -672,35 +742,29 @@ impl MapPreview {
             Screen::PipBoy(_) => return self.pipboy_key(key),
             Screen::Inventory(_) => return self.inventory_key(key),
             Screen::Character(_) => return self.character_key(key),
+            Screen::Skilldex(_) => return self.skilldex_key(key),
+            Screen::Elevator(_) => return self.elevator_key(key),
+            Screen::Loot(_) => return self.loot_key(key),
+            Screen::Options(_) => return self.options_key(key),
+            Screen::SaveLoad(_) => return self.saveload_key(key),
             Screen::Barter(_) | Screen::Movie(_) | Screen::Map => {}
+        }
+        // SPEC-014 §3.19 game-loop hotkeys (Escape opens the options).
+        if self.game_hotkey(key) {
+            return true;
         }
         if self.host.world.ui_disabled {
             return false;
         }
-        match key {
-            KeyCode::KeyW => {
-                self.open_world_map();
-                return true;
-            }
-            KeyCode::KeyB => {
-                self.open_pipboy();
-                return true;
-            }
-            KeyCode::KeyI => {
-                self.open_inventory();
-                return true;
-            }
-            KeyCode::KeyC => {
-                self.open_character();
-                return true;
-            }
-            _ => {}
+        if key == KeyCode::KeyW {
+            self.open_world_map();
+            return true;
         }
         let key_number = match key {
             KeyCode::KeyL => Some(b'L'),
             KeyCode::KeyD => Some(b'D'),
             KeyCode::KeyU => Some(b'U'),
-            KeyCode::KeyP => Some(b'P'),
+            KeyCode::KeyG => Some(b'G'),
             KeyCode::KeyT => Some(b'T'),
             _ => None,
         };
@@ -713,7 +777,7 @@ impl MapPreview {
             KeyCode::KeyL => Some(ObjectAction::LookAt),
             KeyCode::KeyD => Some(ObjectAction::Description),
             KeyCode::KeyU => Some(ObjectAction::Use),
-            KeyCode::KeyP => Some(ObjectAction::Pickup),
+            KeyCode::KeyG => Some(ObjectAction::Pickup),
             KeyCode::KeyT => Some(ObjectAction::Talk),
             _ => None,
         };
@@ -727,9 +791,8 @@ impl MapPreview {
             KeyCode::ArrowUp => self.view.pan(0, 24),
             KeyCode::ArrowDown => self.view.pan(0, -24),
             KeyCode::KeyR => self.view.roofs = !self.view.roofs,
-            KeyCode::Digit0 | KeyCode::Numpad0 => self.view.elevation = 0,
-            KeyCode::Digit1 | KeyCode::Numpad1 => self.view.elevation = 1,
-            KeyCode::Digit2 | KeyCode::Numpad2 => self.view.elevation = 2,
+            KeyCode::PageUp => self.view.elevation = (self.view.elevation + 1).min(2),
+            KeyCode::PageDown => self.view.elevation = self.view.elevation.saturating_sub(1),
             _ => return false,
         }
         self.last_hover = None;
@@ -759,7 +822,7 @@ impl MapPreview {
         self.drain_effects();
     }
     pub fn click(&mut self, point: [i32; 2], right: bool) -> bool {
-        if self.movie_press() {
+        if self.movie_press() || self.notice_click(point) {
             return true;
         }
         if matches!(self.screen, Screen::Barter(_)) {
@@ -783,40 +846,30 @@ impl MapPreview {
             Screen::PipBoy(_) => return self.pipboy_click(point),
             Screen::Inventory(_) => return self.inventory_click(point),
             Screen::Character(_) => return self.character_click(point),
+            Screen::Skilldex(_) => return self.skilldex_click(point),
+            Screen::Elevator(_) => return self.elevator_click(point),
+            Screen::Loot(_) => return self.loot_click(point, right),
+            Screen::Options(_) => return self.options_click(point),
+            Screen::SaveLoad(_) => return self.saveload_click(point),
             Screen::Barter(_) | Screen::Movie(_) | Screen::Map => {}
+        }
+        // SPEC-014 §3.19: the interface bar, then the map area by cursor
+        // mode; a right-click in the map cycles the mode.
+        // The map area runs through y = 379 (the bar window overlaps it).
+        if point[1] > vault_core::ui::bar::BAR_ORIGIN[1] {
+            return self.bar_click(point, right);
         }
         if self.host.world.ui_disabled {
             return false;
         }
-        if (350..364).contains(&point[1]) {
-            for (index, action) in [
-                ObjectAction::LookAt,
-                ObjectAction::Description,
-                ObjectAction::Use,
-                ObjectAction::Pickup,
-                ObjectAction::Talk,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let x = 8 + index as i32 * 126;
-                if (x..x + 118).contains(&point[0]) {
-                    self.press();
-                    self.interact(action);
-                    return true;
-                }
-            }
+        if right {
+            self.cycle_cursor();
+            return true;
         }
         let map = self.host.world.render_snapshot();
-        self.selected = pick_object(&map, self.view, &self.art, point)
+        let object = pick_object(&map, self.view, &self.art, point)
             .and_then(|id| self.host.world.reference_for_id(id));
-        if self.selected.is_some() {
-            self.interact(if right {
-                ObjectAction::Talk
-            } else {
-                ObjectAction::LookAt
-            });
-        }
+        self.map_click(point, object);
         true
     }
     pub fn scroll(&mut self, delta: f64) -> bool {
@@ -846,6 +899,14 @@ impl MapPreview {
             // modal: the world waits for them.
             Screen::Movie(_) => Ok(self.movie_tick(now)),
             Screen::Inventory(_) | Screen::Character(_) | Screen::Barter(_) => Ok(false),
+            // SPEC-013/014 windows suspend the world.
+            Screen::Skilldex(_) | Screen::Elevator(_) | Screen::Loot(_) | Screen::Options(_) => {
+                Ok(false)
+            }
+            Screen::SaveLoad(_) => {
+                self.saveload_frame();
+                Ok(false)
+            }
         };
         let mut changed = match screen {
             Ok(changed) => changed,
@@ -887,6 +948,8 @@ impl MapPreview {
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/world/support.rs"]
 pub(crate) mod fixture;
+#[cfg(test)]
+mod interface_tests;
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/sound/support.rs"]
@@ -1066,8 +1129,11 @@ mod tests {
         preview.image().unwrap();
         assert_eq!(mixer.lock().unwrap().voices(), EFFECT_VOICES);
         mixer.lock().unwrap().stop(Channel::Effect);
-        // A desktop button plays the small-button press, then release, cue.
-        assert!(preview.click([20, 355], false));
+        // A red button (the Skilldex's Cancel) plays the small-button
+        // press, then release, cue.
+        assert!(preview.step(KeyCode::KeyS));
+        mixer.lock().unwrap().stop(Channel::Effect);
+        assert!(preview.click([451 + 48, 5 + 338], false));
         assert!(preview.release());
         assert!(!preview.release(), "only one release per press");
         assert_eq!(mixer.lock().unwrap().voices(), 2);
@@ -1175,7 +1241,7 @@ mod tests {
         assert!(preview.step(KeyCode::Space));
         assert!(!preview.movie_active() && preview.display_override().is_none());
         assert!(!mixer.lock().unwrap().playing(Channel::Movie));
-        assert_eq!(preview.image().unwrap().height(), 380);
+        assert_eq!(preview.image().unwrap().height(), 480);
         // The startup sequence: iplogo is absent, so only intro plays.
         preview.queue_startup_movies();
         assert!(preview.movie_active());
@@ -1188,7 +1254,7 @@ mod tests {
         assert_eq!(preview.host.world.persistence.movies[..3], [0, 0, 1]);
         // The Pip-Boy archive lists boil1 (index 11) and replays it; a
         // click then release skips it, back to the Pip-Boy.
-        assert!(preview.step(KeyCode::KeyB));
+        assert!(preview.step(KeyCode::KeyP));
         assert!(preview.click([30, 155], false), "Video archive tab");
         assert!(preview.release());
         preview.image().unwrap();
@@ -1210,10 +1276,10 @@ mod tests {
         state_fixture::write_corpus(dir.path());
         let mut preview = interactive(dir.path());
         preview.image().unwrap();
-        // Pick up the synthetic item through the action strip.
+        // Pick up the synthetic item with an arrow-mode click.
+        preview.hud.mode = vault_core::ui::cursor::Mode::Arrow;
         preview.click([320, 185], false);
         let item = preview.selected.unwrap();
-        preview.click([400, 355], false);
         let player = preview.host.world.player;
         assert_eq!(preview.host.world.get(item).unwrap().owner, Some(player));
         // Inventory: the entry lists; non-weapons cannot reload; wielding
@@ -1280,8 +1346,10 @@ mod tests {
             preview.host.world.player_sheet().unwrap().reconciled_level,
             3
         );
-        // Barter: a dialogue's pending request opens it with the target.
-        assert!(preview.click([336, 170], true));
+        // Barter: a dialogue's pending request opens it with the target
+        // (an arrow click talks to the NPC).
+        preview.hud.mode = vault_core::ui::cursor::Mode::Arrow;
+        assert!(preview.click([336, 170], false));
         assert!(preview.host.world.dialogue.open);
         preview.host.world.dialogue.pending_barter = true;
         preview.image().unwrap();
@@ -1350,7 +1418,7 @@ mod tests {
             preview.host.world.current_map_name().as_deref(),
             Some("V13ENT.SAV")
         );
-        assert_eq!(preview.image().unwrap().height(), 380);
+        assert_eq!(preview.image().unwrap().height(), 480);
         // Escape returns from the world map without travelling.
         assert!(preview.step(KeyCode::KeyW));
         assert!(preview.step(KeyCode::Escape));
@@ -1376,7 +1444,7 @@ mod tests {
         preview.host.world.gvars = Some(gvars);
         preview.image().unwrap();
         preview.host.world.rest_credit = 100;
-        assert!(preview.step(KeyCode::KeyB));
+        assert!(preview.step(KeyCode::KeyP));
         assert_eq!(preview.host.world.rest_credit, 0, "opening resets credit");
         let image = preview.image().unwrap();
         assert!(image.pixels().iter().any(|pixel| *pixel != 0));
@@ -1428,8 +1496,15 @@ mod tests {
         assert!(!preview.view.roofs);
         preview.step(KeyCode::ArrowRight);
         assert_eq!(preview.hover([288, 190]).unwrap().hex, Some(20100));
-        for key in [KeyCode::Digit0, KeyCode::Digit1, KeyCode::Digit2] {
+        // PageUp and PageDown change the viewed elevation within 0-2.
+        for (key, elevation) in [
+            (KeyCode::PageUp, 1),
+            (KeyCode::PageUp, 2),
+            (KeyCode::PageUp, 2),
+            (KeyCode::PageDown, 1),
+        ] {
             assert!(preview.step(key));
+            assert_eq!(preview.view.elevation, elevation);
             preview.image().unwrap();
         }
         assert!(!preview.step(KeyCode::Space));
@@ -1448,14 +1523,17 @@ mod tests {
         )
         .unwrap();
         preview.image().unwrap();
+        // SPEC-014 §3.27: a right-click cycles movement to arrow; an arrow
+        // click on a talkable critter talks to it.
+        assert!(preview.host.library.palette_cycling);
+        assert!(preview.click([336, 170], true));
+        assert_eq!(preview.hud.mode, vault_core::ui::cursor::Mode::Arrow);
         assert!(preview.click([336, 170], false));
         let selected = preview.selected.unwrap();
         assert_eq!(
             preview.host.world.get(selected).unwrap().category(),
             Category::Critter
         );
-        assert!(preview.host.library.palette_cycling);
-        assert!(preview.click([336, 170], true));
         assert!(preview.host.world.dialogue.open && preview.host.world.dialogue.waiting);
         // The shell's cycling poll follows this flag (SPEC-001/SPEC-006).
         assert!(!preview.host.library.palette_cycling);
@@ -1469,15 +1547,15 @@ mod tests {
         assert!(preview.step(KeyCode::Digit1));
         assert!(!preview.host.world.dialogue.open);
         assert!(preview.host.library.palette_cycling);
-        assert_eq!(preview.image().unwrap().height(), 380);
-        // The clickable action strip routes a real pickup into authoritative inventory.
+        // The map frame now carries the interface bar below the view.
+        assert_eq!(preview.image().unwrap().height(), 480);
+        // An arrow click on an item picks it up into authoritative inventory.
         preview.click([320, 185], false);
         let item = preview.selected.unwrap();
         assert_eq!(
             preview.host.world.get(item).unwrap().category(),
             Category::Item
         );
-        preview.click([400, 355], false);
         assert_eq!(
             preview.host.world.get(item).unwrap().owner,
             Some(preview.host.world.player)

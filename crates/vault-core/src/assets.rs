@@ -62,6 +62,11 @@ pub trait WorldAssets {
     fn map_index(&self, _name: &[u8]) -> Option<i32> {
         None
     }
+    /// The map file whose header carries `number` (SPEC-013 §3.22 loads
+    /// transitions by number).
+    fn map_path(&self, _number: i32) -> Option<String> {
+        None
+    }
     fn available(&self, _path: &[u8]) -> bool {
         true
     }
@@ -481,6 +486,22 @@ impl WorldAssets for VfsWorldAssets {
             }
         }
         None
+    }
+    fn map_path(&self, number: i32) -> Option<String> {
+        let mut maps: Vec<_> = self
+            .vfs
+            .files()
+            .filter(|path| path.extension() == Some("map"))
+            .map(|path| path.as_str().to_owned())
+            .collect();
+        maps.sort();
+        maps.into_iter().find(|path| {
+            self.read(path).ok().is_some_and(|bytes| {
+                bytes.get(0x34..0x38).is_some_and(|word| {
+                    i32::from_be_bytes(word.try_into().expect("4 bytes")) == number
+                })
+            })
+        })
     }
     /// Either slash style; names compare case-insensitively.
     fn available(&self, path: &[u8]) -> bool {

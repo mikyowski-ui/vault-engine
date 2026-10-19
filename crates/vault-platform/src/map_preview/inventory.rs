@@ -2,10 +2,15 @@
 //! and held markers, weights, and caps; the selected entry can be used
 //! (drugs consume through §3.6), wielded or worn (§3.10), reloaded from
 //! the inventory, or unloaded (§3.15). Opening it in combat costs the
-//! §3.11 action points.
+//! §3.11 action points. SPEC-013: using a kit applies it to the player
+//! (§3.13), and using an explosive opens the Set Timer dialog (§3.10, §3.15).
 use super::{MapPreview, Screen, button, panel_text};
-use crate::AppResult;
-use vault_core::{ObjectAction, ObjectRef};
+use crate::{AppResult, interface::Painter};
+use vault_core::{
+    ObjectAction, ObjectRef,
+    skills::{self, SetTimer},
+    ui::{BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect},
+};
 use vault_formats::pro::{BasicFlags, ItemData, PrototypeData};
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
@@ -17,7 +22,16 @@ const ACTIONS: [&[u8]; 5] = [b"Use", b"Wield", b"Reload", b"Unload", b"Close"];
 
 pub(crate) struct InventoryScreen {
     pub selected: Option<usize>,
+    /// The Set Timer dialog for an explosive being armed.
+    pub timer: Option<(ObjectRef, SetTimer)>,
 }
+
+/// §3.15 Set Timer layout (window at screen (140, 80)).
+const TIMER_ORIGIN: [i32; 2] = [140, 80];
+const TIMER_PLUS: Rect = Rect::new(194, 64, 16, 12);
+const TIMER_MINUS: Rect = Rect::new(194, 76, 17, 12);
+const TIMER_DONE: Rect = Rect::new(98, 128, 15, 16);
+const TIMER_CANCEL: Rect = Rect::new(148, 128, 15, 16);
 
 fn row(index: usize) -> [i32; 4] {
     [ROWS[0], ROWS[1] + index as i32 * LINE, 400, LINE - 2]
@@ -34,7 +48,10 @@ impl MapPreview {
     /// Open the inventory; in combat its AP cost may refuse it.
     pub(crate) fn open_inventory(&mut self) {
         if self.host.open_inventory() {
-            self.screen = Screen::Inventory(InventoryScreen { selected: None });
+            self.screen = Screen::Inventory(InventoryScreen {
+                selected: None,
+                timer: None,
+            });
         }
         self.drain_effects();
     }
@@ -61,11 +78,40 @@ impl MapPreview {
             _ => None,
         }
     }
+    /// Enter accepts the timer (arming the explosive), Esc cancels.
+    fn finish_timer(&mut self, accept: bool) {
+        let Screen::Inventory(screen) = &mut self.screen else {
+            return;
+        };
+        let Some((item, timer)) = screen.timer.take() else {
+            return;
+        };
+        if !accept {
+            return;
+        }
+        if !timer.accepts() {
+            self.play_effect(ERROR_SOUND.as_bytes(), None);
+            return;
+        }
+        self.play_effect(BUTTON_PRESS.as_bytes(), None);
+        if let Err(error) = self.host.arm_explosive(item, timer.seconds) {
+            self.status = error.to_string().into_bytes();
+        }
+        self.drain_effects();
+    }
     pub(crate) fn inventory_key(&mut self, key: KeyCode) -> bool {
         let count = self.player_entries().len();
         let Screen::Inventory(screen) = &mut self.screen else {
             return false;
         };
+        if screen.timer.is_some() {
+            match key {
+                KeyCode::Enter | KeyCode::NumpadEnter => self.finish_timer(true),
+                KeyCode::Escape => self.finish_timer(false),
+                _ => return false,
+            }
+            return true;
+        }
         match key {
             KeyCode::Escape | KeyCode::KeyI => self.return_to_map(),
             KeyCode::ArrowDown if count > 0 => {
@@ -83,6 +129,23 @@ impl MapPreview {
         true
     }
     pub(crate) fn inventory_click(&mut self, point: [i32; 2]) -> bool {
+        if let Screen::Inventory(InventoryScreen {
+            timer: Some((_, timer)),
+            ..
+        }) = &mut self.screen
+        {
+            let local = [point[0] - TIMER_ORIGIN[0], point[1] - TIMER_ORIGIN[1]];
+            if TIMER_PLUS.contains(local) {
+                timer.plus();
+            } else if TIMER_MINUS.contains(local) {
+                timer.minus();
+            } else if TIMER_DONE.contains(local) {
+                self.finish_timer(true);
+            } else if TIMER_CANCEL.contains(local) {
+                self.finish_timer(false);
+            }
+            return true;
+        }
         let count = self.player_entries().len().min(VISIBLE);
         if let Some(index) = (0..count).find(|index| inside(row(*index), point)) {
             if let Screen::Inventory(screen) = &mut self.screen {
@@ -104,6 +167,23 @@ impl MapPreview {
             return true;
         };
         let player = self.host.world.player;
+        let pid = self.host.world.get(item).map_or(0, |o| o.raw.pid);
+        if action == 0 && skills::is_explosive(pid) {
+            if self.host.explosive_armable(item)
+                && let Screen::Inventory(screen) = &mut self.screen
+            {
+                screen.timer = Some((item, SetTimer::default()));
+            }
+            self.drain_effects();
+            return true;
+        }
+        if action == 0 && self.host.kit_skill(pid).is_some() {
+            if let Err(error) = self.host.use_kit(player, item, player) {
+                self.status = error.to_string().into_bytes();
+            }
+            self.drain_effects();
+            return true;
+        }
         let drug = matches!(self.item_kind(item), Some(ItemData::Drug(_)));
         let weapon = matches!(self.item_kind(item), Some(ItemData::Weapon(_)));
         let result = match action {
@@ -209,6 +289,35 @@ impl MapPreview {
             green,
         );
         panel_text(&mut image, font, palette, &self.status, [22, 466], green);
+        if let Some((_, timer)) = &screen.timer {
+            let painter = Painter {
+                assets: &self.host.assets,
+                palette,
+            };
+            let [ox, oy] = TIMER_ORIGIN;
+            painter.blit_opaque(&mut image, "movemult.frm", 0, [ox, oy]);
+            let title = painter.message("inventry.msg", 23);
+            painter.centered(&mut image, 103, ColorKey::AMBER, &title, [ox, oy + 9], 259);
+            painter.blit(&mut image, "timer.frm", 0, [ox + 113, oy + 34]);
+            for (x, digit) in timer.digits() {
+                painter.big_digit(&mut image, digit, [ox + x, oy + 64], false);
+            }
+            painter.blit(
+                &mut image,
+                "splsoff.frm",
+                0,
+                [ox + TIMER_PLUS.x, oy + TIMER_PLUS.y],
+            );
+            painter.blit(
+                &mut image,
+                "snegoff.frm",
+                0,
+                [ox + TIMER_MINUS.x, oy + TIMER_MINUS.y],
+            );
+            for rect in [TIMER_DONE, TIMER_CANCEL] {
+                painter.blit(&mut image, "lilredup.frm", 0, [ox + rect.x, oy + rect.y]);
+            }
+        }
         Ok(image)
     }
 }

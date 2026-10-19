@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes revision `R1`, targeting the 32-bit Windows engine. Evidence is static inspection of art lookup, movement, ray traversal, combat, item/stat consumers, and numeric critical-effect data. Synthetic checks use independent arithmetic/state models, not original game assets or a live game session.
+This specification describes reference revision R1, targeting the 32-bit Windows engine. Evidence is static inspection of art lookup, movement, ray traversal, combat, item/stat consumers, and numeric critical-effect data. Synthetic checks use independent arithmetic/state models, not original game assets or a live game session.
 
 SPEC-001 and SPEC-003 define sprite bytes, prototype/map files, and screen/hex projection; SPEC-006 defines effective stat/skill and random-check calculations. This document adds the complete art-identifier codec and combat/routing rules. Public host mnemonics such as `obj_can_see_obj` identify observable interfaces, not native routine names.
 
@@ -17,6 +17,10 @@ Important distinctions: a directional-file selector is not a critter's zero-base
 
 - `[Must-match]`: gameplay-visible behavior, data grammar, formula, ordering, or random-draw sequence. A clean-room engine must reproduce it exactly.
 - `[May-improve]`: reference memory-safety defects, undefined behavior, uninitialized reads, stale state, presentation-only transients, or a lookup that reads the wrong table in an obviously unintended way. A clean-room engine may apply the stated safe rule and should keep every other observable behavior. An engine that wants bit-exact parity may offer a compatibility switch that keeps the reference behavior.
+
+### Revision history
+
+- **R1-rev2 (2026-10-18).** Section 3.6 now gives the exact draw range and position of the punch-to-kick draw. Section 3.7 now gives the complete missed-shot bystander algorithm: the line-of-fire stage, the impact fallback, victim selection, hit location, damage, and draw order. Fixtures D and E are added. The raw revision hash was replaced by the label R1.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -540,7 +544,15 @@ For each hitting round, take base damage plus its ranged bonus, multiply by M, d
 
 **Ammunition multiplier, divisor, and DR modifier are not used here.** Their prototype values remain stored data, but this inspected combat path supplies no corresponding multiplier/divisor/DR term. Combined with the absent ammunition AC term, using a conventional ammunition-adjusted formula would change observable results. Loading/caliber/round-count behavior remains separate and does use ammunition identity/quantity. `[Must-match]`
 
-Before sequencing, a scripted initial combat request can add/clamp defender damage and replace flags. `[Must-match]` Its two supplied override words (attacker flags, then defender flags) are both written to the same defender-flags field, with the last winning. This is not a valid separate attacker/defender override layout. `[May-improve]`: write the first override word to the attacker's flags and the second to the defender's. Those damage clamps do not rerun the already-computed knockback or death-flag calculations. `[Must-match]` A punch request has a one-in-four cosmetic switch to kick when kick art exists; its random draw is part of the sequence. `[Must-match]`
+Before sequencing, a scripted initial combat request can add/clamp defender damage and replace flags. `[Must-match]` Its two supplied override words (attacker flags, then defender flags) are both written to the same defender-flags field, with the last winning. This is not a valid separate attacker/defender override layout. `[May-improve]`: write the first override word to the attacker's flags and the second to the defender's. Those damage clamps do not rerun the already-computed knockback or death-flag calculations. `[Must-match]` A punch request can switch to kick before resolution; the paragraph below gives its draw. `[Must-match]`
+
+**Punch-to-kick substitution.** The ordinary attack request is used by the player's attack command, called or uncalled, and by the NPC AI attack. When its requested hit mode is 4 (punch), it first makes exactly one draw from the shared generator over the inclusive range 1 through 4. This is a range of width 4, so the result is `1 + (U modulo 4)` in the SPEC-006 section 3.4 notation. `[Must-match]`
+
+- **Position.** This is the first random draw of the attack request. It precedes attack-record initialization and the range check, and every draw of this section and section 3.7: hit-chance calculation, attack D100, critical-upgrade D100, Jinxed coin, critical tables, damage, and miss resolution. Hit-chance calculation itself draws nothing. For an NPC it follows that NPC's called-shot draws (SPEC-009). For the player it follows the preflight of section 3.2, which draws nothing. `[Must-match]`
+- **Result 1.** Build a critter art identifier with the attacker's current base index (bits 0-11), its current weapon-animation code (bits 12-15), animation 17 (kick, suffix `ar`), and file selector 0. Section 2.3 rule 1 never probes directional files for animation 17. If that resource exists, the request's hit mode becomes 5 (kick) for the rest of the attack. That includes resolution, the AP-cost query, the animation and its sounds, and the recorded hit mode. If it is missing, the mode stays 4. The existence probe consumes no draw. `[Must-match]`
+- **Results 2-4.** The mode stays 4 and no art probe is made. `[Must-match]`
+- **No draw.** A request for any other hit mode, including a direct kick request (mode 5), makes no draw. A drawn value is never returned to the generator: the draw stays consumed when the attack then fails the range check or sequencing. Attack records built directly by explosion and other action paths with hit mode 4 do not pass through the attack request and make no draw. `[Must-match]`
+- Punch and kick share base cost 3 AP, range 1, the Unarmed skill, and the damage interval (sections 3.4 and 3.6). The substitution therefore changes presentation and the recorded mode, not accuracy, cost, or damage. `[Must-match]`
 
 Attack resolution initially calculates damage/flags/ammunition-to-spend without immediately debiting the magazine or HP. Successful action sequencing debits attack AP. When the tracked combat-animation count reaches zero, cleanup reselects the current weapon by hit mode, consumes its scheduled ammunition, displays results, and applies target damage/status. `[Must-match]` Changing the equipped weapon in between can therefore affect which weapon is debited. `[May-improve]`: consume the scheduled ammunition from the weapon that made the attack.
 
@@ -564,7 +576,52 @@ Ray hits on the main target add to its round count. Other critters become up to 
 
 A failed initial spray with any main/extra hits is promoted to success; a nonfailed spray with no hits becomes failure. Main-target critical augmentation occurs after extra-target damage was already calculated, so a main critical multiplier must not be applied to every extra target. `[Must-match]`
 
-The accidental-target helper used on a ranged miss has an inverted final projectile-through test: an ordinarily selected non-through blocker fails its final acceptance condition, so this helper never commits an accidental hit. `[May-improve]`: accept the selected non-through critter as the accidental target. The later miss-impact fallback can still hit something at the extended impact path or grenade-scatter position, so this does not establish that all stray hits are impossible. `[Must-match]` Grenades scatter by a random direction and nominal D(half target distance), with the generator's reversed-bound quirk and a minimum displacement of 1 for zero result. `[Must-match]`
+#### 3.7.1 Missed-shot bystander resolution
+
+This procedure runs after the attack result is final, including the Jinxed, Slayer and Sniper post-processing of section 3.6. It applies only when the hit mode's weapon subtype is ranged or throw. It covers single shots and throws, and also burst or continuous sprays whose result became failure under the spray rules above. A melee or unarmed miss never selects a bystander. Stage A runs only for an ordinary failure, result 1. Stage B runs when, after the result branch, the attacker flags contain neither the hit bit nor the critical bit. That happens after an ordinary failure that Stage A did not commit, after a critical failure whose selected failure mask is zero, and after a critical failure by protected attacker PID `0x01000008`, which returns before setting the critical marker. A critical failure that sets any mask skips both stages. `[Must-match]`
+
+Let the **extension hex** E be the hex reached by counting the weapon's effective range for this hit mode (section 3.4, including the throw cap) along the pixel line from the attacker's hex center through the intended defender's hex center. The count uses the line-extension rule in this section: count changed hexes, and stop early at an outer-border hex. When the range is at most 0, or attacker and defender share a hex, E is the attacker's hex. `[Must-match]`
+
+**Stage A: line-of-fire candidate.** `[Must-match]`
+
+1. Set the ignored object to the attacker and the current hex to the attacker's hex.
+2. While the current hex differs from E, cast the section 3.2 ray at stride 32 from the current hex to E on the attacker's elevation, supplying the ignored object. Let B be the reported blocker.
+3. If B is none, stop. If B is not a critter, stop with an obstruction and no candidate.
+4. If B is a critter other than the intended defender, let H be the section 3.5 range-aware hit chance of this attacker against B. Use the attack's current hit location (an uncalled request has already become torso) and the same hit mode. The line-of-fire chance is `trunc(H / 3)`, or exactly 5 when B is dead by the dead query of section 3.3. Draw D100. If the draw is at most that chance, stop with B as the candidate. A chance of 0 or less still consumes its draw.
+5. Otherwise, including whenever B is the intended defender, which never draws, set the ignored object to B and the current hex to B's hex, and repeat from step 2.
+6. After stopping, set the attack's hit location to torso whatever the outcome.
+
+Stage A never commits a hit in the reference. Its final acceptance test is inverted: it accepts only a candidate carrying projectile-through bit `0x80000000`, and the stride-32 ray never reports such an object. Stage A's draws are still consumed, and Stage B then runs. `[May-improve]`: when Stage A stops with a critter candidate, commit it. Make it the victim, set the impact hex to its hex, set the hit bit, and compute damage as below. An obstruction or no candidate commits nothing. A committed Stage A skips Stage B because the hit bit is now set. A ray that reaches the sample cap leaves its previous object in place; the cap rule of section 3.2 applies to this loop as well.
+
+**Stage B: impact fallback.** `[Must-match]`
+
+1. Choose the impact hex T. For a grenade, meaning throw animation with explosion, plasma or EMP damage, draw the scatter distance first. It is nominally D(trunc(d / 2)), where d is the object distance of section 3.4, with the generator's reversed-bound quirk and a minimum of 1 for a zero result. Then draw a direction from 0 through 5. T is the hex reached by stepping that distance from the intended defender's hex in that direction. For every other weapon, T is E and no draws are made.
+2. Cast the section 3.2 ray at stride 32 from the intended defender's hex to T on the defender's elevation, ignoring the intended defender. If it reports a blocker other than the intended defender, that blocker is the candidate and the impact hex becomes the candidate's hex. Otherwise the candidate is the first movement blocker of section 3.2 at T on the defender's elevation, with no ignored object, and the impact hex stays T.
+3. If a candidate exists and lacks projectile-through bit `0x80000000`, set the hit bit, record the candidate as the attack's defender, and compute damage as below. Otherwise nothing is hit, and the impact hex is used only for projectile presentation.
+
+Consequences of Stage B, all `[Must-match]`:
+
+- Stage B never considers critters between the attacker and the intended defender. That region belongs to Stage A, which does not commit in the reference.
+- T need not lie beyond the defender. If the pixel line needs more than the range in changed hexes to reach the defender, E lies between the attacker and the defender, and the Stage B ray runs back toward the attacker. If it needs exactly the range, E is the defender's own hex. With no other blocker there, the "miss" then selects the intended defender itself for one round at numerator 2, with no critical.
+- A non-critter candidate, such as a wall or scenery, receives the hit bit and becomes the recorded defender. It takes zero damage and causes no damage draw. No HP, status or script hit notification follows, and the combat message is the attacker's "missed" text (message 515 for the player, 615 or 715 by NPC gender).
+- The originally intended target remains recorded as the intended target. A critter victim other than it produces a "was hit instead" message. Its number is a base plus 8 when the intended target is the player, or plus 9 otherwise. The base is chosen by the victim: 500 for the player, 600 for a male NPC, 700 for a female NPC. Onlookers are notified for that intended target and then, separately, for a critter victim. A bystander retaliates only when its team differs from the attacker's; a bystander left dead or knocked out instead records the attacker as its last attacker.
+
+**Bystander damage and hit location.** Every committed bystander, from Stage B or the Stage A safe rule, is computed as follows. `[Must-match]`
+
+- A non-critter victim receives 0 damage and no draw.
+- A critter victim receives exactly one round of the section 3.6 per-round formula with numerator M = 2. Silent Death, critical-table numerators, the critical-success tables, the D10 save and Better Criticals never apply. Make one base-damage draw from the hit mode's interval in the section 3.6 table. Add the player's ranged-subtype Bonus Ranged Damage. Apply the difficulty percentage selected by the attacker's team against the player's team, not by the victim's team. Use the victim's effective DT/DR for the weapon damage type: Penetrate sets DT to 0, and a player attacker's Finesse adds 30 DR. The armor-bypass branch never applies, because a miss carries no critical victim flags.
+- Knockback follows section 3.8 with the victim as defender. It is zero for a multihex victim. For a non-null ranged or throw weapon, only explosion damage type produces it: `floor(damage / 10)`, or `/ 5` for a Knockback weapon. Death checks then use the victim's HP, and the usual explosion-on-extras step follows.
+- Ammunition already scheduled for the attack (one round for a single shot, the spray amount otherwise) is consumed whether or not a bystander is hit.
+- Hit location is torso after Stage A. The critical-failure paths that reach Stage B never pass through Stage A, so the location there stays the requested called location (uncalled is already torso). Location is not a damage input here. It only selects the "hit in the <location>" message text. `[May-improve]`: report torso for every Stage B victim.
+
+**Draw order for a ranged or throw miss.** `[Must-match]`
+
+1. Attack D100, then the critical-upgrade D100 when the first-day gate allows it.
+2. The Jinxed coin, for global player Jinxed with an ordinary failure.
+3. On ordinary failure, the Stage A D100s in encounter order, up to and including the first success. On critical failure, the section 3.6 critical-failure draws instead.
+4. For a grenade, the Stage B scatter distance, then the scatter direction.
+5. One base-damage draw, only for a critter victim.
+6. Explosion-on-extras draws, when they apply.
 
 The weapon-attack splash helper has its radius/initial-hex setup commented out in the inspected revision. Its first hex remains -1 and it exits without adding splash victims. This omission does not describe the separate scripted-explosion action path. Do not supply an invented radius/falloff formula for this incomplete weapon-splash path. `[Must-match]`
 
@@ -734,6 +791,32 @@ Additional boundary checks on the same rules:
 - A separate melee result of 35 damage gives computed knockback 3. Clear space permits 3; a wall at displacement 2 produces actual displacement 0 because of the double decrement; a wall at displacement 3 permits 1. These are reference values; the section 3.8 `[May-improve]` safe rule gives 1 and 2.
 - Before timestamp 864000, without a forced-upgrade trait/perk, the normal D100 critical-upgrade draw is not made. Slayer/Sniper/Jinxed postprocessing must not be disabled merely by calling it the first day.
 
+### 4.4 Fixture D: Punch-to-Kick Draw Position
+
+Shared inputs: an NPC attacker whose AI makes no called-shot draw, with bare hands, art weapon code 0 and effective Melee Damage 1, so the bare interval is 1-3. It attacks an adjacent defender. Hit chance is 60, effective Critical Chance 5, torso location adjustment 0, and absolute timestamp at least 864000. Random outcomes are listed in draw order.
+
+| Case | Requested mode | Kick art present | Outcomes | Result |
+| --- | ---: | --- | --- | --- |
+| D1 | 4 | Yes | `1, 40, 70, 3` | Kick draw 1 selects mode 5. Attack 40 gives margin 20; upgrade threshold `2 + 5 - 0 = 7`, so 70 does not upgrade. Damage 3 |
+| D2 | 4 | No | `1, 40, 70, 3` | Same draws consumed; mode stays 4; damage 3 |
+| D3 | 4 | Yes | `2, 40, 70, 3` | No probe; mode 4; damage 3 |
+| D4 | 5 | Yes | `40, 70, 3` | No kick draw; the first draw is the attack D100 |
+| D5 | 4 | Yes | `4` | Defender out of range 1: the attack fails after consuming only the kick draw |
+
+D1 and D2 differ only in recorded mode, animation 17 against animation 16, and sounds. AP debit is 3 in D1 through D4; D5 debits nothing.
+
+### 4.5 Fixture E: Missed Single Shot and Bystanders
+
+The player fires a single-fire rifle: normal damage, range 10, damage 8-20, no weapon perk, normal difficulty, no relevant traits or perks, timestamp at least 864000. Ray results are explicit test inputs. Along the line from the attacker toward E are a living critter X1, then the intended defender, then a living critter X2. A stride-32 cast reports them in that order and reports nothing beyond X2 before E. Section 3.5 hit chances are 50 against the defender, 45 against X1 and 30 against X2. X2 has normal DT 2 and DR 20; X1 has DT 0 and DR 0.
+
+| Case | Outcomes | Reference result | Stage A safe-rule result |
+| --- | --- | --- | --- |
+| E1 | `90, 30, 10, 12` | Attack fails (margin -40); 30 exceeds `trunc(40 / 10) = 4`, so no critical failure. Stage A: X1 chance 15, draw 10 selects X1, which is not committed. Stage B: the ray from the defender reports X2, and damage draw 12 gives `12 - 2 = 10`, then `10 - trunc(10 * 20 / 100) = 8`. **X2 takes 8**; X1 is untouched | X1 committed; draw 12 gives **X1 12**; Stage B skipped; same draw count |
+| E2 | `90, 30, 50, 60, 12` | Stage A: X1 draw 50 fails; the defender is passed with no draw; X2 chance 10, draw 60 fails; the cast then reaches E. Stage B selects X2: **X2 takes 8** | Same as reference: no Stage A candidate |
+| E3 | `90, 30, 50` | X2 replaced by a wall at the same place. Stage A: X1 draw 50 fails, defender passed, wall gives an obstruction. Stage B: the ray reports the wall, which gets the hit bit and the "missed" message, with **0 damage and no damage draw** | Same as reference |
+
+Boundary check: when E is the defender's own hex and no other blocker is present, outcomes `90, 30, 12` (with no critter on the line in Stage A) give the intended defender one round at numerator 2. The fixture's damage interval and the defender's DT/DR then apply as in section 3.6.
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -742,4 +825,4 @@ Additional boundary checks on the same rules:
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes: `tools/spec_lint.py` gives 0 errors. Its 16 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc") and this spec's own formula notation ("index", "stat", "column", "rank", "range"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Tag count: 152 `[Must-match]`, 20 `[May-improve]`.
+Verification notes (R1-rev2): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 16 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc") and this spec's own formula notation ("index", "stat", "column", "rank", "range"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Tag count, excluding the two tag definitions: 163 `[Must-match]`, 23 `[May-improve]`.

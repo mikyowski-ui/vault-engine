@@ -60,34 +60,6 @@ impl WorldState {
             }
         }
     }
-    /// The SPEC-005 poison/radiation adjustment: the player only, a
-    /// positive amount first reduced by `amount × resistance / 100`, and
-    /// the level clamped at zero. Returns false (no change) for NPCs.
-    pub(crate) fn adjust_exposure(
-        &mut self,
-        critter: ObjectRef,
-        amount: i32,
-        radiation: bool,
-    ) -> bool {
-        if critter != self.player {
-            return false;
-        }
-        let resistance = self.player_stat(if radiation { 31 } else { 32 });
-        let adjustment = if amount > 0 {
-            i64::from(amount) - i64::from(amount) * i64::from(resistance) / 100
-        } else {
-            i64::from(amount)
-        };
-        if let Some(sheet) = self.player_sheet_mut() {
-            let level = if radiation {
-                &mut sheet.radiation
-            } else {
-                &mut sheet.poison
-            };
-            *level = (i64::from(*level) + adjustment).clamp(0, i64::from(i32::MAX)) as i32;
-        }
-        true
-    }
     /// §3.4 step 1 (safe rule): the drug's mapped addiction variable reads
     /// nonzero. Unlisted PIDs read "not addicted".
     pub fn addicted(&self, pid: i32) -> bool {
@@ -259,9 +231,12 @@ impl<A: WorldAssets> WorldHost<A> {
                         self.kill_critter(critter, 20)?;
                     }
                 }
-                drugs::POISON | drugs::RADIATION => {
-                    self.world
-                        .adjust_exposure(critter, amount, selector == drugs::RADIATION);
+                // SPEC-013 §3.19-3.20: the player-only adjustments.
+                drugs::POISON => {
+                    self.adjust_poison(critter, amount)?;
+                }
+                drugs::RADIATION => {
+                    self.adjust_radiation(critter, amount);
                 }
                 stat => self.world.adjust_bonus(critter, stat as usize, amount),
             }

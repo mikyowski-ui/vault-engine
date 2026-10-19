@@ -657,3 +657,32 @@ fn validates_spec011_item_invariants_and_reports_violations() {
     );
     assert!(errors.contains("2 item invariant(s) failed"), "{errors}");
 }
+
+#[test]
+fn interaction_and_ui_audits_report_categories_and_fail_on_a_partial_corpus() {
+    let temp = tempfile::tempdir().unwrap();
+    state::write_corpus(temp.path());
+    for flag in ["--validate-interactions", "--validate-ui"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+            .arg("--corpus-dir")
+            .arg(temp.path())
+            .arg(flag)
+            .output()
+            .unwrap();
+        // The synthetic corpus has no interface art or catalogs: every
+        // category reports its counts, the failures are listed, and the run
+        // fails.
+        assert!(!output.status.success(), "{flag}");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let title = if flag == "--validate-ui" {
+            "UI"
+        } else {
+            "Interactions"
+        };
+        assert!(text.contains(&format!("{title} messages:")), "{text}");
+        assert!(text.contains(&format!("{title} art:")), "{text}");
+        let errors = String::from_utf8_lossy(&output.stderr);
+        assert!(errors.contains("FAIL messages:"), "{errors}");
+        assert!(errors.contains("check(s) failed"), "{errors}");
+    }
+}

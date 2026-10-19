@@ -7,9 +7,9 @@
 
 ## 1. Overview & Scope
 
-This specification describes the Windows/x86 behavior observable from `fallout1-re` revision `R1`. It covers `color.pal`, indexed `.FRM` sprites and their `.FR0` through `.FR5` variants, and positional `.LST` name indexes. The evidence is source inspection, not execution against original game assets.
+This specification describes the Windows/x86 behavior observable from `fallout1-re` reference revision R1. It covers `color.pal`, indexed `.FRM` sprites and their `.FR0` through `.FR5` variants, and positional `.LST` name indexes. The evidence is source inspection, not execution against original game assets, except that palette lengths were checked against the adjacent local asset corpus (section 2.1).
 
-Paths below are logical resource paths, whether supplied by loose files or an archive. `color.pal` is more than a 768-byte RGB palette: it also supplies a color-quantization table and may supply additional color-processing tables. This is not a specification of every file bearing a `.PAL` extension.
+Paths below are logical resource paths, whether supplied by loose files or an archive. `color.pal` is more than a 768-byte RGB palette: it also supplies a color-quantization table and may supply additional color-processing tables. The same reader and layout also load the other palettes selected by name for full-screen presentations, such as `art/intrface/helpscrn.pal`, `art/intrface/death.pal`, the end-sequence slide palettes in `art/intrface/`, and `art/cuts/subtitle.pal`. This is not a specification of every file bearing a `.PAL` extension.
 
 The inspected revision reads art indexes from `art/<category>/<category>.lst`, script indexes from `scripts/scripts.lst`, and prototype indexes from `proto/<category>/<category>.lst`. No literal `data/*.lst` consumer is present. Consequently, a file merely placed under `data/` has no established parser or ID base in this revision; the consumer, not the extension or directory name, determines those rules. The data-tree indexes actually supported by the inspected readers are distinguished below rather than assigning an invented universal `data/` rule. `[Must-match]`
 
@@ -20,22 +20,26 @@ The inspected revision reads art indexes from `art/<category>/<category>.lst`, s
 
 Plain byte-layout tables carry one tag for the whole table.
 
-Evidence locations, relative to `fallout1-re/`:
+Evidence areas in reference revision R1 (source file paths and line ranges are withheld under the clean-room quarantine policy):
 
-| Subject | Source locations |
+| Subject | Reference area inspected |
 | --- | --- |
-| Palette bytes, lookup tables, optional extension | [redacted-ref] |
-| Display scaling and gamma | [redacted-ref]; [redacted-ref] |
-| Palette-cycle ranges, colors, timing | [redacted-ref] |
-| Sprite header and frame serialization | [redacted-ref]; [redacted-ref] |
-| Sprite selection, list parsing, timing defaults, frame addressing | [redacted-ref]; [redacted-ref] |
-| World placement and frame displacement | [redacted-ref]; [redacted-ref] |
-| Transparent pixel copying and hit testing | [redacted-ref]; [redacted-ref] |
-| Action timing and queued delays | [redacted-ref]; [redacted-ref] |
-| Cursor hotspot and preview centering | [redacted-ref]; [redacted-ref] |
-| Art-list secondary metadata | [redacted-ref] |
-| Script indexes and map-reference conversion | [redacted-ref]; [redacted-ref]; [redacted-ref] |
-| Prototype indexes and text/integer input | [redacted-ref]; [redacted-ref] |
+| Palette bytes, lookup tables, optional extension | Palette loader and its file-read callbacks, including short-read behavior of loose-file and archive reads |
+| Display scaling and gamma | Display-palette submission and gamma tables |
+| Palette-cycle ranges, colors, timing | Palette-cycle module |
+| Sprite header and frame serialization | Sprite reader |
+| Sprite selection, list parsing, timing defaults, frame addressing | Art cache, art identifier and art-list readers |
+| World placement and frame displacement | Object drawing and animation sequencing |
+| Transparent pixel copying and hit testing | Transparent blitters and object pixel hit test |
+| Action timing and queued delays | Action and animation schedulers |
+| Cursor hotspot and preview centering | Mouse cursor and art-preview drawing |
+| Art-list secondary metadata | Critter alias and head fidget-count readers |
+| Script indexes and map-reference conversion | Script-list reader and map/object script attachment |
+| Prototype indexes and text/integer input | Prototype-list reader and the archive text/integer readers |
+
+### Revision history
+
+- **R1-rev2 (2026-10-18).** Section 2.1 and section 3.1: a palette of exactly `0x8300` (33536) bytes, with no discriminator, is the ordinary shipped form and is accepted with generated intensity/mix tables; the previous safe rule wrongly rejected it. Corpus evidence and the reference's end-of-file read behavior are recorded, and Fixture A2 is added. Source paths and the raw revision hash were replaced by area descriptions and the label R1.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -47,7 +51,7 @@ All offsets are from the file's first byte. An RGB entry is three unsigned 8-bit
 | --- | ---: | --- | --- |
 | `0x0000` | 768 (`0x0300`) | 256 consecutive RGB triples | Palette entries 0 through 255; entry i begins at byte `3 * i` |
 | `0x0300` | 32768 (`0x8000`) | Unsigned 8-bit palette indexes | RGB555-to-palette lookup table |
-| `0x8300` | 4 | 32-bit word read in native x86 little-endian order | Optional-table discriminator; extension recognized only for numeric value `0x4E455743` |
+| `0x8300` | 4, or absent | 32-bit word read in native x86 little-endian order | Optional-table discriminator; extension recognized only for numeric value `0x4E455743`. Absent (file ends at `0x8300`) in every palette of the local corpus |
 | `0x8304` | 65536 (`0x10000`) | Unsigned 8-bit palette indexes | Present for recognized discriminator: 256 rows of 256 intensity results |
 | `0x18304` | 65536 | Unsigned 8-bit palette indexes | Present for recognized discriminator: 256 by 256 additive-mix results |
 | `0x28304` | 65536 | Unsigned 8-bit palette indexes | Present for recognized discriminator: 256 by 256 multiplicative-mix results |
@@ -57,6 +61,8 @@ The RGB555 lookup address is `0x0300 + 1024 * red5 + 32 * green5 + blue5`, with 
 Each extended table is row-major, with byte address `table start + 256 * row + column`. In the intensity table the row selects the input palette index and the column the intensity level; in either mix table the row and column select the two input palette indexes. `[Must-match]`
 
 The recognized discriminator's file bytes are `43 57 45 4E` (ASCII `CWEN`). Its numeric value spells `NEWC` when written most-significant byte first, but literal file bytes `4E 45 57 43` do not select the extension on x86. This word does not use the big-endian rule used by FRM files. When the discriminator does not match, intensity and mixing tables are generated instead of read. The complete extended layout ends at exclusive offset `0x38304` (230148 bytes); the base RGB-plus-lookup area ends at exclusive offset `0x8300` (33536 bytes). `[Must-match]`
+
+The base-only form is the ordinary shipped form, not a truncation. All 19 palettes in the local corpus, `color.pal` and the 18 named presentation palettes, are exactly 33536 bytes long; none carries a discriminator or extension tables. A conforming reader must accept that length and use generated intensity/mix tables, exactly as for an explicit nonmatching discriminator. Section 3.1 gives the length rules. `[Must-match]`
 
 ### 2.2 `.FRM` and `.FR0` through `.FR5`: shared 62-byte header
 
@@ -138,7 +144,16 @@ Art categories, in category-number order 0 through 10, are `items`, `critters`, 
 - At neutral gamma the observed display conversion for each valid six-bit channel is multiplication by 4. Thus six-bit values `0, 1, 31, 32, 63` become eight-bit values `0, 4, 124, 128, 252`. The output storage domain is 0 through 255, but this conversion only produces 0 through 252. Full-range normalization to 255, rounding `255 * channel / 63`, and bit replication are not the reference behavior. `[Must-match]`
 - With non-neutral gamma, first raise the six-bit channel to the configured gamma exponent, clamp the result to 0 through 63, discard its fractional part, then multiply by 4 for display. Gamma 1 is neutral. The PAL bytes themselves remain six-bit quantities. `[Must-match]`
 - Sprite pixel index 0 is the transparent key in transparent blits and world-object pixel hit testing: it leaves the destination unchanged and is not a solid hit, irrespective of entry 0's RGB triple. No alpha byte exists in either file. A nonzero index whose RGB triple is black is not thereby transparent. Opaque blits can still copy index 0. `[Must-match]`
-- The palette reader checks opening the file but does not consistently check the byte counts returned by palette/table reads. A 768-byte palette-only file or a truncated lookup/discriminator/table region is not a reliably validated `color.pal`; no deterministic missing-byte defaults are established. Do not equate a missing discriminator with an explicit nonmatching four-byte discriminator. `[May-improve]`: reject with a diagnostic any `color.pal` shorter than `0x8304` bytes, or shorter than `0x38304` bytes when the discriminator matches.
+- Palette length is decided by these rules. Lengths are physical byte counts of the resolved resource. `[Must-match]`
+
+| File length | Discriminator | Result |
+| --- | --- | --- |
+| Exactly `0x8300` (33536) | Absent | Accept; generate intensity/mix tables |
+| At least `0x8304` | Not `0x4E455743` | Accept; generate intensity/mix tables; ignore bytes after `0x8303` |
+| At least `0x38304` | `0x4E455743` | Accept; read the three extension tables; ignore bytes after `0x38303` |
+
+- The reference reader checks only that the file opens; it does not check the byte counts returned by any palette or table read. A read at end of file transfers zero bytes and leaves its destination unwritten, for loose files and archive members alike. At exactly `0x8300` bytes the discriminator read therefore transfers nothing, and the comparison reads a word that was never written in this call. The reference result is formally indeterminate, but generated tables are the only interoperable result: every shipped palette has this length. `[May-improve]`: treat end of file at offset `0x8300` exactly like a nonmatching discriminator, with no diagnostic.
+- Other lengths are truncations with no deterministic reference result. A short RGB read leaves that entry's channel values indeterminate; a short lookup or extension-table read leaves the rest of that table holding earlier contents. A 768-byte palette-only file is not a valid `color.pal`. `[May-improve]`: reject with a diagnostic, leaving the previous palette in effect, any palette shorter than `0x8300` bytes, any palette of `0x8301` through `0x8303` bytes (partial discriminator), and any palette shorter than `0x38304` bytes whose discriminator matches.
 
 ### 3.2 Palette cycling
 
@@ -226,6 +241,26 @@ Expected results at neutral gamma:
 | 3 | `(64,1,2)` | Unavailable | `(0,0,0)` after whole-entry replacement | Nonzero pixel index is still not the transparent key |
 
 The deliberately constant lookup table is structurally valid but not a useful nearest-color quantizer. No particular visual quality is asserted for its generated intensity/mix results.
+
+### 4.1.1 Fixture A2: the shipped 33536-byte form
+
+Take Fixture A and delete its final four bytes, the discriminator at `0x8300`. Length: `0x8300` (33536) bytes.
+
+```text
+0000: 01 02 03 3F 20 01 10 08 04 40 01 02
+000C-02FF: 00 repeated 756 times
+0300-82FF: 00 repeated 32768 times
+```
+
+Expected: the palette loads, and every result in the Fixture A table is unchanged. Intensity and mix tables are generated, as for Fixture A's explicit zero discriminator. Length boundaries for the same content:
+
+| Length | Expected result |
+| --- | --- |
+| `0x82FF` (lookup table one byte short) | Reference indeterminate; safe rule rejects |
+| `0x8300` | Accept, generated tables |
+| `0x8302` (bytes `00 00` at `0x8300`) | Reference indeterminate; safe rule rejects |
+| `0x8304` (Fixture A) | Accept, generated tables |
+| `0x8304` with bytes `43 57 45 4E` at `0x8300` | Reference reads truncated tables; safe rule rejects |
 
 ### 4.2 Fixture B: one shared frame, zero FPS, and signed header shift
 
@@ -328,4 +363,4 @@ Expected runtime script index 0 resolves to `first.int` with local-variable coun
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes: `tools/spec_lint.py` gives 0 errors. Its 25 plain-word warnings were reviewed and are benign. They are this spec's own formula words ("start", "column", "data", "byte", "count", "width", "height", "direction", "offset", "frames") and the public art category directory names (items, critters, scenery, tiles, misc). The fenced blocks are synthetic hex dumps and text-list vectors. Tag count: 39 `[Must-match]`, 7 `[May-improve]`.
+Verification notes (R1-rev2): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 25 plain-word warnings were reviewed and are benign. They are this spec's own formula words ("start", "column", "data", "byte", "count", "width", "height", "direction", "offset", "frames") and the public art category directory names (items, critters, scenery, tiles, misc). The fenced blocks are synthetic hex dumps and text-list vectors. Tag count, excluding the two tag definitions: 41 `[Must-match]`, 8 `[May-improve]`.

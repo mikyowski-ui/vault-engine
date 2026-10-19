@@ -115,6 +115,7 @@ struct AiAssets {
     ai: Option<Vec<u8>>,
     taunts: Option<Arc<MsgCatalog>>,
     misc: Option<Arc<MsgCatalog>>,
+    combat: Option<Arc<MsgCatalog>>,
     /// Critter animation codes without art.
     missing: BTreeSet<u8>,
 }
@@ -125,6 +126,7 @@ impl Default for AiAssets {
             ai: Some(packets()),
             taunts: Some(taunts()),
             misc: Some(misc()),
+            combat: None,
             missing: BTreeSet::new(),
         }
     }
@@ -155,6 +157,7 @@ impl WorldAssets for AiAssets {
         match file {
             "combatai.msg" => self.taunts.clone(),
             "misc.msg" => self.misc.clone(),
+            "combat.msg" => self.combat.clone(),
             _ => None,
         }
         .ok_or_else(|| WorldError::Invalid(format!("{file} is missing")))
@@ -1460,27 +1463,54 @@ fn spec009_team_switching_and_random_retarget() {
     );
 }
 
-/// Every draw returns its upper bound: a D100 miss and maximum damage.
-struct High;
-impl RandomSource for High {
+/// Scripted outcomes in draw order; each must lie in its requested range.
+struct Draws(std::collections::VecDeque<i32>);
+impl Draws {
+    fn new(values: &[i32]) -> Self {
+        Self(values.iter().copied().collect())
+    }
+}
+impl RandomSource for Draws {
     fn range(&mut self, first: i32, last: i32) -> Result<i32, WorldError> {
-        Ok(last.max(first))
+        let value = self.0.pop_front().expect("an outcome for every draw");
+        assert!(
+            (first..=last).contains(&value),
+            "{value} outside {first}..={last}"
+        );
+        Ok(value)
     }
 }
 
-#[test]
-fn spec007_ranged_miss_hits_the_accidental_non_through_critter() {
+/// SPEC-007 Fixture E geometry, on one hex column: the attacker, a living
+/// critter X1, the defender, then X2 (DT 2, DR 20) or a wall, with a
+/// single-fire weapon of range 20 and damage 1-20. The clock is before the
+/// first day, so no critical-upgrade draws are made.
+fn fixture_e(blocker: &str, x1_team: i32) -> (WorldHost<AiAssets>, [ObjectRef; 4]) {
     let mut world = world();
     let player = world.player;
     world.get_mut(player).unwrap().raw.hex = Some(0);
     let attacker = npc(&mut world, 20100 + 2 * 200, 1, 0, &[]);
     world.get_mut(attacker).unwrap().raw.orientation = 2;
-    let bystander = npc(&mut world, 20100 + 3 * 200, 2, 0, &[]);
+    let x1 = npc(&mut world, 20100 + 3 * 200, x1_team, 0, &[]);
     let defender = npc(&mut world, 20100 + 5 * 200, 2, 0, &[]);
+    let far = match blocker {
+        "wall" => {
+            let wall = world
+                .spawn(
+                    Arc::new(Prototype::parse(&fixture::prototype(3, 0)).unwrap()),
+                    20100 + 6 * 200,
+                    0,
+                )
+                .unwrap();
+            world.get_mut(wall).unwrap().raw.flags = BasicFlags(0);
+            wall
+        }
+        _ => npc(&mut world, 20100 + 6 * 200, 2, 0, &[(17, 2), (24, 20)]),
+    };
     let gun = carry(
         &mut world,
         attacker,
-        weapon(60, 0x06, 4, 8, 20, 10, 100),
+        weapon(60, 0x06, 4, 20, 20, 10, 100),
         1,
         loaded(10, 30),
     );
@@ -1490,30 +1520,259 @@ fn spec007_ranged_miss_hits_the_accidental_non_through_critter() {
     state(&mut world, attacker).ap = 8;
     let mut assets = AiAssets::default();
     assets.prototypes.insert(30, ammo(30, 0, 10));
-    let mut host = ai_host(world, assets);
-    assert_eq!(host.accidental_target(attacker, defender), Some(bystander));
-    // A missed shot hits the bystander, torso, at normal damage.
+    (ai_host(world, assets), [attacker, x1, defender, far])
+}
+fn miss(
+    host: &WorldHost<AiAssets>,
+    attacker: ObjectRef,
+    defender: ObjectRef,
+    outcomes: &[i32],
+) -> (crate::Spray, Option<crate::host_ai::Victim>) {
     let attack = host
         .world
         .attack_profile(
             attacker,
             defender,
             hit_mode::RIGHT_PRIMARY,
-            location::TORSO,
+            location::UNCALLED,
             false,
         )
         .unwrap();
-    let (spray, victim) = host
-        .resolve_attack(attacker, defender, &attack, &mut High)
+    let mut draws = Draws::new(outcomes);
+    let outcome = host
+        .resolve_attack(attacker, defender, &attack, &mut draws)
         .unwrap();
+    assert!(draws.0.is_empty(), "unused outcomes {:?}", draws.0);
+    outcome
+}
+fn line_of_fire_chance(host: &WorldHost<AiAssets>, attacker: ObjectRef, critter: ObjectRef) -> i32 {
+    host.world
+        .attack_profile(
+            attacker,
+            critter,
+            hit_mode::RIGHT_PRIMARY,
+            location::TORSO,
+            false,
+        )
+        .unwrap()
+        .hit_chance(true)
+        .unwrap()
+        / 3
+}
+
+#[test]
+fn spec007_fixture_e_missed_shot_bystanders() {
+    use crate::host_ai::Victim;
+    // E1 under the Stage A safe rule: X1's line-of-fire draw selects it, it
+    // is committed, and its one round (DT 0, DR 0) is the damage draw.
+    let (host, [attacker, x1, defender, x2]) = fixture_e("critter", 2);
+    let chance = line_of_fire_chance(&host, attacker, x1);
+    assert!(chance >= 1);
+    let (spray, victim) = miss(&host, attacker, defender, &[100, chance, 12]);
     assert_eq!(spray.main.code, 1);
     assert_ne!(spray.main.defender_flags & effect::HIT, 0);
-    assert!(spray.main.damage > 0);
-    assert_eq!(victim.map(|(victim, _)| victim), Some(bystander));
-    // A projectile-through critter is skipped, and the defender itself is
-    // never an accidental target.
-    host.world.get_mut(bystander).unwrap().raw.flags = BasicFlags::PROJECTILE_THROUGH;
-    assert_eq!(host.accidental_target(attacker, defender), None);
+    assert_eq!((spray.main.damage, spray.main.multiplier), (12, 2));
+    assert!(matches!(victim, Some(Victim::Bystander(victim, _)) if victim == x1));
+    // E2: X1's draw fails, the defender is passed with no draw, X2's fails;
+    // Stage B's ray from the defender reports X2: 12 - 2 = 10, less 20%.
+    let x2_chance = line_of_fire_chance(&host, attacker, x2);
+    let (spray, victim) = miss(
+        &host,
+        attacker,
+        defender,
+        &[100, chance + 1, x2_chance + 1, 12],
+    );
+    assert_eq!(spray.main.damage, 8);
+    assert!(matches!(victim, Some(Victim::Bystander(victim, _)) if victim == x2));
+    // A projectile-through X2 is never hit: no candidate, no damage draw.
+    let mut host = host;
+    host.world.get_mut(x2).unwrap().raw.flags = BasicFlags::PROJECTILE_THROUGH;
+    let (spray, victim) = miss(&host, attacker, defender, &[100, chance + 1]);
+    assert!(victim.is_none());
+    assert_eq!(spray.main.defender_flags & effect::HIT, 0);
+    // E3: a wall in X2's place is an obstruction for Stage A and Stage B's
+    // victim: the hit bit, 0 damage, and no damage draw.
+    let (host, [attacker, _, defender, wall]) = fixture_e("wall", 2);
+    let (spray, victim) = miss(&host, attacker, defender, &[100, chance + 1]);
+    assert_eq!(victim, Some(Victim::Object(wall)));
+    assert_ne!(spray.main.defender_flags & effect::HIT, 0);
+    assert_eq!(spray.main.damage, 0);
+}
+
+#[test]
+fn spec007_missed_shot_at_the_extension_hex_hits_the_defender_at_numerator_2() {
+    use crate::host_ai::Victim;
+    // Range 3 at distance 3: E is the defender's own hex. With no other
+    // blocker the "miss" selects the intended defender for one round.
+    let mut world = world();
+    let player = world.player;
+    world.get_mut(player).unwrap().raw.hex = Some(0);
+    let attacker = npc(&mut world, 20100 + 2 * 200, 1, 0, &[]);
+    let defender = npc(&mut world, 20100 + 5 * 200, 2, 0, &[]);
+    let gun = carry(
+        &mut world,
+        attacker,
+        weapon(60, 0x06, 4, 20, 3, 10, 100),
+        1,
+        loaded(10, 30),
+    );
+    world
+        .equip(attacker, gun, BasicFlags::RIGHT_HAND.0)
+        .unwrap();
+    let mut assets = AiAssets::default();
+    assets.prototypes.insert(30, ammo(30, 0, 10));
+    let host = ai_host(world, assets);
+    let (spray, victim) = miss(&host, attacker, defender, &[100, 9]);
+    assert!(matches!(victim, Some(Victim::Bystander(victim, _)) if victim == defender));
+    assert_eq!((spray.main.damage, spray.main.multiplier), (9, 2));
+    assert_eq!(spray.main.attacker_flags & effect::CRITICAL, 0);
+}
+
+#[test]
+fn spec007_bystander_messages_and_same_team_retaliation() {
+    // A same-team bystander does not retaliate; another team's does.
+    for (team, retaliates) in [(1, false), (2, true)] {
+        let (mut host, [attacker, x1, defender, _]) = fixture_e("critter", team);
+        for (object, name) in [(attacker, "Gunner"), (x1, "Bob"), (defender, "Target")] {
+            host.world.get_mut(object).unwrap().name = name.as_bytes().to_vec();
+        }
+        host.assets.combat = Some(Arc::new(
+            MsgCatalog::parse(b"{506}{}{You}\n{608}{}{Oops! %s was hit instead of you!}\n{609}{}{Oops! %s was hit instead of %s!}\n{615}{}{%s missed}\n")
+                .unwrap(),
+        ));
+        host.world.ai.combat_taunts = Some(0);
+        let main = host
+            .world
+            .attack_profile(
+                attacker,
+                defender,
+                hit_mode::RIGHT_PRIMARY,
+                location::UNCALLED,
+                false,
+            )
+            .unwrap()
+            .hit_chance(true)
+            .unwrap();
+        let chance = line_of_fire_chance(&host, attacker, x1);
+        host.world.rng = crate::fixture_items::seed_where(&[(1, 100), (1, 100)], |v| {
+            v[0] > main && v[1] <= chance
+        });
+        let result = host
+            .perform_attack(
+                attacker,
+                defender,
+                hit_mode::RIGHT_PRIMARY,
+                location::UNCALLED,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_ne!(result.defender_flags & effect::HIT, 0);
+        assert!(messages(&host).contains(&b"Oops! Bob was hit instead of Target!".to_vec()));
+        let opponent = host.world.get(x1).unwrap().opponent;
+        assert_eq!(opponent == attacker, retaliates, "team {team}");
+    }
+    // A wall impact shows the attacker's "missed" text (615, male NPC).
+    let (mut host, [attacker, x1, defender, _]) = fixture_e("wall", 2);
+    host.world.get_mut(attacker).unwrap().name = b"Gunner".to_vec();
+    host.assets.combat = Some(Arc::new(
+        MsgCatalog::parse(b"{615}{}{%s missed}\n").unwrap(),
+    ));
+    host.world.ai.combat_taunts = Some(0);
+    let main = host
+        .world
+        .attack_profile(
+            attacker,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::UNCALLED,
+            false,
+        )
+        .unwrap()
+        .hit_chance(true)
+        .unwrap();
+    let chance = line_of_fire_chance(&host, attacker, x1);
+    host.world.rng =
+        crate::fixture_items::seed_where(&[(1, 100), (1, 100)], |v| v[0] > main && v[1] > chance);
+    let result = host
+        .perform_attack(
+            attacker,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::UNCALLED,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert_ne!(result.defender_flags & effect::HIT, 0, "recorded hit bit");
+    assert_eq!(messages(&host), [b"Gunner missed".to_vec()]);
+}
+
+#[test]
+fn spec007_fixture_d_punch_to_kick_draw() {
+    // A bare-handed NPC and a defender beyond punch range; `missing` lists
+    // animations without art. The generator is positioned so the first
+    // D(1, 4) gives `first`.
+    let build = |first: i32, missing: &[u8]| {
+        let mut world = world();
+        let attacker = npc(&mut world, 20100 + 2 * 200, 1, 0, &[]);
+        let far = npc(&mut world, 20100 + 9 * 200, 2, 0, &[]);
+        state(&mut world, attacker).ap = 8;
+        let mut assets = AiAssets::default();
+        assets.missing.extend(missing);
+        let mut host = ai_host(world, assets);
+        host.world.rng = crate::fixture_items::seed_where(&[(1, 4)], |v| v[0] == first);
+        (host, attacker, far)
+    };
+    let after_one = |mut rng: crate::ParkMiller| {
+        rng.range(1, 4).unwrap();
+        rng
+    };
+    // D1: draw 1 with kick art (animation 17) switches to kick, after
+    // exactly one draw.
+    let (mut host, attacker, _) = build(1, &[]);
+    let expected = after_one(host.world.rng.clone());
+    assert_eq!(
+        host.kick_substitution(attacker, hit_mode::PUNCH).unwrap(),
+        hit_mode::KICK
+    );
+    assert_eq!(host.world.rng, expected);
+    // D2: the same draw without kick art keeps punch.
+    let (mut host, attacker, _) = build(1, &[17]);
+    assert_eq!(
+        host.kick_substitution(attacker, hit_mode::PUNCH).unwrap(),
+        hit_mode::PUNCH
+    );
+    assert_eq!(host.world.rng, expected);
+    // D3: results 2-4 keep punch.
+    for draw in 2..=4 {
+        let (mut host, attacker, _) = build(draw, &[]);
+        assert_eq!(
+            host.kick_substitution(attacker, hit_mode::PUNCH).unwrap(),
+            hit_mode::PUNCH
+        );
+    }
+    // D4: a direct kick, or any other mode, makes no draw.
+    let (mut host, attacker, _) = build(1, &[]);
+    let before = host.world.rng.clone();
+    for mode in [hit_mode::KICK, hit_mode::RIGHT_PRIMARY] {
+        assert_eq!(host.kick_substitution(attacker, mode).unwrap(), mode);
+    }
+    assert_eq!(host.world.rng, before);
+    // D5: the kick draw precedes the range check and stays consumed when the
+    // attack is refused; a kick request is refused with no draw at all.
+    let (mut host, attacker, far) = build(4, &[]);
+    let expected = after_one(host.world.rng.clone());
+    let refused = host
+        .perform_attack(attacker, far, hit_mode::PUNCH, location::UNCALLED, false)
+        .unwrap();
+    assert_eq!(refused, Err(crate::Refusal::Range));
+    assert_eq!(host.world.rng, expected);
+    let refused = host
+        .perform_attack(attacker, far, hit_mode::KICK, location::UNCALLED, false)
+        .unwrap();
+    assert_eq!(refused, Err(crate::Refusal::Range));
+    assert_eq!(host.world.rng, expected);
 }
 
 #[test]

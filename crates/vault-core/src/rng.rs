@@ -10,6 +10,10 @@ pub struct RngState {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParkMiller {
     state: RngState,
+    /// Test builds only: explicit outcomes returned, in order, before the
+    /// generator resumes, so host-level fixtures can name their draws.
+    #[cfg(test)]
+    scripted: std::collections::VecDeque<i32>,
 }
 pub trait RandomSource {
     fn range(&mut self, first: i32, last: i32) -> Result<i32, WorldError>;
@@ -24,7 +28,11 @@ impl ParkMiller {
         if state.recurrence < 0 || state.selector < 0 || state.shuffle.iter().any(|v| *v < 0) {
             return Err(WorldError::Invalid("negative RNG state".into()));
         }
-        Ok(Self { state })
+        Ok(Self {
+            state,
+            #[cfg(test)]
+            scripted: Default::default(),
+        })
     }
     pub fn state(&self) -> &RngState {
         &self.state
@@ -69,6 +77,17 @@ impl ParkMiller {
         self.state.selector = output;
         output as u32
     }
+    /// Test builds only: the next range draws return `outcomes` in order
+    /// (each must lie in its requested range); the generator is untouched.
+    #[cfg(test)]
+    pub fn script(&mut self, outcomes: &[i32]) {
+        self.scripted.extend(outcomes);
+    }
+    /// Test builds only: scripted outcomes not yet drawn.
+    #[cfg(test)]
+    pub fn unused_script(&self) -> Vec<i32> {
+        self.scripted.iter().copied().collect()
+    }
     pub fn startup_diagnostic(&mut self) {
         for _ in 0..100_000 {
             self.draw();
@@ -80,6 +99,14 @@ impl RandomSource for ParkMiller {
     /// (`[Must-match]`); under the SPEC-006 §3.4 safe rule, so does any range
     /// whose width does not fit in 1 through 2147483647.
     fn range(&mut self, first: i32, last: i32) -> Result<i32, WorldError> {
+        #[cfg(test)]
+        if let Some(value) = self.scripted.pop_front() {
+            assert!(
+                (first.min(last)..=last.max(first)).contains(&value),
+                "scripted outcome {value} outside {first}..={last}"
+            );
+            return Ok(value);
+        }
         let width = i64::from(last) - i64::from(first) + 1;
         let draw = self.draw();
         if !(1..=i64::from(i32::MAX)).contains(&width) {

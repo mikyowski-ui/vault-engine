@@ -546,7 +546,12 @@ impl WorldState {
             perception,
             self.in_forward_sector(observer, target),
             seen.raw.flags.contains(BasicFlags::GLASS),
-            target == self.player && self.sneak_working,
+            // SPEC-013 §3.7: sneak on and working.
+            target == self.player
+                && self.sneak_working
+                && self
+                    .player_sheet()
+                    .is_some_and(|sheet| sheet.flags & 1 != 0),
             self.combat,
         );
         self.object_distance(observer, target) <= maximum

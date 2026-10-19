@@ -45,7 +45,8 @@ pub struct DispatchResult {
 }
 struct Interaction {
     target: ObjectRef,
-    action: ObjectAction,
+    /// The action on arrival; `None` only walks.
+    action: Option<ObjectAction>,
     movement: crate::Movement,
     next_ms: u64,
 }
@@ -81,6 +82,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     dialogue_callbacks: Vec<u32>,
     interactions: VecDeque<Interaction>,
     presentation: Option<PresentationState>,
+    /// An interaction's approach has just ended: its action runs as the
+    /// sequence's proximity step (SPEC-013 §3.2), not a new approach.
+    pub(crate) arriving: bool,
 }
 impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn prototype(&self, pid: u32) -> Result<std::sync::Arc<vault_formats::Prototype>, WorldError> {
@@ -128,6 +132,9 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     }
     fn map_index(&self, name: &[u8]) -> Option<i32> {
         (**self).map_index(name)
+    }
+    fn map_path(&self, number: i32) -> Option<String> {
+        (**self).map_path(number)
     }
     fn available(&self, path: &[u8]) -> bool {
         (**self).available(path)
@@ -205,6 +212,7 @@ impl<A: WorldAssets> WorldHost<A> {
             dialogue_callbacks: Vec::new(),
             interactions: VecDeque::new(),
             presentation: None,
+            arriving: false,
         }
     }
     pub fn rules(&mut self, rules: WorldRules) {
@@ -246,6 +254,8 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     pub fn load_map(&mut self, path: &str) -> Result<(), WorldError> {
         self.world.trace.push(WorldTrace::LoadStep(1));
+        // SPEC-013 §2.5 map-exit handlers for explosives and sneak.
+        self.skill_map_exit()?;
         let leaving = self.world.map_exit_cleanup(|_| true);
         self.leave_map_events(leaving)?;
         if let Some(script) = self.world.map_script {
@@ -670,6 +680,11 @@ impl<A: WorldAssets> WorldHost<A> {
                     .insert(self.world.clock.ticks, 600, 0, EventKind::MapUpdate)?;
             }
             EventKind::Midnight => {
+                // SPEC-013 §3.20: a movie already playing skips the whole
+                // handler, including the next midnight.
+                if self.library.movie_playing {
+                    return Ok(0);
+                }
                 let refs: Vec<_> = self.world.iter().map(|(r, _)| r).collect();
                 for reference in refs {
                     if let Some(object) = self.world.get_mut(reference)
@@ -679,11 +694,14 @@ impl<A: WorldAssets> WorldHost<A> {
                         object.set_lock(lock);
                     }
                 }
+                self.water_countdown();
+                // The radiation check follows the other work and precedes
+                // the next midnight.
+                self.radiation_check()?;
                 self.world.queue.retain(|event| {
                     !matches!(event.kind, EventKind::MapUpdate | EventKind::Midnight)
                 });
                 self.world.enqueue_map_timers()?;
-                self.water_countdown();
             }
             EventKind::Knockout => {
                 // Waking clears the knockout status bit of a living critter.
@@ -699,9 +717,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 return self.drug_event(event.object, stats, modifiers);
             }
             EventKind::Withdrawal(payload) => return self.withdrawal_event(event.object, payload),
-            EventKind::Poison | EventKind::Radiation { .. } | EventKind::Other(_) => self
-                .world
-                .diagnostic(format!("timed maintenance event {:?}", event.kind)),
+            // SPEC-013 §3.19-3.20 and §2.5.
+            EventKind::Poison | EventKind::Radiation { .. } => {
+                return self.poison_or_radiation_event(event.object, event.kind);
+            }
+            EventKind::Other(kind) => return self.skill_event(event.object, kind),
         }
         Ok(0)
     }
@@ -814,14 +834,24 @@ impl<A: WorldAssets> WorldHost<A> {
                     }
                     crate::StepOutcome::Stopped => {
                         self.world.diagnostic("interaction route is blocked");
+                        // SPEC-013 §3.2 safe rule: a failed skill approach
+                        // tells a player actor.
+                        if matches!(interaction.action, Some(ObjectAction::UseSkill(_)))
+                            && actor == self.world.player
+                        {
+                            self.print_game("misc.msg", 2000, &[]);
+                        }
                     }
                     _ => {
                         self.drain_requests()?;
                         changed = true;
-                        if let Err(error) =
-                            self.action(actor, interaction.target, interaction.action)
-                        {
-                            self.world.diagnostic(error.to_string());
+                        if let Some(action) = interaction.action {
+                            self.arriving = true;
+                            let result = self.action(actor, interaction.target, action);
+                            self.arriving = false;
+                            if let Err(error) = result {
+                                self.world.diagnostic(error.to_string());
+                            }
                         }
                     }
                 }
@@ -868,6 +898,10 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             self.callback(program, procedure)?;
             self.library.release_named(program, procedure);
+            changed = true;
+        }
+        // SPEC-013 §3.22: a pending transition runs in the main loop.
+        if self.process_transition()? {
             changed = true;
         }
         Ok(changed)
@@ -1170,6 +1204,14 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.world.get(actor).is_none_or(|o| !o.alive()) {
             return Err(WorldError::Invalid("actor is inactive/dead".into()));
         }
+        // SPEC-013 §3.1-3.4: the skill-on request, approach and stage.
+        if let ObjectAction::UseSkill(skill) = action {
+            return if self.use_skill_on(actor, target, skill)? {
+                Ok(())
+            } else {
+                Err(WorldError::Invalid("skill request rejected".into()))
+            };
+        }
         if action == ObjectAction::Pickup && target_category != Category::Item {
             return Err(WorldError::Invalid("only items can be picked up".into()));
         }
@@ -1248,7 +1290,14 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             return self.use_item_on(actor, item, target);
         }
+        // SPEC-013 §3.16: containers (the get-object action) and critters
+        // (looting) are used without the prototype's use permission.
+        let container = object.prototype.as_ref().is_some_and(|prototype| {
+            matches!(&prototype.data, PrototypeData::Item(item) if matches!(item.data, ItemData::Container { .. }))
+        });
         if action == ObjectAction::Use
+            && !container
+            && target_category != Category::Critter
             && object
                 .prototype
                 .as_ref()
@@ -1262,70 +1311,71 @@ impl<A: WorldAssets> WorldHost<A> {
             self.map_update()?;
             return Ok(());
         }
-        if let ObjectAction::UseSkill(skill) = action {
-            if skill == 8 {
-                if let Some(player) = self.world.player_sheet_mut() {
-                    player.flags ^= 1;
-                }
-                return Ok(());
-            }
-            let category = object.category();
-            if !(0..18).contains(&skill)
-                || self.world.combat && matches!(skill, 6 | 7 | 9 | 10 | 11 | 12 | 13)
-                || matches!(skill, 6 | 7) && category != Category::Critter
-                || skill == 9 && !matches!(category, Category::Item | Category::Scenery)
-                || skill == 10 && actor == target
-                || skill == 11 && category == Category::Critter
-            {
-                return Err(WorldError::Invalid(
-                    "skill target/combat restriction".into(),
-                ));
-            }
-            if object
-                .lock()
-                .is_some_and(|lock| lock.contains(LockFlags::JAMMED))
-            {
-                return Err(WorldError::Invalid("lock is jammed".into()));
-            }
-            if matches!(skill, 12 | 13)
-                && object.character.as_ref().is_some_and(|sheet| {
-                    sheet.body != 2 && !(skill == 12 && sheet.kill_category == 5)
-                })
-            {
-                return Err(WorldError::Invalid(
-                    "science/repair requires a robotic target (except Science on brahmin)".into(),
-                ));
-            }
+        // SPEC-013 §3.16: a container that cannot be picked up is used
+        // (and looted) instead.
+        if action == ObjectAction::Pickup
+            && object.prototype.as_ref().is_some_and(|p| {
+                matches!(&p.data, PrototypeData::Item(item) if matches!(item.data, ItemData::Container { .. }))
+                    && !p.extended.contains(vault_formats::pro::ExtendedFlags::PICKUP_CONTAINER)
+            })
+        {
+            return self.action(actor, target, ObjectAction::Use);
         }
-        if action==ObjectAction::Pickup
-            && object.prototype.as_ref().is_some_and(|p|matches!(&p.data,PrototypeData::Item(item) if matches!(item.data,ItemData::Container{..}))&&!p.extended.contains(vault_formats::pro::ExtendedFlags::PICKUP_CONTAINER)) {
-            self.world.emit(WorldEffect::DefaultAction {action:ObjectAction::Use,target});return Ok(());
-        }
-        if matches!(
-            action,
-            ObjectAction::Pickup | ObjectAction::Use | ObjectAction::UseSkill(_)
-        ) && self.world.distance(actor, target) > 1
+        if matches!(action, ObjectAction::Pickup | ObjectAction::Use)
+            && self.world.distance(actor, target) > 1
         {
             return self.approach(actor, target, action, 1);
         }
         if matches!(action, ObjectAction::Pickup | ObjectAction::Use) && self.world.combat {
-            let actor = self.world.get_mut(actor).expect("actor");
-            if let ObjectState::Critter(state) = &mut actor.raw.state {
-                if state.ap < 3 {
-                    return Err(WorldError::Invalid("interaction requires 3 AP".into()));
+            let player = actor == self.world.player;
+            let short = self
+                .world
+                .critter_state(actor)
+                .is_some_and(|state| state.ap < 3);
+            if short {
+                if player {
+                    self.print_game("proto.msg", 700, &[]);
                 }
+                return Err(WorldError::Invalid("interaction requires 3 AP".into()));
+            }
+            if let Some(ObjectState::Critter(state)) =
+                self.world.get_mut(actor).map(|o| &mut o.raw.state)
+            {
                 state.ap -= 3;
             }
         }
-        if action == ObjectAction::Use && container_locked {
-            return Err(WorldError::Invalid("container is locked".into()));
+        // SPEC-013 §3.16: using a critter loots it.
+        if action == ObjectAction::Use && target_category == Category::Critter {
+            self.world.pending_loot = Some(crate::LootRequest {
+                looter: actor,
+                target,
+                steal: false,
+            });
+            return Ok(());
+        }
+        // SPEC-013 §3.16 use-container step, skipped by item PID 213: a
+        // locked container plays its locked sound and shows `proto.msg` 487
+        // to the player. The loot request follows either way (the window
+        // then refuses the closed container).
+        let container_was_closed = self.world.get(target).is_some_and(|o| o.raw.frame == 0);
+        if action == ObjectAction::Use && container {
+            let item_213 = self.world.get(target).is_some_and(|o| o.raw.pid == 213);
+            if item_213 || container_locked {
+                if !item_213 {
+                    self.emit_open_sound(target, 2);
+                    if actor == self.world.player {
+                        self.print_game("proto.msg", 487, &[]);
+                    }
+                }
+                self.loot_container(actor, target, container_was_closed);
+                return Ok(());
+            }
         }
         let event = match action {
             ObjectAction::LookAt => ScriptEvent::LookAt,
             ObjectAction::Description => ScriptEvent::Description,
             ObjectAction::Use => ScriptEvent::Use,
             ObjectAction::Pickup => ScriptEvent::Pickup,
-            ObjectAction::UseSkill(_) => ScriptEvent::UseSkill,
             _ => unreachable!(),
         };
         let result = if let Some(script) = self.world.script_for(target) {
@@ -1335,11 +1385,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 source: actor,
                 target,
                 fixed: 0,
-                action: if let ObjectAction::UseSkill(skill) = action {
-                    skill
-                } else {
-                    -1
-                },
+                action: -1,
                 only_present: false,
             })?
         } else {
@@ -1347,6 +1393,10 @@ impl<A: WorldAssets> WorldHost<A> {
         };
         if result.pending {
             return Ok(());
+        }
+        // An overriding `use_p_proc` ends the step; the loot request stands.
+        if result.overridden && action == ObjectAction::Use && container {
+            self.loot_container(actor, target, container_was_closed);
         }
         if !result.overridden {
             match action {
@@ -1395,7 +1445,21 @@ impl<A: WorldAssets> WorldHost<A> {
                         // SPEC-010 open (0) or close (1) cue.
                         self.emit_open_sound(target, u8::from(!opened));
                     } else if object.category() == Category::Item && object.lock().is_some() {
-                        self.emit_open_sound(target, 0);
+                        // From frame 0 the container opens, otherwise closes,
+                        // then 485 or 486 names it and a closed one is looted.
+                        let opening = object.raw.frame == 0;
+                        object.raw.frame = usize::from(opening);
+                        let name = object.name.clone();
+                        self.emit_open_sound(target, u8::from(!opening));
+                        if actor == self.world.player {
+                            let id = if container_was_closed { 485 } else { 486 };
+                            self.print_game(
+                                "proto.msg",
+                                id,
+                                &[crate::host_drugs::Arg::Text(&name)],
+                            );
+                        }
+                        self.loot_container(actor, target, container_was_closed);
                     }
                 }
                 _ => {}
@@ -1439,55 +1503,10 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.world.distance(actor, target) > 1 {
             return self.approach(actor, target, ObjectAction::UseObject(item), 1);
         }
+        // SPEC-013 §3.13: kits take their own route, with no use-on scripts.
         let pid = self.world.get(item).expect("item").raw.pid;
-        let medical = if self.world.rules.doctor_bag_pid == Some(pid) {
-            Some(7)
-        } else if self.world.rules.first_aid_kit_pid == Some(pid) {
-            Some(6)
-        } else {
-            None
-        };
-        if let Some(skill) = medical {
-            if self.world.combat
-                || self
-                    .world
-                    .get(target)
-                    .is_none_or(|object| object.character.is_none())
-            {
-                return Err(WorldError::Invalid(
-                    "medical kit requires a critter outside combat".into(),
-                ));
-            }
-            let context = self.world.context(actor);
-            let sheet = self
-                .world
-                .get(actor)
-                .and_then(|object| object.character.as_ref())
-                .ok_or_else(|| WorldError::Invalid("medical actor has no skills".into()))?;
-            let chance = sheet.skill(skill, context);
-            let critical = sheet.stat(15, context);
-            let check = crate::rng::skill_check(
-                chance,
-                critical + 20,
-                critical,
-                self.world.clock.ticks,
-                &mut self.world.rng,
-            )?;
-            self.world.emit(WorldEffect::Medical {
-                actor,
-                target,
-                skill: skill as i32,
-                code: check.code,
-                margin: check.margin,
-                kit_bonus: 20,
-            });
-            if crate::RandomSource::range(&mut self.world.rng, 1, 10)? == 1 {
-                if let Some(owner) = self.world.get(item).and_then(|object| object.owner) {
-                    self.world.remove_item(owner, item, 1)?;
-                }
-                self.world.erase(item);
-            }
-            return self.map_update();
+        if self.kit_skill(pid).is_some() {
+            return self.use_kit(actor, item, target);
         }
         let item_script = self.world.script_for(item);
         let target_script = self.world.script_for(target);
@@ -1554,7 +1573,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// SPEC-007 move-to-object approach; the action re-checks its distance
     /// rule once the shortened route completes.
-    fn approach(
+    pub(crate) fn approach(
         &mut self,
         actor: ObjectRef,
         target: ObjectRef,
@@ -1584,11 +1603,37 @@ impl<A: WorldAssets> WorldHost<A> {
         self.emit_movement_sound(actor, false);
         self.interactions.push_back(Interaction {
             target,
-            action,
+            action: Some(action),
             movement,
             next_ms: self.world.elapsed_ms + 100,
         });
         Ok(())
+    }
+    /// SPEC-014 §3.27 a movement-mode click: walk toward `tile`, limited in
+    /// combat to the actor's AP plus free movement. Returns whether a route
+    /// exists.
+    pub fn walk_to(&mut self, actor: ObjectRef, tile: i32) -> Result<bool, WorldError> {
+        let limit = if self.world.combat {
+            usize::try_from(self.world.action_points(actor)).unwrap_or(0)
+        } else {
+            usize::MAX
+        };
+        let Some(movement) = self.plan_to_tile(actor, tile, limit) else {
+            return Ok(false);
+        };
+        if movement.directions.is_empty() {
+            return Ok(false);
+        }
+        self.interactions
+            .retain(|pending| pending.movement.actor != actor);
+        self.emit_movement_sound(actor, false);
+        self.interactions.push_back(Interaction {
+            target: 0,
+            action: None,
+            movement,
+            next_ms: self.world.elapsed_ms + 100,
+        });
+        Ok(true)
     }
     pub fn close_dialogue(&mut self) -> Result<bool, WorldError> {
         if !self.world.dialogue.open {

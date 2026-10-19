@@ -84,7 +84,7 @@ impl WorldState {
             state.maneuvers |= bits;
         }
     }
-    pub(crate) fn item_subtype(&self, item: ObjectRef) -> Option<ItemSubtype> {
+    pub fn item_subtype(&self, item: ObjectRef) -> Option<ItemSubtype> {
         match &self.get(item)?.prototype.as_deref()?.data {
             PrototypeData::Item(data) => Some(data.data.subtype()),
             _ => None,
@@ -419,33 +419,135 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         Ok(None)
     }
-    /// SPEC-007 §3.7 accidental target for a single-shot ranged miss, under
-    /// the safe rule that accepts the selected non-through critter (the
-    /// reference's inverted test never accepts one): the first obstacle of the
-    /// stride-32 shot ray toward the defender, which skips projectile-through
-    /// objects, when it is a critter other than the defender.
-    pub fn accidental_target(&self, attacker: ObjectRef, defender: ObjectRef) -> Option<ObjectRef> {
-        let from = self.world.get(attacker)?.raw.hex?;
-        let to = self.world.get(defender)?.raw.hex?;
-        let obstacle = self
+    /// SPEC-007 §3.7.1 extension hex E: the weapon's effective range counted
+    /// along the pixel line from the attacker's hex center through the
+    /// defender's (stopping at an outer-border hex); the attacker's hex for a
+    /// range of at most 0 or a shared hex.
+    fn extension_hex(&self, from: i32, through: i32, range: i32) -> i32 {
+        if range <= 0 || from == through {
+            return from;
+        }
+        crate::routing::extend_line(from, through, range as usize)
+            .last()
+            .copied()
+            .unwrap_or(from)
+    }
+    /// §3.7.1 Stage A, the line-of-fire candidate: repeated stride-32 casts
+    /// from the attacker toward E, ignoring the last critter met. A
+    /// non-critter is an obstruction (no candidate). Each critter other than
+    /// the defender (which is passed with no draw) is selected when a D100 is
+    /// at most `trunc(H / 3)` of its range-aware hit chance H, or 5 when it
+    /// is dead; a chance of 0 or less still draws.
+    pub(crate) fn line_of_fire(
+        &self,
+        attacker: ObjectRef,
+        defender: ObjectRef,
+        attack: &Attack,
+        extension: i32,
+        rng: &mut impl RandomSource,
+    ) -> Result<Option<ObjectRef>, WorldError> {
+        let Some(mut from) = self.world.get(attacker).and_then(|o| o.raw.hex) else {
+            return Ok(None);
+        };
+        let place = if attack.location == location::UNCALLED {
+            location::TORSO
+        } else {
+            attack.location
+        };
+        let mut ignore = attacker;
+        // Every cast ignores the last critter met; the bound only guards
+        // against stacked critters reporting each other forever.
+        for _ in 0..crate::routing::MAX_RAY_SAMPLES {
+            if from == extension {
+                break;
+            }
+            let Some(blocker) = self
+                .world
+                .ray(attacker, from, extension, 32, Some(ignore))
+                .obstacle
+            else {
+                break;
+            };
+            if !self.world.critter_art(blocker) {
+                break;
+            }
+            if blocker != defender {
+                let chance = if self.world.is_dead(blocker) {
+                    5
+                } else {
+                    self.world
+                        .attack_profile(attacker, blocker, attack.hit_mode, place, attack.aimed)
+                        .and_then(|profile| profile.hit_chance(true))
+                        .map_or(0, |chance| chance / 3)
+                };
+                if rng.range(1, 100)? <= chance {
+                    return Ok(Some(blocker));
+                }
+            }
+            match self.world.get(blocker).and_then(|o| o.raw.hex) {
+                Some(hex) => from = hex,
+                None => break,
+            }
+            ignore = blocker;
+        }
+        Ok(None)
+    }
+    /// §3.7.1 Stage B, the impact fallback. The impact hex is E, or for a
+    /// grenade (throw with explosion, plasma or EMP damage) the scatter hex
+    /// around the defender. A stride-32 cast from the defender toward it,
+    /// ignoring the defender, selects its blocker; otherwise the first
+    /// movement blocker at the impact hex (with no ignored object, so possibly
+    /// the defender itself). A projectile-through candidate is never hit.
+    pub(crate) fn impact_candidate(
+        &self,
+        defender: ObjectRef,
+        attack: &Attack,
+        extension: i32,
+        rng: &mut impl RandomSource,
+    ) -> Result<Option<ObjectRef>, WorldError> {
+        let Some((hex, elevation)) = self
             .world
-            .ray(attacker, from, to, 32, Some(attacker))
-            .obstacle?;
-        (obstacle != defender && Fid(self.world.get(obstacle)?.raw.art_id).category() == 1)
-            .then_some(obstacle)
+            .get(defender)
+            .and_then(|o| Some((o.raw.hex?, o.raw.elevation)))
+        else {
+            return Ok(None);
+        };
+        let grenade = attack.mode() == crate::combat::attack_mode::THROW
+            && attack.weapon.as_ref().is_some_and(|weapon| {
+                use crate::combat::damage_type::{EMP, EXPLOSION, PLASMA};
+                matches!(weapon.damage_type, EXPLOSION | PLASMA | EMP)
+            });
+        let impact = if grenade {
+            crate::combat::grenade_scatter(hex, attack.distance, rng)?
+        } else {
+            extension
+        };
+        let candidate = self
+            .world
+            .ray(defender, hex, impact, 32, Some(defender))
+            .obstacle
+            .filter(|blocker| *blocker != defender)
+            .or_else(|| self.world.movement_blocker(impact, elevation, 0));
+        Ok(candidate.filter(|object| {
+            self.world
+                .get(*object)
+                .is_some_and(|o| o.raw.flags.0 & BasicFlags::PROJECTILE_THROUGH.0 == 0)
+        }))
     }
     /// Resolution plus the SPEC-007 follow-ups: a random-target critical
-    /// failure, or (safe rule) an ordinary single-shot ranged miss that meets
-    /// an accidental target. The replacement defender takes a torso hit at
-    /// normal damage, with the critical marker cleared. Returns the victim
-    /// and its profile when one was found.
+    /// failure (SPEC-009 §3.16), or the §3.7.1 bystander resolution of a
+    /// ranged or throw miss (single shots and failed sprays alike). Stage A
+    /// runs for an ordinary failure; under its safe rule a selected critter
+    /// is committed. Stage B runs when neither the hit nor the critical bit is
+    /// set afterward. A critter victim takes one round at numerator 2 with no
+    /// critical; a non-critter receives the hit bit and no damage or draw.
     pub(crate) fn resolve_attack(
         &self,
         attacker: ObjectRef,
         defender: ObjectRef,
         attack: &Attack,
         rng: &mut impl RandomSource,
-    ) -> Result<(Spray, Option<(ObjectRef, Attack)>), WorldError> {
+    ) -> Result<(Spray, Option<Victim>), WorldError> {
         let spraying = matches!(
             attack.mode(),
             crate::combat::attack_mode::BURST | crate::combat::attack_mode::CONTINUOUS
@@ -458,35 +560,75 @@ impl<A: WorldAssets> WorldHost<A> {
                 extras: Vec::new(),
             }
         };
-        let victim = if spray.main.retarget {
-            self.random_target(attacker, defender, attack.hit_mode, rng)?
-        } else if !spraying
-            && spray.main.code == 1
-            && attack.subtype() == Some(crate::combat::Subtype::Ranged)
-        {
-            self.accidental_target(attacker, defender)
+        let ranged = matches!(
+            attack.subtype(),
+            Some(crate::combat::Subtype::Ranged | crate::combat::Subtype::Throwing)
+        );
+        let (victim, random) = if spray.main.retarget {
+            (
+                self.random_target(attacker, defender, attack.hit_mode, rng)?,
+                true,
+            )
+        } else if ranged && spray.main.code <= 1 {
+            let from = self.world.get(attacker).and_then(|o| o.raw.hex);
+            let through = self.world.get(defender).and_then(|o| o.raw.hex);
+            let (Some(from), Some(through)) = (from, through) else {
+                return Ok((spray, None));
+            };
+            let extension = self.extension_hex(from, through, attack.range());
+            let mut candidate = None;
+            if spray.main.code == 1 {
+                candidate = self.line_of_fire(attacker, defender, attack, extension, rng)?;
+            }
+            if candidate.is_none()
+                && spray.main.attacker_flags & effect::CRITICAL == 0
+                && spray.main.defender_flags & effect::HIT == 0
+            {
+                candidate = self.impact_candidate(defender, attack, extension, rng)?;
+            }
+            (candidate, false)
         } else {
-            None
+            (None, false)
         };
         let Some(victim) = victim else {
             return Ok((spray, None));
         };
-        let mut profile = self.world.attack_profile(
-            attacker,
-            victim,
-            attack.hit_mode,
-            location::TORSO,
-            attack.aimed,
-        )?;
-        profile.weapon = attack.weapon.clone();
         let main = &mut spray.main;
         main.attacker_flags &= !effect::CRITICAL;
         main.defender_flags |= effect::HIT;
+        // A wall or scenery takes the hit bit only: no damage, no draw.
+        let profile = self
+            .world
+            .critter_art(victim)
+            .then(|| {
+                self.world
+                    .attack_profile(
+                        attacker,
+                        victim,
+                        attack.hit_mode,
+                        location::TORSO,
+                        attack.aimed,
+                    )
+                    .ok()
+            })
+            .flatten();
+        let Some(mut profile) = profile else {
+            main.damage = 0;
+            return Ok((spray, Some(Victim::Object(victim))));
+        };
+        profile.weapon = attack.weapon.clone();
         main.multiplier = 2;
         main.rounds = 1;
         main.damage = profile.round_damage(2, false, false, rng)? as i32;
         profile.finish(main);
-        Ok((spray, Some((victim, profile))))
+        Ok((
+            spray,
+            Some(if random {
+                Victim::Random(victim, profile)
+            } else {
+                Victim::Bystander(victim, profile)
+            }),
+        ))
     }
     /// §3.17 attack-form request sites, after the hit location is final:
     /// the attacker's attack taunt, then the hit (survived) or miss taunt
@@ -1512,4 +1654,17 @@ impl<A: WorldAssets> AttackEnv for Engagement<'_, A> {
             switched
         }))
     }
+}
+
+/// The object an attack lands on in place of, or as, its resolved target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Victim {
+    /// A random-hit critical failure's replacement defender (SPEC-009
+    /// §3.16), treated as the unintended victim.
+    Random(ObjectRef, Attack),
+    /// A missed shot's critter victim (SPEC-007 §3.7.1), possibly the
+    /// intended defender itself.
+    Bystander(ObjectRef, Attack),
+    /// A missed shot's non-critter impact: the hit bit, no damage.
+    Object(ObjectRef),
 }

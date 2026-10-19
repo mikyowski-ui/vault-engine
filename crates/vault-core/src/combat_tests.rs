@@ -1240,9 +1240,10 @@ fn spec007_aimed_shot_availability_and_grenade_scatter() {
     forced.location = location::EYES;
     assert_eq!(forced.ap_cost(), 5, "Fast Shot -1, then forced aim +1");
 
-    // Scatter: direction draw, then D(distance / 2) displacement.
+    // Scatter (§3.7.1 Stage B): D(distance / 2) displacement, then the
+    // direction draw.
     assert_eq!(
-        crate::combat::grenade_scatter(20100, 8, &mut Outcomes::new(&[2, 3])).unwrap(),
+        crate::combat::grenade_scatter(20100, 8, &mut Outcomes::new(&[3, 2])).unwrap(),
         vault_formats::HexGrid::step(20100, 2, 3).unwrap()
     );
     // Half distance 0 is a reversed range: the generator returns its first

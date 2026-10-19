@@ -1902,11 +1902,32 @@ fn spec011_progression_and_barter_opcodes() {
         "maximum rank 1"
     );
     // gdialog_barter replaces the script modifier and requests barter;
-    // gdialog_set_barter_mod replaces it alone.
+    // gdialog_set_barter_mod replaces it alone. SPEC-013 §3.18: only a
+    // merchant whose prototype has flag 0x02 switches to barter.
     host.world.dialogue.open = true;
+    let mut merchant = fixture::npc_prototype();
+    fixture::world::word(&mut merchant, 0x2c, 0x02);
+    let merchant = host
+        .world
+        .spawn(Arc::new(Prototype::parse(&merchant).unwrap()), 20300, 0)
+        .unwrap();
+    host.world.dialogue.target = merchant;
     run_fragment(&mut host, &base, &[push(-20), instruction(0x8129)].concat()).unwrap();
     assert_eq!(host.world.dialogue.barter_modifier, -20);
     assert!(host.world.dialogue.pending_barter);
+    host.world.dialogue.pending_barter = false;
+    let plain = host
+        .world
+        .spawn(
+            Arc::new(Prototype::parse(&fixture::npc_prototype()).unwrap()),
+            20500,
+            0,
+        )
+        .unwrap();
+    host.world.dialogue.target = plain;
+    run_fragment(&mut host, &base, &[push(-5), instruction(0x8129)].concat()).unwrap();
+    assert_eq!(host.world.dialogue.barter_modifier, -5);
+    assert!(!host.world.dialogue.pending_barter, "no barter flag");
     run_fragment(&mut host, &base, &[push(7), instruction(0x814e)].concat()).unwrap();
     assert_eq!(host.world.dialogue.barter_modifier, 7);
 }

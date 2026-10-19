@@ -4,6 +4,8 @@ pub mod acm;
 pub mod ai;
 pub mod automap;
 mod binary;
+pub mod cfg;
+pub mod credits;
 pub mod dat;
 pub mod fid;
 pub mod font;
@@ -19,6 +21,7 @@ pub mod mve;
 pub mod palette;
 pub mod pro;
 pub mod pro_catalog;
+pub mod rix;
 pub mod savegame;
 pub mod sfx;
 pub mod sve;
@@ -56,6 +59,7 @@ pub fn validate_asset(path: &VfsPath, bytes: &[u8]) -> Option<Result<(), ParseEr
         "msg" => MsgCatalog::parse(bytes).map(|_| ()),
         "pro" => Prototype::parse(bytes).map(|_| ()),
         "gcd" => GcdFile::parse(bytes).map(|_| ()),
+        "rix" => rix::Splash::parse(bytes).map(|_| ()),
         "gam" => GamFile::parse(
             bytes,
             if path.as_str() == "data/vault13.gam" {
@@ -84,6 +88,8 @@ mod dat_tests;
 mod fid_tests;
 #[cfg(test)]
 mod movie_tests;
+#[cfg(test)]
+mod presentation_tests;
 #[cfg(test)]
 mod save_tests;
 #[cfg(test)]

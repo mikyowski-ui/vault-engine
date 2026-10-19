@@ -45,6 +45,40 @@ fn spec001_palette_values_transparency_and_tables() {
 }
 
 #[test]
+fn spec001_fixture_a2_shipped_base_form_and_length_boundaries() {
+    // Fixture A2: Fixture A without its discriminator, the ordinary shipped
+    // 0x8300-byte form; every Fixture A result is unchanged.
+    let fixture_a = fixtures::palette();
+    let a2 = fixtures::sparse(include_str!(
+        "../../../tests/fixtures/formats/palette-base.hex"
+    ));
+    assert_eq!(a2, fixture_a[..0x8300]);
+    let shipped = Palette::parse(&a2).unwrap();
+    let explicit = Palette::parse(&fixture_a).unwrap();
+    assert!(shipped.supplied_tables().is_none(), "generated tables");
+    assert_eq!(shipped.rgba8(), explicit.rgba8());
+    for index in 0..=255 {
+        assert_eq!(shipped.is_mapped(index), explicit.is_mapped(index));
+        assert_eq!(
+            shipped.intensity(index, 127),
+            explicit.intensity(index, 127)
+        );
+    }
+    assert!(!shipped.is_mapped(3));
+    // §4.1.1 length boundaries for the same content.
+    let accepts = |bytes: &[u8]| Palette::parse(bytes).is_ok();
+    assert!(!accepts(&a2[..0x82ff]), "lookup table one byte short");
+    assert!(accepts(&a2), "0x8300: generated tables");
+    let mut partial = a2.clone();
+    partial.extend([0, 0]);
+    assert!(!accepts(&partial), "0x8302: partial discriminator");
+    assert!(accepts(&fixture_a), "0x8304: Fixture A");
+    let mut truncated = a2;
+    truncated.extend(b"CWEN");
+    assert!(!accepts(&truncated), "matching discriminator, no tables");
+}
+
+#[test]
 fn base_palettes_need_no_tag_but_optional_extensions_must_be_complete() {
     let bytes = fixtures::sparse(include_str!(
         "../../../tests/fixtures/formats/palette-base.hex"
