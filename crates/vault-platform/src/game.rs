@@ -61,6 +61,15 @@ enum Stage {
     Death {
         since: u64,
         palette: Palette,
+        /// The scene is over and the fade to black runs.
+        leaving: bool,
+    },
+    /// SPEC-014 §3.5 the end of a game session: the world's last frame
+    /// fades to white, then the map is unloaded; `death` leads to the
+    /// death scene, otherwise to the main menu.
+    Ending {
+        world: Box<MapPreview>,
+        death: bool,
     },
     /// The endgame slideshow, returning to its world afterward.
     Slides {
@@ -102,8 +111,29 @@ pub struct Game {
     quick: vault_core::ui::saveload::QuickSlot,
     /// A headless replay: worlds complete movies instead of waiting.
     pub headless: bool,
+    /// The vault-debug inspector runs in each world (`--debug`; F9 in a
+    /// world toggles it, and the setting carries to the next world).
+    pub debug: bool,
     sounds: crate::map_preview::SoundBank,
     finished: bool,
+    /// SPEC-014 §3.2 a fade outside the world, and the six-bit levels shown
+    /// in place of the stage's palette once one has ended.
+    fade: Option<GameFade>,
+    shown: Option<[[u8; 3]; 256]>,
+}
+
+/// One fade over the fixed 700 ms of the §3.2 safe rule: step k of n sets
+/// each level to `old - trunc((old - new) * k / n)`; the target is
+/// installed exactly at the end.
+struct GameFade {
+    from: [[u8; 3]; 256],
+    to: [[u8; 3]; 256],
+    start: u64,
+}
+const FADE_STEPS: u32 = 60;
+const WHITE: [[u8; 3]; 256] = [[63; 3]; 256];
+fn levels(palette: &Palette) -> [[u8; 3]; 256] {
+    std::array::from_fn(|index| palette.rgb6(index as u8))
 }
 
 /// A palette from six-bit RGB triples (with an empty lookup table).
@@ -161,8 +191,11 @@ impl Game {
             slot_list: Default::default(),
             quick: Default::default(),
             headless: false,
+            debug: false,
             sounds: Default::default(),
             finished: false,
+            fade: None,
+            shown: None,
         };
         // §3.1 splash: the configured start, without wrapping the stored value.
         let start = config.get_int("system", "splash").unwrap_or(0);
@@ -253,8 +286,49 @@ impl Game {
             Next::Credits => self.enter_credits("credits.txt", CreditStyle::Normal),
         }
     }
+    /// The menu is shown with a fade (§3.4): from a white or black screen
+    /// left by the end of a session, to the game palette.
     fn enter_menu(&mut self) {
         self.stage = Stage::Menu { since: self.now };
+        if self.shown.is_some() || self.fade.is_some() {
+            let target = levels(&self.palette);
+            self.fade_to(target);
+        }
+    }
+    /// The six-bit levels on screen now.
+    fn shown_levels(&self) -> [[u8; 3]; 256] {
+        if let Some(fade) = &self.fade {
+            let elapsed = self
+                .now
+                .saturating_sub(fade.start)
+                .min(crate::map_preview::FADE_MS);
+            let step = (elapsed * u64::from(FADE_STEPS) / crate::map_preview::FADE_MS) as u32;
+            return flow::fade_palette(&fade.from, &fade.to, step, FADE_STEPS);
+        }
+        self.shown.unwrap_or_else(|| levels(self.palette()))
+    }
+    fn fade_to(&mut self, target: [[u8; 3]; 256]) {
+        let from = self.shown_levels();
+        self.fade = Some(GameFade {
+            from,
+            to: target,
+            start: self.now,
+        });
+    }
+    /// Finish a fade whose time is up; returns whether one ended.
+    fn fade_tick(&mut self) -> bool {
+        let Some(fade) = &self.fade else {
+            return false;
+        };
+        if self.now < fade.start + crate::map_preview::FADE_MS {
+            return false;
+        }
+        let to = fade.to;
+        self.fade = None;
+        // Back on the game palette in the menu, nothing replaces it.
+        self.shown = (!matches!(self.stage, Stage::Menu { .. }) || to != levels(&self.palette))
+            .then_some(to);
+        true
     }
     fn enter_credits(&mut self, file: &str, style: CreditStyle) {
         let path = format!("text/{}/{file}", self.language);
@@ -316,6 +390,7 @@ impl Game {
     fn leave_world(&mut self, world: &MapPreview) {
         self.preferences = world.preferences.clone();
         (self.slot_list, self.quick) = world.slot_session();
+        self.debug = world.debug_enabled();
     }
     fn world_with(&self, sheet: CharacterSheet) -> AppResult<MapPreview> {
         let assets = VfsWorldAssets::new(self.vfs.clone(), &self.language)?;
@@ -330,6 +405,7 @@ impl Game {
         if self.headless {
             world.host.movie_policy = vault_core::movie::MoviePolicy::CompleteImmediately;
         }
+        world.set_debug(self.debug);
         Ok(world)
     }
     fn premade(&self, index: usize) -> CharacterSheet {
@@ -436,7 +512,7 @@ impl Game {
             Stage::Splash { palette, .. }
             | Stage::Death { palette, .. }
             | Stage::Slides { palette, .. } => palette,
-            Stage::World(world) | Stage::Load(world) => world
+            Stage::World(world) | Stage::Load(world) | Stage::Ending { world, .. } => world
                 .host
                 .library
                 .palette
@@ -449,6 +525,13 @@ impl Game {
         match &self.stage {
             Stage::Movie { player, .. } => Some(player.palette()),
             Stage::World(world) | Stage::Load(world) => world.display_override(),
+            _ if self.fade.is_some() || self.shown.is_some() => {
+                let gamma = self.brightness();
+                Some(
+                    self.shown_levels()
+                        .map(|rgb6| vault_formats::palette::display_rgb6(rgb6, gamma)),
+                )
+            }
             _ => None,
         }
     }
@@ -462,7 +545,9 @@ impl Game {
     /// display entries then).
     pub fn palette_generation(&self) -> u32 {
         match &self.stage {
-            Stage::World(world) | Stage::Load(world) => world.host.library.palette_generation,
+            Stage::World(world) | Stage::Load(world) | Stage::Ending { world, .. } => {
+                world.host.library.palette_generation
+            }
             Stage::Splash { .. } => 1 << 24,
             Stage::Death { .. } => 2 << 24,
             Stage::Slides { index, .. } => (3 << 24) + *index as u32,
@@ -490,7 +575,29 @@ impl Game {
 
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
         self.now = now;
+        let faded = self.fade_tick();
+        let fading = self.fade.is_some();
         match &mut self.stage {
+            // The end-of-session fade to white blocks; then the map goes.
+            Stage::Ending { death, .. } => {
+                if !faded {
+                    return Ok(fading);
+                }
+                let death = *death;
+                let Stage::Ending { world, .. } =
+                    std::mem::replace(&mut self.stage, Stage::Menu { since: now })
+                else {
+                    unreachable!()
+                };
+                self.leave_world(&world);
+                drop(world);
+                if death {
+                    self.enter_death();
+                } else {
+                    self.enter_menu();
+                }
+                Ok(true)
+            }
             Stage::Splash { since, .. } => {
                 if *since == 0 {
                     *since = now.max(1);
@@ -509,7 +616,7 @@ impl Game {
             }
             Stage::Menu { .. } => {
                 self.menu_poll(MenuInput::None);
-                Ok(false)
+                Ok(faded || fading)
             }
             Stage::Credits { scroll, last, .. } => {
                 let mut changed = false;
@@ -523,11 +630,19 @@ impl Game {
                 }
                 Ok(changed)
             }
-            Stage::Death { since, .. } => {
-                if now >= *since + flow::DEATH_SILENT_MS + flow::DEATH_TAIL_MS {
-                    self.enter_menu();
+            // §3.5: after the narration (or its 3000 ms stand-in and the
+            // 500 ms tail), a fade to black; then the menu fades in.
+            Stage::Death { since, leaving, .. } => {
+                if *leaving {
+                    if faded {
+                        self.enter_menu();
+                    }
+                    return Ok(true);
                 }
-                Ok(false)
+                if now >= *since + flow::DEATH_SILENT_MS + flow::DEATH_TAIL_MS {
+                    self.leave_death();
+                }
+                Ok(faded || fading)
             }
             Stage::Slides {
                 since,
@@ -549,7 +664,7 @@ impl Game {
             Stage::World(world) => {
                 let changed = world.tick(now)?;
                 self.world_events();
-                Ok(changed)
+                Ok(changed || faded || fading)
             }
             Stage::Load(world) => {
                 let changed = world.tick(now)?;
@@ -583,32 +698,30 @@ impl Game {
         }
     }
     /// The world's quit, death and endgame requests.
+    /// §3.5: the session ends on a quit request, or when the player carries
+    /// the dead or knocked-out status at the end of a main-loop pass. Combat
+    /// runs inside one pass, so the status check waits for it to end (a
+    /// knockout in combat is normally recovered by its cleanup).
     fn world_events(&mut self) {
         let Stage::World(world) = &mut self.stage else {
             return;
         };
-        if world.quit_requested {
+        let player = world.host.world.player;
+        let state = &world.host.world;
+        let over = !state.combat
+            && (state.is_dead(player)
+                || state
+                    .critter_state(player)
+                    .is_some_and(|critter| critter.results.0 & 0x01 != 0));
+        if world.quit_requested || over {
+            let death = !world.quit_requested;
             let Stage::World(world) =
                 std::mem::replace(&mut self.stage, Stage::Menu { since: self.now })
             else {
                 return;
             };
-            self.leave_world(&world);
-            self.enter_menu();
-            return;
-        }
-        let player = world.host.world.player;
-        if world.host.world.is_dead(player) {
-            let palette = self
-                .vfs
-                .read_bounded(flow::DEATH_PALETTE, MAX_ASSET_BYTES)
-                .ok()
-                .and_then(|bytes| Palette::parse(&bytes).ok())
-                .unwrap_or_else(black);
-            self.stage = Stage::Death {
-                since: self.now,
-                palette,
-            };
+            self.stage = Stage::Ending { world, death };
+            self.fade_to(WHITE);
             return;
         }
         match world.endgame.take() {
@@ -642,6 +755,34 @@ impl Game {
                 self.play_movie(movie, 0, Next::Credits);
             }
             None => {}
+        }
+    }
+    /// §3.5 the death scene: `death.frm` over the white screen the session's
+    /// end left, fading from white to `death.pal`.
+    fn enter_death(&mut self) {
+        let palette = self
+            .vfs
+            .read_bounded(flow::DEATH_PALETTE, MAX_ASSET_BYTES)
+            .ok()
+            .and_then(|bytes| Palette::parse(&bytes).ok())
+            .unwrap_or_else(black);
+        let target = levels(&palette);
+        self.shown = Some(WHITE);
+        self.stage = Stage::Death {
+            since: self.now,
+            palette,
+            leaving: false,
+        };
+        self.fade_to(target);
+    }
+    /// Step 6: fade to black; the game palette is then loaded without a
+    /// fade, so the screen stays black until the menu fades in.
+    fn leave_death(&mut self) {
+        if let Stage::Death { leaving, .. } = &mut self.stage
+            && !*leaving
+        {
+            *leaving = true;
+            self.fade_to(flow::BLACK);
         }
     }
     /// Show slide `index`, or return to the world after the last (§3.30
@@ -687,7 +828,9 @@ impl Game {
         match &mut self.stage {
             Stage::Splash { image: splash, .. } => return Ok(splash.clone()),
             Stage::Movie { player, .. } => return Ok(player.image()),
-            Stage::World(world) | Stage::Load(world) => return world.image(),
+            Stage::World(world) | Stage::Load(world) | Stage::Ending { world, .. } => {
+                return world.image();
+            }
             Stage::Menu { .. } => {
                 painter.blit_opaque(&mut image, flow::MENU_BACKGROUND, 0, [0, 0]);
                 for button in flow::MENU_BUTTONS {
@@ -974,9 +1117,10 @@ impl Game {
                 }
             }
             Stage::Death { .. } => {
-                self.enter_menu();
+                self.leave_death();
                 true
             }
+            Stage::Ending { .. } => true,
             Stage::Slides { .. } => {
                 self.next_slide();
                 true
@@ -1041,6 +1185,7 @@ impl Game {
             Stage::Splash { .. } | Stage::Death { .. } | Stage::Slides { .. } => {
                 self.step(KeyCode::Space)
             }
+            Stage::Ending { .. } => true,
         }
     }
     /// The world (or the menu's load screen) is in front: it draws its own

@@ -36,6 +36,11 @@ const CRIPPLED: u32 = 0x7c;
 /// Explosion damage type's DT and DR stats.
 const EXPLOSION_DT: usize = 17 + 6;
 const EXPLOSION_DR: usize = 24 + 6;
+/// §3.10 a timed explosive meeting an explosion in progress retries after
+/// 50 ticks (5 game seconds), as type 8.
+pub const EXPLOSION_RETRY_TICKS: i64 = 50;
+/// The explosion sound.
+const EXPLOSION_SOUND: &[u8] = b"whn1xxx1";
 
 impl<A: WorldAssets> WorldHost<A> {
     /// §3.1-3.2 the skill-on request. Sneak toggles at once. Otherwise the
@@ -202,7 +207,7 @@ impl<A: WorldAssets> WorldHost<A> {
         let max = self.world.effective(critter, 7);
         (hp, max)
     }
-    /// Add HP, capped at the maximum.
+    /// Add HP, capped at the maximum; the player's HP counter rolls.
     fn heal_critter(&mut self, critter: ObjectRef, amount: i32) {
         let (hp, max) = self.hit_point_range(critter);
         let healed = hp.saturating_add(amount).min(max);
@@ -213,6 +218,9 @@ impl<A: WorldAssets> WorldHost<A> {
             if let ObjectState::Critter(state) = &mut object.raw.state {
                 state.hp = healed;
             }
+        }
+        if critter == self.world.player {
+            self.world.emit(WorldEffect::RollHitPoints);
         }
     }
     fn name_of(&self, object: ObjectRef) -> Vec<u8> {
@@ -738,7 +746,12 @@ impl<A: WorldAssets> WorldHost<A> {
                         sheet.adjust_bonus(stat, delta, context);
                     }
                 }
-                None if delta < 0 => self.damage_critter(critter, None, -delta, 0)?,
+                None if delta < 0 => {
+                    self.damage_critter(critter, None, -delta, 0)?;
+                    if critter == self.world.player {
+                        self.world.emit(WorldEffect::RollHitPoints);
+                    }
+                }
                 None => self.heal_critter(critter, delta),
             }
         }
@@ -805,36 +818,59 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         Ok(())
     }
-    /// §3.10 detonation at the outermost holder's hex (or the explosive's
-    /// own): one damage draw for a living critter blocking the center hex,
-    /// credited to the player; the explosive is destroyed. The extra-victim
-    /// enumeration returns nothing in R1, so nothing else is damaged.
+    /// §3.10 detonation of a timed explosive at the outermost holder's hex
+    /// (or its own). While another animated explosion is in progress an
+    /// animated detonation is re-queued as type 8 after 50 ticks, and the
+    /// explosive is kept; otherwise the explosion starts, credited to the
+    /// player, and the explosive is destroyed.
     pub(crate) fn detonate(
         &mut self,
         explosive: ObjectRef,
         animated: bool,
     ) -> Result<(), WorldError> {
+        if animated && self.world.explosion.is_some() {
+            self.world.queue.insert(
+                self.world.clock.ticks,
+                EXPLOSION_RETRY_TICKS,
+                explosive,
+                EventKind::Other(skills::EXPLOSION_EVENT),
+            )?;
+            return Ok(());
+        }
         let holder = self.world.outermost_owner(explosive);
-        let Some((hex, elevation, pid)) = self.world.get(holder).and_then(|object| {
+        let center = self.world.get(holder).and_then(|object| {
             Some((
                 object.raw.hex?,
                 object.raw.elevation,
                 self.world.get(explosive)?.raw.pid,
             ))
-        }) else {
-            self.world.erase(explosive);
-            return Ok(());
-        };
-        let (min, max) = skills::explosion_range(pid);
-        if animated {
-            self.world.emit(WorldEffect::Explosion {
-                hex,
-                elevation: i32::from(elevation),
-                min,
-                max,
-            });
+        });
+        if let Some((hex, elevation, pid)) = center {
+            let (min, max) = skills::explosion_range(pid);
+            let player = self.world.player;
+            self.start_explosion(hex, elevation, min, max, Some(player), animated)?;
         }
-        let player = self.world.player;
+        if let Some(owner) = self.world.get(explosive).and_then(|o| o.owner) {
+            self.world.remove_item(owner, explosive, 1)?;
+        }
+        self.world.erase(explosive);
+        Ok(())
+    }
+    /// §3.10 an explosion at `hex`: damage covers only the living critter
+    /// blocking the center hex, computed now with one D(min, max) draw (the
+    /// splash enumeration is disabled in R1, so nothing else takes damage).
+    /// An animated explosion plays `whn1xxx1` and its art and stays in
+    /// progress until its damage step (`finish_explosion`); an unanimated
+    /// one applies the damage, then notifies the scenery scripts, at once.
+    fn start_explosion(
+        &mut self,
+        hex: i32,
+        elevation: u8,
+        min: i32,
+        max: i32,
+        source: Option<ObjectRef>,
+        animated: bool,
+    ) -> Result<(), WorldError> {
         let victim = self
             .world
             .movement_blocker(hex, elevation, 0)
@@ -844,40 +880,226 @@ impl<A: WorldAssets> WorldHost<A> {
                     .is_some_and(|o| Fid(o.raw.art_id).category() == 1)
                     && !self.world.is_dead(*object)
             });
-        if let Some(victim) = victim {
-            let draw = self.world.rng.range(min, max)?;
-            let multihex = self
-                .world
-                .get(victim)
-                .is_some_and(|o| o.raw.flags.contains(BasicFlags::MULTIHEX));
-            let (damage, knockback) = skills::explosion_damage(
-                draw,
-                self.world.effective(victim, EXPLOSION_DT),
-                self.world.effective(victim, EXPLOSION_DR),
-                multihex,
-            );
-            self.damage_critter(victim, Some(player), damage, 0)?;
-            if knockback > 0 && !self.world.is_dead(victim) {
-                self.knock_back(player, victim, knockback)?;
+        let victim = match victim {
+            Some(victim) => {
+                let draw = self.world.rng.range(min, max)?;
+                let multihex = self
+                    .world
+                    .get(victim)
+                    .is_some_and(|o| o.raw.flags.contains(BasicFlags::MULTIHEX));
+                let (damage, knockback) = skills::explosion_damage(
+                    draw,
+                    self.world.effective(victim, EXPLOSION_DT),
+                    self.world.effective(victim, EXPLOSION_DR),
+                    multihex,
+                );
+                Some((victim, damage, knockback))
             }
-            if !self.world.is_dead(victim) && victim != player {
-                self.set_last_attacker(victim, player);
-                if !self.world.combat && self.world.pending_combat.is_none() {
-                    self.world.pending_combat = Some(CombatRequest {
-                        attacker: victim,
-                        defender: player,
-                        accuracy: 0,
-                        damage: [0, i32::MAX],
-                        flags: None,
-                    });
+            None => None,
+        };
+        let explosion = crate::world::ActiveExplosion {
+            hex,
+            elevation,
+            victim,
+            source,
+        };
+        if animated {
+            self.world.emit(WorldEffect::SoundEffect {
+                name: EXPLOSION_SOUND.to_vec(),
+                owner: None,
+            });
+            self.world.emit(WorldEffect::Explosion {
+                hex,
+                elevation: i32::from(elevation),
+                min,
+                max,
+            });
+            self.world.explosion = Some(explosion);
+            return Ok(());
+        }
+        self.apply_explosion(&explosion)?;
+        self.notify_explosion_scripts(hex, elevation, source)
+    }
+    /// §3.10 the animated explosion's later steps, once its art has played
+    /// (one world update after it started; no approved spec names the art):
+    /// notify the scenery scripts, remove the art, then apply the damage and
+    /// attribution. The in-progress state ends after the damage step.
+    pub(crate) fn finish_explosion(&mut self) -> Result<bool, WorldError> {
+        let Some(explosion) = self.world.explosion else {
+            return Ok(false);
+        };
+        let result = self
+            .notify_explosion_scripts(explosion.hex, explosion.elevation, explosion.source)
+            .and_then(|()| self.apply_explosion(&explosion));
+        self.world.explosion = None;
+        result.map(|()| true)
+    }
+    /// §3.10 the computed damage on the center critter (still a living
+    /// critter), its knockback, and the credited source's attribution: kill
+    /// experience for a death, otherwise the victim references the source
+    /// and the first such victim requests combat. A scripted explosion has
+    /// no source, so none of this attribution happens.
+    fn apply_explosion(
+        &mut self,
+        explosion: &crate::world::ActiveExplosion,
+    ) -> Result<(), WorldError> {
+        let Some((victim, damage, knockback)) = explosion.victim else {
+            return Ok(());
+        };
+        if self.world.get(victim).is_none() || self.world.is_dead(victim) {
+            return Ok(());
+        }
+        self.damage_critter(victim, explosion.source, damage, 0)?;
+        let player = self.world.player;
+        if knockback > 0 && !self.world.is_dead(victim) {
+            self.knock_back(explosion.source.unwrap_or(player), victim, knockback)?;
+        }
+        let Some(source) = explosion.source else {
+            return Ok(());
+        };
+        if self.world.is_dead(victim) {
+            // Out of combat the kill's experience goes to the player now.
+            if !self.world.combat {
+                let experience = std::mem::take(&mut self.world.combat_experience);
+                if experience > 0 {
+                    self.give_experience(experience);
                 }
             }
+        } else if victim != source {
+            self.set_last_attacker(victim, source);
+            if !self.world.combat && self.world.pending_combat.is_none() {
+                self.world.pending_combat = Some(CombatRequest {
+                    attacker: victim,
+                    defender: source,
+                    accuracy: 0,
+                    damage: [0, i32::MAX],
+                    flags: None,
+                });
+            }
         }
-        if let Some(owner) = self.world.get(explosive).and_then(|o| o.owner) {
-            self.world.remove_item(owner, explosive, 1)?;
-        }
-        self.world.erase(explosive);
         Ok(())
+    }
+    /// §3.10 scenery and other blockers: the engine never damages them.
+    /// With spatial checks off, collect in script-list order every item or
+    /// scenery object script within hex distance 3 of the center on its
+    /// elevation, then every spatial script there, keeping those with a
+    /// `damage_p_proc` (a program not yet loaded runs `start` first); then
+    /// run each collected `damage_p_proc` once. Critter scripts are not
+    /// notified.
+    fn notify_explosion_scripts(
+        &mut self,
+        hex: i32,
+        elevation: u8,
+        source: Option<ObjectRef>,
+    ) -> Result<(), WorldError> {
+        let near = |at: i32| {
+            vault_formats::HexGrid::angular_distance(at, hex).is_ok_and(|distance| distance <= 3)
+        };
+        let mut objects = Vec::new();
+        let mut spatials = Vec::new();
+        for script in self
+            .world
+            .script_order
+            .iter()
+            .filter_map(|id| self.world.scripts.get(id))
+        {
+            if let Some((at, level, _)) = script.spatial {
+                if level == elevation && near(at) {
+                    spatials.push((script.id, 0));
+                }
+                continue;
+            }
+            let Some(owner) = self.world.get(script.owner) else {
+                continue;
+            };
+            let category = owner.category();
+            if matches!(category, Category::Item | Category::Scenery)
+                && owner.raw.elevation == elevation
+                && owner.raw.hex.is_some_and(near)
+            {
+                objects.push((script.id, script.owner));
+            }
+        }
+        let previous = self.world.spatial_enabled;
+        self.world.spatial_enabled = false;
+        let mut collected = Vec::new();
+        for (script, owner) in objects.into_iter().chain(spatials) {
+            let loaded = self
+                .world
+                .scripts
+                .get(&script)
+                .is_some_and(|instance| instance.initialized);
+            if !loaded {
+                let started = self.dispatch(ScriptRequest {
+                    script,
+                    event: ScriptEvent::Start,
+                    source: 0,
+                    target: owner,
+                    fixed: 0,
+                    action: -1,
+                    only_present: false,
+                });
+                if let Err(error) = started {
+                    self.world
+                        .diagnostic(format!("explosion script start: {error}"));
+                }
+            }
+            if self.has_procedure(script, ScriptEvent::Damage) {
+                collected.push((script, owner));
+            }
+        }
+        self.world.spatial_enabled = previous;
+        for (script, owner) in collected {
+            let result = self.dispatch(ScriptRequest {
+                script,
+                event: ScriptEvent::Damage,
+                source: source.unwrap_or(0),
+                target: owner,
+                fixed: 0,
+                action: -1,
+                only_present: true,
+            });
+            if let Err(error) = result {
+                self.world
+                    .diagnostic(format!("explosion damage_p_proc: {error}"));
+            }
+        }
+        Ok(())
+    }
+    /// §3.10 the request pass for a scripted explosion: in combat the
+    /// combat request pass discards it; out of combat it detonates with
+    /// animation and no credited source. One that finds another animated
+    /// explosion in progress waits for the next pass (safe rule; the
+    /// reference drops it).
+    pub(crate) fn service_explosion_request(&mut self) -> Result<bool, WorldError> {
+        let Some(request) = self.world.pending_explosion else {
+            return Ok(false);
+        };
+        if self.world.combat {
+            self.world.pending_explosion = None;
+            return Ok(false);
+        }
+        if self.world.explosion.is_some() {
+            return Ok(false);
+        }
+        self.world.pending_explosion = None;
+        let Ok(elevation) = u8::try_from(request.elevation)
+            .map_err(|_| ())
+            .and_then(|e| if e <= 2 { Ok(e) } else { Err(()) })
+        else {
+            self.world.diagnostic(format!(
+                "explosion elevation {} is invalid",
+                request.elevation
+            ));
+            return Ok(false);
+        };
+        if !(0..40000).contains(&request.hex) {
+            self.world
+                .diagnostic(format!("explosion hex {} is invalid", request.hex));
+            return Ok(false);
+        }
+        self.start_explosion(request.hex, elevation, request.min, request.max, None, true)?;
+        Ok(true)
     }
     /// The queued handlers for SPEC-013's payload-free events: explosions
     /// (type 11 first shows `misc.msg` 4000) and sneak rechecks.

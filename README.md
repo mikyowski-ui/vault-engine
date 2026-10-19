@@ -28,7 +28,12 @@ grids and the loot/steal window; SPEC-014 adds the game flow (splash, main menu,
 character selection and creation), the save/load and options screens, the
 interface bar, cursor modes and the endgame. The SPEC-007 revision adds the
 punch-to-kick draw and missed-shot bystanders, and the SPEC-001 revision the
-shipped 33536-byte palette form.
+shipped 33536-byte palette form. The final SPEC-005/007/009/013/014 revisions
+add the single intended-target retaliation rule, center-only explosions with
+the scenery `damage_p_proc` notice and the 50-tick retry, scripted explosions,
+the automap and inventory windows, rolling HP/AC counters, the white death
+fade, the large dialog boxes and the help screen; the desktop now streams DAT
+members lazily and can run the vault-debug inspector live (`--debug`, F9).
 
 `AGENTS.md` is the repository's implementation policy. `PROVENANCE.md` records
 the two-team clean-room process, and `CONTRIBUTING.md` the clean-room
@@ -307,8 +312,10 @@ cargo run -p vault-platform -- --master-dat /path/to/MASTER.DAT --critter-dat /p
 `--master-dat` and `--critter-dat` mount a `DatProvider`: ordinary requests use
 the master database, and `art/critters/` requests use the critter database. Each
 consults the loose `--corpus-dir` first, with no fallback to the other archive.
-Every preview and the world host read through this namespace. Archives are read
-into memory at startup; each extracted file keeps the 64 MiB asset bound.
+Every preview and the world host read through this namespace. Archives are
+opened lazily (`DatArchive::open`): startup reads only the directory tables,
+and each member is read and decoded from the file when requested, keeping the
+64 MiB bound per extracted file.
 
 On the local map, **W** opens the world map and **P** the Pip-Boy; script
 `world_map`/`town_map` requests open them too. Both are modal, so the local map's
@@ -380,11 +387,18 @@ cargo run -p vault-platform -- --corpus-dir /path/to/unpacked/game \
 
 On the local map, **I** opens the inventory and **C** the character screen
 (SPEC-011). Both are modal:
-- Inventory lists the player's entries with worn and held markers and
-  weights, caps, and the carried weight. The selected entry can be used (a
-  drug is consumed through §3.6; other items use the default use action),
-  wielded or worn, reloaded from the inventory, or unloaded. Opening it in
-  combat costs the §3.11 action points.
+- The inventory is the SPEC-014 §3.34 window at (80, 0): six list rows, the
+  two hands and the armor slot. In the hand cursor a left press on a filled
+  slot lifts the item and the release drops it on the first target in the
+  §3.34 order (the list, where ammunition dropped on a weapon reloads it
+  through the counter for a stack; the left hand; the right hand; the armor;
+  nowhere). A right press switches to the arrow cursor: a click shows the
+  examine text, a held press opens the item menu (Look, Unload or Use, Drop,
+  Cancel). Using a drug consumes it (SPEC-011 §3.6), a kit heals, an
+  explosive opens Set Timer and a Motion Sensor the automap. Opening it in
+  combat costs the §3.11 action points. No approved spec gives the window's
+  background, stats panel, scroll and Done buttons, or the Unload and Drop
+  icon art, so those are provisional.
 - The character screen reconciles levels on opening. It shows SPECIAL, derived
   statistics, skills (tagged ones starred), traits, and perks, and clicking a
   skill spends an unspent point. When a perk is pending, the chooser lists the
@@ -400,10 +414,6 @@ On the local map, **I** opens the inventory and **C** the character screen
   stack. **Offer** (**M**) tries the trade at the §3.18 price; **Talk** (**T**)
   or Escape returns the tables and the hidden equipment, then resumes the
   dialogue (closing a session that already ended).
-- In the inventory list (a provisional layout: no approved spec gives the
-  window's geometry), dragging ammunition onto a weapon's row is the §3.15
-  drag reload, with the counter for a stack; dragging an entry onto an action
-  button runs that action.
 
 ## Game flow and interface (SPEC-013, SPEC-014)
 
@@ -425,10 +435,18 @@ the campaign globals, and the ending plays `walkm` or `walkw` and the credits.
 Quitting returns to the menu. Outside the world, palette fades are presented
 as instant changes; in the world they run for 700 ms (SPEC-014 §3.2 safe rule):
 the library `fadein`/`fadeout`, `gfade_in`/`gfade_out`, First Aid and Doctor,
-and the movie flags (playback ends on black; flag `0x02` fades back).
+and the movie flags (playback ends on black; flag `0x02` fades back). A
+session ends on a fade to white; the death scene then fades from white into
+`death.pal`, to black when it is dismissed, and the menu fades in. Knockout
+and death are checked between world passes, and ending combat wakes a
+knocked-out player. **F1** shows `helpscrn.frm` under `helpscrn.pal` (no fade,
+cycling suspended) until any key or click.
 
 In the world, the interface bar shows the message monitor, HP/AC counters, AP
-pips in combat, the active item slot and the indicator boxes. Its buttons and the
+pips in combat, the active item slot and the indicator boxes. When the core
+reports a change (damage, healing, drugs, a turn's start or end), a counter
+rolls one unit per step every `trunc(250 / (|P - V| + 1))` ms, switching color
+at 25% and 50% of maximum HP; the world and input wait while it rolls. Its buttons and the
 game-loop keys follow §3.19: **I** inventory, **Escape**/**O** options, **S** the
 Skilldex, **C** character, **P** Pip-Boy, **B** swap hands, **M** or a right-click
 cycle the cursor mode, **A** start combat, **1**-**8** skills (Sneak first), **,**
@@ -448,12 +466,29 @@ the hover: the movement cost (or a red X), the arrow's action icon with the
 object's look-at text in the monitor, or the crosshair's hit chance. Map clicks
 act on the release; holding the button 250 ms in arrow mode opens the action
 menu (move vertically to choose, release to run it). A pointer on the frame's
-edge scrolls the map, with the blocked art where the view's center would leave
-the hex grid. **Tab** or the bar's MAP button shows the automap: the current
-elevation's SPEC-008 raster of seen walls and scenery and the player's hex, in
-a provisional presentation (no approved spec gives the automap window). Map
-objects carry the seen flags stored in the map files; no approved spec says how
-they become seen in play, so a freshly entered map's automap can be empty.
+edge scrolls the map, and the arrow keys share its blocked test and 33 ms
+gate (the blocked art shows where the view would leave the hex grid or the
+scroll limits). Modal dialogs are `lgdialog.frm` boxes (302 by 127) at the
+§3.13 positions: save/load errors at (169, 116), the Pip-Boy refusal in combat
+at (192, 116).
+
+**Tab** or the bar's MAP button opens the SPEC-014 §3.33 automap window
+(`automap.frm` at (75, 0), the world paused): seen walls, the exit-grid
+marker, the player and, in high detail, seen scenery, each map hex drawn at
+pixel `(449 - 2c, 8 + 2r)`. **H** and **L** set high and low detail (the saved
+display flag) and the switch toggles it; **S** or Scanner turns on the motion
+sensor, which needs a Motion Sensor (PID 59) with charges and adds every
+living, visible critter; Escape, Tab, **A** or Cancel close it, and **F10**,
+**Ctrl+Q** or **Alt+X** ask to quit. Objects become
+seen as the player moves (the visited-hex window around each step), and saving
+records the seen state first; the Pip-Boy's automap page draws the stored
+raster.
+
+`--debug` (or **F9** during a run) attaches the vault-debug inspector to the
+interactive world: every GVAR, MVAR and LVAR is watched after each update, the
+live trace records every script instruction, and an overlay on the right of
+the map view shows the newest changes (also logged at debug level, target
+`vault_debug`).
 
 ## Map preview
 
@@ -938,8 +973,10 @@ Where SPEC-009 leaves details open, this engine makes these choices:
   identifiers.
 - Explosion attribution and explosive-drop noticing are host entry points
   (`attribute_explosion`, `notice_explosive_drop`). Nothing calls them yet:
-  SPEC-007's weapon splash adds no victims, and scripted explosions are
-  presentation requests.
+  SPEC-007's weapon splash adds no victims, and SPEC-013 §3.10 explosions
+  (timed and scripted) damage only the center critter and credit their source
+  themselves. No approved spec names the explosion art, so an animated
+  explosion stays in progress until the next world update.
 - `float_msg` texts count as floating text for taunt suppression, with the same
   default lifetime and 200-pixel wrap.
 - Fixture H lists R2's rating as 22. By the §3.4 rule it is `max(2, 20) + 0 = 20`.

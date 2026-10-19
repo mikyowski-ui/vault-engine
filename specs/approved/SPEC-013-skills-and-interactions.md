@@ -53,6 +53,10 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 | Poison and radiation | Critter state module and timed queue |
 | Elevators, ladders, stairs | Elevator module, action scheduler and map-transition request |
 
+### Revision history
+
+- **R1-rev2 (2026-10-19).** Section 3.10 was rewritten. Explosion damage is center-only, matching SPEC-007 §3.7. Scenery and other blockers are affected only through radius-3 `damage_p_proc` notification, replacing the earlier "center-hex scenery" wording. The section now gives the detonation order, the retry rule for timed explosives, and the servicing and no-retry rule for scripted explosions.
+
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
 ### 2.1 Numeric Conventions
@@ -383,9 +387,22 @@ Moves to and from a party member always succeed with no draws and never award ex
 - Type 11 first displays `misc.msg` 4000, then detonates with animation. Type 8 detonates with animation and no message.
 - The center hex is the hex and elevation of the explosive's outermost holder, following nested containers, or the explosive's own hex when nobody holds it.
 - Damage range is 30-50 for PIDs 51 and 206, 40-80 otherwise. For the critter blocking the center hex, if it is a living critter: damage `v = D(min, max) - explosion DT`; if v is positive subtract `trunc(v * explosion DR / 100)`; clamp at 0. Knockback is `trunc(v / 10)` for a non-multihex victim.
-- The extra-victim enumeration shared with SPEC-007 §3.7 has its radius setup disabled in R1 and returns no victims, so a timed explosion damages only the center-hex critter. The six adjacent hexes receive explosion art only. Scenery on the center hex receives the scenery-explosion effect. `[Must-match]`
+- **Damage covers the center target only.** The splash-victim enumeration is shared with SPEC-007 §3.7 and has its radius setup disabled in R1, so it returns no victims and makes no draws. A timed or scripted explosion therefore damages only the critter blocking the center hex. A critter on any other hex, including the six adjacent ones, takes nothing. The six adjacent hexes receive explosion art only. This is the same rule as SPEC-007 §3.7, which states it for every explosion. `[Must-match]`
+- **Scenery and other blockers.** The engine itself never damages, destroys, opens or moves scenery, walls, doors, rocks or items in an explosion. Instead it notifies object scripts within a radius, after the center explosion art has finished playing, or immediately for an unanimated detonation. `[Must-match]`
+  1. Collect, in script-list order, every item or scenery object script that has a `damage_p_proc` (procedure index 14) and whose owner is on the explosion's elevation within hex distance 3 of the center hex. Then collect every spatial script that has `damage_p_proc` and whose own hex is on that elevation within distance 3. A script whose program is not loaded yet first runs its `start` procedure (index 1), so that its procedures are known.
+  2. Spatial-trigger checks are disabled while collecting. Then each collected script's `damage_p_proc` runs once, in collection order.
+  3. Any visible effect, such as a door blown open or a rock removed, is whatever that procedure does. An object without such a script is unaffected. A critter's own script is not notified by this step.
+- **Order.** Damage values are computed when the explosion starts: one D(min, max) draw for the center critter, if there is one. For an animated detonation:
+  1. Play `whn1xxx1` and the center art, together with any victim reaction.
+  2. Play the six adjacent arts.
+  3. Notify the scenery scripts.
+  4. Remove the art objects.
+  5. Apply the damage and the attribution described below.
+
+  An unanimated detonation kills any critter whose computed damage is lethal at once, then applies damage, then notifies the scenery scripts. `[Must-match]`
 - The player is the credited attacker. A critter killed by the blast awards its kill experience to the player. A surviving victim records the player as its last attacker, and the first such victim requests combat against the player if combat is not active.
-- If another animated explosion is in progress, the explosive is re-queued as type 8 after 50 ticks and not destroyed, and message 4000 is not repeated. Otherwise the explosive is destroyed.
+- **Retry.** Only one animated explosion can be in progress. The in-progress state starts when an animated explosion registers its animation and ends after its damage step. A timed explosive (type 8 or 11) that would detonate during another animated explosion is re-queued as type 8 after 50 ticks (5 game seconds) and not destroyed. Because type 8 is re-queued, message 4000 is not repeated. There is no retry limit: each retry is checked again in the same way. Otherwise the explosive is destroyed, even when the explosion could not be set up for lack of memory or animation slots; in that case nothing explodes. `[Must-match]`
+- **Scripted explosions.** The `explosion` opcode (SPEC-005) records one pending explosion request: hex, elevation, minimum and maximum damage. A second request before the next request pass overwrites the first. Out of combat, the request pass detonates it with animation and **no credited source**: no kill experience, no last-attacker change and no combat request. In combat the request is discarded by the combat request pass (section 3.16, step 5). A scripted request that finds another animated explosion in progress is dropped, with no retry. `[Must-match]` `[May-improve]`: retry a refused scripted explosion on the next request pass instead of dropping it.
 
 **Map exit.** The map-exit handlers for types 8 and 11 detonate immediately without animation and without message 4000, on the map being left. An armed explosive carried by the player therefore detonates at the player's hex as the player leaves. `[Must-match]`
 
@@ -941,4 +958,4 @@ Stack of 25. Start value 1. Keys `3`, `7` give 37; Enter plays `iisxxxx1` becaus
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 22 plain-word warnings were reviewed and are benign: this spec's own formula and UI words ("value", "level", "draw", "maximum", "position", "size", "current", "trunc", "slot", "count", "counter", "attempt"). The public opcode names `sfx_build_open_name` and `sfx_build_char_name` appear only as naming-rule references. The fenced blocks hold no code; fixtures are tables. Cross-spec note: SPEC-007 §3.7 says the weapon-splash omission "does not describe the separate scripted-explosion action path". In R1 that path calls the same disabled victim enumeration, so section 3.10 records that a timed or scripted explosion damages only the center-hex critter. Tag count, excluding the two tag definitions: 87 `[Must-match]`, 33 `[May-improve]`.
+Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 23 plain-word warnings were reviewed and are benign: this spec's own formula and UI words ("value", "level", "draw", "maximum", "position", "size", "current", "trunc", "slot", "count", "counter", "attempt"). The public opcode names `sfx_build_open_name` and `sfx_build_char_name` appear only as naming-rule references. The fenced blocks hold no code; fixtures are tables. Cross-spec note (resolved): SPEC-007 §3.7 now states the same rule as section 3.10. Every explosion, whether weapon, grenade, timed or scripted, uses the one disabled victim enumeration, so in R1 only the center target takes damage. Retaliation and onlooker wording now matches the single rule in SPEC-007 §3.6. The added warning "start" is the public SSL procedure name start, used in section 3.10. Tag count, excluding the two tag definitions: 91 `[Must-match]`, 34 `[May-improve]`.

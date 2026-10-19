@@ -1621,9 +1621,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 integer(if op == 0x8118 { month } else { day as i32 + 1 })
             }
+            // SPEC-013 §3.10: one pending request, serviced by the request
+            // pass; a second request before that pass overwrites the first.
             0x811a => {
-                if call.int(2) != -1 {
-                    self.world.emit(WorldEffect::Explosion {
+                if call.int(2) == -1 {
+                    self.world.diagnostic("explosion: hex -1");
+                } else {
+                    self.world.pending_explosion = Some(crate::world::ExplosionRequest {
                         hex: call.int(2),
                         elevation: call.int(1),
                         min: if call.int(0) == 0 { 0 } else { 1 },

@@ -588,3 +588,46 @@ fn spec008_timed_event_with_a_missing_owner_restores_without_one() {
         .collect();
     assert_eq!(restored, [(now + 600, 0)]);
 }
+
+#[test]
+fn spec014_seen_state_marks_a_window_around_visited_hexes() {
+    // SPEC-014 §3.33: a visited hex at the start of its byte (hex 20000,
+    // byte 2500) marks bytes 2500 + 25k + d for k -16..=15, d -2..=2 on the
+    // player's elevation; the set is then cleared.
+    let mut world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+    let player = world.player;
+    world.move_object(player, 20000, 0, false).unwrap();
+    let place = |world: &mut WorldState, hex: i32, elevation: u8| {
+        let prototype =
+            Arc::new(vault_formats::Prototype::parse(&fixture::world::prototype(3, 0)).unwrap());
+        world.spawn(prototype, hex, elevation).unwrap()
+    };
+    let inside = [
+        place(&mut world, 20000 + 16, 0),
+        place(&mut world, 20000 + 15 * 200, 0),
+        place(&mut world, 20000 - 16 * 200, 0),
+    ];
+    let outside = [
+        place(&mut world, 20000 + 24, 0),
+        place(&mut world, 20000 + 16 * 200, 0),
+        place(&mut world, 20000 - 17 * 200, 0),
+        place(&mut world, 20000, 1),
+    ];
+    assert!(world.visited.iter().any(|byte| *byte != 0));
+    world.process_seen();
+    let seen = |world: &WorldState, object| {
+        world
+            .get(object)
+            .unwrap()
+            .raw
+            .flags
+            .contains(BasicFlags::SEEN)
+    };
+    assert!(inside.iter().all(|object| seen(&world, *object)));
+    assert!(outside.iter().all(|object| !seen(&world, *object)));
+    assert!(world.visited.iter().all(|byte| *byte == 0));
+    // A capture processes first, so the flags reach the raster.
+    world.mark_visited(39999);
+    world.process_seen();
+    assert!(world.visited.iter().all(|byte| *byte == 0));
+}

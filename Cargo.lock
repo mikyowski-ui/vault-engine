@@ -2483,6 +2483,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vault-core",
+ "vault-debug",
  "vault-formats",
  "vault-guidance",
  "vault-render",

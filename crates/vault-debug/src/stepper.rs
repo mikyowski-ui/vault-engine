@@ -81,27 +81,9 @@ impl Stepper {
     /// sections) and record it. A VM fault is recorded as the outcome rather
     /// than returned, so the trace keeps the faulting instruction.
     pub fn step(&mut self, vm: &mut Vm, host: &mut impl VmHost) -> TraceEntry {
-        let pc = vm.pc;
-        let instruction = decode_next(vm).ok();
-        let status_before = vm.status.0;
-        let before = Fingerprint::of(vm);
-        let outcome = match vm.run(host, 1) {
-            Ok(outcome) => StepOutcome::Ran(outcome),
-            Err(error) => StepOutcome::Fault(error),
-        };
-        let entry = TraceEntry {
-            seq: self.trace.pushed(),
-            vm: vm.id,
-            pc,
-            instruction,
-            next_pc: vm.pc,
-            executed: Fingerprint::of(vm) != before,
-            value_depth: vm.value_stack.byte_len() / 6,
-            return_depth: vm.return_stack.byte_len() / 6,
-            status_before,
-            status_after: vm.status.0,
-            outcome,
-        };
+        let pending = PendingStep::of(vm);
+        let result = vm.run(host, 1);
+        let entry = pending.finish(vm, result, self.trace.pushed());
         self.trace.push(entry.clone());
         entry
     }
@@ -149,8 +131,51 @@ impl Stepper {
     }
 }
 
+/// What a trace entry needs from before its step ran.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingStep {
+    pc: u32,
+    instruction: Option<Instruction>,
+    status_before: u16,
+    before: Fingerprint,
+}
+impl PendingStep {
+    pub(crate) fn of(vm: &Vm) -> Self {
+        Self {
+            pc: vm.pc,
+            instruction: decode_next(vm).ok(),
+            status_before: vm.status.0,
+            before: Fingerprint::of(vm),
+        }
+    }
+    /// The entry for the step that has now run.
+    pub(crate) fn finish(
+        self,
+        vm: &Vm,
+        result: Result<RunOutcome, vault_vm::VmError>,
+        seq: u64,
+    ) -> TraceEntry {
+        TraceEntry {
+            seq,
+            vm: vm.id,
+            pc: self.pc,
+            instruction: self.instruction,
+            next_pc: vm.pc,
+            executed: Fingerprint::of(vm) != self.before,
+            value_depth: vm.value_stack.byte_len() / 6,
+            return_depth: vm.return_stack.byte_len() / 6,
+            status_before: self.status_before,
+            status_after: vm.status.0,
+            outcome: match result {
+                Ok(outcome) => StepOutcome::Ran(outcome),
+                Err(error) => StepOutcome::Fault(error),
+            },
+        }
+    }
+}
+
 /// Everything a step can change, compared to tell whether it executed.
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     pc: u32,
     status: u16,

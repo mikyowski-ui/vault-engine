@@ -21,6 +21,7 @@ publish = false
 
 [workspace.dependencies]
 vault-core = { path = "crates/vault-core" }
+vault-debug = { path = "crates/vault-debug" }
 vault-formats = { path = "crates/vault-formats" }
 vault-guidance = { path = "crates/vault-guidance" }
 vault-render = { path = "crates/vault-render" }

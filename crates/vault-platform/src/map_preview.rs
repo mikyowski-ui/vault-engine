@@ -28,8 +28,12 @@ mod automap;
 mod barter;
 mod character;
 mod counter;
+mod debug;
+mod dialog;
 mod elevator;
 mod fade;
+pub(crate) use fade::FADE_MS;
+mod help;
 mod hud;
 mod inventory;
 mod loot;
@@ -72,6 +76,8 @@ pub(crate) enum Screen {
     SaveLoad(Box<saveload::SaveLoadScreen>),
     /// The automap overlay.
     Automap(automap::AutomapScreen),
+    /// The F1 help screen.
+    Help(Box<help::HelpScreen>),
 }
 
 /// Decoded ACM samples by VFS path; a failing path is reported once.
@@ -192,8 +198,8 @@ pub struct MapPreview {
     pub endgame: Option<WorldEffect>,
     /// A slot load succeeded (the main menu's load screen reports it).
     pub loaded: bool,
-    /// A save or load failure's Done box over the current screen.
-    notice: Option<saveload::Notice>,
+    /// SPEC-014 §3.13 a dialog box over the current screen.
+    dialog: Option<dialog::Dialog>,
     /// SPEC-014 §3.26-3.29 pointer, hover, action menu and edge scrolling.
     pointer: pointer::PointerState,
     /// The shell clock at the last tick, in milliseconds.
@@ -205,6 +211,8 @@ pub struct MapPreview {
     fades: fade::Fades,
     /// The startup movies fade back to the game palette when they end.
     startup_fade: bool,
+    /// The vault-debug inspector and its overlay, when on.
+    debug: Option<debug::DebugOverlay>,
 }
 struct MapSprites {
     bindings: BTreeMap<(Category, u32, u8), Arc<FrmArchive>>,
@@ -379,12 +387,13 @@ impl MapPreview {
             quit_requested: false,
             endgame: None,
             loaded: false,
-            notice: None,
+            dialog: None,
             pointer: Default::default(),
             clock: 0,
             frame: None,
             fades: Default::default(),
             startup_fade: false,
+            debug: None,
         })
     }
     /// Whether the save/load screen is open (the main menu's load stage).
@@ -445,6 +454,7 @@ impl MapPreview {
                 Screen::Loot(_) => self.loot_release(point),
                 Screen::Inventory(_) => self.inventory_release(point),
                 Screen::Barter(_) => self.barter_release(point),
+                Screen::Automap(_) => self.automap_release(point),
                 _ => false,
             };
         if let Some(cue) = self.pressed.take() {
@@ -582,6 +592,8 @@ impl MapPreview {
                     duration,
                     from_black,
                 } => self.fades.push(out, duration, from_black),
+                WorldEffect::RollHitPoints => self.hud.hp.animate = true,
+                WorldEffect::RollArmorClass => self.hud.ac.animate = true,
                 WorldEffect::WorldMap => self.open_world_map(),
                 WorldEffect::TownMap => self.open_town_map(),
                 // Look and examine already printed their text.
@@ -620,8 +632,10 @@ impl MapPreview {
             Screen::Barter(_) => self.barter_image(),
             Screen::Movie(_) => self.movie_image().ok_or_else(|| "no movie".into()),
             Screen::Automap(_) => self.automap_image(),
+            Screen::Help(_) => self.help_image(),
         }?;
-        self.draw_notice(&mut image);
+        self.draw_dialog(&mut image);
+        self.draw_debug(&mut image);
         self.frame = Some(image.clone());
         self.draw_cursor(&mut image);
         Ok(image)
@@ -739,7 +753,10 @@ impl MapPreview {
             Screen::SaveLoad(_) => {
                 return "Vault — save/load — Enter commits; Escape cancels".into();
             }
-            Screen::Automap(_) => return "Vault — automap — any key or a click closes".into(),
+            Screen::Automap(_) => {
+                return "Vault — automap — Tab, Escape or A closes; H/L detail; S scanner".into();
+            }
+            Screen::Help(_) => return "Vault — help — any key or a click returns".into(),
             Screen::Map => {}
         }
         format!(
@@ -751,7 +768,19 @@ impl MapPreview {
         )
     }
     pub fn step(&mut self, key: KeyCode) -> bool {
-        if self.movie_key() || self.notice_key(key) {
+        if self.movie_key() || self.dialog_key(key) {
+            return true;
+        }
+        // F9 toggles the vault-debug inspector.
+        if key == KeyCode::F9 {
+            let on = !self.debug_enabled();
+            self.set_debug(on);
+            return true;
+        }
+        // SPEC-014 §3.28-3.29: keyboard input is discarded while the action
+        // menu is open or edge scrolling is under way, and §3.21 while a
+        // counter rolls.
+        if self.pointer_swallows_keys() || self.counters_rolling() {
             return true;
         }
         if matches!(self.screen, Screen::Barter(_)) {
@@ -810,8 +839,15 @@ impl MapPreview {
             Screen::Loot(_) => return self.loot_key(key),
             Screen::Options(_) => return self.options_key(key),
             Screen::SaveLoad(_) => return self.saveload_key(key),
-            Screen::Automap(_) => return self.close_automap(),
+            Screen::Automap(_) => return self.automap_key(key),
+            Screen::Help(_) => return self.close_help(),
             Screen::Barter(_) | Screen::Movie(_) | Screen::Map => {}
+        }
+        // SPEC-014 §3.2: F1 shows the help screen.
+        if key == KeyCode::F1 && matches!(self.screen, Screen::Map) && !self.host.world.ui_disabled
+        {
+            self.open_help();
+            return true;
         }
         // SPEC-014 §3.19 game-loop hotkeys (Escape opens the options).
         if self.game_hotkey(key) {
@@ -849,11 +885,20 @@ impl MapPreview {
             self.interact(action);
             return true;
         }
+        // SPEC-014 §3.29: an arrow key scrolls one step through the same
+        // 33 ms gate and blocked test as the edges.
+        let arrow = match key {
+            KeyCode::ArrowUp => Some(1),
+            KeyCode::ArrowRight => Some(3),
+            KeyCode::ArrowDown => Some(5),
+            KeyCode::ArrowLeft => Some(7),
+            _ => None,
+        };
+        if let Some(direction) = arrow {
+            self.scroll_step(direction);
+            return true;
+        }
         match key {
-            KeyCode::ArrowLeft => self.view.pan(32, 0),
-            KeyCode::ArrowRight => self.view.pan(-32, 0),
-            KeyCode::ArrowUp => self.view.pan(0, 24),
-            KeyCode::ArrowDown => self.view.pan(0, -24),
             KeyCode::KeyR => self.view.roofs = !self.view.roofs,
             KeyCode::PageUp => self.view.elevation = (self.view.elevation + 1).min(2),
             KeyCode::PageDown => self.view.elevation = self.view.elevation.saturating_sub(1),
@@ -886,7 +931,11 @@ impl MapPreview {
         self.drain_effects();
     }
     pub fn click(&mut self, point: [i32; 2], right: bool) -> bool {
-        if self.movie_press() || self.notice_click(point) {
+        if self.movie_press() || self.dialog_click(point) {
+            return true;
+        }
+        // SPEC-014 §3.21: game input waits while a counter rolls.
+        if self.counters_rolling() {
             return true;
         }
         if matches!(self.screen, Screen::Barter(_)) {
@@ -908,14 +957,15 @@ impl MapPreview {
             Screen::World(_) => return self.world_click(point),
             Screen::Town(_) => return self.town_click(point),
             Screen::PipBoy(_) => return self.pipboy_click(point),
-            Screen::Inventory(_) => return self.inventory_click(point),
+            Screen::Inventory(_) => return self.inventory_click(point, right),
             Screen::Character(_) => return self.character_click(point),
             Screen::Skilldex(_) => return self.skilldex_click(point),
             Screen::Elevator(_) => return self.elevator_click(point),
             Screen::Loot(_) => return self.loot_click(point, right),
             Screen::Options(_) => return self.options_click(point),
             Screen::SaveLoad(_) => return self.saveload_click(point),
-            Screen::Automap(_) => return self.close_automap(),
+            Screen::Automap(_) => return self.automap_click(point),
+            Screen::Help(_) => return self.close_help(),
             Screen::Barter(_) | Screen::Movie(_) | Screen::Map => {}
         }
         // SPEC-014 §3.19: the interface bar, then the map area by cursor
@@ -952,6 +1002,8 @@ impl MapPreview {
         // and clock wait while travel or rest advances time. An open action
         // menu pauses background map processing.
         let screen = match &self.screen {
+            // A counter roll or an open action menu pauses the world.
+            _ if self.counters_rolling() => Ok(false),
             Screen::Map if self.pointer.menu.is_some() => Ok(false),
             Screen::Map => self.host.tick(now),
             Screen::World(_) | Screen::Town(_) => self
@@ -963,13 +1015,15 @@ impl MapPreview {
             // Movies and the inventory, character, and barter screens are
             // modal: the world waits for them.
             Screen::Movie(_) => Ok(self.movie_tick(now)),
-            Screen::Inventory(_) | Screen::Character(_) | Screen::Barter(_) => Ok(false),
+            Screen::Inventory(_) => Ok(self.inventory_tick()),
+            Screen::Character(_) | Screen::Barter(_) => Ok(false),
             // SPEC-013/014 windows suspend the world.
             Screen::Skilldex(_)
             | Screen::Elevator(_)
             | Screen::Loot(_)
             | Screen::Options(_)
-            | Screen::Automap(_) => Ok(false),
+            | Screen::Automap(_)
+            | Screen::Help(_) => Ok(false),
             Screen::SaveLoad(_) => {
                 self.saveload_frame();
                 Ok(false)
@@ -1001,6 +1055,8 @@ impl MapPreview {
             .fades
             .tick(now, game.as_deref().unwrap_or(&self.palette));
         changed |= self.pointer_tick();
+        changed |= self.counters_tick(now);
+        changed |= self.debug_tick();
         Ok(changed)
     }
     /// The pointer moved over the frame; returns the map hover once per hex
@@ -1365,18 +1421,23 @@ mod tests {
         let item = preview.selected.unwrap();
         let player = preview.host.world.player;
         assert_eq!(preview.host.world.get(item).unwrap().owner, Some(player));
-        // Inventory: the entry lists; non-weapons cannot reload; wielding
-        // puts the item in the active hand.
+        // Inventory (SPEC-014 §3.34): the item lifts from the first list
+        // row (124, 35) and drops into the right hand (325, 286); dropped
+        // back on the list it is unequipped; the right hand takes it again.
         assert!(preview.step(KeyCode::KeyI));
         assert!(matches!(preview.screen, Screen::Inventory(_)));
         assert_eq!(preview.image().unwrap().height(), 480);
-        assert!(preview.click([30, 62], false), "first row");
-        assert!(preview.click([450, 125], false), "Reload");
-        assert_eq!(preview.status, b"That item is not a weapon");
-        assert!(preview.click([450, 95], false), "Wield");
-        let flags = preview.host.world.get(item).unwrap().raw.flags;
-        assert!(flags.contains(BasicFlags::RIGHT_HAND) || flags.contains(BasicFlags::LEFT_HAND));
+        assert!(preview.click([134, 45], false), "first row");
+        assert!(preview.release(Some([340, 300]), false), "right hand");
+        let flags = |preview: &MapPreview| preview.host.world.get(item).unwrap().raw.flags;
+        assert!(flags(&preview).contains(BasicFlags::RIGHT_HAND));
         preview.image().unwrap();
+        assert!(preview.click([340, 300], false));
+        assert!(preview.release(Some([150, 100]), false));
+        assert!(!flags(&preview).contains(BasicFlags::RIGHT_HAND));
+        assert!(preview.click([134, 45], false));
+        assert!(preview.release(Some([340, 300]), false));
+        assert!(flags(&preview).contains(BasicFlags::RIGHT_HAND));
         assert!(preview.step(KeyCode::Escape));
         assert!(matches!(preview.screen, Screen::Map));
         // Character: spending needs points; Cancel restores the sheet.

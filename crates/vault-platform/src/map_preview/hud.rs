@@ -22,6 +22,82 @@ use vault_formats::{
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
+/// §3.21 a counter's running drum roll: its frames with their colors, the
+/// frame shown, the wait after each frame, and when the next one is due.
+pub(crate) struct Roll {
+    frames: Vec<([bar::Glyph; 4], bar::Band)>,
+    index: usize,
+    delay: u64,
+    next: u64,
+}
+/// §3.21 one counter: the remembered value (none before the first draw,
+/// which is unanimated), whether its next change rolls, and the roll.
+#[derive(Default)]
+pub(crate) struct Counter {
+    shown: Option<i32>,
+    band: Option<bar::Band>,
+    pub animate: bool,
+    pub roll: Option<Roll>,
+}
+impl Counter {
+    /// Advance to `now` toward `value`; returns whether the drawing changed.
+    fn tick(
+        &mut self,
+        now: u64,
+        value: i32,
+        segments: impl Fn(i32, bar::Band) -> Vec<(i32, i32, bar::Band)>,
+    ) -> bool {
+        if let Some(roll) = &mut self.roll {
+            let mut changed = false;
+            while now >= roll.next {
+                if roll.index + 1 >= roll.frames.len() {
+                    // The roll ends on its last frame's wait.
+                    let band = roll.frames.last().map(|(_, band)| *band);
+                    self.roll = None;
+                    self.band = band;
+                    return true;
+                }
+                roll.index += 1;
+                roll.next += roll.delay;
+                changed = true;
+            }
+            return changed;
+        }
+        if self.shown == Some(value) {
+            self.animate = false;
+            return false;
+        }
+        let animate = std::mem::take(&mut self.animate);
+        let previous = self.shown.replace(value);
+        if previous.is_none() {
+            // The first draw: what is drawn does not change.
+            return false;
+        }
+        match previous {
+            Some(old) if animate => {
+                let first = self.band.unwrap_or(bar::Band::White);
+                let frames = bar::roll(old, &segments(old, first));
+                let delay = bar::roll_delay(old, value);
+                self.roll = Some(Roll {
+                    frames,
+                    index: 0,
+                    delay,
+                    next: now + delay,
+                });
+            }
+            _ => self.band = None,
+        }
+        true
+    }
+    /// The glyphs and color drawn now.
+    fn glyphs(&self, value: i32, band: bar::Band) -> ([bar::Glyph; 4], bar::Band) {
+        match &self.roll {
+            Some(roll) => roll.frames[roll.index],
+            None => (bar::counter_glyphs(self.shown.unwrap_or(value)), band),
+        }
+    }
+}
+
 /// Interface state that lives with the map view.
 pub(crate) struct Hud {
     pub monitor: bar::Monitor,
@@ -33,6 +109,9 @@ pub(crate) struct Hud {
     /// The player has had a turn in this combat: until then the pips keep
     /// their empty state (§3.22).
     turn_seen: bool,
+    /// §3.21 the HP and AC counters.
+    pub hp: Counter,
+    pub ac: Counter,
 }
 impl Default for Hud {
     fn default() -> Self {
@@ -42,6 +121,8 @@ impl Default for Hud {
             shown_status: Vec::new(),
             modifiers: [false; 3],
             turn_seen: false,
+            hp: Counter::default(),
+            ac: Counter::default(),
         }
     }
 }
@@ -194,16 +275,21 @@ impl MapPreview {
             let y = by + bar::MONITOR.y + 10 * k as i32;
             painter.text(image, 101, bar::MONITOR_COLOR, line, [x, y], bar::MONITOR.w);
         }
-        // HP and AC counters.
+        // HP and AC counters: a running roll's frame, else the remembered
+        // value (§3.21).
         let player = self.host.world.player;
         let hp = self.host.world.hit_points(player).unwrap_or(0);
         let max = self.host.world.player_stat(7);
         let ac = self.host.world.player_stat(9);
-        for (value, origin, band) in [
-            (hp, bar::HP_COUNTER, bar::hp_band(hp, max)),
-            (ac, bar::AC_COUNTER, bar::Band::White),
+        let shown_hp = self.hud.hp.shown.unwrap_or(hp);
+        for ((glyphs, band), origin) in [
+            (
+                self.hud.hp.glyphs(hp, bar::hp_band(shown_hp, max)),
+                bar::HP_COUNTER,
+            ),
+            (self.hud.ac.glyphs(ac, bar::Band::White), bar::AC_COUNTER),
         ] {
-            for (cell, glyph) in bar::COUNTER_CELLS.iter().zip(bar::counter_glyphs(value)) {
+            for (cell, glyph) in bar::COUNTER_CELLS.iter().zip(glyphs) {
                 painter.blit_region(
                     image,
                     "numbers.frm",
@@ -242,6 +328,27 @@ impl MapPreview {
             };
             painter.blit(image, light, 0, [bx + origin[0], by + origin[1]]);
         }
+    }
+    /// §3.21 advance the counters: an unrequested change is drawn at once,
+    /// a requested one rolls one unit at a time. Returns whether the bar
+    /// changed.
+    pub(crate) fn counters_tick(&mut self, now: u64) -> bool {
+        let player = self.host.world.player;
+        let hp = self.host.world.hit_points(player).unwrap_or(0);
+        let max = self.host.world.player_stat(7);
+        let ac = self.host.world.player_stat(9);
+        let hp_changed = self.hud.hp.tick(now, hp, |old, first| {
+            bar::roll_segments(old, hp, max, first)
+        });
+        let ac_changed = self
+            .hud
+            .ac
+            .tick(now, ac, |old, _| vec![(old, ac, bar::Band::White)]);
+        hp_changed || ac_changed
+    }
+    /// A counter roll blocks the caller: the world and game input wait.
+    pub(crate) fn counters_rolling(&self) -> bool {
+        self.hud.hp.roll.is_some() || self.hud.ac.roll.is_some()
     }
     /// The active hand's item, if any.
     pub(crate) fn active_item(&self) -> Option<ObjectRef> {
@@ -410,6 +517,15 @@ impl MapPreview {
     /// §3.23 left click on the item slot: a weapon sets the crosshair (and
     /// starts combat), a non-weapon the use crosshair.
     fn use_item_slot(&mut self) {
+        // SPEC-014 §3.33: using a Motion Sensor from the slot opens the
+        // automap with the scanner on.
+        if let Some(item) = self.active_item()
+            && self.host.world.get(item).map(|o| o.raw.pid)
+                == Some(vault_core::ui::automap::MOTION_SENSOR)
+        {
+            self.use_motion_sensor(item);
+            return;
+        }
         let weapon = self.active_item().is_none_or(|item| {
             self.host
                 .world
@@ -429,9 +545,15 @@ impl MapPreview {
             Action::Character => self.open_character(),
             Action::PipBoy | Action::AlarmClock => {
                 if self.host.world.combat {
+                    // §3.13: a title-only large box at (192, 116), key 32328.
                     self.play_effect(vault_core::ui::ERROR_SOUND.as_bytes(), None);
-                    let text = self.message("misc.msg", 7);
-                    self.notify(text);
+                    let title = self.message("misc.msg", 7);
+                    self.show_dialog(super::dialog::Dialog::done(
+                        [192, 116],
+                        title,
+                        Vec::new(),
+                        vault_core::ui::ColorKey::ERROR,
+                    ));
                 } else {
                     self.open_pipboy();
                 }
@@ -452,7 +574,7 @@ impl MapPreview {
             }
             Action::CycleCursor => self.cycle_cursor(),
             Action::CycleItemMode => {}
-            Action::Automap => self.open_automap(),
+            Action::Automap => self.open_automap(false),
             Action::StartCombat => {
                 if !self.host.world.combat {
                     let player = self.host.world.player;
@@ -558,8 +680,24 @@ impl MapPreview {
         let player = self.host.world.player;
         match self.hud.mode {
             Mode::Movement => {
+                // With Ctrl in combat the current attack's AP cost is kept
+                // out of the route's budget.
+                let reserve = if self.host.world.combat && self.hud.modifiers[1] {
+                    self.host
+                        .world
+                        .attack_profile(
+                            player,
+                            player,
+                            self.attack_mode(),
+                            vault_core::critical::location::UNCALLED,
+                            false,
+                        )
+                        .map_or(0, |attack| attack.ap_cost())
+                } else {
+                    0
+                };
                 if let Some(hex) = self.view.grid.pick_hex(point) {
-                    match self.host.walk_to(player, hex) {
+                    match self.host.walk_to_reserving(player, hex, reserve) {
                         Ok(true) => {}
                         Ok(false) => self.status = b"You cannot get there".to_vec(),
                         Err(error) => self.status = error.to_string().into_bytes(),
@@ -639,11 +777,24 @@ impl MapPreview {
                 }
             }
             Mode::UseCrosshair => {
-                if let (Some(target), Some(item)) = (object, self.active_item()) {
-                    self.selected = Some(target);
-                    self.interact(ObjectAction::UseObject(item));
-                    self.hud.mode = Mode::Movement;
+                // §3.27: the mode returns to movement in every case; in
+                // combat the use needs and spends 2 AP, and without them
+                // nothing happens and nothing is shown.
+                self.hud.mode = Mode::Movement;
+                let (Some(target), Some(item)) = (object, self.active_item()) else {
+                    return;
+                };
+                if self.host.world.combat {
+                    let Some(state) = self.host.world.critter_state_mut(player) else {
+                        return;
+                    };
+                    if state.ap < 2 {
+                        return;
+                    }
+                    state.ap -= 2;
                 }
+                self.selected = Some(target);
+                self.interact(ObjectAction::UseObject(item));
             }
             Mode::Skill(index) => {
                 // SPEC-013 §3.1: no object returns to movement; an accepted

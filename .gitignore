@@ -2,4 +2,5 @@
 # Local game data must never be committed.
 /corpus/
 *.log
-SAVEDGAME/
+# Save slots written by local runs (they hold data from the local corpus).
+SAVEGAME/

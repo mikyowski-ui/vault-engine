@@ -9,8 +9,11 @@ use vault_formats::{
         InventoryEntry, MapFile, MapObject, MapScript, ObjectState, ScriptBlock, ScriptCategory,
         ScriptPrefix,
     },
-    pro::{MapFlags, PackedLocation, ScriptFlags},
+    pro::{BasicFlags, MapFlags, PackedLocation, ScriptFlags},
 };
+
+/// SPEC-014 §3.33 the visited set: 40000 hexes, 8 per byte.
+pub const VISITED_BYTES: usize = 5000;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Persistence {
@@ -195,6 +198,62 @@ impl WorldState {
         map.objects.total = map.objects.elevations.iter().map(Vec::len).sum();
         map
     }
+    /// SPEC-014 §3.33: the player entered `hex`.
+    pub fn mark_visited(&mut self, hex: i32) {
+        if let Ok(hex) = usize::try_from(hex)
+            && let Some(byte) = self.visited.get_mut(hex / 8)
+        {
+            *byte |= 1 << (hex % 8);
+        }
+    }
+    /// SPEC-014 §3.33 seen-state processing (when the automap opens, before
+    /// an automap-database write, and when the map's objects are saved):
+    /// around every nonzero visited byte b, the bytes `b + 25k + d` for k
+    /// -16 through 15 and d -2 through 2, within bytes 0 through 5000, are
+    /// marked; every object on a hex of a marked byte and on the player's
+    /// current elevation gets the seen flag for good. The visited set is
+    /// then cleared. Bytes run on across map rows, so d near a row's start
+    /// or end reaches the neighboring row.
+    pub fn process_seen(&mut self) {
+        if self.visited.iter().all(|byte| *byte == 0) {
+            return;
+        }
+        let mut marked = vec![false; VISITED_BYTES + 1];
+        for (byte, _) in self.visited.iter().enumerate().filter(|(_, b)| **b != 0) {
+            for k in -16..=15_i64 {
+                for d in -2..=2_i64 {
+                    let at = byte as i64 + 25 * k + d;
+                    if let Ok(at) = usize::try_from(at)
+                        && let Some(slot) = marked.get_mut(at)
+                    {
+                        *slot = true;
+                    }
+                }
+            }
+        }
+        let elevation = self
+            .get(self.player)
+            .map_or(self.elevation, |player| player.raw.elevation);
+        let seen: Vec<_> = self
+            .iter()
+            .filter(|(_, object)| {
+                object.owner.is_none()
+                    && object.raw.elevation == elevation
+                    && object
+                        .raw
+                        .hex
+                        .and_then(|hex| usize::try_from(hex).ok())
+                        .is_some_and(|hex| marked.get(hex / 8).copied().unwrap_or(false))
+            })
+            .map(|(reference, _)| reference)
+            .collect();
+        for reference in seen {
+            if let Some(object) = self.get_mut(reference) {
+                object.raw.flags.0 |= BasicFlags::SEEN.0;
+            }
+        }
+        self.visited.fill(0);
+    }
     /// The placed objects that automap extraction reads.
     fn automap_objects(&self) -> Vec<MapObject> {
         self.iter()
@@ -211,6 +270,7 @@ impl WorldState {
     /// for each elevation with tile data. Seen-object bookkeeping is taken
     /// from the objects' existing seen flags.
     pub fn capture_automap(&mut self) {
+        self.process_seen();
         let number = self.map.header.map_number;
         if !(0..automap::MAPS as i32).contains(&number) {
             return;
@@ -241,6 +301,8 @@ impl WorldState {
     /// Write the current map into the working saved-map set (and capture its
     /// automap); a map without a usable resource name is not persisted.
     pub fn persist_current_map(&mut self, include_party: bool) {
+        // The seen flags are saved with the objects.
+        self.process_seen();
         let Some(name) = self.current_map_name() else {
             return;
         };

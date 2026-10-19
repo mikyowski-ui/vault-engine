@@ -18,6 +18,8 @@ This document covers:
 - the in-game options menu, pause window, quit confirmation, preferences screen and generic dialog box;
 - the bottom interface bar: buttons, message monitor, HP/AC counters, AP pips, active item slot, indicator boxes and combat panel animation;
 - mouse cursor shapes and modes: movement hex, action pick, action menu, targeting crosshair, edge scrolling and busy cursors;
+- the in-game automap window and the Pip-Boy automap page;
+- the player inventory window's cursor modes and item dragging;
 - the endgame slideshow, ending movie and scrolling credits.
 
 The reference main menu has **no Options button**: its five buttons are Intro, New Game, Load Game, Credits and Exit. Options and Preferences are reached in game (section 3.17). `[Must-match]`
@@ -40,7 +42,7 @@ Relationship to other specifications: SPEC-001 owns palettes, FRM sprites and th
 | Sounds | A bare sound name such as `ib1p1xx1` means `sound/sfx/<name>.acm`, resolved per SPEC-010 |
 | Art | Art names are under `art/intrface/` unless a path is given; "list index" is the zero-based position in `art/intrface/intrface.lst` |
 | Frame | In modal UI loops, one iteration lasting at least `trunc(1000 / 24)` = 41 milliseconds |
-| Fade | A palette fade of about 700 milliseconds (section 3.2) |
+| Fade | A calibrated palette fade, nominally 700 milliseconds (section 3.2) |
 | Red button | `lilredup.frm` up / `lilreddn.frm` down, 15 by 16, sounds `ib1p1xx1` on press and `ib1lu1x1` on release |
 
 Named colors used throughout: key 18979 [62] label brown; 14723 [63] pressed-label brown; 992 [215] bright green; 32747 [57] selection yellow; 32328 [145] error orange; 21091 [60] amber; 21204 [85] grey-green; 32767 [220] white; 21140 [6] grey; 1313 [96] dark green; 15845 [80] dark olive; 0 [228] black. `[Must-match]`
@@ -58,7 +60,20 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 | Dialog boxes | Bitmap dialog module |
 | Interface bar, counters, item slot, combat panel | Interface module, display monitor, item and combat callers |
 | Cursors and action menu | Game-mouse module and low-level mouse repeat |
+| Palette fades | Game palette layer, color fade primitive, script fade opcodes and their callers |
+| Automap | Automap module, seen-state update, Pip-Boy map page |
+| Inventory dragging | Inventory module |
 | Endgame, credits | Endgame and credits modules, word wrapper |
+
+### Revision history
+
+- **R1-rev2 (2026-10-19).** Builder clarifications, as follows.
+  - HP/AC drum roll (section 3.21): exact step sequence, timing, color segments and the triggers that animate.
+  - Knocked-out player handling: game over only at the end of a main-loop pass, so a knockout during combat is recovered.
+  - Exact dialog-box art and size for the save/load error boxes and the in-combat Pip-Boy refusal (section 3.13).
+  - Palette fades: primitive, calibration caveat, and the list of in-game fade sites (section 3.2).
+  - Hover, hold-click action menu and edge-scroll corrections and additions (sections 3.27-3.29).
+  - New sections 3.33 Automap Window and 3.34 Player Inventory Window, which state that dragging is press-hold-release and has no two-click mode.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -144,9 +159,42 @@ In order: `[Must-match]` unless tagged otherwise.
 
 ### 3.2 Palette Fades
 
-At start the engine times one 60-step fade between identical palettes and sets the step count to `trunc(60 / (elapsed milliseconds / 700))`, with 46 milliseconds substituted for a zero measurement. Every later fade therefore lasts about 700 milliseconds. Step k of n sets each 6-bit level to `old - trunc((old - new) * k / n)`; the target palette is installed exactly at the end. Palette cycling (SPEC-001 §3.2) is suspended during a fade and restored afterward. `[Must-match]` for the duration and step formula. `[May-improve]`: fade over a fixed 700 milliseconds instead of calibrating.
+**Calibration.** At start the engine times one 60-step fade from the current palette to itself, as M milliseconds. It then sets the step count `n = trunc(60 / (M / 700))`, which is `trunc(42000 / M)`. A measurement above 42000 milliseconds gives n = 0, and every later fade is instant. `[Must-match]` The reference clock has about 10-millisecond resolution, so a fast machine can measure 0. The original division by zero then gives no usable step count, and R1 substitutes 46 milliseconds, which gives n = 913. That substitution is a recovered-source workaround, not established original behavior. `[May-improve]`: skip calibration and fade in a fixed 700 milliseconds, with as many steps as the display can show.
 
-Three fade targets exist: the game palette (`color.pal`), black (all levels 0) and "white" (all levels 63). The white target produces a full-screen white flash. `[Must-match]`
+**One fade.** `[Must-match]`
+
+1. Remember whether palette cycling (SPEC-001 §3.2) is enabled, then disable it.
+2. For k = 0 through n - 1, install a palette whose 6-bit levels are `old - trunc((old - new) * k / n)` (signed, truncating toward zero). Step 0 therefore installs the old palette unchanged.
+3. Install the target palette exactly.
+4. Re-enable cycling only if it was enabled before.
+
+- **Source palette.** "Old" is the palette the game last installed through its palette layer: by an earlier fade, an instant palette set, or a cycle update of entries 229-255. It is not read back from the display.
+- **Brightness.** Every installed step passes through the current brightness (gamma) table (SPEC-001 §3.1), which cannot change during a fade.
+- **Timing.** A fade has no timer: its length is n palette uploads. It lasts about 700 milliseconds only when each upload costs what it cost during calibration.
+- **Blocking.** A fade blocks completely. There is no input polling, animation, game-clock advance or background task during it. The one exception is a sound-streaming update at steps where `k mod 128 = 0`, made only while music or speech is enabled.
+
+**Targets.** A fade can target any loaded palette. Those used are: the game palette `color.pal`; black, all levels 0; "white", all levels 63, which shows as a full-screen white flash; the splash `.rix` palette; `art/intrface/death.pal`; and the endgame slide palettes. `[Must-match]`
+
+**In-game fades.** While a map is loaded, only the cases below change the palette. `[Must-match]`
+
+| Trigger | Fade | Afterwards |
+| --- | --- | --- |
+| First Aid or Doctor on an injured target (SPEC-013) | To black before the roll | Back to the game palette after healing and the map-update scripts. First Aid failure does not fade back (SPEC-013) |
+| Reading a skill book out of combat | To black | Game time advances, the map-update scripts run, then a fade back to the game palette and the book messages |
+| `gfade_out` / `gfade_in` with a nonzero operand (SPEC-005) | To black / to the loaded game palette, using the fade above | As the script decides; `gfade_in` does not reload `color.pal` |
+| Game movie with fade flag `0x01` (SPEC-012) | To black before playback | The display is set black after playback; with flag `0x02` `color.pal` is reloaded and faded in |
+| End of the game session (quit, death or knockout) | To white | The map is unloaded and the game reset (section 3.5) |
+| Help screen, F1 | No fade: black, draw `helpscrn.frm` (list index 297), install `art/intrface/helpscrn.pal`, wait for input, black, reinstall `color.pal`. Cycling is suspended meanwhile | |
+
+No palette fade occurs for these: map changes and exit grids, elevation changes, elevators, entering or leaving the world map or town map, resting and waiting, dialogue and talking heads, barter, inventory, loot, the character screen in game, options, preferences, the Pip-Boy, the automap, the Skilldex, or in-game save and load. Several of these suspend palette cycling while open. A map load freezes the view behind the busy cursor and redraws it when done.
+
+**Library fades.** The general-library `fadein` and `fadeout` (SPEC-005) are timed, not stepped:
+
+- Each pass computes the step from the milliseconds elapsed since the previous pass, and runs full background processing, including mouse and button input, between palette writes.
+- They do not suspend palette cycling, so entries 229-255 keep being written at full brightness during and after `fadeout`.
+- They do not update the game's remembered palette, so the next game fade starts from a stale source and can jump. `[Must-match]`
+
+`[May-improve]`: have library fades suspend cycling and update the remembered palette.
 
 ### 3.3 Main-Menu Window
 
@@ -191,16 +239,22 @@ The music restart also happens after a no-op choice (Quotes with the language fi
 
 The table is exact behavior. `[Must-match]` The language filter is read once per program run for Quotes. `[May-improve]`: read the setting when Quotes is requested.
 
-**End of a game session.** The game loop ends when a quit request is set, or when at the end of a main-loop pass the player carries the dead or knocked-out status; the latter also requests the death scene. Teardown fades to white, unloads the map and performs a full game reset (reloading `data/vault13.gam`). A quit confirmed in game, in the selection screen or in the editor therefore returns to the main menu, never to the desktop. `[Must-match]`
+**End of a game session.** The game loop ends when a quit request is set, or when the player carries the dead or knocked-out status at the end of a main-loop pass; the latter also requests the death scene. `[Must-match]`
+
+**Knocked-out player.** A knockout is game over only when it is still present at the end of a main-loop pass. Combat runs inside a single pass, so during combat the check is not made. `[Must-match]`
+
+- **During combat.** The player's turns are skipped while knocked out (SPEC-007 §3.3). The wake-up event queued at knockout, `10 * (35 - 3 * Endurance)` ticks, still runs, because each round adds 5 game seconds (50 ticks). It clears knockout, leaves the player knocked down and makes the player stand at a turn start (SPEC-007). Combat can also end while the player is still out. Normal combat cleanup then wakes a living prone player at once and removes the pending wake-up event, so the game continues. The exception is a combat ended by a scripted combat-ending actor: cleanup does not wake the player, the knockout survives, and the game ends with the death scene at the end of that pass. A loaded save ends combat without that cleanup and restores the saved status instead.
+- **Outside combat.** A knockout applied outside combat, for example by a script, ends the game at the end of the current main-loop pass. Its wake-up event never gets a chance to run.
+- Death ends the game the same way, through the same death scene. Neither path shows a separate "game over" dialog. Teardown fades to white, unloads the map and performs a full game reset (reloading `data/vault13.gam`). A quit confirmed in game, in the selection screen or in the editor therefore returns to the main menu, never to the desktop. `[Must-match]`
 
 **Death scene.** `[Must-match]`
 
-1. Show a black screen-sized window with `death.frm` (list index 309, 640 by 480); wait for mouse buttons to be released and flush input.
-2. Load `art/intrface/death.pal` and fade to it.
+1. Show a black screen-sized window with `death.frm` (list index 309, 640 by 480); wait for mouse buttons to be released and flush input. The end-of-session fade left the white palette installed, so the screen is solid white at this point.
+2. Load `art/intrface/death.pal` and fade to it, from white.
 3. Draw D(1, 4) and play `sound/speech/narrator/nar_<draw + 2>.acm`, one of `nar_3` through `nar_6`.
 4. Wait for a key or mouse event, or the end of the speech; if speech failed to start, wait 3000 milliseconds instead.
 5. Stop speech and wait for button release; if no input ended the wait, pause 500 milliseconds more.
-6. Fade to black, reload `color.pal`, restore the arrow cursor.
+6. Fade to black, then reload `color.pal` without a fade, so the screen stays black until the menu fades in. Restore the arrow cursor.
 
 ### 3.6 Attract Mode and Self-Run Demos
 
@@ -373,6 +427,15 @@ Size: a Yes/No or two-button box is always large. Otherwise large or medium as r
 
 - **Done box.** `donebox.frm` opaque at (97, 98); caption `dbox.msg` 100 in font 103, key 18979, at (132, 101); red button at (110, 102).
 - **Yes/No box.** One `donebox.frm` opaque at (37, 98) with caption 101 at (72, 101) and a red button at (50, 102). A second `donebox.frm` drawn transparently at (169, 98) with caption 102 at (204, 101) and a red button at (182, 102).
+- **Size selection detail.** When neither size is requested, the widest line is measured in the font current at the call, not in font 101. Text is then drawn in font 101, line height 10. Large boxes use 6 layout lines (`y0 = 27 + 30 - trunc((body lines + 1) * 10 / 2)`). Medium boxes use 5 (`y0 = 23 + 25 - trunc((body lines + 1) * 10 / 2)`). Both use a left margin of 29 when centering is disabled. A box is a modal window placed with its top-left at the given screen point. `[Must-match]`
+- **Instances.** These boxes resolve as follows. `[Must-match]`
+
+| Box | Screen top-left | Art and size | Text |
+| --- | --- | --- | --- |
+| Save/load errors: save failure, load failure, corrupt slot, slot-scan error (section 3.15) | (169, 116) | Large requested: `lgdialog.frm`, 302 by 127, single Done button centered at (97, 98) | Title and body key 32328, centered; title at y = 47 with one body line, y = 42 with two; body lines follow every 10 pixels |
+| Pip-Boy in combat, `misc.msg` 7 "Pipboy not available in combat!" (section 3.19) | (192, 116) | No size requested, title only. The title is wider than 168 pixels in every shipped font (221 in font 0, 186 in font 101, 209 in font 103), so the box is always large: `lgdialog.frm`, 302 by 127, Done button at (97, 98) | Title key 32328 at x = `trunc((302 - 186) / 2) = 58`, y = 52 |
+| Save overwrite and quit confirmations | (169, 131) and (169, 117) | Yes/No, always large | As above |
+
 - **Keys.** Enter means yes or OK and plays `ib1p1xx1`. Esc means no or cancel. `y`/`Y` and `n`/`N` work in Yes/No boxes only. A pending quit request forces yes.
 
 ### 3.14 Save/Load Screen: Layout and Navigation
@@ -647,16 +710,33 @@ In the combat input loop, Space ends the turn, Enter requests the end of combat,
 
 HP band: red when HP is below `trunc(max HP * 0.25)`, yellow when below `trunc(max HP * 0.5)`, otherwise white. `[Must-match]`
 
-Animated change: step delay `trunc(250 / (|old - new| + 1))` milliseconds. A roll that crosses a color threshold is split at the threshold, each segment in the color of the range it starts in. One unit step:
+**Unanimated update.** Draw the new value's sign and digits at once. A digit cell shows the magnitude digit, `trunc(|v| / 100)`, `trunc(|v| / 10) mod 10` and `|v| mod 10`; the sign cell shows plus/blank for v at least 0 and minus otherwise. `[Must-match]`
 
-1. Show "up" in the ones cell and wait.
-2. On a carry or borrow, show "up" in the tens cell and wait.
-3. On a further carry, show "up" then "down" in the hundreds cell, waiting after each.
-4. Show "down" in the tens cell and wait.
-5. Show "down" in the ones cell and wait.
-6. Redraw the true digits and sign, then wait.
+**Animated roll.** The counter moves one unit at a time, like a mechanical drum, from the previously shown value P to the new value V (V clamped first). `[Must-match]`
 
-The order is the same in both directions. The roll blocks for its duration while mouse and background processing continue. HP and AC animate at the start of the player's combat turn, and AC also at its end. The first HP draw is not animated, and the remembered start value is 0. `[Must-match]` An animated first frame draws the previous value's digits without taking the absolute value, so a negative previous value reads outside the band. `[May-improve]`: always draw digits of the absolute value with a separate sign.
+- **Step delay.** `t = trunc(250 / (|P - V| + 1))` milliseconds, computed once from the whole change. Each "wait" below is t milliseconds. During a wait the pointer and in-world cursor keep updating, but the caller is blocked: game input is not processed until the roll ends.
+- **Direction.** Each unit changes P by +1 or -1 toward V. The digit cells hold the magnitude. Each unit adds +1 to the ones digit when the magnitude grows, or -1 when it shrinks, with decimal carry and borrow. While all three magnitude digits are 0 the step is always +1, so a roll through zero continues outward on the other side of 0. The hundreds digit wraps from 10 to 0 and from -1 to 9.
+- **One unit**, with each glyph drawn over the cell before its wait:
+  1. Show the "roll up" glyph in the ones cell, then wait.
+  2. When the ones digit carries or borrows, show "roll up" in the tens cell and wait. When the tens digit then also carries or borrows, show "roll up" in the hundreds cell and wait, then "roll down" in the hundreds cell and wait. Then show "roll down" in the tens cell and wait.
+  3. Show "roll down" in the ones cell, then wait.
+  4. Redraw all three digits and the sign of the new P, then wait.
+- A unit therefore lasts 3t, plus 2t for a tens carry, plus 2t more for a hundreds carry. The glyph order is the same whether the value rises or falls.
+- **HP color segments.** Let r = `trunc(max HP * 0.25)` and y = `trunc(max HP * 0.5)`. When the band color changes, the roll is split into segments at the thresholds it crosses, all using the same t:
+  - rising past r, a segment starts at r in yellow; rising past y, a segment starts at y in white;
+  - falling past y, a segment starts at y in yellow; falling past r, a segment starts at r in red;
+  - the first segment uses the previously shown color.
+  When the color is unchanged, there is one segment.
+- **First frame.** The roll begins by drawing P's sign and digits. AC is always white.
+
+**When counters animate.** `[Must-match]`
+
+| Counter | Animated | Unanimated |
+| --- | --- | --- |
+| HP | Combat damage to the player applied through an animated attack; healing from First Aid or Doctor (SPEC-013); using a healing item or drug on the player in the inventory or from the item slot; a drug or stat effect that changes current HP | Explosion damage, which is applied without animation; interface initialization, map load, world-map travel, rest, character editor, direct stat assignment |
+| AC | Start of the player's combat turn; end of the player's turn; end of combat; changing worn armor in the inventory | Interface initialization and refresh |
+
+The remembered previous value starts at 0 for both counters and is updated after every draw, animated or not. The first draw after start is unanimated. `[Must-match]` An animated first frame draws the previous value's digits without taking the absolute value, so a negative previous value reads outside the band. `[May-improve]`: always draw digits of the absolute value with a separate sign.
 
 ### 3.22 AP Pips
 
@@ -781,18 +861,23 @@ In movement mode the hex snaps to the hovered hex; a second object for the AP te
 
 **Hover.** Feedback is computed once the pointer has rested on one pixel for at least 250 milliseconds, and again only after it moves; moving resets the art and removes any item outline. `[Must-match]`
 
+- **Rest timer.** It restarts on any one-pixel move of the hotspot, on a mode change, and after the action menu closes. When the in-world cursor is turned back on, the timer is back-dated by 250 milliseconds, so hover is computed on the next idle poll. This happens on entering the map window, after an edge scroll, and when the interface is re-enabled.
+- **When hover runs.** Only while the in-world cursor is shown over the map window. It does not run during NPC combat turns, when the game mouse is disabled.
+- **Object under the pointer.** No object is found while the pointer is over a visible roof outside the player's see-through cutout. Otherwise the topmost solid object that is not dead or knocked out wins, falling back to the bottom-most object hit.
+
 - **Movement.** Compute a path from the player to the hovered hex (SPEC-007 §3.1).
   - No path, including the player's own hex: a red `X`, key 31744.
   - Out of combat with a path: no text.
   - In combat the cost is path length × 1, × 4 with one crippled leg, or × 8 with both, minus remaining free movement, clamped at 0. A cost up to current AP shows the number in white, key 32767; otherwise a red `X`.
   - The text uses font 101, centered in the 32-by-16 cell from row 3, with a one-pixel black outline.
 - **Arrow.** The hovered object selects a primary action, and the cursor becomes `actpick.frm` (69 by 62): the arrow at top-left with a 40-by-40 action icon to its right.
-  - Item: use. With item highlight on, the item also gets a translucent yellow outline, key 30024.
+  - Item: use. When the `item_highlight` preference is on (default 1), the item also gets an opaque one-color outline, key 30632. The outline is skipped when the object already has an outline or carries the no-highlight object flag `0x1000`.
   - Player: rotate.
   - Talkable critter: talk out of combat, look in combat.
   - Other critter: use (loot).
   - Usable scenery: use; other scenery and walls: look.
-  - Hovering a new object also prints its look-at text to the monitor.
+  - **Look-at text.** It prints only in arrow mode, at the moment the hover is computed, for any object type including the player and walls. It runs the object's `look_at_p_proc`. Unless the script overrides, it prints `proto.msg` 490, or 491/492 at random for a dead critter. It works in and out of combat, costs no AP, and prints nothing while the player is dead.
+  - **No repeat for the same object.** The print is suppressed when the object equals the last object recorded by a hover. Arrow-mode and crosshair-mode hovers both record it, and the record is never cleared. So moving off an object and back does not print again, and switching from crosshair to arrow over the same critter does not print.
   - When `x + 68` is at least 640, the mirrored `actarrom.frm` is used, with the icon on the left.
   - When `y + 39` is at least 381, the art shifts up by `y + 39 - 381 + 2`.
 - **Crosshair.** Over a critter other than the player, the cursor becomes `acttohit.frm` (50 by 21): the crosshair at the left and text in font 101 at (22, 1) with a black outline.
@@ -800,9 +885,9 @@ In movement mode the hex snaps to the hovered hex; a second object for the AP te
   - It is ` X ` in red when the attack is impossible: dead target, the crippled-arm conditions, not enough AP, out of range, an empty magazine, a blocked ranged shot, or no valid attack (SPEC-007 §3.2).
   - Without a critter under the pointer the plain crosshair is shown.
 
-**Clicks** (left release in the map area, y at most 379). `[Must-match]`
+**Clicks** (left release in the map area, y at most 379). Every left-button map action fires on **release**, at the release position; the press itself does nothing. A release before the 250-millisecond hold pulse is an ordinary click. A right click acts on press. `[Must-match]`
 
-- **Movement.** Walk, or run when the `running` preference is on; Shift inverts the preference. In combat the route is limited to AP plus free movement.
+- **Movement.** Walk, or run when the `running` preference is on; Shift inverts the preference. In combat the route is limited to AP plus free movement. With Ctrl held in combat, the current attack's AP cost is subtracted from that budget first, and nothing moves if the result is 0 or less. Out of combat a new walk cancels the current one when `fallout.cfg` [system] `interrupt_walk` is on (default 1).
 - **Arrow.** Perform the primary action:
   - item: pick up;
   - player: rotate, only when standing;
@@ -810,13 +895,13 @@ In movement mode the hex snaps to the hovered hex; a second object for the AP te
   - other critter: loot;
   - scenery: use if usable, else examine;
   - wall: examine.
-- **Crosshair.** Attack the critter under the pointer, then refresh the hover immediately.
-- **Use crosshair.** In combat a non-weapon needs and spends 2 AP. Use the active item on the target, then return to movement.
+- **Crosshair.** Attack the critter under the pointer. The hover is then marked done at the click position, so the to-hit text stays as it was until the pointer moves. It is recomputed by force only at the start of each player combat turn and when the in-world cursor is turned back on.
+- **Use crosshair.** In combat a non-weapon needs and spends 2 AP; when the AP cannot be paid nothing happens and no message is shown. Otherwise use the active item on the target. The mode returns to movement in every case, even with no target.
 - **Skill modes.** As SPEC-013 §3.1.
 
 ### 3.28 Action Menu
 
-The low-level mouse reports a held left button as a repeat event once it has been held more than 250 milliseconds, then every 250 milliseconds. The action menu opens on that event in arrow mode when an object is under the pointer. `[Must-match]`
+**Hold pulse.** Every poll while the left button is down reports "held". A combined pressed-and-held pulse fires when strictly more than 250 milliseconds have passed since the press, then each time more than 250 milliseconds have passed since the previous pulse. The action menu opens only on that combined pulse, in arrow mode, when an object is under the pointer. If no object is under the pointer, a later pulse opens the menu once the pointer reaches one. In other modes a held left button does nothing. `[Must-match]`
 
 Entries top to bottom:
 
@@ -831,6 +916,10 @@ Icons are 40 by 40 normal/highlighted pairs: `canceln.frm` / `cancelh.frm`, `inv
 
 Selection: while held, each vertical move of more than 10 pixels from the last anchor moves the highlight one entry and resets the anchor. On release the pointer is warped to (original x, last anchor y), the art reverts, and the entry runs. `[Must-match]`
 
+- Each poll moves the highlight at most one entry, however far the pointer moved: up decrements and down increments, with no sound.
+- The release is consumed by the menu and never also triggers the primary action.
+- While the menu is open, map background processing is paused. That covers object animation, idle fidgets, critter scripts, timed events, the game clock (normally one tick per 100 milliseconds out of combat), floating text, the game mouse and edge scrolling. Sound keeps playing and keyboard input is discarded. `[Must-match]`
+
 - Inventory: use an inventory item on the target.
 - Look: examine.
 - Rotate and Talk do what they say.
@@ -838,11 +927,24 @@ Selection: while held, each vertical move of more than 10 pixels from the last a
 - Skill: open the Skilldex and use the chosen skill on the target; Sneak toggles.
 - Cancel: nothing. A pending quit makes the choice Cancel.
 
-The selection index is not clamped. Dragging past either end keeps the highlight on the edge entry, but the release reads outside the list. `[May-improve]`: clamp the index to the list.
+The selection index is not clamped. Dragging past either end keeps the highlight on the edge entry while the index keeps counting, so reversing does not move the highlight back at once, and the release reads outside the list. `[May-improve]`: clamp the index to the list.
 
 ### 3.29 Edge Scrolling
 
-A pointer at x = 0, x = 639, y = 0 or y = 479 scrolls the map; corners scroll diagonally. A scroll step happens at most once per 33 milliseconds and moves 32 pixels horizontally and/or 24 vertically. The cursor shows the direction's scroll art, or its blocked variant when the map cannot scroll that way; a throttled tick leaves the cursor unchanged. Leaving the edge restores the previous cursor. A left press that starts on an edge pixel is flagged and, with click-to-scroll, is not passed on as a map click. Scrolling works while the in-world mouse is disabled if scrolling itself was left enabled. `[Must-match]`
+A pointer at x = 0, x = 639, y = 0 or y = 479 scrolls the map; corners scroll diagonally. A scroll step happens at most once per 33 milliseconds and moves 32 pixels horizontally and/or 24 vertically. The cursor shows the direction's scroll art, or its blocked variant when the map cannot scroll that way; a throttled tick leaves the cursor unchanged. Leaving the edge restores the previous cursor. Scrolling works while the in-world mouse is disabled if scrolling itself was left enabled. `[Must-match]`
+
+- **Edges are screen pixels.** The hotspot is clamped to 0-639 and 0-479. Row 479 lies over the interface bar and still scrolls south. While edge scrolling is active, hover and window logic are skipped and keyboard events are dropped; mouse button events still pass. Every attempt that is not throttled hides the in-world cursor. `[Must-match]`
+- **One combined step.** A diagonal is one step. If the diagonal target is blocked, the whole step is blocked; it does not slide along one axis. Blocked attempts also restart the 33-millisecond timer. `[Must-match]`
+- **Blocked test.** The new center is the hex under the current center's screen position plus `(32 dx + 16, 24 dy + 8)`. The step is blocked when any of these holds: `[Must-match]`
+  - that point has no hex, or the hex is outside 0-39999;
+  - scroll limiting is on (the default) and the step increases the center's screen distance from the player on an axis where that distance is already at least 480 pixels horizontally or 400 vertically;
+  - the target hex holds a scroll-blocker object (misc PID `0x0500000C`) on the current elevation;
+  - the center would leave the map-border rectangle derived from the window size.
+
+  Map loading switches limiting and scroll-blocker checks off for its duration. Two reference quirks: hex 0 is never treated as holding a scroll blocker, and the right-edge parity correction adjusts the left bound instead. `[May-improve]`: test hex 0 like any other, and apply the parity correction to the right bound.
+- **Arrow keys** scroll one step per key event through the same 33-millisecond gate. Key auto-repeat starts after more than 500 milliseconds, then repeats every more than 80 milliseconds. Arrow keys work regardless of the edge-scroll enable state, but not while the keyboard is disabled. `[Must-match]`
+- **Combat and other windows.** During NPC turns and the player's attack animations the interface is disabled, but edge scrolling stays on: the scroll art temporarily replaces the animated watch, which returns afterwards. Scrolling is off during the combat panel's open and close animations, and during dialogue, inventory, the Pip-Boy, the world map and the action menu. Re-enabling the game mouse always turns scrolling back on. `[Must-match]`
+- **Click-to-scroll.** A latent mode exists in which a fresh left press on an edge pixel is flagged; any left release clears the flag before it reaches the map. While flagged, hold pulses and right clicks made with the left button down are ignored. Nothing in R1 turns this mode on (there is no configuration key), so it has no effect, and the ordinary release click is never suppressed. `[Must-match]`
 
 ### 3.30 Endgame Slideshow
 
@@ -952,6 +1054,109 @@ Shared by the main menu (credits and quotes) and the ending movie. `[Must-match]
   - During the trailing blank ticks any input ends the credits.
   - On exit: fade to black, close the window, restore the arrow cursor and re-enable palette cycling.
 
+### 3.33 Automap Window
+
+**Opening.** `[Must-match]`
+
+- **Tab** opens the automap with the scanner off. It works only while the interface bar is enabled and neither Alt key is held, and plays `ib1p1xx1` first. The bar is enabled during the player's own combat turn, so the automap opens in combat too.
+- The bar's **Map** button sends Tab, so it follows the same path.
+- **Using a Motion Sensor**, item PID 59, from the inventory or the item slot spends one charge and opens the automap with the scanner already on. With no charges left, it prints `item.msg` 5 ("%s has no charges left.") to the monitor and does not open.
+- The automap never refuses because of the current map. Maps excluded from the automap database (SPEC-008) still open the window.
+
+**Window.** Screen (75, 0), 519 by 480, modal. Its whole area is covered by `automap.frm` (list index 171, 519 by 480). Font 101; arrow cursor. Background map processing (animation, fidgets, time) is paused while the window is open. `[Must-match]`
+
+| Control | Rectangle | Art | Sounds | Sends |
+| --- | --- | --- | --- | --- |
+| Scanner | (111, 454) 15 by 16 | Red button | Red-button sounds | `s` on release |
+| Cancel | (277, 454) 15 by 16 | Red button | Red-button sounds | Esc on release |
+| Detail switch | (457, 340) 42 by 74 | `autoup.frm` (172) up / `autodwn.frm` (173) down; a two-state toggle | `toggle` on press and release | `l` when switched down, `h` when switched up |
+
+The switch starts down when detail is low. Detail (high or low) persists between openings and is saved with the game (SPEC-008), default low. The scanner state is cleared at every opening. `[Must-match]`
+
+**Keys.** `[Must-match]` unless tagged.
+
+- Tab, Esc, `a` or `A` close the window.
+- `h`/`H` select high detail, and `l`/`L` low detail. Each redraws only if the setting changes. The keys do not move the switch art. `[May-improve]`: keep the switch in step with the keys.
+- `s`/`S` resets the shown elevation to the player's (it never differs in R1). Then, if the scanner is off, it looks for a Motion Sensor in the left hand, then the right hand.
+  - Found with charges: spend one charge, turn the scanner on and redraw.
+  - Otherwise: play `iisxxxx1` and show a dialog box at screen (165, 140), key 32328. The text is `misc.msg` 17 ("The motion sensor option is not installed.") when no sensor is held, or 18 when the held sensor is empty.
+- Ctrl+Q, Alt+X and F10 open the quit confirmation; a confirmed quit closes the window. F12 takes a screenshot.
+
+**Drawing.** The window always shows the player's current elevation. Every object on it with a hex is visited in object-list order, and its color is chosen like this. `[Must-match]`
+
+1. Scanner on, and the object is a critter that is not hidden and not dead: key 31744 (bright red), whether or not it has been seen.
+2. Otherwise objects without the seen flag `0x40000000` are skipped. A seen object is drawn:
+   - in key 32328 (orange) if it is the exit-grid marker, scenery PID `0x02000031`;
+   - in key 992 (bright green) if it is a wall;
+   - in key 480 (dark green), with high detail only, if it is scenery other than PID `0x02000158`;
+   - in key 31744 if it is the player.
+   Any other object is not drawn: items, misc objects, critters without the scanner, and scenery in low detail.
+
+For hex t, let c = `t mod 200` and r = `trunc(t / 200)`. The object paints window pixels (x, y) and (x + 1, y), with `x = 449 - 2c` and `y = 8 + 2r`, so the map is mirrored left to right. A dark-green pixel is not painted over a bright-green one, but a later wall overwrites scenery. The player also paints (x - 1, y), (x, y - 1) and (x, y + 1), a small cross that does not blink. `[Must-match]`
+
+When the map has an index (SPEC-008), two labels are printed in key 992 with a transparent background, width 240: the area short name from `map.msg` at (150, 380) and the elevation name at (150, 396). `[Must-match]`
+
+**Seen state.** `[Must-match]`
+
+- Every hex the player enters sets one bit in a 40000-bit visited set, 8 hexes per byte in hex order, 25 bytes per map row of 200 hexes.
+- The set is processed when the automap opens, before an automap-database write, and when the map's objects are saved. Processing marks a window of bytes around every nonzero byte b: offsets `b + 25k + d` for k = -16 through 15 and d = -2 through 2, kept within bytes 0 through 5000. That covers 16 rows before and 15 after, by 40 hexes in 8-hex groups.
+- Every object on a hex of a marked byte and on the player's current elevation gets the seen flag permanently, and the flag is saved with the object. The visited set is then cleared.
+- Near a row's start or end, d crosses into the neighboring row because bytes run continuously. `[Must-match]`
+
+**Pip-Boy automap page.** This page draws from the saved automap database (SPEC-008), not from live objects. It is current only up to the last database write: leaving the map, saving the game, or taking an elevator. Each stored cell is 2 pixels wide and 1 pixel tall at origin (238, 105) of the Pip-Boy window, wall cells in key 992 and scenery cells in key 480. The player, critters and items are not drawn. Rows from 188 on would fall below the 480-pixel window; R1 relies on those rows being empty. `[Must-match]` `[May-improve]`: clip cells to the window.
+
+### 3.34 Player Inventory Window: Cursor Modes and Dragging
+
+The inventory window is at screen (80, 0); the rectangles below are screen coordinates, inclusive. `[Must-match]` unless tagged.
+
+**There is no two-click drag.** Every inventory-type window drags with press, hold and release: the player inventory, loot (SPEC-013 §3.16) and barter (SPEC-013 §3.18). The press lifts the item at once, the drag lasts while the left button stays down, and the first poll after release drops it. The mouse layer has no double-click detection, so a second click is just another press. A quick press and release drops the item where it was lifted, which changes nothing. There is no movement or time threshold that separates a click from a drag.
+
+**Cursor modes.** The window opens in the hand cursor (list index 286). Each right-button press switches between hand and arrow (250); returning to the hand redraws the stats panel. While the right button is held, the held-button repeat (section 3.28) switches the cursor again every 250 milliseconds. `[May-improve]`: switch only on the initial right press.
+
+**Lifting** (hand cursor). A left press on a filled slot lifts it. A press on an empty slot does nothing.
+
+| Slot | Rectangle |
+| --- | --- |
+| List row i, i = 0-5 | (124, 35 + 48i) 64 by 48 |
+| Left hand | (234, 286) 90 by 61 |
+| Right hand | (325, 286) 90 by 61 |
+| Armor | (234, 183) 90 by 61 |
+
+- **Cursor during the drag.** The item's inventory art, frame 0, at its own size (not scaled), with its hotspot at `(trunc(w / 2), trunc(h / 2))`. Drop targets are tested at the pointer.
+- **Sounds.** `ipickup1` on lift and `iputdown` on drop, only when the art loads.
+- **Source slot.** A single item, a hand item or armor is replaced by the slot background. An item held in both hands clears the whole 180-by-61 hand area. A list stack redraws one smaller.
+- **Input.** All other input is ignored during the drag, including scrolling. Only the rotating player figure keeps animating.
+
+**Dropping.** Targets are tested in this order:
+
+1. **List area**, x 124-188 and y 35 through the bottom of the visible rows. The row is `trunc((y - 39) / 48)`, the same 4-pixel offset as SPEC-013 §3.16.
+   - A different container item in that row receives the dragged item. A stack opens the move-items counter (SPEC-013 §3.17), and Cancel aborts.
+   - A weapon there that accepts the dragged ammunition is reloaded, with the counter for a stack, and plays the weapon's ready sound.
+   - Otherwise an item dragged from the list stays put. An item from a hand or armor slot is unequipped into the list, and armor stats are removed. A failed add restores the slot.
+2. **Left hand, then right hand.**
+   - A different container in the slot receives the item.
+   - An empty slot takes the item.
+   - Ammunition that fits the weapon in the slot reloads it.
+   - Otherwise, when the occupant is a weapon and the dragged item is ammunition that did not fit, nothing happens.
+   - When the item came from the other hand, or from the armor slot and the occupant is armor, the two swap.
+   - Otherwise the occupant returns to the list and the slot takes the dragged item. From a list stack the slot takes one unit, without the counter. Any item type can be held.
+3. **Armor.** Armor only; anything else is ignored. The old armor goes back to the source hand slot when the drag came from a hand, otherwise to the list. Both items' stat effects are updated. If the old armor cannot be stored, the move is reverted.
+4. **Player figure**, x 256-316, y 37-137. Only while a nested container is open: the item moves up one container level.
+5. **Anywhere else**, including scroll buttons, Done and outside the window: nothing happens.
+
+After every drop the player art, stats and list are redrawn and the hand cursor returns.
+
+**Arrow cursor.** A left press on a filled slot does not drag.
+
+- Releasing before the 250-millisecond hold event shows the item's full examine text in the stats panel. In the loot and barter windows it shows the short look line on the monitor instead.
+- Holding opens the action menu at the pointer with the pointer hidden, using the section 3.28 highlight rule. Player-window entries:
+  - a weapon that can be unloaded: Look, Unload, Drop, Cancel;
+  - a container held in a hand or worn: Look, Drop, Cancel;
+  - a usable or use-on item: Look, Use, Drop, Cancel;
+  - anything else: Look, Drop, Cancel.
+
+**Use-on window.** It has no drag. In the hand cursor, a left press on a list row uses that item on the target at once and closes the window; in combat this needs and spends 2 AP. The list is drawn first-to-last, but the press selects the item counted from the end of the list: row r at scroll offset o picks entry `length - 1 - (o + r)`. The used item can therefore differ from the one shown. `[May-improve]`: use the item drawn in the pressed row.
+
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
 These vectors are invented and computed from the rules above; none is a shipped asset.
@@ -1034,4 +1239,4 @@ With a bullet width of 6 pixels, the first line of a message holds text narrower
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 27 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc"). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. Tag count, excluding the two tag definitions: 101 `[Must-match]`, 43 `[May-improve]`.
+Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 30 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc"). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. The sound name "toggle" is also flagged. Tag count, excluding the two tag definitions: 129 `[Must-match]`, 49 `[May-improve]`.

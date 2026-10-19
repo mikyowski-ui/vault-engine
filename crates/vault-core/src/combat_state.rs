@@ -463,6 +463,8 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         if critter == self.world.player {
             self.world.combat_state.player_turn = true;
+            // SPEC-014 §3.21: the AC counter rolls at the turn's start.
+            self.world.emit(crate::WorldEffect::RollArmorClass);
             return Ok(true);
         }
         if ai.builtin() {
@@ -486,6 +488,7 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.free_movement = 0;
             self.world.combat_state.player_turn = false;
             self.world.combat_state.turn_ended = false;
+            self.world.emit(crate::WorldEffect::RollArmorClass);
         }
     }
     /// Whether the player's input loop must stop: input gate clear, accepted
@@ -648,10 +651,19 @@ impl<A: WorldAssets> WorldHost<A> {
             }
         }
         self.world.combat_experience = 0;
-        if living && let Some(state) = self.world.critter_state_mut(player) {
+        // SPEC-014 §3.5: normal cleanup wakes a knocked-out living player at
+        // once and removes the pending wake-up event, so the game goes on.
+        if living
+            && let Some(state) = self.world.critter_state_mut(player)
+            && state.results.0 & effect::KNOCKED_OUT != 0
+        {
             state.results.0 &= !effect::KNOCKED_OUT;
+            self.world.queue.retain(|event| {
+                !(event.object == player && event.kind == crate::queue::EventKind::Knockout)
+            });
         }
         self.world.combat_quit = false;
+        self.world.emit(crate::WorldEffect::RollArmorClass);
         self.map_update()
     }
 }

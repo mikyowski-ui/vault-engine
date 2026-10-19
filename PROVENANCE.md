@@ -42,9 +42,21 @@ no research scripts, and no original game assets.
 ## The quarantine barrier
 
 Before hand-off, every spec passes the research vault's `spec_lint.py`
-quarantine check. A spec that fails it is quarantined on the research side, not
-delivered. On this side, the ingestion rule in `CLAUDE.md` repeats that check.
-A builder must reject any incoming spec that contains:
+quarantine check. The linter fails a spec that contains:
+
+- a reference identifier: an internal symbol name of the reference revision.
+  Public SSL opcode and procedure names, and public file-format and
+  `fallout.cfg` key literals that happen to coincide with such a symbol, pass
+  only through the linter's allowlist; plain English words that match a
+  symbol are reported as warnings for human review;
+- a file path under a `src/` directory; or
+- a raw 40-character git commit hash.
+
+Each approved spec records its linter result in its verification notes: zero
+errors, the reviewed warnings, and any allowlisted literals. A spec that fails
+the check is quarantined on the research side, not delivered. On this side,
+the ingestion rule in `CLAUDE.md` repeats the check. A builder must reject any
+incoming spec that contains:
 
 - file paths under a `src/` directory,
 - 40-character git commit hashes, or
@@ -74,9 +86,10 @@ Compatibility with the original data is verified without committing it:
   for this project. None of it is original game data (see
   `tests/fixtures/README.md`).
 - Original game data is supplied by each user from their own installation and
-  is never committed. The local corpus path (`/corpus/`) is gitignored. Fuzz
-  corpora are generated locally from the synthetic fixtures and are not
-  committed (see `fuzz/README.md`).
+  is never committed. The local corpus path (`/corpus/`) is gitignored, and so
+  are the save slots local runs write (`SAVEGAME/`), because a slot holds maps
+  and state derived from the corpus. Fuzz corpora are generated locally from
+  the synthetic fixtures and are not committed (see `fuzz/README.md`).
 
 ## Contributor obligations
 

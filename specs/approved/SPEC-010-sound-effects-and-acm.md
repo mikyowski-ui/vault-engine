@@ -11,7 +11,7 @@ This specification describes the compressed `.ACM` audio format used for sound e
 
 Evidence comes from two sources:
 
-- Static inspection of reference revision `R1`, targeting 32-bit Windows.
+- Static inspection of reference revision R1, targeting 32-bit Windows.
 - Measurements over the local unpacked corpus: all **2511** `.ACM` files (864 under `sound/sfx`, 1646 under `sound/speech`, 1 under `data`), decoded by a research-side oracle that follows the rules below. The oracle tables are in `oracle/SPEC-010/` (section 4.6). No original executable was run; corpus agreement shows these rules are self-consistent with the shipped assets, not that the original game produced identical bytes.
 
 Compatibility tags follow project policy. **[Must-match]** marks behavior an implementation must reproduce exactly: decoded PCM, file layouts, name strings, and formulas. **[May-improve]** marks reference behavior that comes from memory-safety defects or unbounded loops. An implementation must not reproduce that behavior as undefined behavior; it must instead do what the tag text says (an explicit error, or a bounded result). Where a [May-improve] case never occurs in the corpus, this is stated.
@@ -425,7 +425,8 @@ Acceptance for the decoder: for every row of `acm-corpus.tsv`, decoding the asse
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
 - [x] Synthetic test vectors included
-- [x] Every reference-derived quirk tagged `[Must-match]` or `[May-improve]`
-- [x] Spec linter run against reference symbols with no findings
+- [x] Every documented quirk tagged `[Must-match]` or `[May-improve]`
+- [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
+- [x] Spec linter run against `fallout1-re` symbols with no findings
 
 Verification notes: `tools/spec_lint.py` gives 0 errors. Its 5 plain-word warnings were reviewed and are benign: the math notation "column" and "remaining", the directory name "data", and the resource literal "toggle". Sound-name script opcodes are cited by number only, because CLAUDE.md bans their names. Vectors A-H were decoded by the research oracle and match the expected values above. The section 4.4 lookups were checked against the oracle resolver. The section 4.5 volumes were computed from the section 3.11 formula.

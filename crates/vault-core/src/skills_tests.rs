@@ -398,12 +398,18 @@ fn spec013_fixture_c_explosive_timers_and_detonation() {
     host.process_queue().unwrap();
     assert_script_used(&host);
     assert_eq!(messages(&mut host), ["premature"]);
-    assert_eq!(hp(&host, victim), 1);
-    assert_eq!(hp(&host, bystander), 30);
     assert!(
         host.world.get(dynamite).is_none(),
         "the explosive is destroyed"
     );
+    // The animated explosion is in progress: the damage, computed with the
+    // one draw, is applied after the art has played.
+    assert!(host.world.explosion.is_some());
+    assert_eq!(hp(&host, victim), 30);
+    assert!(host.finish_explosion().unwrap());
+    assert!(host.world.explosion.is_none());
+    assert_eq!(hp(&host, victim), 1);
+    assert_eq!(hp(&host, bystander), 30);
     assert_eq!(host.world.get(victim).unwrap().opponent, host.world.player);
     assert!(host.world.pending_combat.is_some());
     // Map exit detonates a carried explosive at once, without 4000.
@@ -416,6 +422,114 @@ fn spec013_fixture_c_explosive_timers_and_detonation() {
     host.skill_map_exit().unwrap();
     assert!(host.world.get(carried).is_none());
     assert!(messages(&mut host).is_empty());
+}
+
+#[test]
+fn spec013_explosion_retry_scripted_requests_and_scenery_notice() {
+    use crate::world::{ActiveExplosion, ExplosionRequest, WorldTrace};
+    let mut host = host();
+    let center = HexGrid::step(20100, 1, 3).unwrap();
+    let victim = critter(&mut host, center, &[(23, 4), (30, 20)]);
+    // Two explosives due together: the second, a type 11, shows 4000 once,
+    // meets the first in progress, and is re-queued as type 8 after 50
+    // ticks without being destroyed.
+    let first = items::spawn(&mut host, skills::DYNAMITE_ARMED);
+    host.world.move_object(first, center, 0, false).unwrap();
+    let second = items::spawn(&mut host, skills::DYNAMITE_ARMED);
+    let elsewhere = HexGrid::step(center, 4, 6).unwrap();
+    host.world.move_object(second, elsewhere, 0, false).unwrap();
+    let now = host.world.clock.ticks;
+    for (explosive, kind) in [(first, 8), (second, 11)] {
+        host.world
+            .queue
+            .insert(now, 0, explosive, EventKind::Other(kind))
+            .unwrap();
+    }
+    host.world.rng.script(&[40]);
+    host.process_queue().unwrap();
+    assert_script_used(&host);
+    assert_eq!(messages(&mut host), ["premature"]);
+    assert!(host.world.get(first).is_none());
+    assert!(host.world.get(second).is_some(), "kept for the retry");
+    let retry = host
+        .world
+        .queue
+        .events()
+        .find(|event| event.object == second)
+        .cloned()
+        .unwrap();
+    assert_eq!((retry.kind, retry.due - now), (EventKind::Other(8), 50));
+    assert!(host.finish_explosion().unwrap());
+    assert_eq!(hp(&host, victim), 1);
+
+    // Scripted requests: the combat request pass discards one; one meeting
+    // an explosion in progress waits for the next pass (safe rule).
+    // (The first blast's knockback moved the victim off the center.)
+    host.world.move_object(victim, center, 0, false).unwrap();
+    set_hp(&mut host, victim, 30);
+    host.world.get_mut(victim).unwrap().opponent = 0;
+    host.world.pending_combat = None;
+    let request = ExplosionRequest {
+        hex: center,
+        elevation: 0,
+        min: 10,
+        max: 10,
+    };
+    host.world.pending_explosion = Some(request);
+    host.world.combat = true;
+    assert!(!host.service_explosion_request().unwrap());
+    assert_eq!(host.world.pending_explosion, None);
+    host.world.combat = false;
+    host.world.pending_explosion = Some(request);
+    host.world.explosion = Some(ActiveExplosion {
+        hex: 0,
+        elevation: 0,
+        victim: None,
+        source: None,
+    });
+    assert!(!host.service_explosion_request().unwrap());
+    assert_eq!(host.world.pending_explosion, Some(request));
+    host.world.explosion = None;
+
+    // Out of combat it detonates with animation and no credited source. The
+    // scenery object 3 hexes away whose script has a damage_p_proc is
+    // notified once the art has played; one 4 hexes away is not.
+    host.assets.program = Some(
+        vault_vm::IntProgram::parse(&crate::fixture_state::program(
+            &[],
+            &[
+                (b"start", crate::fixture_state::returning(Vec::new())),
+                (
+                    b"damage_p_proc",
+                    crate::fixture_state::returning(Vec::new()),
+                ),
+            ],
+        ))
+        .unwrap(),
+    );
+    let scenery = |host: &mut WorldHost<ItemAssets>, hex| {
+        let mut bytes = items::world::prototype(2, 0);
+        items::world::word(&mut bytes, 0, 0x0200_0077_u32 as i32);
+        let object = host.world.spawn(items::parse(&bytes), hex, 0).unwrap();
+        host.world.add_script(object, 0, 3, 0).unwrap()
+    };
+    let near = scenery(&mut host, HexGrid::step(center, 2, 3).unwrap());
+    let far = scenery(&mut host, HexGrid::step(center, 2, 4).unwrap());
+    assert!(host.service_explosion_request().unwrap());
+    assert_eq!(hp(&host, victim), 30, "damage waits for the art");
+    host.world.trace.clear();
+    assert!(host.finish_explosion().unwrap());
+    // 10 - DT 4 = 6, less trunc(6 * 20 / 100) = 1: 5 damage.
+    assert_eq!(hp(&host, victim), 25);
+    assert_eq!(host.world.get(victim).unwrap().opponent, 0);
+    assert!(host.world.pending_combat.is_none());
+    let notified = |host: &WorldHost<ItemAssets>, script| {
+        host.world.trace.iter().any(|entry| {
+            matches!(entry, WorldTrace::Script { id, event: crate::ScriptEvent::Damage, .. } if *id == script)
+        })
+    };
+    assert!(notified(&host, near));
+    assert!(!notified(&host, far));
 }
 
 #[test]

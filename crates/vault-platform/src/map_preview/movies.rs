@@ -139,6 +139,7 @@ impl MapPreview {
     pub fn display_override(&self) -> Option<[[u8; 4]; 256]> {
         match &self.screen {
             Screen::Movie(screen) => Some(screen.player.palette()),
+            Screen::Help(_) => self.help_display(self.preferences.brightness),
             _ => self
                 .fades
                 .display(self.game_palette(), self.preferences.brightness),

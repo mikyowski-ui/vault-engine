@@ -524,23 +524,20 @@ fn spec009_fixture_h_setter_retaliation_and_onlookers() {
     host.set_last_attacker(q, player);
     assert_eq!(host.world.get(q).unwrap().opponent, player);
 
-    // Damage writers: a same-team defender keeps its reference unless it is
-    // the unintended victim; another team runs the rating; a knocked-out
-    // victim references the attacker; an extra has no unintended exception.
+    // Damage writers (SPEC-007 §3.6): a same-team victim makes the rating
+    // check only as the attack's intended target, so a same-team unintended
+    // victim or extra keeps its reference; another team always makes it; a
+    // knocked-out victim references the attacker.
     let ally = npc(&mut host.world, 21500, 1, 0, &[(11, 50)]);
     host.set_last_attacker(v, 0);
-    host.after_damage(ally, v, true);
-    assert_eq!(host.world.get(v).unwrap().opponent, 0);
-    host.world.ai.unintended = v;
     host.after_damage(ally, v, false);
     assert_eq!(host.world.get(v).unwrap().opponent, 0);
     host.after_damage(ally, v, true);
     assert_eq!(host.world.get(v).unwrap().opponent, ally);
-    host.world.ai.unintended = 0;
-    host.after_damage(r1, v, true);
+    host.after_damage(r1, v, false);
     assert_eq!(host.world.get(v).unwrap().opponent, ally, "25 < 50 + 5");
     state(&mut host.world, v).results.0 = effect::KNOCKED_OUT;
-    host.after_damage(q, v, true);
+    host.after_damage(q, v, false);
     assert_eq!(host.world.get(v).unwrap().opponent, q);
 
     // Onlookers: every snapshot entry perceiving the damaged critter
@@ -554,6 +551,79 @@ fn spec009_fixture_h_setter_retaliation_and_onlookers() {
         host.world.critter_state(critter).unwrap().maneuvers & intent::ALERT != 0
     };
     assert!(alert(&host, v) && alert(&host, r2) && !alert(&host, far));
+}
+
+#[test]
+fn spec007_intended_target_rule_covers_unintended_victims() {
+    // SPEC-007 §3.6: the hit lands on V instead of the intended target D.
+    // Onlookers hear of D, though D took nothing, then of V; a surviving
+    // V on the attacker's team keeps its reference. As the intended target
+    // the same V would make the rating check.
+    let mut world = world();
+    let attacker = npc(&mut world, 20100, 1, 0, &[(11, 5)]);
+    let intended = npc(&mut world, 20104, 2, 0, &[]);
+    let victim = npc(&mut world, 20102, 1, 0, &[]);
+    let attack = world
+        .attack_profile(attacker, victim, hit_mode::PUNCH, location::UNCALLED, false)
+        .unwrap();
+    let mut host = ai_host(world, AiAssets::default());
+    host.world.combat = true;
+    host.world.ai.snapshot = vec![attacker, intended, victim];
+    let resolution = Resolution {
+        code: 2,
+        damage: 1,
+        defender_flags: effect::HIT,
+        ..Default::default()
+    };
+    let hp = |host: &WorldHost<AiAssets>, critter| host.world.hit_points(critter).unwrap();
+    let before = hp(&host, intended);
+    host.apply_attack_to(attacker, intended, victim, &attack, &resolution)
+        .unwrap();
+    assert_eq!(
+        hp(&host, intended),
+        before,
+        "the intended target takes nothing"
+    );
+    assert_eq!(host.world.get(victim).unwrap().opponent, 0);
+    let alert = |host: &WorldHost<AiAssets>, critter| {
+        host.world.critter_state(critter).unwrap().maneuvers & intent::ALERT != 0
+    };
+    assert!(alert(&host, intended) && alert(&host, victim));
+    host.apply_attack_to(attacker, victim, victim, &attack, &resolution)
+        .unwrap();
+    assert_eq!(host.world.get(victim).unwrap().opponent, attacker);
+    // A victim already marked dead takes no status, damage or writers.
+    state(&mut host.world, intended).results.0 = effect::DEAD;
+    let hp_dead = hp(&host, intended);
+    host.apply_attack_to(attacker, intended, intended, &attack, &resolution)
+        .unwrap();
+    assert_eq!(hp(&host, intended), hp_dead);
+    assert_eq!(host.world.get(intended).unwrap().opponent, 0);
+}
+
+#[test]
+fn spec014_combat_cleanup_wakes_a_knocked_out_player() {
+    // A knockout during combat is recovered: cleanup wakes the living
+    // player and removes the pending wake-up event (SPEC-014 §3.5).
+    let world = world();
+    let player = world.player;
+    let mut host = ai_host(world, AiAssets::default());
+    host.damage_critter(player, None, 0, effect::KNOCKED_OUT)
+        .unwrap();
+    let wake = |host: &WorldHost<AiAssets>| {
+        host.world
+            .queue
+            .events()
+            .any(|event| event.object == player && event.kind == crate::queue::EventKind::Knockout)
+    };
+    assert!(wake(&host));
+    host.world.combat = true;
+    host.end_combat().unwrap();
+    assert_eq!(
+        host.world.critter_state(player).unwrap().results.0 & effect::KNOCKED_OUT,
+        0
+    );
+    assert!(!wake(&host));
 }
 
 #[test]

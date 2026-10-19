@@ -21,6 +21,7 @@ sha2.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 vault-core.workspace = true
+vault-debug.workspace = true
 vault-formats.workspace = true
 vault-guidance.workspace = true
 vault-render.workspace = true

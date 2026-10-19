@@ -396,3 +396,51 @@ fn spec011_minimum_strength_warns_only_the_player() {
         .unwrap();
     assert!(!attack(&mut host, target, player));
 }
+
+#[test]
+fn spec014_inventory_slot_moves_split_swap_and_drop() {
+    let mut host = support::host();
+    let player = host.world.player;
+    let worn = |host: &WorldHost<ItemAssets>, item, flag: BasicFlags| {
+        host.world.get(item).unwrap().raw.flags.contains(flag)
+    };
+    let entries = |host: &WorldHost<ItemAssets>| host.world.get(player).unwrap().inventory.clone();
+    // From a stack of three, a hand takes one unit as its own entry.
+    let stack = support::carry(&mut host, player, AMMO_X, 3);
+    let held = host
+        .world
+        .equip_slot(player, stack, BasicFlags::LEFT_HAND.0)
+        .unwrap();
+    assert!(worn(&host, held, BasicFlags::LEFT_HAND));
+    let mut quantities: Vec<_> = entries(&host).iter().map(|(_, q)| *q).collect();
+    quantities.sort();
+    assert_eq!(quantities, [1, 2]);
+    // The other hand takes it over; the first hand lets go.
+    host.world
+        .equip_slot(player, held, BasicFlags::RIGHT_HAND.0)
+        .unwrap();
+    assert!(worn(&host, held, BasicFlags::RIGHT_HAND));
+    assert!(!worn(&host, held, BasicFlags::LEFT_HAND));
+    // Back to the list: it merges into the stack again.
+    host.world.unequip(player, held).unwrap();
+    assert_eq!(entries(&host).len(), 1);
+    assert_eq!(entries(&host)[0].1, 3);
+    // Armor worn through the slot applies its AC; unequipping removes it.
+    let armor = support::carry(&mut host, player, ARMOR_A, 1);
+    host.world
+        .equip_slot(player, armor, BasicFlags::WORN.0)
+        .unwrap();
+    assert_eq!(host.world.player_sheet().unwrap().bonus[9], 20);
+    host.world.unequip(player, armor).unwrap();
+    assert_eq!(host.world.player_sheet().unwrap().bonus[9], 0);
+    // A container takes items within its limits; a drop lands on the
+    // player's hex.
+    let bag = support::carry(&mut host, player, CONTAINER, 1);
+    let first = entries(&host)[0].0;
+    assert!(host.world.move_into(player, first, bag, 1).unwrap());
+    assert_eq!(host.world.get(bag).unwrap().inventory.len(), 1);
+    host.world.move_object(player, 20100, 0, false).unwrap();
+    host.world.drop_item(player, armor, 1).unwrap();
+    let dropped = host.world.get(armor).unwrap();
+    assert_eq!((dropped.owner, dropped.raw.hex), (None, Some(20100)));
+}

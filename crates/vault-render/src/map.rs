@@ -181,6 +181,17 @@ pub fn pick_object(
     art: &impl MapArt,
     point: [i32; 2],
 ) -> Option<u32> {
+    pick_objects(map, view, art, point)?.first().copied()
+}
+
+/// Every object with a nontransparent pixel at `point`, frontmost first;
+/// `None` when a roof pixel occludes the point.
+pub fn pick_objects(
+    map: &MapFile,
+    view: MapView,
+    art: &impl MapArt,
+    point: [i32; 2],
+) -> Option<Vec<u32>> {
     if view.elevation > 2 {
         return None;
     }
@@ -205,7 +216,7 @@ pub fn pick_object(
             }
         }
     }
-    let mut selected = None;
+    let mut hits = Vec::new();
     for object in &map.objects.elevations[view.elevation as usize] {
         if object.flags.contains(BasicFlags::HIDDEN) {
             continue;
@@ -246,15 +257,11 @@ pub fn pick_object(
                 anchor[0],
                 object.id,
             );
-            if selected
-                .as_ref()
-                .is_none_or(|(previous, _)| key > *previous)
-            {
-                selected = Some((key, object.id));
-            }
+            hits.push((key, object.id));
         }
     }
-    selected.map(|(_, id)| id)
+    hits.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
+    Some(hits.into_iter().map(|(_, id)| id).collect())
 }
 
 #[cfg(test)]

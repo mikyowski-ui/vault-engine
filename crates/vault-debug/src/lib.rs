@@ -7,6 +7,8 @@
 //! - [`watch`]: GVAR/MVAR/LVAR watches (flat or per-script locals) diffed
 //!   between ticks.
 //! - [`objects`]: map object and critter snapshots, filters, and diffs.
+//! - [`live`]: a live trace of a world's script execution, attached to its
+//!   host as the vault-core `VmObserver`.
 //!
 //! Nothing here mutates world state; stepping drives the VM only through
 //! `Vm::run`. A frontend owns one [`Inspector`] and calls
@@ -23,19 +25,24 @@
 //! }
 //! ```
 pub mod decode;
+pub mod live;
 pub mod objects;
 pub mod stepper;
 pub mod trace;
 pub mod watch;
 
 pub use decode::{DecodeError, Instruction, OpcodeClass};
+pub use live::LiveTrace;
 pub use objects::{CritterSnapshot, ObjectChange, ObjectFilter, ObjectSnapshot, ObjectTracker};
 pub use stepper::{RunStop, Stepper, StopReason, VmSnapshot};
 pub use trace::{StepOutcome, TraceEntry, TraceRing};
 pub use watch::{VarAddress, VarChange, VarScope, VarSnapshot, WatchList, Watcher};
 
-use std::fmt;
-use vault_core::WorldState;
+use std::{
+    fmt,
+    sync::{Arc, Mutex, PoisonError},
+};
+use vault_core::{WorldHost, WorldState, assets::WorldAssets};
 use vault_vm::{Vm, VmHost};
 
 /// What an [`Inspector`] watches.
@@ -103,6 +110,9 @@ pub struct Inspector {
     pub objects: ObjectTracker,
     track_objects: bool,
     ticks: u64,
+    trace_capacity: usize,
+    /// The live trace attached to a host, if any.
+    live: Option<Arc<Mutex<LiveTrace>>>,
 }
 impl Inspector {
     pub fn new(config: InspectorConfig) -> Self {
@@ -112,7 +122,31 @@ impl Inspector {
             objects: ObjectTracker::new(config.objects),
             track_objects: config.track_objects,
             ticks: 0,
+            trace_capacity: config.trace_capacity,
+            live: None,
         }
+    }
+    /// Record a live trace of every instruction `host`'s scripts execute
+    /// (they then run one observed instruction at a time).
+    pub fn attach<A: WorldAssets>(&mut self, host: &mut WorldHost<A>) {
+        let live = Arc::new(Mutex::new(LiveTrace::new(self.trace_capacity)));
+        host.vm_observer = Some(live.clone());
+        self.live = Some(live);
+    }
+    /// Stop the live trace; `host` runs its scripts unobserved again.
+    pub fn detach<A: WorldAssets>(&mut self, host: &mut WorldHost<A>) {
+        host.vm_observer = None;
+        self.live = None;
+    }
+    pub fn attached(&self) -> bool {
+        self.live.is_some()
+    }
+    /// The newest `count` entries of the live trace, oldest first.
+    pub fn live_entries(&self, count: usize) -> Vec<TraceEntry> {
+        self.live.as_ref().map_or_else(Vec::new, |live| {
+            let live = live.lock().unwrap_or_else(PoisonError::into_inner);
+            live.trace().last(count).cloned().collect()
+        })
     }
     /// Record this tick's watched variables and objects and return what
     /// changed since the previous tick. The first tick sets the baseline.

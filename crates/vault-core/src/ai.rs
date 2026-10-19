@@ -36,8 +36,6 @@ pub struct AiState {
     pub requested: Option<(ObjectRef, i32)>,
     /// Taunt display callbacks registered by the current animation sequence.
     pub callbacks: Vec<TauntCallback>,
-    /// The unintended victim of the attack being applied, if any.
-    pub unintended: ObjectRef,
 }
 impl Default for AiState {
     fn default() -> Self {
@@ -53,7 +51,6 @@ impl Default for AiState {
             accuracy: 0,
             requested: None,
             callbacks: Vec::new(),
-            unintended: 0,
         }
     }
 }

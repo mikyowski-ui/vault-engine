@@ -693,11 +693,30 @@ fn spec014_counters_item_slot_and_keys() {
     assert_eq!(frames[3][1], Glyph::RollDown);
     assert_eq!(frames[6], bar::counter_glyphs(100));
     assert_eq!(bar::roll_frames(5, false).len(), 3);
-    // A roll crossing a threshold splits there.
+    // A roll crossing a threshold splits at it: falling past y = 25 a
+    // segment starts at 25 in yellow, past r = 12 one starts at 12 in red;
+    // rising past them, yellow from 12 and white from 25. Without a color
+    // change there is one segment.
+    use bar::Band::{Red, White, Yellow};
     assert_eq!(
-        bar::roll_segments(30, 20, 50),
-        [(30, 24, bar::Band::White), (24, 20, bar::Band::Yellow)]
+        bar::roll_segments(30, 20, 50, White),
+        [(30, 25, White), (25, 20, Yellow)]
     );
+    assert_eq!(
+        bar::roll_segments(30, 5, 50, White),
+        [(30, 25, White), (25, 12, Yellow), (12, 5, Red)]
+    );
+    assert_eq!(
+        bar::roll_segments(5, 40, 50, Red),
+        [(5, 12, Red), (12, 25, Yellow), (25, 40, White)]
+    );
+    assert_eq!(bar::roll_segments(40, 30, 50, White), [(40, 30, White)]);
+    assert_eq!(bar::roll_segments(30, 25, 50, White), [(30, 25, White)]);
+    // The whole roll: the old value first, then 3 frames per plain unit.
+    let roll = bar::roll(3, &[(3, 1, White)]);
+    assert_eq!(roll.len(), 1 + 3 + 3);
+    assert_eq!(roll[0].0, bar::counter_glyphs(3));
+    assert_eq!(roll[6].0, bar::counter_glyphs(1));
     assert_eq!(
         bar::slot_label(bar::SlotAction::Attack(2)),
         Some("unarmed.frm")
@@ -808,4 +827,104 @@ fn spec014_save_list_navigation_thumbnail_and_quick_slots() {
     );
     quick.forget();
     assert_eq!(quick.f7(), saveload::Quick::Pick(Mode::PickQuickLoad));
+}
+
+#[test]
+fn spec014_automap_colors_and_mirrored_pixels() {
+    use crate::ui::automap::{self, Mark};
+    // Hex t paints (449 - 2c, 8 + 2r): the map is mirrored left to right.
+    assert_eq!(automap::pixel(0), Some([449, 8]));
+    assert_eq!(automap::pixel(199), Some([51, 8]));
+    assert_eq!(automap::pixel(200 * 3 + 5), Some([439, 14]));
+    assert_eq!(automap::pixel(40000), None);
+    assert_eq!(
+        automap::player_cross([10, 20]),
+        [[9, 20], [10, 19], [10, 21]]
+    );
+    // The scanner shows living, visible critters seen or not.
+    let critter = Mark::Critter {
+        hidden: false,
+        dead: false,
+    };
+    assert_eq!(
+        automap::color(critter, false, true, false),
+        Some(automap::BRIGHT_RED)
+    );
+    assert_eq!(automap::color(critter, true, false, true), None);
+    let dead = Mark::Critter {
+        hidden: false,
+        dead: true,
+    };
+    assert_eq!(automap::color(dead, true, true, true), None);
+    // Seen objects: walls, the exit-grid marker, the player; scenery only
+    // in high detail, never the undrawn PID; unseen objects are skipped.
+    assert_eq!(
+        automap::color(Mark::Wall, true, false, false),
+        Some(automap::BRIGHT_GREEN)
+    );
+    assert_eq!(automap::color(Mark::Wall, false, false, true), None);
+    let marker = Mark::Scenery {
+        pid: automap::EXIT_GRID_MARKER,
+    };
+    assert_eq!(
+        automap::color(marker, true, false, false),
+        Some(automap::ORANGE)
+    );
+    let scenery = Mark::Scenery { pid: 0x0200_0001 };
+    assert_eq!(automap::color(scenery, true, false, false), None);
+    assert_eq!(
+        automap::color(scenery, true, false, true),
+        Some(automap::DARK_GREEN)
+    );
+    let undrawn = Mark::Scenery {
+        pid: automap::UNDRAWN_SCENERY,
+    };
+    assert_eq!(automap::color(undrawn, true, false, true), None);
+    assert_eq!(
+        automap::color(Mark::Player, true, false, false),
+        Some(automap::BRIGHT_RED)
+    );
+    assert_eq!(automap::color(Mark::Other, true, true, true), None);
+    // The Pip-Boy page: 2 by 1 cells from (238, 105).
+    assert_eq!(automap::pipboy_cell(0, 0), [238, 105]);
+    assert_eq!(automap::pipboy_cell(3, 10), [258, 108]);
+    assert_eq!(automap::pipboy_color(2), Some(automap::DARK_GREEN));
+}
+
+#[test]
+fn spec014_inventory_drop_targets_and_item_menus() {
+    use crate::{
+        skills::ItemEntry,
+        ui::inventory::{self, DropTarget},
+    };
+    // The list area under the safe row rule, then the slots in order.
+    assert_eq!(inventory::drop_target([124, 35]), DropTarget::List(0));
+    assert_eq!(inventory::drop_target([188, 82]), DropTarget::List(0));
+    assert_eq!(inventory::drop_target([150, 83]), DropTarget::List(1));
+    assert_eq!(inventory::drop_target([150, 322]), DropTarget::List(5));
+    assert_eq!(inventory::drop_target([150, 323]), DropTarget::Nowhere);
+    assert_eq!(inventory::drop_target([189, 100]), DropTarget::Nowhere);
+    assert_eq!(inventory::drop_target([240, 300]), DropTarget::LeftHand);
+    assert_eq!(inventory::drop_target([330, 300]), DropTarget::RightHand);
+    assert_eq!(inventory::drop_target([240, 200]), DropTarget::Armor);
+    assert_eq!(inventory::drop_target([256, 37]), DropTarget::Figure);
+    assert_eq!(inventory::drop_target([316, 137]), DropTarget::Figure);
+    assert_eq!(inventory::drop_target([317, 137]), DropTarget::Nowhere);
+    use ItemEntry::*;
+    assert_eq!(
+        inventory::player_menu(true, false, true),
+        [Look, Unload, Drop, Cancel]
+    );
+    assert_eq!(
+        inventory::player_menu(false, true, true),
+        [Look, Drop, Cancel]
+    );
+    assert_eq!(
+        inventory::player_menu(false, false, true),
+        [Look, Use, Drop, Cancel]
+    );
+    assert_eq!(
+        inventory::player_menu(false, false, false),
+        [Look, Drop, Cancel]
+    );
 }

@@ -410,24 +410,60 @@ pub fn roll_frames(value: i32, up: bool) -> Vec<[Glyph; 4]> {
     frames.push(counter_glyphs(next));
     frames
 }
-/// A roll crossing a color threshold is split at it; each segment uses the
-/// band of the value it starts in.
-pub fn roll_segments(old: i32, new: i32, max: i32) -> Vec<(i32, i32, Band)> {
+/// The HP roll's color segments, all with the one step delay. With r =
+/// `trunc(max / 4)` and y = `trunc(max / 2)`: rising past r a segment
+/// starts at r in yellow, rising past y one starts at y in white; falling
+/// past y one starts at y in yellow, falling past r one starts at r in
+/// red. The first segment uses the previously `shown` color; when the color
+/// does not change there is one segment.
+pub fn roll_segments(old: i32, new: i32, max: i32, shown: Band) -> Vec<(i32, i32, Band)> {
+    if hp_band(new, max) == shown {
+        return vec![(old, new, shown)];
+    }
+    let (r, y) = (max / 4, max / 2);
+    let crossed: Vec<_> = if new > old {
+        [(r, Band::Yellow), (y, Band::White)]
+            .into_iter()
+            .filter(|(at, _)| old < *at && *at <= new)
+            .collect()
+    } else {
+        [(y, Band::Yellow), (r, Band::Red)]
+            .into_iter()
+            .filter(|(at, _)| new < *at && *at <= old)
+            .collect()
+    };
     let mut segments = Vec::new();
-    let mut start = old;
-    let mut value = old;
-    while value != new {
-        let next = if new > value { value + 1 } else { value - 1 };
-        if hp_band(next, max) != hp_band(start, max) {
-            segments.push((start, next, hp_band(start, max)));
-            start = next;
-        }
-        value = next;
+    let (mut start, mut color) = (old, shown);
+    for (at, band) in crossed {
+        segments.push((start, at, color));
+        start = at;
+        color = band;
     }
-    if start != new || segments.is_empty() {
-        segments.push((start, new, hp_band(start, max)));
-    }
+    segments.push((start, new, color));
     segments
+}
+/// The frames of a whole roll from `old` through its color segments: the
+/// first frame draws `old`, then each one-unit step's frames; every frame
+/// is followed by one wait of `roll_delay(old, new)`.
+pub fn roll(old: i32, segments: &[(i32, i32, Band)]) -> Vec<([Glyph; 4], Band)> {
+    let first = segments.first().map_or(Band::White, |(_, _, band)| *band);
+    let mut frames = vec![(counter_glyphs(old), first)];
+    for (start, end, band) in segments {
+        let mut value = *start;
+        while value != *end {
+            let up = *end > value;
+            frames.extend(
+                roll_frames(value, up)
+                    .into_iter()
+                    .map(|glyphs| (glyphs, *band)),
+            );
+            value += if up { 1 } else { -1 };
+        }
+        if start == end {
+            frames.push((counter_glyphs(*end), *band));
+        }
+    }
+    frames
 }
 
 /// §3.22 AP pips.

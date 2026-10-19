@@ -227,6 +227,9 @@ impl<A: WorldAssets> WorldHost<A> {
                     .min(i64::from(maximum))
                     .max(i64::from(i32::MIN)) as i32;
                     self.world.set_hit_points(critter, hp);
+                    if player {
+                        self.world.emit(WorldEffect::RollHitPoints);
+                    }
                     if hp <= 0 && !dead {
                         self.kill_critter(critter, 20)?;
                     }

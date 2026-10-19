@@ -146,6 +146,8 @@ pub fn catalogs() -> BTreeMap<&'static str, Arc<MsgCatalog>> {
 pub struct ItemAssets {
     pub prototypes: BTreeMap<u32, Arc<Prototype>>,
     pub catalogs: BTreeMap<&'static str, Arc<MsgCatalog>>,
+    /// The program every script index loads, when set.
+    pub program: Option<vault_vm::IntProgram>,
 }
 impl Default for ItemAssets {
     fn default() -> Self {
@@ -159,6 +161,7 @@ impl Default for ItemAssets {
         Self {
             prototypes,
             catalogs: catalogs(),
+            program: None,
         }
     }
 }
@@ -170,7 +173,10 @@ impl WorldAssets for ItemAssets {
             .ok_or_else(|| WorldError::Invalid(format!("no prototype {pid:#x}")))
     }
     fn program(&self, _index: i32) -> Result<(String, vault_vm::IntProgram), WorldError> {
-        Err(WorldError::Invalid("no programs".into()))
+        self.program
+            .clone()
+            .map(|program| ("synthetic.int".to_owned(), program))
+            .ok_or_else(|| WorldError::Invalid("no programs".into()))
     }
     fn message(&self, _list: i32, _id: i32) -> Option<vault_formats::msg::Message> {
         None

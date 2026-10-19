@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes `.INT` compiled SSL scripts, their bootstrap and metadata tables, tagged values, the two-stack execution model, call frames, core instructions, and the six requested public lifecycle entry names. Evidence is static inspection of the interpreter, symbol registry, extension registration, and lifecycle dispatch in `fallout1-re` revision `R1`, targeting 32-bit Windows/x86. Binary layout observations were also checked against 952 scripts in the adjacent local corpus. Synthetic fixtures are independent of shipped script content.
+This specification describes `.INT` compiled SSL scripts, their bootstrap and metadata tables, tagged values, the two-stack execution model, call frames, core instructions, and the six requested public lifecycle entry names. Evidence is static inspection of the interpreter, symbol registry, extension registration, and lifecycle dispatch in `fallout1-re` reference revision R1, targeting 32-bit Windows/x86. Binary layout observations were also checked against 952 scripts in the adjacent local corpus. Synthetic fixtures are independent of shipped script content.
 
 Two scope corrections are necessary for an exact specification:
 

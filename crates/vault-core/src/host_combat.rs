@@ -272,13 +272,29 @@ impl<A: WorldAssets> WorldHost<A> {
         attack: &Attack,
         resolution: &Resolution,
     ) -> Result<(), WorldError> {
+        self.apply_attack_to(attacker, defender, defender, attack, resolution)
+    }
+    /// `apply_attack` once the recorded defender may differ from the
+    /// intended target (SPEC-007 §3.6): a missed-shot bystander, a random
+    /// target, or a non-critter impact. Onlookers are alerted for an
+    /// intended target that was not the final victim; only a critter not
+    /// already marked dead then takes status, damage and the §3.6 writers.
+    pub(crate) fn apply_attack_to(
+        &mut self,
+        attacker: ObjectRef,
+        intended: ObjectRef,
+        defender: ObjectRef,
+        attack: &Attack,
+        resolution: &Resolution,
+    ) -> Result<(), WorldError> {
         let cost = attack.ap_cost();
         if let Some(state) = self.world.critter_state_mut(attacker) {
             state.ap = state.ap.saturating_sub(cost).max(0);
         }
-        // SPEC-009 §3.4: the player's attack debit references the defender.
+        // SPEC-009 §3.4: the player's attack debit references the defender
+        // named when the attack began.
         if attacker == self.world.player {
-            self.set_last_attacker(attacker, defender);
+            self.set_last_attacker(attacker, intended);
         }
         // Cleanup reselects the current weapon by hit mode before consuming.
         if resolution.ammo > 0
@@ -309,14 +325,21 @@ impl<A: WorldAssets> WorldHost<A> {
                 state.ap = 0;
             }
         }
-        if attack.defender_pid != PROTECTED_PID {
+        if intended != 0 && intended != defender {
+            self.alert_onlookers(intended);
+        }
+        let living_critter = matches!(
+            self.world.get(defender).map(|o| &o.raw.state),
+            Some(ObjectState::Critter(state)) if state.results.0 & effect::DEAD == 0
+        );
+        if attack.defender_pid != PROTECTED_PID && living_critter {
             self.damage_critter(
                 defender,
                 Some(attacker),
                 resolution.damage,
                 resolution.defender_flags,
             )?;
-            self.after_damage(attacker, defender, true);
+            self.after_damage(attacker, defender, defender == intended);
             // The fall (lethal or not) carries the computed knockback; a
             // nonpositive displacement animates without movement.
             if resolution.knockback > 0 {
@@ -787,9 +810,22 @@ impl<A: WorldAssets> WorldHost<A> {
         attack: &Attack,
         spray: &Spray,
     ) -> Result<(), WorldError> {
-        self.apply_attack(attacker, defender, attack, &spray.main)?;
+        self.apply_spray_to(attacker, defender, defender, attack, spray)
+    }
+    /// `apply_spray` with the intended target and the recorded defender
+    /// apart (see `apply_attack_to`). Extras not already marked dead follow
+    /// the same writers; an extra is never the intended target.
+    pub(crate) fn apply_spray_to(
+        &mut self,
+        attacker: ObjectRef,
+        intended: ObjectRef,
+        defender: ObjectRef,
+        attack: &Attack,
+        spray: &Spray,
+    ) -> Result<(), WorldError> {
+        self.apply_attack_to(attacker, intended, defender, attack, &spray.main)?;
         for (object, profile, outcome) in &spray.extras {
-            if profile.defender_pid != PROTECTED_PID {
+            if profile.defender_pid != PROTECTED_PID && !self.world.is_dead(*object) {
                 self.damage_critter(
                     *object,
                     Some(attacker),
@@ -846,13 +882,18 @@ impl<A: WorldAssets> WorldHost<A> {
             adjust_for_request(&request, &mut spray.main);
         }
         let recorded = spray.main.clone();
-        // A random-target victim replaces the defender and is unintended. A
-        // bystander replaces it too, but retaliates only across teams; a
-        // non-critter impact is applied as the miss it is.
-        let (target, applied, unintended) = match &victim {
-            Some(Victim::Random(victim, profile)) => (*victim, profile, *victim),
-            Some(Victim::Bystander(victim, profile)) => (*victim, profile, 0),
-            Some(Victim::Object(_)) | None => (defender, &attack, 0),
+        // A random target or a missed-shot bystander replaces the defender
+        // as an unintended victim (SPEC-007 §3.6); a non-critter impact
+        // becomes the recorded defender and is presented as the miss it is.
+        let (target, applied) = match &victim {
+            Some(Victim::Random(victim, profile) | Victim::Bystander(victim, profile)) => {
+                (*victim, profile)
+            }
+            Some(Victim::Object(_)) | None => (defender, &attack),
+        };
+        let recorded_defender = match &victim {
+            Some(Victim::Object(object)) => *object,
+            _ => target,
         };
         if matches!(victim, Some(Victim::Object(_))) {
             spray.main.defender_flags &= !effect::HIT;
@@ -862,13 +903,16 @@ impl<A: WorldAssets> WorldHost<A> {
         self.attack_taunts(attacker, target, applied, &spray.main)?;
         let hit = spray.main.defender_flags & effect::HIT != 0;
         self.emit_attack_sounds(attacker, target, mode, hit);
-        // Onlookers hear of the intended target, then of a critter victim.
-        if matches!(&victim, Some(Victim::Bystander(victim, _)) if *victim != defender) {
-            self.alert_onlookers(defender);
+        // SPEC-007 §3.6: onlookers hear of the intended target when the
+        // final victim differs, then of a critter victim.
+        let player = self.world.player;
+        let before = self.world.hit_points(player);
+        let application =
+            self.apply_spray_to(attacker, defender, recorded_defender, applied, &spray);
+        // SPEC-014 §3.21: combat damage to the player rolls the HP counter.
+        if self.world.hit_points(player) != before {
+            self.world.emit(crate::WorldEffect::RollHitPoints);
         }
-        self.world.ai.unintended = unintended;
-        let application = self.apply_spray(attacker, target, applied, &spray);
-        self.world.ai.unintended = 0;
         application?;
         self.run_taunts();
         Ok(Ok(recorded))

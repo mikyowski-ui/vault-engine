@@ -19,6 +19,16 @@ use vault_vm::{
 };
 
 pub(crate) type HostResult = Result<Option<ExternalValue>, VmError>;
+
+/// An observer of script execution: a debugger's live instruction trace.
+/// While one is attached to a host, its scripts run one instruction per
+/// `Vm::run` call (the same scheduling as larger budgets) and every step is
+/// reported before and after it executes. Nested script runs are reported
+/// too; the observer is never held across a step.
+pub trait VmObserver: Send {
+    fn before_step(&mut self, vm: &Vm);
+    fn after_step(&mut self, vm: &Vm, result: &Result<RunOutcome, VmError>);
+}
 #[derive(Debug, Clone)]
 pub struct CallTrace {
     pub opcode: u16,
@@ -85,6 +95,8 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// An interaction's approach has just ended: its action runs as the
     /// sequence's proximity step (SPEC-013 §3.2), not a new approach.
     pub(crate) arriving: bool,
+    /// A debugger's live trace of script execution, when attached.
+    pub vm_observer: Option<std::sync::Arc<std::sync::Mutex<dyn VmObserver>>>,
 }
 impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn prototype(&self, pid: u32) -> Result<std::sync::Arc<vault_formats::Prototype>, WorldError> {
@@ -213,6 +225,7 @@ impl<A: WorldAssets> WorldHost<A> {
             interactions: VecDeque::new(),
             presentation: None,
             arriving: false,
+            vm_observer: None,
         }
     }
     pub fn rules(&mut self, rules: WorldRules) {
@@ -464,6 +477,15 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.assets.map(path)
     }
+    /// Whether a loaded script's program defines the event's procedure.
+    pub(crate) fn has_procedure(&self, script: u32, event: ScriptEvent) -> bool {
+        self.world
+            .scripts
+            .get(&script)
+            .filter(|instance| instance.initialized)
+            .and_then(|instance| self.programs.get(&instance.program))
+            .is_some_and(|vm| vm.program.find_procedure(event.name(), true).is_some())
+    }
     pub fn dispatch(&mut self, request: ScriptRequest) -> Result<DispatchResult, WorldError> {
         if !self.world.scripts_enabled {
             return Ok(DispatchResult::default());
@@ -559,12 +581,36 @@ impl<A: WorldAssets> WorldHost<A> {
     fn run_vm(&mut self, vm: &mut Vm) -> Result<RunOutcome, VmError> {
         self.active.insert(vm.id);
         let mut outcome = Err(VmError::InstructionLimit);
-        for _ in 0..1000 {
-            match vm.run(self, 1000) {
-                Ok(RunOutcome::Budget) => {}
-                result => {
-                    outcome = result;
-                    break;
+        match self.vm_observer.clone() {
+            // The same total budget, one observed instruction at a time.
+            Some(observer) => {
+                let lock = || {
+                    observer
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                };
+                for _ in 0..1_000_000 {
+                    lock().before_step(vm);
+                    let result = vm.run(self, 1);
+                    lock().after_step(vm, &result);
+                    match result {
+                        Ok(RunOutcome::Budget) => {}
+                        result => {
+                            outcome = result;
+                            break;
+                        }
+                    }
+                }
+            }
+            None => {
+                for _ in 0..1000 {
+                    match vm.run(self, 1000) {
+                        Ok(RunOutcome::Budget) => {}
+                        result => {
+                            outcome = result;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -794,6 +840,11 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.step_animations(now_ms)? {
             changed_by_animation = true;
         }
+        // SPEC-013 §3.10: an animated explosion started on an earlier update
+        // has played its art; its damage step ends it.
+        if self.finish_explosion()? {
+            changed_by_animation = true;
+        }
         // SPEC-007: service scripted combat requests and advance turns until
         // the player must act (host-configured AI drives NPC turns).
         if self.service_combat_request()? || self.world.combat {
@@ -902,6 +953,10 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         // SPEC-013 §3.22: a pending transition runs in the main loop.
         if self.process_transition()? {
+            changed = true;
+        }
+        // SPEC-013 §3.10: the request pass services a scripted explosion.
+        if self.service_explosion_request()? {
             changed = true;
         }
         Ok(changed)
@@ -1400,18 +1455,37 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         if !result.overridden {
             match action {
+                // SPEC-014 §3.27: `proto.msg` 490, or 491/492 at random
+                // for a dead critter, naming the object; nothing while the
+                // player is dead. Without the catalog the short text is the
+                // name (with "Dead " for a dead critter).
+                ObjectAction::LookAt if self.world.is_dead(self.world.player) => {}
                 ObjectAction::LookAt => {
                     let object = self.world.get(target).expect("target");
-                    let text = if object
-                        .character
-                        .as_ref()
-                        .is_some_and(|sheet| sheet.current_hp <= 0)
-                    {
-                        [b"Dead ".as_slice(), object.name.as_slice()].concat()
+                    let name = object.name.clone();
+                    let dead = object.category() == Category::Critter
+                        && (self.world.is_dead(target)
+                            || object
+                                .character
+                                .as_ref()
+                                .is_some_and(|sheet| sheet.current_hp <= 0));
+                    let id = if dead {
+                        crate::RandomSource::range(&mut self.world.rng, 491, 492)?
                     } else {
-                        object.name.clone()
+                        490
                     };
-                    self.world.emit(WorldEffect::Message(text));
+                    match self.game_text("proto.msg", id) {
+                        Some(format) => self.world.emit(WorldEffect::Message(
+                            crate::host_drugs::format_message(
+                                &format,
+                                &[crate::host_drugs::Arg::Text(&name)],
+                            ),
+                        )),
+                        None if dead => self
+                            .world
+                            .emit(WorldEffect::Message([b"Dead ".as_slice(), &name].concat())),
+                        None => self.world.emit(WorldEffect::Message(name)),
+                    }
                 }
                 ObjectAction::Description => self.world.emit(WorldEffect::Message(
                     self.world.get(target).expect("target").description.clone(),
@@ -1613,8 +1687,23 @@ impl<A: WorldAssets> WorldHost<A> {
     /// combat to the actor's AP plus free movement. Returns whether a route
     /// exists.
     pub fn walk_to(&mut self, actor: ObjectRef, tile: i32) -> Result<bool, WorldError> {
+        self.walk_to_reserving(actor, tile, 0)
+    }
+    /// `walk_to` keeping `reserve` action points in combat (the player's
+    /// Ctrl walk keeps the current attack's cost, SPEC-014 §3.27); nothing
+    /// moves when no points remain for the route.
+    pub fn walk_to_reserving(
+        &mut self,
+        actor: ObjectRef,
+        tile: i32,
+        reserve: i32,
+    ) -> Result<bool, WorldError> {
         let limit = if self.world.combat {
-            usize::try_from(self.world.action_points(actor)).unwrap_or(0)
+            let budget = self.world.action_points(actor).saturating_sub(reserve);
+            if budget <= 0 {
+                return Ok(false);
+            }
+            usize::try_from(budget).unwrap_or(0)
         } else {
             usize::MAX
         };

@@ -2,7 +2,9 @@
 //! the campaign globals with the localized Pip-Boy messages, and the alarm
 //! clock's rest choices. Rest advances one UI step per at least 50 ms so
 //! the window stays responsive; Escape cancels it. The SPEC-012 video
-//! archive lists the played movies and replays one with flags `0x0B`.
+//! archive lists the played movies and replays one with flags `0x0B`. The
+//! SPEC-014 §3.33 automap page draws the current map's stored automap
+//! raster for the player's elevation.
 use super::{MapPreview, Screen, button, panel_text};
 use crate::AppResult;
 use std::sync::Arc;
@@ -10,6 +12,7 @@ use vault_core::{
     assets::WorldAssets,
     host_rest::{RestOutcome, RestRequest, RestSession},
     movie,
+    ui::automap,
 };
 use vault_formats::MsgCatalog;
 use vault_guidance::{DiskLine, Holodisk, QuestState};
@@ -18,11 +21,12 @@ use winit::keyboard::KeyCode;
 
 /// Each rest UI step waits at least 50 wall-clock milliseconds.
 const REST_STEP_MS: u64 = 50;
-const MENU: [&[u8]; 5] = [
+const MENU: [&[u8]; 6] = [
     b"Status",
     b"Holodisks",
     b"Alarm clock",
     b"Video archive",
+    b"Automap",
     b"Close",
 ];
 const CONTENT: [i32; 2] = [180, 60];
@@ -50,6 +54,7 @@ pub(crate) enum Tab {
     Holodisks,
     Alarm,
     Archive,
+    Automap,
 }
 pub(crate) struct PipBoy {
     pub tab: Tab,
@@ -130,10 +135,16 @@ impl MapPreview {
         }
         if let Some(index) = (0..MENU.len()).find(|index| inside(menu_button(*index), point)) {
             self.press();
-            if index == 4 {
+            if index == 5 {
                 self.return_to_map();
             } else if let Screen::PipBoy(pipboy) = &mut self.screen {
-                pipboy.tab = [Tab::Status, Tab::Holodisks, Tab::Alarm, Tab::Archive][index];
+                pipboy.tab = [
+                    Tab::Status,
+                    Tab::Holodisks,
+                    Tab::Alarm,
+                    Tab::Archive,
+                    Tab::Automap,
+                ][index];
                 pipboy.disk = None;
             }
             return true;
@@ -215,7 +226,7 @@ impl MapPreview {
                 }
                 true
             }
-            Tab::Status => false,
+            Tab::Status | Tab::Automap => false,
         }
     }
     /// Advance an active rest by one UI step when 50 ms have passed.
@@ -353,6 +364,7 @@ impl MapPreview {
                         put(&mut image, label, green, false);
                     }
                 }
+                (Tab::Automap, _) => self.draw_pipboy_automap(&mut image),
                 (Tab::Archive, _) => {
                     let played = movie::archive_movies(&self.host.world.persistence.movies);
                     if played.is_empty() {
@@ -371,5 +383,42 @@ impl MapPreview {
         }
         panel_text(&mut image, font, palette, &self.status, [22, 466], green);
         Ok(image)
+    }
+    /// §3.33 the stored raster (current up to the last database write),
+    /// each cell 2 pixels wide and 1 tall from (238, 105): walls key 992,
+    /// scenery key 480. Rows below the window are clipped (safe rule).
+    fn draw_pipboy_automap(&self, image: &mut IndexedImage) {
+        let world = &self.host.world;
+        let elevation = world
+            .get(world.player)
+            .map_or(world.elevation, |object| object.raw.elevation);
+        let raster = usize::try_from(world.map.header.map_number)
+            .ok()
+            .and_then(|map| {
+                world
+                    .persistence
+                    .automap
+                    .raster(map, usize::from(elevation))
+                    .ok()
+                    .flatten()
+            });
+        let Some(raster) = raster else {
+            return;
+        };
+        let painter = crate::interface::Painter {
+            assets: &self.host.assets,
+            palette: &self.palette,
+        };
+        for row in 0..200 {
+            for column in 0..200 {
+                let Some(key) =
+                    automap::pipboy_color(vault_formats::automap::cell(&raster, row, column))
+                else {
+                    continue;
+                };
+                let [x, y] = automap::pipboy_cell(row, column);
+                image.fill_rect([x, y, 2, 1], painter.color(key));
+            }
+        }
     }
 }

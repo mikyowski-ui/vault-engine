@@ -404,6 +404,128 @@ impl WorldState {
         }
         Ok(reference)
     }
+    /// The quantity of `item`'s entry in its owner's inventory.
+    fn entry_quantity(&self, item: ObjectRef) -> Option<i32> {
+        let owner = self.get(item)?.owner?;
+        self.get(owner)?
+            .inventory
+            .iter()
+            .find(|(entry, _)| *entry == item)
+            .map(|(_, quantity)| *quantity)
+    }
+    /// SPEC-014 §3.34 a hand or armor slot (`flag`) takes `item`, which
+    /// first leaves any slot it holds (worn armor's stats come off); from a
+    /// stack the slot takes one unit, split off as its own entry (equipped
+    /// items never stack). Returns the object now in the slot.
+    pub fn equip_slot(
+        &mut self,
+        owner: ObjectRef,
+        item: ObjectRef,
+        flag: u32,
+    ) -> Result<ObjectRef, WorldError> {
+        if self
+            .get(item)
+            .is_none_or(|object| object.owner != Some(owner))
+        {
+            return Err(WorldError::Invalid(
+                "the slot's item must be carried".into(),
+            ));
+        }
+        let held = self
+            .get(item)
+            .map_or(0, |object| object.raw.flags.0 & EQUIPPED);
+        if held & BasicFlags::WORN.0 != 0 && flag != BasicFlags::WORN.0 {
+            self.armour_effect(owner, item, false);
+        }
+        if let Some(object) = self.get_mut(item) {
+            object.raw.flags.0 &= !EQUIPPED;
+        }
+        let quantity = self.entry_quantity(item).unwrap_or(1);
+        if quantity > 1 {
+            // The detached unit becomes its own entry; the rest stays.
+            self.remove_item(owner, item, 1)?;
+            self.get_mut(owner)
+                .expect("owner")
+                .inventory
+                .push((item, 1));
+            let object = self.get_mut(item).expect("item");
+            object.owner = Some(owner);
+            object.raw.hex = None;
+        }
+        self.equip(owner, item, flag)?;
+        Ok(item)
+    }
+    /// SPEC-014 §3.34 an equipped item goes back into the inventory list
+    /// (merging into a stack where it can), worn armor's stats removed.
+    pub fn unequip(&mut self, owner: ObjectRef, item: ObjectRef) -> Result<(), WorldError> {
+        if self
+            .get(item)
+            .is_none_or(|object| object.raw.flags.0 & EQUIPPED == 0)
+        {
+            return Ok(());
+        }
+        let quantity = self.entry_quantity(item).unwrap_or(1);
+        self.remove_item(owner, item, quantity)?;
+        self.add_item(owner, item, quantity, true)
+    }
+    /// SPEC-014 §3.34 `quantity` units of `item` into `container`, with the
+    /// container's limits; a refused move puts them back (forced).
+    pub fn move_into(
+        &mut self,
+        owner: ObjectRef,
+        item: ObjectRef,
+        container: ObjectRef,
+        quantity: i32,
+    ) -> Result<bool, WorldError> {
+        if let Some(refusal) = self.add_refusal(container, item, quantity) {
+            self.diagnostic(refusal.message());
+            return Ok(false);
+        }
+        self.remove_item(owner, item, quantity)?;
+        if let Err(error) = self.add_item(container, item, quantity, false) {
+            self.add_item(owner, item, quantity, true)?;
+            self.diagnostic(error.to_string());
+            return Ok(false);
+        }
+        Ok(true)
+    }
+    /// Drop `quantity` units of a carried item on the owner's hex.
+    pub fn drop_item(
+        &mut self,
+        owner: ObjectRef,
+        item: ObjectRef,
+        quantity: i32,
+    ) -> Result<(), WorldError> {
+        let place = self
+            .get(self.outermost_owner(owner))
+            .and_then(|holder| Some((holder.raw.hex?, holder.raw.elevation)))
+            .ok_or_else(|| WorldError::Invalid("the holder is not on the map".into()))?;
+        self.remove_item(owner, item, quantity)?;
+        self.move_object(item, place.0, place.1, false)
+    }
+    /// A misc item's remaining charges.
+    pub fn charges(&self, item: ObjectRef) -> Option<i32> {
+        match self.get(item).map(|object| &object.raw.state) {
+            Some(ObjectState::Other {
+                detail: ObjectDetail::Charges(charges),
+                ..
+            }) => Some(*charges),
+            _ => None,
+        }
+    }
+    /// Spend one charge; `false` when none is left.
+    pub fn spend_charge(&mut self, item: ObjectRef) -> bool {
+        match self.get_mut(item).map(|object| &mut object.raw.state) {
+            Some(ObjectState::Other {
+                detail: ObjectDetail::Charges(charges),
+                ..
+            }) if *charges > 0 => {
+                *charges -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
     /// Destroy one unit of a carried stack (the rest keeps full packs).
     pub fn destroy_unit(&mut self, item: ObjectRef) -> Result<(), WorldError> {
         if let Some(owner) = self.get(item).and_then(|object| object.owner) {

@@ -2,7 +2,7 @@
 //! states, previews, the info box, the overwrite question and description
 //! box), committing through the SPEC-008 slot writer and reader, and quick
 //! save/load. Slots live below the configured save root.
-use super::{MapPreview, Screen};
+use super::{MapPreview, Screen, dialog::Dialog};
 use crate::{AppResult, interface::Painter};
 use vault_core::{
     host_save::{SaveInfo, slot_directory},
@@ -25,17 +25,6 @@ pub(crate) struct SaveLoadScreen {
     confirm: bool,
     description: Option<Description>,
 }
-
-/// SPEC-014 §3.13 a large Done box at (169, 116) for a save failure (132 /
-/// 133) or a load failure (134 / 135). Dismissing a load failure closes the
-/// screen as cancelled and requests the main menu.
-pub(crate) struct Notice {
-    title: Vec<u8>,
-    body: Vec<u8>,
-    quit: bool,
-}
-
-const NOTICE_ORIGIN: [i32; 2] = [169, 116];
 
 /// Read every slot header below `root`.
 fn scan(root: &std::path::Path) -> (Vec<SlotState>, Vec<Option<Vec<u8>>>) {
@@ -459,95 +448,15 @@ impl MapPreview {
     }
 }
 impl MapPreview {
-    /// `iisxxxx1` and the `lsgame.msg` box.
+    /// `iisxxxx1` and the `lsgame.msg` box: a large Done box at (169, 116)
+    /// with the title and body in key 32328 (SPEC-014 §3.13). Dismissing a
+    /// load failure closes the screen as cancelled and requests the main
+    /// menu.
     fn show_notice(&mut self, title: i32, body: i32, quit: bool) {
         self.play_effect(ERROR_SOUND.as_bytes(), None);
         let title = self.message("lsgame.msg", title);
         let body = self.message("lsgame.msg", body);
-        self.notice = Some(Notice { title, body, quit });
+        let dialog = Dialog::done([169, 116], title, body, ColorKey::ERROR);
+        self.show_dialog(if quit { dialog.quitting() } else { dialog });
     }
-    fn dismiss_notice(&mut self) {
-        if let Some(notice) = self.notice.take()
-            && notice.quit
-        {
-            self.screen = Screen::Map;
-            self.quit_requested = true;
-        }
-    }
-    pub(crate) fn draw_notice(&self, image: &mut IndexedImage) {
-        let Some(notice) = &self.notice else {
-            return;
-        };
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
-        let [ox, oy] = NOTICE_ORIGIN;
-        let (art, [width, _]) = flow::DialogSize::Large.art();
-        painter.blit_opaque(image, art, 0, [ox, oy]);
-        let body = wrap(&notice.body, |line| painter.width(101, line));
-        let mut y = oy + flow::dialog_title_y(body.len());
-        for line in std::iter::once(&notice.title).chain(&body) {
-            painter.centered(image, 101, ColorKey::ERROR, line, [ox, y], width);
-            y += 10;
-        }
-        for button in flow::dialog_buttons(false) {
-            let [bx, by] = button.box_origin;
-            painter.blit_opaque(image, flow::DONE_BOX.0, 0, [ox + bx, oy + by]);
-            let caption = painter.message("dbox.msg", button.caption);
-            let [cx, cy] = button.caption_origin;
-            painter.text(
-                image,
-                103,
-                ColorKey::LABEL,
-                &caption,
-                [ox + cx, oy + cy],
-                60,
-            );
-            let [rx, ry] = button.button;
-            painter.blit(image, "lilredup.frm", 0, [ox + rx, oy + ry]);
-        }
-    }
-    /// Enter (with `ib1p1xx1`) or Esc dismisses; other keys are swallowed.
-    pub(crate) fn notice_key(&mut self, key: KeyCode) -> bool {
-        if self.notice.is_none() {
-            return false;
-        }
-        match key {
-            KeyCode::Enter | KeyCode::NumpadEnter => {
-                self.play_effect(BUTTON_PRESS.as_bytes(), None);
-                self.dismiss_notice();
-            }
-            KeyCode::Escape => self.dismiss_notice(),
-            _ => {}
-        }
-        true
-    }
-    pub(crate) fn notice_click(&mut self, point: [i32; 2]) -> bool {
-        if self.notice.is_none() {
-            return false;
-        }
-        let [ox, oy] = NOTICE_ORIGIN;
-        let [rx, ry] = flow::dialog_buttons(false)[0].button;
-        if vault_core::ui::Rect::new(ox + rx, oy + ry, 15, 16).contains(point) {
-            self.press();
-            self.dismiss_notice();
-        }
-        true
-    }
-}
-
-/// Body lines wider than `flow::DIALOG_WRAP` wrap at spaces.
-fn wrap(text: &[u8], width: impl Fn(&[u8]) -> i32) -> Vec<Vec<u8>> {
-    let mut lines: Vec<Vec<u8>> = Vec::new();
-    for word in text.split(|b| *b == b' ').filter(|w| !w.is_empty()) {
-        match lines.last_mut() {
-            Some(line) if width(&[line.as_slice(), b" ", word].concat()) <= flow::DIALOG_WRAP => {
-                line.push(b' ');
-                line.extend_from_slice(word);
-            }
-            _ => lines.push(word.to_vec()),
-        }
-    }
-    lines
 }

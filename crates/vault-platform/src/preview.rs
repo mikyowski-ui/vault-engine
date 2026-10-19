@@ -83,6 +83,11 @@ pub struct PreviewArgs {
     /// Message ID (default: lowest ID with nonempty text).
     #[arg(long, requires = "preview_frm", allow_negative_numbers = true)]
     pub message_id: Option<i32>,
+    /// Start the vault-debug inspector in the interactive world: GVAR, MVAR
+    /// and LVAR watches and a live script trace in an overlay, also logged
+    /// at debug level (target `vault_debug`). F9 toggles it during a run.
+    #[arg(long)]
+    pub debug: bool,
     /// Set by a headless replay: the world's movies complete without
     /// playback, including the startup movies queued while loading.
     #[arg(skip)]
@@ -298,7 +303,9 @@ fn parse_asset<T>(
 impl PreviewArgs {
     /// The asset namespace: SPEC-008 master and critter databases (each
     /// consulting the optional loose root first, with no fallback to the
-    /// other archive), or a loose directory alone.
+    /// other archive, and each opened lazily: only its directory tables are
+    /// read, and members stream from the file on demand), or a loose
+    /// directory alone.
     pub fn source(&self) -> AppResult<Arc<dyn Vfs>> {
         let loose = self
             .corpus_dir
@@ -311,11 +318,11 @@ impl PreviewArgs {
                 loose.ok_or("a preview requires --corpus-dir or --master-dat/--critter-dat")?;
             return Ok(loose);
         };
+        // Only the directory tables are read here; members stream from the
+        // file on demand (SPEC-008 lookup, one member in memory at a time).
         let archive = |path: &PathBuf| -> AppResult<Arc<DatArchive>> {
-            let bytes =
-                std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
             Ok(Arc::new(
-                DatArchive::parse(bytes).map_err(|error| format!("{}: {error}", path.display()))?,
+                DatArchive::open(path).map_err(|error| format!("{}: {error}", path.display()))?,
             ))
         };
         let master = Database {
@@ -342,6 +349,7 @@ impl PreviewArgs {
                 self.config.clone(),
             )?;
             game.headless = self.headless;
+            game.debug = self.debug;
             return Ok(Some(AssetPreview::Game(Box::new(game))));
         }
         if let Some(path) = &self.preview_map {
@@ -362,6 +370,7 @@ impl PreviewArgs {
             if self.startup_movies {
                 map.queue_startup_movies();
             }
+            map.set_debug(self.debug);
             return Ok(Some(AssetPreview::Map(Box::new(map))));
         }
         if let Some(path) = &self.play_movie {

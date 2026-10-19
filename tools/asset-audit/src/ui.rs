@@ -333,10 +333,16 @@ pub fn audit_ui(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Error>> {
         (140, "mainmenu.frm"),
         (169, "edtrcrte.frm"),
         (170, "bignum.frm"),
+        (171, "automap.frm"),
+        (172, "autoup.frm"),
+        (173, "autodwn.frm"),
         (174, "pickchar.frm"),
         (201, "combat.frm"),
         (202, "stealth.frm"),
         (203, "diplomat.frm"),
+        (250, "actarrow.frm"),
+        (286, "hand.frm"),
+        (297, "helpscrn.frm"),
         (299, "menuup.frm"),
         (300, "menudown.frm"),
         (309, "death.frm"),
@@ -412,6 +418,10 @@ pub fn audit_ui(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Error>> {
         ("actarrow.frm", [29, 23], None),
         ("msef003.frm", [32, 16], None),
         ("death.frm", [640, 480], None),
+        // §3.33 the automap window and its detail switch.
+        ("automap.frm", [519, 480], None),
+        ("autoup.frm", [42, 74], None),
+        ("autodwn.frm", [42, 74], None),
         ("dp.frm", [1280, 480], None),
         ("tblcrd.frm", [369, 279], Some(31)),
     ] {
@@ -473,6 +483,12 @@ pub fn audit_ui(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Error>> {
                 .ok_or(format!("{} frames", archive.frame_count()))
         });
         audit.record("cursors", &format!("{name} frames"), result);
+    }
+    // Screen palettes installed in place of color.pal (SPEC-014 §3.2).
+    for path in [flow::DEATH_PALETTE, "art/intrface/helpscrn.pal"] {
+        let result = read(vfs, path)
+            .and_then(|bytes| Palette::parse(&bytes).map(drop).map_err(|e| e.to_string()));
+        audit.record("palettes", path, result);
     }
     // Named color keys resolve to the documented palette indexes.
     let palette =

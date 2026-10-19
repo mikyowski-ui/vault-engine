@@ -39,13 +39,13 @@ pub mod stats;
 pub mod ui;
 pub mod world;
 pub mod worldmap;
-pub use host::WorldHost;
+pub use host::{VmObserver, WorldHost};
 pub use host_combat::{Refusal, Spray, spray_budgets};
 pub use host_movement::{Movement, StepOutcome};
 pub use host_travel::TravelOutcome;
 pub use world::{
-    LootRequest, ObjectAction, ObjectRef, ScriptEvent, Transition, WorldEffect, WorldRules,
-    WorldState,
+    ActiveExplosion, ExplosionRequest, LootRequest, ObjectAction, ObjectRef, ScriptEvent,
+    Transition, WorldEffect, WorldRules, WorldState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

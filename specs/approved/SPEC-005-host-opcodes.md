@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This document specifies the host instruction registrations in revision `R1`, targeting the 32-bit Windows interpreter described in SPEC-004. The evidence is static inspection of instruction handlers and their host consumers, not measurement of an original executable. Public bytecode mnemonics below are catalog labels, not native implementation routine names or serialized strings.
+This document specifies the host instruction registrations in reference revision R1, targeting the 32-bit Windows interpreter described in SPEC-004. The evidence is static inspection of instruction handlers and their host consumers, not measurement of an original executable. Public bytecode mnemonics below are catalog labels, not native implementation routine names or serialized strings.
 
 The inclusive range `0x804C`-`0x8155` contains 266 instruction words: 83 registered general-library words, two unregistered holes, and 181 registered game words. Every word has a row in sections 2.3-2.10. A registered word can still be a stub, reject ordinary-looking operands, leave a result absent on an early return, or invoke defective host behavior.
 
@@ -350,7 +350,7 @@ Map/world/combat requests are often deferred state requests, not synchronous cha
 | `0x810B` | `metarule` | parameter, rule | I value | Rules 13 end-game request, 14 first-run test, 15 elevator request, 16 party count, 22 loading-state test; other rules return zero. `[Must-match]` |
 | `0x8118` | `get_month` | none | I month | Current calendar month, numbered 1-12. `[Must-match]` |
 | `0x8119` | `get_day` | none | I day | Current calendar day of month, numbered from 1. `[Must-match]` |
-| `0x811A` | `explosion` | maximum damage, elevation, hex | none | Hex -1 diagnoses/no-op. Queue explosion with minimum damage 1, except maximum zero gives minimum zero. `[Must-match]` |
+| `0x811A` | `explosion` | maximum damage, elevation, hex | none | Hex -1 diagnoses/no-op. Post a deferred explosion request with minimum damage 1, except maximum zero gives minimum zero; servicing, damage and the no-retry rule are in SPEC-013 §3.10. `[Must-match]` |
 | `0x811B` | `days_since_visited` | none | I days | Truncated elapsed ticks divided by 864000; last-visit timestamp zero gives -1. `[Must-match]` |
 | `0x8128` | `combat_is_initialized` | none | I bool | Current combat-active state. `[Must-match]` |
 | `0x8143` | `attack_setup` | defender, attacker | none | Two-object combat request with accuracy bonus 0 and damage range 0-2147483647; active attacker/defender required. Existing combat sets opponent/maneuver rather than starting a second combat. `[Must-match]` Null defender is not reliably checked. `[May-improve]`: a null defender is a no-op with a diagnostic. |

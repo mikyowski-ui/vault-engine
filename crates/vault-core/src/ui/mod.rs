@@ -2,11 +2,13 @@
 //! layouts, state machines, timings and text rules that a presentation layer
 //! draws and drives. Coordinates are window-relative pixels unless named
 //! "screen"; durations are milliseconds.
+pub mod automap;
 pub mod bar;
 pub mod cursor;
 pub mod editor;
 pub mod endgame;
 pub mod flow;
+pub mod inventory;
 pub mod options;
 pub mod saveload;
 

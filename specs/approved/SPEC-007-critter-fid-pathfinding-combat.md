@@ -21,6 +21,7 @@ Important distinctions: a directional-file selector is not a critter's zero-base
 ### Revision history
 
 - **R1-rev2 (2026-10-18).** Section 3.6 now gives the exact draw range and position of the punch-to-kick draw. Section 3.7 now gives the complete missed-shot bystander algorithm: the line-of-fire stage, the impact fallback, victim selection, hit location, damage, and draw order. Fixtures D and E are added. The raw revision hash was replaced by the label R1.
+- **R1-rev3 (2026-10-19).** Section 3.6 now holds the single authoritative intended-target, onlooker and retaliation rule, which SPEC-009 cites. A surviving conscious unintended victim, whether a missed-shot bystander or a critical-failure random target, makes the retaliation check only when its team differs from the attacker's. Section 3.7 now states that the disabled splash enumeration serves every explosion, so no explosion damages beyond its center target, which matches SPEC-013 §3.10.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -517,7 +518,7 @@ Critical failure clears hit, chooses the weapon's failure table/tier, and does n
 - Hit-self computes ordinary self damage, using scheduled ammunition count for ranged or one round otherwise; explosion computes one ordinary self-damage round. `[Must-match]`
 - Additional self-injury adds D5. Lose-turn sets ordinary AP to zero; it does not independently clear the free-movement pool. `[Must-match]`
 - Lose-ammunition schedules the entire current magazine for consumption for ranged subtype; on other subtypes that flag is removed. `[Must-match]`
-- Random cripple uses the same four-limb substitution. Random-target selects another AI target, switches to torso, clears the critical marker, marks hit, and calculates normal damage if a target exists. `[Must-match]`
+- Random cripple uses the same four-limb substitution. Random-target selects another AI target, switches to torso, clears the critical marker, marks hit, and calculates normal damage if a target exists. That target is an unintended victim for the retaliation rule below. `[Must-match]`
 - Weapon drop/destruction/explosion effects are also presented through animation callbacks. A mask is not proof that every intended HP/equipment effect later commits; see the application guards below. `[Must-match]`
 
 Protected PID `0x01000008` bypasses victim critical augmentation and the ordinary death/status/HP application paths. The same PID as attacker is exempt from critical-failure effects. This is a literal PID exception, not a general invulnerability test. `[Must-match]`
@@ -557,6 +558,18 @@ Before sequencing, a scripted initial combat request can add/clamp defender dama
 Attack resolution initially calculates damage/flags/ammunition-to-spend without immediately debiting the magazine or HP. Successful action sequencing debits attack AP. When the tracked combat-animation count reaches zero, cleanup reselects the current weapon by hit mode, consumes its scheduled ammunition, displays results, and applies target damage/status. `[Must-match]` Changing the equipped weapon in between can therefore affect which weapon is debited. `[May-improve]`: consume the scheduled ammunition from the weapon that made the attack.
 
 For ordinary victims, positive damage at least current HP sets dead. Persistent status applies mask `0x80FF`; armor bypass, hit, critical and weapon-effect bits are not all stored as permanent critter status. Dead removes queued events; knockout queues wake-up after `10 * (35 - 3 * Endurance)` ticks. HP application records damage received, invokes damage/destroy scripts, can credit player/team kills unless overridden, detaches dead scripts and removes dead party members. `[Must-match]`
+
+**Intended target, unintended victims, onlookers and retaliation.** This is the single authoritative rule; SPEC-009 §3.3 and §3.4 refer to it. Every attack records its **intended target**: the defender named when the attack began. The recorded defender can later change to an **unintended victim**: a missed-shot bystander (section 3.7.1) or a critical-failure random target (above). When the attack's damage is applied, these steps run in order. `[Must-match]`
+
+1. If the intended target exists and differs from the final recorded defender, onlookers are alerted for the intended target, even though it took no damage.
+2. If the final recorded defender is a critter not already marked dead, its new status is applied. Then, when the attacker is a critter:
+   - if the defender is now dead or knocked out, it records the attacker as its last attacker (SPEC-009 §3.4 standard setter);
+   - otherwise it makes the SPEC-009 §3.4 retaliation rating check against the attacker **only if it is the intended target, or its team differs from the attacker's**.
+
+   Its damage is then applied, and onlookers are alerted for it.
+3. Each splash or burst extra that is a critter not already marked dead follows step 2. The intended-target exception never applies to extras, so a surviving extra makes the rating check only when its team differs from the attacker's.
+
+An unintended victim on the attacker's own team that survives conscious therefore never changes its last-attacker reference. An intended target on the attacker's team does make the rating check. Attacks by a non-critter source, such as a timed or scripted explosion, skip both the setter and the rating check here. Explosion attribution follows SPEC-013 §3.10. `[Must-match]`
 
 The inspected attacker-self-damage commit tests whether the attacker is **already marked dead**, rather than the normal live-attacker condition. Calculating or displaying critical-failure self damage therefore does not guarantee that a living attacker's HP receives it. `[May-improve]`: commit attacker self-damage and its flags when the attacker is **not** marked dead. A table dead flag can also mark a victim dead independently of HP arithmetic. `[Must-match]` Apart from that safe rule, do not assume that all calculated damage is immediately authoritative HP.
 
@@ -604,7 +617,7 @@ Consequences of Stage B, all `[Must-match]`:
 - Stage B never considers critters between the attacker and the intended defender. That region belongs to Stage A, which does not commit in the reference.
 - T need not lie beyond the defender. If the pixel line needs more than the range in changed hexes to reach the defender, E lies between the attacker and the defender, and the Stage B ray runs back toward the attacker. If it needs exactly the range, E is the defender's own hex. With no other blocker there, the "miss" then selects the intended defender itself for one round at numerator 2, with no critical.
 - A non-critter candidate, such as a wall or scenery, receives the hit bit and becomes the recorded defender. It takes zero damage and causes no damage draw. No HP, status or script hit notification follows, and the combat message is the attacker's "missed" text (message 515 for the player, 615 or 715 by NPC gender).
-- The originally intended target remains recorded as the intended target. A critter victim other than it produces a "was hit instead" message. Its number is a base plus 8 when the intended target is the player, or plus 9 otherwise. The base is chosen by the victim: 500 for the player, 600 for a male NPC, 700 for a female NPC. Onlookers are notified for that intended target and then, separately, for a critter victim. A bystander retaliates only when its team differs from the attacker's; a bystander left dead or knocked out instead records the attacker as its last attacker.
+- The originally intended target remains recorded as the intended target. A critter victim other than it produces a "was hit instead" message. Its number is a base plus 8 when the intended target is the player, or plus 9 otherwise. The base is chosen by the victim: 500 for the player, 600 for a male NPC, 700 for a female NPC. Onlookers, last-attacker recording and retaliation follow the intended-target rule in section 3.6. A bystander is an unintended victim, so a surviving conscious bystander makes the retaliation rating check only when its team differs from the attacker's. A bystander left dead or knocked out records the attacker as its last attacker whatever its team.
 
 **Bystander damage and hit location.** Every committed bystander, from Stage B or the Stage A safe rule, is computed as follows. `[Must-match]`
 
@@ -623,7 +636,7 @@ Consequences of Stage B, all `[Must-match]`:
 5. One base-damage draw, only for a critter victim.
 6. Explosion-on-extras draws, when they apply.
 
-The weapon-attack splash helper has its radius/initial-hex setup commented out in the inspected revision. Its first hex remains -1 and it exits without adding splash victims. This omission does not describe the separate scripted-explosion action path. Do not supply an invented radius/falloff formula for this incomplete weapon-splash path. `[Must-match]`
+The splash-victim enumeration has its radius and initial-hex setup commented out in reference revision R1. Its first hex stays -1, so it exits on its first iteration without adding any victim and without drawing. This one enumeration serves every explosion: explosive weapon attacks, grenades, critical-failure explosions, and the timed and scripted explosions of SPEC-013 §3.10, including the dropped-explosive notice check. In R1 **no explosion damages anything beyond its center target**: for a weapon, the struck defender; for a timed or scripted explosion, the critter blocking the center hex. Do not supply an invented radius or falloff formula. `[Must-match]` The surrounding explosion art, and the separate radius-3 scenery-script notification of SPEC-013 §3.10, are presentation and script effects, not damage.
 
 ### 3.8 Knockback, Death Animation, and Corpse Presentation
 
@@ -825,4 +838,4 @@ Boundary check: when E is the defender's own hex and no other blocker is present
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes (R1-rev2): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 16 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc") and this spec's own formula notation ("index", "stat", "column", "rank", "range"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Tag count, excluding the two tag definitions: 163 `[Must-match]`, 23 `[May-improve]`.
+Verification notes (R1-rev2): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 16 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc") and this spec's own formula notation ("index", "stat", "column", "rank", "range"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Tag count, excluding the two tag definitions: 165 `[Must-match]`, 23 `[May-improve]`.

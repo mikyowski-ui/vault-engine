@@ -298,11 +298,15 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.add_intent(watcher, intent::ALERT);
         }
     }
-    /// §3.4 damage-application writers: a dead or knocked-out victim of a
-    /// critter references it; a still-active defender runs the retaliation
-    /// check if unintended or on another team, an extra only if on another
-    /// team. Onlookers are alerted first.
-    pub(crate) fn after_damage(&mut self, attacker: ObjectRef, victim: ObjectRef, defender: bool) {
+    /// §3.4 damage-application writers, under the single rule of SPEC-007
+    /// §3.6, for a critter victim that was not already marked dead: a
+    /// critter attacker becomes the reference of a victim left dead or
+    /// knocked out; a surviving victim makes the retaliation check only when
+    /// it is the attack's `intended` target or its team differs from the
+    /// attacker's. An extra is never the intended target, and a non-critter
+    /// source (a timed or scripted explosion) runs neither writer. Onlookers
+    /// are alerted for the victim.
+    pub(crate) fn after_damage(&mut self, attacker: ObjectRef, victim: ObjectRef, intended: bool) {
         self.alert_onlookers(victim);
         if !self.world.critter_art(attacker) {
             return;
@@ -313,8 +317,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         let other_team =
             ThreatView::team(&self.world, victim) != ThreatView::team(&self.world, attacker);
-        let unintended = defender && self.world.ai.unintended == victim;
-        if other_team || unintended {
+        if other_team || intended {
             self.retaliate(victim, attacker);
         }
     }
@@ -1660,7 +1663,7 @@ impl<A: WorldAssets> AttackEnv for Engagement<'_, A> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Victim {
     /// A random-hit critical failure's replacement defender (SPEC-009
-    /// §3.16), treated as the unintended victim.
+    /// §3.16), an unintended victim (SPEC-007 §3.6).
     Random(ObjectRef, Attack),
     /// A missed shot's critter victim (SPEC-007 §3.7.1), possibly the
     /// intended defender itself.

@@ -1,7 +1,7 @@
 //! SPEC-014 §3.26-3.29 pointer handling in the interactive world: the
 //! cursor drawn into the frame (the system cursor is hidden), hover
 //! feedback once the pointer rests 250 ms, map clicks on the left release,
-//! the held-button action menu, and edge scrolling.
+//! the held-button action menu, and edge and arrow-key scrolling.
 //!
 //! Time is the shell clock passed to `tick`, so a replay sees the same
 //! rests, holds and scroll steps as the desktop did.
@@ -16,8 +16,14 @@ use vault_core::{
         cursor::{self, Entry, MenuTracker, Mode, MoveHover, Primary, Target},
     },
 };
-use vault_formats::Fid;
-use vault_render::{IndexedImage, map::pick_object};
+use vault_formats::{Fid, HexGrid, pro::Category};
+use vault_render::{IndexedImage, map::pick_objects};
+
+/// The scroll blocker (misc PID `0x0500000C`).
+const SCROLL_BLOCKER: u32 = 0x0500_000c;
+/// Scroll limiting: a step may not take the view center further from the
+/// player on an axis where it is already this many pixels away.
+const SCROLL_LIMIT: [i64; 2] = [480, 400];
 
 /// What the hover computed for the current rest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,11 +40,9 @@ pub(crate) enum Feedback {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Held {
     pub point: [i32; 2],
-    /// The next held-button repeat event (every 250 ms after the first
-    /// 250).
-    next_repeat: u64,
-    /// The press started on an edge pixel: it scrolls, never clicks.
-    edge: bool,
+    /// The next combined pressed-and-held pulse: strictly more than 250 ms
+    /// after the press, then after each pulse.
+    next_pulse: u64,
 }
 
 /// The open action menu.
@@ -52,12 +56,12 @@ pub(crate) struct ActionMenu {
     pub origin: [i32; 2],
 }
 
-/// Edge scrolling under way.
+/// Edge scrolling under way: the direction and whether its last step was
+/// blocked.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Edge {
     pub direction: usize,
     pub blocked: bool,
-    last_step: u64,
 }
 
 #[derive(Debug, Default)]
@@ -74,6 +78,10 @@ pub(crate) struct PointerState {
     pub held: Option<Held>,
     pub menu: Option<ActionMenu>,
     pub edge: Option<Edge>,
+    /// The last scroll attempt (edge or arrow key), for the 33 ms gate.
+    last_scroll: Option<u64>,
+    /// The cursor mode, player turn and interface state the hover last saw.
+    seen: Option<(Mode, bool, bool)>,
 }
 
 /// The map area's last row (the bar window starts below it).
@@ -112,7 +120,7 @@ impl MapPreview {
     fn world_pointer(&self) -> bool {
         matches!(self.screen, Screen::Map)
             && !self.host.world.dialogue.open
-            && self.notice.is_none()
+            && self.dialog.is_none()
     }
     /// The item a window's drag holds, drawn as the cursor.
     fn dragged_item(&self) -> Option<ObjectRef> {
@@ -125,11 +133,40 @@ impl MapPreview {
             _ => None,
         }
     }
-    /// The object drawn under a frame pixel.
+    /// §3.27 the object under a frame pixel: none under a visible roof;
+    /// otherwise the topmost one that is not a dead or knocked-out critter,
+    /// falling back to the bottom-most one hit.
     pub(crate) fn object_at(&self, point: [i32; 2]) -> Option<ObjectRef> {
         let map = self.host.world.render_snapshot();
-        pick_object(&map, self.view, &self.art, point)
-            .and_then(|id| self.host.world.reference_for_id(id))
+        let hits: Vec<_> = pick_objects(&map, self.view, &self.art, point)?
+            .into_iter()
+            .filter_map(|id| self.host.world.reference_for_id(id))
+            .collect();
+        let world = &self.host.world;
+        let down = |object: ObjectRef| {
+            world
+                .get(object)
+                .is_some_and(|o| o.category() == Category::Critter)
+                && (world.is_dead(object)
+                    || world
+                        .critter_state(object)
+                        .is_some_and(|s| s.results.0 & 0x01 != 0))
+        };
+        hits.iter()
+            .copied()
+            .find(|object| !down(*object))
+            .or_else(|| hits.last().copied())
+    }
+    /// Restart the hover's rest now, or back-date it 250 ms so the next
+    /// idle poll computes it (the in-world cursor turned back on).
+    fn restart_rest(&mut self, back_date: bool) {
+        self.pointer.rest_since = if back_date {
+            self.clock.saturating_sub(cursor::HOVER_REST_MS)
+        } else {
+            self.clock
+        };
+        self.pointer.rested = false;
+        self.pointer.feedback = None;
     }
     /// The pointer moved to a frame pixel: the rest restarts, the hover art
     /// reverts, and an open menu tracks the vertical motion.
@@ -139,12 +176,14 @@ impl MapPreview {
             return;
         }
         self.pointer.at = Some(point);
-        self.pointer.rest_since = self.clock;
-        self.pointer.rested = false;
-        self.pointer.feedback = None;
+        // Entering the map window turns the in-world cursor back on.
+        let entered_map =
+            point[1] <= map_bottom() && previous.is_none_or(|[_, y]| y > map_bottom());
+        self.restart_rest(entered_map);
         if let Some(menu) = &mut self.pointer.menu {
             menu.tracker.moved(point[1]);
         }
+        self.inventory_pointer(point[1]);
         // Leaving the map window out of combat drops the crosshair, use and
         // skill modes back to movement.
         let left_map = previous.is_some_and(|[_, y]| y <= map_bottom()) && point[1] > map_bottom();
@@ -171,19 +210,18 @@ impl MapPreview {
     pub(crate) fn map_press(&mut self, point: [i32; 2]) {
         self.pointer.held = Some(Held {
             point,
-            next_repeat: self.clock + cursor::MENU_HOLD_MS,
-            edge: cursor::edge_direction(point[0], point[1]).is_some(),
+            next_pulse: self.clock + cursor::MENU_HOLD_MS,
         });
     }
     /// A left release: the action menu's entry, or the map click.
     pub(crate) fn map_release(&mut self, point: Option<[i32; 2]>) -> bool {
         let held = self.pointer.held.take();
         if let Some(menu) = self.pointer.menu.take() {
-            // The pointer returns to the menu's column at the last anchor.
+            // The pointer returns to the menu's column at the last anchor,
+            // and the rest restarts.
             let at = [menu.origin[0], menu.tracker.anchor];
             self.pointer.at = Some(at);
-            self.pointer.rest_since = self.clock;
-            self.pointer.rested = false;
+            self.restart_rest(false);
             let entry = if self.quit_requested {
                 Entry::Cancel
             } else {
@@ -195,24 +233,27 @@ impl MapPreview {
             self.menu_entry(entry, menu.object, menu.target);
             return true;
         }
-        let (Some(held), Some(point)) = (held, point) else {
+        // Click-to-scroll is never on in R1, so an edge press still clicks.
+        let (Some(_), Some(point)) = (held, point) else {
             return false;
         };
-        if held.edge
-            || !self.world_pointer()
-            || point[1] > map_bottom()
-            || self.host.world.ui_disabled
-        {
-            return held.edge;
+        if !self.world_pointer() || point[1] > map_bottom() || self.host.world.ui_disabled {
+            return false;
         }
         let object = self.object_at(point);
+        let mode = self.hud.mode;
         self.map_click(point, object);
-        // A crosshair attack refreshes the hover at once.
-        if self.hud.mode == Mode::Crosshair && self.pointer.at == Some(point) {
-            self.pointer.feedback = self.hover_feedback(point);
+        // A crosshair attack marks the hover done at the click position: the
+        // to-hit text stays as it was until the pointer moves.
+        if mode == Mode::Crosshair && self.pointer.at == Some(point) {
             self.pointer.rested = true;
         }
         true
+    }
+    /// Keys are dropped while the action menu is open or edge scrolling is
+    /// under way.
+    pub(crate) fn pointer_swallows_keys(&self) -> bool {
+        self.world_pointer() && (self.pointer.menu.is_some() || self.pointer.edge.is_some())
     }
     /// One shell frame of pointer time: the held-button repeat that opens
     /// the menu, edge scrolling, and the hover after a rest. Returns
@@ -221,6 +262,21 @@ impl MapPreview {
         if !self.world_pointer() {
             return self.pointer.edge.take().is_some();
         }
+        // A mode change restarts the rest; the start of a player turn, and
+        // the interface coming back on, force the hover on the next poll.
+        let seen = (
+            self.hud.mode,
+            self.host.world.combat && self.host.world.combat_state.player_turn,
+            self.host.world.ui_disabled,
+        );
+        if let Some((mode, turn, disabled)) = self.pointer.seen.replace(seen) {
+            if mode != seen.0 {
+                self.restart_rest(false);
+            }
+            if (!turn && seen.1) || (disabled && !seen.2) {
+                self.restart_rest(true);
+            }
+        }
         let mut changed = self.menu_repeat();
         if self.pointer.menu.is_some() {
             return changed;
@@ -228,17 +284,18 @@ impl MapPreview {
         changed |= self.edge_scroll();
         changed | self.hover_tick()
     }
-    /// The held-button repeat events: in arrow mode, one over an object
-    /// opens the action menu (`iaccuxx1`).
+    /// §3.28 the combined pressed-and-held pulses: in arrow mode, the
+    /// first pulse with an object under the pointer opens the action menu
+    /// (`iaccuxx1`). In other modes a held button does nothing.
     fn menu_repeat(&mut self) -> bool {
         let Some(held) = &mut self.pointer.held else {
             return false;
         };
-        if self.pointer.menu.is_some() || held.edge || self.clock <= held.next_repeat {
+        if self.pointer.menu.is_some() || self.clock <= held.next_pulse {
             return false;
         }
-        held.next_repeat += cursor::MENU_HOLD_MS;
-        let point = held.point;
+        held.next_pulse = self.clock + cursor::MENU_HOLD_MS;
+        let point = self.pointer.at.unwrap_or(held.point);
         if self.hud.mode != Mode::Arrow || self.host.world.ui_disabled {
             return false;
         }
@@ -280,44 +337,85 @@ impl MapPreview {
             Entry::Cancel => {}
         }
     }
-    /// §3.29 a pointer on an edge pixel scrolls the map 32 by 24 pixels at
-    /// most every 33 ms; a step the map cannot take shows the blocked art.
-    /// The map cannot scroll when the view's center would leave the hex
-    /// grid (no approved spec gives finer limits).
+    /// §3.29 a pointer on an edge pixel scrolls the map one step at most
+    /// every 33 ms; a step the map cannot take shows the blocked art.
+    /// Leaving the edge restores the previous cursor and turns the
+    /// in-world cursor back on.
     fn edge_scroll(&mut self) -> bool {
         let direction = self
             .pointer
             .at
             .and_then(|[x, y]| cursor::edge_direction(x, y));
         let Some(direction) = direction else {
-            // Leaving the edge restores the previous cursor.
-            return self.pointer.edge.take().is_some();
+            let left = self.pointer.edge.take().is_some();
+            if left {
+                self.restart_rest(true);
+            }
+            return left;
         };
+        let Some(blocked) = self.scroll_step(direction) else {
+            return false;
+        };
+        self.pointer.edge = Some(Edge { direction, blocked });
+        true
+    }
+    /// One scroll step (an edge or an arrow key) through the shared 33 ms
+    /// gate: `None` when throttled, else whether the step was blocked. A
+    /// diagonal is one step, blocked as a whole, and a blocked attempt also
+    /// restarts the gate. The new center is the hex at the current center
+    /// plus 32 pixels across and 24 down per step. It is blocked when there
+    /// is no such hex; when, with scroll limiting on, it takes the center
+    /// further from the player on an axis already 480 (across) or 400 (down)
+    /// pixels away; or when a scroll blocker stands on it (safe rule: hex 0
+    /// too). No approved spec gives the map-border rectangle's derivation,
+    /// so that test is not made.
+    pub(crate) fn scroll_step(&mut self, direction: usize) -> Option<bool> {
         if self
             .pointer
-            .edge
-            .is_some_and(|edge| self.clock < edge.last_step + cursor::EDGE_PERIOD_MS)
+            .last_scroll
+            .is_some_and(|last| self.clock < last + cursor::EDGE_PERIOD_MS)
         {
-            return false;
+            return None;
         }
-        let [dx, dy] = cursor::edge_step(direction);
-        let mut view = self.view;
-        view.pan(-dx, -dy);
-        let center = view
-            .grid
-            .pick_hex([view.width as i32 / 2, view.height as i32 / 2]);
-        let blocked = center.is_none();
-        if let Some(hex) = center {
-            self.view = view;
+        self.pointer.last_scroll = Some(self.clock);
+        let target = self.scroll_target(direction);
+        if let Some(hex) = target {
             self.host.world.camera_hex = hex;
+            if let Ok(grid) = HexGrid::centered(hex, self.view.width, self.view.height) {
+                self.view.grid = grid;
+            }
             self.last_hover = None;
         }
-        self.pointer.edge = Some(Edge {
-            direction,
-            blocked,
-            last_step: self.clock,
+        Some(target.is_none())
+    }
+    fn scroll_target(&self, direction: usize) -> Option<i32> {
+        let grid = HexGrid::default();
+        let world = &self.host.world;
+        let center = grid.hex_center(world.camera_hex).ok()?;
+        let [dx, dy] = cursor::edge_step(direction).map(i64::from);
+        let point = [center[0] + dx, center[1] + dy];
+        let hex = grid.pick_hex([i32::try_from(point[0]).ok()?, i32::try_from(point[1]).ok()?])?;
+        if !(0..40000).contains(&hex) {
+            return None;
+        }
+        let player = world.get(world.player)?;
+        if let Some(at) = player.raw.hex.and_then(|hex| grid.hex_center(hex).ok()) {
+            for axis in 0..2 {
+                let old = (center[axis] - at[axis]).abs();
+                let new = (point[axis] - at[axis]).abs();
+                if new > old && old >= SCROLL_LIMIT[axis] {
+                    return None;
+                }
+            }
+        }
+        let elevation = world.elevation;
+        let blocker = world.iter().any(|(_, object)| {
+            object.raw.pid == SCROLL_BLOCKER
+                && object.raw.hex == Some(hex)
+                && object.raw.elevation == elevation
+                && object.owner.is_none()
         });
-        true
+        (!blocker).then_some(hex)
     }
     /// The hover once the pointer has rested for 250 ms, and only again
     /// after it moves.
@@ -390,6 +488,11 @@ impl MapPreview {
                 ))
             }
             Mode::Crosshair => {
+                // Crosshair hovers record the object too, so switching to
+                // the arrow over the same critter prints nothing.
+                if let Some(object) = self.object_at(at) {
+                    self.pointer.looked = Some(object);
+                }
                 let target = self.object_at(at).filter(|object| {
                     *object != player
                         && self
@@ -458,6 +561,26 @@ impl MapPreview {
         if let Some(menu) = &self.pointer.menu {
             self.draw_menu(&painter, image, menu);
             return;
+        }
+        // The inventory-type windows: the hand cursor, or the arrow over a
+        // counter (the inventory's item menu hides the pointer).
+        match &self.screen {
+            Screen::Inventory(screen) => {
+                if let Some(art) = screen.cursor() {
+                    painter.cursor(image, art, at);
+                }
+                return;
+            }
+            Screen::Loot(screen) => {
+                let art = if screen.counter.is_some() {
+                    vault_core::ui::inventory::ARROW_CURSOR
+                } else {
+                    vault_core::ui::inventory::HAND_CURSOR
+                };
+                painter.cursor(image, art, at);
+                return;
+            }
+            _ => {}
         }
         if let Some(edge) = self.pointer.edge {
             let art = if edge.blocked {

@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes revision `R1`, targeting the 32-bit Windows engine. Evidence is static inspection of the drug, withdrawal, inventory, equipment, ammunition, barter, experience, perk, and character-editor advancement paths, plus the call sites that consume perk ranks. A structural survey of a locally owned unpacked corpus (section 4.12) checked the prototype invariants these rules depend on. No original item statistics, drug amounts, prices, or message texts are reproduced. All fixtures use synthetic prototypes and explicit random draws.
+This specification describes reference revision R1, targeting the 32-bit Windows engine. Evidence is static inspection of the drug, withdrawal, inventory, equipment, ammunition, barter, experience, perk, and character-editor advancement paths, plus the call sites that consume perk ranks. A structural survey of a locally owned unpacked corpus (section 4.12) checked the prototype invariants these rules depend on. No original item statistics, drug amounts, prices, or message texts are reproduced. All fixtures use synthetic prototypes and explicit random draws.
 
 This document covers:
 

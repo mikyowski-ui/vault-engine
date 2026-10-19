@@ -264,6 +264,27 @@ pub struct LootRequest {
     pub target: ObjectRef,
     pub steal: bool,
 }
+/// SPEC-013 §3.10 a scripted explosion request (the `explosion` opcode):
+/// one pending at a time, the last request winning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExplosionRequest {
+    pub hex: i32,
+    pub elevation: i32,
+    pub min: i32,
+    pub max: i32,
+}
+/// SPEC-013 §3.10 the animated explosion in progress, from its start until
+/// its damage step. Damage is computed at the start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveExplosion {
+    pub hex: i32,
+    pub elevation: u8,
+    /// The critter blocking the center hex, its damage and knockback.
+    pub victim: Option<(ObjectRef, i32, i32)>,
+    /// The credited attacker: the player for a timed explosive, none for a
+    /// scripted request.
+    pub source: Option<ObjectRef>,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorldEffect {
     Diagnostic(String),
@@ -318,6 +339,13 @@ pub enum WorldEffect {
         min: i32,
         max: i32,
     },
+    /// SPEC-014 §3.21: the interface's HP counter rolls to the player's new
+    /// HP (combat damage, healing, a drug or stat effect); any other change
+    /// is drawn at once.
+    RollHitPoints,
+    /// SPEC-014 §3.21: the AC counter rolls (the player's turn starts or
+    /// ends, combat ends, worn armor changes in the inventory).
+    RollArmorClass,
     MapTransition {
         index: i32,
         parameter: i32,
@@ -438,6 +466,13 @@ pub struct WorldState {
     /// SPEC-013 §3.9/§3.16 a deferred loot or steal request for the
     /// presentation layer's loot window.
     pub pending_loot: Option<LootRequest>,
+    /// SPEC-013 §3.10 the scripted explosion awaiting the request pass.
+    pub pending_explosion: Option<ExplosionRequest>,
+    /// SPEC-013 §3.10 the animated explosion in progress, if any.
+    pub explosion: Option<ActiveExplosion>,
+    /// SPEC-014 §3.33 the hexes the player entered since the seen state was
+    /// last processed: 40000 bits, 8 hexes per byte in hex order.
+    pub visited: Vec<u8>,
     pub combat_quit: bool,
     pub combat_actor: ObjectRef,
     pub ui_disabled: bool,
@@ -574,6 +609,9 @@ impl WorldState {
             pending_combat: None,
             pending_transition: None,
             pending_loot: None,
+            pending_explosion: None,
+            explosion: None,
+            visited: vec![0; crate::persistence::VISITED_BYTES],
             combat_quit: false,
             combat_actor: 0,
             ui_disabled: false,
@@ -1203,6 +1241,7 @@ impl WorldState {
         if reference == self.player {
             self.camera_hex = hex;
             self.set_current_elevation(elevation);
+            self.mark_visited(hex);
             self.check_exit_grids(hex, elevation);
         }
         self.rebuild_lighting();

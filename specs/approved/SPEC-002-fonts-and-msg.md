@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes the on-disk `.FON`, `.AAF`, and `.MSG` formats and their source-derived loading, measurement, and rendering behavior. The reference is `fallout1-re` revision `R1`, targeting 32-bit Windows/x86. It is not a specification for Windows resource fonts, Unicode fonts, or other games' similarly named files.
+This specification describes the on-disk `.FON`, `.AAF`, and `.MSG` formats and their source-derived loading, measurement, and rendering behavior. The reference is `fallout1-re` reference revision R1, targeting 32-bit Windows/x86. It is not a specification for Windows resource fonts, Unicode fonts, or other games' similarly named files.
 
 - `.FON`: `font0.fon` through `font5.fon`; font selection numbers 0 through 5. All use the same format.
 - `.AAF`: `font0.aaf` through `font4.aaf`; font selection numbers 100 through 104. All use the same format.
@@ -22,19 +22,19 @@ This specification describes the on-disk `.FON`, `.AAF`, and `.MSG` formats and 
 
 Plain layout tables carry one tag for the whole table.
 
-Evidence locations, relative to the research-vault root:
+Evidence areas inspected in reference revision R1:
 
-| Subject | Source location |
+| Subject | Reference area inspected |
 | --- | --- |
-| `.FON` disk layout and binary reads | [redacted-ref]; [redacted-ref] |
-| `.FON` drawing and metrics | [redacted-ref] |
-| `.AAF` disk layout and binary reads | [redacted-ref] |
-| `.AAF` drawing and metrics | [redacted-ref] |
-| Palette coverage and intensity mathematics | [redacted-ref] |
-| `.MSG` path selection and load outcome | [redacted-ref] |
-| `.MSG` replacement, decimal IDs, and field scanning | [redacted-ref] |
-| Text-stream newline translation | [redacted-ref] |
-| Platform and font selection ranges | `fallout1-re/CMakeSettings.json`; [redacted-ref]; [redacted-ref]; [redacted-ref] |
+| `.FON` disk layout and binary reads | Bitmap-font header declaration and loader |
+| `.FON` drawing and metrics | Bitmap-font glyph drawing and measurement routines |
+| `.AAF` disk layout and binary reads | Interface-font loader |
+| `.AAF` drawing and metrics | Interface-font glyph drawing and measurement routines |
+| Palette coverage and intensity mathematics | Palette and intensity-table builder |
+| `.MSG` path selection and load outcome | Message-file path construction and load |
+| `.MSG` replacement, decimal IDs, and field scanning | Message-record insertion and field parser |
+| Text-stream newline translation | Database text-mode read layer |
+| Platform and font selection ranges | Build configuration; font-manager registration and startup font selection |
 
 These are static-analysis results, not a claim that malformed inputs or pixel output were tested in the original executable. Undefined or platform-dependent behavior is identified rather than assigned an invented result.
 

@@ -253,14 +253,14 @@ fn spec014_save_and_load_failures_show_done_boxes() {
     std::fs::write(&file, b"x").unwrap();
     preview.save_root = file;
     save(&mut preview);
-    assert!(preview.notice.is_some());
+    assert!(preview.dialog.is_some());
     assert!(matches!(preview.screen, Screen::SaveLoad(_)));
     preview.image().unwrap();
     // Other keys are swallowed; Enter dismisses.
     assert!(preview.step(KeyCode::ArrowDown));
-    assert!(preview.notice.is_some());
+    assert!(preview.dialog.is_some());
     assert!(preview.step(KeyCode::Enter));
-    assert!(preview.notice.is_none() && !preview.quit_requested);
+    assert!(preview.dialog.is_none() && !preview.quit_requested);
     assert!(matches!(preview.screen, Screen::SaveLoad(_)));
     assert!(preview.step(KeyCode::Escape));
     // A corrupt slot: 134 with the safe-rule body; nothing loads.
@@ -271,7 +271,7 @@ fn spec014_save_and_load_failures_show_done_boxes() {
     assert!(preview.step(KeyCode::F5));
     assert!(preview.step(KeyCode::ArrowDown));
     assert!(preview.step(KeyCode::Enter));
-    assert!(preview.notice.is_some());
+    assert!(preview.dialog.is_some());
     assert!(!preview.loaded);
     assert!(preview.step(KeyCode::Escape));
     assert!(matches!(preview.screen, Screen::SaveLoad(_)) && !preview.quit_requested);
@@ -286,10 +286,10 @@ fn spec014_save_and_load_failures_show_done_boxes() {
     std::fs::write(&path, &bytes[..vault_formats::savegame::HEADER_LEN]).unwrap();
     assert!(preview.step(KeyCode::F5));
     assert!(preview.step(KeyCode::Enter));
-    assert!(preview.notice.is_some() && !preview.loaded);
+    assert!(preview.dialog.is_some() && !preview.loaded);
     let [rx, ry] = vault_core::ui::flow::dialog_buttons(false)[0].button;
     assert!(preview.click([169 + rx + 2, 116 + ry + 2], false));
-    assert!(preview.notice.is_none());
+    assert!(preview.dialog.is_none());
     assert!(matches!(preview.screen, Screen::Map) && preview.quit_requested);
 }
 
@@ -329,10 +329,84 @@ fn spec014_game_flow_menu_selection_editor_and_world() {
     let [ox, oy] = vault_core::ui::options::OPTIONS_ORIGIN;
     assert!(game.click([ox + 20, oy + 17 + 3 * 37 + 5], false));
     assert!(game.step(KeyCode::KeyY));
+    // §3.5: the session ends with a fade to white over the world, then the
+    // menu fades in from white; Escape there exits.
     game.tick(32).unwrap();
+    assert!(game.world().is_none());
+    game.image().unwrap();
+    game.tick(32 + 700).unwrap();
     assert_eq!(game.title(), "Vault — main menu");
+    assert_eq!(game.display_override().unwrap()[1], [252, 252, 252, 255]);
+    game.tick(32 + 1400).unwrap();
+    assert_eq!(game.display_override(), None);
     assert!(game.step(KeyCode::Escape));
     assert!(game.finished());
+}
+
+#[test]
+fn spec014_knockout_and_death_end_the_session_between_passes() {
+    let dir = corpus();
+    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+    let mut game = Game::new(vfs, "english", 1, dir.path().join("saves"), None).unwrap();
+    assert!(game.step(KeyCode::KeyN));
+    assert!(game.step(KeyCode::KeyT));
+    game.tick(16).unwrap();
+    // A knockout outside combat ends the session at the end of the pass
+    // (in combat the check waits, and the cleanup normally wakes the
+    // player): white, then the death scene fading from white, then black,
+    // then the menu.
+    let world = game.world().unwrap();
+    let player = world.host.world.player;
+    world
+        .host
+        .world
+        .critter_state_mut(player)
+        .unwrap()
+        .results
+        .0 |= 0x01;
+    game.tick(48).unwrap();
+    assert!(game.world().is_none());
+    game.tick(48 + 700).unwrap();
+    assert_eq!(game.display_override().unwrap()[1], [252, 252, 252, 255]);
+    game.image().unwrap();
+    let mut now = 48 + 700;
+    while game.title() != "Vault — main menu" {
+        now += 50;
+        game.tick(now).unwrap();
+        assert!(now < 20_000, "the death scene ends");
+    }
+    // The menu fades in from black.
+    assert_eq!(game.display_override().unwrap()[1], [0, 0, 0, 255]);
+}
+
+/// The inventory list point of `item` (SPEC-014 §3.34 row (124, 35 +
+/// 48i), unequipped entries in order).
+fn list_point(preview: &MapPreview, item: vault_core::ObjectRef) -> [i32; 2] {
+    let world = &preview.host.world;
+    let row = world
+        .get(world.player)
+        .unwrap()
+        .inventory
+        .iter()
+        .filter(|(entry, _)| {
+            world.get(*entry).unwrap().raw.flags.0 & vault_core::items::EQUIPPED == 0
+        })
+        .position(|(entry, _)| *entry == item)
+        .unwrap();
+    [134, 45 + 48 * row as i32]
+}
+/// In the arrow cursor, hold a press on `at` past the 250 ms pulse to open
+/// the item menu, move down one entry (Look, then Use) and release.
+fn menu_second_entry(preview: &mut MapPreview, at: [i32; 2], now: &mut u64) {
+    preview.hover(at);
+    assert!(preview.click(at, false));
+    *now += 300;
+    preview.tick(*now).unwrap();
+    assert!(matches!(&preview.screen, Screen::Inventory(screen) if screen.menu.is_some()));
+    preview.image().unwrap();
+    let below = [at[0], at[1] + 11];
+    preview.hover(below);
+    assert!(preview.release(Some(below), false));
 }
 
 #[test]
@@ -351,18 +425,13 @@ fn spec013_set_timer_arms_an_explosive_from_the_inventory() {
         .unwrap();
     preview.image().unwrap();
     assert!(preview.step(KeyCode::KeyI));
-    let row = preview
-        .host
-        .world
-        .get(player)
-        .unwrap()
-        .inventory
-        .iter()
-        .position(|(item, _)| *item == dynamite)
-        .unwrap();
-    assert!(preview.click([30, 62 + 16 * row as i32], false));
-    // Use opens the Set Timer dialog at 60 seconds; plus makes it 70.
-    assert!(preview.click([450, 65], false));
+    // SPEC-014 §3.34: a right press switches to the arrow cursor; held on
+    // the dynamite it opens Look, Use, Drop, Cancel. Use opens the Set
+    // Timer dialog at 60 seconds; plus makes it 70.
+    let at = list_point(&preview, dynamite);
+    assert!(preview.click(at, true));
+    let mut now = 0;
+    menu_second_entry(&mut preview, at, &mut now);
     assert!(matches!(&preview.screen, Screen::Inventory(screen) if screen.timer.is_some()));
     preview.image().unwrap();
     assert!(preview.click([140 + 196, 80 + 66], false));
@@ -379,7 +448,7 @@ fn spec013_set_timer_arms_an_explosive_from_the_inventory() {
     let delay = event.due - preview.host.world.clock.ticks;
     assert!(matches!(delay, 0 | 350 | 700), "70 seconds: {delay}");
     // A second use refuses: the timer is already ticking.
-    assert!(preview.click([450, 65], false));
+    menu_second_entry(&mut preview, at, &mut now);
     assert!(matches!(&preview.screen, Screen::Inventory(screen) if screen.timer.is_none()));
 }
 
@@ -425,11 +494,14 @@ fn spec014_hover_feedback_waits_for_a_rest_and_draws_the_cursor() {
     );
     // Arrow over the talkable NPC: the talk icon, and its look-at text
     // reaches the monitor once. Moving resets the art.
+    // The mode change restarts the rest (§3.27).
     preview.hud.mode = Mode::Arrow;
     let hex = preview.host.world.get(target).unwrap().raw.hex.unwrap();
     let point = on_hex(&preview, hex);
     preview.hover(point);
     preview.tick(600).unwrap();
+    assert_eq!(preview.pointer.feedback, None);
+    preview.tick(900).unwrap();
     assert_eq!(
         preview.pointer.feedback,
         Some(super::pointer::Feedback::Pick("talkn.frm"))
@@ -441,7 +513,7 @@ fn spec014_hover_feedback_waits_for_a_rest_and_draws_the_cursor() {
     assert_eq!(preview.pointer.feedback, None);
     // Out of the map area the arrow is drawn and no hover runs.
     preview.hover([320, 440]);
-    preview.tick(1000).unwrap();
+    preview.tick(1300).unwrap();
     assert_eq!(preview.pointer.feedback, None);
     assert!(preview.pointer_frame().is_some());
 }
@@ -568,7 +640,32 @@ fn spec014_world_fades_run_in_order_over_700_ms() {
 }
 
 #[test]
-fn spec014_tab_opens_the_automap_of_seen_walls_and_scenery() {
+fn spec014_help_screen_swaps_the_palette_until_any_input() {
+    let dir = corpus();
+    let mut help_palette = vec![0u8; 768 + 32768];
+    help_palette[..3].copy_from_slice(&[63, 0, 0]);
+    std::fs::write(dir.path().join("art/intrface/helpscrn.pal"), &help_palette).unwrap();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    assert_eq!(preview.display_override(), None);
+    assert!(preview.step(KeyCode::F1));
+    assert!(matches!(preview.screen, Screen::Help(_)));
+    let shown = preview.display_override().expect("help palette");
+    assert_eq!(shown[0], [252, 0, 0, 255]);
+    assert_eq!(shown[1], [0, 0, 0, 255]);
+    preview.image().unwrap();
+    // Any key returns to the map under the game palette, without a fade.
+    assert!(preview.step(KeyCode::KeyQ));
+    assert!(matches!(preview.screen, Screen::Map));
+    assert_eq!(preview.display_override(), None);
+    // A click also returns.
+    assert!(preview.step(KeyCode::F1));
+    assert!(preview.click([320, 240], false));
+    assert!(matches!(preview.screen, Screen::Map));
+}
+
+#[test]
+fn spec014_automap_window_detail_scanner_and_motion_sensor() {
     let dir = corpus();
     let mut preview = world(dir.path());
     preview.tick(16).unwrap();
@@ -582,16 +679,64 @@ fn spec014_tab_opens_the_automap_of_seen_walls_and_scenery() {
     let object = preview.host.world.get_mut(wall).unwrap();
     object.raw.flags.0 |= vault_formats::pro::BasicFlags::SEEN.0;
     let tile = object.raw.hex.unwrap();
+    // Tab opens the window over the paused world with the scanner off; a
+    // seen wall paints (449 - 2c, 8 + 2r) and the pixel to its right, from
+    // the window at (75, 0).
     assert!(preview.step(KeyCode::Tab));
-    assert!(matches!(preview.screen, Screen::Automap(_)));
+    assert!(matches!(&preview.screen, Screen::Automap(screen) if !screen.scanner));
     let image = preview.image().unwrap();
-    // The raster writer's X = 200 - column; each cell is 2 by 2 pixels.
-    let (row, x) = (tile / 200, 200 - tile % 200);
-    let [x, y] = if x == 200 { [0, row + 1] } else { [x, row] };
     let green = vault_core::ui::ColorKey::GREEN.resolve(&preview.palette);
-    let index = ((40 + 2 * y) * 640 + 120 + 2 * x) as usize;
-    assert_eq!(image.pixels()[index], green);
+    let [x, y] = [75 + 449 - 2 * (tile % 200), 8 + 2 * (tile / 200)];
+    for x in [x, x + 1] {
+        assert_eq!(image.pixels()[(y * 640 + x) as usize], green);
+    }
+    // h and l set the saved detail flag; the switch toggles on its press.
+    let high = |preview: &MapPreview| preview.host.world.persistence.automap_flags & 0x02 != 0;
+    assert!(preview.step(KeyCode::KeyH));
+    assert!(high(&preview));
+    assert!(preview.step(KeyCode::KeyL));
+    assert!(!high(&preview));
+    assert!(preview.click([75 + 457 + 10, 340 + 10], false));
+    assert!(high(&preview));
+    // The scanner without a sensor: the refusal box; Esc closes it.
+    assert!(preview.step(KeyCode::KeyS));
+    assert!(preview.dialog.is_some());
+    preview.image().unwrap();
     assert!(preview.step(KeyCode::Escape));
+    assert!(preview.dialog.is_none());
+    assert!(matches!(preview.screen, Screen::Automap(_)));
+    // Cancel acts on its release.
+    let cancel = [75 + 277 + 5, 454 + 5];
+    assert!(preview.click(cancel, false));
+    assert!(matches!(preview.screen, Screen::Automap(_)));
+    assert!(preview.release(Some(cancel), false));
+    assert!(matches!(preview.screen, Screen::Map));
+    // A Motion Sensor with one charge opens it with the scanner on; empty,
+    // it opens nothing.
+    let mut bytes = super::fixture::prototype(0, 5);
+    super::fixture::word(&mut bytes, 0, vault_core::ui::automap::MOTION_SENSOR as i32);
+    super::fixture::word(&mut bytes, 0x39 + 8, 1);
+    let sensor = preview
+        .host
+        .world
+        .spawn(
+            Arc::new(vault_formats::Prototype::parse(&bytes).unwrap()),
+            0,
+            0,
+        )
+        .unwrap();
+    let player = preview.host.world.player;
+    preview
+        .host
+        .world
+        .add_item(player, sensor, 1, true)
+        .unwrap();
+    preview.use_motion_sensor(sensor);
+    assert!(matches!(&preview.screen, Screen::Automap(screen) if screen.scanner));
+    assert_eq!(preview.host.world.charges(sensor), Some(0));
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::Escape));
+    preview.use_motion_sensor(sensor);
     assert!(matches!(preview.screen, Screen::Map));
 }
 
@@ -621,22 +766,20 @@ fn spec011_inventory_drag_reloads_a_weapon_through_the_counter() {
     };
     let gun = spawn(&mut preview, &weapon, 1);
     let rounds = spawn(&mut preview, &ammo, 2);
+    // The gun starts empty.
+    preview.host.world.get_mut(gun).unwrap().raw.state = ObjectState::Other {
+        word: 0,
+        detail: vault_formats::map::ObjectDetail::Weapon {
+            rounds: 0,
+            ammo_pid: -1,
+        },
+    };
+    assert_eq!(preview.host.world.loaded(gun).0, 0);
     preview.image().unwrap();
     assert!(preview.step(KeyCode::KeyI));
-    let row = |preview: &MapPreview, item| {
-        let index = preview
-            .host
-            .world
-            .get(player)
-            .unwrap()
-            .inventory
-            .iter()
-            .position(|(entry, _)| *entry == item)
-            .unwrap();
-        [30, 62 + 16 * index as i32]
-    };
-    // Dropping the stack on the gun asks for the count; 2 loads both packs.
-    let (from, to) = (row(&preview, rounds), row(&preview, gun));
+    // Dropping the stack on the gun's row asks for the count; 2 loads both
+    // packs (SPEC-014 §3.34, SPEC-011 §3.15).
+    let (from, to) = (list_point(&preview, rounds), list_point(&preview, gun));
     assert!(preview.click(from, false));
     preview.hover(to);
     assert!(preview.pointer_frame().is_some());
@@ -647,12 +790,26 @@ fn spec011_inventory_drag_reloads_a_weapon_through_the_counter() {
     assert!(preview.step(KeyCode::Enter));
     assert!(matches!(&preview.screen, Screen::Inventory(screen) if screen.counter.is_none()));
     assert_eq!(preview.host.world.loaded(gun).0, 10);
-    // A drop elsewhere does nothing; a drag onto Close closes.
-    assert!(preview.click(row(&preview, gun), false));
-    assert!(preview.release(Some([300, 400]), false));
-    assert!(matches!(preview.screen, Screen::Inventory(_)));
-    assert!(preview.click(row(&preview, gun), false));
-    assert!(preview.release(Some([450, 60 + 30 * 4 + 5]), false));
+    // A drop outside every target changes nothing; the left hand takes the
+    // gun; the provisional Done button closes.
+    let at = list_point(&preview, gun);
+    assert!(preview.click(at, false));
+    assert!(preview.release(Some([600, 400]), false));
+    assert_eq!(list_point(&preview, gun), at);
+    assert!(preview.click(at, false));
+    assert!(preview.release(Some([240, 300]), false));
+    assert!(
+        preview
+            .host
+            .world
+            .get(gun)
+            .unwrap()
+            .raw
+            .flags
+            .contains(vault_formats::pro::BasicFlags::LEFT_HAND)
+    );
+    preview.image().unwrap();
+    assert!(preview.click([505, 345], false));
     assert!(matches!(preview.screen, Screen::Map));
 }
 
@@ -738,4 +895,74 @@ fn spec007_player_punch_upgrades_to_kick_through_the_crosshair() {
         names.contains(&punch) && !names.contains(&kick),
         "{names:?}"
     );
+}
+
+#[test]
+fn spec014_hp_counter_rolls_only_when_asked_and_blocks_the_world() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    let hp = preview.host.world.hit_points(player).unwrap();
+    // A change without a roll request is drawn at once.
+    preview.host.world.set_hit_points(player, hp - 2);
+    preview.tick(32).unwrap();
+    assert!(!preview.counters_rolling());
+    // Combat damage asks for a roll: one unit at a time, every frame
+    // followed by trunc(250 / (|P - V| + 1)) ms, while the world and game
+    // input wait.
+    preview.host.world.set_hit_points(player, hp - 5);
+    preview.host.world.emit(WorldEffect::RollHitPoints);
+    preview.tick(48).unwrap();
+    assert!(preview.counters_rolling());
+    let ticks = preview.host.world.clock.ticks;
+    assert!(preview.step(KeyCode::KeyI), "keys are swallowed");
+    assert!(matches!(preview.screen, Screen::Map));
+    let mut now = 48;
+    while preview.counters_rolling() {
+        now += 16;
+        preview.tick(now).unwrap();
+        preview.image().unwrap();
+        assert!(now < 48 + 2000, "the roll ends");
+    }
+    assert_eq!(preview.host.world.clock.ticks, ticks, "the world waited");
+    // 3 units of 3 frames plus the first, at 62 ms each.
+    assert!(now >= 48 + 10 * 62, "{now}");
+}
+
+#[test]
+fn debug_inspector_watches_variables_traces_scripts_and_toggles() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    let plain = preview.image().unwrap();
+    preview.set_debug(true);
+    assert!(preview.debug_enabled() && preview.host.vm_observer.is_some());
+    // A changed map variable reaches the overlay; scripts run observed.
+    if preview.host.world.mvars.is_empty() {
+        preview.host.world.mvars.push(0);
+    }
+    preview.host.world.mvars[0] += 7;
+    preview.tick(32).unwrap();
+    // Talking runs the NPC's script, one observed instruction at a time.
+    let player = preview.host.world.player;
+    let target = npc(&preview);
+    preview
+        .host
+        .action(player, target, vault_core::ObjectAction::Talk)
+        .unwrap();
+    preview.tick(48).unwrap();
+    let overlay = preview.debug.as_ref().unwrap();
+    assert!(overlay.recent_changes().any(|line| line.contains("MVAR")));
+    assert!(
+        !overlay.trace_lines(4).is_empty(),
+        "the talk script ran observed"
+    );
+    assert!(preview.host.world.dialogue.open, "with the same result");
+    let shown = preview.image().unwrap();
+    assert_ne!(shown.pixels(), plain.pixels());
+    // F9 turns it off and detaches the trace.
+    assert!(preview.step(KeyCode::F9));
+    assert!(!preview.debug_enabled() && preview.host.vm_observer.is_none());
 }

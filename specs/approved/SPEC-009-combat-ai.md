@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes revision `R1`, targeting the 32-bit Windows engine. Evidence is static inspection of the AI-packet loader, the generic INI-style configuration reader it uses, NPC combat-turn decision logic, taunt presentation, and the combat/damage/script paths that read or write AI-relevant state. A structural (non-content) audit of a locally owned `data/ai.txt` confirmed the grammar and ordering assumptions below. No original packet values or taunt texts are reproduced. Synthetic checks use independent state models, not a live game session.
+This specification describes reference revision R1, targeting the 32-bit Windows engine. Evidence is static inspection of the AI-packet loader, the generic INI-style configuration reader it uses, NPC combat-turn decision logic, taunt presentation, and the combat/damage/script paths that read or write AI-relevant state. A structural (non-content) audit of a locally owned `data/ai.txt` confirmed the grammar and ordering assumptions below. No original packet values or taunt texts are reproduced. Synthetic checks use independent state models, not a live game session.
 
 This document covers:
 
@@ -39,6 +39,10 @@ Terminology used in this document (descriptive, not reference identifiers):
 | Effective X | Stat/skill value after all SPEC-006 adjustments |
 | `dist(a,b)` | SPEC-007 object distance: hex distance minus one per multihex participant, clamped at 0 |
 | Player | The player-controlled critter |
+
+### Revision history
+
+- **R1-rev2 (2026-10-19).** Section 3.3 onlooker alerting and the section 3.4 retaliation rows now follow the authoritative rule in SPEC-007 §3.6. The exception that allows a same-team retaliation check applies to the attack's **intended** target, not to an unintended victim. The earlier wording had this reversed.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -228,7 +232,7 @@ The snapshot includes the player, party members, every team, and critters that l
 - Otherwise, limit = `2P` during combat or `P` outside combat. Quarter it (truncating) for a sneaking player target as above. There is **no** glass halving in this branch. `[Must-match]`
 - Return `d <= limit`. No line-of-fire or obstacle ray is part of this predicate. `[Must-match]`
 
-**Onlooker alerting.** Whenever damage is applied to a critter (the defender, each splash/burst extra, and an unintended "oops" victim distinct from the defender), every snapshot entry that perceives the damaged critter gets intent bit `0x01` set. This includes the damaged critter itself, dead entries, and entries of any team. `[Must-match]`
+**Onlooker alerting.** Alerting runs for the critters listed in the intended-target rule of SPEC-007 §3.6. These are the attack's intended target when the final victim differs from it (even though the intended target took no damage), the final victim when it is a critter not already dead, and each extra critter not already dead. For each such critter, every snapshot entry that perceives it gets intent bit `0x01` set. This includes the critter itself, dead entries, and entries of any team. `[Must-match]`
 
 ### 3.4 Last-Attacker Reference and Retaliation Rating
 
@@ -248,8 +252,8 @@ Writers of the reference:
 | Player attack debit (SPEC-007 §3.4) | player references the defender | setter |
 | NPC attack loop entry (section 3.12) | attacker references its target | setter |
 | Damage applied by a critter attacker, victim dead or knocked out afterwards | victim references the attacking critter | setter |
-| Damage applied by a critter attacker to a still-active defender | retaliation check, only if the defender is the unintended victim or on a different team from the attacker | rating |
-| Damage applied to a still-active extra | retaliation check, only if on a different team (no unintended-victim exception) | rating |
+| Damage applied by a critter attacker to a defender not left dead or knocked out | retaliation check, only if the defender is the attack's intended target or on a different team from the attacker (SPEC-007 §3.6). A missed-shot bystander or critical-failure random target is not the intended target | rating |
+| Damage applied to an extra not left dead or knocked out | retaliation check, only if on a different team (an extra is never the intended target) | rating |
 | Explosion damage attribution with a known source | each surviving defender/extra other than the source references the source | setter |
 | Player drops a primed explosive while closing inventory | each non-player critter not on the player's team, in the explosion-extras set centered on the player's hex, that passes a Perception stat check (SPEC-006 D10) references the player | setter |
 | Team switch (section 3.15) | cleared if it now references a teammate | setter |
@@ -257,7 +261,7 @@ Writers of the reference:
 | `critter_stop_attacking` | set `0x02`, clear the reference | direct |
 | Restoration, or `critter_damage` with the -1 sentinel present | sentinel replaced with nothing | direct |
 
-All of these are `[Must-match]`. A same-team attacker who is neither dead-making nor the unintended victim therefore does **not** change the defender's reference. `[Must-match]` For the explosive-drop row, the Perception check consumes one D10 draw per eligible critter in set order, and the first critter that references the player starts a combat request against the player when not already in combat. The geometry of the explosion-extras enumeration belongs to the explosion rules (SPEC-007 §3.7) and is not restated here.
+All of these are `[Must-match]`. Damage from a same-team attacker therefore changes the victim's reference only when the victim is the attack's intended target (rating check) or is left dead or knocked out (setter). A same-team unintended victim that survives conscious keeps its reference. `[Must-match]` For the explosive-drop row, the Perception check consumes one D10 draw per eligible critter in set order, and the first critter that references the player starts a combat request against the player when not already in combat. The geometry of the explosion-extras enumeration belongs to the explosion rules (SPEC-007 §3.7) and is not restated here.
 
 **Retaliation rating** of a critter X:
 

@@ -774,3 +774,89 @@ fn inspector_steps_and_renders_a_vm() {
     assert_eq!(lines.len(), 7);
     assert!(lines[6].contains("add"));
 }
+
+// --- live trace -----------------------------------------------------------
+
+/// Every script index loads the VM fixture program.
+struct TraceAssets(IntProgram);
+impl vault_core::assets::WorldAssets for TraceAssets {
+    fn prototype(
+        &self,
+        pid: u32,
+    ) -> Result<std::sync::Arc<vault_formats::Prototype>, vault_core::WorldError> {
+        Err(vault_core::WorldError::Invalid(format!(
+            "no prototype {pid:#x}"
+        )))
+    }
+    fn program(&self, _index: i32) -> Result<(String, IntProgram), vault_core::WorldError> {
+        Ok(("trace.int".to_owned(), self.0.clone()))
+    }
+    fn message(&self, _list: i32, _id: i32) -> Option<vault_formats::msg::Message> {
+        None
+    }
+}
+
+#[test]
+fn live_trace_records_the_steps_a_host_runs_and_detaches() {
+    let program = IntProgram::parse(&fixture::program()).unwrap();
+    let mut world = WorldState::empty(1).unwrap();
+    let script = world.add_script(0, 0, 0, 0).unwrap();
+    let mut host = vault_core::WorldHost::new(world, TraceAssets(program));
+    let mut inspector = Inspector::new(InspectorConfig::default());
+    assert!(!inspector.attached());
+    inspector.attach(&mut host);
+    assert!(inspector.attached() && host.vm_observer.is_some());
+    let request = vault_core::world::ScriptRequest {
+        script,
+        event: vault_core::ScriptEvent::Start,
+        source: 0,
+        target: 0,
+        fixed: 0,
+        action: -1,
+        only_present: false,
+    };
+    host.dispatch(request.clone()).unwrap();
+    let entries = inspector.live_entries(1000);
+    assert!(!entries.is_empty(), "the start run was traced");
+    // One entry per step, numbered in order, each from a decoded address.
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.seq, index as u64);
+    }
+    assert!(entries.iter().any(|entry| entry.executed));
+    // Detached, the host runs unobserved and the trace stops.
+    inspector.detach(&mut host);
+    assert!(host.vm_observer.is_none() && inspector.live_entries(10).is_empty());
+    host.dispatch(request).unwrap();
+}
+
+#[test]
+fn observed_script_runs_end_where_unobserved_ones_do() {
+    let run = |observed: bool| {
+        let program = IntProgram::parse(&fixture::program()).unwrap();
+        let mut world = WorldState::empty(1).unwrap();
+        let script = world.add_script(0, 0, 0, 0).unwrap();
+        let mut host = vault_core::WorldHost::new(world, TraceAssets(program));
+        let mut inspector = Inspector::new(InspectorConfig::default());
+        if observed {
+            inspector.attach(&mut host);
+        }
+        let result = host.dispatch(vault_core::world::ScriptRequest {
+            script,
+            event: vault_core::ScriptEvent::Start,
+            source: 0,
+            target: 0,
+            fixed: 0,
+            action: -1,
+            only_present: false,
+        });
+        let vm = host.programs.values().next().unwrap();
+        (
+            result.map(|r| (r.overridden, r.pending)).ok(),
+            vm.pc,
+            vm.status.0,
+            vm.value_stack.bytes().to_vec(),
+            host.calls.len(),
+        )
+    };
+    assert_eq!(run(true), run(false));
+}

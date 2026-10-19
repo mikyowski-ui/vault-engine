@@ -7,7 +7,7 @@
 
 ## 1. Overview & Scope
 
-This specification describes revision `R1`, targeting the 32-bit Windows engine. Evidence comes from two sources:
+This specification describes reference revision R1, targeting the 32-bit Windows engine. Evidence comes from two sources:
 
 - **Static inspection** of the movie library (container reader, frame timer, audio buffering, video block decoder, palette handling), the engine-side movie player (presentation, subtitles), the movie-fade module, the game movie table, and the `play_gmovie` opcode and other callers.
 - **Measurements** over the local unpacked corpus: 13 `.MVE` files under `art/cuts`, 7 fade files (`art/cuts/*.cfg`), and 15 `.SVE` files (5 per language for English, French and Spanish). A research-side oracle decoder that follows the rules below produced the vectors in `oracle/SPEC-012/` (section 4.9). A scratch harness compiled the reference block decoder and compared it frame by frame against the oracle. All **8613** corpus video frames and all synthetic frames matched byte for byte.
