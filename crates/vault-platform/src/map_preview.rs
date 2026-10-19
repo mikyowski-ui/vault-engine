@@ -20,19 +20,23 @@ use vault_formats::{
 use vault_render::{
     IndexedImage, TextStyle,
     dialogue::{self, ChoiceHit},
-    map::{MapArt, MapHover, MapView, pick_object, render_map},
+    map::{MapArt, MapHover, MapView, render_map},
 };
 use winit::keyboard::KeyCode;
 
+mod automap;
 mod barter;
 mod character;
+mod counter;
 mod elevator;
+mod fade;
 mod hud;
 mod inventory;
 mod loot;
 mod movies;
 mod options;
 mod pipboy;
+mod pointer;
 mod saveload;
 mod skilldex;
 mod world;
@@ -66,6 +70,8 @@ pub(crate) enum Screen {
     /// SPEC-014 options, pause, quit confirmation and preferences.
     Options(options::OptionsScreen),
     SaveLoad(Box<saveload::SaveLoadScreen>),
+    /// The automap overlay.
+    Automap(automap::AutomapScreen),
 }
 
 /// Decoded ACM samples by VFS path; a failing path is reported once.
@@ -188,6 +194,17 @@ pub struct MapPreview {
     pub loaded: bool,
     /// A save or load failure's Done box over the current screen.
     notice: Option<saveload::Notice>,
+    /// SPEC-014 §3.26-3.29 pointer, hover, action menu and edge scrolling.
+    pointer: pointer::PointerState,
+    /// The shell clock at the last tick, in milliseconds.
+    clock: u64,
+    /// The last composed frame without the cursor, so a pointer move only
+    /// redraws the cursor.
+    frame: Option<IndexedImage>,
+    /// SPEC-014 §3.2 palette fades.
+    fades: fade::Fades,
+    /// The startup movies fade back to the game palette when they end.
+    startup_fade: bool,
 }
 struct MapSprites {
     bindings: BTreeMap<(Category, u32, u8), Arc<FrmArchive>>,
@@ -363,6 +380,11 @@ impl MapPreview {
             endgame: None,
             loaded: false,
             notice: None,
+            pointer: Default::default(),
+            clock: 0,
+            frame: None,
+            fades: Default::default(),
+            startup_fade: false,
         })
     }
     /// Whether the save/load screen is open (the main menu's load stage).
@@ -409,17 +431,27 @@ impl MapPreview {
         self.pressed = Some(release);
         self.play_effect(press, None);
     }
-    /// The mouse button was released.
-    pub fn release(&mut self) -> bool {
+    /// A mouse release at a frame pixel (`None` outside the frame): a drag
+    /// drops, a map click acts, and a held desktop button plays its release
+    /// cue.
+    pub fn release(&mut self, point: Option<[i32; 2]>, right: bool) -> bool {
         if self.movie_release() {
             self.pressed = None;
             return true;
         }
-        let Some(cue) = self.pressed.take() else {
-            return false;
-        };
-        self.play_effect(cue, None);
-        true
+        let mut handled = !right
+            && match self.screen {
+                Screen::Map => self.map_release(point),
+                Screen::Loot(_) => self.loot_release(point),
+                Screen::Inventory(_) => self.inventory_release(point),
+                Screen::Barter(_) => self.barter_release(point),
+                _ => false,
+            };
+        if let Some(cue) = self.pressed.take() {
+            self.play_effect(cue, None);
+            handled = true;
+        }
+        handled
     }
     pub(crate) fn location_name(&self, town: usize) -> Vec<u8> {
         vault_core::worldmap::TOWNS
@@ -545,8 +577,18 @@ impl MapPreview {
                     mode,
                 } => self.play_library(slot, &filename, mode),
                 WorldEffect::Movie(request) => self.queue_movie(request),
+                WorldEffect::Fade {
+                    out,
+                    duration,
+                    from_black,
+                } => self.fades.push(out, duration, from_black),
                 WorldEffect::WorldMap => self.open_world_map(),
                 WorldEffect::TownMap => self.open_town_map(),
+                // Look and examine already printed their text.
+                WorldEffect::DefaultAction {
+                    action: ObjectAction::LookAt | ObjectAction::Description,
+                    ..
+                } => {}
                 WorldEffect::DefaultAction { action, target } => {
                     let name = self
                         .host
@@ -577,9 +619,27 @@ impl MapPreview {
             Screen::Character(_) => self.character_image(),
             Screen::Barter(_) => self.barter_image(),
             Screen::Movie(_) => self.movie_image().ok_or_else(|| "no movie".into()),
+            Screen::Automap(_) => self.automap_image(),
         }?;
         self.draw_notice(&mut image);
+        self.frame = Some(image.clone());
+        self.draw_cursor(&mut image);
         Ok(image)
+    }
+    /// The last composed frame with the cursor at the pointer's current
+    /// place, without composing the scene again.
+    pub fn pointer_frame(&self) -> Option<IndexedImage> {
+        let mut image = self.frame.clone()?;
+        self.draw_cursor(&mut image);
+        Some(image)
+    }
+    /// The game palette (a script-loaded one replaces the map's).
+    pub(crate) fn game_palette(&self) -> &Palette {
+        self.host
+            .library
+            .palette
+            .as_deref()
+            .unwrap_or(&self.palette)
     }
     /// The 640-by-380 map view: sprites under the world lighting.
     pub(crate) fn map_view_image(&mut self) -> AppResult<IndexedImage> {
@@ -656,7 +716,8 @@ impl MapPreview {
                 return "Vault — character — Done keeps, Cancel or Escape restores".into();
             }
             Screen::Barter(_) => {
-                return "Vault — barter — click moves one, right-click all; Done returns".into();
+                return "Vault — barter — drag items between columns; M offers; T or Escape returns"
+                    .into();
             }
             Screen::Movie(screen) => {
                 return format!(
@@ -671,12 +732,14 @@ impl MapPreview {
                 return "Vault — elevator — choose a level; Escape cancels".into();
             }
             Screen::Loot(_) => {
-                return "Vault — loot — click an item, then the other pane; A takes all; Escape closes".into();
+                return "Vault — loot — drag an item to the other pane; A takes all; Escape closes"
+                    .into();
             }
             Screen::Options(_) => return "Vault — options".into(),
             Screen::SaveLoad(_) => {
                 return "Vault — save/load — Enter commits; Escape cancels".into();
             }
+            Screen::Automap(_) => return "Vault — automap — any key or a click closes".into(),
             Screen::Map => {}
         }
         format!(
@@ -692,7 +755,7 @@ impl MapPreview {
             return true;
         }
         if matches!(self.screen, Screen::Barter(_)) {
-            return key == KeyCode::Escape && self.barter_key();
+            return self.barter_key(key);
         }
         if self.host.world.dialogue.open {
             let choice = match key {
@@ -747,6 +810,7 @@ impl MapPreview {
             Screen::Loot(_) => return self.loot_key(key),
             Screen::Options(_) => return self.options_key(key),
             Screen::SaveLoad(_) => return self.saveload_key(key),
+            Screen::Automap(_) => return self.close_automap(),
             Screen::Barter(_) | Screen::Movie(_) | Screen::Map => {}
         }
         // SPEC-014 §3.19 game-loop hotkeys (Escape opens the options).
@@ -851,6 +915,7 @@ impl MapPreview {
             Screen::Loot(_) => return self.loot_click(point, right),
             Screen::Options(_) => return self.options_click(point),
             Screen::SaveLoad(_) => return self.saveload_click(point),
+            Screen::Automap(_) => return self.close_automap(),
             Screen::Barter(_) | Screen::Movie(_) | Screen::Map => {}
         }
         // SPEC-014 §3.19: the interface bar, then the map area by cursor
@@ -866,10 +931,7 @@ impl MapPreview {
             self.cycle_cursor();
             return true;
         }
-        let map = self.host.world.render_snapshot();
-        let object = pick_object(&map, self.view, &self.art, point)
-            .and_then(|id| self.host.world.reference_for_id(id));
-        self.map_click(point, object);
+        self.map_press(point);
         true
     }
     pub fn scroll(&mut self, delta: f64) -> bool {
@@ -885,9 +947,12 @@ impl MapPreview {
         true
     }
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
+        self.clock = now;
         // The world and Pip-Boy screens are modal: the local map's scripts
-        // and clock wait while travel or rest advances time.
+        // and clock wait while travel or rest advances time. An open action
+        // menu pauses background map processing.
         let screen = match &self.screen {
+            Screen::Map if self.pointer.menu.is_some() => Ok(false),
             Screen::Map => self.host.tick(now),
             Screen::World(_) | Screen::Town(_) => self
                 .world_tick(now)
@@ -900,9 +965,11 @@ impl MapPreview {
             Screen::Movie(_) => Ok(self.movie_tick(now)),
             Screen::Inventory(_) | Screen::Character(_) | Screen::Barter(_) => Ok(false),
             // SPEC-013/014 windows suspend the world.
-            Screen::Skilldex(_) | Screen::Elevator(_) | Screen::Loot(_) | Screen::Options(_) => {
-                Ok(false)
-            }
+            Screen::Skilldex(_)
+            | Screen::Elevator(_)
+            | Screen::Loot(_)
+            | Screen::Options(_)
+            | Screen::Automap(_) => Ok(false),
             Screen::SaveLoad(_) => {
                 self.saveload_frame();
                 Ok(false)
@@ -929,9 +996,17 @@ impl MapPreview {
             self.drain_effects();
             changed = true;
         }
+        let game = self.host.library.palette.clone();
+        changed |= self
+            .fades
+            .tick(now, game.as_deref().unwrap_or(&self.palette));
+        changed |= self.pointer_tick();
         Ok(changed)
     }
+    /// The pointer moved over the frame; returns the map hover once per hex
+    /// change, for the shell's log.
     pub fn hover(&mut self, point: [i32; 2]) -> Option<MapHover> {
+        self.pointer_moved(point);
         if self.host.world.dialogue.open || !matches!(self.screen, Screen::Map) {
             return None;
         }
@@ -1134,8 +1209,8 @@ mod tests {
         assert!(preview.step(KeyCode::KeyS));
         mixer.lock().unwrap().stop(Channel::Effect);
         assert!(preview.click([451 + 48, 5 + 338], false));
-        assert!(preview.release());
-        assert!(!preview.release(), "only one release per press");
+        assert!(preview.release(None, false));
+        assert!(!preview.release(None, false), "only one release per press");
         assert_eq!(mixer.lock().unwrap().voices(), 2);
         mixer.lock().unwrap().stop(Channel::Effect);
         // Speech without a talking head (or file) finishes at once.
@@ -1237,9 +1312,17 @@ mod tests {
             preview.host.world.clock.ticks, ticks,
             "modal: the clock waits"
         );
-        // A key skips the movie and returns to the map.
+        // A key skips the movie and returns to the map: playback ends on
+        // black, and flag 0x02 fades back to the game palette (SPEC-012
+        // §3.12, SPEC-014 §3.2).
         assert!(preview.step(KeyCode::Space));
-        assert!(!preview.movie_active() && preview.display_override().is_none());
+        assert!(!preview.movie_active());
+        assert_eq!(preview.display_override(), Some([[0, 0, 0, 255]; 256]));
+        for _ in 0..50 {
+            now += 16;
+            preview.tick(now).unwrap();
+        }
+        assert!(preview.display_override().is_none());
         assert!(!mixer.lock().unwrap().playing(Channel::Movie));
         assert_eq!(preview.image().unwrap().height(), 480);
         // The startup sequence: iplogo is absent, so only intro plays.
@@ -1256,17 +1339,17 @@ mod tests {
         // click then release skips it, back to the Pip-Boy.
         assert!(preview.step(KeyCode::KeyP));
         assert!(preview.click([30, 155], false), "Video archive tab");
-        assert!(preview.release());
+        assert!(preview.release(None, false));
         preview.image().unwrap();
         assert!(preview.click([200, 64], false));
         assert!(preview.movie_active());
-        assert!(preview.release(), "the starting click's release");
+        assert!(preview.release(None, false), "the starting click's release");
         assert!(
             preview.movie_active(),
             "a press before the movie does not skip"
         );
         assert!(preview.click([10, 10], false));
-        assert!(preview.release());
+        assert!(preview.release(None, false));
         assert!(matches!(preview.screen, Screen::PipBoy(_)));
     }
 
@@ -1278,7 +1361,7 @@ mod tests {
         preview.image().unwrap();
         // Pick up the synthetic item with an arrow-mode click.
         preview.hud.mode = vault_core::ui::cursor::Mode::Arrow;
-        preview.click([320, 185], false);
+        preview.tap([320, 185]);
         let item = preview.selected.unwrap();
         let player = preview.host.world.player;
         assert_eq!(preview.host.world.get(item).unwrap().owner, Some(player));
@@ -1349,7 +1432,7 @@ mod tests {
         // Barter: a dialogue's pending request opens it with the target
         // (an arrow click talks to the NPC).
         preview.hud.mode = vault_core::ui::cursor::Mode::Arrow;
-        assert!(preview.click([336, 170], false));
+        assert!(preview.tap([336, 170]));
         assert!(preview.host.world.dialogue.open);
         preview.host.world.dialogue.pending_barter = true;
         preview.image().unwrap();
@@ -1357,13 +1440,40 @@ mod tests {
             panic!("barter");
         };
         let offer = screen.session.offer;
-        assert!(preview.click([20, 62], true), "the player's whole entry");
+        // SPEC-013 §3.18: the player's first inventory slot (subwindow
+        // (29, 35), screen (109, 325)) drags onto the player table's drop
+        // rectangle (screen x 245-309, y 310-454); a release elsewhere
+        // moves nothing.
+        assert!(preview.click([120, 340], false));
+        assert!(preview.release(Some([200, 340]), false));
+        assert!(preview.host.world.get(offer).unwrap().inventory.is_empty());
+        assert!(preview.click([120, 340], false));
+        preview.pointer_moved([260, 340]);
+        assert!(preview.pointer_frame().is_some(), "the item is the cursor");
+        assert!(preview.release(Some([260, 340]), false));
         assert!(!preview.host.world.get(offer).unwrap().inventory.is_empty());
         preview.image().unwrap();
-        assert!(preview.click([530, 445], false), "Done");
+        // Talk (barter window (584, 162)) returns the tables.
+        assert!(preview.tap([590, 289 + 168]), "Talk");
         assert!(!preview.host.world.dialogue.pending_barter);
         assert_eq!(preview.host.world.get(item).unwrap().owner, Some(player));
         assert!(matches!(preview.screen, Screen::Map) && preview.host.world.dialogue.open);
+        // Again: an offer for an empty merchant table costs nothing, so Offer
+        // (`m`) trades; the result is the conversation's reply meanwhile.
+        preview.host.world.dialogue.pending_barter = true;
+        preview.image().unwrap();
+        let Screen::Barter(screen) = &preview.screen else {
+            panic!("barter");
+        };
+        let merchant = screen.session.merchant;
+        assert!(preview.click([120, 340], false));
+        assert!(preview.release(Some([260, 340]), false));
+        assert!(preview.step(KeyCode::KeyM));
+        assert!(matches!(&preview.screen, Screen::Barter(screen) if screen.reply.is_some()));
+        assert_eq!(preview.host.world.get(item).unwrap().owner, Some(merchant));
+        preview.image().unwrap();
+        assert!(preview.step(KeyCode::Escape));
+        assert!(matches!(preview.screen, Screen::Map));
     }
 
     #[test]
@@ -1528,7 +1638,7 @@ mod tests {
         assert!(preview.host.library.palette_cycling);
         assert!(preview.click([336, 170], true));
         assert_eq!(preview.hud.mode, vault_core::ui::cursor::Mode::Arrow);
-        assert!(preview.click([336, 170], false));
+        assert!(preview.tap([336, 170]));
         let selected = preview.selected.unwrap();
         assert_eq!(
             preview.host.world.get(selected).unwrap().category(),
@@ -1550,7 +1660,7 @@ mod tests {
         // The map frame now carries the interface bar below the view.
         assert_eq!(preview.image().unwrap().height(), 480);
         // An arrow click on an item picks it up into authoritative inventory.
-        preview.click([320, 185], false);
+        preview.tap([320, 185]);
         let item = preview.selected.unwrap();
         assert_eq!(
             preview.host.world.get(item).unwrap().category(),

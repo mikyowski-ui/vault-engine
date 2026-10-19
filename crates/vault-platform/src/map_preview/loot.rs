@@ -1,8 +1,11 @@
 //! SPEC-013 §3.16-3.17 the container/corpse loot window (and steal mode)
-//! over the world, with the move-items counter. The desktop delivers mouse
-//! releases without a position, so a drag is a press on an entry (the
-//! steal attempt counts here) and a second press on the other pane.
-use super::{MapPreview, Screen};
+//! over the world, with the move-items counter. A drag lifts an entry on
+//! the left press (the steal attempt counts here, `ipickup1`) and drops it
+//! on the release (`iputdown`) when the pointer is over the other pane.
+use super::{
+    MapPreview, Screen,
+    counter::{CounterInput, counter_click, counter_key, draw_counter},
+};
 use crate::{AppResult, interface::Painter};
 use vault_core::{
     ObjectRef,
@@ -33,11 +36,6 @@ const SCROLL: [(bool, bool, Rect); 4] = [
     (true, true, Rect::new(379, 39, 22, 23)),
     (true, false, Rect::new(379, 62, 22, 23)),
 ];
-const COUNTER_PLUS: Rect = Rect::new(200, 46, 16, 12);
-const COUNTER_MINUS: Rect = Rect::new(200, 58, 17, 12);
-const COUNTER_ALL: Rect = Rect::new(120, 80, 94, 33);
-const COUNTER_DONE: Rect = Rect::new(98, 128, 15, 16);
-const COUNTER_CANCEL: Rect = Rect::new(148, 128, 15, 16);
 
 fn slot(target: bool, row: usize) -> Rect {
     let [x, y] = if target {
@@ -71,7 +69,10 @@ impl MapPreview {
         }
         self.drain_effects();
     }
-    fn item_icon(&self, item: ObjectRef) -> Option<std::sync::Arc<vault_formats::FrmArchive>> {
+    pub(crate) fn item_icon(
+        &self,
+        item: ObjectRef,
+    ) -> Option<std::sync::Arc<vault_formats::FrmArchive>> {
         let fid = self.host.world.get(item).and_then(|object| {
             object
                 .prototype
@@ -138,43 +139,13 @@ impl MapPreview {
         }
         painter.blit(&mut image, "lilredup.frm", 0, [ox + DONE.x, oy + DONE.y]);
         if let Some((counter, _)) = &screen.counter {
-            let [cx, cy] = skills::COUNTER_ORIGIN;
-            painter.blit_opaque(&mut image, "movemult.frm", 0, [cx, cy]);
-            let title = painter.message("inventry.msg", 21);
-            painter.centered(&mut image, 103, ColorKey::AMBER, &title, [cx, cy + 9], 259);
-            for (digit, [x, y]) in counter.digits().iter().zip(skills::COUNTER_DIGITS) {
-                painter.big_digit(&mut image, *digit, [cx + x, cy + y], false);
-            }
-            painter.blit(
+            let icon = screen.held.and_then(|(_, item, _)| self.item_icon(item));
+            draw_counter(
+                &painter,
                 &mut image,
-                "splsoff.frm",
-                0,
-                [cx + COUNTER_PLUS.x, cy + COUNTER_PLUS.y],
+                counter,
+                icon.as_ref().and_then(|icon| icon.frame(0, 0)),
             );
-            painter.blit(
-                &mut image,
-                "snegoff.frm",
-                0,
-                [cx + COUNTER_MINUS.x, cy + COUNTER_MINUS.y],
-            );
-            painter.blit(
-                &mut image,
-                "allboff.frm",
-                0,
-                [cx + COUNTER_ALL.x, cy + COUNTER_ALL.y],
-            );
-            let all = painter.message("inventry.msg", 22);
-            painter.centered(
-                &mut image,
-                103,
-                ColorKey::AMBER,
-                &all,
-                [cx + COUNTER_ALL.x, cy + COUNTER_ALL.y + 4],
-                94,
-            );
-            for rect in [COUNTER_DONE, COUNTER_CANCEL] {
-                painter.blit(&mut image, "lilredup.frm", 0, [cx + rect.x, cy + rect.y]);
-            }
         }
         Ok(image)
     }
@@ -196,10 +167,6 @@ impl MapPreview {
             return;
         };
         screen.counter = None;
-        self.play_effect(b"iputdown", None);
-        let Screen::Loot(screen) = &mut self.screen else {
-            return;
-        };
         let outcome = self
             .host
             .loot_move(&mut screen.session, from_target, item, quantity);
@@ -215,19 +182,11 @@ impl MapPreview {
             return false;
         };
         if let Some((counter, _)) = &mut screen.counter {
-            let [cx, cy] = skills::COUNTER_ORIGIN;
-            let local = [point[0] - cx, point[1] - cy];
-            if COUNTER_PLUS.contains(local) {
-                counter.plus();
-            } else if COUNTER_MINUS.contains(local) {
-                counter.minus();
-            } else if COUNTER_ALL.contains(local) {
-                counter.all();
-            } else if COUNTER_DONE.contains(local) {
-                return self.loot_key(KeyCode::Enter);
-            } else if COUNTER_CANCEL.contains(local) {
-                return self.loot_key(KeyCode::Escape);
+            let input = counter_click(counter, point);
+            if input != CounterInput::Ignored {
+                self.press();
             }
+            self.loot_counter(input);
             return true;
         }
         let [ox, oy] = skills::LOOT_ORIGIN;
@@ -250,50 +209,78 @@ impl MapPreview {
         }
         // A press on a filled entry lifts it (an arrow-cursor right press
         // prints its look text instead).
-        if screen.held.is_none() {
-            for target in [false, true] {
-                let Some(row) =
-                    (0..skills::LOOT_ROWS).find(|row| slot(target, *row).contains(local))
-                else {
-                    continue;
-                };
-                let entries = self.host.loot_items(&screen.session, target);
-                let Some((item, quantity)) = entries
-                    .get(screen.offsets[usize::from(target)] + row)
-                    .copied()
-                else {
-                    return true;
-                };
-                if right {
-                    let name = self
-                        .host
-                        .world
-                        .get(item)
-                        .map(|o| o.name.clone())
-                        .unwrap_or_default();
-                    self.notify(name);
-                    return true;
-                }
-                screen.session.press();
-                screen.held = Some((target, item, quantity));
-                self.play_effect(b"ipickup1", None);
+        for target in [false, true] {
+            let Some(row) = (0..skills::LOOT_ROWS).find(|row| slot(target, *row).contains(local))
+            else {
+                continue;
+            };
+            let entries = self.host.loot_items(&screen.session, target);
+            let Some((item, quantity)) = entries
+                .get(screen.offsets[usize::from(target)] + row)
+                .copied()
+            else {
+                return true;
+            };
+            if right {
+                let name = self
+                    .host
+                    .world
+                    .get(item)
+                    .map(|o| o.name.clone())
+                    .unwrap_or_default();
+                self.notify(name);
                 return true;
             }
+            screen.session.press();
+            screen.held = Some((target, item, quantity));
+            self.play_effect(b"ipickup1", None);
             return true;
         }
-        // A press over the other pane's drop zone drops the lifted entry.
-        let Some((from_target, _, quantity)) = screen.held else {
-            return true;
+        true
+    }
+    /// The counter's outcome for the lifted entry.
+    fn loot_counter(&mut self, input: CounterInput) -> bool {
+        let Screen::Loot(screen) = &mut self.screen else {
+            return false;
         };
-        match skills::loot_drop_target(point) {
+        match input {
+            CounterInput::Accept(quantity) => self.loot_drop(quantity),
+            CounterInput::Refused => self.play_effect(ERROR_SOUND.as_bytes(), None),
+            CounterInput::Cancel => {
+                screen.counter = None;
+                screen.held = None;
+            }
+            CounterInput::Changed => {}
+            CounterInput::Ignored => return false,
+        }
+        true
+    }
+    /// The release ends a drag: over the other pane's drop zone it moves
+    /// the entry (through the counter for a stack); elsewhere nothing.
+    pub(crate) fn loot_release(&mut self, point: Option<[i32; 2]>) -> bool {
+        let Screen::Loot(screen) = &mut self.screen else {
+            return false;
+        };
+        if screen.counter.is_some() {
+            return false;
+        }
+        let Some((from_target, _, quantity)) = screen.held else {
+            return false;
+        };
+        match point.and_then(skills::loot_drop_target) {
             Some(to_target) if to_target != from_target => {
                 if quantity > 1 {
                     screen.counter = Some((Counter::new(quantity), to_target));
+                    self.play_effect(b"iputdown", None);
                 } else {
+                    self.play_effect(b"iputdown", None);
                     self.loot_drop(1);
                 }
             }
-            _ => screen.held = None,
+            _ => {
+                screen.held = None;
+                self.play_effect(b"iputdown", None);
+            }
         }
         true
     }
@@ -302,32 +289,13 @@ impl MapPreview {
             return false;
         };
         if let Some((counter, _)) = &mut screen.counter {
-            match key {
-                KeyCode::Escape => {
-                    screen.counter = None;
-                    screen.held = None;
-                }
-                KeyCode::Enter | KeyCode::NumpadEnter => match counter.enter() {
-                    Some(quantity) => {
-                        self.play_effect(BUTTON_PRESS.as_bytes(), None);
-                        self.loot_drop(quantity);
-                    }
-                    None => self.play_effect(ERROR_SOUND.as_bytes(), None),
-                },
-                KeyCode::Backspace => counter.backspace(),
-                _ => {
-                    let name = format!("{key:?}");
-                    let Some(digit) = name
-                        .strip_prefix("Digit")
-                        .or_else(|| name.strip_prefix("Numpad"))
-                        .and_then(|d| d.parse::<u8>().ok())
-                    else {
-                        return false;
-                    };
-                    counter.digit(digit);
-                }
+            let input = counter_key(counter, key);
+            if matches!(key, KeyCode::Enter | KeyCode::NumpadEnter)
+                && matches!(input, CounterInput::Accept(_))
+            {
+                self.play_effect(BUTTON_PRESS.as_bytes(), None);
             }
-            return true;
+            return self.loot_counter(input);
         }
         let control = self.hud.modifiers[1];
         match key {

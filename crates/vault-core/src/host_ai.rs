@@ -112,7 +112,7 @@ impl WorldState {
             })
     }
     /// Loaded rounds and ammunition PID of a weapon instance.
-    pub(crate) fn loaded(&self, weapon: ObjectRef) -> (i32, i32) {
+    pub fn loaded(&self, weapon: ObjectRef) -> (i32, i32) {
         match self.get(weapon).map(|object| &object.raw.state) {
             Some(ObjectState::Other {
                 detail: ObjectDetail::Weapon { rounds, ammo_pid },

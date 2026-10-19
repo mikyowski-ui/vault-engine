@@ -100,7 +100,7 @@ fn spec013_skilldex_rows_and_targeting() {
     assert!(preview.click([451 + 20, 5 + 45 + 5], false));
     assert!(preview.host.sneaking());
     // A targeting click with no object returns to movement.
-    assert!(preview.click([5, 5], false));
+    assert!(preview.tap([5, 5]));
     assert_eq!(preview.hud.mode, Mode::Movement);
 }
 
@@ -163,9 +163,10 @@ fn spec013_loot_window_moves_items_between_panes() {
     });
     preview.image().unwrap();
     assert!(matches!(preview.screen, Screen::Loot(_)));
-    // Lift the target pane's first entry, then drop it on the player pane.
+    // Lift the target pane's first entry (the press), then drop it on the
+    // player pane (the release).
     assert!(preview.click([80 + 430, 35 + 10], false));
-    assert!(preview.click([130, 100], false));
+    assert!(preview.release(Some([130, 100]), false));
     assert_eq!(preview.host.world.get(item).unwrap().owner, Some(player));
     assert!(preview.step(KeyCode::Escape));
     assert!(matches!(preview.screen, Screen::Map));
@@ -380,4 +381,361 @@ fn spec013_set_timer_arms_an_explosive_from_the_inventory() {
     // A second use refuses: the timer is already ticking.
     assert!(preview.click([450, 65], false));
     assert!(matches!(&preview.screen, Screen::Inventory(screen) if screen.timer.is_none()));
+}
+
+/// A frame pixel on the critter or item at `hex` (sprites stand on the
+/// hex center).
+fn on_hex(preview: &MapPreview, hex: i32) -> [i32; 2] {
+    let [x, y] = preview.view.grid.hex_center(hex).unwrap();
+    [x as i32, y as i32 - 5]
+}
+
+#[test]
+fn spec014_hover_feedback_waits_for_a_rest_and_draws_the_cursor() {
+    let dir = corpus();
+    for (name, size) in [("msef003.frm", [32, 16]), ("stdarrow.frm", [18, 18])] {
+        std::fs::write(
+            dir.path().join("art/intrface").join(name),
+            super::fixture::frm(size[0], size[1], 9),
+        )
+        .unwrap();
+    }
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let target = npc(&preview);
+    preview.tick(16).unwrap();
+    let base = preview.image().unwrap();
+    // No pointer, no cursor; with one, the drawn cursor changes the frame.
+    let player_hex = preview.host.world.get(player).unwrap().raw.hex.unwrap();
+    let own = on_hex(&preview, player_hex);
+    preview.hover([own[0], own[1] + 5]);
+    let drawn = preview.pointer_frame().unwrap();
+    assert_ne!(drawn.pixels(), base.pixels());
+    // Movement: nothing before 250 ms of rest; then the player's own hex
+    // has no path, a red X.
+    preview.tick(200).unwrap();
+    assert_eq!(preview.pointer.feedback, None);
+    preview.tick(300).unwrap();
+    assert_eq!(
+        preview.pointer.feedback,
+        Some(super::pointer::Feedback::Cost(
+            b"X".to_vec(),
+            vault_core::ui::ColorKey::RED
+        ))
+    );
+    // Arrow over the talkable NPC: the talk icon, and its look-at text
+    // reaches the monitor once. Moving resets the art.
+    preview.hud.mode = Mode::Arrow;
+    let hex = preview.host.world.get(target).unwrap().raw.hex.unwrap();
+    let point = on_hex(&preview, hex);
+    preview.hover(point);
+    preview.tick(600).unwrap();
+    assert_eq!(
+        preview.pointer.feedback,
+        Some(super::pointer::Feedback::Pick("talkn.frm"))
+    );
+    let name = preview.host.world.get(target).unwrap().name.clone();
+    assert!(preview.status.ends_with(&name), "{:?}", preview.status);
+    preview.image().unwrap();
+    preview.hover([point[0] + 1, point[1]]);
+    assert_eq!(preview.pointer.feedback, None);
+    // Out of the map area the arrow is drawn and no hover runs.
+    preview.hover([320, 440]);
+    preview.tick(1000).unwrap();
+    assert_eq!(preview.pointer.feedback, None);
+    assert!(preview.pointer_frame().is_some());
+}
+
+#[test]
+fn spec014_action_menu_opens_on_a_held_press_and_runs_the_entry() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let target = npc(&preview);
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    preview.hud.mode = Mode::Arrow;
+    let hex = preview.host.world.get(target).unwrap().raw.hex.unwrap();
+    let point = on_hex(&preview, hex);
+    preview.hover(point);
+    assert!(preview.click(point, false));
+    // The first repeat event comes after more than 250 ms.
+    preview.tick(266).unwrap();
+    assert!(preview.pointer.menu.is_none());
+    preview.tick(282).unwrap();
+    let menu = preview.pointer.menu.as_ref().expect("the action menu");
+    use vault_core::ui::cursor::Entry;
+    assert_eq!(
+        menu.entries,
+        [
+            Entry::Talk,
+            Entry::Look,
+            Entry::Inventory,
+            Entry::Skill,
+            Entry::Cancel
+        ]
+    );
+    // The world pauses; each move of more than 10 pixels moves the
+    // highlight one entry.
+    let ticks = preview.host.world.clock.ticks;
+    preview.tick(2000).unwrap();
+    assert_eq!(preview.host.world.clock.ticks, ticks);
+    preview.hover([point[0], point[1] + 11]);
+    preview.hover([point[0] + 3, point[1] + 22]);
+    assert_eq!(preview.pointer.menu.as_ref().unwrap().tracker.highlight, 2);
+    preview.hover([point[0], point[1] + 12]);
+    assert_eq!(preview.pointer.menu.as_ref().unwrap().tracker.highlight, 2);
+    preview.hover([point[0] + 5, point[1] + 11]);
+    assert_eq!(preview.pointer.menu.as_ref().unwrap().tracker.highlight, 1);
+    preview.image().unwrap();
+    // The release runs Look (examine) and warps the pointer to the menu's
+    // column at the last anchor.
+    assert!(preview.release(Some([point[0] + 5, point[1] + 11]), false));
+    assert!(preview.pointer.menu.is_none());
+    assert_eq!(preview.pointer.at, Some([point[0], point[1] + 11]));
+    assert!(!preview.host.world.dialogue.open);
+    // A second hold without moving runs Talk.
+    preview.hover(point);
+    assert!(preview.click(point, false));
+    preview.tick(2400).unwrap();
+    assert!(preview.pointer.menu.is_some());
+    assert!(preview.release(Some(point), false));
+    assert!(preview.host.world.dialogue.open);
+}
+
+#[test]
+fn spec014_edge_scrolling_steps_at_most_every_33_ms_until_blocked() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    let start = preview.host.world.camera_hex;
+    preview.hover([639, 200]);
+    assert!(preview.tick(100).unwrap());
+    let first = preview.host.world.camera_hex;
+    assert_ne!(first, start);
+    let edge = preview.pointer.edge.unwrap();
+    assert_eq!((edge.direction, edge.blocked), (3, false));
+    // Throttled within 33 ms; the next step after.
+    preview.tick(120).unwrap();
+    assert_eq!(preview.host.world.camera_hex, first);
+    preview.tick(133).unwrap();
+    assert_ne!(preview.host.world.camera_hex, first);
+    preview.image().unwrap();
+    // A press on an edge pixel never clicks the map.
+    assert!(preview.click([639, 200], false));
+    assert!(preview.release(Some([639, 200]), false));
+    // Far enough east the view's center leaves the grid: blocked.
+    let mut now = 133;
+    for _ in 0..400 {
+        now += 40;
+        preview.tick(now).unwrap();
+    }
+    assert!(preview.pointer.edge.unwrap().blocked);
+    let stopped = preview.host.world.camera_hex;
+    now += 40;
+    preview.tick(now).unwrap();
+    assert_eq!(preview.host.world.camera_hex, stopped);
+    // Leaving the edge restores the cursor.
+    preview.hover([320, 200]);
+    preview.tick(now + 40).unwrap();
+    assert!(preview.pointer.edge.is_none());
+    preview.pointer_left();
+    assert!(preview.pointer_frame().is_some());
+}
+
+#[test]
+fn spec014_world_fades_run_in_order_over_700_ms() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    assert_eq!(preview.display_override(), None);
+    for out in [true, false] {
+        preview.host.world.emit(WorldEffect::Fade {
+            out,
+            duration: 0,
+            from_black: false,
+        });
+    }
+    preview.tick(1000).unwrap();
+    preview.tick(1350).unwrap();
+    let halfway = preview.display_override().expect("fading");
+    preview.tick(1700).unwrap();
+    assert_eq!(preview.display_override(), Some([[0, 0, 0, 255]; 256]));
+    assert_ne!(halfway, [[0, 0, 0, 255]; 256]);
+    preview.tick(1716).unwrap();
+    preview.tick(2416).unwrap();
+    assert_eq!(preview.display_override(), None);
+}
+
+#[test]
+fn spec014_tab_opens_the_automap_of_seen_walls_and_scenery() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    let wall = preview
+        .host
+        .world
+        .iter()
+        .find(|(_, object)| object.category() == Category::Wall && object.raw.hex.is_some())
+        .map(|(reference, _)| reference)
+        .expect("a wall in the synthetic map");
+    let object = preview.host.world.get_mut(wall).unwrap();
+    object.raw.flags.0 |= vault_formats::pro::BasicFlags::SEEN.0;
+    let tile = object.raw.hex.unwrap();
+    assert!(preview.step(KeyCode::Tab));
+    assert!(matches!(preview.screen, Screen::Automap(_)));
+    let image = preview.image().unwrap();
+    // The raster writer's X = 200 - column; each cell is 2 by 2 pixels.
+    let (row, x) = (tile / 200, 200 - tile % 200);
+    let [x, y] = if x == 200 { [0, row + 1] } else { [x, row] };
+    let green = vault_core::ui::ColorKey::GREEN.resolve(&preview.palette);
+    let index = ((40 + 2 * y) * 640 + 120 + 2 * x) as usize;
+    assert_eq!(image.pixels()[index], green);
+    assert!(preview.step(KeyCode::Escape));
+    assert!(matches!(preview.screen, Screen::Map));
+}
+
+#[test]
+fn spec011_inventory_drag_reloads_a_weapon_through_the_counter() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    // A 10-round weapon of caliber 1 and two packs of five caliber-1 rounds.
+    let mut weapon = super::fixture::prototype(0, 3);
+    super::fixture::word(&mut weapon, 0, 0x0000_0010);
+    super::fixture::word(&mut weapon, 0x39 + 52, 1);
+    super::fixture::word(&mut weapon, 0x39 + 60, 10);
+    let mut ammo = super::fixture::prototype(0, 4);
+    super::fixture::word(&mut ammo, 0, 0x0000_0011);
+    super::fixture::word(&mut ammo, 0x39, 1);
+    super::fixture::word(&mut ammo, 0x39 + 4, 5);
+    let spawn = |preview: &mut MapPreview, bytes: &[u8], quantity| {
+        let prototype = Arc::new(vault_formats::Prototype::parse(bytes).unwrap());
+        let item = preview.host.world.spawn(prototype, 0, 0).unwrap();
+        preview
+            .host
+            .world
+            .add_item(player, item, quantity, true)
+            .unwrap();
+        item
+    };
+    let gun = spawn(&mut preview, &weapon, 1);
+    let rounds = spawn(&mut preview, &ammo, 2);
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::KeyI));
+    let row = |preview: &MapPreview, item| {
+        let index = preview
+            .host
+            .world
+            .get(player)
+            .unwrap()
+            .inventory
+            .iter()
+            .position(|(entry, _)| *entry == item)
+            .unwrap();
+        [30, 62 + 16 * index as i32]
+    };
+    // Dropping the stack on the gun asks for the count; 2 loads both packs.
+    let (from, to) = (row(&preview, rounds), row(&preview, gun));
+    assert!(preview.click(from, false));
+    preview.hover(to);
+    assert!(preview.pointer_frame().is_some());
+    assert!(preview.release(Some(to), false));
+    assert!(matches!(&preview.screen, Screen::Inventory(screen) if screen.counter.is_some()));
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::Digit2));
+    assert!(preview.step(KeyCode::Enter));
+    assert!(matches!(&preview.screen, Screen::Inventory(screen) if screen.counter.is_none()));
+    assert_eq!(preview.host.world.loaded(gun).0, 10);
+    // A drop elsewhere does nothing; a drag onto Close closes.
+    assert!(preview.click(row(&preview, gun), false));
+    assert!(preview.release(Some([300, 400]), false));
+    assert!(matches!(preview.screen, Screen::Inventory(_)));
+    assert!(preview.click(row(&preview, gun), false));
+    assert!(preview.release(Some([450, 60 + 30 * 4 + 5]), false));
+    assert!(matches!(preview.screen, Screen::Map));
+}
+
+#[test]
+fn spec007_player_punch_upgrades_to_kick_through_the_crosshair() {
+    // Fixture D through the interface: a bare-handed player attacks an
+    // adjacent critter with the crosshair; the generator is positioned so
+    // the kick draw D(1, 4) gives `first`.
+    let attack = |kick_art: bool, first: i32| {
+        let dir = corpus();
+        if kick_art {
+            std::fs::copy(
+                dir.path().join("art/critters/sampleaa.frm"),
+                dir.path().join("art/critters/samplear.frm"),
+            )
+            .unwrap();
+        }
+        let mut preview = world(dir.path());
+        let player = preview.host.world.player;
+        let target = npc(&preview);
+        let object = preview.host.world.get(target).unwrap();
+        let (hex, elevation) = (object.raw.hex.unwrap(), object.raw.elevation);
+        let beside = (0..6)
+            .filter_map(|direction| vault_formats::HexGrid::neighbor(hex, direction).ok()?)
+            .find(|tile| !preview.host.world.occupancy(elevation).contains_key(tile))
+            .unwrap();
+        preview
+            .host
+            .world
+            .move_object(player, beside, elevation, false)
+            .unwrap();
+        assert_eq!(preview.host.world.object_distance(player, target), 1);
+        assert!(preview.active_item().is_none(), "bare hands");
+        preview.tick(16).unwrap();
+        preview.image().unwrap();
+        preview.host.world.combat = true;
+        preview.host.world.critter_state_mut(player).unwrap().ap = 8;
+        let mut stream = vault_core::ParkMiller::seeded(12345).unwrap();
+        while {
+            let mut probe = stream.clone();
+            vault_core::RandomSource::range(&mut probe, 1, 4).unwrap() != first
+        } {
+            vault_core::RandomSource::range(&mut stream, 1, 100).unwrap();
+        }
+        let before = stream.clone();
+        preview.host.world.rng = stream;
+        preview.host.world.effects.clear();
+        preview.hud.mode = Mode::Crosshair;
+        assert!(preview.tap(on_hex(&preview, hex)));
+        assert!(
+            preview.host.world.rng != before,
+            "the attack drew: {}",
+            preview.status.escape_ascii()
+        );
+        let swing = |animation| preview.host.character_sound_name(player, animation, 0);
+        let names: Vec<_> = preview
+            .host
+            .world
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                WorldEffect::SoundEffect { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        (names, swing(17).unwrap(), swing(16).unwrap())
+    };
+    // D1: draw 1 with kick art: the swing sound is the kick's (17).
+    let (names, kick, punch) = attack(true, 1);
+    assert_ne!(kick, punch);
+    assert!(
+        names.contains(&kick) && !names.contains(&punch),
+        "{names:?}"
+    );
+    // D2: no kick art keeps the punch; D3: results 2-4 keep it too.
+    let (names, kick, punch) = attack(false, 1);
+    assert!(
+        names.contains(&punch) && !names.contains(&kick),
+        "{names:?}"
+    );
+    let (names, kick, punch) = attack(true, 3);
+    assert!(
+        names.contains(&punch) && !names.contains(&kick),
+        "{names:?}"
+    );
 }

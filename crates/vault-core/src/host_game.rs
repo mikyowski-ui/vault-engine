@@ -1814,6 +1814,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     self.world.emit(WorldEffect::Fade {
                         out: op == 0x8136,
                         duration: 0,
+                        from_black: false,
                     });
                 }
                 None

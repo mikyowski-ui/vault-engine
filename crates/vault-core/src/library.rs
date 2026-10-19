@@ -428,6 +428,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.world.emit(WorldEffect::Fade {
                     out: word == 0x8070,
                     duration: call.int(0),
+                    from_black: word == 0x806f,
                 });
             }
             0x8071 => self.library.window_mut(vm.window)?.cursor = [call.int(1), call.int(0)],

@@ -4,11 +4,23 @@
 //! the inventory, or unloaded (§3.15). Opening it in combat costs the
 //! §3.11 action points. SPEC-013: using a kit applies it to the player
 //! (§3.13), and using an explosive opens the Set Timer dialog (§3.10, §3.15).
-use super::{MapPreview, Screen, button, panel_text};
+//!
+//! An entry can also be dragged: a left press lifts it (`ipickup1`) and the
+//! release (`iputdown`) drops it. Dropped on an action button it runs that
+//! action; ammunition dropped on a weapon's row is the §3.15 drag reload,
+//! asking for the count through the move-items counter for a stack. Opened
+//! from the action menu's Inventory entry (SPEC-014 §3.28), Use applies
+//! the item to that target. The list layout itself is provisional: no
+//! approved spec gives the inventory window's art or geometry.
+use super::{
+    MapPreview, Screen, button,
+    counter::{CounterInput, counter_click, counter_key, draw_counter},
+    panel_text,
+};
 use crate::{AppResult, interface::Painter};
 use vault_core::{
     ObjectAction, ObjectRef,
-    skills::{self, SetTimer},
+    skills::{self, Counter, SetTimer},
     ui::{BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect},
 };
 use vault_formats::pro::{BasicFlags, ItemData, PrototypeData};
@@ -24,6 +36,20 @@ pub(crate) struct InventoryScreen {
     pub selected: Option<usize>,
     /// The Set Timer dialog for an explosive being armed.
     pub timer: Option<(ObjectRef, SetTimer)>,
+    /// The action menu's target for Use.
+    pub target: Option<ObjectRef>,
+    /// The lifted entry: its row and item.
+    pub held: Option<(usize, ObjectRef)>,
+    /// The drag-reload count: the counter, the weapon and the ammunition.
+    pub counter: Option<(Counter, ObjectRef, ObjectRef)>,
+}
+impl InventoryScreen {
+    /// The item a drag holds (the counter shows the arrow instead).
+    pub fn dragged(&self) -> Option<ObjectRef> {
+        self.held
+            .filter(|_| self.counter.is_none())
+            .map(|(_, item)| item)
+    }
 }
 
 /// §3.15 Set Timer layout (window at screen (140, 80)).
@@ -47,10 +73,16 @@ pub(crate) fn inside(rect: [i32; 4], point: [i32; 2]) -> bool {
 impl MapPreview {
     /// Open the inventory; in combat its AP cost may refuse it.
     pub(crate) fn open_inventory(&mut self) {
+        self.open_inventory_on(None);
+    }
+    pub(crate) fn open_inventory_on(&mut self, target: Option<ObjectRef>) {
         if self.host.open_inventory() {
             self.screen = Screen::Inventory(InventoryScreen {
                 selected: None,
                 timer: None,
+                target,
+                held: None,
+                counter: None,
             });
         }
         self.drain_effects();
@@ -104,6 +136,13 @@ impl MapPreview {
         let Screen::Inventory(screen) = &mut self.screen else {
             return false;
         };
+        if let Some((counter, ..)) = &mut screen.counter {
+            let input = counter_key(counter, key);
+            if matches!(input, CounterInput::Accept(_)) {
+                self.play_effect(BUTTON_PRESS.as_bytes(), None);
+            }
+            return self.inventory_counter(input);
+        }
         if screen.timer.is_some() {
             match key {
                 KeyCode::Enter | KeyCode::NumpadEnter => self.finish_timer(true),
@@ -130,6 +169,21 @@ impl MapPreview {
     }
     pub(crate) fn inventory_click(&mut self, point: [i32; 2]) -> bool {
         if let Screen::Inventory(InventoryScreen {
+            counter: Some((counter, ..)),
+            ..
+        }) = &mut self.screen
+        {
+            let input = counter_click(counter, point);
+            if input != CounterInput::Ignored {
+                self.press();
+            }
+            self.inventory_counter(input);
+            return true;
+        }
+        if let Screen::Inventory(screen) = &mut self.screen {
+            screen.held = None;
+        }
+        if let Screen::Inventory(InventoryScreen {
             timer: Some((_, timer)),
             ..
         }) = &mut self.screen
@@ -146,11 +200,15 @@ impl MapPreview {
             }
             return true;
         }
-        let count = self.player_entries().len().min(VISIBLE);
+        let entries = self.player_entries();
+        let count = entries.len().min(VISIBLE);
         if let Some(index) = (0..count).find(|index| inside(row(*index), point)) {
+            // The press selects the entry and lifts it.
             if let Screen::Inventory(screen) = &mut self.screen {
                 screen.selected = Some(index);
+                screen.held = Some((index, entries[index].0));
             }
+            self.play_effect(b"ipickup1", None);
             return true;
         }
         let Some(action) = (0..ACTIONS.len()).find(|index| inside(action_button(*index), point))
@@ -158,15 +216,120 @@ impl MapPreview {
             return false;
         };
         self.press();
+        self.inventory_action(action);
+        true
+    }
+    /// The release ends a drag: on an action button that action runs on
+    /// the entry; ammunition on a weapon's row reloads it.
+    pub(crate) fn inventory_release(&mut self, point: Option<[i32; 2]>) -> bool {
+        let Screen::Inventory(screen) = &mut self.screen else {
+            return false;
+        };
+        if screen.counter.is_some() {
+            return false;
+        }
+        let Some((from, ammo)) = screen.held.take() else {
+            return false;
+        };
+        let Some(point) = point else {
+            return true;
+        };
+        let entries = self.player_entries();
+        let over_row = (0..entries.len().min(VISIBLE)).find(|index| inside(row(*index), point));
+        if over_row == Some(from) {
+            // A click: the selection stands.
+            return true;
+        }
+        self.play_effect(b"iputdown", None);
+        if let Some(index) = over_row {
+            let weapon = entries[index].0;
+            let quantity = entries[from].1;
+            let reloads = matches!(self.item_kind(ammo), Some(ItemData::Ammunition { .. }))
+                && matches!(self.item_kind(weapon), Some(ItemData::Weapon(_)));
+            if !reloads {
+                return true;
+            }
+            if quantity > 1 {
+                if let Screen::Inventory(screen) = &mut self.screen {
+                    screen.held = Some((from, ammo));
+                    screen.counter = Some((Counter::new(quantity), weapon, ammo));
+                }
+            } else {
+                self.drag_reload(weapon, ammo, 1);
+            }
+            return true;
+        }
+        if let Some(action) = (0..ACTIONS.len()).find(|index| inside(action_button(*index), point))
+        {
+            if let Screen::Inventory(screen) = &mut self.screen {
+                screen.selected = Some(from);
+            }
+            self.inventory_action(action);
+        }
+        true
+    }
+    /// The drag-reload counter's outcome.
+    fn inventory_counter(&mut self, input: CounterInput) -> bool {
+        let Screen::Inventory(screen) = &mut self.screen else {
+            return false;
+        };
+        match input {
+            CounterInput::Accept(count) => {
+                if let Some((_, weapon, ammo)) = screen.counter.take() {
+                    screen.held = None;
+                    self.drag_reload(weapon, ammo, count);
+                }
+            }
+            CounterInput::Refused => self.play_effect(ERROR_SOUND.as_bytes(), None),
+            CounterInput::Cancel => {
+                screen.counter = None;
+                screen.held = None;
+            }
+            CounterInput::Changed => {}
+            CounterInput::Ignored => return false,
+        }
+        true
+    }
+    /// SPEC-011 §3.15 drag reload of `weapon` from up to `count` units.
+    fn drag_reload(&mut self, weapon: ObjectRef, ammo: ObjectRef, count: i32) {
+        let player = self.host.world.player;
+        match self.host.drag_reload(player, weapon, ammo, count) {
+            Ok(true) => {}
+            Ok(false) => self.status = b"The weapon did not load".to_vec(),
+            Err(error) => self.status = error.to_string().into_bytes(),
+        }
+        self.drain_effects();
+        self.clamp_selection();
+    }
+    fn clamp_selection(&mut self) {
+        let count = self.player_entries().len();
+        if let Screen::Inventory(screen) = &mut self.screen
+            && screen.selected.is_some_and(|index| index >= count)
+        {
+            screen.selected = count.checked_sub(1);
+        }
+    }
+    /// One action button on the selected entry.
+    fn inventory_action(&mut self, action: usize) {
         if action == 4 {
             self.return_to_map();
-            return true;
+            return;
         }
         let Some(item) = self.selected_item() else {
             self.status = b"Select an item first".to_vec();
-            return true;
+            return;
         };
         let player = self.host.world.player;
+        // From the action menu, Use applies the item to its target.
+        if let Screen::Inventory(screen) = &self.screen
+            && action == 0
+            && let Some(target) = screen.target
+        {
+            self.return_to_map();
+            self.selected = Some(target);
+            self.interact(ObjectAction::UseObject(item));
+            return;
+        }
         let pid = self.host.world.get(item).map_or(0, |o| o.raw.pid);
         if action == 0 && skills::is_explosive(pid) {
             if self.host.explosive_armable(item)
@@ -175,14 +338,14 @@ impl MapPreview {
                 screen.timer = Some((item, SetTimer::default()));
             }
             self.drain_effects();
-            return true;
+            return;
         }
         if action == 0 && self.host.kit_skill(pid).is_some() {
             if let Err(error) = self.host.use_kit(player, item, player) {
                 self.status = error.to_string().into_bytes();
             }
             self.drain_effects();
-            return true;
+            return;
         }
         let drug = matches!(self.item_kind(item), Some(ItemData::Drug(_)));
         let weapon = matches!(self.item_kind(item), Some(ItemData::Weapon(_)));
@@ -206,13 +369,7 @@ impl MapPreview {
         }
         self.drain_effects();
         // The selection follows the entry list, which may have shrunk.
-        let count = self.player_entries().len();
-        if let Screen::Inventory(screen) = &mut self.screen
-            && screen.selected.is_some_and(|index| index >= count)
-        {
-            screen.selected = count.checked_sub(1);
-        }
-        true
+        self.clamp_selection();
     }
     pub(crate) fn inventory_image(&self) -> AppResult<IndexedImage> {
         let Screen::Inventory(screen) = &self.screen else {
@@ -317,6 +474,19 @@ impl MapPreview {
             for rect in [TIMER_DONE, TIMER_CANCEL] {
                 painter.blit(&mut image, "lilredup.frm", 0, [ox + rect.x, oy + rect.y]);
             }
+        }
+        if let Some((counter, _, ammo)) = &screen.counter {
+            let painter = Painter {
+                assets: &self.host.assets,
+                palette,
+            };
+            let icon = self.item_icon(*ammo);
+            draw_counter(
+                &painter,
+                &mut image,
+                counter,
+                icon.as_ref().and_then(|icon| icon.frame(0, 0)),
+            );
         }
         Ok(image)
     }

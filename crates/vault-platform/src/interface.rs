@@ -48,6 +48,29 @@ impl Painter<'_> {
         image.blit(frame, [i64::from(origin[0]), i64::from(origin[1])]);
         true
     }
+    /// Cursor art with its SPEC-001 §3.5 hotspot, `(trunc(w / 2) - direction
+    /// X shift, h - 1 - direction Y shift)`, at `point` (SPEC-014 §3.26).
+    pub fn cursor(&self, image: &mut IndexedImage, name: &str, point: [i32; 2]) -> bool {
+        let Some(art) = self.art(name) else {
+            return false;
+        };
+        let Some(frame) = art.frame(0, 0) else {
+            return false;
+        };
+        let [sx, sy] = art.shifts[0].map(i64::from);
+        let hotspot = [
+            i64::from(frame.width / 2) - sx,
+            i64::from(frame.height) - 1 - sy,
+        ];
+        image.blit(
+            frame,
+            [
+                i64::from(point[0]) - hotspot[0],
+                i64::from(point[1]) - hotspot[1],
+            ],
+        );
+        true
+    }
     /// An opaque blit: every pixel, index 0 included.
     pub fn blit_opaque(
         &self,

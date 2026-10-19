@@ -237,6 +237,19 @@ impl Renderer {
         )
     }
 
+    /// [`image_position_clamped`] for this surface: the pointer outside the
+    /// frame maps to the nearest edge pixel.
+    pub fn image_position_clamped(&self, point: [f64; 2]) -> Option<[i32; 2]> {
+        if !self.drawable {
+            return None;
+        }
+        image_position_clamped(
+            [self.config.width, self.config.height],
+            self.image_size,
+            point,
+        )
+    }
+
     /// Return true only when a frame was submitted and presented.
     /// Recoverable surface errors request a retry through a false result.
     /// Call `before_present` only for a completed frame, allowing the platform
@@ -380,6 +393,27 @@ fn texture(
 /// downscale); `None` outside the frame. Headless replays use this to map
 /// logged pointer positions exactly as the desktop does.
 pub fn image_position(surface: [u32; 2], image: [u32; 2], point: [f64; 2]) -> Option<[i32; 2]> {
+    let result = unclamped_position(surface, image, point)?;
+    (result[0] >= 0.0
+        && result[1] >= 0.0
+        && result[0] < image[0] as f64
+        && result[1] < image[1] as f64)
+        .then_some(result.map(|value| value as i32))
+}
+
+/// [`image_position`] with a pointer outside the frame (in the letterbox)
+/// clamped to the nearest frame pixel, so the frame's edge pixels stay
+/// reachable for edge scrolling.
+pub fn image_position_clamped(
+    surface: [u32; 2],
+    image: [u32; 2],
+    point: [f64; 2],
+) -> Option<[i32; 2]> {
+    let result = unclamped_position(surface, image, point)?;
+    Some([0, 1].map(|axis| result[axis].clamp(0.0, image[axis] as f64 - 1.0) as i32))
+}
+
+fn unclamped_position(surface: [u32; 2], image: [u32; 2], point: [f64; 2]) -> Option<[f64; 2]> {
     if surface.contains(&0) || image.contains(&0) || point.iter().any(|value| !value.is_finite()) {
         return None;
     }
@@ -392,15 +426,10 @@ pub fn image_position(surface: [u32; 2], image: [u32; 2], point: [f64; 2]) -> Op
     };
     let left = (surface[0] as f64 - image[0] as f64 * scale) / 2.0;
     let top = (surface[1] as f64 - image[1] as f64 * scale) / 2.0;
-    let result = [
+    Some([
         ((point[0] - left) / scale).floor(),
         ((point[1] - top) / scale).floor(),
-    ];
-    (result[0] >= 0.0
-        && result[1] >= 0.0
-        && result[0] < image[0] as f64
-        && result[1] < image[1] as f64)
-        .then_some(result.map(|value| value as i32))
+    ])
 }
 
 #[cfg(test)]
@@ -414,6 +443,11 @@ mod tests {
         assert_eq!(position([159.9, 80.0]), None);
         assert_eq!(position([800.0, 80.0]), None);
         assert_eq!(position([f64::NAN, 80.0]), None);
+        let clamped = |point| super::image_position_clamped([960, 640], [640, 480], point);
+        assert_eq!(clamped([0.0, 0.0]), Some([0, 0]));
+        assert_eq!(clamped([959.0, 300.0]), Some([639, 220]));
+        assert_eq!(clamped([500.0, 639.0]), Some([340, 479]));
+        assert_eq!(clamped([f64::NAN, 80.0]), None);
         // 2560 x 1600: integer scale 2, inset 640 x 320.
         assert_eq!(
             super::image_position([2560, 1600], [640, 480], [643.0, 325.0]),

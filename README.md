@@ -391,12 +391,19 @@ On the local map, **I** opens the inventory and **C** the character screen
   eligible perks by name. Tag! asks for a fourth tag skill and Mutate! for a
   trait to drop and one to take; cancelling either removes the rank. Done
   keeps the sheet, while Cancel or Escape restores the sheet saved on opening.
-- A dialogue barter request (`gdialog_barter`) opens barter with the
-  dialogue's target. It has four columns: your items, your offer, their
-  offer, and their items. A click moves one unit and a right-click moves the
-  whole entry. **Offer** tries the trade at the §3.18 price; **Done** returns
-  the tables and the hidden equipment, then resumes the dialogue (closing a
-  session that already ended).
+- A dialogue barter request (`gdialog_barter`) opens the SPEC-013 §3.18
+  barter window (`barter.frm` under the conversation) with the dialogue's
+  target. Its subwindow shows three rows each of your items, your offer,
+  their offer, and their items, with scroll buttons (arrows, PageUp/PageDown,
+  Ctrl for the merchant side) and the two totals. Drag an entry onto its
+  route's drop rectangle to move it, through the move-items counter for a
+  stack. **Offer** (**M**) tries the trade at the §3.18 price; **Talk** (**T**)
+  or Escape returns the tables and the hidden equipment, then resumes the
+  dialogue (closing a session that already ended).
+- In the inventory list (a provisional layout: no approved spec gives the
+  window's geometry), dragging ammunition onto a weapon's row is the §3.15
+  drag reload, with the counter for a stack; dragging an entry onto an action
+  button runs that action.
 
 ## Game flow and interface (SPEC-013, SPEC-014)
 
@@ -415,7 +422,10 @@ age, **S** sex, **Enter** done with the specification's validation). Taking a
 character plays `ovrintro` and starts `maps/v13ent.map` at 07:21, 5 December 2161.
 A dead player sees the death scene; `endgame_slideshow` shows the slides chosen by
 the campaign globals, and the ending plays `walkm` or `walkw` and the credits.
-Quitting returns to the menu. Palette fades are presented as instant changes.
+Quitting returns to the menu. Outside the world, palette fades are presented
+as instant changes; in the world they run for 700 ms (SPEC-014 §3.2 safe rule):
+the library `fadein`/`fadeout`, `gfade_in`/`gfade_out`, First Aid and Doctor,
+and the movie flags (playback ends on black; flag `0x02` fades back).
 
 In the world, the interface bar shows the message monitor, HP/AC counters, AP
 pips in combat, the active item slot and the indicator boxes. Its buttons and the
@@ -427,12 +437,23 @@ and **.** rotate, **/** the date, **Ctrl+S**/**F4** save, **Ctrl+L**/**F5** load
 ends a combat turn. The Skilldex sets a skill's targeting mode; a click on an
 object makes the SPEC-013 skill-on request. Using a container or an untalkable
 critter, and the Steal default, open the loot window (Shift+**A** take all, arrows
-scroll, **PageUp**/**PageDown** cycle stacked bodies); the desktop sends releases
-without a position, so a drag is a press on an entry and a press on the other
-pane, with the move-items counter for stacks. `metarule` 15 opens the elevator
-panel. The options menu leads to the save/load screens (slots below `--save-dir`),
-the preferences (written to `--config`) and the quit confirmation; the automap is
-not available.
+scroll, **PageUp**/**PageDown** cycle stacked bodies); a drag lifts an entry
+on the press and drops it on the release over the other pane, with the
+move-items counter for stacks. `metarule` 15 opens the elevator panel. The
+options menu leads to the save/load screens (slots below `--save-dir`), the
+preferences (written to `--config`) and the quit confirmation.
+
+The world draws its own cursor (§3.26-3.29). Resting the pointer 250 ms shows
+the hover: the movement cost (or a red X), the arrow's action icon with the
+object's look-at text in the monitor, or the crosshair's hit chance. Map clicks
+act on the release; holding the button 250 ms in arrow mode opens the action
+menu (move vertically to choose, release to run it). A pointer on the frame's
+edge scrolls the map, with the blocked art where the view's center would leave
+the hex grid. **Tab** or the bar's MAP button shows the automap: the current
+elevation's SPEC-008 raster of seen walls and scenery and the player's hex, in
+a provisional presentation (no approved spec gives the automap window). Map
+objects carry the seen flags stored in the map files; no approved spec says how
+they become seen in play, so a freshly entered map's automap can be empty.
 
 ## Map preview
 
@@ -452,7 +473,7 @@ are mutually exclusive. Arrow keys pan, **R** toggles roofs, and **PageUp** and
 and elevation coordinates; picking reverses the displayed image's scale and
 letterbox offset before applying the specification's inverse projection.
 
-A left click acts by the SPEC-014 cursor mode (see "Game flow and interface"):
+A left click acts on its release by the SPEC-014 cursor mode (see "Game flow and interface"):
 movement walks, the arrow performs the object's primary action (pick up, talk,
 loot, use or look) and selects it, the crosshair attacks; a right-click cycles
 the mode. The **L/D/U/G/T** keys route look, description, use, pickup ("get") and

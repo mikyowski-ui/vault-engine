@@ -452,10 +452,7 @@ impl MapPreview {
             }
             Action::CycleCursor => self.cycle_cursor(),
             Action::CycleItemMode => {}
-            Action::Automap => {
-                let text = b"The automap is not available".to_vec();
-                self.notify(text);
-            }
+            Action::Automap => self.open_automap(),
             Action::StartCombat => {
                 if !self.host.world.combat {
                     let player = self.host.world.player;
@@ -527,7 +524,7 @@ impl MapPreview {
             .is_some_and(|state| state.results.0 & (0x01 | 0x80 | 0x8000) == 0)
     }
     /// The SPEC-014 §3.27 hover target kind of an object.
-    fn target_kind(&self, object: ObjectRef) -> Option<cursor::Target> {
+    pub(crate) fn target_kind(&self, object: ObjectRef) -> Option<cursor::Target> {
         let found = self.host.world.get(object)?;
         let usable = found.prototype.as_ref().is_some_and(|p| p.permits_use());
         Some(match found.category() {
@@ -545,7 +542,18 @@ impl MapPreview {
             _ => cursor::Target::Wall { usable },
         })
     }
-    /// A left click in the map area by cursor mode.
+    /// The player's attack request (SPEC-007 §3.6): an empty active hand
+    /// requests punch (4), else the hand's primary mode.
+    pub(crate) fn attack_mode(&self) -> u8 {
+        if self.active_item().is_none() {
+            hit_mode::PUNCH
+        } else if self.host.world.active_hand == 0 {
+            hit_mode::LEFT_PRIMARY
+        } else {
+            hit_mode::RIGHT_PRIMARY
+        }
+    }
+    /// A left release in the map area by cursor mode (SPEC-014 §3.27).
     pub(crate) fn map_click(&mut self, point: [i32; 2], object: Option<ObjectRef>) {
         let player = self.host.world.player;
         match self.hud.mode {
@@ -572,7 +580,7 @@ impl MapPreview {
                     }
                     cursor::Primary::Use => ObjectAction::Use,
                     cursor::Primary::Talk => ObjectAction::Talk,
-                    cursor::Primary::Look => ObjectAction::LookAt,
+                    cursor::Primary::Look => ObjectAction::Description,
                     cursor::Primary::Rotate => {
                         self.game_action(Action::Rotate(true));
                         return;
@@ -592,15 +600,8 @@ impl MapPreview {
                     return;
                 };
                 if self.host.world.combat {
-                    // SPEC-007 §3.6: an empty hand requests punch (4), whose
-                    // kick draw follows the player's preflight (no draws).
-                    let mode = if self.active_item().is_none() {
-                        hit_mode::PUNCH
-                    } else if self.host.world.active_hand == 0 {
-                        hit_mode::LEFT_PRIMARY
-                    } else {
-                        hit_mode::RIGHT_PRIMARY
-                    };
+                    // The kick draw follows the player's preflight (no draws).
+                    let mode = self.attack_mode();
                     let uncalled = vault_core::critical::location::UNCALLED;
                     let preflight = self
                         .host

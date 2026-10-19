@@ -286,9 +286,13 @@ pub enum WorldEffect {
     StopSpeech,
     /// A SPEC-012 game movie that was found and marked played.
     Movie(crate::movie::MovieRequest),
+    /// A palette fade to black (`out`) or to the game palette, over
+    /// `duration` host milliseconds (0: the standard fade). `from_black`
+    /// forces the black palette first (the library `fadein`).
     Fade {
         out: bool,
         duration: i32,
+        from_black: bool,
     },
     Gui {
         opcode: u16,

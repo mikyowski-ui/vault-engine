@@ -145,6 +145,7 @@ impl Shell {
                     renderer.set_image(&image, &palette);
                 }
                 window.set_title(&preview.title());
+                window.set_cursor_visible(preview.system_cursor());
                 window.request_redraw();
             }
             Err(error) => self.fail(event_loop, error),
@@ -153,12 +154,37 @@ impl Shell {
             self.log_hover(event_loop, pointer);
         }
     }
+    /// Present the drawn cursor's move without composing the scene again.
+    fn refresh_pointer(&mut self, window: &Window) {
+        let Some(preview) = &mut self.preview else {
+            return;
+        };
+        let Some(image) = preview.pointer_frame() else {
+            return;
+        };
+        if let Some(renderer) = &mut self.renderer {
+            let palette = preview.display_override().unwrap_or_else(|| {
+                self.display
+                    .as_ref()
+                    .map_or_else(|| preview.palette().rgba8(), |display| display.entries)
+            });
+            renderer.set_image(&image, &palette);
+        }
+        window.request_redraw();
+    }
+    /// The frame pixel under the pointer, or `None` outside the frame.
+    fn pixel(&self) -> Option<[i32; 2]> {
+        self.pointer
+            .and_then(|point| self.renderer.as_ref()?.image_position(point))
+    }
 
+    /// The pointer's frame pixel reaches the preview, clamped to the frame
+    /// so its edge pixels stay reachable (SPEC-014 §3.29 edge scrolling).
     fn log_hover(&mut self, event_loop: &ActiveEventLoop, point: [f64; 2]) {
         let hover = self
             .renderer
             .as_ref()
-            .and_then(|renderer| renderer.image_position(point))
+            .and_then(|renderer| renderer.image_position_clamped(point))
             .and_then(|pixel| self.preview.as_mut()?.hover(pixel));
         if let Some(hover) = hover {
             self.log(
@@ -223,6 +249,9 @@ impl ApplicationHandler for Shell {
                 self.fail(event_loop, error);
                 return;
             }
+        }
+        if let Some(preview) = &self.preview {
+            window.set_cursor_visible(preview.system_cursor());
         }
         window.request_redraw();
         self.window = Some(window);
@@ -336,6 +365,15 @@ impl ApplicationHandler for Shell {
                         y: position.y,
                     },
                 );
+                self.refresh_pointer(&window);
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.pointer = None;
+                if let Some(preview) = &mut self.preview {
+                    preview.pointer_left();
+                }
+                self.log(event_loop, InputCommand::PointerLeft);
+                self.refresh_pointer(&window);
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.log(
@@ -345,19 +383,19 @@ impl ApplicationHandler for Shell {
                         pressed: state == ElementState::Pressed,
                     },
                 );
+                let pixel = self.pixel();
                 if state == ElementState::Released
+                    && matches!(button, MouseButton::Left | MouseButton::Right)
                     && self
                         .preview
                         .as_mut()
-                        .is_some_and(preview::AssetPreview::release)
+                        .is_some_and(|preview| preview.release(pixel, button == MouseButton::Right))
                 {
                     self.refresh_preview(event_loop, &window);
                 }
                 if state == ElementState::Pressed
                     && matches!(button, MouseButton::Left | MouseButton::Right)
-                    && let Some(pixel) = self
-                        .pointer
-                        .and_then(|point| self.renderer.as_ref()?.image_position(point))
+                    && let Some(pixel) = pixel
                     && self
                         .preview
                         .as_mut()

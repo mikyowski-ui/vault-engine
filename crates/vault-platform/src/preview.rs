@@ -233,16 +233,47 @@ impl AssetPreview {
             Self::Game(game) => game.scroll(delta),
         }
     }
-    /// A mouse release: a held desktop button plays its release cue.
-    pub fn release(&mut self) -> bool {
+    /// A mouse release at a frame pixel (`None` outside the frame): drags
+    /// drop, map clicks act, and a held desktop button plays its release
+    /// cue.
+    pub fn release(&mut self, point: Option<[i32; 2]>, right: bool) -> bool {
         match self {
             Self::Sprite(_) => false,
-            Self::Map(preview) => preview.release(),
+            Self::Map(preview) => preview.release(point, right),
             Self::Movie(movie) => {
                 movie.player.release();
                 true
             }
-            Self::Game(game) => game.release(),
+            Self::Game(game) => game.release(point, right),
+        }
+    }
+    /// The pointer left the window.
+    pub fn pointer_left(&mut self) {
+        match self {
+            Self::Map(preview) => preview.pointer_left(),
+            Self::Game(game) => {
+                if let Some(world) = game.world() {
+                    world.pointer_left();
+                }
+            }
+            _ => {}
+        }
+    }
+    /// The last frame with only the drawn cursor moved, when the preview
+    /// draws its own cursor.
+    pub fn pointer_frame(&mut self) -> Option<IndexedImage> {
+        match self {
+            Self::Map(preview) => preview.pointer_frame(),
+            Self::Game(game) => game.world()?.pointer_frame(),
+            _ => None,
+        }
+    }
+    /// Whether the system cursor shows: an interactive world draws its own.
+    pub fn system_cursor(&self) -> bool {
+        match self {
+            Self::Map(_) => false,
+            Self::Game(game) => !game.world_shown(),
+            _ => true,
         }
     }
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {

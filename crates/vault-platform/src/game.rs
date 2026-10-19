@@ -1043,9 +1043,14 @@ impl Game {
             }
         }
     }
-    pub fn release(&mut self) -> bool {
+    /// The world (or the menu's load screen) is in front: it draws its own
+    /// cursor.
+    pub fn world_shown(&self) -> bool {
+        matches!(self.stage, Stage::World(_) | Stage::Load(_))
+    }
+    pub fn release(&mut self, point: Option<[i32; 2]>, right: bool) -> bool {
         match &mut self.stage {
-            Stage::World(world) | Stage::Load(world) => world.release(),
+            Stage::World(world) | Stage::Load(world) => world.release(point, right),
             Stage::Movie { player, .. } => {
                 player.release();
                 if player.finished() {

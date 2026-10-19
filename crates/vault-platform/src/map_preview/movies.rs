@@ -19,6 +19,8 @@ pub(crate) struct MovieScreen {
 impl MapPreview {
     /// The startup sequence: iplogo (fade to black first), then intro.
     pub fn queue_startup_movies(&mut self) {
+        // Without the main menu's fade, the preview fades the map in after.
+        self.startup_fade = true;
         self.host.play_game_movie(movie::IPLOGO, flags::FADE_BEFORE);
         self.host.play_game_movie(movie::INTRO, 0);
         self.drain_effects();
@@ -64,18 +66,26 @@ impl MapPreview {
         self.host.movie_finished();
     }
     /// Cleanup: back to the previous screen, then the next queued movie.
-    /// The desktop does not present script palette fades, so the game
-    /// palette returns at once even without flag `0x02`.
+    /// Playback ends on a black palette; flag `0x02` fades back to the
+    /// game palette (SPEC-012 §3.12). The fade to black that flag `0x01`
+    /// requests before playback is hidden behind the movie's own palette.
     fn end_movie(&mut self) {
         let Screen::Movie(screen) = std::mem::replace(&mut self.screen, Screen::Map) else {
             return;
         };
         let MovieScreen { player, resume } = *screen;
-        if player.request.flags & flags::FADE_AFTER == 0 {
+        self.fades.set_black();
+        if player.request.flags & flags::FADE_AFTER != 0 {
+            self.fades.push(false, 0, false);
+        } else {
             tracing::debug!(movie = %player.request.path, "movie left the palette black");
         }
         self.screen = *resume;
         self.start_next_movie();
+        if self.startup_fade && !matches!(self.screen, Screen::Movie(_)) {
+            self.startup_fade = false;
+            self.fades.push(false, 0, false);
+        }
     }
     pub(crate) fn movie_active(&self) -> bool {
         matches!(self.screen, Screen::Movie(_))
@@ -125,10 +135,13 @@ impl MapPreview {
         }
     }
     /// The movie's device palette replaces the display palette.
+    /// A running fade, or black left by a fade or movie, replaces it too.
     pub fn display_override(&self) -> Option<[[u8; 4]; 256]> {
         match &self.screen {
             Screen::Movie(screen) => Some(screen.player.palette()),
-            _ => None,
+            _ => self
+                .fades
+                .display(self.game_palette(), self.preferences.brightness),
         }
     }
 }

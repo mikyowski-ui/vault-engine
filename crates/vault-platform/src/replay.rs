@@ -125,8 +125,13 @@ impl Replay {
         vault_render::image_position(self.surface, self.image, self.pointer?)
     }
 
+    /// Pointer moves reach the preview clamped to the frame, as on the
+    /// desktop.
     fn hover(&mut self) {
-        if let Some(pixel) = self.pixel() {
+        if let Some(pixel) = self
+            .pointer
+            .and_then(|point| vault_render::image_position_clamped(self.surface, self.image, point))
+        {
             self.preview.hover(pixel);
         }
     }
@@ -155,15 +160,19 @@ impl Replay {
                 self.pointer = Some([x, y]);
                 self.hover();
             }
+            InputCommand::PointerLeft => {
+                self.pointer = None;
+                self.preview.pointer_left();
+            }
             InputCommand::PointerButton { button, pressed } => {
-                if !pressed && self.preview.release() {
-                    self.present()?;
-                }
                 let right = match button.as_str() {
                     "Left" => false,
                     "Right" => true,
                     _ => return Ok(()),
                 };
+                if !pressed && self.preview.release(self.pixel(), right) {
+                    self.present()?;
+                }
                 if pressed
                     && let Some(pixel) = self.pixel()
                     && self.preview.click(pixel, right)
@@ -286,12 +295,13 @@ mod tests {
 {"command_id":4,"kind":"pointer_button","button":"Right","pressed":false}
 
 {"command_id":5,"kind":"pointer_button","button":"Left","pressed":true}
-{"command_id":6,"kind":"map_hover","elevation":0,"hex":null,"floor_square":null,"roof_square":null}
-{"command_id":7,"kind":"pointer_moved","x":360.5,"y":418.5}
-{"command_id":8,"kind":"pointer_button","button":"Left","pressed":true}
-{"command_id":9,"kind":"key","physical_key":"Digit1","pressed":true,"repeat":false}
-{"command_id":10,"kind":"quit"}
-{"command_id":11,"kind":"key","physical_key":"Digit1","pressed":true,"repeat":false}
+{"command_id":6,"kind":"pointer_button","button":"Left","pressed":false}
+{"command_id":7,"kind":"map_hover","elevation":0,"hex":null,"floor_square":null,"roof_square":null}
+{"command_id":8,"kind":"pointer_moved","x":360.5,"y":418.5}
+{"command_id":9,"kind":"pointer_button","button":"Left","pressed":true}
+{"command_id":10,"kind":"key","physical_key":"Digit1","pressed":true,"repeat":false}
+{"command_id":11,"kind":"quit"}
+{"command_id":12,"kind":"key","physical_key":"Digit1","pressed":true,"repeat":false}
 "#;
 
     fn args(root: &std::path::Path) -> PreviewArgs {
@@ -319,7 +329,7 @@ mod tests {
         assert!(map.host.library.palette_cycling);
         assert_eq!(replay.surface, INITIAL_SURFACE);
         let first = replay.finish(None).unwrap();
-        assert_eq!((first.commands, first.elapsed_ms), (10, 10 * FRAME_MS));
+        assert_eq!((first.commands, first.elapsed_ms), (11, 11 * FRAME_MS));
         assert_eq!(first.state_sha256.len(), 64);
         let again = replay_log(dir.path(), DIALOGUE_LOG);
         assert_eq!(again, first, "same log, same digest");
@@ -344,6 +354,7 @@ mod tests {
 {"command_id":2,"kind":"pointer_moved","x":993.0,"y":501.0}
 {"command_id":3,"kind":"pointer_button","button":"Right","pressed":true}
 {"command_id":4,"kind":"pointer_button","button":"Left","pressed":true}
+{"command_id":5,"kind":"pointer_button","button":"Left","pressed":false}
 "#;
         let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
         replay.run(log.as_bytes()).unwrap();

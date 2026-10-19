@@ -1,16 +1,20 @@
 //! SPEC-013 §3.15 the Skilldex window over the world: eight skill rows
 //! with their effective values, and Cancel. Sneak toggles at once; another
-//! row enters that skill's targeting mode.
+//! row enters that skill's targeting mode, or, opened from the action
+//! menu's Skill entry (SPEC-014 §3.28), uses the skill on that target.
 use super::{MapPreview, Screen};
 use crate::{AppResult, interface::Painter};
 use vault_core::{
-    skills,
+    ObjectRef, skills,
     ui::{BUTTON_PRESS, ColorKey, Rect},
 };
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
-pub(crate) struct SkilldexScreen;
+pub(crate) struct SkilldexScreen {
+    /// The action menu's target.
+    target: Option<ObjectRef>,
+}
 
 const ROW: [i32; 2] = [86, 33];
 const CANCEL: Rect = Rect::new(48, 338, 15, 16);
@@ -22,8 +26,11 @@ fn row_rect(row: usize) -> Rect {
 
 impl MapPreview {
     pub(crate) fn open_skilldex(&mut self) {
+        self.open_skilldex_on(None);
+    }
+    pub(crate) fn open_skilldex_on(&mut self, target: Option<ObjectRef>) {
         if matches!(self.screen, Screen::Map) {
-            self.screen = Screen::Skilldex(SkilldexScreen);
+            self.screen = Screen::Skilldex(SkilldexScreen { target });
         }
     }
     pub(crate) fn skilldex_image(&mut self) -> AppResult<IndexedImage> {
@@ -92,9 +99,21 @@ impl MapPreview {
         Ok(image)
     }
     fn close_skilldex(&mut self, skill: Option<i32>) {
-        self.screen = Screen::Map;
-        if let Some(skill) = skill {
-            self.choose_skill(skill);
+        let Screen::Skilldex(screen) = std::mem::replace(&mut self.screen, Screen::Map) else {
+            return;
+        };
+        let Some(skill) = skill else {
+            return;
+        };
+        match screen.target {
+            Some(target) if skill != skills::skill::SNEAK => {
+                let player = self.host.world.player;
+                if let Err(error) = self.host.use_skill_on(player, target, skill) {
+                    self.status = error.to_string().into_bytes();
+                }
+                self.drain_effects();
+            }
+            _ => self.choose_skill(skill),
         }
     }
     pub(crate) fn skilldex_click(&mut self, point: [i32; 2]) -> bool {

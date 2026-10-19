@@ -22,6 +22,8 @@ pub enum InputCommand {
         button: String,
         pressed: bool,
     },
+    /// The pointer left the window.
+    PointerLeft,
     Wheel {
         x: f64,
         y: f64,

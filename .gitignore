@@ -2,3 +2,4 @@
 # Local game data must never be committed.
 /corpus/
 *.log
+SAVEDGAME/

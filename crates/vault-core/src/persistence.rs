@@ -195,6 +195,18 @@ impl WorldState {
         map.objects.total = map.objects.elevations.iter().map(Vec::len).sum();
         map
     }
+    /// The placed objects that automap extraction reads.
+    fn automap_objects(&self) -> Vec<MapObject> {
+        self.iter()
+            .filter(|(_, object)| object.owner.is_none() && object.raw.hex.is_some())
+            .map(|(_, object)| object.raw.clone())
+            .collect()
+    }
+    /// The current map's live SPEC-008 §2.8 raster for `elevation`, as a
+    /// capture would store it.
+    pub fn automap_raster(&self, elevation: u8) -> Vec<u8> {
+        automap::raster_from_objects(&self.automap_objects(), elevation)
+    }
     /// Capture the current map's automap rasters into the working database
     /// for each elevation with tile data. Seen-object bookkeeping is taken
     /// from the objects' existing seen flags.
@@ -203,11 +215,7 @@ impl WorldState {
         if !(0..automap::MAPS as i32).contains(&number) {
             return;
         }
-        let placed: Vec<MapObject> = self
-            .iter()
-            .filter(|(_, object)| object.owner.is_none() && object.raw.hex.is_some())
-            .map(|(_, object)| object.raw.clone())
-            .collect();
+        let placed = self.automap_objects();
         for elevation in 0..3_u8 {
             if self.map.tiles[usize::from(elevation)].is_none() {
                 continue;

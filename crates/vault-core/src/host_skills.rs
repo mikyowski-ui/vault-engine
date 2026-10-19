@@ -222,7 +222,11 @@ impl<A: WorldAssets> WorldHost<A> {
             .unwrap_or_default()
     }
     fn fade(&mut self, out: bool) {
-        self.world.emit(WorldEffect::Fade { out, duration: 0 });
+        self.world.emit(WorldEffect::Fade {
+            out,
+            duration: 0,
+            from_black: false,
+        });
     }
     /// §3.11 First Aid with kit bonus `kit`. Returns `false` only when the
     /// daily usage limit refused it (the routine's failure result). Safe
