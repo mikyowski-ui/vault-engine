@@ -253,3 +253,154 @@ fn spec008_selected_database_precedence_has_no_cross_archive_fallback() {
     );
     assert!(provider.files().any(|path| path.as_str() == "only.txt"));
 }
+
+/// A root-directory archive of raw (`0x20`) members, payloads after the table.
+fn raw_archive(members: &[(&[u8], &[u8])]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for word in [1_i32, 1, 0, 0] {
+        bytes.extend(word.to_be_bytes());
+    }
+    bytes.extend([1, b'.']);
+    for word in [members.len() as i32, members.len() as i32, 16, 0] {
+        bytes.extend(word.to_be_bytes());
+    }
+    let table_end = bytes.len()
+        + members
+            .iter()
+            .map(|(name, _)| 1 + name.len() + 16)
+            .sum::<usize>();
+    let mut offset = table_end as u32;
+    for (name, body) in members {
+        bytes.push(name.len() as u8);
+        bytes.extend(*name);
+        for word in [0x20_u32, offset, body.len() as u32, body.len() as u32] {
+            bytes.extend(word.to_be_bytes());
+        }
+        offset += body.len() as u32;
+    }
+    for (_, body) in members {
+        bytes.extend(*body);
+    }
+    bytes
+}
+
+/// A stream that counts the bytes read through it.
+struct Counting {
+    inner: Cursor<Vec<u8>>,
+    read: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl std::io::Read for Counting {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(buffer)?;
+        self.read
+            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+        Ok(count)
+    }
+}
+impl std::io::Seek for Counting {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(position)
+    }
+}
+
+#[test]
+fn spec008_opened_archive_streams_members_matching_the_in_memory_archive() {
+    let bytes = archive_bytes();
+    let in_memory = DatArchive::parse(bytes.clone()).unwrap();
+    assert!(!in_memory.is_streamed());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("SYNTH.DAT");
+    std::fs::write(&path, &bytes).unwrap();
+    let opened = DatArchive::open(&path).unwrap();
+    assert!(opened.is_streamed());
+    assert_eq!(
+        (&opened.root, &opened.directories),
+        (&in_memory.root, &in_memory.directories)
+    );
+    assert_eq!(
+        opened.paths().collect::<Vec<_>>(),
+        in_memory.paths().collect::<Vec<_>>()
+    );
+    for name in [&b"pack.txt"[..], b".\\Plain.Txt", b"PLAIN.TXT"] {
+        let entry = opened.entry(name).unwrap();
+        assert_eq!(opened.extract(entry), in_memory.extract(entry));
+    }
+    // Clones share the stream and read independently of order.
+    let clone = opened.clone();
+    assert_eq!(
+        clone.extract(clone.entry(b"PLAIN.TXT").unwrap()).unwrap(),
+        b"XYZ"
+    );
+    assert_eq!(
+        opened.extract(opened.entry(b"PACK.TXT").unwrap()).unwrap(),
+        b"ABCABCABC"
+    );
+
+    // The same malformed members fail streamed as in memory.
+    let mut longer = bytes.clone();
+    longer[0x33..0x37].copy_from_slice(&10_u32.to_be_bytes());
+    let mut past = bytes.clone();
+    past[0x2f..0x33].copy_from_slice(&0x200_u32.to_be_bytes());
+    for broken in [longer, past] {
+        let archive = DatArchive::from_reader(Cursor::new(broken)).unwrap();
+        assert!(
+            archive
+                .extract(archive.entry(b"PACK.TXT").unwrap())
+                .is_err()
+        );
+    }
+    for end in 0..0x55 {
+        assert!(
+            DatArchive::from_reader(Cursor::new(bytes[..end].to_vec())).is_err(),
+            "{end}"
+        );
+    }
+    assert!(DatArchive::open(directory.path().join("MISSING.DAT")).is_err());
+}
+
+#[test]
+fn spec008_opening_reads_only_tables_and_extraction_only_the_member() {
+    let large = vec![0x5a; 1 << 20];
+    let bytes = raw_archive(&[(b"LARGE.BIN", &large), (b"SMALL.TXT", b"small")]);
+    let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let archive = DatArchive::from_reader(Counting {
+        inner: Cursor::new(bytes),
+        read: read.clone(),
+    })
+    .unwrap();
+    let count = || read.load(std::sync::atomic::Ordering::Relaxed);
+    // Only the (buffered) table reads happened: far less than the payloads.
+    let after_tables = count();
+    assert!(after_tables < 16 * 1024, "{after_tables}");
+    let small = archive.entry(b"small.txt").unwrap();
+    assert_eq!(archive.extract(small).unwrap(), b"small");
+    assert_eq!(count() - after_tables, 5);
+    let before = count();
+    assert_eq!(
+        archive
+            .extract(archive.entry(b"LARGE.BIN").unwrap())
+            .unwrap(),
+        large
+    );
+    assert_eq!(count() - before, large.len());
+}
+
+#[test]
+fn spec008_streamed_archive_serves_the_database_vfs() {
+    let bytes = raw_archive(&[(b"SHARED.TXT", b"streamed")]);
+    let archive = Arc::new(DatArchive::from_reader(Cursor::new(bytes)).unwrap());
+    let provider = DatProvider::new(
+        Database {
+            loose: None,
+            archive: Some(archive.clone()),
+        },
+        Database {
+            loose: None,
+            archive: Some(archive),
+        },
+    );
+    assert_eq!(provider.read("shared.txt").unwrap(), b"streamed");
+    assert_eq!(provider.read_critter("SHARED.TXT").unwrap(), b"streamed");
+    assert!(provider.read("missing.txt").is_err());
+    assert!(provider.files().any(|path| path.as_str() == "shared.txt"));
+}

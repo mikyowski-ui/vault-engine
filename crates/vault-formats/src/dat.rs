@@ -1,9 +1,17 @@
 //! SPEC-008 `.DAT` archives: byte-zero directory tables, raw/LZSS/block
 //! payloads, and bounded decoding that rejects malformed streams.
+//!
+//! An archive opened from a file or other seekable stream reads only its
+//! directory tables up front; each extraction seeks to one member and reads
+//! just its stored bytes.
 use crate::{MAX_ASSET_BYTES, ParseError, Vfs, VfsError, VfsPath};
 use std::{
     collections::BTreeMap,
-    io::{self, Read, Seek, SeekFrom},
+    fmt,
+    fs::File,
+    io::{self, BufReader, Read, Seek, SeekFrom},
+    path::Path,
+    sync::{Arc, Mutex, PoisonError},
 };
 
 /// Logical archive block size; every non-final block must produce exactly this.
@@ -62,12 +70,34 @@ pub struct DatDirectory {
     pub files: Vec<DatEntry>,
 }
 
-/// A parsed archive: root prefix, directories in root order, and the bytes.
+/// A seekable byte source an archive streams its members from.
+pub trait ArchiveSource: Read + Seek + Send {}
+impl<T: Read + Seek + Send> ArchiveSource for T {}
+
+/// Where member payloads come from.
+#[derive(Clone)]
+enum Payloads {
+    /// The whole archive, already in memory.
+    Memory(Arc<Vec<u8>>),
+    /// A shared stream; extractions seek to one member at a time.
+    Stream(Arc<Mutex<Box<dyn ArchiveSource>>>),
+}
+impl fmt::Debug for Payloads {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Memory(bytes) => write!(f, "Memory({} bytes)", bytes.len()),
+            Self::Stream(_) => f.write_str("Stream"),
+        }
+    }
+}
+
+/// A parsed archive: root prefix, directories in root order, and the source
+/// of its payloads (in-memory bytes or a lazily read stream).
 #[derive(Debug, Clone)]
 pub struct DatArchive {
     pub root: DatTablePrefix,
     pub directories: Vec<DatDirectory>,
-    bytes: std::sync::Arc<Vec<u8>>,
+    payloads: Payloads,
     index: BTreeMap<(Vec<u8>, Vec<u8>), (usize, usize)>,
 }
 
@@ -279,7 +309,31 @@ impl DatArchive {
     /// Archives are not bounded by the 64 MiB per-asset limit, but each
     /// extracted file is.
     pub fn parse(bytes: Vec<u8>) -> Result<Self, ParseError> {
-        let DatTables { root, directories } = DatTables::read(bytes.as_slice())?;
+        let tables = DatTables::read(bytes.as_slice())?;
+        Ok(Self::new(tables, Payloads::Memory(Arc::new(bytes))))
+    }
+    /// Open an archive file, reading only its directory tables. Members are
+    /// read and decoded on demand by `extract`.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ParseError> {
+        let path = path.as_ref();
+        let file = File::open(path)
+            .map_err(|error| ParseError::new("DAT", 0, format!("{}: {error}", path.display())))?;
+        Self::from_reader(file)
+    }
+    /// Read the directory tables from the start of a seekable stream and keep
+    /// the stream for on-demand member reads; no payload is read here.
+    pub fn from_reader(mut source: impl ArchiveSource + 'static) -> Result<Self, ParseError> {
+        source
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| ParseError::new("DAT", 0, error.to_string()))?;
+        // Buffered, since the tables are read in one- to four-byte fields.
+        let tables = DatTables::read(BufReader::new(&mut source))?;
+        Ok(Self::new(
+            tables,
+            Payloads::Stream(Arc::new(Mutex::new(Box::new(source)))),
+        ))
+    }
+    fn new(DatTables { root, directories }: DatTables, payloads: Payloads) -> Self {
         let mut index = BTreeMap::new();
         for (d, directory) in directories.iter().enumerate() {
             for (f, file) in directory.files.iter().enumerate() {
@@ -288,12 +342,17 @@ impl DatArchive {
                     .or_insert((d, f));
             }
         }
-        Ok(Self {
+        Self {
             root,
             directories,
-            bytes: std::sync::Arc::new(bytes),
+            payloads,
             index,
-        })
+        }
+    }
+    /// Whether members are read from a stream on demand rather than from
+    /// archive bytes held in memory.
+    pub fn is_streamed(&self) -> bool {
+        matches!(self.payloads, Payloads::Stream(_))
     }
     /// Lookup: uppercase, split at the final backslash into directory and
     /// file keys, stripping a leading `.\\`/`.`; a path without a directory
@@ -314,8 +373,16 @@ impl DatArchive {
     }
     /// Extract a file's exact logical bytes.
     pub fn extract(&self, entry: &DatEntry) -> Result<Vec<u8>, ParseError> {
-        let stored = self.bytes.get(entry.offset as usize..).unwrap_or_default();
-        entry.decode(stored)
+        match &self.payloads {
+            Payloads::Memory(bytes) => {
+                entry.decode(bytes.get(entry.offset as usize..).unwrap_or_default())
+            }
+            // Every read seeks first, so a panic mid-read leaves no state
+            // that matters and the poisoned lock is safe to reuse.
+            Payloads::Stream(source) => {
+                entry.read_from(&mut *source.lock().unwrap_or_else(PoisonError::into_inner))
+            }
+        }
     }
     /// Every stored path as `directory\\file` (root `.` files bare).
     pub fn paths(&self) -> impl Iterator<Item = Vec<u8>> + '_ {

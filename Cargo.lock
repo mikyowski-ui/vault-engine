@@ -2445,6 +2445,11 @@ dependencies = [
 [[package]]
 name = "vault-debug"
 version = "0.1.0"
+dependencies = [
+ "vault-core",
+ "vault-formats",
+ "vault-vm",
+]
 
 [[package]]
 name = "vault-formats"

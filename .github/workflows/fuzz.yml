@@ -1,0 +1,32 @@
+name: Fuzz smoke
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # `fuzz/` is outside the workspace, so the root fmt gate skips it.
+      - run: rustfmt --edition 2024 --check fuzz/fuzz_targets/*.rs
+      # Synthetic seeds only; no game data enters the corpora.
+      - run: python3 -I fuzz/seed.py
+      - run: cargo +nightly fuzz build
+      - run: |
+          for target in $(cargo +nightly fuzz list); do
+            cargo +nightly fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=2048 || exit 1
+          done
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/

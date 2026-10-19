@@ -1,0 +1,67 @@
+[package]
+name = "vault-fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vault-core = { path = "../crates/vault-core" }
+vault-formats = { path = "../crates/vault-formats" }
+vault-vm = { path = "../crates/vault-vm" }
+
+# Kept out of the main workspace: cargo-fuzz builds with nightly sanitizer flags.
+[workspace]
+
+[[bin]]
+name = "dat"
+path = "fuzz_targets/dat.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lzss"
+path = "fuzz_targets/lzss.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frm"
+path = "fuzz_targets/frm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pal"
+path = "fuzz_targets/pal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "acm"
+path = "fuzz_targets/acm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mve"
+path = "fuzz_targets/mve.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "map"
+path = "fuzz_targets/map.rs"
+test = false
+doc = false
+bench = false

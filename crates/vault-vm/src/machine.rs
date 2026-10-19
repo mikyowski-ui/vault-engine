@@ -183,10 +183,16 @@ impl Vm {
         };
         self.value_stack.push(value)
     }
-    fn code(&self) -> &[u8] {
+    /// The bytes `pc` addresses: the program image, or an isolated fragment.
+    pub fn code(&self) -> &[u8] {
         self.fragment
             .as_ref()
             .map_or(&self.program.image, |fragment| &fragment.bytes)
+    }
+    /// Whether `address` is a valid jump target: an instruction boundary, or
+    /// an isolated fragment's end. Read-only; used by debug inspectors.
+    pub fn instruction_boundary(&self, address: u32) -> bool {
+        self.address_valid(address)
     }
     fn address_valid(&self, address: u32) -> bool {
         if let Some(fragment) = &self.fragment {

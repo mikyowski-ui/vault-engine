@@ -30,7 +30,9 @@ interface bar, cursor modes and the endgame. The SPEC-007 revision adds the
 punch-to-kick draw and missed-shot bystanders, and the SPEC-001 revision the
 shipped 33536-byte palette form.
 
-`AGENTS.md` is the repository's implementation policy. Format behavior follows
+`AGENTS.md` is the repository's implementation policy. `PROVENANCE.md` records
+the two-team clean-room process, and `CONTRIBUTING.md` the clean-room
+certification every contribution requires. Format behavior follows
 `specs/approved/SPEC-001-pal-frm-lst.md` through
 `SPEC-014-game-flow-and-ui.md`.
 No original game
@@ -45,7 +47,7 @@ data is needed to build, test, or run the synthetic shell and preview fixtures.
 | `vault-vm` | INT loader, two-stack core interpreter, explicit host interfaces |
 | `vault-guidance` | Pip-Boy holodisk and quest status from campaign globals |
 | `vault-render` | Indexed sprite/text/map/dialogue composition and palette rendering |
-| `vault-debug` | Library scaffold for inspectors and asset browsing |
+| `vault-debug` | Headless VM stepper and instruction trace, GVAR/MVAR/LVAR watches, and map object/critter inspectors with tick diffs and text rendering |
 | `vault-platform` | Desktop shell, asset preview, input command logging |
 | `xtask` | Engineering gate runner |
 | `asset-audit` | Loose-corpus counts and format validation |
@@ -62,6 +64,11 @@ cargo test --workspace
 # Run all three gates:
 cargo xtask check
 ```
+
+CI also builds a Windows release (`vault-platform.exe`, `asset-audit.exe`),
+checks dependencies with `cargo audit` and `cargo deny check` (policy in
+`deny.toml`). A scheduled nightly workflow builds the `fuzz/` targets and runs
+each briefly on synthetic seeds (see `fuzz/README.md`).
 
 On Linux the desktop shell needs a Wayland or X11 session, the corresponding
 window-system libraries (including libxkbcommon), and a Vulkan or OpenGL driver.
@@ -767,6 +774,12 @@ the critter database and no fallback between databases. `VfsWorldAssets` and
 `LocalPrototypeCatalog` accept any `Vfs`, so the world host runs from a loose
 directory or from `DatProvider` archives. The desktop shell's `--corpus-dir`
 still mounts a loose directory.
+`DatArchive::open` (a file) and `DatArchive::from_reader` (any seekable
+stream) read only the directory tables when the archive is mounted. Each
+`extract` then seeks to one member, reads only its stored bytes, and decodes
+them, so a mounted archive holds just its tables in memory. Clones share the
+stream, and reads are serialized. `DatArchive::parse` still takes the whole
+archive in memory, and both forms extract identical bytes.
 
 `savegame` reads and writes the strict 30051-byte header (only the first 18
 signature bytes are compared; a version other than 1.1 is rejected under the
@@ -946,7 +959,11 @@ Where SPEC-010 leaves details open, this engine makes these choices:
 - A non-scenery, non-item object uses item sound byte 0 for open/close names,
   since only item prototypes carry that byte.
 - Narration names use `/` separators in the VFS path.
-- No mixer exists yet, so the four-effect limit and attenuation are not modeled.
+- The core resolves names and relative volumes only; mixing is the platform's.
+  The desktop shell's four-voice mixer (`vault-platform`'s `audio` module)
+  models the four-effect limit, refusing a fifth request rather than evicting
+  one, and plays each effect at its owner's `WorldState::effect_volume` (see
+  "Desktop game shell").
 
 ## Items, drugs, barter, and progression (SPEC-011)
 
