@@ -90,30 +90,44 @@ impl IndexedImage {
     }
     pub fn fill_rect(&mut self, rect: [i32; 4], color: u8) {
         let [x, y, width, height] = rect;
+        let start = i64::from(x).max(0);
+        let end = (i64::from(x) + i64::from(width)).clamp(0, i64::from(self.width));
+        if start >= end {
+            return;
+        }
+        let stride = self.width as usize;
         for row in
-            y.max(0)..(i64::from(y) + i64::from(height)).clamp(0, i64::from(self.height)) as i32
+            i64::from(y).max(0)..(i64::from(y) + i64::from(height)).clamp(0, i64::from(self.height))
         {
-            for col in
-                x.max(0)..(i64::from(x) + i64::from(width)).clamp(0, i64::from(self.width)) as i32
-            {
-                if let Some(pixel) = self.pixel_mut(i64::from(col), i64::from(row)) {
-                    *pixel = color;
-                }
-            }
+            let row = row as usize * stride;
+            self.pixels[row + start as usize..row + end as usize].fill(color);
         }
     }
     pub fn copy_image(&mut self, source: &IndexedImage, origin: [i32; 2]) {
-        for y in 0..source.height {
-            let target_y = i64::from(origin[1]) + i64::from(y);
-            if target_y < 0 || target_y >= i64::from(self.height) {
-                continue;
-            }
-            for x in 0..source.width {
-                let target_x = i64::from(origin[0]) + i64::from(x);
-                if let Some(pixel) = self.pixel_mut(target_x, target_y) {
-                    *pixel = source.pixels[(y * source.width + x) as usize];
-                }
-            }
+        self.copy_rows(&source.pixels, [source.width, source.height], origin);
+    }
+    /// An opaque copy of a frame (index 0 included), clipped.
+    pub fn copy_frame(&mut self, frame: &FrmFrame, origin: [i32; 2]) {
+        self.copy_rows(
+            frame.pixels(),
+            [u32::from(frame.width), u32::from(frame.height)],
+            origin,
+        );
+    }
+    /// Copy a `width` by `height` pixel block row by row, clipped.
+    fn copy_rows(&mut self, pixels: &[u8], [width, height]: [u32; 2], origin: [i32; 2]) {
+        let [left, top] = origin.map(i64::from);
+        let start = left.max(0);
+        let end = (left + i64::from(width)).min(i64::from(self.width));
+        if start >= end {
+            return;
+        }
+        let stride = self.width as usize;
+        for y in top.max(0)..(top + i64::from(height)).min(i64::from(self.height)) {
+            let source = ((y - top) * i64::from(width) + start - left) as usize;
+            let row = y as usize * stride;
+            self.pixels[row + start as usize..row + end as usize]
+                .copy_from_slice(&pixels[source..source + (end - start) as usize]);
         }
     }
     fn pixel_mut(&mut self, x: i64, y: i64) -> Option<&mut u8> {
@@ -137,11 +151,44 @@ impl IndexedImage {
         {
             return;
         }
+        let (start, end) = (left.max(0), (left + width).min(i64::from(self.width)));
+        let stride = self.width as usize;
         for y in top.max(0)..(top + height).min(i64::from(self.height)) {
-            for x in left.max(0)..(left + width).min(i64::from(self.width)) {
-                let color = frame.pixels()[((y - top) * width + x - left) as usize];
-                if color != 0 {
-                    self.pixels[y as usize * self.width as usize + x as usize] = color;
+            let source = ((y - top) * width + start - left) as usize;
+            let source = &frame.pixels()[source..source + (end - start) as usize];
+            let row = y as usize * stride;
+            let target = &mut self.pixels[row + start as usize..row + end as usize];
+            for (pixel, color) in target.iter_mut().zip(source) {
+                if *color != 0 {
+                    *pixel = *color;
+                }
+            }
+        }
+    }
+
+    /// A one-pixel, one-color outline around `frame` drawn at `origin`:
+    /// every transparent pixel (inside the frame or in the one-pixel ring
+    /// around it) with an opaque neighbor among its eight takes `color`,
+    /// within the `clip` rows `[top, bottom)`.
+    pub fn outline(&mut self, frame: &FrmFrame, origin: [i64; 2], color: u8, clip: [i64; 2]) {
+        let (width, height) = (i64::from(frame.width), i64::from(frame.height));
+        let opaque = |x: i64, y: i64| {
+            (0..width).contains(&x)
+                && (0..height).contains(&y)
+                && frame.pixels()[(y * width + x) as usize] != 0
+        };
+        for y in -1..=height {
+            for x in -1..=width {
+                if opaque(x, y) {
+                    continue;
+                }
+                let row = origin[1] + y;
+                let edge = (-1..=1).any(|dy| (-1..=1).any(|dx| opaque(x + dx, y + dy)));
+                if edge
+                    && (clip[0]..clip[1]).contains(&row)
+                    && let Some(pixel) = self.pixel_mut(origin[0] + x, row)
+                {
+                    *pixel = color;
                 }
             }
         }

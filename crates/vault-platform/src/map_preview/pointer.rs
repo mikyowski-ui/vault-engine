@@ -16,14 +16,35 @@ use vault_core::{
         cursor::{self, Entry, MenuTracker, Mode, MoveHover, Primary, Target},
     },
 };
-use vault_formats::{Fid, HexGrid, pro::Category};
-use vault_render::{IndexedImage, map::pick_objects};
+use vault_formats::{
+    Fid, HexGrid,
+    pro::{BasicFlags, Category},
+};
+use vault_render::{
+    IndexedImage,
+    map::{object_sprite, pick_objects},
+};
 
 /// The scroll blocker (misc PID `0x0500000C`).
 const SCROLL_BLOCKER: u32 = 0x0500_000c;
 /// Scroll limiting: a step may not take the view center further from the
 /// player on an axis where it is already this many pixels away.
 const SCROLL_LIMIT: [i64; 2] = [480, 400];
+
+/// What a movement hover depends on (§3.27): the hovered hex, the player's
+/// hex and elevation, combat, crippled legs, free movement, AP and the route
+/// blockers. A rest with the same inputs reuses the last result instead of
+/// planning the path again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RouteKey {
+    hex: i32,
+    player: Option<(i32, u8)>,
+    combat: bool,
+    legs: u8,
+    free_movement: i32,
+    ap: i32,
+    blockers: u64,
+}
 
 /// What the hover computed for the current rest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +103,13 @@ pub(crate) struct PointerState {
     last_scroll: Option<u64>,
     /// The cursor mode, player turn and interface state the hover last saw.
     seen: Option<(Mode, bool, bool)>,
+    /// The last movement hover's inputs and feedback.
+    route: Option<(RouteKey, Option<Feedback>)>,
+    /// The item the arrow hover outlines, until the pointer moves.
+    pub outlined: Option<ObjectRef>,
+    /// Paths planned for movement hovers.
+    #[cfg(test)]
+    pub routes_planned: u32,
 }
 
 /// The map area's last row (the bar window starts below it).
@@ -167,6 +195,7 @@ impl MapPreview {
         };
         self.pointer.rested = false;
         self.pointer.feedback = None;
+        self.pointer.outlined = None;
     }
     /// The pointer moved to a frame pixel: the rest restarts, the hover art
     /// reverts, and an open menu tracks the vertical motion.
@@ -203,6 +232,7 @@ impl MapPreview {
         self.pointer.at = None;
         self.pointer.rested = false;
         self.pointer.feedback = None;
+        self.pointer.outlined = None;
         self.pointer.edge = None;
     }
     /// A left press in the map area: the click waits for the release, and
@@ -441,35 +471,65 @@ impl MapPreview {
         match self.hud.mode {
             Mode::Movement => {
                 let hex = self.view.grid.pick_hex(at)?;
+                let world = &self.host.world;
+                let state = world.critter_state(player);
+                let flags = state.map_or(0, |state| state.results.0);
+                let place = world
+                    .get(player)
+                    .and_then(|object| Some((object.raw.hex?, object.raw.elevation)));
+                let key = RouteKey {
+                    hex,
+                    player: place,
+                    combat: world.combat,
+                    legs: u8::from(flags & 0x04 != 0) + u8::from(flags & 0x08 != 0),
+                    free_movement: world.free_movement,
+                    ap: state.map_or(0, |state| state.ap),
+                    blockers: place.map_or(0, |(_, elevation)| {
+                        world.route_fingerprint(elevation, player)
+                    }),
+                };
+                if let Some((seen, feedback)) = &self.pointer.route
+                    && *seen == key
+                {
+                    return feedback.clone();
+                }
+                #[cfg(test)]
+                {
+                    self.pointer.routes_planned += 1;
+                }
                 let path = self
                     .host
                     .plan_to_tile(player, hex, usize::MAX)
                     .map(|movement| movement.directions.len() as i32)
                     .filter(|length| *length > 0);
-                let state = self.host.world.critter_state(player);
-                let flags = state.map_or(0, |state| state.results.0);
-                let legs = u8::from(flags & 0x04 != 0) + u8::from(flags & 0x08 != 0);
-                let ap = state.map_or(0, |state| state.ap);
-                match cursor::move_hover(
-                    path,
-                    self.host.world.combat,
-                    legs,
-                    self.host.world.free_movement,
-                    ap,
-                ) {
-                    MoveHover::Nothing => None,
-                    MoveHover::Cost(cost) => Some(Feedback::Cost(
-                        cost.to_string().into_bytes(),
-                        cursor::COST_COLOR,
-                    )),
-                    MoveHover::Blocked => {
-                        Some(Feedback::Cost(b"X".to_vec(), cursor::BLOCKED_COLOR))
-                    }
-                }
+                let feedback =
+                    match cursor::move_hover(path, key.combat, key.legs, key.free_movement, key.ap)
+                    {
+                        MoveHover::Nothing => None,
+                        MoveHover::Cost(cost) => Some(Feedback::Cost(
+                            cost.to_string().into_bytes(),
+                            cursor::COST_COLOR,
+                        )),
+                        MoveHover::Blocked => {
+                            Some(Feedback::Cost(b"X".to_vec(), cursor::BLOCKED_COLOR))
+                        }
+                    };
+                self.pointer.route = Some((key, feedback.clone()));
+                feedback
             }
             Mode::Arrow => {
                 let object = self.object_at(at)?;
                 let target = self.target_kind(object)?;
+                // With item highlight on, an item gets the outline unless
+                // it has one already or carries the no-highlight flag.
+                if matches!(target, Target::Item { .. })
+                    && self.preferences.item_highlight != 0
+                    && self.host.world.get(object).is_some_and(|item| {
+                        item.raw.outline == 0 && !item.raw.flags.contains(BasicFlags::NO_HIGHLIGHT)
+                    })
+                {
+                    self.pointer.outlined = Some(object);
+                }
                 // A newly hovered object prints its look-at text.
                 if self.pointer.looked != Some(object) {
                     self.pointer.looked = Some(object);
@@ -544,6 +604,7 @@ impl MapPreview {
             assets: &self.host.assets,
             palette: &self.palette,
         };
+        self.draw_outline(&painter, image);
         if let Some(item) = self.dragged_item() {
             if let Some(icon) = self.item_icon(item)
                 && let Some(frame) = icon.frame(0, 0)
@@ -596,6 +657,29 @@ impl MapPreview {
             return;
         }
         painter.cursor(image, cursor::ARROW.art, at);
+    }
+    /// §3.27 the hovered item's outline in key 30632, drawn with the cursor
+    /// so that a move removes it at once. No approved spec gives its
+    /// geometry: it is one pixel around the item's opaque pixels, over the
+    /// composed map view (provisional).
+    fn draw_outline(&self, painter: &Painter, image: &mut IndexedImage) {
+        let Some(item) = self.pointer.outlined else {
+            return;
+        };
+        if !self.world_pointer() {
+            return;
+        }
+        let Some(object) = self.host.world.get(item) else {
+            return;
+        };
+        if object.owner.is_some() || object.raw.elevation != self.view.elevation {
+            return;
+        }
+        if let Some((frame, origin)) = object_sprite(self.view, &self.art, &object.raw) {
+            let color = painter.color(cursor::ITEM_OUTLINE);
+            // The bar window covers row 379 down.
+            image.outline(frame, origin, color, [0, i64::from(map_bottom())]);
+        }
     }
     fn draw_world_cursor(&self, painter: &Painter, image: &mut IndexedImage, at: [i32; 2]) {
         let feedback = self.pointer.feedback.as_ref();

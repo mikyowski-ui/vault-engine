@@ -429,6 +429,31 @@ impl WorldState {
     pub fn movement_blocker(&self, hex: i32, elevation: u8, actor: ObjectRef) -> Option<ObjectRef> {
         self.movement_blocker_in(&self.occupancy(elevation), hex, actor)
     }
+    /// A fingerprint of what `route` reads from the objects on an
+    /// elevation for `actor`: each eligible blocker's identity, hex and
+    /// multihex footprint, and whether the actor may open it. Equal
+    /// fingerprints with equal endpoints and combat state give equal routes.
+    pub fn route_fingerprint(&self, elevation: u8, actor: ObjectRef) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        for (reference, object) in self.iter() {
+            if object.owner.is_none()
+                && object.active
+                && object.raw.elevation == elevation
+                && let Some(hex) = object.raw.hex
+                && self.eligible_blocker(reference, actor, false)
+            {
+                (
+                    reference,
+                    hex,
+                    object.raw.flags.contains(BasicFlags::MULTIHEX),
+                    self.may_auto_open(actor, reference),
+                )
+                    .hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
     /// Dedicated sight-blocker query: scenery/wall on the exact hex, ignoring
     /// hidden and light-through objects, with no multihex expansion.
     pub fn sight_blocker(&self, hex: i32, elevation: u8) -> Option<ObjectRef> {

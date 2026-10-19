@@ -1059,3 +1059,27 @@ fn spec013_containers_and_critters_post_loot_requests() {
         Some(false)
     );
 }
+
+#[test]
+fn spec014_corpse_look_at_leaves_the_world_generator_alone() {
+    // SPEC-014 §3.27: a dead critter's look-at line is 491 or 492 at
+    // random; the pick draws from the presentation generator, so looking
+    // never moves the world's sequence.
+    let mut host = host();
+    let player = host.world.player;
+    let corpse = critter(&mut host, adjacent(1), &[]);
+    set_hp(&mut host, corpse, 0);
+    host.world.get_mut(corpse).unwrap().name = b"rat".to_vec();
+    let world = host.world.rng.state().clone();
+    let presentation = host.presentation_rng.state().clone();
+    let mut lines = Vec::new();
+    for _ in 0..4 {
+        host.action(player, corpse, crate::ObjectAction::LookAt)
+            .unwrap();
+        lines.extend(messages(&mut host));
+    }
+    assert_eq!(lines.len(), 4);
+    assert!(lines.iter().all(|line| line.contains("rat")), "{lines:?}");
+    assert_eq!(host.world.rng.state(), &world);
+    assert_ne!(host.presentation_rng.state(), &presentation);
+}

@@ -70,6 +70,10 @@ cargo test --workspace
 cargo xtask check
 ```
 
+The dev profile builds `vault-formats` and `vault-core` at `opt-level = 2`, so
+debug runs of the desktop decode, decompress, light and route at near-release
+speed while the other crates keep full debug builds.
+
 CI also builds a Windows release (`vault-platform.exe`, `asset-audit.exe`),
 checks dependencies with `cargo audit` and `cargo deny check` (policy in
 `deny.toml`). A scheduled nightly workflow builds the `fuzz/` targets and runs
@@ -315,7 +319,14 @@ consults the loose `--corpus-dir` first, with no fallback to the other archive.
 Every preview and the world host read through this namespace. Archives are
 opened lazily (`DatArchive::open`): startup reads only the directory tables,
 and each member is read and decoded from the file when requested, keeping the
-64 MiB bound per extracted file.
+64 MiB bound per extracted file. `VfsWorldAssets` caches every decoded
+resource by path or identifier, failures included (prototypes, list files,
+message catalogs, frames and palettes), so a member is read and decompressed
+once per session; the frame cache starts over past 256 MiB, and a
+conversation's end releases only talking heads and backgrounds. The map view
+binds sprites through that cache only for art it has not seen, keeps the
+pixel-to-hex light mapping until the view moves, and shades in bulk through
+the palette's intensity table.
 
 On the local map, **W** opens the world map and **P** the Pip-Boy; script
 `world_map`/`town_map` requests open them too. Both are modal, so the local map's
@@ -388,15 +399,20 @@ cargo run -p vault-platform -- --corpus-dir /path/to/unpacked/game \
 On the local map, **I** opens the inventory and **C** the character screen
 (SPEC-011). Both are modal:
 - The inventory is the SPEC-014 §3.34 window at (80, 0): six list rows, the
-  two hands and the armor slot. In the hand cursor a left press on a filled
+  two hands, the armor slot and the player figure, which turns one facing
+  every 166 ms (a provisional rate), drags included. In the hand cursor a left press on a filled
   slot lifts the item and the release drops it on the first target in the
   §3.34 order (the list, where ammunition dropped on a weapon reloads it
   through the counter for a stack; the left hand; the right hand; the armor;
   nowhere). A right press switches to the arrow cursor: a click shows the
   examine text, a held press opens the item menu (Look, Unload or Use, Drop,
   Cancel). Using a drug consumes it (SPEC-011 §3.6), a kit heals, an
-  explosive opens Set Timer and a Motion Sensor the automap. Opening it in
-  combat costs the §3.11 action points. No approved spec gives the window's
+  explosive opens Set Timer and a Motion Sensor the automap. Use on a
+  container opens it, up to nine levels deep: the list shows its contents and
+  its name, drops into the list go into it, an item dropped on the figure
+  moves up one level, and a press on the figure goes up one level. A weapon
+  reloaded in a hand stays in that hand. Opening it in combat costs the §3.11
+  action points. No approved spec gives the window's
   background, stats panel, scroll and Done buttons, or the Unload and Drop
   icon art, so those are provisional.
 - The character screen reconciles levels on opening. It shows SPECIAL, derived
@@ -463,7 +479,13 @@ preferences (written to `--config`) and the quit confirmation.
 
 The world draws its own cursor (§3.26-3.29). Resting the pointer 250 ms shows
 the hover: the movement cost (or a red X), the arrow's action icon with the
-object's look-at text in the monitor, or the crosshair's hit chance. Map clicks
+object's look-at text in the monitor, or the crosshair's hit chance. The
+movement hover plans a path only when the hovered hex, the player's hex, AP,
+legs or combat state, or a route blocker changes. With item highlight on, an
+item under the arrow gets a one-pixel outline in key 30632 until the pointer
+moves (no approved spec gives the outline's geometry). A dead critter's
+look-at line (491 or 492) draws from a presentation-only generator, so
+looking never moves the world's random sequence. Map clicks
 act on the release; holding the button 250 ms in arrow mode opens the action
 menu (move vertically to choose, release to run it). A pointer on the frame's
 edge scrolls the map, and the arrow keys share its blocked test and 33 ms

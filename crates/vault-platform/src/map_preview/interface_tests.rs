@@ -8,7 +8,7 @@ use vault_core::{
     critical::effect,
     ui::{cursor::Mode, saveload::Mode as SaveMode},
 };
-use vault_formats::{LocalDirProvider, Vfs, map::ObjectState, pro::Category};
+use vault_formats::{LocalDirProvider, Vfs, VfsError, VfsPath, map::ObjectState, pro::Category};
 use winit::keyboard::KeyCode;
 
 /// The synthetic corpus, with its map also under a save-manifest-sized
@@ -519,6 +519,121 @@ fn spec014_hover_feedback_waits_for_a_rest_and_draws_the_cursor() {
 }
 
 #[test]
+fn spec014_arrow_hover_outlines_an_item_until_the_pointer_moves() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let (player_hex, elevation) = preview
+        .host
+        .world
+        .get(player)
+        .map(|object| (object.raw.hex.unwrap(), object.raw.elevation))
+        .unwrap();
+    let hex = vault_formats::HexGrid::step(player_hex, 2, 3).unwrap();
+    let prototype =
+        Arc::new(vault_formats::Prototype::parse(&super::fixture::prototype(0, 5)).unwrap());
+    let item = preview.host.world.spawn(prototype, hex, elevation).unwrap();
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    let point = on_hex(&preview, hex);
+    // The synthetic roofs would hide the item from picking.
+    preview.view.roofs = false;
+    assert_eq!(preview.object_at(point), Some(item));
+    let color = vault_core::ui::cursor::ITEM_OUTLINE.resolve(&preview.palette);
+    // The pixel just left of the item's 12-by-20 sprite, halfway down.
+    let (_, origin) = vault_render::map::object_sprite(
+        preview.view,
+        &preview.art,
+        &preview.host.world.get(item).unwrap().raw,
+    )
+    .unwrap();
+    let ring = (origin[1] as usize + 10) * 640 + origin[0] as usize - 1;
+    // A move, then a 300 ms rest (a mode change restarts the rest on the
+    // next poll, so the hover runs on the one after).
+    let rest = |preview: &mut MapPreview, at: [i32; 2], now: &mut u64| {
+        preview.hover(at);
+        *now += 16;
+        preview.tick(*now).unwrap();
+        *now += 300;
+        preview.tick(*now).unwrap();
+    };
+    let mut now = 16;
+    preview.hud.mode = Mode::Arrow;
+    rest(&mut preview, point, &mut now);
+    assert_eq!(preview.pointer.outlined, Some(item));
+    preview.image().unwrap();
+    let plain = preview.frame.as_ref().unwrap().pixels()[ring];
+    assert_ne!(plain, color);
+    assert_eq!(preview.pointer_frame().unwrap().pixels()[ring], color);
+    // A one-pixel move removes the outline at once (§3.27).
+    preview.hover([point[0] + 1, point[1]]);
+    assert_eq!(preview.pointer.outlined, None);
+    assert_eq!(preview.pointer_frame().unwrap().pixels()[ring], plain);
+    // Item highlight off, or the no-highlight flag, skips the outline.
+    preview.preferences.item_highlight = 0;
+    rest(&mut preview, point, &mut now);
+    assert!(preview.pointer.feedback.is_some());
+    assert_eq!(preview.pointer.outlined, None);
+    preview.preferences.item_highlight = 1;
+    preview.host.world.get_mut(item).unwrap().raw.flags.0 |=
+        vault_formats::pro::BasicFlags::NO_HIGHLIGHT.0;
+    rest(&mut preview, [point[0] + 1, point[1]], &mut now);
+    assert_eq!(preview.pointer.outlined, None);
+}
+
+#[test]
+fn spec014_movement_hover_plans_only_when_its_inputs_change() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    let player = preview.host.world.player;
+    let own = preview.host.world.get(player).unwrap().raw.hex.unwrap();
+    let center = |preview: &MapPreview, hex: i32| {
+        let [x, y] = preview.view.grid.hex_center(hex).unwrap();
+        [x as i32, y as i32]
+    };
+    let mut now = 16;
+    let mut rest = |preview: &mut MapPreview, at: [i32; 2]| {
+        preview.hover(at);
+        now += 300;
+        preview.tick(now).unwrap();
+    };
+    let blocked = Some(super::pointer::Feedback::Cost(
+        b"X".to_vec(),
+        vault_core::ui::ColorKey::RED,
+    ));
+    // The player's own hex has no path: a red X, planned once.
+    let at = center(&preview, own);
+    rest(&mut preview, at);
+    assert_eq!(preview.pointer.feedback, blocked);
+    assert_eq!(preview.pointer.routes_planned, 1);
+    // Resting again on another pixel of the same hex reuses it.
+    rest(&mut preview, [at[0] + 1, at[1]]);
+    assert_eq!(preview.pointer.feedback, blocked);
+    assert_eq!(preview.pointer.routes_planned, 1);
+    // Another hex plans again, and so does a return to the first.
+    let other = vault_formats::HexGrid::step(own, 2, 3).unwrap();
+    let there = center(&preview, other);
+    rest(&mut preview, there);
+    assert_eq!(preview.pointer.routes_planned, 2);
+    rest(&mut preview, at);
+    assert_eq!(preview.pointer.routes_planned, 3);
+    // A blocker moving on the elevation plans again.
+    let blocker = npc(&preview);
+    let elevation = preview.host.world.get(blocker).unwrap().raw.elevation;
+    let spot = vault_formats::HexGrid::step(own, 4, 2).unwrap();
+    preview
+        .host
+        .world
+        .move_object(blocker, spot, elevation, false)
+        .unwrap();
+    rest(&mut preview, [at[0] + 1, at[1]]);
+    assert_eq!(preview.pointer.routes_planned, 4);
+    assert_eq!(preview.pointer.feedback, blocked);
+}
+
+#[test]
 fn spec014_action_menu_opens_on_a_held_press_and_runs_the_entry() {
     let dir = corpus();
     let mut preview = world(dir.path());
@@ -814,6 +929,172 @@ fn spec011_inventory_drag_reloads_a_weapon_through_the_counter() {
 }
 
 #[test]
+fn spec014_inventory_figure_turns_and_nested_containers_open() {
+    use vault_formats::pro::BasicFlags;
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let spawn = |preview: &mut MapPreview, bytes: &[u8], owner, quantity| {
+        let prototype = Arc::new(vault_formats::Prototype::parse(bytes).unwrap());
+        let item = preview.host.world.spawn(prototype, 0, 0).unwrap();
+        preview
+            .host
+            .world
+            .add_item(owner, item, quantity, true)
+            .unwrap();
+        item
+    };
+    // A bag of size 100 holding a rock and a pouch with a pebble.
+    let container = |pid| {
+        let mut bytes = super::fixture::prototype(0, 1);
+        super::fixture::word(&mut bytes, 0, pid);
+        super::fixture::word(&mut bytes, 0x39, 100);
+        bytes
+    };
+    let misc = |pid| {
+        let mut bytes = super::fixture::prototype(0, 5);
+        super::fixture::word(&mut bytes, 0, pid);
+        bytes
+    };
+    let bag = spawn(&mut preview, &container(0x20), player, 1);
+    let rock = spawn(&mut preview, &misc(0x21), bag, 1);
+    let pouch = spawn(&mut preview, &container(0x22), bag, 1);
+    let pebble = spawn(&mut preview, &misc(0x23), pouch, 1);
+    let owner = |preview: &MapPreview, item| preview.host.world.get(item).unwrap().owner;
+    let screen = |preview: &MapPreview| match &preview.screen {
+        Screen::Inventory(screen) => (screen.facing, screen.path.clone()),
+        _ => panic!("the inventory is open"),
+    };
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::KeyI));
+    // The figure turns one facing every 166 ms (provisional).
+    let mut now = preview.clock;
+    let start = screen(&preview).0;
+    now += 166;
+    preview.tick(now).unwrap();
+    assert_eq!(screen(&preview).0, (start + 1) % 6);
+    // Use on the bag (arrow cursor, second menu entry) opens it; the list
+    // shows its contents.
+    let at = list_point(&preview, bag);
+    assert!(preview.click(at, true));
+    menu_second_entry(&mut preview, at, &mut now);
+    assert_eq!(screen(&preview).1, [bag]);
+    preview.image().unwrap();
+    // And the pouch inside it, a level deeper.
+    let row = |row: i32| [134, 45 + 48 * row];
+    menu_second_entry(&mut preview, row(1), &mut now);
+    assert_eq!(screen(&preview).1, [bag, pouch]);
+    assert!(preview.click(at, true));
+    // Dropping the pebble on the figure moves it up into the bag; the
+    // figure keeps turning during the drag.
+    let figure = [280, 80];
+    assert!(preview.click(row(0), false));
+    let turning = screen(&preview).0;
+    now += 166;
+    preview.tick(now).unwrap();
+    assert_eq!(screen(&preview).0, (turning + 1) % 6);
+    assert!(preview.release(Some(figure), false));
+    assert_eq!(owner(&preview, pebble), Some(bag));
+    // A press on the figure goes up a level, to the bag (the release
+    // does nothing more).
+    assert!(preview.click(figure, false));
+    assert!(!preview.release(Some(figure), false));
+    assert_eq!(screen(&preview).1, [bag]);
+    // The rock goes straight from the bag to the right hand.
+    assert!(preview.click(row(0), false));
+    assert!(preview.release(Some([330, 300]), false));
+    assert_eq!(owner(&preview, rock), Some(player));
+    assert!(
+        preview
+            .host
+            .world
+            .get(rock)
+            .unwrap()
+            .raw
+            .flags
+            .contains(BasicFlags::RIGHT_HAND)
+    );
+    // From the hand, dropped on the list, it goes back into the open bag.
+    assert!(preview.click([330, 300], false));
+    assert!(preview.release(Some(row(2)), false));
+    assert_eq!(owner(&preview, rock), Some(bag));
+    assert_eq!(
+        preview.host.world.get(rock).unwrap().raw.flags.0 & vault_core::items::EQUIPPED,
+        0
+    );
+    // Up again to the player's own list; the rock moves up with it.
+    let index = |preview: &MapPreview, item| {
+        let world = &preview.host.world;
+        world
+            .get(world.get(item).unwrap().owner.unwrap())
+            .unwrap()
+            .inventory
+            .iter()
+            .position(|(entry, _)| *entry == item)
+            .unwrap() as i32
+    };
+    let rock_row = row(index(&preview, rock));
+    assert!(preview.click(rock_row, false));
+    assert!(preview.release(Some(figure), false));
+    assert_eq!(owner(&preview, rock), Some(player));
+    assert!(preview.click(figure, false));
+    assert!(screen(&preview).1.is_empty());
+}
+
+#[test]
+fn spec014_reloading_a_held_weapon_keeps_it_in_its_hand() {
+    use vault_formats::pro::BasicFlags;
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let mut weapon = super::fixture::prototype(0, 3);
+    super::fixture::word(&mut weapon, 0, 0x0000_0010);
+    super::fixture::word(&mut weapon, 0x39 + 52, 1);
+    super::fixture::word(&mut weapon, 0x39 + 60, 10);
+    let mut ammo = super::fixture::prototype(0, 4);
+    super::fixture::word(&mut ammo, 0, 0x0000_0011);
+    super::fixture::word(&mut ammo, 0x39, 1);
+    super::fixture::word(&mut ammo, 0x39 + 4, 5);
+    let spawn = |preview: &mut MapPreview, bytes: &[u8], quantity| {
+        let prototype = Arc::new(vault_formats::Prototype::parse(bytes).unwrap());
+        let item = preview.host.world.spawn(prototype, 0, 0).unwrap();
+        preview
+            .host
+            .world
+            .add_item(player, item, quantity, true)
+            .unwrap();
+        item
+    };
+    let gun = spawn(&mut preview, &weapon, 1);
+    let rounds = spawn(&mut preview, &ammo, 2);
+    preview.host.world.get_mut(gun).unwrap().raw.state = ObjectState::Other {
+        word: 0,
+        detail: vault_formats::map::ObjectDetail::Weapon {
+            rounds: 0,
+            ammo_pid: -1,
+        },
+    };
+    preview
+        .host
+        .world
+        .equip_slot(player, gun, BasicFlags::LEFT_HAND.0)
+        .unwrap();
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::KeyI));
+    // The stack dropped on the left hand loads both packs; the gun stays
+    // in the hand (SPEC-014 §3.34 target 2).
+    let from = list_point(&preview, rounds);
+    assert!(preview.click(from, false));
+    assert!(preview.release(Some([240, 300]), false));
+    assert!(preview.step(KeyCode::Digit2));
+    assert!(preview.step(KeyCode::Enter));
+    assert_eq!(preview.host.world.loaded(gun).0, 10);
+    let object = preview.host.world.get(gun).unwrap();
+    assert!(object.raw.flags.contains(BasicFlags::LEFT_HAND));
+    assert_eq!(object.owner, Some(player));
+}
+
+#[test]
 fn spec007_player_punch_upgrades_to_kick_through_the_crosshair() {
     // Fixture D through the interface: a bare-handed player attacks an
     // adjacent critter with the crosshair; the generator is positioned so
@@ -965,4 +1246,93 @@ fn debug_inspector_watches_variables_traces_scripts_and_toggles() {
     // F9 turns it off and detaches the trace.
     assert!(preview.step(KeyCode::F9));
     assert!(!preview.debug_enabled() && preview.host.vm_observer.is_none());
+}
+
+/// The corpus with every read counted by path.
+struct CountingVfs {
+    inner: LocalDirProvider,
+    reads: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+}
+impl CountingVfs {
+    fn count(&self, path: &str) {
+        *self.reads.lock().unwrap().entry(path.into()).or_default() += 1;
+    }
+    fn take(&self) -> std::collections::BTreeMap<String, usize> {
+        std::mem::take(&mut *self.reads.lock().unwrap())
+    }
+}
+impl Vfs for CountingVfs {
+    fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        self.count(path);
+        self.inner.read(path)
+    }
+    fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
+        self.count(path);
+        self.inner.read_bounded(path, max_bytes)
+    }
+    fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {
+        self.inner.files()
+    }
+}
+
+#[test]
+fn decoded_assets_are_read_once_across_frames_hovers_and_windows() {
+    let dir = corpus();
+    // Scenery art index 1 names a file that does not exist.
+    std::fs::write(
+        dir.path().join("art/scenery/scenery.lst"),
+        b"sample.frm\nghost.frm\n",
+    )
+    .unwrap();
+    let counting = Arc::new(CountingVfs {
+        inner: LocalDirProvider::mount(dir.path()).unwrap(),
+        reads: Default::default(),
+    });
+    let vfs: Arc<dyn Vfs> = counting.clone();
+    let mut preview = MapPreview::load(
+        vfs,
+        "maps/synth.map",
+        "english",
+        Some("premade/synthetic.gcd"),
+        1,
+    )
+    .unwrap();
+    preview.save_root = dir.path().join("saves");
+    let ghost = npc(&preview);
+    preview.host.world.get_mut(ghost).unwrap().raw.art_id =
+        vault_formats::Fid::new(2, 1, 0, 0, 0).0;
+    let player = preview.host.world.player;
+    let own = preview.host.world.get(player).unwrap().raw.hex.unwrap();
+    let points = [
+        on_hex(&preview, own),
+        on_hex(&preview, vault_formats::HexGrid::step(own, 2, 3).unwrap()),
+        [320, 440],
+    ];
+    let mut now = 0;
+    let mut cycle = |preview: &mut MapPreview| {
+        for mode in [Mode::Movement, Mode::Arrow, Mode::Crosshair] {
+            preview.hud.mode = mode;
+            for point in points {
+                preview.hover(point);
+                for _ in 0..3 {
+                    now += 150;
+                    preview.tick(now).unwrap();
+                    preview.image().unwrap();
+                    preview.pointer_frame();
+                }
+            }
+        }
+        assert!(preview.step(KeyCode::KeyI));
+        preview.image().unwrap();
+        assert!(preview.step(KeyCode::Escape));
+        preview.image().unwrap();
+    };
+    cycle(&mut preview);
+    let first = counting.take();
+    assert_eq!(first.get("art/scenery/ghost.frm"), Some(&1), "{first:?}");
+    // Every decoded resource is cached, failures included: the same frames,
+    // hovers and windows again read nothing.
+    cycle(&mut preview);
+    let again = counting.take();
+    assert!(again.is_empty(), "{again:?}");
 }

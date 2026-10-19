@@ -761,11 +761,9 @@ impl Game {
     /// end left, fading from white to `death.pal`.
     fn enter_death(&mut self) {
         let palette = self
-            .vfs
-            .read_bounded(flow::DEATH_PALETTE, MAX_ASSET_BYTES)
-            .ok()
-            .and_then(|bytes| Palette::parse(&bytes).ok())
-            .unwrap_or_else(black);
+            .assets
+            .palette(flow::DEATH_PALETTE.as_bytes())
+            .unwrap_or_else(|_| black());
         let target = levels(&palette);
         self.shown = Some(WHITE);
         self.stage = Stage::Death {
@@ -793,11 +791,9 @@ impl Game {
             return;
         }
         let palette = self
-            .vfs
-            .read_bounded(&slides[index].palette_path(), MAX_ASSET_BYTES)
-            .ok()
-            .and_then(|bytes| Palette::parse(&bytes).ok())
-            .unwrap_or_else(|| self.palette.clone());
+            .assets
+            .palette(slides[index].palette_path().as_bytes())
+            .unwrap_or_else(|_| self.palette.clone());
         self.stage = Stage::Slides {
             slides,
             index,

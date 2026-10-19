@@ -45,6 +45,32 @@ fn spec001_palette_values_transparency_and_tables() {
 }
 
 #[test]
+fn spec001_bulk_shading_matches_per_pixel_intensity() {
+    // Generated and supplied tables alike: shading a pixel run equals the
+    // per-pixel intensity rule, and index 0 stays transparent.
+    let generated = Palette::parse(&fixtures::palette()).unwrap();
+    let mut extended = fixtures::palette();
+    extended[0x8300..].copy_from_slice(b"CWEN");
+    extended.extend((0..3 * 65536).map(|index| (index * 7 % 251) as u8));
+    let supplied = Palette::parse(&extended).unwrap();
+    for palette in [&generated, &supplied] {
+        let pixels: Vec<u8> = (0..=255).chain(0..=255).collect();
+        let levels: Vec<u8> = (0..512).map(|index| (index * 37 % 256) as u8).collect();
+        let mut shaded = pixels.clone();
+        palette.shade(&mut shaded, &levels);
+        for ((before, after), level) in pixels.iter().zip(&shaded).zip(&levels) {
+            let expected = if *before == 0 {
+                0
+            } else {
+                palette.intensity(*before, *level)
+            };
+            assert_eq!(*after, expected, "color {before} level {level}");
+        }
+        assert_eq!(palette.intensity_table().len(), 65536);
+    }
+}
+
+#[test]
 fn spec001_fixture_a2_shipped_base_form_and_length_boundaries() {
     // Fixture A2: Fixture A without its discriminator, the ordinary shipped
     // 0x8300-byte form; every Fixture A result is unchanged.

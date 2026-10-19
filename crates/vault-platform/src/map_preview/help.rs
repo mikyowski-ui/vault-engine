@@ -4,8 +4,9 @@
 //! meanwhile (the help palette replaces the display palette).
 use super::{MapPreview, Screen};
 use crate::{AppResult, interface::Painter};
+use vault_core::assets::WorldAssets;
 use vault_core::ui::ColorKey;
-use vault_formats::{MAX_ASSET_BYTES, Palette};
+use vault_formats::Palette;
 use vault_render::IndexedImage;
 
 const ART: &str = "helpscrn.frm";
@@ -18,13 +19,7 @@ pub(crate) struct HelpScreen {
 
 impl MapPreview {
     pub(crate) fn open_help(&mut self) {
-        let palette = self
-            .host
-            .assets
-            .vfs
-            .read_bounded(PALETTE, MAX_ASSET_BYTES)
-            .ok()
-            .and_then(|bytes| Palette::parse(&bytes).ok());
+        let palette = self.host.assets.palette(PALETTE.as_bytes()).ok();
         self.screen = Screen::Help(Box::new(HelpScreen { palette }));
     }
     pub(crate) fn close_help(&mut self) -> bool {

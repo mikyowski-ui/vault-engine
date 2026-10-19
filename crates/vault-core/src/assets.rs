@@ -2,7 +2,11 @@ use crate::{
     WorldError,
     dialogue::{HeadDefinition, Mood, selectable_fidgets},
 };
-use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
+use std::{
+    cell::{OnceCell, RefCell},
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use vault_formats::{
     ArtCatalog, Fid, Font, FontKind, FontSet, FrmArchive, GamFile, GamSection, GcdFile,
     LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype, Vfs,
@@ -118,15 +122,27 @@ pub trait WorldAssets {
         Err(WorldError::Invalid(format!("{file}: messages unavailable")))
     }
 }
+/// Decoded frames kept at once; past it the frame cache starts over (the
+/// frames callers hold stay valid).
+const FRAME_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
+/// Resources over a VFS. Every decoded resource (prototypes, lists, message
+/// catalogs, frames and palettes) is cached by identifier or path, failures
+/// included, so each file is read and decoded at most once per session
+/// (frames again only after the cache budget resets).
 pub struct VfsWorldAssets {
     pub vfs: Arc<dyn Vfs>,
     pub language: String,
-    prototypes: RefCell<BTreeMap<u32, Arc<Prototype>>>,
-    messages: RefCell<BTreeMap<String, MsgCatalog>>,
-    game_catalogs: RefCell<BTreeMap<String, Arc<MsgCatalog>>>,
+    prototypes: RefCell<BTreeMap<u32, Result<Arc<Prototype>, WorldError>>>,
+    messages: RefCell<BTreeMap<String, Option<MsgCatalog>>>,
+    game_catalogs: RefCell<BTreeMap<String, Result<Arc<MsgCatalog>, WorldError>>>,
     programs: RefCell<BTreeMap<i32, (String, IntProgram)>>,
-    frames: RefCell<BTreeMap<String, Arc<FrmArchive>>>,
+    lists: RefCell<BTreeMap<String, Result<Arc<LstTable>, WorldError>>>,
+    frames: RefCell<BTreeMap<String, Result<Arc<FrmArchive>, WorldError>>>,
     frame_bytes: RefCell<usize>,
+    palettes: RefCell<BTreeMap<String, Result<vault_formats::Palette, WorldError>>>,
+    /// The mounted file names, collected on the first existence test.
+    files: OnceCell<BTreeSet<VfsPath>>,
     art: RefCell<Option<Arc<ArtCatalog>>>,
     fonts: RefCell<Option<Arc<FontSet>>>,
 }
@@ -148,8 +164,11 @@ impl VfsWorldAssets {
             messages: RefCell::new(BTreeMap::new()),
             game_catalogs: RefCell::new(BTreeMap::new()),
             programs: RefCell::new(BTreeMap::new()),
+            lists: RefCell::new(BTreeMap::new()),
             frames: RefCell::new(BTreeMap::new()),
             frame_bytes: RefCell::new(0),
+            palettes: RefCell::new(BTreeMap::new()),
+            files: OnceCell::new(),
             art: RefCell::new(None),
             fonts: RefCell::new(None),
         })
@@ -171,15 +190,26 @@ impl VfsWorldAssets {
             .clone()
     }
     fn exists(&self, path: &str) -> bool {
-        VfsPath::new(path).is_ok_and(|path| self.vfs.files().any(|file| *file == path))
+        let files = self
+            .files
+            .get_or_init(|| self.vfs.files().cloned().collect());
+        VfsPath::new(path).is_ok_and(|path| files.contains(&path))
     }
     pub fn read(&self, path: &str) -> Result<Vec<u8>, WorldError> {
         self.vfs
             .read_bounded(path, MAX_ASSET_BYTES)
             .map_err(|error| WorldError::Invalid(format!("{path}: {error}")))
     }
-    fn list(&self, path: &str, kind: LstKind) -> Result<LstTable, WorldError> {
-        Ok(LstTable::parse(&self.read(path)?, kind)?)
+    /// A list file, parsed once (each path has one kind).
+    fn list(&self, path: &str, kind: LstKind) -> Result<Arc<LstTable>, WorldError> {
+        if let Some(list) = self.lists.borrow().get(path) {
+            return list.clone();
+        }
+        let list = self
+            .read(path)
+            .and_then(|bytes| Ok(Arc::new(LstTable::parse(&bytes, kind)?)));
+        self.lists.borrow_mut().insert(path.into(), list.clone());
+        list
     }
     fn art_name(&self, folder: &str, index: i32) -> Result<String, WorldError> {
         if !(0..4096).contains(&index) {
@@ -201,20 +231,18 @@ impl VfsWorldAssets {
     }
     fn catalog(&self, path: &str, id: i32) -> Option<vault_formats::msg::Message> {
         if !self.messages.borrow().contains_key(path) {
-            let catalog = MsgCatalog::parse(&self.read(path).ok()?).ok()?;
+            let catalog = self
+                .read(path)
+                .ok()
+                .and_then(|bytes| MsgCatalog::parse(&bytes).ok());
             self.messages.borrow_mut().insert(path.into(), catalog);
         }
-        self.messages.borrow().get(path)?.get(id).cloned()
+        self.messages.borrow().get(path)?.as_ref()?.get(id).cloned()
     }
     pub fn gcd(&self, path: &str) -> Result<GcdFile, WorldError> {
         Ok(GcdFile::parse(&self.read(path)?)?)
     }
-}
-impl WorldAssets for VfsWorldAssets {
-    fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
-        if let Some(prototype) = self.prototypes.borrow().get(&pid) {
-            return Ok(prototype.clone());
-        }
+    fn load_prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
         let category = Category::from_pid(pid)?;
         let folder = category.directory();
         let list = self.list(&format!("proto/{folder}/{folder}.lst"), LstKind::Prototype)?;
@@ -236,8 +264,17 @@ impl WorldAssets for VfsWorldAssets {
                 prototype.pid
             )));
         }
-        self.prototypes.borrow_mut().insert(pid, prototype.clone());
         Ok(prototype)
+    }
+}
+impl WorldAssets for VfsWorldAssets {
+    fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
+        if let Some(prototype) = self.prototypes.borrow().get(&pid) {
+            return prototype.clone();
+        }
+        let prototype = self.load_prototype(pid);
+        self.prototypes.borrow_mut().insert(pid, prototype.clone());
+        prototype
     }
     fn program(&self, index: i32) -> Result<(String, IntProgram), WorldError> {
         if let Some(program) = self.programs.borrow().get(&index) {
@@ -357,23 +394,22 @@ impl WorldAssets for VfsWorldAssets {
     }
     fn frame(&self, path: &str) -> Result<Arc<FrmArchive>, WorldError> {
         if let Some(frame) = self.frames.borrow().get(path) {
-            return Ok(frame.clone());
+            return frame.clone();
         }
-        let bytes = self.read(path)?;
-        let total = self
-            .frame_bytes
-            .borrow()
-            .checked_add(bytes.len())
-            .ok_or(WorldError::Arithmetic)?;
-        if total > 256 * 1024 * 1024 {
-            return Err(WorldError::Invalid(
-                "dialogue art cache limit exceeded".into(),
-            ));
-        }
-        let frame = Arc::new(FrmArchive::parse(&bytes)?);
+        let loaded = self
+            .read(path)
+            .and_then(|bytes| Ok((Arc::new(FrmArchive::parse(&bytes)?), bytes.len())));
+        let frame = loaded.map(|(frame, size)| {
+            let mut total = self.frame_bytes.borrow_mut();
+            if total.saturating_add(size) > FRAME_CACHE_BYTES {
+                self.frames.borrow_mut().retain(|_, cached| cached.is_err());
+                *total = 0;
+            }
+            *total += size;
+            frame
+        });
         self.frames.borrow_mut().insert(path.into(), frame.clone());
-        *self.frame_bytes.borrow_mut() = total;
-        Ok(frame)
+        frame
     }
     fn object_art(&self, fid: u32) -> Result<Arc<FrmArchive>, WorldError> {
         let path = self
@@ -421,13 +457,15 @@ impl WorldAssets for VfsWorldAssets {
     fn game_messages(&self, file: &str) -> Result<Arc<MsgCatalog>, WorldError> {
         let path = format!("text/{}/game/{file}", self.language);
         if let Some(catalog) = self.game_catalogs.borrow().get(&path) {
-            return Ok(catalog.clone());
+            return catalog.clone();
         }
-        let catalog = Arc::new(MsgCatalog::parse(&self.read(&path)?)?);
+        let catalog = self
+            .read(&path)
+            .and_then(|bytes| Ok(Arc::new(MsgCatalog::parse(&bytes)?)));
         self.game_catalogs
             .borrow_mut()
             .insert(path, catalog.clone());
-        Ok(catalog)
+        catalog
     }
     fn background_path(&self, index: i32) -> Result<String, WorldError> {
         self.art_name("backgrnd", index)
@@ -450,7 +488,16 @@ impl WorldAssets for VfsWorldAssets {
     fn palette(&self, name: &[u8]) -> Result<vault_formats::Palette, WorldError> {
         let name = std::str::from_utf8(name)
             .map_err(|_| WorldError::Invalid("palette filename is not ASCII".into()))?;
-        Ok(vault_formats::Palette::parse(&self.read(name)?)?)
+        if let Some(palette) = self.palettes.borrow().get(name) {
+            return palette.clone();
+        }
+        let palette = self
+            .read(name)
+            .and_then(|bytes| Ok(vault_formats::Palette::parse(&bytes)?));
+        self.palettes
+            .borrow_mut()
+            .insert(name.into(), palette.clone());
+        palette
     }
     fn gam(&self, path: &str, section: GamSection) -> Result<Option<GamFile>, WorldError> {
         match self.vfs.read_bounded(path, MAX_ASSET_BYTES) {
@@ -525,9 +572,11 @@ impl WorldAssets for VfsWorldAssets {
             .map(|path| path.as_str().as_bytes().to_vec())
             .collect()
     }
+    /// Talking heads and backgrounds go at a conversation's end. Interface
+    /// art stays: the interface bar and windows draw it every frame.
     fn release_dialogue_art(&self) {
         self.frames.borrow_mut().retain(|path, _| {
-            !["art/heads/", "art/backgrnd/", "art/intrface/"]
+            !["art/heads/", "art/backgrnd/"]
                 .iter()
                 .any(|prefix| path.starts_with(prefix))
         });
@@ -535,6 +584,7 @@ impl WorldAssets for VfsWorldAssets {
             .frames
             .borrow()
             .values()
+            .filter_map(|frame| frame.as_ref().ok())
             .map(|frame| frame.stored_frame_area_len() as usize + 62)
             .sum();
     }

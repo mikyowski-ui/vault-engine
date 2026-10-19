@@ -47,3 +47,11 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "warn"
+
+# Non-release runs still decode, decompress, light and route through
+# optimized format and world code.
+[profile.dev.package.vault-formats]
+opt-level = 2
+
+[profile.dev.package.vault-core]
+opt-level = 2

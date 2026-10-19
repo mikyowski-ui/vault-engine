@@ -1959,3 +1959,54 @@ fn spec006_head_counts_use_own_columns_only_when_fidget_art_exists() {
     // selectable and keeps the first column.
     assert_eq!(assets.head(2).unwrap().counts, [1, 4, 1]);
 }
+
+#[test]
+fn vfs_assets_read_each_resource_once_failures_included() {
+    use std::{collections::BTreeMap, sync::Mutex};
+    use vault_formats::{LocalDirProvider, Vfs, VfsError, VfsPath};
+    struct Counting {
+        inner: LocalDirProvider,
+        reads: Mutex<BTreeMap<String, usize>>,
+    }
+    impl Vfs for Counting {
+        fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+            *self.reads.lock().unwrap().entry(path.into()).or_default() += 1;
+            self.inner.read(path)
+        }
+        fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
+            *self.reads.lock().unwrap().entry(path.into()).or_default() += 1;
+            self.inner.read_bounded(path, max_bytes)
+        }
+        fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {
+            self.inner.files()
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    fixture::write_corpus(dir.path());
+    let counting = Arc::new(Counting {
+        inner: LocalDirProvider::mount(dir.path()).unwrap(),
+        reads: Default::default(),
+    });
+    let assets = VfsWorldAssets::new(counting.clone(), "english").unwrap();
+    for _ in 0..3 {
+        // Lists, message catalogs, prototypes, frames and palettes, found
+        // or not.
+        let _ = assets.message(1, 100);
+        let _ = assets.local_count(0);
+        let _ = assets.prototype(0x0100_0001);
+        assert!(assets.prototype(0x0100_0009).is_err());
+        assert!(assets.frame("art/scenery/sample.frm").is_ok());
+        assert!(assets.frame("art/scenery/ghost.frm").is_err());
+        assert!(assets.game_messages("pro_item.msg").is_ok());
+        assert!(assets.game_messages("absent.msg").is_err());
+        assert!(assets.palette(b"color.pal").is_ok());
+        assert!(assets.palette(b"absent.pal").is_err());
+        let _ = assets.head(0);
+        let _ = assets.interface_path(0);
+        assert!(assets.available(b"color.pal"));
+        assert!(!assets.available(b"absent.pal"));
+    }
+    let reads = counting.reads.lock().unwrap();
+    assert!(reads.len() > 8, "{reads:?}");
+    assert!(reads.values().all(|count| *count == 1), "{reads:?}");
+}

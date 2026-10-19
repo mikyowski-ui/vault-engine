@@ -151,7 +151,8 @@ pub fn move_hover(
 }
 pub const COST_COLOR: ColorKey = ColorKey::WHITE;
 pub const BLOCKED_COLOR: ColorKey = ColorKey::RED;
-pub const ITEM_OUTLINE: ColorKey = ColorKey(30024);
+/// §3.27 the arrow hover's opaque one-color item outline.
+pub const ITEM_OUTLINE: ColorKey = ColorKey(30632);
 
 /// What the pointer is over in arrow mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

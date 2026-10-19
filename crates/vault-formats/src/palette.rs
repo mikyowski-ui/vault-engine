@@ -1,5 +1,6 @@
 //! SPEC-001 §2.1/3.1/3.2 and SPEC-002 §3.2.
 use crate::{ParseError, binary::Reader};
+use std::sync::OnceLock;
 
 pub const TRANSPARENT_INDEX: u8 = 0;
 
@@ -11,6 +12,8 @@ pub struct Palette {
     /// Supplied intensity, additive and multiplicative tables, in that order.
     /// A nonmatching discriminator has no supplied tables.
     tables: Option<Vec<u8>>,
+    /// Every generated intensity, evaluated on the first bulk use.
+    generated: OnceLock<Box<[u8]>>,
 }
 
 impl Palette {
@@ -42,6 +45,7 @@ impl Palette {
             mapped,
             rgb555: base[768..0x8300].to_vec(),
             tables,
+            generated: OnceLock::new(),
         })
     }
 
@@ -96,6 +100,30 @@ impl Palette {
             }) as u8
         });
         self.lookup_rgb5(rgb).expect("generated five-bit channels")
+    }
+
+    /// The intensity of every color at every level, indexed `color * 256 +
+    /// level`: the supplied table, or the generated rule evaluated once.
+    pub fn intensity_table(&self) -> &[u8] {
+        if let Some(tables) = &self.tables {
+            return &tables[..65536];
+        }
+        self.generated.get_or_init(|| {
+            (0..=u16::MAX)
+                .map(|index| self.intensity((index >> 8) as u8, index as u8))
+                .collect()
+        })
+    }
+
+    /// Shade `pixels` in place, each by its level in `levels`, through the
+    /// intensity table; index 0, the transparency key, stays 0.
+    pub fn shade(&self, pixels: &mut [u8], levels: &[u8]) {
+        let table = self.intensity_table();
+        for (pixel, level) in pixels.iter_mut().zip(levels) {
+            if *pixel != 0 {
+                *pixel = table[usize::from(*pixel) * 256 + usize::from(*level)];
+            }
+        }
     }
 
     /// Same-coordinate destination sampling, as specified by the synthetic fixture.

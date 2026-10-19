@@ -1,8 +1,10 @@
 use crate::{ImageError, IndexedImage};
+use std::sync::OnceLock;
 use vault_formats::{
     HexGrid, MapFile,
     frm::FrmFrame,
     geometry::GeometryError,
+    map::MapObject,
     pro::{BasicFlags, Category},
 };
 
@@ -65,6 +67,22 @@ impl MapView {
         }
     }
 }
+/// The squares in drawing order, by corner row, then column, then index.
+/// A corner is the grid origin plus a fixed offset per square, so the order
+/// is the same for every view and is computed once.
+fn square_order() -> &'static [i32] {
+    static ORDER: OnceLock<Vec<i32>> = OnceLock::new();
+    ORDER.get_or_init(|| {
+        let grid = HexGrid::default();
+        let mut squares: Vec<i32> = (0..10000).collect();
+        squares.sort_by_key(|index| {
+            let [x, y] = grid.square_corner(*index, false).expect("square in range");
+            (y, x, *index)
+        });
+        squares
+    })
+}
+
 pub fn render_map(
     map: &MapFile,
     view: MapView,
@@ -82,18 +100,23 @@ pub fn render_map(
         return Err(GeometryError::ProjectionOverflow.into());
     }
     let mut image = IndexedImage::new(view.width, view.height)?;
-    let mut squares: Vec<_> = (0..10000)
+    let squares: Vec<_> = square_order()
+        .iter()
         .map(|index| {
             (
                 view.grid
-                    .square_corner(index, false)
+                    .square_corner(*index, false)
                     .expect("square in range"),
-                index,
+                *index,
             )
         })
         .collect();
-    squares.sort_by_key(|([x, y], index)| (*y, *x, *index));
+    // A square whose corner lies past the right or bottom edge draws nothing.
+    let beyond = |[x, y]: [i64; 2]| x >= i64::from(view.width) || y >= i64::from(view.height);
     for (corner, index) in &squares {
+        if beyond(*corner) {
+            continue;
+        }
         let tile = map
             .tile(view.elevation as usize, *index as usize)
             .expect("validated map grid");
@@ -118,31 +141,7 @@ pub fn render_map(
         else {
             continue;
         };
-        let (origin, anchor) = if let Some(hex) = object.hex {
-            let center = view.grid.hex_center(hex)?;
-            // i64 arithmetic preserves geometry even when a panned camera is far
-            // outside the grid; the clipped blit never iterates offscreen pixels.
-            let anchor = [
-                center[0] + i64::from(shift[0]) + i64::from(object.displacement[0]),
-                center[1] + i64::from(shift[1]) + i64::from(object.displacement[1]),
-            ];
-            (
-                [
-                    anchor[0] - i64::from(frame.width / 2),
-                    anchor[1] - i64::from(frame.height) + 1,
-                ],
-                anchor,
-            )
-        } else {
-            let origin = object.screen.map(i64::from);
-            (
-                origin,
-                [
-                    origin[0] + i64::from(frame.width / 2),
-                    origin[1] + i64::from(frame.height) - 1,
-                ],
-            )
-        };
+        let (origin, anchor) = placement(view, frame, shift, object)?;
         objects.push((
             (
                 !object.flags.contains(BasicFlags::FLAT),
@@ -160,6 +159,9 @@ pub fn render_map(
     }
     if view.roofs {
         for (corner, index) in squares {
+            if beyond([corner[0], corner[1] - 96]) {
+                continue;
+            }
             let tile = map
                 .tile(view.elevation as usize, index as usize)
                 .expect("validated map grid");
@@ -172,6 +174,55 @@ pub fn render_map(
         }
     }
     Ok(image)
+}
+
+/// Where an object's frame is drawn: its top-left corner and its anchor
+/// (the sort point). A hex-placed object anchors at the hex center plus the
+/// art shift and its displacement, any other at its screen position.
+fn placement(
+    view: MapView,
+    frame: &FrmFrame,
+    shift: [i16; 2],
+    object: &MapObject,
+) -> Result<([i64; 2], [i64; 2]), GeometryError> {
+    Ok(if let Some(hex) = object.hex {
+        let center = view.grid.hex_center(hex)?;
+        // i64 arithmetic preserves geometry even when a panned camera is far
+        // outside the grid; the clipped blit never iterates offscreen pixels.
+        let anchor = [
+            center[0] + i64::from(shift[0]) + i64::from(object.displacement[0]),
+            center[1] + i64::from(shift[1]) + i64::from(object.displacement[1]),
+        ];
+        (
+            [
+                anchor[0] - i64::from(frame.width / 2),
+                anchor[1] - i64::from(frame.height) + 1,
+            ],
+            anchor,
+        )
+    } else {
+        let origin = object.screen.map(i64::from);
+        (
+            origin,
+            [
+                origin[0] + i64::from(frame.width / 2),
+                origin[1] + i64::from(frame.height) - 1,
+            ],
+        )
+    })
+}
+
+/// The frame an object shows and its top-left corner in the view, for
+/// overlays drawn over the composed map (an item's hover outline).
+pub fn object_sprite<'a>(
+    view: MapView,
+    art: &'a impl MapArt,
+    object: &MapObject,
+) -> Option<(&'a FrmFrame, [i64; 2])> {
+    let category = Category::from_pid(object.pid).ok()?;
+    let (frame, shift) = art.frame(category, object.art_id, object.orientation, object.frame)?;
+    let (origin, _) = placement(view, frame, shift, object).ok()?;
+    Some((frame, origin))
 }
 
 /// Pick the frontmost nontransparent object pixel. Roof pixels occlude picking.
@@ -227,29 +278,7 @@ pub fn pick_objects(
         else {
             continue;
         };
-        let (origin, anchor) = if let Some(hex) = object.hex {
-            let center = view.grid.hex_center(hex).ok()?;
-            let anchor = [
-                center[0] + i64::from(shift[0]) + i64::from(object.displacement[0]),
-                center[1] + i64::from(shift[1]) + i64::from(object.displacement[1]),
-            ];
-            (
-                [
-                    anchor[0] - i64::from(frame.width / 2),
-                    anchor[1] - i64::from(frame.height) + 1,
-                ],
-                anchor,
-            )
-        } else {
-            let origin = object.screen.map(i64::from);
-            (
-                origin,
-                [
-                    origin[0] + i64::from(frame.width / 2),
-                    origin[1] + i64::from(frame.height) - 1,
-                ],
-            )
-        };
+        let (origin, anchor) = placement(view, frame, shift, object).ok()?;
         if sample(frame, origin) {
             let key = (
                 !object.flags.contains(BasicFlags::FLAT),

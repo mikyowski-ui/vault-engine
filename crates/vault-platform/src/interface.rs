@@ -85,13 +85,7 @@ impl Painter<'_> {
         let Some(frame) = art.frame(0, frame) else {
             return false;
         };
-        if let Ok(copy) = IndexedImage::from_pixels(
-            u32::from(frame.width),
-            u32::from(frame.height),
-            frame.pixels().to_vec(),
-        ) {
-            image.copy_image(&copy, origin);
-        }
+        image.copy_frame(frame, origin);
         true
     }
     /// Copy the `source` rectangle of frame 0 to `origin`, transparently or

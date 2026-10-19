@@ -15,11 +15,19 @@
 //! menu's Inventory entry, a press on a list row uses that item on the
 //! target and closes the window.
 //!
+//! **Nested containers.** Use on a container in the list opens it, up to
+//! nine levels deep (as in the SPEC-013 §3.16 windows): the list then shows
+//! its contents, drops into the list go into it, and dropping an item on the
+//! player figure moves it up one container level (§3.34 target 4). A press
+//! on the figure goes up one level, like SPEC-013's portrait hot zones.
+//!
 //! No approved spec gives the window's background art, the stats panel's
-//! place, the scroll or Done buttons, or the Unload and Drop icon art, so
-//! those are provisional: a dark panel, the examine text at (345, 40), the
-//! arrow keys for scrolling, a red Done button at (500, 340) and labeled
-//! boxes for the two icons.
+//! place, the scroll or Done buttons, the Unload and Drop icon art, or the
+//! figure's rotation, so those are provisional: a dark panel, the examine
+//! text at (345, 40), the arrow keys for scrolling, a red Done button at
+//! (500, 340), labeled boxes for the two icons, the open container's name
+//! above the list, and the figure turning clockwise one facing every 166
+//! milliseconds from the player's own facing.
 use super::{
     MapPreview, Screen,
     counter::{CounterInput, counter_click, counter_key, draw_counter},
@@ -97,6 +105,11 @@ pub(crate) struct ItemMenu {
 pub(crate) struct InventoryScreen {
     /// The world action menu's target: the use-on window.
     pub target: Option<ObjectRef>,
+    /// The open containers, outermost first; empty shows the player's list.
+    pub path: Vec<ObjectRef>,
+    /// The rotating figure's facing and when it last turned.
+    pub facing: u8,
+    turned: u64,
     /// The list's scroll offset.
     offset: usize,
     /// The arrow cursor (else the hand).
@@ -147,6 +160,10 @@ pub(crate) fn inside(rect: [i32; 4], point: [i32; 2]) -> bool {
 const PANEL: [i32; 4] = [80, 0, 500, 377];
 const EXAMINE: [i32; 2] = [345, 40];
 const DONE: Rect = Rect::new(500, 340, 15, 16);
+const CONTAINER_LABEL: [i32; 2] = [124, 20];
+const FIGURE_TURN_MS: u64 = 166;
+/// How deep containers open (SPEC-013 §3.16).
+const MAX_DEPTH: usize = 9;
 
 impl MapPreview {
     /// Open the inventory; in combat its AP cost may refuse it.
@@ -155,8 +172,13 @@ impl MapPreview {
     }
     pub(crate) fn open_inventory_on(&mut self, target: Option<ObjectRef>) {
         if self.host.open_inventory() {
+            let world = &self.host.world;
+            let facing = world.get(world.player).map_or(0, |o| o.raw.orientation % 6);
             self.screen = Screen::Inventory(InventoryScreen {
                 target,
+                path: Vec::new(),
+                facing,
+                turned: self.clock,
                 offset: 0,
                 arrow: false,
                 held: None,
@@ -169,13 +191,22 @@ impl MapPreview {
         }
         self.drain_effects();
     }
-    /// The list: the player's entries that no slot holds.
+    /// The innermost open container, else the player.
+    fn list_owner(&self) -> ObjectRef {
+        match &self.screen {
+            Screen::Inventory(screen) => screen.path.last().copied(),
+            _ => None,
+        }
+        .unwrap_or(self.host.world.player)
+    }
+    /// The list: the open container's entries, or the player's entries that
+    /// no slot holds.
     fn list_entries(&self) -> Vec<(ObjectRef, i32)> {
         let world = &self.host.world;
         world
-            .get(world.player)
-            .map(|player| {
-                player
+            .get(self.list_owner())
+            .map(|owner| {
+                owner
                     .inventory
                     .iter()
                     .copied()
@@ -204,12 +235,53 @@ impl MapPreview {
             _ => None,
         }
     }
+    /// The quantity of `item`'s entry in its owner's inventory.
     fn entry_quantity(&self, item: ObjectRef) -> i32 {
         let world = &self.host.world;
         world
-            .get(world.player)
-            .and_then(|player| player.inventory.iter().find(|(entry, _)| *entry == item))
+            .get(item)
+            .and_then(|object| world.get(object.owner?))
+            .and_then(|owner| owner.inventory.iter().find(|(entry, _)| *entry == item))
             .map_or(1, |(_, quantity)| *quantity)
+    }
+    /// The item's direct owner (the player when it has none).
+    fn owner_of(&self, item: ObjectRef) -> ObjectRef {
+        self.host
+            .world
+            .get(item)
+            .and_then(|object| object.owner)
+            .unwrap_or(self.host.world.player)
+    }
+    /// A unit of `item` from an open container comes out to the player, so
+    /// that a slot can take it.
+    fn take_out(&mut self, item: ObjectRef) -> Result<(), vault_core::WorldError> {
+        let player = self.host.world.player;
+        let owner = self.owner_of(item);
+        if owner == player {
+            return Ok(());
+        }
+        self.host.world.remove_item(owner, item, 1)?;
+        self.host.world.add_item(player, item, 1, true)
+    }
+    /// Open a container from the list, up to nine levels deep.
+    fn open_container(&mut self, container: ObjectRef) {
+        if let Screen::Inventory(screen) = &mut self.screen
+            && screen.path.len() < MAX_DEPTH
+        {
+            screen.path.push(container);
+            screen.offset = 0;
+        }
+    }
+    /// Go up one container level.
+    fn close_container(&mut self) -> bool {
+        let Screen::Inventory(screen) = &mut self.screen else {
+            return false;
+        };
+        let closed = screen.path.pop().is_some();
+        if closed {
+            screen.offset = 0;
+        }
+        closed
     }
     /// The filled slot under a point: a list row (at the scroll offset), a
     /// hand or the armor.
@@ -331,6 +403,10 @@ impl MapPreview {
         }
         let (arrow, target) = (screen.arrow, screen.target);
         let Some((slot, item)) = self.slot_at(point) else {
+            // The figure goes up one container level.
+            if !arrow && layout::FIGURE.contains(point) {
+                self.close_container();
+            }
             return true;
         };
         if let Some(target) = target {
@@ -409,18 +485,26 @@ impl MapPreview {
         self.drain_effects();
         true
     }
-    /// The arrow press's hold pulse opens the item menu at the pointer.
+    /// The figure's rotation, and the arrow press's hold pulse that opens
+    /// the item menu at the pointer.
     pub(crate) fn inventory_tick(&mut self) -> bool {
         let clock = self.clock;
         let at = self.pointer.at;
         let Screen::Inventory(screen) = &mut self.screen else {
             return false;
         };
+        // The figure keeps turning, even during a drag (§3.34).
+        let mut turned = false;
+        if clock.saturating_sub(screen.turned) >= FIGURE_TURN_MS {
+            screen.facing = (screen.facing + 1) % 6;
+            screen.turned = clock;
+            turned = true;
+        }
         let Some(press) = screen.press else {
-            return false;
+            return turned;
         };
         if clock <= press.next_pulse {
-            return false;
+            return turned;
         }
         screen.press = None;
         let item = press.item;
@@ -455,26 +539,30 @@ impl MapPreview {
             .get(item)
             .is_some_and(|object| object.raw.flags.0 & EQUIPPED != 0);
         let pid = world.get(item).map_or(0, |object| object.raw.pid);
-        let usable = world.get(item).is_some_and(|object| {
-            object
-                .prototype
-                .as_ref()
-                .is_some_and(|p| p.permits_use() || p.permits_use_on())
-        }) || matches!(self.item_kind(item), Some(ItemData::Drug(_)))
+        // A container in the list opens with Use.
+        let usable = (container && !held)
+            || world.get(item).is_some_and(|object| {
+                object
+                    .prototype
+                    .as_ref()
+                    .is_some_and(|p| p.permits_use() || p.permits_use_on())
+            })
+            || matches!(self.item_kind(item), Some(ItemData::Drug(_)))
             || skills::is_explosive(pid)
             || self.host.kit_skill(pid).is_some()
             || pid == MOTION_SENSOR;
         layout::player_menu(unloadable, container && held, usable)
     }
     fn item_entry(&mut self, item: ObjectRef, entry: ItemEntry) {
-        let player = self.host.world.player;
         match entry {
             ItemEntry::Look => self.examine(item),
             ItemEntry::Use => self.use_item(item),
             ItemEntry::Unload => {
+                // The ammunition goes, forced, to the weapon's owner.
+                let owner = self.owner_of(item);
                 match self.host.world.unload_weapon(item) {
                     Ok(Some(ammo)) => {
-                        if let Err(error) = self.host.world.add_item(player, ammo, 1, true) {
+                        if let Err(error) = self.host.world.add_item(owner, ammo, 1, true) {
                             self.status = error.to_string().into_bytes();
                         }
                     }
@@ -526,6 +614,10 @@ impl MapPreview {
     fn use_item(&mut self, item: ObjectRef) {
         let player = self.host.world.player;
         let pid = self.host.world.get(item).map_or(0, |o| o.raw.pid);
+        if matches!(self.item_kind(item), Some(ItemData::Container { .. })) {
+            self.open_container(item);
+            return;
+        }
         if skills::is_explosive(pid) {
             if self.host.explosive_armable(item)
                 && let Screen::Inventory(screen) = &mut self.screen
@@ -563,6 +655,10 @@ impl MapPreview {
     fn inventory_drop(&mut self, from: Slot, item: ObjectRef, target: DropTarget) {
         let player = self.host.world.player;
         let quantity = self.entry_quantity(item);
+        let open = match &self.screen {
+            Screen::Inventory(screen) => screen.path.last().copied(),
+            _ => None,
+        };
         let is = |host: &Self, object: ObjectRef, check: fn(&ItemData) -> bool| {
             host.item_kind(object).is_some_and(check)
         };
@@ -606,9 +702,13 @@ impl MapPreview {
                         );
                         Ok(())
                     }
-                    // From the list it stays put; from a slot it returns.
+                    // From the list it stays put; from a slot it returns,
+                    // into the open container when there is one.
                     _ if from == Slot::List => Ok(()),
-                    _ => self.host.world.unequip(player, item),
+                    _ => match open {
+                        Some(container) => self.unequip_into(item, container),
+                        None => self.host.world.unequip(player, item),
+                    },
                 }
             }
             DropTarget::LeftHand | DropTarget::RightHand => {
@@ -630,7 +730,10 @@ impl MapPreview {
                         );
                         Ok(())
                     }
-                    None => self.host.world.equip_slot(player, item, flag).map(|_| ()),
+                    None => self
+                        .take_out(item)
+                        .and_then(|()| self.host.world.equip_slot(player, item, flag))
+                        .map(|_| ()),
                     Some(gun) if is(self, gun, weapon) && is(self, item, ammo) => {
                         if self.host.world.reload_permitted(gun, item) {
                             self.count_or(
@@ -658,6 +761,7 @@ impl MapPreview {
                         .host
                         .world
                         .unequip(player, occupant)
+                        .and_then(|()| self.take_out(item))
                         .and_then(|()| self.host.world.equip_slot(player, item, flag))
                         .map(|_| ()),
                 }
@@ -665,9 +769,8 @@ impl MapPreview {
             DropTarget::Armor if is(self, item, armor) => {
                 let old = self.slot_item(Slot::Armor).filter(|old| *old != item);
                 let worn = self
-                    .host
-                    .world
-                    .equip_slot(player, item, BasicFlags::WORN.0)
+                    .take_out(item)
+                    .and_then(|()| self.host.world.equip_slot(player, item, BasicFlags::WORN.0))
                     .map(|_| ());
                 // The old armor goes to the source hand, else the list.
                 match (worn, old, from.flag()) {
@@ -677,7 +780,10 @@ impl MapPreview {
                     (result, ..) => result,
                 }
             }
-            // Only with a nested container open (not offered here).
+            // With a container open, an item from its list moves up a level.
+            DropTarget::Figure if from == Slot::List && open.is_some() => {
+                self.move_up(item, quantity)
+            }
             DropTarget::Armor | DropTarget::Figure | DropTarget::Nowhere => Ok(()),
         };
         if let Err(error) = result {
@@ -685,6 +791,50 @@ impl MapPreview {
         }
         self.host.refresh_armor_art(player);
         self.host.world.emit(WorldEffect::RollArmorClass);
+    }
+    /// A slot's item goes into the open container; a refused move keeps it
+    /// in its slot.
+    fn unequip_into(
+        &mut self,
+        item: ObjectRef,
+        container: ObjectRef,
+    ) -> Result<(), vault_core::WorldError> {
+        let player = self.host.world.player;
+        if let Some(refusal) = self.host.world.add_refusal(container, item, 1) {
+            self.status = refusal.message().as_bytes().to_vec();
+            return Ok(());
+        }
+        self.host.world.unequip(player, item)?;
+        self.host
+            .world
+            .move_into(player, item, container, 1)
+            .map(|_| ())
+    }
+    /// §3.34 target 4: an item of the open container's list moves up one
+    /// container level, the whole entry. Into a container the normal limits
+    /// apply; into the player it is forced, since the carried weight does
+    /// not change.
+    fn move_up(&mut self, item: ObjectRef, quantity: i32) -> Result<(), vault_core::WorldError> {
+        let (current, parent) = match &self.screen {
+            Screen::Inventory(screen) => match screen.path.as_slice() {
+                [.., parent, current] => (*current, Some(*parent)),
+                [current] => (*current, None),
+                [] => return Ok(()),
+            },
+            _ => return Ok(()),
+        };
+        match parent {
+            Some(parent) => self
+                .host
+                .world
+                .move_into(current, item, parent, quantity)
+                .map(|_| ()),
+            None => {
+                let player = self.host.world.player;
+                self.host.world.remove_item(current, item, quantity)?;
+                self.host.world.add_item(player, item, quantity, true)
+            }
+        }
     }
     /// A stack opens the counter; a single item moves at once.
     fn count_or(&mut self, quantity: i32, count: Count) {
@@ -700,14 +850,29 @@ impl MapPreview {
         let player = self.host.world.player;
         match count {
             Count::Reload { weapon, ammo } => {
-                match self.host.drag_reload(player, weapon, ammo, quantity) {
+                // SPEC-011 §3.15 lifts the weapon out of its owner's
+                // inventory and re-adds it; one held in a hand returns to
+                // that hand.
+                let owner = self.owner_of(weapon);
+                let held = self
+                    .host
+                    .world
+                    .get(weapon)
+                    .map_or(0, |object| object.raw.flags.0 & EQUIPPED);
+                match self.host.drag_reload(owner, weapon, ammo, quantity) {
                     Ok(true) => {}
                     Ok(false) => self.status = b"The weapon did not load".to_vec(),
                     Err(error) => self.status = error.to_string().into_bytes(),
                 }
+                if held != 0
+                    && let Err(error) = self.host.world.equip_slot(owner, weapon, held)
+                {
+                    self.status = error.to_string().into_bytes();
+                }
             }
             Count::Into { item, container } => {
-                if let Err(error) = self.host.world.move_into(player, item, container, quantity) {
+                let owner = self.owner_of(item);
+                if let Err(error) = self.host.world.move_into(owner, item, container, quantity) {
                     self.status = error.to_string().into_bytes();
                 }
                 self.host.refresh_armor_art(player);
@@ -802,11 +967,26 @@ impl MapPreview {
                 icon(&mut image, item, rect);
             }
         }
-        // The player figure.
+        // The open container's name over the list.
+        if let Some(container) = screen.path.last()
+            && let Some(object) = self.host.world.get(*container)
+        {
+            painter.text(
+                &mut image,
+                101,
+                ColorKey::GREEN,
+                &object.name,
+                CONTAINER_LABEL,
+                120,
+            );
+        }
+        // The rotating player figure.
         let player = self.host.world.player;
         if let Some(object) = self.host.world.get(player)
             && let Ok(art) = self.host.assets.object_art(Fid(object.raw.art_id).0)
-            && let Some(frame) = art.frame(usize::from(object.raw.orientation), 0)
+            && let Some(frame) = art
+                .frame(usize::from(screen.facing), 0)
+                .or_else(|| art.frame(0, 0))
         {
             let rect = layout::FIGURE;
             image.draw_frame(

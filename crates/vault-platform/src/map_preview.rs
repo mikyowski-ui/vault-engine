@@ -12,8 +12,7 @@ use vault_core::{
     movie::{MoviePolicy, MovieRequest},
 };
 use vault_formats::{
-    ArtCatalog, Fid, Font, FrmArchive, HexGrid, MAX_ASSET_BYTES, MapFile, Palette, Vfs, VfsPath,
-    acm,
+    Fid, Font, FrmArchive, HexGrid, MAX_ASSET_BYTES, MapFile, Palette, Vfs, VfsPath, acm,
     pro::{BasicFlags, Category},
     sfx,
 };
@@ -36,6 +35,7 @@ pub(crate) use fade::FADE_MS;
 mod help;
 mod hud;
 mod inventory;
+mod light;
 mod loot;
 mod movies;
 mod options;
@@ -45,7 +45,6 @@ mod saveload;
 mod skilldex;
 mod world;
 
-const MAX_ART_BYTES: u64 = 256 * 1024 * 1024;
 /// The effect volume setting S (SPEC-010 §3.11): the desktop plays effects
 /// at the full setting.
 const EFFECT_SETTING: i32 = 32767;
@@ -213,9 +212,22 @@ pub struct MapPreview {
     startup_fade: bool,
     /// The vault-debug inspector and its overlay, when on.
     debug: Option<debug::DebugOverlay>,
+    /// The map view's light levels.
+    light: light::LightCache,
 }
+/// The map's sprites by tile index or object art. Each art file is read and
+/// decoded once, through the world's asset cache, and object art that is
+/// missing or unreadable is remembered, so a frame binds only art it has not
+/// seen before.
+#[derive(Default)]
 struct MapSprites {
     bindings: BTreeMap<(Category, u32, u8), Arc<FrmArchive>>,
+    /// The bound tile art by tile index, for the per-square lookups.
+    tile_art: Vec<Option<Arc<FrmArchive>>>,
+    /// Object art that is missing or unreadable; it is not drawn.
+    missing: BTreeSet<(Category, u32, u8)>,
+    /// The map whose tiles are bound (its header name and number).
+    tiles: Option<([u8; 16], i32)>,
 }
 impl MapArt for MapSprites {
     fn frame(
@@ -225,7 +237,11 @@ impl MapArt for MapSprites {
         orientation: u8,
         frame: usize,
     ) -> Option<(&vault_formats::frm::FrmFrame, [i16; 2])> {
-        let archive = self.bindings.get(&(category, art_id, orientation))?;
+        let archive = if category == Category::Tile {
+            self.tile_art.get(art_id as usize)?.as_ref()?
+        } else {
+            self.bindings.get(&(category, art_id, orientation))?
+        };
         Some((
             archive
                 .frame(orientation as usize, frame)
@@ -235,34 +251,48 @@ impl MapArt for MapSprites {
     }
 }
 impl MapSprites {
-    fn load(vfs: &dyn Vfs, map: &MapFile) -> AppResult<Self> {
+    /// The visible objects' art not yet bound or known missing.
+    fn unbound_objects(&self, map: &MapFile) -> AppResult<BTreeSet<(Category, u32, u8)>> {
         let mut needed = BTreeSet::new();
-        for tiles in map.tiles.iter().flatten() {
-            for tile in tiles {
-                for (index, skip) in [
-                    (tile.floor(), tile.floor_hidden()),
-                    (tile.roof(), tile.roof_hidden() || tile.roof() == 1),
-                ] {
-                    if !skip {
-                        needed.insert((Category::Tile, u32::from(index), 0_u8));
+        for object in map.objects.elevations.iter().flatten() {
+            if !object.flags.contains(BasicFlags::HIDDEN) {
+                let key = (
+                    Category::from_pid(object.pid)?,
+                    object.art_id,
+                    object.orientation,
+                );
+                if !self.bindings.contains_key(&key) && !self.missing.contains(&key) {
+                    needed.insert(key);
+                }
+            }
+        }
+        Ok(needed)
+    }
+    /// Bind the art `map` draws that is not bound yet: every tile of a map
+    /// not seen before, and each new object art.
+    fn bind(&mut self, assets: &VfsWorldAssets, map: &MapFile) -> AppResult<()> {
+        let mut needed = self.unbound_objects(map)?;
+        let identity = (map.header.name, map.header.map_number);
+        if self.tiles != Some(identity) {
+            for tiles in map.tiles.iter().flatten() {
+                for tile in tiles {
+                    for (index, skip) in [
+                        (tile.floor(), tile.floor_hidden()),
+                        (tile.roof(), tile.roof_hidden() || tile.roof() == 1),
+                    ] {
+                        let key = (Category::Tile, u32::from(index), 0_u8);
+                        if !skip && !self.bindings.contains_key(&key) {
+                            needed.insert(key);
+                        }
                     }
                 }
             }
         }
-        for object in map.objects.elevations.iter().flatten() {
-            if !object.flags.contains(BasicFlags::HIDDEN) {
-                needed.insert((
-                    Category::from_pid(object.pid)?,
-                    object.art_id,
-                    object.orientation,
-                ));
-            }
+        if needed.is_empty() {
+            self.tiles = Some(identity);
+            return Ok(());
         }
-        let catalog = ArtCatalog::load(vfs)?;
-        let files: BTreeSet<&str> = vfs.files().map(VfsPath::as_str).collect();
-        let mut archives: BTreeMap<String, Arc<FrmArchive>> = BTreeMap::new();
-        let mut bindings = BTreeMap::new();
-        let mut bytes_loaded = 0_u64;
+        let catalog = assets.art_catalog()?;
         for key @ (category, id, _) in needed {
             // Tile squares store a bare list index; objects store a complete FID,
             // whose own category bits select the art directory and codec.
@@ -275,31 +305,29 @@ impl MapSprites {
                 .path(fid)
                 .map_err(|error| format!("art identifier {:#010x}: {error}", fid.0))?;
             let resolved = VfsPath::new(&resolved)?.to_string();
-            if category != Category::Tile && !files.contains(resolved.as_str()) {
-                // The reference has no guaranteed final fallback resource.
-                tracing::warn!(art_id = fid.0, sprite = %resolved, "object art is missing; not drawn");
-                continue;
-            }
-            let archive = if let Some(archive) = archives.get(&resolved) {
-                archive.clone()
-            } else {
-                let bytes = vfs.read_bounded(&resolved, MAX_ASSET_BYTES)?;
-                bytes_loaded += bytes.len() as u64;
-                if bytes_loaded > MAX_ART_BYTES {
-                    return Err("map preview art exceeds 256 MiB limit".into());
+            match assets.frame(&resolved) {
+                Ok(archive) => {
+                    if category == Category::Tile {
+                        let index = id as usize;
+                        if self.tile_art.len() <= index {
+                            self.tile_art.resize(index + 1, None);
+                        }
+                        self.tile_art[index] = Some(archive.clone());
+                    }
+                    self.bindings.insert(key, archive);
                 }
-                let archive = Arc::new(
-                    FrmArchive::parse(&bytes).map_err(|error| format!("{resolved}: {error}"))?,
-                );
-                archives.insert(resolved, archive.clone());
-                archive
-            };
-            bindings.insert(key, archive);
+                // The reference has no guaranteed final fallback resource.
+                Err(error) if category != Category::Tile => {
+                    tracing::warn!(art_id = fid.0, sprite = %resolved, %error, "object art is missing; not drawn");
+                    self.missing.insert(key);
+                }
+                Err(error) => return Err(format!("{resolved}: {error}").into()),
+            }
         }
-        let art = MapSprites { bindings };
+        self.tiles = Some(identity);
         for object in map.objects.elevations.iter().flatten() {
             let category = Category::from_pid(object.pid)?;
-            if let Some(archive) = art
+            if let Some(archive) = self
                 .bindings
                 .get(&(category, object.art_id, object.orientation))
                 && object.frame >= archive.frame_count()
@@ -311,7 +339,7 @@ impl MapSprites {
                 );
             }
         }
-        Ok(art)
+        Ok(())
     }
 }
 impl MapPreview {
@@ -355,7 +383,8 @@ impl MapPreview {
         }
         host.load_map(path.as_str())?;
         let map = host.world.render_snapshot();
-        let art = MapSprites::load(&*host.assets.vfs, &map)?;
+        let mut art = MapSprites::default();
+        art.bind(&host.assets, &map)?;
         let mut view = MapView::new(&map, 640, 380)?;
         view.grid = HexGrid::centered(host.world.camera_hex, 640, 380)?;
         view.elevation = host.world.elevation;
@@ -394,6 +423,7 @@ impl MapPreview {
             fades: Default::default(),
             startup_fade: false,
             debug: None,
+            light: Default::default(),
         })
     }
     /// Whether the save/load screen is open (the main menu's load stage).
@@ -658,37 +688,17 @@ impl MapPreview {
     /// The 640-by-380 map view: sprites under the world lighting.
     pub(crate) fn map_view_image(&mut self) -> AppResult<IndexedImage> {
         let map = self.host.world.render_snapshot();
-        if map.objects.elevations.iter().flatten().any(|object| {
-            !object.flags.contains(BasicFlags::HIDDEN)
-                && Category::from_pid(object.pid).is_ok_and(|category| {
-                    !self
-                        .art
-                        .bindings
-                        .contains_key(&(category, object.art_id, object.orientation))
-                })
-        }) {
-            self.art = MapSprites::load(&*self.host.assets.vfs, &map)?;
-        }
+        self.art.bind(&self.host.assets, &map)?;
         let mut image = render_map(&map, self.view, &self.art)?;
-        for y in 0..image.height() {
-            for x in 0..image.width() {
-                let light = self.view.grid.pick_hex([x as i32, y as i32]).map_or(
-                    self.host.world.ambient,
-                    |hex| {
-                        self.host.world.tile_light[self.view.elevation as usize][hex as usize]
-                            .max(i64::from(self.host.world.ambient))
-                            .min(65536) as i32
-                    },
-                );
-                let index = (y * image.width() + x) as usize;
-                let color = image.pixels()[index];
-                if color != 0 {
-                    image.pixels_mut()[index] = self
-                        .palette
-                        .intensity(color, ((light as u32 * 128) / 65536) as u8);
-                }
-            }
-        }
+        let size = [image.width(), image.height()];
+        self.light.shade(
+            image.pixels_mut(),
+            size,
+            self.view.grid,
+            &self.palette,
+            &self.host.world.tile_light[self.view.elevation as usize],
+            self.host.world.ambient,
+        );
         Ok(image)
     }
     /// The map screen: a conversation's window, or the map view with the

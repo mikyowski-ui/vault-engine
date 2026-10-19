@@ -97,6 +97,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub(crate) arriving: bool,
     /// A debugger's live trace of script execution, when attached.
     pub vm_observer: Option<std::sync::Arc<std::sync::Mutex<dyn VmObserver>>>,
+    /// Presentation-only draws (a dead critter's look-at line), apart from
+    /// the world's generator so looking never moves its sequence.
+    pub presentation_rng: crate::ParkMiller,
 }
 impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn prototype(&self, pid: u32) -> Result<std::sync::Arc<vault_formats::Prototype>, WorldError> {
@@ -226,6 +229,7 @@ impl<A: WorldAssets> WorldHost<A> {
             presentation: None,
             arriving: false,
             vm_observer: None,
+            presentation_rng: crate::ParkMiller::seeded(1).expect("a positive seed"),
         }
     }
     pub fn rules(&mut self, rules: WorldRules) {
@@ -1458,7 +1462,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 // SPEC-014 §3.27: `proto.msg` 490, or 491/492 at random
                 // for a dead critter, naming the object; nothing while the
                 // player is dead. Without the catalog the short text is the
-                // name (with "Dead " for a dead critter).
+                // name (with "Dead " for a dead critter). The pick draws
+                // from the presentation generator, not the world's.
                 ObjectAction::LookAt if self.world.is_dead(self.world.player) => {}
                 ObjectAction::LookAt => {
                     let object = self.world.get(target).expect("target");
@@ -1470,7 +1475,7 @@ impl<A: WorldAssets> WorldHost<A> {
                                 .as_ref()
                                 .is_some_and(|sheet| sheet.current_hp <= 0));
                     let id = if dead {
-                        crate::RandomSource::range(&mut self.world.rng, 491, 492)?
+                        crate::RandomSource::range(&mut self.presentation_rng, 491, 492)?
                     } else {
                         490
                     };
