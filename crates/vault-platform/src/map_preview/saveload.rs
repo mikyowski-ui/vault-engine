@@ -197,22 +197,23 @@ impl MapPreview {
             .into_iter()
             .zip([104, 105])
         {
-            painter.blit(&mut image, "lilredup.frm", 0, button);
+            let rect = vault_core::ui::Rect::new(button[0], button[1], 15, 16);
+            let art = self.button_art(rect, "lilredup.frm", "lilreddn.frm");
+            painter.blit(&mut image, art, 0, button);
             let text = painter.message("lsgame.msg", id);
             painter.text(&mut image, 103, ColorKey::LABEL, &text, caption, 80);
         }
-        painter.blit(
-            &mut image,
-            "uparwoff.frm",
-            0,
-            [saveload::ARROW_UP.x, saveload::ARROW_UP.y],
-        );
-        painter.blit(
-            &mut image,
-            "dnarwoff.frm",
-            0,
-            [saveload::ARROW_DOWN.x, saveload::ARROW_DOWN.y],
-        );
+        for (rect, up, down) in [
+            (saveload::ARROW_UP, "uparwoff.frm", "uparwon.frm"),
+            (saveload::ARROW_DOWN, "dnarwoff.frm", "dnarwon.frm"),
+        ] {
+            painter.blit(
+                &mut image,
+                self.button_art(rect, up, down),
+                0,
+                [rect.x, rect.y],
+            );
+        }
         if screen.confirm {
             let [ox, oy] = [169, 131];
             painter.blit_opaque(&mut image, flow::DialogSize::Large.art().0, 0, [ox, oy]);
@@ -383,18 +384,20 @@ impl MapPreview {
         if screen.description.is_some() || screen.confirm {
             return true;
         }
-        let hit = |origin: [i32; 2]| {
-            vault_core::ui::Rect::new(origin[0], origin[1], 15, 16).contains(point)
-        };
-        if hit(saveload::DONE.0) {
+        let red = |origin: [i32; 2]| vault_core::ui::Rect::new(origin[0], origin[1], 15, 16);
+        if red(saveload::DONE.0).contains(point) {
+            self.held = Some(red(saveload::DONE.0));
             self.play_effect(BUTTON_PRESS.as_bytes(), None);
             self.commit_slot();
-        } else if hit(saveload::CANCEL.0) {
-            self.press();
+        } else if red(saveload::CANCEL.0).contains(point) {
+            self.press_button(red(saveload::CANCEL.0));
             self.close_save_screen();
         } else if saveload::ARROW_UP.contains(point) {
+            // The arrows use the red-button sounds.
+            self.press_button(saveload::ARROW_UP);
             self.slot_list.key(ListKey::Up);
         } else if saveload::ARROW_DOWN.contains(point) {
+            self.press_button(saveload::ARROW_DOWN);
             self.slot_list.key(ListKey::Down);
         } else if saveload::LIST_AREA.contains(point)
             && let Click::Done(_) = self.slot_list.click(point[1])

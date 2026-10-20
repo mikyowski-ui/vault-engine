@@ -1,7 +1,8 @@
 //! SPEC-013 §3.21 the elevator window: background, optional panel, the
-//! level buttons and the gauge. A chosen level plays the travel sound and
-//! moves the player (or requests the map change); Esc cancels and, under
-//! the safe rule, changes nothing.
+//! level buttons and the gauge. A level button plays `ib1p1xx1` on the
+//! press and reports on the release over it; a chosen level plays the
+//! travel sound and moves the player (or requests the map change); Esc
+//! cancels and, under the safe rule, changes nothing.
 use super::{MapPreview, Screen};
 use crate::{AppResult, interface::Painter};
 use vault_core::{
@@ -17,6 +18,12 @@ pub(crate) struct ElevatorScreen {
 }
 
 const BUTTON: [i32; 2] = [48, 50];
+
+/// Level button `i`'s screen rectangle in the window at `origin`.
+fn elevator_button(origin: [i32; 2], i: usize) -> Rect {
+    let [x, y] = skills::elevator_button(i);
+    Rect::new(origin[0] + x, origin[1] + y, BUTTON[0], BUTTON[1])
+}
 
 impl MapPreview {
     /// A deferred elevator request opens the window over the world.
@@ -55,13 +62,9 @@ impl MapPreview {
             );
         }
         for i in 0..elevator.buttons() {
-            let [x, y] = skills::elevator_button(i);
-            painter.blit(
-                &mut image,
-                "ebut_out.frm",
-                0,
-                [origin[0] + x, origin[1] + y],
-            );
+            let rect = elevator_button(origin, i);
+            let art = self.button_art(rect, "ebut_out.frm", "ebut_in.frm");
+            painter.blit(&mut image, art, 0, [rect.x, rect.y]);
         }
         let (gauge, [gx, gy], [w, h]) = skills::GAUGE;
         let cell = elevator.gauge_cell(start);
@@ -102,14 +105,31 @@ impl MapPreview {
         };
         let origin = self.elevator_origin(&painter, kind);
         let buttons = skills::elevator(kind).map_or(0, |e| e.buttons());
-        let local = [point[0] - origin[0], point[1] - origin[1]];
-        if let Some(level) = (0..buttons).find(|i| {
-            let [x, y] = skills::elevator_button(*i);
-            Rect::new(x, y, BUTTON[0], BUTTON[1]).contains(local)
-        }) {
+        if let Some(rect) = (0..buttons)
+            .map(|i| elevator_button(origin, i))
+            .find(|rect| rect.contains(point))
+        {
+            self.held = Some(rect);
             self.play_effect(BUTTON_PRESS.as_bytes(), None);
-            self.choose_level(Some(level));
         }
+        true
+    }
+    /// A left release over the held level button (`over`) chooses it.
+    pub(crate) fn elevator_release(&mut self, over: Option<Rect>) -> bool {
+        let Screen::Elevator(screen) = &self.screen else {
+            return false;
+        };
+        let kind = screen.kind;
+        let painter = Painter {
+            assets: &self.host.assets,
+            palette: &self.palette,
+        };
+        let origin = self.elevator_origin(&painter, kind);
+        let buttons = skills::elevator(kind).map_or(0, |e| e.buttons());
+        let Some(level) = (0..buttons).find(|i| over == Some(elevator_button(origin, *i))) else {
+            return false;
+        };
+        self.choose_level(Some(level));
         true
     }
     pub(crate) fn elevator_key(&mut self, key: KeyCode) -> bool {

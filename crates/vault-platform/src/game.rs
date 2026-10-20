@@ -120,6 +120,13 @@ pub struct Game {
     /// in place of the stage's palette once one has ended.
     fade: Option<GameFade>,
     shown: Option<[[u8; 3]; 256]>,
+    /// The menu, selection or editor button pressed and still held, as a
+    /// screen rectangle, and the pointer: the button shows its down art
+    /// while the pointer stays over it (a world tracks its own).
+    held: Option<Rect>,
+    pointer: Option<[i32; 2]>,
+    /// The last frame drew the held button down.
+    held_shown: bool,
 }
 
 /// One fade over the fixed 700 ms of the §3.2 safe rule: step k of n sets
@@ -196,6 +203,9 @@ impl Game {
             finished: false,
             fade: None,
             shown: None,
+            held: None,
+            pointer: None,
+            held_shown: false,
         };
         // §3.1 splash: the configured start, without wrapping the stored value.
         let start = config.get_int("system", "splash").unwrap_or(0);
@@ -616,7 +626,7 @@ impl Game {
             }
             Stage::Menu { .. } => {
                 self.menu_poll(MenuInput::None);
-                Ok(faded || fading)
+                Ok(faded || fading || self.held_moved())
             }
             Stage::Credits { scroll, last, .. } => {
                 let mut changed = false;
@@ -682,8 +692,17 @@ impl Game {
                 }
                 Ok(changed)
             }
-            Stage::Selection | Stage::Editor(_) => Ok(false),
+            Stage::Selection | Stage::Editor(_) => Ok(self.held_moved()),
         }
+    }
+    /// The held button, while the pointer is over it.
+    fn held_button(&self) -> Option<Rect> {
+        self.held
+            .filter(|rect| self.pointer.is_some_and(|at| rect.contains(at)))
+    }
+    /// The pointer moved onto or off the held button since the last frame.
+    fn held_moved(&self) -> bool {
+        self.held_button().is_some() != self.held_shown
     }
     fn movie_done(&mut self) {
         let Stage::Movie { next, .. } =
@@ -816,6 +835,11 @@ impl Game {
     }
 
     pub fn image(&mut self) -> AppResult<IndexedImage> {
+        let held = self.held_button();
+        self.held_shown = held.is_some();
+        let art = |rect: Rect, (up, down): (&'static str, &'static str)| {
+            if held == Some(rect) { down } else { up }
+        };
         let painter = Painter {
             assets: &self.assets,
             palette: &self.palette,
@@ -831,7 +855,8 @@ impl Game {
                 painter.blit_opaque(&mut image, flow::MENU_BACKGROUND, 0, [0, 0]);
                 for button in flow::MENU_BUTTONS {
                     let rect = button.rect();
-                    painter.blit(&mut image, flow::MENU_BUTTON_ART.0, 0, [rect.x, rect.y]);
+                    let up = art(rect, flow::MENU_BUTTON_ART);
+                    painter.blit(&mut image, up, 0, [rect.x, rect.y]);
                     let label = painter.message("misc.msg", button.label());
                     let origin = button.label_origin(painter.width(104, &label));
                     painter.text(&mut image, 104, flow::MENU_LABEL_COLOR, &label, origin, 200);
@@ -867,8 +892,8 @@ impl Game {
                     painter.blit(&mut image, art, frame as usize, origin);
                 }
             }
-            Stage::Selection => self.draw_selection(&painter, &mut image),
-            Stage::Editor(stage) => draw_editor(&painter, &mut image, stage),
+            Stage::Selection => self.draw_selection(&painter, &mut image, held),
+            Stage::Editor(stage) => draw_editor(&painter, &mut image, stage, held),
             Stage::Death { .. } => {
                 painter.blit_opaque(&mut image, flow::DEATH_ART, 0, [0, 0]);
             }
@@ -900,7 +925,7 @@ impl Game {
         }
         Ok(image)
     }
-    fn draw_selection(&self, painter: &Painter, image: &mut IndexedImage) {
+    fn draw_selection(&self, painter: &Painter, image: &mut IndexedImage, held: Option<Rect>) {
         painter.blit_opaque(image, flow::SELECTION_BACKGROUND, 0, [0, 0]);
         let premade = flow::PREMADES[self.selection];
         // The portrait with every odd row left out (the scan-line effect).
@@ -1022,21 +1047,17 @@ impl Game {
                 }
             }
         }
+        let art = |rect: Rect, up, down| if held == Some(rect) { down } else { up };
         for origin in flow::SELECTION_BUTTONS {
-            painter.blit(image, "lilredup.frm", 0, origin);
+            let rect = red_button(origin);
+            painter.blit(image, art(rect, "lilredup.frm", "lilreddn.frm"), 0, origin);
         }
-        painter.blit(
-            image,
-            "slu.frm",
-            0,
-            [flow::SELECTION_PREVIOUS.x, flow::SELECTION_PREVIOUS.y],
-        );
-        painter.blit(
-            image,
-            "sru.frm",
-            0,
-            [flow::SELECTION_NEXT.x, flow::SELECTION_NEXT.y],
-        );
+        for (rect, up, down) in [
+            (flow::SELECTION_PREVIOUS, "slu.frm", "sld.frm"),
+            (flow::SELECTION_NEXT, "sru.frm", "srd.frm"),
+        ] {
+            painter.blit(image, art(rect, up, down), 0, [rect.x, rect.y]);
+        }
     }
 
     pub fn step(&mut self, key: KeyCode) -> bool {
@@ -1130,19 +1151,19 @@ impl Game {
                 player.press();
                 true
             }
+            // §3.4: a press plays `nmselec0`; the release over the button
+            // selects it.
             Stage::Menu { .. } => {
                 if let Some(button) = flow::MENU_BUTTONS
                     .into_iter()
                     .find(|b| b.rect().contains(point))
                 {
+                    self.held = Some(button.rect());
                     self.menu_poll(MenuInput::Press(button));
-                    self.menu_poll(MenuInput::Release(button));
                 }
                 true
             }
             Stage::Selection => {
-                let red =
-                    |origin: [i32; 2]| Rect::new(origin[0], origin[1], 15, 16).contains(point);
                 let actions = [
                     SelectionAction::Take,
                     SelectionAction::Modify,
@@ -1151,28 +1172,35 @@ impl Game {
                 ];
                 if let Some(index) = flow::SELECTION_BUTTONS
                     .iter()
-                    .position(|origin| red(*origin))
+                    .position(|origin| red_button(*origin).contains(point))
                 {
+                    self.held = Some(red_button(flow::SELECTION_BUTTONS[index]));
                     self.selection_action(actions[index]);
                 } else if flow::SELECTION_PREVIOUS.contains(point) {
+                    self.held = Some(flow::SELECTION_PREVIOUS);
                     self.selection_action(SelectionAction::Previous);
                 } else if flow::SELECTION_NEXT.contains(point) {
+                    self.held = Some(flow::SELECTION_NEXT);
                     self.selection_action(SelectionAction::Next);
                 }
                 true
             }
-            Stage::Editor(stage) => match editor_click(stage, point) {
-                EditorExit::Stay(handled) => handled,
-                EditorExit::Done(sheet) => {
-                    self.start_game(*sheet);
-                    true
+            Stage::Editor(stage) => {
+                // A press that closes the refusal box presses nothing.
+                self.held = editor_button(point).filter(|_| stage.refusal.is_none());
+                match editor_click(stage, point) {
+                    EditorExit::Stay(handled) => handled,
+                    EditorExit::Done(sheet) => {
+                        self.start_game(*sheet);
+                        true
+                    }
+                    EditorExit::Cancel => {
+                        self.sheet = self.premade(self.selection);
+                        self.stage = Stage::Selection;
+                        true
+                    }
                 }
-                EditorExit::Cancel => {
-                    self.sheet = self.premade(self.selection);
-                    self.stage = Stage::Selection;
-                    true
-                }
-            },
+            }
             Stage::Credits { scroll, .. } => {
                 scroll.input(CreditInput::Other, self.preferences.violence_level);
                 self.enter_menu();
@@ -1190,6 +1218,9 @@ impl Game {
         matches!(self.stage, Stage::World(_) | Stage::Load(_))
     }
     pub fn release(&mut self, point: Option<[i32; 2]>, right: bool) -> bool {
+        // A left release ends the held button's down art.
+        let held = if right { None } else { self.held.take() };
+        let over = held.filter(|rect| point.is_some_and(|point| rect.contains(point)));
         match &mut self.stage {
             Stage::World(world) | Stage::Load(world) => world.release(point, right),
             Stage::Movie { player, .. } => {
@@ -1199,13 +1230,30 @@ impl Game {
                 }
                 true
             }
-            _ => false,
+            Stage::Menu { .. } => {
+                if let Some(button) = flow::MENU_BUTTONS
+                    .into_iter()
+                    .find(|b| over == Some(b.rect()))
+                {
+                    self.menu_poll(MenuInput::Release(button));
+                }
+                held.is_some()
+            }
+            _ => held.is_some(),
+        }
+    }
+    /// The pointer left the window.
+    pub fn pointer_left(&mut self) {
+        self.pointer = None;
+        if let Some(world) = self.world() {
+            world.pointer_left();
         }
     }
     pub fn scroll(&mut self, delta: f64) -> bool {
         self.world().is_some_and(|world| world.scroll(delta))
     }
     pub fn hover(&mut self, point: [i32; 2]) -> Option<vault_render::map::MapHover> {
+        self.pointer = Some(point);
         self.world()?.hover(point)
     }
     pub fn set_modifiers(&mut self, modifiers: [bool; 3]) {
@@ -1225,6 +1273,23 @@ enum EditorExit {
 /// SPEC-014 §3.8 element positions used for clicks.
 const EDITOR_DONE: Rect = Rect::new(455, 454, 15, 16);
 const EDITOR_CANCEL: Rect = Rect::new(552, 454, 15, 16);
+
+/// A red button at `origin`.
+fn red_button(origin: [i32; 2]) -> Rect {
+    Rect::new(origin[0], origin[1], 15, 16)
+}
+/// The SPECIAL plus and minus buttons of row `y`.
+fn special_buttons(y: i32) -> [Rect; 2] {
+    [Rect::new(149, y, 16, 12), Rect::new(149, y + 11, 17, 12)]
+}
+/// The editor button with down art under `point`: Done, Cancel, or a
+/// SPECIAL plus or minus.
+fn editor_button(point: [i32; 2]) -> Option<Rect> {
+    [EDITOR_DONE, EDITOR_CANCEL]
+        .into_iter()
+        .chain(editor::SPECIAL_Y.iter().flat_map(|y| special_buttons(*y)))
+        .find(|rect| rect.contains(point))
+}
 
 fn editor_done(stage: &mut EditorStage) -> EditorExit {
     match stage.editor.done() {
@@ -1290,11 +1355,12 @@ fn editor_click(stage: &mut EditorStage, point: [i32; 2]) -> EditorExit {
     }
     let editor = &mut stage.editor;
     for (stat, y) in editor::SPECIAL_Y.iter().enumerate() {
-        if Rect::new(149, *y, 16, 12).contains(point) {
+        let [plus, minus] = special_buttons(*y);
+        if plus.contains(point) {
             editor.increment(stat);
             return EditorExit::Stay(true);
         }
-        if Rect::new(149, y + 11, 17, 12).contains(point) {
+        if minus.contains(point) {
             editor.decrement(stat);
             return EditorExit::Stay(true);
         }
@@ -1317,7 +1383,13 @@ fn editor_click(stage: &mut EditorStage, point: [i32; 2]) -> EditorExit {
     }
     EditorExit::Stay(true)
 }
-fn draw_editor(painter: &Painter, image: &mut IndexedImage, stage: &EditorStage) {
+fn draw_editor(
+    painter: &Painter,
+    image: &mut IndexedImage,
+    stage: &EditorStage,
+    held: Option<Rect>,
+) {
+    let art = |rect: Rect, up, down| if held == Some(rect) { down } else { up };
     let editor = &stage.editor;
     let context = StatContext::default();
     painter.blit_opaque(image, editor::BACKGROUND, 0, [0, 0]);
@@ -1365,8 +1437,14 @@ fn draw_editor(painter: &Painter, image: &mut IndexedImage, stage: &EditorStage)
             ColorKey::GREEN
         };
         painter.text(image, 101, key, &word, [103, y + 8], 50);
-        painter.blit(image, "splsoff.frm", 0, [149, *y]);
-        painter.blit(image, "snegoff.frm", 0, [149, y + 11]);
+        let [plus, minus] = special_buttons(*y);
+        painter.blit(image, art(plus, "splsoff.frm", "splson.frm"), 0, [149, *y]);
+        painter.blit(
+            image,
+            art(minus, "snegoff.frm", "snegon.frm"),
+            0,
+            [149, y + 11],
+        );
     }
     // Conditions: Hit Points with "max/max", then the (inactive at
     // creation) condition lines; the derived list beneath.
@@ -1471,7 +1549,8 @@ fn draw_editor(painter: &Painter, image: &mut IndexedImage, stage: &EditorStage)
         .zip([[363, 454], [475, 454], [571, 454]])
         .zip([101, 100, 102])
     {
-        painter.blit(image, "lilredup.frm", 0, *button);
+        let up = art(red_button(*button), "lilredup.frm", "lilreddn.frm");
+        painter.blit(image, up, 0, *button);
         let text = painter.message("editor.msg", id);
         painter.text(image, 103, ColorKey::LABEL, &text, caption, 80);
     }

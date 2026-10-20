@@ -112,6 +112,8 @@ pub(crate) struct Hud {
     /// §3.21 the HP and AC counters.
     pub hp: Counter,
     pub ac: Counter,
+    /// The bar button pressed and still held: it reports on the release.
+    pub held: Option<BarButton>,
 }
 impl Default for Hud {
     fn default() -> Self {
@@ -123,8 +125,19 @@ impl Default for Hud {
             turn_seen: false,
             hp: Counter::default(),
             ac: Counter::default(),
+            held: None,
         }
     }
+}
+
+/// A bar button's screen rectangle.
+fn bar_button_rect(button: BarButton) -> Rect {
+    let [bx, by] = bar::BAR_ORIGIN;
+    let (_, rect, ..) = bar::BAR_BUTTONS
+        .iter()
+        .find(|(found, ..)| *found == button)
+        .expect("a bar button");
+    Rect::new(bx + rect.x, by + rect.y, rect.w, rect.h)
 }
 
 /// The game-loop key for a physical key (with Shift for the shifted digits).
@@ -259,14 +272,14 @@ impl MapPreview {
     fn draw_bar(&self, painter: &Painter, image: &mut IndexedImage) {
         let [bx, by] = bar::BAR_ORIGIN;
         painter.blit_opaque(image, bar::BAR_BACKGROUND, 0, [bx, by]);
-        let at = |rect: Rect| [bx + rect.x, by + rect.y];
         let combat = self.host.world.combat;
-        for (button, rect, up, _, _) in bar::BAR_BUTTONS {
+        for (button, _, up, down, _) in bar::BAR_BUTTONS {
             if matches!(button, BarButton::EndTurn | BarButton::EndCombat) && !combat {
                 continue;
             }
             if button != BarButton::ItemSlot {
-                painter.blit(image, up, 0, at(rect));
+                let rect = bar_button_rect(button);
+                painter.blit(image, self.button_art(rect, up, down), 0, [rect.x, rect.y]);
             }
         }
         // The message monitor: six lines, each one pixel further right.
@@ -359,10 +372,16 @@ impl MapPreview {
         };
         self.host.world.wielded(self.host.world.player, mode)
     }
+    /// §3.23 the active item slot, in its up image or, while held, its
+    /// down image: `sattkbdn.frm`, the label darkened to light 59641/65536
+    /// one pixel right and two up, the cost one right and two up, and the
+    /// item art darkened to 63571/65536 one right and two up.
     fn draw_item_slot(&self, painter: &Painter, image: &mut IndexedImage) {
         let [bx, by] = bar::BAR_ORIGIN;
         let slot = bar::SLOT;
         let origin = [bx + slot.x, by + slot.y];
+        let pressed = self.held_button() == Some(Rect::new(origin[0], origin[1], slot.w, slot.h));
+        let level = |light: u32| (light * 128 / 65536) as u8;
         let item = self.active_item();
         let weapon = item
             .and_then(|item| self.host.world.get(item))
@@ -400,14 +419,25 @@ impl MapPreview {
                 painter.blit_opaque(image, bar::SLOT_DISABLED, 0, origin);
             }
             Some(digit) => {
-                painter.blit_opaque(image, "sattkbup.frm", 0, origin);
+                let background = if pressed {
+                    "sattkbdn.frm"
+                } else {
+                    "sattkbup.frm"
+                };
+                painter.blit_opaque(image, background, 0, origin);
                 if let Some(label) = bar::slot_label(action)
                     && let Some([w, _]) = painter.size(label)
                 {
-                    let [x, y] = bar::slot_label_origin(w, false);
-                    painter.blit(image, label, 0, [origin[0] + x, origin[1] + y]);
+                    let [x, y] = bar::slot_label_origin(w, pressed);
+                    let at = [origin[0] + x, origin[1] + y];
+                    if pressed {
+                        painter.blit_lit(image, label, at, level(bar::PRESSED_LABEL_LIGHT));
+                    } else {
+                        painter.blit(image, label, 0, at);
+                    }
                 }
-                let (art, label_at, _) = bar::COST_LABEL;
+                let (art, up_at, down_at) = bar::COST_LABEL;
+                let label_at = if pressed { down_at } else { up_at };
                 painter.blit(
                     image,
                     art,
@@ -416,7 +446,8 @@ impl MapPreview {
                 );
                 // Digit cells are 10 wide; the last (9) is clipped to the
                 // strip's 9 remaining columns (safe rule).
-                let (digits, digit_at, _) = bar::COST_DIGIT;
+                let (digits, up_at, down_at) = bar::COST_DIGIT;
+                let digit_at = if pressed { down_at } else { up_at };
                 let width = if digit == 9 { 9 } else { 10 };
                 painter.blit_region(
                     image,
@@ -439,14 +470,25 @@ impl MapPreview {
                     _ => None,
                 })
         });
-        // The item art, centered and (safe rule) clipped to the slot.
+        // The item art, centered and (safe rule) clipped to the slot; the
+        // down image draws it darkened at (x + 1, y - 2), from row 0 with
+        // two rows fewer when that goes above the slot.
         if let Some(fid) = inventory_art
             && let Ok(art) = vault_core::assets::WorldAssets::object_art(&self.host.assets, fid)
             && let Some(frame) = art.frame(0, 0)
         {
             let (w, h) = (i32::from(frame.width), i32::from(frame.height));
-            let [x, y] = bar::item_art_origin(w, h);
-            for row in 0..h {
+            let [mut x, mut y] = bar::item_art_origin(w, h);
+            let mut rows = h;
+            if pressed {
+                x += 1;
+                y -= 2;
+                if y < 0 {
+                    y = 0;
+                    rows = h - 2;
+                }
+            }
+            for row in 0..rows.max(0) {
                 for column in 0..w {
                     let (sx, sy) = (x + column, y + row);
                     let color = frame.pixels()[(row * w + column) as usize];
@@ -454,12 +496,20 @@ impl MapPreview {
                         continue;
                     }
                     let (dx, dy) = (origin[0] + sx, origin[1] + sy);
-                    image.pixels_mut()[(dy * 640 + dx) as usize] = color;
+                    image.pixels_mut()[(dy * 640 + dx) as usize] = if pressed {
+                        painter
+                            .palette
+                            .intensity(color, level(bar::PRESSED_ITEM_LIGHT))
+                    } else {
+                        color
+                    };
                 }
             }
         }
     }
-    /// A press in the bar (screen y of at least 379). Returns whether it was
+    /// A press in the bar (screen y of at least 379): a left press holds a
+    /// button down until the release, which sends its key; a right press
+    /// on the item slot cycles the item mode. Returns whether it was
     /// handled.
     pub(crate) fn bar_click(&mut self, point: [i32; 2], right: bool) -> bool {
         let [bx, by] = bar::BAR_ORIGIN;
@@ -473,20 +523,56 @@ impl MapPreview {
             return true;
         }
         let combat = self.host.world.combat;
-        let Some((button, ..)) = bar::BAR_BUTTONS.iter().find(|(button, rect, ..)| {
+        let Some(&(button, ..)) = bar::BAR_BUTTONS.iter().find(|(button, rect, ..)| {
             rect.contains(local)
                 && (combat || !matches!(button, BarButton::EndTurn | BarButton::EndCombat))
         }) else {
             return local[1] >= 0;
         };
-        let (press, release) = if *button == BarButton::ItemSlot {
+        let (press, release) = if button == BarButton::ItemSlot {
             bar::SLOT_SOUNDS
         } else {
             bar::BUTTON_SOUNDS
         };
-        self.press_cue(press.as_bytes(), release.as_bytes());
+        if right {
+            if button == BarButton::ItemSlot {
+                self.press_cue(press.as_bytes(), release.as_bytes());
+                self.game_action(Action::CycleItemMode);
+            }
+            return true;
+        }
+        self.press_button_cue(
+            press.as_bytes(),
+            release.as_bytes(),
+            bar_button_rect(button),
+        );
+        self.hud.held = Some(button);
+        true
+    }
+    /// A left release over the held bar button `button` (`over` is the
+    /// held rectangle when the release is over it): the button's release
+    /// sound, then its key, which plays `ib1p1xx1` as the game loop does,
+    /// or the item slot's use. A release off the button does nothing.
+    pub(crate) fn bar_release(&mut self, button: Option<BarButton>, over: Option<Rect>) -> bool {
+        let Some(button) = button else {
+            return false;
+        };
+        // The combat buttons are gone once combat has ended.
+        let gone =
+            matches!(button, BarButton::EndTurn | BarButton::EndCombat) && !self.host.world.combat;
+        if over != Some(bar_button_rect(button)) || gone {
+            return false;
+        }
+        if let Some(cue) = self.pressed.take() {
+            self.play_effect(cue, None);
+        }
+        if !matches!(
+            button,
+            BarButton::ItemSlot | BarButton::EndTurn | BarButton::EndCombat
+        ) {
+            self.play_effect(vault_core::ui::BUTTON_PRESS.as_bytes(), None);
+        }
         let _ = match button {
-            BarButton::ItemSlot if right => self.game_action(Action::CycleItemMode),
             BarButton::ItemSlot => {
                 self.use_item_slot();
                 true

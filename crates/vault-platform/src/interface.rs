@@ -71,6 +71,31 @@ impl Painter<'_> {
         );
         true
     }
+    /// A transparent blit of frame 0 with every pixel darkened to intensity
+    /// level `level` (128 leaves colors unchanged).
+    pub fn blit_lit(&self, image: &mut IndexedImage, name: &str, origin: [i32; 2], level: u8) {
+        let Some(art) = self.art(name) else {
+            return;
+        };
+        let Some(frame) = art.frame(0, 0) else {
+            return;
+        };
+        let (width, height) = (i32::from(frame.width), i32::from(frame.height));
+        let stride = image.width() as i32;
+        for y in 0..height {
+            for x in 0..width {
+                let color = frame.pixels()[(y * width + x) as usize];
+                let (dx, dy) = (origin[0] + x, origin[1] + y);
+                if color != 0
+                    && (0..stride).contains(&dx)
+                    && (0..image.height() as i32).contains(&dy)
+                {
+                    image.pixels_mut()[(dy * stride + dx) as usize] =
+                        self.palette.intensity(color, level);
+                }
+            }
+        }
+    }
     /// An opaque blit: every pixel, index 0 included.
     pub fn blit_opaque(
         &self,

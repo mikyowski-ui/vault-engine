@@ -109,6 +109,17 @@ pub(crate) struct PointerState {
     pub routes_planned: u32,
 }
 
+/// The loot and barter windows' cursor art.
+fn window_cursor(counter: bool, arrow: bool, over_entry: bool) -> &'static str {
+    use vault_core::ui::inventory::{ARROW_CURSOR, HAND_CURSOR};
+    match (counter, arrow, over_entry) {
+        (true, ..) => ARROW_CURSOR,
+        (false, true, true) => "actpick.frm",
+        (false, true, false) => ARROW_CURSOR,
+        (false, false, _) => HAND_CURSOR,
+    }
+}
+
 /// The map area's last row (the bar window starts below it).
 fn map_bottom() -> i32 {
     bar::BAR_ORIGIN[1]
@@ -209,7 +220,7 @@ impl MapPreview {
         if let Some(menu) = &mut self.pointer.menu {
             menu.tracker.moved(point[1]);
         }
-        self.inventory_pointer(point[1]);
+        self.window_pointer(point);
         // Leaving the map window out of combat drops the crosshair, use and
         // skill modes back to movement.
         let left_map = previous.is_some_and(|[_, y]| y <= map_bottom()) && point[1] > map_bottom();
@@ -663,12 +674,31 @@ impl MapPreview {
                 }
                 return;
             }
+            // SPEC-013 §3.16 the loot and barter cursors: none while the
+            // item menu is open, the arrow over a counter, the pick cursor
+            // over a filled entry in the arrow cursor, else the mode's arrow
+            // or hand.
             Screen::Loot(screen) => {
-                let art = if screen.counter.is_some() {
-                    vault_core::ui::inventory::ARROW_CURSOR
-                } else {
-                    vault_core::ui::inventory::HAND_CURSOR
-                };
+                if screen.menu.is_some() {
+                    return;
+                }
+                let art = window_cursor(
+                    screen.counter.is_some(),
+                    screen.arrow,
+                    self.window_entry_under(at),
+                );
+                painter.cursor(image, art, at);
+                return;
+            }
+            Screen::Barter(screen) => {
+                if screen.menu.is_some() {
+                    return;
+                }
+                let art = window_cursor(
+                    screen.dragged().is_none() && screen.counter_open(),
+                    screen.arrow,
+                    self.window_entry_under(at),
+                );
                 painter.cursor(image, art, at);
                 return;
             }

@@ -83,18 +83,30 @@ pub(crate) enum Count {
     Drop { item: ObjectRef },
 }
 
-/// An arrow-cursor press on an item, waiting for its release or the hold
-/// pulse.
+/// An arrow-cursor press on an item (in the inventory, use-on, loot or
+/// barter window), waiting for its release or the 250 ms hold pulse.
 #[derive(Debug, Clone, Copy)]
-struct ArrowPress {
-    item: ObjectRef,
+pub(crate) struct ArrowPress {
+    pub item: ObjectRef,
     next_pulse: u64,
+}
+impl ArrowPress {
+    pub(crate) fn new(item: ObjectRef, clock: u64) -> Self {
+        Self {
+            item,
+            next_pulse: clock + cursor::MENU_HOLD_MS,
+        }
+    }
+    /// The hold pulse is due: strictly more than 250 ms after the press.
+    pub(crate) fn due(&self, clock: u64) -> bool {
+        clock > self.next_pulse
+    }
 }
 
 /// The arrow cursor's item menu.
 #[derive(Debug, Clone)]
 pub(crate) struct ItemMenu {
-    item: ObjectRef,
+    pub item: ObjectRef,
     pub entries: Vec<ItemEntry>,
     pub tracker: MenuTracker,
     /// The pointer when it opened, where the release returns it.
@@ -102,6 +114,33 @@ pub(crate) struct ItemMenu {
     /// The menu's top after any upward shift, and whether it is flipped.
     pub top: i32,
     pub flipped: bool,
+}
+impl ItemMenu {
+    /// §3.34 a menu of `entries` for `item`, opened with the pointer at
+    /// `origin` in a window with the given edges.
+    pub(crate) fn new(
+        item: ObjectRef,
+        entries: Vec<ItemEntry>,
+        origin: [i32; 2],
+        edges: [i32; 2],
+    ) -> Self {
+        let (top, flipped) = layout::menu_place(origin, entries.len(), edges);
+        Self {
+            item,
+            tracker: MenuTracker::new(origin[1], entries.len()),
+            entries,
+            origin,
+            top,
+            flipped,
+        }
+    }
+    /// The highlighted entry, run on the release.
+    pub(crate) fn chosen(&self) -> ItemEntry {
+        self.entries
+            .get(self.tracker.highlight)
+            .copied()
+            .unwrap_or(ItemEntry::Cancel)
+    }
 }
 
 /// §3.34 the stats panel's examine text: the item's name, its examine text
@@ -158,6 +197,15 @@ const TIMER_PLUS: Rect = Rect::new(194, 64, 16, 12);
 const TIMER_MINUS: Rect = Rect::new(194, 76, 17, 12);
 const TIMER_DONE: Rect = Rect::new(98, 128, 15, 16);
 const TIMER_CANCEL: Rect = Rect::new(148, 128, 15, 16);
+/// A Set Timer button's screen rectangle.
+fn timer_button(rect: Rect) -> Rect {
+    Rect::new(
+        TIMER_ORIGIN[0] + rect.x,
+        TIMER_ORIGIN[1] + rect.y,
+        rect.w,
+        rect.h,
+    )
+}
 /// A screen rectangle `[x, y, w, h]` contains `point`.
 pub(crate) fn inside(rect: [i32; 4], point: [i32; 2]) -> bool {
     (rect[0]..rect[0] + rect[2]).contains(&point[0])
@@ -249,6 +297,21 @@ impl MapPreview {
             .and_then(|owner| owner.inventory.iter().find(|(entry, _)| *entry == item))
             .map_or(1, |(_, quantity)| *quantity)
     }
+    /// Unload a weapon: the ammunition goes, forced, to the weapon's owner
+    /// (SPEC-011 §3.15, SPEC-013 §3.16).
+    pub(crate) fn unload_to_owner(&mut self, item: ObjectRef) {
+        let owner = self.owner_of(item);
+        match self.host.world.unload_weapon(item) {
+            Ok(Some(ammo)) => {
+                if let Err(error) = self.host.world.add_item(owner, ammo, 1, true) {
+                    self.status = error.to_string().into_bytes();
+                }
+            }
+            Ok(None) => {}
+            Err(error) => self.status = error.to_string().into_bytes(),
+        }
+        self.drain_effects();
+    }
     /// The item's direct owner (the player when it has none).
     fn owner_of(&self, item: ObjectRef) -> ObjectRef {
         self.host
@@ -308,6 +371,16 @@ impl MapPreview {
         .into_iter()
         .find(|(_, rect)| rect.contains(point))
         .and_then(|(slot, _)| Some((slot, self.slot_item(slot)?)))
+    }
+    /// The red button at `origin`, sized by its art.
+    fn red_button(&self, origin: [i32; 2]) -> Rect {
+        let [w, h] = Painter {
+            assets: &self.host.assets,
+            palette: &self.palette,
+        }
+        .size(layout::RED_BUTTON.0)
+        .unwrap_or([15, 16]);
+        Rect::new(origin[0], origin[1], w, h)
     }
     /// Enter accepts the timer (arming the explosive), Esc cancels.
     fn finish_timer(&mut self, accept: bool) {
@@ -391,23 +464,36 @@ impl MapPreview {
         let Screen::Inventory(screen) = &mut self.screen else {
             return false;
         };
-        if let Some((counter, _)) = &mut screen.counter {
-            let input = counter_click(counter, point);
-            if input != CounterInput::Ignored {
-                self.press();
+        if screen.counter.is_some() {
+            if let Some(rect) = super::counter::counter_button(point) {
+                self.press_button(rect);
             }
+            let Screen::Inventory(screen) = &mut self.screen else {
+                return false;
+            };
+            let Some((counter, _)) = &mut screen.counter else {
+                return true;
+            };
+            let input = counter_click(counter, point);
             self.inventory_counter(input);
             return true;
         }
         if let Some((_, timer)) = &mut screen.timer {
-            let local = [point[0] - TIMER_ORIGIN[0], point[1] - TIMER_ORIGIN[1]];
-            if TIMER_PLUS.contains(local) {
+            let Some(button) = [TIMER_PLUS, TIMER_MINUS, TIMER_DONE, TIMER_CANCEL]
+                .into_iter()
+                .find(|&rect| timer_button(rect).contains(point))
+            else {
+                return true;
+            };
+            if button == TIMER_PLUS {
                 timer.plus();
-            } else if TIMER_MINUS.contains(local) {
+            } else if button == TIMER_MINUS {
                 timer.minus();
-            } else if TIMER_DONE.contains(local) {
+            }
+            self.held = Some(timer_button(button));
+            if button == TIMER_DONE {
                 self.finish_timer(true);
-            } else if TIMER_CANCEL.contains(local) {
+            } else if button == TIMER_CANCEL {
                 self.finish_timer(false);
             }
             return true;
@@ -432,14 +518,9 @@ impl MapPreview {
         } else {
             layout::DONE
         };
-        let [w, h] = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        }
-        .size(layout::RED_BUTTON.0)
-        .unwrap_or([15, 16]);
-        if Rect::new(red[0], red[1], w, h).contains(point) {
-            self.press();
+        let red = self.red_button(red);
+        if red.contains(point) {
+            self.press_button(red);
             self.return_to_map();
             return true;
         }
@@ -448,7 +529,7 @@ impl MapPreview {
         let count = self.list_entries().len();
         for (rect, down) in [(layout::SCROLL_UP.0, false), (layout::SCROLL_DOWN.0, true)] {
             if rect.contains(point) {
-                self.press();
+                self.press_button(rect);
                 if let Screen::Inventory(screen) = &mut self.screen {
                     if down && screen.offset + layout::ROWS < count {
                         screen.offset += 1;
@@ -466,11 +547,17 @@ impl MapPreview {
             }
             return true;
         };
+        // The use-on window has only the list: the hand cursor uses the
+        // pressed row's item on the target, the arrow cursor examines it
+        // or opens its menu.
         if let Some(target) = target {
             if !arrow && slot == Slot::List {
                 self.use_on_target(item, target);
+                return true;
             }
-            return true;
+            if slot != Slot::List {
+                return true;
+            }
         }
         let clock = self.clock;
         let has_art = self.item_icon(item).is_some();
@@ -478,10 +565,7 @@ impl MapPreview {
             return false;
         };
         if arrow {
-            screen.press = Some(ArrowPress {
-                item,
-                next_pulse: clock + cursor::MENU_HOLD_MS,
-            });
+            screen.press = Some(ArrowPress::new(item, clock));
         } else {
             screen.held = Some((slot, item));
             if has_art {
@@ -515,18 +599,20 @@ impl MapPreview {
             return false;
         };
         if let Some(menu) = screen.menu.take() {
-            let entry = menu
-                .entries
-                .get(menu.tracker.highlight)
-                .copied()
-                .unwrap_or(ItemEntry::Cancel);
             // The pointer returns to where it was when the menu opened.
             self.pointer.at = Some(menu.origin);
-            self.item_entry(menu.item, entry);
+            self.item_entry(menu.item, menu.chosen());
             return true;
         }
         if let Some(press) = screen.press.take() {
-            self.examine(press.item);
+            // A quick click: the examine text in the stats panel, or the
+            // short look line on the monitor in the use-on window, which
+            // has none.
+            if screen.target.is_some() {
+                self.look_line(press.item);
+            } else {
+                self.examine(press.item);
+            }
             return true;
         }
         if screen.counter.is_some() {
@@ -570,34 +656,37 @@ impl MapPreview {
         let Some(press) = screen.press else {
             return turned;
         };
-        if clock <= press.next_pulse {
+        if !press.due(clock) {
             return turned;
         }
         screen.press = None;
         let item = press.item;
         let entries = self.item_menu(item);
         let origin = at.unwrap_or([layout::WINDOW[0], 0]);
-        let (top, flipped) = layout::menu_place(origin, entries.len(), edges);
         if let Screen::Inventory(screen) = &mut self.screen {
-            screen.menu = Some(ItemMenu {
-                item,
-                tracker: MenuTracker::new(origin[1], entries.len()),
-                entries,
-                origin,
-                top,
-                flipped,
-            });
+            screen.menu = Some(ItemMenu::new(item, entries, origin, edges));
         }
         self.play_effect(cursor::MENU_OPEN_SOUND.as_bytes(), None);
         true
     }
-    /// The pointer moved with the item menu open.
-    pub(crate) fn inventory_pointer(&mut self, y: i32) {
-        if let Screen::Inventory(InventoryScreen {
-            menu: Some(menu), ..
-        }) = &mut self.screen
-        {
-            menu.tracker.moved(y);
+    /// The pointer moved over a window: an open item menu tracks the
+    /// vertical motion, and the loot and barter arrow cursors print the
+    /// short look line of a newly hovered entry.
+    pub(crate) fn window_pointer(&mut self, point: [i32; 2]) {
+        let menu = match &mut self.screen {
+            Screen::Inventory(screen) => screen.menu.as_mut(),
+            Screen::Loot(screen) => screen.menu.as_mut().map(|(_, menu)| menu),
+            Screen::Barter(screen) => screen.menu.as_mut().map(|(_, menu)| menu),
+            _ => None,
+        };
+        if let Some(menu) = menu {
+            menu.tracker.moved(point[1]);
+            return;
+        }
+        match self.screen {
+            Screen::Loot(_) => self.loot_hover(point),
+            Screen::Barter(_) => self.barter_hover(point),
+            _ => {}
         }
     }
     fn item_menu(&self, item: ObjectRef) -> Vec<ItemEntry> {
@@ -628,20 +717,7 @@ impl MapPreview {
         match entry {
             ItemEntry::Look => self.examine(item),
             ItemEntry::Use => self.use_item(item),
-            ItemEntry::Unload => {
-                // The ammunition goes, forced, to the weapon's owner.
-                let owner = self.owner_of(item);
-                match self.host.world.unload_weapon(item) {
-                    Ok(Some(ammo)) => {
-                        if let Err(error) = self.host.world.add_item(owner, ammo, 1, true) {
-                            self.status = error.to_string().into_bytes();
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => self.status = error.to_string().into_bytes(),
-                }
-                self.drain_effects();
-            }
+            ItemEntry::Unload => self.unload_to_owner(item),
             ItemEntry::Drop => {
                 let quantity = self.entry_quantity(item);
                 if quantity > 1 {
@@ -655,8 +731,30 @@ impl MapPreview {
             ItemEntry::Cancel => {}
         }
     }
-    /// The item's full examine text in the stats panel (not the monitor).
+    /// The short look line (the look-at text) on the monitor.
+    pub(crate) fn look_line(&mut self, item: ObjectRef) {
+        let player = self.host.world.player;
+        if let Err(error) = self.host.action(player, item, ObjectAction::LookAt) {
+            self.status = error.to_string().into_bytes();
+        }
+        self.drain_effects();
+    }
+    /// The full examine text on the monitor (a window without a stats
+    /// panel).
+    pub(crate) fn examine_line(&mut self, item: ObjectRef) {
+        let player = self.host.world.player;
+        if let Err(error) = self.host.action(player, item, ObjectAction::Description) {
+            self.status = error.to_string().into_bytes();
+        }
+        self.drain_effects();
+    }
+    /// The item's full examine text in the stats panel (not the monitor);
+    /// the use-on window has no panel, so there it goes to the monitor.
     fn examine(&mut self, item: ObjectRef) {
+        if matches!(&self.screen, Screen::Inventory(screen) if screen.target.is_some()) {
+            self.examine_line(item);
+            return;
+        }
         let player = self.host.world.player;
         let start = self.host.world.effects.len();
         if let Err(error) = self.host.action(player, item, ObjectAction::Description) {
@@ -1027,11 +1125,22 @@ impl MapPreview {
                 );
             }
         }
-        for (rect, up, _) in [layout::SCROLL_UP, layout::SCROLL_DOWN] {
-            painter.blit(&mut image, up, 0, [rect.x, rect.y]);
+        for (rect, up, down) in [layout::SCROLL_UP, layout::SCROLL_DOWN] {
+            painter.blit(
+                &mut image,
+                self.button_art(rect, up, down),
+                0,
+                [rect.x, rect.y],
+            );
         }
-        let red = if use_on { layout::CANCEL } else { layout::DONE };
-        painter.blit(&mut image, layout::RED_BUTTON.0, 0, red);
+        let red = self.red_button(if use_on { layout::CANCEL } else { layout::DONE });
+        let (up, down) = layout::RED_BUTTON;
+        painter.blit(
+            &mut image,
+            self.button_art(red, up, down),
+            0,
+            [red.x, red.y],
+        );
         self.draw_figure(&mut image);
         if !use_on {
             self.draw_slots(&mut image, lifted);
@@ -1052,20 +1161,19 @@ impl MapPreview {
             for (x, digit) in timer.digits() {
                 painter.big_digit(&mut image, digit, [ox + x, oy + 64], false);
             }
-            painter.blit(
-                &mut image,
-                "splsoff.frm",
-                0,
-                [ox + TIMER_PLUS.x, oy + TIMER_PLUS.y],
-            );
-            painter.blit(
-                &mut image,
-                "snegoff.frm",
-                0,
-                [ox + TIMER_MINUS.x, oy + TIMER_MINUS.y],
-            );
-            for rect in [TIMER_DONE, TIMER_CANCEL] {
-                painter.blit(&mut image, "lilredup.frm", 0, [ox + rect.x, oy + rect.y]);
+            for (rect, up, down) in [
+                (TIMER_PLUS, "splsoff.frm", "splson.frm"),
+                (TIMER_MINUS, "snegoff.frm", "snegon.frm"),
+                (TIMER_DONE, "lilredup.frm", "lilreddn.frm"),
+                (TIMER_CANCEL, "lilredup.frm", "lilreddn.frm"),
+            ] {
+                let rect = timer_button(rect);
+                painter.blit(
+                    &mut image,
+                    self.button_art(rect, up, down),
+                    0,
+                    [rect.x, rect.y],
+                );
             }
         }
         if let Some((counter, count)) = &screen.counter {
@@ -1079,6 +1187,7 @@ impl MapPreview {
                 &mut image,
                 counter,
                 icon.as_ref().and_then(|icon| icon.frame(0, 0)),
+                self.held_button(),
             );
         }
         Ok(image)
@@ -1310,7 +1419,12 @@ impl MapPreview {
     /// at the menu's top-left, or `actarrom.frm` at its top-right when
     /// flipped, then the 40-by-40 icons, the highlighted entry in its `h`
     /// art.
-    fn draw_item_menu(&self, painter: &Painter, image: &mut IndexedImage, menu: &ItemMenu) {
+    pub(crate) fn draw_item_menu(
+        &self,
+        painter: &Painter,
+        image: &mut IndexedImage,
+        menu: &ItemMenu,
+    ) {
         let x = menu.origin[0];
         let (arrow, arrow_x, icons_x) = if menu.flipped {
             ("actarrom.frm", x - 28, x - 68)

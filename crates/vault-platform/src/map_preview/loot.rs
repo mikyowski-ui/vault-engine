@@ -1,20 +1,26 @@
 //! SPEC-013 §3.16-3.17 the container/corpse loot window (and steal mode)
-//! over the world, with the move-items counter. A drag lifts an entry on
+//! over the world, with the move-items counter. The right button toggles
+//! the hand and arrow cursors. In the hand cursor a drag lifts an entry on
 //! the left press (the steal attempt counts here, `ipickup1`) and drops it
-//! on the release (`iputdown`) when the pointer is over the other pane.
+//! on the release (`iputdown`) when the pointer is over the other pane. In
+//! the arrow cursor a hovered entry prints its short look line, a quick
+//! click prints it too, and a held press opens the action menu: Look,
+//! Unload or Use, Drop (the player's own items), Cancel. Use opens a
+//! container in its pane; the portrait hot zones go back up a level.
 use super::{
     MapPreview, Screen,
     counter::{CounterInput, counter_click, counter_key, draw_counter},
+    inventory::{ArrowPress, ItemMenu},
 };
 use crate::{AppResult, interface::Painter};
 use vault_core::{
     ObjectRef,
     assets::WorldAssets,
     loot::{LootMove, LootSession},
-    skills::{self, Counter},
-    ui::{BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect},
+    skills::{self, Counter, ItemEntry},
+    ui::{BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect, cursor, inventory as layout},
 };
-use vault_formats::pro::PrototypeData;
+use vault_formats::pro::{ItemData, PrototypeData};
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
@@ -24,11 +30,41 @@ pub(crate) struct LootScreen {
     pub offsets: [usize; 2],
     /// The lifted entry: its pane (true for the target) and item.
     pub held: Option<(bool, ObjectRef, i32)>,
-    /// The open move-items counter for the lifted entry's drop.
-    pub counter: Option<(Counter, bool)>,
+    /// The open move-items counter: the lifted entry's move, or a Drop.
+    pub counter: Option<(Counter, LootCount)>,
+    /// The arrow cursor (else the hand).
+    pub arrow: bool,
+    /// An arrow press and its pane, waiting for its release or the hold
+    /// pulse.
+    press: Option<(bool, ArrowPress)>,
+    /// The arrow cursor's item menu and its pane.
+    pub menu: Option<(bool, ItemMenu)>,
+    /// The entry under the arrow cursor, whose look line was printed.
+    hovered: Option<ObjectRef>,
+}
+
+/// What the loot window's counter counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LootCount {
+    /// The lifted entry into a pane (true for the target).
+    Move(bool),
+    /// The menu's Drop of an item at the player's position.
+    Drop(ObjectRef),
 }
 
 const DONE: Rect = Rect::new(288, 328, 15, 16);
+/// Body cycling (sending PgUp and PgDn) with its up and down art.
+const CYCLE: [(Rect, bool, &str, &str); 2] = [
+    (Rect::new(436, 162, 20, 18), false, "slu.frm", "sld.frm"),
+    (Rect::new(456, 162, 20, 18), true, "sru.frm", "srd.frm"),
+];
+/// The portrait boxes and their hot zones, which go up one container
+/// level: the player's (under the safe rule over the drawn portrait at
+/// (176, 37), with item slots winning) and the target's.
+const PORTRAITS: [(bool, Rect); 2] = [
+    (false, Rect::new(176, 37, 60, 100)),
+    (true, Rect::new(297, 37, 60, 100)),
+];
 const SLOT: [i32; 2] = [64, 48];
 const SCROLL: [(bool, bool, Rect); 4] = [
     (false, true, Rect::new(128, 39, 22, 23)),
@@ -62,6 +98,10 @@ impl MapPreview {
                     offsets: [0, 0],
                     held: None,
                     counter: None,
+                    arrow: false,
+                    press: None,
+                    menu: None,
+                    hovered: None,
                 }))
             }
             Ok(None) => {}
@@ -129,31 +169,215 @@ impl MapPreview {
                 }
             }
         }
+        for target in [false, true] {
+            self.draw_portrait(&mut image, screen, target);
+        }
         for (_, up, rect) in SCROLL {
-            let art = if up { "invupout.frm" } else { "invdnout.frm" };
+            let art = if up {
+                self.button_art(on_screen(rect), "invupout.frm", "invupin.frm")
+            } else {
+                self.button_art(on_screen(rect), "invdnout.frm", "invdnin.frm")
+            };
             painter.blit(&mut image, art, 0, [ox + rect.x, oy + rect.y]);
         }
         if screen.session.bodies.len() > 1 {
-            painter.blit(&mut image, "slu.frm", 0, [ox + 436, oy + 162]);
-            painter.blit(&mut image, "sru.frm", 0, [ox + 456, oy + 162]);
+            for (rect, _, up, down) in CYCLE {
+                let art = self.button_art(on_screen(rect), up, down);
+                painter.blit(&mut image, art, 0, [ox + rect.x, oy + rect.y]);
+            }
         }
-        painter.blit(&mut image, "lilredup.frm", 0, [ox + DONE.x, oy + DONE.y]);
-        if let Some((counter, _)) = &screen.counter {
-            let icon = screen.held.and_then(|(_, item, _)| self.item_icon(item));
+        let done = self.button_art(on_screen(DONE), "lilredup.frm", "lilreddn.frm");
+        painter.blit(&mut image, done, 0, [ox + DONE.x, oy + DONE.y]);
+        if let Some((_, menu)) = &screen.menu {
+            self.draw_item_menu(&painter, &mut image, menu);
+        }
+        if let Some((counter, count)) = &screen.counter {
+            let item = match count {
+                LootCount::Drop(item) => Some(*item),
+                LootCount::Move(_) => screen.held.map(|(_, item, _)| item),
+            };
+            let icon = item.and_then(|item| self.item_icon(item));
             draw_counter(
                 &painter,
                 &mut image,
                 counter,
                 icon.as_ref().and_then(|icon| icon.frame(0, 0)),
+                self.held_button(),
             );
         }
         Ok(image)
+    }
+    /// §3.16 a pane's portrait, centered in its 60-by-100 box and clipped
+    /// to it: the player's figure with the active hand's weapon code facing
+    /// southwest (3), frame 0; the target's art at its facing, last frame;
+    /// an open container's own world art.
+    fn draw_portrait(&self, image: &mut IndexedImage, screen: &LootScreen, target: bool) {
+        let session = &screen.session;
+        let shown = session.shown(target);
+        let world = &self.host.world;
+        let (fid, direction, last) = if shown != if target { session.root } else { session.looter }
+        {
+            (world.get(shown).map(|o| o.raw.art_id), 0, false)
+        } else if target {
+            let object = world.get(shown);
+            (
+                object.map(|o| o.raw.art_id),
+                object.map_or(0, |o| usize::from(o.raw.orientation)),
+                true,
+            )
+        } else {
+            (self.host.figure_art(shown, self.active_item(), 3), 3, false)
+        };
+        let Some(art) = fid.and_then(|fid| self.host.assets.object_art(fid).ok()) else {
+            return;
+        };
+        let index = if last {
+            art.frame_count().saturating_sub(1)
+        } else {
+            0
+        };
+        let Some(frame) = art.frame(direction, index).or_else(|| art.frame(0, index)) else {
+            return;
+        };
+        let rect = on_screen(PORTRAITS[usize::from(target)].1);
+        let origin = [
+            i64::from(rect.x + (rect.w - i32::from(frame.width)) / 2),
+            i64::from(rect.y + (rect.h - i32::from(frame.height)) / 2),
+        ];
+        image.blit_within(
+            frame,
+            origin,
+            [rect.x, rect.y, rect.w, rect.h].map(i64::from),
+        );
     }
     fn close_loot_screen(&mut self) {
         let Screen::Loot(screen) = std::mem::replace(&mut self.screen, Screen::Map) else {
             return;
         };
         if let Err(error) = self.host.close_loot(screen.session) {
+            self.status = error.to_string().into_bytes();
+        }
+        self.drain_effects();
+    }
+    /// The entries a pane shows.
+    fn loot_entries(&self, target: bool) -> Vec<(ObjectRef, i32)> {
+        match &self.screen {
+            Screen::Loot(screen) => self.host.loot_items(&screen.session, target),
+            _ => Vec::new(),
+        }
+    }
+    /// The filled entry at a screen point, and its pane.
+    fn loot_entry_at(&self, point: [i32; 2]) -> Option<(bool, ObjectRef, i32)> {
+        let Screen::Loot(screen) = &self.screen else {
+            return None;
+        };
+        let [ox, oy] = skills::LOOT_ORIGIN;
+        let local = [point[0] - ox, point[1] - oy];
+        [false, true].into_iter().find_map(|target| {
+            let row = (0..skills::LOOT_ROWS).find(|row| slot(target, *row).contains(local))?;
+            let entries = self.host.loot_items(&screen.session, target);
+            let (item, quantity) = entries
+                .get(screen.offsets[usize::from(target)] + row)
+                .copied()?;
+            Some((target, item, quantity))
+        })
+    }
+    /// Whether a filled loot or barter entry is under a screen point (for
+    /// the pick cursor).
+    pub(crate) fn window_entry_under(&self, point: [i32; 2]) -> bool {
+        match self.screen {
+            Screen::Loot(_) => self.loot_entry_at(point).is_some(),
+            Screen::Barter(_) => self.barter_entry_at_point(point),
+            _ => false,
+        }
+    }
+    /// §3.16 the arrow cursor over a filled entry prints its short look
+    /// line when the hovered entry changes.
+    pub(crate) fn loot_hover(&mut self, point: [i32; 2]) {
+        let entry = self.loot_entry_at(point).map(|(_, item, _)| item);
+        let Screen::Loot(screen) = &mut self.screen else {
+            return;
+        };
+        if !screen.arrow || screen.held.is_some() || screen.hovered == entry {
+            return;
+        }
+        screen.hovered = entry;
+        if let Some(item) = entry {
+            self.look_line(item);
+        }
+    }
+    /// The hold pulse of an arrow press opens the item menu at the pointer.
+    pub(crate) fn loot_tick(&mut self) -> bool {
+        let (clock, at) = (self.clock, self.pointer.at);
+        let Screen::Loot(screen) = &mut self.screen else {
+            return false;
+        };
+        let Some((target, press)) = screen.press.filter(|(_, press)| press.due(clock)) else {
+            return false;
+        };
+        screen.press = None;
+        let entries = self.loot_menu(target, press.item);
+        let origin = at.unwrap_or(skills::LOOT_ORIGIN);
+        if let Screen::Loot(screen) = &mut self.screen {
+            screen.menu = Some((
+                target,
+                ItemMenu::new(press.item, entries, origin, layout::LOOT_EDGES),
+            ));
+        }
+        self.play_effect(cursor::MENU_OPEN_SOUND.as_bytes(), None);
+        true
+    }
+    /// §3.16 the menu: Look, then Unload for a weapon holding ammunition or
+    /// Use for a container, Drop for the player's own items, and Cancel.
+    fn loot_menu(&self, target: bool, item: ObjectRef) -> Vec<ItemEntry> {
+        let data =
+            self.host
+                .world
+                .get(item)
+                .and_then(|object| match &object.prototype.as_deref()?.data {
+                    PrototypeData::Item(item) => Some(&item.data),
+                    _ => None,
+                });
+        let unloadable = matches!(data, Some(ItemData::Weapon(gun)) if gun.capacity > 0)
+            && self.host.world.loaded(item).0 > 0;
+        let container = matches!(data, Some(ItemData::Container { .. }));
+        skills::item_menu(!target, unloadable, container)
+    }
+    /// §3.16 an action menu entry: Look prints the full examine text; Unload
+    /// adds the ammunition, forced, to the item's owner; Use opens a
+    /// container in its pane, up to nine deep; Drop drops the item at the
+    /// player's position, through the counter for a stack.
+    fn loot_entry(&mut self, target: bool, item: ObjectRef, entry: ItemEntry) {
+        match entry {
+            ItemEntry::Look => self.examine_line(item),
+            ItemEntry::Unload => self.unload_to_owner(item),
+            ItemEntry::Use => {
+                if let Screen::Loot(screen) = &mut self.screen
+                    && screen.session.open_container(target, item)
+                {
+                    screen.offsets[usize::from(target)] = 0;
+                }
+            }
+            ItemEntry::Drop => {
+                let quantity = self
+                    .loot_entries(target)
+                    .iter()
+                    .find(|(entry, _)| *entry == item)
+                    .map_or(1, |(_, quantity)| *quantity);
+                if quantity > 1 {
+                    if let Screen::Loot(screen) = &mut self.screen {
+                        screen.counter = Some((Counter::new(quantity), LootCount::Drop(item)));
+                    }
+                } else {
+                    self.loot_drop_ground(item, 1);
+                }
+            }
+            ItemEntry::Cancel => {}
+        }
+    }
+    fn loot_drop_ground(&mut self, item: ObjectRef, quantity: i32) {
+        let player = self.host.world.player;
+        if let Err(error) = self.host.world.drop_item(player, item, quantity) {
             self.status = error.to_string().into_bytes();
         }
         self.drain_effects();
@@ -178,25 +402,44 @@ impl MapPreview {
         }
     }
     pub(crate) fn loot_click(&mut self, point: [i32; 2], right: bool) -> bool {
+        let clock = self.clock;
+        let entry = self.loot_entry_at(point);
         let Screen::Loot(screen) = &mut self.screen else {
             return false;
         };
-        if let Some((counter, _)) = &mut screen.counter {
-            let input = counter_click(counter, point);
-            if input != CounterInput::Ignored {
-                self.press();
+        if screen.counter.is_some() {
+            if let Some(rect) = super::counter::counter_button(point) {
+                self.press_button(rect);
             }
+            let Screen::Loot(screen) = &mut self.screen else {
+                return false;
+            };
+            let Some((counter, _)) = &mut screen.counter else {
+                return true;
+            };
+            let input = counter_click(counter, point);
             self.loot_counter(input);
+            return true;
+        }
+        // A drag or an open menu takes every other input.
+        if screen.held.is_some() || screen.menu.is_some() {
+            return true;
+        }
+        // The right button toggles the hand and arrow cursors.
+        if right {
+            screen.arrow = !screen.arrow;
+            screen.press = None;
+            screen.hovered = None;
             return true;
         }
         let [ox, oy] = skills::LOOT_ORIGIN;
         let local = [point[0] - ox, point[1] - oy];
         if DONE.contains(local) {
-            self.press();
+            self.press_button(on_screen(DONE));
             self.close_loot_screen();
             return true;
         }
-        if let Some((target, up, _)) = SCROLL.iter().find(|(_, _, rect)| rect.contains(local)) {
+        if let Some((target, up, rect)) = SCROLL.iter().find(|(_, _, rect)| rect.contains(local)) {
             let index = usize::from(*target);
             let count = self.host.loot_items(&screen.session, *target).len();
             let offset = &mut screen.offsets[index];
@@ -205,36 +448,33 @@ impl MapPreview {
             } else if *offset + skills::LOOT_ROWS < count {
                 *offset += 1;
             }
+            self.press_button(on_screen(*rect));
             return true;
         }
-        // A press on a filled entry lifts it (an arrow-cursor right press
-        // prints its look text instead).
-        for target in [false, true] {
-            let Some(row) = (0..skills::LOOT_ROWS).find(|row| slot(target, *row).contains(local))
-            else {
-                continue;
-            };
-            let entries = self.host.loot_items(&screen.session, target);
-            let Some((item, quantity)) = entries
-                .get(screen.offsets[usize::from(target)] + row)
-                .copied()
-            else {
-                return true;
-            };
-            if right {
-                let name = self
-                    .host
-                    .world
-                    .get(item)
-                    .map(|o| o.name.clone())
-                    .unwrap_or_default();
-                self.notify(name);
+        if screen.session.bodies.len() > 1
+            && let Some((rect, forward, ..)) = CYCLE.iter().find(|(rect, ..)| rect.contains(local))
+        {
+            screen.session.cycle(*forward);
+            screen.offsets[1] = 0;
+            self.press_button(on_screen(*rect));
+            return true;
+        }
+        // A press on a filled entry: the hand lifts it, the arrow waits for
+        // the release or the hold pulse.
+        if let Some((target, item, quantity)) = entry {
+            if screen.arrow {
+                screen.press = Some((target, ArrowPress::new(item, clock)));
                 return true;
             }
             screen.session.press();
             screen.held = Some((target, item, quantity));
             self.play_effect(b"ipickup1", None);
             return true;
+        }
+        // The portrait hot zones go up one container level.
+        if let Some((target, _)) = PORTRAITS.iter().find(|(_, rect)| rect.contains(local)) {
+            screen.session.up(*target);
+            screen.offsets[usize::from(*target)] = 0;
         }
         true
     }
@@ -244,7 +484,10 @@ impl MapPreview {
             return false;
         };
         match input {
-            CounterInput::Accept(quantity) => self.loot_drop(quantity),
+            CounterInput::Accept(quantity) => match screen.counter.take() {
+                Some((_, LootCount::Drop(item))) => self.loot_drop_ground(item, quantity),
+                _ => self.loot_drop(quantity),
+            },
             CounterInput::Refused => self.play_effect(ERROR_SOUND.as_bytes(), None),
             CounterInput::Cancel => {
                 screen.counter = None;
@@ -261,6 +504,17 @@ impl MapPreview {
         let Screen::Loot(screen) = &mut self.screen else {
             return false;
         };
+        if let Some((target, menu)) = screen.menu.take() {
+            // The pointer returns to where it was when the menu opened.
+            self.pointer.at = Some(menu.origin);
+            self.loot_entry(target, menu.item, menu.chosen());
+            return true;
+        }
+        if let Some((_, press)) = screen.press.take() {
+            // A quick click prints the short look text.
+            self.look_line(press.item);
+            return true;
+        }
         if screen.counter.is_some() {
             return false;
         }
@@ -270,7 +524,7 @@ impl MapPreview {
         match point.and_then(skills::loot_drop_target) {
             Some(to_target) if to_target != from_target => {
                 if quantity > 1 {
-                    screen.counter = Some((Counter::new(quantity), to_target));
+                    screen.counter = Some((Counter::new(quantity), LootCount::Move(to_target)));
                     self.play_effect(b"iputdown", None);
                 } else {
                     self.play_effect(b"iputdown", None);
@@ -325,4 +579,10 @@ impl MapPreview {
         }
         true
     }
+}
+
+/// A window-relative rectangle on the screen.
+fn on_screen(rect: Rect) -> Rect {
+    let [ox, oy] = skills::LOOT_ORIGIN;
+    Rect::new(ox + rect.x, oy + rect.y, rect.w, rect.h)
 }

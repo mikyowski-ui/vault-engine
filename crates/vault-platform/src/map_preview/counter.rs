@@ -31,11 +31,26 @@ pub(crate) enum CounterInput {
     Ignored,
 }
 
+/// The counter button under a screen point, as a screen rectangle (for its
+/// down art while held).
+pub(crate) fn counter_button(point: [i32; 2]) -> Option<Rect> {
+    let [cx, cy] = skills::COUNTER_ORIGIN;
+    [PLUS, MINUS, ALL, DONE, CANCEL]
+        .into_iter()
+        .map(|rect| Rect::new(cx + rect.x, cy + rect.y, rect.w, rect.h))
+        .find(|rect| rect.contains(point))
+}
+
+/// The counter, its buttons in their down art while `held` (the held
+/// button's screen rectangle) is over them. ALL's up image is
+/// `allbon.frm` with its caption in key 21091, its down image `allboff.frm`
+/// with key 18977 (SPEC-013 §3.17).
 pub(crate) fn draw_counter(
     painter: &Painter,
     image: &mut IndexedImage,
     counter: &Counter,
     picture: Option<&FrmFrame>,
+    held: Option<Rect>,
 ) {
     let [cx, cy] = skills::COUNTER_ORIGIN;
     painter.blit_opaque(image, "movemult.frm", 0, [cx, cy]);
@@ -47,20 +62,38 @@ pub(crate) fn draw_counter(
     for (digit, [x, y]) in counter.digits().iter().zip(skills::COUNTER_DIGITS) {
         painter.big_digit(image, *digit, [cx + x, cy + y], false);
     }
-    painter.blit(image, "splsoff.frm", 0, [cx + PLUS.x, cy + PLUS.y]);
-    painter.blit(image, "snegoff.frm", 0, [cx + MINUS.x, cy + MINUS.y]);
-    painter.blit(image, "allboff.frm", 0, [cx + ALL.x, cy + ALL.y]);
-    let all = painter.message("inventry.msg", 22);
-    painter.centered(
+    let down = |rect: Rect| held == Some(Rect::new(cx + rect.x, cy + rect.y, rect.w, rect.h));
+    let art = |rect: Rect, up: &'static str, pressed: &'static str| {
+        if down(rect) { pressed } else { up }
+    };
+    painter.blit(
         image,
-        103,
-        ColorKey::AMBER,
-        &all,
-        [cx + ALL.x, cy + ALL.y + 4],
-        94,
+        art(PLUS, "splsoff.frm", "splson.frm"),
+        0,
+        [cx + PLUS.x, cy + PLUS.y],
     );
+    painter.blit(
+        image,
+        art(MINUS, "snegoff.frm", "snegon.frm"),
+        0,
+        [cx + MINUS.x, cy + MINUS.y],
+    );
+    painter.blit(
+        image,
+        art(ALL, "allbon.frm", "allboff.frm"),
+        0,
+        [cx + ALL.x, cy + ALL.y],
+    );
+    let all = painter.message("inventry.msg", 22);
+    let key = if down(ALL) {
+        ColorKey(18977)
+    } else {
+        ColorKey::AMBER
+    };
+    painter.centered(image, 103, key, &all, [cx + ALL.x, cy + ALL.y + 4], 94);
     for rect in [DONE, CANCEL] {
-        painter.blit(image, "lilredup.frm", 0, [cx + rect.x, cy + rect.y]);
+        let red = art(rect, "lilredup.frm", "lilreddn.frm");
+        painter.blit(image, red, 0, [cx + rect.x, cy + rect.y]);
     }
 }
 

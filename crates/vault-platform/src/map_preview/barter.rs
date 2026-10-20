@@ -5,22 +5,30 @@
 //! the merchant's offer table and inventory (its armor and held weapon
 //! hidden for the session), with their scroll buttons and the two totals.
 //!
-//! An entry is dragged: the left press lifts it (`ipickup1`), the release
-//! (`iputdown`) over its route's drop rectangle moves it, forced, through
-//! the move-items counter for a stack. Offer (`m`) attempts the trade at
-//! the merchant's price; Talk (`t`) and Esc return every table and the
-//! hidden equipment, then resume dialogue.
+//! The right button toggles the hand and arrow cursors (the loot window's
+//! rules). In the hand cursor an entry is dragged: the left press lifts it
+//! (`ipickup1`), the release (`iputdown`) over its route's drop rectangle
+//! moves it, forced, through the move-items counter for a stack. In the
+//! arrow cursor a hovered entry or a quick click shows its short look line
+//! and a held press opens the action menu (table entries count as not the
+//! player's); Use opens a container in its column, and the portraits go
+//! back up a level. Offer (`m`) attempts the trade at the merchant's price;
+//! Talk (`t`) and Esc return every table and the hidden equipment, then
+//! resume dialogue.
 use super::{
     MapPreview, Screen,
     counter::{CounterInput, counter_click, counter_key, draw_counter},
+    inventory::{ArrowPress, ItemMenu},
 };
 use crate::{AppResult, interface::Painter};
 use vault_core::{
-    ObjectRef,
+    ObjectAction, ObjectRef, WorldEffect,
+    assets::WorldAssets,
     barter::{BarterSession, Trade},
-    skills::{self, Counter},
-    ui::{BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect},
+    skills::{self, Counter, ItemEntry},
+    ui::{BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect, cursor, inventory as layout},
 };
+use vault_formats::pro::{ItemData, PrototypeData};
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
@@ -31,11 +39,24 @@ pub(crate) struct BarterScreen {
     offsets: [usize; 4],
     /// The lifted entry: its column, item and quantity.
     held: Option<(usize, ObjectRef, i32)>,
-    /// The counter for the lifted stack's drop.
+    /// The counter for the lifted stack's drop, or for a menu Drop.
     counter: Option<Counter>,
+    /// The item a menu Drop counts, while the counter is open for it.
+    dropping: Option<ObjectRef>,
     /// The last trade or move message, shown in the conversation's reply
     /// area (the barter window covers the message monitor).
     pub reply: Option<Vec<u8>>,
+    /// The arrow cursor (else the hand).
+    pub arrow: bool,
+    /// An arrow press and its column, waiting for its release or the hold
+    /// pulse.
+    press: Option<(usize, ArrowPress)>,
+    /// The arrow cursor's item menu and its column.
+    pub menu: Option<(usize, ItemMenu)>,
+    /// The entry under the arrow cursor, whose look line was shown.
+    hovered: Option<ObjectRef>,
+    /// Containers opened in each column, outermost first.
+    pub views: [Vec<ObjectRef>; 4],
 }
 impl BarterScreen {
     /// The item a drag holds (the counter shows the arrow instead).
@@ -43,6 +64,10 @@ impl BarterScreen {
         self.held
             .filter(|_| self.counter.is_none())
             .map(|(_, item, _)| item)
+    }
+    /// The move-items counter is open.
+    pub fn counter_open(&self) -> bool {
+        self.counter.is_some()
     }
 }
 
@@ -58,20 +83,80 @@ const ICONS: [([i32; 2], [i32; 2]); 4] = [
     ([397, 39], [56, 40]),
 ];
 const SLOT: [i32; 2] = [64, 48];
-/// Scroll buttons (subwindow coordinates): column, up, rectangle, art.
-const SCROLL: [(usize, bool, Rect, &str); 8] = [
-    (0, true, Rect::new(109, 56, 23, 24), "di_up1.frm"),
-    (0, false, Rect::new(109, 82, 24, 25), "di_down1.frm"),
-    (3, true, Rect::new(342, 56, 23, 24), "di_up1.frm"),
-    (3, false, Rect::new(342, 82, 24, 25), "di_down1.frm"),
-    (1, true, Rect::new(128, 113, 22, 23), "invupout.frm"),
-    (1, false, Rect::new(128, 136, 22, 23), "invdnout.frm"),
-    (2, true, Rect::new(333, 113, 22, 23), "invupout.frm"),
-    (2, false, Rect::new(333, 136, 22, 23), "invdnout.frm"),
+/// Scroll buttons (subwindow coordinates): column, up, rectangle, and the
+/// up and down art.
+const SCROLL: [(usize, bool, Rect, &str, &str); 8] = [
+    (
+        0,
+        true,
+        Rect::new(109, 56, 23, 24),
+        "di_up1.frm",
+        "di_up2.frm",
+    ),
+    (
+        0,
+        false,
+        Rect::new(109, 82, 24, 25),
+        "di_down1.frm",
+        "di_down2.frm",
+    ),
+    (
+        3,
+        true,
+        Rect::new(342, 56, 23, 24),
+        "di_up1.frm",
+        "di_up2.frm",
+    ),
+    (
+        3,
+        false,
+        Rect::new(342, 82, 24, 25),
+        "di_down1.frm",
+        "di_down2.frm",
+    ),
+    (
+        1,
+        true,
+        Rect::new(128, 113, 22, 23),
+        "invupout.frm",
+        "invupin.frm",
+    ),
+    (
+        1,
+        false,
+        Rect::new(128, 136, 22, 23),
+        "invdnout.frm",
+        "invdnin.frm",
+    ),
+    (
+        2,
+        true,
+        Rect::new(333, 113, 22, 23),
+        "invupout.frm",
+        "invupin.frm",
+    ),
+    (
+        2,
+        false,
+        Rect::new(333, 136, 22, 23),
+        "invdnout.frm",
+        "invdnin.frm",
+    ),
 ];
-/// Offer and Talk (barter-window coordinates).
+/// Offer and Talk (barter-window coordinates): up `di_rdbt2.frm`, down
+/// `di_rdbt1.frm`.
 const OFFER: Rect = Rect::new(41, 163, 14, 14);
 const TALK: Rect = Rect::new(584, 162, 14, 14);
+/// The portraits (barter-window coordinates), the player's and the
+/// merchant's; their invisible buttons go up one container level.
+const PORTRAITS: [(bool, Rect); 2] = [
+    (false, Rect::new(15, 25, 60, 100)),
+    (true, Rect::new(560, 25, 60, 100)),
+];
+/// A rectangle relative to `origin` on the screen.
+fn at(origin: [i32; 2], rect: Rect) -> Rect {
+    Rect::new(origin[0] + rect.x, origin[1] + rect.y, rect.w, rect.h)
+}
 /// Drop rectangles span screen y 310-454.
 const DROP_Y: std::ops::RangeInclusive<i32> = 310..=454;
 
@@ -112,7 +197,13 @@ impl MapPreview {
                     offsets: [0; 4],
                     held: None,
                     counter: None,
+                    dropping: None,
                     reply: None,
+                    arrow: false,
+                    press: None,
+                    menu: None,
+                    hovered: None,
+                    views: Default::default(),
                 }))
             }
             Err(error) => {
@@ -121,18 +212,167 @@ impl MapPreview {
             }
         }
     }
-    /// The four holders, left to right.
+    /// The four holders shown, left to right: each column's innermost open
+    /// container, else the player, the two tables and the merchant.
     fn barter_owners(&self) -> Option<[ObjectRef; 4]> {
         let Screen::Barter(screen) = &self.screen else {
             return None;
         };
         let session = &screen.session;
-        Some([
+        let roots = [
             self.host.world.player,
             session.offer,
             session.table,
             session.merchant,
-        ])
+        ];
+        Some(std::array::from_fn(|column| {
+            screen.views[column]
+                .last()
+                .copied()
+                .unwrap_or(roots[column])
+        }))
+    }
+    /// The filled entry at a screen point, and its column.
+    fn barter_entry_at(&self, point: [i32; 2]) -> Option<(usize, ObjectRef, i32)> {
+        let owners = self.barter_owners()?;
+        let Screen::Barter(screen) = &self.screen else {
+            return None;
+        };
+        owners.iter().enumerate().find_map(|(column, owner)| {
+            let row = (0..ROWS).find(|row| slot_rect(column, *row).contains(point))?;
+            let (item, quantity) = self
+                .barter_entries(*owner)
+                .get(screen.offsets[column] + row)
+                .copied()?;
+            Some((column, item, quantity))
+        })
+    }
+    /// Whether a filled entry is under a screen point.
+    pub(crate) fn barter_entry_at_point(&self, point: [i32; 2]) -> bool {
+        self.barter_entry_at(point).is_some()
+    }
+    /// The text an action on `item` prints, shown in the reply area (the
+    /// barter window covers the message monitor).
+    fn barter_text(&mut self, item: ObjectRef, action: ObjectAction) {
+        let player = self.host.world.player;
+        let start = self.host.world.effects.len();
+        if let Err(error) = self.host.action(player, item, action) {
+            self.status = error.to_string().into_bytes();
+        }
+        let emitted: Vec<_> = self.host.world.effects.drain(start..).collect();
+        let mut text = Vec::new();
+        for effect in emitted {
+            match effect {
+                WorldEffect::Message(line) => {
+                    if !text.is_empty() {
+                        text.push(b' ');
+                    }
+                    text.extend(line);
+                }
+                other => self.host.world.effects.push_back(other),
+            }
+        }
+        if !text.is_empty() {
+            self.barter_reply(text);
+        }
+        self.drain_effects();
+    }
+    /// The arrow cursor over a filled entry shows its short look line when
+    /// the hovered entry changes.
+    pub(crate) fn barter_hover(&mut self, point: [i32; 2]) {
+        let entry = self.barter_entry_at(point).map(|(_, item, _)| item);
+        let Screen::Barter(screen) = &mut self.screen else {
+            return;
+        };
+        if !screen.arrow || screen.held.is_some() || screen.hovered == entry {
+            return;
+        }
+        screen.hovered = entry;
+        if let Some(item) = entry {
+            self.barter_text(item, ObjectAction::LookAt);
+        }
+    }
+    /// The hold pulse of an arrow press opens the item menu at the pointer.
+    pub(crate) fn barter_tick(&mut self) -> bool {
+        let (clock, at) = (self.clock, self.pointer.at);
+        let Screen::Barter(screen) = &mut self.screen else {
+            return false;
+        };
+        let Some((column, press)) = screen.press.filter(|(_, press)| press.due(clock)) else {
+            return false;
+        };
+        screen.press = None;
+        let entries = self.barter_menu(column, press.item);
+        let origin = at.unwrap_or(SUBWINDOW);
+        if let Screen::Barter(screen) = &mut self.screen {
+            screen.menu = Some((
+                column,
+                ItemMenu::new(press.item, entries, origin, layout::BARTER_EDGES),
+            ));
+        }
+        self.play_effect(cursor::MENU_OPEN_SOUND.as_bytes(), None);
+        true
+    }
+    /// SPEC-013 §3.16 the menu; only the player's inventory column holds
+    /// the player's own items (table entries are not, §3.18).
+    fn barter_menu(&self, column: usize, item: ObjectRef) -> Vec<ItemEntry> {
+        let data =
+            self.host
+                .world
+                .get(item)
+                .and_then(|object| match &object.prototype.as_deref()?.data {
+                    PrototypeData::Item(item) => Some(&item.data),
+                    _ => None,
+                });
+        let unloadable = matches!(data, Some(ItemData::Weapon(gun)) if gun.capacity > 0)
+            && self.host.world.loaded(item).0 > 0;
+        let container = matches!(data, Some(ItemData::Container { .. }));
+        skills::item_menu(column == 0, unloadable, container)
+    }
+    /// An action menu entry, as in the loot window: Look shows the full
+    /// examine text, Unload gives the ammunition, forced, to the item's
+    /// owner, Use opens a container in its column (up to nine deep), and
+    /// Drop drops the player's item on the ground, through the counter for
+    /// a stack.
+    fn barter_entry(&mut self, column: usize, item: ObjectRef, entry: ItemEntry) {
+        match entry {
+            ItemEntry::Look => self.barter_text(item, ObjectAction::Description),
+            ItemEntry::Unload => self.unload_to_owner(item),
+            ItemEntry::Use => {
+                if let Screen::Barter(screen) = &mut self.screen
+                    && screen.views[column].len() < skills::MAX_NESTING
+                {
+                    screen.views[column].push(item);
+                    screen.offsets[column] = 0;
+                }
+            }
+            ItemEntry::Drop => {
+                let Some(owners) = self.barter_owners() else {
+                    return;
+                };
+                let quantity = self
+                    .barter_entries(owners[column])
+                    .iter()
+                    .find(|(entry, _)| *entry == item)
+                    .map_or(1, |(_, quantity)| *quantity);
+                if quantity > 1 {
+                    if let Screen::Barter(screen) = &mut self.screen {
+                        screen.counter = Some(Counter::new(quantity));
+                        screen.dropping = Some(item);
+                    }
+                } else {
+                    self.barter_drop_ground(item, 1);
+                }
+            }
+            ItemEntry::Cancel => {}
+        }
+    }
+    fn barter_drop_ground(&mut self, item: ObjectRef, quantity: i32) {
+        let player = self.host.world.player;
+        if let Err(error) = self.host.world.drop_item(player, item, quantity) {
+            self.status = error.to_string().into_bytes();
+        }
+        self.drain_effects();
     }
     fn barter_entries(&self, owner: ObjectRef) -> Vec<(ObjectRef, i32)> {
         self.host
@@ -224,56 +464,85 @@ impl MapPreview {
         true
     }
     pub(crate) fn barter_click(&mut self, point: [i32; 2], right: bool) -> bool {
-        let Some(owners) = self.barter_owners() else {
-            return false;
-        };
         let Screen::Barter(screen) = &mut self.screen else {
             return false;
         };
-        if let Some(counter) = &mut screen.counter {
-            let input = counter_click(counter, point);
-            if input != CounterInput::Ignored {
-                self.press();
+        if screen.counter.is_some() {
+            if let Some(rect) = super::counter::counter_button(point) {
+                self.press_button(rect);
             }
+            let Screen::Barter(screen) = &mut self.screen else {
+                return false;
+            };
+            let Some(counter) = &mut screen.counter else {
+                return true;
+            };
+            let input = counter_click(counter, point);
             self.barter_counter(input);
             return true;
         }
         screen.held = None;
+        // An open menu takes every other input.
+        if screen.menu.is_some() {
+            return true;
+        }
+        // The right button toggles the hand and arrow cursors.
+        if right {
+            screen.arrow = !screen.arrow;
+            screen.press = None;
+            screen.hovered = None;
+            return true;
+        }
         let window = [point[0] - WINDOW[0], point[1] - WINDOW[1]];
         if OFFER.contains(window) {
-            self.press_cue(b"ib2p1xx1", b"ib2lu1x1");
+            self.press_button_cue(b"ib2p1xx1", b"ib2lu1x1", at(WINDOW, OFFER));
             self.attempt_barter();
             return true;
         }
         if TALK.contains(window) {
-            self.press_cue(b"ib2p1xx1", b"ib2lu1x1");
+            self.press_button_cue(b"ib2p1xx1", b"ib2lu1x1", at(WINDOW, TALK));
             self.end_barter_screen();
             return true;
         }
         let local = [point[0] - SUBWINDOW[0], point[1] - SUBWINDOW[1]];
-        if let Some((column, up, ..)) = SCROLL.iter().find(|(.., rect, _)| rect.contains(local)) {
-            self.press();
+        if let Some((column, up, rect, ..)) =
+            SCROLL.iter().find(|(_, _, rect, ..)| rect.contains(local))
+        {
+            self.press_button(at(SUBWINDOW, *rect));
             self.scroll_barter(*column, *up);
             return true;
         }
-        if right {
-            return true;
-        }
-        // A press on a filled slot lifts the entry (row + offset must stay
-        // below the column's length).
-        for (column, owner) in owners.iter().enumerate() {
-            let Some(row) = (0..ROWS).find(|row| slot_rect(column, *row).contains(point)) else {
-                continue;
-            };
-            let entries = self.barter_entries(*owner);
+        // A press on a filled slot: the hand lifts the entry (row + offset
+        // must stay below the column's length), the arrow waits for the
+        // release or the hold pulse.
+        let clock = self.clock;
+        if let Some((column, item, quantity)) = self.barter_entry_at(point) {
             let Screen::Barter(screen) = &mut self.screen else {
                 return false;
             };
-            if let Some((item, quantity)) = entries.get(screen.offsets[column] + row).copied() {
+            if screen.arrow {
+                screen.press = Some((column, ArrowPress::new(item, clock)));
+            } else {
                 screen.held = Some((column, item, quantity));
                 self.play_effect(b"ipickup1", None);
             }
             return true;
+        }
+        // The portraits go up one container level: the inventory column,
+        // else the side's table.
+        if let Some((merchant, _)) = PORTRAITS
+            .iter()
+            .find(|(_, rect)| at(WINDOW, *rect).contains(point))
+            && let Screen::Barter(screen) = &mut self.screen
+        {
+            let columns = if *merchant { [3, 2] } else { [0, 1] };
+            if let Some(column) = columns
+                .into_iter()
+                .find(|column| !screen.views[*column].is_empty())
+            {
+                screen.views[column].pop();
+                screen.offsets[column] = 0;
+            }
         }
         true
     }
@@ -283,6 +552,17 @@ impl MapPreview {
         let Screen::Barter(screen) = &mut self.screen else {
             return false;
         };
+        if let Some((column, menu)) = screen.menu.take() {
+            // The pointer returns to where it was when the menu opened.
+            self.pointer.at = Some(menu.origin);
+            self.barter_entry(column, menu.item, menu.chosen());
+            return true;
+        }
+        if let Some((_, press)) = screen.press.take() {
+            // A quick click shows the short look text.
+            self.barter_text(press.item, ObjectAction::LookAt);
+            return true;
+        }
         if screen.counter.is_some() {
             return false;
         }
@@ -312,11 +592,18 @@ impl MapPreview {
             return false;
         };
         match input {
-            CounterInput::Accept(quantity) => self.barter_drop(quantity),
+            CounterInput::Accept(quantity) => match screen.dropping.take() {
+                Some(item) => {
+                    screen.counter = None;
+                    self.barter_drop_ground(item, quantity);
+                }
+                None => self.barter_drop(quantity),
+            },
             CounterInput::Refused => self.play_effect(ERROR_SOUND.as_bytes(), None),
             CounterInput::Cancel => {
                 screen.counter = None;
                 screen.held = None;
+                screen.dropping = None;
             }
             CounterInput::Changed => {}
             CounterInput::Ignored => return false,
@@ -347,6 +634,56 @@ impl MapPreview {
             self.barter_reply(text);
         }
         self.drain_effects();
+    }
+    /// A side's portrait, drawn as in the loot window: the player's figure
+    /// facing southwest, frame 0, or the merchant's art at its facing, last
+    /// frame; an open container in the side's inventory column shows its own
+    /// world art. Centered in the 60-by-100 box and clipped to it.
+    fn draw_barter_portrait(
+        &self,
+        image: &mut IndexedImage,
+        screen: &BarterScreen,
+        merchant: bool,
+        rect: Rect,
+    ) {
+        let world = &self.host.world;
+        let column = if merchant { 3 } else { 0 };
+        let (fid, direction, last) = match screen.views[column].last() {
+            Some(container) => (world.get(*container).map(|o| o.raw.art_id), 0, false),
+            None if merchant => {
+                let object = world.get(screen.session.merchant);
+                (
+                    object.map(|o| o.raw.art_id),
+                    object.map_or(0, |o| usize::from(o.raw.orientation)),
+                    true,
+                )
+            }
+            None => (
+                self.host.figure_art(world.player, self.active_item(), 3),
+                3,
+                false,
+            ),
+        };
+        let Some(art) = fid.and_then(|fid| self.host.assets.object_art(fid).ok()) else {
+            return;
+        };
+        let index = if last {
+            art.frame_count().saturating_sub(1)
+        } else {
+            0
+        };
+        let Some(frame) = art.frame(direction, index).or_else(|| art.frame(0, index)) else {
+            return;
+        };
+        let origin = [
+            i64::from(rect.x + (rect.w - i32::from(frame.width)) / 2),
+            i64::from(rect.y + (rect.h - i32::from(frame.height)) / 2),
+        ];
+        image.blit_within(
+            frame,
+            origin,
+            [rect.x, rect.y, rect.w, rect.h].map(i64::from),
+        );
     }
     pub(crate) fn barter_image(&mut self) -> AppResult<IndexedImage> {
         let Some(owners) = self.barter_owners() else {
@@ -407,13 +744,17 @@ impl MapPreview {
                 }
             }
         }
-        for (_, _, rect, art) in SCROLL {
+        for (_, _, rect, up, down) in SCROLL {
+            let art = self.button_art(at(SUBWINDOW, rect), up, down);
             painter.blit(
                 &mut image,
                 art,
                 0,
                 [SUBWINDOW[0] + rect.x, SUBWINDOW[1] + rect.y],
             );
+        }
+        for (merchant, rect) in PORTRAITS {
+            self.draw_barter_portrait(&mut image, screen, merchant, at(WINDOW, rect));
         }
         let world = &self.host.world;
         for (text, x) in [
@@ -430,20 +771,23 @@ impl MapPreview {
             );
         }
         for rect in [OFFER, TALK] {
-            painter.blit(
-                &mut image,
-                "di_rdbt2.frm",
-                0,
-                [WINDOW[0] + rect.x, WINDOW[1] + rect.y],
-            );
+            let art = self.button_art(at(WINDOW, rect), "di_rdbt2.frm", "di_rdbt1.frm");
+            painter.blit(&mut image, art, 0, [WINDOW[0] + rect.x, WINDOW[1] + rect.y]);
+        }
+        if let Some((_, menu)) = &screen.menu {
+            self.draw_item_menu(&painter, &mut image, menu);
         }
         if let Some(counter) = &screen.counter {
-            let icon = screen.held.and_then(|(_, item, _)| self.item_icon(item));
+            let icon = screen
+                .dropping
+                .or(screen.held.map(|(_, item, _)| item))
+                .and_then(|item| self.item_icon(item));
             draw_counter(
                 &painter,
                 &mut image,
                 counter,
                 icon.as_ref().and_then(|icon| icon.frame(0, 0)),
+                self.held_button(),
             );
         }
         Ok(image)

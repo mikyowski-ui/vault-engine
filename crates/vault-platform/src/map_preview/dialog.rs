@@ -116,7 +116,9 @@ impl MapPreview {
                 60,
             );
             let [rx, ry] = button.button;
-            painter.blit(image, "lilredup.frm", 0, [ox + rx, oy + ry]);
+            let rect = Rect::new(ox + rx, oy + ry, 15, 16);
+            let art = self.button_art(rect, "lilredup.frm", "lilreddn.frm");
+            painter.blit(image, art, 0, [rect.x, rect.y]);
         }
     }
     /// Enter means OK/yes (with `ib1p1xx1`), Esc no/cancel; `y` and `n`
@@ -151,12 +153,13 @@ impl MapPreview {
         let [ox, oy] = dialog.origin;
         let pressed = flow::dialog_buttons(dialog.yes_no)
             .into_iter()
-            .find(|button| {
+            .map(|button| {
                 let [rx, ry] = button.button;
-                Rect::new(ox + rx, oy + ry, 15, 16).contains(point)
-            });
-        if let Some(button) = pressed {
-            self.press();
+                (button, Rect::new(ox + rx, oy + ry, 15, 16))
+            })
+            .find(|(_, rect)| rect.contains(point));
+        if let Some((button, rect)) = pressed {
+            self.press_button(rect);
             // `dbox.msg` 100 is Done, 101 Yes, 102 No.
             self.answer_dialog(button.caption != 102);
         }

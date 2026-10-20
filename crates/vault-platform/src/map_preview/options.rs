@@ -173,16 +173,16 @@ impl MapPreview {
                 painter.blit_opaque(&mut image, "opbase.frm", 0, [ox, oy]);
                 for i in 0..5 {
                     let rect = options::options_button(i);
-                    painter.blit_opaque(&mut image, "opbtnoff.frm", 0, [ox + rect.x, oy + rect.y]);
+                    let rect = Rect::new(ox + rect.x, oy + rect.y, rect.w, rect.h);
+                    let art = self.button_art(rect, "opbtnoff.frm", "opbtnon.frm");
+                    painter.blit_opaque(&mut image, art, 0, [rect.x, rect.y]);
+                    let key = if art == "opbtnon.frm" {
+                        ColorKey::LABEL_PRESSED
+                    } else {
+                        ColorKey::LABEL
+                    };
                     let caption = painter.message("options.msg", i as i32);
-                    painter.centered(
-                        &mut image,
-                        103,
-                        ColorKey::LABEL,
-                        &caption,
-                        [ox + rect.x, oy + rect.y + 8],
-                        rect.w,
-                    );
+                    painter.centered(&mut image, 103, key, &caption, [rect.x, rect.y + 8], rect.w);
                 }
             }
             OptionsScreen::Pause => {
@@ -241,7 +241,9 @@ impl MapPreview {
                         60,
                     );
                     let [rx, ry] = button.button;
-                    painter.blit(&mut image, "lilredup.frm", 0, [ox + rx, oy + ry]);
+                    let rect = Rect::new(ox + rx, oy + ry, 15, 16);
+                    let art = self.button_art(rect, "lilredup.frm", "lilreddn.frm");
+                    painter.blit(&mut image, art, 0, [rect.x, rect.y]);
                 }
             }
             OptionsScreen::Preferences(state) => {
@@ -337,7 +339,13 @@ impl MapPreview {
             painter.blit_opaque(image, "prefcvr.frm", 0, [0, 356]);
         }
         for (button, caption, id, file) in PREFERENCE_BUTTONS {
-            painter.blit(image, "lilredup.frm", 0, button);
+            let rect = Rect::new(button[0], button[1], 15, 16);
+            painter.blit(
+                image,
+                self.button_art(rect, "lilredup.frm", "lilreddn.frm"),
+                0,
+                button,
+            );
             let text = painter.message(file, id);
             painter.text(image, 103, ColorKey::LABEL, &text, caption, 100);
         }
@@ -441,7 +449,12 @@ impl MapPreview {
                 let [ox, oy] = options::OPTIONS_ORIGIN;
                 let local = [point[0] - ox, point[1] - oy];
                 if let Some(i) = (0..5).find(|i| options::options_button(*i).contains(local)) {
-                    self.play_effect(b"ib3p1xx1", None);
+                    let rect = options::options_button(i);
+                    self.press_button_cue(
+                        b"ib3p1xx1",
+                        b"ib3lu1x1",
+                        Rect::new(ox + rect.x, oy + rect.y, rect.w, rect.h),
+                    );
                     self.options_action(options::OPTIONS_BUTTONS[i]);
                 }
             }
@@ -450,8 +463,9 @@ impl MapPreview {
                 let [ox, oy] = options::QUIT_ORIGIN;
                 for button in flow::dialog_buttons(true) {
                     let [rx, ry] = button.button;
-                    if Rect::new(ox + rx, oy + ry, 15, 16).contains(point) {
-                        self.press();
+                    let rect = Rect::new(ox + rx, oy + ry, 15, 16);
+                    if rect.contains(point) {
+                        self.press_button(rect);
                         self.answer_quit(button.caption == 101);
                         break;
                     }
@@ -485,8 +499,9 @@ impl MapPreview {
             })
             .collect();
         for (index, (button, ..)) in PREFERENCE_BUTTONS.iter().enumerate() {
-            if Rect::new(button[0], button[1], 15, 16).contains(point) {
-                self.press();
+            let rect = Rect::new(button[0], button[1], 15, 16);
+            if rect.contains(point) {
+                self.press_button(rect);
                 match index {
                     0 => {
                         if let Screen::Options(OptionsScreen::Preferences(state)) = &mut self.screen

@@ -63,11 +63,12 @@ fn spec014_bar_monitor_and_hotkeys() {
         Some(b"Hello".as_slice())
     );
     assert_eq!(visible.last().unwrap()[0], vault_core::ui::bar::BULLET);
-    // Bar buttons: inventory (211, 41) and the Skilldex (523, 7) under y 379.
-    assert!(preview.click([220, 379 + 50], false));
+    // Bar buttons: inventory (211, 41) and the Skilldex (523, 7) under y
+    // 379, sending their keys on the release.
+    assert!(preview.tap([220, 379 + 50]));
     assert!(matches!(preview.screen, Screen::Inventory(_)));
     assert!(preview.step(KeyCode::Escape));
-    assert!(preview.click([530, 379 + 15], false));
+    assert!(preview.tap([530, 379 + 15]));
     assert!(matches!(preview.screen, Screen::Skilldex(_)));
     assert!(preview.step(KeyCode::Escape));
     // Hotkey 2 selects Lockpick targeting; a right-click returns to movement.
@@ -91,13 +92,20 @@ fn spec013_skilldex_rows_and_targeting() {
     preview.image().unwrap();
     assert!(preview.step(KeyCode::KeyS));
     preview.image().unwrap();
-    // Row 1 (Lockpick) at (451 + 15, 5 + 45 + 36).
+    // Row 1 (Lockpick) at (451 + 15, 5 + 45 + 36). The window waits
+    // trunc(1000 / 9) ms after the press, discarding input, then closes.
+    let now = preview.clock;
     assert!(preview.click([451 + 20, 5 + 45 + 36 + 5], false));
+    assert!(preview.step(KeyCode::Escape));
+    preview.tick(now + 110).unwrap();
+    assert!(matches!(preview.screen, Screen::Skilldex(_)));
+    preview.tick(now + 111).unwrap();
     assert!(matches!(preview.screen, Screen::Map));
     assert_eq!(preview.hud.mode, Mode::Skill(9));
     // Row 0 toggles Sneak and leaves the mode alone.
     assert!(preview.step(KeyCode::KeyS));
     assert!(preview.click([451 + 20, 5 + 45 + 5], false));
+    preview.tick(now + 222).unwrap();
     assert!(preview.host.sneaking());
     // A targeting click with no object returns to movement.
     assert!(preview.tap([5, 5]));
@@ -1528,4 +1536,475 @@ fn decoded_assets_are_read_once_across_frames_hovers_and_windows() {
     cycle(&mut preview);
     let again = counting.take();
     assert!(again.is_empty(), "{again:?}");
+}
+
+/// Solid one-frame interface art for each `(name, width, height, color)`,
+/// so a frame pixel tells which image was drawn.
+fn write_art(dir: &std::path::Path, art: &[(&str, u16, u16, u8)]) {
+    for (name, width, height, color) in art {
+        std::fs::write(
+            dir.join("art/intrface").join(name),
+            super::fixture::frm(*width, *height, *color),
+        )
+        .unwrap();
+    }
+}
+/// The last composed frame's pixel (without the cursor).
+fn frame_pixel(preview: &MapPreview, [x, y]: [i32; 2]) -> u8 {
+    preview.frame.as_ref().unwrap().pixels()[(y * 640 + x) as usize]
+}
+/// The newest monitor line, without its bullet.
+fn monitor_line(preview: &MapPreview) -> Vec<u8> {
+    preview
+        .hud
+        .monitor
+        .visible()
+        .last()
+        .map(|line| line[1..].to_vec())
+        .unwrap_or_default()
+}
+/// A marker on the monitor, so the next line is known to be new.
+fn mark_monitor(preview: &mut MapPreview) {
+    preview
+        .host
+        .world
+        .effects
+        .push_back(WorldEffect::Message(b"mark".to_vec()));
+    preview.image().unwrap();
+    assert_eq!(monitor_line(preview), b"mark");
+}
+/// An item named `Widget`, with an examine text, at the end of `owner`'s
+/// inventory.
+fn widget(preview: &mut MapPreview, owner: vault_core::ObjectRef) -> vault_core::ObjectRef {
+    let mut bytes = super::fixture::prototype(0, 5);
+    super::fixture::word(&mut bytes, 0, 0x40);
+    let prototype = Arc::new(vault_formats::Prototype::parse(&bytes).unwrap());
+    let item = preview.host.world.spawn(prototype, 0, 0).unwrap();
+    let object = preview.host.world.get_mut(item).unwrap();
+    object.name = b"Widget".to_vec();
+    object.description = b"A synthetic widget.".to_vec();
+    preview.host.world.add_item(owner, item, 1, true).unwrap();
+    item
+}
+fn contains(text: &[u8], part: &[u8]) -> bool {
+    text.windows(part.len()).any(|window| window == part)
+}
+
+#[test]
+fn spec014_bar_buttons_draw_down_while_held_and_send_on_release() {
+    use vault_core::ui::Rect;
+    let dir = corpus();
+    write_art(
+        dir.path(),
+        &[
+            ("invbutup.frm", 32, 21, 1),
+            ("invbutdn.frm", 32, 21, 2),
+            ("sattkbup.frm", 188, 67, 3),
+            ("sattkbdn.frm", 188, 67, 4),
+        ],
+    );
+    let mut preview = world(dir.path());
+    // The Inventory button is screen (211, 420) 32 by 21; the item slot
+    // (267, 405) 188 by 67. Their bottom-right pixels show the image.
+    let (inventory, slot) = ([242, 440], [454, 471]);
+    preview.image().unwrap();
+    assert_eq!(frame_pixel(&preview, inventory), 1);
+    assert_eq!(frame_pixel(&preview, slot), 3);
+    // The press draws the down image and sends nothing yet.
+    let button = [220, 429];
+    preview.hover(button);
+    assert!(preview.click(button, false));
+    assert!(matches!(preview.screen, Screen::Map));
+    preview.image().unwrap();
+    assert_eq!(frame_pixel(&preview, inventory), 2);
+    assert_eq!(preview.held_button(), Some(Rect::new(211, 420, 32, 21)));
+    // Off the button it is up again, back on it down; each crossing asks
+    // for a new frame.
+    preview.hover([100, 429]);
+    assert!(preview.held_moved());
+    preview.image().unwrap();
+    assert_eq!(frame_pixel(&preview, inventory), 1);
+    assert!(!preview.held_moved());
+    preview.hover(button);
+    assert!(preview.held_moved());
+    preview.image().unwrap();
+    assert_eq!(frame_pixel(&preview, inventory), 2);
+    // The release over it sends `i`.
+    assert!(preview.release(Some(button), false));
+    assert!(matches!(preview.screen, Screen::Inventory(_)));
+    assert_eq!(preview.held_button(), None);
+    assert!(preview.step(KeyCode::Escape));
+    // A release off the button sends nothing and draws it up.
+    assert!(preview.click(button, false));
+    preview.hover([100, 429]);
+    assert!(preview.release(Some([100, 429]), false));
+    assert!(matches!(preview.screen, Screen::Map));
+    preview.image().unwrap();
+    assert_eq!(frame_pixel(&preview, inventory), 1);
+    // §3.23 the item slot: `sattkbdn.frm` while held; the release uses the
+    // (empty-handed) slot, setting the crosshair.
+    let at = [361, 438];
+    preview.hover(at);
+    assert!(preview.click(at, false));
+    preview.image().unwrap();
+    assert_eq!(frame_pixel(&preview, slot), 4);
+    assert_eq!(preview.hud.mode, Mode::Movement);
+    assert!(preview.release(Some(at), false));
+    assert_eq!(preview.hud.mode, Mode::Crosshair);
+    preview.image().unwrap();
+    assert_eq!(frame_pixel(&preview, slot), 3);
+}
+
+#[test]
+fn spec013_elevator_buttons_draw_down_and_report_on_release() {
+    let dir = corpus();
+    write_art(
+        dir.path(),
+        &[("ebut_out.frm", 48, 50, 1), ("ebut_in.frm", 48, 50, 2)],
+    );
+    let mut preview = world(dir.path());
+    preview.host.world.map.header.map_number = 6;
+    let player = preview.host.world.player;
+    preview
+        .host
+        .world
+        .move_object(player, 20100, 2, false)
+        .unwrap();
+    preview
+        .host
+        .world
+        .effects
+        .push_back(WorldEffect::Elevator(8));
+    preview.image().unwrap();
+    assert!(matches!(preview.screen, Screen::Elevator(_)));
+    // Button 0 at (13, 40) in the window, 48 by 50.
+    let size = crate::interface::Painter {
+        assets: &preview.host.assets,
+        palette: &preview.palette,
+    }
+    .size("el_vault.frm")
+    .unwrap_or([230, 284]);
+    let [ox, oy] = vault_core::skills::elevator_origin(size);
+    let [bx, by] = vault_core::skills::elevator_button(0);
+    let (button, corner) = ([ox + bx + 20, oy + by + 20], [ox + bx + 47, oy + by + 49]);
+    assert_eq!(frame_pixel(&preview, corner), 1);
+    // The press plays its sound and draws `ebut_in.frm`; the level waits
+    // for the release.
+    preview.hover(button);
+    assert!(preview.click(button, false));
+    preview.image().unwrap();
+    assert_eq!(frame_pixel(&preview, corner), 2);
+    assert!(matches!(preview.screen, Screen::Elevator(_)));
+    // Released off the button: nothing, and the button is up.
+    preview.hover([10, 10]);
+    assert!(preview.release(Some([10, 10]), false));
+    assert!(matches!(preview.screen, Screen::Elevator(_)));
+    preview.image().unwrap();
+    assert_eq!(frame_pixel(&preview, corner), 1);
+    // Released over it: level 1 (vault 6/0/14104).
+    preview.hover(button);
+    assert!(preview.tap(button));
+    assert!(matches!(preview.screen, Screen::Map));
+    let object = preview.host.world.get(player).unwrap();
+    assert_eq!((object.raw.hex, object.raw.elevation), (Some(14104), 0));
+}
+
+#[test]
+fn spec014_main_menu_buttons_draw_down_and_select_on_release() {
+    let dir = corpus();
+    write_art(
+        dir.path(),
+        &[("menuup.frm", 26, 26, 1), ("menudown.frm", 26, 26, 2)],
+    );
+    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+    let mut game = Game::new(vfs, "english", 1, dir.path().join("saves"), None).unwrap();
+    assert_eq!(game.title(), "Vault — main menu");
+    // Button 1 (New Game) at (425, 86), 26 by 26.
+    let pixel = |game: &mut Game| game.image().unwrap().pixels()[(86 + 25) * 640 + 425 + 25];
+    assert_eq!(pixel(&mut game), 1);
+    let button = [430, 90];
+    game.hover(button);
+    assert!(game.click(button, false));
+    assert_eq!(game.title(), "Vault — main menu");
+    assert_eq!(pixel(&mut game), 2);
+    // Off the button: a new frame with the up image; a release there
+    // selects nothing.
+    game.hover([300, 300]);
+    assert!(game.tick(16).unwrap());
+    assert_eq!(pixel(&mut game), 1);
+    assert!(game.release(Some([300, 300]), false));
+    assert_eq!(game.title(), "Vault — main menu");
+    // A release over the button selects it.
+    game.hover(button);
+    assert!(game.click(button, false));
+    assert!(game.release(Some(button), false));
+    assert!(game.title().contains("character selection"));
+}
+
+#[test]
+fn spec013_counter_all_button_is_allbon_up_and_allboff_down() {
+    use vault_core::ui::Rect;
+    let dir = corpus();
+    write_art(
+        dir.path(),
+        &[("allbon.frm", 94, 33, 1), ("allboff.frm", 94, 33, 2)],
+    );
+    let preview = world(dir.path());
+    let painter = crate::interface::Painter {
+        assets: &preview.host.assets,
+        palette: &preview.palette,
+    };
+    let counter = vault_core::skills::Counter::new(5);
+    let [cx, cy] = vault_core::skills::COUNTER_ORIGIN;
+    let all = Rect::new(cx + 120, cy + 80, 94, 33);
+    let corner = ((all.y + 32) * 640 + all.x + 93) as usize;
+    for (held, color) in [(None, 1), (Some(all), 2)] {
+        let mut image = vault_render::IndexedImage::new(640, 480).unwrap();
+        super::counter::draw_counter(&painter, &mut image, &counter, None, held);
+        assert_eq!(image.pixels()[corner], color);
+    }
+}
+
+#[test]
+fn spec013_loot_arrow_cursor_looks_and_runs_the_item_menu() {
+    use vault_core::{skills::ItemEntry, ui::inventory as layout};
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let npc = npc(&preview);
+    if let Some(ObjectState::Critter(state)) =
+        preview.host.world.get_mut(npc).map(|o| &mut o.raw.state)
+    {
+        state.results.0 |= effect::DEAD;
+    }
+    widget(&mut preview, npc);
+    let own = widget(&mut preview, player);
+    preview.host.world.pending_loot = Some(LootRequest {
+        looter: player,
+        target: npc,
+        steal: false,
+    });
+    preview.image().unwrap();
+    let menu = |preview: &MapPreview| match &preview.screen {
+        Screen::Loot(screen) => screen.menu.as_ref().map(|(_, menu)| menu.clone()),
+        _ => panic!("the loot window is open"),
+    };
+    // The right press switches to the arrow cursor; hovering the target's
+    // entry prints its look line.
+    let entry = [80 + 430, 35 + 10];
+    assert!(preview.click(entry, true));
+    assert!(matches!(&preview.screen, Screen::Loot(screen) if screen.arrow));
+    preview.hover(entry);
+    assert!(contains(&monitor_line(&preview), b"Widget"));
+    // A quick click prints it again.
+    mark_monitor(&mut preview);
+    assert!(preview.click(entry, false));
+    assert!(preview.release(Some(entry), false));
+    assert!(contains(&monitor_line(&preview), b"Widget"));
+    // A hold past 250 ms opens the target entry's menu (Look, Cancel) at
+    // the pointer, flipped against x 617 and shifted up from y 376.
+    let mut now = preview.clock;
+    assert!(preview.click(entry, false));
+    let at = [600, 360];
+    preview.hover(at);
+    now += 300;
+    preview.tick(now).unwrap();
+    let opened = menu(&preview).expect("the item menu");
+    assert_eq!(opened.entries, [ItemEntry::Look, ItemEntry::Cancel]);
+    assert_eq!(
+        (opened.top, opened.flipped),
+        layout::menu_place(at, 2, layout::LOOT_EDGES)
+    );
+    assert_eq!((opened.top, opened.flipped), (295, true));
+    preview.image().unwrap();
+    // The release on Look prints the examine text; the pointer returns to
+    // where the menu opened.
+    mark_monitor(&mut preview);
+    preview.hover([at[0], at[1] + 5]);
+    assert!(preview.release(Some([at[0], at[1] + 5]), false));
+    assert!(menu(&preview).is_none());
+    assert_eq!(preview.pointer.at, Some(at));
+    assert_eq!(monitor_line(&preview), b"A synthetic widget.");
+    // The player's own entry offers Drop: one move down and the release
+    // drops it at the player's position.
+    let row = match &preview.screen {
+        Screen::Loot(screen) => preview
+            .host
+            .loot_items(&screen.session, false)
+            .iter()
+            .position(|(entry, _)| *entry == own)
+            .unwrap(),
+        _ => unreachable!(),
+    };
+    assert!(row < vault_core::skills::LOOT_ROWS);
+    let [sx, sy] = vault_core::skills::loot_player_slot(row);
+    let [ox, oy] = vault_core::skills::LOOT_ORIGIN;
+    let at = [ox + sx + 20, oy + sy + 20];
+    preview.hover(at);
+    assert!(preview.click(at, false));
+    now += 300;
+    preview.tick(now).unwrap();
+    assert_eq!(
+        menu(&preview).unwrap().entries,
+        [ItemEntry::Look, ItemEntry::Drop, ItemEntry::Cancel]
+    );
+    preview.hover([at[0], at[1] + 11]);
+    assert!(preview.release(Some([at[0], at[1] + 11]), false));
+    let dropped = preview.host.world.get(own).unwrap();
+    assert_eq!(dropped.owner, None);
+    assert_eq!(
+        dropped.raw.hex,
+        preview.host.world.get(player).unwrap().raw.hex
+    );
+    assert!(preview.step(KeyCode::Escape));
+}
+
+#[test]
+fn spec013_barter_arrow_cursor_looks_and_drops_through_the_item_menu() {
+    use vault_core::{skills::ItemEntry, ui::inventory as layout};
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    // Only the widget in the player's inventory column.
+    let carried: Vec<_> = preview.host.world.get(player).unwrap().inventory.clone();
+    for (item, quantity) in carried {
+        preview
+            .host
+            .world
+            .drop_item(player, item, quantity)
+            .unwrap();
+    }
+    let item = widget(&mut preview, player);
+    preview.image().unwrap();
+    preview.hud.mode = Mode::Arrow;
+    assert!(preview.tap([336, 170]));
+    assert!(preview.host.world.dialogue.open);
+    preview.host.world.dialogue.pending_barter = true;
+    preview.image().unwrap();
+    let reply = |preview: &mut MapPreview| match &mut preview.screen {
+        Screen::Barter(screen) => screen.reply.take().unwrap_or_default(),
+        _ => panic!("the barter window is open"),
+    };
+    let menu = |preview: &MapPreview| match &preview.screen {
+        Screen::Barter(screen) => screen.menu.as_ref().map(|(_, menu)| menu.clone()),
+        _ => panic!("the barter window is open"),
+    };
+    // The arrow cursor: hovering and a quick click show the look line in
+    // the reply area (the window covers the monitor).
+    let entry = [120, 340];
+    assert!(preview.click(entry, true));
+    preview.hover(entry);
+    assert!(contains(&reply(&mut preview), b"Widget"));
+    assert!(preview.click(entry, false));
+    assert!(preview.release(Some(entry), false));
+    assert!(contains(&reply(&mut preview), b"Widget"));
+    // A hold opens Look, Drop, Cancel for the player's own column, shifted
+    // up from the window's bottom (470).
+    let mut now = preview.clock;
+    assert!(preview.click(entry, false));
+    let at = [120, 400];
+    preview.hover(at);
+    now += 300;
+    preview.tick(now).unwrap();
+    let opened = menu(&preview).expect("the item menu");
+    assert_eq!(
+        opened.entries,
+        [ItemEntry::Look, ItemEntry::Drop, ItemEntry::Cancel]
+    );
+    assert_eq!(
+        (opened.top, opened.flipped),
+        layout::menu_place(at, 3, layout::BARTER_EDGES)
+    );
+    assert_eq!((opened.top, opened.flipped), (349, false));
+    preview.image().unwrap();
+    // Look shows the examine text.
+    assert!(preview.release(Some(at), false));
+    assert_eq!(reply(&mut preview), b"A synthetic widget.");
+    assert_eq!(preview.pointer.at, Some(at));
+    // Drop: one entry down, and the widget lies at the player's feet.
+    assert!(preview.click(entry, false));
+    preview.hover(entry);
+    now += 300;
+    preview.tick(now).unwrap();
+    assert!(menu(&preview).is_some());
+    preview.hover([entry[0], entry[1] + 11]);
+    assert!(preview.release(Some([entry[0], entry[1] + 11]), false));
+    assert_eq!(preview.host.world.get(item).unwrap().owner, None);
+    assert!(preview.step(KeyCode::Escape));
+}
+
+#[test]
+fn spec014_use_on_window_arrow_menu_and_quick_look() {
+    use vault_core::{skills::ItemEntry, ui::inventory as layout};
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let item = widget(&mut preview, player);
+    let target = npc(&preview);
+    preview.open_inventory_on(Some(target));
+    preview.image().unwrap();
+    let entry = list_point(&preview, item);
+    assert!(preview.click(entry, true));
+    // A quick click prints the look line on the monitor.
+    mark_monitor(&mut preview);
+    preview.hover(entry);
+    assert!(preview.click(entry, false));
+    assert!(preview.release(Some(entry), false));
+    assert!(contains(&monitor_line(&preview), b"Widget"));
+    // A hold opens the menu against the use-on window's own right edge
+    // (372, where the inventory window's 579 would not flip it).
+    let mut now = preview.clock;
+    assert!(preview.click(entry, false));
+    let at = [330, entry[1]];
+    preview.hover(at);
+    now += 300;
+    preview.tick(now).unwrap();
+    let opened = match &preview.screen {
+        Screen::Inventory(screen) => screen.menu.clone().expect("the item menu"),
+        _ => panic!("the use-on window is open"),
+    };
+    assert_eq!(opened.entries[0], ItemEntry::Look);
+    assert!(opened.flipped);
+    assert_eq!(
+        (opened.top, opened.flipped),
+        layout::menu_place(at, opened.entries.len(), layout::USE_ON_EDGES)
+    );
+    assert!(!layout::menu_place(at, opened.entries.len(), layout::INVENTORY_EDGES).1);
+    preview.image().unwrap();
+    // Look sends the examine text to the monitor (no stats panel here).
+    mark_monitor(&mut preview);
+    assert!(preview.release(Some(at), false));
+    assert_eq!(monitor_line(&preview), b"A synthetic widget.");
+    assert!(preview.step(KeyCode::Escape));
+}
+
+#[test]
+fn spec014_hotkeys_work_over_the_bar_but_drop_while_edge_scrolling() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    // Resting over the interface bar, `i` opens the inventory.
+    preview.hover([320, 430]);
+    preview.tick(100).unwrap();
+    assert!(preview.pointer.edge.is_none());
+    assert!(!preview.pointer_swallows_keys());
+    assert!(preview.step(KeyCode::KeyI));
+    assert!(matches!(preview.screen, Screen::Inventory(_)));
+    assert!(preview.step(KeyCode::Escape));
+    // On an edge pixel (row 479, below the bar, or the corner a letterboxed
+    // window's border clamps to) the view scrolls and §3.29 drops keys.
+    for (point, now) in [([320, 479], 200), ([639, 479], 300)] {
+        preview.hover(point);
+        preview.tick(now).unwrap();
+        assert!(preview.pointer.edge.is_some());
+        assert!(preview.pointer_swallows_keys());
+        assert!(preview.step(KeyCode::KeyI));
+        assert!(matches!(preview.screen, Screen::Map));
+    }
+    // Back over the bar, keys work again.
+    preview.hover([320, 430]);
+    preview.tick(400).unwrap();
+    assert!(preview.step(KeyCode::KeyI));
+    assert!(matches!(preview.screen, Screen::Inventory(_)));
 }

@@ -217,6 +217,11 @@ pub struct MapPreview {
     /// SPEC-014 §3.34 the inventory figure's facing and when it last
     /// turned; the counter persists between openings.
     figure: (u8, u64),
+    /// The button pressed and still held, as a screen rectangle: it shows
+    /// its down art while the pointer stays over it.
+    held: Option<vault_core::ui::Rect>,
+    /// The last frame drew the held button down.
+    held_shown: bool,
 }
 /// The map's sprites by tile index or object art. Each art file is read and
 /// decoded once, through the world's asset cache, and object art that is
@@ -428,6 +433,8 @@ impl MapPreview {
             debug: None,
             light: Default::default(),
             figure: (0, 0),
+            held: None,
+            held_shown: false,
         })
     }
     /// Whether the save/load screen is open (the main menu's load stage).
@@ -474,17 +481,64 @@ impl MapPreview {
         self.pressed = Some(release);
         self.play_effect(press, None);
     }
+    /// A red-button press on the button at screen `rect`: the cues, and its
+    /// down art until the release.
+    pub(crate) fn press_button(&mut self, rect: vault_core::ui::Rect) {
+        self.press();
+        self.held = Some(rect);
+    }
+    /// A press on a button at screen `rect` with its own cues.
+    pub(crate) fn press_button_cue(
+        &mut self,
+        press: &'static [u8],
+        release: &'static [u8],
+        rect: vault_core::ui::Rect,
+    ) {
+        self.press_cue(press, release);
+        self.held = Some(rect);
+    }
+    /// The held button, while the pointer is over it.
+    pub(crate) fn held_button(&self) -> Option<vault_core::ui::Rect> {
+        self.held
+            .filter(|rect| self.pointer.at.is_some_and(|at| rect.contains(at)))
+    }
+    /// The pointer moved onto or off the held button since the last frame.
+    fn held_moved(&self) -> bool {
+        self.held_button().is_some() != self.held_shown
+    }
+    /// A button's art: `down` while it is held with the pointer over it,
+    /// else `up`.
+    pub(crate) fn button_art(
+        &self,
+        rect: vault_core::ui::Rect,
+        up: &'static str,
+        down: &'static str,
+    ) -> &'static str {
+        if self.held_button() == Some(rect) {
+            down
+        } else {
+            up
+        }
+    }
     /// A mouse release at a frame pixel (`None` outside the frame): a drag
-    /// drops, a map click acts, and a held desktop button plays its release
-    /// cue.
+    /// drops, a map click acts, a held desktop button plays its release
+    /// cue, and a button that reports on release acts when it is over it.
     pub fn release(&mut self, point: Option<[i32; 2]>, right: bool) -> bool {
+        // A left release ends the held button's down art.
+        let (held, bar) = if right {
+            (None, None)
+        } else {
+            (self.held.take(), self.hud.held.take())
+        };
+        let over = held.filter(|rect| point.is_some_and(|point| rect.contains(point)));
         if self.movie_release() {
             self.pressed = None;
             return true;
         }
         let mut handled = !right
             && match self.screen {
-                Screen::Map => self.map_release(point),
+                Screen::Map => self.map_release(point) || self.bar_release(bar, over),
+                Screen::Elevator(_) => self.elevator_release(over),
                 Screen::Loot(_) => self.loot_release(point),
                 Screen::Inventory(_) => self.inventory_release(point),
                 Screen::Barter(_) => self.barter_release(point),
@@ -495,7 +549,7 @@ impl MapPreview {
             self.play_effect(cue, None);
             handled = true;
         }
-        handled
+        handled || held.is_some()
     }
     pub(crate) fn location_name(&self, town: usize) -> Vec<u8> {
         vault_core::worldmap::TOWNS
@@ -670,6 +724,7 @@ impl MapPreview {
         }?;
         self.draw_dialog(&mut image);
         self.draw_debug(&mut image);
+        self.held_shown = self.held_button().is_some();
         self.frame = Some(image.clone());
         self.draw_cursor(&mut image);
         Ok(image)
@@ -1029,14 +1084,14 @@ impl MapPreview {
             // modal: the world waits for them.
             Screen::Movie(_) => Ok(self.movie_tick(now)),
             Screen::Inventory(_) => Ok(self.inventory_tick()),
-            Screen::Character(_) | Screen::Barter(_) => Ok(false),
+            Screen::Barter(_) => Ok(self.barter_tick()),
+            Screen::Loot(_) => Ok(self.loot_tick()),
+            Screen::Character(_) => Ok(false),
             // SPEC-013/014 windows suspend the world.
-            Screen::Skilldex(_)
-            | Screen::Elevator(_)
-            | Screen::Loot(_)
-            | Screen::Options(_)
-            | Screen::Automap(_)
-            | Screen::Help(_) => Ok(false),
+            Screen::Skilldex(_) => Ok(self.skilldex_tick()),
+            Screen::Elevator(_) | Screen::Options(_) | Screen::Automap(_) | Screen::Help(_) => {
+                Ok(false)
+            }
             Screen::SaveLoad(_) => {
                 self.saveload_frame();
                 Ok(false)
@@ -1068,6 +1123,7 @@ impl MapPreview {
             .fades
             .tick(now, game.as_deref().unwrap_or(&self.palette));
         changed |= self.pointer_tick();
+        changed |= self.held_moved();
         changed |= self.counters_tick(now);
         changed |= self.debug_tick();
         Ok(changed)

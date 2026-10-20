@@ -256,11 +256,7 @@ impl AssetPreview {
     pub fn pointer_left(&mut self) {
         match self {
             Self::Map(preview) => preview.pointer_left(),
-            Self::Game(game) => {
-                if let Some(world) = game.world() {
-                    world.pointer_left();
-                }
-            }
+            Self::Game(game) => game.pointer_left(),
             _ => {}
         }
     }
