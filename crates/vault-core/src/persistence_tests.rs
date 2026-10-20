@@ -830,3 +830,84 @@ fn spec013_the_world_and_town_maps_save_and_clear_the_outgoing_map() {
     assert!(host.world.unloaded);
     assert!(host.world.effects.contains(&crate::WorldEffect::TownMap));
 }
+
+/// A corpus map file with no map script and world-map map number `number`.
+fn corpus_map(dir: &Path, name: &str, number: i32) {
+    let mut map = fixture::interactive_map();
+    fixture::world::word(&mut map, 0x24, 0);
+    fixture::world::word(&mut map, 0x28, 0);
+    fixture::world::word(&mut map, 0x34, number);
+    fs::write(dir.join(format!("maps/{name}.map")), map).unwrap();
+}
+
+#[test]
+fn spec013_transitions_move_the_world_map_to_the_destination_town() {
+    let dir = corpus();
+    // Junktown's slot-0 hotspot map (SPEC-008 §3.7).
+    corpus_map(dir.path(), "junkent", 9);
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let to = |map: i32| crate::Transition {
+        map,
+        elevation: -1,
+        hex: -1,
+        facing: -1,
+    };
+    host.request_transition(to(9));
+    assert!(host.process_transition().unwrap());
+    assert_eq!(host.world.world_map.saved.town, 3);
+    assert_eq!(
+        host.world.world_map.position(),
+        [17 * 50 + 25, 10 * 50 + 25]
+    );
+    // A map outside the hotspot catalog keeps the town.
+    host.request_transition(to(8));
+    assert!(host.process_transition().unwrap());
+    assert_eq!(host.world.world_map.saved.town, 3);
+}
+
+#[test]
+fn spec014_leaving_requeues_the_game_time_event_restores_the_roof_and_starts_city_music() {
+    let dir = corpus();
+    corpus_map(dir.path(), "v13ent", 35);
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let music = |host: &WorldHost<VfsWorldAssets>| -> Vec<String> {
+        host.world
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                crate::WorldEffect::Music(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(music(&host).is_empty(), "map 7 has no music the specs name");
+    // A roof square over the player's elevation, hidden.
+    host.world.map.tiles[0].as_mut().unwrap()[5050].word |= 0x1000_0000;
+    host.world.effects.clear();
+    host.load_map("maps/v13ent.map").unwrap();
+    assert_eq!(music(&host), ["06vault"]);
+    // The saved copy shows the roof again.
+    let saved = parse_saved(&host, "SYNTH.SAV");
+    assert_eq!(
+        saved.tiles[0].as_ref().unwrap()[5050].stored & 0x1000_0000,
+        0
+    );
+    // Leaving for the world map queues the game-time (midnight) event
+    // again, so the days go on while the map is cleared.
+    host.request_transition(crate::Transition {
+        map: -2,
+        elevation: -1,
+        hex: -1,
+        facing: -1,
+    });
+    assert!(host.process_transition().unwrap());
+    assert!(host.world.unloaded);
+    assert!(
+        host.world
+            .queue
+            .events()
+            .any(|event| event.kind == EventKind::Midnight)
+    );
+}

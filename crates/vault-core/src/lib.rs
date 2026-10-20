@@ -16,6 +16,7 @@ mod host_animation;
 pub mod host_choreography;
 mod host_combat;
 mod host_drugs;
+mod host_fidget;
 mod host_game;
 mod host_items;
 mod host_motion;

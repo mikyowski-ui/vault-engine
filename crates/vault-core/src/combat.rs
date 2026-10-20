@@ -112,7 +112,7 @@ pub struct PlayerModifiers {
 }
 
 /// Effective, explicit inputs for one attack.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Attack {
     pub attacker_player: bool,
     pub attacker_pid: u32,

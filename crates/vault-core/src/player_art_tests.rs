@@ -145,18 +145,16 @@ fn spec005_wield_obj_critter_registers_the_armor_art() {
     let player = host.world.player;
     let armor = support::carry(&mut host, player, LEATHER, 1);
     call(&mut host, 0x80da, &[armor as i32, player as i32]);
-    // The art change waits for the next animation step in its own
-    // reserved sequence; the protection applies at once.
-    assert_eq!(art(&host, player), 0x0100_000B);
-    assert!(host.animation_busy(player));
-    assert_eq!(host.world.player_sheet().unwrap().bonus[9], 20);
-    host.step_animations(0).unwrap();
+    // The art change is its own reserved sequence, whose set-art entry
+    // takes effect as it registers (SPEC-007 §3.10.1), so nothing is left
+    // busy; the protection applies at once too.
     assert_eq!(art(&host, player), 0x0100_000C);
+    assert!(!host.animation_busy(player));
+    assert_eq!(host.world.player_sheet().unwrap().bonus[9], 20);
     // Swapping armor moves the worn flag; under the safe rule a -1 field
     // shows the default player art (the reference takes base index 1).
     let undrawn = support::carry(&mut host, player, UNDRAWN, 1);
     call(&mut host, 0x80da, &[undrawn as i32, player as i32]);
-    host.step_animations(100).unwrap();
     assert_eq!(art(&host, player), 0x0100_000B);
     assert!(
         !host
@@ -176,7 +174,6 @@ fn spec005_wield_obj_critter_registers_the_armor_art() {
     let worn = support::carry(&mut host, npc, LEATHER, 1);
     let npc_art = art(&host, npc);
     call(&mut host, 0x80da, &[worn as i32, npc as i32]);
-    host.step_animations(200).unwrap();
     assert_eq!(art(&host, npc), npc_art);
     assert!(
         host.world
@@ -215,7 +212,6 @@ fn spec005_scripted_removal_restores_the_jumpsuit() {
     let player = host.world.player;
     let armor = support::carry(&mut host, player, LEATHER, 1);
     call(&mut host, 0x80da, &[armor as i32, player as i32]);
-    host.step_animations(0).unwrap();
     let spear = support::carry(&mut host, player, SPEAR, 1);
     host.world
         .equip(player, spear, BasicFlags::RIGHT_HAND.0)

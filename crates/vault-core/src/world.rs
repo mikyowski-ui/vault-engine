@@ -505,6 +505,9 @@ pub enum WorldEffect {
     /// world map: `map.msg` 1000 shows and the session returns to the main
     /// menu.
     MapSaveFailed,
+    /// SPEC-014 §3.35 a loaded map's city music, `sound/music/<name>.acm`,
+    /// replacing what plays.
+    Music(String),
     Elevator(i32),
     EndGame,
     Slideshow,

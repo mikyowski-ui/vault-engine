@@ -46,6 +46,11 @@ const LIT_FLARE: u32 = 205;
 const PLAYER_LIGHT: (i32, i32) = (4, 65536);
 /// The weapon explosion art of the explode effect (`roktxpd.frm`).
 const EXPLODED_WEAPON_ART: u32 = 0x0500_000A;
+/// §3.11.5 script damage's temporary attacker art, its sound, and its
+/// knockback direction (the direction from a hex to itself).
+const SCRIPT_ATTACKER_ART: u32 = 0x0200_01F5;
+const SCRIPT_DAMAGE_SOUND: &[u8] = b"whc1xxx1";
+const SOUTHEAST: u8 = 2;
 
 /// Animation codes (SPEC-007 §2.2).
 mod animation {
@@ -91,6 +96,9 @@ pub(crate) struct Scene<'a> {
     pub impact: Option<i32>,
     /// The weapon explosion an explosive projectile ends in.
     pub explosion: Option<ExplosionArt>,
+    /// The attack-animation selector a death takes from attacker art
+    /// `0x020001F5` (§3.8), for script damage (§3.11.5).
+    pub selector: Option<u8>,
 }
 
 /// An effect the sequence commits: applied to the world at once, before
@@ -256,6 +264,159 @@ impl<A: WorldAssets> WorldHost<A> {
         }
     }
 
+    /// A walk the world has already made, shown (SPEC-007 §3.11.1): the
+    /// mover leaves the display `from` and steps along `route` frame by
+    /// frame, with the walk art (or the run art, under the run rules) at
+    /// its rate plus `combat_speed` in combat (§3.10.1). It plays after the
+    /// shows before it, and combat waits for it.
+    pub(crate) fn present_walk(
+        &mut self,
+        mover: ObjectRef,
+        from: Display,
+        route: Vec<u8>,
+        run: bool,
+    ) {
+        if route.is_empty() {
+            return;
+        }
+        let animation = self.walk_animation(mover, run);
+        let speed = if animation == animation::WALK {
+            self.walk_speed(mover)
+        } else {
+            0
+        };
+        let arts: [u32; 6] =
+            std::array::from_fn(|facing| self.critter_fid(mover, animation, None, facing as u8));
+        let frames = Box::new(std::array::from_fn(|facing| {
+            self.frames(arts[facing], facing as u8, speed)
+        }));
+        let mut show = Show::default();
+        let owner = Owner::World(mover);
+        show.main.show(owner, from);
+        let walk = Action::Walk {
+            arts,
+            frames,
+            route,
+            cursor: 0,
+            frame: 0,
+        };
+        if show.main.push(owner, 0, walk).is_ok() {
+            self.present(show);
+        }
+    }
+    /// §3.11.5 script damage shown: a hidden temporary attacker at the
+    /// victim's hex, art `0x020001F5` facing 0 (NE), and one sequence:
+    /// `whc1xxx1`, then the victim's §3.10.6 reaction with delay 0. The
+    /// victim is hit from the front when it faces SE, SW or W; knockback is
+    /// `trunc(damage / 10)` hexes SE, or none for a multihex victim,
+    /// electrical damage or bypassed armor; a death takes the
+    /// maximum-violence column for the damage type. The reaction's effects
+    /// (a slide, the corpse) apply at once, as an attack's do.
+    pub(crate) fn present_script_damage(
+        &mut self,
+        victim: ObjectRef,
+        damage: i32,
+        kind: i32,
+        bypassed: bool,
+        died: bool,
+    ) -> Result<(), WorldError> {
+        let Some((hex, elevation, orientation, multihex)) =
+            self.world.get(victim).and_then(|object| {
+                Some((
+                    object.raw.hex?,
+                    object.raw.elevation,
+                    object.raw.orientation,
+                    object.raw.flags.contains(BasicFlags::MULTIHEX),
+                ))
+            })
+        else {
+            return Ok(());
+        };
+        let mut raw = crate::world::object_record(0x0500_0001, 0);
+        raw.art_id = SCRIPT_ATTACKER_ART;
+        raw.hex = Some(hex);
+        raw.elevation = elevation;
+        raw.flags = BasicFlags(BasicFlags::HIDDEN.0 | BasicFlags::TEMPORARY.0);
+        let attacker = self.world.insert(crate::world::WorldObject {
+            raw,
+            prototype: None,
+            character: None,
+            name: Vec::new(),
+            description: Vec::new(),
+            owner: None,
+            inventory: Vec::new(),
+            money: None,
+            active: true,
+            opponent: 0,
+        })?;
+        let knockback = if bypassed || multihex || kind == damage_type::ELECTRICAL {
+            0
+        } else {
+            damage / 10
+        };
+        let flags = effect::HIT | if died { effect::DEAD } else { 0 };
+        let attack = Attack::default();
+        let spray = Spray {
+            main: Resolution {
+                code: 2,
+                defender_flags: flags,
+                damage,
+                knockback,
+                ..Resolution::default()
+            },
+            extras: Vec::new(),
+        };
+        let selector = usize::try_from(kind)
+            .ok()
+            .and_then(|kind| crate::combat::SEVERE_DEATH.get(kind))
+            .map_or(animation::FALL_BACK, |(_, maximum)| *maximum);
+        let scene = Scene {
+            attacker,
+            defender: victim,
+            attack: &attack,
+            victim: &attack,
+            spray: &spray,
+            hit: true,
+            impact: None,
+            explosion: None,
+            selector: Some(selector),
+        };
+        let mut draft = Draft::default();
+        draft.facing.insert(attacker, 0);
+        draft.facing.insert(victim, orientation);
+        let built = self
+            .sound(
+                &mut draft,
+                Into::Main,
+                victim,
+                0,
+                Some(SCRIPT_DAMAGE_SOUND.to_vec()),
+            )
+            .and_then(|()| {
+                let react = React {
+                    critter: victim,
+                    flags,
+                    knockback,
+                    direction: Some(SOUTHEAST),
+                    delay: 0,
+                    from_front: matches!(orientation, 2..=4),
+                    profile: &attack,
+                    damage,
+                };
+                self.react(&mut draft, Into::Main, &scene, react)
+            });
+        self.world.erase(attacker);
+        match built {
+            Ok(()) => {
+                self.apply_effects(&draft.effects)?;
+                self.present(draft.show);
+            }
+            Err(refused) => self
+                .world
+                .diagnostic(format!("script damage sequence refused: {refused:?}")),
+        }
+        Ok(())
+    }
     /// §3.10 the attack's show: the melee sequence (§3.10.3) or the ranged
     /// and thrown one (§3.10.4), with the reactions (§3.10.6) and the extra
     /// victims' sequences (§3.10.7). Building draws, in order, the attack
@@ -314,7 +475,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.get(object).and_then(|object| object.raw.hex)
     }
     /// A world object's display as it is now (off the map while carried).
-    fn display_now(&self, object: ObjectRef) -> Option<Display> {
+    pub(crate) fn display_now(&self, object: ObjectRef) -> Option<Display> {
         let found = self.world.get(object)?;
         Some(Display {
             pid: found.raw.pid,
@@ -1151,7 +1312,9 @@ impl<A: WorldAssets> WorldHost<A> {
             mode: profile.mode(),
             damage: react.damage,
             bloody_mess: profile.player.bloody_mess,
-            attack_animation: Fid(attacker.raw.art_id).animation(),
+            attack_animation: scene
+                .selector
+                .unwrap_or(Fid(attacker.raw.art_id).animation()),
         };
         let orientation = victim.raw.orientation;
         choice.animation(|animation| {

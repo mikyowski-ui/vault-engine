@@ -40,10 +40,6 @@ pub struct AnimationSequence {
     /// insignificant.
     pub flags: i32,
     pub commands: Vec<(u16, Vec<i32>)>,
-    /// Index of the executing command.
-    pub cursor: usize,
-    /// Execution state of the current command.
-    pub progress: crate::host_animation::CommandProgress,
     /// Sound-cue names by command index.
     pub sounds: BTreeMap<usize, Vec<u8>>,
 }
@@ -79,7 +75,6 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// NPC combat policy: the built-in SPEC-009 packet AI by default.
     pub combat_ai: Box<dyn crate::combat_state::CombatAi>,
     pub building_animation: Option<AnimationSequence>,
-    pub animations: Vec<AnimationSequence>,
     /// SPEC-007 §3.10-3.11 how attack shows and the world's own sequences
     /// play: at once (the default for headless runs) or over time, with
     /// combat waiting for them.
@@ -95,6 +90,8 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub(crate) next_motion: u64,
     /// The scheduler time of the world's sequences.
     pub(crate) motion_time: u64,
+    /// SPEC-007 §3.11.2 the idle-fidget background task, while it runs.
+    pub(crate) fidget: Option<crate::host_fidget::Fidget>,
     presentation: Option<PresentationState>,
     /// An interaction's approach has just ended: its action runs as the
     /// sequence's proximity step (SPEC-013 §3.2), not a new approach.
@@ -228,7 +225,6 @@ impl<A: WorldAssets> WorldHost<A> {
             next_program: 1,
             combat_ai: Box::new(crate::combat_state::PacketAi),
             building_animation: None,
-            animations: Vec::new(),
             playback: Default::default(),
             floating_style: 1,
             dialogue_waiters: Vec::new(),
@@ -237,6 +233,7 @@ impl<A: WorldAssets> WorldHost<A> {
             running_motions: Vec::new(),
             next_motion: 0,
             motion_time: 0,
+            fidget: None,
             presentation: None,
             arriving: false,
             vm_observer: None,
@@ -287,8 +284,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// excluded map's working copy is deleted instead). Returns whether the
     /// map's save, when one was due, succeeded.
     pub(crate) fn leave_map(&mut self) -> Result<bool, WorldError> {
-        self.animations.clear();
-        self.motions.clear();
+        self.stop_motions();
         self.building_animation = None;
         // SPEC-013 §2.5 map-exit handlers for explosives and sneak.
         self.skill_map_exit()?;
@@ -308,6 +304,15 @@ impl<A: WorldAssets> WorldHost<A> {
             });
             self.report_load_dispatch(result);
         }
+        // SPEC-014 §3.35 step 3: the game-time (midnight) event is queued
+        // again, and the roof over the player's position is restored.
+        self.world.queue.insert(
+            self.world.clock.ticks,
+            self.world.clock.midnight_delay(),
+            0,
+            crate::queue::EventKind::Midnight,
+        )?;
+        self.world.restore_roofs();
         self.world.map.header.flags.0 |= 1;
         self.world.map.header.last_visit = self.world.clock.ticks as u32;
         Ok(self.world.save_left_map())
@@ -498,9 +503,12 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.loading = false;
         self.world.restoring = false;
         // SPEC-014 §3.35: once a saved copy has loaded, with its map
-        // scripts, the revisit rules age it.
+        // scripts, the revisit rules age it; then the city music starts.
         if saved && load_error.is_none() {
             self.revisit()?;
+        }
+        if let Some(track) = crate::worldmap::city_music(self.world.map.header.map_number) {
+            self.world.emit(WorldEffect::Music(track.to_string()));
         }
         self.drain_requests()?;
         if let Some(error) = load_error {
@@ -809,12 +817,21 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.world.enqueue_map_timers()?;
             }
             EventKind::Knockout => {
-                // Waking clears the knockout status bit of a living critter.
+                // SPEC-007 §3.11.5: waking replaces a living critter's
+                // knockout with a knockdown. Outside combat it gets up at
+                // once, which clears the knockdown; in combat it gets up on
+                // its turn.
+                use crate::critical::effect::{DEAD, KNOCKED_DOWN, KNOCKED_OUT};
+                let combat = self.world.combat;
                 if let Some(ObjectState::Critter(state)) =
                     self.world.get_mut(event.object).map(|o| &mut o.raw.state)
-                    && state.results.0 & crate::critical::effect::DEAD == 0
+                    && state.results.0 & DEAD == 0
                 {
-                    state.results.0 &= !crate::critical::effect::KNOCKED_OUT;
+                    state.results.0 = (state.results.0 & !KNOCKED_OUT) | KNOCKED_DOWN;
+                    if !combat {
+                        state.results.0 &= !KNOCKED_DOWN;
+                        self.stand_up(event.object);
+                    }
                 }
             }
             // SPEC-011 §3.3 and §3.8 handlers report their own stop rule.
@@ -896,9 +913,6 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.elapsed_ms = now_ms;
         self.update_programs()?;
         let mut changed_by_animation = false;
-        if self.step_animations(now_ms)? {
-            changed_by_animation = true;
-        }
         // SPEC-007 §3.10 attack shows play in order; SPEC-013 §3.10: a timed
         // or scripted explosion's art plays at its own rate, and its damage
         // step follows its last art.
@@ -913,6 +927,10 @@ impl<A: WorldAssets> WorldHost<A> {
         if !self.world.dialogue.open && self.step_motions(now_ms) {
             changed_by_animation = true;
             self.drain_requests()?;
+        }
+        // SPEC-007 §3.11.2 the idle-fidget background task.
+        if !self.world.dialogue.open && self.idle_fidget(now_ms)? {
+            changed_by_animation = true;
         }
         // SPEC-007: service scripted combat requests and advance turns until
         // the player must act (host-configured AI drives NPC turns). Combat

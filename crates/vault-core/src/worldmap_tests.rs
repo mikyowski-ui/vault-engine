@@ -790,3 +790,27 @@ fn spec008_rest_eligibility_attackers_and_team_locations() {
     }
     assert!(host.rest_allowed());
 }
+
+#[test]
+fn spec013_maps_belong_to_the_town_of_their_hotspot_row() {
+    use crate::worldmap::{city_music, town_center, town_of_map};
+    for (file, town) in [
+        ("V13ENT.MAP", 0),
+        ("vault13.map", 0),
+        ("JUNKENT.MAP", 3),
+        ("HUBDWNTN.MAP", 6),
+        ("LAGUNRUN.MAP", 10),
+        // The alternate rows: the Cathedral, the Military Base and the
+        // Brotherhood.
+        ("CHILDEAD.MAP", 11),
+        ("MBDEAD.MAP", 8),
+        ("BRODEAD.MAP", 7),
+    ] {
+        assert_eq!(town_of_map(file), Some(town), "{file}");
+    }
+    assert_eq!(town_of_map("DESERT1.MAP"), None);
+    assert_eq!(town_center(3), Some([17 * 50 + 25, 10 * 50 + 25]));
+    // SPEC-014 §3.12: city 35 (Vault 13's entrance) plays 06vault.
+    assert_eq!(city_music(35), Some("06vault"));
+    assert_eq!(city_music(7), None);
+}

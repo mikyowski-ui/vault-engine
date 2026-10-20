@@ -435,7 +435,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.programs.clear();
         self.clear_program_bindings();
-        self.animations.clear();
+        self.motions.clear();
         self.building_animation = None;
         let sheet = self.world.player_sheet().cloned().unwrap_or_default();
         let mut world = WorldState::new(sheet, 1)?;

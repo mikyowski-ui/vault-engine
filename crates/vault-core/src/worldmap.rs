@@ -150,6 +150,34 @@ pub fn hotspots(row: usize) -> impl Iterator<Item = (usize, &'static Hotspot)> {
         .take_while(|(_, hotspot)| hotspot.x != 0 && hotspot.y != 0)
 }
 
+/// The town whose hotspot catalog (§3.7) names a map file: knowledge rows
+/// 0-11 are towns 0-11, and the alternate rows 12, 13 and 14 belong to the
+/// Cathedral, the Military Base and the Brotherhood.
+pub fn town_of_map(file: &str) -> Option<usize> {
+    let row = (0..HOTSPOTS.len())
+        .find(|row| hotspots(*row).any(|(_, hotspot)| hotspot.map.eq_ignore_ascii_case(file)))?;
+    Some(match row {
+        12 => 11,
+        13 => 8,
+        14 => 7,
+        town => town,
+    })
+}
+/// The center of a town's cell.
+pub fn town_center(town: usize) -> Option<[i32; 2]> {
+    let [column, row] = TOWNS.get(town)?.cell;
+    Some([column as i32 * CELL + 25, row as i32 * CELL + 25])
+}
+/// SPEC-014 §3.12 the city music the specifications name, by the map
+/// header's world-map city number: only Vault 13's entrance (35) is given,
+/// so other maps start none.
+pub fn city_music(city: i32) -> Option<&'static str> {
+    match city {
+        35 => Some("06vault"),
+        _ => None,
+    }
+}
+
 /// SPEC-008 §3.4 movement: absolute differences, signs, a zero error
 /// accumulator, and a zero step count. The X-major branch's strict
 /// `error > A` comparison can finish one Y pixel short of the target.

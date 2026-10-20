@@ -14,6 +14,8 @@ use vault_formats::{
 
 /// SPEC-014 §3.33 the visited set: 40000 hexes, 8 per byte.
 pub const VISITED_BYTES: usize = 5000;
+/// SPEC-003 §2.8 the transient roof-hide bit of a tile word.
+const ROOF_HIDDEN: u32 = 0x1000_0000;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Persistence {
@@ -294,6 +296,19 @@ impl WorldState {
                 .store(number as usize, usize::from(elevation), &raster)
         {
             self.diagnostic(format!("automap capture failed: {error}"));
+        }
+    }
+    /// SPEC-014 §3.35 step 3: the roof over the player's position is shown
+    /// again. Only the roof-hide bit (SPEC-003 §2.8) hides a roof, so every
+    /// hidden roof square on the player's elevation is cleared.
+    pub fn restore_roofs(&mut self) {
+        let elevation = self
+            .get(self.player)
+            .map_or(self.elevation, |player| player.raw.elevation);
+        if let Some(Some(tiles)) = self.map.tiles.get_mut(usize::from(elevation)) {
+            for tile in tiles {
+                tile.word &= !ROOF_HIDDEN;
+            }
         }
     }
     /// The current map's working `.SAV` name: its requested file name, else

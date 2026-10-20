@@ -1485,6 +1485,15 @@ impl<A: WorldAssets> WorldHost<A> {
                     .map_path(map)
                     .ok_or_else(|| WorldError::Invalid(format!("map {map} is not available")))?;
                 self.load_map(&path)?;
+                // Step 3: the world-map position moves to the map's town (by
+                // the §3.7 hotspot catalog; other maps keep the town).
+                let file = path.rsplit('/').next().unwrap_or(&path);
+                if let Some(town) = crate::worldmap::town_of_map(file)
+                    && let Some(center) = crate::worldmap::town_center(town)
+                {
+                    self.world.world_map.saved.town = town as i32;
+                    self.world.world_map.set_position(center);
+                }
                 if !matches!(transition.hex, -1 | 0) && (0..=2).contains(&transition.elevation) {
                     let facing = transition.facing.clamp(0, 5) as u8;
                     self.place_player(transition.hex, transition.elevation as u8, facing)?;

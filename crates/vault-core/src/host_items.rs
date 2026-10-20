@@ -5,9 +5,7 @@
 //! SPEC-005 §3.8 player base art: the jumpsuit by gender, armor art, and
 //! the inventory figure.
 use crate::{
-    ObjectRef, Perk, WorldEffect, WorldError, ai,
-    assets::WorldAssets,
-    host::{AnimationSequence, WorldHost},
+    ObjectRef, Perk, WorldEffect, WorldError, ai, assets::WorldAssets, host::WorldHost,
     progression::PerkChoice,
 };
 use vault_formats::{
@@ -275,21 +273,16 @@ impl<A: WorldAssets> WorldHost<A> {
         Ok(())
     }
     /// A new reserved animation sequence whose one entry, with start delay
-    /// 0, changes `object`'s art to `fid` on the next animation step.
+    /// 0, changes `object`'s art to `fid`: an instant entry, so it takes
+    /// effect as the sequence registers (SPEC-007 §3.10.1).
     fn register_art_change(&mut self, object: ObjectRef, fid: u32) {
-        if self.animations.len() >= 32 {
-            self.world
-                .diagnostic("animation sequence list is full; art change dropped");
-            return;
+        let mut sequence = crate::motion::MotionSequence::new();
+        match sequence.push(object, 0, crate::motion::Motion::SetArt { art: fid }) {
+            Ok(()) => self.register_motion(sequence),
+            Err(refused) => self
+                .world
+                .diagnostic(format!("art change refused: {refused:?}")),
         }
-        self.animations.push(AnimationSequence {
-            flags: 2,
-            commands: vec![(
-                crate::host_animation::CHANGE_ART,
-                vec![fid as i32, object as i32],
-            )],
-            ..Default::default()
-        });
     }
     /// §3.15 inventory drag reload; anything loaded plays the weapon's
     /// ready sound.

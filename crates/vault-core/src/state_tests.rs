@@ -511,7 +511,7 @@ fn spec005_fixture_c_registration_dialogue_and_callback_type_mutation() {
     combat_host.world.combat = true;
     let combat_vm = run_fragment(&mut combat_host, &combat_base, &bytes[..0x30]).unwrap();
     assert_eq!(combat_vm.value_stack.byte_len(), 0);
-    assert!(combat_host.animations.is_empty() && combat_host.building_animation.is_none());
+    assert!(combat_host.motions.is_empty() && combat_host.building_animation.is_none());
     assert!(
         !combat_host
             .world
@@ -520,6 +520,7 @@ fn spec005_fixture_c_registration_dialogue_and_callback_type_mutation() {
             .any(|effect| matches!(effect, WorldEffect::Animation { .. }))
     );
     let (mut host, base, _) = host(&[b"Hello", b"Continue"]);
+    host.playback = crate::host_choreography::Playback::RealTime;
     let vm = run_fragment(&mut host, &base, &bytes).unwrap();
     assert_eq!(
         (vm.value_stack.byte_len(), vm.return_stack.byte_len()),
@@ -528,8 +529,18 @@ fn spec005_fixture_c_registration_dialogue_and_callback_type_mutation() {
     assert_eq!(vm.status.0 & 0x20, 0);
     assert!(!host.world.dialogue.open);
     assert_eq!(host.world.dialogue.target, 0);
-    assert_eq!(host.animations.len(), 1);
-    assert_eq!(host.animations[0].commands[0], (0x810f, vec![-1, 1, 65536]));
+    // The registered forward animation 1 of 0x10000 plays as one sequence.
+    assert_eq!(host.motions.len(), 1);
+    let entry = &host.motions[0].schedule.entries()[0];
+    assert_eq!(entry.owner, 0x10000);
+    assert!(matches!(
+        entry.action,
+        crate::motion::Motion::Play {
+            animation: 1,
+            play: crate::motion::Play::Forward,
+            ..
+        }
+    ));
     let calls: Vec<_> = host.calls.iter().map(|call| call.opcode).collect();
     assert_eq!(
         calls,
@@ -1470,7 +1481,11 @@ fn spec005_critter_damage_uses_armor_unless_bypassed() {
 fn spec005_registered_sequences_execute_retire_and_clear_busy() {
     use fixture::{instruction, literal, push};
     let (mut host, base, _) = host(&[b"Hello", b"Continue"]);
+    // Registered sequences play over time under the SPEC-007 §3.10.1 start
+    // rule; each registers at the time of the next tick.
+    host.playback = crate::host_choreography::Playback::RealTime;
     let me = host.world.player as i32;
+    let player = host.world.player;
     let busy = |host: &mut WorldHost<Assets>| {
         let code = [push(me), instruction(0x80e7)].concat();
         let mut vm = run_fragment(host, &base, &code).unwrap();
@@ -1478,6 +1493,23 @@ fn spec005_registered_sequences_execute_retire_and_clear_busy() {
     };
     let begin = |flags: i32| [push(1), push(flags), instruction(0x810e)].concat();
     let end = [push(3), push(0), instruction(0x810e)].concat();
+    let mut now = 1000;
+    let register = |host: &mut WorldHost<Assets>, now: u64, code: &[u8]| {
+        host.world.elapsed_ms = now;
+        run_fragment(host, &base, code).unwrap();
+    };
+    let sounds = |host: &WorldHost<Assets>| -> Vec<Vec<u8>> {
+        host.world
+            .effects
+            .iter()
+            .filter_map(|e| match e {
+                WorldEffect::SoundEffect { name, owner } if *owner == Some(player) => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
     // A registered walk to hex 20103 on the object's elevation.
     let code = [
         begin(1),
@@ -1488,20 +1520,16 @@ fn spec005_registered_sequences_execute_retire_and_clear_busy() {
         end.clone(),
     ]
     .concat();
-    run_fragment(&mut host, &base, &code).unwrap();
+    register(&mut host, now, &code);
     assert_eq!(busy(&mut host), Value::integer(-1));
-    let mut now = 1000;
     let mut visited = Vec::new();
-    while !host.animations.is_empty() {
+    while host.moving(player) {
         host.tick(now).unwrap();
-        visited.push(host.world.get(host.world.player).unwrap().raw.hex.unwrap());
+        visited.push(host.world.get(player).unwrap().raw.hex.unwrap());
         now += 100;
         assert!(now < 10_000, "sequence must retire");
     }
-    assert_eq!(
-        host.world.get(host.world.player).unwrap().raw.hex,
-        Some(20103)
-    );
+    assert_eq!(host.world.get(player).unwrap().raw.hex, Some(20103));
     // One adjacent hex per frame step along the planned route.
     let mut path = vec![20100];
     path.extend(visited.iter().copied());
@@ -1516,12 +1544,13 @@ fn spec005_registered_sequences_execute_retire_and_clear_busy() {
     // Retired: no longer busy, and the critter returned to standing.
     assert_eq!(busy(&mut host), Value::integer(0));
     assert_eq!(
-        Fid(host.world.get(host.world.player).unwrap().raw.art_id).animation(),
+        Fid(host.world.get(player).unwrap().raw.art_id).animation(),
         0
     );
 
-    // Forward animation 20 with a two-frame sprite ends on static art 48,
-    // after a nonnegative delay of two frame steps; flag 4 keeps that art.
+    // Forward animation 20 with a two-frame sprite ends on static art 48;
+    // flag 4 keeps that art. The first entry's delay (2) is forced to 0, so
+    // it takes three frame steps: first frame, second frame, end.
     let code = [
         begin(1 | 4),
         push(me),
@@ -1531,21 +1560,17 @@ fn spec005_registered_sequences_execute_retire_and_clear_busy() {
         end.clone(),
     ]
     .concat();
-    run_fragment(&mut host, &base, &code).unwrap();
+    register(&mut host, now, &code);
     let mut steps = 0;
-    while !host.animations.is_empty() {
+    while host.moving(player) {
         host.tick(now).unwrap();
         now += 100;
         steps += 1;
         assert!(steps < 20);
     }
+    assert_eq!(steps, 3, "first frame, second frame, end");
     assert_eq!(
-        steps,
-        2 + 3,
-        "two waiting steps, first frame, second frame, end"
-    );
-    assert_eq!(
-        Fid(host.world.get(host.world.player).unwrap().raw.art_id).animation(),
+        Fid(host.world.get(player).unwrap().raw.art_id).animation(),
         48
     );
 
@@ -1559,14 +1584,66 @@ fn spec005_registered_sequences_execute_retire_and_clear_busy() {
         end.clone(),
     ]
     .concat();
-    run_fragment(&mut host, &base, &code).unwrap();
+    register(&mut host, now, &code);
     host.tick(now).unwrap();
-    assert_eq!(host.world.get(host.world.player).unwrap().raw.frame, 1);
+    assert_eq!(host.world.get(player).unwrap().raw.frame, 1);
     host.tick(now + 100).unwrap();
-    assert_eq!(host.world.get(host.world.player).unwrap().raw.frame, 0);
+    assert_eq!(host.world.get(player).unwrap().raw.frame, 0);
     host.tick(now + 200).unwrap();
     now += 300;
-    assert!(host.animations.is_empty());
+    assert!(!host.moving(player));
+
+    // The start rule: a delay-0 entry starts with the entry before it, and
+    // a -1 entry once every earlier entry has finished.
+    let code = [
+        begin(1),
+        push(me),
+        push(1),
+        push(0),
+        instruction(0x810f),
+        push(me),
+        literal(6),
+        push(0),
+        instruction(0x813b),
+        push(me),
+        literal(14),
+        push(-1),
+        instruction(0x813b),
+        end.clone(),
+    ]
+    .concat();
+    host.world.effects.clear();
+    register(&mut host, now, &code);
+    assert_eq!(sounds(&host), [b"Hello".to_vec()], "with the animation");
+    host.tick(now).unwrap();
+    host.tick(now + 100).unwrap();
+    assert_eq!(sounds(&host).len(), 1, "the animation still runs");
+    host.tick(now + 200).unwrap();
+    assert_eq!(
+        sounds(&host),
+        [b"Hello".to_vec(), b"Continue".to_vec()],
+        "once the animation has finished"
+    );
+    now += 300;
+
+    // `anim` registers its animation: forward 20 plays both frames, then
+    // ends on static art 48.
+    let code = [push(me), push(20), push(0), instruction(0x810c)].concat();
+    register(&mut host, now, &code);
+    assert_eq!(busy(&mut host), Value::integer(-1));
+    host.tick(now).unwrap();
+    assert_eq!(
+        Fid(host.world.get(player).unwrap().raw.art_id).animation(),
+        20
+    );
+    host.tick(now + 100).unwrap();
+    host.tick(now + 200).unwrap();
+    now += 300;
+    assert_eq!(
+        Fid(host.world.get(player).unwrap().raw.art_id).animation(),
+        48
+    );
+    host.world.get_mut(player).unwrap().raw.art_id &= !0x00ff_0000;
 
     // Sound cues emit their name and never count as busy; neither does a
     // lone standing action.
@@ -1579,23 +1656,18 @@ fn spec005_registered_sequences_execute_retire_and_clear_busy() {
         end.clone(),
     ]
     .concat();
-    run_fragment(&mut host, &base, &code).unwrap();
-    assert_eq!(busy(&mut host), Value::integer(0));
     host.world.effects.clear();
-    host.tick(now).unwrap();
-    assert!(
-        host.world
-            .effects
-            .iter()
-            .any(|e| matches!(
-                e,
-                WorldEffect::SoundEffect { name, owner: Some(owner) } if name == b"Hello" && *owner == me as u32
-            ))
-    );
-    let code = [push(me), instruction(0x80cc)].concat();
-    run_fragment(&mut host, &base, &code).unwrap();
-    assert_eq!(host.animations.len(), 1);
+    register(&mut host, now, &code);
     assert_eq!(busy(&mut host), Value::integer(0));
+    assert_eq!(sounds(&host), [b"Hello".to_vec()]);
+    let code = [push(me), instruction(0x80cc)].concat();
+    register(&mut host, now, &code);
+    assert_eq!(busy(&mut host), Value::integer(0));
+    assert_eq!(
+        Fid(host.world.get(player).unwrap().raw.art_id).animation(),
+        0,
+        "standing at once"
+    );
 }
 
 #[test]

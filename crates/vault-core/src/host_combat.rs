@@ -957,6 +957,7 @@ impl<A: WorldAssets> WorldHost<A> {
         // cannot register fails the attack before its AP debit, and nothing
         // plays.
         let scene = crate::host_choreography::Scene {
+            selector: None,
             attacker,
             defender: recorded_defender,
             attack: &attack,

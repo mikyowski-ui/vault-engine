@@ -15,7 +15,7 @@ use crate::{
     host::{DispatchResult, WorldHost},
     host_choreography::Playback,
     host_drugs::Arg,
-    motion::{Call, Goal, HEX_STEPS, Motion, MotionSequence, Walk, crosses},
+    motion::{Call, Goal, HEX_STEPS, Motion, MotionSequence, Play, Walk, crosses},
     routing::{rotation, step},
     stats::Perk,
     world::ScriptRequest,
@@ -33,6 +33,9 @@ mod animation {
     pub const GROUND_REACH: u8 = 10;
     pub const MIDDLE_REACH: u8 = 11;
     pub const RUN: u8 = 19;
+    pub const FALL_BACK: u8 = 20;
+    pub const PRONE_UP: u8 = 36;
+    pub const BACK_UP: u8 = 37;
     pub const TAKE_OUT: u8 = 38;
     pub const PUT_AWAY: u8 = 39;
 }
@@ -68,6 +71,19 @@ impl<A: WorldAssets> WorldHost<A> {
     /// Register a world sequence (§3.10.1): it is examined once now, and
     /// instant playback plays it to its end at once.
     pub(crate) fn register_motion(&mut self, mut sequence: MotionSequence) {
+        // §3.11.2: a later sequence naming a critter ends that critter's
+        // insignificant sequences.
+        let owners = sequence.owners();
+        let (ended, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.motions)
+            .into_iter()
+            .partition(|playing| {
+                playing.insignificant && owners.iter().any(|owner| playing.names(*owner))
+            });
+        self.motions = kept;
+        for mut playing in ended {
+            playing.schedule.cancel();
+            self.end_motion(&playing);
+        }
         self.next_motion += 1;
         sequence.id = self.next_motion;
         let now = self.motion_time.max(self.world.elapsed_ms);
@@ -188,6 +204,55 @@ impl<A: WorldAssets> WorldHost<A> {
             object.raw.displacement = [0; 2];
         }
     }
+    /// Stop every world sequence as a failing entry would (§3.10.1): forced
+    /// callbacks, such as a door's finishing callback, run at once, the
+    /// rest are dropped, and critters return to standing.
+    pub(crate) fn stop_motions(&mut self) {
+        let now = self.motion_time.max(self.world.elapsed_ms);
+        for mut sequence in std::mem::take(&mut self.motions) {
+            self.running_motions.push(Running {
+                owners: sequence.owners(),
+                cancelled: false,
+            });
+            sequence.schedule.halt(now, self);
+            self.running_motions.pop();
+            self.end_motion(&sequence);
+        }
+    }
+    /// §3.11.5 getting up at once: animation 37 after a fall back (20), 36
+    /// otherwise, then the standing pose; without that art, the standing
+    /// pose at once.
+    pub(crate) fn stand_up(&mut self, critter: ObjectRef) {
+        let current = self
+            .world
+            .get(critter)
+            .map_or(0, |object| Fid(object.raw.art_id).animation());
+        let up = if current == animation::FALL_BACK {
+            animation::BACK_UP
+        } else {
+            animation::PRONE_UP
+        };
+        let art = self.critter_fid(critter, up, None, self.facing(critter));
+        if self.world.critter_art(critter) && self.assets.art_exists(art) {
+            let mut sequence = MotionSequence::new();
+            let play = Motion::Play {
+                animation: up,
+                play: Play::Forward,
+                art,
+                frames: Frames::default(),
+            };
+            if sequence.push(critter, 0, play).is_ok() {
+                self.register_motion(sequence);
+                return;
+            }
+        }
+        let standing = self.critter_fid(critter, animation::STAND, None, self.facing(critter));
+        if let Some(object) = self.world.get_mut(critter) {
+            object.raw.art_id = standing;
+            object.raw.frame = 0;
+            object.raw.displacement = [0; 2];
+        }
+    }
     /// End every sequence with an entry of `object`'s: its critters return
     /// to standing. A sequence playing now stops where it stands.
     pub(crate) fn cancel_motions(&mut self, object: ObjectRef) {
@@ -215,7 +280,7 @@ impl<A: WorldAssets> WorldHost<A> {
     pub fn moving(&self, object: ObjectRef) -> bool {
         self.motions.iter().any(|sequence| sequence.names(object))
     }
-    fn facing(&self, object: ObjectRef) -> u8 {
+    pub(crate) fn facing(&self, object: ObjectRef) -> u8 {
         self.world
             .get(object)
             .map_or(0, |object| object.raw.orientation)
@@ -246,7 +311,7 @@ impl<A: WorldAssets> WorldHost<A> {
 
     /// A run request walks instead with a crippled leg, for a sneaking
     /// player without Silent Running, or without art for running.
-    fn walk_animation(&self, mover: ObjectRef, run: bool) -> u8 {
+    pub(crate) fn walk_animation(&self, mover: ObjectRef, run: bool) -> u8 {
         if !run {
             return animation::WALK;
         }
@@ -471,6 +536,60 @@ impl<A: WorldAssets> WorldHost<A> {
                 Stepped::Done
             }
         }
+    }
+    /// One frame step of a script animation (SPEC-005). Forward, step k
+    /// shows frame k - 1, adding its displacement, and a critter's death
+    /// animation (20-35) ends on its static art 28 higher. In reverse, step
+    /// k shows the k-th frame from the last, leaving each later frame's
+    /// displacement. Repeating, the frames cycle without end.
+    fn play_step(
+        &mut self,
+        owner: ObjectRef,
+        animation: u8,
+        play: Play,
+        art: u32,
+        frames: &Frames,
+        step_number: usize,
+    ) -> Stepped {
+        let count = frames.shifts.len();
+        let still = (play == Play::Forward
+            && step_number > count
+            && self.world.critter_art(owner)
+            && (20..=35).contains(&animation))
+        .then(|| self.critter_fid(owner, animation + 28, None, self.facing(owner)));
+        let Some(object) = self.world.get_mut(owner) else {
+            return Stepped::Done;
+        };
+        object.raw.art_id = art;
+        match play {
+            Play::Forward => {
+                let Some(shift) = frames.shifts.get(step_number - 1) else {
+                    object.raw.frame = object.raw.frame.min(count.saturating_sub(1));
+                    if let Some(still) = still {
+                        object.raw.art_id = still;
+                        object.raw.frame = 0;
+                    }
+                    return Stepped::Done;
+                };
+                object.raw.frame = step_number - 1;
+                object.raw.displacement[0] += shift[0];
+                object.raw.displacement[1] += shift[1];
+            }
+            Play::Reverse => {
+                if step_number > count {
+                    object.raw.frame = 0;
+                    return Stepped::Done;
+                }
+                let frame = count - step_number;
+                if let Some(left) = frames.shifts.get(frame + 1).filter(|_| step_number > 1) {
+                    object.raw.displacement[0] -= left[0];
+                    object.raw.displacement[1] -= left[1];
+                }
+                object.raw.frame = frame;
+            }
+            Play::Forever => object.raw.frame = (step_number - 1) % count.max(1),
+        }
+        Stepped::After(frames.interval_ms)
     }
     /// The frame count of an object's own art; without the art, two
     /// frames stand for closed and open.
@@ -1350,6 +1469,38 @@ impl<A: WorldAssets> Driver<ObjectRef, Motion> for WorldHost<A> {
                 *interval_ms = self.art_interval(art, 0);
                 Begin::Timed
             }
+            Motion::Play {
+                animation,
+                art,
+                frames,
+                ..
+            } => {
+                let facing = self.facing(owner);
+                *art = if self.world.critter_art(owner) {
+                    self.critter_fid(owner, *animation, None, facing)
+                } else {
+                    self.world.get(owner).map_or(0, |object| object.raw.art_id)
+                };
+                *frames = self.frames(*art, facing, 0);
+                Begin::Timed
+            }
+            Motion::Stand => {
+                if self.world.critter_art(owner) && !self.world.is_dead(owner) {
+                    let art = self.critter_fid(owner, animation::STAND, None, self.facing(owner));
+                    if let Some(object) = self.world.get_mut(owner) {
+                        object.raw.art_id = art;
+                        object.raw.frame = 0;
+                    }
+                }
+                Begin::Done
+            }
+            Motion::SetArt { art } => {
+                if let Some(object) = self.world.get_mut(owner) {
+                    object.raw.art_id = *art;
+                    object.raw.frame = 0;
+                }
+                Begin::Done
+            }
             Motion::Walk(walk) => self.start_walk(owner, walk),
             Motion::Call(call) => match self.call(owner, *call) {
                 Ok(begin) => begin,
@@ -1372,6 +1523,12 @@ impl<A: WorldAssets> Driver<ObjectRef, Motion> for WorldHost<A> {
                 interval_ms,
             } => self.swing_step(owner, *forward, *interval_ms, step),
             Motion::Walk(walk) => self.walk_step(owner, walk, step),
+            Motion::Play {
+                animation,
+                play,
+                art,
+                frames,
+            } => self.play_step(owner, *animation, *play, *art, frames, step),
             _ => Stepped::Done,
         }
     }

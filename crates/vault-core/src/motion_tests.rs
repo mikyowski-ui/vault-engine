@@ -213,6 +213,11 @@ fn labels(sequence: &MotionSequence) -> Vec<(i32, String)> {
                     None => format!("animate {animation}"),
                 },
                 Motion::Swing { forward, .. } => format!("swing {forward}"),
+                Motion::Play {
+                    animation, play, ..
+                } => format!("play {animation} {play:?}"),
+                Motion::Stand => "stand".into(),
+                Motion::SetArt { art } => format!("art {art:#x}"),
                 Motion::Walk(walk) => {
                     format!("{} {:?}", ["walk", "run"][usize::from(walk.run)], walk.goal)
                 }
@@ -780,4 +785,220 @@ fn spec007_a_new_request_stops_the_walking_player_first() {
     );
     assert_eq!(host.motions.len(), 1);
     assert!(!host.motions[0].walking(player));
+}
+
+/// The attack shows queued, as (delay, what each entry does).
+fn shown(host: &WorldHost<Assets>) -> Vec<(i32, String)> {
+    use crate::choreography::Action;
+    host.world
+        .shows
+        .iter()
+        .flat_map(|show| show.main.entries())
+        .map(|entry| {
+            let label = match &entry.action {
+                Action::Sound { name, .. } => format!("sound {}", String::from_utf8_lossy(name)),
+                Action::Animate { art, .. } => format!("animate {}", Fid(*art).animation()),
+                Action::Move { .. } => "move".into(),
+                Action::Walk { route, .. } => format!("walk {route:?}"),
+                Action::Corpse { .. } => "corpse".into(),
+                _ => "other".into(),
+            };
+            (entry.delay, label)
+        })
+        .collect()
+}
+/// A living NPC with `hp` hit points.
+fn living(host: &mut WorldHost<Assets>, hex: i32, hp: i32) -> ObjectRef {
+    let critter = npc(host, hex);
+    host.world.set_hit_points(critter, hp);
+    critter
+}
+
+#[test]
+fn spec007_idle_fidgets_play_a_standing_critter_on_the_screen() {
+    use crate::RandomSource;
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    host.assets.art.insert(critter(0, 0), frm(4, 10, 0, STILL));
+    // A male stem ("m...") near the player, and a critter off the screen.
+    host.assets.tokens.insert((1, 1), b"maboss".to_vec());
+    host.assets
+        .art
+        .insert(Fid::new(1, 1, 0, 0, 0).0, frm(4, 10, 0, STILL));
+    let player = host.world.player;
+    host.world.set_hit_points(player, 10);
+    let near = living(&mut host, hexes(20100, 1, 3), 10);
+    host.world.get_mut(near).unwrap().raw.art_id = Fid::new(1, 1, 0, 0, 0).0;
+    let far = living(&mut host, 39000, 10);
+    host.world.get_mut(far).unwrap().raw.art_id = Fid::new(1, 1, 0, 0, 0).0;
+    // The task starts with the first pass and runs once time has passed.
+    let initial = host.world.rng.clone();
+    host.tick(16).unwrap();
+    assert_eq!(host.world.rng, initial);
+    // Two candidates: one pick, then a wait of random(0, 3000) + 7000
+    // (k = trunc(20 / 2) clamped to 7).
+    let mut expected = host.world.rng.clone();
+    let pick = expected.range(0, 1).unwrap();
+    let wait = expected.range(0, 3000).unwrap() as u64 + 7000;
+    host.tick(32).unwrap();
+    assert_eq!(host.world.rng, expected);
+    let picked = [player, near][pick as usize];
+    let sequence = host.motions.last().unwrap();
+    assert!(sequence.insignificant && sequence.names(picked));
+    let name = if picked == player {
+        "HMJMPSAA"
+    } else {
+        "MABOSSAA"
+    };
+    assert_eq!(
+        labels(sequence),
+        [(0, format!("sound {name}")), row(0, "play 0 Forward")]
+    );
+    // Nothing more until the wait has passed.
+    let state = host.world.rng.clone();
+    host.tick(32 + wait).unwrap();
+    assert_eq!(host.world.rng, state);
+    host.tick(33 + wait).unwrap();
+    assert_ne!(host.world.rng, state);
+    // A later sequence naming the fidgeting critter ends the fidget.
+    host.motions.clear();
+    host.fidget = None;
+    host.tick(20_000).unwrap();
+    host.tick(20_001).unwrap();
+    let fidgeting = host.motions.last().unwrap().owners()[0];
+    assert!(
+        host.walk_toward(fidgeting, hexes(20100, 4, 3), false, 0)
+            .unwrap()
+    );
+    assert!(host.motions.iter().all(|sequence| !sequence.insignificant));
+    // None in combat, nor while the player is hidden.
+    host.motions.clear();
+    host.world.combat = true;
+    let state = host.world.rng.clone();
+    host.tick(40_000).unwrap();
+    assert!(host.fidget.is_none());
+    host.world.combat = false;
+    host.world.get_mut(player).unwrap().raw.flags.0 |= BasicFlags::HIDDEN.0;
+    host.tick(40_016).unwrap();
+    host.tick(50_000).unwrap();
+    assert_eq!(host.world.rng, state);
+}
+
+#[test]
+fn spec007_script_damage_shows_a_hit_that_slides_falls_and_gets_up() {
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let victim = living(&mut host, 20300, 100);
+    // Facing SE: hit from the front. 25 damage slides it 2 hexes SE; it
+    // falls back (20) and gets up at once (37), with no knockdown.
+    host.world.get_mut(victim).unwrap().raw.orientation = 2;
+    host.present_script_damage(victim, 25, 0, false, false)
+        .unwrap();
+    assert_eq!(hex(&host, victim), hexes(20300, 2, 2));
+    assert_eq!(
+        shown(&host),
+        [
+            row(0, "sound whc1xxx1"),
+            row(0, "move"),
+            row(-1, "animate 37"),
+        ]
+    );
+    assert_eq!(
+        host.world.critter_state(victim).unwrap().results.0 & effect::KNOCKED_DOWN,
+        0
+    );
+    // Electrical damage, bypassed armor and a multihex victim slide no
+    // hexes: a plain flinch.
+    for (kind, bypassed) in [(4, false), (0, true)] {
+        host.world.shows.clear();
+        let at = hex(&host, victim);
+        host.present_script_damage(victim, 25, kind, bypassed, false)
+            .unwrap();
+        assert_eq!(hex(&host, victim), at);
+        assert_eq!(
+            shown(&host)[1..],
+            [row(0, "sound HMJMPSAO"), row(0, "animate 14")]
+        );
+    }
+    // A lethal hit takes the maximum-violence column for its damage type
+    // (normal: 25, chunks), under maximum-violence validation.
+    host.world.shows.clear();
+    host.world.violence = Some(3);
+    host.world.set_hit_points(victim, 0);
+    host.world.critter_state_mut(victim).unwrap().results.0 |= effect::DEAD;
+    host.present_script_damage(victim, 9, 0, false, true)
+        .unwrap();
+    let rows = shown(&host);
+    assert!(rows.contains(&row(0, "animate 25")), "{rows:?}");
+    assert_eq!(rows.last().unwrap().1, "corpse");
+}
+
+#[test]
+fn spec007_knockouts_wake_into_a_knockdown_and_get_up_outside_combat() {
+    use crate::queue::EventKind;
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let critter = living(&mut host, 20300, 10);
+    let fallen = |host: &mut WorldHost<Assets>, animation: u8| {
+        host.world.get_mut(critter).unwrap().raw.art_id = Fid::new(1, 0, animation, 0, 0).0;
+        host.world.critter_state_mut(critter).unwrap().results.0 = effect::KNOCKED_OUT;
+        let now = host.world.clock.ticks;
+        host.world
+            .queue
+            .insert(now, 0, critter, EventKind::Knockout)
+            .unwrap();
+        host.process_queue().unwrap();
+        host.world.critter_state(critter).unwrap().results.0
+    };
+    // In combat the knockout only turns into a knockdown.
+    host.world.combat = true;
+    assert_eq!(fallen(&mut host, 21), effect::KNOCKED_DOWN);
+    assert!(host.motions.is_empty());
+    // Outside combat the critter gets up at once: 37 after a fall back.
+    host.world.combat = false;
+    assert_eq!(fallen(&mut host, 20), 0);
+    assert_eq!(labels(&host.motions[0]), [row(0, "play 37 Forward")]);
+    host.motions.clear();
+    assert_eq!(fallen(&mut host, 21), 0);
+    assert_eq!(labels(&host.motions[0]), [row(0, "play 36 Forward")]);
+}
+
+#[test]
+fn spec007_combat_cleanup_gets_a_prone_player_up_unless_a_script_ended_it() {
+    use crate::queue::EventKind;
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let player = host.world.player;
+    let down = |host: &mut WorldHost<Assets>, flags: u32| {
+        host.world.get_mut(player).unwrap().raw.art_id = Fid::new(1, 0, 20, 0, 0).0;
+        host.world.critter_state_mut(player).unwrap().results.0 = flags;
+        let now = host.world.clock.ticks;
+        host.world
+            .queue
+            .insert(now, 600, player, EventKind::Knockout)
+            .unwrap();
+        host.world.combat = true;
+    };
+    let waking = |host: &WorldHost<Assets>| {
+        host.world
+            .queue
+            .events()
+            .any(|event| event.object == player && event.kind == EventKind::Knockout)
+    };
+    // Knocked down: the wake event goes and the player gets up (37).
+    down(&mut host, effect::KNOCKED_DOWN);
+    host.end_combat().unwrap();
+    assert_eq!(host.world.critter_state(player).unwrap().results.0, 0);
+    assert!(!waking(&host));
+    assert_eq!(labels(&host.motions[0]), [row(0, "play 37 Forward")]);
+    // A script ended combat while the player was out: the knockout stays.
+    host.motions.clear();
+    down(&mut host, effect::KNOCKED_OUT);
+    host.world.combat_quit = true;
+    host.end_combat().unwrap();
+    assert_eq!(
+        host.world.critter_state(player).unwrap().results.0,
+        effect::KNOCKED_OUT
+    );
+    assert!(waking(&host) && host.motions.is_empty());
 }

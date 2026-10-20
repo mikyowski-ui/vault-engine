@@ -856,19 +856,42 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         Ok(target)
     }
-    /// Execute a planned movement for at most `budget` hexes.
-    fn run_movement(&mut self, mut movement: Movement, budget: usize) -> Result<(), WorldError> {
+    /// Execute a planned movement for at most `budget` hexes. The world
+    /// takes it at once; the hexes it crossed are then shown as a walk (or
+    /// a run), frame by frame (SPEC-007 §3.11.1), before what follows.
+    fn run_movement(
+        &mut self,
+        mut movement: Movement,
+        budget: usize,
+        run: bool,
+    ) -> Result<(), WorldError> {
+        let mover = movement.actor;
+        let from = self.display_now(mover);
         movement.directions.truncate(budget);
         let mut moved = 0;
+        let mut route = Vec::new();
         for _ in 0..budget.saturating_mul(4).saturating_add(4) {
             if moved >= budget || movement.finished() {
                 break;
             }
+            let before = self.world.get(mover).and_then(|object| object.raw.hex);
             match self.step_movement(&mut movement)? {
-                StepOutcome::Moved => moved += 1,
+                StepOutcome::Moved => {
+                    moved += 1;
+                    let after = self.world.get(mover).and_then(|object| object.raw.hex);
+                    if let Some(direction) = before
+                        .zip(after)
+                        .and_then(|(before, after)| rotation(before, after))
+                    {
+                        route.push(direction);
+                    }
+                }
                 StepOutcome::Replanned => movement.directions.truncate(budget - moved),
                 StepOutcome::Finished | StepOutcome::Stopped => break,
             }
+        }
+        if let Some(from) = from {
+            self.present_walk(mover, from, route, run);
         }
         Ok(())
     }
@@ -906,7 +929,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.request_taunt(critter, Taunt::Run)?;
         let budget = usize::try_from(ap).unwrap_or(0);
         if let Some(movement) = self.plan_to_tile(critter, goal, budget) {
-            self.run_movement(movement, budget)?;
+            self.run_movement(movement, budget, true)?;
         }
         self.run_taunts();
         Ok(())
@@ -937,7 +960,7 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.ai.callbacks.clear();
             return Ok(false);
         };
-        self.run_movement(movement, budget)?;
+        self.run_movement(movement, budget, false)?;
         self.run_taunts();
         Ok(true)
     }
@@ -1167,7 +1190,7 @@ impl<A: WorldAssets> WorldHost<A> {
         if budget > 0
             && let Some(movement) = self.plan_to_object(critter, item)
         {
-            self.run_movement(movement, budget)?;
+            self.run_movement(movement, budget, false)?;
         }
         if self.world.object_distance(critter, item) > 1 {
             return Ok(None);

@@ -71,7 +71,7 @@ impl<A: WorldAssets> WorldHost<A> {
             sound: sound.clone(),
         });
         if let Some(sequence) = &mut self.building_animation {
-            if sequence.commands.len() < 64 {
+            if sequence.commands.len() < crate::choreography::CAPACITY {
                 if let Some(sound) = sound {
                     sequence.sounds.insert(sequence.commands.len(), sound);
                 }
@@ -80,7 +80,9 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.world
                     .diagnostic("animation sequence is full; registration dropped");
             }
-        } else if self.animations.len() < 32 {
+        } else {
+            // An entry outside any registration is its own unreserved
+            // sequence.
             let mut sequence = AnimationSequence {
                 flags: 1,
                 commands: vec![(word, values)],
@@ -89,19 +91,10 @@ impl<A: WorldAssets> WorldHost<A> {
             if let Some(sound) = sound {
                 sequence.sounds.insert(0, sound);
             }
-            self.animations.push(sequence);
-        } else {
-            self.world
-                .diagnostic("animation sequence list is full; sequence dropped");
+            self.register_script_sequence(&sequence);
         }
     }
     pub(crate) fn clear_animation(&mut self, object: ObjectRef) {
-        self.animations.retain(|sequence| {
-            !sequence
-                .commands
-                .iter()
-                .any(|(_, args)| args.contains(&(object as i32)))
-        });
         self.cancel_motions(object);
     }
     fn kill(&mut self, vm: &mut Vm, object: ObjectRef, animation: i32) -> Result<(), VmError> {
@@ -291,13 +284,26 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             value.clamp(0, i64::from(i32::MAX)) as i32
         };
+        let was_dead = self.world.is_dead(victim);
         self.damage_critter(victim, None, damage, 0)?;
+        let died = !was_dead && self.world.is_dead(victim);
+        // SPEC-007 §3.11.5: shown as a temporary attacker's hit, or without
+        // animation a lethal amount kills at once (the static fall-back).
         if flags & 0x200 == 0 {
             self.world.emit(WorldEffect::Animation {
                 opcode: op,
                 values: values.to_vec(),
                 sound: None,
             });
+            self.present_script_damage(
+                victim,
+                damage,
+                (flags & 0xff) as i32,
+                flags & 0x100 != 0,
+                died,
+            )?;
+        } else if died {
+            self.kill_critter(victim, 48)?;
         }
         Ok(())
     }
@@ -1515,6 +1521,8 @@ impl<A: WorldAssets> WorldHost<A> {
                             object.raw.frame =
                                 usize::try_from(call.int(0)).map_err(|_| VmError::Arithmetic)?
                         }
+                        // A registered forward (control 0) or reverse animation;
+                        // a forward death animation ends on its static art.
                         animation if (0..65).contains(&animation) => {
                             if let ObjectState::Critter(state) = &mut object.raw.state {
                                 if call.int(0) == 0 {
@@ -1523,13 +1531,6 @@ impl<A: WorldAssets> WorldHost<A> {
                                     state.results.0 |= 2;
                                 }
                             }
-                            let animation = if call.int(0) == 0 && (20..=35).contains(&animation) {
-                                animation + 28
-                            } else {
-                                animation
-                            };
-                            object.raw.art_id =
-                                (object.raw.art_id & !0x00ff0000) | ((animation as u32) << 16);
                             self.queue_animation(op, values.clone(), None);
                         }
                         _ => {}
@@ -1550,13 +1551,7 @@ impl<A: WorldAssets> WorldHost<A> {
                         2 => self.clear_animation(call.uint(0)),
                         3 => {
                             if let Some(sequence) = self.building_animation.take() {
-                                if self.animations.len() < 32 {
-                                    self.animations.push(sequence);
-                                } else {
-                                    self.world.diagnostic(
-                                        "animation sequence list is full; sequence dropped",
-                                    );
-                                }
+                                self.register_script_sequence(&sequence);
                             }
                         }
                         _ => {}

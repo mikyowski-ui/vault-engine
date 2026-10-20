@@ -630,6 +630,17 @@ impl MapPreview {
             self.host.speech_finished();
         }
     }
+    /// SPEC-014 §3.35 a map's city music, `sound/music/<name>.acm`, looping
+    /// in place of the track before it; without the file, silence.
+    fn play_music(&mut self, name: &str) {
+        let path = format!("sound/music/{name}.acm");
+        match self.sounds.load(&*self.host.assets.vfs, &path) {
+            Some(samples) => {
+                self.audio.play(samples, 1.0, Channel::Music, true);
+            }
+            None => self.audio.stop(Channel::Music),
+        }
+    }
     /// A library sound slot: the named file with its looping mode bit.
     fn play_library(&mut self, slot: usize, filename: &[u8], mode: i32) {
         let path = String::from_utf8_lossy(filename).replace('\\', "/");
@@ -689,6 +700,7 @@ impl MapPreview {
                 WorldEffect::WorldMap => self.open_world_map(),
                 WorldEffect::TownMap => self.open_town_map(),
                 WorldEffect::MapSaveFailed => self.map_save_failed(),
+                WorldEffect::Music(name) => self.play_music(&name),
                 // Look and examine already printed their text.
                 WorldEffect::DefaultAction {
                     action: ObjectAction::LookAt | ObjectAction::Description,

@@ -14,13 +14,15 @@ use vault_formats::acm::MIXER_RATE;
 pub const EFFECT_VOICES: usize = 4;
 
 /// What a voice belongs to: effects share the four-voice limit, speech has
-/// one voice, each library slot has its own, and a movie has one stream.
+/// one voice, each library slot has its own, a movie has one stream, and
+/// the city music has one looping voice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
     Effect,
     Speech,
     Library(usize),
     Movie,
+    Music,
 }
 
 // Without a device (feature `audio` off) only tests drain the mixer.

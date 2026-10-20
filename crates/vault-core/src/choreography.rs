@@ -7,7 +7,12 @@
 //! An attack's [`Sequence`] is presentation. The world applies the attack
 //! at once, and the sequence only shows it: each object it owns is drawn
 //! from the sequence's display state for that object until it ends.
-use crate::{ObjectRef, ai::TauntCallback};
+use crate::{
+    ObjectRef,
+    ai::TauntCallback,
+    motion::{HEX_STEPS, crosses},
+    routing::step,
+};
 use std::collections::BTreeMap;
 
 /// The most entries one sequence holds (§3.10.1).
@@ -97,10 +102,23 @@ pub enum Action {
         frames: Frames,
         nodes: Vec<(i32, [i32; 2])>,
     },
+    /// Walk a route the world has already taken, from the owner's shown
+    /// hex, by the SPEC-007 §3.11.1 step model, with `arts` and `frames`
+    /// for each facing (timed).
+    Walk {
+        arts: [u32; 6],
+        frames: Box<[Frames; 6]>,
+        route: Vec<u8>,
+        cursor: usize,
+        frame: usize,
+    },
 }
 impl Action {
     fn timed(&self) -> bool {
-        matches!(self, Self::Animate { .. } | Self::Move { .. })
+        matches!(
+            self,
+            Self::Animate { .. } | Self::Move { .. } | Self::Walk { .. }
+        )
     }
 }
 
@@ -305,6 +323,14 @@ impl<O, A> Schedule<O, A> {
         }
         self.next = self.entries.len();
     }
+    /// Stop the sequence as an entry failing would (§3.10.1): running
+    /// entries end, unstarted forced entries run at once, and the rest are
+    /// dropped.
+    pub fn halt(&mut self, now_ms: u64, driver: &mut impl Driver<O, A>) {
+        if !self.stopped {
+            self.stop(now_ms, driver);
+        }
+    }
     /// End the sequence where it stands, running nothing more.
     pub fn cancel(&mut self) {
         self.stopped = true;
@@ -430,6 +456,19 @@ impl Driver<Owner, Action> for Present<'_> {
     /// move's last node, finishes the entry.
     fn step(&mut self, entry: &mut Entry<Owner, Action>, step: usize, _now_ms: u64) -> Stepped {
         let display = self.displays.get_mut(&entry.owner);
+        if let Action::Walk {
+            arts,
+            frames,
+            route,
+            cursor,
+            frame,
+        } = &mut entry.action
+        {
+            return match display {
+                Some(display) => walk(display, arts, frames, route, cursor, frame, step),
+                None => Stepped::Done,
+            };
+        }
         match &entry.action {
             Action::Animate { art, frames, hide } => {
                 if let Some(shift) = frames.shifts.get(step - 1) {
@@ -564,6 +603,65 @@ impl Sequence {
         );
         started
     }
+}
+
+/// One frame step of a shown walk (SPEC-007 §3.11.1): the first step
+/// starts at frame 0 with no displacement, later ones advance a frame,
+/// wrapping; the shown frame's displacement for the facing accumulates
+/// until it reaches the next hex's pixel step, and then the walker enters
+/// that hex with the residual. A facing whose frames never move enters a
+/// hex every step. The step entering the last hex finishes, dropping the
+/// residual.
+fn walk(
+    display: &mut Display,
+    arts: &[u32; 6],
+    frames: &[Frames; 6],
+    route: &[u8],
+    cursor: &mut usize,
+    frame: &mut usize,
+    step_number: usize,
+) -> Stepped {
+    let Some(&facing) = route.get(*cursor) else {
+        display.displacement = [0; 2];
+        return Stepped::Done;
+    };
+    let index = usize::from(facing % 6);
+    let set = &frames[index];
+    if step_number == 1 {
+        *frame = 0;
+        display.displacement = [0; 2];
+    } else {
+        *frame = (*frame + 1) % set.shifts.len().max(1);
+    }
+    display.art = arts[index];
+    display.frame = *frame;
+    display.orientation = facing;
+    display.hidden = false;
+    let moving = set.shifts.iter().any(|shift| *shift != [0; 2]);
+    let shift = set.shifts.get(*frame).copied().unwrap_or([0; 2]);
+    let moved = [
+        display.displacement[0] + shift[0],
+        display.displacement[1] + shift[1],
+    ];
+    if moving && !crosses(moved, facing) {
+        display.displacement = moved;
+        return Stepped::After(set.interval_ms);
+    }
+    let pixel = HEX_STEPS[index];
+    display.hex = display.hex.map(|hex| step(hex, facing));
+    *cursor += 1;
+    let Some(&next) = route.get(*cursor) else {
+        display.displacement = [0; 2];
+        return Stepped::Done;
+    };
+    display.orientation = next;
+    display.art = arts[usize::from(next % 6)];
+    display.displacement = if moving {
+        [moved[0] - pixel[0], moved[1] - pixel[1]]
+    } else {
+        [0; 2]
+    };
+    Stepped::After(set.interval_ms)
 }
 
 /// An instant action's effect on its owner's display.

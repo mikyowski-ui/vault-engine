@@ -224,7 +224,7 @@ impl<A: WorldAssets> WorldHost<A> {
         defender: ObjectRef,
     ) -> Result<(), WorldError> {
         // Starting a fresh combat stops registered animations.
-        self.animations.clear();
+        self.stop_motions();
         self.building_animation = None;
         let elevation = self
             .world
@@ -460,6 +460,8 @@ impl<A: WorldAssets> WorldHost<A> {
             if let Some(state) = self.world.critter_state_mut(critter) {
                 state.results.0 &= !effect::KNOCKED_DOWN;
             }
+            // SPEC-007 §3.4: it gets up, 37 after a fall back, 36 otherwise.
+            self.stand_up(critter);
         }
         if critter == self.world.player {
             self.world.combat_state.player_turn = true;
@@ -651,16 +653,22 @@ impl<A: WorldAssets> WorldHost<A> {
             }
         }
         self.world.combat_experience = 0;
-        // SPEC-014 §3.5: normal cleanup wakes a knocked-out living player at
-        // once and removes the pending wake-up event, so the game goes on.
-        if living
-            && let Some(state) = self.world.critter_state_mut(player)
-            && state.results.0 & effect::KNOCKED_OUT != 0
-        {
-            state.results.0 &= !effect::KNOCKED_OUT;
+        // SPEC-014 §3.5 and SPEC-007 §3.11.5: normal cleanup has a prone
+        // living player's wake-up event removed and gets it up at once, so
+        // the game goes on; a script's ending of combat leaves a knockout in
+        // place.
+        let knocked_out = self
+            .world
+            .critter_state(player)
+            .is_some_and(|state| state.results.0 & effect::KNOCKED_OUT != 0);
+        if living && self.world.is_prone(player) && !(self.world.combat_quit && knocked_out) {
+            if let Some(state) = self.world.critter_state_mut(player) {
+                state.results.0 &= !(effect::KNOCKED_OUT | effect::KNOCKED_DOWN);
+            }
             self.world.queue.retain(|event| {
                 !(event.object == player && event.kind == crate::queue::EventKind::Knockout)
             });
+            self.stand_up(player);
         }
         self.world.combat_quit = false;
         self.world.emit(crate::WorldEffect::RollArmorClass);

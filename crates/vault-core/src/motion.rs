@@ -103,6 +103,15 @@ pub enum Call {
     Finish { open: bool },
 }
 
+/// How a script animation plays (SPEC-005).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Play {
+    Forward,
+    Reverse,
+    /// Repeating without end, until something cancels it.
+    Forever,
+}
+
 /// What a world sequence's entry does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Motion {
@@ -130,6 +139,20 @@ pub enum Motion {
         forward: bool,
         interval_ms: u64,
     },
+    /// A script animation (SPEC-005): a critter animation by code, or a
+    /// non-critter's own art, resolved when it starts (timed).
+    Play {
+        animation: u8,
+        play: Play,
+        art: u32,
+        frames: Frames,
+    },
+    /// The standing pose for the current weapon code (instant).
+    Stand,
+    /// New art at frame 0 (instant).
+    SetArt {
+        art: u32,
+    },
     /// A walk or run (timed).
     Walk(Box<Walk>),
     Call(Call),
@@ -142,6 +165,9 @@ pub struct MotionSequence {
     /// Critter owners return to standing when it ends (§3.10.1); ladder
     /// climbing is registered without this.
     pub reset: bool,
+    /// SPEC-005 request flag 512: any later sequence naming one of its
+    /// critters ends it (§3.11.2).
+    pub insignificant: bool,
     pub id: u64,
 }
 impl MotionSequence {
@@ -179,6 +205,21 @@ impl MotionSequence {
             }
         }
         owners
+    }
+    /// SPEC-005 `anim_busy`: an entry of `object`'s still to finish that is
+    /// neither a sound nor a callback, unless the sequence is a lone
+    /// standing action.
+    pub fn busy(&self, object: ObjectRef) -> bool {
+        let schedule = &self.schedule;
+        let entries = schedule.entries();
+        if entries.len() == 1 && entries[0].action == Motion::Stand {
+            return false;
+        }
+        entries.iter().enumerate().any(|(index, entry)| {
+            entry.owner == object
+                && !matches!(entry.action, Motion::Sound { .. } | Motion::Call(_))
+                && (!schedule.started(index) || schedule.running(index))
+        })
     }
     /// Whether `object` walks or runs in an entry still to finish.
     pub fn walking(&self, object: ObjectRef) -> bool {

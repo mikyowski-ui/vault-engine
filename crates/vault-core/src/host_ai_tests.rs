@@ -1975,6 +1975,7 @@ fn labels(
                     format!("animate {}{}", art(*fid), if *hide { " hide" } else { "" })
                 }
                 Action::Move { .. } => "move".into(),
+                Action::Walk { route, .. } => format!("walk {route:?}"),
             };
             (entry.owner, entry.delay, label)
         })
@@ -2544,6 +2545,7 @@ fn build(
     spray: &crate::Spray,
 ) -> crate::host_choreography::Built {
     let scene = crate::host_choreography::Scene {
+        selector: None,
         attacker: player,
         defender,
         attack,
@@ -3016,4 +3018,61 @@ fn spec007_combat_waits_while_attacks_play() {
     play(&mut host);
     host.tick(100_000).unwrap();
     assert!(host.world.pending_combat.is_none());
+}
+
+#[test]
+fn spec007_ai_moves_play_as_walks_frame_by_frame() {
+    // The world takes an AI's move at once; with real-time playback a show
+    // then replays its route from the starting hex, frame by frame
+    // (SPEC-007 §3.11.1): a run for a flight, a walk for an approach.
+    // Without walk art every frame step enters the next hex.
+    use crate::choreography::Owner;
+    let mut world = self::world();
+    let critter = npc(&mut world, 21500, 1, 1, &[]);
+    state(&mut world, critter).ap = 4;
+    let mut host = ai_host(world, AiAssets::default());
+    host.playback = crate::host_choreography::Playback::RealTime;
+    host.world.combat = true;
+    host.ai_flee(critter).unwrap();
+    let goal = HexGrid::step(21500, 2, 4).unwrap();
+    assert_eq!(hex(&host.world, critter), goal, "the world moved at once");
+    assert!(host.presenting(), "combat waits for the walk");
+    let shown = |host: &WorldHost<AiAssets>| {
+        let show = host.world.shows.front()?;
+        let display = show.display(Owner::World(critter))?;
+        Some((display.hex?, Fid(display.art).animation()))
+    };
+    let mut path = vec![shown(&host).unwrap().0];
+    let mut now = 0;
+    while host.presenting() {
+        host.step_shows(now);
+        match shown(&host) {
+            Some((at, animation)) => {
+                if at != 21500 {
+                    assert_eq!(animation, 19, "running");
+                }
+                path.push(at);
+            }
+            // Played: the world draws the critter where it is.
+            None => path.push(hex(&host.world, critter)),
+        }
+        now += 100;
+        assert!(now < 10_000);
+    }
+    path.dedup();
+    let expected: Vec<_> = (0..=4)
+        .map(|steps| HexGrid::step(21500, 2, steps).unwrap())
+        .collect();
+    assert_eq!(path, expected);
+    // An approach walks (animation 1).
+    let target = npc(&mut host.world, 21500, 0, 0, &[]);
+    state(&mut host.world, critter).ap = 4;
+    assert!(host.ai_approach(critter, target, false).unwrap());
+    let walk = host.world.shows.back().unwrap().main.entries()[0]
+        .action
+        .clone();
+    assert!(matches!(
+        walk,
+        crate::choreography::Action::Walk { arts, .. } if Fid(arts[0]).animation() == 1
+    ));
 }

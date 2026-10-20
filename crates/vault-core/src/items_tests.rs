@@ -268,8 +268,8 @@ fn spec011_fixture_i_armor_swap_for_the_player_only() {
     };
     host.wield_object(player, a).unwrap();
     assert_eq!(bonus(&host), [20, 30, 500, 4, 0, 0]);
-    // SPEC-005 §3.8: the armor's art follows on the next animation step.
-    host.step_animations(0).unwrap();
+    // SPEC-005 §3.8: the armor's art comes in its own reserved sequence,
+    // whose set-art entry takes effect as it registers (SPEC-007 §3.10.1).
     assert_eq!(
         host.world.get(player).unwrap().raw.art_id & 0xfff,
         10,
@@ -277,7 +277,6 @@ fn spec011_fixture_i_armor_swap_for_the_player_only() {
     );
     let carry = host.world.player_stat(12);
     host.wield_object(player, b).unwrap();
-    host.step_animations(100).unwrap();
     assert_eq!(bonus(&host), [25, 40, 500, 12, 3, 30]);
     assert_eq!(host.world.player_stat(29), 100, "EMP DR clamps at 100");
     let base = host.world.player_sheet().unwrap().base[24];
@@ -296,10 +295,8 @@ fn spec011_fixture_i_armor_swap_for_the_player_only() {
     host.world.default_player_art = 4;
     host.world.add_item(player, b, 1, true).unwrap();
     host.wield_object(player, b).unwrap();
-    host.step_animations(200).unwrap();
     assert_eq!(host.world.get(player).unwrap().raw.art_id & 0xfff, 13);
     host.wield_object(player, a).unwrap();
-    host.step_animations(300).unwrap();
     assert_eq!(host.world.get(player).unwrap().raw.art_id & 0xfff, 4);
 
     // NPC: the worn flag only; no AC/DR/DT/perk change.
