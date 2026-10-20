@@ -489,7 +489,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 if op == 0x80a8 {
                     if valid {
                         self.world.set_current_elevation(elevation as u8);
-                        self.world.camera_hex = hex as i32;
+                        self.world.set_view_center(hex as i32);
                         self.world.map.header.entry_hex = hex as i32;
                         self.world.map.header.entry_elevation = elevation as u8;
                         self.world.map.header.entry_orientation = orientation as u8;
@@ -1452,7 +1452,7 @@ impl<A: WorldAssets> WorldHost<A> {
                             && let Some(hex) =
                                 self.world.get(self.world.player).and_then(|p| p.raw.hex)
                         {
-                            self.world.camera_hex = hex;
+                            self.world.set_view_center(hex);
                         }
                         let font = if style == -2 { 103 } else { 101 };
                         // A live floating text suppresses SPEC-009 taunts.

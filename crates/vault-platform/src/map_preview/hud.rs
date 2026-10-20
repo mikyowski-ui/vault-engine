@@ -515,8 +515,34 @@ impl MapPreview {
         true
     }
     /// §3.23 left click on the item slot: a weapon sets the crosshair (and
-    /// starts combat), a non-weapon the use crosshair.
+    /// starts combat), a skill book is used at once (SPEC-013 §3.25), any
+    /// other non-weapon sets the use crosshair.
     fn use_item_slot(&mut self) {
+        // A use-only item is used at once; in combat it needs and spends
+        // 2 AP, and a book then refuses with 902 but the AP stay spent.
+        if let Some(item) = self.active_item()
+            && self
+                .host
+                .world
+                .get(item)
+                .is_some_and(|o| skills::skill_book(o.raw.pid).is_some())
+        {
+            if self.host.world.combat {
+                let player = self.host.world.player;
+                let Some(state) = self.host.world.critter_state_mut(player) else {
+                    return;
+                };
+                if state.ap < 2 {
+                    return;
+                }
+                state.ap -= 2;
+            }
+            if let Err(error) = self.host.read_book(item, vault_core::BookRoute::ItemSlot) {
+                self.status = error.to_string().into_bytes();
+            }
+            self.drain_effects();
+            return;
+        }
         // SPEC-014 §3.33: using a Motion Sensor from the slot opens the
         // automap with the scanner on.
         if let Some(item) = self.active_item()
@@ -594,12 +620,7 @@ impl MapPreview {
                     self.choose_skill(index);
                 }
             }
-            Action::CenterPlayer => {
-                let player = self.host.world.player;
-                if let Some(hex) = self.host.world.get(player).and_then(|o| o.raw.hex) {
-                    self.host.world.camera_hex = hex;
-                }
-            }
+            Action::CenterPlayer => self.center_on_player(),
             Action::Rotate(clockwise) => {
                 let player = self.host.world.player;
                 if let Some(object) = self.host.world.get_mut(player) {

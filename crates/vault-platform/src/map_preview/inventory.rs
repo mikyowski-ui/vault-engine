@@ -1,33 +1,31 @@
-//! SPEC-014 §3.34 the player inventory window at screen (80, 0), with the
-//! SPEC-011 rules behind its moves: opening it in combat costs the §3.11
-//! action points; using a drug consumes it (§3.6), a kit heals the player
-//! (SPEC-013 §3.13), an explosive opens the Set Timer dialog (SPEC-013
-//! §3.10, §3.15), and a Motion Sensor opens the automap (SPEC-014 §3.33).
+//! SPEC-014 §3.34 the player inventory and use-on windows at screen (80,
+//! 0), drawn over the paused world, with the SPEC-011 rules behind their
+//! moves: opening the inventory in combat costs the §3.11 action points;
+//! using a skill book reads it (SPEC-013 §3.25), a drug is consumed (§3.6),
+//! a kit heals the player (SPEC-013 §3.13), an explosive opens the Set Timer
+//! dialog (SPEC-013 §3.10, §3.15), and a Motion Sensor opens the automap
+//! (SPEC-014 §3.33).
 //!
-//! The window opens in the hand cursor. A left press on a filled slot (a
-//! list row, a hand, the armor) lifts the item (`ipickup1`); the release
-//! drops it (`iputdown`) on the first target in the §3.34 order: the list
-//! (into a container, onto a weapon it reloads, else back into the list),
-//! the left hand, the right hand, the armor slot, or nowhere. There is no
-//! two-click drag. A right press switches to the arrow cursor, where a
-//! quick click shows the item's examine text and a held press opens its
-//! menu (Look, Unload or Use, Drop, Cancel). Opened from the world action
-//! menu's Inventory entry, a press on a list row uses that item on the
-//! target and closes the window.
+//! The inventory window shows `invbox.frm`: six list rows, the scroll
+//! buttons, the rotating figure, the armor and hand slots, the stats panel
+//! and the Done button. The use-on window (from the world action menu's
+//! Inventory entry) shows `use.frm` with the list, scroll buttons, figure
+//! and a Cancel button; a press on a list row uses the item drawn there on
+//! the target (safe rule) and closes it.
+//!
+//! The window opens in the hand cursor. A left press on a filled slot lifts
+//! the item (`ipickup1`); the release drops it (`iputdown`) on the first
+//! target in the §3.34 order: the list (into a container, onto a weapon it
+//! reloads, else back into the list), the left hand, the right hand, the
+//! armor slot, the figure, or nowhere. There is no two-click drag. A right
+//! press switches to the arrow cursor, where a quick click shows the item's
+//! examine text in the stats panel and a held press opens its menu.
 //!
 //! **Nested containers.** Use on a container in the list opens it, up to
 //! nine levels deep (as in the SPEC-013 §3.16 windows): the list then shows
-//! its contents, drops into the list go into it, and dropping an item on the
-//! player figure moves it up one container level (§3.34 target 4). A press
-//! on the figure goes up one level, like SPEC-013's portrait hot zones.
-//!
-//! No approved spec gives the window's background art, the stats panel's
-//! place, the scroll or Done buttons, the Unload and Drop icon art, or the
-//! figure's rotation, so those are provisional: a dark panel, the examine
-//! text at (345, 40), the arrow keys for scrolling, a red Done button at
-//! (500, 340), labeled boxes for the two icons, the open container's name
-//! above the list, and the figure turning clockwise one facing every 166
-//! milliseconds from the player's own facing.
+//! its contents, drops into the list go into it, dropping an item on the
+//! figure moves it up one container level, and a press on the figure (its
+//! invisible button) goes up one level.
 use super::{
     MapPreview, Screen,
     counter::{CounterInput, counter_click, counter_key, draw_counter},
@@ -46,7 +44,7 @@ use vault_core::{
     },
 };
 use vault_formats::{
-    Fid,
+    map::{ObjectDetail, ObjectState},
     pro::{BasicFlags, ItemData, PrototypeData},
 };
 use vault_render::IndexedImage;
@@ -99,7 +97,20 @@ pub(crate) struct ItemMenu {
     item: ObjectRef,
     pub entries: Vec<ItemEntry>,
     pub tracker: MenuTracker,
-    origin: [i32; 2],
+    /// The pointer when it opened, where the release returns it.
+    pub origin: [i32; 2],
+    /// The menu's top after any upward shift, and whether it is flipped.
+    pub top: i32,
+    pub flipped: bool,
+}
+
+/// §3.34 the stats panel's examine text: the item's name, its examine text
+/// and its weight.
+#[derive(Debug, Clone)]
+struct Examine {
+    name: Vec<u8>,
+    text: Vec<u8>,
+    weight: i64,
 }
 
 pub(crate) struct InventoryScreen {
@@ -107,11 +118,8 @@ pub(crate) struct InventoryScreen {
     pub target: Option<ObjectRef>,
     /// The open containers, outermost first; empty shows the player's list.
     pub path: Vec<ObjectRef>,
-    /// The rotating figure's facing and when it last turned.
-    pub facing: u8,
-    turned: u64,
     /// The list's scroll offset.
-    offset: usize,
+    pub offset: usize,
     /// The arrow cursor (else the hand).
     pub arrow: bool,
     /// The lifted item and its source slot.
@@ -121,8 +129,8 @@ pub(crate) struct InventoryScreen {
     pub counter: Option<(Counter, Count)>,
     /// The Set Timer dialog for an explosive being armed.
     pub timer: Option<(ObjectRef, SetTimer)>,
-    /// The stats panel's examine text.
-    examine: Vec<u8>,
+    /// The stats panel's examine text, until the hand cursor returns.
+    examine: Option<Examine>,
 }
 impl InventoryScreen {
     /// The item a drag holds (the counter shows the arrow instead).
@@ -156,14 +164,10 @@ pub(crate) fn inside(rect: [i32; 4], point: [i32; 2]) -> bool {
         && (rect[1]..rect[1] + rect[3]).contains(&point[1])
 }
 
-/// Provisional elements (see the module documentation).
-const PANEL: [i32; 4] = [80, 0, 500, 377];
-const EXAMINE: [i32; 2] = [345, 40];
-const DONE: Rect = Rect::new(500, 340, 15, 16);
-const CONTAINER_LABEL: [i32; 2] = [124, 20];
-const FIGURE_TURN_MS: u64 = 166;
 /// How deep containers open (SPEC-013 §3.16).
 const MAX_DEPTH: usize = 9;
+/// The stats panel's font color, key 992.
+const STATS_COLOR: ColorKey = ColorKey(992);
 
 impl MapPreview {
     /// Open the inventory; in combat its AP cost may refuse it.
@@ -172,13 +176,9 @@ impl MapPreview {
     }
     pub(crate) fn open_inventory_on(&mut self, target: Option<ObjectRef>) {
         if self.host.open_inventory() {
-            let world = &self.host.world;
-            let facing = world.get(world.player).map_or(0, |o| o.raw.orientation % 6);
             self.screen = Screen::Inventory(InventoryScreen {
                 target,
                 path: Vec::new(),
-                facing,
-                turned: self.clock,
                 offset: 0,
                 arrow: false,
                 held: None,
@@ -186,7 +186,7 @@ impl MapPreview {
                 menu: None,
                 counter: None,
                 timer: None,
-                examine: Vec::new(),
+                examine: None,
             });
         }
         self.drain_effects();
@@ -218,6 +218,11 @@ impl MapPreview {
                     .collect()
             })
             .unwrap_or_default()
+    }
+    /// The number of list entries shown (for tests).
+    #[cfg(test)]
+    pub(crate) fn list_entries_len(&self) -> usize {
+        self.list_entries().len()
     }
     /// The item a slot holds.
     fn slot_item(&self, slot: Slot) -> Option<ObjectRef> {
@@ -349,11 +354,35 @@ impl MapPreview {
         if screen.held.is_some() || screen.menu.is_some() {
             return true;
         }
+        // §3.34 keys: Esc, Up, Down and Ctrl+Q / Ctrl+X in both windows;
+        // the use-on window adds Home, End, PgUp and PgDn (6 rows).
+        let rows = layout::ROWS;
+        let use_on = screen.target.is_some();
+        let control = self.hud.modifiers[1];
         match key {
-            KeyCode::Escape | KeyCode::KeyI => self.return_to_map(),
-            KeyCode::ArrowDown if screen.offset + layout::ROWS < count => screen.offset += 1,
+            KeyCode::Escape => self.return_to_map(),
             KeyCode::ArrowUp => screen.offset = screen.offset.saturating_sub(1),
+            KeyCode::ArrowDown if screen.offset + rows < count => screen.offset += 1,
             KeyCode::ArrowDown => {}
+            KeyCode::KeyQ | KeyCode::KeyX if control => {
+                let title = self.message("misc.msg", 0);
+                self.show_dialog(super::dialog::Dialog::quit_confirmation(
+                    [169, 117],
+                    title,
+                    ColorKey::ERROR,
+                ));
+            }
+            KeyCode::Home if use_on => screen.offset = 0,
+            KeyCode::End if use_on => screen.offset = count.saturating_sub(rows),
+            KeyCode::PageUp if use_on => screen.offset = screen.offset.saturating_sub(rows),
+            KeyCode::PageDown if use_on => {
+                let next = screen.offset + rows;
+                screen.offset = if next + rows >= count {
+                    count.saturating_sub(rows)
+                } else {
+                    next
+                };
+            }
             _ => return false,
         }
         true
@@ -392,16 +421,44 @@ impl MapPreview {
             screen.arrow = !screen.arrow;
             screen.press = None;
             if !screen.arrow {
-                screen.examine.clear();
+                screen.examine = None;
             }
             return true;
         }
-        if DONE.contains(point) {
+        // Done (inventory) or Cancel (use-on): a red button sending Esc.
+        let (arrow, target) = (screen.arrow, screen.target);
+        let red = if target.is_some() {
+            layout::CANCEL
+        } else {
+            layout::DONE
+        };
+        let [w, h] = Painter {
+            assets: &self.host.assets,
+            palette: &self.palette,
+        }
+        .size(layout::RED_BUTTON.0)
+        .unwrap_or([15, 16]);
+        if Rect::new(red[0], red[1], w, h).contains(point) {
             self.press();
             self.return_to_map();
             return true;
         }
-        let (arrow, target) = (screen.arrow, screen.target);
+        // The scroll buttons move one row: up from a positive offset, down
+        // while offset + 6 is below the entry count.
+        let count = self.list_entries().len();
+        for (rect, down) in [(layout::SCROLL_UP.0, false), (layout::SCROLL_DOWN.0, true)] {
+            if rect.contains(point) {
+                self.press();
+                if let Screen::Inventory(screen) = &mut self.screen {
+                    if down && screen.offset + layout::ROWS < count {
+                        screen.offset += 1;
+                    } else if !down {
+                        screen.offset = screen.offset.saturating_sub(1);
+                    }
+                }
+                return true;
+            }
+        }
         let Some((slot, item)) = self.slot_at(point) else {
             // The figure goes up one container level.
             if !arrow && layout::FIGURE.contains(point) {
@@ -463,7 +520,8 @@ impl MapPreview {
                 .get(menu.tracker.highlight)
                 .copied()
                 .unwrap_or(ItemEntry::Cancel);
-            self.pointer.at = Some([menu.origin[0], menu.tracker.anchor]);
+            // The pointer returns to where it was when the menu opened.
+            self.pointer.at = Some(menu.origin);
             self.item_entry(menu.item, entry);
             return true;
         }
@@ -490,16 +548,25 @@ impl MapPreview {
     pub(crate) fn inventory_tick(&mut self) -> bool {
         let clock = self.clock;
         let at = self.pointer.at;
+        if !matches!(self.screen, Screen::Inventory(_)) {
+            return false;
+        }
+        // §3.34: the figure turns one facing at most every 166 ms, on the
+        // window's polls, even during a drag; the counter persists between
+        // openings.
+        let (facing, since) = self.figure;
+        let turned = clock.saturating_sub(since) >= layout::FIGURE_TURN_MS;
+        if turned {
+            self.figure = ((facing + 1) % 6, clock);
+        }
         let Screen::Inventory(screen) = &mut self.screen else {
             return false;
         };
-        // The figure keeps turning, even during a drag (§3.34).
-        let mut turned = false;
-        if clock.saturating_sub(screen.turned) >= FIGURE_TURN_MS {
-            screen.facing = (screen.facing + 1) % 6;
-            screen.turned = clock;
-            turned = true;
-        }
+        let edges = if screen.target.is_some() {
+            layout::USE_ON_EDGES
+        } else {
+            layout::INVENTORY_EDGES
+        };
         let Some(press) = screen.press else {
             return turned;
         };
@@ -510,12 +577,15 @@ impl MapPreview {
         let item = press.item;
         let entries = self.item_menu(item);
         let origin = at.unwrap_or([layout::WINDOW[0], 0]);
+        let (top, flipped) = layout::menu_place(origin, entries.len(), edges);
         if let Screen::Inventory(screen) = &mut self.screen {
             screen.menu = Some(ItemMenu {
                 item,
                 tracker: MenuTracker::new(origin[1], entries.len()),
                 entries,
                 origin,
+                top,
+                flipped,
             });
         }
         self.play_effect(cursor::MENU_OPEN_SOUND.as_bytes(), None);
@@ -549,6 +619,7 @@ impl MapPreview {
             })
             || matches!(self.item_kind(item), Some(ItemData::Drug(_)))
             || skills::is_explosive(pid)
+            || skills::skill_book(pid).is_some()
             || self.host.kit_skill(pid).is_some()
             || pid == MOTION_SENSOR;
         layout::player_menu(unloadable, container && held, usable)
@@ -584,7 +655,7 @@ impl MapPreview {
             ItemEntry::Cancel => {}
         }
     }
-    /// The full examine text in the stats panel (not the monitor).
+    /// The item's full examine text in the stats panel (not the monitor).
     fn examine(&mut self, item: ObjectRef) {
         let player = self.host.world.player;
         let start = self.host.world.effects.len();
@@ -604,16 +675,31 @@ impl MapPreview {
                 other => self.host.world.effects.push_back(other),
             }
         }
+        let world = &self.host.world;
+        let examine = Examine {
+            name: world.get(item).map(|o| o.name.clone()).unwrap_or_default(),
+            text,
+            weight: world.item_weight(item),
+        };
         if let Screen::Inventory(screen) = &mut self.screen {
-            screen.examine = text;
+            screen.examine = Some(examine);
         }
         self.drain_effects();
     }
-    /// Use an item from the window: an explosive's timer, a kit on the
-    /// player, a drug, a Motion Sensor's automap, else its use procedure.
+    /// Use an item from the window: a skill book, an explosive's timer, a
+    /// kit on the player, a drug, a Motion Sensor's automap, else its use
+    /// procedure.
     fn use_item(&mut self, item: ObjectRef) {
         let player = self.host.world.player;
         let pid = self.host.world.get(item).map_or(0, |o| o.raw.pid);
+        // SPEC-013 §3.25: the route tests the skill books first.
+        if skills::skill_book(pid).is_some() {
+            if let Err(error) = self.host.read_book(item, vault_core::BookRoute::Inventory) {
+                self.status = error.to_string().into_bytes();
+            }
+            self.drain_effects();
+            return;
+        }
         if matches!(self.item_kind(item), Some(ItemData::Container { .. })) {
             self.open_container(item);
             return;
@@ -899,7 +985,9 @@ impl MapPreview {
         }
         true
     }
-    pub(crate) fn inventory_image(&self) -> AppResult<IndexedImage> {
+    pub(crate) fn inventory_image(&mut self) -> AppResult<IndexedImage> {
+        let view = self.map_view_image()?;
+        let mut image = self.compose_world(view);
         let Screen::Inventory(screen) = &self.screen else {
             return Err("inventory is not open".into());
         };
@@ -907,148 +995,51 @@ impl MapPreview {
             assets: &self.host.assets,
             palette: &self.palette,
         };
-        let mut image = IndexedImage::new(640, 480)?;
-        image.fill_rect(PANEL, painter.color(ColorKey(1057)));
-        let dark = painter.color(ColorKey::BLACK);
-        let frame_color = painter.color(ColorKey::DARK_GREEN);
-        let outline = |image: &mut IndexedImage, rect: Rect| {
-            image.fill_rect([rect.x, rect.y, rect.w, rect.h], frame_color);
-            image.fill_rect([rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2], dark);
+        let use_on = screen.target.is_some();
+        let art = if use_on {
+            layout::USE_ON_ART
+        } else {
+            layout::INVENTORY_ART
         };
-        let icon = |image: &mut IndexedImage, item: ObjectRef, rect: Rect| {
-            if let Some(art) = self.item_icon(item)
-                && let Some(frame) = art.frame(0, 0)
-            {
-                image.draw_frame(
-                    frame,
-                    [rect.x as u32, rect.y as u32],
-                    [rect.w as u32, rect.h as u32],
-                );
-            }
-        };
+        painter.blit_opaque(&mut image, art, 0, layout::WINDOW);
         let lifted = screen.held;
-        // The list, a lifted stack drawn one smaller.
+        // The list: item art scaled into 56 by 40, a lifted stack drawn one
+        // smaller, and the loot window's quantity labels.
         let entries = self.list_entries();
         for row in 0..layout::ROWS {
-            let rect = layout::row_rect(row);
-            outline(&mut image, rect);
             let Some((item, quantity)) = entries.get(screen.offset + row).copied() else {
                 continue;
             };
-            let shown = if lifted == Some((Slot::List, item)) {
-                quantity - 1
-            } else {
-                quantity
-            };
+            let rect = layout::icon_rect(row);
+            let dragged = lifted == Some((Slot::List, item));
+            let shown = if dragged { quantity - 1 } else { quantity };
             if shown > 0 {
-                icon(&mut image, item, rect);
+                self.draw_icon(&mut image, item, rect);
             }
-            if let Some(label) = skills::quantity_label(shown, None) {
+            if let Some(label) = skills::quantity_label(shown, self.ammo_label(item, dragged)) {
                 painter.text(
                     &mut image,
                     101,
                     ColorKey::WHITE,
                     &label,
-                    [rect.x + 2, rect.y + 2],
-                    60,
+                    [rect.x, rect.y],
+                    80,
                 );
             }
         }
-        // The hands and the armor; a lifted slot shows empty.
-        for (slot, rect) in [
-            (Slot::LeftHand, layout::LEFT_HAND),
-            (Slot::RightHand, layout::RIGHT_HAND),
-            (Slot::Armor, layout::ARMOR),
-        ] {
-            outline(&mut image, rect);
-            if let Some(item) = self.slot_item(slot)
-                && lifted != Some((slot, item))
-            {
-                icon(&mut image, item, rect);
+        for (rect, up, _) in [layout::SCROLL_UP, layout::SCROLL_DOWN] {
+            painter.blit(&mut image, up, 0, [rect.x, rect.y]);
+        }
+        let red = if use_on { layout::CANCEL } else { layout::DONE };
+        painter.blit(&mut image, layout::RED_BUTTON.0, 0, red);
+        self.draw_figure(&mut image);
+        if !use_on {
+            self.draw_slots(&mut image, lifted);
+            match &screen.examine {
+                Some(examine) => self.draw_examine(&painter, &mut image, examine),
+                None => self.draw_stats(&painter, &mut image),
             }
         }
-        // The open container's name over the list.
-        if let Some(container) = screen.path.last()
-            && let Some(object) = self.host.world.get(*container)
-        {
-            painter.text(
-                &mut image,
-                101,
-                ColorKey::GREEN,
-                &object.name,
-                CONTAINER_LABEL,
-                120,
-            );
-        }
-        // The rotating player figure.
-        let player = self.host.world.player;
-        if let Some(object) = self.host.world.get(player)
-            && let Ok(art) = self.host.assets.object_art(Fid(object.raw.art_id).0)
-            && let Some(frame) = art
-                .frame(usize::from(screen.facing), 0)
-                .or_else(|| art.frame(0, 0))
-        {
-            let rect = layout::FIGURE;
-            image.draw_frame(
-                frame,
-                [rect.x as u32, rect.y as u32],
-                [rect.w as u32, rect.h as u32],
-            );
-        }
-        // The stats panel: the examine text, caps and weight.
-        let world = &self.host.world;
-        let carry = world
-            .player_sheet()
-            .map_or(0, |sheet| sheet.stat(12, world.context(player)));
-        let summary = format!(
-            "Caps: {}   Weight: {} / {} lb",
-            world.caps(player),
-            world.inventory_weight(player),
-            carry
-        );
-        painter.text(
-            &mut image,
-            101,
-            ColorKey::GREEN,
-            summary.as_bytes(),
-            [EXAMINE[0], 250],
-            220,
-        );
-        let mut y = EXAMINE[1];
-        let font = painter.font(101);
-        let width = |line: &[u8]| {
-            font.as_ref()
-                .map_or(line.len() as i32 * 6, |f| f.text_width(line, false) as i32)
-        };
-        for line in vault_core::ui::bar::wrap_message(&screen.examine, width) {
-            painter.text(
-                &mut image,
-                101,
-                ColorKey::GREEN,
-                &line,
-                [EXAMINE[0], y],
-                220,
-            );
-            y += 10;
-        }
-        painter.blit(&mut image, "lilredup.frm", 0, [DONE.x, DONE.y]);
-        let done = painter.message("dbox.msg", 100);
-        painter.text(
-            &mut image,
-            103,
-            ColorKey::LABEL,
-            &done,
-            [DONE.x + 20, DONE.y + 1],
-            80,
-        );
-        painter.text(
-            &mut image,
-            101,
-            ColorKey::GREEN,
-            &self.status,
-            [22, 466],
-            600,
-        );
         if let Some(menu) = &screen.menu {
             self.draw_item_menu(&painter, &mut image, menu);
         }
@@ -1092,44 +1083,249 @@ impl MapPreview {
         }
         Ok(image)
     }
-    /// The item menu at the pointer (the pointer hidden): the arrow, then
-    /// the 40-by-40 icons, highlighted entry in its `h` art. The Unload and
-    /// Drop icons have no approved art name, so they are labeled boxes.
-    fn draw_item_menu(&self, painter: &Painter, image: &mut IndexedImage, menu: &ItemMenu) {
-        let [x, y] = menu.origin;
-        let top = y - cursor::menu_shift(y, menu.entries.len());
-        painter.blit(image, layout::ARROW_CURSOR, 0, [x, top]);
-        for (index, entry) in menu.entries.iter().enumerate() {
-            let highlighted = index == menu.tracker.highlight;
-            let origin = [x + 29, top + 40 * index as i32];
-            let art = match entry {
-                ItemEntry::Look => Some(("lookn.frm", "lookh.frm")),
-                ItemEntry::Use => Some(("usegetn.frm", "usegeth.frm")),
-                ItemEntry::Cancel => Some(("canceln.frm", "cancelh.frm")),
-                ItemEntry::Unload | ItemEntry::Drop => None,
-            };
-            match art {
-                Some((normal, lit)) => {
-                    painter.blit(image, if highlighted { lit } else { normal }, 0, origin);
-                }
-                None => {
-                    let key = if highlighted {
-                        ColorKey::SELECTED
-                    } else {
-                        ColorKey::GREEN
-                    };
-                    image.fill_rect(
-                        [origin[0], origin[1], 40, 40],
-                        painter.color(ColorKey::BLACK),
-                    );
-                    let label: &[u8] = if *entry == ItemEntry::Drop {
-                        b"Drop"
-                    } else {
-                        b"Unload"
-                    };
-                    painter.centered(image, 101, key, label, [origin[0], origin[1] + 15], 40);
+    /// An item's inventory art scaled into `rect`.
+    fn draw_icon(&self, image: &mut IndexedImage, item: ObjectRef, rect: Rect) {
+        if let Some(art) = self.item_icon(item)
+            && let Some(frame) = art.frame(0, 0)
+        {
+            image.draw_frame(
+                frame,
+                [rect.x as u32, rect.y as u32],
+                [rect.w as u32, rect.h as u32],
+            );
+        }
+    }
+    /// The ammunition terms of a quantity label: the pack size and the
+    /// front pack's rounds, which a dragged entry leaves out (SPEC-013
+    /// §3.16).
+    fn ammo_label(&self, item: ObjectRef, dragged: bool) -> Option<(i32, i32)> {
+        let Some(ItemData::Ammunition { quantity: pack, .. }) = self.item_kind(item) else {
+            return None;
+        };
+        let front = match &self.host.world.get(item)?.raw.state {
+            ObjectState::Other {
+                detail: ObjectDetail::Ammunition(rounds),
+                ..
+            } if !dragged => *rounds,
+            _ => *pack,
+        };
+        Some((*pack, front))
+    }
+    /// §3.34 the rotating figure, centered in its 60-by-100 box, clipped to
+    /// it and drawn transparently over the window art (the safe rule's
+    /// restore from the window's own background).
+    fn draw_figure(&self, image: &mut IndexedImage) {
+        let player = self.host.world.player;
+        let facing = self.figure.0;
+        let Some(fid) = self.host.figure_art(player, self.active_item(), facing) else {
+            return;
+        };
+        let Ok(art) = self.host.assets.object_art(fid) else {
+            return;
+        };
+        let Some(frame) = art
+            .frame(usize::from(facing), 0)
+            .or_else(|| art.frame(0, 0))
+        else {
+            return;
+        };
+        let rect = layout::FIGURE_BOX;
+        let origin = [
+            i64::from(rect.x + (rect.w - i32::from(frame.width)) / 2),
+            i64::from(rect.y + (rect.h - i32::from(frame.height)) / 2),
+        ];
+        let clip = [rect.x, rect.y, rect.w, rect.h].map(i64::from);
+        image.blit_within(frame, origin, clip);
+    }
+    /// The hands and the armor, each scaled into its slot; a lifted slot
+    /// shows empty. An item held in both hands is drawn once into the
+    /// 180-by-61 hand area (safe rule).
+    fn draw_slots(&self, image: &mut IndexedImage, lifted: Option<(Slot, ObjectRef)>) {
+        let left = self.slot_item(Slot::LeftHand);
+        let right = self.slot_item(Slot::RightHand);
+        let held = |slot: Slot, item: ObjectRef| lifted != Some((slot, item));
+        if let (Some(both), true) = (left, left == right) {
+            if held(Slot::LeftHand, both) && held(Slot::RightHand, both) {
+                self.draw_icon(image, both, layout::BOTH_HANDS);
+            }
+        } else {
+            for (slot, item, rect) in [
+                (Slot::LeftHand, left, layout::LEFT_HAND),
+                (Slot::RightHand, right, layout::RIGHT_HAND),
+            ] {
+                if let Some(item) = item.filter(|item| held(slot, *item)) {
+                    self.draw_icon(image, item, rect);
                 }
             }
+        }
+        if let Some(armor) = self
+            .slot_item(Slot::Armor)
+            .filter(|armor| held(Slot::Armor, *armor))
+        {
+            self.draw_icon(image, armor, layout::ARMOR);
+        }
+    }
+    /// A one-pixel rule across the stats panel, (377, y) to (520, y).
+    fn panel_rule(painter: &Painter, image: &mut IndexedImage, y: i32) {
+        image.fill_rect([377, y, 144, 1], painter.color(STATS_COLOR));
+    }
+    /// §3.34 the stats panel: the owner's name, the primary statistics, HP,
+    /// AC and the DT/DR pairs, a block per hand and the total weight.
+    fn draw_stats(&self, painter: &Painter, image: &mut IndexedImage) {
+        let world = &self.host.world;
+        let player = world.player;
+        let text = |image: &mut IndexedImage, line: &[u8], at: [i32; 2], clip: i32| {
+            painter.text(image, 101, STATS_COLOR, line, at, clip);
+        };
+        let name = world
+            .get(player)
+            .map(|o| o.name.clone())
+            .unwrap_or_default();
+        text(image, &name, [377, 44], 80);
+        Self::panel_rule(painter, image, 59);
+        // DT and DR stat pairs: normal, laser, fire, plasma, explosion.
+        const PROTECTION: [usize; 5] = [17, 18, 19, 20, 23];
+        for k in 0..7 {
+            let y = 64 + 10 * k as i32;
+            text(
+                image,
+                &painter.message("inventry.msg", k as i32),
+                [377, y],
+                24,
+            );
+            let stat = world.player_stat(k).to_string();
+            text(image, stat.as_bytes(), [401, y], 16);
+            let label = painter.message("inventry.msg", 7 + k as i32);
+            text(image, &label, [417, y], 64);
+            let value = match k {
+                0 => format!(
+                    "{}/{}",
+                    world.hit_points(player).unwrap_or(0),
+                    world.player_stat(7)
+                ),
+                1 => format!("   {}", world.player_stat(9)),
+                _ => {
+                    let dt = PROTECTION[k - 2];
+                    format!("{}/{}%", world.player_stat(dt), world.player_stat(dt + 7))
+                }
+            };
+            text(image, value.as_bytes(), [481, y], 48);
+        }
+        Self::panel_rule(painter, image, 138);
+        Self::panel_rule(painter, image, 178);
+        for (slot, y) in [(Slot::LeftHand, 144), (Slot::RightHand, 184)] {
+            for (index, (line, clip)) in self.hand_lines(painter, slot).iter().enumerate() {
+                text(image, line, [377, y + 10 * index as i32], *clip);
+            }
+        }
+        let weight = [
+            painter.message("inventry.msg", 20),
+            format!(" {}", world.inventory_weight(player)).into_bytes(),
+        ]
+        .concat();
+        text(image, &weight, [407, 224], 80);
+    }
+    /// §3.34 a hand's stats block: an empty hand's unarmed damage, else the
+    /// item's name with an armor note, or a weapon's damage, range and
+    /// loaded ammunition.
+    pub(crate) fn hand_lines(&self, painter: &Painter, slot: Slot) -> Vec<(Vec<u8>, i32)> {
+        let world = &self.host.world;
+        let melee = world.player_stat(11);
+        let message = |id: i32| painter.message("inventry.msg", id);
+        let Some(item) = self.slot_item(slot) else {
+            let damage = [message(24), format!(" 1-{}", melee + 2).into_bytes()].concat();
+            return vec![(message(14), 120), (damage, 120)];
+        };
+        let name = world.get(item).map(|o| o.name.clone()).unwrap_or_default();
+        let mut lines = vec![(name, 140)];
+        match self.item_kind(item) {
+            Some(ItemData::Armor(_)) => lines.push((message(18), 140)),
+            Some(ItemData::Weapon(gun)) => {
+                let mode = world
+                    .get(item)
+                    .and_then(|o| o.prototype.as_ref())
+                    .map_or(0, |prototype| (prototype.extended.0 & 15) as u8);
+                let subtype = vault_core::combat::Subtype::of(mode);
+                let close = subtype.is_some_and(vault_core::combat::Subtype::close);
+                let max = gun.damage[1] + if close { melee } else { 0 };
+                let mut damage = [
+                    message(15),
+                    format!(" {}-{max}", gun.damage[0]).into_bytes(),
+                ]
+                .concat();
+                if subtype == Some(vault_core::combat::Subtype::Ranged) || gun.ranges[0] > 1 {
+                    damage.extend(b"   ");
+                    damage.extend(message(16));
+                    damage.extend(format!(" {}", gun.ranges[0]).into_bytes());
+                }
+                lines.push((damage, 140));
+                if gun.capacity > 0 {
+                    let (rounds, ammo) = world.loaded(item);
+                    let mut loaded = [
+                        message(17),
+                        format!(" {rounds}/{}", gun.capacity).into_bytes(),
+                    ]
+                    .concat();
+                    let name = u32::try_from(ammo)
+                        .ok()
+                        .filter(|pid| *pid != 0)
+                        .and_then(|pid| self.host.assets.prototype(pid).ok())
+                        .and_then(|prototype| self.host.assets.prototype_text(&prototype, false));
+                    if let Some(name) = name {
+                        loaded.push(b' ');
+                        loaded.extend(name);
+                    }
+                    lines.push((loaded, 140));
+                }
+            }
+            _ => {}
+        }
+        lines
+    }
+    /// §3.34 the examine text over the stats panel: the item's name on line
+    /// 1, a rule at y = 64, then the wrapped text from line 3 and the
+    /// weight line (`proto.msg` 540, or 541 for a weight of 1; none for 0).
+    /// Line n is at y = 44 + 10n; lines past 17 are dropped.
+    fn draw_examine(&self, painter: &Painter, image: &mut IndexedImage, examine: &Examine) {
+        let width = layout::STATS.w;
+        let line = |image: &mut IndexedImage, n: i32, text: &[u8]| {
+            painter.text(image, 101, STATS_COLOR, text, [377, 44 + 10 * n], width);
+        };
+        line(image, 1, &examine.name);
+        Self::panel_rule(painter, image, 64);
+        let measure = |text: &[u8]| painter.width(101, text);
+        let mut lines = layout::wrap_examine(&examine.text, width, measure);
+        if examine.weight > 0 {
+            let format = painter.message("proto.msg", if examine.weight == 1 { 541 } else { 540 });
+            let weight = String::from_utf8_lossy(&format)
+                .replacen("%d", &examine.weight.to_string(), 1)
+                .into_bytes();
+            lines.extend(layout::wrap_examine(&weight, width, measure));
+        }
+        for (n, text) in (3..=17).zip(&lines) {
+            line(image, n, text);
+        }
+    }
+    /// §3.34 the item menu at its placement (the pointer hidden): the arrow
+    /// at the menu's top-left, or `actarrom.frm` at its top-right when
+    /// flipped, then the 40-by-40 icons, the highlighted entry in its `h`
+    /// art.
+    fn draw_item_menu(&self, painter: &Painter, image: &mut IndexedImage, menu: &ItemMenu) {
+        let x = menu.origin[0];
+        let (arrow, arrow_x, icons_x) = if menu.flipped {
+            ("actarrom.frm", x - 28, x - 68)
+        } else {
+            (layout::ARROW_CURSOR, x, x + 29)
+        };
+        painter.blit(image, arrow, 0, [arrow_x, menu.top]);
+        for (index, entry) in menu.entries.iter().enumerate() {
+            let (normal, lit) = layout::entry_icons(*entry);
+            let art = if index == menu.tracker.highlight {
+                lit
+            } else {
+                normal
+            };
+            painter.blit(image, art, 0, [icons_x, menu.top + 40 * index as i32]);
         }
     }
 }

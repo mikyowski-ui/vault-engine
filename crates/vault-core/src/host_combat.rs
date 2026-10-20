@@ -877,7 +877,7 @@ impl<A: WorldAssets> WorldHost<A> {
         let mut rng = std::mem::take(&mut self.world.rng);
         let outcome = self.resolve_attack(attacker, defender, &attack, &mut rng);
         self.world.rng = rng;
-        let (mut spray, victim) = outcome?;
+        let (mut spray, victim, impact) = outcome?;
         if let Some(request) = request {
             adjust_for_request(&request, &mut spray.main);
         }
@@ -902,7 +902,24 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.ai.callbacks.clear();
         self.attack_taunts(attacker, target, applied, &spray.main)?;
         let hit = spray.main.defender_flags & effect::HIT != 0;
-        self.emit_attack_sounds(attacker, target, mode, hit);
+        // SPEC-013 §3.10: an exploding weapon's hit sound plays with its
+        // explosion art, where the projectile ends.
+        let explosion =
+            self.weapon_explosion(attacker, defender, &attack, &spray.main, &victim, impact);
+        self.emit_attack_sounds(attacker, target, mode, hit && explosion.is_none());
+        if let Some((weapon, art)) = explosion {
+            use vault_formats::sfx::effect::{FLIGHT, HIT};
+            let flight = self.weapon_sound_name(FLIGHT, weapon, attack.hit_mode, 0);
+            self.emit_effect(flight, attacker);
+            if let Some(name) = self
+                .weapon_sound_name(HIT, weapon, attack.hit_mode, 0)
+                .filter(|name| !name.is_empty())
+            {
+                self.world
+                    .emit(crate::WorldEffect::SoundEffect { name, owner: None });
+            }
+            self.world.explosion_effects.push(art);
+        }
         // SPEC-007 §3.6: onlookers hear of the intended target when the
         // final victim differs, then of a critter victim.
         let player = self.world.player;
@@ -916,6 +933,40 @@ impl<A: WorldAssets> WorldHost<A> {
         application?;
         self.run_taunts();
         Ok(Ok(recorded))
+    }
+    /// SPEC-013 §3.10 a weapon explosion: the wielded weapon explodes when
+    /// thrown with explosion, plasma or EMP damage or used without throwing
+    /// with explosion damage. The projectile ends at the victim's hex on a
+    /// hit or at the §3.7.1 impact hex on a miss, where the explosion art
+    /// plays (presentation only: the attack has applied the damage). A
+    /// critical failure launches no projectile, so nothing explodes.
+    fn weapon_explosion(
+        &self,
+        attacker: ObjectRef,
+        defender: ObjectRef,
+        attack: &crate::combat::Attack,
+        result: &crate::combat::Resolution,
+        victim: &Option<Victim>,
+        impact: Option<i32>,
+    ) -> Option<(ObjectRef, crate::world::ExplosionArt)> {
+        let data = attack.weapon.as_ref()?;
+        let weapon = self.world.wielded(attacker, attack.hit_mode)?;
+        let pid = self.world.get(weapon)?.raw.pid;
+        let thrown = attack.mode() == crate::combat::attack_mode::THROW;
+        let (fid, delay) = crate::skills::weapon_explosion(pid, data.damage_type, thrown)?;
+        if result.code == 0 {
+            return None;
+        }
+        let place = |object: ObjectRef| self.world.get(object).and_then(|o| o.raw.hex);
+        let center = match victim {
+            Some(
+                Victim::Random(object, _) | Victim::Bystander(object, _) | Victim::Object(object),
+            ) => place(*object),
+            None if result.defender_flags & effect::HIT != 0 => place(defender),
+            None => impact,
+        }?;
+        let elevation = self.world.get(attacker)?.raw.elevation;
+        Some((weapon, self.explosion_art(center, elevation, fid, delay)))
     }
     /// SPEC-007 §3.6 punch-to-kick substitution: a punch request first draws
     /// D(1, 4); on 1, kick art for the attacker's current base index and

@@ -42,6 +42,7 @@ pub mod worldmap;
 pub use host::{VmObserver, WorldHost};
 pub use host_combat::{Refusal, Spray, spray_budgets};
 pub use host_movement::{Movement, StepOutcome};
+pub use host_skills::BookRoute;
 pub use host_travel::TravelOutcome;
 pub use world::{
     ActiveExplosion, ExplosionRequest, LootRequest, ObjectAction, ObjectRef, ScriptEvent,

@@ -928,3 +928,83 @@ fn spec014_inventory_drop_targets_and_item_menus() {
         [Look, Drop, Cancel]
     );
 }
+
+#[test]
+fn spec014_map_border_and_player_distance_test() {
+    use super::cursor::{distance_refused, inside_border};
+    // §3.29 border under the safe rule: columns 45-155, rows 45-154 (the
+    // reference also takes column 44 and 156 through its parity slip).
+    let hex = |column: i32, row: i32| row * 200 + column;
+    assert!(inside_border(20100));
+    for (column, row, inside) in [
+        (45, 45, true),
+        (155, 154, true),
+        (44, 100, false),
+        (156, 100, false),
+        (100, 44, false),
+        (100, 155, false),
+    ] {
+        assert_eq!(inside_border(hex(column, row)), inside, "{column},{row}");
+    }
+    assert!(!inside_border(-1) && !inside_border(40000));
+    // Player-distance test with the odd-column reference (304, 182).
+    let odd = hex(101, 100);
+    let player = [304 + 500, 182];
+    // Farther from the player than the reference and 600 pixels away.
+    assert!(distance_refused([304 - 100, 182], player, odd));
+    // Toward the player: never refused, however far the player is.
+    assert!(!distance_refused([304 + 32, 182], [304 + 1000, 182], odd));
+    // Farther, but under 480 across and 400 down.
+    assert!(!distance_refused([304 - 100, 182], [304 + 300, 182], odd));
+    // Vertically: 400 down is the limit.
+    assert!(distance_refused([304, 182 - 24], [304, 182 + 380], odd));
+    assert!(!distance_refused([304, 182 - 12], [304, 182 + 380], odd));
+    // An even center column moves the reference to (272, 182): a target
+    // 490 from the player is refused against 304 but not against 272.
+    let even = hex(100, 100);
+    let player = [272 + 500, 182];
+    assert!(distance_refused([player[0] - 490, 182], player, odd));
+    assert!(!distance_refused([player[0] - 490, 182], player, even));
+}
+
+#[test]
+fn spec014_inventory_examine_wrapping_and_menu_placement() {
+    use super::inventory::{INVENTORY_EDGES, USE_ON_EDGES, menu_place, wrap_examine};
+    // Six pixels per byte; the panel width is 152 in the window, 30 here.
+    let measure = |text: &[u8]| 6 * text.len() as i32;
+    let wrap = |text: &str| -> Vec<String> {
+        wrap_examine(text.as_bytes(), 30, measure)
+            .into_iter()
+            .map(|line| String::from_utf8(line).unwrap())
+            .collect()
+    };
+    // No wider than the width: one line.
+    assert_eq!(wrap("aa bb"), ["aa bb"]);
+    // Cut at the last space that keeps the line narrower than the width:
+    // "cc dd" is exactly 30 wide, so it is cut after "cc".
+    assert_eq!(wrap("a b cc dd ee"), ["a b", "cc", "dd ee"]);
+    // A first word of exactly the width still makes a line.
+    assert_eq!(wrap("aaaaa bb"), ["aaaaa", "bb"]);
+    // A first word wider than the width drops it and the rest.
+    assert_eq!(wrap("aa bb cccccc dd"), ["aa", "bb"]);
+    assert!(wrap("aaaaaa bb").is_empty());
+    // No space after the first character: drawn whole, clipped.
+    assert_eq!(wrap("aaaaaaaa"), ["aaaaaaaa"]);
+    // The menu's top-left is at the pointer; at the inventory's right edge
+    // (x + 68 reaching 579) it flips, and it shifts up when its last icon
+    // would reach the window's bottom (377), by that amount less it plus 2.
+    assert_eq!(menu_place([300, 100], 4, INVENTORY_EDGES), (100, false));
+    assert_eq!(menu_place([511, 100], 4, INVENTORY_EDGES), (100, true));
+    assert_eq!(menu_place([510, 100], 4, INVENTORY_EDGES), (100, false));
+    let y = 300;
+    assert_eq!(
+        menu_place([300, y], 4, INVENTORY_EDGES),
+        (y - (y + 159 - 377 + 2), false)
+    );
+    // The use-on window's edges are 372 and 376.
+    assert_eq!(menu_place([304, 100], 3, USE_ON_EDGES), (100, true));
+    assert_eq!(
+        menu_place([300, 260], 3, USE_ON_EDGES),
+        (260 - (260 + 119 - 376 + 2), false)
+    );
+}

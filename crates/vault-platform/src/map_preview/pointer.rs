@@ -27,9 +27,6 @@ use vault_render::{
 
 /// The scroll blocker (misc PID `0x0500000C`).
 const SCROLL_BLOCKER: u32 = 0x0500_000c;
-/// Scroll limiting: a step may not take the view center further from the
-/// player on an axis where it is already this many pixels away.
-const SCROLL_LIMIT: [i64; 2] = [480, 400];
 
 /// What a movement hover depends on (§3.27): the hovered hex, the player's
 /// hex and elevation, combat, crippled legs, free movement, AP and the route
@@ -393,12 +390,8 @@ impl MapPreview {
     /// gate: `None` when throttled, else whether the step was blocked. A
     /// diagonal is one step, blocked as a whole, and a blocked attempt also
     /// restarts the gate. The new center is the hex at the current center
-    /// plus 32 pixels across and 24 down per step. It is blocked when there
-    /// is no such hex; when, with scroll limiting on, it takes the center
-    /// further from the player on an axis already 480 (across) or 400 (down)
-    /// pixels away; or when a scroll blocker stands on it (safe rule: hex 0
-    /// too). No approved spec gives the map-border rectangle's derivation,
-    /// so that test is not made.
+    /// plus 32 pixels across and 24 down per step; it is blocked when there
+    /// is no such hex or `center_refused` refuses it.
     pub(crate) fn scroll_step(&mut self, direction: usize) -> Option<bool> {
         if self
             .pointer
@@ -410,7 +403,7 @@ impl MapPreview {
         self.pointer.last_scroll = Some(self.clock);
         let target = self.scroll_target(direction);
         if let Some(hex) = target {
-            self.host.world.camera_hex = hex;
+            self.host.world.set_view_center(hex);
             if let Ok(grid) = HexGrid::centered(hex, self.view.width, self.view.height) {
                 self.view.grid = grid;
             }
@@ -428,16 +421,27 @@ impl MapPreview {
         if !(0..40000).contains(&hex) {
             return None;
         }
-        let player = world.get(world.player)?;
-        if let Some(at) = player.raw.hex.and_then(|hex| grid.hex_center(hex).ok()) {
-            for axis in 0..2 {
-                let old = (center[axis] - at[axis]).abs();
-                let new = (point[axis] - at[axis]).abs();
-                if new > old && old >= SCROLL_LIMIT[axis] {
-                    return None;
+        (!self.center_refused(hex)).then_some(hex)
+    }
+    /// §3.29 the tests a scrolled view center must pass (edge and arrow
+    /// scrolling and the Home walk): scroll limiting's player-distance test,
+    /// in the current view's pixels; no scroll blocker on the hex on the
+    /// current elevation (safe rule: hex 0 too); and the map border.
+    fn center_refused(&self, hex: i32) -> bool {
+        let world = &self.host.world;
+        let view = HexGrid::centered(world.camera_hex, self.view.width, self.view.height);
+        let player = world.get(world.player).and_then(|object| object.raw.hex);
+        let limited = match (view, player) {
+            (Ok(view), Some(player)) => {
+                match (view.hex_reference(hex), view.hex_reference(player)) {
+                    (Ok(target), Ok(player)) => {
+                        cursor::distance_refused(target, player, world.camera_hex)
+                    }
+                    _ => true,
                 }
             }
-        }
+            _ => false,
+        };
         let elevation = world.elevation;
         let blocker = world.iter().any(|(_, object)| {
             object.raw.pid == SCROLL_BLOCKER
@@ -445,7 +449,34 @@ impl MapPreview {
                 && object.raw.elevation == elevation
                 && object.owner.is_none()
         });
-        (!blocker).then_some(hex)
+        limited || blocker || !cursor::inside_border(hex)
+    }
+    /// §3.29 Home: the view walks hex by hex toward the player under the
+    /// scroll tests; the first refused step ends the walk.
+    pub(crate) fn center_on_player(&mut self) {
+        let world = &self.host.world;
+        let Some(player) = world.get(world.player).and_then(|object| object.raw.hex) else {
+            return;
+        };
+        for _ in 0..400 {
+            let center = self.host.world.camera_hex;
+            let next = vault_core::routing::rotation(center, player)
+                .and_then(|direction| HexGrid::step(center, direction, 1).ok());
+            let Some(next) = next.filter(|_| center != player) else {
+                break;
+            };
+            if self.center_refused(next) || !self.host.world.set_view_center(next) {
+                break;
+            }
+        }
+        if let Ok(grid) = HexGrid::centered(
+            self.host.world.camera_hex,
+            self.view.width,
+            self.view.height,
+        ) {
+            self.view.grid = grid;
+        }
+        self.last_hover = None;
     }
     /// The hover once the pointer has rested for 250 ms, and only again
     /// after it moves.

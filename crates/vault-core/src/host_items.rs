@@ -133,6 +133,64 @@ impl<A: WorldAssets> WorldHost<A> {
             object.raw.art_id = (object.raw.art_id & !0xfff) | base as u32;
         }
     }
+    /// SPEC-014 §3.34 the inventory windows' rotating figure: `owner`'s art,
+    /// standing, facing `facing`, frame 0. A critter shows its worn armor's
+    /// male or female art index for its gender (the default player art when
+    /// that index is -1), else the default player art, with the weapon code
+    /// of `active`, the interface bar's active-hand item, when it is a
+    /// weapon (else 0). A non-critter shows its own art. The player's
+    /// prototype is a runtime one (SPEC-003) with no file behind it, so
+    /// when it cannot be loaded the default art is the player's current
+    /// art.
+    pub fn figure_art(
+        &self,
+        owner: ObjectRef,
+        active: Option<ObjectRef>,
+        facing: u8,
+    ) -> Option<u32> {
+        let object = self.world.get(owner)?;
+        if object.category() != vault_formats::pro::Category::Critter {
+            return Some(object.raw.art_id);
+        }
+        let female = object
+            .character
+            .as_ref()
+            .is_some_and(|sheet| sheet.stat(34, self.world.context(owner)) == 1);
+        let armor = object.inventory.iter().find_map(|(item, _)| {
+            let worn = self.world.get(*item)?.raw.flags.contains(BasicFlags::WORN);
+            match &self.world.item_data(*item)?.data {
+                ItemData::Armor(armour) if worn => Some(if female {
+                    armour.female_art
+                } else {
+                    armour.male_art
+                }),
+                _ => None,
+            }
+        });
+        let default = || {
+            self.assets
+                .prototype(PLAYER_PID)
+                .map_or(object.raw.art_id, |prototype| prototype.art_id)
+                & 0xfff
+        };
+        let base = match armor {
+            Some(index) if index != -1 => index as u32 & 0xfff,
+            _ => default(),
+        };
+        let weapon = active
+            .and_then(|item| match &self.world.item_data(item)?.data {
+                ItemData::Weapon(weapon) => u8::try_from(weapon.animation).ok(),
+                _ => None,
+            })
+            .unwrap_or(0);
+        Some(self.assets.construct_fid(
+            1,
+            base as u16,
+            0,
+            weapon,
+            vault_formats::Fid::selector_for_orientation(facing),
+        ))
+    }
     /// `wield_obj_critter`: armor is worn (§3.10 for the player, the worn
     /// flag only for an NPC), anything else goes to the right hand, or the
     /// player's active hand.

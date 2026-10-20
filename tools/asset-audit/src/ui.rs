@@ -11,7 +11,7 @@ use vault_core::{
 };
 use vault_formats::{
     Font, FrmArchive, LocalDirProvider, LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES,
-    MapFile, MsgCatalog, Palette, Vfs, credits, rix,
+    MapFile, MsgCatalog, Palette, Prototype, Vfs, credits, rix,
 };
 
 /// Pass and fail counts per category, failures reported on stderr.
@@ -193,8 +193,76 @@ pub fn audit_interactions(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Err
             (901, Some("The supplies in the First Aid Kit run out.")),
             (902, Some("You cannot do that in combat.")),
             (903, Some("This person will not barter with you.")),
+            // §3.25 the skill books.
+            (800, Some("You read the book.")),
+            (801, Some("You learn nothing new.")),
+            (802, Some("You learn new science information.")),
+            (
+                803,
+                Some("You learn a lot about repairing broken electronics."),
+            ),
+            (804, Some("You learn new ways to heal injury.")),
+            (805, Some("You learn how to handle your guns better.")),
+            (806, Some("You learn a lot about wilderness survival.")),
         ],
     );
+    // §3.25 the five skill-book prototypes, by their corpus names.
+    let names = catalog(vfs, "pro_item.msg");
+    let books: std::collections::BTreeMap<u32, i32> = vfs
+        .files()
+        .filter(|path| path.as_str().starts_with("proto/items/") && path.extension() == Some("pro"))
+        .filter_map(|path| Prototype::parse(&read(vfs, path.as_str()).ok()?).ok())
+        .filter(|prototype| skills::skill_book(prototype.pid).is_some())
+        .map(|prototype| (prototype.pid, prototype.message_base))
+        .collect();
+    for (pid, name) in [
+        (73, "Big Book of Science"),
+        (76, "Deans Electronics"),
+        (80, "First Aid Book"),
+        (86, "Scout Handbook"),
+        (102, "Guns and Bullets"),
+    ] {
+        let result = names.as_ref().map_err(Clone::clone).and_then(|names| {
+            let base = books.get(&pid).ok_or("no prototype")?;
+            let found = names.get(*base).ok_or("no name")?;
+            (found.text == name.as_bytes())
+                .then_some(())
+                .ok_or(format!("{:?}", String::from_utf8_lossy(&found.text)))
+        });
+        audit.record("books", &format!("{pid} {name}"), result);
+    }
+    // §3.10 explosion art (misc.lst positions and frames per direction) and
+    // the four explosion hit sounds.
+    let misc = read(vfs, "art/misc/misc.lst")
+        .and_then(|bytes| LstTable::parse(&bytes, LstKind::Art).map_err(|e| e.to_string()));
+    for (index, name, frames) in [
+        (2, "empxpld.frm", 5),
+        (10, "roktxpd.frm", 6),
+        (29, "expa.frm", 7),
+        (31, "expp.frm", 9),
+    ] {
+        let listed = misc.as_ref().map_err(Clone::clone).and_then(|list| {
+            let entry = list.entries().get(index).ok_or("missing entry")?;
+            let found = entry
+                .name
+                .as_deref()
+                .map(|n| String::from_utf8_lossy(n).to_ascii_lowercase());
+            (found.as_deref() == Some(name))
+                .then_some(())
+                .ok_or(format!("{found:?}"))
+        });
+        let counted = listed.and_then(|()| {
+            let (_, count) = size(vfs, &format!("art/misc/{name}"))?;
+            (count == frames)
+                .then_some(())
+                .ok_or(format!("{count} frames != {frames}"))
+        });
+        audit.record("explosions", &format!("{index} {name}"), counted);
+    }
+    for sound in ["whn1xxx1", "who1xxx1", "whp1xxx1", "whq1xxx1"] {
+        let path = format!("sound/sfx/{sound}.acm");
+        audit.record("explosions", &path, read(vfs, &path).map(|_| ()));
+    }
     let mut misc: Vec<_> = (1000..=1005).map(|id| (id, None)).collect();
     misc.extend([
         (1006, Some("You have died from radiation sickness.")),
@@ -329,7 +397,18 @@ pub fn audit_ui(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Error>> {
     let list = read(vfs, "art/intrface/intrface.lst")
         .and_then(|bytes| LstTable::parse(&bytes, LstKind::Art).map_err(|e| e.to_string()));
     for (index, name) in [
+        (8, "lilredup.frm"),
+        (9, "lilreddn.frm"),
         (16, "iface.frm"),
+        (32, "sattkbup.frm"),
+        // §3.34 the inventory and use-on windows.
+        (48, "invbox.frm"),
+        (49, "invupout.frm"),
+        (50, "invupin.frm"),
+        (51, "invdnout.frm"),
+        (52, "invdnin.frm"),
+        (113, "use.frm"),
+        (114, "loot.frm"),
         (140, "mainmenu.frm"),
         (169, "edtrcrte.frm"),
         (170, "bignum.frm"),
@@ -341,10 +420,15 @@ pub fn audit_ui(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Error>> {
         (202, "stealth.frm"),
         (203, "diplomat.frm"),
         (250, "actarrow.frm"),
+        (254, "droph.frm"),
+        (255, "dropn.frm"),
+        (283, "actmenu.frm"),
         (286, "hand.frm"),
         (297, "helpscrn.frm"),
         (299, "menuup.frm"),
         (300, "menudown.frm"),
+        (301, "unloadh.frm"),
+        (302, "unloadn.frm"),
         (309, "death.frm"),
     ] {
         let result = list.as_ref().map_err(Clone::clone).and_then(|list| {
@@ -422,6 +506,15 @@ pub fn audit_ui(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Error>> {
         ("automap.frm", [519, 480], None),
         ("autoup.frm", [42, 74], None),
         ("autodwn.frm", [42, 74], None),
+        // §3.34 the inventory and use-on windows and the item menu.
+        ("invbox.frm", [499, 377], None),
+        ("use.frm", [292, 376], None),
+        ("sattkbup.frm", [188, 67], None),
+        ("actmenu.frm", [69, 222], None),
+        ("dropn.frm", [40, 40], None),
+        ("droph.frm", [40, 40], None),
+        ("unloadn.frm", [40, 40], None),
+        ("unloadh.frm", [40, 40], None),
         ("dp.frm", [1280, 480], None),
         ("tblcrd.frm", [369, 279], Some(31)),
     ] {

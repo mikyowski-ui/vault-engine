@@ -468,7 +468,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.load_map(&format!("maps/{stem}.map"))?;
         self.restore_player(&save)?;
         let world = &mut self.world;
-        world.camera_hex = save.viewport;
+        world.set_view_center(save.viewport);
         world.elevation = save.player.elevation;
         world.sneak_working = save.sneak_working != 0;
         world.kills = save.kills;

@@ -12,7 +12,8 @@ This specification describes reference revision R1, targeting the 32-bit Windows
 This document covers:
 
 - active skill execution: entry points, gating, the script dispatch point, and the default behavior of Sneak, Lockpick, Steal, Traps, First Aid, Doctor, Science and Repair, including the kit route, the daily usage timers, experience and random-draw order;
-- explosive arming, timers and detonation, which are the engine's only built-in Traps mechanics;
+- explosive arming, timers and detonation, which are the engine's only built-in Traps mechanics, and the explosion art and sounds of every explosion;
+- skill books;
 - the Skilldex and Set Timer windows;
 - the container/corpse loot window and the barter window as interaction state machines;
 - the timed poison and radiation events, including their behavior for non-player critters;
@@ -46,7 +47,8 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 | Skill gating, approach, animation | Skill-on action request and proximity callback |
 | Default skill routine, experience, usage slots, steal check | Skill module |
 | Sneak flag, recheck event, perception hook | Critter state module, AI perception test, animation movement requests |
-| Jam check, locks, explosives, kits | Object-use module |
+| Jam check, locks, explosives, kits, skill books | Object-use module |
+| Explosion art and sounds | Action scheduler: explosion and ranged-attack sequences; animation sequencer |
 | Timed events, map-exit cleanup | Timed queue module |
 | Skilldex window | Skilldex module and interface-bar button |
 | Loot, steal, barter and timer windows | Inventory module and dialogue barter module |
@@ -56,6 +58,7 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 ### Revision history
 
 - **R1-rev2 (2026-10-19).** Section 3.10 was rewritten. Explosion damage is center-only, matching SPEC-007 §3.7. Scenery and other blockers are affected only through radius-3 `damage_p_proc` notification, replacing the earlier "center-hex scenery" wording. The section now gives the detonation order, the retry rule for timed explosives, and the servicing and no-retry rule for scripted explosions.
+- **R1-rev3 (2026-10-19).** Builder placeholders filled. Section 3.10 gains the explosion art and sound table for timed, scripted, grenade and rocket explosions. New section 3.25 Skill Books gives the PIDs, the increase formula, time cost, fade and messages, with Fixture G. `proto.msg` 800-806 were added to section 2.4.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -125,7 +128,7 @@ All files are under `text/<language>/game/`. Numbers are decimal message indices
 
 `skilldex.msg`: 100 `SKILLDEX`, 101 `CANCEL`, 102-109 `SNEAK`, `LOCKPICK`, `STEAL`, `TRAPS`, `FIRST AID`, `DOCTOR`, `SCIENCE`, `REPAIR`.
 
-`proto.msg`: 487 "It is locked.", 582 "That does nothing.", 589 "You set the timer.", 590 "The timer is already ticking!", 900 "The supplies in the Doctor's Bag run out.", 901 "The supplies in the First Aid Kit run out.", 902 "You cannot do that in combat."
+`proto.msg`: 487 "It is locked.", 582 "That does nothing.", 589 "You set the timer.", 800 "You read the book.", 801 "You learn nothing new.", 802 "You learn new science information.", 803 "You learn a lot about repairing broken electronics.", 804 "You learn new ways to heal injury.", 805 "You learn how to handle your guns better.", 806 "You learn a lot about wilderness survival.", 590 "The timer is already ticking!", 900 "The supplies in the Doctor's Bag run out.", 901 "The supplies in the First Aid Kit run out.", 902 "You cannot do that in combat."
 
 `misc.msg`: 2000 "You cannot get there.", 2001 "The lock is jammed.", 4000 "Due to your inept handling, the explosive detonates prematurely."
 
@@ -403,6 +406,26 @@ Moves to and from a party member always succeed with no draws and never award ex
 - The player is the credited attacker. A critter killed by the blast awards its kill experience to the player. A surviving victim records the player as its last attacker, and the first such victim requests combat against the player if combat is not active.
 - **Retry.** Only one animated explosion can be in progress. The in-progress state starts when an animated explosion registers its animation and ends after its damage step. A timed explosive (type 8 or 11) that would detonate during another animated explosion is re-queued as type 8 after 50 ticks (5 game seconds) and not destroyed. Because type 8 is re-queued, message 4000 is not repeated. There is no retry limit: each retry is checked again in the same way. Otherwise the explosive is destroyed, even when the explosion could not be set up for lack of memory or animation slots; in that case nothing explodes. `[Must-match]`
 - **Scripted explosions.** The `explosion` opcode (SPEC-005) records one pending explosion request: hex, elevation, minimum and maximum damage. A second request before the next request pass overwrites the first. Out of combat, the request pass detonates it with animation and **no credited source**: no kill experience, no last-attacker change and no combat request. In combat the request is discarded by the combat request pass (section 3.16, step 5). A scripted request that finds another animated explosion in progress is dropped, with no retry. `[Must-match]` `[May-improve]`: retry a refused scripted explosion on the next request pass instead of dropping it.
+
+**Explosion art and sounds.** Every explosion shows one art object on the center hex and one on each of the six adjacent hexes. Each plays its art once at the art's own rate (a stored rate of 0 means 10 frames per second, SPEC-001) and is then removed. Only the center object plays a sound. Explosion art is miscellaneous art (`art/misc/`, identifier `0x05000000` plus the `misc.lst` index). The table is exact. `[Must-match]`
+
+| Source | Art (`misc.lst` index, identifier) | Frames | Sound |
+| --- | --- | ---: | --- |
+| Timed explosive: Dynamite (PIDs 51, 206), Plastic Explosives (85, 209); scripted `explosion` | `roktxpd.frm` (10, `0x0500000A`) | 6 | `whn1xxx1` |
+| Rocket Launcher (PID 13), and any other weapon with explosion damage (type 6) that is not thrown | `roktxpd.frm` (10, `0x0500000A`) | 6 | Weapon hit sound: `whn1xxx1` for the Rocket Launcher |
+| Frag Grenade (25), Molotov Cocktail (159): thrown, explosion damage | `expa.frm` (29, `0x0500001D`) | 7 | `who1xxx1` |
+| Plasma Grenade (26): thrown, plasma damage (3) | `expp.frm` (31, `0x0500001F`) | 9 | `whp1xxx1` |
+| Pulse Grenade (27): thrown, EMP damage (5) | `empxpld.frm` (2, `0x05000002`) | 5 | `whq1xxx1` |
+
+Frame counts are per direction, from the corpus FRM headers. The weapon sounds are the SPEC-010 weapon hit names. They are built from the corpus weapon sound codes `N`, `O`, `P` and `Q`, with variant 1 for the primary hit modes these weapons use, and material letter `X`, because the material lookup is skipped for plasma, EMP and explosion damage. All five sound files are in the corpus. Weapon explosions follow these rules. `[Must-match]`
+
+- **Classification.** A weapon explodes when it is thrown with explosion, plasma or EMP damage, or used without throwing with explosion damage. The weapon prototype's damage type decides this, not the ammunition. Plasma and EMP weapons that are not thrown, such as the Plasma Rifle and Plasma Pistol, never explode.
+- **Center.** The center hex is where the projectile ends: the defender's hex on a hit, or the miss impact hex (SPEC-007 §3.7.1) on a miss. A critical failure launches no projectile, so it shows no explosion.
+- **Order.**
+  1. The projectile flies with the weapon's flight sound (`wfo1xxx1`, `wfp1xxx1`, `wfq1xxx1` or `wfn1xxx1`).
+  2. On arrival a grenade first shows its own item art, then the projectile object turns into the center explosion art and plays the hit sound. The thrown grenade is erased afterwards and does not stay on the ground.
+  3. The six adjacent arts are queued after the center art, in direction order 0-5. Direction 0's art carries a scheduler start delay of 2 (4 for the Plasma Grenade); the other five carry none. Sequence entries start in order, so none of the six starts before direction 0's art. The delay counts down only while an earlier entry of the same animation sequence is still running, and it is ignored once none is.
+- **Timed and scripted explosions.** These use `roktxpd.frm` for all seven objects, with the `whn1xxx1` sound on the center object, in the detonation order given earlier in this section.
 
 **Map exit.** The map-exit handlers for types 8 and 11 detonate immediately without animation and without message 4000, on the map being left. An armed explosive carried by the player therefore detonates at the player's hex as the player leaves. `[Must-match]`
 
@@ -870,8 +893,46 @@ Ladder and stairs instances store packed destination words (SPEC-003), but no en
 | Poison tick | None |
 | Radiation midnight check | D(1, 10); then D(4, 18) only when a new onset is queued |
 | Elevators, exit grids, ladders, loot, counter, barter moves | None |
+| Reading a skill book (section 3.25) | None |
 
 "Upgrade" means the critical-upgrade D100, drawn only when the clock is at least 864000 ticks. The table is exact. `[Must-match]`
+
+### 3.25 Skill Books
+
+`[Must-match]` unless tagged.
+
+| PID | Book (corpus name) | Skill | Message |
+| ---: | --- | --- | ---: |
+| 73 | Big Book of Science | 12 Science | 802 |
+| 76 | Deans Electronics | 13 Repair | 803 |
+| 80 | First Aid Book | 6 First Aid | 804 |
+| 86 | Scout Handbook | 17 Outdoorsman | 806 |
+| 102 | Guns and Bullets | 0 Small Guns | 805 |
+
+No other PID is a skill book. Messages are `proto.msg` (section 2.4).
+
+**Entry.** A book is read through the item-use route. That route tests the book PIDs first, before flares, radios and explosives.
+
+- **Interface-bar item slot.** Use is offered when the prototype is usable. In combat it needs and spends the slot's ordinary use cost.
+- **Inventory action menu.** Use (SPEC-014 §3.34).
+
+There is no other route. The book's own script gets no `use_p_proc` call on this route.
+
+**Procedure.**
+
+1. **In combat**, show message 902 and stop. The book is kept. Through the item slot the AP cost is still spent. `[May-improve]`: refuse before spending AP.
+2. Let S be the player's effective skill percentage (SPEC-006 §3.3, with traits, perks, difficulty and the 200 cap). Compute `n = trunc((100 - S) / 10)`, truncating toward zero.
+3. If n ≤ 0, that is S ≥ 91, the result message is 801 and the skill is unchanged. Otherwise the result message is the book's message. Then repeat n times: add 1 to the unspent skill points, then spend one point on the skill (SPEC-006 §3.3). Each point adds +1 percentage point, or +2 for a tagged skill. Unspent points therefore end where they started. n is computed once, before any increase.
+4. Fade to black (SPEC-014 §3.2).
+5. Advance the game clock by `36000 × (11 - IN)` ticks, where IN is the player's effective Intelligence, so between 1 and 10 game hours. The clock is advanced directly. Timed events that fall due are not run during the read; they run in order on the next queue pass (SPEC-006 §3.7).
+6. Run the map-update scripts.
+7. Fade back to the game palette.
+8. Show message 800, then the result message.
+9. The book is destroyed, **including** when the result is 801.
+   - From the inventory, it is first placed on the player's hex and then destroyed.
+   - The item-slot route runs the map-update scripts once more after the use.
+
+A book draws no random numbers and grants no experience.
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
@@ -950,6 +1011,20 @@ Gauge cells for 4 buttons: levels 0-3 map to cells 0, 4, 8, 12. The step delay f
 
 Stack of 25. Start value 1. Keys `3`, `7` give 37; Enter plays `iisxxxx1` because 37 exceeds 25. Minus gives 36, still too high. ALL gives 25; Enter accepts. In a fresh counter, `1`, `2`, `3`, `4` give 1, 12, 123, then `(1230 mod 1000) + 4` = 234.
 
+### 4.7 Fixture G: Skill Books
+
+All cases are out of combat with effective Intelligence 6, unless stated.
+
+| Case | Book and starting skill | n | Result |
+| --- | --- | ---: | --- |
+| G1 | Big Book of Science, Science 45, untagged | 5 | Science 50; unspent points unchanged; clock +180000 ticks (5 hours); messages 800, 802; book destroyed |
+| G2 | Guns and Bullets, Small Guns 45, tagged | 5 | Small Guns 55 |
+| G3 | Scout Handbook, Outdoorsman 90 | 1 | Outdoorsman 91; messages 800, 806 |
+| G4 | Scout Handbook, Outdoorsman 91 | 0 | Unchanged; messages 800, 801; clock +5 hours; book destroyed |
+| G5 | Big Book of Science, Science 120 after perks and difficulty | -2 | Unchanged; messages 800, 801 |
+| G6 | First Aid Book, Intelligence 10 / Intelligence 1 | - | Clock +36000 / +360000 ticks |
+| G7 | Any book from the item slot in combat | - | Message 902; book kept; the slot's use AP spent |
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -958,4 +1033,4 @@ Stack of 25. Start value 1. Keys `3`, `7` give 37; Enter plays `iisxxxx1` becaus
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 23 plain-word warnings were reviewed and are benign: this spec's own formula and UI words ("value", "level", "draw", "maximum", "position", "size", "current", "trunc", "slot", "count", "counter", "attempt"). The public opcode names `sfx_build_open_name` and `sfx_build_char_name` appear only as naming-rule references. The fenced blocks hold no code; fixtures are tables. Cross-spec note (resolved): SPEC-007 §3.7 now states the same rule as section 3.10. Every explosion, whether weapon, grenade, timed or scripted, uses the one disabled victim enumeration, so in R1 only the center target takes damage. Retaliation and onlooker wording now matches the single rule in SPEC-007 §3.6. The added warning "start" is the public SSL procedure name start, used in section 3.10. Tag count, excluding the two tag definitions: 91 `[Must-match]`, 34 `[May-improve]`.
+Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 23 plain-word warnings were reviewed and are benign: this spec's own formula and UI words ("value", "level", "draw", "maximum", "position", "size", "current", "trunc", "slot", "count", "counter", "attempt"). The public opcode names `sfx_build_open_name` and `sfx_build_char_name` appear only as naming-rule references. The fenced blocks hold no code; fixtures are tables. Cross-spec note (resolved): SPEC-007 §3.7 now states the same rule as section 3.10. Every explosion, whether weapon, grenade, timed or scripted, uses the one disabled victim enumeration, so in R1 only the center target takes damage. Retaliation and onlooker wording now matches the single rule in SPEC-007 §3.6. The added warning "start" is the public SSL procedure name start, used in section 3.10. Explosion art, sound and skill-book names in sections 3.10 and 3.25 are corpus file and prototype names, checked against `art/misc/misc.lst`, the corpus FRM headers, `sound/sfx` and `pro_item.msg`. Tag count, excluding the two tag definitions: 94 `[Must-match]`, 35 `[May-improve]`.

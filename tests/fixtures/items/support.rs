@@ -6,7 +6,7 @@ use crate::{
     assets::WorldAssets,
 };
 use std::{collections::BTreeMap, sync::Arc};
-use vault_formats::{MsgCatalog, Prototype};
+use vault_formats::{FrmArchive, MsgCatalog, Prototype};
 
 pub(crate) use crate::fixture_assets as assets;
 pub(crate) use crate::fixture_world as world;
@@ -148,6 +148,8 @@ pub struct ItemAssets {
     pub catalogs: BTreeMap<&'static str, Arc<MsgCatalog>>,
     /// The program every script index loads, when set.
     pub program: Option<vault_vm::IntProgram>,
+    /// Object art by identifier.
+    pub art: BTreeMap<u32, Arc<FrmArchive>>,
 }
 impl Default for ItemAssets {
     fn default() -> Self {
@@ -162,6 +164,7 @@ impl Default for ItemAssets {
             prototypes,
             catalogs: catalogs(),
             program: None,
+            art: BTreeMap::new(),
         }
     }
 }
@@ -186,6 +189,12 @@ impl WorldAssets for ItemAssets {
             .get(file)
             .cloned()
             .ok_or_else(|| WorldError::Invalid(format!("{file} is missing")))
+    }
+    fn object_art(&self, fid: u32) -> Result<Arc<FrmArchive>, WorldError> {
+        self.art
+            .get(&fid)
+            .cloned()
+            .ok_or_else(|| WorldError::Invalid(format!("no art {fid:#x}")))
     }
 }
 

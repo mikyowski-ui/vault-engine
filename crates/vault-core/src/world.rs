@@ -275,7 +275,7 @@ pub struct ExplosionRequest {
 }
 /// SPEC-013 §3.10 the animated explosion in progress, from its start until
 /// its damage step. Damage is computed at the start.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveExplosion {
     pub hex: i32,
     pub elevation: u8,
@@ -284,6 +284,154 @@ pub struct ActiveExplosion {
     /// The credited attacker: the player for a timed explosive, none for a
     /// scripted request.
     pub source: Option<ObjectRef>,
+    /// The explosion's art; the scenery scripts are notified once its
+    /// center has played, and the damage step follows the last art.
+    pub art: ExplosionArt,
+    pub notified: bool,
+}
+
+/// The id of an explosion art object in render snapshots: no world object
+/// has it, so the art is drawn but never picked.
+pub const EXPLOSION_ART_ID: u32 = u32::MAX;
+/// The PID given to explosion art in render snapshots (miscellaneous, with
+/// no prototype).
+pub const EXPLOSION_ART_PID: u32 = 0x0500_0000;
+
+/// SPEC-013 §3.10 an explosion's art: one misc art object on the center hex
+/// and one on each adjacent hex. Entries start in order; each plays its
+/// frames once, one per frame step at the art's rate, and is then removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplosionArt {
+    pub elevation: u8,
+    /// The misc art identifier.
+    pub fid: u32,
+    /// Frames per direction (0 when the art cannot be loaded: the entries
+    /// then finish as they start) and the frame interval.
+    pub frames: usize,
+    pub interval_ms: u64,
+    /// The center first, then the adjacent hexes in direction order 0-5
+    /// (none off the grid).
+    pub objects: Vec<ArtObject>,
+    /// When the next frame step is due; `None` before the first poll.
+    pub next_ms: Option<u64>,
+}
+/// One explosion art object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtObject {
+    pub hex: i32,
+    /// Frame steps it waits while an earlier entry is running.
+    pub delay: u32,
+    /// The frame shown while it plays.
+    pub frame: Option<usize>,
+    pub done: bool,
+}
+impl ExplosionArt {
+    /// The seven arts of an explosion at `center`; direction 0's adjacent
+    /// art carries the start delay `first_delay`, the others none.
+    pub fn new(
+        center: i32,
+        elevation: u8,
+        fid: u32,
+        [frames, interval_ms]: [u64; 2],
+        first_delay: u32,
+    ) -> Self {
+        let art = |hex, delay| ArtObject {
+            hex,
+            delay,
+            frame: None,
+            done: false,
+        };
+        let mut objects = vec![art(center, 0)];
+        for direction in 0..6 {
+            if let Ok(hex) = vault_formats::HexGrid::step(center, direction, 1)
+                && hex != center
+            {
+                objects.push(art(hex, if direction == 0 { first_delay } else { 0 }));
+            }
+        }
+        Self {
+            elevation,
+            fid,
+            frames: frames as usize,
+            interval_ms: interval_ms.max(1),
+            objects,
+            next_ms: None,
+        }
+    }
+    /// The center art has played.
+    pub fn center_done(&self) -> bool {
+        self.objects.first().is_none_or(|object| object.done)
+    }
+    /// Every art has played and been removed.
+    pub fn finished(&self) -> bool {
+        self.objects.iter().all(|object| object.done)
+    }
+    /// One scheduler frame step. A running entry shows its next frame, or
+    /// is removed after its last. Then waiting entries start in order: an
+    /// entry whose delay is still counting down while an earlier entry
+    /// runs takes one off and holds back the rest; the delay is ignored
+    /// once no earlier entry runs.
+    fn step(&mut self) {
+        let frames = self.frames;
+        for object in &mut self.objects {
+            if let Some(frame) = object.frame {
+                if frame + 1 < frames {
+                    object.frame = Some(frame + 1);
+                } else {
+                    object.frame = None;
+                    object.done = true;
+                }
+            }
+        }
+        for index in 0..self.objects.len() {
+            let object = self.objects[index];
+            if object.done || object.frame.is_some() {
+                continue;
+            }
+            let earlier_running = self.objects[..index]
+                .iter()
+                .any(|earlier| earlier.frame.is_some());
+            if object.delay > 0 && earlier_running {
+                self.objects[index].delay -= 1;
+                break;
+            }
+            let entry = &mut self.objects[index];
+            if frames == 0 {
+                entry.done = true;
+            } else {
+                entry.frame = Some(0);
+            }
+        }
+    }
+    /// Advance to `now_ms`: the first poll starts the arts, then one frame
+    /// step falls due per interval. Returns whether anything changed.
+    pub fn poll(&mut self, now_ms: u64) -> bool {
+        let mut changed = false;
+        loop {
+            match self.next_ms {
+                Some(due) if due > now_ms => break,
+                _ => {}
+            }
+            if self.finished() {
+                break;
+            }
+            self.step();
+            changed = true;
+            self.next_ms = Some(self.next_ms.unwrap_or(now_ms) + self.interval_ms);
+        }
+        changed
+    }
+    /// The playing arts as map objects for drawing.
+    fn records(&self) -> impl Iterator<Item = MapObject> + '_ {
+        self.objects.iter().filter_map(|object| {
+            let mut record = object_record(EXPLOSION_ART_PID, EXPLOSION_ART_ID);
+            record.art_id = self.fid;
+            record.frame = object.frame?;
+            record.hex = Some(object.hex);
+            record.elevation = self.elevation;
+            Some(record)
+        })
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorldEffect {
@@ -470,6 +618,9 @@ pub struct WorldState {
     pub pending_explosion: Option<ExplosionRequest>,
     /// SPEC-013 §3.10 the animated explosion in progress, if any.
     pub explosion: Option<ActiveExplosion>,
+    /// SPEC-013 §3.10 weapon explosions' art, played after their attack's
+    /// damage (presentation only).
+    pub explosion_effects: Vec<ExplosionArt>,
     /// SPEC-014 §3.33 the hexes the player entered since the seen state was
     /// last processed: 40000 bits, 8 hexes per byte in hex order.
     pub visited: Vec<u8>,
@@ -611,6 +762,7 @@ impl WorldState {
             pending_loot: None,
             pending_explosion: None,
             explosion: None,
+            explosion_effects: Vec::new(),
             visited: vec![0; crate::persistence::VISITED_BYTES],
             combat_quit: false,
             combat_actor: 0,
@@ -1063,7 +1215,27 @@ impl WorldState {
                 map.objects.total += 1;
             }
         }
+        // SPEC-013 §3.10 the explosion art playing now.
+        let arts = self.explosion.iter().map(|explosion| &explosion.art);
+        for record in arts
+            .chain(&self.explosion_effects)
+            .flat_map(ExplosionArt::records)
+        {
+            if let Some(elevation) = map.objects.elevations.get_mut(record.elevation as usize) {
+                elevation.push(record);
+                map.objects.total += 1;
+            }
+        }
         map
+    }
+    /// SPEC-014 §3.29: a view center outside the map border is refused and
+    /// leaves the view where it was. Returns whether the view moved there.
+    pub fn set_view_center(&mut self, hex: i32) -> bool {
+        let inside = crate::ui::cursor::inside_border(hex);
+        if inside {
+            self.camera_hex = hex;
+        }
+        inside
     }
     pub fn script_for(&self, object: ObjectRef) -> Option<u32> {
         let sid = self.get(object)?.raw.script_id;
@@ -1239,7 +1411,7 @@ impl WorldState {
         object.raw.hex = Some(hex);
         object.raw.elevation = elevation;
         if reference == self.player {
-            self.camera_hex = hex;
+            self.set_view_center(hex);
             self.set_current_elevation(elevation);
             self.mark_visited(hex);
             self.check_exit_grids(hex, elevation);

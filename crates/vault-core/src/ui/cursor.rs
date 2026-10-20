@@ -327,3 +327,39 @@ pub fn edge_step(direction: usize) -> [i32; 2] {
     [32 * dx, 24 * dy]
 }
 pub const EDGE_PERIOD_MS: u64 = 33;
+
+/// §3.29 the map border in mirrored columns (`199 - column`) and rows, both
+/// exclusive. The reference applies the parity correction meant for the
+/// right bound (156) to the left one (43, made 42); under the safe rule the
+/// bounds are 43 and 155, so centers lie in columns 45-155 and rows 45-154.
+pub const BORDER_COLUMNS: (i32, i32) = (43, 155);
+pub const BORDER_ROWS: (i32, i32) = (44, 155);
+/// §3.29 whether a view center lies inside the map border. Every map is 200
+/// by 200 hexes and the border does not depend on its contents.
+pub fn inside_border(hex: i32) -> bool {
+    if !(0..40000).contains(&hex) {
+        return false;
+    }
+    let (mirrored, row) = (199 - hex % 200, hex / 200);
+    BORDER_COLUMNS.0 < mirrored
+        && mirrored < BORDER_COLUMNS.1
+        && BORDER_ROWS.0 < row
+        && row < BORDER_ROWS.1
+}
+/// §3.29 the player-distance test of scroll limiting. Positions are hex
+/// cell corners in the current view's pixels: `target` is the new center,
+/// `player` the player's hex. The view reference is (304, 182), or (272,
+/// 182) when the current center hex's column is even. The target is refused
+/// when it is farther from the player than the reference on either axis and
+/// at least 480 pixels across or 400 down from the player, so a step toward
+/// the player is never refused.
+pub fn distance_refused(target: [i64; 2], player: [i64; 2], center: i32) -> bool {
+    let reference: [i64; 2] = if (center % 200) % 2 == 0 {
+        [272, 182]
+    } else {
+        [304, 182]
+    };
+    let [dx, dy] = [0, 1].map(|axis| (player[axis] - target[axis]).abs());
+    (dx > (player[0] - reference[0]).abs() || dy > (player[1] - reference[1]).abs())
+        && (dx >= 480 || dy >= 400)
+}

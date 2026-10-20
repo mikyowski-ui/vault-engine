@@ -1609,11 +1609,11 @@ fn miss(
         )
         .unwrap();
     let mut draws = Draws::new(outcomes);
-    let outcome = host
+    let (spray, victim, _) = host
         .resolve_attack(attacker, defender, &attack, &mut draws)
         .unwrap();
     assert!(draws.0.is_empty(), "unused outcomes {:?}", draws.0);
-    outcome
+    (spray, victim)
 }
 fn line_of_fire_chance(host: &WorldHost<AiAssets>, attacker: ObjectRef, critter: ObjectRef) -> i32 {
     host.world
@@ -1904,4 +1904,96 @@ fn spec009_join_and_stop_predicates_use_live_danger() {
         .unwrap()
         .base[1] = 1;
     assert!(host.request_end_combat(&mut ai));
+}
+
+#[test]
+fn spec013_weapon_explosions_show_their_art_where_the_projectile_ends() {
+    use crate::skills::explosion_art;
+    use vault_formats::pro::{ItemData, PrototypeData};
+    // Fixture E's gun given a damage type, a PID and an attack mode.
+    let explosive_gun = |pid: u32, damage_type: i32, extended: i32| {
+        let (mut host, [attacker, _, defender, _]) = fixture_e("critter", 2);
+        let gun = host
+            .world
+            .wielded(attacker, hit_mode::RIGHT_PRIMARY)
+            .unwrap();
+        let mut prototype = (*weapon(pid, extended, 4, 20, 20, 10, 100)).clone();
+        if let PrototypeData::Item(item) = &mut prototype.data
+            && let ItemData::Weapon(weapon) = &mut item.data
+        {
+            weapon.damage_type = damage_type;
+        }
+        let object = host.world.get_mut(gun).unwrap();
+        object.raw.pid = pid;
+        object.prototype = Some(Arc::new(prototype));
+        host.world.ai.combat_taunts = Some(0);
+        (host, attacker, defender)
+    };
+    let attack = |host: &mut WorldHost<AiAssets>, attacker, defender, hits: bool| {
+        let chance = host
+            .world
+            .attack_profile(
+                attacker,
+                defender,
+                hit_mode::RIGHT_PRIMARY,
+                location::UNCALLED,
+                false,
+            )
+            .unwrap()
+            .hit_chance(true)
+            .unwrap();
+        host.world.rng = crate::fixture_items::seed_where(&[(1, 100)], |v| {
+            if hits {
+                v[0] <= chance.min(90)
+            } else {
+                v[0] > chance && v[0] < 96
+            }
+        });
+        host.perform_attack(
+            attacker,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::UNCALLED,
+            false,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    // Explosion damage, not thrown (a Rocket Launcher): roktxpd.frm on the
+    // defender's hex on a hit, direction 0 waiting 2 frame steps.
+    let (mut host, attacker, defender) = explosive_gun(13, 6, 0x06);
+    let result = attack(&mut host, attacker, defender, true);
+    assert_ne!(result.defender_flags & effect::HIT, 0);
+    let art = host.world.explosion_effects.last().unwrap();
+    assert_eq!(art.fid, explosion_art::ROCKET);
+    assert_eq!(art.objects.len(), 7);
+    assert_eq!(
+        art.objects[0].hex,
+        host.world.get(defender).unwrap().raw.hex.unwrap()
+    );
+    assert_eq!(
+        art.objects
+            .iter()
+            .map(|object| object.delay)
+            .collect::<Vec<_>>(),
+        [0, 2, 0, 0, 0, 0, 0]
+    );
+    // Thrown plasma damage (the Plasma Grenade): expp.frm, delay 4.
+    let (mut host, attacker, defender) = explosive_gun(26, 3, 0x05);
+    attack(&mut host, attacker, defender, true);
+    let art = host.world.explosion_effects.last().unwrap();
+    assert_eq!((art.fid, art.objects[1].delay), (explosion_art::PLASMA, 4));
+    // Plasma damage that is not thrown never explodes.
+    let (mut host, attacker, defender) = explosive_gun(15, 3, 0x06);
+    attack(&mut host, attacker, defender, true);
+    assert!(host.world.explosion_effects.is_empty());
+    // A miss explodes where the projectile ends; the art is presentation
+    // only and leaves with its last frame.
+    let (mut host, attacker, defender) = explosive_gun(13, 6, 0x06);
+    let result = attack(&mut host, attacker, defender, false);
+    if result.code != 0 {
+        assert_eq!(host.world.explosion_effects.len(), 1);
+    }
+    host.step_explosions(0).unwrap();
+    assert!(host.world.explosion_effects.is_empty());
 }

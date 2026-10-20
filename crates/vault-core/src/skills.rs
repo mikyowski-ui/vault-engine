@@ -7,6 +7,7 @@ use crate::{RandomSource, WorldError, rng};
 
 /// SPEC-006 §3.3 skill indices used here.
 pub mod skill {
+    pub const SMALL_GUNS: i32 = 0;
     pub const FIRST_AID: i32 = 6;
     pub const DOCTOR: i32 = 7;
     pub const SNEAK: i32 = 8;
@@ -288,6 +289,65 @@ pub fn armed_pid(pid: u32) -> Option<u32> {
 }
 pub fn is_explosive(pid: u32) -> bool {
     matches!(pid, DYNAMITE | PLASTIC | DYNAMITE_ARMED | PLASTIC_ARMED)
+}
+
+/// §3.10 explosion art: miscellaneous art identifiers (`0x05000000` plus
+/// the `misc.lst` index).
+pub mod explosion_art {
+    /// `roktxpd.frm` (10): timed and scripted explosions, and weapons with
+    /// explosion damage that are not thrown (the Rocket Launcher).
+    pub const ROCKET: u32 = 0x0500_000a;
+    /// `expa.frm` (29): thrown explosion damage (Frag Grenade, Molotov).
+    pub const GRENADE: u32 = 0x0500_001d;
+    /// `expp.frm` (31): thrown plasma damage (Plasma Grenade).
+    pub const PLASMA: u32 = 0x0500_001f;
+    /// `empxpld.frm` (2): thrown EMP damage (Pulse Grenade).
+    pub const EMP: u32 = 0x0500_0002;
+}
+/// The Plasma Grenade, whose direction-0 art waits 4 frame steps.
+pub const PLASMA_GRENADE: u32 = 26;
+/// §3.10 whether a weapon explodes, by its prototype's damage type (not the
+/// ammunition's): thrown with explosion, plasma or EMP damage, or used
+/// without throwing with explosion damage. Returns the explosion art and
+/// direction 0's adjacent-art start delay, 2 frame steps (4 for the Plasma
+/// Grenade).
+pub fn weapon_explosion(pid: u32, damage_type: i32, thrown: bool) -> Option<(u32, u32)> {
+    use crate::combat::damage_type::{EMP, EXPLOSION, PLASMA};
+    let art = match (thrown, damage_type) {
+        (true, EXPLOSION) => explosion_art::GRENADE,
+        (true, PLASMA) => explosion_art::PLASMA,
+        (true, EMP) => explosion_art::EMP,
+        (false, EXPLOSION) => explosion_art::ROCKET,
+        _ => return None,
+    };
+    Some((art, if pid == PLASMA_GRENADE { 4 } else { 2 }))
+}
+
+/// §3.25 the skill books: PID, skill and the `proto.msg` result message.
+/// No other PID is a skill book.
+pub const SKILL_BOOKS: [(u32, i32, i32); 5] = [
+    (73, skill::SCIENCE, 802),
+    (76, skill::REPAIR, 803),
+    (80, skill::FIRST_AID, 804),
+    (86, skill::OUTDOORSMAN, 806),
+    (102, skill::SMALL_GUNS, 805),
+];
+/// §3.25 the skill and result message of a book PID.
+pub fn skill_book(pid: u32) -> Option<(i32, i32)> {
+    SKILL_BOOKS
+        .iter()
+        .find(|(book, _, _)| *book == pid)
+        .map(|(_, skill, message)| (*skill, *message))
+}
+/// §3.25 the skill points a book adds at effective skill `percent`:
+/// `trunc((100 - S) / 10)`, truncating toward zero; 0 or less adds none.
+pub fn book_points(percent: i32) -> i32 {
+    (100 - percent) / 10
+}
+/// §3.25 the reading time: `36000 × (11 - IN)` ticks, 1 to 10 game hours
+/// (effective Intelligence clamped to 1-10).
+pub fn book_ticks(intelligence: i32) -> u64 {
+    36_000 * (11 - intelligence.clamp(1, 10)) as u64
 }
 /// Timed-queue types for a timely and a premature explosion.
 pub const EXPLOSION_EVENT: u32 = 8;

@@ -42,6 +42,15 @@ pub const EXPLOSION_RETRY_TICKS: i64 = 50;
 /// The explosion sound.
 const EXPLOSION_SOUND: &[u8] = b"whn1xxx1";
 
+/// SPEC-013 §3.25 the item-use routes a skill book can be read through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookRoute {
+    /// The inventory window's action menu.
+    Inventory,
+    /// The interface bar's item slot.
+    ItemSlot,
+}
+
 impl<A: WorldAssets> WorldHost<A> {
     /// §3.1-3.2 the skill-on request. Sneak toggles at once. Otherwise the
     /// gate rejects (`proto.msg` 902 for a player in combat) or the request
@@ -235,6 +244,56 @@ impl<A: WorldAssets> WorldHost<A> {
             duration: 0,
             from_black: false,
         });
+    }
+    /// SPEC-013 §3.25 reading a skill book through the item-use route;
+    /// `false` when `book` is not one. In combat message 902 shows and the
+    /// book is kept. Otherwise the skill gains `trunc((100 - S) / 10)` points
+    /// bought with added unspent points (message 801 and no change when that
+    /// is not positive); the screen fades to black; the clock advances
+    /// `36000 × (11 - IN)` ticks directly, so due events wait for the next
+    /// queue pass; the map-update scripts run; the screen fades back;
+    /// messages 800 and the result show; and the book is destroyed, from the
+    /// inventory after being placed on the player's hex, from the item slot
+    /// with one more map update. No draws, no experience.
+    pub fn read_book(&mut self, book: ObjectRef, route: BookRoute) -> Result<bool, WorldError> {
+        let Some((skill, message)) = self
+            .world
+            .get(book)
+            .and_then(|object| skills::skill_book(object.raw.pid))
+        else {
+            return Ok(false);
+        };
+        if self.world.combat {
+            self.print_game("proto.msg", 902, &[]);
+            return Ok(true);
+        }
+        let player = self.world.player;
+        let points = skills::book_points(self.skill_of(player, skill));
+        let result = if points > 0 { message } else { 801 };
+        if let Some(sheet) = self.world.player_sheet_mut() {
+            for _ in 0..points.max(0) {
+                sheet.unspent_skills = sheet.unspent_skills.saturating_add(1);
+                sheet.buy_skill(skill as usize);
+            }
+        }
+        self.fade(true);
+        let intelligence = self.world.effective(player, 4);
+        self.world.clock.ticks += skills::book_ticks(intelligence);
+        self.map_update()?;
+        self.fade(false);
+        self.print_game("proto.msg", 800, &[]);
+        self.print_game("proto.msg", result, &[]);
+        match route {
+            BookRoute::Inventory => {
+                self.world.drop_item(player, book, 1)?;
+                self.world.erase(book);
+            }
+            BookRoute::ItemSlot => {
+                self.world.destroy_unit(book)?;
+                self.map_update()?;
+            }
+        }
+        Ok(true)
     }
     /// §3.11 First Aid with kit bonus `kit`. Returns `false` only when the
     /// daily usage limit refused it (the routine's failure result). Safe
@@ -828,7 +887,7 @@ impl<A: WorldAssets> WorldHost<A> {
         explosive: ObjectRef,
         animated: bool,
     ) -> Result<(), WorldError> {
-        if animated && self.world.explosion.is_some() {
+        if animated && self.explosion_in_progress() {
             self.world.queue.insert(
                 self.world.clock.ticks,
                 EXPLOSION_RETRY_TICKS,
@@ -856,12 +915,37 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.erase(explosive);
         Ok(())
     }
+    /// §3.10 only one animated explosion can be in progress: a timed or
+    /// scripted one until its damage step, a weapon explosion while its art
+    /// plays.
+    fn explosion_in_progress(&self) -> bool {
+        self.world.explosion.is_some() || !self.world.explosion_effects.is_empty()
+    }
+    /// §3.10 the seven arts of an explosion at `center` with art `fid`:
+    /// its frame count per direction and rate (a stored rate of 0 is 10
+    /// frames per second); art that cannot be loaded shows nothing.
+    pub(crate) fn explosion_art(
+        &self,
+        center: i32,
+        elevation: u8,
+        fid: u32,
+        first_delay: u32,
+    ) -> crate::world::ExplosionArt {
+        let timing = self.assets.object_art(fid).ok().map_or([0, 100], |art| {
+            [
+                art.frame_count() as u64,
+                art.frame_interval_ms().unwrap_or(100),
+            ]
+        });
+        crate::world::ExplosionArt::new(center, elevation, fid, timing, first_delay)
+    }
     /// §3.10 an explosion at `hex`: damage covers only the living critter
     /// blocking the center hex, computed now with one D(min, max) draw (the
     /// splash enumeration is disabled in R1, so nothing else takes damage).
-    /// An animated explosion plays `whn1xxx1` and its art and stays in
-    /// progress until its damage step (`finish_explosion`); an unanimated
-    /// one applies the damage, then notifies the scenery scripts, at once.
+    /// An animated explosion plays `whn1xxx1` with its art, `roktxpd.frm` on
+    /// the center and the six adjacent hexes, and stays in progress until
+    /// its damage step (`step_explosions`); an unanimated one applies the
+    /// damage, then notifies the scenery scripts, at once.
     fn start_explosion(
         &mut self,
         hex: i32,
@@ -897,11 +981,14 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             None => None,
         };
+        let art = self.explosion_art(hex, elevation, skills::explosion_art::ROCKET, 0);
         let explosion = crate::world::ActiveExplosion {
             hex,
             elevation,
             victim,
             source,
+            art,
+            notified: false,
         };
         if animated {
             self.world.emit(WorldEffect::SoundEffect {
@@ -920,19 +1007,35 @@ impl<A: WorldAssets> WorldHost<A> {
         self.apply_explosion(&explosion)?;
         self.notify_explosion_scripts(hex, elevation, source)
     }
-    /// §3.10 the animated explosion's later steps, once its art has played
-    /// (one world update after it started; no approved spec names the art):
-    /// notify the scenery scripts, remove the art, then apply the damage and
-    /// attribution. The in-progress state ends after the damage step.
-    pub(crate) fn finish_explosion(&mut self) -> Result<bool, WorldError> {
-        let Some(explosion) = self.world.explosion else {
-            return Ok(false);
+    /// §3.10 one poll of the explosions at `now_ms`. The animated explosion
+    /// in progress advances its art; once the center art has played the
+    /// scenery scripts are notified; once every art has played and been
+    /// removed the damage and attribution apply, ending the in-progress
+    /// state. Weapon explosions' art advances and is dropped once played.
+    pub(crate) fn step_explosions(&mut self, now_ms: u64) -> Result<bool, WorldError> {
+        let mut changed = false;
+        self.world.explosion_effects.retain_mut(|art| {
+            changed |= art.poll(now_ms);
+            !art.finished()
+        });
+        let Some(explosion) = self.world.explosion.as_mut() else {
+            return Ok(changed);
         };
-        let result = self
-            .notify_explosion_scripts(explosion.hex, explosion.elevation, explosion.source)
-            .and_then(|()| self.apply_explosion(&explosion));
-        self.world.explosion = None;
-        result.map(|()| true)
+        changed |= explosion.art.poll(now_ms);
+        if explosion.art.center_done() && !explosion.notified {
+            explosion.notified = true;
+            let (hex, elevation, source) = (explosion.hex, explosion.elevation, explosion.source);
+            self.notify_explosion_scripts(hex, elevation, source)?;
+        }
+        if let Some(explosion) = self
+            .world
+            .explosion
+            .take_if(|explosion| explosion.art.finished())
+        {
+            self.apply_explosion(&explosion)?;
+            changed = true;
+        }
+        Ok(changed)
     }
     /// §3.10 the computed damage on the center critter (still a living
     /// critter), its knockback, and the credited source's attribution: kill
@@ -1079,7 +1182,7 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.pending_explosion = None;
             return Ok(false);
         }
-        if self.world.explosion.is_some() {
+        if self.explosion_in_progress() {
             return Ok(false);
         }
         self.world.pending_explosion = None;

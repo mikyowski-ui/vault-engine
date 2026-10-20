@@ -141,19 +141,31 @@ impl IndexedImage {
     /// Unscaled palette-keyed blit, clipped before iteration. Map projection
     /// supplies the image corner; tile footprints never rescale the art.
     pub fn blit(&mut self, frame: &FrmFrame, origin: [i64; 2]) {
+        self.blit_within(
+            frame,
+            origin,
+            [0, 0, i64::from(self.width), i64::from(self.height)],
+        );
+    }
+    /// A transparent blit clipped to `clip` (`[x, y, width, height]`) as
+    /// well as to the image.
+    pub fn blit_within(&mut self, frame: &FrmFrame, origin: [i64; 2], clip: [i64; 4]) {
         let [left, top] = origin;
         let width = i64::from(frame.width);
         let height = i64::from(frame.height);
-        if left >= i64::from(self.width)
-            || top >= i64::from(self.height)
-            || left <= -width
-            || top <= -height
-        {
+        let start = left.max(clip[0]).max(0);
+        let end = (left + width)
+            .min(clip[0] + clip[2])
+            .min(i64::from(self.width));
+        let first = top.max(clip[1]).max(0);
+        let last = (top + height)
+            .min(clip[1] + clip[3])
+            .min(i64::from(self.height));
+        if start >= end {
             return;
         }
-        let (start, end) = (left.max(0), (left + width).min(i64::from(self.width)));
         let stride = self.width as usize;
-        for y in top.max(0)..(top + height).min(i64::from(self.height)) {
+        for y in first..last {
             let source = ((y - top) * width + start - left) as usize;
             let source = &frame.pixels()[source..source + (end - start) as usize];
             let row = y as usize * stride;

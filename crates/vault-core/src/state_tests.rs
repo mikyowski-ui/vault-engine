@@ -2010,3 +2010,29 @@ fn vfs_assets_read_each_resource_once_failures_included() {
     assert!(reads.len() > 8, "{reads:?}");
     assert!(reads.values().all(|count| *count == 1), "{reads:?}");
 }
+
+#[test]
+fn spec014_an_entry_hex_outside_the_map_border_fails_the_load() {
+    // SPEC-014 §3.29: map entry is a view-center change under the border.
+    let dir = tempfile::tempdir().unwrap();
+    fixture::write_corpus(dir.path());
+    let mut map = fixture::interactive_map();
+    fixture::world::word(&mut map, 0x14, 30 * 200 + 100);
+    std::fs::write(dir.path().join("maps/outside.map"), map).unwrap();
+    let assets = VfsWorldAssets::new(
+        Arc::new(vault_formats::LocalDirProvider::mount(dir.path()).unwrap()),
+        "english",
+    )
+    .unwrap();
+    let mut host = WorldHost::new(
+        WorldState::new(CharacterSheet::default(), 1).unwrap(),
+        assets,
+    );
+    let error = host.load_map("maps/outside.map").unwrap_err();
+    assert!(
+        error.to_string().contains("outside the map border"),
+        "{error}"
+    );
+    host.load_map("maps/synthetic.map").unwrap();
+    assert!(crate::ui::cursor::inside_border(host.world.camera_hex));
+}

@@ -59,7 +59,8 @@ fn host() -> WorldHost<ItemAssets> {
         (
             "proto.msg",
             "{485}{}{search %s}\n{486}{}{close %s}\n{487}{}{locked}\n{582}{}{no use}\n{589}{}{timer set}\n\
-             {590}{}{ticking}\n{700}{}{no ap}\n{900}{}{bag out}\n{901}{}{kit out}\n{902}{}{not in combat}\n{903}{}{no barter}\n"
+             {590}{}{ticking}\n{700}{}{no ap}\n{900}{}{bag out}\n{901}{}{kit out}\n{902}{}{not in combat}\n{903}{}{no barter}\n\
+             {800}{}{read}\n{801}{}{nothing new}\n{802}{}{science}\n{803}{}{repair}\n{804}{}{heal}\n{805}{}{guns}\n{806}{}{outdoors}\n"
                 .into(),
         ),
         (
@@ -403,10 +404,11 @@ fn spec013_fixture_c_explosive_timers_and_detonation() {
         "the explosive is destroyed"
     );
     // The animated explosion is in progress: the damage, computed with the
-    // one draw, is applied after the art has played.
+    // one draw, is applied after the art has played (here there is no art,
+    // so it plays out on the first poll).
     assert!(host.world.explosion.is_some());
     assert_eq!(hp(&host, victim), 30);
-    assert!(host.finish_explosion().unwrap());
+    assert!(host.step_explosions(0).unwrap());
     assert!(host.world.explosion.is_none());
     assert_eq!(hp(&host, victim), 1);
     assert_eq!(hp(&host, bystander), 30);
@@ -459,7 +461,7 @@ fn spec013_explosion_retry_scripted_requests_and_scenery_notice() {
         .cloned()
         .unwrap();
     assert_eq!((retry.kind, retry.due - now), (EventKind::Other(8), 50));
-    assert!(host.finish_explosion().unwrap());
+    assert!(host.step_explosions(0).unwrap());
     assert_eq!(hp(&host, victim), 1);
 
     // Scripted requests: the combat request pass discards one; one meeting
@@ -486,6 +488,8 @@ fn spec013_explosion_retry_scripted_requests_and_scenery_notice() {
         elevation: 0,
         victim: None,
         source: None,
+        art: host.explosion_art(0, 0, skills::explosion_art::ROCKET, 0),
+        notified: false,
     });
     assert!(!host.service_explosion_request().unwrap());
     assert_eq!(host.world.pending_explosion, Some(request));
@@ -518,7 +522,7 @@ fn spec013_explosion_retry_scripted_requests_and_scenery_notice() {
     assert!(host.service_explosion_request().unwrap());
     assert_eq!(hp(&host, victim), 30, "damage waits for the art");
     host.world.trace.clear();
-    assert!(host.finish_explosion().unwrap());
+    assert!(host.step_explosions(0).unwrap());
     // 10 - DT 4 = 6, less trunc(6 * 20 / 100) = 1: 5 damage.
     assert_eq!(hp(&host, victim), 25);
     assert_eq!(host.world.get(victim).unwrap().opponent, 0);
@@ -1082,4 +1086,240 @@ fn spec014_corpse_look_at_leaves_the_world_generator_alone() {
     assert!(lines.iter().all(|line| line.contains("rat")), "{lines:?}");
     assert_eq!(host.world.rng.state(), &world);
     assert_ne!(host.presentation_rng.state(), &presentation);
+}
+
+#[test]
+fn spec013_fixture_g_skill_books() {
+    use crate::{BookRoute, stats::Trait};
+    // A host with the five books, effective Intelligence `intelligence`,
+    // the given traits and tag, and `count` copies of book `pid` carried.
+    let setup = |pid: u32, intelligence: i32, traits: [i32; 2], tag: i32, count: i32| {
+        let mut host = host();
+        for (book, _, _) in skills::SKILL_BOOKS {
+            host.assets
+                .prototypes
+                .insert(book, items::misc(book, 0, 1, 10));
+        }
+        let gifted = traits.contains(&(Trait::Gifted as i32));
+        let sheet = host.world.player_sheet_mut().unwrap();
+        sheet.traits = traits;
+        sheet.tags = [tag, -1, -1, -1];
+        sheet.base[4] = intelligence - i32::from(gifted);
+        let player = host.world.player;
+        let book = items::carry(&mut host, player, pid, count);
+        host.world.effects.clear();
+        (host, book)
+    };
+    // The effective skill set to `target` through invested points.
+    let set_skill = |host: &mut WorldHost<ItemAssets>, index: usize, target: i32| {
+        host.world.player_sheet_mut().unwrap().invested[index] = 0;
+        let start = skill(host, index);
+        let tagged = host
+            .world
+            .player_sheet()
+            .unwrap()
+            .tags
+            .contains(&(index as i32));
+        let per = if tagged { 2 } else { 1 };
+        assert!(
+            target >= start && (target - start) % per == 0,
+            "{start} to {target}"
+        );
+        host.world.player_sheet_mut().unwrap().invested[index] = (target - start) / per;
+        assert_eq!(skill(host, index), target);
+    };
+    let unspent = |host: &WorldHost<ItemAssets>| host.world.player_sheet().unwrap().unspent_skills;
+    let none = [-1, -1];
+    // G1: Big Book of Science, Science 45 untagged, two copies carried.
+    let (mut host, book) = setup(73, 6, none, -1, 2);
+    set_skill(&mut host, 12, 45);
+    let (points, clock) = (unspent(&host), host.world.clock.ticks);
+    let rng = host.world.rng.state().clone();
+    let experience = host.world.player_sheet().unwrap().experience;
+    assert!(host.read_book(book, BookRoute::Inventory).unwrap());
+    assert_eq!(skill(&host, 12), 50);
+    assert_eq!(unspent(&host), points);
+    assert_eq!(host.world.clock.ticks - clock, 180_000);
+    assert_eq!(host.world.rng.state(), &rng, "no draws");
+    assert_eq!(host.world.player_sheet().unwrap().experience, experience);
+    let fades: Vec<bool> = host
+        .world
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            WorldEffect::Fade { out, .. } => Some(*out),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fades, [true, false]);
+    assert_eq!(messages(&mut host), ["read", "science"]);
+    // One copy is read and destroyed; the other stays carried.
+    assert!(host.world.get(book).is_none());
+    let player = host.world.player;
+    let carried: i32 = host
+        .world
+        .get(player)
+        .unwrap()
+        .inventory
+        .iter()
+        .map(|(_, n)| n)
+        .sum();
+    assert_eq!(carried, 1);
+    // G2: Guns and Bullets, Small Guns 45 tagged (Gifted and Good Natured
+    // bring the tagged skill down to 45): +2 per point.
+    let traits = [Trait::Gifted as i32, Trait::GoodNatured as i32];
+    let (mut host, book) = setup(102, 6, traits, 0, 1);
+    set_skill(&mut host, 0, 45);
+    assert!(host.read_book(book, BookRoute::Inventory).unwrap());
+    assert_eq!(skill(&host, 0), 55);
+    assert_eq!(messages(&mut host), ["read", "guns"]);
+    // G3 and G4: Scout Handbook at Outdoorsman 90 gives one point; at 91,
+    // none, but the time passes and the book is destroyed all the same.
+    for (start, after, result) in [(90, 91, "outdoors"), (91, 91, "nothing new")] {
+        let (mut host, book) = setup(86, 6, none, -1, 1);
+        set_skill(&mut host, 17, start);
+        let clock = host.world.clock.ticks;
+        assert!(host.read_book(book, BookRoute::Inventory).unwrap());
+        assert_eq!(skill(&host, 17), after);
+        assert_eq!(messages(&mut host), ["read", result]);
+        assert_eq!(host.world.clock.ticks - clock, 180_000);
+        assert!(host.world.get(book).is_none());
+    }
+    // G5: Science 120 gives n = -2: unchanged, message 801.
+    let (mut host, book) = setup(73, 6, none, -1, 1);
+    set_skill(&mut host, 12, 120);
+    assert!(host.read_book(book, BookRoute::Inventory).unwrap());
+    assert_eq!(skill(&host, 12), 120);
+    assert_eq!(messages(&mut host), ["read", "nothing new"]);
+    // G6: the First Aid Book takes 1 hour at Intelligence 10, 10 at 1.
+    for (intelligence, ticks) in [(10, 36_000), (1, 360_000)] {
+        let (mut host, book) = setup(80, intelligence, none, -1, 1);
+        let clock = host.world.clock.ticks;
+        assert!(host.read_book(book, BookRoute::Inventory).unwrap());
+        assert_eq!(host.world.clock.ticks - clock, ticks);
+    }
+    // G7: in combat message 902; the book is kept.
+    let (mut host, book) = setup(76, 6, none, -1, 1);
+    host.world.combat = true;
+    let before = skill(&host, 13);
+    assert!(host.read_book(book, BookRoute::ItemSlot).unwrap());
+    assert_eq!(messages(&mut host), ["not in combat"]);
+    assert!(host.world.get(book).is_some());
+    assert_eq!(skill(&host, 13), before);
+    // Anything else is not a book.
+    let (mut host, _) = setup(73, 6, none, -1, 1);
+    let player = host.world.player;
+    let other = items::carry(&mut host, player, ITEM_PID, 1);
+    assert!(!host.read_book(other, BookRoute::Inventory).unwrap());
+}
+
+#[test]
+fn spec013_explosion_art_schedule() {
+    use crate::world::ExplosionArt;
+    let frame = |art: &ExplosionArt, index: usize| art.objects[index].frame;
+    // A weapon explosion: six frames at 100 ms, direction 0's art waiting
+    // two frame steps while the center runs, the other five behind it.
+    let mut art = ExplosionArt::new(20100, 0, skills::explosion_art::ROCKET, [6, 100], 2);
+    assert_eq!(art.objects.len(), 7);
+    assert!(art.poll(1000));
+    assert_eq!(
+        (frame(&art, 0), frame(&art, 1), frame(&art, 6)),
+        (Some(0), None, None)
+    );
+    assert!(!art.poll(1099), "the next step is due at 1100");
+    art.poll(1100);
+    assert_eq!((frame(&art, 0), frame(&art, 1)), (Some(1), None));
+    art.poll(1200);
+    assert_eq!(
+        (frame(&art, 0), frame(&art, 1), frame(&art, 6)),
+        (Some(2), Some(0), Some(0))
+    );
+    art.poll(1600);
+    assert!(art.center_done() && !art.finished());
+    assert_eq!(frame(&art, 1), Some(4));
+    art.poll(1800);
+    assert!(art.finished());
+    // Timed and scripted explosions: no delay, all seven play together.
+    let mut art = ExplosionArt::new(20100, 0, skills::explosion_art::ROCKET, [6, 100], 0);
+    art.poll(0);
+    assert!(art.objects.iter().all(|object| object.frame == Some(0)));
+    art.poll(500);
+    assert!(art.objects.iter().all(|object| object.frame == Some(5)));
+    art.poll(600);
+    assert!(art.finished());
+    // A delay is ignored once no earlier entry runs.
+    let mut art = ExplosionArt::new(20100, 0, skills::explosion_art::GRENADE, [1, 100], 4);
+    art.poll(0);
+    art.poll(100);
+    assert!(art.center_done());
+    assert_eq!(frame(&art, 1), Some(0));
+    // Art that cannot be loaded finishes on the first poll.
+    let mut art = ExplosionArt::new(20100, 0, skills::explosion_art::ROCKET, [0, 100], 2);
+    art.poll(0);
+    assert!(art.finished());
+}
+
+#[test]
+fn spec013_timed_explosion_art_precedes_the_damage_step() {
+    use crate::world::{EXPLOSION_ART_ID, WorldTrace};
+    let mut host = host();
+    host.assets.art.insert(
+        skills::explosion_art::ROCKET,
+        Arc::new(
+            vault_formats::FrmArchive::parse(&crate::fixture_state::animated_frame(
+                12,
+                20,
+                &[1, 2, 3, 4, 5, 6],
+            ))
+            .unwrap(),
+        ),
+    );
+    let center = HexGrid::step(20100, 1, 3).unwrap();
+    let victim = critter(&mut host, center, &[(23, 4), (30, 20)]);
+    let dynamite = items::spawn(&mut host, skills::DYNAMITE_ARMED);
+    host.world.move_object(dynamite, center, 0, false).unwrap();
+    host.world
+        .queue
+        .insert(host.world.clock.ticks, 0, dynamite, EventKind::Other(8))
+        .unwrap();
+    host.world.rng.script(&[40]);
+    host.process_queue().unwrap();
+    // roktxpd.frm on the center and the six adjacent hexes, frame 0 at the
+    // first poll, with whn1xxx1 at the start.
+    assert!(host.world.effects.iter().any(|effect| matches!(
+        effect,
+        WorldEffect::SoundEffect { name, .. } if name == b"whn1xxx1"
+    )));
+    host.step_explosions(1000).unwrap();
+    let arts = |host: &WorldHost<ItemAssets>| -> Vec<(i32, usize)> {
+        host.world.render_snapshot().objects.elevations[0]
+            .iter()
+            .filter(|object| object.id == EXPLOSION_ART_ID)
+            .map(|object| (object.hex.unwrap(), object.frame))
+            .collect()
+    };
+    let shown = arts(&host);
+    assert_eq!(shown.len(), 7);
+    assert_eq!(shown[0], (center, 0));
+    assert!(shown.iter().all(|(_, frame)| *frame == 0));
+    // Six frames at the art's rate; the damage waits for the last.
+    let interval = host.world.explosion.as_ref().unwrap().art.interval_ms;
+    for step in 1..6 {
+        host.step_explosions(1000 + step * interval).unwrap();
+        assert!(host.world.explosion.is_some());
+        assert_eq!(hp(&host, victim), 30);
+        assert!(arts(&host).iter().all(|(_, frame)| *frame == step as usize));
+    }
+    host.world.trace.clear();
+    host.step_explosions(1000 + 6 * interval).unwrap();
+    assert!(host.world.explosion.is_none());
+    assert_eq!(hp(&host, victim), 1);
+    assert!(arts(&host).is_empty());
+    assert!(
+        !host
+            .world
+            .trace
+            .iter()
+            .any(|entry| matches!(entry, WorldTrace::Script { .. }))
+    );
 }

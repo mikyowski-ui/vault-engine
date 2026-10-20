@@ -214,6 +214,9 @@ pub struct MapPreview {
     debug: Option<debug::DebugOverlay>,
     /// The map view's light levels.
     light: light::LightCache,
+    /// SPEC-014 §3.34 the inventory figure's facing and when it last
+    /// turned; the counter persists between openings.
+    figure: (u8, u64),
 }
 /// The map's sprites by tile index or object art. Each art file is read and
 /// decoded once, through the world's asset cache, and object art that is
@@ -424,6 +427,7 @@ impl MapPreview {
             startup_fade: false,
             debug: None,
             light: Default::default(),
+            figure: (0, 0),
         })
     }
     /// Whether the save/load screen is open (the main menu's load stage).
@@ -915,11 +919,10 @@ impl MapPreview {
             _ => return false,
         }
         self.last_hover = None;
-        self.host.world.camera_hex = self
-            .view
-            .grid
-            .pick_hex([320, 190])
-            .unwrap_or(self.host.world.camera_hex);
+        // An elevation change keeps the map border (SPEC-014 §3.29).
+        if let Some(center) = self.view.grid.pick_hex([320, 190]) {
+            self.host.world.set_view_center(center);
+        }
         if self.host.world.elevation != self.view.elevation {
             self.host.world.elevation = self.view.elevation;
             if self.host.world.map_script.is_some()

@@ -501,19 +501,20 @@ impl<A: WorldAssets> WorldHost<A> {
     /// ignoring the defender, selects its blocker; otherwise the first
     /// movement blocker at the impact hex (with no ignored object, so possibly
     /// the defender itself). A projectile-through candidate is never hit.
+    /// Returns the candidate and the impact hex.
     pub(crate) fn impact_candidate(
         &self,
         defender: ObjectRef,
         attack: &Attack,
         extension: i32,
         rng: &mut impl RandomSource,
-    ) -> Result<Option<ObjectRef>, WorldError> {
+    ) -> Result<(Option<ObjectRef>, Option<i32>), WorldError> {
         let Some((hex, elevation)) = self
             .world
             .get(defender)
             .and_then(|o| Some((o.raw.hex?, o.raw.elevation)))
         else {
-            return Ok(None);
+            return Ok((None, None));
         };
         let grenade = attack.mode() == crate::combat::attack_mode::THROW
             && attack.weapon.as_ref().is_some_and(|weapon| {
@@ -531,11 +532,12 @@ impl<A: WorldAssets> WorldHost<A> {
             .obstacle
             .filter(|blocker| *blocker != defender)
             .or_else(|| self.world.movement_blocker(impact, elevation, 0));
-        Ok(candidate.filter(|object| {
+        let candidate = candidate.filter(|object| {
             self.world
                 .get(*object)
                 .is_some_and(|o| o.raw.flags.0 & BasicFlags::PROJECTILE_THROUGH.0 == 0)
-        }))
+        });
+        Ok((candidate, Some(impact)))
     }
     /// Resolution plus the SPEC-007 follow-ups: a random-target critical
     /// failure (SPEC-009 §3.16), or the §3.7.1 bystander resolution of a
@@ -544,13 +546,14 @@ impl<A: WorldAssets> WorldHost<A> {
     /// is committed. Stage B runs when neither the hit nor the critical bit is
     /// set afterward. A critter victim takes one round at numerator 2 with no
     /// critical; a non-critter receives the hit bit and no damage or draw.
+    /// Also returns Stage B's impact hex when it ran.
     pub(crate) fn resolve_attack(
         &self,
         attacker: ObjectRef,
         defender: ObjectRef,
         attack: &Attack,
         rng: &mut impl RandomSource,
-    ) -> Result<(Spray, Option<Victim>), WorldError> {
+    ) -> Result<(Spray, Option<Victim>, Option<i32>), WorldError> {
         let spraying = matches!(
             attack.mode(),
             crate::combat::attack_mode::BURST | crate::combat::attack_mode::CONTINUOUS
@@ -567,6 +570,7 @@ impl<A: WorldAssets> WorldHost<A> {
             attack.subtype(),
             Some(crate::combat::Subtype::Ranged | crate::combat::Subtype::Throwing)
         );
+        let mut impact = None;
         let (victim, random) = if spray.main.retarget {
             (
                 self.random_target(attacker, defender, attack.hit_mode, rng)?,
@@ -576,7 +580,7 @@ impl<A: WorldAssets> WorldHost<A> {
             let from = self.world.get(attacker).and_then(|o| o.raw.hex);
             let through = self.world.get(defender).and_then(|o| o.raw.hex);
             let (Some(from), Some(through)) = (from, through) else {
-                return Ok((spray, None));
+                return Ok((spray, None, None));
             };
             let extension = self.extension_hex(from, through, attack.range());
             let mut candidate = None;
@@ -587,14 +591,14 @@ impl<A: WorldAssets> WorldHost<A> {
                 && spray.main.attacker_flags & effect::CRITICAL == 0
                 && spray.main.defender_flags & effect::HIT == 0
             {
-                candidate = self.impact_candidate(defender, attack, extension, rng)?;
+                (candidate, impact) = self.impact_candidate(defender, attack, extension, rng)?;
             }
             (candidate, false)
         } else {
             (None, false)
         };
         let Some(victim) = victim else {
-            return Ok((spray, None));
+            return Ok((spray, None, impact));
         };
         let main = &mut spray.main;
         main.attacker_flags &= !effect::CRITICAL;
@@ -617,7 +621,7 @@ impl<A: WorldAssets> WorldHost<A> {
             .flatten();
         let Some(mut profile) = profile else {
             main.damage = 0;
-            return Ok((spray, Some(Victim::Object(victim))));
+            return Ok((spray, Some(Victim::Object(victim)), impact));
         };
         profile.weapon = attack.weapon.clone();
         main.multiplier = 2;
@@ -631,6 +635,7 @@ impl<A: WorldAssets> WorldHost<A> {
             } else {
                 Victim::Bystander(victim, profile)
             }),
+            impact,
         ))
     }
     /// §3.17 attack-form request sites, after the hit location is final:

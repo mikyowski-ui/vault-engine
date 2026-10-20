@@ -19,7 +19,7 @@ This document covers:
 - the bottom interface bar: buttons, message monitor, HP/AC counters, AP pips, active item slot, indicator boxes and combat panel animation;
 - mouse cursor shapes and modes: movement hex, action pick, action menu, targeting crosshair, edge scrolling and busy cursors;
 - the in-game automap window and the Pip-Boy automap page;
-- the player inventory window's cursor modes and item dragging;
+- the player inventory and use-on windows: art, layout, stats panel, rotating figure, action menu, cursor modes and item dragging;
 - the endgame slideshow, ending movie and scrolling credits.
 
 The reference main menu has **no Options button**: its five buttons are Intro, New Game, Load Game, Credits and Exit. Options and Preferences are reached in game (section 3.17). `[Must-match]`
@@ -62,7 +62,8 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 | Cursors and action menu | Game-mouse module and low-level mouse repeat |
 | Palette fades | Game palette layer, color fade primitive, script fade opcodes and their callers |
 | Automap | Automap module, seen-state update, Pip-Boy map page |
-| Inventory dragging | Inventory module |
+| Inventory and use-on windows | Inventory module, item-art scaler, action-menu frame builder |
+| Map border and scroll limits | Tile module, map scroll and map load |
 | Endgame, credits | Endgame and credits modules, word wrapper |
 
 ### Revision history
@@ -74,6 +75,10 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
   - Palette fades: primitive, calibration caveat, and the list of in-game fade sites (section 3.2).
   - Hover, hold-click action menu and edge-scroll corrections and additions (sections 3.27-3.29).
   - New sections 3.33 Automap Window and 3.34 Player Inventory Window, which state that dragging is press-hold-release and has no two-click mode.
+- **R1-rev3 (2026-10-19).** Builder placeholders filled, as follows.
+  - Section 3.34: art list indices and window-relative geometry of the inventory and use-on windows, the stats panel and examine text, the rotating figure, and the inventory action menu with its Drop and Unload icons. Loot and barter geometry stays in SPEC-013 §3.16 and §3.18.
+  - Section 3.29: exact player-distance test and the map-border rectangle, which in R1 accepts centers in hex columns 44-156 and rows 45-154.
+  - Section 3.2: the skill-book fade row points to SPEC-013 §3.25, which now holds the skill-book rules. Explosion art and sounds are in SPEC-013 §3.10.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -180,7 +185,7 @@ In order: `[Must-match]` unless tagged otherwise.
 | Trigger | Fade | Afterwards |
 | --- | --- | --- |
 | First Aid or Doctor on an injured target (SPEC-013) | To black before the roll | Back to the game palette after healing and the map-update scripts. First Aid failure does not fade back (SPEC-013) |
-| Reading a skill book out of combat | To black | Game time advances, the map-update scripts run, then a fade back to the game palette and the book messages |
+| Reading a skill book out of combat (SPEC-013 §3.25) | To black, after the skill increase | Game time advances, the map-update scripts run, then a fade back to the game palette and the book messages |
 | `gfade_out` / `gfade_in` with a nonzero operand (SPEC-005) | To black / to the loaded game palette, using the fade above | As the script decides; `gfade_in` does not reload `color.pal` |
 | Game movie with fade flag `0x01` (SPEC-012) | To black before playback | The display is set black after playback; with flag `0x02` `color.pal` is reloaded and faded in |
 | End of the game session (quit, death or knockout) | To white | The map is unloaded and the game reset (section 3.5) |
@@ -937,11 +942,28 @@ A pointer at x = 0, x = 639, y = 0 or y = 479 scrolls the map; corners scroll di
 - **One combined step.** A diagonal is one step. If the diagonal target is blocked, the whole step is blocked; it does not slide along one axis. Blocked attempts also restart the 33-millisecond timer. `[Must-match]`
 - **Blocked test.** The new center is the hex under the current center's screen position plus `(32 dx + 16, 24 dy + 8)`. The step is blocked when any of these holds: `[Must-match]`
   - that point has no hex, or the hex is outside 0-39999;
-  - scroll limiting is on (the default) and the step increases the center's screen distance from the player on an axis where that distance is already at least 480 pixels horizontally or 400 vertically;
+  - scroll limiting is on (the default) and the player-distance test below refuses the target;
   - the target hex holds a scroll-blocker object (misc PID `0x0500000C`) on the current elevation;
-  - the center would leave the map-border rectangle derived from the window size.
+  - the target hex is outside the map border below.
 
-  Map loading switches limiting and scroll-blocker checks off for its duration. Two reference quirks: hex 0 is never treated as holding a scroll blocker, and the right-edge parity correction adjusts the left bound instead. `[May-improve]`: test hex 0 like any other, and apply the parity correction to the right bound.
+  Map loading switches limiting and scroll-blocker checks off for its duration. Two reference quirks: hex 0 is never treated as holding a scroll blocker, and the parity correction meant for the right border bound adjusts the left bound instead (see the map border). `[May-improve]`: test hex 0 like any other, and use left bound 43 and right bound 155, both in mirrored columns.
+- **Player-distance test.** `[Must-match]` Positions are in map-window pixels, as the top-left corner of a hex's 32-by-16 cell. The map window is 640 by 380.
+  - A is the target hex's position and P the player's hex position.
+  - R is the view reference point: (304, 182), or (272, 182) when the current center hex's column (hex mod 200) is even.
+  - With `dx = |Px - Ax|` and `dy = |Py - Ay|`, the target is refused when both of these hold:
+    - `dx > |Px - Rx|` or `dy > |Py - Ry|`;
+    - `dx >= 480` or `dy >= 400`.
+
+  A step that moves the view toward the player is therefore never refused by this test, even when the player is far off screen.
+- **Map border.** `[Must-match]` Every map is 200 by 200 hexes. For a hex h, let column c = h mod 200, row r = trunc(h / 200), and mirrored column x' = 199 - c.
+  - The border is computed once at engine start, for the 640-by-380 map window, with the view centered on hex 20100:
+    1. The hex under window point (-320, -240) is 12702, and the hex under (-320, 620) is 23538.
+    2. Left bound `L = |199 - (23538 mod 200) - 98| + 6 = 43`. Top bound `T = |100 - trunc(12702 / 200)| + 7 = 44`. Here 98 is the mirrored column of hex 20100, made even, and 100 is its row.
+    3. Right bound `200 - L - 1 = 156`. Bottom bound `200 - T - 1 = 155`.
+    4. An even L would be incremented; 43 stays. The right bound is even, so the reference decrements L to 42.
+  - A center is accepted only when `42 < x' < 156` and `44 < r < 155`, that is, columns c = 44-156 and rows r = 45-154. The border does not depend on a map's contents.
+  - The border applies to every view-center change. Edge and arrow scrolling, the Home key's hex-by-hex walk toward the player, and dialogue centering also apply the limiting and blocker tests. Map entry and elevation changes skip those two tests but not the border.
+  - A refused center leaves the view where it was. A refused map-entry hex fails the map load (SPEC-003). The entry hexes of all 72 corpus maps lie inside the border.
 - **Arrow keys** scroll one step per key event through the same 33-millisecond gate. Key auto-repeat starts after more than 500 milliseconds, then repeats every more than 80 milliseconds. Arrow keys work regardless of the edge-scroll enable state, but not while the keyboard is disabled. `[Must-match]`
 - **Combat and other windows.** During NPC turns and the player's attack animations the interface is disabled, but edge scrolling stays on: the scroll art temporarily replaces the animated watch, which returns afterwards. Scrolling is off during the combat panel's open and close animations, and during dialogue, inventory, the Pip-Boy, the world map and the action menu. Re-enabling the game mouse always turns scrolling back on. `[Must-match]`
 - **Click-to-scroll.** A latent mode exists in which a fresh left press on an edge pixel is flagged; any left release clears the flag before it reaches the map. While flagged, hold pulses and right clicks made with the left button down are ignored. Nothing in R1 turns this mode on (there is no configuration key), so it has no effect, and the ordinary release click is never suppressed. `[Must-match]`
@@ -1109,6 +1131,67 @@ When the map has an index (SPEC-008), two labels are printed in key 992 with a t
 
 The inventory window is at screen (80, 0); the rectangles below are screen coordinates, inclusive. `[Must-match]` unless tagged.
 
+**Window art and layout.** Both windows open at screen (80, 0) with the window's art as background. Art is given as name and `intrface.lst` index. The loot and barter windows are in SPEC-013 §3.16 and §3.18.
+
+| Element | Inventory window | Use-on window |
+| --- | --- | --- |
+| Background | `invbox.frm` (48), 499 by 377 | `use.frm` (113), 292 by 376 |
+| Item list | 6 rows; buttons (124, 35 + 48i) 64 by 48; item art scaled into 56 by 40 at (128, 39 + 48i) | Same |
+| Quantity label | As in the loot window (SPEC-013 §3.16): font 101, white, at the icon's top-left | Same |
+| Scroll up | (208, 39) 22 by 23, `invupout.frm` (49) up, `invupin.frm` (50) down; key Up | Same |
+| Scroll down | (208, 62) 22 by 23, `invdnout.frm` (51) up, `invdnin.frm` (52) down; key Down | Same |
+| Done / Cancel | Done: red button (`lilredup.frm` 8, `lilreddn.frm` 9) at (517, 329); sends Esc | Cancel: red button at (313, 328); sends Esc |
+| Rotating figure | 60 by 100 box at (256, 37); an invisible button over it goes up one container level | Same |
+| Armor slot | (234, 183) 90 by 61 | None |
+| Left hand (item 1) / right hand (item 2) | (234, 286) / (325, 286), each 90 by 61 | None |
+| Stats panel | (377, 44) 152 by 188 | None |
+
+- The scroll buttons use the red-button sounds and move one row: up needs a positive offset, and down needs offset + 6 below the entry count.
+- The inventory window's keys are Esc, Up and Down, plus Ctrl+Q and Ctrl+X for the quit confirmation. The use-on window also takes Home (offset 0), End (offset: the entry count minus 6, at least 0), PgUp and PgDn (6 rows).
+  - PgDn always redraws. When the new offset + 6 would reach the entry count, it is clamped to the entry count minus 6, at least 0.
+  - PgUp redraws only when it clamps to 0. Otherwise the offset changes but the list keeps showing the old rows until the next redraw. `[May-improve]`: redraw after every PgUp.
+- Slot art is scaled into the slot's 90 by 61 rectangle. An item held in both hands is drawn once, scaled into 180 by 61 at the **right-hand** position (325, 286), so it extends past the hand area. Before redrawing the hands in that state the reference pastes `sattkbup.frm` (32, 188 by 67) at (232, 284) instead of the window background. `[May-improve]`: draw a both-hands item at (234, 286) and restore the background from `invbox.frm`.
+
+**Stats panel** (inventory window only). Font 101, bright green (key 992), line height 10, drawn over a fresh copy of the panel's `invbox.frm` background. Coordinates are screen coordinates. `[Must-match]`
+
+| Item | Position | Content |
+| --- | --- | --- |
+| Name | (377, 44), clip 80 | The inventory owner's name |
+| Rule | (377, 59) to (520, 59) | One-pixel line |
+| Rows k = 0-6, left column | Label (377, 64 + 10k), value (401, 64 + 10k) | `inventry.msg` k (ST, PE, EN, CH, IN, AG, LK) and the effective primary stat |
+| Rows k = 0-6, right column | Label (417, 64 + 10k), value (481, 64 + 10k) | `inventry.msg` 7 + k. Row 0 `current/max` HP; row 1 three spaces then AC; rows 2-6 `DT/DR%` for normal, laser, fire, plasma, explosion |
+| Rules | (377, 138) to (520, 138) and (377, 178) to (520, 178) | One-pixel lines |
+| Left-hand block | Lines at y = 144, 154, 164 | See below |
+| Right-hand block | Lines at y = 184, 194, 204 | See below |
+| Total weight | (407, 224), clip 80 | `inventry.msg` 20, a space, total carried weight |
+
+Each hand block, at x = 377:
+
+- **Empty hand.** Line 1: `inventry.msg` 14, clip 120. Line 2: message 24, a space, then `1-` and the owner's melee damage + 2, clip 120.
+- **Item.** Line 1: the item name, clip 140.
+  - Armor held in a hand: line 2 is message 18.
+  - Weapon: line 2 is message 15, a space and `min-max`, clip 140. Max includes the owner's melee damage when the hand's primary mode is melee or unarmed. When that mode is ranged or its range exceeds 1, the line continues with three spaces, message 16, a space and the range.
+  - Weapon with ammunition capacity above 0: line 3 is message 17, a space and `loaded/capacity`, followed by a space and the ammunition name when the weapon has an ammunition PID.
+  - Any other item has only line 1.
+
+**Examine text.** An arrow-cursor click, or Look in the action menu, replaces the stats panel. `[Must-match]`
+
+- The panel background is restored.
+- The item name goes on line 1 and a rule at y = 64. Then the examine text follows from line 3, then `proto.msg` 540, or 541 when the weight is 1, filled in with the item's weight. A weight of 0 gets no weight line.
+- Line n is at y = 44 + 10n, clip 152. Lines past 17 are dropped.
+- **Wrapping.** A string wider than 152 pixels is cut at a space: after its first word, or at a later space while the cut text stays narrower than 152 pixels. The rest continues on the next line. A first word wider than 152 drops that line and all remaining text. A string wider than 152 with no space after its first character is drawn clipped at 152.
+- Returning to the hand cursor redraws the stats.
+
+**Rotating figure.** `[Must-match]` unless tagged.
+
+- **Art.** The owner's critter art, frame 0:
+  - with worn armor, the armor prototype's male or female art index for the owner's gender, or the default player art when that index is -1;
+  - otherwise the default player art;
+  - the weapon code of the item in the interface bar's active hand when it is a weapon, otherwise 0.
+  - A non-critter owner shows its own art.
+- **Draw.** It is centered in the 60 by 100 box, clipped to the box, and drawn transparently. The box is first restored from `loot.frm` (114) at window (176, 37), even in the inventory and use-on windows, whose own art differs there (422 and 1275 differing pixels in the corpus). `[May-improve]`: restore from the window's own background art.
+- **Rotation.** The figure turns one facing at a time through facings 0-5. It changes at most once every `trunc(1000 / 6)` = 166 milliseconds, and only on polls of the window loop. The facing counter persists between openings.
+
 **There is no two-click drag.** Every inventory-type window drags with press, hold and release: the player inventory, loot (SPEC-013 §3.16) and barter (SPEC-013 §3.18). The press lifts the item at once, the drag lasts while the left button stays down, and the first poll after release drops it. The mouse layer has no double-click detection, so a second click is just another press. A quick press and release drops the item where it was lifted, which changes nothing. There is no movement or time threshold that separates a click from a drag.
 
 **Cursor modes.** The window opens in the hand cursor (list index 286). Each right-button press switches between hand and arrow (250); returning to the hand redraws the stats panel. While the right button is held, the held-button repeat (section 3.28) switches the cursor again every 250 milliseconds. `[May-improve]`: switch only on the initial right press.
@@ -1149,7 +1232,13 @@ After every drop the player art, stats and list are redrawn and the hand cursor 
 **Arrow cursor.** A left press on a filled slot does not drag.
 
 - Releasing before the 250-millisecond hold event shows the item's full examine text in the stats panel. In the loot and barter windows it shows the short look line on the monitor instead.
-- Holding opens the action menu at the pointer with the pointer hidden, using the section 3.28 highlight rule. Player-window entries:
+- Holding opens the action menu at the pointer with the pointer hidden, using the section 3.28 highlight rule. Unlike the world menu, the index is clamped to the list, so reversing direction moves the highlight back at once.
+- **Menu art.** The menu is composed as in section 3.28 (`actmenu.frm` 283, 69 by 222, `iaccuxx1` on opening), with 40-by-40 icons: Look `lookn.frm` / `lookh.frm`, Use `usegetn.frm` / `usegeth.frm`, **Drop** `dropn.frm` (255) / `droph.frm` (254), **Unload** `unloadn.frm` (302) / `unloadh.frm` (301), and Cancel `canceln.frm` / `cancelh.frm`. The highlighted art is the list index just before the normal art. The first entry starts highlighted.
+- **Menu placement.** The 69-by-222 menu's top-left is at the pointer (after any upward shift), with icons stacked 40 pixels apart starting 29 pixels to its right. When flipped, its top-right is at the pointer.
+  - The window's right edge (screen x 579 for the inventory, 372 for use-on, 617 for loot, 560 for barter) replaces the screen edge in the flip test.
+  - The window's bottom (377, 376, 376, 470) replaces y 381 in the upward shift of section 3.28.
+  - The menu button is clipped to the window's height. On release, the menu area is restored from the window art (for barter, from the barter window) and the pointer returns to where it was when the menu opened.
+- Player-window entries:
   - a weapon that can be unloaded: Look, Unload, Drop, Cancel;
   - a container held in a hand or worn: Look, Drop, Cancel;
   - a usable or use-on item: Look, Use, Drop, Cancel;
@@ -1239,4 +1328,4 @@ With a bullet width of 6 pixels, the first line of a message holds text narrower
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 30 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc"). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. The sound name "toggle" is also flagged. Tag count, excluding the two tag definitions: 129 `[Must-match]`, 49 `[May-improve]`.
+Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 30 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc"). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. The sound name "toggle" is also flagged. The section 3.29 border values were recomputed with an independent model of the hex-to-screen transform and checked against the entry hexes of all 72 corpus maps. Section 3.34 art sizes were read from the corpus FRM headers. Tag count, excluding the two tag definitions: 134 `[Must-match]`, 52 `[May-improve]`.

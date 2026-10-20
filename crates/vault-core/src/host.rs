@@ -334,7 +334,13 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.import_map(map, &self.assets)?;
         self.world.trace.push(WorldTrace::LoadStep(4));
         self.world.elevation = self.world.map.header.entry_elevation;
-        self.world.camera_hex = self.world.map.header.entry_hex;
+        // SPEC-014 §3.29: an entry hex outside the map border fails the load.
+        let entry = self.world.map.header.entry_hex;
+        if !self.world.set_view_center(entry) {
+            return Err(WorldError::Invalid(format!(
+                "map entry hex {entry} is outside the map border"
+            )));
+        }
         self.world.trace.push(WorldTrace::LoadStep(5));
         self.world.set_ambient(65536);
         let (hex, elevation, orientation) = (
@@ -844,9 +850,9 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.step_animations(now_ms)? {
             changed_by_animation = true;
         }
-        // SPEC-013 §3.10: an animated explosion started on an earlier update
-        // has played its art; its damage step ends it.
-        if self.finish_explosion()? {
+        // SPEC-013 §3.10: explosion art plays at its own rate; an animated
+        // explosion's damage step follows its last art.
+        if self.step_explosions(now_ms)? {
             changed_by_animation = true;
         }
         // SPEC-007: service scripted combat requests and advance turns until

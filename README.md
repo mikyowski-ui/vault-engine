@@ -398,23 +398,33 @@ cargo run -p vault-platform -- --corpus-dir /path/to/unpacked/game \
 
 On the local map, **I** opens the inventory and **C** the character screen
 (SPEC-011). Both are modal:
-- The inventory is the SPEC-014 §3.34 window at (80, 0): six list rows, the
-  two hands, the armor slot and the player figure, which turns one facing
-  every 166 ms (a provisional rate), drags included. In the hand cursor a left press on a filled
-  slot lifts the item and the release drops it on the first target in the
-  §3.34 order (the list, where ammunition dropped on a weapon reloads it
-  through the counter for a stack; the left hand; the right hand; the armor;
-  nowhere). A right press switches to the arrow cursor: a click shows the
-  examine text, a held press opens the item menu (Look, Unload or Use, Drop,
-  Cancel). Using a drug consumes it (SPEC-011 §3.6), a kit heals, an
+- The inventory is the SPEC-014 §3.34 window, `invbox.frm` at (80, 0) over
+  the paused world: six list rows (item art scaled into 56 by 40, the loot
+  window's quantity labels), the scroll buttons at (208, 39) and (208, 62),
+  the rotating figure, the armor and hand slots, the stats panel at (377, 44)
+  and Done at (517, 329). The figure shows the player's armor art (or the
+  default player art) with the active hand's weapon code, turning one facing
+  at most every 166 ms on a counter that persists between openings, drags
+  included. The stats panel lists the name, SPECIAL, HP, AC, the five DT/DR
+  pairs, a block per hand and the total weight; an arrow click or Look
+  replaces it with the item's name, wrapped examine text and weight. In the
+  hand cursor a left press on a filled slot lifts the item and the release
+  drops it on the first target in the §3.34 order (the list, where
+  ammunition dropped on a weapon reloads it through the counter for a stack;
+  the left hand; the right hand; the armor; the figure; nowhere). A right
+  press switches to the arrow cursor, where a held press opens the item menu
+  (Look, Unload or Use, Drop, Cancel; `dropn.frm`/`unloadn.frm` icons),
+  flipped and shifted against the window's edges. Using a skill book reads
+  it (SPEC-013 §3.25), a drug is consumed (SPEC-011 §3.6), a kit heals, an
   explosive opens Set Timer and a Motion Sensor the automap. Use on a
-  container opens it, up to nine levels deep: the list shows its contents and
-  its name, drops into the list go into it, an item dropped on the figure
-  moves up one level, and a press on the figure goes up one level. A weapon
-  reloaded in a hand stays in that hand. Opening it in combat costs the §3.11
-  action points. No approved spec gives the window's
-  background, stats panel, scroll and Done buttons, or the Unload and Drop
-  icon art, so those are provisional.
+  container opens it, up to nine levels deep: the list shows its contents,
+  drops into the list go into it, an item dropped on the figure moves up one
+  level, and a press on the figure goes up one level. A weapon reloaded in a
+  hand stays in that hand. Keys are Esc, Up and Down, with Ctrl+Q/Ctrl+X for
+  the quit confirmation. Opening it in combat costs the §3.11 action points.
+  The use-on window (the world action menu's Inventory entry) is `use.frm`
+  with the list, scroll buttons, figure and Cancel at (313, 328), plus Home,
+  End, PgUp and PgDn.
 - The character screen reconciles levels on opening. It shows SPECIAL, derived
   statistics, skills (tagged ones starred), traits, and perks, and clicking a
   skill spends an unspent point. When a perk is pending, the chooser lists the
@@ -468,7 +478,10 @@ Skilldex, **C** character, **P** Pip-Boy, **B** swap hands, **M** or a right-cli
 cycle the cursor mode, **A** start combat, **1**-**8** skills (Sneak first), **,**
 and **.** rotate, **/** the date, **Ctrl+S**/**F4** save, **Ctrl+L**/**F5** load,
 **F6**/**F7** quick save/load, **Ctrl+P** pause, **Ctrl+Q**/**F10** quit. **Space**
-ends a combat turn. The Skilldex sets a skill's targeting mode; a click on an
+ends a combat turn. A skill book in the active hand is read at once from the
+item slot (SPEC-013 §3.25): the skill gains `trunc((100 - S) / 10)` points,
+the screen fades to black while 1-10 game hours pass, and the book is used
+up; in combat it costs 2 AP and refuses with message 902. The Skilldex sets a skill's targeting mode; a click on an
 object makes the SPEC-013 skill-on request. Using a container or an untalkable
 critter, and the Steal default, open the loot window (Shift+**A** take all, arrows
 scroll, **PageUp**/**PageDown** cycle stacked bodies); a drag lifts an entry
@@ -489,8 +502,12 @@ looking never moves the world's random sequence. Map clicks
 act on the release; holding the button 250 ms in arrow mode opens the action
 menu (move vertically to choose, release to run it). A pointer on the frame's
 edge scrolls the map, and the arrow keys share its blocked test and 33 ms
-gate (the blocked art shows where the view would leave the hex grid or the
-scroll limits). Modal dialogs are `lgdialog.frm` boxes (302 by 127) at the
+gate: the blocked art shows where the new center has no hex, is refused by
+the player-distance test, holds a scroll blocker, or leaves the map border
+(columns 45-155 and rows 45-154 under the safe rule). The border applies to
+every view center, so a map whose entry hex lies outside it fails to load;
+**Home** walks the view back toward the player hex by hex under the same
+tests. Modal dialogs are `lgdialog.frm` boxes (302 by 127) at the
 §3.13 positions: save/load errors at (169, 116), the Pip-Boy refusal in combat
 at (192, 116).
 
@@ -997,8 +1014,13 @@ Where SPEC-009 leaves details open, this engine makes these choices:
   (`attribute_explosion`, `notice_explosive_drop`). Nothing calls them yet:
   SPEC-007's weapon splash adds no victims, and SPEC-013 §3.10 explosions
   (timed and scripted) damage only the center critter and credit their source
-  themselves. No approved spec names the explosion art, so an animated
-  explosion stays in progress until the next world update.
+  themselves. Every explosion shows its §3.10 art on the center and the six
+  adjacent hexes, at the art's own rate: a timed or scripted one stays in
+  progress until its `roktxpd.frm` art has played, then notifies the scenery
+  scripts and applies its damage. A weapon explosion's art (rockets and
+  grenades, by damage type and throwing) plays where the projectile ended,
+  after the attack has applied its damage; the attack resolution has no
+  projectile flight, so the grenade's own art is not shown in flight.
 - `float_msg` texts count as floating text for taunt suppression, with the same
   default lifetime and 200-pixel wrap.
 - Fixture H lists R2's rating as 22. By the §3.4 rule it is `max(2, 20) + 0 = 20`.

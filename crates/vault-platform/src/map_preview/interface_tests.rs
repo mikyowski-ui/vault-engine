@@ -731,6 +731,55 @@ fn spec014_edge_scrolling_steps_at_most_every_33_ms_until_blocked() {
 }
 
 #[test]
+fn spec014_scrolling_stops_at_the_map_border_and_home_walks_back() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    // The player near the top of the border: row 50, column 100.
+    let player = preview.host.world.player;
+    let elevation = preview.host.world.get(player).unwrap().raw.elevation;
+    let near = 50 * 200 + 100;
+    preview
+        .host
+        .world
+        .move_object(player, near, elevation, false)
+        .unwrap();
+    assert_eq!(preview.host.world.camera_hex, near);
+    // Arrow-key steps north stop on the border's first row, 45.
+    let mut now = 16;
+    let mut blocked = false;
+    for _ in 0..20 {
+        now += 40;
+        preview.tick(now).unwrap();
+        if preview.scroll_step(1) == Some(true) {
+            blocked = true;
+            break;
+        }
+    }
+    assert!(blocked);
+    let top = preview.host.world.camera_hex;
+    assert!(vault_core::ui::cursor::inside_border(top));
+    assert!((45..=46).contains(&(top / 200)), "row {}", top / 200);
+    // Home walks hex by hex back to the player.
+    assert!(preview.step(KeyCode::Home));
+    assert_eq!(preview.host.world.camera_hex, near);
+    // A player outside the border: the walk stops on it, and moving the
+    // player there leaves the view where it was.
+    let outside = 30 * 200 + 100;
+    preview
+        .host
+        .world
+        .move_object(player, outside, elevation, false)
+        .unwrap();
+    assert_eq!(preview.host.world.camera_hex, near);
+    assert!(preview.step(KeyCode::Home));
+    let stopped = preview.host.world.camera_hex;
+    assert_ne!(stopped, near);
+    assert!(vault_core::ui::cursor::inside_border(stopped));
+    assert_eq!(stopped / 200, 45);
+}
+
+#[test]
 fn spec014_world_fades_run_in_order_over_700_ms() {
     let dir = corpus();
     let mut preview = world(dir.path());
@@ -924,7 +973,8 @@ fn spec011_inventory_drag_reloads_a_weapon_through_the_counter() {
             .contains(vault_formats::pro::BasicFlags::LEFT_HAND)
     );
     preview.image().unwrap();
-    assert!(preview.click([505, 345], false));
+    // Done is the red button at (517, 329).
+    assert!(preview.click([520, 333], false));
     assert!(matches!(preview.screen, Screen::Map));
 }
 
@@ -962,15 +1012,18 @@ fn spec014_inventory_figure_turns_and_nested_containers_open() {
     let pebble = spawn(&mut preview, &misc(0x23), pouch, 1);
     let owner = |preview: &MapPreview, item| preview.host.world.get(item).unwrap().owner;
     let screen = |preview: &MapPreview| match &preview.screen {
-        Screen::Inventory(screen) => (screen.facing, screen.path.clone()),
+        Screen::Inventory(screen) => (preview.figure.0, screen.path.clone()),
         _ => panic!("the inventory is open"),
     };
     preview.image().unwrap();
     assert!(preview.step(KeyCode::KeyI));
-    // The figure turns one facing every 166 ms (provisional).
+    // The figure turns one facing at most every 166 ms (SPEC-014 §3.34).
     let mut now = preview.clock;
     let start = screen(&preview).0;
     now += 166;
+    preview.tick(now).unwrap();
+    assert_eq!(screen(&preview).0, (start + 1) % 6);
+    now += 100;
     preview.tick(now).unwrap();
     assert_eq!(screen(&preview).0, (start + 1) % 6);
     // Use on the bag (arrow cursor, second menu entry) opens it; the list
@@ -1039,6 +1092,146 @@ fn spec014_inventory_figure_turns_and_nested_containers_open() {
     assert_eq!(owner(&preview, rock), Some(player));
     assert!(preview.click(figure, false));
     assert!(screen(&preview).1.is_empty());
+}
+
+#[test]
+fn spec013_skill_books_read_from_the_inventory_and_the_item_slot() {
+    use vault_formats::pro::BasicFlags;
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let carry = |preview: &mut MapPreview, pid: i32| {
+        let mut bytes = super::fixture::prototype(0, 5);
+        super::fixture::word(&mut bytes, 0, pid);
+        let prototype = Arc::new(vault_formats::Prototype::parse(&bytes).unwrap());
+        let item = preview.host.world.spawn(prototype, 0, 0).unwrap();
+        preview.host.world.add_item(player, item, 1, true).unwrap();
+        item
+    };
+    let skill = |preview: &MapPreview, index: usize| {
+        let world = &preview.host.world;
+        world
+            .player_sheet()
+            .unwrap()
+            .skill(index, world.context(player))
+    };
+    // The inventory's Use (Look, Use, Drop, Cancel) reads the book.
+    let book = carry(&mut preview, 73);
+    let (science, clock) = (skill(&preview, 12), preview.host.world.clock.ticks);
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::KeyI));
+    let at = list_point(&preview, book);
+    assert!(preview.click(at, true));
+    let mut now = preview.clock;
+    menu_second_entry(&mut preview, at, &mut now);
+    assert!(preview.host.world.get(book).is_none());
+    assert!(skill(&preview, 12) > science);
+    assert!(preview.host.world.clock.ticks > clock);
+    assert!(preview.step(KeyCode::Escape));
+    // From the item slot in combat: 2 AP are spent and the book is kept.
+    let book = carry(&mut preview, 76);
+    preview
+        .host
+        .world
+        .equip_slot(player, book, BasicFlags::LEFT_HAND.0)
+        .unwrap();
+    preview.host.world.active_hand = 0;
+    preview.host.world.combat = true;
+    preview.host.world.critter_state_mut(player).unwrap().ap = 5;
+    let repair = skill(&preview, 13);
+    preview.tap([360, 440]);
+    assert_eq!(preview.host.world.critter_state(player).unwrap().ap, 3);
+    assert!(preview.host.world.get(book).is_some());
+    assert_eq!(skill(&preview, 13), repair);
+    // Out of combat the slot reads it at once.
+    preview.host.world.combat = false;
+    preview.tap([360, 440]);
+    assert!(preview.host.world.get(book).is_none());
+    assert!(skill(&preview, 13) > repair);
+}
+
+#[test]
+fn spec014_inventory_and_use_on_window_layout() {
+    use super::inventory::Slot;
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    for pid in 0x40..0x4e {
+        let mut bytes = super::fixture::prototype(0, 5);
+        super::fixture::word(&mut bytes, 0, pid);
+        let prototype = Arc::new(vault_formats::Prototype::parse(&bytes).unwrap());
+        let item = preview.host.world.spawn(prototype, 0, 0).unwrap();
+        preview.host.world.add_item(player, item, 1, true).unwrap();
+    }
+    let count = preview.list_entries_len();
+    assert!(count >= 14);
+    let offset = |preview: &MapPreview| match &preview.screen {
+        Screen::Inventory(screen) => screen.offset,
+        _ => panic!("the inventory is open"),
+    };
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::KeyI));
+    // The scroll buttons at (208, 39) and (208, 62) move one row each.
+    assert!(preview.click([215, 70], false));
+    assert_eq!(offset(&preview), 1);
+    assert!(preview.click([215, 45], false));
+    assert!(preview.click([215, 45], false));
+    assert_eq!(offset(&preview), 0, "up needs a positive offset");
+    // The stats panel's empty-hand block: 1 to melee damage + 2.
+    let melee = preview.host.world.player_stat(11);
+    let painter = crate::interface::Painter {
+        assets: &preview.host.assets,
+        palette: &preview.palette,
+    };
+    let lines = preview.hand_lines(&painter, Slot::LeftHand);
+    assert_eq!(lines.len(), 2);
+    assert!(lines[1].0.ends_with(format!(" 1-{}", melee + 2).as_bytes()));
+    preview.image().unwrap();
+    // A held arrow press opens the menu where the pointer is at the pulse:
+    // flipped against the window's right edge (x + 68 reaching 579). The
+    // release returns the pointer to where the menu opened.
+    let mut now = preview.clock;
+    assert!(preview.click([134, 45], true));
+    assert!(preview.click([134, 45], false));
+    preview.hover([560, 45]);
+    now += 300;
+    preview.tick(now).unwrap();
+    let menu = match &preview.screen {
+        Screen::Inventory(screen) => screen.menu.clone().unwrap(),
+        _ => panic!("the inventory is open"),
+    };
+    assert!(menu.flipped);
+    assert_eq!((menu.origin, menu.top), ([560, 45], 45));
+    preview.image().unwrap();
+    // A move under 10 pixels keeps Look highlighted.
+    preview.hover([560, 52]);
+    preview.release(Some([560, 52]), false);
+    assert_eq!(preview.pointer.at, Some([560, 45]));
+    assert_eq!(preview.list_entries_len(), count);
+    // The facing counter persists between openings.
+    now += 400;
+    preview.tick(now).unwrap();
+    let facing = preview.figure.0;
+    assert!(preview.step(KeyCode::Escape));
+    assert!(preview.step(KeyCode::KeyI));
+    assert_eq!(preview.figure.0, facing);
+    assert!(preview.step(KeyCode::Escape));
+    // The use-on window: Home, End, PgUp and PgDn, and Cancel at (313, 328).
+    let target = npc(&preview);
+    preview.open_inventory_on(Some(target));
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::PageDown));
+    assert_eq!(offset(&preview), 6);
+    assert!(preview.step(KeyCode::PageDown));
+    assert_eq!(offset(&preview), count - 6, "clamped to the last rows");
+    assert!(preview.step(KeyCode::PageUp));
+    assert_eq!(offset(&preview), count - 12);
+    assert!(preview.step(KeyCode::Home));
+    assert_eq!(offset(&preview), 0);
+    assert!(preview.step(KeyCode::End));
+    assert_eq!(offset(&preview), count - 6);
+    assert!(preview.click([316, 332], false));
+    assert!(matches!(preview.screen, Screen::Map));
 }
 
 #[test]
