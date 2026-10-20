@@ -1189,6 +1189,7 @@ Each hand block, at x = 377:
   - otherwise the default player art;
   - the weapon code of the item in the interface bar's active hand when it is a weapon, otherwise 0.
   - A non-critter owner shows its own art.
+  - When the player inventory window closes and its owner is the player, the player object takes this art (SPEC-005 §3.8).
 - **Draw.** It is centered in the 60 by 100 box, clipped to the box, and drawn transparently. The box is first restored from `loot.frm` (114) at window (176, 37), even in the inventory and use-on windows, whose own art differs there (422 and 1275 differing pixels in the corpus). `[May-improve]`: restore from the window's own background art.
 - **Rotation.** The figure turns one facing at a time through facings 0-5. It changes at most once every `trunc(1000 / 6)` = 166 milliseconds, and only on polls of the window loop. The facing counter persists between openings.
 

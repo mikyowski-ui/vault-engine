@@ -252,8 +252,8 @@ Paths that change worn armor:
 | Dropping all items on death (worn armor dropped) | Applies removal | No change |
 
 - NPC protection comes only from the prototype base stats and bonus array, never from worn armor. `[Must-match]`
-- Taking armor off restores the player's default body art from the player prototype. `[Must-match]`
-- Armor art: female consumers use the female art selector, others the male one, and -1 falls back to art index 1. `[Must-match]`
+- Taking armor off restores the player's default jumpsuit art (SPEC-005 §3.8). `[Must-match]`
+- Armor art: female wearers use the female art field, others the male one. A -1 field falls back to the jumpsuit in the inventory-window path, but to art index 1 in the `wield_obj_critter` path. SPEC-005 §3.8 has the full rules, the corpus values and the tags for each path. `[Must-match]`
 
 ### 3.11 Hands, Two-Handed Weapons, and Strength
 

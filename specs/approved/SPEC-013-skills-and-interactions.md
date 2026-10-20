@@ -420,7 +420,7 @@ Moves to and from a party member always succeed with no draws and never award ex
 Frame counts are per direction, from the corpus FRM headers. The weapon sounds are the SPEC-010 weapon hit names. They are built from the corpus weapon sound codes `N`, `O`, `P` and `Q`, with variant 1 for the primary hit modes these weapons use, and material letter `X`, because the material lookup is skipped for plasma, EMP and explosion damage. All five sound files are in the corpus. Weapon explosions follow these rules. `[Must-match]`
 
 - **Classification.** A weapon explodes when it is thrown with explosion, plasma or EMP damage, or used without throwing with explosion damage. The weapon prototype's damage type decides this, not the ammunition. Plasma and EMP weapons that are not thrown, such as the Plasma Rifle and Plasma Pistol, never explode.
-- **Center.** The center hex is where the projectile ends: the defender's hex on a hit, or the miss impact hex (SPEC-007 §3.7.1) on a miss. A critical failure launches no projectile, so it shows no explosion.
+- **Center.** The center hex is where the projectile ends: the defender's hex on a hit, or the miss impact hex (SPEC-007 §3.7.1) on a miss. A critical failure that keeps its critical bit launches no projectile, so it shows no explosion (SPEC-007 §3.9).
 - **Order.**
   1. The projectile flies with the weapon's flight sound (`wfo1xxx1`, `wfp1xxx1`, `wfq1xxx1` or `wfn1xxx1`).
   2. On arrival a grenade first shows its own item art, then the projectile object turns into the center explosion art and plays the hit sound. The thrown grenade is erased afterwards and does not stay on the ground.
