@@ -53,13 +53,6 @@ pub struct DispatchResult {
     pub result: i32,
     pub pending: bool,
 }
-struct Interaction {
-    target: ObjectRef,
-    /// The action on arrival; `None` only walks.
-    action: Option<ObjectAction>,
-    movement: crate::Movement,
-    next_ms: u64,
-}
 struct PresentationState {
     font: i32,
     mouse_hidden: bool,
@@ -87,13 +80,21 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub combat_ai: Box<dyn crate::combat_state::CombatAi>,
     pub building_animation: Option<AnimationSequence>,
     pub animations: Vec<AnimationSequence>,
-    /// SPEC-007 §3.10 how attack shows play: at once (the default for
-    /// headless runs) or over time, with combat waiting for them.
+    /// SPEC-007 §3.10-3.11 how attack shows and the world's own sequences
+    /// play: at once (the default for headless runs) or over time, with
+    /// combat waiting for them.
     pub playback: crate::host_choreography::Playback,
     pub floating_style: i32,
     dialogue_waiters: Vec<u32>,
     dialogue_callbacks: Vec<u32>,
-    interactions: VecDeque<Interaction>,
+    /// SPEC-007 §3.11 the world's own sequences: walking, interactions,
+    /// doors and containers.
+    pub motions: Vec<crate::motion::MotionSequence>,
+    /// The sequences being played (a callback can register another).
+    pub(crate) running_motions: Vec<crate::host_motion::Running>,
+    pub(crate) next_motion: u64,
+    /// The scheduler time of the world's sequences.
+    pub(crate) motion_time: u64,
     presentation: Option<PresentationState>,
     /// An interaction's approach has just ended: its action runs as the
     /// sequence's proximity step (SPEC-013 §3.2), not a new approach.
@@ -232,7 +233,10 @@ impl<A: WorldAssets> WorldHost<A> {
             floating_style: 1,
             dialogue_waiters: Vec::new(),
             dialogue_callbacks: Vec::new(),
-            interactions: VecDeque::new(),
+            motions: Vec::new(),
+            running_motions: Vec::new(),
+            next_motion: 0,
+            motion_time: 0,
             presentation: None,
             arriving: false,
             vm_observer: None,
@@ -276,8 +280,16 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.gvars = Some(gam.values);
         Ok(())
     }
-    pub fn load_map(&mut self, path: &str) -> Result<(), WorldError> {
-        self.world.trace.push(WorldTrace::LoadStep(1));
+    /// SPEC-014 §3.35 leaving a map, before another loads or the town or
+    /// world map opens: every animation stops; the map-exit handlers and
+    /// `map_exit_p_proc` run; the map is marked saved with the current
+    /// game time as its last visit; then it joins the working map set (an
+    /// excluded map's working copy is deleted instead). Returns whether the
+    /// map's save, when one was due, succeeded.
+    pub(crate) fn leave_map(&mut self) -> Result<bool, WorldError> {
+        self.animations.clear();
+        self.motions.clear();
+        self.building_animation = None;
         // SPEC-013 §2.5 map-exit handlers for explosives and sneak.
         self.skill_map_exit()?;
         let leaving = self.world.map_exit_cleanup(|_| true);
@@ -298,11 +310,11 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.world.map.header.flags.0 |= 1;
         self.world.map.header.last_visit = self.world.clock.ticks as u32;
-        // SPEC-008: the left map joins the working saved-map set.
-        self.world.persist_current_map(false);
-        self.animations.clear();
-        self.interactions.clear();
-        self.building_animation = None;
+        Ok(self.world.save_left_map())
+    }
+    /// The left map's programs and presentation stop before a load.
+    fn teardown_map(&mut self) -> Result<(), WorldError> {
+        self.motions.clear();
         self.world.background_enabled = false;
         self.world.scrolling_enabled = false;
         self.world.rendering_enabled = false;
@@ -321,10 +333,28 @@ impl<A: WorldAssets> WorldHost<A> {
                 intensity: 0,
             };
         }
+        Ok(())
+    }
+    /// SPEC-013 §3.22 leaving for the town map or the world map: the map is
+    /// left and saved (SPEC-014 §3.35), then cleared, so no map is loaded
+    /// until a location is entered. Returns whether the save succeeded.
+    pub(crate) fn unload_map(&mut self) -> Result<bool, WorldError> {
+        let saved = self.leave_map()?;
+        self.teardown_map()?;
+        self.world.import_map(empty_map(), &self.assets)?;
+        self.world.persistence.current_map = None;
+        self.world.loading = false;
+        self.world.unloaded = true;
+        Ok(saved)
+    }
+    pub fn load_map(&mut self, path: &str) -> Result<(), WorldError> {
+        self.world.trace.push(WorldTrace::LoadStep(1));
+        self.leave_map()?;
+        self.teardown_map()?;
         self.world.trace.push(WorldTrace::LoadStep(2));
-        let (map, load_error) = match self.read_map(path) {
-            Ok(map) => (map, None),
-            Err(error) => (empty_map(), Some(error)),
+        let (map, saved, load_error) = match self.read_map(path) {
+            Ok((map, saved)) => (map, saved, None),
+            Err(error) => (empty_map(), false, Some(error)),
         };
         self.world.persistence.current_map = load_error
             .is_none()
@@ -339,6 +369,12 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.world.trace.push(WorldTrace::LoadStep(3));
         self.world.import_map(map, &self.assets)?;
+        self.world.unloaded = false;
+        // SPEC-014 §3.35: a map loaded fresh clears the player's last
+        // attacker.
+        if !saved && let Some(player) = self.world.get_mut(self.world.player) {
+            player.opponent = 0;
+        }
         self.world.trace.push(WorldTrace::LoadStep(4));
         self.world.elevation = self.world.map.header.entry_elevation;
         // SPEC-014 §3.29: an entry hex outside the map border fails the load.
@@ -461,6 +497,11 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.enqueue_map_timers()?;
         self.world.loading = false;
         self.world.restoring = false;
+        // SPEC-014 §3.35: once a saved copy has loaded, with its map
+        // scripts, the revisit rules age it.
+        if saved && load_error.is_none() {
+            self.revisit()?;
+        }
         self.drain_requests()?;
         if let Some(error) = load_error {
             self.world.diagnostic(error.to_string());
@@ -471,10 +512,11 @@ impl<A: WorldAssets> WorldHost<A> {
     pub(crate) fn clear_program_bindings(&mut self) {
         self.program_scripts.clear();
         self.active.clear();
-        self.interactions.clear();
+        self.motions.clear();
     }
-    /// A working saved-map `.SAV` takes precedence over the asset lookup.
-    fn read_map(&self, path: &str) -> Result<vault_formats::MapFile, WorldError> {
+    /// A working saved-map `.SAV` takes precedence over the asset lookup;
+    /// the flag tells which was read.
+    fn read_map(&self, path: &str) -> Result<(vault_formats::MapFile, bool), WorldError> {
         let saved = path
             .rsplit('/')
             .next()
@@ -490,9 +532,9 @@ impl<A: WorldAssets> WorldHost<A> {
                         message: error.to_string(),
                     })
             };
-            return Ok(vault_formats::MapFile::parse(bytes, &lookup)?);
+            return Ok((vault_formats::MapFile::parse(bytes, &lookup)?, true));
         }
-        self.assets.map(path)
+        Ok((self.assets.map(path)?, false))
     }
     /// Whether a loaded script's program defines the event's procedure.
     pub(crate) fn has_procedure(&self, script: u32, event: ScriptEvent) -> bool {
@@ -866,6 +908,12 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.step_explosions(now_ms)? {
             changed_by_animation = true;
         }
+        // SPEC-007 §3.11 the world's own sequences (walking, interactions,
+        // doors) pause while a dialogue is open.
+        if !self.world.dialogue.open && self.step_motions(now_ms) {
+            changed_by_animation = true;
+            self.drain_requests()?;
+        }
         // SPEC-007: service scripted combat requests and advance turns until
         // the player must act (host-configured AI drives NPC turns). Combat
         // waits while an attack still plays.
@@ -891,47 +939,6 @@ impl<A: WorldAssets> WorldHost<A> {
         self.callbacks.extend(self.library.callbacks());
         self.drain_requests()?;
         let mut changed = changed_by_animation;
-        if !self.world.dialogue.open
-            && let Some(mut interaction) = self.interactions.pop_front()
-        {
-            if now_ms >= interaction.next_ms {
-                let actor = interaction.movement.actor;
-                match self.step_movement(&mut interaction.movement)? {
-                    crate::StepOutcome::Moved | crate::StepOutcome::Replanned
-                        if !interaction.movement.finished() =>
-                    {
-                        self.drain_requests()?;
-                        changed = true;
-                        interaction.next_ms = now_ms + 100;
-                        self.interactions.push_front(interaction);
-                    }
-                    crate::StepOutcome::Stopped => {
-                        self.world.diagnostic("interaction route is blocked");
-                        // SPEC-013 §3.2 safe rule: a failed skill approach
-                        // tells a player actor.
-                        if matches!(interaction.action, Some(ObjectAction::UseSkill(_)))
-                            && actor == self.world.player
-                        {
-                            self.print_game("misc.msg", 2000, &[]);
-                        }
-                    }
-                    _ => {
-                        self.drain_requests()?;
-                        changed = true;
-                        if let Some(action) = interaction.action {
-                            self.arriving = true;
-                            let result = self.action(actor, interaction.target, action);
-                            self.arriving = false;
-                            if let Err(error) = result {
-                                self.world.diagnostic(error.to_string());
-                            }
-                        }
-                    }
-                }
-            } else {
-                self.interactions.push_front(interaction);
-            }
-        }
         // SPEC-006 §3.11 safe rule: missing head art keeps the current frame
         // and is diagnosed once, rather than failing the update.
         if let Some(head) = &mut self.world.dialogue.head {
@@ -1274,10 +1281,6 @@ impl<A: WorldAssets> WorldHost<A> {
             .get(target)
             .ok_or_else(|| WorldError::Invalid("interaction target missing".into()))?;
         let target_category = object.category();
-        let container_locked = target_category == Category::Item
-            && object
-                .lock()
-                .is_some_and(|lock| lock.contains(LockFlags::LOCKED));
         if self.world.get(actor).is_none_or(|o| !o.alive()) {
             return Err(WorldError::Invalid("actor is inactive/dead".into()));
         }
@@ -1311,11 +1314,20 @@ impl<A: WorldAssets> WorldHost<A> {
                     "talk requires the player and a critter outside combat".into(),
                 ));
             }
-            if self.world.object_distance(actor, target) >= 9 {
-                return self.approach(actor, target, action, 8);
+            // SPEC-007 §3.11.1: at object distance 9 or more, or with a
+            // shot-blocked line, the player runs to the target first; the
+            // stage after that approach does not chase again.
+            let far =
+                self.world.object_distance(actor, target) >= crate::host_motion::TALK_RUN_DISTANCE;
+            let blocked = self.world.shot(actor, target).hard_obstruction;
+            if (far || blocked) && !self.arriving {
+                return self.approach(actor, target, action, true);
+            }
+            if far {
+                return Err(WorldError::Invalid("talk target is out of reach".into()));
             }
             // Post-movement: an unobstructed shot line (SPEC-007 shot query).
-            if self.world.shot(actor, target).hard_obstruction {
+            if blocked {
                 return Err(WorldError::Invalid(
                     "talk requires an unobstructed shot line".into(),
                 ));
@@ -1398,61 +1410,34 @@ impl<A: WorldAssets> WorldHost<A> {
         {
             return self.action(actor, target, ObjectAction::Use);
         }
-        if matches!(action, ObjectAction::Pickup | ObjectAction::Use)
-            && self.world.distance(actor, target) > 1
-        {
-            return self.approach(actor, target, action, 1);
-        }
-        if matches!(action, ObjectAction::Pickup | ObjectAction::Use) && self.world.combat {
-            let player = actor == self.world.player;
-            let short = self
-                .world
-                .critter_state(actor)
-                .is_some_and(|state| state.ap < 3);
-            if short {
-                if player {
-                    self.print_game("proto.msg", 700, &[]);
-                }
-                return Err(WorldError::Invalid("interaction requires 3 AP".into()));
+        // SPEC-007 §3.11.3: a pickup or a use runs as the actor's
+        // interaction sequence, whose callbacks perform it. Using a critter
+        // loots it (SPEC-013 §3.16); a ladder up is climbed (SPEC-013
+        // §3.23).
+        let ladder_up = object.prototype.as_ref().is_some_and(|prototype| {
+            matches!(
+                prototype.data,
+                PrototypeData::Scenery(vault_formats::pro::Scenery {
+                    data: vault_formats::pro::SceneryData::LadderUp { .. },
+                    ..
+                })
+            )
+        });
+        match action {
+            ObjectAction::Pickup => return self.pickup_sequence(actor, target),
+            ObjectAction::Use if target_category == Category::Critter => {
+                return self.loot_sequence(actor, target);
             }
-            if let Some(ObjectState::Critter(state)) =
-                self.world.get_mut(actor).map(|o| &mut o.raw.state)
-            {
-                state.ap -= 3;
+            ObjectAction::Use if container => return self.container_sequence(actor, target),
+            ObjectAction::Use if ladder_up => return self.ladder_sequence(actor, target),
+            ObjectAction::Use => {
+                return self.use_sequence(actor, target, crate::motion::Call::Use { target });
             }
-        }
-        // SPEC-013 §3.16: using a critter loots it.
-        if action == ObjectAction::Use && target_category == Category::Critter {
-            self.world.pending_loot = Some(crate::LootRequest {
-                looter: actor,
-                target,
-                steal: false,
-            });
-            return Ok(());
-        }
-        // SPEC-013 §3.16 use-container step, skipped by item PID 213: a
-        // locked container plays its locked sound and shows `proto.msg` 487
-        // to the player. The loot request follows either way (the window
-        // then refuses the closed container).
-        let container_was_closed = self.world.get(target).is_some_and(|o| o.raw.frame == 0);
-        if action == ObjectAction::Use && container {
-            let item_213 = self.world.get(target).is_some_and(|o| o.raw.pid == 213);
-            if item_213 || container_locked {
-                if !item_213 {
-                    self.emit_open_sound(target, 2);
-                    if actor == self.world.player {
-                        self.print_game("proto.msg", 487, &[]);
-                    }
-                }
-                self.loot_container(actor, target, container_was_closed);
-                return Ok(());
-            }
+            _ => {}
         }
         let event = match action {
             ObjectAction::LookAt => ScriptEvent::LookAt,
             ObjectAction::Description => ScriptEvent::Description,
-            ObjectAction::Use => ScriptEvent::Use,
-            ObjectAction::Pickup => ScriptEvent::Pickup,
             _ => unreachable!(),
         };
         let result = if let Some(script) = self.world.script_for(target) {
@@ -1470,10 +1455,6 @@ impl<A: WorldAssets> WorldHost<A> {
         };
         if result.pending {
             return Ok(());
-        }
-        // An overriding `use_p_proc` ends the step; the loot request stands.
-        if result.overridden && action == ObjectAction::Use && container {
-            self.loot_container(actor, target, container_was_closed);
         }
         if !result.overridden {
             match action {
@@ -1513,52 +1494,6 @@ impl<A: WorldAssets> WorldHost<A> {
                 ObjectAction::Description => self.world.emit(WorldEffect::Message(
                     self.world.get(target).expect("target").description.clone(),
                 )),
-                ObjectAction::Pickup => {
-                    let amount = self
-                        .world
-                        .get(target)
-                        .and_then(|o| o.money)
-                        .map_or(1, |n| n.max(1));
-                    self.world.add_item(actor, target, amount, false)?;
-                    if let Some(object) = self.world.get_mut(target)
-                        && object.money.is_some()
-                    {
-                        object.money = Some(0);
-                    }
-                    self.world.rebuild_lighting();
-                }
-                ObjectAction::Use => {
-                    let object = self.world.get_mut(target).expect("target");
-                    if object.category() == Category::Scenery
-                        && let Some(mut lock) = object.lock()
-                    {
-                        if lock.contains(LockFlags::LOCKED) {
-                            return Err(WorldError::Invalid("door/container is locked".into()));
-                        }
-                        lock.0 ^= 1;
-                        let opened = lock.0 & 1 != 0;
-                        object.raw.frame = usize::from(opened);
-                        object.set_lock(lock);
-                        // SPEC-010 open (0) or close (1) cue.
-                        self.emit_open_sound(target, u8::from(!opened));
-                    } else if object.category() == Category::Item && object.lock().is_some() {
-                        // From frame 0 the container opens, otherwise closes,
-                        // then 485 or 486 names it and a closed one is looted.
-                        let opening = object.raw.frame == 0;
-                        object.raw.frame = usize::from(opening);
-                        let name = object.name.clone();
-                        self.emit_open_sound(target, u8::from(!opening));
-                        if actor == self.world.player {
-                            let id = if container_was_closed { 485 } else { 486 };
-                            self.print_game(
-                                "proto.msg",
-                                id,
-                                &[crate::host_drugs::Arg::Text(&name)],
-                            );
-                        }
-                        self.loot_container(actor, target, container_was_closed);
-                    }
-                }
                 _ => {}
             }
             self.world
@@ -1583,11 +1518,10 @@ impl<A: WorldAssets> WorldHost<A> {
             };
             self.world.emit(WorldEffect::Message(text.into_bytes()));
         }
-        if action == ObjectAction::Use {
-            self.map_update()?;
-        }
         self.drain_requests()
     }
+    /// SPEC-007 §3.11.3 using an item on a target runs as the scenery use
+    /// sequence, whose use callback is [`Self::use_item_stage`].
     fn use_item_on(
         &mut self,
         actor: ObjectRef,
@@ -1597,8 +1531,17 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.world.get(item).is_none() || self.world.get(target).is_none() {
             return Err(WorldError::Invalid("missing item/target".into()));
         }
-        if self.world.distance(actor, target) > 1 {
-            return self.approach(actor, target, ObjectAction::UseObject(item), 1);
+        self.use_sequence(actor, target, crate::motion::Call::UseOn { item, target })
+    }
+    /// SPEC-006 §3.8 the use-on stage once the actor stands by the target.
+    pub(crate) fn use_item_stage(
+        &mut self,
+        actor: ObjectRef,
+        item: ObjectRef,
+        target: ObjectRef,
+    ) -> Result<(), WorldError> {
+        if self.world.get(item).is_none() || self.world.get(target).is_none() {
+            return Ok(());
         }
         // SPEC-013 §3.13: kits take their own route, with no use-on scripts.
         let pid = self.world.get(item).expect("item").raw.pid;
@@ -1668,14 +1611,15 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.map_update()
     }
-    /// SPEC-007 move-to-object approach; the action re-checks its distance
-    /// rule once the shortened route completes.
+    /// SPEC-007 §3.11.1 an approach to `target` (a run when `run`), after
+    /// which the request runs its own stage, re-checking its distance rule.
+    /// An unreachable target refuses the approach.
     pub(crate) fn approach(
         &mut self,
         actor: ObjectRef,
         target: ObjectRef,
         action: ObjectAction,
-        _range: i32,
+        run: bool,
     ) -> Result<(), WorldError> {
         let (Some(a), Some(b)) = (self.world.get(actor), self.world.get(target)) else {
             return Err(WorldError::Invalid(
@@ -1695,22 +1639,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 "interaction target is unreachable".into(),
             ));
         }
-        self.interactions
-            .retain(|pending| pending.movement.actor != actor);
-        self.emit_movement_sound(actor, false);
-        self.interactions.push_back(Interaction {
-            target,
-            action: Some(action),
-            movement,
-            next_ms: self.world.elapsed_ms + 100,
-        });
-        Ok(())
+        self.approach_sequence(actor, target, action, run)
     }
     /// SPEC-014 §3.27 a movement-mode click: walk toward `tile`, limited in
     /// combat to the actor's AP plus free movement. Returns whether a route
     /// exists.
     pub fn walk_to(&mut self, actor: ObjectRef, tile: i32) -> Result<bool, WorldError> {
-        self.walk_to_reserving(actor, tile, 0)
+        self.walk_toward(actor, tile, false, 0)
     }
     /// `walk_to` keeping `reserve` action points in combat (the player's
     /// Ctrl walk keeps the current attack's cost, SPEC-014 §3.27); nothing
@@ -1721,31 +1656,7 @@ impl<A: WorldAssets> WorldHost<A> {
         tile: i32,
         reserve: i32,
     ) -> Result<bool, WorldError> {
-        let limit = if self.world.combat {
-            let budget = self.world.action_points(actor).saturating_sub(reserve);
-            if budget <= 0 {
-                return Ok(false);
-            }
-            usize::try_from(budget).unwrap_or(0)
-        } else {
-            usize::MAX
-        };
-        let Some(movement) = self.plan_to_tile(actor, tile, limit) else {
-            return Ok(false);
-        };
-        if movement.directions.is_empty() {
-            return Ok(false);
-        }
-        self.interactions
-            .retain(|pending| pending.movement.actor != actor);
-        self.emit_movement_sound(actor, false);
-        self.interactions.push_back(Interaction {
-            target: 0,
-            action: None,
-            movement,
-            next_ms: self.world.elapsed_ms + 100,
-        });
-        Ok(true)
+        self.walk_toward(actor, tile, false, reserve)
     }
     pub fn close_dialogue(&mut self) -> Result<bool, WorldError> {
         if !self.world.dialogue.open {

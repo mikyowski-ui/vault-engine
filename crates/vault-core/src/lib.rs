@@ -18,9 +18,11 @@ mod host_combat;
 mod host_drugs;
 mod host_game;
 mod host_items;
+mod host_motion;
 mod host_movement;
 mod host_movie;
 pub mod host_rest;
+mod host_revisit;
 pub mod host_save;
 mod host_skills;
 mod host_sound;
@@ -28,6 +30,7 @@ mod host_travel;
 pub mod items;
 pub mod library;
 pub mod loot;
+pub mod motion;
 pub mod movie;
 pub mod persistence;
 pub mod progression;
@@ -117,6 +120,8 @@ mod host_ai_tests;
 mod host_sound_tests;
 #[cfg(test)]
 mod items_tests;
+#[cfg(test)]
+mod motion_tests;
 #[cfg(test)]
 mod movie_tests;
 #[cfg(test)]

@@ -274,10 +274,6 @@ fn spec010_cues_for_doors_containers_attacks_and_movement() {
             ("IOCNTNRB".to_string(), Some(chest)),
         ]
     );
-    // Walking toward a distant object requests the walk effect.
-    host.action(player, far, crate::ObjectAction::Pickup)
-        .unwrap();
-    assert_eq!(effects(&mut host), [("HMJMPSAB".to_string(), Some(player))]);
 
     // Unarmed (SPEC-007 §3.10.2-3.10.3): the punch effect on the attacker
     // and, on a hit, its contact effect on the attacker's action frame; the
@@ -346,4 +342,19 @@ fn spec010_cues_for_doors_containers_attacks_and_movement() {
         .map(|(name, _)| name)
         .collect();
     assert_eq!(mine, expected);
+    // SPEC-007 §3.11.1: walking and running to a distant object play no
+    // walk (`AB`) or run (`AT`) effect.
+    host.action(player, far, crate::ObjectAction::Pickup)
+        .unwrap();
+    let names: Vec<_> = effects(&mut host)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.starts_with("HMJMPS") || !matches!(&name[6..], "AB" | "AT")),
+        "{names:?}"
+    );
+    assert_eq!(host.world.get(far).unwrap().owner, Some(player));
 }

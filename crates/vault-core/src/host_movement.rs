@@ -1,8 +1,7 @@
 //! SPEC-007 §3.1/§3.4 movement: move-to-object/tile planning, per-hex
 //! commits with door auto-opening and strict-goal replanning, and AP debits.
 use crate::{
-    ObjectRef, ScriptEvent, WorldError, assets::WorldAssets, critical::effect, host::WorldHost,
-    routing::step, world::ScriptRequest,
+    ObjectRef, WorldError, assets::WorldAssets, critical::effect, host::WorldHost, routing::step,
 };
 use vault_formats::{map::ObjectState, pro::BasicFlags};
 
@@ -52,12 +51,15 @@ impl<A: WorldAssets> WorldHost<A> {
     /// Move-to-object: plan with the destination object temporarily hidden,
     /// then drop one step (two for a multihex mover; only the mover's flag
     /// matters). The core search does not dilate obstacles for the mover.
+    /// The goal is permissive: SPEC-007 §3.1 does not say, and a strict goal
+    /// would make every container sharing its hex with a wall (as corpus
+    /// lockers do) unreachable.
     pub fn plan_to_object(&mut self, actor: ObjectRef, target: ObjectRef) -> Option<Movement> {
         let start = self.world.get(actor)?.raw.hex?;
         let goal = self.world.get(target)?.raw.hex?;
         let hidden = self.world.get(target)?.raw.flags.0 & BasicFlags::HIDDEN.0;
         self.world.get_mut(target)?.raw.flags.0 |= BasicFlags::HIDDEN.0;
-        let directions = self.world.route(actor, start, goal, true);
+        let directions = self.world.route(actor, start, goal, false);
         let object = self.world.get_mut(target)?;
         object.raw.flags.0 = (object.raw.flags.0 & !BasicFlags::HIDDEN.0) | hidden;
         let count = if self
@@ -148,35 +150,10 @@ impl<A: WorldAssets> WorldHost<A> {
         movement.cursor += 1;
         Ok(StepOutcome::Moved)
     }
-    /// The door's use request: its script runs first; unless overridden, an
-    /// unlocked door opens.
+    /// The door's use (SPEC-007 §3.11.4): its script runs first; unless
+    /// overridden, the door opens or closes in its own sequence.
     fn request_door_open(&mut self, actor: ObjectRef, door: ObjectRef) -> Result<(), WorldError> {
-        let overridden = match self.world.script_for(door) {
-            Some(script) => {
-                self.dispatch(ScriptRequest {
-                    script,
-                    event: ScriptEvent::Use,
-                    source: actor,
-                    target: door,
-                    fixed: 0,
-                    action: -1,
-                    only_present: false,
-                })?
-                .overridden
-            }
-            None => false,
-        };
-        if !overridden
-            && let Some(object) = self.world.get_mut(door)
-            && let Some(mut lock) = object.lock()
-            && !lock.contains(vault_formats::pro::LockFlags::LOCKED)
-        {
-            object.raw.frame = 1;
-            lock.0 |= vault_formats::pro::LockFlags::OPEN.0;
-            object.set_lock(lock);
-            self.emit_open_sound(door, 0);
-        }
-        Ok(())
+        self.use_door(actor, door)
     }
     /// SPEC-007 §3.4: in combat each committed hex costs 1 AP with sound legs,
     /// 4 with one crippled leg, 8 with both; the player's free-movement pool

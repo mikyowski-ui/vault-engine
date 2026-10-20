@@ -129,13 +129,14 @@ fn spec008_left_maps_join_the_working_saved_set_with_automap_capture() {
         .unwrap();
     assert_eq!(raster[5024] & 3, 1);
     assert_eq!(raster.iter().filter(|byte| **byte != 0).count(), 1);
+    // SPEC-014 §3.35: leaving captures only the player's elevation.
     assert!(
         host.world
             .persistence
             .automap
             .raster(7, 1)
             .unwrap()
-            .is_some()
+            .is_none()
     );
 
     // Returning restores from the working save: embedded values are kept.
@@ -630,4 +631,202 @@ fn spec014_seen_state_marks_a_window_around_visited_hexes() {
     world.mark_visited(39999);
     world.process_seen();
     assert!(world.visited.iter().all(|byte| *byte == 0));
+}
+
+/// The corpus plus `desert.map`, map 19: an excluded encounter map.
+fn corpus_with_desert() -> tempfile::TempDir {
+    let dir = corpus();
+    let mut map = fixture::interactive_map();
+    fixture::world::word(&mut map, 0x24, 0);
+    fixture::world::word(&mut map, 0x28, 0);
+    fixture::world::word(&mut map, 0x34, 19);
+    fs::write(dir.path().join("maps/desert.map"), map).unwrap();
+    dir
+}
+fn save_info() -> SaveInfo {
+    SaveInfo {
+        description: b"Working set".to_vec(),
+        host_date: [20, 10, 2026],
+        host_time: 1,
+        thumbnail: None,
+    }
+}
+
+#[test]
+fn spec014_excluded_maps_are_rebuilt_but_a_saved_game_keeps_the_current_one() {
+    let dir = corpus_with_desert();
+    let root = tempfile::tempdir().unwrap();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    host.load_map("maps/desert.map").unwrap();
+    assert!(host.world.persistence.maps.contains_key("SYNTH.SAV"));
+    // Leaving the desert writes nothing: it comes back from its `.MAP`.
+    let scenery = find(&host, SCENERY, None);
+    host.world.move_object(scenery, 20500, 0, false).unwrap();
+    host.load_map("maps/second.map").unwrap();
+    assert!(!host.world.persistence.maps.contains_key("DESERT.SAV"));
+    host.load_map("maps/desert.map").unwrap();
+    let scenery = find(&host, SCENERY, None);
+    assert_eq!(host.world.get(scenery).unwrap().raw.hex, Some(20301));
+    // Saving a game writes the current map without leaving it, marked
+    // saved with the current time, even though it is excluded.
+    host.world.clock.set(7000);
+    host.save_game(root.path(), 1, &save_info()).unwrap();
+    let saved = parse_saved(&host, "DESERT.SAV");
+    assert_eq!(
+        (saved.header.flags.0 & 1, saved.header.last_visit),
+        (1, 7000)
+    );
+    let slot = slot_directory(root.path(), 1).unwrap();
+    assert!(files(&slot).contains(&"DESERT.SAV".to_string()));
+    // Leaving it then deletes that working copy again.
+    host.load_map("maps/second.map").unwrap();
+    assert!(!host.world.persistence.maps.contains_key("DESERT.SAV"));
+    assert!(host.world.persistence.maps.contains_key("SECOND.SAV"));
+}
+
+#[test]
+fn spec014_revisits_unjam_heal_calm_and_leave_remains() {
+    let dir = corpus();
+    // Miscellaneous PID 4 is the remains, whose art has nine frames.
+    let proto = dir.path().join("proto/misc");
+    fs::write(
+        proto.join("misc.lst"),
+        b"synthetic.pro\nsynthetic.pro\nsynthetic.pro\nremains.pro\n",
+    )
+    .unwrap();
+    let mut remains = fixture::world::prototype(5, 0);
+    fixture::world::word(&mut remains, 0, 0x0500_0004);
+    fixture::world::word(&mut remains, 8, 0x0500_0001);
+    fs::write(proto.join("remains.pro"), remains).unwrap();
+    fs::write(
+        dir.path().join("art/misc/misc.lst"),
+        b"sample.frm\nrscorpbl.frm\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("art/misc/rscorpbl.frm"),
+        fixture::animated_frame(4, 4, &[1, 2, 3, 4, 5, 6, 7, 8, 9]),
+    )
+    .unwrap();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let chest = find(&host, ITEM, Some(20300));
+    let jam = |host: &mut WorldHost<VfsWorldAssets>| {
+        let object = host.world.get_mut(chest).unwrap();
+        let mut lock = object.lock().unwrap();
+        lock.0 |= vault_formats::pro::LockFlags::JAMMED.0;
+        object.set_lock(lock);
+    };
+    let jammed = |host: &WorldHost<VfsWorldAssets>| {
+        let chest = find(host, ITEM, Some(20300));
+        host.world
+            .get(chest)
+            .and_then(|object| object.lock())
+            .is_some_and(|lock| lock.contains(vault_formats::pro::LockFlags::JAMMED))
+    };
+    let critter = find(&host, CRITTER, None);
+    let maximum = host
+        .world
+        .get(critter)
+        .unwrap()
+        .character
+        .as_ref()
+        .unwrap()
+        .stat(7, host.world.context(critter));
+    let wound = |host: &mut WorldHost<VfsWorldAssets>| {
+        host.world.set_hit_points(critter, 2);
+        host.world.critter_state_mut(critter).unwrap().maneuvers |=
+            crate::critical::maneuver::FLEEING;
+    };
+    jam(&mut host);
+    wound(&mut host);
+    // 50 minutes away: nothing changes.
+    host.world.clock.set(1000);
+    host.load_map("maps/second.map").unwrap();
+    host.world.clock.set(1000 + 30_000);
+    host.load_map("maps/synth.map").unwrap();
+    let critter = find(&host, CRITTER, None);
+    assert!(jammed(&host));
+    assert_eq!(host.world.hit_points(critter), Some(2));
+    // Five hours: no longer fleeing, 14 * trunc(5 / 3) HP healed, still
+    // jammed.
+    host.load_map("maps/second.map").unwrap();
+    let now = host.world.clock.ticks;
+    host.world.clock.set(now + 5 * 36_000);
+    host.load_map("maps/synth.map").unwrap();
+    let critter = find(&host, CRITTER, None);
+    assert_eq!(host.world.hit_points(critter), Some(2 + 14));
+    assert_eq!(
+        host.world.critter_state(critter).unwrap().maneuvers & crate::critical::maneuver::FLEEING,
+        0
+    );
+    assert!(jammed(&host));
+    // A day: the lock is unjammed, and healing stops at the maximum.
+    host.load_map("maps/second.map").unwrap();
+    let now = host.world.clock.ticks;
+    host.world.clock.set(now + 24 * 36_000);
+    host.load_map("maps/synth.map").unwrap();
+    let critter = find(&host, CRITTER, None);
+    assert!(!jammed(&host));
+    assert_eq!(host.world.hit_points(critter), Some(maximum));
+    // Dead for more than six days: remains replace the corpse, which
+    // drops what it carried on its hex.
+    let item = find(&host, ITEM, Some(20100));
+    let item_id = host.world.get(item).unwrap().raw.id;
+    host.world.add_item(critter, item, 1, true).unwrap();
+    host.world.set_hit_points(critter, 0);
+    host.world.critter_state_mut(critter).unwrap().results.0 |= crate::critical::effect::DEAD;
+    let corpse_hex = host.world.get(critter).unwrap().raw.hex;
+    host.load_map("maps/second.map").unwrap();
+    let now = host.world.clock.ticks;
+    host.world.clock.set(now + 145 * 36_000);
+    host.load_map("maps/synth.map").unwrap();
+    assert!(
+        host.world
+            .iter()
+            .all(|(_, object)| object.raw.pid != CRITTER)
+    );
+    let remains = find(&host, 0x0500_0004, corpse_hex);
+    assert!((3..=5).contains(&host.world.get(remains).unwrap().raw.frame));
+    let dropped = host.world.reference_for_id(item_id).unwrap();
+    let dropped = host.world.get(dropped).unwrap();
+    assert_eq!((dropped.owner, dropped.raw.hex), (None, corpse_hex));
+}
+
+#[test]
+fn spec013_the_world_and_town_maps_save_and_clear_the_outgoing_map() {
+    let dir = corpus();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    host.world.clock.set(4000);
+    // An exit grid holding map 0: the world map.
+    host.request_transition(crate::Transition {
+        map: 0,
+        elevation: 0,
+        hex: 20100,
+        facing: 2,
+    });
+    host.world.effects.clear();
+    assert!(host.process_transition().unwrap());
+    assert!(host.world.unloaded);
+    assert_eq!(parse_saved(&host, "SYNTH.SAV").header.last_visit, 4000);
+    assert!(host.world.effects.contains(&crate::WorldEffect::WorldMap));
+    assert_eq!(host.world.current_map_name(), None);
+    assert_eq!(host.world.iter().count(), 1, "only the player remains");
+    // Entering a location loads its saved copy.
+    host.load_map("maps/synth.map").unwrap();
+    assert!(!host.world.unloaded);
+    assert_eq!(host.world.current_map_name().as_deref(), Some("SYNTH.SAV"));
+    // The town map (-1) saves first too.
+    host.request_transition(crate::Transition {
+        map: -1,
+        elevation: -1,
+        hex: -1,
+        facing: -1,
+    });
+    host.world.effects.clear();
+    assert!(host.process_transition().unwrap());
+    assert!(host.world.unloaded);
+    assert!(host.world.effects.contains(&crate::WorldEffect::TownMap));
 }

@@ -102,6 +102,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 .iter()
                 .any(|(_, args)| args.contains(&(object as i32)))
         });
+        self.cancel_motions(object);
     }
     fn kill(&mut self, vm: &mut Vm, object: ObjectRef, animation: i32) -> Result<(), VmError> {
         if object == 0 {
@@ -1023,10 +1024,18 @@ impl<A: WorldAssets> WorldHost<A> {
                 } else {
                     None
                 };
+                // SPEC-005: a transition to the map's default entrance
+                // (hex, elevation and orientation all -1).
                 if let Some(index) = index {
                     self.world.emit(WorldEffect::MapTransition {
                         index,
                         parameter: call.int(0),
+                    });
+                    self.request_transition(crate::world::Transition {
+                        map: index,
+                        elevation: -1,
+                        hex: -1,
+                        facing: -1,
                     });
                 }
                 None
@@ -1415,12 +1424,15 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 None
             }
-            0x8108 => {
-                self.world.emit(WorldEffect::WorldMap);
-                None
-            }
-            0x8109 => {
-                self.world.emit(WorldEffect::TownMap);
+            // SPEC-005 queued world-map and town-map requests: transitions
+            // to maps -2 and -1 (SPEC-013 §3.22).
+            0x8108 | 0x8109 => {
+                self.request_transition(crate::world::Transition {
+                    map: if op == 0x8108 { -2 } else { -1 },
+                    elevation: -1,
+                    hex: -1,
+                    facing: -1,
+                });
                 None
             }
             0x810a => {
@@ -1781,20 +1793,9 @@ impl<A: WorldAssets> WorldHost<A> {
                     .get(call.uint(0))
                     .is_some_and(|o| o.raw.frame != 0),
             )),
+            // SPEC-007 §3.11.4 the script open and close sequences.
             0x8131 | 0x8132 => {
-                if let Some(object) = self.world.get_mut(call.uint(0))
-                    && let Some(mut lock) = object.lock()
-                    && !lock.contains(LockFlags::LOCKED)
-                {
-                    let open = op == 0x8131;
-                    object.raw.frame = usize::from(open);
-                    if open {
-                        lock.0 |= 1;
-                    } else {
-                        lock.0 &= !1;
-                    }
-                    object.set_lock(lock);
-                }
+                self.script_open(call.uint(0), op == 0x8131);
                 None
             }
             0x8133 => {

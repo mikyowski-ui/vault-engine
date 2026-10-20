@@ -74,7 +74,7 @@ fn validates_maps_with_prototype_lists_and_int_images() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 41 passed, 0 failed"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 43 passed, 0 failed"));
     std::fs::write(
         temp.path().join("proto/items/synthetic.pro"),
         &world::container()[..64],
@@ -89,7 +89,7 @@ fn validates_maps_with_prototype_lists_and_int_images() {
     assert!(errors.contains("FAIL maps/synthetic.map: MAP"));
     assert!(errors.contains("FAIL proto/items/synthetic.pro: PRO"));
     assert!(errors.contains("FAIL scripts/synthetic.int: INT"));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 38 passed, 3 failed"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 40 passed, 3 failed"));
 }
 
 #[test]

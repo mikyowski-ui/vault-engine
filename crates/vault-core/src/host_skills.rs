@@ -82,13 +82,16 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             return Ok(false);
         }
-        if target != self.world.player && self.world.object_distance(actor, target) > 1 {
+        let distance = self.world.object_distance(actor, target);
+        if target != self.world.player && distance > 1 {
             // The proximity step after an approach aborts rather than
             // chasing; under the safe rule a failed approach (one that
-            // cannot start or ends short) tells a player actor.
+            // cannot start or ends short) tells a player actor. SPEC-007
+            // §3.11.1: the approach runs out of combat at distance 5 or more.
+            let run = !self.world.combat && distance >= crate::host_motion::RUN_DISTANCE;
             let failed = self.arriving
                 || self
-                    .approach(actor, target, ObjectAction::UseSkill(index), 1)
+                    .approach(actor, target, ObjectAction::UseSkill(index), run)
                     .is_err();
             if failed && actor == self.world.player {
                 self.print_game("misc.msg", 2000, &[]);
@@ -1453,10 +1456,12 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.world.pending_transition = Some(transition);
     }
-    /// §3.22 processing out of combat: map 0 is the world map, -1 the town
-    /// map; otherwise the map loads by number and, for a hex other than -1
-    /// and 0 on elevation 0-2, the player is placed there with the facing.
-    /// Returns whether a transition ran.
+    /// §3.22 processing out of combat: map 0 (an exit grid's world map,
+    /// also requested as -2) opens the world map and -1 the town map, once
+    /// the outgoing map is saved and cleared (SPEC-014 §3.35); a failed
+    /// save ends the session instead. Otherwise the map loads by number
+    /// and, for a hex other than -1 and 0 on elevation 0-2, the player is
+    /// placed there with the facing. Returns whether a transition ran.
     pub fn process_transition(&mut self) -> Result<bool, WorldError> {
         if self.world.combat {
             return Ok(false);
@@ -1465,8 +1470,15 @@ impl<A: WorldAssets> WorldHost<A> {
             return Ok(false);
         };
         match transition.map {
-            0 => self.world.emit(WorldEffect::WorldMap),
-            -1 => self.world.emit(WorldEffect::TownMap),
+            -2..=0 => {
+                if !self.unload_map()? {
+                    self.world.emit(WorldEffect::MapSaveFailed);
+                } else if transition.map == -1 {
+                    self.world.emit(WorldEffect::TownMap);
+                } else {
+                    self.world.emit(WorldEffect::WorldMap);
+                }
+            }
             map => {
                 let path = self
                     .assets

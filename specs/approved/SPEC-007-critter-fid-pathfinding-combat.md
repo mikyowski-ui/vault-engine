@@ -22,6 +22,10 @@ Important distinctions: a directional-file selector is not a critter's zero-base
 
 - **R1-rev2 (2026-10-18).** Section 3.6 now gives the exact draw range and position of the punch-to-kick draw. Section 3.7 now gives the complete missed-shot bystander algorithm: the line-of-fire stage, the impact fallback, victim selection, hit location, damage, and draw order. Fixtures D and E are added. The raw revision hash was replaced by the label R1.
 - **R1-rev3 (2026-10-19).** Section 3.6 now holds the single authoritative intended-target, onlooker and retaliation rule, which SPEC-009 cites. A surviving conscious unintended victim, whether a missed-shot bystander or a critical-failure random target, makes the retaliation check only when its team differs from the attacker's. Section 3.7 now states that the disabled splash enumeration serves every explosion, so no explosion damages beyond its center target, which matches SPEC-013 §3.10.
+- **R1-rev6 (2026-10-19).**
+  - New section 3.11 covers non-combat animation: walking and running art, when the engine runs, and the per-frame step model with its hex crossing rule; idle fidgets; interaction reaches for pickup, use, containers and ladders; door and container opening and closing, with `use_p_proc` order and when the blocking flags change; and knockback and getting up outside combat.
+  - The section also corrects several suffix assumptions: walking is `ab`, `am` is the high reach, `af` is falling, and `ap` is hit from behind.
+  - New Fixture H.
 - **R1-rev5 (2026-10-19).**
   - New section 3.10 gives the attack animation choreography: the animation start rule and its delays; the attack animation, sounds and action frame for each attack mode; the melee and ranged sequences; projectile flight timing; and every reaction, from dodge, flinch, knockdown and knockback to death, blood and fire.
   - Section 3.9 answers two Builder questions. The projectile hit-sound delay needs no clamp because nothing intercepts a projectile in flight. A landed item keeps the light it was given at launch, where the requested radius 9 becomes 8, or 0 without intensity.
@@ -812,6 +816,8 @@ A sequence that stops while playing, because an entry fails as it starts, ends a
 
 `[Must-match]`
 
+The standing reset also happens when a sequence ends normally. Every critter owner that is not prone is set to its standing pose for its current weapon code, unless the sequence was registered without that reset; ladder climbing is registered that way (SPEC-013 §3.23). Hidden objects whose hide entry has run, and every forced erase, are removed from the map when the sequence ends. `[Must-match]`
+
 #### 3.10.2 Attack animation by hit mode
 
 The attack animation comes from the weapon's attack-mode nibble for the hit mode (SPEC-003). Hit mode 5 (kick) always uses animation 17. A hit mode with no weapon uses animation 16. The suffixes are those of section 2.2. `[Must-match]`
@@ -990,6 +996,148 @@ In the knocked-out or knocked-down case with knockback, the same effect name pla
   4. the fire-dance draws of each extra, in extras order.
 
   A draw is made only when its condition holds: taunts enabled and the speaker eligible, and the fire-dance death chosen.
+
+### 3.11 Non-Combat Animation
+
+This section covers every animation the engine itself starts outside an attack: walking and running, idle fidgets, interaction reaches, ladders, doors and containers, and knockback or getting up outside combat. Sequences, delays and frame steps follow section 3.10.1. Scripts can start any animation through the SPEC-005 animation opcodes; this section only covers what the engine starts.
+
+**Suffix corrections.** `[Must-match]` These follow from the section 2.2 suffix table:
+
+- `aa` is standing (0), and walking (1) is `ab`, or the weapon letter then `b`.
+- `al` is the middle-height reach (11), and the high reach (12) is `am`.
+- `ae` is the ladder climb (4), and `af` is falling (5).
+- `ap` is hit from behind (15); knockdown falls are 20 (`ba`) and 21 (`bb`).
+
+#### 3.11.1 Walking and running
+
+**Art.** `[Must-match]` A walking step uses animation 1, whose filename depends on the weapon code: `ab` for code 0, otherwise the weapon letter then `b`. Running uses animation 19, `at`, whose filename ignores the weapon code, so an armed runner shows unarmed running art. A run request walks instead (animation 1) when any of these holds:
+
+- the mover is a critter with a crippled leg (bit `0x04` or `0x08`);
+- the mover is the player, sneaking, without the Silent Running perk;
+- the mover has no art for animation 19.
+
+A player run request made by a click also clears sneaking unless the player has Silent Running.
+
+**When the engine runs.** `[Must-match]`
+
+| Request | Out of combat | In combat |
+| --- | --- | --- |
+| Player click to move (SPEC-014 §3.27) | Run when the `running` preference is on; Shift inverts it | Same rule, AP-limited |
+| Pick up an item, use an object or scenery, climb a ladder, open a container's loot | Run when the object distance is 5 or more, otherwise walk | Walk, limited to current AP |
+| Use a skill on a target | Run at distance 5 or more, otherwise walk; no movement when the target is the player | Walk, AP-limited |
+| Talk | Run when the distance is 9 or more, or the line to the target is shot-blocked (section 3.2); otherwise no approach movement | Walk, AP-limited |
+
+A move toward an object is followed by a turn toward that object's hex, with delay -1. A move toward a hex is not followed by a turn. If the player is already walking or running when a new interaction starts, the player's current sequence is cancelled first.
+
+**Step model.** `[Must-match]` A walk or run entry plans its route when it starts (section 3.1). It then takes one frame step per `trunc(1000 / fps)` milliseconds, with the `combat_speed` rule of section 3.10.1. On each step:
+
+1. **First step:** re-place the mover on its own hex, which zeroes its pixel displacement. Set frame 0, face the route's first direction, and switch to the walk or run art. **Later steps:** advance one frame, wrapping from the last frame to 0.
+2. Add the shown frame's per-frame displacement for the current facing to the mover's displacement (SPEC-001 §3.5).
+3. Let (dx, dy) be the pixel step to the next hex in the facing direction. NE is (16, -12), E (32, 0), SE (16, 12), SW (-16, 12), W (-32, 0) and NW (-16, -12). The mover **crosses** when its displacement reaches the step on either axis: x ≥ dx for positive dx, x ≤ dx for negative dx, and the same test for y.
+4. On a crossing, the residual is the displacement minus (dx, dy). Let H be the neighboring hex in that direction.
+   - If H holds a movement blocker that the mover may not auto-open (section 3.1), the route is rebuilt from the current hex with a strict goal. On success the mover is re-placed on its hex (displacement 0) at frame 0, facing the new first direction, and the route cursor restarts. On failure the move ends.
+   - If H holds a door the mover may auto-open, the door is used as in section 3.11.4 and the move continues into H at once.
+   - Otherwise the mover moves to H, which zeroes its displacement. In combat, AP is charged for the hex (section 3.4). The move ends when the route is complete, or in combat when AP plus free movement reach 0. Otherwise the mover faces the next direction and its displacement is set to the residual.
+
+There is no interpolation between hexes. The visible speed comes entirely from the art's per-frame displacements and frame rate. The frame counter continues across hexes and direction changes, and a residual from one hex carries into the next. When the move ends, the last residual is dropped, so the mover stands exactly on its hex. Fixture H gives a worked case.
+
+**Sounds.** `[Must-match]` Walking and running play no footstep or movement sound. Exit grids under the player's new hex are tested whenever the player moves onto a hex (SPEC-013 §3.22).
+
+#### 3.11.2 Idle fidgets
+
+`[Must-match]` Outside combat, a background task runs while a map is loaded. It is removed when combat starts and added again when combat ends. It does nothing while a quit request is pending, during self-run playback, or while the player is hidden. Otherwise, when the time since its last run exceeds the current wait W (initially 0):
+
+1. Collect up to 100 candidates on the player's elevation, in object order. A candidate is a visible critter whose current animation is 0 (standing), that is not dead, and whose bounding rectangle intersects the 640-by-480 screen.
+2. If there is at least one candidate, draw `random(0, count - 1)` to pick one. Register an unreserved, insignificant sequence: when the candidate is the player, or its critter art stem starts with `m` or `M` and its distance to the player is below twice the player's Perception, first the character sound for animation 0 with delay 0. Then animation 0 once, with delay 0. Any later sequence that names the same critter ends this one.
+3. Let k be `trunc(20 / count)` with candidates, or 7 without, clamped to 1 through 7. Set W to `random(0, 3000) + 1000 × k` milliseconds.
+
+These draws use the shared generator (SPEC-006 §3.4), so idle fidgets interleave with other draws outside combat.
+
+#### 3.11.3 Interaction animations
+
+`[Must-match]` unless tagged.
+
+| Action | Entries after the approach |
+| --- | --- |
+| Pick up an item (SPEC-006 §3.8) | Adjacency check, forced, -1. The 3-AP combat check, -1. Reach to the ground: animation 10 (`ak`), delay 0. A sound named after the item's art stem, delay A. The pickup, delay A. |
+| Use a container that cannot be picked up | Adjacency and AP checks. If armed, the put-away sound (-1) and put-away animation 39 (-1). Reach (below), delay 0. The container use of section 3.11.4, delay -1. If armed, take out the weapon again, -1. If the container was closed when the sequence was built, or its PID is 213, the loot window request (SPEC-013 §3.16), -1. |
+| Use scenery or an object, or use an item on one | Adjacency and AP checks. If armed, the put-away sound (-1) and animation 39 (delay 0). Reach (below), delay -1. The use (section 3.11.4, or SPEC-006 §3.8 for an item used on a target), delay -1. If armed, take out the weapon again, -1. |
+| Climb a ladder up | SPEC-013 §3.23: approach the hex southeast of the ladder, turn, the AP check, the put-away, then the climb sound and animation 4 (`ae`), then the use. |
+
+A is the action frame of the reach art for the mover's current base and weapon code, or -1 when that art cannot be loaded. With -1, the pickup waits until the reach has finished.
+
+**Reach height.** `[Must-match]` For a prone critter target, or scenery whose prototype extended flags have bit `0x01` set, the reach is the ground reach (10, `ak`); otherwise the middle reach (11, `al`).
+
+- For a container, prototype payload word `0x04` bit 0 **set** selects the ground reach. Clear selects the middle reach.
+- In the corpus, the bit is set on the Ice Chests, Bones, Footlockers and the Crate, and clear on bookcases, desks, lockers, shelves, boxes and every other container.
+- The high reach (12, `am`) is never started by the engine. Animations 2, 3 and 5-9 (jump, falling, stairs) are never started by it either; a script must request them.
+
+**Container reach timing.** The container branch means to time its use from the reach art's action frame, but its art test is inverted: it reads the action frame only when the art fails to load, so the value is always -1. The container therefore opens only after the reach animation finishes. `[May-improve]`: when the reach art loads, use its action frame as the delay of the container use.
+
+PID 213 (Remains of Gizmo) skips the container use and always requests the loot window.
+
+#### 3.11.4 Doors and containers
+
+**Door use.** `[Must-match]` unless tagged. Using a door, by a click, a script request or an NPC auto-opening it during a walk, runs in this order:
+
+1. If the door is locked, play its locked sound at once, outside any sequence: open/close name with action `L` (SPEC-010 §3.8).
+2. Run the door's `use_p_proc` **before** any animation, with the user as source and the door as target. If the script sets its override, stop here; the door does not move.
+3. If the door's frame is not 0, **close** it. Register a reserved sequence:
+   - set the open bit `0x01` of the door's instance open-flags word to clear, -1;
+   - play the close sound (action `C`), -1;
+   - animation 0 of the door's art in reverse, delay 0.
+4. If the frame is 0 and the open bit is already set, do nothing. Otherwise **open** it:
+   - set the open bit, -1;
+   - play a sound, -1;
+   - animation 0 forward, delay 0.
+
+   The sound is again the close sound (`C`), not the open sound. `[May-improve]`: play the open sound (`O`), as the script open request does.
+5. Last, a forced finishing callback, -1 (below).
+
+A locked door is not refused here. Unless its script overrides, it plays the locked sound and then opens. Corpus door scripts enforce locks through the override. Nothing tests for an object standing in the doorway; a door closes on a critter in it. Scenery that is not a door runs its `use_p_proc` with the same override rule. Without an override the player sees `proto.msg` 480. Then the map-update scripts run.
+
+**Animation.** `[Must-match]` A door or container uses animation 0 of its own art. Forward play starts from the current frame and stops on the last frame; reverse play starts from the current frame and stops on frame 0. Each frame adds its per-frame displacement going forward and subtracts it in reverse (SPEC-001 §3.5).
+
+**Finishing callback.** `[Must-match]` unless tagged.
+
+- **Open bit clear:** clear the open-door flag group `0xA0000010` (movement-nonblocking `0x10`, light-through `0x20000000`, projectile-through `0x80000000`) and rebuild lighting. If the frame is not 0, subtract displacements and set frame 0. The reference subtracts the displacements of frames from (current − 1) down to 0, which is one frame off. `[May-improve]`: subtract those of the current frame down to frame 1, the exact reverse of forward play.
+- **Open bit set:** set that flag group and rebuild lighting. If the frame is not the last, add the displacements of each later frame and set the last frame.
+
+Blocking, sight and projectile passage therefore change only **after** the animation:
+
+- an opening door blocks movement, sight and shots until it is fully open;
+- a closing door stays passable until it is fully shut.
+
+The open bit itself flips as the sequence starts. Section 3.1 and section 3.2 give how these flags affect routes and rays.
+
+**Container use.** `[Must-match]`
+
+1. If the container is locked: play its locked sound (`L`); for the player, show `proto.msg` 487 ("It is locked."); and fail.
+2. Run its `use_p_proc`; an override stops here.
+3. Register a sequence: at frame 0, the open sound (`O`) with delay 0 and animation 0 forward; otherwise the close sound (`C`) with delay 0 and animation 0 in reverse.
+4. For the player, show `proto.msg` 485 ("You search the %s.") when the frame was 0, or 486 ("You close the %s.") otherwise.
+
+No flag word changes. An open container is one whose frame is not 0 (SPEC-005 `obj_is_open`).
+
+**Script open and close.** `[Must-match]` `obj_open` and `obj_close` (SPEC-005) act only on a door or container that is in the opposite state.
+
+- A locked object is refused, with no sound.
+- Otherwise its jam is cleared, and no `use_p_proc` runs.
+- The sequence is: set or clear the open bit as a forced callback (-1); the open sound (`O`) or close sound (`C`), -1; the animation forward or reversed, delay 0; and the finishing callback.
+- For a container, the open bit is kept in a word its saved record does not hold, and the flag group has no blocking effect, because items never block.
+
+#### 3.11.5 Knockback and getting up outside combat
+
+`[Must-match]`
+
+- **Script damage.** `critter_damage` (SPEC-005) with animation enabled uses a hidden temporary attacker at the victim's hex, with art `0x020001F5` and facing 0. One sequence plays `whc1xxx1` and then the section 3.10.6 reaction with delay 0.
+  - From the front: the victim's facing is SE, SW or W.
+  - Knockback is `trunc(damage / 10)` hexes for a victim that is not multihex and damage that is not electrical, or 0 when armor is bypassed. The direction is SE, because the direction from a hex to itself is SE.
+  - A death uses the maximum-violence column of section 3.8 for the damage type, under maximum-violence validation.
+  - Without animation, a lethal amount kills the victim at once, with no animation.
+- **Knockback alive.** The victim slides and falls (20 or 21), then stands up at once with 37 or 36 (section 3.10.6). The knocked-down status is not set.
+- **Knockout wake-up.** When a knockout's wake event fires outside combat, it replaces knocked out with knocked down and immediately plays the stand-up: 37 when the current animation is 20, otherwise 36. That clears knocked down. In combat it only marks the critter, which stands up on its turn (section 3.4).
+- **End of combat.** A prone player who is not dead has the wake event removed and stands up at once, unless a script ended combat while the player was knocked out. A player still knocked out at the end of a main-loop pass ends the game (SPEC-014 §3.5).
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
@@ -1179,6 +1327,23 @@ Every animation and the projectile run at 10 fps with `combat_speed` 0, so each 
 
 Path check: L = 0 (adjacent defender) gives 1 node and N = 0. L = 31 gives 1 node; L = 32 gives 2 nodes and N = 1.
 
+### 4.8 Fixture H: Walking Steps
+
+A synthetic walk art has 8 frames. Every SE frame has per-frame displacement (5, 4), and every E frame has (8, 0). The route is [SE, E], out of combat. Each row is one frame step (section 3.11.1). `[Must-match]`
+
+| Step | Frame | Facing | Displacement after adding | Event |
+| ---: | ---: | --- | --- | --- |
+| 1 | 0 | SE | (5, 4) | Re-placed at displacement 0 first; no crossing |
+| 2 | 1 | SE | (10, 8) | — |
+| 3 | 2 | SE | (15, 12) | y reaches 12: cross. Residual (-1, 0). Move to the SE neighbor, face E, displacement (-1, 0) |
+| 4 | 3 | E | (7, 0) | — |
+| 5 | 4 | E | (15, 0) | — |
+| 6 | 5 | E | (23, 0) | — |
+| 7 | 6 | E | (31, 0) | — |
+| 8 | 7 | E | (39, 0) | x reaches 32: cross. Move to the E neighbor. The route is complete, so the residual (7, 0) is dropped and the walker ends at displacement (0, 0). When its sequence ends, it is reset to its standing pose (section 3.10.1) |
+
+With a blocker on the E neighbor at step 8 that is not an auto-usable door, the walker stays on the SE neighbor. It then replans from there, or stops if no route exists.
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -1187,4 +1352,4 @@ Path check: L = 0 (adjacent defender) gives 1 node and N = 0. L = 31 gives 1 nod
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes (R1-rev5): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 16 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc") and this spec's own formula notation ("index", "stat", "column", "rank", "range"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Fixture G timelines were cross-checked with an independent model of the section 3.10.1 start rule, written from this spec's text rather than reference code. Tag count, excluding the two tag definitions: 193 `[Must-match]`, 34 `[May-improve]`.
+Verification notes (R1-rev6): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 18 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc"), the public `fallout.cfg` key "running", and this spec's own formula notation ("index", "stat", "column", "rank", "range", "count"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Fixture G timelines were cross-checked with an independent model of the section 3.10.1 start rule, written from this spec's text rather than reference code. The section 3.11 container reach bits were read from the corpus item prototypes. Fixture H was recomputed by hand from the section 3.11.1 step rule. Tag count, excluding the two tag definitions: 209 `[Must-match]`, 37 `[May-improve]`.

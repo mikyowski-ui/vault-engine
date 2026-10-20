@@ -29,7 +29,7 @@ flags!(CritterFlags { BARTER=0x2, NO_STEAL=0x20, NO_DROP=0x40, NO_LIMBS=0x80,
     NO_AGE=0x100, NO_HEAL=0x200, INVULNERABLE=0x400, FLAT=0x800,
     SPECIAL_DEATH=0x1000, LONG_LIMBS=0x2000, NO_KNOCKBACK=0x4000 });
 flags!(LockFlags { OPEN=0x1, LOCKED=0x2000000, JAMMED=0x4000000 });
-flags!(ContainerFlags { RAISED_INTERACTION=0x1 });
+flags!(ContainerFlags { GROUND_REACH=0x1 });
 flags!(MapFlags { SAVED=0x1, OMIT_ELEVATION_0=0x2, OMIT_ELEVATION_1=0x4, OMIT_ELEVATION_2=0x8 });
 flags!(ScriptFlags { LOADED=0x1, NO_SAVE=0x8 });
 flags!(CombatFlags {});

@@ -249,7 +249,7 @@ pub struct WorldRules {
 /// SPEC-013 §3.22 a map transition request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Transition {
-    /// Map number; 0 is the world map and -1 the town map.
+    /// Map number; 0 (or -2) is the world map and -1 the town map.
     pub map: i32,
     pub elevation: i32,
     /// -1 or 0 keeps the map's default entrance.
@@ -501,6 +501,10 @@ pub enum WorldEffect {
     },
     WorldMap,
     TownMap,
+    /// SPEC-013 §3.22 the outgoing map could not be saved for the town or
+    /// world map: `map.msg` 1000 shows and the session returns to the main
+    /// menu.
+    MapSaveFailed,
     Elevator(i32),
     EndGame,
     Slideshow,
@@ -612,6 +616,9 @@ pub struct WorldState {
     pub pending_combat: Option<crate::combat_state::CombatRequest>,
     /// SPEC-013 §3.22 the pending map transition (the last request wins).
     pub pending_transition: Option<Transition>,
+    /// SPEC-013 §3.22 the outgoing map was saved and cleared for the town
+    /// or world map: no map is loaded until a location is entered.
+    pub unloaded: bool,
     /// SPEC-013 §3.9/§3.16 a deferred loot or steal request for the
     /// presentation layer's loot window.
     pub pending_loot: Option<LootRequest>,
@@ -785,6 +792,7 @@ impl WorldState {
             persistence: Default::default(),
             pending_combat: None,
             pending_transition: None,
+            unloaded: false,
             pending_loot: None,
             pending_explosion: None,
             explosion: None,

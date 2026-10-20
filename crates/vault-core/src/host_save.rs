@@ -163,8 +163,12 @@ impl<A: WorldAssets> WorldHost<A> {
             })
     }
     /// The 27 ordered components from live state. The current map (with its
-    /// party members) first joins the working saved-map set.
+    /// party members) first joins the working saved-map set without being
+    /// left: marked saved with the current time as its last visit, and
+    /// written even when it is an excluded map (SPEC-014 §3.35).
     pub fn build_save(&mut self, info: &SaveInfo) -> Result<SaveGame, WorldError> {
+        self.world.map.header.flags.0 |= 1;
+        self.world.map.header.last_visit = self.world.clock.ticks as u32;
         self.world.persist_current_map(true);
         let world = &self.world;
         let player = world

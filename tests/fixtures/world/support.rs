@@ -153,6 +153,12 @@ pub fn write_corpus(root: &std::path::Path) {
             frm(width, height, color),
         )
         .unwrap();
+        if category == 1 {
+            // The ground and middle reaches of SPEC-007 §3.11.3.
+            for reach in ["sampleak.frm", "sampleal.frm"] {
+                std::fs::write(root.join("art/critters").join(reach), frm(12, 20, 16)).unwrap();
+            }
+        }
         if category == 4 {
             // Index 1 is the ordinary blank tile; like shipped data it is drawn
             // but entirely transparent.

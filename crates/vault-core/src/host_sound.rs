@@ -115,11 +115,6 @@ impl<A: WorldAssets> WorldHost<A> {
         let name = self.open_sound_name(object, action);
         self.emit_effect(name, object);
     }
-    /// Movement cue: the mover's walk (1) or run (19) character effect.
-    pub(crate) fn emit_movement_sound(&mut self, object: ObjectRef, run: bool) {
-        let name = self.character_sound_name(object, if run { 19 } else { 1 }, 0);
-        self.emit_effect(name, object);
-    }
     /// Emit a weapon sound request with its effect name (ready and out of
     /// ammunition always use variant 1).
     pub(crate) fn emit_weapon_sound(&mut self, object: ObjectRef, weapon: ObjectRef, effect: u8) {

@@ -59,6 +59,9 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 
 - **R1-rev2 (2026-10-19).** Section 3.10 was rewritten. Explosion damage is center-only, matching SPEC-007 §3.7. Scenery and other blockers are affected only through radius-3 `damage_p_proc` notification, replacing the earlier "center-hex scenery" wording. The section now gives the detonation order, the retry rule for timed explosives, and the servicing and no-retry rule for scripted explosions.
 - **R1-rev3 (2026-10-19).** Builder placeholders filled. Section 3.10 gains the explosion art and sound table for timed, scripted, grenade and rocket explosions. New section 3.25 Skill Books gives the PIDs, the increase formula, time cost, fade and messages, with Fixture G. `proto.msg` 800-806 were added to section 2.4.
+- **R1-rev4 (2026-10-19).**
+  - Section 3.21 now states that its table is the complete elevator set: there is no Vault 15 elevator and no other elevator art.
+  - Section 3.22 now covers leaving a map, which saves it and then reloads the destination's working copy (SPEC-014 §3.35), and the town-map and world-map destinations (maps -1 and -2), including the save-failure dialog.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -838,6 +841,17 @@ With single-precision accumulation the final cell can be one off; for 3 buttons 
 
 On Esc the player is still turned southeast and loses pending animations. A nearby elevator door is closed when the computed level's elevation differs from the actual one, although nobody moved. `[May-improve]`: Cancel changes nothing.
 
+**Coverage.** `[Must-match]` The section 2.7 table is the complete elevator set in R1:
+
+- the Brotherhood, types 0-1;
+- the Master's lair under the Cathedral, types 2-3;
+- the Military Base, types 4-5;
+- the Glow, types 6, 7 and 11;
+- Vault 13, type 8;
+- the Necropolis vault, types 9 and 10.
+
+No type names a Vault 15 map (`map.msg` 7 or 8), so any level change there is scripted. There is no other elevator art: the backgrounds, panels, buttons and gauge in section 2.7 are all of it. A destination hex is reached by the placement rule above, and on another map through the transition of section 3.22, which saves the outgoing map (SPEC-014 §3.35).
+
 ### 3.22 Exit Grids, Map Transitions and Party Following
 
 **Exit grids.** Exit grids are miscellaneous PIDs `0x05000010` through `0x05000017`; their instance data holds map, hex, elevation and facing (SPEC-003). Whenever the player is moved onto a hex, by walking, placement or script, every exit grid on that hex and elevation requests a transition, and the last one wins. `[Must-match]`
@@ -855,6 +869,21 @@ On Esc the player is still turned southeast and loses pending animations. A near
 4. At the end of the load, apply the facing again when the destination map is positive and the facing is not negative.
 
 There is no palette fade. Loading shows the busy cursor and plays background sound `wind2` until the city music starts.
+
+**Leaving a map.** `[Must-match]` Before the destination loads, the outgoing map is saved into the working map set and then cleared. The destination is then loaded from its working `.SAV` when one exists, otherwise from its original `.MAP`. SPEC-014 §3.35 gives both steps, the revisit aging and the maps that are never saved.
+
+**World map and town map destinations.** `[Must-match]` These run in the main loop, out of combat, after all animations are stopped.
+
+- **Map -2** (an exit grid holding map 0): open the world map at the current town.
+- **Map -1:** open the town map of the current town first. Its result decides what follows:
+  - **A hotspot was chosen.** If the party is already in that town on the world map, load the hotspot's map directly. Otherwise travel there on the world map and enter it on arrival. SPEC-008 §3.7 gives the hotspots, their maps and their entry selectors.
+  - **The World Map button:** open the world map normally.
+  - **Failure** (an out-of-range town or a missing town picture): the world map is entered with a failure state and returns at once. The outgoing map has already been saved and unloaded, so no map is loaded and play is left on an empty map. `[May-improve]`: open the world map at the current town.
+  - **A quit request:** nothing more.
+- **Saving first.** Both the town map and the world map save the outgoing map first (SPEC-014 §3.35). If that save fails:
+  - show `map.msg` 1000 ("Error: Not enough disk space to save map!") in a large dialog at (169, 116), with the arrow cursor and sound `iisxxxx1`;
+  - end the game session with a return to the main menu.
+- The transition request is cleared after the world map closes.
 
 **Party following.** On an elevation change, each visible party member other than the player is placed around the player's new hex by the placement rule with starting radius 2: in practice successive members fill successive free neighbors in NE through NW order. On a map change, members travel with the map save and load and are placed the same way. The elevator code itself moves only the player. `[Must-match]`
 
@@ -1033,4 +1062,4 @@ All cases are out of combat with effective Intelligence 6, unless stated.
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 23 plain-word warnings were reviewed and are benign: this spec's own formula and UI words ("value", "level", "draw", "maximum", "position", "size", "current", "trunc", "slot", "count", "counter", "attempt"). The public opcode names `sfx_build_open_name` and `sfx_build_char_name` appear only as naming-rule references. The fenced blocks hold no code; fixtures are tables. Cross-spec note (resolved): SPEC-007 §3.7 now states the same rule as section 3.10. Every explosion, whether weapon, grenade, timed or scripted, uses the one disabled victim enumeration, so in R1 only the center target takes damage. Retaliation and onlooker wording now matches the single rule in SPEC-007 §3.6. The added warning "start" is the public SSL procedure name start, used in section 3.10. Explosion art, sound and skill-book names in sections 3.10 and 3.25 are corpus file and prototype names, checked against `art/misc/misc.lst`, the corpus FRM headers, `sound/sfx` and `pro_item.msg`. Tag count, excluding the two tag definitions: 94 `[Must-match]`, 35 `[May-improve]`.
+Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 23 plain-word warnings were reviewed and are benign: this spec's own formula and UI words ("value", "level", "draw", "maximum", "position", "size", "current", "trunc", "slot", "count", "counter", "attempt"). The public opcode names `sfx_build_open_name` and `sfx_build_char_name` appear only as naming-rule references. The fenced blocks hold no code; fixtures are tables. Cross-spec note (resolved): SPEC-007 §3.7 now states the same rule as section 3.10. Every explosion, whether weapon, grenade, timed or scripted, uses the one disabled victim enumeration, so in R1 only the center target takes damage. Retaliation and onlooker wording now matches the single rule in SPEC-007 §3.6. The added warning "start" is the public SSL procedure name start, used in section 3.10. Explosion art, sound and skill-book names in sections 3.10 and 3.25 are corpus file and prototype names, checked against `art/misc/misc.lst`, the corpus FRM headers, `sound/sfx` and `pro_item.msg`. The section 3.21 coverage note was checked against `art/intrface/intrface.lst` and `map.msg`. Tag count, excluding the two tag definitions: 97 `[Must-match]`, 36 `[May-improve]`.

@@ -126,7 +126,7 @@ Container:
 | Payload offset | Bytes | Meaning |
 | --- | ---: | --- |
 | `0x00` | 4 | Maximum contained size |
-| `0x04` | 4 | Container interaction flags; bit 0 selects raised rather than ground-level interaction animation |
+| `0x04` | 4 | Container interaction flags; bit 0 set selects the ground reach animation (10), clear selects the middle reach (11); see SPEC-007 §3.11.3 |
 
 This container prototype word is not the instance's lock-state word and does not contain an inventory list. `[Must-match]`
 

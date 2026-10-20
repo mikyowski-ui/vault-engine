@@ -1,9 +1,13 @@
 //! Executing SPEC-005 animation registrations. Sequences run their commands
 //! in order, one frame step at a time (at the art's frame interval, or 10 FPS
-//! without art), and retire when complete. Movement uses the SPEC-007 routes
-//! with unlimited action points.
+//! without art), and retire when complete. Movement takes the SPEC-007
+//! §3.11.1 walk steps with unlimited action points.
 use crate::{
-    Movement, ObjectRef, StepOutcome, WorldEffect, WorldError, assets::WorldAssets, host::WorldHost,
+    ObjectRef, WorldEffect, WorldError,
+    assets::WorldAssets,
+    choreography::{Begin, Stepped},
+    host::WorldHost,
+    motion::{Goal, Walk},
 };
 use vault_formats::{Fid, map::ObjectState};
 
@@ -23,7 +27,9 @@ pub struct CommandProgress {
     pub frames: usize,
     pub interval_ms: u64,
     pub next_ms: u64,
-    pub movement: Option<Movement>,
+    /// A move command's walk, and the frame steps it has taken.
+    pub walk: Option<Box<Walk>>,
+    pub steps: usize,
 }
 
 /// The animated object is each registration's last operand.
@@ -43,6 +49,10 @@ impl<A: WorldAssets> WorldHost<A> {
                 .is_some_and(|sequence| sequence.commands.len() >= 64)
         {
             return false;
+        }
+        // SPEC-007 §3.11: the world's own sequences animate it too.
+        if self.moving(object) {
+            return true;
         }
         self.animations.iter().any(|sequence| {
             let lone_stand =
@@ -164,22 +174,20 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 0x8111..=0x8114 | 0x80ce => {
                     let run = matches!(op, 0x8112 | 0x8114) || (*op == 0x80ce && values[0] != 0);
-                    let fid = self.animation_fid(object, if run { 19 } else { 1 });
-                    if let (Some(fid), Some(found)) = (fid, self.world.get_mut(object)) {
-                        found.raw.art_id = fid;
-                    }
-                    progress.movement = match op {
-                        0x8111 | 0x8112 => self.plan_to_object(object, values[1] as ObjectRef),
-                        _ => self.plan_to_tile(object, values[1], usize::MAX),
+                    let goal = match op {
+                        0x8111 | 0x8112 => Goal::Object(values[1] as ObjectRef),
+                        _ => Goal::Hex(values[1]),
                     };
-                    self.emit_movement_sound(object, run);
+                    let mut walk = Walk::new(goal, run, usize::MAX);
+                    if self.start_walk(object, &mut walk) == Begin::Timed {
+                        progress.interval_ms = walk.interval_ms;
+                        progress.walk = Some(Box::new(walk));
+                    }
                 }
                 _ => {}
             }
-            // The first frame (or the walk art) shows for this frame step.
-            if matches!(op, 0x810f | 0x8110 | 0x8126 | 0x8111..=0x8114 | 0x80ce)
-                && (progress.frames > 0 || progress.movement.is_some())
-            {
+            // The first frame shows for this frame step.
+            if matches!(op, 0x810f | 0x8110 | 0x8126) && progress.frames > 0 {
                 *changed = true;
                 progress.next_ms = now_ms + progress.interval_ms;
                 self.animations[index].progress = progress;
@@ -220,12 +228,11 @@ impl<A: WorldAssets> WorldHost<A> {
                     }
                 }
             }
-            0x8111..=0x8114 | 0x80ce => match progress.movement.as_mut() {
-                Some(movement) => {
-                    let outcome = self.step_movement(movement)?;
-                    *changed |= outcome == StepOutcome::Moved;
-                    matches!(outcome, StepOutcome::Finished | StepOutcome::Stopped)
-                        || movement.finished()
+            0x8111..=0x8114 | 0x80ce => match progress.walk.as_mut() {
+                Some(walk) => {
+                    progress.steps += 1;
+                    *changed = true;
+                    self.walk_step(object, walk, progress.steps) == Stepped::Done
                 }
                 None => true,
             },

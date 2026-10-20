@@ -1286,6 +1286,17 @@ fn spec006_live_queue_stop_elevation_updates_speech_reputation_and_campaign_fail
             parameter: 1
         }
     )));
+    // SPEC-005: a transition to the map's default entrance.
+    assert_eq!(
+        host.world.pending_transition,
+        Some(crate::Transition {
+            map: 0,
+            elevation: -1,
+            hex: -1,
+            facing: -1
+        })
+    );
+    host.world.pending_transition = None;
 
     // Elevation changes request a map update only with a current map script.
     host.world.requests.clear();

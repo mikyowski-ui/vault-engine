@@ -270,24 +270,30 @@ impl WorldState {
     /// for each elevation with tile data. Seen-object bookkeeping is taken
     /// from the objects' existing seen flags.
     pub fn capture_automap(&mut self) {
+        for elevation in 0..3_u8 {
+            self.capture_automap_at(elevation);
+        }
+    }
+    /// Capture one elevation's automap raster, when it has tile data.
+    pub fn capture_automap_at(&mut self, elevation: u8) {
         self.process_seen();
         let number = self.map.header.map_number;
-        if !(0..automap::MAPS as i32).contains(&number) {
+        if !(0..automap::MAPS as i32).contains(&number)
+            || self
+                .map
+                .tiles
+                .get(usize::from(elevation))
+                .is_none_or(Option::is_none)
+        {
             return;
         }
-        let placed = self.automap_objects();
-        for elevation in 0..3_u8 {
-            if self.map.tiles[usize::from(elevation)].is_none() {
-                continue;
-            }
-            let raster = automap::raster_from_objects(&placed, elevation);
-            if let Err(error) =
-                self.persistence
-                    .automap
-                    .store(number as usize, usize::from(elevation), &raster)
-            {
-                self.diagnostic(format!("automap capture failed: {error}"));
-            }
+        let raster = automap::raster_from_objects(&self.automap_objects(), elevation);
+        if let Err(error) =
+            self.persistence
+                .automap
+                .store(number as usize, usize::from(elevation), &raster)
+        {
+            self.diagnostic(format!("automap capture failed: {error}"));
         }
     }
     /// The current map's working `.SAV` name: its requested file name, else
@@ -298,20 +304,46 @@ impl WorldState {
             .clone()
             .or_else(|| saved_map_name(&self.map.header.name))
     }
-    /// Write the current map into the working saved-map set (and capture its
-    /// automap); a map without a usable resource name is not persisted.
-    pub fn persist_current_map(&mut self, include_party: bool) {
+    /// Write the current map into the working saved-map set and capture its
+    /// automap for the player's elevation (SPEC-014 §3.35); a map without a
+    /// usable resource name is not persisted. Returns false when the write
+    /// failed.
+    pub fn persist_current_map(&mut self, include_party: bool) -> bool {
         // The seen flags are saved with the objects.
         self.process_seen();
         let Some(name) = self.current_map_name() else {
-            return;
+            return true;
         };
-        match self.export_map(include_party).write() {
+        let written = match self.export_map(include_party).write() {
             Ok(bytes) => {
                 self.persistence.maps.insert(name, bytes);
+                true
             }
-            Err(error) => self.diagnostic(format!("saved map {name} not written: {error}")),
+            Err(error) => {
+                self.diagnostic(format!("saved map {name} not written: {error}"));
+                false
+            }
+        };
+        let elevation = self
+            .get(self.player)
+            .map_or(self.elevation, |player| player.raw.elevation);
+        self.capture_automap_at(elevation);
+        written
+    }
+    /// SPEC-014 §3.35 the save on leaving a map: a map whose number is in
+    /// the SPEC-008 §2.8 excluded set (the desert and encounter maps) has
+    /// its working copy deleted and writes nothing, so it is rebuilt from
+    /// its `.MAP` on every visit; any other map is persisted. Returns false
+    /// when the write failed.
+    pub fn save_left_map(&mut self) -> bool {
+        let excluded = usize::try_from(self.map.header.map_number)
+            .is_ok_and(|number| automap::EXCLUDED.contains(&number));
+        if excluded {
+            if let Some(name) = self.current_map_name() {
+                self.persistence.maps.remove(&name);
+            }
+            return true;
         }
-        self.capture_automap();
+        self.persist_current_map(false)
     }
 }

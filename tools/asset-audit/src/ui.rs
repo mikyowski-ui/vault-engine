@@ -4,8 +4,9 @@
 //! color keys through `color.pal`, fonts, the elevator destinations, splash
 //! images, credits, endgame slide resources, premades, the location table
 //! and the new-game map; with the interactions, the SPEC-005 §3.8 jumpsuit
-//! rows and armor art fields, the SPEC-007 §3.9 thrown weapons, and the
-//! §3.10 action frames, projectile weapons and projectile art rates.
+//! rows and armor art fields, the SPEC-007 §3.9 thrown weapons, the §3.10
+//! action frames, projectile weapons and projectile art rates, the §3.11.3
+//! container reach bits, and the SPEC-014 §3.35 remains.
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -17,7 +18,7 @@ use vault_core::{
 use vault_formats::{
     ArtCatalog, Font, FrmArchive, LocalDirProvider, LocalPrototypeCatalog, LstKind, LstTable,
     MAX_ASSET_BYTES, MapFile, MsgCatalog, Palette, Prototype, Vfs, credits,
-    pro::{ItemData, PrototypeData},
+    pro::{ContainerFlags, ItemData, PrototypeData},
     rix,
 };
 
@@ -354,6 +355,75 @@ fn projectile_weapons(
     }
 }
 
+/// SPEC-007 §3.11.3 each container prototype's interaction word bit 0
+/// (the ground reach) is set exactly for the Ice Chests, Bones,
+/// Footlockers and the Crate, by their `pro_item.msg` names.
+fn container_reach(audit: &mut UiAudit, vfs: &LocalDirProvider, items: &BTreeMap<u32, Prototype>) {
+    let names = catalog(vfs, "pro_item.msg");
+    for (pid, prototype) in items {
+        let PrototypeData::Item(item) = &prototype.data else {
+            continue;
+        };
+        let ItemData::Container { flags, .. } = &item.data else {
+            continue;
+        };
+        let result = names.as_ref().map_err(Clone::clone).and_then(|names| {
+            let name = names
+                .get(prototype.message_base)
+                .map(|message| String::from_utf8_lossy(&message.text).into_owned())
+                .ok_or("no name")?;
+            let ground = matches!(
+                name.as_str(),
+                "Ice Chest" | "Bones" | "Footlocker" | "Crate"
+            );
+            (flags.contains(ContainerFlags::GROUND_REACH) == ground)
+                .then_some(())
+                .ok_or(format!("{name}: flags {:#x}", flags.0))
+        });
+        audit.record("container reach", &format!("{pid}"), result);
+    }
+}
+/// SPEC-014 §3.35 the remains: miscellaneous PID 4 shows `rscorpbl.frm`
+/// with nine frames, and item PID 213 is the Remains of Gizmo.
+fn remains(audit: &mut UiAudit, vfs: &LocalDirProvider, items: &BTreeMap<u32, Prototype>) {
+    let protos = list(vfs, "proto/misc/misc.lst", LstKind::Prototype);
+    let arts = list(vfs, "art/misc/misc.lst", LstKind::Art);
+    let result = (|| {
+        let protos = protos.as_ref().map_err(Clone::clone)?;
+        let file = protos
+            .prototype_id(0x0500_0004)
+            .and_then(|entry| entry.name.clone())
+            .ok_or("no misc prototype 4")?;
+        let path = format!("proto/misc/{}", String::from_utf8_lossy(&file));
+        let prototype = Prototype::parse(&read(vfs, &path)?).map_err(|error| error.to_string())?;
+        let listed = arts
+            .as_ref()
+            .map_err(Clone::clone)
+            .map(|list| row_name(list, prototype.art_id & 0xfff))?;
+        if listed.as_deref() != Some("rscorpbl.frm") {
+            return Err(format!("art {listed:?}"));
+        }
+        let frames = art(vfs, "art/misc/rscorpbl.frm")?.frame_count();
+        (frames == 9)
+            .then_some(())
+            .ok_or(format!("{frames} frames"))
+    })();
+    audit.record("remains", "misc 4", result);
+    let result = catalog(vfs, "pro_item.msg").and_then(|names| {
+        let prototype = items.get(&213).ok_or("no item prototype")?;
+        let name = names
+            .get(prototype.message_base)
+            .map(|message| message.text.clone());
+        (name.as_deref() == Some(b"Remains of Gizmo".as_slice()))
+            .then_some(())
+            .ok_or(format!(
+                "{:?}",
+                name.map(|name| String::from_utf8_lossy(&name).into_owned())
+            ))
+    });
+    audit.record("remains", "item 213", result);
+}
+
 /// SPEC-013: message texts, window art, and elevator destinations.
 pub fn audit_interactions(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Error>> {
     let mut audit = UiAudit::default();
@@ -510,6 +580,8 @@ pub fn audit_interactions(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Err
     thrown_weapons(&mut audit, vfs, &items);
     action_frames(&mut audit, vfs);
     projectile_weapons(&mut audit, vfs, &items);
+    container_reach(&mut audit, vfs, &items);
+    remains(&mut audit, vfs, &items);
     let mut misc: Vec<_> = (1000..=1005).map(|id| (id, None)).collect();
     misc.extend([
         (1006, Some("You have died from radiation sickness.")),

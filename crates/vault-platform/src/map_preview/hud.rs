@@ -803,8 +803,11 @@ impl MapPreview {
                 } else {
                     0
                 };
+                // SPEC-007 §3.11.1: a run when the `running` preference is
+                // on, which Shift inverts.
+                let run = (self.preferences.running != 0) != self.hud.modifiers[0];
                 if let Some(hex) = self.view.grid.pick_hex(point) {
-                    match self.host.walk_to_reserving(player, hex, reserve) {
+                    match self.host.walk_toward(player, hex, run, reserve) {
                         Ok(true) => {}
                         Ok(false) => self.status = b"You cannot get there".to_vec(),
                         Err(error) => self.status = error.to_string().into_bytes(),

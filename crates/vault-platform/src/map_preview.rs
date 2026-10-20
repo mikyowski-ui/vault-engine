@@ -688,6 +688,7 @@ impl MapPreview {
                 WorldEffect::RollArmorClass => self.hud.ac.animate = true,
                 WorldEffect::WorldMap => self.open_world_map(),
                 WorldEffect::TownMap => self.open_town_map(),
+                WorldEffect::MapSaveFailed => self.map_save_failed(),
                 // Look and examine already printed their text.
                 WorldEffect::DefaultAction {
                     action: ObjectAction::LookAt | ObjectAction::Description,

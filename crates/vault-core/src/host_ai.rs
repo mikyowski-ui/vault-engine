@@ -904,7 +904,6 @@ impl<A: WorldAssets> WorldHost<A> {
         };
         self.world.ai.callbacks.clear();
         self.request_taunt(critter, Taunt::Run)?;
-        self.emit_movement_sound(critter, true);
         let budget = usize::try_from(ap).unwrap_or(0);
         if let Some(movement) = self.plan_to_tile(critter, goal, budget) {
             self.run_movement(movement, budget)?;
@@ -938,7 +937,6 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.ai.callbacks.clear();
             return Ok(false);
         };
-        self.emit_movement_sound(critter, false);
         self.run_movement(movement, budget)?;
         self.run_taunts();
         Ok(true)
@@ -1169,9 +1167,6 @@ impl<A: WorldAssets> WorldHost<A> {
         if budget > 0
             && let Some(movement) = self.plan_to_object(critter, item)
         {
-            if !movement.directions.is_empty() {
-                self.emit_movement_sound(critter, false);
-            }
             self.run_movement(movement, budget)?;
         }
         if self.world.object_distance(critter, item) > 1 {

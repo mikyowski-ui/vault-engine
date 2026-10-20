@@ -4,7 +4,7 @@
 //! cells are drawn from the fixed terrain grid and their discovery values
 //! (unknown black, seen dim, visited full). Travel runs at most two loop
 //! iterations per update, about 24 updates per second.
-use super::{MapPreview, Screen, button, label, panel_text};
+use super::{MapPreview, Screen, button, dialog::Dialog, label, panel_text};
 use crate::AppResult;
 use vault_core::{
     TravelOutcome,
@@ -76,9 +76,20 @@ impl MapPreview {
             last_update: 0,
         });
     }
-    /// The current town's map (a town-map request from a script).
+    /// The current town's map (SPEC-013 §3.22 map -1). Under the safe rule
+    /// a town out of range, or one without its picture, opens the world
+    /// map at the current town instead.
     pub(crate) fn open_town_map(&mut self) {
         let town = self.host.world.world_map.saved.town.max(0) as usize;
+        let picture = self
+            .host
+            .assets
+            .interface_path(worldmap::TOWN_PICTURE_BASE + town as i32)
+            .and_then(|path| self.host.assets.frame(&path));
+        if town >= TOWNS.len() || picture.is_err() {
+            self.open_world_map();
+            return;
+        }
         let gvars = self.host.world.gvars.clone().unwrap_or_default();
         let buttons = self.host.world.world_map.town_buttons(town, &gvars);
         self.screen = Screen::Town(TownScreen {
@@ -86,6 +97,20 @@ impl MapPreview {
             picture: worldmap::TOWN_PICTURE_BASE + town as i32,
             buttons,
         });
+    }
+    /// SPEC-013 §3.22 the outgoing map could not be saved for the town or
+    /// world map: `map.msg` 1000 in a large box at (169, 116) with the
+    /// error sound; closing it returns to the main menu.
+    pub(crate) fn map_save_failed(&mut self) {
+        self.play_effect(vault_core::ui::ERROR_SOUND.as_bytes(), None);
+        let title = self.message("map.msg", 1000);
+        let dialog = Dialog::done(
+            [169, 116],
+            title,
+            Vec::new(),
+            vault_core::ui::ColorKey::ERROR,
+        );
+        self.show_dialog(dialog.quitting());
     }
     /// Head for a town: its center with signed 0-16 pixel jitter per axis.
     fn travel_to_town(&mut self, town: usize) {
@@ -124,6 +149,9 @@ impl MapPreview {
             KeyCode::ArrowRight => [CELL, 0],
             KeyCode::ArrowUp => [0, -CELL],
             KeyCode::ArrowDown => [0, CELL],
+            // A map left for the world map stays closed until a location
+            // is entered (SPEC-013 §3.22).
+            KeyCode::Escape if self.host.world.unloaded => return true,
             KeyCode::Escape => {
                 self.return_to_map();
                 return true;
@@ -196,7 +224,7 @@ impl MapPreview {
             self.enter_here();
             return true;
         }
-        if inside(CLOSE_BUTTON, point) {
+        if inside(CLOSE_BUTTON, point) && !self.host.world.unloaded {
             self.press();
             self.return_to_map();
             return true;
@@ -356,7 +384,9 @@ impl MapPreview {
                 );
             }
             button(&mut image, font, palette, b"Enter", ENTER_BUTTON);
-            button(&mut image, font, palette, b"Close", CLOSE_BUTTON);
+            if !self.host.world.unloaded {
+                button(&mut image, font, palette, b"Close", CLOSE_BUTTON);
+            }
             panel_text(&mut image, font, palette, &self.status, [22, 466], green);
         }
         Ok(image)

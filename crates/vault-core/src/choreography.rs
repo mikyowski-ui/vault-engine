@@ -1,11 +1,12 @@
-//! SPEC-007 §3.10 attack choreography. An attack registers one reserved
-//! sequence: an ordered list of entries, each with an owner and a start
-//! delay, run by the §3.10.1 start rule. Instant entries finish as they
-//! start; timed entries take frame steps at their own interval.
+//! SPEC-007 §3.10 animation sequences. A sequence is an ordered list of
+//! entries, each with an owner and a start delay, run by the §3.10.1 start
+//! rule ([`Schedule`]). Instant entries finish as they start; timed entries
+//! take frame steps at their own interval. A [`Driver`] says what entries
+//! do: the world's own sequences (SPEC-007 §3.11) act on world objects.
 //!
-//! A sequence is presentation. The world applies the attack at once, and
-//! the sequence only shows it: each object it owns is drawn from the
-//! sequence's display state for that object until the sequence ends.
+//! An attack's [`Sequence`] is presentation. The world applies the attack
+//! at once, and the sequence only shows it: each object it owns is drawn
+//! from the sequence's display state for that object until it ends.
 use crate::{ObjectRef, ai::TauntCallback};
 use std::collections::BTreeMap;
 
@@ -114,16 +115,43 @@ enum State {
     Finished,
 }
 
-/// One entry of a sequence.
+/// One entry of a sequence: its owner, start delay and action.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Entry {
-    pub owner: Owner,
+pub struct Entry<O, A> {
+    pub owner: O,
     pub delay: i32,
-    pub action: Action,
+    pub action: A,
     /// A forced callback or erase: it still runs when the sequence stops
     /// early (§3.10.1).
     pub forced: bool,
     state: State,
+}
+
+/// How an entry starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Begin {
+    /// An instant entry took effect and finished.
+    Done,
+    /// A timed entry runs; its first frame step is due at once.
+    Timed,
+    /// The entry failed as it started: the sequence stops (§3.10.1).
+    Failed,
+}
+/// What a running entry's frame step did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stepped {
+    /// It runs on; the next step is due this many milliseconds later.
+    After(u64),
+    /// It finished.
+    Done,
+}
+
+/// What a sequence's entries do when they start and step: the start rule
+/// itself is the [`Schedule`]'s.
+pub trait Driver<O, A> {
+    fn start(&mut self, entry: &mut Entry<O, A>, now_ms: u64) -> Begin;
+    /// Frame step `step` (1 for the first) of a running entry.
+    fn step(&mut self, entry: &mut Entry<O, A>, step: usize, now_ms: u64) -> Stepped;
 }
 
 /// What an examination or a pass started that the host acts on.
@@ -146,35 +174,29 @@ pub enum Refused {
     Art(u32),
 }
 
-/// One reserved, prioritized animation sequence.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Sequence {
-    entries: Vec<Entry>,
+/// The §3.10.1 start rule over one sequence's entries, whatever they do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Schedule<O, A> {
+    entries: Vec<Entry<O, A>>,
     /// The next entry to start; every earlier one has started.
     next: usize,
-    displays: BTreeMap<Owner, Display>,
     registered: bool,
+    /// An entry failed as it started, or the sequence was cancelled.
+    stopped: bool,
 }
-impl Sequence {
-    /// An owner's display before the sequence plays.
-    pub fn show(&mut self, owner: Owner, display: Display) {
-        self.displays.entry(owner).or_insert(display);
+impl<O, A> Default for Schedule<O, A> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            next: 0,
+            registered: false,
+            stopped: false,
+        }
     }
+}
+impl<O, A> Schedule<O, A> {
     /// Append an entry; past [`CAPACITY`] the sequence cannot register.
-    pub fn push(&mut self, owner: Owner, delay: i32, action: Action) -> Result<(), Refused> {
-        self.push_entry(owner, delay, action, false)
-    }
-    /// Append a forced callback or erase.
-    pub fn push_forced(&mut self, owner: Owner, delay: i32, action: Action) -> Result<(), Refused> {
-        self.push_entry(owner, delay, action, true)
-    }
-    fn push_entry(
-        &mut self,
-        owner: Owner,
-        delay: i32,
-        action: Action,
-        forced: bool,
-    ) -> Result<(), Refused> {
+    pub fn push(&mut self, owner: O, delay: i32, action: A, forced: bool) -> Result<(), Refused> {
         if self.entries.len() >= CAPACITY {
             return Err(Refused::Full);
         }
@@ -187,7 +209,7 @@ impl Sequence {
         });
         Ok(())
     }
-    pub fn entries(&self) -> &[Entry] {
+    pub fn entries(&self) -> &[Entry<O, A>] {
         &self.entries
     }
     pub fn len(&self) -> usize {
@@ -198,6 +220,10 @@ impl Sequence {
     }
     pub fn registered(&self) -> bool {
         self.registered
+    }
+    /// An entry failed as it started, or the sequence was cancelled.
+    pub fn stopped(&self) -> bool {
+        self.stopped
     }
     /// Every entry has finished.
     pub fn finished(&self) -> bool {
@@ -217,28 +243,20 @@ impl Sequence {
             .get(index)
             .is_some_and(|entry| matches!(entry.state, State::Running { .. }))
     }
-    pub fn display(&self, owner: Owner) -> Option<&Display> {
-        self.displays.get(&owner)
-    }
-    pub fn displays(&self) -> impl Iterator<Item = (&Owner, &Display)> {
-        self.displays.iter()
-    }
     /// Registration at `now_ms`: the first entry's delay is forced to 0,
     /// then the sequence is examined once.
-    pub fn register(&mut self, now_ms: u64) -> Vec<Started> {
+    pub fn register(&mut self, now_ms: u64, driver: &mut impl Driver<O, A>) {
         self.registered = true;
         if let Some(first) = self.entries.first_mut() {
             first.delay = 0;
         }
-        let mut started = Vec::new();
-        self.examine(now_ms, &mut started);
-        started
+        self.examine(now_ms, driver);
     }
     /// §3.10.1 an examination: start the next entry whatever its delay
     /// when every started entry has finished; otherwise a negative delay
     /// waits, a positive one counts down by one, and 0 starts it.
-    fn examine(&mut self, now_ms: u64, started: &mut Vec<Started>) {
-        while self.next < self.entries.len() {
+    fn examine(&mut self, now_ms: u64, driver: &mut impl Driver<O, A>) {
+        while !self.stopped && self.next < self.entries.len() {
             let settled = self.entries[..self.next]
                 .iter()
                 .all(|entry| entry.state == State::Finished);
@@ -254,32 +272,134 @@ impl Sequence {
             }
             let index = self.next;
             self.next += 1;
-            self.start(index, now_ms, started);
+            self.start(index, now_ms, driver);
         }
     }
     /// Start an entry: an instant one takes effect and finishes; a timed
     /// one takes its first frame step at the next pass that reaches it.
-    fn start(&mut self, index: usize, now_ms: u64, started: &mut Vec<Started>) {
+    fn start(&mut self, index: usize, now_ms: u64, driver: &mut impl Driver<O, A>) {
+        let begin = driver.start(&mut self.entries[index], now_ms);
         let entry = &mut self.entries[index];
-        let owner = entry.owner;
-        if entry.action.timed() {
-            entry.state = State::Running {
+        entry.state = match begin {
+            Begin::Timed => State::Running {
                 steps: 0,
                 due_ms: now_ms,
+            },
+            Begin::Done | Begin::Failed => State::Finished,
+        };
+        if begin == Begin::Failed {
+            self.stop(now_ms, driver);
+        }
+    }
+    /// §3.10.1 a sequence that stops while playing: running entries end,
+    /// unstarted forced entries run at once, and every other unstarted
+    /// entry (sounds among them) is dropped.
+    fn stop(&mut self, now_ms: u64, driver: &mut impl Driver<O, A>) {
+        self.stopped = true;
+        for index in 0..self.entries.len() {
+            let entry = &mut self.entries[index];
+            if entry.state == State::Waiting && entry.forced {
+                driver.start(entry, now_ms);
+            }
+            entry.state = State::Finished;
+        }
+        self.next = self.entries.len();
+    }
+    /// End the sequence where it stands, running nothing more.
+    pub fn cancel(&mut self) {
+        self.stopped = true;
+        for entry in &mut self.entries {
+            entry.state = State::Finished;
+        }
+        self.next = self.entries.len();
+    }
+    /// One scheduler pass at `now_ms`: each running timed entry whose step
+    /// is due takes one frame step, earlier-started entries first; an entry
+    /// started during the pass takes its first step in it.
+    pub fn pass(&mut self, now_ms: u64, driver: &mut impl Driver<O, A>) {
+        if !self.registered {
+            return;
+        }
+        let mut index = 0;
+        while index < self.entries.len() && !self.stopped {
+            if matches!(self.entries[index].state, State::Running { due_ms, .. } if due_ms <= now_ms)
+            {
+                self.step(index, now_ms, driver);
+            }
+            index += 1;
+        }
+    }
+    /// The earliest time a running entry's step is due.
+    pub fn due_ms(&self) -> Option<u64> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry.state {
+                State::Running { due_ms, .. } => Some(due_ms),
+                _ => None,
+            })
+            .min()
+    }
+    /// One frame step of a running entry: the sequence is examined at its
+    /// start, and again when the step finishes the entry.
+    fn step(&mut self, index: usize, now_ms: u64, driver: &mut impl Driver<O, A>) {
+        self.examine(now_ms, driver);
+        let State::Running { steps, .. } = self.entries[index].state else {
+            return;
+        };
+        let step = steps + 1;
+        let stepped = driver.step(&mut self.entries[index], step, now_ms);
+        let entry = &mut self.entries[index];
+        match (stepped, &mut entry.state) {
+            (Stepped::After(interval), State::Running { steps, due_ms }) => {
+                *steps = step;
+                *due_ms += interval.max(1);
+            }
+            (Stepped::Done, _) => {
+                entry.state = State::Finished;
+                self.examine(now_ms, driver);
+            }
+            // The step stopped the sequence.
+            _ => {}
+        }
+    }
+    /// Run every remaining step at once. Returns the time of the last pass.
+    pub fn run_to_end(&mut self, mut now_ms: u64, driver: &mut impl Driver<O, A>) -> u64 {
+        if !self.registered {
+            self.register(now_ms, driver);
+        }
+        for _ in 0..100_000 {
+            let Some(due) = self.due_ms() else {
+                break;
             };
+            now_ms = now_ms.max(due);
+            self.pass(now_ms, driver);
+        }
+        now_ms
+    }
+}
+
+/// The presentation's driver: entries act on the sequence's displays and
+/// report what the host plays.
+struct Present<'a> {
+    displays: &'a mut BTreeMap<Owner, Display>,
+    started: &'a mut Vec<Started>,
+}
+impl Driver<Owner, Action> for Present<'_> {
+    fn start(&mut self, entry: &mut Entry<Owner, Action>, _now_ms: u64) -> Begin {
+        let owner = entry.owner;
+        if entry.action.timed() {
             if let Some(display) = self.displays.get_mut(&owner) {
                 display.displacement = [0; 2];
             }
-            return;
+            return Begin::Timed;
         }
-        entry.state = State::Finished;
         match &entry.action {
-            Action::Sound { name, object } => started.push(Started::Sound {
+            Action::Sound { name, object } => self.started.push(Started::Sound {
                 name: name.clone(),
                 object: *object,
             }),
-            Action::Taunt(index) => started.push(Started::Taunt(*index)),
-            Action::Release(index) => started.push(Started::Release(*index)),
+            Action::Taunt(index) => self.started.push(Started::Taunt(*index)),
+            Action::Release(index) => self.started.push(Started::Release(*index)),
             Action::Corpse {
                 flat,
                 dropped,
@@ -303,51 +423,15 @@ impl Sequence {
                 }
             }
         }
+        Begin::Done
     }
-    /// One scheduler pass at `now_ms`: each running timed entry whose step
-    /// is due takes one frame step, earlier-started entries first; an entry
-    /// started during the pass takes its first step in it.
-    pub fn pass(&mut self, now_ms: u64) -> Vec<Started> {
-        let mut started = Vec::new();
-        if !self.registered {
-            return started;
-        }
-        let mut index = 0;
-        while index < self.entries.len() {
-            if matches!(self.entries[index].state, State::Running { due_ms, .. } if due_ms <= now_ms)
-            {
-                self.step(index, now_ms, &mut started);
-            }
-            index += 1;
-        }
-        started
-    }
-    /// The earliest time a running entry's step is due.
-    pub fn due_ms(&self) -> Option<u64> {
-        self.entries
-            .iter()
-            .filter_map(|entry| match entry.state {
-                State::Running { due_ms, .. } => Some(due_ms),
-                _ => None,
-            })
-            .min()
-    }
-    /// One frame step of a running entry: the sequence is examined at its
-    /// start; step k shows frame k - 1 (an animation) or node k - 1 (a
-    /// move). The step after an animation's last frame, or the one that
-    /// reaches a move's last node, finishes the entry and examines again.
-    fn step(&mut self, index: usize, now_ms: u64, started: &mut Vec<Started>) {
-        self.examine(now_ms, started);
-        let entry = &mut self.entries[index];
-        let State::Running { steps, due_ms } = &mut entry.state else {
-            return;
-        };
-        *steps += 1;
-        let step = *steps;
+    /// Step k shows frame k - 1 (an animation) or node k - 1 (a move). The
+    /// step after an animation's last frame, or the one that reaches a
+    /// move's last node, finishes the entry.
+    fn step(&mut self, entry: &mut Entry<Owner, Action>, step: usize, _now_ms: u64) -> Stepped {
         let display = self.displays.get_mut(&entry.owner);
-        let finished = match &entry.action {
+        match &entry.action {
             Action::Animate { art, frames, hide } => {
-                *due_ms += frames.interval_ms.max(1);
                 if let Some(shift) = frames.shifts.get(step - 1) {
                     if let Some(display) = display {
                         display.art = *art;
@@ -356,7 +440,7 @@ impl Sequence {
                         display.displacement[0] += shift[0];
                         display.displacement[1] += shift[1];
                     }
-                    false
+                    Stepped::After(frames.interval_ms)
                 } else {
                     if let Some(display) = display {
                         // Art that could not be loaded still takes effect.
@@ -368,40 +452,116 @@ impl Sequence {
                             display.hidden = true;
                         }
                     }
-                    true
+                    Stepped::Done
                 }
             }
             Action::Move { art, frames, nodes } => {
-                *due_ms += frames.interval_ms.max(1);
                 if let (Some(display), Some((hex, offset))) = (display, nodes.get(step - 1)) {
                     display.art = *art;
                     display.frame = (step - 1) % frames.shifts.len().max(1);
                     display.hex = Some(*hex);
                     display.displacement = *offset;
                 }
-                step >= nodes.len()
+                if step >= nodes.len() {
+                    Stepped::Done
+                } else {
+                    Stepped::After(frames.interval_ms)
+                }
             }
-            _ => true,
-        };
-        if finished {
-            entry.state = State::Finished;
-            self.examine(now_ms, started);
+            _ => Stepped::Done,
         }
+    }
+}
+
+/// One reserved, prioritized attack sequence: the start rule over
+/// presentation entries, and the displays they act on.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Sequence {
+    schedule: Schedule<Owner, Action>,
+    displays: BTreeMap<Owner, Display>,
+}
+impl Sequence {
+    /// An owner's display before the sequence plays.
+    pub fn show(&mut self, owner: Owner, display: Display) {
+        self.displays.entry(owner).or_insert(display);
+    }
+    /// Append an entry; past [`CAPACITY`] the sequence cannot register.
+    pub fn push(&mut self, owner: Owner, delay: i32, action: Action) -> Result<(), Refused> {
+        self.schedule.push(owner, delay, action, false)
+    }
+    /// Append a forced callback or erase.
+    pub fn push_forced(&mut self, owner: Owner, delay: i32, action: Action) -> Result<(), Refused> {
+        self.schedule.push(owner, delay, action, true)
+    }
+    pub fn entries(&self) -> &[Entry<Owner, Action>] {
+        self.schedule.entries()
+    }
+    pub fn len(&self) -> usize {
+        self.schedule.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.schedule.is_empty()
+    }
+    pub fn registered(&self) -> bool {
+        self.schedule.registered()
+    }
+    /// Every entry has finished.
+    pub fn finished(&self) -> bool {
+        self.schedule.finished()
+    }
+    /// Whether entry `index` has started (running or finished).
+    pub fn started(&self, index: usize) -> bool {
+        self.schedule.started(index)
+    }
+    /// Whether entry `index` is running.
+    pub fn running(&self, index: usize) -> bool {
+        self.schedule.running(index)
+    }
+    pub fn display(&self, owner: Owner) -> Option<&Display> {
+        self.displays.get(&owner)
+    }
+    pub fn displays(&self) -> impl Iterator<Item = (&Owner, &Display)> {
+        self.displays.iter()
+    }
+    /// Registration at `now_ms`; returns what started.
+    pub fn register(&mut self, now_ms: u64) -> Vec<Started> {
+        let mut started = Vec::new();
+        self.schedule.register(
+            now_ms,
+            &mut Present {
+                displays: &mut self.displays,
+                started: &mut started,
+            },
+        );
+        started
+    }
+    /// One scheduler pass at `now_ms`; returns what started.
+    pub fn pass(&mut self, now_ms: u64) -> Vec<Started> {
+        let mut started = Vec::new();
+        self.schedule.pass(
+            now_ms,
+            &mut Present {
+                displays: &mut self.displays,
+                started: &mut started,
+            },
+        );
+        started
+    }
+    /// The earliest time a running entry's step is due.
+    pub fn due_ms(&self) -> Option<u64> {
+        self.schedule.due_ms()
     }
     /// Run every remaining step at once (headless playback, and the final
     /// state an attack leaves). Returns what started, in order.
-    pub fn run_to_end(&mut self, mut now_ms: u64) -> Vec<Started> {
+    pub fn run_to_end(&mut self, now_ms: u64) -> Vec<Started> {
         let mut started = Vec::new();
-        if !self.registered {
-            started.extend(self.register(now_ms));
-        }
-        for _ in 0..100_000 {
-            let Some(due) = self.due_ms() else {
-                break;
-            };
-            now_ms = now_ms.max(due);
-            started.extend(self.pass(now_ms));
-        }
+        self.schedule.run_to_end(
+            now_ms,
+            &mut Present {
+                displays: &mut self.displays,
+                started: &mut started,
+            },
+        );
         started
     }
 }

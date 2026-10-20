@@ -26,13 +26,14 @@ use vault_formats::{
     sfx,
 };
 
-/// How attack shows play.
+/// How attack shows and the world's own sequences (SPEC-007 §3.11) play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Playback {
-    /// Each show plays to its end as soon as it is built (headless runs).
+    /// Each plays to its end as soon as it is registered (headless runs).
     #[default]
     Instant,
-    /// Shows play over time, one after another, and combat waits for them.
+    /// They play over time, shows one after another, and combat waits for
+    /// them.
     RealTime,
 }
 
@@ -158,9 +159,10 @@ enum Into {
 }
 
 impl<A: WorldAssets> WorldHost<A> {
-    /// Attack shows are still playing.
+    /// Attack shows are still playing, or in combat the world's own
+    /// sequences (a walk, a door): combat waits for them.
     pub fn presenting(&self) -> bool {
-        !self.world.shows.is_empty()
+        !self.world.shows.is_empty() || (self.world.combat && !self.motions.is_empty())
     }
     /// One playback pass at `now_ms`: the first show registers or takes a
     /// pass, starting its sounds and taunts; a finished show leaves and the
@@ -328,7 +330,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// A critter art identifier: `critter`'s base, `animation`, its art's
     /// weapon code unless `weapon` is given, facing `orientation`.
-    fn critter_fid(
+    pub(crate) fn critter_fid(
         &self,
         critter: ObjectRef,
         animation: u8,
@@ -349,7 +351,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// The frames of `fid` for `orientation`, at `trunc(1000 / fps)` ms a
     /// step (stored 0 is 10 fps), with `speed` added to the fps.
-    fn frames(&self, fid: u32, orientation: u8, speed: i32) -> Frames {
+    pub(crate) fn frames(&self, fid: u32, orientation: u8, speed: i32) -> Frames {
         let Ok(art) = self.assets.object_art(fid) else {
             return Frames {
                 shifts: Vec::new(),
@@ -376,7 +378,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// `combat_speed` for a walk animation in combat: every owner but the
     /// player, and the player with `player_speedup`.
-    fn walk_speed(&self, owner: ObjectRef) -> i32 {
+    pub(crate) fn walk_speed(&self, owner: ObjectRef) -> i32 {
         if self.world.combat && (owner != self.world.player || self.world.player_speedup) {
             self.world.combat_speed
         } else {

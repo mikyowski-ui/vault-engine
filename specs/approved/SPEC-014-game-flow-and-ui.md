@@ -20,7 +20,8 @@ This document covers:
 - mouse cursor shapes and modes: movement hex, action pick, action menu, targeting crosshair, edge scrolling and busy cursors;
 - the in-game automap window and the Pip-Boy automap page;
 - the player inventory and use-on windows: art, layout, stats panel, rotating figure, action menu, cursor modes and item dragging;
-- the endgame slideshow, ending movie and scrolling credits.
+- the endgame slideshow, ending movie and scrolling credits;
+- the working map set: how visited maps persist across map changes, saves and loads, and how a revisited map ages.
 
 The reference main menu has **no Options button**: its five buttons are Intro, New Game, Load Game, Credits and Exit. Options and Preferences are reached in game (section 3.17). `[Must-match]`
 
@@ -65,6 +66,7 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 | Inventory and use-on windows | Inventory module, item-art scaler, action-menu frame builder |
 | Map border and scroll limits | Tile module, map scroll and map load |
 | Endgame, credits | Endgame and credits modules, word wrapper |
+| Working map set, revisit aging | Map load/save, save-slot copying and game reset |
 
 ### Revision history
 
@@ -79,6 +81,12 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
   - Section 3.34: art list indices and window-relative geometry of the inventory and use-on windows, the stats panel and examine text, the rotating figure, and the inventory action menu with its Drop and Unload icons. Loot and barter geometry stays in SPEC-013 §3.16 and §3.18.
   - Section 3.29: exact player-distance test and the map-border rectangle, which in R1 accepts centers in hex columns 44-156 and rows 45-154.
   - Section 3.2: the skill-book fade row points to SPEC-013 §3.25, which now holds the skill-book rules. Explosion art and sounds are in SPEC-013 §3.10.
+- **R1-rev4 (2026-10-19).**
+  - New section 3.35 Working Map Set, Revisits and Aging covers persistent map state:
+    - when the per-map `.SAV` files are cleared, written, skipped and reloaded;
+    - what they hold, including map variables;
+    - how they travel with save slots;
+    - the revisit rules: lock unjamming, healing, and replacing old corpses with remains.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -1247,6 +1255,58 @@ After every drop the player art, stats and list are redrawn and the hand cursor 
 
 **Use-on window.** It has no drag. In the hand cursor, a left press on a list row uses that item on the target at once and closes the window; in combat this needs and spends 2 AP. The list is drawn first-to-last, but the press selects the item counted from the end of the list: row r at scroll offset o picks entry `length - 1 - (o + r)`. The used item can therefore differ from the one shown. `[May-improve]`: use the item drawn in the pressed row.
 
+### 3.35 Working Map Set, Revisits and Aging
+
+Area maps persist through the **working map set**: one `.SAV` file per visited map, in `MAPS\` under the writable data directory. That directory is the `master_patches` path of `fallout.cfg` `[system]`, or `DATA` when the key is absent.
+
+A `.SAV` is the map stream of SPEC-008 §2.9 and SPEC-003, with the saved bit set. It holds:
+
+- every object record: dead critters with their final art, door frames and open-door flags, lock and jam state, and items dropped anywhere;
+- the map's global variables (MVARs);
+- every script instance with its local variables.
+
+Campaign variables are not in it; they live in the save slot's `SAVE.DAT` (SPEC-008). `[Must-match]`
+
+**Clearing.** `[Must-match]` Every game reset deletes all `MAPS\*.SAV`. A reset happens at program start, on a new game, when a save is loaded (before the slot's copies are restored), and when a session returns to the main menu. A new game therefore always starts from the original `.MAP` files.
+
+**Leaving a map.** `[Must-match]` This happens before another map loads, and when the town map or world map opens (SPEC-013 §3.22):
+
+1. Stop all animations, and prepare the party members and their items for the move.
+2. Run the map-exit queue cleanup, then request `map_exit_p_proc` (SPEC-006 §3.5).
+3. Re-queue the game-time event, and restore the roof over the player's position.
+4. Set the map's saved bit `0x01` and record the current game time as its last visit.
+5. If the map number at the player's elevation is in the excluded set, delete any working `.SAV` for it and write nothing. The excluded set is SPEC-008 §2.8's initial set: maps 0-2, 19-23, 49-54 and 56-65, which are the desert and encounter maps. Those maps are rebuilt from their `.MAP` on every visit. Otherwise write `MAPS\<name>.SAV` and capture the automap for that elevation.
+6. Remove every object, the prototype cache and the tile data.
+
+**Loading a map.** `[Must-match]`
+
+- The name comes from `map.msg` by map number and is uppercased. Probe `MAPS\<name>.SAV`.
+- If it opens, load the saved copy. Under SPEC-006 §3.5 this means no `.GAM` initialization, and `map_enter_p_proc` receives 0. When that load finishes, including its map scripts, apply the revisit rules below and start the city music.
+- Otherwise load `<name>.MAP` fresh and clear the player's last-attacker reference.
+- Requesting the current map again still saves it and then reloads it.
+
+**Revisit rules.** These apply only after a saved copy loads, and only when the current game time is not earlier than its recorded last visit. Let h = `trunc((now - last visit) / 36000)`, in whole game hours. `[Must-match]` unless tagged.
+
+1. If h ≥ 24, unjam every lock on the map.
+2. If h ≥ 1, process every living critter other than the player and party members: clear its fleeing bit, and unless its kill type is robot, heal it by `14 × trunc(h / 3)` HP when it is below its maximum, without exceeding the maximum.
+3. If h > 144 (more than 6 days), replace every dead critter other than the player whose kill type is not robot with remains, in object order:
+   - Critter PID `0x01000031` gets item PID 213 (Remains of Gizmo), and its inventory is not dropped; it is destroyed with the corpse. Every other corpse drops its whole inventory on its hex and gets miscellaneous PID `0x05000004` (`rscorpbl.frm`, 9 frames).
+   - Place the remains on the corpse's hex and elevation. Draw r = `random(0, 3)` from the shared generator. The frame is r + 6 when bit `0x800` of the critter prototype's behavioral flags (SPEC-003 offset `0x2C`) is set; otherwise r + 3, except r alone for the rat and mantis kill types. A frame past the art's last frame is rejected, and the remains keep frame 0.
+   - Cancel the corpse's animations and erase it.
+
+   The draw can reach into the next three-frame group, or past the end of the art. `[May-improve]`: draw `random(0, 2)`, so the frame stays within its group of `rscorpbl.frm` (0-2, 3-5 or 6-8).
+4. The reference also has a branch for more than 14 days, which would remove miscellaneous PID `0x0500000B` objects. It is unreachable, because the more-than-6-days test is made first, so such objects are never removed.
+
+**Saving and loading a game.** `[Must-match]`
+
+1. Saving first writes the current map into the working set without leaving it. The map is marked saved with the current time as its last visit, and it is written even when it is an excluded map, because that exclusion is tested only when leaving.
+2. Every `MAPS\*.SAV` is then copied into the slot folder, and their names are listed in `SAVE.DAT`. `AUTOMAP.DB` is stored as `AUTOMAP.SAV` (SPEC-008 §2.4-§2.5 and §3.3).
+3. Loading erases the working `.SAV` set and `AUTOMAP.DB`, and copies the slot's listed files back.
+4. It then loads the current map from its `.SAV` with the revisit rules above. No hours have passed at that point, so they change nothing.
+5. Leaving an excluded map that was loaded this way deletes its working `.SAV` again.
+
+Returning to a town therefore shows exactly the state left there, apart from the revisit rules: corpses, opened doors, dropped and moved items, map variables and script state.
+
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
 These vectors are invented and computed from the rules above; none is a shipped asset.
@@ -1329,4 +1389,4 @@ With a bullet width of 6 pixels, the first line of a message holds text narrower
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 30 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc"). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. The sound name "toggle" is also flagged. The section 3.29 border values were recomputed with an independent model of the hex-to-screen transform and checked against the entry hexes of all 72 corpus maps. Section 3.34 art sizes were read from the corpus FRM headers. Tag count, excluding the two tag definitions: 134 `[Must-match]`, 52 `[May-improve]`.
+Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 31 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles", and the configuration section name "system"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc"). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. The sound name "toggle" is also flagged. The section 3.29 border values were recomputed with an independent model of the hex-to-screen transform and checked against the entry hexes of all 72 corpus maps. Section 3.34 art sizes were read from the corpus FRM headers. Section 3.35 file and frame facts were checked against the corpus (`rscorpbl.frm` has 9 frames; item PID 213 is Remains of Gizmo). Tag count, excluding the two tag definitions: 140 `[Must-match]`, 53 `[May-improve]`.
