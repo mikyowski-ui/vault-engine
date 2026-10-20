@@ -120,41 +120,6 @@ impl<A: WorldAssets> WorldHost<A> {
         let name = self.character_sound_name(object, if run { 19 } else { 1 }, 0);
         self.emit_effect(name, object);
     }
-    /// Attack cues: a weapon's attack effect, then on a hit its hit effect
-    /// with the target's material (owned by the target). An unarmed attack
-    /// uses the punch or kick character effect, with the contact selector
-    /// (4) on a hit.
-    pub(crate) fn emit_attack_sounds(
-        &mut self,
-        attacker: ObjectRef,
-        target: ObjectRef,
-        hit_mode: u8,
-        hit: bool,
-    ) {
-        match self.world.wielded(attacker, hit_mode) {
-            Some(weapon) => {
-                let attack = self.weapon_sound_name(sfx::effect::ATTACK, weapon, hit_mode, 0);
-                self.emit_effect(attack, attacker);
-                if hit {
-                    let hit = self.weapon_sound_name(sfx::effect::HIT, weapon, hit_mode, target);
-                    self.emit_effect(hit, target);
-                }
-            }
-            None => {
-                let animation = if hit_mode == crate::critical::hit_mode::KICK {
-                    17
-                } else {
-                    16
-                };
-                let swing = self.character_sound_name(attacker, animation, 0);
-                self.emit_effect(swing, attacker);
-                if hit {
-                    let contact = self.character_sound_name(attacker, animation, 4);
-                    self.emit_effect(contact, attacker);
-                }
-            }
-        }
-    }
     /// Emit a weapon sound request with its effect name (ready and out of
     /// ammunition always use variant 1).
     pub(crate) fn emit_weapon_sound(&mut self, object: ObjectRef, weapon: ObjectRef, effect: u8) {

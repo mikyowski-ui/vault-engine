@@ -1302,14 +1302,19 @@ fn spec007_player_punch_upgrades_to_kick_through_the_crosshair() {
     // the kick draw D(1, 4) gives `first`.
     let attack = |kick_art: bool, first: i32| {
         let dir = corpus();
-        if kick_art {
+        // SPEC-007 §3.10.1: an attack whose sequence art is missing does
+        // not register, so the punch and every reaction get art.
+        let suffixes = ["aq", "an", "ao", "ap", "ba", "bb", "bo", "bp", "ch", "cj"];
+        for suffix in suffixes.iter().chain(kick_art.then_some(&"ar")) {
             std::fs::copy(
                 dir.path().join("art/critters/sampleaa.frm"),
-                dir.path().join("art/critters/samplear.frm"),
+                dir.path().join(format!("art/critters/sample{suffix}.frm")),
             )
             .unwrap();
         }
         let mut preview = world(dir.path());
+        // The show plays at once, so its sounds follow the tap.
+        preview.host.playback = vault_core::host_choreography::Playback::Instant;
         let player = preview.host.world.player;
         let target = npc(&preview);
         let object = preview.host.world.get(target).unwrap();

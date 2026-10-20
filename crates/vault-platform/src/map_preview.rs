@@ -381,8 +381,10 @@ impl MapPreview {
         // SPEC-005 §3.8: loading the player sheet runs the gender update.
         host.update_player_gender();
         host.interactive_dialogue = true;
-        // The desktop plays every movie and reports its end.
+        // The desktop plays every movie and reports its end, and plays
+        // attacks over time (SPEC-007 §3.10).
         host.movie_policy = MoviePolicy::WaitUntilFinished;
+        host.playback = vault_core::host_choreography::Playback::RealTime;
         // A preview can run without campaign globals; the failure is reported.
         if let Err(error) = host.load_campaign() {
             tracing::warn!(%error, "campaign initializer unavailable");

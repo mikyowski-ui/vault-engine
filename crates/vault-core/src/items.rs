@@ -189,9 +189,13 @@ impl WorldState {
     /// stacks (equipped, used/armed, a container, or holding contents).
     /// Ammunition rounds and the money amount are left out.
     fn stack_key(&self, item: ObjectRef) -> Option<(u32, i32, ObjectState)> {
+        self.stack_key_masked(item, EQUIPPED | BasicFlags::USED.0)
+    }
+    /// The stacking key, refusing objects with any flag of `refused`.
+    fn stack_key_masked(&self, item: ObjectRef, refused: u32) -> Option<(u32, i32, ObjectState)> {
         let object = self.get(item)?;
         let data = item_of(object)?;
-        if object.raw.flags.0 & (EQUIPPED | BasicFlags::USED.0) != 0
+        if object.raw.flags.0 & refused != 0
             || matches!(data.data, ItemData::Container { .. })
             || !object.inventory.is_empty()
         {
@@ -455,10 +459,28 @@ impl WorldState {
         self.add_item(attacker, refill, 1, true)?;
         Ok((item, Some(refill)))
     }
+    /// The entry that refills the hand when `item`, still carried, is
+    /// thrown (SPEC-007 §3.9): the first other entry identical to it once
+    /// its hand flags are gone.
+    pub(crate) fn refill_for(&self, owner: ObjectRef, item: ObjectRef) -> Option<ObjectRef> {
+        let key = self.stack_key_masked(item, BasicFlags::USED.0)?;
+        self.first_matching(owner, |entry| {
+            entry != item && self.stack_key(entry).as_ref() == Some(&key)
+        })
+    }
     /// The first entry of `owner`'s inventory identical to `item`, in
     /// order and through nested containers.
     fn first_identical(&self, owner: ObjectRef, item: ObjectRef) -> Option<ObjectRef> {
         let key = self.stack_key(item)?;
+        self.first_matching(owner, |entry| self.stack_key(entry).as_ref() == Some(&key))
+    }
+    /// The first entry of `owner`'s inventory, in order and through nested
+    /// containers, that `matches`.
+    fn first_matching(
+        &self,
+        owner: ObjectRef,
+        matches: impl Fn(ObjectRef) -> bool,
+    ) -> Option<ObjectRef> {
         let entries = |object: ObjectRef| {
             self.get(object)
                 .map(|found| {
@@ -473,7 +495,7 @@ impl WorldState {
         };
         let mut pending: Vec<ObjectRef> = entries(owner);
         while let Some(entry) = pending.pop() {
-            if self.stack_key(entry).as_ref() == Some(&key) {
+            if matches(entry) {
                 return Some(entry);
             }
             pending.extend(entries(entry));

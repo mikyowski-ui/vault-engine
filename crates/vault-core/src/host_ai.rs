@@ -68,7 +68,7 @@ impl WorldState {
             .and_then(|object| object.character.as_ref())
             .map_or(0, |sheet| sheet.body)
     }
-    fn critter_art(&self, object: ObjectRef) -> bool {
+    pub(crate) fn critter_art(&self, object: ObjectRef) -> bool {
         self.get(object)
             .is_some_and(|object| Fid(object.raw.art_id).category() == 1)
     }
@@ -196,6 +196,8 @@ fn refusal_code(refusal: Refusal) -> u8 {
         Refusal::Obstructed => 5,
         Refusal::CrippledArmTwoHanded => 6,
         Refusal::CrippledArms => 7,
+        // Preflight never refuses this way; only sequencing does.
+        Refusal::Sequence => 0,
     }
 }
 
@@ -638,17 +640,16 @@ impl<A: WorldAssets> WorldHost<A> {
             impact,
         ))
     }
-    /// §3.17 attack-form request sites, after the hit location is final:
-    /// the attacker's attack taunt, then the hit (survived) or miss taunt
-    /// from the attacker for melee forms or the defender otherwise.
-    pub(crate) fn attack_taunts(
+    /// §3.17 the hit (survived) or miss taunt of an attack's result,
+    /// spoken by the attacker for melee forms and by the defender
+    /// otherwise; the attack taunt is the attacker's own request.
+    pub(crate) fn request_result_taunt(
         &mut self,
         attacker: ObjectRef,
         defender: ObjectRef,
         attack: &Attack,
         result: &Resolution,
-    ) -> Result<(), WorldError> {
-        self.request_taunt(attacker, Taunt::Attack)?;
+    ) -> Result<bool, WorldError> {
         let speaker = if ai::melee_form(ai::attack_animation(attack.mode())) {
             attacker
         } else {
@@ -660,11 +661,12 @@ impl<A: WorldAssets> WorldHost<A> {
             attack.location
         };
         if result.defender_flags & effect::HIT == 0 {
-            self.request_taunt(speaker, Taunt::Miss)?;
+            self.request_taunt(speaker, Taunt::Miss)
         } else if result.defender_flags & effect::DEAD == 0 {
-            self.request_taunt(speaker, Taunt::Hit(place))?;
+            self.request_taunt(speaker, Taunt::Hit(place))
+        } else {
+            Ok(false)
         }
-        Ok(())
     }
     /// §3.17 taunt request: critter PID, taunts enabled, a living conscious
     /// non-player speaker, the chance draw, a nonempty inclusive range, the
@@ -719,24 +721,29 @@ impl<A: WorldAssets> WorldHost<A> {
     /// its buffer's text at callback time unless any floating text exists.
     pub fn run_taunts(&mut self) {
         for callback in std::mem::take(&mut self.world.ai.callbacks) {
-            let now = self.world.elapsed_ms;
-            self.world.floating.retain(|(_, expiry)| *expiry > now);
-            let text = self.world.ai.taunts[callback.buffer].clone();
-            if !self.world.floating.is_empty()
-                || text.is_empty()
-                || self.world.get(callback.speaker).is_none()
-            {
-                continue;
-            }
-            self.register_floating(callback.speaker, callback.font, &text);
-            self.world.emit(WorldEffect::Taunt {
-                object: callback.speaker,
-                text,
-                font: callback.font,
-                color: callback.color,
-                outline: callback.outline,
-            });
+            self.show_taunt(&callback);
         }
+    }
+    /// One taunt callback: its buffer's text, now, unless any floating text
+    /// exists.
+    pub(crate) fn show_taunt(&mut self, callback: &TauntCallback) {
+        let now = self.world.elapsed_ms;
+        self.world.floating.retain(|(_, expiry)| *expiry > now);
+        let text = self.world.ai.taunts[callback.buffer].clone();
+        if !self.world.floating.is_empty()
+            || text.is_empty()
+            || self.world.get(callback.speaker).is_none()
+        {
+            return;
+        }
+        self.register_floating(callback.speaker, callback.font, &text);
+        self.world.emit(WorldEffect::Taunt {
+            object: callback.speaker,
+            text,
+            font: callback.font,
+            color: callback.color,
+            outline: callback.outline,
+        });
     }
     /// Track a new floating text over `object` for the floating-text
     /// subsystem's default lifetime (3500 ms plus 1399 ms per line, words

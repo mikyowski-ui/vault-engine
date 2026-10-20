@@ -208,6 +208,11 @@ impl WorldAssets for ItemAssets {
             .cloned()
             .ok_or_else(|| WorldError::Invalid(format!("no art {fid:#x}")))
     }
+    /// Every art identifier counts as existing, so that attack sequences
+    /// register (SPEC-007 §3.10.1).
+    fn art_exists(&self, _fid: u32) -> bool {
+        true
+    }
     fn art_row(&self, category: u8, name: &[u8]) -> Option<u16> {
         let row = (category == 1).then(|| {
             self.critters

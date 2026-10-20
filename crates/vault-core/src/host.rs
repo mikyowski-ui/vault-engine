@@ -87,6 +87,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub combat_ai: Box<dyn crate::combat_state::CombatAi>,
     pub building_animation: Option<AnimationSequence>,
     pub animations: Vec<AnimationSequence>,
+    /// SPEC-007 §3.10 how attack shows play: at once (the default for
+    /// headless runs) or over time, with combat waiting for them.
+    pub playback: crate::host_choreography::Playback,
     pub floating_style: i32,
     dialogue_waiters: Vec<u32>,
     dialogue_callbacks: Vec<u32>,
@@ -225,6 +228,7 @@ impl<A: WorldAssets> WorldHost<A> {
             combat_ai: Box::new(crate::combat_state::PacketAi),
             building_animation: None,
             animations: Vec::new(),
+            playback: Default::default(),
             floating_style: 1,
             dialogue_waiters: Vec::new(),
             dialogue_callbacks: Vec::new(),
@@ -853,19 +857,19 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.step_animations(now_ms)? {
             changed_by_animation = true;
         }
-        // SPEC-007 §3.9 projectiles fly first: an explosive one's arrival
-        // starts its explosion art. SPEC-013 §3.10: explosion art plays at
-        // its own rate; an animated explosion's damage step follows its
-        // last art.
-        if self.step_projectiles(now_ms) {
+        // SPEC-007 §3.10 attack shows play in order; SPEC-013 §3.10: a timed
+        // or scripted explosion's art plays at its own rate, and its damage
+        // step follows its last art.
+        if self.step_shows(now_ms) {
             changed_by_animation = true;
         }
         if self.step_explosions(now_ms)? {
             changed_by_animation = true;
         }
         // SPEC-007: service scripted combat requests and advance turns until
-        // the player must act (host-configured AI drives NPC turns).
-        if self.service_combat_request()? || self.world.combat {
+        // the player must act (host-configured AI drives NPC turns). Combat
+        // waits while an attack still plays.
+        if !self.presenting() && (self.service_combat_request()? || self.world.combat) {
             let mut ai =
                 std::mem::replace(&mut self.combat_ai, Box::new(crate::combat_state::NoAi));
             let progress = self.advance_combat(&mut *ai);

@@ -434,118 +434,6 @@ impl ExplosionArt {
     }
 }
 
-/// SPEC-007 §3.9 a projectile's flight, presentation only: the attack has
-/// already taken a thrown unit from the attacker, placed it where it lands
-/// and applied the damage. The projectile stays hidden for the throw's
-/// action frame, then shows at the origin hex and moves one stride-32 ray
-/// sample per frame step to its arrival. There an explosive one turns into
-/// its explosion art; a thrown item that stays is drawn again as the item
-/// it is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectileFlight {
-    /// The thrown item that stays on the map; it is left out of the drawn
-    /// map until the flight ends.
-    pub item: Option<ObjectRef>,
-    /// The projectile art, facing `orientation`.
-    pub fid: u32,
-    pub orientation: u8,
-    pub elevation: u8,
-    /// The origin hex's center, then each ray sample: hex and pixel offset
-    /// from that hex's center.
-    pub path: Vec<(i32, [i32; 2])>,
-    /// Frame steps hidden (the throw art's action frame), `wait_ms` each.
-    pub wait: u32,
-    pub wait_ms: u64,
-    /// The interval of one step of the move.
-    pub interval_ms: u64,
-    /// The path position shown; `None` while hidden.
-    pub position: Option<usize>,
-    /// The flight sound, played when the projectile shows, and the hit
-    /// sound with the move steps it waits (a non-explosive arrival).
-    pub flight_sound: Option<Vec<u8>>,
-    pub hit_sound: Option<(usize, Vec<u8>)>,
-    /// The explosion that replaces the projectile on arrival, with the
-    /// explosion's own hit sound.
-    pub explosion: Option<(ExplosionArt, Option<Vec<u8>>)>,
-    /// When the next step is due; `None` before the first poll.
-    pub next_ms: Option<u64>,
-    pub done: bool,
-}
-/// What one flight step started.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FlightEvent {
-    Sound(Vec<u8>),
-    Explosion(ExplosionArt, Option<Vec<u8>>),
-}
-impl ProjectileFlight {
-    /// One scheduler step: a hidden wait, the showing at the origin with
-    /// the flight sound, a move step, or the arrival after the last sample.
-    fn step(&mut self, events: &mut Vec<FlightEvent>) {
-        if self.wait > 0 {
-            self.wait -= 1;
-            return;
-        }
-        let moved = match self.position {
-            None => 0,
-            Some(position) if position + 1 < self.path.len() => position + 1,
-            Some(_) => {
-                self.done = true;
-                if let Some((art, sound)) = self.explosion.take() {
-                    events.push(FlightEvent::Explosion(art, sound));
-                }
-                return;
-            }
-        };
-        if moved == 0 {
-            events.extend(self.flight_sound.take().map(FlightEvent::Sound));
-        }
-        self.position = Some(moved);
-        if self
-            .hit_sound
-            .as_ref()
-            .is_some_and(|(wait, _)| *wait == moved)
-        {
-            events.extend(
-                self.hit_sound
-                    .take()
-                    .map(|(_, name)| FlightEvent::Sound(name)),
-            );
-        }
-    }
-    /// Advance to `now_ms`; returns the sounds and explosions started.
-    pub fn poll(&mut self, now_ms: u64) -> Vec<FlightEvent> {
-        let mut events = Vec::new();
-        loop {
-            match self.next_ms {
-                Some(due) if due > now_ms => break,
-                _ => {}
-            }
-            if self.done {
-                break;
-            }
-            let hidden = self.position.is_none() && self.wait > 0;
-            self.step(&mut events);
-            let interval = if hidden {
-                self.wait_ms
-            } else {
-                self.interval_ms
-            };
-            self.next_ms = Some(self.next_ms.unwrap_or(now_ms) + interval.max(1));
-        }
-        events
-    }
-    /// The projectile as a map object while it shows.
-    fn record(&self) -> Option<MapObject> {
-        let (hex, offset) = *self.path.get(self.position?)?;
-        let mut record = object_record(EXPLOSION_ART_PID, EXPLOSION_ART_ID);
-        record.art_id = self.fid;
-        record.hex = Some(hex);
-        record.displacement = offset;
-        record.orientation = self.orientation;
-        record.elevation = self.elevation;
-        Some(record)
-    }
-}
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorldEffect {
     Diagnostic(String),
@@ -731,11 +619,14 @@ pub struct WorldState {
     pub pending_explosion: Option<ExplosionRequest>,
     /// SPEC-013 §3.10 the animated explosion in progress, if any.
     pub explosion: Option<ActiveExplosion>,
-    /// SPEC-013 §3.10 weapon explosions' art, played after their attack's
-    /// damage (presentation only).
-    pub explosion_effects: Vec<ExplosionArt>,
-    /// SPEC-007 §3.9 projectiles in flight (presentation only).
-    pub projectiles: Vec<ProjectileFlight>,
+    /// SPEC-007 §3.10 attack presentations, played in order: each owns the
+    /// drawn state of the objects it shows until it ends.
+    pub shows: VecDeque<crate::choreography::Show>,
+    /// The SPEC-014 preferences the choreography reads: `combat_speed`,
+    /// added to the walk animation's rate in combat, and `player_speedup`,
+    /// which lets the player's walking use it too.
+    pub combat_speed: i32,
+    pub player_speedup: bool,
     /// SPEC-005 §3.8 the default player art index: the jumpsuit for the
     /// player's gender, set by each gender update (0 before the first).
     pub default_player_art: u16,
@@ -800,6 +691,23 @@ pub fn empty_map() -> MapFile {
         consumed_len: 0,
         diagnostics: Vec::new(),
     }
+}
+/// A record drawn as a presentation display shows it; `None` when the
+/// display is off the map or hidden.
+fn displayed(mut record: MapObject, display: &crate::choreography::Display) -> Option<MapObject> {
+    if display.hidden {
+        return None;
+    }
+    record.hex = Some(display.hex?);
+    record.art_id = display.art;
+    record.frame = display.frame;
+    record.elevation = display.elevation;
+    record.orientation = display.orientation;
+    record.displacement = display.displacement;
+    if display.flat {
+        record.flags.0 |= BasicFlags::FLAT.0;
+    }
+    Some(record)
 }
 pub fn object_record(pid: u32, id: u32) -> MapObject {
     MapObject {
@@ -880,8 +788,9 @@ impl WorldState {
             pending_loot: None,
             pending_explosion: None,
             explosion: None,
-            explosion_effects: Vec::new(),
-            projectiles: Vec::new(),
+            shows: VecDeque::new(),
+            combat_speed: 0,
+            player_speedup: false,
             default_player_art: 0,
             visited: vec![0; crate::persistence::VISITED_BYTES],
             combat_quit: false,
@@ -1329,34 +1238,45 @@ impl WorldState {
         let mut map = self.map.clone();
         map.objects.elevations = std::array::from_fn(|_| Vec::new());
         map.objects.total = 0;
-        // A thrown item still in flight is drawn as its projectile.
-        let flying: BTreeSet<ObjectRef> = self
-            .projectiles
-            .iter()
-            .filter(|flight| !flight.done)
-            .filter_map(|flight| flight.item)
-            .collect();
-        for (reference, object) in self.iter() {
-            if object.owner.is_none()
-                && object.active
-                && object.raw.elevation < 3
-                && !flying.contains(&reference)
-            {
-                map.objects.elevations[object.raw.elevation as usize].push(object.raw.clone());
-                map.objects.total += 1;
-            }
+        // SPEC-007 §3.10: an object an attack presentation owns is drawn as
+        // the earliest one still to finish draws it. Owners only the
+        // presentation knows (a created projectile, explosion art, an
+        // erased grenade) are drawn from their displays alone.
+        use crate::choreography::{Display, Owner};
+        let mut owned: BTreeMap<Owner, &Display> = BTreeMap::new();
+        for (owner, display) in self.shows.iter().flat_map(|show| show.displays()) {
+            owned.entry(*owner).or_insert(display);
         }
-        for record in self.projectiles.iter().filter_map(ProjectileFlight::record) {
+        let mut push = |record: MapObject| {
             if let Some(elevation) = map.objects.elevations.get_mut(record.elevation as usize) {
                 elevation.push(record);
                 map.objects.total += 1;
             }
+        };
+        for (reference, object) in self.iter() {
+            if object.owner.is_some() || !object.active || object.raw.elevation >= 3 {
+                continue;
+            }
+            match owned.remove(&Owner::World(reference)) {
+                Some(display) => {
+                    if let Some(record) = displayed(object.raw.clone(), display) {
+                        push(record);
+                    }
+                }
+                None => push(object.raw.clone()),
+            }
         }
-        // SPEC-013 §3.10 the explosion art playing now.
-        let arts = self.explosion.iter().map(|explosion| &explosion.art);
-        for record in arts
-            .chain(&self.explosion_effects)
-            .flat_map(ExplosionArt::records)
+        for (_, display) in owned {
+            let record = object_record(display.pid, EXPLOSION_ART_ID);
+            if let Some(record) = displayed(record, display) {
+                push(record);
+            }
+        }
+        // SPEC-013 §3.10 the timed or scripted explosion's art playing now.
+        for record in self
+            .explosion
+            .iter()
+            .flat_map(|explosion| explosion.art.records())
         {
             if let Some(elevation) = map.objects.elevations.get_mut(record.elevation as usize) {
                 elevation.push(record);
@@ -1685,6 +1605,25 @@ impl WorldState {
         };
         self.rebuild_lighting();
         Ok(())
+    }
+    /// SPEC-007 §3.9 setting an object's light: the radius is clamped to
+    /// at most 8 at the given intensity, and an intensity of 0 or less sets
+    /// both to 0.
+    pub fn set_light(&mut self, reference: ObjectRef, radius: i32, intensity: i32) {
+        if let Some(object) = self.get_mut(reference) {
+            object.raw.light = if intensity > 0 {
+                Light {
+                    radius: radius.min(8),
+                    intensity,
+                }
+            } else {
+                Light {
+                    radius: 0,
+                    intensity: 0,
+                }
+            };
+        }
+        self.rebuild_lighting();
     }
     pub fn rebuild_lighting(&mut self) {
         for layer in &mut self.tile_light {

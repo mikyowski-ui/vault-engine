@@ -33,6 +33,10 @@ impl WorldAssets for SoundAssets {
     fn art_token(&self, category: u8, index: u16) -> Option<Vec<u8>> {
         self.tokens.get(&(category, index)).cloned()
     }
+    /// Every art exists but the kick (17), so a punch stays a punch.
+    fn art_exists(&self, fid: u32) -> bool {
+        vault_formats::Fid(fid).animation() != 17
+    }
     fn available(&self, path: &[u8]) -> bool {
         let stem = path
             .strip_prefix(b"sound/sfx/")
@@ -275,7 +279,10 @@ fn spec010_cues_for_doors_containers_attacks_and_movement() {
         .unwrap();
     assert_eq!(effects(&mut host), [("HMJMPSAB".to_string(), Some(player))]);
 
-    // Unarmed: the punch effect, and its contact effect on a hit.
+    // Unarmed (SPEC-007 §3.10.2-3.10.3): the punch effect on the attacker
+    // and, on a hit, its contact effect on the attacker's action frame; the
+    // defender then reacts with its own effect, or dodges a miss with its
+    // dodge effect.
     let mode = crate::critical::hit_mode::PUNCH;
     let result = host
         .perform_attack(
@@ -288,13 +295,32 @@ fn spec010_cues_for_doors_containers_attacks_and_movement() {
         .unwrap()
         .unwrap();
     let hit = result.defender_flags & crate::critical::effect::HIT != 0;
-    let mut expected = vec![("HMJMPSAQ".to_string(), Some(player))];
+    let (mine, theirs): (Vec<_>, Vec<_>) = effects(&mut host)
+        .into_iter()
+        .partition(|(_, owner)| *owner == Some(player));
+    let mut expected = vec!["HMJMPSAQ".to_string()];
     if hit {
-        expected.push(("HMJMPSZQ".to_string(), Some(player)));
+        expected.push("HMJMPSZQ".to_string());
     }
-    assert_eq!(effects(&mut host), expected);
-    // Armed: the weapon's attack effect, then its hit effect on the critter
-    // target (no material: `F`), owned by the target.
+    assert_eq!(
+        mine.into_iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        expected
+    );
+    let reacted: Vec<_> = theirs
+        .iter()
+        .map(|(name, owner)| (name.as_str(), *owner))
+        .collect();
+    if hit {
+        assert!(
+            matches!(reacted.as_slice(), [("HMJMPSAO" | "HMJMPSAP" | "HMJMPSBA" | "HMJMPSBB", Some(owner))] if *owner == critter),
+            "{reacted:?}"
+        );
+    } else {
+        assert_eq!(reacted, [("HMJMPSAN", Some(critter))]);
+    }
+    // Armed: the weapon's attack effect, then its hit effect, both on the
+    // attacker; the hit's material comes from the critter target (none:
+    // `F`).
     host.world
         .equip(player, club, vault_formats::pro::BasicFlags::RIGHT_HAND.0)
         .unwrap();
@@ -310,9 +336,14 @@ fn spec010_cues_for_doors_containers_attacks_and_movement() {
         .unwrap()
         .unwrap();
     let hit = result.defender_flags & crate::critical::effect::HIT != 0;
-    let mut expected = vec![("WAE1XXX1".to_string(), Some(player))];
+    let mut expected = vec!["WAE1XXX1".to_string()];
     if hit {
-        expected.push(("WHE1FXX1".to_string(), Some(critter)));
+        expected.push("WHE1FXX1".to_string());
     }
-    assert_eq!(effects(&mut host), expected);
+    let mine: Vec<_> = effects(&mut host)
+        .into_iter()
+        .filter(|(_, owner)| *owner == Some(player))
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(mine, expected);
 }

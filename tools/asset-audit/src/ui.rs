@@ -4,7 +4,8 @@
 //! color keys through `color.pal`, fonts, the elevator destinations, splash
 //! images, credits, endgame slide resources, premades, the location table
 //! and the new-game map; with the interactions, the SPEC-005 §3.8 jumpsuit
-//! rows and armor art fields and the SPEC-007 §3.9 thrown weapons.
+//! rows and armor art fields, the SPEC-007 §3.9 thrown weapons, and the
+//! §3.10 action frames, projectile weapons and projectile art rates.
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -215,26 +216,141 @@ fn thrown_weapons(audit: &mut UiAudit, vfs: &LocalDirProvider, items: &BTreeMap<
             if found != (5, code, damage_type) {
                 return Err(format!("mode, code, damage type {found:?}"));
             }
-            let protos = protos.as_ref().map_err(Clone::clone)?;
-            let file = u32::try_from(weapon.projectile_pid)
-                .ok()
-                .and_then(|projectile| protos.prototype_id(projectile)?.name.clone())
-                .ok_or("no projectile prototype")?;
-            let path = format!("proto/misc/{}", String::from_utf8_lossy(&file));
-            let projectile =
-                Prototype::parse(&read(vfs, &path)?).map_err(|error| error.to_string())?;
-            if projectile.art_id != fid {
-                return Err(format!("projectile art {:#010x}", projectile.art_id));
-            }
-            let listed = arts
-                .as_ref()
-                .map_err(Clone::clone)
-                .map(|list| row_name(list, fid & 0xfff))?;
-            (listed.as_deref() == Some(name))
-                .then_some(())
-                .ok_or(format!("misc.lst {listed:?}"))
+            check_projectile(vfs, &protos, &arts, weapon.projectile_pid, fid, name)
         })();
         audit.record("thrown", &format!("{pid}"), result);
+    }
+}
+/// A weapon's projectile prototype has art `fid`, whose `misc.lst` row is
+/// `name`.
+fn check_projectile(
+    vfs: &LocalDirProvider,
+    protos: &Result<LstTable, String>,
+    arts: &Result<LstTable, String>,
+    projectile_pid: i32,
+    fid: u32,
+    name: &str,
+) -> Result<(), String> {
+    let protos = protos.as_ref().map_err(Clone::clone)?;
+    let file = u32::try_from(projectile_pid)
+        .ok()
+        .and_then(|projectile| protos.prototype_id(projectile)?.name.clone())
+        .ok_or("no projectile prototype")?;
+    let path = format!("proto/misc/{}", String::from_utf8_lossy(&file));
+    let projectile = Prototype::parse(&read(vfs, &path)?).map_err(|error| error.to_string())?;
+    if projectile.art_id != fid {
+        return Err(format!("projectile art {:#010x}", projectile.art_id));
+    }
+    let listed = arts
+        .as_ref()
+        .map_err(Clone::clone)
+        .map(|list| row_name(list, fid & 0xfff))?;
+    (listed.as_deref() == Some(name))
+        .then_some(())
+        .ok_or(format!("misc.lst {listed:?}"))
+}
+/// SPEC-007 §3.10.2 the corpus examples for the player stem `hmjmps`: each
+/// attack or dodge art's action frame and frame count, all at 10 fps.
+fn action_frames(audit: &mut UiAudit, vfs: &LocalDirProvider) {
+    for (suffix, action, frames) in [
+        ("aq", 3, 11),
+        ("ar", 6, 17),
+        ("as", 4, 12),
+        ("an", 1, 8),
+        ("eg", 7, 12),
+        ("ef", 4, 10),
+        ("hj", 1, 5),
+        ("ik", 1, 9),
+    ] {
+        let name = format!("art/critters/hmjmps{suffix}.frm");
+        let result = art(vfs, &name).and_then(|archive| {
+            let found = (archive.action_frame, archive.frame_count(), archive.fps);
+            (found == (action, frames, 10))
+                .then_some(())
+                .ok_or(format!("action frame, frames, fps {found:?}"))
+        });
+        audit.record("action frames", &name, result);
+    }
+}
+/// SPEC-007 §3.10.4 the corpus weapons that fire a projectile: a single or
+/// burst mode, the listed projectile art, and explosive only with
+/// explosion damage; every other single, burst or flame weapon has
+/// projectile PID -1. §3.10.5 the projectile arts' stored rates.
+fn projectile_weapons(
+    audit: &mut UiAudit,
+    vfs: &LocalDirProvider,
+    items: &BTreeMap<u32, Prototype>,
+) {
+    let protos = list(vfs, "proto/misc/misc.lst", LstKind::Prototype);
+    let arts = list(vfs, "art/misc/misc.lst", LstKind::Art);
+    let fired = [
+        (13, 0x0500_0009, "rocket.frm", true),
+        (15, 0x0500_0007, "plazpis.frm", false),
+        (24, 0x0500_0007, "plazpis.frm", false),
+        (233, 0x0500_0007, "plazpis.frm", false),
+        (16, 0x0500_0005, "lazrpis.frm", false),
+        (118, 0x0500_0005, "lazrpis.frm", false),
+        (120, 0x0500_000E, "elect.frm", false),
+    ];
+    for (pid, fid, name, explosive) in fired {
+        let result = (|| {
+            let prototype = items.get(&pid).ok_or("no item prototype")?;
+            let PrototypeData::Item(item) = &prototype.data else {
+                return Err("not an item".to_owned());
+            };
+            let ItemData::Weapon(weapon) = &item.data else {
+                return Err("not a weapon".to_owned());
+            };
+            let modes = prototype.extended.attack_modes();
+            if !modes.iter().any(|mode| matches!(mode, 6 | 7)) {
+                return Err(format!("modes {modes:?}"));
+            }
+            if (weapon.damage_type == 6) != explosive {
+                return Err(format!("damage type {}", weapon.damage_type));
+            }
+            check_projectile(vfs, &protos, &arts, weapon.projectile_pid, fid, name)
+        })();
+        audit.record("projectiles", &format!("{pid}"), result);
+    }
+    for (pid, prototype) in items {
+        let PrototypeData::Item(item) = &prototype.data else {
+            continue;
+        };
+        let ItemData::Weapon(weapon) = &item.data else {
+            continue;
+        };
+        let ranged = prototype
+            .extended
+            .attack_modes()
+            .iter()
+            .any(|mode| matches!(mode, 6..=8));
+        if !ranged || fired.iter().any(|(listed, ..)| listed == pid) {
+            continue;
+        }
+        let result = (weapon.projectile_pid == -1)
+            .then_some(())
+            .ok_or(format!("projectile PID {:#x}", weapon.projectile_pid));
+        audit.record("projectiles", &format!("{pid} without"), result);
+    }
+    for (name, fps) in [
+        ("knife.frm", 29),
+        ("spear.frm", 0),
+        ("rockthro.frm", 0),
+        ("grndtro.frm", 10),
+        ("fthro.frm", 10),
+        ("molotov.frm", 10),
+        ("rocket.frm", 10),
+        ("plazpis.frm", 10),
+        ("lazrpis.frm", 10),
+        ("elect.frm", 10),
+    ] {
+        let path = format!("art/misc/{name}");
+        let result = art(vfs, &path).and_then(|archive| {
+            (archive.fps == fps)
+                .then_some(())
+                .ok_or(format!("{} fps", archive.fps))
+        });
+        audit.record("projectile fps", name, result);
     }
 }
 
@@ -392,6 +508,8 @@ pub fn audit_interactions(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Err
         .collect();
     player_art(&mut audit, vfs, &items);
     thrown_weapons(&mut audit, vfs, &items);
+    action_frames(&mut audit, vfs);
+    projectile_weapons(&mut audit, vfs, &items);
     let mut misc: Vec<_> = (1000..=1005).map(|id| (id, None)).collect();
     misc.extend([
         (1006, Some("You have died from radiation sickness.")),

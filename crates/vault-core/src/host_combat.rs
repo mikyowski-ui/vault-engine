@@ -33,6 +33,9 @@ pub enum Refusal {
     Range,
     NoAmmunition,
     Obstructed,
+    /// SPEC-007 §3.10.1: the attack's animation sequence cannot register
+    /// (the attack then applies nothing).
+    Sequence,
 }
 
 impl WorldState {
@@ -287,6 +290,19 @@ impl<A: WorldAssets> WorldHost<A> {
         attack: &Attack,
         resolution: &Resolution,
     ) -> Result<(), WorldError> {
+        self.apply_resolved(attacker, intended, defender, attack, resolution, false)
+    }
+    /// `apply_attack_to`; a `sequenced` attack leaves the knockback and the
+    /// death presentation to its show (SPEC-007 §3.10).
+    fn apply_resolved(
+        &mut self,
+        attacker: ObjectRef,
+        intended: ObjectRef,
+        defender: ObjectRef,
+        attack: &Attack,
+        resolution: &Resolution,
+        sequenced: bool,
+    ) -> Result<(), WorldError> {
         let cost = attack.ap_cost();
         if let Some(state) = self.world.critter_state_mut(attacker) {
             state.ap = state.ap.saturating_sub(cost).max(0);
@@ -340,6 +356,9 @@ impl<A: WorldAssets> WorldHost<A> {
                 resolution.defender_flags,
             )?;
             self.after_damage(attacker, defender, defender == intended);
+            if sequenced {
+                return Ok(());
+            }
             // The fall (lethal or not) carries the computed knockback; a
             // nonpositive displacement animates without movement.
             if resolution.knockback > 0 {
@@ -823,7 +842,30 @@ impl<A: WorldAssets> WorldHost<A> {
         attack: &Attack,
         spray: &Spray,
     ) -> Result<(), WorldError> {
-        self.apply_attack_to(attacker, intended, defender, attack, &spray.main)?;
+        self.apply_sprayed(attacker, intended, defender, attack, spray, false)
+    }
+    /// The §3.6 cleanup of a sequenced attack: its show commits the
+    /// knockback, the death and the corpse presentation.
+    pub(crate) fn apply_spray_sequenced(
+        &mut self,
+        attacker: ObjectRef,
+        intended: ObjectRef,
+        defender: ObjectRef,
+        attack: &Attack,
+        spray: &Spray,
+    ) -> Result<(), WorldError> {
+        self.apply_sprayed(attacker, intended, defender, attack, spray, true)
+    }
+    fn apply_sprayed(
+        &mut self,
+        attacker: ObjectRef,
+        intended: ObjectRef,
+        defender: ObjectRef,
+        attack: &Attack,
+        spray: &Spray,
+        sequenced: bool,
+    ) -> Result<(), WorldError> {
+        self.apply_resolved(attacker, intended, defender, attack, &spray.main, sequenced)?;
         for (object, profile, outcome) in &spray.extras {
             if profile.defender_pid != PROTECTED_PID && !self.world.is_dead(*object) {
                 self.damage_critter(
@@ -833,7 +875,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     outcome.defender_flags,
                 )?;
                 self.after_damage(attacker, *object, false);
-                if outcome.knockback > 0 {
+                if outcome.knockback > 0 && !sequenced {
                     self.knock_back(attacker, *object, outcome.knockback)?;
                 }
             }
@@ -895,67 +937,60 @@ impl<A: WorldAssets> WorldHost<A> {
             Some(Victim::Object(object)) => *object,
             _ => target,
         };
-        if matches!(victim, Some(Victim::Object(_))) {
+        // A struck wall or scenery object is the recorded defender with the
+        // hit bit (§3.9): the projectile and N end on its hex, but it is
+        // applied and reported as the miss it is.
+        let struck = matches!(victim, Some(Victim::Object(_)));
+        let hit = spray.main.defender_flags & effect::HIT != 0;
+        if struck {
             spray.main.defender_flags &= !effect::HIT;
         }
         self.bystander_message(attacker, defender, victim.as_ref());
         self.world.ai.callbacks.clear();
-        self.attack_taunts(attacker, target, applied, &spray.main)?;
-        let hit = spray.main.defender_flags & effect::HIT != 0;
-        // SPEC-013 §3.10: an exploding weapon's hit sound plays with its
-        // explosion art, where the projectile ends.
-        let explosion =
-            self.weapon_explosion(attacker, defender, &attack, &spray.main, &victim, impact);
-        // SPEC-007 §3.9: a projectile flies to the target's hex on a hit or
-        // the impact hex on a miss; a throw consumes the thrown unit.
-        let place = |host: &Self, object: ObjectRef| host.world.get(object)?.raw.hex;
-        let arrival = if hit {
-            place(self, target)
-        } else {
-            impact.or_else(|| place(self, recorded_defender))
+        // SPEC-013 §3.10: an exploding weapon's explosion is where the
+        // projectile ends.
+        let explosion = self
+            .weapon_explosion(attacker, defender, &attack, &spray.main, &victim, impact)
+            .map(|(_, art)| art);
+        // SPEC-007 §3.10: the attack's sequence is built, making the taunt
+        // and fire-dance draws, before anything applies. A sequence that
+        // cannot register fails the attack before its AP debit, and nothing
+        // plays.
+        let scene = crate::host_choreography::Scene {
+            attacker,
+            defender: recorded_defender,
+            attack: &attack,
+            victim: applied,
+            spray: &spray,
+            hit,
+            impact,
+            explosion,
         };
-        let launch = self
-            .projectile_launch(attacker, &attack, &spray.main)
-            .zip(arrival);
-        let mut hand = None;
-        if let Some((launch, arrival)) = launch {
-            let landing = crate::host_projectile::Landing {
-                hit,
-                arrival,
-                explosion: explosion.map(|(_, art)| art),
-            };
-            hand = self.launch_projectile(attacker, target, &attack, launch, landing)?;
-        } else {
-            self.emit_attack_sounds(attacker, target, mode, hit && explosion.is_none());
-            if let Some((weapon, art)) = explosion {
-                use vault_formats::sfx::effect::{FLIGHT, HIT};
-                let flight = self.weapon_sound_name(FLIGHT, weapon, attack.hit_mode, 0);
-                self.emit_effect(flight, attacker);
-                if let Some(name) = self
-                    .weapon_sound_name(HIT, weapon, attack.hit_mode, 0)
-                    .filter(|name| !name.is_empty())
-                {
-                    self.world
-                        .emit(crate::WorldEffect::SoundEffect { name, owner: None });
-                }
-                self.world.explosion_effects.push(art);
+        let built = match self.build_show(&scene) {
+            Ok(built) => built,
+            Err(refused) => {
+                self.world
+                    .diagnostic(format!("attack sequence refused: {refused:?}"));
+                return Ok(Err(Refusal::Sequence));
             }
+        };
+        // The sequence's commitments, then the §3.6 cleanup: onlookers hear
+        // of the intended target when the final victim differs, then of a
+        // critter victim.
+        if let Some(thrown) = built.thrown {
+            self.consume_throw(attacker, thrown.item, thrown.landing)?;
         }
-        // SPEC-007 §3.6: onlookers hear of the intended target when the
-        // final victim differs, then of a critter victim.
+        self.apply_effects(&built.effects)?;
         let player = self.world.player;
         let before = self.world.hit_points(player);
         let application =
-            self.apply_spray_to(attacker, defender, recorded_defender, applied, &spray);
+            self.apply_spray_sequenced(attacker, defender, recorded_defender, applied, &spray);
         // SPEC-014 §3.21: combat damage to the player rolls the HP counter.
         if self.world.hit_points(player) != before {
             self.world.emit(crate::WorldEffect::RollHitPoints);
         }
         application?;
-        if let Some(weapon) = hand {
-            self.show_hand(attacker, weapon);
-        }
-        self.run_taunts();
+        self.present(built.show);
         Ok(Ok(recorded))
     }
     /// SPEC-013 §3.10 a weapon explosion: the wielded weapon explodes when

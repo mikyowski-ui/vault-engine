@@ -3,6 +3,7 @@
 pub mod ai;
 pub mod assets;
 pub mod barter;
+pub mod choreography;
 pub mod combat;
 pub mod combat_state;
 pub mod critical;
@@ -12,13 +13,13 @@ pub mod handles;
 pub mod host;
 mod host_ai;
 mod host_animation;
+pub mod host_choreography;
 mod host_combat;
 mod host_drugs;
 mod host_game;
 mod host_items;
 mod host_movement;
 mod host_movie;
-mod host_projectile;
 pub mod host_rest;
 pub mod host_save;
 mod host_skills;
@@ -84,6 +85,8 @@ pub use stats::{CharacterSheet, Perk, StatContext, Trait};
 mod ai_tests;
 #[cfg(test)]
 mod barter_tests;
+#[cfg(test)]
+mod choreography_tests;
 #[cfg(test)]
 mod combat_tests;
 #[cfg(test)]

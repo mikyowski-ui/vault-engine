@@ -357,10 +357,15 @@ fn spec007_fixture_b_controlled_rays_los_and_cover() {
     assert!(!world.can_see(player, defender));
 }
 
+/// No resources, though every art identifier counts as existing, so that
+/// attack sequences register (SPEC-007 §3.10.1).
 struct NoAssets;
 impl crate::assets::WorldAssets for NoAssets {
     fn prototype(&self, _pid: u32) -> Result<Arc<Prototype>, crate::WorldError> {
         Err(crate::WorldError::Invalid("no prototypes".into()))
+    }
+    fn art_exists(&self, _fid: u32) -> bool {
+        true
     }
     fn program(&self, _index: i32) -> Result<(String, vault_vm::IntProgram), crate::WorldError> {
         Err(crate::WorldError::Invalid("no programs".into()))

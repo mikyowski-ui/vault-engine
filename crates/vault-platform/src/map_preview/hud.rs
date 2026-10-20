@@ -845,6 +845,11 @@ impl MapPreview {
                     return;
                 };
                 if self.host.world.combat {
+                    // SPEC-007 §3.10: the player acts again once every attack
+                    // has finished playing.
+                    if self.host.presenting() {
+                        return;
+                    }
                     // The kick draw follows the player's preflight (no draws).
                     let mode = self.attack_mode();
                     let uncalled = vault_core::critical::location::UNCALLED;

@@ -118,6 +118,8 @@ struct AiAssets {
     combat: Option<Arc<MsgCatalog>>,
     /// Critter animation codes without art.
     missing: BTreeSet<u8>,
+    /// Loadable art by identifier.
+    art: BTreeMap<u32, Arc<vault_formats::FrmArchive>>,
 }
 impl Default for AiAssets {
     fn default() -> Self {
@@ -128,6 +130,7 @@ impl Default for AiAssets {
             misc: Some(misc()),
             combat: None,
             missing: BTreeSet::new(),
+            art: BTreeMap::new(),
         }
     }
 }
@@ -146,6 +149,12 @@ impl WorldAssets for AiAssets {
     }
     fn art_exists(&self, fid: u32) -> bool {
         !self.missing.contains(&Fid(fid).animation())
+    }
+    fn object_art(&self, fid: u32) -> Result<Arc<vault_formats::FrmArchive>, WorldError> {
+        self.art
+            .get(&fid)
+            .cloned()
+            .ok_or_else(|| WorldError::Invalid("object art unavailable".into()))
     }
     fn resource(&self, path: &str) -> Result<Vec<u8>, WorldError> {
         self.ai
@@ -1045,7 +1054,9 @@ fn spec009_fixture_g_taunt_requests_buffers_and_display() {
         let attack_id = expected.range(1020, 1030).unwrap();
         let passed = expected.range(1, 100).unwrap() <= 35;
         let hit_id = passed.then(|| expected.range(1080, 1090).unwrap());
-        host.attack_taunts(guard, zeta, &ranged, &hit).unwrap();
+        host.request_taunt(guard, crate::ai::Taunt::Attack).unwrap();
+        host.request_result_taunt(guard, zeta, &ranged, &hit)
+            .unwrap();
         assert_eq!(host.world.rng, expected);
         assert_eq!(host.world.ai.taunts[0], line(attack_id));
         let speakers: Vec<_> = host.world.ai.callbacks.iter().map(|c| c.speaker).collect();
@@ -1059,7 +1070,9 @@ fn spec009_fixture_g_taunt_requests_buffers_and_display() {
     }
     let miss = Resolution::default();
     host.world.ai.callbacks.clear();
-    host.attack_taunts(guard, zeta, &attack, &miss).unwrap();
+    host.request_taunt(guard, crate::ai::Taunt::Attack).unwrap();
+    host.request_result_taunt(guard, zeta, &attack, &miss)
+        .unwrap();
     let speakers: Vec<_> = host.world.ai.callbacks.iter().map(|c| c.speaker).collect();
     assert_eq!(speakers, [guard, guard], "melee: the attacker speaks");
     // A hit that kills requests no hit taunt.
@@ -1068,7 +1081,9 @@ fn spec009_fixture_g_taunt_requests_buffers_and_display() {
         ..Resolution::default()
     };
     host.world.ai.callbacks.clear();
-    host.attack_taunts(guard, zeta, &attack, &killed).unwrap();
+    host.request_taunt(guard, crate::ai::Taunt::Attack).unwrap();
+    host.request_result_taunt(guard, zeta, &attack, &killed)
+        .unwrap();
     assert_eq!(host.world.ai.callbacks.len(), 1);
 }
 const LOCATION_TORSO: u8 = location::TORSO;
@@ -1906,11 +1921,105 @@ fn spec009_join_and_stop_predicates_use_live_danger() {
     assert!(host.request_end_combat(&mut ai));
 }
 
+/// A one-pixel-per-frame FRM with `frames` frames in a direction shared by
+/// all six, its fps and its action frame (SPEC-001 layout).
+fn animation_frm(frames: u16, fps: u16, action: u16) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend(4_u32.to_be_bytes());
+    bytes.extend(fps.to_be_bytes());
+    bytes.extend(action.to_be_bytes());
+    bytes.extend(frames.to_be_bytes());
+    bytes.extend([0; 12 + 12 + 24]);
+    bytes.extend((u32::from(frames) * 13).to_be_bytes());
+    for _ in 0..frames {
+        bytes.extend(1_u16.to_be_bytes());
+        bytes.extend(1_u16.to_be_bytes());
+        bytes.extend(1_u32.to_be_bytes());
+        bytes.extend([0; 4]);
+        bytes.push(1);
+    }
+    bytes
+}
+fn loaded_art(frames: u16, fps: u16, action: u16) -> Arc<vault_formats::FrmArchive> {
+    Arc::new(vault_formats::FrmArchive::parse(&animation_frm(frames, fps, action)).unwrap())
+}
+/// A show's entries: owner, delay, and what each does.
+fn labels(
+    sequence: &crate::choreography::Sequence,
+) -> Vec<(crate::choreography::Owner, i32, String)> {
+    use crate::choreography::Action;
+    let art = |fid: u32| {
+        let fid = Fid(fid);
+        if fid.category() == 1 {
+            fid.animation().to_string()
+        } else {
+            format!("{:#x}", fid.0)
+        }
+    };
+    sequence
+        .entries()
+        .iter()
+        .map(|entry| {
+            let label = match &entry.action {
+                Action::Turn { orientation, .. } => format!("turn {orientation}"),
+                Action::Sound { name, .. } => format!("sound {}", String::from_utf8_lossy(name)),
+                Action::Taunt(_) => "taunt".into(),
+                Action::Release(index) => format!("release {index}"),
+                Action::Hide => "hide".into(),
+                Action::Unhide => "unhide".into(),
+                Action::SetArt { art: fid } => format!("art {}", art(*fid)),
+                Action::Place { .. } => "place".into(),
+                Action::Remove => "remove".into(),
+                Action::Corpse { .. } => "corpse".into(),
+                Action::Animate { art: fid, hide, .. } => {
+                    format!("animate {}{}", art(*fid), if *hide { " hide" } else { "" })
+                }
+                Action::Move { .. } => "move".into(),
+            };
+            (entry.owner, entry.delay, label)
+        })
+        .collect()
+}
+/// The last node of a show's projectile flight.
+fn flight_end(host: &WorldHost<AiAssets>) -> i32 {
+    host.world
+        .shows
+        .front()
+        .unwrap()
+        .main
+        .entries()
+        .iter()
+        .find_map(|entry| match &entry.action {
+            crate::choreography::Action::Move { nodes, .. } => nodes.last().map(|node| node.0),
+            _ => None,
+        })
+        .expect("a flight")
+}
+/// Play every queued show, a pass per 100 ms; returns the sounds started.
+fn play(host: &mut WorldHost<AiAssets>) -> Vec<Vec<u8>> {
+    host.world.effects.clear();
+    let mut now = 100;
+    while host.presenting() {
+        host.step_shows(now);
+        now += 100;
+        assert!(now < 1_000_000, "the shows end");
+    }
+    host.world
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            WorldEffect::SoundEffect { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
-fn spec013_weapon_explosions_show_their_art_where_the_projectile_ends() {
-    use crate::skills::explosion_art;
+fn spec013_weapon_explosions_play_where_the_projectile_ends() {
+    use crate::{choreography::Owner, host_choreography::Playback, skills::explosion_art};
     use vault_formats::pro::{ItemData, PrototypeData};
-    // Fixture E's gun given a damage type, a PID and an attack mode.
+    // Fixture E's gun given a PID, a damage type, an attack mode and a
+    // projectile with art; the shows wait in the queue.
     let explosive_gun = |pid: u32, damage_type: i32, extended: i32| {
         let (mut host, [attacker, _, defender, _]) = fixture_e("critter", 2);
         let gun = host
@@ -1922,11 +2031,19 @@ fn spec013_weapon_explosions_show_their_art_where_the_projectile_ends() {
             && let ItemData::Weapon(weapon) = &mut item.data
         {
             weapon.damage_type = damage_type;
+            weapon.projectile_pid = 0x0500_0009;
         }
         let object = host.world.get_mut(gun).unwrap();
         object.raw.pid = pid;
         object.prototype = Some(Arc::new(prototype));
+        let mut rocket = fixture::prototype(5, 0);
+        fixture::word(&mut rocket, 0, 0x0500_0009);
+        fixture::word(&mut rocket, 8, 0x0500_0009);
+        host.assets
+            .prototypes
+            .insert(0x0500_0009, Arc::new(Prototype::parse(&rocket).unwrap()));
         host.world.ai.combat_taunts = Some(0);
+        host.playback = Playback::RealTime;
         (host, attacker, defender)
     };
     let attack = |host: &mut WorldHost<AiAssets>, attacker, defender, hits: bool| {
@@ -1959,43 +2076,69 @@ fn spec013_weapon_explosions_show_their_art_where_the_projectile_ends() {
         .unwrap()
         .unwrap()
     };
-    // Explosion damage, not thrown (a Rocket Launcher): roktxpd.frm on the
-    // defender's hex on a hit, direction 0 waiting 2 frame steps.
+    // The explosion entries: the projectile turns into the center art, and
+    // the six adjacent arts follow with direction 0's start delay.
+    let blasts = |host: &WorldHost<AiAssets>, art: u32| {
+        let show = host.world.shows.front().unwrap();
+        labels(&show.main)
+            .into_iter()
+            .filter(|(_, _, label)| *label == format!("animate {art:#x} hide"))
+            .map(|(owner, delay, _)| (owner, delay))
+            .collect::<Vec<_>>()
+    };
+    // Explosion damage, not thrown (a Rocket Launcher): roktxpd.frm where
+    // the rocket ends, the defender's hex on a hit.
     let (mut host, attacker, defender) = explosive_gun(13, 6, 0x06);
     let result = attack(&mut host, attacker, defender, true);
     assert_ne!(result.defender_flags & effect::HIT, 0);
-    let art = host.world.explosion_effects.last().unwrap();
-    assert_eq!(art.fid, explosion_art::ROCKET);
-    assert_eq!(art.objects.len(), 7);
+    assert!(host.world.shows.front().unwrap().explosive);
+    assert_eq!(flight_end(&host), hex(&host.world, defender));
+    let rocket = blasts(&host, explosion_art::ROCKET);
+    assert_eq!(rocket.len(), 7);
+    assert!(matches!(rocket[0].0, Owner::Shown(_)), "a created rocket");
     assert_eq!(
-        art.objects[0].hex,
-        host.world.get(defender).unwrap().raw.hex.unwrap()
-    );
-    assert_eq!(
-        art.objects
-            .iter()
-            .map(|object| object.delay)
-            .collect::<Vec<_>>(),
+        rocket.iter().map(|(_, delay)| *delay).collect::<Vec<_>>(),
         [0, 2, 0, 0, 0, 0, 0]
     );
+    let show = host.world.shows.front().unwrap().clone();
+    let center = hex(&host.world, defender);
+    for (owner, _) in &rocket[1..] {
+        let place = show.main.display(*owner).unwrap().hex.unwrap();
+        assert_eq!(
+            vault_formats::HexGrid::lattice_distance(center, place).unwrap(),
+            1
+        );
+    }
+    play(&mut host);
+    assert!(!host.presenting());
     // Thrown plasma damage (the Plasma Grenade): expp.frm, delay 4.
     let (mut host, attacker, defender) = explosive_gun(26, 3, 0x05);
     attack(&mut host, attacker, defender, true);
-    let art = host.world.explosion_effects.last().unwrap();
-    assert_eq!((art.fid, art.objects[1].delay), (explosion_art::PLASMA, 4));
-    // Plasma damage that is not thrown never explodes.
+    let plasma = blasts(&host, explosion_art::PLASMA);
+    assert_eq!((plasma.len(), plasma[1].1), (7, 4));
+    // Plasma damage that is not thrown never explodes: the projectile is
+    // erased, then the hit sound plays on the weapon.
     let (mut host, attacker, defender) = explosive_gun(15, 3, 0x06);
     attack(&mut host, attacker, defender, true);
-    assert!(host.world.explosion_effects.is_empty());
-    // A miss explodes where the projectile ends; the art is presentation
-    // only and leaves with its last frame.
+    let show = host.world.shows.front().unwrap();
+    assert!(!show.explosive);
+    let entries = labels(&show.main);
+    let erase = entries
+        .iter()
+        .position(|(owner, delay, label)| {
+            matches!(owner, Owner::Shown(_)) && *delay == -1 && label == "remove"
+        })
+        .expect("the projectile's erase");
+    assert!(entries[erase + 1].2.starts_with("sound WH"));
+    // A miss explodes where the projectile ends, the impact hex.
     let (mut host, attacker, defender) = explosive_gun(13, 6, 0x06);
     let result = attack(&mut host, attacker, defender, false);
     if result.code != 0 {
-        assert_eq!(host.world.explosion_effects.len(), 1);
+        assert!(host.world.shows.front().unwrap().explosive);
+        assert_ne!(flight_end(&host), hex(&host.world, attacker));
     }
-    host.step_explosions(0).unwrap();
-    assert!(host.world.explosion_effects.is_empty());
+    play(&mut host);
+    assert!(!host.presenting());
 }
 
 // SPEC-007 §3.9 thrown weapons: the weapon payload's damage type (file
@@ -2058,6 +2201,7 @@ fn fixture_f(
     );
     let mut host = ai_host(world, assets);
     host.world.ai.combat_taunts = Some(0);
+    host.playback = crate::host_choreography::Playback::RealTime;
     (host, hand, defender, spare)
 }
 /// The player's throw, hitting or (not critically) missing.
@@ -2116,25 +2260,6 @@ fn hand_art(host: &WorldHost<AiAssets>) -> (u8, u8) {
     let art = Fid(host.world.get(host.world.player).unwrap().raw.art_id);
     (art.weapon(), art.animation())
 }
-/// Every flight poll until none is left; returns the sounds they started.
-fn fly(host: &mut WorldHost<AiAssets>) -> Vec<Vec<u8>> {
-    host.world.effects.clear();
-    let mut now = 0;
-    while !host.world.projectiles.is_empty() {
-        host.step_projectiles(now);
-        now += 100;
-        assert!(now < 100_000, "the flight ends");
-    }
-    host.world
-        .effects
-        .iter()
-        .filter_map(|effect| match effect {
-            WorldEffect::SoundEffect { name, .. } => Some(name.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 #[test]
 fn spec007_fixture_f_thrown_weapon_consumption() {
     // F1: a Throwing Knife from a hand stack of 3 hits. A copy with a new
@@ -2152,7 +2277,11 @@ fn spec007_fixture_f_thrown_weapon_consumption() {
     assert_eq!(landed.owner, None);
     assert_eq!(landed.raw.hex, Some(hex(&host.world, defender)));
     assert_eq!(landed.raw.art_id, landed.prototype.as_ref().unwrap().art_id);
-    assert_eq!(landed.raw.light.radius, 9);
+    // §3.9: the requested radius 9 is set at the knife's own intensity, 0.
+    assert_eq!(
+        (landed.raw.light.radius, landed.raw.light.intensity),
+        (0, 0)
+    );
     assert_eq!(landed.raw.flags.0 & crate::items::EQUIPPED, 0);
     assert_eq!(hand_art(&host), (1, 0));
 
@@ -2169,14 +2298,11 @@ fn spec007_fixture_f_thrown_weapon_consumption() {
         [2]
     );
     assert!(host.world.get(grenade).is_none(), "erased");
-    let arrival = host.world.projectiles[0].path.last().unwrap().0;
-    assert!(
-        host.world.explosion_effects.is_empty(),
-        "explodes on arrival"
-    );
-    fly(&mut host);
-    let art = host.world.explosion_effects.last().expect("explosion art");
-    assert_eq!(art.objects[0].hex, arrival);
+    // It flies to the impact hex and explodes there, after its flight.
+    assert!(host.world.shows.front().unwrap().explosive);
+    let arrival = flight_end(&host);
+    assert_ne!(arrival, hex(&host.world, defender), "a miss");
+    play(&mut host);
     assert_eq!(hand_art(&host), (0, 0));
 
     // F3: a Spear hits; the unequipped Spear refills the hand and its
@@ -2227,28 +2353,94 @@ fn spec007_fixture_f_thrown_weapon_consumption() {
     throw(&mut host, defender, false);
     let (hand, other) = hands(&host);
     assert!(hand.is_empty() && other.is_empty());
-    let arrival = host.world.projectiles[0].path.last().unwrap().0;
+    let arrival = flight_end(&host);
     assert_eq!(host.world.get(flare).unwrap().raw.hex, Some(arrival));
+    let light = host.world.get(flare).unwrap().raw.light;
+    assert_eq!((light.radius, light.intensity), (0, 0), "no light");
     assert_eq!(hand_art(&host), (0, 0));
+
+    // F7: a lit flare (radius 8, intensity 65536) hits. It lands lit, its
+    // burn-out event still queued; under the safe rule the thrower's light
+    // returns to radius 4 (the reference keeps the raised radius 8).
+    let (mut host, lit, defender, _) = fixture_f(205, 0, 0, 1, 0);
+    let player = host.world.player;
+    host.world.get_mut(lit).unwrap().raw.light = vault_formats::pro::Light {
+        radius: 8,
+        intensity: 65536,
+    };
+    host.world.get_mut(player).unwrap().raw.light = vault_formats::pro::Light {
+        radius: 8,
+        intensity: 65536,
+    };
+    host.world
+        .queue
+        .insert(0, 18000, lit, crate::queue::EventKind::Other(7))
+        .unwrap();
+    throw(&mut host, defender, true);
+    let landed = host.world.get(lit).unwrap();
+    assert_eq!(landed.raw.hex, Some(hex(&host.world, defender)));
+    assert_eq!(
+        (landed.raw.light.radius, landed.raw.light.intensity),
+        (8, 65536)
+    );
+    assert!(host.world.queue.events().any(|event| event.object == lit));
+    let light = host.world.get(player).unwrap().raw.light;
+    assert_eq!((light.radius, light.intensity), (4, 65536));
 }
 
 #[test]
 fn spec007_projectile_flight_from_the_adjacent_hex_to_the_target() {
+    use crate::choreography::{Action, Owner};
     let (mut host, knife, defender, _) = fixture_f(45, 1, 0, 1, 0);
     let player = host.world.player;
     host.world.get_mut(player).unwrap().raw.orientation = 5;
+    // The throw art for the player's base and its art's weapon code (0,
+    // `as`): 12 frames at 10 fps, action frame 4.
+    host.assets
+        .art
+        .insert(Fid::new(1, 0, 18, 0, 0).0, loaded_art(12, 0, 4));
     throw(&mut host, defender, true);
     // The attacker turns toward the defender (direction 2, straight
-    // south); the projectile starts on the adjacent hex, facing that way.
+    // south) at once; the knife waits hidden on the adjacent hex.
     assert_eq!(host.world.get(player).unwrap().raw.orientation, 2);
-    let flight = host.world.projectiles[0].clone();
-    assert_eq!(flight.path[0], (20300, [0, 0]));
-    assert_eq!(flight.orientation, 2);
-    assert_eq!((flight.fid, flight.item), (PROJECTILE_ART, Some(knife)));
-    assert_eq!(flight.path.last().unwrap().0, hex(&host.world, defender));
-    // On a hit the hit sound waits the ray's sample count less one.
-    let samples = flight.path.len() - 1;
-    assert_eq!(flight.hit_sound.as_ref().unwrap().0, samples - 1);
+    let show = host.world.shows.front().unwrap().clone();
+    let projectile = Owner::World(knife);
+    let start = show.main.display(projectile).unwrap();
+    assert_eq!(
+        (start.hex, start.orientation, start.art, start.hidden),
+        (Some(20300), 2, PROJECTILE_ART, true)
+    );
+    let entries = labels(&show.main);
+    let rows: Vec<_> = entries
+        .iter()
+        .filter(|(owner, ..)| *owner == projectile)
+        .map(|(_, delay, label)| (*delay, label.as_str()))
+        .collect();
+    // Unhide on the throw's action frame, flight sound, flight, hit sound
+    // N = nodes - 1 steps on, then the knife's art comes back.
+    let nodes = show
+        .main
+        .entries()
+        .iter()
+        .find_map(|entry| match &entry.action {
+            Action::Move { nodes, .. } => Some(nodes.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let grid = vault_formats::HexGrid::default();
+    let ([ax, ay], [bx, by]) = (
+        grid.hex_center(20300).unwrap(),
+        grid.hex_center(hex(&host.world, defender)).unwrap(),
+    );
+    let l = (bx - ax).abs().max((by - ay).abs());
+    assert_eq!(nodes.len() as i64, l / 32 + 1);
+    assert_eq!(nodes.last().unwrap().0, hex(&host.world, defender));
+    let n = nodes.len() as i32 - 1;
+    assert_eq!(rows[0], (4, "unhide"));
+    assert!(rows[1].1.starts_with("sound WF") && rows[1].0 == 0);
+    assert_eq!(rows[2], (0, "move"));
+    assert!(rows[3].1.starts_with("sound WH") && rows[3].0 == n);
+    assert_eq!(rows.last().unwrap().0, -1);
     // In flight the thrown item is drawn as its projectile only.
     let drawn = |host: &WorldHost<AiAssets>, art: u32| {
         host.world.render_snapshot().objects.elevations[0]
@@ -2257,36 +2449,571 @@ fn spec007_projectile_flight_from_the_adjacent_hex_to_the_target() {
             .count()
     };
     let item_art = host.world.get(knife).unwrap().raw.art_id;
-    // Without throw art the projectile shows at once, with the flight
-    // sound, then moves one sample per step; on arrival it is the item.
+    assert_eq!(
+        (drawn(&host, PROJECTILE_ART), drawn(&host, item_art)),
+        (0, 0)
+    );
     host.world.effects.clear();
-    host.step_projectiles(0);
+    for pass in 0..=3 {
+        host.step_shows(100 * pass);
+    }
+    assert_eq!(
+        drawn(&host, PROJECTILE_ART),
+        0,
+        "hidden until the action frame"
+    );
+    host.step_shows(400);
     assert_eq!(
         (drawn(&host, PROJECTILE_ART), drawn(&host, item_art)),
         (1, 0)
     );
-    assert!(host.world.effects.iter().any(|effect| matches!(
-        effect,
-        WorldEffect::SoundEffect { name, owner } if name.starts_with(b"WF") && *owner == Some(knife)
-    )));
-    let sounds = fly(&mut host);
-    assert!(sounds.first().is_some_and(|name| name.starts_with(b"WH")));
+    // The flight and hit sounds start on and after the action frame.
+    let early: Vec<Vec<u8>> = host
+        .world
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            WorldEffect::SoundEffect { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let sounds = [early, play(&mut host)].concat();
+    assert!(sounds.iter().any(|name| name.starts_with(b"WF")));
+    assert!(sounds.iter().any(|name| name.starts_with(b"WH")));
     assert_eq!(
         (drawn(&host, PROJECTILE_ART), drawn(&host, item_art)),
         (0, 1)
     );
 
-    // A miss's hit sound waits no steps; the throw art's action frame
-    // holds the projectile back, one frame interval per step.
-    let (mut host, _, defender, _) = fixture_f(45, 1, 0, 1, 0);
+    // A miss's hit sound waits no steps.
+    let (mut host, knife, defender, _) = fixture_f(45, 1, 0, 1, 0);
     throw(&mut host, defender, false);
-    let flight = &mut host.world.projectiles[0];
-    assert_eq!(flight.hit_sound.as_ref().unwrap().0, 0);
-    flight.wait = 2;
-    flight.wait_ms = 50;
-    host.step_projectiles(0);
-    host.step_projectiles(99);
-    assert_eq!(host.world.projectiles[0].position, None);
-    host.step_projectiles(100);
-    assert_eq!(host.world.projectiles[0].position, Some(0));
+    let show = host.world.shows.front().unwrap();
+    let hit = labels(&show.main)
+        .into_iter()
+        .find(|(owner, _, label)| *owner == Owner::World(knife) && label.starts_with("sound WH"))
+        .unwrap();
+    assert_eq!(hit.1, 0);
+}
+
+/// SPEC-007 §3.10 scenes: the player at 20100 and an NPC adjacent to the
+/// south (20300), both with critter base 0, combat taunts off, and the
+/// player's punch art (11 frames, action frame 3) loadable.
+fn scene_pair() -> (WorldHost<AiAssets>, ObjectRef, ObjectRef) {
+    let mut world = world();
+    let player = world.player;
+    let defender = npc(&mut world, 20300, 1, 0, &[]);
+    state(&mut world, player).ap = 8;
+    let mut host = ai_host(world, AiAssets::default());
+    host.world.ai.combat_taunts = Some(0);
+    host.assets
+        .art
+        .insert(Fid::new(1, 0, 16, 0, 0).0, loaded_art(11, 0, 3));
+    (host, player, defender)
+}
+/// A resolved punch against `defender` with defender flags `flags`.
+fn punch_scene(
+    host: &WorldHost<AiAssets>,
+    player: ObjectRef,
+    defender: ObjectRef,
+    flags: u32,
+    knockback: i32,
+    damage: i32,
+) -> (crate::combat::Attack, crate::Spray) {
+    let attack = host
+        .world
+        .attack_profile(player, defender, hit_mode::PUNCH, location::TORSO, false)
+        .unwrap();
+    let spray = crate::Spray {
+        main: Resolution {
+            code: if flags & effect::HIT != 0 { 2 } else { 1 },
+            defender_flags: flags,
+            damage,
+            knockback,
+            ..Resolution::default()
+        },
+        extras: Vec::new(),
+    };
+    (attack, spray)
+}
+fn build(
+    host: &mut WorldHost<AiAssets>,
+    player: ObjectRef,
+    defender: ObjectRef,
+    attack: &crate::combat::Attack,
+    spray: &crate::Spray,
+) -> crate::host_choreography::Built {
+    let scene = crate::host_choreography::Scene {
+        attacker: player,
+        defender,
+        attack,
+        victim: attack,
+        spray,
+        hit: spray.main.defender_flags & effect::HIT != 0,
+        impact: None,
+        explosion: None,
+    };
+    host.build_show(&scene).unwrap()
+}
+/// A sequence's rows as `(object, delay, label)`.
+fn rows(sequence: &crate::choreography::Sequence) -> Vec<(ObjectRef, i32, String)> {
+    labels(sequence)
+        .into_iter()
+        .map(|(owner, delay, label)| match owner {
+            crate::choreography::Owner::World(object) => (object, delay, label),
+            crate::choreography::Owner::Shown(_) => (0, delay, label),
+        })
+        .collect()
+}
+fn row(object: ObjectRef, delay: i32, label: &str) -> (ObjectRef, i32, String) {
+    (object, delay, label.to_string())
+}
+
+#[test]
+fn spec007_melee_contact_and_dodges_follow_the_action_frames() {
+    // §3.10.3 a punch hit: the contact sound waits the punch art's action
+    // frame (3); the defender, hit from the front, flinches (14) then.
+    let (mut host, player, defender) = scene_pair();
+    let (attack, hit) = punch_scene(&host, player, defender, effect::HIT, 0, 1);
+    let built = build(&mut host, player, defender, &attack, &hit);
+    assert_eq!(
+        rows(&built.show.main),
+        [
+            row(player, 0, "turn 2"),
+            row(player, 0, "sound "),
+            row(player, 0, "animate 16"),
+            row(player, 3, "sound "),
+            row(defender, 0, "sound "),
+            row(defender, 0, "animate 14"),
+        ]
+    );
+    // A miss with dodge art: B = 1 <= A, so the dodge waits A - B = 2.
+    host.assets
+        .art
+        .insert(Fid::new(1, 0, 13, 0, 0).0, loaded_art(8, 0, 1));
+    let (attack, miss) = punch_scene(&host, player, defender, 0, 0, 0);
+    let built = build(&mut host, player, defender, &attack, &miss);
+    assert_eq!(
+        rows(&built.show.main)[1..],
+        [
+            row(player, -1, "sound "),
+            row(player, 0, "animate 16"),
+            row(defender, 2, "sound "),
+            row(defender, 0, "animate 13"),
+        ]
+    );
+    // B = 5 > A: the attack waits B - A = 2 behind the dodge.
+    host.assets
+        .art
+        .insert(Fid::new(1, 0, 13, 0, 0).0, loaded_art(8, 0, 5));
+    let built = build(&mut host, player, defender, &attack, &miss);
+    assert_eq!(
+        rows(&built.show.main)[1..],
+        [
+            row(defender, -1, "sound "),
+            row(defender, 0, "animate 13"),
+            row(player, 2, "sound "),
+            row(player, 0, "animate 16"),
+        ]
+    );
+    // No dodge art: under the safe rule the attacker still swings.
+    host.assets.missing.insert(13);
+    let built = build(&mut host, player, defender, &attack, &miss);
+    assert_eq!(
+        rows(&built.show.main)[1..],
+        [row(player, -1, "sound "), row(player, 0, "animate 16")]
+    );
+}
+
+#[test]
+fn spec007_bullets_show_no_projectile_and_no_hit_sound() {
+    // §3.10.4 a single shot from a bullet weapon (projectile PID -1, as
+    // every corpus bullet weapon): point, the shot, then the reactions on
+    // the shot's action frame, with no hit sound, and unpoint.
+    let (mut host, [attacker, _, defender, _]) = fixture_e("critter", 2);
+    host.world.ai.combat_taunts = Some(0);
+    host.assets
+        .art
+        .insert(Fid::new(1, 0, 45, 5, 0).0, loaded_art(5, 0, 1));
+    let gun = host
+        .world
+        .wielded(attacker, hit_mode::RIGHT_PRIMARY)
+        .unwrap();
+    host.world.get_mut(attacker).unwrap().raw.art_id = Fid::new(1, 0, 0, 5, 0).0;
+    let attack = host
+        .world
+        .attack_profile(
+            attacker,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::TORSO,
+            false,
+        )
+        .unwrap();
+    let spray = crate::Spray {
+        main: Resolution {
+            code: 2,
+            defender_flags: effect::HIT,
+            damage: 3,
+            ..Resolution::default()
+        },
+        extras: Vec::new(),
+    };
+    let built = build(&mut host, attacker, defender, &attack, &spray);
+    let labels = rows(&built.show.main);
+    assert_eq!(labels[1], row(attacker, -1, "animate 43"));
+    assert_eq!(labels[3], row(attacker, 0, "animate 45"));
+    assert_eq!(labels[4], row(defender, 1, "sound "), "reaction on A = 1");
+    assert_eq!(labels.last().unwrap(), &row(attacker, -1, "animate 44"));
+    assert!(
+        !labels
+            .iter()
+            .any(|(_, _, label)| label.starts_with("sound WH")),
+        "no hit sound"
+    );
+    assert!(!labels.iter().any(|(_, _, label)| label == "move"));
+    // A miss: the defender dodges on the action frame, with no sound.
+    let spray = crate::Spray {
+        main: Resolution {
+            code: 1,
+            ..Resolution::default()
+        },
+        extras: Vec::new(),
+    };
+    let built = build(&mut host, attacker, defender, &attack, &spray);
+    let labels = rows(&built.show.main);
+    assert_eq!(labels[4], row(defender, 1, "animate 13"));
+    assert!(host.world.get(gun).is_some());
+}
+
+#[test]
+fn spec007_reactions_fall_slide_get_up_die_and_bleed() {
+    // Knocked down from the front: fall back (20) and stay down.
+    let (mut host, player, defender) = scene_pair();
+    let (attack, spray) = punch_scene(
+        &host,
+        player,
+        defender,
+        effect::HIT | effect::KNOCKED_DOWN,
+        0,
+        1,
+    );
+    let built = build(&mut host, player, defender, &attack, &spray);
+    assert_eq!(
+        rows(&built.show.main)[4..],
+        [row(defender, 0, "sound "), row(defender, 0, "animate 20")]
+    );
+    // Knockback without a knockdown: the slide (20 from the front), then
+    // back on its feet (37); the world takes the final hex.
+    let (attack, spray) = punch_scene(&host, player, defender, effect::HIT, 2, 1);
+    let built = build(&mut host, player, defender, &attack, &spray);
+    assert_eq!(
+        rows(&built.show.main)[4..],
+        [row(defender, 0, "move"), row(defender, -1, "animate 37")]
+    );
+    let slid = 20300 + 2 * 200;
+    assert_eq!(
+        built.effects,
+        [crate::host_choreography::Effect::Move {
+            object: defender,
+            hex: slid,
+            elevation: 0
+        }]
+    );
+    // A lethal hit under 15 damage: the die sound, the plain fall, blood
+    // after it (34 after 20), and the corpse callback.
+    let (attack, spray) = punch_scene(&host, player, defender, effect::HIT | effect::DEAD, 0, 10);
+    let built = build(&mut host, player, defender, &attack, &spray);
+    assert_eq!(
+        rows(&built.show.main)[4..],
+        [
+            row(defender, 0, "sound "),
+            row(defender, 0, "animate 20"),
+            row(defender, -1, "animate 34"),
+            row(defender, -1, "corpse"),
+        ]
+    );
+    // Through a real attack the corpse keeps its blood art once the show
+    // is done, flat and nonblocking.
+    host.world.rng =
+        crate::fixture_items::seed_where(&[(1, 4), (1, 100)], |v| v[0] != 1 && v[1] <= 50);
+    set_hp(&mut host.world, defender, 1);
+    let result = host
+        .perform_attack(player, defender, hit_mode::PUNCH, location::TORSO, false)
+        .unwrap()
+        .unwrap();
+    if result.defender_flags & effect::DEAD != 0 {
+        let corpse = host.world.get(defender).unwrap();
+        assert_eq!(Fid(corpse.raw.art_id).animation(), 34);
+        assert!(corpse.raw.flags.contains(BasicFlags::NONBLOCKING));
+    }
+    // A blocker behind the defender reverses its fall to the front (21),
+    // whose blood is 35.
+    let (mut host, player, defender) = scene_pair();
+    host.world.get_mut(defender).unwrap().raw.orientation = 5;
+    let behind = crate::routing::step(20300, 2);
+    npc(&mut host.world, behind, 1, 0, &[]);
+    let (attack, spray) = punch_scene(&host, player, defender, effect::HIT | effect::DEAD, 0, 10);
+    let built = build(&mut host, player, defender, &attack, &spray);
+    let labels = rows(&built.show.main);
+    assert!(
+        labels.contains(&row(defender, 0, "animate 21")),
+        "{labels:?}"
+    );
+    assert!(labels.contains(&row(defender, -1, "animate 35")));
+}
+
+#[test]
+fn spec007_fire_dance_runs_then_burns_and_on_fire_returns_to_standing() {
+    use vault_formats::pro::{ItemData, PrototypeData};
+    let (mut host, player, defender) = scene_pair();
+    host.world.violence = Some(3);
+    // A flamer: fire damage (2) at maximum violence and 45+ damage picks
+    // the fire dance (33).
+    let mut flamer = (*weapon(70, 0x06, 4, 60, 10, 0, 100)).clone();
+    if let PrototypeData::Item(item) = &mut flamer.data
+        && let ItemData::Weapon(gun) = &mut item.data
+    {
+        gun.damage_type = 2;
+        gun.projectile_pid = -1;
+    }
+    let gun = carry(&mut host.world, player, Arc::new(flamer), 1, loaded(5, 30));
+    host.world
+        .equip(player, gun, BasicFlags::RIGHT_HAND.0)
+        .unwrap();
+    let attack = host
+        .world
+        .attack_profile(
+            player,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::TORSO,
+            false,
+        )
+        .unwrap();
+    let spray = crate::Spray {
+        main: Resolution {
+            code: 2,
+            defender_flags: effect::HIT | effect::DEAD,
+            damage: 60,
+            ..Resolution::default()
+        },
+        extras: Vec::new(),
+    };
+    let before = host.world.rng.clone();
+    let built = build(&mut host, player, defender, &attack, &spray);
+    let labels: Vec<_> = rows(&built.show.main)
+        .into_iter()
+        .filter(|(object, ..)| *object == defender)
+        .map(|(_, delay, label)| (delay, label))
+        .collect();
+    // The dance in place, a turn and a run (when a path is free), then
+    // burned to nothing (29) and the corpse callback; two draws.
+    assert_eq!(labels[0], (0, "sound ".to_string()));
+    assert_eq!(labels[1], (0, "animate 33".to_string()));
+    assert_eq!(labels[labels.len() - 2], (0, "animate 29".to_string()));
+    assert_eq!(labels.last().unwrap().1, "corpse");
+    let mut expected = before;
+    expected.range(2, 5).unwrap();
+    expected.range(0, 5).unwrap();
+    assert_eq!(host.world.rng, expected);
+    if labels.iter().any(|(_, label)| label == "move") {
+        assert!(matches!(
+            built.effects[0],
+            crate::host_choreography::Effect::Move { object, .. } if object == defender
+        ));
+    }
+    // Set on fire and surviving: the dance (33) with no sound, then its
+    // standing art.
+    let spray = crate::Spray {
+        main: Resolution {
+            code: 2,
+            defender_flags: effect::HIT | effect::ON_FIRE,
+            damage: 5,
+            ..Resolution::default()
+        },
+        extras: Vec::new(),
+    };
+    let built = build(&mut host, player, defender, &attack, &spray);
+    let labels: Vec<_> = rows(&built.show.main)
+        .into_iter()
+        .filter(|(object, ..)| *object == defender)
+        .collect();
+    assert_eq!(
+        labels,
+        [row(defender, 0, "animate 33"), row(defender, -1, "art 0")]
+    );
+}
+
+#[test]
+fn spec007_extras_react_when_the_main_sequence_reaches_their_placeholders() {
+    // A burst with two critter extras: placeholders before the recorded
+    // defender's reaction (the first with the reaction delay), each extra
+    // in its own sequence, held until released.
+    let (mut host, [attacker, x1, defender, far]) = fixture_e("critter", 2);
+    host.world.ai.combat_taunts = Some(0);
+    host.playback = crate::host_choreography::Playback::RealTime;
+    let attack = host
+        .world
+        .attack_profile(
+            attacker,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::TORSO,
+            false,
+        )
+        .unwrap();
+    let extra = |object| {
+        (
+            object,
+            attack.clone(),
+            Resolution {
+                code: 2,
+                defender_flags: effect::HIT,
+                damage: 2,
+                ..Resolution::default()
+            },
+        )
+    };
+    let spray = crate::Spray {
+        main: Resolution {
+            code: 2,
+            defender_flags: effect::HIT,
+            damage: 3,
+            ..Resolution::default()
+        },
+        extras: vec![extra(x1), extra(far)],
+    };
+    let built = build(&mut host, attacker, defender, &attack, &spray);
+    let main = rows(&built.show.main);
+    let first = main
+        .iter()
+        .position(|(_, _, label)| label == "release 0")
+        .unwrap();
+    assert_eq!(main[first + 1].2, "release 1");
+    assert_eq!(main[first + 1].1, 0);
+    assert_eq!(main[first + 2].0, defender, "then the defender reacts");
+    assert_eq!(main[first + 2].1, 0, "its delay is 0 after placeholders");
+    assert_eq!(built.show.extras.len(), 2);
+    assert_eq!(rows(&built.show.extras[0])[0].0, x1);
+    let mut show = built.show;
+    show.pass(0);
+    assert!(!show.extras[0].registered(), "held");
+    show.run_to_end(0);
+    assert!(
+        show.extras
+            .iter()
+            .all(|extra| extra.registered() && extra.finished())
+    );
+}
+
+#[test]
+fn spec007_an_attack_whose_sequence_cannot_register_does_nothing() {
+    // §3.10.1: without the punch art the sequence is refused before the AP
+    // debit; nothing applies and nothing plays.
+    let (mut host, player, defender) = scene_pair();
+    host.assets.missing.insert(16);
+    host.assets.missing.insert(17);
+    let hp = host.world.hit_points(defender);
+    let refused = host
+        .perform_attack(player, defender, hit_mode::PUNCH, location::TORSO, false)
+        .unwrap();
+    assert_eq!(refused, Err(crate::Refusal::Sequence));
+    assert_eq!(host.world.critter_state(player).unwrap().ap, 8);
+    assert_eq!(host.world.hit_points(defender), hp);
+    assert!(!host.presenting());
+}
+
+#[test]
+fn spec007_critical_failure_effects_drop_or_destroy_the_weapon() {
+    // A critical failure with the drop bit: the attacker's own reaction
+    // (delay -1, from the front), then the weapon drops at its hex.
+    let (mut host, [attacker, _, defender, _]) = fixture_e("critter", 2);
+    host.world.ai.combat_taunts = Some(0);
+    let gun = host
+        .world
+        .wielded(attacker, hit_mode::RIGHT_PRIMARY)
+        .unwrap();
+    let attack = host
+        .world
+        .attack_profile(
+            attacker,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::TORSO,
+            false,
+        )
+        .unwrap();
+    let failure = |flags| crate::Spray {
+        main: Resolution {
+            code: 0,
+            attacker_flags: effect::CRITICAL | flags,
+            ..Resolution::default()
+        },
+        extras: Vec::new(),
+    };
+    let spray = failure(effect::DROP);
+    let built = build(&mut host, attacker, defender, &attack, &spray);
+    let labels = rows(&built.show.main);
+    assert!(labels.contains(&row(attacker, -1, "sound ")));
+    assert!(labels.contains(&row(attacker, 0, "animate 14")));
+    assert!(labels.contains(&row(gun, -1, "place")));
+    host.apply_effects(&built.effects).unwrap();
+    let dropped = host.world.get(gun).unwrap();
+    assert_eq!(
+        (dropped.owner, dropped.raw.hex),
+        (None, Some(hex(&host.world, attacker)))
+    );
+    // The destroy bit erases it.
+    let (mut host, [attacker, _, defender, _]) = fixture_e("critter", 2);
+    host.world.ai.combat_taunts = Some(0);
+    let gun = host
+        .world
+        .wielded(attacker, hit_mode::RIGHT_PRIMARY)
+        .unwrap();
+    let attack = host
+        .world
+        .attack_profile(
+            attacker,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::TORSO,
+            false,
+        )
+        .unwrap();
+    let built = build(
+        &mut host,
+        attacker,
+        defender,
+        &attack,
+        &failure(effect::DESTROY),
+    );
+    assert!(rows(&built.show.main).contains(&row(gun, -1, "remove")));
+    host.apply_effects(&built.effects).unwrap();
+    assert!(host.world.get(gun).is_none());
+}
+
+#[test]
+fn spec007_combat_waits_while_attacks_play() {
+    // In real time a queued show holds the combat request pass until it
+    // has played.
+    let (mut host, player, defender) = scene_pair();
+    host.playback = crate::host_choreography::Playback::RealTime;
+    host.world.rng = crate::fixture_items::seed_where(&[(1, 4)], |v| v[0] != 1);
+    host.perform_attack(player, defender, hit_mode::PUNCH, location::TORSO, false)
+        .unwrap()
+        .unwrap();
+    assert!(host.presenting());
+    host.world.pending_combat = Some(CombatRequest {
+        attacker: player,
+        defender,
+        accuracy: 0,
+        damage: [0, i32::MAX],
+        flags: None,
+    });
+    host.tick(100).unwrap();
+    assert!(host.world.pending_combat.is_some(), "combat waits");
+    play(&mut host);
+    host.tick(100_000).unwrap();
+    assert!(host.world.pending_combat.is_none());
 }

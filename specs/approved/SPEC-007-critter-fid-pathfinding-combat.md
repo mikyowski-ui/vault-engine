@@ -22,6 +22,11 @@ Important distinctions: a directional-file selector is not a critter's zero-base
 
 - **R1-rev2 (2026-10-18).** Section 3.6 now gives the exact draw range and position of the punch-to-kick draw. Section 3.7 now gives the complete missed-shot bystander algorithm: the line-of-fire stage, the impact fallback, victim selection, hit location, damage, and draw order. Fixtures D and E are added. The raw revision hash was replaced by the label R1.
 - **R1-rev3 (2026-10-19).** Section 3.6 now holds the single authoritative intended-target, onlooker and retaliation rule, which SPEC-009 cites. A surviving conscious unintended victim, whether a missed-shot bystander or a critical-failure random target, makes the retaliation check only when its team differs from the attacker's. Section 3.7 now states that the disabled splash enumeration serves every explosion, so no explosion damages beyond its center target, which matches SPEC-013 §3.10.
+- **R1-rev5 (2026-10-19).**
+  - New section 3.10 gives the attack animation choreography: the animation start rule and its delays; the attack animation, sounds and action frame for each attack mode; the melee and ranged sequences; projectile flight timing; and every reaction, from dodge, flinch, knockdown and knockback to death, blood and fire.
+  - Section 3.9 answers two Builder questions. The projectile hit-sound delay needs no clamp because nothing intercepts a projectile in flight. A landed item keeps the light it was given at launch, where the requested radius 9 becomes 8, or 0 without intensity.
+  - Section 3.8 now states that blood plays after a fall rather than replacing it.
+  - New Fixture G; Fixture F gains row F7.
 - **R1-rev4 (2026-10-19).** New section 3.9 gives thrown-weapon consumption (one unit, hand refill), the projectile flight sequence from the attacker's adjacent hex to the defender or impact hex, and what remains on the map. New Fixture F.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
@@ -669,7 +674,7 @@ Minimum-violence/art validation returns the desired animation if allowed and fou
 
 Before the ordinary victim-based choice tree, special attacker art `0x0500000A` requests explosive 31, attacker PID `0x020001EB` requests electrical 30, and attacker art `0x020001F5` uses the supplied attack-animation selector, each under maximum-violence validation. Ordinary fall selection checks one/two hexes in the falling direction, can reverse fall-front/back around obstacles, then replaces unavailable fall-front with fall-back. `[Must-match]`
 
-Blood presentation replaces fall-back/front with 34/35 when violence is not zero and the corresponding art exists. Fire-dance death can animate a random unobstructed 2-5-hex run, then burned-to-nothing 29. A living on-fire result can use 33 and return to standing. These presentation changes do not turn every transient fire/critical flag into permanent critter status. `[Must-match]`
+Blood presentation adds 34/35 after a fall-back/front when violence is not zero and the corresponding art exists; it plays after the fall rather than replacing it (section 3.10.6). Fire-dance death can animate a random unobstructed 2-5-hex run, then burned-to-nothing 29. A living on-fire result can use 33 and return to standing. These presentation changes do not turn every transient fire/critical flag into permanent critter status. `[Must-match]`
 
 Corpse presentation sets movement-nonblocking and flattens except for victim PIDs `0x01000032,0x01000031,0x01000008`; it removes the outline. Final animation 30 or 31 drops inventory except for victim PIDs `0x01000031,0x01000032,0x01000017`. Public direct/static-death requests have a separate correction: static codes 51-63 revert to forced fall-back 20 in these callers if maximum violence/art is unavailable. They are not the same decision tree as attack-driven damage selection. `[Must-match]`
 
@@ -677,7 +682,7 @@ Corpse presentation sets movement-nonblocking and flattens except for victim PID
 
 This section applies to a hit mode whose attack animation is the throw (animation 18), after the attack result is final, including section 3.7.1. It covers removing the thrown item from the attacker and flying it to the target. SPEC-013 §3.10 gives the explosion art, sounds and damage for explosive throws. Non-thrown ranged weapons with a projectile use the same flight steps but create a new projectile object and remove nothing from the inventory.
 
-The animation start delays below are those of SPEC-013 §3.10: -1 waits until every earlier entry of the sequence has finished, 0 starts together with the entry before it, and N > 0 waits N scheduler ticks while an earlier entry is still running.
+The animation start delays below follow the start rule of section 3.10.1, which SPEC-013 §3.10 summarizes: -1 waits until every earlier entry of the sequence has finished, 0 starts together with the entry before it, and N > 0 waits N examinations of the sequence while an earlier entry is still running. Section 3.10 places these steps in the whole attack sequence.
 
 **Corpus thrown weapons.** `[Must-match]`
 
@@ -724,17 +729,267 @@ A hand stack with units left can still be refilled from a separate unequipped st
 
 1. The attacker turns toward the final defender's hex, delay -1. Section 3.7.1 can replace the defender with a bystander.
 2. The AI attack taunt (SPEC-009). Then the attack sound on the attacker, delay -1: the weapon attack sound (SPEC-010) when the attacker's art weapon code is nonzero, otherwise the character sound for the throw animation. Then the throw animation, delay 0.
-3. The projectile is hidden and lit with radius 9 at its own light intensity. It is moved to the **origin hex**: the hex adjacent to the attacker in the hex direction from the attacker's hex to the defender's hex, on the attacker's elevation. It faces that direction.
+3. The projectile is hidden, and its light is set with a requested radius of 9 at its own light intensity ("Projectile light" below gives the result). It is moved to the **origin hex**: the hex adjacent to the attacker in the hex direction from the attacker's hex to the defender's hex, on the attacker's elevation. It faces that direction.
 4. The projectile is unhidden with delay A. A is the action frame of the attacker's throw art for its current base, weapon code and facing (taken before the turn of step 1), or 0 when that art cannot be loaded.
 5. The flight sound (SPEC-010 "ammo flying" weapon sound) plays on the projectile, delay 0.
-6. The projectile moves in a straight line, using the walk animation, delay 0. On a hit it goes to the defender's hex on the defender's elevation. On a miss it goes to the impact hex of section 3.7.1 on the defender's elevation. On a hit, N is the stride-32 straight-ray sample count from the origin hex to the defender's hex (section 3.2), minus 1. On a miss, N is 0.
+6. The projectile moves in a straight line, using the walk animation, delay 0. On a hit it goes to the defender's hex on the defender's elevation. On a miss it goes to the impact hex of section 3.7.1 on the defender's elevation. On a hit, N is the stride-32 straight-ray sample count from the origin hex to the defender's hex (section 3.2), minus 1. On a miss, N is 0. The flight path never tests for blockers, and its nodes take the projectile's own elevation, which is the attacker's; the supplied elevation is not used. Section 3.10.5 gives the node count, the flight speed and the value of N.
 7. **Explosive arrival:** SPEC-013 §3.10 ("Order", steps 2-3). The grenade first shows its own item art, then the explosion art plays and the six adjacent arts follow.
-8. **Non-explosive arrival:** the weapon hit sound plays on the projectile, delay N.
-9. The defender's reaction and damage display, delay 0 (section 3.8). Then the AI hit or miss taunt.
+8. **Non-explosive arrival:** the weapon hit sound plays on the projectile, delay N. Section 3.10.5 gives when it starts.
+9. The defender's reaction and damage display, delay 0 (section 3.10.6). Then the AI hit or miss taunt.
 10. An explosive projectile is erased. A non-explosive thrown projectile changes back to the recorded item art, delay -1, and **stays on the map** at its arrival hex as an ordinary item, where it can be picked up. The six explosion neighbors are erased.
 11. Unless the attack left the attacker knocked out, knocked down or dead: if the refill item exists and has a nonzero weapon code, the attacker takes out that weapon code, delay -1. Otherwise the attacker's art changes to standing with weapon code 0, delay -1.
 
 When the rest of a stack stays in the hand (step 2), there is no refill item. The attacker then shows weapon code 0 while still holding the item. Its next throw uses weapon-code-0 throw art (section 2.2) and the character attack sound. This affects the Spear and the Throwing Knife; the other corpus thrown weapons have weapon code 0 anyway. `[May-improve]`: when units remain in the hand, take out that hand item's weapon code instead.
+
+**Hit-sound delay when a blocker intercepts the line.** `[Must-match]` N is never clamped, and no clamp is needed. Nothing intercepts a projectile in flight. The flight path and N are both built without a blocker test, from the same origin hex to the same destination, so the projectile passes over anything on the line and N always equals its node count minus 1. Interception is decided earlier, during attack resolution (section 3.7.1). When a bystander, wall or scenery object is struck there, it becomes the recorded defender and gets the hit bit, so both the flight and N end at its hex. The start rule of section 3.10.1 also bounds the wait: a positive delay never holds an entry after every earlier entry has finished. The hit sound therefore never starts after the flight ends; it can start earlier, because the attacker's still-running throw animation also counts N down (section 3.10.5).
+
+**Projectile light.** `[Must-match]` Setting an object's light keeps its intensity and clamps the radius to at most 8. An intensity of 0 or less instead sets both the radius and the intensity to 0. The requested radius 9 therefore becomes:
+
+- radius 8 when the projectile's own intensity is positive;
+- radius 0 with intensity 0 otherwise.
+
+While hidden, the projectile casts no light. From the unhide of step 4 its light moves with it. Arrival changes only its art, so a landed item **keeps** the radius and intensity it was given at launch. In the corpus, no thrown-item prototype and no miscellaneous projectile prototype has a nonzero light value. Only a lit flare carries light: lighting a Flare (PID 79) turns it into PID 205 with radius 8 and intensity 65536, and starts its burn-out event. A thrown lit flare therefore lands with radius 8 and intensity 65536, the same as before the throw. Its burn-out event stays queued and destroys the landed flare when it fires (SPEC-008 event type 7). An unlit Flare, and every other corpus thrown item, flies and lands with no light.
+
+The throw does not change the thrower's own light. Wielding a lit flare raises the wielder's light to the larger of its own and the flare's values, and this stays raised after the flare is thrown. `[May-improve]`: when the throw leaves no lit flare in either hand, restore the thrower's light the way the reference does when another item replaces a lit flare in the hand. That is radius 4 and intensity 65536 for the player, and the prototype's radius and intensity for any other critter.
+
+### 3.10 Attack Animation Choreography
+
+This section gives the order and timing of everything an attack shows and plays: the attacker's animations and sounds, the projectile, and the reactions of the defender, the extra victims and the attacker. The attack sequence is built once, when the attack is sequenced after resolution (section 3.6), and plays afterwards. The damage it shows was already computed. HP and status change when the combat-animation count returns to zero (section 3.6), not when a reaction plays.
+
+#### 3.10.1 Animation sequences and the start rule
+
+`[Must-match]` An attack registers one reserved, prioritized animation sequence: an ordered list of entries, each with an owner object and a start delay. The reference holds at most 40 entries per sequence. The longest attack in this section, an explosive throw that kills its knocked-back defender, uses 37.
+
+- **Instant entries** finish as soon as they start: turn toward a hex, play a sound, show a taunt, hide, unhide, set art, set light, and the forced callbacks of section 3.10.6. The turn sets the facing and the standing pose for the current weapon code at once; it does not animate.
+- **Timed entries** run over several frame steps: animate (play an animation once), animate and hide, straight move, and take out a weapon.
+
+Frame steps (`[Must-match]`):
+
+- A timed entry takes its frame steps every `trunc(1000 / fps)` milliseconds, with the fps of SPEC-001 §3.4 (stored 0 means 10).
+- In combat, an entry that uses the walk animation (1) adds the `combat_speed` preference (SPEC-014) to its fps. This applies to every owner except the player, and to the player only when `player_speedup` is 1. The projectile flight uses animation 1, so its rate always includes `combat_speed`.
+- An animation's first frame step comes at the first scheduler pass after it starts, including the pass in which it started when that pass has not yet reached it. Step k shows zero-based frame k − 1. The step after the last frame finishes the entry.
+- A straight move's step k places the object on path node k − 1, and the step that reaches the last node finishes the entry.
+
+**Start rule.** `[Must-match]` The sequence is **examined** at these moments:
+
+- once when it is registered;
+- right after any of its entries starts;
+- at the start of every frame step of each of its running timed entries;
+- whenever one of its timed entries finishes.
+
+Each examination repeats the following:
+
+1. If no entry is left, stop.
+2. If every started entry has finished, start the next entry whatever its delay, and repeat.
+3. Otherwise read the next entry's delay:
+   - negative: stop and wait;
+   - positive: decrease it by 1 and stop;
+   - 0: start the entry and repeat.
+
+The first entry's delay is forced to 0. Consequences:
+
+- **-1** starts once every earlier entry has finished.
+- **0** starts in the same examination as the entry before it.
+- **N > 0** starts at the N + 1-th examination after it becomes the next entry. The first of those examinations is the one in which the entry before it started.
+  - When that entry is an animation and the only running entry, the delayed entry starts on that animation's N-th frame step, the one that shows its zero-based frame N − 1.
+  - Several running timed entries of the sequence count the same delay down, so it runs out sooner.
+  - A finishing step examines twice: once at its start and once when it finishes.
+- A positive delay never holds an entry after every earlier entry has finished. This is the only bound on a delay.
+
+A sound entry is built when the sequence is registered. Its relative volume (SPEC-010 §3.11) is fixed then. If no effect file is found, the entry stays in place as a silent entry with the same delay. `[Must-match]`
+
+**Failure.** `[Must-match]` If any entry cannot be registered, because the capacity is full or the art of an animate, set-art or take-out entry cannot be loaded, the whole sequence is discarded before anything plays.
+
+- The attack request then fails before the AP debit of section 3.6, plays nothing, and applies no damage.
+- Random draws already made stay consumed.
+- An explosive or non-thrown projectile is erased. A non-explosive thrown item has already been consumed (section 3.9) and stays on the map at the origin hex, hidden. `[May-improve]`: when a thrown attack's sequence fails, return the unit to the attacker's inventory.
+
+A sequence that stops while playing, because an entry fails as it starts, ends as follows:
+
+- every unstarted entry is dropped, except forced callbacks and forced erases, which run at once;
+- unstarted sounds are discarded;
+- each critter owner that is not prone is reset to its standing pose.
+
+`[Must-match]`
+
+#### 3.10.2 Attack animation by hit mode
+
+The attack animation comes from the weapon's attack-mode nibble for the hit mode (SPEC-003). Hit mode 5 (kick) always uses animation 17. A hit mode with no weapon uses animation 16. The suffixes are those of section 2.2. `[Must-match]`
+
+| Attack mode | Animation | Suffix | Sound on the attacker at start | Contact or hit sound |
+| --- | ---: | --- | --- | --- |
+| Punch | 16 | `aq` | Character sound, animation 16 | Character sound, animation 16, contact extra (SPEC-010 first letter `z`) |
+| Kick | 17 | `ar` | Character sound, animation 17 | Character sound, animation 17, contact extra |
+| Swing | 42 | weapon letter, `g` | Weapon attack sound (`A`) | Weapon hit sound (`H`) |
+| Thrust | 41 | weapon letter, `f` | Weapon attack sound | Weapon hit sound |
+| Throw | 18 | `dm` knife, `gm` spear, `as` otherwise | Weapon attack sound when the attacker's art weapon code is nonzero, else character sound, animation 18 | Section 3.9 arrival |
+| Single fire | 45 | weapon letter, `j` | Same rule as throw | Weapon hit sound only with a projectile (section 3.10.4) |
+| Burst | 46 | weapon letter, `k` | Same rule as throw | Same as single fire |
+| Continuous fire | 47 | weapon letter, `l` | Same rule as throw | None |
+
+Animations 16 and 17 use the character sounds even when a weapon such as Brass Knuckles makes the punch. `[Must-match]` A ranged attack other than a throw also plays point (43, weapon letter then `h`) before its attack animation and unpoint (44, weapon letter then `i`) after it.
+
+`[Must-match]` The **action frame** A is the action-frame value in the attack art's FRM header (SPEC-001 offset `0x06`, used as in §3.4). It is read from the attack animation for the attacker's current base and weapon code, and is 0 when that art cannot be loaded. Animations 16-18 and 41-47 always encode file selector 0 (section 2.3 rule 1), so the facing does not matter. A is a start delay in the sense of section 3.10.1. The contact sound, the projectile's appearance and the reactions are all timed from it. Corpus examples for the player stem `hmjmps`, all at 10 fps:
+
+| Art | Animation | A | Frames |
+| --- | --- | ---: | ---: |
+| `aq` | punch | 3 | 11 |
+| `ar` | kick | 6 | 17 |
+| `as` | throw | 4 | 12 |
+| `an` | dodge | 1 | 8 |
+| `eg` | club swing | 7 | 12 |
+| `ef` | club thrust | 4 | 10 |
+| `hj` | pistol single fire | 1 | 5 |
+| `ik` | SMG burst | 1 | 9 |
+
+#### 3.10.3 Melee and unarmed sequence
+
+This applies to attack animations below 45 other than 18. Let A be the attacker's action frame. Let B be the action frame of the defender's dodge art: animation 13 for the defender's current base and weapon code, suffix `an` with weapon code 0, otherwise the weapon letter then `e`. The entries are, in order: `[Must-match]`
+
+1. The attacker turns toward the recorded defender's hex.
+2. The AI attack taunt (SPEC-009 §3.17), delay 0.
+3. One branch, chosen by the attack result:
+   - **Hit, or critical bit set.** The attacker's flags contain the hit bit `0x100` or the critical bit `0x200`, which includes every critical failure that kept its critical bit.
+     - Attack sound, delay 0.
+     - Attack animation, delay 0.
+     - Contact or hit sound on the attacker, delay A.
+     - Then the reactions of section 3.10.6 with delay 0, so they begin on the attacker's action frame.
+
+     A critical failure therefore plays the contact or hit sound although nothing was struck. The attacker's own reaction follows.
+   - **Miss, defender knocked out or knocked down** (status bit `0x01` or `0x02`): attack sound with delay -1, then the attack animation with delay 0. There is no dodge and no contact sound.
+   - **Miss, dodge art exists, B ≤ A.**
+     - Attack sound, delay -1.
+     - Attack animation, delay 0.
+     - Dodge sound on the defender (character sound for animation 13), delay A − B.
+     - Dodge animation, delay 0.
+   - **Miss, dodge art exists, B > A.**
+     - Dodge sound, delay -1.
+     - Dodge animation, delay 0.
+     - Attack sound, delay B − A.
+     - Attack animation, delay 0.
+
+     Either dodge branch lines the two action frames up to within one frame step.
+   - **Miss, no dodge art:** nothing more. The attacker does not animate and no sound plays. `[May-improve]`: register the attack sound (delay -1) and the attack animation (delay 0), as for a knocked-down defender.
+4. The attacker's hit taunt (delay -1) when the attack hit and the defender did not die, or its miss taunt (delay -1) when the attack missed (SPEC-009 §3.17).
+
+A melee miss never selects a bystander (section 3.7.1), so the recorded defender is the intended target.
+
+#### 3.10.4 Ranged and thrown sequence
+
+This applies to animations 18 and 45-47. The entries are, in order: `[Must-match]`
+
+1. The attacker turns toward the final recorded defender's hex, which section 3.7.1 may have replaced.
+2. Unless the animation is 18, point (43), delay -1. It plays in full before the attack.
+3. The AI attack taunt, delay 0.
+4. The attack sound on the attacker (section 3.10.2), delay -1.
+5. The attack animation, delay 0.
+6. The **projectile phase**, under the conditions of section 3.9. It never runs for animation 47. It follows section 3.9 steps 3-8; a non-thrown weapon creates a new object with the projectile art instead of consuming an item. The arrival is one of:
+   - **Explosive:** a throw with damage type explosion, plasma or EMP, or any other weapon with damage type explosion. SPEC-013 §3.10 gives the explosion entries.
+   - **Thrown, non-explosive:** the weapon hit sound on the projectile, delay N.
+   - **Non-thrown, non-explosive** (lasers, plasma weapons and the Alien Blaster): the projectile is erased with delay -1, then the weapon hit sound plays with delay N. The sound plays on the weapon object, which SPEC-010 §3.11 positions at its owner, the attacker. The erase waits for both the flight and the attacker's animation to finish. The hit sound then starts at once, because nothing earlier is still running, so N has no effect.
+7. For animations 18, 45 and 46, when the projectile phase does not run because the weapon has no valid projectile (section 3.9 condition 2), the attack is not a hit, the critical bit is clear, and the defender is neither knocked out nor knocked down: the defender's dodge animation, delay A, with **no** dodge sound. Its art is not checked first. A missing dodge art makes the registration fail, and so the whole attack fails (section 3.10.1). `[May-improve]`: skip the dodge when its art does not exist.
+8. The reactions of section 3.10.6. Their delay is 0 after a projectile phase and A otherwise. Without a projectile, the defender therefore reacts on the attacker's action frame.
+9. The defender's hit taunt (delay -1) when the attack hit and the defender did not die, otherwise its miss taunt (delay -1). The taunt is spoken by the defender, not the attacker (SPEC-009 §3.17).
+10. Clean-up: section 3.9 step 10 (an explosive projectile and its six neighbors are erased; a thrown non-explosive item gets its art back), all with delay -1.
+11. Unless the attacker's flags hold knocked out, knocked down or dead: for a throw, section 3.9 step 11; otherwise unpoint (44), delay -1.
+
+**Corpus projectile weapons.** `[Must-match]` Every corpus bullet, burst and flame weapon has projectile PID -1, so it shows no projectile and plays no hit sound at all. Its target reacts on the attacker's action frame. The corpus weapons that do fire a projectile are listed below; the thrown weapons are in section 3.9.
+
+| PID | Weapon | Projectile art (`misc.lst` index, identifier) | Arrival |
+| ---: | --- | --- | --- |
+| 13 | Rocket Launcher | `rocket.frm` (9, `0x05000009`) | Explosive |
+| 15, 24, 233 | Plasma Rifle, Plasma Pistol, Turbo Plasma Rifle | `plazpis.frm` (7, `0x05000007`) | Non-explosive |
+| 16, 118 | Laser Pistol, Laser Rifle | `lazrpis.frm` (5, `0x05000005`) | Non-explosive |
+| 120 | Alien Blaster | `elect.frm` (14, `0x0500000E`) | Non-explosive |
+
+Plasma damage counts as explosive only for a throw. The plasma rifles and the Plasma Pistol therefore never explode. `[Must-match]`
+
+#### 3.10.5 Projectile flight timing
+
+`[Must-match]`
+
+- **Path.** Let L be `max(|dx|, |dy|)` in screen pixels between the centers of the origin hex and the destination hex (SPEC-003 projection). The flight path has `floor(L / 32) + 1` nodes: one every 32 major-axis pixels, plus a final node on the destination. It always ends on the destination hex, and it never tests for blockers. When the origin hex is the destination, because the defender is adjacent, the path has one node.
+- **Speed.** The projectile reaches one node per frame step: `trunc(1000 / (fps + combat_speed))` milliseconds. The fps is the projectile art's own rate, with stored 0 meaning 10.
+  - Corpus rates: `knife.frm` 29 fps.
+  - `spear.frm` and `rockthro.frm` store 0, so they use 10.
+  - The other projectile arts store 10.
+
+  The projectile art's frames advance once per step.
+- **N.** On a hit, N is `floor(L / 32)`, the node count minus 1. On a miss with nothing struck, N is 0.
+- **Hit sound (thrown, non-explosive).** The sound entry becomes next in the examination that starts the flight, which happens on the attacker's action frame. It counts down from there. With the flight as the only running entry, the sound starts on the flight step that reaches the second-to-last node. While the attacker's throw animation is still running, its steps count down too, so the sound starts earlier. Fixture G gives a worked case. The defender's reaction starts in the same examination as the sound.
+- **Miss.** With N = 0 the hit sound starts together with the flight, when the projectile appears, not when it lands. On a miss the sound's target is the intended defender, which selects the SPEC-010 material letter.
+
+#### 3.10.6 Reactions
+
+Reactions are registered at one point in the sequence, in this order:
+
+1. One placeholder for each extra victim that is a critter (section 3.10.7). The first placeholder carries the reaction delay D, and the rest carry 0.
+2. Then, by attack result:
+   - **Not a hit, and the critical or backwash bit (`0x400000`) is set:** the attacker's own reaction.
+   - **Hit:**
+     - the recorded defender's reaction, when that defender is a critter;
+     - then, when the attacker's dud bit (`0x40000`) is set, the attacker's own reaction.
+
+`[Must-match]`
+
+The defender's reaction uses delay D only when there is no placeholder; otherwise its delay is 0. The attacker's own reaction always has delay -1, counts as from the front, and has no knockback. A struck wall or scenery object shows no reaction.
+
+**From the front.** Section 3.8 compares stored orientations. For the recorded defender, the attacker's orientation is read while the sequence is being built, which is before the turn entry runs. Extra victims are evaluated after the main sequence has started, so the turn has already happened for them. `[May-improve]`: for the recorded defender, use the direction from the attacker's hex to the defender's hex as the attacker's orientation. Knockback direction always uses that hex direction (section 3.8).
+
+**Reaction of critter R** with flags F, knockback distance k, direction d and delay D. `[Must-match]` The first matching row applies.
+
+| Case | Entries |
+| --- | --- |
+| R is prone when the sequence is built (status bit `0x01` or `0x02`, or current animation 20-35 or 48-63) | If F has the dead bit `0x80` and R is not already dead: blood (below) with delay D, then the weapon effects and death callback below. Otherwise nothing at all, including no weapon effects. |
+| F has the dead bit; the death animation (section 3.8) is 33 fire dance, and R has its art | Sound for 33, delay D. Animation 33 in place, delay 0. Then draw a distance `random(2, 5)` and a direction `random(0, 5)`. For distance j from that value down to 1, test a stride-4 straight path from R's hex to the hex j steps away in that direction. At the first path with no blocker, add a turn toward that hex (delay -1, so after the first fire dance) and a straight move to it using animation 33 (delay 0). When no path is free, R does not move. Then the sound for 29, delay -1, and animation 29 (burned to nothing), delay 0. |
+| F has the dead bit; k ≠ 0 and the death animation is 20 or 21 | Knockback executor (section 3.8), delay D. It plays the sound for the fall with the knockdown extra, then animates in place or animates while sliding to the final hex, delay 0. Then blood, delay -1. No die sound plays. |
+| F has the dead bit, otherwise | Die sound: the character sound for the chosen animation with the die extra, first letter `z` for 20 and 21 (SPEC-010), delay D. Apply the fall choice of section 3.8, which reverses 20 and 21 around obstacles. Death animation, delay 0. For 20 or 21, blood, delay -1. |
+| F has knocked out (`0x01`) or knocked down (`0x02`) | Animation 20 from the front, else 21. Sound for that animation with no extra, delay D. If k ≠ 0, the knockback executor with delay 0, which plays the same effect name again with the knockdown extra. Otherwise apply the fall choice, then the animation with delay 0. R stays down; it stands up on its own turn (section 3.4): 37 after 20, 36 otherwise. |
+| F has the on-fire bit `0x400` and R has art for 33 | Animation 33, delay D, with no sound. Then R's standing art, delay -1. |
+| k ≠ 0 | Animation 20 from the front, else 21. Knockback executor, delay D. Then 37 if the final animation is 20, otherwise 36, delay -1. |
+| Otherwise (hit flinch) | Animation 14 (hit from front, `ao`) when from the front or when R has no art for 15, otherwise 15 (hit from back, `ap`). Sound for that animation, delay D. The animation, delay 0. |
+
+**Blood.** `[Must-match]` When violence is above 0 and the art exists, blood adds animation 34 after a fall of 20, or 35 after a fall of 21. It is a second animation that plays once the fall has finished, not a replacement for the fall; the corpse keeps its last frame. Without that art, nothing is added.
+
+In the knocked-out or knocked-down case with knockback, the same effect name plays twice at once, because extras 0 and 1 build the same name. `[May-improve]`: play it once.
+
+**Weapon effects and the death callback.** `[Must-match]` These follow the case entries, and they act on the attack's weapon, which is the attacker's. They matter for the attacker's own reaction after a critical failure.
+
+- Explode bit `0x1000`:
+  - a forced callback drops the weapon at R's hex, delay -1;
+  - the weapon's art becomes `roktxpd.frm` (`0x0500000A`), delay 0;
+  - it animates and hides, delay 0;
+  - the weapon hit sound plays for the right-hand primary mode with R as the target, delay 0;
+  - a forced erase follows, delay -1.
+- Destroy bit `0x2000`: a forced callback destroys the weapon, delay -1.
+- Drop bit `0x4000`: a forced callback drops the weapon, delay -1.
+- Dead bit: a forced callback applies the corpse presentation of section 3.8, delay -1.
+
+**Reaction animation summary.** Codes and suffixes are from section 2.2.
+
+| Reaction | Codes |
+| --- | --- |
+| Dodge | 13 (`an`, or weapon letter then `e`) |
+| Hit flinch | 14 `ao` front, 15 `ap` back |
+| Knockdown, knockout, knockback slide | 20 `ba`, 21 `bb` |
+| Stand up | 37 `cj` after 20, 36 `ch` after 21 |
+| Bloody falls | 34 `bo`, 35 `bp` |
+| Gore deaths | 23 `bd` big hole, 24 `be` charred, 25 `bf` chunks, 26 `bg` autofire dance, 27 `bh` electrify, 28 `bi` sliced in half, 30 `bk` electrified to nothing, 31 `bl` exploded to nothing, 32 `bm` melted |
+| Fire | 33 `bn` fire dance, 29 `bj` burned to nothing |
+| Static corpse frames | 48-63 (`ra`-`rp`), used by direct death requests and map loading, not by this sequence |
+
+#### 3.10.7 Extra victims and draws made while building
+
+`[Must-match]`
+
+- **Extras.** After the main sequence is registered, and so has started, each extra victim that is a critter gets its own reserved, prioritized sequence holding only its reaction. Its from-the-front value compares the attacker's orientation after the turn with the extra's own. Its knockback direction runs from the attacker's hex to its hex, and its delay is 0. Each extra sequence is held until the main sequence reaches its placeholder (section 3.10.6). All critter extras therefore begin reacting when the recorded defender does. Extras that are not critters get nothing. In R1 no explosion has extras (section 3.7), so extras come only from burst and continuous fire.
+- **Draws.** Building the sequence makes random draws after every draw of sections 3.6 and 3.7, in this order:
+  1. the attack taunt (SPEC-009 §3.17);
+  2. the fire-dance distance and direction of each reaction in the main sequence, in registration order;
+  3. the hit or miss taunt;
+  4. the fire-dance draws of each extra, in extras order.
+
+  A draw is made only when its condition holds: taunts enabled and the speaker eligible, and the fire-dance death chosen.
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
@@ -905,7 +1160,24 @@ Player attacker; the right hand is the active hand. Each row is independent. "Ha
 | F3 | Spear ×1 in hand; Spear ×1 unequipped | Hit | Spear ×1 (refill) | none | One Spear at the defender's hex | Takes out weapon code 4 |
 | F4 | Rock ×1 in hand | Critical failure, nonzero mask | Rock ×1, unchanged unless the failure effect drops or destroys it | unchanged | No projectile | Per section 3.6 critical failure |
 | F5 | Throwing Knife ×2 in hand; Throwing Knife ×1 unequipped | Hit | Throwing Knife ×1 (copy) and Throwing Knife ×1 (refill): two hand-flagged entries, `[May-improve]` | none | One Throwing Knife at the defender's hex | Takes out weapon code 1 |
-| F6 | Flare ×1 in hand | Miss, impact hex T | empty | none | One Flare at T | Standing, weapon code 0 |
+| F6 | Flare ×1 in hand | Miss, impact hex T | empty | none | One Flare at T, with no light | Standing, weapon code 0 |
+| F7 | Lit flare (PID 205, radius 8, intensity 65536) ×1 in hand; the player's light was raised to radius 8 by wielding it | Hit | empty | none | One lit flare at the defender's hex, still radius 8 and intensity 65536, its burn-out event still queued | Standing, weapon code 0; the player's light stays at radius 8 (`[May-improve]`: restored to radius 4) |
+
+### 4.7 Fixture G: Attack Sequence Timing
+
+Every animation and the projectile run at 10 fps with `combat_speed` 0, so each running entry takes one frame step per scheduler pass. Within a pass, the entry that started earlier steps first. An entry that starts during a pass also takes its first step in that pass. Pass 0 is registration. The rows follow section 3.10.1. `[Must-match]`
+
+| ID | Setup | Timeline |
+| --- | --- | --- |
+| G1 | Punch hit. Attack art 11 frames, A = 3. Defender flinches. | Pass 0: turn, attack sound and attack animation start. Passes 1-2: attack frames 0-1. Pass 3: contact sound, flinch sound and flinch animation start, and the attacker shows frame 2 (A − 1). |
+| G2 | Melee miss. A = 3, dodge B = 1. | Pass 0: attack sound and attack animation start. Dodge sound delay 2: the dodge sound and dodge animation start in pass 2, while the attacker shows frame 1. |
+| G3 | Melee miss. A = 3, dodge B = 5. | Pass 0: dodge sound and dodge animation start. Attack sound delay 2: the attack sound and attack animation start in pass 2, and attack frame 0 shows in the same pass. |
+| G4 | Thrown knife hit. Throw art 12 frames, A = 4. L = 200, so N = 6 and the flight has 7 nodes. | Pass 4: unhide, flight sound and flight start. The attacker shows frame 3 and the knife reaches node 0. The attacker's steps and the flight's steps both count N down. Pass 7: the hit sound, the defender's reaction sound and its animation start, as the knife reaches node 3. Pass 10: the knife reaches node 6 and the flight finishes. |
+| G5 | As G4, but the throw art has 4 frames. | Pass 5: the attacker's finishing step examines twice. Pass 7: the hit sound starts, at node 3, as in G4. |
+| G6 | As G4, but the attack misses and nothing is struck, so N = 0. | Pass 4: the hit sound starts together with the flight. |
+| G7 | Laser hit. Point art 4 frames; single-fire art 5 frames, A = 1. L = 64, so the flight has 3 nodes. | Pass 5: point finishes; the attack sound, attack animation, unhide, flight sound and flight start; attack frame 0 and node 0. Pass 7: the flight finishes. Pass 10: the attack animation finishes; the projectile is erased, and the hit sound and the reaction start. |
+
+Path check: L = 0 (adjacent defender) gives 1 node and N = 0. L = 31 gives 1 node; L = 32 gives 2 nodes and N = 1.
 
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
@@ -915,4 +1187,4 @@ Player attacker; the right hand is the active hand. Each row is independent. "Ha
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes (R1-rev4): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 16 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc") and this spec's own formula notation ("index", "stat", "column", "rank", "range"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Tag count, excluding the two tag definitions: 171 `[Must-match]`, 27 `[May-improve]`.
+Verification notes (R1-rev5): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 16 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc") and this spec's own formula notation ("index", "stat", "column", "rank", "range"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Fixture G timelines were cross-checked with an independent model of the section 3.10.1 start rule, written from this spec's text rather than reference code. Tag count, excluding the two tag definitions: 193 `[Must-match]`, 34 `[May-improve]`.

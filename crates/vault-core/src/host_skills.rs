@@ -919,13 +919,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// scripted one until its damage step, a weapon explosion while its
     /// projectile flies (SPEC-007 §3.9) and its art plays.
     fn explosion_in_progress(&self) -> bool {
-        self.world.explosion.is_some()
-            || !self.world.explosion_effects.is_empty()
-            || self
-                .world
-                .projectiles
-                .iter()
-                .any(|flight| flight.explosion.is_some())
+        self.world.explosion.is_some() || self.world.shows.iter().any(|show| show.explosive)
     }
     /// §3.10 the seven arts of an explosion at `center` with art `fid`:
     /// its frame count per direction and rate (a stored rate of 0 is 10
@@ -1017,17 +1011,12 @@ impl<A: WorldAssets> WorldHost<A> {
     /// in progress advances its art; once the center art has played the
     /// scenery scripts are notified; once every art has played and been
     /// removed the damage and attribution apply, ending the in-progress
-    /// state. Weapon explosions' art advances and is dropped once played.
+    /// state. Weapon explosions play in their attack's show instead.
     pub(crate) fn step_explosions(&mut self, now_ms: u64) -> Result<bool, WorldError> {
-        let mut changed = false;
-        self.world.explosion_effects.retain_mut(|art| {
-            changed |= art.poll(now_ms);
-            !art.finished()
-        });
         let Some(explosion) = self.world.explosion.as_mut() else {
-            return Ok(changed);
+            return Ok(false);
         };
-        changed |= explosion.art.poll(now_ms);
+        let mut changed = explosion.art.poll(now_ms);
         if explosion.art.center_done() && !explosion.notified {
             explosion.notified = true;
             let (hex, elevation, source) = (explosion.hex, explosion.elevation, explosion.source);

@@ -146,6 +146,8 @@ impl MapPreview {
         world.running_burning = values.running_burning_guy;
         world.ai.combat_taunts = Some(values.combat_taunts);
         world.ai.language_filter = Some(values.language_filter);
+        world.combat_speed = values.combat_speed;
+        world.player_speedup = values.player_speedup != 0;
         world.persistence.preferences = values.to_words();
         if let Some(path) = &self.config_path {
             let mut config = std::fs::read_to_string(path)
