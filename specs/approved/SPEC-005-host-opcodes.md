@@ -203,8 +203,8 @@ Unless a row explicitly checks category, a non-null I operand is assumed to refe
 | `0x80D6` | `pickup_obj` | item | none | Null item no-op. Current invocation target acts as actor to pick up item. `[Must-match]` Recovered missing-script comparison checks the wrong failure value and can dereference missing context. `[May-improve]`: when no script matches the program, diagnose and return without action. |
 | `0x80D7` | `drop_obj` | item | none | Current invocation target drops item; missing context, null target/item gives no action. `[Must-match]` |
 | `0x80D8` | `add_obj_to_inven` | item, owner | none | Add one item only if both non-null and item has no owner; successful add disconnects it from map and refreshes display. Already-owned item diagnoses. `[Must-match]` |
-| `0x80D9` | `rm_obj_from_inven` | item, owner | none | Remove one; on success connect it at hex 1/elevation 0, refresh, repair equipment art/armor/UI as needed. Null operands no-op. `[Must-match]` |
-| `0x80DA` | `wield_obj_critter` | item, critter | none | Require non-null operands and critter PID. Equip right hand, except player's active hand selects left/right; wearing player armor adjusts armor class. `[Must-match]` |
+| `0x80D9` | `rm_obj_from_inven` | item, owner | none | Remove one; on success connect it at hex 1/elevation 0, refresh, repair equipment art/armor/UI as needed (worn-armor art: section 3.8). Null operands no-op. `[Must-match]` |
+| `0x80DA` | `wield_obj_critter` | item, critter | none | Require non-null operands and critter PID. Equip right hand, except player's active hand selects left/right; wearing player armor adjusts armor class. Armor art rules: section 3.8. `[Must-match]` |
 | `0x80DB` | `use_obj` | object | none | Require object, current script, and invocation target. Critter owner queues target actor's use; non-critter owner directly uses object. Missing actor/context only diagnoses. `[Must-match]` |
 | `0x80DC` | `obj_can_see_obj` | target, observer | I bool | Require both references and placed target; check perception and straight-path blocker equal to target. Null returns zero with diagnostic. `[Must-match]` |
 | `0x80E1` | `turn_off_objs_in_area` | last hex, first hex, last elevation, first elevation | none | Hide matching visible objects. `[Must-match]` Recovered range sorting and elevation iteration are defective and can loop forever; see 3.4. `[May-improve]`: swap reversed hex bounds and advance one elevation per pass so the call terminates. |
@@ -524,6 +524,69 @@ Game sound-name effects return uppercase text, not playback handles. Open/contai
 Game movie numbers are 0-13. All request fade-in and paused music. Numbers 0,1,2,5,8,9,11,12 also request fade-out; 3 and 4 add fade-out when the map name is empty. Game playback temporarily disables dialogue background updating and restores it afterward. It is separate from generic movie rectangle/window selection, generic movie option bits, and generic movie waiting. `[Must-match]`
 
 Named events/handlers occupy 40 slots, with case-insensitive names stored in 32-byte name areas. `[Must-match]` There is no safe long-name bounds enforcement. `[May-improve]`: truncate names to 31 characters. Registering an existing name replaces its binding; full-table and missing-name statuses are ignored by the opcodes. Signaling queues hits only for a usable, nonbusy binding. Update dispatches at most one pending hit per binding per pass; one-shot events are freed after dispatch, while persistent handlers remain. Program removal clears their bindings. These callbacks, keyboard callbacks, exported procedures, and script timers are distinct registries with different lifetimes and operands. `[Must-match]`
+
+### 3.8 Player Base Art and Armor Art
+
+This section gathers every rule that sets the player's base critter art, because the opcode rows above depend on it. It also covers the engine paths outside the opcodes. Art identifiers follow SPEC-007 §2.1 and §2.3. Armor's AC, DR, DT and perk effects are in SPEC-011 §3.10. The inventory figure is in SPEC-014 §3.34.
+
+**Jumpsuit indexes.** `[Must-match]`
+
+- At art start-up, the engine scans `art/critters/critters.lst` for the base names `hmjmps` (male jumpsuit) and `hfjmps` (female jumpsuit), compared case-insensitively. A row's base name is its text up to the first space, comma, semicolon, tab or line feed, cut to 12 characters (SPEC-001). The zero-based row number of a match is that gender's jumpsuit index. If a name occurs more than once, the last row wins. A name that never occurs leaves that gender's index at 0.
+- In the corpus list (59 rows), the male jumpsuit is row 11, art identifier `0x0100000B`, and the female jumpsuit is row 4, `0x01000004`.
+
+**Default player art.** The engine keeps one default player art index. It is 0 until the first gender update below. The player object is created during object start-up, before the prototype start-up that runs the first gender update, so it briefly carries base index 0. Row 0 of the corpus list is `reserv`. Nothing is drawn between those two steps. `[May-improve]`: create the player directly with the gender's jumpsuit art; never show `reserv` art for the player.
+
+**Gender update.** `[Must-match]` It runs at:
+
+1. every player-sheet load: prototype start-up and reset (both load `premade/player.gcd`), each premade selection on the character selection screen (SPEC-014), and the self-running demo's `premade/combat.gcd`;
+2. leaving the character editor with Done in creation mode;
+3. the end of loading a saved game;
+4. the end of `move_obj_inven_to_obj` when the source owner is the player.
+
+It does the following, in order:
+
+1. Set the default player art to the male jumpsuit index when the player's effective gender stat is 0 (male), otherwise to the female jumpsuit index.
+2. If the player wears no armor, replace the player object's art at once, with no animation: critter category, the default player art, animation 0 and selector 0. The weapon code is the player's current art weapon code when either hand holds any item, otherwise 0.
+3. If the player wears armor, leave the player object's art unchanged.
+4. In both cases, set the player prototype's art to the critter category plus the default player art, with every other field 0.
+
+**Armor art fields.** An armor prototype stores a male and a female art field (SPEC-003). A female wearer (gender stat 1) uses the female field, and any other wearer uses the male field. Only the field's low 12 bits are used, as the base index. The corpus stores complete critter art identifiers there, and no corpus armor stores -1. `[Must-match]`
+
+| Armor PID | Armor | Male field (index, base name) | Female field (index, base name) |
+| ---: | --- | --- | --- |
+| 1 | Leather Armor | `0x0100000C` (12, `hmlthr`) | `0x01000005` (5, `hflthr`) |
+| 2 | Metal Armor | `0x0100000E` (14, `hmmetl`) | `0x01000007` (7, `hfmetl`) |
+| 3 | Powered Armor | `0x01000001` (1, `hapowr`) | `0x01000001` (1, `hapowr`) |
+| 17 | Combat Armor | `0x0100000A` (10, `hmcmbt`) | `0x01000003` (3, `hfcmbt`) |
+| 74 | Leather Jacket | `0x0100000D` (13, `hmmaxx`) | `0x01000006` (6, `hfmaxx`) |
+| 113 | Robes | `0x01000002` (2, `harobe`) | `0x01000002` (2, `harobe`) |
+| 232 | Hardened Power Armor | `0x01000001` (1, `hapowr`) | `0x01000001` (1, `hapowr`) |
+| 239 | Brotherhood Armor | `0x0100000A` (10, `hmcmbt`) | `0x01000003` (3, `hfcmbt`) |
+| 240 | Tesla Armor | `0x0100000E` (14, `hmmetl`) | `0x01000007` (7, `hfmetl`) |
+
+**Inventory window.** `[Must-match]`
+
+- When the player inventory window closes and its top-level owner is the player, the player object's art is replaced at once, with no animation, by the figure art of SPEC-014 §3.34:
+  - the base is the worn armor's field for the player's gender, or the default player art when no armor is worn or the field is -1;
+  - the weapon code is that of the item in the interface bar's active hand when it is a weapon, otherwise 0;
+  - animation and selector are 0.
+- Taking armor off in the window (dragging it into the item list, dropping it on the ground or into a container) therefore restores the jumpsuit when the window closes. Putting armor on, or swapping it, shows the new armor's art from then on. The art does not change while the window is open; only the figure does.
+- The loot, barter and use-on windows never apply the figure art to the player object.
+- With no armor worn, the reference uses the default player art when the owner's prototype lookup succeeds. When the lookup fails, it reads the base from an invalid prototype. `[May-improve]`: use the default player art in both cases.
+
+**`wield_obj_critter` with armor.** `[Must-match]`
+
+1. The previously worn armor, if any, loses its worn flag but stays in the inventory. The new armor gains the worn flag.
+2. The base is the new armor's field for the wearer's gender. A field of -1 gives base index 1, not the jumpsuit (row 1 is `hapowr` in the corpus). `[May-improve]`: use the default player art. This fallback is unreachable with corpus armor.
+3. For the player, an art change is registered in a new reserved animation sequence, with start delay 0. The new art is the critter category, that base, animation 0, and the player's current weapon code. The requested selector is facing plus 1, and the standing animation encodes it as 0 (SPEC-007 §2.3). The opcode then applies the armor change of SPEC-011 §3.10.
+4. For any other critter, the art and protection are unchanged; only the worn flag moves.
+
+**Taking armor off by script.** `[Must-match]`
+
+- `rm_obj_from_inven` on a worn item, when the owner is the player: once the item is removed and placed on the map (row `0x80D9`), the interface bar's item slots are refreshed and the armor's effects are removed (SPEC-011 §3.10). The player object's art then becomes the default player art, keeping its current animation, weapon code and selector. The change is applied at once, with no animation, and the screen is refreshed. For any other owner, the art is unchanged.
+- `move_obj_inven_to_obj` from the player moves everything, removes the old armor's effects (SPEC-011 §3.10), and then runs the gender update. The hands are now empty, so the player shows the jumpsuit with weapon code 0.
+
+**Worked example.** `[Must-match]` A female player (gender stat 1) with Leather Armor worn and an empty active hand closes the inventory window. Her art becomes `0x01000005` (`hflthr`, animation 0, weapon code 0). She then drags the armor back into the item list, puts a Spear (weapon code 4) in the active hand, and closes the window again. Her art becomes `0x01004004`: base 4 (`hfjmps`) plus weapon code 4 times `0x1000`. A male player in the same steps gets `0x0100000C`, then `0x0100400B`.
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 

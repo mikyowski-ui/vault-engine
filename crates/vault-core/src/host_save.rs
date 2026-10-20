@@ -530,6 +530,8 @@ impl<A: WorldAssets> WorldHost<A> {
             player.name = name;
         }
         self.world.rebuild_lighting();
+        // SPEC-005 §3.8: the gender update ends the load.
+        self.update_player_gender();
         Ok(())
     }
     /// Components 1, 5, 6, 8, 10, 13, 16, 19: the player object tree and

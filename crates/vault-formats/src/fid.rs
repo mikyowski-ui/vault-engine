@@ -161,6 +161,23 @@ impl ArtCatalog {
     pub fn base_token(&self, category: u8, index: u16) -> Option<&[u8]> {
         self.entry(category, index).ok()?.name.as_deref()
     }
+    /// The zero-based row whose base name equals `name`, compared without
+    /// case; when the name occurs more than once the last row wins
+    /// (SPEC-005 §3.8 jumpsuit indexes).
+    pub fn last_row(&self, category: u8, name: &[u8]) -> Option<u16> {
+        let row = self
+            .lists
+            .get(&category)?
+            .entries()
+            .iter()
+            .rposition(|entry| {
+                entry
+                    .name
+                    .as_deref()
+                    .is_some_and(|base| base.eq_ignore_ascii_case(name))
+            })?;
+        u16::try_from(row).ok()
+    }
     fn stem(&self, category: u8, index: u16) -> Result<&str, FidError> {
         let name = self.entry(category, index)?.name.as_deref().unwrap_or(b"");
         std::str::from_utf8(name)

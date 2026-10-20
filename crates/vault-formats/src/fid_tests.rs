@@ -259,3 +259,20 @@ fn spec007_critter_rows_follow_list_token_rules() {
         })
     );
 }
+
+#[test]
+fn spec005_jumpsuit_rows_match_base_names_without_case_and_the_last_wins() {
+    let mut catalog = ArtCatalog::default();
+    catalog.insert(
+        1,
+        LstTable::parse(
+            b"reserv,0\nHFJMPS,4\nhmjmps;old\nhfjmps\thalf\nhmjmps 11\n",
+            LstKind::Art,
+        )
+        .unwrap(),
+    );
+    assert_eq!(catalog.last_row(1, b"hfjmps"), Some(3));
+    assert_eq!(catalog.last_row(1, b"hmjmps"), Some(4));
+    assert_eq!(catalog.last_row(1, b"hapowr"), None);
+    assert_eq!(catalog.last_row(0, b"hmjmps"), None, "no list");
+}

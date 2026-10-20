@@ -169,6 +169,9 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn art_token(&self, category: u8, index: u16) -> Option<Vec<u8>> {
         (**self).art_token(category, index)
     }
+    fn art_row(&self, category: u8, name: &[u8]) -> Option<u16> {
+        (**self).art_row(category, name)
+    }
     fn object_art(
         &self,
         fid: u32,
@@ -850,8 +853,13 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.step_animations(now_ms)? {
             changed_by_animation = true;
         }
-        // SPEC-013 §3.10: explosion art plays at its own rate; an animated
-        // explosion's damage step follows its last art.
+        // SPEC-007 §3.9 projectiles fly first: an explosive one's arrival
+        // starts its explosion art. SPEC-013 §3.10: explosion art plays at
+        // its own rate; an animated explosion's damage step follows its
+        // last art.
+        if self.step_projectiles(now_ms) {
+            changed_by_animation = true;
+        }
         if self.step_explosions(now_ms)? {
             changed_by_animation = true;
         }

@@ -1,4 +1,5 @@
 use crate::fixture_state as fixture;
+use crate::fixture_vm as vm_fixture;
 use crate::{
     assets::{VfsWorldAssets, WorldAssets},
     dialogue::*,
@@ -20,9 +21,6 @@ use vault_vm::{
     IntProgram, RunOutcome, Value, Vm, VmError,
     extensions::{self, Rule},
 };
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/vm/support.rs"]
-mod vm_fixture;
 
 #[derive(Default)]
 struct Dice {

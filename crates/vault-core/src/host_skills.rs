@@ -916,10 +916,16 @@ impl<A: WorldAssets> WorldHost<A> {
         Ok(())
     }
     /// §3.10 only one animated explosion can be in progress: a timed or
-    /// scripted one until its damage step, a weapon explosion while its art
-    /// plays.
+    /// scripted one until its damage step, a weapon explosion while its
+    /// projectile flies (SPEC-007 §3.9) and its art plays.
     fn explosion_in_progress(&self) -> bool {
-        self.world.explosion.is_some() || !self.world.explosion_effects.is_empty()
+        self.world.explosion.is_some()
+            || !self.world.explosion_effects.is_empty()
+            || self
+                .world
+                .projectiles
+                .iter()
+                .any(|flight| flight.explosion.is_some())
     }
     /// §3.10 the seven arts of an explosion at `center` with art `fid`:
     /// its frame count per direction and rate (a stored rate of 0 is 10

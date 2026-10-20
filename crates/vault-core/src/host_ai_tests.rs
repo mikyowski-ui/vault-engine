@@ -1997,3 +1997,296 @@ fn spec013_weapon_explosions_show_their_art_where_the_projectile_ends() {
     host.step_explosions(0).unwrap();
     assert!(host.world.explosion_effects.is_empty());
 }
+
+// SPEC-007 §3.9 thrown weapons: the weapon payload's damage type (file
+// 0x45) and projectile PID (file 0x51), and the projectile prototype.
+const DAMAGE_TYPE: usize = 69;
+const PROJECTILE: usize = 81;
+const PROJECTILE_PID: u32 = 0x0500_0010;
+/// The projectile prototype's art (`spear.frm`, `misc.lst` 13).
+const PROJECTILE_ART: u32 = 0x0500_000D;
+
+/// A primary-throw weapon (PID `pid`, weapon code `code`) whose projectile
+/// is `PROJECTILE_PID`.
+fn thrown(pid: u32, code: i32, damage_type: i32) -> Arc<Prototype> {
+    let mut bytes = item_bytes(
+        3,
+        pid,
+        &[
+            (EXTENDED, 0x05),
+            (COST, 10),
+            (ANIMATION, code),
+            (MIN_DAMAGE, 1),
+            (MAX_DAMAGE, 4),
+            (DAMAGE_TYPE, damage_type),
+            (RANGE, 10),
+            (RANGE + 4, 10),
+            (PROJECTILE, PROJECTILE_PID as i32),
+            (AP, 2),
+            (AP + 4, 2),
+            (PERK, -1),
+        ],
+    );
+    bytes[WEAPON_SOUND] = b'A';
+    Arc::new(Prototype::parse(&bytes).unwrap())
+}
+/// Fixture F: the player (right hand active) at 20100 holds `held` units
+/// of a thrown weapon, with `spare` more unequipped, and throws at an NPC
+/// four hexes south.
+fn fixture_f(
+    pid: u32,
+    code: i32,
+    damage_type: i32,
+    held: i32,
+    spare: i32,
+) -> (WorldHost<AiAssets>, ObjectRef, ObjectRef, Option<ObjectRef>) {
+    let mut world = world();
+    let player = world.player;
+    let defender = npc(&mut world, 20100 + 4 * 200, 1, 0, &[]);
+    let prototype = thrown(pid, code, damage_type);
+    let hand = carry(&mut world, player, prototype.clone(), held, loaded(0, -1));
+    world.equip(player, hand, BasicFlags::RIGHT_HAND.0).unwrap();
+    let spare = (spare > 0).then(|| carry(&mut world, player, prototype, spare, loaded(0, -1)));
+    state(&mut world, player).ap = 8;
+    let mut assets = AiAssets::default();
+    let mut projectile = fixture::prototype(5, 0);
+    fixture::word(&mut projectile, 0, PROJECTILE_PID as i32);
+    fixture::word(&mut projectile, 8, PROJECTILE_ART as i32);
+    assets.prototypes.insert(
+        PROJECTILE_PID,
+        Arc::new(Prototype::parse(&projectile).unwrap()),
+    );
+    let mut host = ai_host(world, assets);
+    host.world.ai.combat_taunts = Some(0);
+    (host, hand, defender, spare)
+}
+/// The player's throw, hitting or (not critically) missing.
+fn throw(host: &mut WorldHost<AiAssets>, defender: ObjectRef, hits: bool) -> Resolution {
+    let player = host.world.player;
+    let chance = host
+        .world
+        .attack_profile(
+            player,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::UNCALLED,
+            false,
+        )
+        .unwrap()
+        .hit_chance(true)
+        .unwrap();
+    host.world.rng = crate::fixture_items::seed_where(&[(1, 100)], |v| {
+        if hits {
+            v[0] <= chance.min(90)
+        } else {
+            v[0] > chance && v[0] < 96
+        }
+    });
+    let result = host
+        .perform_attack(
+            player,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::UNCALLED,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.defender_flags & effect::HIT != 0, hits);
+    result
+}
+/// Inventory entries: item and quantity.
+type Entries = Vec<(ObjectRef, i32)>;
+/// The player's inventory: hand-flagged entries, then the others.
+fn hands(host: &WorldHost<AiAssets>) -> (Entries, Entries) {
+    let world = &host.world;
+    world
+        .get(world.player)
+        .unwrap()
+        .inventory
+        .iter()
+        .partition(|(item, _)| {
+            world.get(*item).unwrap().raw.flags.0
+                & (BasicFlags::LEFT_HAND.0 | BasicFlags::RIGHT_HAND.0)
+                != 0
+        })
+}
+/// The player's art weapon code and animation.
+fn hand_art(host: &WorldHost<AiAssets>) -> (u8, u8) {
+    let art = Fid(host.world.get(host.world.player).unwrap().raw.art_id);
+    (art.weapon(), art.animation())
+}
+/// Every flight poll until none is left; returns the sounds they started.
+fn fly(host: &mut WorldHost<AiAssets>) -> Vec<Vec<u8>> {
+    host.world.effects.clear();
+    let mut now = 0;
+    while !host.world.projectiles.is_empty() {
+        host.step_projectiles(now);
+        now += 100;
+        assert!(now < 100_000, "the flight ends");
+    }
+    host.world
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            WorldEffect::SoundEffect { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn spec007_fixture_f_thrown_weapon_consumption() {
+    // F1: a Throwing Knife from a hand stack of 3 hits. A copy with a new
+    // ID keeps the other 2 in the hand; the thrown unit lies at the
+    // defender's hex with its item art; under the safe rule the hand's
+    // weapon code (1) is taken out.
+    let (mut host, knife, defender, _) = fixture_f(45, 1, 0, 3, 0);
+    let id = host.world.get(knife).unwrap().raw.id;
+    throw(&mut host, defender, true);
+    let (hand, other) = hands(&host);
+    assert_eq!((hand.len(), hand[0].1, other.len()), (1, 2, 0));
+    assert_ne!(hand[0].0, knife);
+    assert_ne!(host.world.get(hand[0].0).unwrap().raw.id, id);
+    let landed = host.world.get(knife).unwrap();
+    assert_eq!(landed.owner, None);
+    assert_eq!(landed.raw.hex, Some(hex(&host.world, defender)));
+    assert_eq!(landed.raw.art_id, landed.prototype.as_ref().unwrap().art_id);
+    assert_eq!(landed.raw.light.radius, 9);
+    assert_eq!(landed.raw.flags.0 & crate::items::EQUIPPED, 0);
+    assert_eq!(hand_art(&host), (1, 0));
+
+    // F2: a Frag Grenade misses at impact hex T. The hand is refilled from
+    // the unequipped stack of 3; the grenade explodes at T and is erased.
+    let (mut host, grenade, defender, spare) = fixture_f(25, 0, 6, 1, 3);
+    throw(&mut host, defender, false);
+    // The unit taken from the stack is its old representative; a copy
+    // keeps the other 2.
+    let (hand, other) = hands(&host);
+    assert_eq!(hand, vec![(spare.unwrap(), 1)]);
+    assert_eq!(
+        other.iter().map(|(_, count)| *count).collect::<Vec<_>>(),
+        [2]
+    );
+    assert!(host.world.get(grenade).is_none(), "erased");
+    let arrival = host.world.projectiles[0].path.last().unwrap().0;
+    assert!(
+        host.world.explosion_effects.is_empty(),
+        "explodes on arrival"
+    );
+    fly(&mut host);
+    let art = host.world.explosion_effects.last().expect("explosion art");
+    assert_eq!(art.objects[0].hex, arrival);
+    assert_eq!(hand_art(&host), (0, 0));
+
+    // F3: a Spear hits; the unequipped Spear refills the hand and its
+    // weapon code (4) is taken out.
+    let (mut host, spear, defender, spare) = fixture_f(7, 4, 0, 1, 1);
+    throw(&mut host, defender, true);
+    let (hand, other) = hands(&host);
+    assert_eq!((hand, other.len()), (vec![(spare.unwrap(), 1)], 0));
+    assert_eq!(
+        host.world.get(spear).unwrap().raw.hex,
+        Some(hex(&host.world, defender))
+    );
+    assert_eq!(hand_art(&host), (4, 0));
+
+    // F4: a critical failure that keeps its effect launches nothing.
+    let (host, _, defender, _) = fixture_f(19, 0, 0, 1, 0);
+    let player = host.world.player;
+    let attack = host
+        .world
+        .attack_profile(
+            player,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::UNCALLED,
+            false,
+        )
+        .unwrap();
+    let failure = Resolution {
+        attacker_flags: effect::CRITICAL | effect::DROP,
+        ..Default::default()
+    };
+    assert!(host.projectile_launch(player, &attack, &failure).is_none());
+    let ordinary = Resolution::default();
+    assert!(host.projectile_launch(player, &attack, &ordinary).is_some());
+
+    // F5: a hand stack of 2 with 1 more unequipped. Under the safe rule a
+    // hand that keeps units is not refilled (the reference leaves two
+    // hand entries), and its weapon code is taken out.
+    let (mut host, _, defender, spare) = fixture_f(45, 1, 0, 2, 1);
+    throw(&mut host, defender, true);
+    let (hand, other) = hands(&host);
+    assert_eq!((hand.len(), hand[0].1), (1, 1));
+    assert_eq!(other, vec![(spare.unwrap(), 1)]);
+    assert_eq!(hand_art(&host), (1, 0));
+
+    // F6: a Flare misses at T: the hand is empty and the Flare lies at T.
+    let (mut host, flare, defender, _) = fixture_f(79, 0, 0, 1, 0);
+    throw(&mut host, defender, false);
+    let (hand, other) = hands(&host);
+    assert!(hand.is_empty() && other.is_empty());
+    let arrival = host.world.projectiles[0].path.last().unwrap().0;
+    assert_eq!(host.world.get(flare).unwrap().raw.hex, Some(arrival));
+    assert_eq!(hand_art(&host), (0, 0));
+}
+
+#[test]
+fn spec007_projectile_flight_from_the_adjacent_hex_to_the_target() {
+    let (mut host, knife, defender, _) = fixture_f(45, 1, 0, 1, 0);
+    let player = host.world.player;
+    host.world.get_mut(player).unwrap().raw.orientation = 5;
+    throw(&mut host, defender, true);
+    // The attacker turns toward the defender (direction 2, straight
+    // south); the projectile starts on the adjacent hex, facing that way.
+    assert_eq!(host.world.get(player).unwrap().raw.orientation, 2);
+    let flight = host.world.projectiles[0].clone();
+    assert_eq!(flight.path[0], (20300, [0, 0]));
+    assert_eq!(flight.orientation, 2);
+    assert_eq!((flight.fid, flight.item), (PROJECTILE_ART, Some(knife)));
+    assert_eq!(flight.path.last().unwrap().0, hex(&host.world, defender));
+    // On a hit the hit sound waits the ray's sample count less one.
+    let samples = flight.path.len() - 1;
+    assert_eq!(flight.hit_sound.as_ref().unwrap().0, samples - 1);
+    // In flight the thrown item is drawn as its projectile only.
+    let drawn = |host: &WorldHost<AiAssets>, art: u32| {
+        host.world.render_snapshot().objects.elevations[0]
+            .iter()
+            .filter(|record| record.art_id == art)
+            .count()
+    };
+    let item_art = host.world.get(knife).unwrap().raw.art_id;
+    // Without throw art the projectile shows at once, with the flight
+    // sound, then moves one sample per step; on arrival it is the item.
+    host.world.effects.clear();
+    host.step_projectiles(0);
+    assert_eq!(
+        (drawn(&host, PROJECTILE_ART), drawn(&host, item_art)),
+        (1, 0)
+    );
+    assert!(host.world.effects.iter().any(|effect| matches!(
+        effect,
+        WorldEffect::SoundEffect { name, owner } if name.starts_with(b"WF") && *owner == Some(knife)
+    )));
+    let sounds = fly(&mut host);
+    assert!(sounds.first().is_some_and(|name| name.starts_with(b"WH")));
+    assert_eq!(
+        (drawn(&host, PROJECTILE_ART), drawn(&host, item_art)),
+        (0, 1)
+    );
+
+    // A miss's hit sound waits no steps; the throw art's action frame
+    // holds the projectile back, one frame interval per step.
+    let (mut host, _, defender, _) = fixture_f(45, 1, 0, 1, 0);
+    throw(&mut host, defender, false);
+    let flight = &mut host.world.projectiles[0];
+    assert_eq!(flight.hit_sound.as_ref().unwrap().0, 0);
+    flight.wait = 2;
+    flight.wait_ms = 50;
+    host.step_projectiles(0);
+    host.step_projectiles(99);
+    assert_eq!(host.world.projectiles[0].position, None);
+    host.step_projectiles(100);
+    assert_eq!(host.world.projectiles[0].position, Some(0));
+}

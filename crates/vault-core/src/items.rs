@@ -404,6 +404,82 @@ impl WorldState {
         }
         Ok(reference)
     }
+    /// SPEC-007 §3.9 consumption of a thrown item: exactly one unit leaves
+    /// `attacker`'s inventory (nested containers included) and loses its
+    /// owner and hand and worn flags. The rest of a stack stays in the same
+    /// hand as a copy with a new object ID and a new script instance. A
+    /// hand left empty takes one unit of the first entry identical to the
+    /// thrown unit (same PID and script, neither equipped nor in use, no
+    /// container or contents, equal item data), in inventory order through
+    /// nested containers, as its own hand entry. Under the §3.9 safe rule a
+    /// hand that keeps units is not refilled (the reference refills it
+    /// too, leaving two hand entries). Returns the removed unit, which
+    /// becomes the projectile, and the item now in the hand.
+    pub fn consume_thrown(
+        &mut self,
+        attacker: ObjectRef,
+        item: ObjectRef,
+    ) -> Result<(ObjectRef, Option<ObjectRef>), WorldError> {
+        let not_carried = || WorldError::Invalid("the thrown item is not carried".into());
+        let object = self.get(item).ok_or_else(not_carried)?;
+        let hands = object.raw.flags.0 & (BasicFlags::LEFT_HAND.0 | BasicFlags::RIGHT_HAND.0);
+        let parent = object.owner.ok_or_else(not_carried)?;
+        let (slot, count) = self
+            .get(parent)
+            .and_then(|owner| {
+                let slot = owner
+                    .inventory
+                    .iter()
+                    .position(|(entry, _)| *entry == item)?;
+                Some((slot, owner.inventory[slot].1))
+            })
+            .ok_or_else(not_carried)?;
+        let script = self
+            .script_for(item)
+            .and_then(|sid| self.scripts.get(&sid))
+            .map(|script| (script.file, (script.id >> 24) as u8, script.local_count));
+        self.remove_item(attacker, item, 1)?;
+        if count > 1 {
+            let copy = self.get(parent).expect("parent").inventory[slot].0;
+            self.get_mut(copy).expect("copy").raw.flags.0 |= hands;
+            if let Some((file, category, locals)) = script {
+                self.add_script(copy, file, category, locals)?;
+            }
+            return Ok((item, Some(copy)));
+        }
+        let Some(refill) = self.first_identical(attacker, item) else {
+            return Ok((item, None));
+        };
+        self.remove_item(attacker, refill, 1)?;
+        self.get_mut(refill).expect("refill").raw.flags.0 |= hands;
+        self.add_item(attacker, refill, 1, true)?;
+        Ok((item, Some(refill)))
+    }
+    /// The first entry of `owner`'s inventory identical to `item`, in
+    /// order and through nested containers.
+    fn first_identical(&self, owner: ObjectRef, item: ObjectRef) -> Option<ObjectRef> {
+        let key = self.stack_key(item)?;
+        let entries = |object: ObjectRef| {
+            self.get(object)
+                .map(|found| {
+                    found
+                        .inventory
+                        .iter()
+                        .rev()
+                        .map(|(entry, _)| *entry)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut pending: Vec<ObjectRef> = entries(owner);
+        while let Some(entry) = pending.pop() {
+            if self.stack_key(entry).as_ref() == Some(&key) {
+                return Some(entry);
+            }
+            pending.extend(entries(entry));
+        }
+        None
+    }
     /// The quantity of `item`'s entry in its owner's inventory.
     fn entry_quantity(&self, item: ObjectRef) -> Option<i32> {
         let owner = self.get(item)?.owner?;

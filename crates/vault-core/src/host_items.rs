@@ -1,16 +1,23 @@
 //! SPEC-011 host integration outside drugs and barter: experience awards
 //! with their level-up message and sound (§3.20), the player-stat setter,
 //! the perk chooser's display-name order (§3.21), opening the inventory in
-//! combat (§3.11), the player's armor art (§3.10), and the drag reload's
-//! ready sound (§3.15).
+//! combat (§3.11), and the drag reload's ready sound (§3.15); and the
+//! SPEC-005 §3.8 player base art: the jumpsuit by gender, armor art, and
+//! the inventory figure.
 use crate::{
-    ObjectRef, Perk, WorldEffect, WorldError, ai, assets::WorldAssets, host::WorldHost,
+    ObjectRef, Perk, WorldEffect, WorldError, ai,
+    assets::WorldAssets,
+    host::{AnimationSequence, WorldHost},
     progression::PerkChoice,
 };
-use vault_formats::pro::{BasicFlags, ItemData};
+use vault_formats::{
+    Fid,
+    pro::{BasicFlags, ItemData},
+};
 
-/// The player prototype, whose art is the unarmored body art.
-const PLAYER_PID: u32 = 0x0100_0000;
+/// SPEC-005 §3.8 the `critters.lst` base names of the male and female
+/// jumpsuits.
+const JUMPSUITS: [&[u8]; 2] = [b"hmjmps", b"hfjmps"];
 
 impl<A: WorldAssets> WorldHost<A> {
     /// Each gained level prints `stat.msg` 600 and plays `levelup`.
@@ -96,52 +103,89 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         true
     }
-    /// §3.10 player armor art: worn armor selects its female or male art
-    /// (by the player's gender; -1 falls back to art index 1); no armor
-    /// restores the body art of the player prototype.
-    pub fn refresh_armor_art(&mut self, critter: ObjectRef) {
-        if critter != self.world.player {
+    /// The armor `critter` wears.
+    fn worn_armor(&self, critter: ObjectRef) -> Option<ObjectRef> {
+        self.world
+            .get(critter)?
+            .inventory
+            .iter()
+            .map(|(item, _)| *item)
+            .find(|item| {
+                self.world
+                    .get(*item)
+                    .is_some_and(|object| object.raw.flags.contains(BasicFlags::WORN))
+                    && matches!(
+                        self.world.item_data(*item).map(|data| &data.data),
+                        Some(ItemData::Armor(_))
+                    )
+            })
+    }
+    /// SPEC-005 §3.8 an armor's art field for `wearer`'s gender: the female
+    /// field for gender stat 1, else the male one, as a base index (its low
+    /// 12 bits); `None` for a field of -1.
+    fn armor_base(&self, wearer: ObjectRef, armor: ObjectRef) -> Option<u16> {
+        let female = self
+            .world
+            .get(wearer)?
+            .character
+            .as_ref()?
+            .stat(34, self.world.context(wearer))
+            == 1;
+        let ItemData::Armor(armour) = &self.world.item_data(armor)?.data else {
+            return None;
+        };
+        let field = if female {
+            armour.female_art
+        } else {
+            armour.male_art
+        };
+        (field != -1).then_some((field & 0xfff) as u16)
+    }
+    /// SPEC-005 §3.8 the gender update, run at every player-sheet load
+    /// (new game, premade or edited character), at the end of a load and
+    /// after `move_obj_inven_to_obj` from the player. The default player
+    /// art becomes the jumpsuit row for the player's gender (row 0 when
+    /// `critters.lst` has none). Without worn armor the player's art is
+    /// replaced at once: that base, standing, selector 0, and the current
+    /// weapon code only while a hand holds an item. With armor it stays.
+    pub fn update_player_gender(&mut self) {
+        let player = self.world.player;
+        let female = self.world.get(player).is_some_and(|object| {
+            object
+                .character
+                .as_ref()
+                .is_some_and(|sheet| sheet.stat(34, self.world.context(player)) != 0)
+        });
+        let default = self
+            .assets
+            .art_row(1, JUMPSUITS[usize::from(female)])
+            .unwrap_or(0);
+        self.world.default_player_art = default;
+        if self.worn_armor(player).is_some() {
             return;
         }
-        let Some(object) = self.world.get(critter) else {
-            return;
-        };
-        let female = object
-            .character
-            .as_ref()
-            .is_some_and(|sheet| sheet.stat(34, self.world.context(critter)) == 1);
-        let worn = object.inventory.iter().find_map(|(item, _)| {
-            let worn = self.world.get(*item)?.raw.flags.contains(BasicFlags::WORN);
-            match &self.world.item_data(*item)?.data {
-                ItemData::Armor(armour) if worn => Some(if female {
-                    armour.female_art
-                } else {
-                    armour.male_art
-                }),
-                _ => None,
-            }
+        let holding = self.world.get(player).is_some_and(|object| {
+            object.inventory.iter().any(|(item, _)| {
+                self.world.get(*item).is_some_and(|item| {
+                    item.raw.flags.0 & (BasicFlags::LEFT_HAND.0 | BasicFlags::RIGHT_HAND.0) != 0
+                })
+            })
         });
-        let base = match worn {
-            Some(-1) => 1,
-            Some(art) => art & 0xfff,
-            None => match self.assets.prototype(PLAYER_PID) {
-                Ok(prototype) => (prototype.art_id & 0xfff) as i32,
-                Err(_) => return,
-            },
-        };
-        if let Some(object) = self.world.get_mut(critter) {
-            object.raw.art_id = (object.raw.art_id & !0xfff) | base as u32;
+        if let Some(object) = self.world.get_mut(player) {
+            let weapon = if holding {
+                Fid(object.raw.art_id).weapon()
+            } else {
+                0
+            };
+            object.raw.art_id = Fid::new(1, default, 0, weapon, 0).0;
         }
     }
     /// SPEC-014 §3.34 the inventory windows' rotating figure: `owner`'s art,
     /// standing, facing `facing`, frame 0. A critter shows its worn armor's
-    /// male or female art index for its gender (the default player art when
-    /// that index is -1), else the default player art, with the weapon code
-    /// of `active`, the interface bar's active-hand item, when it is a
-    /// weapon (else 0). A non-critter shows its own art. The player's
-    /// prototype is a runtime one (SPEC-003) with no file behind it, so
-    /// when it cannot be loaded the default art is the player's current
-    /// art.
+    /// art for its gender, or the default player art without armor or for a
+    /// field of -1 (SPEC-005 §3.8), with the weapon code of `active`, the
+    /// interface bar's active-hand item, when it is a weapon (else 0). A
+    /// non-critter shows its own art.
     pub fn figure_art(
         &self,
         owner: ObjectRef,
@@ -152,48 +196,53 @@ impl<A: WorldAssets> WorldHost<A> {
         if object.category() != vault_formats::pro::Category::Critter {
             return Some(object.raw.art_id);
         }
-        let female = object
-            .character
-            .as_ref()
-            .is_some_and(|sheet| sheet.stat(34, self.world.context(owner)) == 1);
-        let armor = object.inventory.iter().find_map(|(item, _)| {
-            let worn = self.world.get(*item)?.raw.flags.contains(BasicFlags::WORN);
-            match &self.world.item_data(*item)?.data {
-                ItemData::Armor(armour) if worn => Some(if female {
-                    armour.female_art
-                } else {
-                    armour.male_art
-                }),
-                _ => None,
-            }
-        });
-        let default = || {
-            self.assets
-                .prototype(PLAYER_PID)
-                .map_or(object.raw.art_id, |prototype| prototype.art_id)
-                & 0xfff
-        };
-        let base = match armor {
-            Some(index) if index != -1 => index as u32 & 0xfff,
-            _ => default(),
-        };
+        let base = self
+            .worn_armor(owner)
+            .and_then(|armor| self.armor_base(owner, armor))
+            .unwrap_or(self.world.default_player_art);
         let weapon = active
             .and_then(|item| match &self.world.item_data(item)?.data {
                 ItemData::Weapon(weapon) => u8::try_from(weapon.animation).ok(),
                 _ => None,
             })
             .unwrap_or(0);
-        Some(self.assets.construct_fid(
-            1,
-            base as u16,
-            0,
-            weapon,
-            vault_formats::Fid::selector_for_orientation(facing),
-        ))
+        Some(
+            self.assets
+                .construct_fid(1, base, 0, weapon, Fid::selector_for_orientation(facing)),
+        )
     }
-    /// `wield_obj_critter`: armor is worn (§3.10 for the player, the worn
-    /// flag only for an NPC), anything else goes to the right hand, or the
-    /// player's active hand.
+    /// SPEC-005 §3.8 the player inventory window closes: the player's art
+    /// becomes the figure art at once (standing, selector 0), so armor put
+    /// on or taken off in the window shows from now on. `active` is the
+    /// interface bar's active-hand item.
+    pub fn apply_figure_art(&mut self, active: Option<ObjectRef>) {
+        let player = self.world.player;
+        if let Some(fid) = self.figure_art(player, active, 0)
+            && let Some(object) = self.world.get_mut(player)
+        {
+            object.raw.art_id = fid;
+            object.raw.frame = 0;
+        }
+    }
+    /// SPEC-005 §3.8 `rm_obj_from_inven` took worn armor off the player:
+    /// the default player art at once, keeping the animation, weapon code
+    /// and selector. Any other owner's art is unchanged.
+    pub(crate) fn unworn_art(&mut self, owner: ObjectRef) {
+        if owner != self.world.player {
+            return;
+        }
+        let base = u32::from(self.world.default_player_art);
+        if let Some(object) = self.world.get_mut(owner) {
+            object.raw.art_id = (object.raw.art_id & !0xfff) | base;
+        }
+    }
+    /// `wield_obj_critter`: armor is worn, anything else goes to the right
+    /// hand, or the player's active hand. For the player, SPEC-005 §3.8
+    /// registers the armor's art in a new reserved animation sequence: its
+    /// field for the player's gender (under the safe rule the default
+    /// player art for -1, where the reference takes base index 1),
+    /// standing, with the current weapon code. The worn flag moves for any
+    /// critter, the protection only for the player (SPEC-011 §3.10).
     pub fn wield_object(&mut self, critter: ObjectRef, item: ObjectRef) -> Result<(), WorldError> {
         let armour = self
             .world
@@ -207,10 +256,40 @@ impl<A: WorldAssets> WorldHost<A> {
             BasicFlags::RIGHT_HAND
         };
         self.world.equip(critter, item, flag.0)?;
-        if armour {
-            self.refresh_armor_art(critter);
+        if armour && critter == self.world.player {
+            let base = self
+                .armor_base(critter, item)
+                .unwrap_or(self.world.default_player_art);
+            let Some(object) = self.world.get(critter) else {
+                return Ok(());
+            };
+            let fid = self.assets.construct_fid(
+                1,
+                base,
+                0,
+                Fid(object.raw.art_id).weapon(),
+                Fid::selector_for_orientation(object.raw.orientation),
+            );
+            self.register_art_change(critter, fid);
         }
         Ok(())
+    }
+    /// A new reserved animation sequence whose one entry, with start delay
+    /// 0, changes `object`'s art to `fid` on the next animation step.
+    fn register_art_change(&mut self, object: ObjectRef, fid: u32) {
+        if self.animations.len() >= 32 {
+            self.world
+                .diagnostic("animation sequence list is full; art change dropped");
+            return;
+        }
+        self.animations.push(AnimationSequence {
+            flags: 2,
+            commands: vec![(
+                crate::host_animation::CHANGE_ART,
+                vec![fid as i32, object as i32],
+            )],
+            ..Default::default()
+        });
     }
     /// §3.15 inventory drag reload; anything loaded plays the weapon's
     /// ready sound.

@@ -18,6 +18,7 @@ mod host_game;
 mod host_items;
 mod host_movement;
 mod host_movie;
+mod host_projectile;
 pub mod host_rest;
 pub mod host_save;
 mod host_skills;
@@ -101,6 +102,10 @@ pub(crate) mod fixture_items;
 pub(crate) mod fixture_state;
 #[cfg(test)]
 #[allow(dead_code)]
+#[path = "../../../tests/fixtures/vm/support.rs"]
+pub(crate) mod fixture_vm;
+#[cfg(test)]
+#[allow(dead_code)]
 #[path = "../../../tests/fixtures/world/support.rs"]
 pub(crate) mod fixture_world;
 #[cfg(test)]
@@ -113,6 +118,8 @@ mod items_tests;
 mod movie_tests;
 #[cfg(test)]
 mod persistence_tests;
+#[cfg(test)]
+mod player_art_tests;
 #[cfg(test)]
 mod progression_tests;
 #[cfg(test)]

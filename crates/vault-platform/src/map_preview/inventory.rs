@@ -372,6 +372,15 @@ impl MapPreview {
         .find(|(_, rect)| rect.contains(point))
         .and_then(|(slot, _)| Some((slot, self.slot_item(slot)?)))
     }
+    /// SPEC-005 §3.8 closing the window: the inventory window (not use-on)
+    /// gives the player its figure art, so armor changes made in it show.
+    fn close_inventory(&mut self) {
+        if matches!(&self.screen, Screen::Inventory(screen) if screen.target.is_none()) {
+            let active = self.active_item();
+            self.host.apply_figure_art(active);
+        }
+        self.return_to_map();
+    }
     /// The red button at `origin`, sized by its art.
     fn red_button(&self, origin: [i32; 2]) -> Rect {
         let [w, h] = Painter {
@@ -433,7 +442,7 @@ impl MapPreview {
         let use_on = screen.target.is_some();
         let control = self.hud.modifiers[1];
         match key {
-            KeyCode::Escape => self.return_to_map(),
+            KeyCode::Escape => self.close_inventory(),
             KeyCode::ArrowUp => screen.offset = screen.offset.saturating_sub(1),
             KeyCode::ArrowDown if screen.offset + rows < count => screen.offset += 1,
             KeyCode::ArrowDown => {}
@@ -521,7 +530,7 @@ impl MapPreview {
         let red = self.red_button(red);
         if red.contains(point) {
             self.press_button(red);
-            self.return_to_map();
+            self.close_inventory();
             return true;
         }
         // The scroll buttons move one row: up from a positive offset, down
@@ -832,7 +841,6 @@ impl MapPreview {
         if let Err(error) = self.host.world.drop_item(player, item, quantity) {
             self.status = error.to_string().into_bytes();
         }
-        self.host.refresh_armor_art(player);
         self.drain_effects();
     }
     /// §3.34 the drop of `item`, lifted from `from`, on `target`.
@@ -973,7 +981,6 @@ impl MapPreview {
         if let Err(error) = result {
             self.status = error.to_string().into_bytes();
         }
-        self.host.refresh_armor_art(player);
         self.host.world.emit(WorldEffect::RollArmorClass);
     }
     /// A slot's item goes into the open container; a refused move keeps it
@@ -1031,7 +1038,6 @@ impl MapPreview {
         }
     }
     fn counted(&mut self, count: Count, quantity: i32) {
-        let player = self.host.world.player;
         match count {
             Count::Reload { weapon, ammo } => {
                 // SPEC-011 §3.15 lifts the weapon out of its owner's
@@ -1059,7 +1065,6 @@ impl MapPreview {
                 if let Err(error) = self.host.world.move_into(owner, item, container, quantity) {
                     self.status = error.to_string().into_bytes();
                 }
-                self.host.refresh_armor_art(player);
             }
             Count::Drop { item } => self.drop_units(item, quantity),
         }

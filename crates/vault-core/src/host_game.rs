@@ -890,16 +890,13 @@ impl<A: WorldAssets> WorldHost<A> {
                     return Ok(None);
                 }
                 if item != 0 && actor != 0 {
-                    let worn = self.worn(item);
                     let result = if op == 0x80d6 {
                         self.world.add_item(actor, item, 1, false)
                     } else {
                         self.world.remove_item(actor, item, 1)
                     };
-                    match result {
-                        Err(error) => self.world.diagnostic(error.to_string()),
-                        Ok(()) if worn => self.refresh_armor_art(actor),
-                        Ok(()) => {}
+                    if let Err(error) = result {
+                        self.world.diagnostic(error.to_string());
                     }
                 }
                 None
@@ -919,7 +916,9 @@ impl<A: WorldAssets> WorldHost<A> {
                     };
                     match result {
                         Err(error) => self.world.diagnostic(error.to_string()),
-                        Ok(()) if worn => self.refresh_armor_art(owner),
+                        // SPEC-005 §3.8: worn armor taken off the player
+                        // leaves the default player art.
+                        Ok(()) if worn && op == 0x80d9 => self.unworn_art(owner),
                         Ok(()) => {}
                     }
                 }
@@ -1600,11 +1599,8 @@ impl<A: WorldAssets> WorldHost<A> {
                         .find(|(r, _)| *r == item)
                         .map_or(0, |(_, n)| *n)
                         .min(call.int(0));
-                    let worn = self.worn(item);
-                    match self.world.remove_item(owner, item, amount) {
-                        Err(error) => self.world.diagnostic(error.to_string()),
-                        Ok(()) if worn => self.refresh_armor_art(owner),
-                        Ok(()) => {}
+                    if let Err(error) = self.world.remove_item(owner, item, amount) {
+                        self.world.diagnostic(error.to_string());
                     }
                     integer(amount)
                 }
@@ -2026,15 +2022,16 @@ impl<A: WorldAssets> WorldHost<A> {
                 if source != 0 && destination != 0 && source != destination {
                     let inventory = self.object(source)?.inventory.clone();
                     self.object(destination)?;
-                    let worn = inventory.iter().any(|(item, _)| self.worn(*item));
                     for (item, count) in inventory {
                         self.world.remove_item(source, item, count)?;
                         if let Err(error) = self.world.add_item(destination, item, count, true) {
                             self.world.diagnostic(error.to_string());
                         }
                     }
-                    if worn {
-                        self.refresh_armor_art(source);
+                    // SPEC-005 §3.8: the player, now with empty hands and no
+                    // armor, shows the jumpsuit with weapon code 0.
+                    if source == self.world.player {
+                        self.update_player_gender();
                     }
                 }
                 None

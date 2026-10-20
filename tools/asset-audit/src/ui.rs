@@ -3,15 +3,21 @@
 //! counts, `intrface.lst` positions, cursor hotspots by the SPEC-001 rule,
 //! color keys through `color.pal`, fonts, the elevator destinations, splash
 //! images, credits, endgame slide resources, premades, the location table
-//! and the new-game map.
-use std::{collections::BTreeSet, error::Error};
+//! and the new-game map; with the interactions, the SPEC-005 §3.8 jumpsuit
+//! rows and armor art fields and the SPEC-007 §3.9 thrown weapons.
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+};
 use vault_core::{
     skills,
     ui::{ColorKey, cursor, endgame, flow, saveload},
 };
 use vault_formats::{
-    Font, FrmArchive, LocalDirProvider, LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES,
-    MapFile, MsgCatalog, Palette, Prototype, Vfs, credits, rix,
+    ArtCatalog, Font, FrmArchive, LocalDirProvider, LocalPrototypeCatalog, LstKind, LstTable,
+    MAX_ASSET_BYTES, MapFile, MsgCatalog, Palette, Prototype, Vfs, credits,
+    pro::{ItemData, PrototypeData},
+    rix,
 };
 
 /// Pass and fail counts per category, failures reported on stderr.
@@ -114,6 +120,121 @@ fn check_messages(
             _ => Ok(()),
         };
         audit.record("messages", &format!("{file} {id}"), result);
+    }
+}
+
+fn list(vfs: &LocalDirProvider, path: &str, kind: LstKind) -> Result<LstTable, String> {
+    LstTable::parse(&read(vfs, path)?, kind).map_err(|error| format!("{path}: {error}"))
+}
+/// An art list row's base name, lowercased.
+fn row_name(list: &LstTable, index: u32) -> Option<String> {
+    let name = list.art_id(index)?.name.as_deref()?;
+    Some(String::from_utf8_lossy(name).to_ascii_lowercase())
+}
+/// SPEC-005 §3.8: the 59-row critter list's jumpsuit rows (`hmjmps` 11,
+/// `hfjmps` 4, the last match without case) and the corpus armor's male
+/// and female art fields with the rows they name.
+fn player_art(audit: &mut UiAudit, vfs: &LocalDirProvider, items: &BTreeMap<u32, Prototype>) {
+    let critters = list(vfs, "art/critters/critters.lst", LstKind::Art);
+    let rows = critters.as_ref().map_err(Clone::clone).and_then(|list| {
+        let rows = list.entries().len();
+        (rows == 59).then_some(()).ok_or(format!("{rows} rows"))
+    });
+    audit.record("player art", "critters.lst rows", rows);
+    for (name, row) in [("hmjmps", 11), ("hfjmps", 4)] {
+        let result = critters.as_ref().map_err(Clone::clone).and_then(|list| {
+            let mut catalog = ArtCatalog::default();
+            catalog.insert(1, list.clone());
+            let found = catalog.last_row(1, name.as_bytes());
+            (found == Some(row))
+                .then_some(())
+                .ok_or(format!("{found:?}"))
+        });
+        audit.record("player art", &format!("{name} row {row}"), result);
+    }
+    for (pid, fields, names) in [
+        (1, [0x0100_000C, 0x0100_0005], ["hmlthr", "hflthr"]),
+        (2, [0x0100_000E, 0x0100_0007], ["hmmetl", "hfmetl"]),
+        (3, [0x0100_0001, 0x0100_0001], ["hapowr", "hapowr"]),
+        (17, [0x0100_000A, 0x0100_0003], ["hmcmbt", "hfcmbt"]),
+        (74, [0x0100_000D, 0x0100_0006], ["hmmaxx", "hfmaxx"]),
+        (113, [0x0100_0002, 0x0100_0002], ["harobe", "harobe"]),
+        (232, [0x0100_0001, 0x0100_0001], ["hapowr", "hapowr"]),
+        (239, [0x0100_000A, 0x0100_0003], ["hmcmbt", "hfcmbt"]),
+        (240, [0x0100_000E, 0x0100_0007], ["hmmetl", "hfmetl"]),
+    ] {
+        let result = critters.as_ref().map_err(Clone::clone).and_then(|list| {
+            let found = match items.get(&pid).map(|prototype| &prototype.data) {
+                Some(PrototypeData::Item(item)) => match &item.data {
+                    ItemData::Armor(armour) => [armour.male_art, armour.female_art],
+                    _ => return Err("not armor".into()),
+                },
+                _ => return Err("no item prototype".into()),
+            };
+            if found != fields {
+                return Err(format!("fields {found:x?}"));
+            }
+            let named = found.map(|field| row_name(list, field as u32 & 0xfff));
+            (named == names.map(|name| Some(name.to_owned())))
+                .then_some(())
+                .ok_or(format!("rows {named:?}"))
+        });
+        audit.record("player art", &format!("armor {pid}"), result);
+    }
+}
+/// SPEC-007 §3.9 the corpus thrown weapons: the throw mode in the given
+/// slot (0 primary, 1 secondary), the weapon code, the damage type, and the
+/// projectile prototype's art with its `misc.lst` row.
+fn thrown_weapons(audit: &mut UiAudit, vfs: &LocalDirProvider, items: &BTreeMap<u32, Prototype>) {
+    let protos = list(vfs, "proto/misc/misc.lst", LstKind::Prototype);
+    let arts = list(vfs, "art/misc/misc.lst", LstKind::Art);
+    for (pid, slot, code, damage_type, fid, name) in [
+        (7, 1, 4, 0, 0x0500_000D, "spear.frm"),
+        (19, 0, 0, 0, 0x0500_001C, "rockthro.frm"),
+        (25, 0, 0, 6, 0x0500_001B, "grndtro.frm"),
+        (26, 0, 0, 3, 0x0500_001B, "grndtro.frm"),
+        (27, 0, 0, 5, 0x0500_001B, "grndtro.frm"),
+        (45, 0, 1, 0, 0x0500_0004, "knife.frm"),
+        (79, 0, 0, 0, 0x0500_001A, "fthro.frm"),
+        (205, 0, 0, 0, 0x0500_001A, "fthro.frm"),
+        (159, 0, 0, 6, 0x0500_0020, "molotov.frm"),
+    ] {
+        let result = (|| {
+            let prototype = items.get(&pid).ok_or("no item prototype")?;
+            let PrototypeData::Item(item) = &prototype.data else {
+                return Err("not an item".to_owned());
+            };
+            let ItemData::Weapon(weapon) = &item.data else {
+                return Err("not a weapon".to_owned());
+            };
+            let found = (
+                prototype.extended.attack_modes()[slot],
+                weapon.animation,
+                weapon.damage_type,
+            );
+            if found != (5, code, damage_type) {
+                return Err(format!("mode, code, damage type {found:?}"));
+            }
+            let protos = protos.as_ref().map_err(Clone::clone)?;
+            let file = u32::try_from(weapon.projectile_pid)
+                .ok()
+                .and_then(|projectile| protos.prototype_id(projectile)?.name.clone())
+                .ok_or("no projectile prototype")?;
+            let path = format!("proto/misc/{}", String::from_utf8_lossy(&file));
+            let projectile =
+                Prototype::parse(&read(vfs, &path)?).map_err(|error| error.to_string())?;
+            if projectile.art_id != fid {
+                return Err(format!("projectile art {:#010x}", projectile.art_id));
+            }
+            let listed = arts
+                .as_ref()
+                .map_err(Clone::clone)
+                .map(|list| row_name(list, fid & 0xfff))?;
+            (listed.as_deref() == Some(name))
+                .then_some(())
+                .ok_or(format!("misc.lst {listed:?}"))
+        })();
+        audit.record("thrown", &format!("{pid}"), result);
     }
 }
 
@@ -263,6 +384,14 @@ pub fn audit_interactions(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Err
         let path = format!("sound/sfx/{sound}.acm");
         audit.record("explosions", &path, read(vfs, &path).map(|_| ()));
     }
+    let items: BTreeMap<u32, Prototype> = vfs
+        .files()
+        .filter(|path| path.as_str().starts_with("proto/items/") && path.extension() == Some("pro"))
+        .filter_map(|path| Prototype::parse(&read(vfs, path.as_str()).ok()?).ok())
+        .map(|prototype| (prototype.pid, prototype))
+        .collect();
+    player_art(&mut audit, vfs, &items);
+    thrown_weapons(&mut audit, vfs, &items);
     let mut misc: Vec<_> = (1000..=1005).map(|id| (id, None)).collect();
     misc.extend([
         (1006, Some("You have died from radiation sickness.")),

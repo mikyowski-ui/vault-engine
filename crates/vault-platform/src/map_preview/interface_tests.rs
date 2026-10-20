@@ -2008,3 +2008,53 @@ fn spec014_hotkeys_work_over_the_bar_but_drop_while_edge_scrolling() {
     assert!(preview.step(KeyCode::KeyI));
     assert!(matches!(preview.screen, Screen::Inventory(_)));
 }
+
+#[test]
+fn spec005_player_art_follows_the_gender_and_the_inventory_window() {
+    use vault_formats::{Fid, pro::BasicFlags};
+    let dir = corpus();
+    std::fs::write(
+        dir.path().join("art/critters/critters.lst"),
+        b"sample,0\nhfjmps,0\nhmjmps,0\n",
+    )
+    .unwrap();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let base =
+        |preview: &MapPreview| Fid(preview.host.world.get(player).unwrap().raw.art_id).base();
+    // Loading the player sheet ran the gender update: the jumpsuit row.
+    let context = preview.host.world.context(player);
+    let female = preview.host.world.player_sheet().unwrap().stat(34, context) == 1;
+    let jumpsuit = if female { 1 } else { 2 };
+    assert_eq!(preview.host.world.default_player_art, jumpsuit);
+    assert_eq!(base(&preview), jumpsuit);
+    // Armor worn through the window shows once the window closes.
+    let mut bytes = super::fixture::prototype(0, 0);
+    super::fixture::word(&mut bytes, 0, 0x30);
+    super::fixture::word(&mut bytes, 0x79, 0x0100_0007);
+    super::fixture::word(&mut bytes, 0x7d, 0x0100_0008);
+    let prototype = Arc::new(vault_formats::Prototype::parse(&bytes).unwrap());
+    let armor = preview.host.world.spawn(prototype, 0, 0).unwrap();
+    preview.host.world.add_item(player, armor, 1, true).unwrap();
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::KeyI));
+    preview
+        .host
+        .world
+        .equip(player, armor, BasicFlags::WORN.0)
+        .unwrap();
+    preview.image().unwrap();
+    assert_eq!(base(&preview), jumpsuit, "unchanged while open");
+    assert!(preview.step(KeyCode::Escape));
+    assert_eq!(base(&preview), if female { 8 } else { 7 });
+    // The use-on window never applies the figure art.
+    let target = npc(&preview);
+    preview.open_inventory_on(Some(target));
+    preview.host.world.unequip(player, armor).unwrap();
+    assert!(preview.step(KeyCode::Escape));
+    assert_eq!(base(&preview), if female { 8 } else { 7 });
+    // The inventory window does: the jumpsuit again.
+    assert!(preview.step(KeyCode::KeyI));
+    assert!(preview.step(KeyCode::Escape));
+    assert_eq!(base(&preview), jumpsuit);
+}

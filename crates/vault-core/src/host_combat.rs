@@ -906,19 +906,40 @@ impl<A: WorldAssets> WorldHost<A> {
         // explosion art, where the projectile ends.
         let explosion =
             self.weapon_explosion(attacker, defender, &attack, &spray.main, &victim, impact);
-        self.emit_attack_sounds(attacker, target, mode, hit && explosion.is_none());
-        if let Some((weapon, art)) = explosion {
-            use vault_formats::sfx::effect::{FLIGHT, HIT};
-            let flight = self.weapon_sound_name(FLIGHT, weapon, attack.hit_mode, 0);
-            self.emit_effect(flight, attacker);
-            if let Some(name) = self
-                .weapon_sound_name(HIT, weapon, attack.hit_mode, 0)
-                .filter(|name| !name.is_empty())
-            {
-                self.world
-                    .emit(crate::WorldEffect::SoundEffect { name, owner: None });
+        // SPEC-007 §3.9: a projectile flies to the target's hex on a hit or
+        // the impact hex on a miss; a throw consumes the thrown unit.
+        let place = |host: &Self, object: ObjectRef| host.world.get(object)?.raw.hex;
+        let arrival = if hit {
+            place(self, target)
+        } else {
+            impact.or_else(|| place(self, recorded_defender))
+        };
+        let launch = self
+            .projectile_launch(attacker, &attack, &spray.main)
+            .zip(arrival);
+        let mut hand = None;
+        if let Some((launch, arrival)) = launch {
+            let landing = crate::host_projectile::Landing {
+                hit,
+                arrival,
+                explosion: explosion.map(|(_, art)| art),
+            };
+            hand = self.launch_projectile(attacker, target, &attack, launch, landing)?;
+        } else {
+            self.emit_attack_sounds(attacker, target, mode, hit && explosion.is_none());
+            if let Some((weapon, art)) = explosion {
+                use vault_formats::sfx::effect::{FLIGHT, HIT};
+                let flight = self.weapon_sound_name(FLIGHT, weapon, attack.hit_mode, 0);
+                self.emit_effect(flight, attacker);
+                if let Some(name) = self
+                    .weapon_sound_name(HIT, weapon, attack.hit_mode, 0)
+                    .filter(|name| !name.is_empty())
+                {
+                    self.world
+                        .emit(crate::WorldEffect::SoundEffect { name, owner: None });
+                }
+                self.world.explosion_effects.push(art);
             }
-            self.world.explosion_effects.push(art);
         }
         // SPEC-007 §3.6: onlookers hear of the intended target when the
         // final victim differs, then of a critter victim.
@@ -931,6 +952,9 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.emit(crate::WorldEffect::RollHitPoints);
         }
         application?;
+        if let Some(weapon) = hand {
+            self.show_hand(attacker, weapon);
+        }
         self.run_taunts();
         Ok(Ok(recorded))
     }

@@ -93,6 +93,11 @@ pub trait WorldAssets {
     fn art_token(&self, _category: u8, _index: u16) -> Option<Vec<u8>> {
         None
     }
+    /// The last art-list row whose base name is `name`, without case
+    /// (SPEC-005 §3.8 jumpsuit indexes).
+    fn art_row(&self, _category: u8, _name: &[u8]) -> Option<u16> {
+        None
+    }
     /// Load the art selected by a complete SPEC-007 identifier.
     fn object_art(&self, _fid: u32) -> Result<Arc<FrmArchive>, WorldError> {
         Err(WorldError::Invalid("object art unavailable".into()))
@@ -444,6 +449,9 @@ impl WorldAssets for VfsWorldAssets {
                 .base_token(category, index)?
                 .to_vec(),
         )
+    }
+    fn art_row(&self, category: u8, name: &[u8]) -> Option<u16> {
+        self.art_catalog().ok()?.last_row(category, name)
     }
     fn art_exists(&self, fid: u32) -> bool {
         self.art_catalog()

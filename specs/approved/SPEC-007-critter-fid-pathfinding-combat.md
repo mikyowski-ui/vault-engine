@@ -22,6 +22,7 @@ Important distinctions: a directional-file selector is not a critter's zero-base
 
 - **R1-rev2 (2026-10-18).** Section 3.6 now gives the exact draw range and position of the punch-to-kick draw. Section 3.7 now gives the complete missed-shot bystander algorithm: the line-of-fire stage, the impact fallback, victim selection, hit location, damage, and draw order. Fixtures D and E are added. The raw revision hash was replaced by the label R1.
 - **R1-rev3 (2026-10-19).** Section 3.6 now holds the single authoritative intended-target, onlooker and retaliation rule, which SPEC-009 cites. A surviving conscious unintended victim, whether a missed-shot bystander or a critical-failure random target, makes the retaliation check only when its team differs from the attacker's. Section 3.7 now states that the disabled splash enumeration serves every explosion, so no explosion damages beyond its center target, which matches SPEC-013 §3.10.
+- **R1-rev4 (2026-10-19).** New section 3.9 gives thrown-weapon consumption (one unit, hand refill), the projectile flight sequence from the attacker's adjacent hex to the defender or impact hex, and what remains on the map. New Fixture F.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -672,6 +673,69 @@ Blood presentation replaces fall-back/front with 34/35 when violence is not zero
 
 Corpse presentation sets movement-nonblocking and flattens except for victim PIDs `0x01000032,0x01000031,0x01000008`; it removes the outline. Final animation 30 or 31 drops inventory except for victim PIDs `0x01000031,0x01000032,0x01000017`. Public direct/static-death requests have a separate correction: static codes 51-63 revert to forced fall-back 20 in these callers if maximum violence/art is unavailable. They are not the same decision tree as attack-driven damage selection. `[Must-match]`
 
+### 3.9 Thrown Weapons: Consumption and Projectile Flight
+
+This section applies to a hit mode whose attack animation is the throw (animation 18), after the attack result is final, including section 3.7.1. It covers removing the thrown item from the attacker and flying it to the target. SPEC-013 §3.10 gives the explosion art, sounds and damage for explosive throws. Non-thrown ranged weapons with a projectile use the same flight steps but create a new projectile object and remove nothing from the inventory.
+
+The animation start delays below are those of SPEC-013 §3.10: -1 waits until every earlier entry of the sequence has finished, 0 starts together with the entry before it, and N > 0 waits N scheduler ticks while an earlier entry is still running.
+
+**Corpus thrown weapons.** `[Must-match]`
+
+| PID | Item | Throw mode | Weapon code | Damage type | Projectile art (`misc.lst` index, identifier) | After arrival |
+| ---: | --- | --- | ---: | --- | --- | --- |
+| 7 | Spear | secondary | 4 | 0 normal | `spear.frm` (13, `0x0500000D`) | Lies at the arrival hex |
+| 19 | Rock | primary | 0 | 0 normal | `rockthro.frm` (28, `0x0500001C`) | Lies at the arrival hex |
+| 25 | Frag Grenade | primary | 0 | 6 explosion | `grndtro.frm` (27, `0x0500001B`) | Explodes and is erased |
+| 26 | Plasma Grenade | primary | 0 | 3 plasma | `grndtro.frm` (27, `0x0500001B`) | Explodes and is erased |
+| 27 | Pulse Grenade | primary | 0 | 5 EMP | `grndtro.frm` (27, `0x0500001B`) | Explodes and is erased |
+| 45 | Throwing Knife | primary | 1 | 0 normal | `knife.frm` (4, `0x05000004`) | Lies at the arrival hex |
+| 79, 205 | Flare | primary | 0 | 0 normal | `fthro.frm` (26, `0x0500001A`) | Lies at the arrival hex |
+| 159 | Molotov Cocktail | primary | 0 | 6 explosion | `molotov.frm` (32, `0x05000020`) | Explodes and is erased |
+
+The projectile art is the art of the weapon prototype's projectile PID (SPEC-003 weapon payload offset `0x18`), which names a miscellaneous prototype. A throw is **explosive** when its damage type is explosion, plasma or EMP.
+
+**When the projectile phase runs.** `[Must-match]` Both conditions must hold:
+
+1. The attack is a hit, or it does not carry the critical bit. A critical failure with a nonzero effect mask keeps the critical bit and does not fly (section 3.6). A critical failure whose mask is zero is an ordinary miss, and a critical failure that redirects to a random target clears the critical bit and sets hit; both of these fly.
+2. The projectile PID names a loadable prototype whose art identifier is not -1. Every corpus thrown weapon qualifies.
+
+When the phase does not run, nothing is removed from the attacker and nothing flies. On a miss, the defender plays its dodge animation at the attacker's action frame unless it is knocked out or knocked down. Critical-failure weapon effects (drop, destroy, explode) act on the item still in the hand. `[Must-match]`
+
+**Consumption.** `[Must-match]` Consumption happens at once, while the attack's animation sequence is being built, before any of it plays. In this order:
+
+1. Record the thrown item's own art identifier and its hand flags.
+2. Remove exactly **one unit** from the attacker's inventory, searching nested containers as well.
+   - When the entry held exactly one unit, the entry is deleted and the hand is now empty.
+   - When it held more, the inventory entry is replaced by a copy of the thrown object with the quantity reduced by 1. The copy gets a new object ID and a new script instance. It keeps the hand flag, so the rest of the stack stays in the same hand.
+   - The removed object loses its hand and worn flags and no longer has an owner.
+3. **Refill the hand.** Search the attacker's inventory, in order and including nested containers, for the first entry identical to the thrown item:
+   - same PID and script;
+   - neither object equipped or marked used;
+   - not a container, and both inventories empty;
+   - equal item data.
+
+   Take one unit of that entry, give it the recorded hand flags, and add it back as its own entry. That unit is the **refill item**. If none is found, there is no refill item. An equipped copy left by step 2 never matches, so a partly used hand stack is never refilled from itself.
+4. For the player, refresh the interface bar's item slots without animation.
+5. The removed object **is** the projectile. Its art becomes the projectile art, and it is placed on the map at the attacker's hex and elevation.
+
+A hand stack with units left can still be refilled from a separate unequipped stack of the same item. The hand then holds two hand-flagged entries. `[May-improve]`: skip the refill when units remain in the hand.
+
+**Flight.** `[Must-match]` Every entry that has a delay is registered in the attack's single reserved animation sequence. Step 3 happens at once, while the sequence is being built.
+
+1. The attacker turns toward the final defender's hex, delay -1. Section 3.7.1 can replace the defender with a bystander.
+2. The AI attack taunt (SPEC-009). Then the attack sound on the attacker, delay -1: the weapon attack sound (SPEC-010) when the attacker's art weapon code is nonzero, otherwise the character sound for the throw animation. Then the throw animation, delay 0.
+3. The projectile is hidden and lit with radius 9 at its own light intensity. It is moved to the **origin hex**: the hex adjacent to the attacker in the hex direction from the attacker's hex to the defender's hex, on the attacker's elevation. It faces that direction.
+4. The projectile is unhidden with delay A. A is the action frame of the attacker's throw art for its current base, weapon code and facing (taken before the turn of step 1), or 0 when that art cannot be loaded.
+5. The flight sound (SPEC-010 "ammo flying" weapon sound) plays on the projectile, delay 0.
+6. The projectile moves in a straight line, using the walk animation, delay 0. On a hit it goes to the defender's hex on the defender's elevation. On a miss it goes to the impact hex of section 3.7.1 on the defender's elevation. On a hit, N is the stride-32 straight-ray sample count from the origin hex to the defender's hex (section 3.2), minus 1. On a miss, N is 0.
+7. **Explosive arrival:** SPEC-013 §3.10 ("Order", steps 2-3). The grenade first shows its own item art, then the explosion art plays and the six adjacent arts follow.
+8. **Non-explosive arrival:** the weapon hit sound plays on the projectile, delay N.
+9. The defender's reaction and damage display, delay 0 (section 3.8). Then the AI hit or miss taunt.
+10. An explosive projectile is erased. A non-explosive thrown projectile changes back to the recorded item art, delay -1, and **stays on the map** at its arrival hex as an ordinary item, where it can be picked up. The six explosion neighbors are erased.
+11. Unless the attack left the attacker knocked out, knocked down or dead: if the refill item exists and has a nonzero weapon code, the attacker takes out that weapon code, delay -1. Otherwise the attacker's art changes to standing with weapon code 0, delay -1.
+
+When the rest of a stack stays in the hand (step 2), there is no refill item. The attacker then shows weapon code 0 while still holding the item. Its next throw uses weapon-code-0 throw art (section 2.2) and the character attack sound. This affects the Spear and the Throwing Knife; the other corpus thrown weapons have weapon code 0 anyway. `[May-improve]`: when units remain in the hand, take out that hand item's weapon code instead.
+
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
 These vectors are invented and require no shipped artwork or live host execution. Resource-existence sets, blocker objects, effective stats and random outcomes are explicit test inputs. Hex dumps contain data only; none is a complete map/prototype file.
@@ -830,6 +894,19 @@ The player fires a single-fire rifle: normal damage, range 10, damage 8-20, no w
 
 Boundary check: when E is the defender's own hex and no other blocker is present, outcomes `90, 30, 12` (with no critter on the line in Stage A) give the intended defender one round at numerator 2. The fixture's damage interval and the defender's DT/DR then apply as in section 3.6.
 
+### 4.6 Fixture F: Thrown-Weapon Consumption
+
+Player attacker; the right hand is the active hand. Each row is independent. "Hand" lists hand-flagged entries after the attack. `[Must-match]` except where tagged.
+
+| ID | Before | Attack result | Hand after | Other inventory after | Map after | Attacker art after |
+| --- | --- | --- | --- | --- | --- | --- |
+| F1 | Throwing Knife ×3 in hand | Hit | Throwing Knife ×2 (copy, new object ID) | none | One Throwing Knife at the defender's hex, item art restored | Standing, weapon code 0 (`[May-improve]`: take out code 1) |
+| F2 | Frag Grenade ×1 in hand; Frag Grenade ×3 unequipped | Miss, impact hex T | Frag Grenade ×1 (refill) | Frag Grenade ×2 | Nothing: the grenade explodes at T and is erased | Standing, weapon code 0 (refill code is 0) |
+| F3 | Spear ×1 in hand; Spear ×1 unequipped | Hit | Spear ×1 (refill) | none | One Spear at the defender's hex | Takes out weapon code 4 |
+| F4 | Rock ×1 in hand | Critical failure, nonzero mask | Rock ×1, unchanged unless the failure effect drops or destroys it | unchanged | No projectile | Per section 3.6 critical failure |
+| F5 | Throwing Knife ×2 in hand; Throwing Knife ×1 unequipped | Hit | Throwing Knife ×1 (copy) and Throwing Knife ×1 (refill): two hand-flagged entries, `[May-improve]` | none | One Throwing Knife at the defender's hex | Takes out weapon code 1 |
+| F6 | Flare ×1 in hand | Miss, impact hex T | empty | none | One Flare at T | Standing, weapon code 0 |
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -838,4 +915,4 @@ Boundary check: when E is the defender's own hex and no other blocker is present
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes (R1-rev2): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 16 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc") and this spec's own formula notation ("index", "stat", "column", "rank", "range"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Tag count, excluding the two tag definitions: 165 `[Must-match]`, 23 `[May-improve]`.
+Verification notes (R1-rev4): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 16 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc") and this spec's own formula notation ("index", "stat", "column", "rank", "range"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Tag count, excluding the two tag definitions: 171 `[Must-match]`, 27 `[May-improve]`.

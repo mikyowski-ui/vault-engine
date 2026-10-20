@@ -7,6 +7,10 @@ use crate::{
 };
 use vault_formats::{Fid, map::ObjectState};
 
+/// An engine-registered entry (no script opcode): change the animated
+/// object's art to the identifier in its first operand.
+pub(crate) const CHANGE_ART: u16 = 0x0001;
+
 /// Per-command execution state.
 #[derive(Debug, Clone, Default)]
 pub struct CommandProgress {
@@ -238,6 +242,14 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             0x80cc | 0x80cd => {
                 self.stand(object);
+                true
+            }
+            &CHANGE_ART => {
+                if let Some(found) = self.world.get_mut(object) {
+                    found.raw.art_id = values[0] as u32;
+                    found.raw.frame = 0;
+                }
+                *changed = true;
                 true
             }
             _ => true,

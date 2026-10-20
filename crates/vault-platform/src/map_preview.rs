@@ -378,6 +378,8 @@ impl MapPreview {
         let palette = Palette::parse(&assets.vfs.read_bounded("color.pal", MAX_ASSET_BYTES)?)?;
         let font = assets.font().ok();
         let mut host = WorldHost::new(WorldState::new(character, seed)?, assets);
+        // SPEC-005 §3.8: loading the player sheet runs the gender update.
+        host.update_player_gender();
         host.interactive_dialogue = true;
         // The desktop plays every movie and reports its end.
         host.movie_policy = MoviePolicy::WaitUntilFinished;

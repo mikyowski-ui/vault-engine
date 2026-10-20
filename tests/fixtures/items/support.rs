@@ -45,6 +45,15 @@ pub fn renumbered(pid: u32, as_pid: u32) -> Arc<Prototype> {
     world::word(&mut bytes, 0, as_pid as i32);
     parse(&bytes)
 }
+/// An armor (Armor A's protection) with SPEC-003 male and female art
+/// fields (payload offsets 0x40 and 0x44, file 0x79 and 0x7d).
+pub fn armor(pid: u32, male: i32, female: i32) -> Arc<Prototype> {
+    let mut bytes = bytes(ARMOR_A);
+    world::word(&mut bytes, 0, pid as i32);
+    world::word(&mut bytes, 0x79, male);
+    world::word(&mut bytes, 0x7d, female);
+    parse(&bytes)
+}
 /// A plain misc item (no power cell) with size, weight, and cost.
 pub fn misc(pid: u32, size: i32, weight: i32, cost: i32) -> Arc<Prototype> {
     let mut bytes = world::prototype(0, 5);
@@ -150,6 +159,8 @@ pub struct ItemAssets {
     pub program: Option<vault_vm::IntProgram>,
     /// Object art by identifier.
     pub art: BTreeMap<u32, Arc<FrmArchive>>,
+    /// `critters.lst` base names, by row.
+    pub critters: Vec<&'static str>,
 }
 impl Default for ItemAssets {
     fn default() -> Self {
@@ -165,6 +176,7 @@ impl Default for ItemAssets {
             catalogs: catalogs(),
             program: None,
             art: BTreeMap::new(),
+            critters: Vec::new(),
         }
     }
 }
@@ -195,6 +207,14 @@ impl WorldAssets for ItemAssets {
             .get(&fid)
             .cloned()
             .ok_or_else(|| WorldError::Invalid(format!("no art {fid:#x}")))
+    }
+    fn art_row(&self, category: u8, name: &[u8]) -> Option<u16> {
+        let row = (category == 1).then(|| {
+            self.critters
+                .iter()
+                .rposition(|base| base.as_bytes().eq_ignore_ascii_case(name))
+        })??;
+        u16::try_from(row).ok()
     }
 }
 

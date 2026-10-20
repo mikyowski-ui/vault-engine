@@ -433,6 +433,119 @@ impl ExplosionArt {
         })
     }
 }
+
+/// SPEC-007 §3.9 a projectile's flight, presentation only: the attack has
+/// already taken a thrown unit from the attacker, placed it where it lands
+/// and applied the damage. The projectile stays hidden for the throw's
+/// action frame, then shows at the origin hex and moves one stride-32 ray
+/// sample per frame step to its arrival. There an explosive one turns into
+/// its explosion art; a thrown item that stays is drawn again as the item
+/// it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectileFlight {
+    /// The thrown item that stays on the map; it is left out of the drawn
+    /// map until the flight ends.
+    pub item: Option<ObjectRef>,
+    /// The projectile art, facing `orientation`.
+    pub fid: u32,
+    pub orientation: u8,
+    pub elevation: u8,
+    /// The origin hex's center, then each ray sample: hex and pixel offset
+    /// from that hex's center.
+    pub path: Vec<(i32, [i32; 2])>,
+    /// Frame steps hidden (the throw art's action frame), `wait_ms` each.
+    pub wait: u32,
+    pub wait_ms: u64,
+    /// The interval of one step of the move.
+    pub interval_ms: u64,
+    /// The path position shown; `None` while hidden.
+    pub position: Option<usize>,
+    /// The flight sound, played when the projectile shows, and the hit
+    /// sound with the move steps it waits (a non-explosive arrival).
+    pub flight_sound: Option<Vec<u8>>,
+    pub hit_sound: Option<(usize, Vec<u8>)>,
+    /// The explosion that replaces the projectile on arrival, with the
+    /// explosion's own hit sound.
+    pub explosion: Option<(ExplosionArt, Option<Vec<u8>>)>,
+    /// When the next step is due; `None` before the first poll.
+    pub next_ms: Option<u64>,
+    pub done: bool,
+}
+/// What one flight step started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlightEvent {
+    Sound(Vec<u8>),
+    Explosion(ExplosionArt, Option<Vec<u8>>),
+}
+impl ProjectileFlight {
+    /// One scheduler step: a hidden wait, the showing at the origin with
+    /// the flight sound, a move step, or the arrival after the last sample.
+    fn step(&mut self, events: &mut Vec<FlightEvent>) {
+        if self.wait > 0 {
+            self.wait -= 1;
+            return;
+        }
+        let moved = match self.position {
+            None => 0,
+            Some(position) if position + 1 < self.path.len() => position + 1,
+            Some(_) => {
+                self.done = true;
+                if let Some((art, sound)) = self.explosion.take() {
+                    events.push(FlightEvent::Explosion(art, sound));
+                }
+                return;
+            }
+        };
+        if moved == 0 {
+            events.extend(self.flight_sound.take().map(FlightEvent::Sound));
+        }
+        self.position = Some(moved);
+        if self
+            .hit_sound
+            .as_ref()
+            .is_some_and(|(wait, _)| *wait == moved)
+        {
+            events.extend(
+                self.hit_sound
+                    .take()
+                    .map(|(_, name)| FlightEvent::Sound(name)),
+            );
+        }
+    }
+    /// Advance to `now_ms`; returns the sounds and explosions started.
+    pub fn poll(&mut self, now_ms: u64) -> Vec<FlightEvent> {
+        let mut events = Vec::new();
+        loop {
+            match self.next_ms {
+                Some(due) if due > now_ms => break,
+                _ => {}
+            }
+            if self.done {
+                break;
+            }
+            let hidden = self.position.is_none() && self.wait > 0;
+            self.step(&mut events);
+            let interval = if hidden {
+                self.wait_ms
+            } else {
+                self.interval_ms
+            };
+            self.next_ms = Some(self.next_ms.unwrap_or(now_ms) + interval.max(1));
+        }
+        events
+    }
+    /// The projectile as a map object while it shows.
+    fn record(&self) -> Option<MapObject> {
+        let (hex, offset) = *self.path.get(self.position?)?;
+        let mut record = object_record(EXPLOSION_ART_PID, EXPLOSION_ART_ID);
+        record.art_id = self.fid;
+        record.hex = Some(hex);
+        record.displacement = offset;
+        record.orientation = self.orientation;
+        record.elevation = self.elevation;
+        Some(record)
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorldEffect {
     Diagnostic(String),
@@ -621,6 +734,11 @@ pub struct WorldState {
     /// SPEC-013 §3.10 weapon explosions' art, played after their attack's
     /// damage (presentation only).
     pub explosion_effects: Vec<ExplosionArt>,
+    /// SPEC-007 §3.9 projectiles in flight (presentation only).
+    pub projectiles: Vec<ProjectileFlight>,
+    /// SPEC-005 §3.8 the default player art index: the jumpsuit for the
+    /// player's gender, set by each gender update (0 before the first).
+    pub default_player_art: u16,
     /// SPEC-014 §3.33 the hexes the player entered since the seen state was
     /// last processed: 40000 bits, 8 hexes per byte in hex order.
     pub visited: Vec<u8>,
@@ -763,6 +881,8 @@ impl WorldState {
             pending_explosion: None,
             explosion: None,
             explosion_effects: Vec::new(),
+            projectiles: Vec::new(),
+            default_player_art: 0,
             visited: vec![0; crate::persistence::VISITED_BYTES],
             combat_quit: false,
             combat_actor: 0,
@@ -1209,9 +1329,26 @@ impl WorldState {
         let mut map = self.map.clone();
         map.objects.elevations = std::array::from_fn(|_| Vec::new());
         map.objects.total = 0;
-        for (_, object) in self.iter() {
-            if object.owner.is_none() && object.active && object.raw.elevation < 3 {
+        // A thrown item still in flight is drawn as its projectile.
+        let flying: BTreeSet<ObjectRef> = self
+            .projectiles
+            .iter()
+            .filter(|flight| !flight.done)
+            .filter_map(|flight| flight.item)
+            .collect();
+        for (reference, object) in self.iter() {
+            if object.owner.is_none()
+                && object.active
+                && object.raw.elevation < 3
+                && !flying.contains(&reference)
+            {
                 map.objects.elevations[object.raw.elevation as usize].push(object.raw.clone());
+                map.objects.total += 1;
+            }
+        }
+        for record in self.projectiles.iter().filter_map(ProjectileFlight::record) {
+            if let Some(elevation) = map.objects.elevations.get_mut(record.elevation as usize) {
+                elevation.push(record);
                 map.objects.total += 1;
             }
         }
