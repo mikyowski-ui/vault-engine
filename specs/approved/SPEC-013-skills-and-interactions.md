@@ -62,6 +62,9 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 - **R1-rev4 (2026-10-19).**
   - Section 3.21 now states that its table is the complete elevator set: there is no Vault 15 elevator and no other elevator art.
   - Section 3.22 now covers leaving a map, which saves it and then reloads the destination's working copy (SPEC-014 §3.35), and the town-map and world-map destinations (maps -1 and -2), including the save-failure dialog.
+- **R1-rev5 (2026-10-20).**
+  - Section 3.16 step 3 now states the same container reach timing as SPEC-007 §3.11.3. The previous text put the missing-art fault on the wrong branch and gave a different improvement rule. The current rule opens the container on the reach's action frame when the art loads.
+  - Sections 3.2 and 3.23 now point to the shared adjacency check and approach-goal rule in SPEC-007.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -233,7 +236,7 @@ Accepted requests are scheduled as one animation sequence: `[Must-match]`
 
 1. If the actor is the player and is walking or running, its current animation is cleared.
 2. Out of combat, if the target is not the player, the actor runs to the target when object distance is at least 5, otherwise walks. The player as target causes no movement. The approach uses the ordinary move-to-object rules of SPEC-007 §3.1.
-3. A proximity step requires object distance at most 1. When it fails, the sequence aborts and `misc.msg` 2000 is displayed only when the **target** is the player. `[May-improve]`: display it when the actor is the player.
+3. A proximity step requires object distance at most 1. When it fails, the sequence aborts and `misc.msg` 2000 is displayed only when the **target** is the player. `[May-improve]`: display it when the actor is the player. This is the shared adjacency check of SPEC-007 §3.11.3. The approach goal rule, under which the target's own hex is never tested for a blocker, is in SPEC-007 §3.1.
 4. The actor plays the manipulation animation: the ground variant when the target's art is a critter and the target is prone (SPEC-007 §3.3), otherwise the middle variant.
 5. After that animation completes, the skill-on stage of section 3.3 runs. The animation's action frame is looked up but not used; the stage is a sequential step after the full animation.
 
@@ -538,7 +541,7 @@ Digit keys and Backspace are ignored. Enter accepts a value from 10 through 180 
 
 1. **Container item on the map.** A left click or the action-menu Use runs the "get object" action. The player walks to the item, or runs when out of combat at object distance 5 or more, and must end adjacent. In combat it costs 3 AP, and without them `proto.msg` 700 is shown and the sequence stops. A container whose prototype is not flagged as pick-up-able then:
    1. puts away a held weapon (animation 39, with sound);
-   2. plays the reach animation: ground (animation 10) when bit `0x01` of the container prototype's open-flags word is set, else middle (animation 11);
+   2. plays the reach animation: ground (animation 10) when bit `0x01` of the container prototype's open-flags word (payload word `0x04`, SPEC-003) is set, else middle (animation 11);
    3. runs the use-container step below, except item PID 213, which skips it;
    4. takes the weapon out again;
    5. posts a loot request only when the container's frame was 0 (closed) at the time of the click, or the PID is 213.
@@ -550,7 +553,11 @@ Digit keys and Backspace are ignored. Enter accepts a value from 10 through 180 
    - Otherwise animate: from frame 0, play the open sound and the forward animation; from any other frame, play the close sound and the reverse animation.
    - Display 485 when the container was closed before the step, otherwise 486, with the container's name.
    - The jammed bit is not tested on this path. A locked container still posts its loot request, but the window refuses the closed container.
-3. The reach step's action-frame lookup has an inverted missing-art test. With missing art the reference reads through a null image and leaks its lock. `[May-improve]`: always run the use-container step after the reach animation completes.
+3. **Reach timing.** SPEC-007 §3.11.3 ("Container reach timing") is authoritative, and this step states the same rule.
+   - The delay of the use-container step is meant to come from the reach art's action frame, looked up with weapon code 0. The art test is inverted, so when the art loads, the delay is -1.
+   - With corpus art, the use-container step therefore always starts after the reach animation has finished. `[Must-match]`
+   - `[May-improve]`: when the reach art loads, start the use-container step on its action frame, as the pickup does. When it does not load, start it after the reach has finished.
+   - The weapon take-out and the loot request keep delay -1 under either rule.
 4. **Critter targets.** A click on a critter that cannot be talked to loots it. "Can talk" requires the prototype's talk flag and an active critter (not dead, knocked out or lost-turn). The action-menu Use is offered exactly for such critters and does the same: approach, 3 AP in combat, loot request. A living critter whose prototype lacks the talk flag therefore opens an ordinary loot window, not steal mode.
 5. **In combat**, loot and elevator requests are serviced by the per-input combat request pass. That pass then discards every other pending deferred request, including dialogue, explosion, endgame and steal requests.
 
@@ -895,7 +902,7 @@ Ladder and stairs instances store packed destination words (SPEC-003), but no en
 
 1. Stop the player's walk or run.
 2. Move to the hex one step southeast of the ladder, on the ladder's elevation: walking in combat or at distance below 5, otherwise running, and AP-limited in combat.
-3. Require adjacency. The "cannot get there" test checks the wrong object, so `misc.msg` 2000 never appears for the player. `[May-improve]`: display it when the actor is the player.
+3. Require adjacency. The "cannot get there" test checks the wrong object, so `misc.msg` 2000 never appears for the player. `[May-improve]`: display it when the actor is the player. This is the adjacency check every approaching interaction shares, not a ladder-only fault (SPEC-007 §3.11.3).
 4. Turn to face the ladder.
 5. In combat, require 3 AP, or show `proto.msg` 700.
 6. Put away a held weapon (animation 39).
@@ -1062,4 +1069,4 @@ All cases are out of combat with effective Intelligence 6, unless stated.
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 23 plain-word warnings were reviewed and are benign: this spec's own formula and UI words ("value", "level", "draw", "maximum", "position", "size", "current", "trunc", "slot", "count", "counter", "attempt"). The public opcode names `sfx_build_open_name` and `sfx_build_char_name` appear only as naming-rule references. The fenced blocks hold no code; fixtures are tables. Cross-spec note (resolved): SPEC-007 §3.7 now states the same rule as section 3.10. Every explosion, whether weapon, grenade, timed or scripted, uses the one disabled victim enumeration, so in R1 only the center target takes damage. Retaliation and onlooker wording now matches the single rule in SPEC-007 §3.6. The added warning "start" is the public SSL procedure name start, used in section 3.10. Explosion art, sound and skill-book names in sections 3.10 and 3.25 are corpus file and prototype names, checked against `art/misc/misc.lst`, the corpus FRM headers, `sound/sfx` and `pro_item.msg`. The section 3.21 coverage note was checked against `art/intrface/intrface.lst` and `map.msg`. Tag count, excluding the two tag definitions: 97 `[Must-match]`, 36 `[May-improve]`.
+Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 23 plain-word warnings were reviewed and are benign: this spec's own formula and UI words ("value", "level", "draw", "maximum", "position", "size", "current", "trunc", "slot", "count", "counter", "attempt"). The public opcode names `sfx_build_open_name` and `sfx_build_char_name` appear only as naming-rule references. The fenced blocks hold no code; fixtures are tables. Cross-spec note (resolved): SPEC-007 §3.7 now states the same rule as section 3.10. Every explosion, whether weapon, grenade, timed or scripted, uses the one disabled victim enumeration, so in R1 only the center target takes damage. Retaliation and onlooker wording now matches the single rule in SPEC-007 §3.6. The added warning "start" is the public SSL procedure name start, used in section 3.10. Explosion art, sound and skill-book names in sections 3.10 and 3.25 are corpus file and prototype names, checked against `art/misc/misc.lst`, the corpus FRM headers, `sound/sfx` and `pro_item.msg`. The section 3.21 coverage note was checked against `art/intrface/intrface.lst` and `map.msg`. Section 3.16 step 3 and the pointers in sections 3.2 and 3.23 were checked against SPEC-007 §3.11.3 (R1-rev7) so that both specs state one container reach timing rule and one adjacency check. Tag count, excluding the two tag definitions: 98 `[Must-match]`, 36 `[May-improve]`.

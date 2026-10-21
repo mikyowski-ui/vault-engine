@@ -21,7 +21,8 @@ This document covers:
 - the in-game automap window and the Pip-Boy automap page;
 - the player inventory and use-on windows: art, layout, stats panel, rotating figure, action menu, cursor modes and item dragging;
 - the endgame slideshow, ending movie and scrolling credits;
-- the working map set: how visited maps persist across map changes, saves and loads, and how a revisited map ages.
+- the working map set: how visited maps persist across map changes, saves and loads, and how a revisited map ages;
+- when roofs are hidden as the player walks under them and restored when the player walks out.
 
 The reference main menu has **no Options button**: its five buttons are Intro, New Game, Load Game, Credits and Exit. Options and Preferences are reached in game (section 3.17). `[Must-match]`
 
@@ -67,6 +68,7 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 | Map border and scroll limits | Tile module, map scroll and map load |
 | Endgame, credits | Endgame and credits modules, word wrapper |
 | Working map set, revisit aging | Map load/save, save-slot copying and game reset |
+| Roof hiding | Object placement, tile roof fills and map tile-block load |
 
 ### Revision history
 
@@ -87,6 +89,8 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
     - what they hold, including map variables;
     - how they travel with save slots;
     - the revisit rules: lock unjamming, healing, and replacing old corpses with remains.
+- **R1-rev5 (2026-10-20).** Section 3.27 gains "Clicks while the player is busy": a click is never queued, and the section states which clicks cancel the player's current sequence and which are ignored, in and out of combat. The movement-click rule for `interrupt_walk` now says that it cancels any player sequence, not only a walk.
+- **R1-rev6 (2026-10-20).** New section 3.36 Roof Hiding and Restoring: the hex-to-roof-square mapping, the empty test (art index 1), the hide and restore fills, the per-placement rule, map load and leave, and two `[May-improve]` defects (the first-placement read outside the grid, and the elevation-change restore on the wrong elevation). New Fixture G. Section 3.35 step 5 now states that a map with no number is never saved.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -900,7 +904,7 @@ In movement mode the hex snaps to the hovered hex; a second object for the AP te
 
 **Clicks** (left release in the map area, y at most 379). Every left-button map action fires on **release**, at the release position; the press itself does nothing. A release before the 250-millisecond hold pulse is an ordinary click. A right click acts on press. `[Must-match]`
 
-- **Movement.** Walk, or run when the `running` preference is on; Shift inverts the preference. In combat the route is limited to AP plus free movement. With Ctrl held in combat, the current attack's AP cost is subtracted from that budget first, and nothing moves if the result is 0 or less. Out of combat a new walk cancels the current one when `fallout.cfg` [system] `interrupt_walk` is on (default 1).
+- **Movement.** Walk, or run when the `running` preference is on; Shift inverts the preference. In combat the route is limited to AP plus free movement. With Ctrl held in combat, the current attack's AP cost is subtracted from that budget first, and nothing moves if the result is 0 or less. Out of combat, when `fallout.cfg` [system] `interrupt_walk` is on (default 1), a new walk first cancels the player's current sequence, whatever it is doing ("Clicks while the player is busy", below).
 - **Arrow.** Perform the primary action:
   - item: pick up;
   - player: rotate, only when standing;
@@ -911,6 +915,19 @@ In movement mode the hex snaps to the hovered hex; a second object for the AP te
 - **Crosshair.** Attack the critter under the pointer. The hover is then marked done at the click position, so the to-hit text stays as it was until the pointer moves. It is recomputed by force only at the start of each player combat turn and when the in-world cursor is turned back on.
 - **Use crosshair.** In combat a non-weapon needs and spends 2 AP; when the AP cannot be paid nothing happens and no message is shown. Otherwise use the active item on the target. The mode returns to movement in every case, even with no target.
 - **Skill modes.** As SPEC-013 §3.1.
+
+**Clicks while the player is busy.** `[Must-match]` unless tagged. Busy means that a sequence holding the player is still playing, such as an approach, a reach, a put-away, a take-out or a door use. Nothing is ever queued. A click either cancels the current sequence and starts its own, or does nothing. The rules come from SPEC-007 §3.10.1 ("One sequence per owner").
+
+- **In combat**, the first sequence registered on the player's turn disables the game mouse, keyboard and interface bar. It shows the animated watch until every running sequence has ended. Clicks made meanwhile are discarded (section 3.26).
+- **Movement click, out of combat.**
+  - With `interrupt_walk` on, the click cancels the player's current sequence and the new walk starts. A reach or container use in progress is abandoned. Its unstarted entries are dropped: the use itself, the weapon take-out and the loot request.
+  - A sequence the player is not part of keeps playing. An example is a door's opening animation that the use already started.
+  - With `interrupt_walk` off, the new walk cannot register while the player is busy, so the click does nothing.
+- **Arrow click or action-menu entry** (pick up, use, loot, talk, skill use).
+  - If the player's current art is walk or run, the current sequence is cancelled first. A click during the approach of an earlier action therefore replaces that whole action, not only its movement.
+  - In any other pose, such as a reach, put-away, take-out or standing inside a sequence, nothing is cancelled. The new action's first player-owned entry cannot register, so the click does nothing and shows no message.
+  - Talk out of combat, at object distance below 9 with an unblocked line, has no approach entry. It consists only of callbacks, so it registers even while the player is busy. Its dialogue request is then made while the earlier animation plays.
+- **Player click (rotate)** works only while the player's art is standing (above).
 
 ### 3.28 Action Menu
 
@@ -1275,7 +1292,7 @@ Campaign variables are not in it; they live in the save slot's `SAVE.DAT` (SPEC-
 2. Run the map-exit queue cleanup, then request `map_exit_p_proc` (SPEC-006 §3.5).
 3. Re-queue the game-time event, and restore the roof over the player's position.
 4. Set the map's saved bit `0x01` and record the current game time as its last visit.
-5. If the map number at the player's elevation is in the excluded set, delete any working `.SAV` for it and write nothing. The excluded set is SPEC-008 §2.8's initial set: maps 0-2, 19-23, 49-54 and 56-65, which are the desert and encounter maps. Those maps are rebuilt from their `.MAP` on every visit. Otherwise write `MAPS\<name>.SAV` and capture the automap for that elevation.
+5. If the map number at the player's elevation is in the excluded set, or the map has no number (SPEC-008 §3.10), delete any working `.SAV` for it and write nothing. The excluded set is SPEC-008 §2.8's initial set: maps 0-2, 19-23, 49-54 and 56-65, which are the desert and encounter maps. Those maps are rebuilt from their `.MAP` on every visit. Otherwise write `MAPS\<name>.SAV` and capture the automap for that elevation.
 6. Remove every object, the prototype cache and the tile data.
 
 **Loading a map.** `[Must-match]`
@@ -1306,6 +1323,50 @@ Campaign variables are not in it; they live in the save slot's `SAVE.DAT` (SPEC-
 5. Leaving an excluded map that was loaded this way deletes its working `.SAV` again.
 
 Returning to a town therefore shows exactly the state left there, apart from the revisit rules: corpses, opened doors, dropped and moved items, map variables and script state.
+
+### 3.36 Roof Hiding and Restoring
+
+Roofs are hidden by setting the roof-hide bit of whole connected groups of roof squares when the player walks under them, and restored by clearing it when the player walks out. The roof word layout is in SPEC-003 §2.8: roof art index in bits 16-27, roof-hide bit `0x10000000`, flood-barrier bit `0x20000000`. In R1 there is no key, preference or script that turns roofs off as a whole. `[Must-match]`
+
+**Terms.** `[Must-match]`
+
+- The **roof square** of hex h is column `trunc((h mod 200) / 2)`, row `trunc(trunc(h / 200) / 2)`, at grid position `column + 100 × row` of the player's elevation. Each square covers a 2 × 2 block of hexes.
+- A square is **empty** when its roof art index is exactly **1**, the blank tile. Any other index counts as a roof, including index 0, which no corpus map uses as a roof.
+- The **nibble** of a square is its roof flag bits 28-31: bit 0 is the hide bit, bit 1 the barrier bit.
+- **Hide fill** from a square: if the square is inside the 100 × 100 grid, not empty, and has neither the hide bit nor the barrier bit, set its hide bit and continue to its four edge neighbors (left, right, up, down). The result is the edge-connected group of such squares that contains the start. A start square that does not qualify hides nothing.
+- **Restore fill** from a square: if the square is inside the grid, not empty, and has its hide bit set, clear the bit and continue to its four edge neighbors. The result is the edge-connected group of hidden squares that contains the start.
+- The fills do not connect diagonally. The reference fills recursively; any traversal order gives the same set.
+
+**Tracking state.** The engine keeps the last roof square (column and row), the last elevation, and a last-empty flag. Removing all objects (unloading a map, loading a map, a game reset) sets them to "none" (-1, -1, -1) and last-empty to true. `[Must-match]`
+
+**The rule.** `[Must-match]` Every time the **player** object is placed on a hex — a walking step that crosses into a new hex (SPEC-007 §3.11.1), a placement, a script move, or the entrance placement of a map load — and after that hex's exit grids are checked (SPEC-013 §3.22):
+
+1. Compute the new roof square S on the new elevation. If S and the elevation both equal the last ones, stop.
+2. Let E be "S is empty", c the nibble of S, and p the nibble at the last square's position, read from the **new** elevation's grid.
+3. If E differs from last-empty, or c differs from p:
+   - (3a) If last-empty is false, run the restore fill from the last square, on the new elevation.
+   - (3b) If E is false, run the hide fill from S.
+4. Record S, the elevation and E as the last ones, whether or not step 3 ran.
+
+Only the player triggers this. Party members and other critters never hide or restore roofs.
+
+**Consequences.** `[Must-match]`
+
+- Stepping under a roof hides its whole edge-connected group at once, so roofs of buildings that touch along an edge vanish together. Stepping within that group changes nothing, because every square of it has nibble 1.
+- Stepping out onto an empty square restores the group.
+- A hex step can move to a diagonally adjacent square. Two roof groups that touch only at a corner are separate groups: stepping from one to the other compares nibble 1 with nibble 0, so it restores the first and hides the second.
+- A square with the barrier bit is never hidden and stops both fills. Standing on it hides nothing, so its roof stays drawn over the player. No corpus map sets the barrier bit.
+- The hide bit also changes pointer picking: a hidden roof square no longer blocks objects under the pointer (section 3.27).
+
+**Loading and leaving a map.** `[Must-match]`
+
+- Loading a map clears the hide bit on every square of each tile block present in the file (SPEC-003 §2.8). Hidden roofs saved in a `.SAV` therefore come back drawn. The entrance placement, a placement from "none", then hides the group under the player, if any.
+- Leaving a map (section 3.35 step 3): if the last square, read on the player's current elevation, is not empty, run the restore fill from it before the map is written.
+
+**Defects.**
+
+- The first placement after a reset reads the "previous" nibble at position `-1 + 100 × -1`, 101 words before the start of the grid. With last-empty still true, the value read never changes the result. `[May-improve]`: when there is no last square, skip the nibble comparison and test only E against last-empty.
+- On an elevation change, step 2 reads p and step 3a restores on the **new** elevation, at the old square's position. A group hidden on the old elevation therefore stays hidden there. It reappears only when the player later enters and leaves it on that elevation, or when the map is reloaded. A matching group on the new elevation at the old position, if hidden, is restored instead. `[May-improve]`: run the restore fill on the elevation where the group was hidden, and take p from that elevation.
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
@@ -1381,6 +1442,21 @@ Expected in normal style: rows 0-4 are title `PRODUCER` (font 103), name `Jane E
 
 With a bullet width of 6 pixels, the first line of a message holds text narrower than 155 pixels; continuation lines hold text narrower than 161. A 154-pixel first chunk fits; a 155-pixel chunk breaks at its last space. Seven consecutive one-line messages leave the oldest of them out of view; the six visible lines are drawn at x = 23 through 28, top to bottom.
 
+### 4.7 Fixture G: Roof Hiding
+
+A synthetic elevation-0 roof grid: squares with columns 10-12 and rows 20-21 form one group with roof art index 5; square (13, 22) has index 5 and touches that group only at a corner; every other square has index 1. All nibbles start at 0. The player starts after a map load with the tracking state at "none" and is placed on these hexes in turn:
+
+| Step | Hex | Square | E | c / p | Action | Hidden squares afterwards |
+| ---: | ---: | --- | --- | --- | --- | --- |
+| 1 | 8018 | (9, 20) | empty | 0 / read before the grid | Emptiness unchanged (true); nothing to restore or hide | None |
+| 2 | 8020 | (10, 20) | roof | 0 / 0 | E changed: hide fill from (10, 20) | The 6 squares (10-12, 20-21), roof words now `0x1005xxxx` |
+| 3 | 8422 | (11, 21) | roof | 1 / 1 | No change | Same 6 |
+| 4 | 8424 | (12, 21) | roof | 1 / 1 | No change | Same 6 |
+| 5 | 8826 | (13, 22) | roof | 0 / 1 | Nibble changed: restore from (12, 21), hide from (13, 22) | (13, 22) only |
+| 6 | 8828 | (14, 22) | empty | 0 / 1 | E changed: restore from (13, 22) | None |
+
+Here `xxxx` is the unchanged floor half. If square (13, 21) also had index 5, it would join both groups along edges, step 2 would hide 8 squares and step 5 would change nothing.
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -1389,4 +1465,4 @@ With a bullet width of 6 pixels, the first line of a message holds text narrower
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 31 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles", and the configuration section name "system"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc"). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. The sound name "toggle" is also flagged. The section 3.29 border values were recomputed with an independent model of the hex-to-screen transform and checked against the entry hexes of all 72 corpus maps. Section 3.34 art sizes were read from the corpus FRM headers. Section 3.35 file and frame facts were checked against the corpus (`rscorpbl.frm` has 9 frames; item PID 213 is Remains of Gizmo). Tag count, excluding the two tag definitions: 140 `[Must-match]`, 53 `[May-improve]`.
+Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 33 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles", and the configuration section name "system"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc", and "column" in the section 3.36 roof-square formula). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. The sound name "toggle" is also flagged. The section 3.29 border values were recomputed with an independent model of the hex-to-screen transform and checked against the entry hexes of all 72 corpus maps. Section 3.34 art sizes were read from the corpus FRM headers. Section 3.35 file and frame facts were checked against the corpus (`rscorpbl.frm` has 9 frames; item PID 213 is Remains of Gizmo). The section 3.27 busy-click rules were checked against SPEC-007 §3.10.1 ("One sequence per owner"). The section 3.36 empty-roof test and bits match SPEC-003 §2.8, and the roof words of all 72 corpus maps were scanned: 15056 roofed squares, none with roof index 0 or the barrier bit; `LAGUNRUN.MAP` stores 257 squares with the hide bit set, which loading clears. Fixture G was stepped by hand through the section 3.36 rule. Tag count, excluding the two tag definitions: 148 `[Must-match]`, 57 `[May-improve]`.

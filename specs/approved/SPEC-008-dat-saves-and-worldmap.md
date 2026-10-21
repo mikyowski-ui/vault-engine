@@ -556,6 +556,111 @@ Until-healed first estimates `trunc(3 x missing player HP / player healing rate)
 
 Wake-up presets target the next requested whole hour. If already exactly at that hour and minute zero, wait 24 hours rather than zero. Queue effects, poison/radiation, campaign deadlines, and ordinary interruptions remain active during explicit time advancement. `[Must-match]`
 
+### 3.10 Map Numbers, Town Lookup and City Music
+
+**Map numbers.** A map number is a message number 0-65 in `text/<language>/game/map.msg`; that message's text is the map's file name. There are exactly 66 numbers. They index the automap database (section 2.8), the area short names (SPEC-014 §3.14), the excluded-map set, the town lookup and the city music below. `[Must-match]`
+
+**Assigning the current map number.** `[Must-match]` After a map stream (`.MAP` or `.SAV`) has been read and the player placed at its entrance, the current map number is set from the **header's name field** (SPEC-003 §2.7, offset `0x04`), not from the requested file name:
+
+1. If the name contains the lowercase text `.sav`, or is exactly `TMP$MAP#.MAP`, keep the header's map-number word (offset `0x34`).
+2. Otherwise uppercase the name and replace its first `.SAV` with `.MAP`. Compare it with the texts of messages 0-65 in order; the first exact match gives the number.
+3. No match gives -1.
+
+Apart from case 1, the header's offset-`0x34` word is overwritten, so a renamed copy of a map takes the number of its name. A `.SAV` written by the engine stores its name as `<NAME>.SAV` in upper case, so it matches its original map.
+
+**The 72 corpus maps.** The corpus `maps/` directory holds 72 `.MAP` files. 66 of them are the numbered maps below, and each one's header word `0x34` already equals its number. The other six, `CARAVAN.MAP`, `JUNKDEMO.MAP`, `TEMPLAT1.MAP`, `ZDESERT1.MAP`, `ZDESERT2.MAP` and `ZDESERT3.MAP`, are not in `map.msg`, store -1 there, and load with map number -1. Normal play cannot reach them. Hotspots, encounter tables, exit grids and `load_map` all go through map numbers; `load_map` with a name string first matches it against `map.msg` (SPEC-005), so an unlisted name makes no transition. The only engine path that loads a map by file name alone is a self-run demo recording (SPEC-014 §3.6), and the corpus holds no recordings. `[Must-match]`
+
+**Town lookup.** `[Must-match]` Each map number has one fixed town id (section 3.7). An out-of-range number, including -1, gives town -1. The table assigns a town to every numbered map, including the interior maps that no hotspot in section 3.7 names: the Necropolis vault (9) belongs to Necropolis, the caves (16) to Shady Sands, the second Cathedral map (18) and both Master's Lair levels (33, 34) to Cathedral, the two inner Military Base maps (31, 32) to Military Base, the second Glow map (43) to Glow, and `HUBMIS1` (65) to Vault 13, although its short name and music are the Hub's. Random-encounter, special-encounter and caravan maps carry town 1 (Vault 15), except the fourth caravan pair (63, 64) and `HUBMIS1`, which carry town 0. These are plain table values, not a "no town" marker.
+
+The town is used in three places:
+
+- **Map transitions** (SPEC-013 §3.22 step 3). After a map is loaded by number, the party is moved on the world map to the new map's town by the script-directed town travel of section 3.4, unless the party's current cell is already that town's cell. Town -1 moves nothing.
+- **Rest permission** (section 3.9). Town -1 falls into the team-checking default.
+- **Town-map and world-map entry** start from the current town (SPEC-013 §3.22).
+
+**City music.** `[Must-match]` A track name `t` means `sound/music/<t>.acm`, looked up case-insensitively. The world map plays `03wrldmp`. Loading a map first starts the background track `wind2`, looping (SPEC-013 §3.22). When the map number is known, its city track then replaces it:
+
+- The current background track is stopped and the city track starts from its beginning, looping. This happens even when the same track was already playing.
+- The city track starts after a saved copy is loaded, after any load by map number, after a town-map or world-map entry loads its map, after a game load, and when a new game starts on its first map.
+- One map change can request the city track two or three times in a row, restarting it each time before any of it is heard. `[May-improve]`: start the track once per map change, and do not restart a track that is already playing.
+- When the map number is -1, nothing replaces `wind2`, which keeps looping for as long as that map is shown.
+- When music is disabled the request is recorded but nothing plays. Re-enabling music later plays the last recorded track.
+
+**Unnumbered maps.** A map with number -1 has no automap entry, no area short name, no town and no city music. It is always treated as excluded when leaving it, so no working `.SAV` is ever written for it (SPEC-014 §3.35). `[Must-match]`
+
+The complete table follows. Track files are not in the corpus, which has no `sound/music/` directory, so only the names are given. The table is exact data. `[Must-match]`
+
+| Map | `map.msg` text | Town | City music |
+| ---: | --- | --- | --- |
+| 0 | `DESERT1.MAP` | 1 Vault 15 | `07desert` |
+| 1 | `DESERT2.MAP` | 1 Vault 15 | `07desert` |
+| 2 | `DESERT3.MAP` | 1 Vault 15 | `07desert` |
+| 3 | `HALLDED.MAP` | 5 Necropolis | `14necro` |
+| 4 | `HOTEL.MAP` | 5 Necropolis | `14necro` |
+| 5 | `WATRSHD.MAP` | 5 Necropolis | `14necro` |
+| 6 | `VAULT13.MAP` | 0 Vault 13 | `06vault` |
+| 7 | `VAULTENT.MAP` | 1 Vault 15 | `13carvrn` |
+| 8 | `VAULTBUR.MAP` | 1 Vault 15 | `13carvrn` |
+| 9 | `VAULTNEC.MAP` | 5 Necropolis | `14necro` |
+| 10 | `JUNKENT.MAP` | 3 Junktown | `12junktn` |
+| 11 | `JUNKCSNO.MAP` | 3 Junktown | `12junktn` |
+| 12 | `JUNKKILL.MAP` | 3 Junktown | `12junktn` |
+| 13 | `BROHDENT.MAP` | 7 Brotherhood | `04brthrh` |
+| 14 | `BROHD12.MAP` | 7 Brotherhood | `04brthrh` |
+| 15 | `BROHD34.MAP` | 7 Brotherhood | `04brthrh` |
+| 16 | `CAVES.MAP` | 2 Shady Sands | `13carvrn` |
+| 17 | `CHILDRN1.MAP` | 11 Cathedral | `11chilrn` |
+| 18 | `CHILDRN2.MAP` | 11 Cathedral | `11chilrn` |
+| 19 | `CITY1.MAP` | 1 Vault 15 | `11chilrn` |
+| 20 | `COAST1.MAP` | 1 Vault 15 | `07desert` |
+| 21 | `COAST2.MAP` | 1 Vault 15 | `07desert` |
+| 22 | `COLATRUK.MAP` | 1 Vault 15 | `07desert` |
+| 23 | `FSAUSER.MAP` | 1 Vault 15 | `07desert` |
+| 24 | `RAIDERS.MAP` | 4 Raiders | `05raider` |
+| 25 | `SHADYE.MAP` | 2 Shady Sands | `15shady` |
+| 26 | `SHADYW.MAP` | 2 Shady Sands | `15shady` |
+| 27 | `GLOWENT.MAP` | 9 Glow | `09glow` |
+| 28 | `LAADYTUM.MAP` | 10 Boneyard | `10labone` |
+| 29 | `LAFOLLWR.MAP` | 10 Boneyard | `16follow` |
+| 30 | `MBENT.MAP` | 8 Military Base | `08vats` |
+| 31 | `MBSTRG12.MAP` | 8 Military Base | `08vats` |
+| 32 | `MBVATS12.MAP` | 8 Military Base | `08vats` |
+| 33 | `MSTRLR12.MAP` | 11 Cathedral | `02mstrlr` |
+| 34 | `MSTRLR34.MAP` | 11 Cathedral | `02mstrlr` |
+| 35 | `V13ENT.MAP` | 0 Vault 13 | `06vault` |
+| 36 | `HUBENT.MAP` | 6 Hub | `01hub` |
+| 37 | `DETHCLAW.MAP` | 6 Hub | `13carvrn` |
+| 38 | `HUBDWNTN.MAP` | 6 Hub | `01hub` |
+| 39 | `HUBHEIGT.MAP` | 6 Hub | `01hub` |
+| 40 | `HUBOLDTN.MAP` | 6 Hub | `01hub` |
+| 41 | `HUBWATER.MAP` | 6 Hub | `01hub` |
+| 42 | `GLOW1.MAP` | 9 Glow | `09glow` |
+| 43 | `GLOW2.MAP` | 9 Glow | `09glow` |
+| 44 | `LABLADES.MAP` | 10 Boneyard | `10labone` |
+| 45 | `LARIPPER.MAP` | 10 Boneyard | `10labone` |
+| 46 | `LAGUNRUN.MAP` | 10 Boneyard | `10labone` |
+| 47 | `CHILDEAD.MAP` | 11 Cathedral | `08vats` |
+| 48 | `MBDEAD.MAP` | 8 Military Base | `08vats` |
+| 49 | `MOUNTN1.MAP` | 1 Vault 15 | `07desert` |
+| 50 | `MOUNTN2.MAP` | 1 Vault 15 | `07desert` |
+| 51 | `FOOT.MAP` | 1 Vault 15 | `07desert` |
+| 52 | `TARDIS.MAP` | 1 Vault 15 | `07desert` |
+| 53 | `TALKCOW.MAP` | 1 Vault 15 | `07desert` |
+| 54 | `USEDCAR.MAP` | 1 Vault 15 | `07desert` |
+| 55 | `BRODEAD.MAP` | 7 Brotherhood | `08vats` |
+| 56 | `DESCRVN1.MAP` | 1 Vault 15 | `07desert` |
+| 57 | `DESCRVN2.MAP` | 1 Vault 15 | `07desert` |
+| 58 | `MNTCRVN1.MAP` | 1 Vault 15 | `07desert` |
+| 59 | `MNTCRVN2.MAP` | 1 Vault 15 | `07desert` |
+| 60 | `VIPERS.MAP` | 1 Vault 15 | `07desert` |
+| 61 | `DESCRVN3.MAP` | 1 Vault 15 | `07desert` |
+| 62 | `MNTCRVN3.MAP` | 1 Vault 15 | `07desert` |
+| 63 | `DESCRVN4.MAP` | 0 Vault 13 | `07desert` |
+| 64 | `MNTCRVN4.MAP` | 0 Vault 13 | `07desert` |
+| 65 | `HUBMIS1.MAP` | 0 Vault 13 | `01hub` |
+
+Tracks grouped: `01hub` 36, 38-41, 65; `02mstrlr` 33, 34; `04brthrh` 13-15; `05raider` 24; `06vault` 6, 35; `07desert` 0-2, 20-23, 49-54, 56-64; `08vats` 30-32, 47, 48, 55; `09glow` 27, 42, 43; `10labone` 28, 44-46; `11chilrn` 17-19; `12junktn` 10-12; `13carvrn` 7, 8, 16, 37; `14necro` 3-5, 9; `15shady` 25, 26; `16follow` 29. Note that `CITY1` (19) plays the Cathedral track, the Deathclaw lair (37) the cavern track, and the destroyed Cathedral (47), destroyed Military Base (48) and destroyed Brotherhood (55) all play `08vats`. `[Must-match]`
+
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
 ### 4.1 Complete Synthetic DAT Archive
@@ -640,6 +745,21 @@ With campaign index 101 zero, the water-chip quest is still visible and active. 
 
 For rest, assume the Pip-Boy has just opened with zero credited minutes, no queue interruption, a player included in the party, and healing rate 1. A single three-hour request gives A 0.6875 and K 13.75: thirteen executed hour steps credit `13 x trunc(180 / 13.75) = 169` minutes. Game time advances 108000 ticks, but no healing trigger occurs. Eighteen ten-minute requests **without closing the Pip-Boy** credit 180 minutes and trigger one healing-rate unit over the same three game hours. A one-HP deficit under until-healed can consequently require repeated three-hour phases rather than the naive three-hour estimate.
 
+### 4.5 Map Number, Town and Music Vectors
+
+These are computed from section 3.10. Each row gives the 16-byte header name field (offset `0x04`) and header word `0x34` of a synthetic map, and the result after loading.
+
+| Header name | Word `0x34` | Map number | Town | Music after load | Leaving writes `.SAV` |
+| --- | ---: | ---: | --- | --- | --- |
+| `hubent.map` | 7 | 36 (name uppercased and matched) | 6 Hub | `01hub` | Yes |
+| `HUBENT.SAV` | -1 | 36 (`.SAV` replaced by `.MAP`) | 6 Hub | `01hub` | Yes |
+| `hubent.sav` | 7 | 7 (lowercase `.sav` keeps the word) | 1 Vault 15 | `13carvrn` | Yes |
+| `MSTRLR34.MAP` | 34 | 34 | 11 Cathedral | `02mstrlr` | Yes |
+| `DESCRVN4.MAP` | 63 | 63 | 0 Vault 13 | `07desert` | No (excluded) |
+| `CARAVAN.MAP` | -1 | -1 (no match) | -1, world map position unchanged | `wind2` keeps looping | No (unnumbered) |
+
+Rest on map 34 checks combat teams (town 11 is not in the omitted set of section 3.9); rest on map 36 does not (town 6 is).
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -647,3 +767,5 @@ For rest, assume the Pip-Boy has just opened with zero credited minutes, no queu
 - [x] Every documented quirk tagged `[Must-match]` or `[May-improve]`
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
+
+Verification notes (map numbers, section 3.10): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. The 66-row table was generated from the reference tables and checked row by row against the English corpus `map.msg` messages 0-65, which list the same names in the same order. The header word `0x34` and name field of all 72 corpus `maps/*.map` files were read: the 66 numbered maps store their own number, and the six unlisted maps store -1. The corpus has no `sound/music/` directory, so the track names are not checked against audio files.

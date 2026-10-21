@@ -22,6 +22,11 @@ Important distinctions: a directional-file selector is not a critter's zero-base
 
 - **R1-rev2 (2026-10-18).** Section 3.6 now gives the exact draw range and position of the punch-to-kick draw. Section 3.7 now gives the complete missed-shot bystander algorithm: the line-of-fire stage, the impact fallback, victim selection, hit location, damage, and draw order. Fixtures D and E are added. The raw revision hash was replaced by the label R1.
 - **R1-rev3 (2026-10-19).** Section 3.6 now holds the single authoritative intended-target, onlooker and retaliation rule, which SPEC-009 cites. A surviving conscious unintended victim, whether a missed-shot bystander or a critical-failure random target, makes the retaliation check only when its team differs from the attacker's. Section 3.7 now states that the disabled splash enumeration serves every explosion, so no explosion damages beyond its center target, which matches SPEC-013 §3.10.
+- **R1-rev7 (2026-10-20).** Answers four Builder questions from the movement and interaction pass:
+  - Section 3.1: a move to an object never tests the target's hex for a blocker, so a target that shares its hex with a wall is reached from an adjacent hex.
+  - Section 3.10.1: new "One sequence per owner" rule.
+  - Section 3.11.3: the container reach timing rule now matches SPEC-013 §3.16. A new "Adjacency check" paragraph states when `misc.msg` 2000 prints.
+  - Section 3.11.3 also points to SPEC-014 §3.27 for player clicks while a sequence runs.
 - **R1-rev6 (2026-10-19).**
   - New section 3.11 covers non-combat animation: walking and running art, when the engine runs, and the per-frame step model with its hex crossing rule; idle fidgets; interaction reaches for pickup, use, containers and ladders; door and container opening and closing, with `use_p_proc` order and when the blocking flags change; and knockback and getting up outside combat.
   - The section also corrects several suffix assumptions: walking is `ab`, `am` is the high reach, `af` is falling, and `ap` is hit from behind.
@@ -383,6 +388,12 @@ Auto-door permission requires a non-player actor with critter art, biped or robo
 Movement animation applies frame displacements until the next hex boundary, then queries the next hex again. A newly blocking non-door triggers route rebuilding from the actor's current hex to its saved destination with strict-goal enabled. Successful rebuilding resets frame, facing, displacement, and route cursor; failure ends movement. A usable door instead receives an open/use request and the move proceeds; the door action's return value is not checked before the subsequent move attempt. `[Must-match]`
 
 Move-to-object temporarily hides the destination object while planning, then restores its prior hidden state. It shortens the selected path by one step for a normal mover or two for a multihex mover; only the moving actor's multihex flag controls that subtraction. Core search does **not** dilate every obstacle for a multihex mover's full body. The saved replan destination is computed by stepping forward from the original target along the removed final direction, and for a multihex mover also along the preceding removed direction, rather than simply storing the actor's intended stopping hex. This can produce unintuitive replans. `[Must-match]`
+
+**Move-to-object goal.** `[Must-match]` Move-to-object plans with a non-strict goal: the target's own hex is never tested for a blocker. A wall, scenery or any other object sharing that hex does not stop the route. Corpus examples are wall lockers whose hex also holds a wall.
+- There is no separate search for a free hex next to the target. The mover stops on the route's next-to-last hex: the neighbor from which the search reached the target hex, which is always reachable.
+- A one-step route (the mover is already adjacent) moves nothing. A mover on the target's own hex and elevation registers no move entry at all.
+- When no route exists, because every reachable approach to the target hex is blocked, the move entry fails as it starts. Its sequence then ends (section 3.10.1), and the forced adjacency check that follows the move fails (section 3.11.3).
+- In combat the route is also cut to the AP limit. A cut route can stop short, and the adjacency check then fails the same way.
 
 Move-to-tile similarly removes the last step if the destination is occupied, and updates that saved replan destination. Ordinary move request limits truncate the scheduled route length; the core search's 50/60 costs are not the remaining AP budget. Actual AP is charged when a hex transition commits. `[Must-match]`
 
@@ -818,6 +829,13 @@ A sequence that stops while playing, because an entry fails as it starts, ends a
 
 The standing reset also happens when a sequence ends normally. Every critter owner that is not prone is set to its standing pose for its current weapon code, unless the sequence was registered without that reset; ladder climbing is registered that way (SPEC-013 §3.23). Hidden objects whose hide entry has run, and every forced erase, are removed from the map when the sequence ends. `[Must-match]`
 
+**One sequence per owner.** `[Must-match]` A new sequence cannot add an entry owned by an object that has a non-callback entry, started or not, in another sequence that has not ended.
+- Such an entry fails, so the whole new sequence is discarded (Failure, above). The request is dropped, not queued.
+- If that other sequence is an idle fidget (section 3.11.2), it is ended at once and registration continues.
+- Callback entries are not checked. A sequence made only of callbacks therefore always registers.
+- Cancelling an object's sequence (SPEC-014 §3.27) ends the first sequence that has not ended and holds a non-callback entry owned by that object. A prioritized sequence, such as an attack, is never cancelled this way. The ending follows the rules above: unstarted entries are dropped except forced ones, and owners are reset to their standing pose.
+- A use-item-on-object entry is a three-argument callback. The reference records its target object as the owner of that entry and checks it like any other owned entry. While such a sequence runs, the target cannot register an entry of its own, and cancelling the target's sequence ends the user's sequence. `[May-improve]`: treat this entry as having no owner, like every other callback.
+
 #### 3.10.2 Attack animation by hit mode
 
 The attack animation comes from the weapon's attack-mode nibble for the hit mode (SPEC-003). Hit mode 5 (kick) always uses animation 17. A hit mode with no weapon uses animation 16. The suffixes are those of section 2.2. `[Must-match]`
@@ -1072,7 +1090,20 @@ A is the action frame of the reach art for the mover's current base and weapon c
 - In the corpus, the bit is set on the Ice Chests, Bones, Footlockers and the Crate, and clear on bookcases, desks, lockers, shelves, boxes and every other container.
 - The high reach (12, `am`) is never started by the engine. Animations 2, 3 and 5-9 (jump, falling, stairs) are never started by it either; a script must request them.
 
-**Container reach timing.** The container branch means to time its use from the reach art's action frame, but its art test is inverted: it reads the action frame only when the art fails to load, so the value is always -1. The container therefore opens only after the reach animation finishes. `[May-improve]`: when the reach art loads, use its action frame as the delay of the container use.
+**Container reach timing.** This rule is authoritative, and SPEC-013 §3.16 states the same rule.
+- The container branch looks up the chosen reach art, ground or middle, with weapon code 0, because the weapon has been put away by then. The lookup is meant to time the container use from that art's action frame.
+- Its art test is inverted. When the art loads, the action frame is not read, so the delay of the container use is -1. Only when the art fails to load does it try to read an action frame, from art that does not exist.
+- Every corpus critter has both reach arts. The container use therefore always waits until the reach animation has finished. `[Must-match]`
+- `[May-improve]`: when the reach art loads, read its action frame A and give the container use delay A, as the pickup does. The container then opens on the reach's action frame, and its sound and animation overlap the rest of the reach. When the art does not load, use delay -1 and read nothing.
+- The entries after the container use keep delay -1 under either rule: the weapon take-out and the loot window request (SPEC-013 §3.16). The loot window therefore still opens only after the reach and the container animation have both finished.
+
+**Adjacency check.** `[Must-match]` Every engine interaction that approaches a target follows the approach with the same forced check: object distance at most 1, otherwise the sequence ends. This covers pickup, container use, scenery or object use, using an item on an object, ladder climbing, skill use (SPEC-013 §3.2) and looting a critter (SPEC-013 §3.16).
+- The check prints `misc.msg` 2000 ("You cannot get there.") only when the **target** is the player. It never prints because the actor is the player.
+- A player whose approach fails therefore sees no message, for ladders and every other interaction. The player sees 2000 only when another critter's interaction aimed at the player fails.
+- `[May-improve]`: print it when the actor is the player, and not because the target is.
+- Talk is the one exception, and its check is correct. It prints 2000 when the actor is the player, after the approach, if the line to the target is shot-blocked or the object distance is 9 or more. Out of combat, a failed talk is therefore the only case where the player is told "You cannot get there."
+
+**Player clicks during a sequence.** What a click does while the player's reach, use or other sequence is still playing is given in SPEC-014 §3.27 ("Clicks while the player is busy"), using the "One sequence per owner" rule of section 3.10.1.
 
 PID 213 (Remains of Gizmo) skips the container use and always requests the loot window.
 
@@ -1352,4 +1383,4 @@ With a blocker on the E neighbor at step 8 that is not an auto-usable door, the 
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes (R1-rev6): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 18 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc"), the public `fallout.cfg` key "running", and this spec's own formula notation ("index", "stat", "column", "rank", "range", "count"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Fixture G timelines were cross-checked with an independent model of the section 3.10.1 start rule, written from this spec's text rather than reference code. The section 3.11 container reach bits were read from the corpus item prototypes. Fixture H was recomputed by hand from the section 3.11.1 step rule. Tag count, excluding the two tag definitions: 209 `[Must-match]`, 37 `[May-improve]`.
+Verification notes (R1-rev7): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 18 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc"), the public `fallout.cfg` key "running", and this spec's own formula notation ("index", "stat", "column", "rank", "range", "count"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Fixture G timelines were cross-checked with an independent model of the section 3.10.1 start rule, written from this spec's text rather than reference code. The section 3.11 container reach bits were read from the corpus item prototypes. Fixture H was recomputed by hand from the section 3.11.1 step rule. The R1-rev7 container reach timing and adjacency rules were cross-checked with SPEC-013 §3.16, §3.2 and §3.23, and the busy-click rules with SPEC-014 §3.27. Tag count, excluding the two tag definitions: 213 `[Must-match]`, 39 `[May-improve]`.
