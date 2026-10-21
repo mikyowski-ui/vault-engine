@@ -37,7 +37,9 @@ impl<A: WorldAssets> WorldHost<A> {
     /// whose art cannot be loaded) is discarded whole (§3.10.1).
     pub(crate) fn register_script_sequence(&mut self, sequence: &AnimationSequence) {
         match self.script_motion(sequence) {
-            Ok(motion) => self.register_motion(motion),
+            Ok(motion) => {
+                self.register_motion(motion);
+            }
             Err(refused) => self
                 .world
                 .diagnostic(format!("animation sequence refused: {refused:?}")),

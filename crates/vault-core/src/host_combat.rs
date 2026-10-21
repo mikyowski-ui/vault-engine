@@ -290,10 +290,21 @@ impl<A: WorldAssets> WorldHost<A> {
         attack: &Attack,
         resolution: &Resolution,
     ) -> Result<(), WorldError> {
-        self.apply_resolved(attacker, intended, defender, attack, resolution, false)
+        self.apply_resolved(
+            attacker,
+            intended,
+            defender,
+            attack,
+            resolution,
+            attack.ap_cost(),
+            false,
+        )
     }
     /// `apply_attack_to`; a `sequenced` attack leaves the knockback and the
-    /// death presentation to its show (SPEC-007 §3.10).
+    /// death presentation to its show (SPEC-007 §3.10). `cost` is the AP
+    /// debit: the initiating request's own cost (SPEC-007 §3.4, aiming
+    /// included), which an unintended victim's profile does not replace.
+    #[allow(clippy::too_many_arguments)]
     fn apply_resolved(
         &mut self,
         attacker: ObjectRef,
@@ -301,9 +312,9 @@ impl<A: WorldAssets> WorldHost<A> {
         defender: ObjectRef,
         attack: &Attack,
         resolution: &Resolution,
+        cost: i32,
         sequenced: bool,
     ) -> Result<(), WorldError> {
-        let cost = attack.ap_cost();
         if let Some(state) = self.world.critter_state_mut(attacker) {
             state.ap = state.ap.saturating_sub(cost).max(0);
         }
@@ -312,7 +323,11 @@ impl<A: WorldAssets> WorldHost<A> {
         if attacker == self.world.player {
             self.set_last_attacker(attacker, intended);
         }
-        // Cleanup reselects the current weapon by hit mode before consuming.
+        // SPEC-007 §3.6 `[Must-match]`: cleanup reselects the current weapon
+        // by hit mode before consuming the scheduled ammunition, so a weapon
+        // swapped in between is the one debited. The `[May-improve]`
+        // alternative (consume from the weapon that made the attack) is not
+        // taken: the reference-visible magazine counts are kept.
         if resolution.ammo > 0
             && let Some(item) = self.world.wielded(attacker, attack.hit_mode)
             && let Some(ObjectState::Other {
@@ -707,6 +722,11 @@ impl<A: WorldAssets> WorldHost<A> {
         // Extra targets take normal-scale damage before any main critical.
         let mut resolved = Vec::new();
         for (object, hits) in extras {
+            // SPEC-007 §3.7/§3.7.1: an extra or Stage B victim takes
+            // normal-scale rounds through its own effective DT/DR, so its
+            // profile is built at the torso (uncalled normalized, no aiming)
+            // and serves damage, armor and knockback only; the AP debit stays
+            // the request's own cost (§3.4).
             let mut profile = self.world.attack_profile(
                 attacker,
                 object,
@@ -776,7 +796,11 @@ impl<A: WorldAssets> WorldHost<A> {
             let Some(object) = self.world.movement_blocker_in(&occupancy, *hex, attacker) else {
                 continue;
             };
-            let found = self.world.get(object).expect("occupant");
+            // The occupancy is built from live objects; a vanished one
+            // cannot block.
+            let Some(found) = self.world.get(object) else {
+                continue;
+            };
             if Fid(found.raw.art_id).category() != 1 {
                 if found.raw.flags.contains(BasicFlags::PROJECTILE_THROUGH) {
                     continue;
@@ -789,6 +813,11 @@ impl<A: WorldAssets> WorldHost<A> {
             if continuous {
                 budget = 1;
             }
+            // SPEC-007 §3.7/§3.7.1: an extra or Stage B victim takes
+            // normal-scale rounds through its own effective DT/DR, so its
+            // profile is built at the torso (uncalled normalized, no aiming)
+            // and serves damage, armor and knockback only; the AP debit stays
+            // the request's own cost (§3.4).
             let mut profile = self.world.attack_profile(
                 attacker,
                 object,
@@ -842,10 +871,19 @@ impl<A: WorldAssets> WorldHost<A> {
         attack: &Attack,
         spray: &Spray,
     ) -> Result<(), WorldError> {
-        self.apply_sprayed(attacker, intended, defender, attack, spray, false)
+        self.apply_sprayed(
+            attacker,
+            intended,
+            defender,
+            attack,
+            spray,
+            attack.ap_cost(),
+            false,
+        )
     }
     /// The §3.6 cleanup of a sequenced attack: its show commits the
     /// knockback, the death and the corpse presentation.
+    /// `cost` is the initiating request's AP cost (see `apply_resolved`).
     pub(crate) fn apply_spray_sequenced(
         &mut self,
         attacker: ObjectRef,
@@ -853,9 +891,11 @@ impl<A: WorldAssets> WorldHost<A> {
         defender: ObjectRef,
         attack: &Attack,
         spray: &Spray,
+        cost: i32,
     ) -> Result<(), WorldError> {
-        self.apply_sprayed(attacker, intended, defender, attack, spray, true)
+        self.apply_sprayed(attacker, intended, defender, attack, spray, cost, true)
     }
+    #[allow(clippy::too_many_arguments)]
     fn apply_sprayed(
         &mut self,
         attacker: ObjectRef,
@@ -863,9 +903,18 @@ impl<A: WorldAssets> WorldHost<A> {
         defender: ObjectRef,
         attack: &Attack,
         spray: &Spray,
+        cost: i32,
         sequenced: bool,
     ) -> Result<(), WorldError> {
-        self.apply_resolved(attacker, intended, defender, attack, &spray.main, sequenced)?;
+        self.apply_resolved(
+            attacker,
+            intended,
+            defender,
+            attack,
+            &spray.main,
+            cost,
+            sequenced,
+        )?;
         for (object, profile, outcome) in &spray.extras {
             if profile.defender_pid != PROTECTED_PID && !self.world.is_dead(*object) {
                 self.damage_critter(
@@ -905,6 +954,16 @@ impl<A: WorldAssets> WorldHost<A> {
         let request = self.apply_request(attacker, defender, &mut attack);
         if let Err(refusal) = self.world.preflight(attacker, defender, &attack) {
             return Ok(Err(refusal));
+        }
+        // SPEC-007 §3.4: the debit is this request's cost (aiming included),
+        // whichever victim profile the resolution ends on.
+        let cost = attack.ap_cost();
+        // SPEC-007 §2.5 safe rule (see `Attack::critical_success`).
+        if !attack.defender_player && !(0..=14).contains(&attack.kill_category) {
+            self.world.diagnostic(format!(
+                "kill category {} is outside 0-14; victim table 0 is used",
+                attack.kill_category
+            ));
         }
         // SPEC-011 §3.11: the player is warned when the weapon's minimum
         // strength exceeds effective ST (the hit chance pays 20 per point).
@@ -984,8 +1043,14 @@ impl<A: WorldAssets> WorldHost<A> {
         self.apply_effects(&built.effects)?;
         let player = self.world.player;
         let before = self.world.hit_points(player);
-        let application =
-            self.apply_spray_sequenced(attacker, defender, recorded_defender, applied, &spray);
+        let application = self.apply_spray_sequenced(
+            attacker,
+            defender,
+            recorded_defender,
+            applied,
+            &spray,
+            cost,
+        );
         // SPEC-014 §3.21: combat damage to the player rolls the HP counter.
         if self.world.hit_points(player) != before {
             self.world.emit(crate::WorldEffect::RollHitPoints);

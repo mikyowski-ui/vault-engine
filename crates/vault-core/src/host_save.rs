@@ -167,9 +167,21 @@ impl<A: WorldAssets> WorldHost<A> {
     /// left: marked saved with the current time as its last visit, and
     /// written even when it is an excluded map (SPEC-014 §3.35).
     pub fn build_save(&mut self, info: &SaveInfo) -> Result<SaveGame, WorldError> {
+        // A slot names its current map, which restore loads first
+        // (SPEC-014 §3.35): with no map loaded, or an unnumbered one that
+        // has no working name (SPEC-008 §3.10), the slot could never load.
+        if self.world.unloaded || self.world.current_map_name().is_none() {
+            return Err(WorldError::Invalid(
+                "saving requires a loaded, numbered map".into(),
+            ));
+        }
         self.world.map.header.flags.0 |= 1;
         self.world.map.header.last_visit = self.world.clock.ticks as u32;
-        self.world.persist_current_map(true);
+        if !self.world.persist_current_map(true) {
+            return Err(WorldError::Invalid(
+                "the current map could not be written to the working map set".into(),
+            ));
+        }
         let world = &self.world;
         let player = world
             .get(world.player)
@@ -196,7 +208,9 @@ impl<A: WorldAssets> WorldHost<A> {
             game_date: game_date(world.clock.ticks, world.rules.calendar_year),
             game_ticks: u32::try_from(world.clock.ticks).map_err(|_| WorldError::Arithmetic)?,
             elevation: u16::from(world.elevation),
-            map: world.map.header.map_number.clamp(0, i32::from(u16::MAX)) as u16,
+            // The number as its 16-bit truncation (never -1 here: an
+            // unnumbered map cannot be saved).
+            map: world.map.header.map_number as u16,
             map_file: fixed(map_file.as_bytes()),
             thumbnail,
             ..SaveHeader::default()
@@ -211,7 +225,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 free_movement: world.free_movement,
                 experience: world.combat_experience,
                 combatants: combat.active as i32,
-                noncombatants: (combat.list.len() - combat.active) as i32,
+                noncombatants: combat.list.len().saturating_sub(combat.active) as i32,
                 player_id: combat_id(&world.player),
                 list: combat.list.iter().map(combat_id).collect(),
             }
@@ -424,10 +438,27 @@ impl<A: WorldAssets> WorldHost<A> {
             ));
         }
         let automap = AutomapDb::parse(automap)?;
+        // Restore loads the slot's current map first (SPEC-014 §3.35): its
+        // name must be usable and its stream present, as the working copy
+        // the save always lists or as the original `.MAP`, before any state
+        // is reset.
+        let map_file = String::from_utf8_lossy(text(&save.header.map_file)).to_ascii_lowercase();
+        let stem = map_file
+            .rsplit_once('.')
+            .map_or(map_file.as_str(), |(stem, _)| stem);
+        let present = crate::persistence::saved_map_name(stem.as_bytes())
+            .is_some_and(|name| maps.contains_key(&name))
+            || self.assets.available(format!("maps/{stem}.map").as_bytes());
+        if stem.is_empty() || stem.contains(['/', '\\']) || !present {
+            return Err(WorldError::Invalid(format!(
+                "save names no loadable map ({map_file:?})"
+            )));
+        }
         self.apply_save(save, maps, automap)
     }
     /// Reset like a new game, keeping rules and generator state (the random
-    /// component has no bytes and is not restored).
+    /// component has no bytes and is not restored, so the fresh world's
+    /// startup diagnostic draws are skipped).
     fn reset_game(&mut self) -> Result<(), WorldError> {
         for program in self.programs.keys().copied().collect::<Vec<_>>() {
             self.registry.purge(program)?;
@@ -438,7 +469,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.motions.clear();
         self.building_animation = None;
         let sheet = self.world.player_sheet().cloned().unwrap_or_default();
-        let mut world = WorldState::new(sheet, 1)?;
+        let mut world = WorldState::fresh(sheet, 1)?;
         world.rules = std::mem::take(&mut self.world.rules);
         world.rng = self.world.rng.clone();
         self.world = world;

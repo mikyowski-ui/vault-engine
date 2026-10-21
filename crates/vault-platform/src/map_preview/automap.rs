@@ -65,7 +65,13 @@ impl MapPreview {
     /// `item.msg` 5 and opens nothing.
     pub(crate) fn use_motion_sensor(&mut self, sensor: ObjectRef) {
         if self.host.world.spend_charge(sensor) {
-            self.return_to_map();
+            // G-31: the inventory closes as it always does (the player
+            // takes the figure's art, SPEC-014 §3.34) before the automap.
+            if matches!(self.screen, Screen::Inventory(_)) {
+                self.close_inventory();
+            } else {
+                self.return_to_map();
+            }
             self.open_automap(true);
             return;
         }
@@ -150,6 +156,8 @@ impl MapPreview {
             KeyCode::KeyQ if control => self.automap_quit(),
             KeyCode::KeyX if alt => self.automap_quit(),
             KeyCode::F10 => self.automap_quit(),
+            // §3.33 F12 takes a screenshot.
+            KeyCode::F12 => self.screenshot(),
             _ => {}
         }
         true

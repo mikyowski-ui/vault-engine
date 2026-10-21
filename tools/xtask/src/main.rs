@@ -29,7 +29,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Task {
-    /// Run all engineering gates from AGENTS.md.
+    /// Run all engineering gates from AGENTS.md (clippy and tests with `--locked`).
     Check,
     /// Materialize a complete synthetic map/prototype/art/INT corpus in an empty directory.
     Fixtures {
@@ -50,11 +50,12 @@ fn check() -> Result<(), Box<dyn Error>> {
             "clippy",
             "--workspace",
             "--all-targets",
+            "--locked",
             "--",
             "-D",
             "warnings",
         ],
-        &["test", "--workspace"],
+        &["test", "--workspace", "--locked"],
     ] {
         let status = Command::new(&cargo).args(args).current_dir(root).status()?;
         if !status.success() {

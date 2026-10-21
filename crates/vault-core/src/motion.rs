@@ -91,11 +91,14 @@ pub enum Call {
     UseContainer { container: ObjectRef },
     /// SPEC-013 §3.16 the loot request.
     Loot { target: ObjectRef },
-    /// An approach ended: the request's own stage runs (talk, skills).
+    /// An approach ended: the request's own stage runs (talk).
     Arrive {
         target: ObjectRef,
         action: ObjectAction,
     },
+    /// SPEC-013 §3.2 step 5: the skill-on stage of §3.3, after the
+    /// manipulation animation.
+    SkillStage { target: ObjectRef, skill: i32 },
     /// §3.11.4 the open bit of a door, set or cleared.
     OpenBit { open: bool },
     /// §3.11.4 the finishing callback, for an object being opened or
@@ -196,11 +199,32 @@ impl MotionSequence {
             .iter()
             .any(|entry| entry.owner == object)
     }
+    /// SPEC-007 §3.10.1 "One sequence per owner": whether a non-callback
+    /// entry of the sequence, started or not, belongs to `object`.
+    /// Callback entries are never checked, so a sequence made only of
+    /// callbacks holds nothing.
+    pub fn owns(&self, object: ObjectRef) -> bool {
+        self.schedule
+            .entries()
+            .iter()
+            .any(|entry| entry.owner == object && !matches!(entry.action, Motion::Call(_)))
+    }
     /// The distinct owners, in entry order.
     pub fn owners(&self) -> Vec<ObjectRef> {
         let mut owners = Vec::new();
         for entry in self.schedule.entries() {
             if !owners.contains(&entry.owner) {
+                owners.push(entry.owner);
+            }
+        }
+        owners
+    }
+    /// The distinct owners of non-callback entries, in entry order (the
+    /// objects the sequence holds under §3.10.1).
+    pub fn owned(&self) -> Vec<ObjectRef> {
+        let mut owners = Vec::new();
+        for entry in self.schedule.entries() {
+            if !matches!(entry.action, Motion::Call(_)) && !owners.contains(&entry.owner) {
                 owners.push(entry.owner);
             }
         }

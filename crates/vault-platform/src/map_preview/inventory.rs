@@ -35,7 +35,7 @@ use vault_core::{
     ObjectAction, ObjectRef, WorldEffect,
     assets::WorldAssets,
     items::EQUIPPED,
-    skills::{self, Counter, ItemEntry, SetTimer},
+    skills::{self, Counter, ItemEntry},
     ui::{
         BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect,
         automap::MOTION_SENSOR,
@@ -166,8 +166,6 @@ pub(crate) struct InventoryScreen {
     press: Option<ArrowPress>,
     pub menu: Option<ItemMenu>,
     pub counter: Option<(Counter, Count)>,
-    /// The Set Timer dialog for an explosive being armed.
-    pub timer: Option<(ObjectRef, SetTimer)>,
     /// The stats panel's examine text, until the hand cursor returns.
     examine: Option<Examine>,
 }
@@ -183,7 +181,7 @@ impl InventoryScreen {
     pub fn cursor(&self) -> Option<&'static str> {
         if self.menu.is_some() {
             None
-        } else if self.counter.is_some() || self.timer.is_some() || self.arrow {
+        } else if self.counter.is_some() || self.arrow {
             Some(layout::ARROW_CURSOR)
         } else {
             Some(layout::HAND_CURSOR)
@@ -191,21 +189,6 @@ impl InventoryScreen {
     }
 }
 
-/// §3.15 Set Timer layout (window at screen (140, 80)).
-const TIMER_ORIGIN: [i32; 2] = [140, 80];
-const TIMER_PLUS: Rect = Rect::new(194, 64, 16, 12);
-const TIMER_MINUS: Rect = Rect::new(194, 76, 17, 12);
-const TIMER_DONE: Rect = Rect::new(98, 128, 15, 16);
-const TIMER_CANCEL: Rect = Rect::new(148, 128, 15, 16);
-/// A Set Timer button's screen rectangle.
-fn timer_button(rect: Rect) -> Rect {
-    Rect::new(
-        TIMER_ORIGIN[0] + rect.x,
-        TIMER_ORIGIN[1] + rect.y,
-        rect.w,
-        rect.h,
-    )
-}
 /// A screen rectangle `[x, y, w, h]` contains `point`.
 pub(crate) fn inside(rect: [i32; 4], point: [i32; 2]) -> bool {
     (rect[0]..rect[0] + rect[2]).contains(&point[0])
@@ -233,7 +216,6 @@ impl MapPreview {
                 press: None,
                 menu: None,
                 counter: None,
-                timer: None,
                 examine: None,
             });
         }
@@ -374,7 +356,7 @@ impl MapPreview {
     }
     /// SPEC-005 §3.8 closing the window: the inventory window (not use-on)
     /// gives the player its figure art, so armor changes made in it show.
-    fn close_inventory(&mut self) {
+    pub(super) fn close_inventory(&mut self) {
         if matches!(&self.screen, Screen::Inventory(screen) if screen.target.is_none()) {
             let active = self.active_item();
             self.host.apply_figure_art(active);
@@ -391,27 +373,6 @@ impl MapPreview {
         .unwrap_or([15, 16]);
         Rect::new(origin[0], origin[1], w, h)
     }
-    /// Enter accepts the timer (arming the explosive), Esc cancels.
-    fn finish_timer(&mut self, accept: bool) {
-        let Screen::Inventory(screen) = &mut self.screen else {
-            return;
-        };
-        let Some((item, timer)) = screen.timer.take() else {
-            return;
-        };
-        if !accept {
-            return;
-        }
-        if !timer.accepts() {
-            self.play_effect(ERROR_SOUND.as_bytes(), None);
-            return;
-        }
-        self.play_effect(BUTTON_PRESS.as_bytes(), None);
-        if let Err(error) = self.host.arm_explosive(item, timer.seconds) {
-            self.status = error.to_string().into_bytes();
-        }
-        self.drain_effects();
-    }
     pub(crate) fn inventory_key(&mut self, key: KeyCode) -> bool {
         let count = self.list_entries().len();
         let Screen::Inventory(screen) = &mut self.screen else {
@@ -423,14 +384,6 @@ impl MapPreview {
                 self.play_effect(BUTTON_PRESS.as_bytes(), None);
             }
             return self.inventory_counter(input);
-        }
-        if screen.timer.is_some() {
-            match key {
-                KeyCode::Enter | KeyCode::NumpadEnter => self.finish_timer(true),
-                KeyCode::Escape => self.finish_timer(false),
-                _ => return false,
-            }
-            return true;
         }
         // All other input is ignored during a drag or with the menu open.
         if screen.held.is_some() || screen.menu.is_some() {
@@ -485,26 +438,6 @@ impl MapPreview {
             };
             let input = counter_click(counter, point);
             self.inventory_counter(input);
-            return true;
-        }
-        if let Some((_, timer)) = &mut screen.timer {
-            let Some(button) = [TIMER_PLUS, TIMER_MINUS, TIMER_DONE, TIMER_CANCEL]
-                .into_iter()
-                .find(|&rect| timer_button(rect).contains(point))
-            else {
-                return true;
-            };
-            if button == TIMER_PLUS {
-                timer.plus();
-            } else if button == TIMER_MINUS {
-                timer.minus();
-            }
-            self.held = Some(timer_button(button));
-            if button == TIMER_DONE {
-                self.finish_timer(true);
-            } else if button == TIMER_CANCEL {
-                self.finish_timer(false);
-            }
             return true;
         }
         if screen.held.is_some() || screen.menu.is_some() {
@@ -797,25 +730,33 @@ impl MapPreview {
     /// kit on the player, a drug, a Motion Sensor's automap, else its use
     /// procedure.
     fn use_item(&mut self, item: ObjectRef) {
+        self.use_item_now(item, vault_core::BookRoute::Inventory);
+    }
+    /// The "use" of `item` by the player, from the inventory window or (a
+    /// use-only item, SPEC-014 §3.23) the item slot: the skill books by
+    /// their route first (SPEC-013 §3.25); a container opens in the
+    /// inventory window; an explosive opens the Set Timer window (SPEC-013
+    /// §3.10, from either place); a Motion Sensor the automap; a kit on the
+    /// player; a drug; else the item's use procedure.
+    pub(super) fn use_item_now(&mut self, item: ObjectRef, route: vault_core::BookRoute) {
         let player = self.host.world.player;
         let pid = self.host.world.get(item).map_or(0, |o| o.raw.pid);
-        // SPEC-013 §3.25: the route tests the skill books first.
         if skills::skill_book(pid).is_some() {
-            if let Err(error) = self.host.read_book(item, vault_core::BookRoute::Inventory) {
+            if let Err(error) = self.host.read_book(item, route) {
                 self.status = error.to_string().into_bytes();
             }
             self.drain_effects();
             return;
         }
-        if matches!(self.item_kind(item), Some(ItemData::Container { .. })) {
+        if matches!(self.item_kind(item), Some(ItemData::Container { .. }))
+            && matches!(self.screen, Screen::Inventory(_))
+        {
             self.open_container(item);
             return;
         }
         if skills::is_explosive(pid) {
-            if self.host.explosive_armable(item)
-                && let Screen::Inventory(screen) = &mut self.screen
-            {
-                screen.timer = Some((item, SetTimer::default()));
+            if self.host.explosive_armable(item) {
+                self.open_timer(item);
             }
             self.drain_effects();
             return;
@@ -1157,30 +1098,6 @@ impl MapPreview {
         if let Some(menu) = &screen.menu {
             self.draw_item_menu(&painter, &mut image, menu);
         }
-        if let Some((_, timer)) = &screen.timer {
-            let [ox, oy] = TIMER_ORIGIN;
-            painter.blit_opaque(&mut image, "movemult.frm", 0, [ox, oy]);
-            let title = painter.message("inventry.msg", 23);
-            painter.centered(&mut image, 103, ColorKey::AMBER, &title, [ox, oy + 9], 259);
-            painter.blit(&mut image, "timer.frm", 0, [ox + 113, oy + 34]);
-            for (x, digit) in timer.digits() {
-                painter.big_digit(&mut image, digit, [ox + x, oy + 64], false);
-            }
-            for (rect, up, down) in [
-                (TIMER_PLUS, "splsoff.frm", "splson.frm"),
-                (TIMER_MINUS, "snegoff.frm", "snegon.frm"),
-                (TIMER_DONE, "lilredup.frm", "lilreddn.frm"),
-                (TIMER_CANCEL, "lilredup.frm", "lilreddn.frm"),
-            ] {
-                let rect = timer_button(rect);
-                painter.blit(
-                    &mut image,
-                    self.button_art(rect, up, down),
-                    0,
-                    [rect.x, rect.y],
-                );
-            }
-        }
         if let Some((counter, count)) = &screen.counter {
             let item = match count {
                 Count::Reload { ammo, .. } => *ammo,
@@ -1212,7 +1129,7 @@ impl MapPreview {
     /// The ammunition terms of a quantity label: the pack size and the
     /// front pack's rounds, which a dragged entry leaves out (SPEC-013
     /// §3.16).
-    fn ammo_label(&self, item: ObjectRef, dragged: bool) -> Option<(i32, i32)> {
+    pub(super) fn ammo_label(&self, item: ObjectRef, dragged: bool) -> Option<(i32, i32)> {
         let Some(ItemData::Ammunition { quantity: pack, .. }) = self.item_kind(item) else {
             return None;
         };

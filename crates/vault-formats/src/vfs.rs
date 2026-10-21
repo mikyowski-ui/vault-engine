@@ -285,12 +285,24 @@ impl LocalDirProvider {
                 .ok_or_else(|| VfsError::NotFound(path.clone()))?,
         };
         let native_path = &native_path;
-        self.check_components(native_path)?;
+        match self.check_components(native_path) {
+            // A snapshot entry removed since the mount is simply absent
+            // (SPEC-008 §3.2: the archive is consulted next).
+            Err(VfsError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                return Err(VfsError::NotFound(path.clone()));
+            }
+            result => result?,
+        }
         // Use the capability for the actual open, not an ambient/canonical path.
-        let file = self
-            .root
-            .open(native_path)
-            .map_err(|error| io_error(native_path, error))?;
+        let file = self.root.open(native_path).map_err(|error| {
+            // A snapshot entry removed since the mount is simply absent
+            // (SPEC-008 §3.2: the archive is consulted next).
+            if error.kind() == io::ErrorKind::NotFound {
+                VfsError::NotFound(path.clone())
+            } else {
+                io_error(native_path, error)
+            }
+        })?;
         let metadata = file
             .metadata()
             .map_err(|error| io_error(native_path, error))?;

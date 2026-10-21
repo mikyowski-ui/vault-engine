@@ -64,6 +64,12 @@ pub struct Decoded {
     /// `(sample index, value after the level shift)` for every sample that
     /// wrapped to 16 bits.
     pub wrapped: Vec<(usize, i32)>,
+    /// SPEC-010 §3.7: the error that ended decoding at a block (a reserved
+    /// column format, an out-of-range step-table index, or a block header
+    /// at or past the end of the file). `samples` then holds every block
+    /// before it and nothing from the failing block, as the reference emits
+    /// (`[Must-match]`), and the error is still reported (`[May-improve]`).
+    pub failure: Option<ParseError>,
 }
 impl Decoded {
     /// The samples as signed 16-bit little-endian bytes.
@@ -378,6 +384,10 @@ fn lift(elements: &mut [i32], rows: usize, width: usize, carries: &mut [(i32, i3
 /// indexes, `R = 0` with samples to emit, and a block header that would
 /// start at or past the end of the file are errors; so are streams beyond
 /// the safe sample and block bounds.
+///
+/// `Err` is a header the decoder cannot start from. A failure inside the
+/// block stream instead ends decoding and is returned in
+/// [`Decoded::failure`], with the samples of every earlier block.
 pub fn decode(bytes: &[u8]) -> Result<Decoded, ParseError> {
     let header = AcmHeader::parse(bytes)?;
     let mut bits = Bits::new(bytes);
@@ -414,23 +424,27 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, ParseError> {
     let mut block = vec![0_i32; rows * columns];
     let mut decoded = Decoded {
         header,
-        samples: Vec::with_capacity(total),
+        // Reserve for one block at most: the header's sample count is
+        // untrusted, and the output grows only as blocks actually decode.
+        samples: Vec::with_capacity(total.min(rows * columns)),
         blocks: 0,
         past_end: 0,
         wrapped: Vec::new(),
+        failure: None,
     };
     while decoded.samples.len() < total {
         if bits.position() >= bytes.len() as u64 * 8 {
-            return Err(ParseError::new(
+            decoded.failure = Some(ParseError::new(
                 "ACM",
                 bytes.len(),
                 "a block header starts at or past the end of the file",
             ));
+            break;
         }
         let k = bits.read(4);
         let step = bits.read(16);
         let table = Table::new(k, step);
-        for index in 0..columns {
+        let columns_decoded = (0..columns).try_for_each(|index| {
             let format = bits.read(5);
             column(
                 &mut bits,
@@ -443,7 +457,11 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, ParseError> {
                     rows,
                     row: 0,
                 },
-            )?;
+            )
+        });
+        if let Err(error) = columns_decoded {
+            decoded.failure = Some(error);
+            break;
         }
         if levels > 0 {
             let mut row = 0;

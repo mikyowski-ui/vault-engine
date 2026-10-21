@@ -715,8 +715,10 @@ fn inspector_ticks_vars_and_objects_together() {
     world.gvars = Some(vec![0, 0]);
     let mut watches = WatchList::new();
     watches.watch_all(VarScope::Global);
+    // Object tracking is opt-in (it snapshots the world every tick).
     let mut inspector = Inspector::new(InspectorConfig {
         watches,
+        track_objects: true,
         ..InspectorConfig::default()
     });
     let frame = inspector.tick(&world);
@@ -859,4 +861,18 @@ fn observed_script_runs_end_where_unobserved_ones_do() {
         )
     };
     assert_eq!(run(true), run(false));
+}
+
+#[test]
+fn hand_built_instructions_with_unregistered_words_do_not_panic() {
+    // `decode` never yields such a word; a hand-built instruction is
+    // classified `Invalid` and still renders.
+    let bogus = Instruction {
+        address: 4,
+        word: 0x1234,
+        immediate: None,
+    };
+    assert_eq!(bogus.class(), OpcodeClass::Invalid);
+    assert_eq!(bogus.text(), "invalid 0x1234");
+    assert_eq!(bogus.to_string(), "0x0004  1234           invalid 0x1234");
 }

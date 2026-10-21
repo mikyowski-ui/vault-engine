@@ -51,10 +51,21 @@ impl Painter<'_> {
     /// Cursor art with its SPEC-001 §3.5 hotspot, `(trunc(w / 2) - direction
     /// X shift, h - 1 - direction Y shift)`, at `point` (SPEC-014 §3.26).
     pub fn cursor(&self, image: &mut IndexedImage, name: &str, point: [i32; 2]) -> bool {
+        self.cursor_frame(image, name, 0, point)
+    }
+    /// Frame `index` of an animated cursor (SPEC-014 §3.26), with the same
+    /// hotspot rule.
+    pub fn cursor_frame(
+        &self,
+        image: &mut IndexedImage,
+        name: &str,
+        index: usize,
+        point: [i32; 2],
+    ) -> bool {
         let Some(art) = self.art(name) else {
             return false;
         };
-        let Some(frame) = art.frame(0, 0) else {
+        let Some(frame) = art.frame(0, index).or_else(|| art.frame(0, 0)) else {
             return false;
         };
         let [sx, sy] = art.shifts[0].map(i64::from);
@@ -220,4 +231,53 @@ impl Painter<'_> {
         let x = 14 * i32::from(cell) + if red { 168 } else { 0 };
         self.blit_region(image, "bignum.frm", Rect::new(x, 0, 14, 24), origin, true);
     }
+}
+
+/// F12 (SPEC-014 §3.9, §3.17, §3.33) saves a screenshot. The
+/// specification leaves the file to the platform (a platform-specific
+/// facility, `[May-improve]`): the frame as displayed (through `palette`)
+/// becomes a binary PPM named `scrNNNNN.ppm`, the first free number, in
+/// `directory`. A failure is logged and changes nothing else.
+pub(crate) fn save_screenshot(
+    directory: &std::path::Path,
+    image: &IndexedImage,
+    palette: &[[u8; 4]; 256],
+) -> Option<std::path::PathBuf> {
+    if let Err(error) = std::fs::create_dir_all(directory) {
+        tracing::warn!(%error, path = %directory.display(), "screenshot not saved");
+        return None;
+    }
+    let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
+    for index in image.pixels() {
+        ppm.extend_from_slice(&palette[usize::from(*index)][..3]);
+    }
+    for number in 0..100_000 {
+        let path = directory.join(format!("scr{number:05}.ppm"));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path);
+        match file {
+            Ok(mut file) => {
+                use std::io::Write;
+                return match file.write_all(&ppm) {
+                    Ok(()) => {
+                        tracing::info!(path = %path.display(), "screenshot saved");
+                        Some(path)
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, path = %path.display(), "screenshot not saved");
+                        None
+                    }
+                };
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "screenshot not saved");
+                return None;
+            }
+        }
+    }
+    tracing::warn!("no free screenshot name");
+    None
 }

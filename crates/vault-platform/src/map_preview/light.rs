@@ -4,7 +4,9 @@
 //!
 //! The pixel-to-hex mapping only changes with the view, and the levels only
 //! with the light, so both are kept: a frame computes one level per visible
-//! hex and shades in bulk through the palette's intensity table.
+//! hex and shades in bulk through the palette's intensity table. A pick
+//! depends only on the point minus the grid origin, so a scrolled view
+//! moves the previous mapping and picks only the pixels it newly shows.
 use vault_formats::{HexGrid, Palette};
 
 #[derive(Debug, Default)]
@@ -19,6 +21,10 @@ pub(crate) struct LightCache {
     slot_levels: Vec<u8>,
     /// The level per pixel.
     levels: Vec<u8>,
+    /// The hex each pixel picks (-1 off the grid), for the next scroll.
+    pixel_hexes: Vec<i32>,
+    /// Per hex, its slot plus one while a rebuild runs (0: not seen yet).
+    slot_of: Vec<u32>,
 }
 
 /// The intensity level of a light value.
@@ -67,32 +73,64 @@ impl LightCache {
         palette.shade(pixels, &self.levels);
     }
     fn rebuild(&mut self, grid: HexGrid, width: u32, height: u32) {
-        let mut index = std::collections::BTreeMap::new();
+        let (w, h) = (width as usize, height as usize);
+        // P-02: a view of the same size moved by `shift` takes each pixel
+        // it shares with the previous view from there (the pixel at p now
+        // picks what p - shift picked), so a scroll step picks only the
+        // newly shown strip instead of all 243200 pixels.
+        let shift = match self.view {
+            Some((old, old_width, old_height))
+                if (old_width, old_height) == (width, height)
+                    && self.pixel_hexes.len() == w * h =>
+            {
+                Some([
+                    grid.origin[0].wrapping_sub(old.origin[0]),
+                    grid.origin[1].wrapping_sub(old.origin[1]),
+                ])
+            }
+            _ => None,
+        };
+        let previous = std::mem::take(&mut self.pixel_hexes);
+        let mut pixel_hexes = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let moved = shift.and_then(|[dx, dy]| {
+                    let source = [(x as i64).checked_sub(dx)?, (y as i64).checked_sub(dy)?];
+                    ((0..w as i64).contains(&source[0]) && (0..h as i64).contains(&source[1]))
+                        .then(|| previous[source[1] as usize * w + source[0] as usize])
+                });
+                pixel_hexes.push(
+                    moved.unwrap_or_else(|| grid.pick_hex([x as i32, y as i32]).unwrap_or(-1)),
+                );
+            }
+        }
+        // Slots in first-seen order, through a per-hex table.
+        if self.slot_of.len() < 40000 {
+            self.slot_of = vec![0; 40000];
+        }
         self.hexes.clear();
         self.slots.clear();
         let mut off_grid = Vec::new();
-        for y in 0..height as i32 {
-            for x in 0..width as i32 {
-                match grid.pick_hex([x, y]) {
-                    Some(hex) => {
-                        let next = index.len();
-                        let slot = *index.entry(hex).or_insert_with(|| {
-                            self.hexes.push(hex);
-                            next
-                        });
-                        self.slots.push(slot as u32);
-                    }
-                    None => {
-                        off_grid.push(self.slots.len());
-                        self.slots.push(0);
-                    }
-                }
+        for (pixel, hex) in pixel_hexes.iter().enumerate() {
+            let Ok(hex) = usize::try_from(*hex) else {
+                off_grid.push(pixel);
+                self.slots.push(0);
+                continue;
+            };
+            if self.slot_of[hex] == 0 {
+                self.hexes.push(hex as i32);
+                self.slot_of[hex] = self.hexes.len() as u32;
             }
+            self.slots.push(self.slot_of[hex] - 1);
+        }
+        for hex in &self.hexes {
+            self.slot_of[*hex as usize] = 0;
         }
         let outside = self.hexes.len() as u32;
         for pixel in off_grid {
             self.slots[pixel] = outside;
         }
+        self.pixel_hexes = pixel_hexes;
         self.slot_levels.clear();
         self.view = Some((grid, width, height));
     }
@@ -116,10 +154,16 @@ mod tests {
         let mut tile_light: Vec<i64> = (0..40000).map(|hex| hex * 7919 % 70000).collect();
         let mut cache = LightCache::default();
         let source: Vec<u8> = (0..640 * 380).map(|index| (index % 256) as u8).collect();
+        // Scrolls by a hex or a few (the moved mapping) and a jump with
+        // no overlap.
         let cases = [
             (HexGrid::centered(20100, 640, 380).unwrap(), 30000, false),
             (HexGrid::centered(20100, 640, 380).unwrap(), 30000, true),
+            (HexGrid::centered(20101, 640, 380).unwrap(), 30000, false),
+            (HexGrid::centered(20302, 640, 380).unwrap(), 30000, false),
+            (HexGrid::centered(19897, 640, 380).unwrap(), 30000, false),
             (HexGrid::centered(0, 640, 380).unwrap(), 70000, false),
+            (HexGrid::centered(205, 640, 380).unwrap(), 70000, false),
         ];
         for (grid, ambient, relight) in cases {
             if relight {

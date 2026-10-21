@@ -114,6 +114,14 @@ pub fn write_corpus(root: &std::path::Path) {
     assets::write_corpus(root);
     std::fs::create_dir_all(root.join("maps")).unwrap();
     std::fs::write(root.join("maps/synthetic.map"), preview_map()).unwrap();
+    // SPEC-008 §3.10: a map's number comes from `map.msg` by its header
+    // name, so the fixture map (header `SYNTH.MAP`, word 7) is map 7.
+    std::fs::create_dir_all(root.join("text/english/game")).unwrap();
+    std::fs::write(
+        root.join("text/english/game/map.msg"),
+        b"{7}{}{SYNTH.MAP}\n",
+    )
+    .unwrap();
     for (category, folder) in ["items", "critters", "scenery", "walls", "tiles", "misc"]
         .into_iter()
         .enumerate()

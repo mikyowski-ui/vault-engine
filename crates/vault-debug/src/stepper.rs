@@ -161,7 +161,7 @@ impl PendingStep {
             pc: self.pc,
             instruction: self.instruction,
             next_pc: vm.pc,
-            executed: Fingerprint::of(vm) != self.before,
+            executed: !self.before.matches(vm),
             value_depth: vm.value_stack.byte_len() / 6,
             return_depth: vm.return_stack.byte_len() / 6,
             status_before: self.status_before,
@@ -174,7 +174,8 @@ impl PendingStep {
     }
 }
 
-/// Everything a step can change, compared to tell whether it executed.
+/// Everything a step can change, captured once before the step and
+/// compared against the live VM afterwards (no second copy of the stacks).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     pc: u32,
@@ -190,6 +191,13 @@ impl Fingerprint {
             values: vm.value_stack.bytes().to_vec(),
             returns: vm.return_stack.bytes().to_vec(),
         }
+    }
+    /// Whether `vm` still matches this fingerprint.
+    fn matches(&self, vm: &Vm) -> bool {
+        self.pc == vm.pc
+            && self.status == vm.status.0
+            && self.values == vm.value_stack.bytes()
+            && self.returns == vm.return_stack.bytes()
     }
 }
 

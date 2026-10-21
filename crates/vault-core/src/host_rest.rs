@@ -123,7 +123,9 @@ impl<A: WorldAssets> WorldHost<A> {
     pub fn rest_allowed(&self) -> bool {
         let map = self.world.map.header.map_number;
         let elevation = self.world.elevation;
-        let town = self.world.world_map.saved.town;
+        // SPEC-008 §3.10: the town is the current map's fixed table town;
+        // -1 (an unnumbered map) falls into the team-checking default.
+        let town = crate::worldmap::map_town(map);
         let teams = TEAM_CHECK_MAPS.contains(&map)
             || !(map == 17
                 || (map == 3 && elevation > 0)

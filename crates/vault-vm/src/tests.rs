@@ -822,3 +822,46 @@ fn spec005_long_export_names_use_the_retained_31_byte_key() {
             .is_err()
     );
 }
+#[test]
+fn scheduling_faults_wrapping_remainder_and_detach_without_a_parent() {
+    // SPEC-004 §3.8 safe rule: a fired procedure whose call cannot be
+    // prepared faults the VM (ended/error, `last_error`) instead of
+    // vanishing; its schedule was consumed by the firing.
+    // (An isolated fragment cannot take a host call.)
+    let mut vm = fragment(&op(0x8000));
+    vm.program.schedule(1, procedure_flags::TIMED, 0, 0);
+    let mut host = BasicHost::default();
+    host.milliseconds = 1;
+    let error = vm.poll_scheduled(&mut host, 100).unwrap_err();
+    assert!(matches!(error, VmError::Host(_)));
+    assert!(vm.status.contains(VmStatus::ERROR) && vm.status.contains(VmStatus::ENDED));
+    assert_eq!(vm.last_error, Some(error));
+    assert_eq!(vm.program.procedures()[1].flags, 0);
+    // §3.5 [May-improve]: `m / -1` wraps to `m`, so `m % -1` is 0.
+    for (opcode, expected) in [(0x803c, i32::MIN), (0x803d, 0)] {
+        let mut vm = fragment(&op(opcode));
+        vm.value_stack.push(Value::integer(i32::MIN)).unwrap();
+        vm.value_stack.push(Value::integer(-1)).unwrap();
+        finish(&mut vm).unwrap();
+        assert_eq!(vm.value_stack.top().unwrap(), Value::integer(expected));
+    }
+    // 0x8007 rejects a condition address at the program's code end (not an
+    // instruction) when scheduled, not when the condition first runs.
+    let mut bytes = fixture::program();
+    bytes.truncate(0xfc);
+    let end = 0xfc + 14;
+    for instruction in [push(end as i32), push(1), op(0x8007)] {
+        bytes.extend(instruction);
+    }
+    assert_eq!(bytes.len(), end);
+    let mut vm = Vm::new(IntProgram::parse(&bytes).unwrap());
+    vm.program.schedule(1, procedure_flags::TIMED, 0, 0);
+    assert_eq!(vm.poll_scheduled(&mut host, 100).unwrap(), Some(1));
+    assert_eq!(vm.run(&mut host, 100), Err(VmError::Address(end as u32)));
+    // 0x800F with a parent the host no longer has drops the link; no fault.
+    let mut vm = fragment(&op(0x800f));
+    vm.parent = Some(9);
+    assert_eq!(finish(&mut vm).unwrap(), RunOutcome::FragmentEnd);
+    assert_eq!(vm.parent, None);
+    assert!(!vm.status.contains(VmStatus::ERROR));
+}

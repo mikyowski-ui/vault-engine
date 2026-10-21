@@ -28,7 +28,12 @@ pub struct UiAudit {
     categories: Vec<(&'static str, u64, u64)>,
 }
 impl UiAudit {
-    fn record(&mut self, category: &'static str, label: &str, result: Result<(), String>) {
+    pub(crate) fn record(
+        &mut self,
+        category: &'static str,
+        label: &str,
+        result: Result<(), String>,
+    ) {
         let index = match self
             .categories
             .iter()

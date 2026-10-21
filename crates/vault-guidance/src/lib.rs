@@ -54,8 +54,12 @@ pub struct Holodisk {
     pub last_page: usize,
 }
 impl Holodisk {
+    /// Records of `page`; a page past the end is empty (the multiplication
+    /// saturates, so no page index can overflow).
     pub fn page(&self, page: usize) -> &[DiskLine] {
-        let start = (page * RECORDS_PER_PAGE).min(self.records.len());
+        let start = page
+            .saturating_mul(RECORDS_PER_PAGE)
+            .min(self.records.len());
         let end = (start + RECORDS_PER_PAGE).min(self.records.len());
         &self.records[start..end]
     }
@@ -65,6 +69,9 @@ impl Holodisk {
 pub enum DiskError {
     Ordinal(usize),
     MissingTitle(i32),
+    /// A content id inside the disk's 500-record window that has no message
+    /// before `**END-DISK**`. SPEC-008 §3.8 does not say whether a gap ends
+    /// the disk or is skipped (open spec question), so it is an error.
     MissingRecord(i32),
     /// No `**END-DISK**` within the 500-record search window.
     Unterminated(usize),
@@ -74,7 +81,18 @@ impl std::fmt::Display for DiskError {
         match self {
             Self::Ordinal(ordinal) => write!(f, "holodisk ordinal {ordinal} outside 0-17"),
             Self::MissingTitle(id) => write!(f, "holodisk title message {id} is missing"),
-            Self::MissingRecord(id) => write!(f, "holodisk content message {id} is missing"),
+            Self::MissingRecord(id) => {
+                // Content ids run from `1000 x ordinal + 1000`.
+                let first = id.div_euclid(1000) * 1000;
+                write!(
+                    f,
+                    "holodisk {} content message {id} is missing: a gap in the \
+                     {first}-{} window before **END-DISK** (SPEC-008 §3.8 leaves \
+                     gaps undefined, so the disk is not shown)",
+                    id.div_euclid(1000) - 1,
+                    first + DISK_RECORD_LIMIT - 1
+                )
+            }
             Self::Unterminated(ordinal) => {
                 write!(
                     f,

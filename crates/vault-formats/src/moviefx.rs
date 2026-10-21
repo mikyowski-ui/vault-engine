@@ -25,7 +25,13 @@ impl FadeEffect {
     /// The level at step `k` for a source level and this effect's color
     /// component, with truncating division, stored modulo 256. Fade in:
     /// `C - trunc(k (C - src) / S)`; fade out: `src - trunc(k (src - C) / S)`.
+    /// Safe rule: an effect with no steps (`S <= 0`) covers no frame, so
+    /// the hook never consults it; asked directly, it leaves the source
+    /// level unchanged instead of dividing by zero.
     pub fn level(&self, k: i64, source: u8, component: usize) -> u8 {
+        if self.steps <= 0 {
+            return source;
+        }
         let (color, source) = (i64::from(self.color[component]), i64::from(source));
         let steps = i64::from(self.steps);
         let level = if self.out {

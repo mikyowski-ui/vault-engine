@@ -3,25 +3,32 @@
 //! preview the desktop would show, with no window, GPU, or audio device, and
 //! the final state is summarized as one SHA-256 digest for regression tests.
 //!
-//! Logs carry no timestamps, so time is simulated: before each command the
-//! clock advances one desktop frame and the preview ticks, as the desktop's
-//! event loop does between event batches. Pointer positions map to image
-//! pixels through the renderer's own geometry for the logged window size.
-//! Movies follow the headless policy: they complete at once instead of
-//! playing, so a script's `playmovie` cannot stall the replay.
+//! The desktop logs its window's initial inner size (`surface`, the first
+//! record) and every frame's clock (`tick`), so the replay starts from the
+//! same picking geometry and ticks the preview at exactly the logged times,
+//! between the same commands, with the same engine key repeats (SPEC-014
+//! §3.29). A log without a leading `surface` record comes from an older
+//! desktop: its time is simulated, one 16 ms frame before each command, on
+//! a 960 x 640 surface, and every logged key press applies. Pointer
+//! positions map to image pixels through the renderer's own geometry for
+//! the logged window size. Movies follow the headless policy: they complete
+//! at once instead of playing, so a script's `playmovie` cannot stall the
+//! replay.
 use crate::{
     AppResult,
-    input::{InputCommand, LoggedCommand},
-    preview::AssetPreview,
+    input::{InputCommand, KeyRepeat, LoggedCommand},
+    preview::{AssetPreview, KeyLayer},
 };
 use sha2::{Digest, Sha256};
 use std::io::BufRead;
 use vault_core::{CommandId, host_save::SaveInfo, movie::MoviePolicy};
 use winit::keyboard::KeyCode;
 
-/// Simulated milliseconds per command: the desktop's idle redraw interval.
+/// Simulated milliseconds per command in an untimed log: the desktop's
+/// idle redraw interval.
 pub const FRAME_MS: u64 = 16;
-/// The desktop's initial logical window size, until the log reports a resize.
+/// The desktop's initial logical window size, for an untimed log until it
+/// reports a resize.
 const INITIAL_SURFACE: [u32; 2] = [960, 640];
 
 /// The replay's result: what was applied and the final state digest.
@@ -44,6 +51,11 @@ pub struct Replay {
     commands: u64,
     last: Option<CommandId>,
     stopped: bool,
+    /// The log records its frames (it starts with a `surface` record);
+    /// `None` until the first record is read.
+    timed: Option<bool>,
+    /// SPEC-014 §3.29 the engine key repeat, as on the desktop.
+    repeat: KeyRepeat<KeyLayer>,
 }
 
 impl Replay {
@@ -62,14 +74,17 @@ impl Replay {
             commands: 0,
             last: None,
             stopped: false,
+            timed: None,
+            repeat: KeyRepeat::default(),
         };
         replay.present()?;
         Ok(replay)
     }
 
     /// Apply every command of a JSONL log (blank lines are skipped), stopping
-    /// at a quit, an Escape the preview does not consume, or the end of a
-    /// standalone movie. Command identifiers must increase.
+    /// at a quit, an Escape a standalone preview does not consume, or the
+    /// end of a standalone movie. Command identifiers must increase, and so
+    /// must a timed log's frame times.
     pub fn run(&mut self, log: impl BufRead) -> AppResult<()> {
         for (number, line) in log.lines().enumerate() {
             if self.stopped {
@@ -91,7 +106,22 @@ impl Replay {
                 .into());
             }
             self.last = Some(logged.command_id);
-            self.tick()?;
+            let timed = *self
+                .timed
+                .get_or_insert(matches!(logged.command, InputCommand::Surface { .. }));
+            if !timed {
+                self.frame(self.now + FRAME_MS, false)?;
+            }
+            if let InputCommand::Tick { now_ms } = logged.command
+                && now_ms < self.now
+            {
+                return Err(format!(
+                    "replay line {}: tick at {now_ms} ms is before the last frame at {} ms",
+                    number + 1,
+                    self.now
+                )
+                .into());
+            }
             if !self.stopped {
                 self.apply(logged.command)?;
                 self.commands += 1;
@@ -100,13 +130,40 @@ impl Replay {
         Ok(())
     }
 
-    /// One desktop frame: advance the clock and update the preview.
-    fn tick(&mut self) -> AppResult<()> {
-        self.now += FRAME_MS;
-        if self.preview.tick(self.now)? {
-            self.present()?;
+    /// One desktop frame at `now`. A timed log follows the desktop's
+    /// order: the preview ticks, a finished one stops, a held key repeats,
+    /// and the changed frame is presented. An untimed log keeps the order
+    /// its simulated frames always had.
+    fn frame(&mut self, now: u64, timed: bool) -> AppResult<()> {
+        self.now = now;
+        let changed = self.preview.tick(now)?;
+        if !timed {
+            if changed {
+                self.present()?;
+            }
+            self.stopped |= self.preview.finished();
+            return Ok(());
         }
         if self.preview.finished() {
+            self.stopped = true;
+            return Ok(());
+        }
+        if let Some(key) = self.repeat.poll(now, self.preview.key_layer()) {
+            self.press_key(key, self.preview.escape_exits())?;
+        }
+        if changed {
+            self.present()?;
+        }
+        Ok(())
+    }
+
+    /// A key press reaches the preview; an Escape it does not consume stops
+    /// the replay when `exits` (the desktop's standalone previews, or any
+    /// preview for an older desktop).
+    fn press_key(&mut self, key: KeyCode, exits: bool) -> AppResult<()> {
+        if self.preview.step(key) {
+            self.present()?;
+        } else if key == KeyCode::Escape && exits {
             self.stopped = true;
         }
         Ok(())
@@ -115,9 +172,14 @@ impl Replay {
     /// Compose the presented frame; dialogue choice areas and the picking
     /// geometry follow it, as on the desktop.
     fn present(&mut self) -> AppResult<()> {
+        self.compose()?;
+        self.hover();
+        Ok(())
+    }
+    /// Compose the frame, as the desktop does for its renderer.
+    fn compose(&mut self) -> AppResult<()> {
         let image = self.preview.image()?;
         self.image = [image.width(), image.height()];
-        self.hover();
         Ok(())
     }
 
@@ -138,11 +200,12 @@ impl Replay {
 
     /// The desktop shell's handling of one observed command.
     fn apply(&mut self, command: InputCommand) -> AppResult<()> {
+        let timed = self.timed == Some(true);
         match command {
             InputCommand::Key {
                 physical_key,
-                pressed: true,
-                ..
+                pressed,
+                repeat,
             } => {
                 // Unidentified keys reach neither the preview nor Escape.
                 let Ok(key) =
@@ -150,12 +213,31 @@ impl Replay {
                 else {
                     return Ok(());
                 };
-                if self.preview.step(key) {
-                    self.present()?;
-                } else if key == KeyCode::Escape {
-                    self.stopped = true;
+                if !timed {
+                    // An older desktop applied every press, OS repeats too,
+                    // and left at any Escape it did not consume.
+                    if pressed {
+                        self.press_key(key, true)?;
+                    }
+                } else if !pressed {
+                    self.repeat.release(key);
+                } else if !repeat {
+                    // The desktop ignores the OS repeats; the engine repeats.
+                    self.repeat.press(key, self.preview.key_layer());
+                    self.press_key(key, self.preview.escape_exits())?;
                 }
             }
+            InputCommand::Tick { now_ms } => self.frame(now_ms, timed)?,
+            InputCommand::Surface { width, height } => {
+                self.surface = [width, height];
+                // The desktop opening its window again composes the frame
+                // (without a hover); the first opening was composed when
+                // the replay began.
+                if self.commands > 0 {
+                    self.compose()?;
+                }
+            }
+            InputCommand::Focus { focused: false } => self.repeat.clear(),
             InputCommand::PointerMoved { x, y } => {
                 self.pointer = Some([x, y]);
                 self.hover();
@@ -193,11 +275,9 @@ impl Replay {
                 ..
             } => self.preview.set_modifiers([shift, control, alt]),
             InputCommand::Quit => self.stopped = true,
-            // Key releases and focus do not reach the preview; a logged
-            // hover is the desktop's output, recomputed here.
-            InputCommand::Key { .. }
-            | InputCommand::Focus { .. }
-            | InputCommand::MapHover { .. } => {}
+            // Focus does not reach the preview; a logged hover is the
+            // desktop's output, recomputed here.
+            InputCommand::Focus { .. } | InputCommand::MapHover { .. } => {}
         }
         Ok(())
     }
@@ -376,6 +456,80 @@ mod tests {
                 .run(&b"{\"command_id\":1,\"kind\":\"jump\"}\n"[..])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn timed_logs_replay_their_surface_frames_and_key_repeats() {
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        // D-11: the log opens with the physical surface (a HiDPI window of
+        // 1920 x 1280 draws the frame at scale 2, inset 320 x 160), and its
+        // ticks are the only clock. A right-click turns the cursor into the
+        // arrow over the NPC and the left button goes down at 32 ms; the
+        // action menu opens on the first frame more than 250 ms later
+        // (SPEC-014 §3.28).
+        let hold = |last: u64| {
+            format!(
+                r#"{{"command_id":1,"kind":"surface","width":1920,"height":1280}}
+{{"command_id":2,"kind":"tick","now_ms":16}}
+{{"command_id":3,"kind":"pointer_moved","x":993.0,"y":501.0}}
+{{"command_id":4,"kind":"tick","now_ms":32}}
+{{"command_id":5,"kind":"pointer_button","button":"Right","pressed":true}}
+{{"command_id":6,"kind":"pointer_button","button":"Left","pressed":true}}
+{{"command_id":7,"kind":"tick","now_ms":{last}}}
+"#
+            )
+        };
+        let menu = |last: u64| {
+            let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+            replay.run(hold(last).as_bytes()).unwrap();
+            assert_eq!(replay.pixel(), Some([336, 170]));
+            assert_eq!((replay.now, replay.commands), (last, 7));
+            let AssetPreview::Map(map) = &replay.preview else {
+                panic!("map preview expected");
+            };
+            map.menu_open()
+        };
+        assert!(!menu(282), "250 ms is not more than 250");
+        assert!(menu(283));
+        // SPEC-014 §3.29: a held arrow repeats on the logged frames, more
+        // than 500 ms after the frame that saw the press (32 ms), while the
+        // OS repeat is ignored: two scroll steps in all.
+        let keys = r#"{"command_id":1,"kind":"surface","width":960,"height":640}
+{"command_id":2,"kind":"tick","now_ms":16}
+{"command_id":3,"kind":"key","physical_key":"ArrowRight","pressed":true,"repeat":false}
+{"command_id":4,"kind":"tick","now_ms":32}
+{"command_id":5,"kind":"tick","now_ms":532}
+{"command_id":6,"kind":"key","physical_key":"ArrowRight","pressed":true,"repeat":true}
+{"command_id":7,"kind":"tick","now_ms":548}
+{"command_id":8,"kind":"tick","now_ms":564}
+{"command_id":9,"kind":"key","physical_key":"ArrowRight","pressed":false,"repeat":false}
+{"command_id":10,"kind":"tick","now_ms":2000}
+"#;
+        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        replay.run(keys.as_bytes()).unwrap();
+        let AssetPreview::Map(map) = &replay.preview else {
+            panic!("map preview expected");
+        };
+        let Some(AssetPreview::Map(mut desktop)) = args(dir.path()).load().unwrap() else {
+            panic!("map preview expected");
+        };
+        let start = desktop.host.world.camera_hex;
+        for now in [16, 548] {
+            desktop.tick(now).unwrap();
+            assert!(desktop.step(KeyCode::ArrowRight));
+        }
+        assert_ne!(desktop.host.world.camera_hex, start);
+        assert_eq!(map.host.world.camera_hex, desktop.host.world.camera_hex);
+        assert_eq!(replay.now, 2000);
+        // Frame times must not go back.
+        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let back = r#"{"command_id":1,"kind":"surface","width":960,"height":640}
+{"command_id":2,"kind":"tick","now_ms":50}
+{"command_id":3,"kind":"tick","now_ms":40}
+"#;
+        let error = replay.run(back.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("line 3"), "{error}");
     }
 
     #[test]

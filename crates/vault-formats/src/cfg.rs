@@ -39,8 +39,14 @@ impl ConfigFile {
     pub fn get_int(&self, section: &str, key: &str) -> Option<i64> {
         self.get(section, key)?.parse().ok()
     }
+    /// A real value. R-05: `nan`, `inf` and `infinity` parse as `f64` but
+    /// are no configuration value; they read as missing, so the caller's
+    /// default applies (SPEC-014 §2.3 clamps only finite values).
     pub fn get_real(&self, section: &str, key: &str) -> Option<f64> {
-        self.get(section, key)?.parse().ok()
+        self.get(section, key)?
+            .parse()
+            .ok()
+            .filter(|value: &f64| value.is_finite())
     }
     /// Replace a value, adding the section or key in first-use order.
     pub fn set(&mut self, section: &str, key: &str, value: impl Into<String>) {
@@ -96,5 +102,15 @@ mod tests {
             "[system]\nsplash=4\nlanguage=english\n\n[preferences]\nbrightness=1.011250\n\n[sound]\nmaster_volume=22281\n"
         );
         assert_eq!(ConfigFile::parse(&text), written);
+    }
+
+    #[test]
+    fn non_finite_reals_read_as_missing() {
+        let config = ConfigFile::parse(
+            "[preferences]\nbrightness=nan\ntext_base_delay=inf\nmouse_sensitivity=-Infinity\n",
+        );
+        for key in ["brightness", "text_base_delay", "mouse_sensitivity"] {
+            assert_eq!(config.get_real("preferences", key), None, "{key}");
+        }
     }
 }

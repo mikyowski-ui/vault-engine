@@ -66,3 +66,101 @@ path = "fuzz_targets/map.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "int"
+path = "fuzz_targets/int.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "save"
+path = "fuzz_targets/save.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "automap"
+path = "fuzz_targets/automap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pro"
+path = "fuzz_targets/pro.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "font"
+path = "fuzz_targets/font.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "msg"
+path = "fuzz_targets/msg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lst"
+path = "fuzz_targets/lst.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gcd"
+path = "fuzz_targets/gcd.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gam"
+path = "fuzz_targets/gam.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rix"
+path = "fuzz_targets/rix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sve"
+path = "fuzz_targets/sve.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "moviefx"
+path = "fuzz_targets/moviefx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ai"
+path = "fuzz_targets/ai.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validate"
+path = "fuzz_targets/validate.rs"
+test = false
+doc = false
+bench = false

@@ -324,15 +324,20 @@ fn spec009_secondary_and_called_frequencies_at_most_one_still_draw() {
 
 #[test]
 fn spec009_fixture_f_flee_candidate_order() {
-    let candidates = flee_candidates(1, 4);
+    let candidates: Vec<_> = flee_candidates(1, 4).collect();
     assert_eq!(
         candidates[..6],
         [(4, 1), (4, 2), (4, 0), (3, 1), (3, 2), (3, 0)]
     );
     assert_eq!(candidates.len(), 12);
     assert_eq!(candidates[11], (1, 0));
-    assert!(flee_candidates(1, 0).is_empty());
-    assert_eq!(flee_candidates(5, 1), [(1, 5), (1, 0), (1, 4)]);
+    assert_eq!(flee_candidates(1, 0).count(), 0);
+    assert_eq!(
+        flee_candidates(5, 1).collect::<Vec<_>>(),
+        [(1, 5), (1, 0), (1, 4)]
+    );
+    // A crafted AP word enumerates lazily: no allocation of 3 × AP tuples.
+    assert_eq!(flee_candidates(0, i32::MAX).next(), Some((i32::MAX, 0)));
 }
 
 fn fixture_a() -> Packets {

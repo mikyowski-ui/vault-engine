@@ -51,6 +51,14 @@ fn art(host: &WorldHost<ItemAssets>, object: ObjectRef) -> u32 {
 }
 /// Run one host opcode with integer operands, in the handler's order.
 fn call(host: &mut WorldHost<ItemAssets>, word: u16, operands: &[i32]) {
+    call_result(host, word, operands);
+}
+/// `call`, returning the row's pushed result.
+fn call_result(
+    host: &mut WorldHost<ItemAssets>,
+    word: u16,
+    operands: &[i32],
+) -> Option<vault_vm::ExternalValue> {
     let mut vm = Vm::new(IntProgram::parse(&vm_fixture::program()).unwrap());
     let call = HostCall {
         spec: extensions::opcode(word).unwrap(),
@@ -63,7 +71,44 @@ fn call(host: &mut WorldHost<ItemAssets>, word: u16, operands: &[i32]) {
             })
             .collect(),
     };
-    host.game_call(&mut vm, &call).unwrap();
+    host.game_call(&mut vm, &call).unwrap()
+}
+
+#[test]
+fn spec005_a_stale_object_reference_gives_the_rows_null_result() {
+    use vault_vm::ExternalValue;
+    // SPEC-005 §2.1 safe rule: a nonzero reference that names no object is
+    // diagnosed and the row pushes its null result instead of faulting.
+    let mut host = support::host();
+    let stale = support::spawn(&mut host, WEAPON_W);
+    host.world.erase(stale);
+    host.world.effects.clear();
+    let reference = stale as i32;
+    assert_eq!(
+        call_result(&mut host, 0x8100, &[reference]),
+        Some(ExternalValue::Value(Value::integer(-1))),
+        "obj_pid"
+    );
+    assert_eq!(
+        call_result(&mut host, 0x8149, &[reference]),
+        Some(ExternalValue::Value(Value::integer(0))),
+        "obj_art_fid"
+    );
+    assert_eq!(
+        call_result(&mut host, 0x8124, &[reference]),
+        None,
+        "party_add"
+    );
+    let diagnostics = host
+        .world
+        .effects
+        .iter()
+        .filter(|effect| {
+            matches!(effect, crate::WorldEffect::Diagnostic(message)
+                if message.contains("invalid opaque object reference"))
+        })
+        .count();
+    assert_eq!(diagnostics, 3);
 }
 
 #[test]

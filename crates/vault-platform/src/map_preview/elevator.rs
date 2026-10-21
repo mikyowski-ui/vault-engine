@@ -15,6 +15,31 @@ use winit::keyboard::KeyCode;
 pub(crate) struct ElevatorScreen {
     pub kind: i32,
     pub start: usize,
+    /// G-18 the travel animation under way: the chosen level, the gauge
+    /// cells it draws, when it started and the wait after each cell.
+    pub travel: Option<Travel>,
+}
+pub(crate) struct Travel {
+    level: usize,
+    cells: Vec<i32>,
+    start: u64,
+    step: u64,
+    /// The cell the last frame drew.
+    shown: Option<i32>,
+}
+impl Travel {
+    /// The cell drawn at `now`: one per step, the last held to the end.
+    fn cell(&self, now: u64) -> Option<i32> {
+        let index = (now.saturating_sub(self.start) / self.step.max(1)) as usize;
+        self.cells
+            .get(index.min(self.cells.len().saturating_sub(1)))
+            .copied()
+    }
+    /// SPEC-013 §3.21: each drawn cell is followed by its busy-wait, and
+    /// the last by the 200 ms pause.
+    fn end(&self) -> u64 {
+        self.start + self.cells.len() as u64 * self.step + skills::ELEVATOR_PAUSE_MS
+    }
 }
 
 const BUTTON: [i32; 2] = [48, 50];
@@ -30,7 +55,11 @@ impl MapPreview {
     pub(crate) fn open_elevator(&mut self, kind: i32) {
         if skills::elevator(kind).is_some() {
             let start = self.host.elevator_start_level(kind);
-            self.screen = Screen::Elevator(ElevatorScreen { kind, start });
+            self.screen = Screen::Elevator(ElevatorScreen {
+                kind,
+                start,
+                travel: None,
+            });
         }
     }
     fn elevator_origin(&self, painter: &Painter, kind: i32) -> [i32; 2] {
@@ -42,6 +71,10 @@ impl MapPreview {
             return Err("no elevator".into());
         };
         let (kind, start) = (screen.kind, screen.start);
+        let moving = screen
+            .travel
+            .as_ref()
+            .and_then(|travel| travel.cell(self.clock));
         let elevator = skills::elevator(kind).ok_or("invalid elevator")?;
         let view = self.map_view_image()?;
         let mut image = self.compose_world(view);
@@ -67,7 +100,7 @@ impl MapPreview {
             painter.blit(&mut image, art, 0, [rect.x, rect.y]);
         }
         let (gauge, [gx, gy], [w, h]) = skills::GAUGE;
-        let cell = elevator.gauge_cell(start);
+        let cell = moving.unwrap_or_else(|| elevator.gauge_cell(start));
         painter.blit_region(
             &mut image,
             gauge,
@@ -77,27 +110,78 @@ impl MapPreview {
         );
         Ok(image)
     }
+    /// A chosen level (or Esc). G-18 / SPEC-013 §3.21: a level other than
+    /// the start one plays the travel sound and runs the travel animation
+    /// first (the gauge steps by `(n - 1) / 12` cells every 23, 46 or 69 ms,
+    /// then a 200 ms pause; safe rule: the exact target cell ends it); the
+    /// window then closes and the player moves.
     fn choose_level(&mut self, choice: Option<usize>) {
-        let Screen::Elevator(screen) = std::mem::replace(&mut self.screen, Screen::Map) else {
+        let Screen::Elevator(screen) = &mut self.screen else {
             return;
         };
         let Some(elevator) = skills::elevator(screen.kind) else {
+            self.screen = Screen::Map;
             return;
         };
         if let Some(level) = choice
             && level != screen.start
-            && let Some(sound) = elevator.travel_sound(level.abs_diff(screen.start))
         {
-            self.play_effect(sound.as_bytes(), None);
+            screen.travel = Some(Travel {
+                level,
+                cells: elevator.gauge_path(screen.start, level),
+                start: self.clock,
+                step: elevator.step_ms(),
+                shown: None,
+            });
+            if let Some(sound) = elevator.travel_sound(level.abs_diff(screen.start)) {
+                self.play_effect(sound.as_bytes(), None);
+            }
+            return;
         }
+        self.perform_level(choice);
+    }
+    fn perform_level(&mut self, choice: Option<usize>) {
+        let Screen::Elevator(screen) = std::mem::replace(&mut self.screen, Screen::Map) else {
+            return;
+        };
         if let Err(error) = self.host.perform_elevator(screen.kind, choice) {
             self.status = error.to_string().into_bytes();
         }
+    }
+    /// One frame of the travel animation; it busy-waits, so the window
+    /// takes no input meanwhile. Returns whether the frame changed.
+    pub(crate) fn elevator_tick(&mut self, now: u64) -> bool {
+        let Screen::Elevator(ElevatorScreen {
+            travel: Some(travel),
+            ..
+        }) = &mut self.screen
+        else {
+            return false;
+        };
+        if now >= travel.end() {
+            let level = travel.level;
+            self.perform_level(Some(level));
+            return true;
+        }
+        let cell = travel.cell(now);
+        std::mem::replace(&mut travel.shown, cell) != cell
+    }
+    fn elevator_moving(&self) -> bool {
+        matches!(
+            &self.screen,
+            Screen::Elevator(ElevatorScreen {
+                travel: Some(_),
+                ..
+            })
+        )
     }
     pub(crate) fn elevator_click(&mut self, point: [i32; 2]) -> bool {
         let Screen::Elevator(screen) = &self.screen else {
             return false;
         };
+        if self.elevator_moving() {
+            return true;
+        }
         let kind = screen.kind;
         let painter = Painter {
             assets: &self.host.assets,
@@ -119,6 +203,9 @@ impl MapPreview {
         let Screen::Elevator(screen) = &self.screen else {
             return false;
         };
+        if self.elevator_moving() {
+            return true;
+        }
         let kind = screen.kind;
         let painter = Painter {
             assets: &self.host.assets,
@@ -136,6 +223,9 @@ impl MapPreview {
         let Screen::Elevator(screen) = &self.screen else {
             return false;
         };
+        if self.elevator_moving() {
+            return true;
+        }
         if key == KeyCode::Escape {
             self.choose_level(None);
             return true;

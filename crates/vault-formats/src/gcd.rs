@@ -29,6 +29,12 @@ impl GcdFile {
         let tags: [i32; 4] = r.words()?;
         let traits: [i32; 2] = r.words()?;
         let remaining_points = r.be_i32()?;
+        // SPEC-006 §2.2 describes the serialized words as "not
+        // guaranteed-valid"; the checks below are engine safe bounds, not
+        // reference behavior: a name without its NUL terminator, a SPECIAL
+        // base outside 1-10, a tag outside -1..17 or trait outside -1..15
+        // (the fixed tables), or negative creation points would otherwise
+        // index tables or run the §2.3 normalization on out-of-range input.
         if !name.contains(&0) {
             return Err(r.error("player name has no NUL terminator"));
         }

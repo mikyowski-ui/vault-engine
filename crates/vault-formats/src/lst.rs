@@ -51,6 +51,10 @@ impl LstEntry {
 pub struct LstTable {
     kind: LstKind,
     entries: Vec<LstEntry>,
+    /// Per-line defects (an embedded NUL, overflowing decimal metadata):
+    /// the line keeps its position without a name or metadata, and the
+    /// rest of the list still loads.
+    diagnostics: Vec<String>,
 }
 
 fn decimal_prefix(bytes: &[u8], offset: usize) -> Result<i32, ParseError> {
@@ -87,13 +91,16 @@ impl LstTable {
             LstKind::Raw => usize::MAX,
         };
         let mut entries = Vec::new();
+        let mut diagnostics = Vec::new();
         let mut position = 0;
         while position < bytes.len() {
             if entries.len() == MAX_ENTRIES {
                 return Err(ParseError::new("LST", position, "entry limit exceeded"));
             }
             let offset = position;
+            let line = entries.len() + 1;
             let mut raw = Vec::new();
+            let mut nul = None;
             while position < bytes.len() && raw.len() < limit {
                 let mut byte = bytes[position];
                 position += 1;
@@ -101,18 +108,42 @@ impl LstTable {
                     byte = b'\n';
                     position += 1;
                 }
-                if byte == 0 {
-                    return Err(ParseError::new(
-                        "LST",
-                        position - 1,
-                        "embedded NUL has no supported name semantics",
-                    ));
+                if byte == 0 && nul.is_none() {
+                    nul = Some(position - 1);
                 }
                 raw.push(byte);
                 if byte == b'\n' {
                     break;
                 }
             }
+            // SPEC-001 §3.6: malformed text has no dependable compatibility
+            // result and must not pass for a supported mapping. Safe rule:
+            // a line with an embedded NUL keeps its position (so later
+            // positions stay aligned) with no name or metadata, and the
+            // rest of the list still loads.
+            if let Some(at) = nul {
+                diagnostics.push(format!(
+                    "line {line} at byte {at:#x}: embedded NUL; position kept without a name"
+                ));
+                entries.push(LstEntry {
+                    raw,
+                    name: None,
+                    alias: None,
+                    head_counts: None,
+                    head_columns: None,
+                    local_vars: None,
+                });
+                continue;
+            }
+            // Overflowing decimal metadata likewise withholds that value
+            // for the line instead of failing the whole list.
+            let mut metadata = |result: Result<i32, ParseError>| match result {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    diagnostics.push(format!("line {line}: {error}; metadata withheld"));
+                    None
+                }
+            };
             let name = match kind {
                 LstKind::Raw => None,
                 LstKind::Art => Some(
@@ -135,10 +166,9 @@ impl LstTable {
                 }),
             };
             let alias = if kind == LstKind::Art {
-                raw.iter()
-                    .position(|byte| *byte == b',')
-                    .map(|comma| decimal_prefix(&raw[comma + 1..], offset + comma + 1))
-                    .transpose()?
+                raw.iter().position(|byte| *byte == b',').and_then(|comma| {
+                    metadata(decimal_prefix(&raw[comma + 1..], offset + comma + 1))
+                })
             } else {
                 None
             };
@@ -151,8 +181,7 @@ impl LstTable {
                             .position(|window| window == b"local_vars=")
                             .map(|at| hash + 1 + at + 11)
                     })
-                    .map(|start| decimal_prefix(&raw[start..], offset + start))
-                    .transpose()?
+                    .and_then(|start| metadata(decimal_prefix(&raw[start..], offset + start)))
             } else {
                 None
             };
@@ -178,11 +207,19 @@ impl LstTable {
                 local_vars,
             });
         }
-        Ok(Self { kind, entries })
+        Ok(Self {
+            kind,
+            entries,
+            diagnostics,
+        })
     }
 
     pub fn entries(&self) -> &[LstEntry] {
         &self.entries
+    }
+    /// Lines whose name or metadata was withheld as malformed, in order.
+    pub fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
     }
     /// The entry count, derived from successful bounded reads for every
     /// kind (SPEC-001 §3.4 safe rule; the reference's script and prototype

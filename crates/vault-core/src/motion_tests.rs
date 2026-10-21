@@ -4,11 +4,12 @@
 use crate::{
     CharacterSheet, ObjectAction, ObjectRef, Perk, WorldEffect, WorldError, WorldHost, WorldState,
     assets::WorldAssets,
-    choreography::{Begin, Stepped},
+    choreography::{Begin, Frames, Stepped},
+    clicks::{Click, Policy, busy_policy},
     critical::effect,
     fixture_world as fixture,
     host_choreography::Playback,
-    motion::{Call, Goal, HEX_STEPS, Motion, MotionSequence, Walk, crosses},
+    motion::{Call, Goal, HEX_STEPS, Motion, MotionSequence, Play, Walk, crosses},
     routing::step,
 };
 use std::{
@@ -196,6 +197,16 @@ fn messages(host: &mut WorldHost<Assets>) -> Vec<String> {
         })
         .collect()
 }
+fn diagnostics(host: &WorldHost<Assets>) -> Vec<String> {
+    host.world
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            WorldEffect::Diagnostic(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
 /// A built sequence's entries: delay and what each does.
 fn labels(sequence: &MotionSequence) -> Vec<(i32, String)> {
     sequence
@@ -229,6 +240,7 @@ fn labels(sequence: &MotionSequence) -> Vec<(i32, String)> {
                     Call::UseContainer { .. } => "container".into(),
                     Call::Loot { .. } => "loot".into(),
                     Call::Arrive { .. } => "arrive".into(),
+                    Call::SkillStage { skill, .. } => format!("skill {skill}"),
                     Call::OpenBit { open } => format!("open bit {open}"),
                     Call::Finish { open } => format!("finish {open}"),
                 },
@@ -442,12 +454,15 @@ fn spec007_pickups_reach_down_and_take_the_item_on_the_action_frame() {
     let player = host.world.player;
     let item = place(&mut host, prototype(0, 5, &[], &[]), step(20100, 1));
     host.action(player, item, ObjectAction::Pickup).unwrap();
-    // Registered: the first delay forced to 0, the turn and checks done,
-    // the reach running, and the sound's delay A counted down once.
+    // Registered: the first delay forced to 0, the move entry (a one-step
+    // route next to the item, moving nothing; SPEC-007 §3.1), the turn
+    // and checks done, the reach running, and the sound's delay A counted
+    // down once.
     assert_eq!(
         labels(&host.motions[0]),
         [
-            row(0, "turn"),
+            (0, format!("walk {:?}", Goal::Object(item))),
+            row(-1, "turn"),
             row(-1, "adjacent"),
             row(-1, "points"),
             row(0, "animate 10"),
@@ -520,11 +535,14 @@ fn spec007_interaction_sequences_follow_the_section_3_11_3_table() {
     // Armed (a pistol, code 5): a closed container with interaction bit 0
     // (the ground reach) puts the weapon away, reaches, is used on the
     // reach's action frame (safe rule), takes the weapon out and is looted.
+    // Next to it, the move entry is still registered (§3.1: a one-step
+    // route moves nothing).
     host.world.get_mut(player).unwrap().raw.art_id = critter(0, 5);
     let ground = chest(&mut host, step(20100, 1), &[(0x3D, 1)]);
     assert_eq!(
         labels(&host.container_motion(player, ground).unwrap()),
         [
+            (0, format!("walk {:?}", Goal::Object(ground))),
             row(-1, "turn"),
             row(-1, "adjacent"),
             row(-1, "points"),
@@ -542,7 +560,7 @@ fn spec007_interaction_sequences_follow_the_section_3_11_3_table() {
     host.world.get_mut(middle).unwrap().raw.frame = 2;
     let entries = labels(&host.container_motion(player, middle).unwrap());
     assert_eq!(
-        entries[5..],
+        entries[6..],
         [
             row(0, "animate 11"),
             row(2, "container"),
@@ -552,7 +570,7 @@ fn spec007_interaction_sequences_follow_the_section_3_11_3_table() {
     host.world.get_mut(middle).unwrap().raw.pid = 213;
     let entries = labels(&host.container_motion(player, middle).unwrap());
     assert_eq!(
-        entries[5..],
+        entries[6..],
         [
             row(0, "animate 11"),
             row(-1, "animate 38 code 5"),
@@ -572,7 +590,7 @@ fn spec007_interaction_sequences_follow_the_section_3_11_3_table() {
             &host
                 .use_motion(player, lever, Call::Use { target: lever })
                 .unwrap()
-        )[3..],
+        )[4..],
         [
             row(-1, "sound HMJMPSHD"),
             row(0, "animate 39"),
@@ -754,37 +772,326 @@ fn spec007_walkers_open_doors_they_may_use_and_walk_on() {
 }
 
 #[test]
-fn spec007_a_new_request_stops_the_walking_player_first() {
+fn spec014_clicks_while_the_player_is_busy_cancel_or_do_nothing() {
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let shifts = HEX_STEPS.map(|[x, y]| [(x / 4) as i16, (y / 4) as i16]);
+    host.assets.art.insert(critter(1, 0), frm(8, 10, 0, shifts));
+    host.assets.art.insert(critter(10, 0), frm(6, 10, 2, STILL));
+    let player = host.world.player;
+    let interrupt = |host: &mut WorldHost<Assets>, on: bool| {
+        host.walk_toward_with(player, hexes(20100, 4, 2), false, 0, on)
+            .unwrap()
+    };
+    let art =
+        |host: &WorldHost<Assets>| Fid(host.world.get(player).unwrap().raw.art_id).animation();
+    // SPEC-014 §3.27: a walking player's movement click does nothing with
+    // `interrupt_walk` off (the walk keeps its route); on, it replaces the
+    // walk and the walker stands on its hex (SPEC-007 §3.10.1).
+    let mut now = 0;
+    assert!(
+        host.walk_toward(player, hexes(20100, 1, 6), false, 0)
+            .unwrap()
+    );
+    host.step_motions(now);
+    now += 100;
+    host.step_motions(now);
+    assert_ne!(host.world.get(player).unwrap().raw.displacement, [0, 0]);
+    assert!(host.click_state().walking && host.click_state().busy);
+    let first = host.motions[0].id;
+    assert!(!interrupt(&mut host, false));
+    assert_eq!(host.motions[0].id, first);
+    assert!(interrupt(&mut host, true));
+    assert_eq!(host.motions.len(), 1);
+    assert_ne!(host.motions[0].id, first);
+    assert_eq!(host.world.get(player).unwrap().raw.displacement, [0, 0]);
+    host.motions.clear();
+    // Mid-reach, a movement click with `interrupt_walk` off does nothing;
+    // on, it cancels the pickup whole: the reach is abandoned, its pickup
+    // entry dropped, and the forced adjacency check reports nothing.
+    let item = place(&mut host, prototype(0, 5, &[], &[]), step(20100, 1));
+    host.action(player, item, ObjectAction::Pickup).unwrap();
+    now += 100;
+    host.step_motions(now);
+    let state = host.click_state();
+    assert!(state.busy && !state.walking && !state.standing);
+    assert_eq!(busy_policy(Click::Rotate, &state, true), Policy::Ignore);
+    assert!(!interrupt(&mut host, false));
+    assert!(!host.motions[0].walking(player));
+    assert!(interrupt(&mut host, true));
+    assert_eq!(host.motions.len(), 1);
+    assert!(host.motions[0].walking(player));
+    while host.moving(player) {
+        now += 100;
+        host.step_motions(now);
+        assert!(now < 5000, "the walk ends");
+    }
+    assert_eq!(
+        host.world.get(item).unwrap().owner,
+        None,
+        "the pickup was dropped"
+    );
+    assert!(messages(&mut host).is_empty(), "a cancel reports nothing");
+    assert_eq!(
+        busy_policy(Click::Rotate, &host.click_state(), true),
+        Policy::Proceed
+    );
+    // An action click during the approach of an earlier action replaces
+    // that whole action (the player's art is walk); in any other pose it
+    // does nothing and shows no message.
+    host.world.move_object(player, 20100, 0, false).unwrap();
+    let far = place(&mut host, prototype(0, 5, &[], &[]), hexes(20100, 1, 4));
+    host.action(player, far, ObjectAction::Pickup).unwrap();
+    now += 100;
+    host.step_motions(now);
+    assert_eq!(art(&host), 1);
+    host.action(player, item, ObjectAction::Pickup).unwrap();
+    assert_eq!(host.motions.len(), 1);
+    let replaced = labels(&host.motions[0]);
+    assert_eq!(replaced[0], (0, format!("walk {:?}", Goal::Object(item))));
+    let busy = host.motions[0].id;
+    now += 100;
+    host.step_motions(now);
+    assert_eq!(art(&host), 10);
+    host.action(player, far, ObjectAction::Pickup).unwrap();
+    assert_eq!((host.motions.len(), host.motions[0].id), (1, busy));
+    assert!(messages(&mut host).is_empty());
+    // A talk at object distance below 9 with a clear line is callbacks
+    // only, so it registers while the player is busy.
+    assert_eq!(
+        busy_policy(Click::NearTalk, &host.click_state(), false),
+        Policy::Proceed
+    );
+}
+
+#[test]
+fn spec007_one_sequence_per_owner_discards_the_new_sequence() {
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let shifts = HEX_STEPS.map(|[x, y]| [(x / 4) as i16, (y / 4) as i16]);
+    host.assets.art.insert(critter(1, 0), frm(8, 10, 0, shifts));
+    host.assets.art.insert(critter(0, 0), frm(4, 10, 0, STILL));
+    let walker = npc(&mut host, 20102);
+    let goal = hexes(20102, 1, 4);
+    assert!(host.walk_toward(walker, goal, false, 0).unwrap());
+    host.step_motions(0);
+    // A second walk for the walker cannot register: the whole sequence is
+    // discarded with a diagnostic, not queued, and the first keeps its
+    // route (§3.10.1).
+    assert!(
+        !host
+            .walk_toward(walker, hexes(20102, 4, 2), false, 0)
+            .unwrap()
+    );
+    assert_eq!(host.motions.len(), 1);
+    assert!(
+        diagnostics(&host)
+            .iter()
+            .any(|text| text.contains("discarded"))
+    );
+    let mut now = 100;
+    while host.moving(walker) {
+        host.step_motions(now);
+        now += 100;
+        assert!(now < 5000, "the walk ends");
+    }
+    assert_eq!(hex(&host, walker), goal);
+    // A sequence made only of callbacks always registers.
+    assert!(
+        host.walk_toward(walker, hexes(goal, 4, 1), false, 0)
+            .unwrap()
+    );
+    let mut callbacks = MotionSequence::new();
+    callbacks
+        .push(walker, 0, Motion::Call(Call::CombatPoints))
+        .unwrap();
+    assert!(host.register_motion(callbacks));
+    // An idle fidget is ended at once by a later sequence naming its
+    // critter, which registers.
+    let other = npc(&mut host, 20300);
+    let mut fidget = MotionSequence {
+        insignificant: true,
+        ..MotionSequence::new()
+    };
+    let play = Motion::Play {
+        animation: 0,
+        play: Play::Forward,
+        art: critter(0, 0),
+        frames: Frames::default(),
+    };
+    fidget.push(other, 0, play).unwrap();
+    assert!(host.register_motion(fidget));
+    assert!(host.motions.iter().any(|sequence| sequence.insignificant));
+    assert!(!host.owns_motion(other), "a fidget never holds its critter");
+    assert!(
+        host.walk_toward(other, hexes(20300, 1, 2), false, 0)
+            .unwrap()
+    );
+    assert!(host.motions.iter().all(|sequence| !sequence.insignificant));
+    assert!(host.motions.iter().any(|sequence| sequence.walking(other)));
+    assert!(host.owns_motion(other));
+}
+
+#[test]
+fn spec007_cancelling_a_swing_runs_its_forced_finishing_callback() {
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let player = host.world.player;
+    let at = step(20100, 1);
+    let door = door(&mut host, at);
+    host.use_door(player, door).unwrap();
+    host.step_motions(0);
+    host.step_motions(100);
+    assert_eq!(host.world.get(door).unwrap().raw.frame, 1);
+    // SPEC-005 `reg_anim_func` command 2 mid-swing: the open bit has
+    // already flipped, so the forced finishing callback still runs
+    // (§3.10.1): the open flags, the last frame and its displacement.
+    // Nothing is left half-open.
+    host.clear_animation(door);
+    assert!(host.motions.is_empty());
+    let raw = &host.world.get(door).unwrap().raw;
+    assert_eq!(
+        (raw.frame, raw.flags.0 & 0xA000_0010, raw.displacement),
+        (3, 0xA000_0010, [3, 0])
+    );
+    assert!(host.world.movement_blocker(at, 0, player).is_none());
+}
+
+#[test]
+fn spec007_the_loot_window_waits_for_the_container_animation() {
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    // The middle reach: six frames, action frame A = 2. The chest's art:
+    // ten frames, so its swing outlasts the reach.
+    host.assets.art.insert(critter(11, 0), frm(6, 10, 2, STILL));
+    let player = host.world.player;
+    let chest = chest(&mut host, step(20100, 1), &[]);
+    host.assets.art.insert(0, frm(10, 10, 0, STILL));
+    host.action(player, chest, ObjectAction::Use).unwrap();
+    assert_eq!(
+        labels(&host.motions[0])[4..],
+        [row(0, "animate 11"), row(1, "container"), row(-1, "loot")]
+    );
+    host.step_motions(0);
+    assert!(sounds(&mut host).is_empty());
+    // The container use runs on the reach's action frame (safe rule) and
+    // registers the chest's sound and swing into this sequence, right
+    // after itself (§3.11.3, SPEC-013 §3.16 step 3).
+    host.step_motions(100);
+    assert_eq!(sounds(&mut host), ["IOCNTNRB"]);
+    assert_eq!(
+        labels(&host.motions[0])[5..],
+        [
+            row(0, "container"),
+            row(0, "sound IOCNTNRB"),
+            row(0, "swing true"),
+            row(-1, "loot"),
+        ]
+    );
+    let frames = |host: &WorldHost<Assets>| {
+        (
+            host.world.get(player).unwrap().raw.frame,
+            host.world.get(chest).unwrap().raw.frame,
+        )
+    };
+    assert_eq!(frames(&host), (1, 0));
+    // The reach ends at 600 ms; the loot request waits for the swing,
+    // which ends at 1100 ms.
+    for now in (200..=1000).step_by(100) {
+        host.step_motions(now);
+        assert!(host.take_loot_request().is_none(), "at {now} ms");
+    }
+    assert_eq!(host.world.get(chest).unwrap().raw.frame, 9);
+    host.step_motions(1100);
+    assert_eq!(
+        host.take_loot_request().map(|request| request.target),
+        Some(chest)
+    );
+    assert!(!host.moving(player));
+}
+
+#[test]
+fn spec007_a_failed_approach_tells_the_player_but_an_external_stop_does_not() {
     let mut host = host();
     host.playback = Playback::RealTime;
     let shifts = HEX_STEPS.map(|[x, y]| [(x / 4) as i16, (y / 4) as i16]);
     host.assets.art.insert(critter(1, 0), frm(8, 10, 0, shifts));
     let player = host.world.player;
-    assert!(
-        host.walk_toward(player, hexes(20100, 1, 6), false, 0)
-            .unwrap()
-    );
+    // Combat starting (or a map exit) mid-approach stops every sequence:
+    // the forced adjacency check runs under the halt and prints nothing,
+    // as the reference prints nothing (§3.11.3).
+    let far = place(&mut host, prototype(0, 5, &[], &[]), hexes(20100, 1, 4));
+    host.action(player, far, ObjectAction::Pickup).unwrap();
     host.step_motions(0);
-    host.step_motions(100);
-    assert_ne!(host.world.get(player).unwrap().raw.displacement, [0, 0]);
-    // The new walk replaces the old one; the walker stands on its hex.
-    assert!(
-        host.walk_toward(player, hexes(20100, 4, 2), false, 0)
-            .unwrap()
+    host.stop_motions();
+    assert!(host.motions.is_empty());
+    assert!(messages(&mut host).is_empty());
+    assert_eq!(
+        Fid(host.world.get(player).unwrap().raw.art_id).animation(),
+        0
     );
-    assert_eq!(host.motions.len(), 1);
-    assert_eq!(host.world.get(player).unwrap().raw.displacement, [0, 0]);
-    // Busy with anything else (a reach), the player ignores a request.
-    host.motions.clear();
-    host.assets.art.insert(critter(10, 0), frm(6, 10, 2, STILL));
-    let item = place(&mut host, prototype(0, 5, &[], &[]), step(20100, 1));
+    // With every approach to the target blocked, the move entry fails as
+    // it starts (§3.1) and the check then tells a player actor (safe
+    // rule).
+    let ringed = hexes(20100, 0, 3);
+    let item = place(&mut host, prototype(0, 5, &[], &[]), ringed);
+    for direction in 0..6 {
+        npc(&mut host, step(ringed, direction));
+    }
     host.action(player, item, ObjectAction::Pickup).unwrap();
-    assert!(
-        host.walk_toward(player, hexes(20100, 4, 2), false, 0)
-            .unwrap()
+    assert_eq!(messages(&mut host), ["You cannot get there."]);
+    assert!(host.motions.is_empty());
+}
+
+#[test]
+fn spec007_approaches_move_by_route_not_object_distance() {
+    let mut host = host();
+    let player = host.world.player;
+    // A multihex chest two hexes east is at object distance 1, but the
+    // route to its hex has two steps and the shortened route one: the
+    // approach moves the player one hex (§3.1), and the use follows.
+    let chest = chest(&mut host, hexes(20100, 1, 2), &[]);
+    host.world.get_mut(chest).unwrap().raw.flags.0 |= BasicFlags::MULTIHEX.0;
+    assert_eq!(host.world.object_distance(player, chest), 1);
+    host.action(player, chest, ObjectAction::Use).unwrap();
+    assert_eq!(hex(&host, player), hexes(20100, 1, 1));
+    assert_eq!(host.world.get(chest).unwrap().raw.frame, 2);
+    // Next to it the one-step route moves nothing but the move entry is
+    // still registered; only a mover on the target's own hex registers
+    // none.
+    let sequence = host.container_motion(player, chest).unwrap();
+    assert_eq!(
+        labels(&sequence)[0],
+        (0, format!("walk {:?}", Goal::Object(chest)))
     );
+    host.world
+        .move_object(player, hexes(20100, 1, 2), 0, false)
+        .unwrap();
+    let sequence = host.container_motion(player, chest).unwrap();
+    assert_eq!(labels(&sequence)[0], row(-1, "turn"));
+}
+
+#[test]
+fn spec005_a_repeating_animation_keeps_running_under_instant_playback() {
+    let mut host = host();
+    host.assets.art.insert(critter(0, 0), frm(4, 10, 0, STILL));
+    let player = host.world.player;
+    let mut sequence = MotionSequence::new();
+    let play = Motion::Play {
+        animation: 0,
+        play: Play::Forever,
+        art: critter(0, 0),
+        frames: Frames::default(),
+    };
+    sequence.push(player, 0, play).unwrap();
+    // Instant playback stops once only the repeating entry runs, after
+    // its first step; the entry keeps running until something cancels it.
+    assert!(host.register_motion(sequence));
     assert_eq!(host.motions.len(), 1);
-    assert!(!host.motions[0].walking(player));
+    assert!(host.motions[0].busy(player));
+    assert_eq!(host.world.get(player).unwrap().raw.frame, 0);
+    host.clear_animation(player);
+    assert!(host.motions.is_empty());
 }
 
 /// The attack shows queued, as (delay, what each entry does).

@@ -884,13 +884,20 @@ impl<A: WorldAssets> WorldHost<A> {
                 Some(Thrown { hand, .. }) if *hand != 0 => {
                     self.animate(draft, main, attacker, animation::TAKE_OUT, Some(*hand), -1)?;
                 }
-                Some(_) => {
+                // §3.10.4 step 11 sends every throw to §3.9 step 11, where
+                // without a refill item the attacker's art changes to
+                // standing with weapon code 0. A throw whose projectile
+                // phase did not run (§3.9: a critical failure that kept its
+                // critical bit, or no valid projectile) has no refill item,
+                // so it ends the same way under the literal reading; the
+                // spec does not say whether such a throw keeps its weapon
+                // code instead (README "Open spec questions", item 5).
+                Some(_) | None if thrown => {
                     let facing = draft.facing.get(&attacker).copied().unwrap_or(0);
                     let art = self.critter_fid(attacker, animation::STAND, Some(0), facing);
                     self.push(draft, main, attacker, -1, Action::SetArt { art })?;
                 }
-                None if thrown => {}
-                None => self.animate(draft, main, attacker, animation::UNPOINT, None, -1)?,
+                _ => self.animate(draft, main, attacker, animation::UNPOINT, None, -1)?,
             }
         }
         Ok(consumption)

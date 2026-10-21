@@ -3,7 +3,7 @@
 //! Repair), skill-use experience, Sneak, poison and radiation, explosives,
 //! barter entry, elevators, exit grids and map transitions.
 use crate::{
-    ObjectAction, ObjectRef, RandomSource, WorldEffect, WorldError,
+    ObjectRef, RandomSource, WorldEffect, WorldError,
     assets::WorldAssets,
     combat_state::CombatRequest,
     host::WorldHost,
@@ -20,7 +20,8 @@ use vault_formats::{
     pro::{BasicFlags, Category, LockFlags},
 };
 
-/// §3.13 kit bonus and PIDs (overridable through `WorldRules`).
+/// §3.13 the kit bonus (fixed) and the kit PIDs (the PIDs alone are
+/// overridable through `WorldRules`).
 const KIT_BONUS: i32 = 20;
 pub const FIRST_AID_KIT: u32 = 47;
 pub const DOCTORS_BAG: u32 = 91;
@@ -54,8 +55,9 @@ pub enum BookRoute {
 impl<A: WorldAssets> WorldHost<A> {
     /// §3.1-3.2 the skill-on request. Sneak toggles at once. Otherwise the
     /// gate rejects (`proto.msg` 902 for a player in combat) or the request
-    /// is accepted: out of reach the actor approaches first (charging no
-    /// AP), and the stage follows adjacency. Returns whether it was accepted.
+    /// is accepted and scheduled as one animation sequence (charging no
+    /// AP): the approach, the adjacency check, the manipulation animation
+    /// and, after it, the stage of §3.3. Returns whether it was accepted.
     pub fn use_skill_on(
         &mut self,
         actor: ObjectRef,
@@ -82,23 +84,11 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             return Ok(false);
         }
-        let distance = self.world.object_distance(actor, target);
-        if target != self.world.player && distance > 1 {
-            // The proximity step after an approach aborts rather than
-            // chasing; under the safe rule a failed approach (one that
-            // cannot start or ends short) tells a player actor. SPEC-007
-            // §3.11.1: the approach runs out of combat at distance 5 or more.
-            let run = !self.world.combat && distance >= crate::host_motion::RUN_DISTANCE;
-            let failed = self.arriving
-                || self
-                    .approach(actor, target, ObjectAction::UseSkill(index), run)
-                    .is_err();
-            if failed && actor == self.world.player {
-                self.print_game("misc.msg", 2000, &[]);
-            }
-            return Ok(true);
-        }
-        self.skill_stage(actor, target, index)?;
+        // §3.2 steps 1-5 (`skill_motion`): a walking player is cleared
+        // first (SPEC-014 §3.27), the approach and its forced adjacency
+        // check follow, and the stage runs only after the manipulation
+        // animation has completed.
+        self.skill_sequence(actor, target, index)?;
         Ok(true)
     }
     /// §3.3 the skill-on stage: a jammed lock stops every skill (`misc.msg`
@@ -585,9 +575,12 @@ impl<A: WorldAssets> WorldHost<A> {
 
     /// §3.19 poison adjustment (the `poison` opcode, stat setting and drug
     /// effects): the player only; a positive amount less its resistance
-    /// share. A positive level restarts the tick at `10 (505 - 5 level)` and
-    /// shows `misc.msg` 3000; otherwise the level is 0 (safe rule: pending
-    /// ticks are removed).
+    /// share (`trunc(amount × resistance / 100)`, step 2). A positive level
+    /// removes the pending ticks, restarts one at `10 (505 - 5 level)` and
+    /// shows `misc.msg` 3000 (step 4); otherwise the level is 0 and pending
+    /// ticks stay queued (step 5, `[Must-match]`). The level is held at 0
+    /// from below by step 5 itself, and the saturating addition is the safe
+    /// bound on a crafted amount.
     pub fn adjust_poison(&mut self, critter: ObjectRef, amount: i32) -> Result<bool, WorldError> {
         let player = self.world.player;
         if critter != player {
@@ -609,10 +602,10 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Some(sheet) = self.world.player_sheet_mut() {
             sheet.poison = level;
         }
-        self.world
-            .queue
-            .retain(|event| !(event.object == player && event.kind == EventKind::Poison));
         if level > 0 {
+            self.world
+                .queue
+                .retain(|event| !(event.object == player && event.kind == EventKind::Poison));
             self.world.queue.insert(
                 self.world.clock.ticks,
                 skills::poison_delay(level).max(0),
@@ -782,6 +775,9 @@ impl<A: WorldAssets> WorldHost<A> {
         level: i32,
         sign: i32,
     ) -> Result<(), WorldError> {
+        // SPEC-013 §3.20 applies levels 1-6 (the §2.6 rows); the reference
+        // indexes its penalty table with the raw event level, so an event
+        // carrying another level applies nothing (safe bound).
         let Some(row) = usize::try_from(level - 1)
             .ok()
             .and_then(|row| skills::RADIATION_PENALTIES.get(row))
@@ -1448,6 +1444,41 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         Ok(())
     }
+    /// SPEC-008 §3.10 / §3.22 step 3: after a map is loaded by number the
+    /// party is moved on the world map to the map's fixed table town by the
+    /// script-directed town travel of SPEC-008 §3.4, driven to completion
+    /// here: a jittered target within 16 pixels of the town center (two
+    /// draws), the shared terrain stepping counters, time charges off the
+    /// city branch and 24-hour party healing every W iterations, with no
+    /// encounter tests or walk-mask checks. Nothing moves for town -1 (an
+    /// unnumbered map) or when the party's cell is already the town's cell.
+    pub fn move_to_map_town(&mut self) -> Result<(), WorldError> {
+        let town = crate::worldmap::map_town(self.world.map.header.map_number);
+        let Some(cell) = usize::try_from(town)
+            .ok()
+            .and_then(|town| crate::worldmap::TOWNS.get(town))
+            .map(|town| town.cell)
+        else {
+            return Ok(());
+        };
+        if self.world.world_map.cell() == Some(cell) {
+            return Ok(());
+        }
+        self.travel_to_town(town as usize)?;
+        // The scripted path runs inside the transition rather than frame by
+        // frame; a bound keeps a malformed world position from looping
+        // forever ([May-improve] safe bound: a crossing of the whole map
+        // takes under 10,000 iterations).
+        for _ in 0..100_000 {
+            if self.travel_iteration()? != crate::TravelOutcome::Moving {
+                return Ok(());
+            }
+        }
+        self.world.world_map.travel = None;
+        Err(WorldError::Invalid(
+            "script-directed town travel did not finish".into(),
+        ))
+    }
     /// §3.22 a transition request: one made in combat ends combat; the last
     /// request wins.
     pub fn request_transition(&mut self, transition: Transition) {
@@ -1476,6 +1507,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 } else if transition.map == -1 {
                     self.world.emit(WorldEffect::TownMap);
                 } else {
+                    // SPEC-008 §3.10: the world map plays `03wrldmp`.
+                    self.play_world_map_music();
                     self.world.emit(WorldEffect::WorldMap);
                 }
             }
@@ -1485,15 +1518,8 @@ impl<A: WorldAssets> WorldHost<A> {
                     .map_path(map)
                     .ok_or_else(|| WorldError::Invalid(format!("map {map} is not available")))?;
                 self.load_map(&path)?;
-                // Step 3: the world-map position moves to the map's town (by
-                // the §3.7 hotspot catalog; other maps keep the town).
-                let file = path.rsplit('/').next().unwrap_or(&path);
-                if let Some(town) = crate::worldmap::town_of_map(file)
-                    && let Some(center) = crate::worldmap::town_center(town)
-                {
-                    self.world.world_map.saved.town = town as i32;
-                    self.world.world_map.set_position(center);
-                }
+                // Step 3: the party moves on the world map to the map's town.
+                self.move_to_map_town()?;
                 if !matches!(transition.hex, -1 | 0) && (0..=2).contains(&transition.elevation) {
                     let facing = transition.facing.clamp(0, 5) as u8;
                     self.place_player(transition.hex, transition.elevation as u8, facing)?;

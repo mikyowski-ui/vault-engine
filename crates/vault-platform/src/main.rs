@@ -1,4 +1,5 @@
 mod audio;
+mod editor_screen;
 mod game;
 mod input;
 mod interface;
@@ -52,8 +53,8 @@ struct Args {
     #[arg(long)]
     no_audio: bool,
     /// Replay a captured JSONL input log headlessly (no window, GPU, or
-    /// audio) against the selected preview, one simulated 16 ms frame per
-    /// command, then print the final state SHA-256 digest as JSON.
+    /// audio) against the selected preview, ticking it at the logged frame
+    /// times, then print the final state SHA-256 digest as JSON.
     #[arg(
         long,
         value_name = "PATH",
@@ -87,6 +88,15 @@ impl DisplayPalette {
     }
 }
 
+/// The JSONL input log on stdout, buffered: P-02 one flush per event-loop
+/// pass (and at exit) instead of one per input event.
+struct InputLog(std::io::BufWriter<std::io::Stdout>);
+impl Default for InputLog {
+    fn default() -> Self {
+        Self(std::io::BufWriter::new(std::io::stdout()))
+    }
+}
+
 #[derive(Default)]
 struct Shell {
     renderer: Option<Renderer>,
@@ -101,6 +111,14 @@ struct Shell {
     display: Option<DisplayPalette>,
     /// The output stream, kept alive for the whole session.
     _audio: Option<audio::Audio>,
+    /// SPEC-014 §3.29 the engine's key repeat (the OS repeat is ignored).
+    repeat: input::KeyRepeat<preview::KeyLayer>,
+    input_log: InputLog,
+    /// The window title last set (P-02: set only when it changes).
+    title: String,
+    /// The drawn cursor moved since the last presented frame; the next
+    /// redraw presents it once, however many moves came in between (P-01).
+    pointer_moved: bool,
 }
 
 impl Shell {
@@ -112,14 +130,35 @@ impl Shell {
     }
 
     fn log(&mut self, event_loop: &ActiveEventLoop, command: InputCommand) {
-        if let Err(error) = input::write_command(std::io::stdout().lock(), &mut self.ids, &command)
-        {
+        if let Err(error) = input::write_command(&mut self.input_log.0, &mut self.ids, &command) {
+            self.fail(event_loop, error);
+        }
+    }
+    fn flush_log(&mut self, event_loop: &ActiveEventLoop) {
+        use std::io::Write;
+        if let Err(error) = self.input_log.0.flush() {
             self.fail(event_loop, error);
         }
     }
 }
 
 impl Shell {
+    /// A key press (or an engine repeat) reaches the preview. A standalone
+    /// sprite or map preview, or the bare color test, exits on an Escape it
+    /// does not consume; the game never exits on a key (G-01).
+    fn press_key(&mut self, event_loop: &ActiveEventLoop, window: &Window, key: KeyCode) {
+        let handled = self.preview_key(event_loop, window, key);
+        if !handled
+            && key == KeyCode::Escape
+            && self
+                .preview
+                .as_ref()
+                .is_none_or(preview::AssetPreview::escape_exits)
+        {
+            self.log(event_loop, InputCommand::Quit);
+            event_loop.exit();
+        }
+    }
     fn preview_key(&mut self, event_loop: &ActiveEventLoop, window: &Window, key: KeyCode) -> bool {
         let Some(preview) = &mut self.preview else {
             return false;
@@ -144,7 +183,13 @@ impl Shell {
                     });
                     renderer.set_image(&image, &palette);
                 }
-                window.set_title(&preview.title());
+                // The composed frame already shows the cursor where it is.
+                self.pointer_moved = false;
+                let title = preview.title();
+                if title != self.title {
+                    window.set_title(&title);
+                    self.title = title;
+                }
                 window.set_cursor_visible(preview.system_cursor());
                 window.request_redraw();
             }
@@ -154,8 +199,19 @@ impl Shell {
             self.log_hover(event_loop, pointer);
         }
     }
-    /// Present the drawn cursor's move without composing the scene again.
+    /// The drawn cursor moved: the next redraw presents it.
     fn refresh_pointer(&mut self, window: &Window) {
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| !preview.system_cursor())
+        {
+            self.pointer_moved = true;
+            window.request_redraw();
+        }
+    }
+    /// Present the drawn cursor's move without composing the scene again.
+    fn present_pointer(&mut self) {
         let Some(preview) = &mut self.preview else {
             return;
         };
@@ -170,7 +226,24 @@ impl Shell {
             });
             renderer.set_image(&image, &palette);
         }
-        window.request_redraw();
+    }
+    /// G-31 / SPEC-014 §3.28: the action menu's release moves the system
+    /// pointer to the frame pixel the preview asks for (where supported).
+    fn warp_pointer(&mut self, window: &Window) {
+        let Some(pixel) = self
+            .preview
+            .as_mut()
+            .and_then(preview::AssetPreview::take_warp)
+        else {
+            return;
+        };
+        let size = window.inner_size();
+        let Some([x, y]) = surface_point([size.width, size.height], [640, 480], pixel) else {
+            return;
+        };
+        if let Err(error) = window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y)) {
+            tracing::debug!(%error, "pointer warp unsupported");
+        }
     }
     /// The frame pixel under the pointer, or `None` outside the frame.
     fn pixel(&self) -> Option<[i32; 2]> {
@@ -220,6 +293,15 @@ impl ApplicationHandler for Shell {
             }
         };
         let size = window.inner_size();
+        // D-11: the surface in physical pixels (a HiDPI window is larger
+        // than its logical size), so a replay picks with the same geometry.
+        self.log(
+            event_loop,
+            InputCommand::Surface {
+                width: size.width,
+                height: size.height,
+            },
+        );
         let renderer = (|| -> AppResult<Renderer> {
             if let Some(preview) = &mut self.preview {
                 let image = preview.image()?;
@@ -265,10 +347,18 @@ impl ApplicationHandler for Shell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let (Some(started), Some(preview)) = (self.started, self.preview.as_mut()) else {
+        // The commands logged since the last pass.
+        self.flush_log(event_loop);
+        let Some(started) = self.started.filter(|_| self.preview.is_some()) else {
             return;
         };
         let now = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        // D-11: every frame's clock is logged, so a replay ticks the preview
+        // at the same times between the same commands.
+        self.log(event_loop, InputCommand::Tick { now_ms: now });
+        let Some(preview) = self.preview.as_mut() else {
+            return;
+        };
         let changed = match preview.tick(now) {
             Ok(changed) => changed,
             Err(error) => return self.fail(event_loop, error),
@@ -278,6 +368,15 @@ impl ApplicationHandler for Shell {
             event_loop.exit();
             return;
         }
+        // SPEC-014 §3.29: a held key repeats on the frame clock.
+        if let Some(key) = self.repeat.poll(now, preview.key_layer())
+            && let Some(window) = self.window.clone()
+        {
+            self.press_key(event_loop, &window, key);
+        }
+        let Some(preview) = self.preview.as_mut() else {
+            return;
+        };
         // Each loop pass is one enabled cycling poll; the world can disable it
         // (for example during dialogue or a movie) and later restore it. A
         // movie's device palette is presented with its frames instead.
@@ -344,15 +443,18 @@ impl ApplicationHandler for Shell {
                         repeat: event.repeat,
                     },
                 );
-                let handled = pressed
-                    && if let PhysicalKey::Code(key) = event.physical_key {
-                        self.preview_key(event_loop, &window, key)
-                    } else {
-                        false
-                    };
-                if pressed && !handled && event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
-                    self.log(event_loop, InputCommand::Quit);
-                    event_loop.exit();
+                // SPEC-014 §3.29: the engine repeats a held key itself, so
+                // the operating system's repeats are only logged.
+                let PhysicalKey::Code(key) = event.physical_key else {
+                    return;
+                };
+                if !pressed {
+                    self.repeat.release(key);
+                } else if !event.repeat {
+                    if let Some(preview) = &self.preview {
+                        self.repeat.press(key, preview.key_layer());
+                    }
+                    self.press_key(event_loop, &window, key);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -384,6 +486,20 @@ impl ApplicationHandler for Shell {
                     },
                 );
                 let pixel = self.pixel();
+                let pressed = state == ElementState::Pressed;
+                // SPEC-012 §3.12 (G-31): a movie counts the buttons the
+                // frame paths below never see, a middle or extra button
+                // and a press in the letterbox around the frame.
+                let framed = matches!(button, MouseButton::Left | MouseButton::Right);
+                if (!framed || pressed && pixel.is_none())
+                    && self
+                        .preview
+                        .as_mut()
+                        .is_some_and(|preview| preview.movie_button(pressed))
+                {
+                    self.refresh_preview(event_loop, &window);
+                    return;
+                }
                 if state == ElementState::Released
                     && matches!(button, MouseButton::Left | MouseButton::Right)
                     && self
@@ -392,6 +508,7 @@ impl ApplicationHandler for Shell {
                         .is_some_and(|preview| preview.release(pixel, button == MouseButton::Right))
                 {
                     self.refresh_preview(event_loop, &window);
+                    self.warp_pointer(&window);
                 }
                 if state == ElementState::Pressed
                     && matches!(button, MouseButton::Left | MouseButton::Right)
@@ -422,7 +539,13 @@ impl ApplicationHandler for Shell {
                     self.refresh_preview(event_loop, &window);
                 }
             }
-            WindowEvent::Focused(focused) => self.log(event_loop, InputCommand::Focus { focused }),
+            WindowEvent::Focused(focused) => {
+                // Keys held when the focus goes stop repeating.
+                if !focused {
+                    self.repeat.clear();
+                }
+                self.log(event_loop, InputCommand::Focus { focused });
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 let modifiers = modifiers.state();
                 if let Some(preview) = &mut self.preview {
@@ -457,12 +580,23 @@ impl ApplicationHandler for Shell {
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 let size = window.inner_size();
+                // The surface changes here too, so the log records it.
+                self.log(
+                    event_loop,
+                    InputCommand::Resize {
+                        width: size.width,
+                        height: size.height,
+                    },
+                );
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                if std::mem::take(&mut self.pointer_moved) {
+                    self.present_pointer();
+                }
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
@@ -486,6 +620,35 @@ impl ApplicationHandler for Shell {
             _ => {}
         }
     }
+}
+
+/// The surface point at the center of frame pixel `pixel`, found through
+/// the renderer's own pointer mapping (monotonic on each axis), so a warp
+/// lands where a pointer maps back to that pixel.
+fn surface_point(surface: [u32; 2], image: [u32; 2], pixel: [i32; 2]) -> Option<[f64; 2]> {
+    let mut point = [0.0; 2];
+    for axis in 0..2 {
+        let mapped = |value: f64| {
+            let mut probe = [0.0; 2];
+            probe[axis] = value;
+            vault_render::image_position_clamped(surface, image, probe).map(|at| at[axis])
+        };
+        // The first surface coordinate that maps to `target` or beyond.
+        let first = |target: i32| -> Option<f64> {
+            let (mut low, mut high) = (0.0, f64::from(surface[axis]));
+            for _ in 0..48 {
+                let middle = (low + high) / 2.0;
+                if mapped(middle)? >= target {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
+            }
+            Some(high)
+        };
+        point[axis] = (first(pixel[axis])? + first(pixel[axis] + 1)?) / 2.0;
+    }
+    Some(point)
 }
 
 fn run(mut args: Args) -> AppResult<()> {
@@ -532,7 +695,7 @@ fn run(mut args: Args) -> AppResult<()> {
         }
         Some(preview::AssetPreview::Game(game)) => {
             let audio = output();
-            game.audio = audio.handle();
+            game.set_audio(audio.handle());
             Some(audio)
         }
         _ => None,
@@ -548,7 +711,12 @@ fn run(mut args: Args) -> AppResult<()> {
         .as_ref()
         .map(|preview| DisplayPalette::new(preview.palette(), preview.brightness()));
     shell.preview = preview;
-    event_loop.run_app(&mut shell)?;
+    let run = event_loop.run_app(&mut shell);
+    {
+        use std::io::Write;
+        shell.input_log.0.flush()?;
+    }
+    run?;
     if let Some(error) = shell.failure {
         return Err(error);
     }

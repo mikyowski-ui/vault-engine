@@ -1542,3 +1542,77 @@ fn spec007_scripted_request_starts_combat_and_adjusts_the_first_attack() {
     assert!(host.world.combat_state.request.is_none());
     assert_eq!(ap(&host.world, player), 7 - 6);
 }
+
+#[test]
+fn spec005_an_elevation_change_removes_combat_membership() {
+    let mut world = world();
+    let player = world.player;
+    let a = fighter(&mut world, 20102, 12, 0);
+    let b = fighter(&mut world, 20104, 6, 0);
+    let mut host = crate::WorldHost::new(world, NoAssets);
+    host.start_combat(a, b).unwrap();
+    host.world.get_mut(a).unwrap().opponent = b;
+    assert!(host.world.ai.snapshot.contains(&b));
+    // SPEC-005 0x80B6/0x80FF: moving b to another elevation removes it from
+    // the list and its partition, the SPEC-009 snapshot, and every
+    // last-attacker reference to it.
+    host.world.move_object(b, 20104, 1, false).unwrap();
+    let combat = &host.world.combat_state;
+    assert!(!combat.list.contains(&b));
+    assert_eq!(&combat.list[..combat.active], &[a, player]);
+    assert!(!host.world.ai.snapshot.contains(&b));
+    assert_eq!(host.world.get(a).unwrap().opponent, 0);
+    // A move on the combat elevation keeps membership.
+    host.world.move_object(a, 20103, 0, false).unwrap();
+    assert!(host.world.combat_state.list.contains(&a));
+}
+
+#[test]
+fn spec007_the_ap_debit_is_the_requests_cost_not_the_victims() {
+    let mut world = world();
+    let attacker = fighter(&mut world, 20102, 12, 0);
+    let intended = fighter(&mut world, 20104, 6, 0);
+    let bystander = fighter(&mut world, 20106, 8, 0);
+    world.critter_state_mut(attacker).unwrap().ap = 9;
+    let mut host = crate::WorldHost::new(world, NoAssets);
+    // SPEC-007 §3.4: fixture C's aimed leg shot costs 5 + 1. The missed
+    // shot's bystander profile (§3.7.1, torso, unaimed) would cost 5, but it
+    // serves damage, armor and knockback only.
+    let request = fixture_c();
+    assert_eq!(request.ap_cost(), 6);
+    let mut victim = request.clone();
+    victim.location = location::TORSO;
+    victim.aimed = false;
+    assert_eq!(victim.ap_cost(), 5);
+    let spray = crate::host_combat::Spray {
+        main: crate::combat::Resolution::default(),
+        extras: Vec::new(),
+    };
+    host.apply_spray_sequenced(
+        attacker,
+        intended,
+        bystander,
+        &victim,
+        &spray,
+        request.ap_cost(),
+    )
+    .unwrap();
+    assert_eq!(host.world.critter_state(attacker).unwrap().ap, 3);
+}
+
+#[test]
+fn spec007_a_kill_category_outside_the_tables_uses_table_0() {
+    // SPEC-007 §2.5 safe rule: an unvalidated category word selects victim
+    // table 0 instead of refusing the attack after its draws.
+    let mut attack = fixture_c();
+    attack.kill_category = 15;
+    let mut resolution = crate::combat::Resolution::default();
+    attack
+        .critical_success(&mut resolution, &mut Lowest)
+        .unwrap();
+    attack.kill_category = 0;
+    let mut expected = crate::combat::Resolution::default();
+    attack.critical_success(&mut expected, &mut Lowest).unwrap();
+    assert_eq!(resolution, expected);
+    assert_ne!(resolution.defender_flags & effect::CRITICAL, 0);
+}

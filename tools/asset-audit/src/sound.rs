@@ -54,6 +54,11 @@ fn check_acm(
         return Err("source bytes differ from the oracle's asset".into());
     }
     let decoded = acm::decode(&bytes).map_err(|error| error.to_string())?;
+    // SPEC-010 §3.7: a block stream that ended early is reported even
+    // though the samples before it are kept.
+    if let Some(failure) = &decoded.failure {
+        return Err(format!("decoding stopped early: {failure}"));
+    }
     let header = decoded.header;
     let observed = [
         bytes.len().to_string(),
@@ -87,11 +92,17 @@ fn check_acm(
             return Err(format!("{}: {value} != {expected}", NAMES[index]));
         }
     }
-    let wrapped: Vec<_> = decoded
+    let wrapped = decoded
         .wrapped
         .iter()
-        .map(|(index, shifted)| (*index, *shifted, i32::from(decoded.samples[*index])))
-        .collect();
+        .map(|(index, shifted)| {
+            let sample = decoded
+                .samples
+                .get(*index)
+                .ok_or_else(|| format!("wrapped sample {index} is past the decoded samples"))?;
+            Ok((*index, *shifted, i32::from(*sample)))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     if wrapped != wraps {
         return Err(format!("wrapped samples {wrapped:?} != {wraps:?}"));
     }
@@ -261,6 +272,7 @@ fn check_proto_bytes(
 ) -> Result<u64, Box<dyn Error>> {
     let mut counts: BTreeMap<(String, i32, String), u64> = BTreeMap::new();
     let mut weapons: BTreeMap<String, u64> = BTreeMap::new();
+    let mut unreadable = 0;
     for path in vfs.files() {
         let category = match path.as_str() {
             name if name.starts_with("proto/items/") => "items",
@@ -270,7 +282,18 @@ fn check_proto_bytes(
         if path.extension() != Some("pro") {
             continue;
         }
-        let prototype = Prototype::parse(&vfs.read_bounded(path.as_str(), MAX_ASSET_BYTES)?)?;
+        let parsed = vfs
+            .read_bounded(path.as_str(), MAX_ASSET_BYTES)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| Prototype::parse(&bytes).map_err(|error| error.to_string()));
+        let prototype = match parsed {
+            Ok(prototype) => prototype,
+            Err(error) => {
+                unreadable += 1;
+                eprintln!("FAIL {path}: {error}");
+                continue;
+            }
+        };
         let (subtype, sound) = match &prototype.data {
             PrototypeData::Item(item) => {
                 if let ItemData::Weapon(weapon) = &item.data {
@@ -285,7 +308,7 @@ fn check_proto_bytes(
             .entry((category.to_owned(), subtype, byte_label(sound)))
             .or_default() += 1;
     }
-    let mut failures = 0;
+    let mut failures = unreadable;
     let rows = table(&oracle.join("sfx-proto-bytes.tsv"))?;
     let mut listed = BTreeSet::new();
     for row in &rows {
@@ -300,7 +323,12 @@ fn check_proto_bytes(
             .copied()
             .unwrap_or(0);
         let expected: u64 = field(row, 3)?.parse()?;
-        let sound = if label == "0" { 0 } else { label.as_bytes()[0] };
+        // An empty label is an oracle-row error, not a panic.
+        let sound = match label.as_bytes() {
+            b"0" => 0,
+            [byte, ..] => *byte,
+            [] => return Err(format!("sfx-proto-bytes {category} {subtype}: empty label").into()),
+        };
         let names: Vec<String> = (0..4)
             .map(|action| {
                 let object = if category == "scenery" {

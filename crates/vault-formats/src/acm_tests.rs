@@ -41,20 +41,35 @@ fn spec010_vectors_a_to_d_decode_exactly() {
 
 #[test]
 fn spec010_vectors_e_to_h_edges() {
-    // E: a reserved column format emits nothing and is an error.
+    // E: a reserved column format ends the stream at its block: nothing is
+    // emitted from it (§3.7) and the error is reported.
+    let e = decode(&sound::acm('E')).unwrap();
+    assert!(e.samples.is_empty() && e.blocks == 0);
     assert!(
-        decode(&sound::acm('E'))
-            .unwrap_err()
+        e.failure
+            .unwrap()
             .to_string()
             .contains("reserved column format 1")
     );
     // F: format 29 needs T[-5] with k = 0: an error, never stale memory.
+    let f = decode(&sound::acm('F')).unwrap();
+    assert!(f.samples.is_empty());
     assert!(
-        decode(&sound::acm('F'))
-            .unwrap_err()
+        f.failure
+            .unwrap()
             .to_string()
             .contains("step-table index -5")
     );
+    // The samples of every block before the failing one remain emitted.
+    let partial = decode(&file(2, 0, 1, |w| {
+        w.put(0, 20);
+        w.put(0, 5);
+        w.put(0, 20);
+        w.put(1, 5);
+    }))
+    .unwrap();
+    assert_eq!((partial.samples.as_slice(), partial.blocks), (&[0][..], 1));
+    assert!(partial.failure.is_some());
     // G: the 16-bit step table (step 40000: T[+1] = -25536).
     assert_eq!(samples('G'), [-12768, -25536, 0, 25536]);
     assert_eq!(wrap16(40000), -25536);
@@ -197,7 +212,10 @@ fn spec010_every_column_code() {
             w.put(0, 20);
             w.put(reserved, 5);
         });
-        assert!(decode(&bytes).is_err(), "format {reserved}");
+        assert!(
+            decode(&bytes).unwrap().failure.is_some(),
+            "format {reserved}"
+        );
     }
     let bytes = file(1, 0, 1, |w| {
         w.put(1, 4);
@@ -205,7 +223,10 @@ fn spec010_every_column_code() {
         w.put(4, 5);
         w.put(0, 4);
     });
-    assert!(decode(&bytes).is_err(), "format 4 with k = 1 reads T[-8]");
+    assert!(
+        decode(&bytes).unwrap().failure.is_some(),
+        "format 4 with k = 1 reads T[-8]"
+    );
 }
 
 #[test]
@@ -244,8 +265,9 @@ fn spec010_header_errors_and_safe_bounds() {
     assert!(decoded.samples.is_empty() && decoded.blocks == 0);
     // R = 0 with samples to emit would never terminate: rejected.
     assert!(decode(&file(1, 0, 0, |w| w.put(0, 32))).is_err());
-    // A block header at or past the end of the file is rejected.
-    assert!(decode(&file(1, 0, 1, |_| {})).is_err());
+    // A block header at or past the end of the file ends decoding there.
+    let short = decode(&file(1, 0, 1, |_| {})).unwrap();
+    assert!(short.samples.is_empty() && short.failure.is_some());
     // Bounds on decoded samples and block size.
     assert!(decode(&file(u32::MAX, 0, 1, |w| w.put(0, 32))).is_err());
     assert!(decode(&file(1, 15, 4095, |w| w.put(0, 32))).is_err());

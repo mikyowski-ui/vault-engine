@@ -162,11 +162,10 @@ pub(crate) fn execute(vm: &mut Vm, word: u16) -> Result<(), VmError> {
             if divisor == 0 {
                 return Err(VmError::DivisionByZero);
             }
-            Value::integer(
-                (a.payload as i32)
-                    .checked_rem(divisor)
-                    .ok_or(VmError::Arithmetic)?,
-            )
+            // SPEC-004 §3.5 [May-improve]: integer results wrap modulo
+            // 2^32, so `m / -1` is `m` and its remainder is 0 rather than
+            // an overflow error.
+            Value::integer((a.payload as i32).wrapping_rem(divisor))
         }
         0x803e | 0x803f => {
             let left = truth(a, word == 0x803e && a.tag == Value::FLOAT && b.is_string())?;

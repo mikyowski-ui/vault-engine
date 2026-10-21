@@ -4,6 +4,16 @@ on:
   push:
   pull_request:
 
+# Every job only reads the repository.
+permissions:
+  contents: read
+
+# Third-party actions are pinned by version tag, not by commit SHA: the
+# repository's clean-room ingestion tooling rejects 40-character hashes.
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -12,19 +22,54 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       # The desktop's default `audio` feature links ALSA through cpal.
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
+  # The workspace `rust-version`, read from Cargo.toml so the two never drift.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' Cargo.toml | head -n 1)
+          test -n "$version" || { echo "no rust-version in Cargo.toml" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo check --workspace --all-targets --locked
+
+  # `fuzz/` is its own workspace; its targets check on stable (the nightly
+  # sanitizer build runs in fuzz.yml).
+  fuzz-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: rustfmt --edition 2024 --check fuzz/fuzz_targets/*.rs
+      - run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
+
   windows-release:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       # cpal uses WASAPI on Windows; no extra system packages are needed.
       - run: cargo build --workspace --release --locked
+      - run: cargo test --workspace --locked
       - uses: actions/upload-artifact@v4
         with:
           name: vault-engine-windows-x86_64
@@ -32,6 +77,16 @@ jobs:
             target/release/vault-platform.exe
             target/release/asset-audit.exe
           if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # cpal uses CoreAudio on macOS; no extra system packages are needed.
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --locked
 
   supply-chain:
     runs-on: ubuntu-latest
@@ -41,8 +96,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit,cargo-deny
-      # RustSec advisories against Cargo.lock.
-      - run: cargo audit
-      # Advisories, licenses, bans, and sources from deny.toml.
+      # RustSec advisories against both lockfiles (the fuzz crate is its own
+      # workspace with its own Cargo.lock).
+      - run: cargo audit --file Cargo.lock
+      - run: cargo audit --file fuzz/Cargo.lock
+      # Advisories, licenses, bans, and sources from deny.toml, for both.
       - run: cargo deny --locked check
-
+      - run: cargo deny --manifest-path fuzz/Cargo.toml --locked check --config deny.toml

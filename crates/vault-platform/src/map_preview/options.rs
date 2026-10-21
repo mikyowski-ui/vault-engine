@@ -3,7 +3,7 @@
 //! the speed-up checkbox, Default, Done and Cancel), with preferences applied
 //! to the world and written to `fallout.cfg` when a path is configured.
 use super::{MapPreview, Screen};
-use crate::{AppResult, interface::Painter};
+use crate::{AppResult, audio::Volumes, interface::Painter};
 use vault_core::ui::{
     BUTTON_PRESS, ColorKey, Rect,
     flow::{self, DialogKey},
@@ -25,7 +25,35 @@ pub(crate) struct PreferenceState {
     changed: bool,
     /// Ping-pong directions of the five knobs (true is up).
     knob_up: [bool; 5],
+    /// The knob or switch pressed, evaluated on the release (§3.18).
+    armed: Option<Control>,
+    /// A slider's modal drag loop.
+    drag: Option<SliderDrag>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Control {
+    Knob(usize),
+    Switch(usize),
+}
+/// §3.18 a slider drag: each iteration lasts at least 35 ms; the release is
+/// tested before the movement, so a release before the first iteration
+/// changes nothing.
+#[derive(Debug, Clone, Copy)]
+struct SliderDrag {
+    index: usize,
+    position: i32,
+    iteration: u32,
+    next: u64,
+    released: bool,
+}
+/// One drag iteration lasts at least 35 ms.
+const DRAG_ITERATION_MS: u64 = 35;
+/// A knob or switch's release cue follows its press cue after 70 ms.
+const CONTROL_CUE_MS: u64 = 70;
+/// The effects slider's sample sound, every 8th iteration; the speech
+/// slider's, every 41st.
+const EFFECTS_SAMPLE: (&[u8], u32) = (b"butin1", 8);
+const SPEECH_SAMPLE: (&str, u32) = ("sound/speech/narrator/options.acm", 41);
 
 /// The preferences screen's red buttons: Default, Done, Cancel.
 const PREFERENCE_BUTTONS: [([i32; 2], [i32; 2], i32, &str); 3] = [
@@ -133,11 +161,24 @@ impl MapPreview {
             values,
             changed: false,
             knob_up: [true; 5],
+            armed: None,
+            drag: None,
         })));
     }
-    /// Apply preferences to the world (the save words included) and write
-    /// the configuration file when one is configured.
+    /// Apply preferences to the world (the save words included) and the
+    /// mixer, and write the configuration file when one is configured.
     pub(crate) fn apply_preferences(&mut self) {
+        self.store_preferences();
+        // SPEC-014 §3.18: reapplying sets the volumes, so an F2/F3 master
+        // offset (which never reaches the preference) does not survive it.
+        let volumes = Volumes::from_preferences(&self.preferences);
+        self.volume_source = Some(volumes);
+        self.apply_volumes(volumes);
+    }
+    /// Store preferences in the world (the save words included) and write
+    /// the configuration file when one is configured. A brightness hotkey
+    /// does only this (and applies its gamma): it reapplies no volume.
+    pub(crate) fn store_preferences(&mut self) {
         let values = self.preferences.clone();
         let world = &mut self.host.world;
         world.difficulty = values.game_difficulty;
@@ -188,29 +229,13 @@ impl MapPreview {
                 }
             }
             OptionsScreen::Pause => {
-                let [ox, oy] = options::PAUSE_ORIGIN;
-                painter.blit_opaque(&mut image, "charwin.frm", 0, [ox, oy]);
-                painter.blit(&mut image, "donebox.frm", 0, [ox + 13, oy + 42]);
-                let done = painter.message("options.msg", 300);
-                painter.text(
-                    &mut image,
-                    103,
-                    ColorKey::LABEL,
-                    &done,
-                    [ox + 52, oy + 45],
-                    80,
-                );
-                let paused = painter.message("options.msg", 301);
-                let x = options::paused_title_x(painter.width(104, &paused));
-                painter.text(
-                    &mut image,
-                    104,
-                    ColorKey::LABEL,
-                    &paused,
-                    [ox + x, oy + 10],
-                    139,
-                );
-                painter.blit(&mut image, "lilredup.frm", 0, [ox + 26, oy + 46]);
+                // G-24 / §3.17: the game window (the map view above the bar)
+                // is converted through the grey lookup table first.
+                let grey = vault_core::ui::grey_table(self.game_palette());
+                for pixel in &mut image.pixels_mut()[..640 * bar_top()] {
+                    *pixel = grey[usize::from(*pixel)];
+                }
+                draw_pause(&painter, &mut image, options::PAUSE_ORIGIN);
             }
             OptionsScreen::Quit => {
                 let [ox, oy] = options::QUIT_ORIGIN;
@@ -322,12 +347,12 @@ impl MapPreview {
             let caption = painter.message("options.msg", 112 + index as i32);
             let y = [19, 94, 165, 216, 268, 319, 369, 420][index];
             painter.text(image, 103, ColorKey::LABEL, &caption, [384, y], 240);
-            painter.blit(
-                image,
-                "prfsldof.frm",
-                0,
-                [slider_position(&state.values, index), *ky],
-            );
+            // The dragged knob shows `prfsldon.frm` at its drag position.
+            let (art, x) = match state.drag {
+                Some(drag) if drag.index == index => ("prfsldon.frm", drag.position),
+                _ => ("prfsldof.frm", slider_position(&state.values, index)),
+            };
+            painter.blit(image, art, 0, [x, *ky]);
         }
         let checkbox = if state.values.player_speedup != 0 {
             "prfxin.frm"
@@ -351,6 +376,132 @@ impl MapPreview {
             let text = painter.message(file, id);
             painter.text(image, 103, ColorKey::LABEL, &text, caption, 100);
         }
+    }
+    /// A slider drag is under way.
+    fn preference_drag(&self) -> bool {
+        matches!(&self.screen, Screen::Options(OptionsScreen::Preferences(state)) if state.drag.is_some())
+    }
+    /// A left release over the preferences: the armed knob or switch acts
+    /// when the release is inside its rectangle (any release there marks
+    /// "changed", even in a dead zone); a change plays the press cue, then
+    /// the release cue 70 ms later. A drag notes its release for its next
+    /// iteration.
+    pub(crate) fn options_release(&mut self, point: Option<[i32; 2]>) -> bool {
+        let painter = Painter {
+            assets: &self.host.assets,
+            palette: &self.palette,
+        };
+        let width = |id: i32| painter.width(101, &painter.message("options.msg", id));
+        let Screen::Options(OptionsScreen::Preferences(state)) = &mut self.screen else {
+            return false;
+        };
+        if let Some(drag) = &mut state.drag {
+            drag.released = true;
+            return true;
+        }
+        let (Some(control), Some(point)) = (state.armed.take(), point) else {
+            return false;
+        };
+        let cues: (&'static [u8], &'static [u8]) = match control {
+            Control::Knob(index) => {
+                let knob = &options::KNOBS[index];
+                let widths: Vec<i32> = knob.labels.iter().map(|id| width(*id)).collect();
+                let value = *knob_values(&mut state.values)[index];
+                let Some((new, up)) =
+                    options::knob_click(knob, &widths, point, value, state.knob_up[index])
+                else {
+                    return true;
+                };
+                state.changed = true;
+                state.knob_up[index] = up;
+                if new == value {
+                    return true;
+                }
+                *knob_values(&mut state.values)[index] = new;
+                (b"ib3p1xx1", b"ib3lu1x1")
+            }
+            Control::Switch(index) => {
+                let switch = &options::SWITCHES[index];
+                let widths = switch.labels.map(width);
+                let value = *switch_values(&mut state.values)[index];
+                let Some(new) = options::switch_click(switch, widths, point, value) else {
+                    return true;
+                };
+                state.changed = true;
+                if new == value {
+                    return true;
+                }
+                *switch_values(&mut state.values)[index] = new;
+                (b"ib2p1xx1", b"ib2lu1x1")
+            }
+        };
+        self.play_effect(cues.0, None);
+        self.cue_later(CONTROL_CUE_MS, cues.1);
+        true
+    }
+    /// One frame of the options window: a slider drag's iteration when due.
+    /// Each iteration tests the release first (`ib1lu1x1`, the idle knob,
+    /// and mouse sensitivity takes effect), then follows the pointer with
+    /// the hysteresis of `options::slider_drag`. Volumes and brightness
+    /// apply at once (the live preview), the text delay is stored as it
+    /// changes; the effects slider samples `butin1` on the first and every
+    /// 8th iteration, the speech slider the narrator's `options.acm` on the
+    /// first and every 41st.
+    pub(crate) fn options_tick(&mut self, now: u64) -> bool {
+        let pointer = self.pointer.at;
+        let Screen::Options(OptionsScreen::Preferences(state)) = &mut self.screen else {
+            return false;
+        };
+        let Some(drag) = &mut state.drag else {
+            return false;
+        };
+        if now < drag.next {
+            return false;
+        }
+        if drag.released {
+            state.drag = None;
+            self.play_effect(vault_core::ui::BUTTON_RELEASE.as_bytes(), None);
+            return true;
+        }
+        drag.next = now + DRAG_ITERATION_MS;
+        let iteration = drag.iteration;
+        drag.iteration += 1;
+        let index = drag.index;
+        if let Some([x, _]) = pointer {
+            drag.position = options::slider_drag(drag.position, x);
+        }
+        let position = drag.position;
+        let (old, min, max) = slider_value(&state.values, index);
+        let value = if index == 1 {
+            options::delay_value(position)
+        } else {
+            options::slider_value(position, min, max)
+        };
+        set_slider(&mut state.values, index, value);
+        let moved = slider_value(&state.values, index).0 != old;
+        state.changed |= moved;
+        let values = state.values.clone();
+        // The live preview: brightness and the volumes take effect now
+        // (Cancel restores the backup).
+        match index {
+            2 => self.preferences.master_volume = values.master_volume,
+            3 => self.preferences.music_volume = values.music_volume,
+            4 => self.preferences.sndfx_volume = values.sndfx_volume,
+            5 => self.preferences.speech_volume = values.speech_volume,
+            6 => self.preferences.brightness = values.brightness,
+            _ => {}
+        }
+        if index == 4 && iteration.is_multiple_of(EFFECTS_SAMPLE.1) {
+            self.play_effect(EFFECTS_SAMPLE.0, None);
+        }
+        if index == 5
+            && iteration.is_multiple_of(SPEECH_SAMPLE.1)
+            && let Some(samples) = self.sounds.load(&*self.host.assets.vfs, SPEECH_SAMPLE.0)
+        {
+            self.audio
+                .play(samples, 1.0, crate::audio::Channel::Speech, false);
+        }
+        true
     }
     /// Global 603 at its initial 0 covers the fifth knob.
     fn preferences_covered(&self) -> bool {
@@ -378,12 +529,29 @@ impl MapPreview {
     }
     pub(crate) fn options_key(&mut self, key: KeyCode) -> bool {
         let control = self.hud.modifiers[1];
+        // A slider drag is modal: it ignores other input.
+        if self.preference_drag() {
+            return true;
+        }
         let brightness = matches!(
             key,
             KeyCode::Equal | KeyCode::Minus | KeyCode::NumpadAdd | KeyCode::NumpadSubtract
         );
         if brightness {
-            self.brightness_step(matches!(key, KeyCode::Equal | KeyCode::NumpadAdd));
+            let up = matches!(key, KeyCode::Equal | KeyCode::NumpadAdd);
+            self.brightness_step(up);
+            // G-31 / §3.18 `[May-improve]`: inside preferences the hotkey
+            // also moves the slider and joins the cancellable state, so
+            // Done keeps it and Cancel restores the old gamma (and file).
+            if let Screen::Options(OptionsScreen::Preferences(state)) = &mut self.screen {
+                state.values.brightness = self.preferences.brightness;
+                state.changed = true;
+            }
+            return true;
+        }
+        // §3.17 F12 saves a screenshot (and is not an options shortcut).
+        if key == KeyCode::F12 && !matches!(self.screen, Screen::Options(OptionsScreen::Pause)) {
+            self.screenshot();
             return true;
         }
         let Screen::Options(screen) = &self.screen else {
@@ -415,6 +583,10 @@ impl MapPreview {
             }
             OptionsScreen::Preferences(_) => match key {
                 KeyCode::Escape => self.close_preferences(false),
+                // §3.18 Ctrl+Q, Ctrl+X and F10: the quit confirmation, whose
+                // Yes acts as Cancel.
+                KeyCode::KeyQ | KeyCode::KeyX if control => self.confirm_quit(),
+                KeyCode::F10 => self.confirm_quit(),
                 KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::KeyP => {
                     self.play_effect(BUTTON_PRESS.as_bytes(), None);
                     self.close_preferences(true);
@@ -431,7 +603,7 @@ impl MapPreview {
             self.quit_requested = true;
         }
     }
-    fn close_preferences(&mut self, keep: bool) {
+    pub(super) fn close_preferences(&mut self, keep: bool) {
         let Screen::Options(OptionsScreen::Preferences(state)) =
             std::mem::replace(&mut self.screen, Screen::Options(OptionsScreen::Menu))
         else {
@@ -443,6 +615,9 @@ impl MapPreview {
         }
     }
     pub(crate) fn options_click(&mut self, point: [i32; 2]) -> bool {
+        if self.preference_drag() {
+            return true;
+        }
         let Screen::Options(screen) = &mut self.screen else {
             return false;
         };
@@ -521,52 +696,69 @@ impl MapPreview {
         let Screen::Options(OptionsScreen::Preferences(state)) = &mut self.screen else {
             return;
         };
-        for (index, knob) in options::KNOBS.iter().enumerate() {
-            if index == 4 && covered {
-                continue;
-            }
-            let value = *knob_values(&mut state.values)[index];
-            if let Some((new, up)) = options::knob_click(
-                knob,
-                &knob_widths[index],
-                point,
-                value,
-                state.knob_up[index],
-            ) {
-                // A label click that picks the current value still sets
-                // the direction.
-                state.changed = true;
-                *knob_values(&mut state.values)[index] = new;
-                state.knob_up[index] = up;
-                return;
-            }
+        // G-23 / §3.18: knobs and switches act on the release inside their
+        // rectangle; the press only arms them.
+        state.armed = options::KNOBS
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !(*index == 4 && covered))
+            .find(|(index, knob)| knob.rect(&knob_widths[*index]).contains(point))
+            .map(|(index, _)| Control::Knob(index))
+            .or_else(|| {
+                options::SWITCHES
+                    .iter()
+                    .enumerate()
+                    .find(|(index, switch)| switch.rect(switch_widths[*index]).contains(point))
+                    .map(|(index, _)| Control::Switch(index))
+            });
+        if state.armed.is_some() {
+            return;
         }
-        for (index, switch) in options::SWITCHES.iter().enumerate() {
-            let value = *switch_values(&mut state.values)[index];
-            if let Some(new) = options::switch_click(switch, switch_widths[index], point, value) {
-                state.changed = true;
-                *switch_values(&mut state.values)[index] = new;
-                return;
-            }
+        // A press in a slider's strip starts its modal drag loop with
+        // `ib1p1xx1` and the active knob; the first iteration runs on the
+        // next frame.
+        if let Some(index) = options::SLIDER_KNOB_Y
+            .iter()
+            .position(|ky| options::slider_rect(*ky).contains(point))
+        {
+            state.drag = Some(SliderDrag {
+                index,
+                position: slider_position(&state.values, index),
+                iteration: 0,
+                next: self.clock,
+                released: false,
+            });
+            self.play_effect(BUTTON_PRESS.as_bytes(), None);
+            return;
         }
-        for (index, ky) in options::SLIDER_KNOB_Y.iter().enumerate() {
-            if options::slider_rect(*ky).contains(point) {
-                let position =
-                    options::slider_drag(slider_position(&state.values, index), point[0]);
-                let (_, min, max) = slider_value(&state.values, index);
-                let value = if index == 1 {
-                    options::delay_value(position)
-                } else {
-                    options::slider_value(position, min, max)
-                };
-                set_slider(&mut state.values, index, value);
-                state.changed = true;
-                return;
-            }
-        }
+        // The checkbox toggles on the press with `ib2p1xx1`; the reference
+        // plays `ib2p1xx1` on the release too, the safe rule `ib2lu1x1`.
         if CHECKBOX.contains(point) {
             state.values.player_speedup ^= 1;
             state.changed = true;
+            self.press_cue(b"ib2p1xx1", b"ib2lu1x1");
         }
     }
+}
+
+/// The bar window's top row: the game window above it is what the pause
+/// greys (the bar is a separate window).
+fn bar_top() -> usize {
+    vault_core::ui::bar::BAR_ORIGIN[1] as usize
+}
+
+/// §3.17 the pause window at `origin`: `charwin.frm`, `donebox.frm` drawn
+/// transparently at (13, 42), DONE (`options.msg` 300) at (52, 45) in font
+/// 103, PAUSED (301) in font 104 centered at y = 10, and the red button at
+/// (26, 46).
+pub(super) fn draw_pause(painter: &Painter, image: &mut IndexedImage, origin: [i32; 2]) {
+    let [ox, oy] = origin;
+    painter.blit_opaque(image, "charwin.frm", 0, [ox, oy]);
+    painter.blit(image, "donebox.frm", 0, [ox + 13, oy + 42]);
+    let done = painter.message("options.msg", 300);
+    painter.text(image, 103, ColorKey::LABEL, &done, [ox + 52, oy + 45], 80);
+    let paused = painter.message("options.msg", 301);
+    let x = options::paused_title_x(painter.width(104, &paused));
+    painter.text(image, 104, ColorKey::LABEL, &paused, [ox + x, oy + 10], 139);
+    painter.blit(image, "lilredup.frm", 0, [ox + 26, oy + 46]);
 }

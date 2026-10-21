@@ -86,6 +86,11 @@ pub enum Category {
     Misc,
 }
 impl Category {
+    /// SPEC-003 §2.1: categories 0-5 are fixed. The whole most-significant
+    /// byte is dispatched on, so a PID with bits 28-31 set (other than the
+    /// `0xFFFFFFFF` sentinel, handled by callers) or a category 6-15, which
+    /// has no index path, is rejected with a diagnostic (`[May-improve]`)
+    /// rather than read as a negative or out-of-table category.
     pub fn from_pid(pid: u32) -> Result<Self, ParseError> {
         match pid >> 24 {
             0 => Ok(Self::Item),

@@ -63,9 +63,26 @@ incoming spec that contains:
 - raw C decompilation listings.
 
 A rejected spec is not redacted or sanitized on the builder host. The builder
-fails fast and asks the research vault for a sanitized revision, so tainted
-text never enters this repository's history. Commit `40718af` replaced earlier
-reference commit identifiers in the approved specs with `R1` under this rule.
+fails fast and asks the research vault for a sanitized revision.
+
+### Recorded exception: commit `40718af`
+
+The repository history does not fully meet this rule:
+
+- Before commit `40718af`, SPEC-001 to SPEC-012 in `specs/approved/` each cited
+  the reference revision by its raw 40-character commit hash. The blobs of
+  those earlier commits still contain that hash.
+- Commit `40718af` replaced the hash with `R1` by editing the specs on the
+  builder host. That was a local sanitization, which the ingestion rule added
+  to `CLAUDE.md` in the same commit now forbids.
+- The history has **not** been rewritten. The affected commits are reachable
+  from every branch, including `main` and the `origin` remote.
+
+The current specs carry no hash. Whether to rewrite the history (for example by
+replacing those blobs with the research vault's sanitized revisions) is a
+decision for the repository owner, and it must be made before the repository is
+published. Until then, treat the history before `40718af` as containing tainted
+text.
 
 ## Hash-only oracle verification
 
@@ -73,7 +90,10 @@ Compatibility with the original data is verified without committing it:
 
 - The oracle tables hold SHA-256 digests (or digest prefixes) of corpus files
   and of decoded outputs: ACM samples, MVE frames, palettes, and PCM. They also
-  hold counts and header fields, but no corpus pixels, audio, or text.
+  hold counts and header fields, but no corpus pixels or text. The only decoded
+  corpus audio values are short sample excerpts: `oracle/SPEC-010/acm-corpus.tsv`
+  lists the first 8 and last 4 decoded samples of each ACM file, and
+  `acm-wrap.tsv` the individual samples that wrap.
 - `asset-audit` decodes the user's own locally installed corpus and compares
   each result with the oracle row. A match proves bit-exact behavior. The
   repository never contains the bytes being compared, only their digests.

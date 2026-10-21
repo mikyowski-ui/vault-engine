@@ -255,7 +255,10 @@ fn script_category(
     saved: bool,
     locals: usize,
     total: &mut usize,
+    diagnostics: &mut Vec<String>,
 ) -> Result<ScriptCategory, ParseError> {
+    // SPEC-003 §2.9 [May-improve]: a negative count (which the reference
+    // reads at least one block for) is rejected, and the counts are bounded.
     let count = r.count("script count", MAX_SCRIPTS)?;
     *total = total
         .checked_add(count)
@@ -270,21 +273,36 @@ fn script_category(
         for _ in 0..16 {
             slots.push(script(r, saved)?);
         }
+        // SPEC-003 §2.9 [May-improve]: an active-slot count that is
+        // negative or exceeds 16 is rejected (the reference does not check).
         let active = r.count("active block slots", 16)?;
         r.take(4)?; // obsolete next-block address
         occupied += active;
         for slot in slots.iter().take(active) {
+            // SPEC-003 §2.9: every slot dispatches on its own identifier
+            // and no rule requires an active one to match the outer
+            // stream, so a mismatch is reported rather than rejected.
             if slot.id >> 24 != category as u32 {
-                return Err(r.error("active script category differs from its stream"));
+                diagnostics.push(format!(
+                    "script {:#010x} at byte {:#x} is active in the category {category} stream",
+                    slot.id, slot.file_offset
+                ));
             }
+            // SPEC-003 §3.3 [May-improve]: an out-of-range file index or
+            // local slice is rejected before it can index memory.
             if slot.file_index < 0 || slot.local_base < -1 || slot.stored_local_count < 0 {
                 return Err(r.error("invalid active script index/local slice"));
             }
+            // SPEC-003 §3.2: an out-of-range local-pool access is a runtime
+            // error that reads zero, not a load failure.
             if saved
                 && slot.local_base >= 0
                 && slot.local_base as u64 + slot.local_count as u64 > locals as u64
             {
-                return Err(r.error("active script local slice extends beyond LVAR pool"));
+                diagnostics.push(format!(
+                    "script {:#010x} at byte {:#x}: local slice {}+{} extends beyond the {locals}-element pool",
+                    slot.id, slot.file_offset, slot.local_base, slot.local_count
+                ));
             }
         }
         blocks.push(ScriptBlock { slots, active });
@@ -374,16 +392,30 @@ impl MapFile {
                 flags.contains(MapFlags::SAVED),
                 lvars.len(),
                 &mut total,
+                &mut diagnostics,
             )?);
         }
         let scripts: [ScriptCategory; 5] = scripts.try_into().expect("five categories");
+        // SPEC-003 §3.3 resolves object script references against the
+        // loaded records without a uniqueness rule: a repeated identifier
+        // keeps its first record and is reported.
         let mut bindings = BTreeMap::new();
         for record in scripts.iter().flat_map(ScriptCategory::active) {
-            if bindings.insert(record.id, record.file_index).is_some() {
-                return Err(r.error("duplicate active script ID"));
+            if let std::collections::btree_map::Entry::Vacant(slot) = bindings.entry(record.id) {
+                slot.insert(record.file_index);
+            } else {
+                diagnostics.push(format!(
+                    "duplicate active script {:#010x} at byte {:#x}; the first record binds",
+                    record.id, record.file_offset
+                ));
             }
         }
-        let mut objects = MapObjects::read(&mut r, prototypes, flags.contains(MapFlags::SAVED))?;
+        let mut objects = MapObjects::read(
+            &mut r,
+            prototypes,
+            flags.contains(MapFlags::SAVED),
+            &mut diagnostics,
+        )?;
         for object in objects.elevations.iter_mut().flatten() {
             object.restore_scripts(&bindings, true);
         }
@@ -426,17 +458,25 @@ impl MapFile {
     }
 }
 impl MapObjects {
+    /// An object section on its own. Safe-rule substitutions are not
+    /// reported here; `MapFile::parse` collects them for a whole map.
     pub fn parse(
         bytes: &[u8],
         prototypes: &impl PrototypeLookup,
         saved: bool,
     ) -> Result<Self, ParseError> {
-        Self::read(&mut Reader::new(bytes, "MAP objects")?, prototypes, saved)
+        Self::read(
+            &mut Reader::new(bytes, "MAP objects")?,
+            prototypes,
+            saved,
+            &mut Vec::new(),
+        )
     }
     fn read(
         r: &mut Reader<'_>,
         prototypes: &impl PrototypeLookup,
         saved: bool,
+        diagnostics: &mut Vec<String>,
     ) -> Result<Self, ParseError> {
         let start = r.pos;
         let total = r.count("total objects", MAX_OBJECTS)?;
@@ -458,9 +498,13 @@ impl MapObjects {
                     None,
                     0,
                     &mut budget,
+                    diagnostics,
                 )?);
             }
         }
+        // SPEC-003 §3.3 [May-improve]: the reference preloads by the total
+        // and overruns when it is smaller than the elevation sum; a total
+        // that differs from that sum is rejected.
         if total != roots {
             return Err(r.error("top-level object total disagrees with elevation counts"));
         }
@@ -480,11 +524,23 @@ impl MapObject {
         elevation: u8,
     ) -> Result<Self, ParseError> {
         let mut budget = MAX_OBJECTS;
-        Self::read(r, prototypes, true, elevation, None, 0, &mut budget)
+        // The save's player record has no diagnostics sink; substitutions
+        // in it are applied silently.
+        Self::read(
+            r,
+            prototypes,
+            true,
+            elevation,
+            None,
+            0,
+            &mut budget,
+            &mut Vec::new(),
+        )
     }
     pub(crate) fn write_tree(&self, out: &mut Vec<u8>) -> Result<(), ParseError> {
         self.write(out, self.elevation, 0)
     }
+    #[allow(clippy::too_many_arguments)]
     fn read(
         r: &mut Reader<'_>,
         prototypes: &impl PrototypeLookup,
@@ -493,6 +549,7 @@ impl MapObject {
         owner: Option<u32>,
         depth: usize,
         budget: &mut usize,
+        diagnostics: &mut Vec<String>,
     ) -> Result<Self, ParseError> {
         if depth > MAX_INVENTORY_DEPTH || *budget == 0 {
             return Err(r.error("object depth/count resource limit exceeded"));
@@ -507,14 +564,34 @@ impl MapObject {
         } else {
             return Err(r.error("object hex outside grid"));
         };
-        if p[6] < 0 || !(0..6).contains(&p[7]) {
-            return Err(r.error("invalid object frame/orientation"));
-        }
+        // SPEC-003 §2.10 lists the frame as zero-based and the orientation
+        // as 0-5 without a validation rule; as for the §3.2 header
+        // orientation, a value outside its range reads as 0 with a
+        // diagnostic instead of failing the map.
+        let frame = usize::try_from(p[6]).unwrap_or_else(|_| {
+            diagnostics.push(format!(
+                "object {:#x} at byte {file_offset:#x}: frame {} is negative; using 0",
+                p[0], p[6]
+            ));
+            0
+        });
+        let orientation = u8::try_from(p[7])
+            .ok()
+            .filter(|orientation| *orientation <= 5)
+            .unwrap_or_else(|| {
+                diagnostics.push(format!(
+                    "object {:#x} at byte {file_offset:#x}: orientation {} is outside 0-5; using 0",
+                    p[0], p[7]
+                ));
+                0
+            });
         let pid = p[11] as u32;
         let category = Category::from_pid(pid).map_err(|error| r.error(error.message))?;
         if pid & 0xffffff == 0 && pid != 0x01000000 {
             return Err(r.error("zero file-backed object prototype index"));
         }
+        // SPEC-003 §2.11 [May-improve]: a negative inventory count or a
+        // capacity below the count is rejected before allocation.
         let count = r.count("inventory entries", MAX_OBJECTS)?;
         let inventory_capacity = r.count("inventory capacity", MAX_ENTRIES)?;
         if inventory_capacity < count {
@@ -601,9 +678,15 @@ impl MapObject {
         };
         let mut inventory = Vec::new();
         for _ in 0..count {
+            // SPEC-003 §2.12 gives the quantity no range rule; a negative
+            // one cannot be represented and is rejected, while a zero
+            // stack is kept and reported.
             let quantity = r.count("inventory quantity", i32::MAX as usize)?;
             if quantity == 0 {
-                return Err(r.error("inventory quantity must be positive"));
+                diagnostics.push(format!(
+                    "object {:#x} at byte {file_offset:#x}: inventory entry with quantity 0",
+                    p[0]
+                ));
             }
             inventory.push(InventoryEntry {
                 quantity: quantity as u32,
@@ -615,6 +698,7 @@ impl MapObject {
                     Some(p[0] as u32),
                     depth + 1,
                     budget,
+                    diagnostics,
                 )?,
             });
         }
@@ -638,8 +722,8 @@ impl MapObject {
             hex,
             displacement: [p[2], p[3]],
             screen: [p[4], p[5]],
-            frame: p[6] as usize,
-            orientation: p[7] as u8,
+            frame,
+            orientation,
             art_id,
             flags,
             stored_elevation: p[10],

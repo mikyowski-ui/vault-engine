@@ -172,14 +172,26 @@ impl FrmArchive {
     pub fn stored_frame_area_len(&self) -> u32 {
         self.stored_frame_area_len
     }
+    /// SPEC-001 §3.4: stored FPS 0 means 10; otherwise the signed stored
+    /// value, with no positive-range clamp.
     pub fn effective_fps(&self) -> i16 {
         if self.fps == 0 { 10 } else { self.fps }
     }
+    /// SPEC-001 §3.4: integer `1000 / effective FPS` milliseconds per
+    /// frame, truncated toward zero; negative for a negative stored FPS
+    /// (the reference does not clamp it).
+    pub fn frame_interval_signed_ms(&self) -> i32 {
+        1000 / i32::from(self.effective_fps())
+    }
+    /// [`frame_interval_signed_ms`] when it is positive; `None` for a
+    /// negative stored FPS, whose interval callers must take from the
+    /// signed form.
+    ///
+    /// [`frame_interval_signed_ms`]: FrmArchive::frame_interval_signed_ms
     pub fn frame_interval_ms(&self) -> Option<u64> {
-        u64::try_from(self.effective_fps())
+        u64::try_from(self.frame_interval_signed_ms())
             .ok()
-            .filter(|fps| *fps > 0)
-            .map(|fps| 1000 / fps)
+            .filter(|interval| *interval > 0)
     }
     pub fn frame(&self, direction: usize, frame: usize) -> Option<&FrmFrame> {
         self.sequences

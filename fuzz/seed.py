@@ -85,6 +85,23 @@ def main():
         write("mve", path.name, path.read_bytes())
     for path in sorted((FIXTURES / "world").glob("*.map.hex")):
         write("map", path.name.removesuffix(".hex"), read(path))
+    write("int", "program.int", read(FIXTURES / "vm" / "program.int.hex"))
+    for path in sorted((FIXTURES / "formats").glob("font.*.hex")):
+        write("font", path.name.removesuffix(".hex"), read(path))
+    for path in sorted((FIXTURES / "formats").glob("*.msg")):
+        write("msg", path.name, path.read_bytes())
+    for path in sorted((FIXTURES / "formats").glob("*.lst")):
+        write("lst", path.name, path.read_bytes())
+    for directory in ("world", "items"):
+        for path in sorted((FIXTURES / directory).glob("*.pro.hex")):
+            write("pro", path.name.removesuffix(".hex"), read(path))
+    write("gcd", "player.gcd", read(FIXTURES / "state" / "player.gcd.hex"))
+    for path in sorted((FIXTURES / "state").glob("*.gam")):
+        write("gam", path.name, path.read_bytes())
+    write("sve", "fixture-f.sve", (FIXTURES / "movie" / "fixture-f.sve").read_bytes())
+    write("moviefx", "fixture-g.cfg", (FIXTURES / "movie" / "fixture-g.cfg").read_bytes())
+    for path in sorted((FIXTURES / "loose" / "data").glob("ai*.txt")):
+        write("ai", path.name, path.read_bytes())
     for directory in sorted(CORPUS.iterdir()):
         print(f"{directory.relative_to(ROOT)}: {len(list(directory.iterdir()))} seeds")
 

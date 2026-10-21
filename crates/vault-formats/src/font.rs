@@ -338,9 +338,8 @@ impl FontSet {
         let load = |name: String, parse: fn(&[u8]) -> Result<Font, ParseError>| {
             present
                 .contains(name.as_str())
-                .then(|| vfs.read(&name).ok())
+                .then(|| vfs.read_bounded(&name, crate::MAX_ASSET_BYTES).ok())
                 .flatten()
-                .filter(|bytes| bytes.len() <= crate::MAX_ASSET_BYTES)
                 .and_then(|bytes| parse(&bytes).ok())
                 .map(std::sync::Arc::new)
         };

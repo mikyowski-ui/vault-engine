@@ -4,25 +4,19 @@ mod movies;
 mod sound;
 mod ui;
 
-use std::{
-    collections::BTreeSet,
-    error::Error,
-    path::{Path, PathBuf},
-    process::ExitCode,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, error::Error, path::PathBuf, process::ExitCode, sync::Arc};
 
 use clap::Parser;
 use vault_core::{
     CharacterSheet, WorldHost, WorldState,
     ai::{Taunt, taunt_range},
-    assets::VfsWorldAssets,
+    assets::{VfsWorldAssets, WorldAssets},
     host_save::SaveInfo,
     worldmap,
 };
 use vault_formats::{
-    ArtCatalog, Fid, LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, Prototype,
-    Vfs, VfsPath,
+    ArtCatalog, Fid, LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, MsgCatalog,
+    Prototype, Vfs, VfsPath,
     map::MapObject,
     pro::{BasicFlags, ItemData, PrototypeData},
     savegame::SaveGame,
@@ -47,18 +41,33 @@ struct Args {
     /// Parse all supported formats, resolving MAP object subtypes through proto/ lists.
     #[arg(long)]
     validate_formats: bool,
-    /// Resolve every PRO/MAP art identifier through the SPEC-007 filename codec
-    /// and require the selected file to exist.
+    /// Resolve every PRO/MAP art identifier through the SPEC-007 filename
+    /// codec. Identifiers whose file is absent are reported as `MISSING`
+    /// (not fatal); identifiers the codec rejects and PRO/MAP files that
+    /// cannot be read or parsed fail.
     #[arg(long)]
     validate_art_ids: bool,
     /// Re-serialize every PRO and MAP through the SPEC-003 writers.
     #[arg(long)]
     validate_writers: bool,
     /// SPEC-008: check fixed campaign indices against the initializer, enter
-    /// every map so it joins the working saved-map set, round-trip the
-    /// central save grammar, and write/read a temporary save slot.
+    /// every map so it joins the working saved-map set (no unnumbered map
+    /// may be written, §3.10), round-trip the central save grammar, and
+    /// write/read a temporary save slot.
     #[arg(long)]
     validate_saves: bool,
+    /// SPEC-008 §3.10: the 66 numbered maps and the six unlisted ones are
+    /// present and nothing else is, every map's header word 0x34 equals the
+    /// number its header name takes, `map.msg` 0-65 equals the fixed table,
+    /// and the §4.5 vectors hold against the corpus `map.msg`.
+    #[arg(long)]
+    validate_map_numbers: bool,
+    /// SPEC-014 §3.36 / SPEC-003 §2.8: every map's roof words: the roofed
+    /// squares add up to the corpus total, none has roof index 0 or the
+    /// barrier bit, only `LAGUNRUN.MAP` stores hide bits (257), and no
+    /// hide bit survives parsing.
+    #[arg(long)]
+    validate_roofs: bool,
     /// SPEC-009: load `combatai.msg` and `data/ai.txt` (every packet needs
     /// all 25 keys), resolve each critter prototype's default AI packet, and
     /// count taunt ranges without catalog lines. Only counts are printed.
@@ -186,28 +195,44 @@ fn map_art(object: &MapObject, art: &mut Vec<(&'static str, u32)>) {
 }
 
 /// Per source (`.pro`, `.map`): identifiers whose decoded file exists, whose
-/// decoded file is absent from this corpus, and that the codec rejects.
-fn audit_art_ids(vfs: &LocalDirProvider) -> Result<[[u64; 3]; 2], Box<dyn Error>> {
+/// decoded file is absent from this corpus, that the codec rejects, and
+/// source files that cannot be read or parsed (each reported, and the
+/// audit continues with the next file).
+fn audit_art_ids(vfs: &LocalDirProvider) -> Result<[[u64; 4]; 2], Box<dyn Error>> {
     let catalog = ArtCatalog::load(vfs)?;
     let prototypes = LocalPrototypeCatalog::new(vfs);
     let files: BTreeSet<&str> = vfs.files().map(VfsPath::as_str).collect();
-    let mut counts = [[0; 3]; 2];
+    let mut counts = [[0; 4]; 2];
     for path in vfs.files() {
-        let (source, art) = match path.extension() {
-            Some("pro") => {
-                let bytes = vfs.read_bounded(path.as_str(), MAX_ASSET_BYTES)?;
-                (0, prototype_art(&Prototype::parse(&bytes)?))
-            }
-            Some("map") => {
-                let bytes = vfs.read_bounded(path.as_str(), MAX_ASSET_BYTES)?;
-                let map = MapFile::parse(&bytes, &prototypes)?;
-                let mut art = Vec::new();
-                for object in map.objects.elevations.iter().flatten() {
-                    map_art(object, &mut art);
-                }
-                (1, art)
-            }
+        let source = match path.extension() {
+            Some("pro") => 0,
+            Some("map") => 1,
             _ => continue,
+        };
+        let art = vfs
+            .read_bounded(path.as_str(), MAX_ASSET_BYTES)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                if source == 0 {
+                    Prototype::parse(&bytes)
+                        .map(|prototype| prototype_art(&prototype))
+                        .map_err(|error| error.to_string())
+                } else {
+                    let map = MapFile::parse(&bytes, &prototypes).map_err(|e| e.to_string())?;
+                    let mut art = Vec::new();
+                    for object in map.objects.elevations.iter().flatten() {
+                        map_art(object, &mut art);
+                    }
+                    Ok(art)
+                }
+            });
+        let art = match art {
+            Ok(art) => art,
+            Err(error) => {
+                counts[source][3] += 1;
+                eprintln!("FAIL {path}: {error}");
+                continue;
+            }
         };
         for (field, fid) in art {
             match catalog
@@ -232,9 +257,8 @@ fn audit_art_ids(vfs: &LocalDirProvider) -> Result<[[u64; 3]; 2], Box<dyn Error>
 
 /// SPEC-008 corpus checks. Returns maps entered, working `.SAV` files that
 /// reparse with the saved bit, and failures.
-fn audit_saves(dir: &Path) -> Result<[u64; 3], Box<dyn Error>> {
-    let vfs = Arc::new(LocalDirProvider::mount(dir)?);
-    let prototypes = LocalPrototypeCatalog::new(&*vfs);
+fn audit_saves(vfs: &Arc<LocalDirProvider>) -> Result<[u64; 3], Box<dyn Error>> {
+    let prototypes = LocalPrototypeCatalog::new(&**vfs);
     let assets = VfsWorldAssets::new(vfs.clone(), "english")?;
     let mut host = WorldHost::new(WorldState::new(CharacterSheet::default(), 1)?, assets);
     host.load_campaign()?;
@@ -269,26 +293,66 @@ fn audit_saves(dir: &Path) -> Result<[u64; 3], Box<dyn Error>> {
         .collect();
     maps.sort();
     let [mut entered, mut saved, mut failed] = [0_u64; 3];
+    let mut last_numbered = None;
     for path in &maps {
         match host.load_map(path) {
-            Ok(()) => entered += 1,
+            Ok(()) => {
+                entered += 1;
+                if host.world.map.header.map_number >= 0 {
+                    last_numbered = Some(path.clone());
+                }
+            }
             Err(error) => {
                 failed += 1;
                 eprintln!("FAIL {path}: {error}");
             }
         }
     }
-    host.world.persist_current_map(true);
+    // A save needs a numbered current map (SPEC-008 §3.10): leave the last
+    // map for the last numbered one when it has no number.
+    if host.world.map.header.map_number < 0 {
+        let path = last_numbered.ok_or("no map in the corpus has a map number")?;
+        host.load_map(&path)?;
+    }
+    if !host.world.persist_current_map(true) {
+        return Err("the current map could not be written to the working map set".into());
+    }
+    // SPEC-008 §3.10 / SPEC-014 §3.35 step 5: every working `.SAV` is a
+    // numbered map's, under the name `map.msg` gives its number, and never
+    // one of the unlisted maps.
+    let catalog = host.assets.game_messages("map.msg").ok();
     for (name, bytes) in &host.world.persistence.maps {
-        match MapFile::parse(bytes, &prototypes) {
-            Ok(map) if map.header.flags.0 & 1 != 0 => saved += 1,
-            Ok(_) => {
-                failed += 1;
-                eprintln!("FAIL {name}: saved-state bit clear");
-            }
+        let map = match MapFile::parse(bytes, &prototypes) {
+            Ok(map) => map,
             Err(error) => {
                 failed += 1;
                 eprintln!("FAIL {name}: {error}");
+                continue;
+            }
+        };
+        let number = map.header.map_number;
+        let expected = vault_core::persistence::working_map_name(number, catalog.as_deref());
+        let header_name = String::from_utf8_lossy(&map.header.name)
+            .trim_end_matches('\0')
+            .to_string();
+        let problem = if map.header.flags.0 & 1 == 0 {
+            Some("saved-state bit clear".to_string())
+        } else if number < 0 {
+            Some("an unnumbered map was written to the working set".to_string())
+        } else if expected.as_deref() != Some(name.as_str()) {
+            Some(format!("map {number} should be written as {expected:?}"))
+        } else if header_name != *name {
+            Some(format!("header name {header_name:?} is not {name:?}"))
+        } else if UNLISTED_MAPS.contains(&name.replace(".SAV", ".MAP").as_str()) {
+            Some("an unlisted map was written to the working set".to_string())
+        } else {
+            None
+        };
+        match problem {
+            None => saved += 1,
+            Some(problem) => {
+                failed += 1;
+                eprintln!("FAIL {name}: {problem}");
             }
         }
     }
@@ -328,11 +392,304 @@ fn audit_saves(dir: &Path) -> Result<[u64; 3], Box<dyn Error>> {
     Ok([entered, saved, failed])
 }
 
+/// SPEC-008 §3.10: the six corpus maps `map.msg` does not list; they store
+/// -1 and load with map number -1.
+const UNLISTED_MAPS: [&str; 6] = [
+    "CARAVAN.MAP",
+    "JUNKDEMO.MAP",
+    "TEMPLAT1.MAP",
+    "ZDESERT1.MAP",
+    "ZDESERT2.MAP",
+    "ZDESERT3.MAP",
+];
+/// SPEC-008 §4.5: header name, word 0x34, assigned number, town, music
+/// after load, and whether leaving writes a working `.SAV`.
+struct MapNumberVector {
+    name: &'static str,
+    word: i32,
+    number: i32,
+    town: i32,
+    music: Option<&'static str>,
+    saves: bool,
+}
+const MAP_NUMBER_VECTORS: [MapNumberVector; 6] = [
+    MapNumberVector {
+        name: "hubent.map",
+        word: 7,
+        number: 36,
+        town: 6,
+        music: Some("01hub"),
+        saves: true,
+    },
+    MapNumberVector {
+        name: "HUBENT.SAV",
+        word: -1,
+        number: 36,
+        town: 6,
+        music: Some("01hub"),
+        saves: true,
+    },
+    MapNumberVector {
+        name: "hubent.sav",
+        word: 7,
+        number: 7,
+        town: 1,
+        music: Some("13carvrn"),
+        saves: true,
+    },
+    MapNumberVector {
+        name: "MSTRLR34.MAP",
+        word: 34,
+        number: 34,
+        town: 11,
+        music: Some("02mstrlr"),
+        saves: true,
+    },
+    MapNumberVector {
+        name: "DESCRVN4.MAP",
+        word: 63,
+        number: 63,
+        town: 0,
+        music: Some("07desert"),
+        saves: false,
+    },
+    MapNumberVector {
+        name: "CARAVAN.MAP",
+        word: -1,
+        number: -1,
+        town: -1,
+        music: None,
+        saves: false,
+    },
+];
+
+/// SPEC-008 §3.10 corpus checks: `map.msg` 0-65 equals the fixed table;
+/// the 66 numbered maps and the six unlisted ones are present and no other
+/// `.map` is; every map's header word 0x34 equals the number its header
+/// name takes (its own number, or -1 for the unlisted six); and the §4.5
+/// vectors hold against the corpus `map.msg`.
+fn audit_map_numbers(vfs: &LocalDirProvider) -> Result<ui::UiAudit, Box<dyn Error>> {
+    let mut audit = ui::UiAudit::default();
+    let catalog =
+        MsgCatalog::parse(&vfs.read_bounded("text/english/game/map.msg", MAX_ASSET_BYTES)?)?;
+    for (number, entry) in worldmap::MAP_TABLE.iter().enumerate() {
+        let result = match catalog.get(number as i32) {
+            None => Err("missing".into()),
+            Some(message) if message.text != entry.name.as_bytes() => Err(format!(
+                "{:?} != {:?}",
+                String::from_utf8_lossy(&message.text),
+                entry.name
+            )),
+            Some(_) => Ok(()),
+        };
+        audit.record("map.msg", &format!("message {number}"), result);
+    }
+    let present: BTreeSet<String> = vfs
+        .files()
+        .filter(|path| path.extension() == Some("map") && path.as_str().starts_with("maps/"))
+        .map(|path| path.as_str()["maps/".len()..].to_ascii_uppercase())
+        .collect();
+    let expected: Vec<(String, i32)> = worldmap::MAP_TABLE
+        .iter()
+        .enumerate()
+        .map(|(number, entry)| (entry.name.to_string(), number as i32))
+        .chain(UNLISTED_MAPS.iter().map(|name| (name.to_string(), -1)))
+        .collect();
+    for (name, number) in &expected {
+        let result = if present.contains(name) {
+            Ok(())
+        } else {
+            Err("missing".into())
+        };
+        audit.record("maps present", name, result);
+        if !present.contains(name) {
+            continue;
+        }
+        let bytes = match vfs.read_bounded(
+            &format!("maps/{}", name.to_ascii_lowercase()),
+            MAX_ASSET_BYTES,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                audit.record("header word 0x34", name, Err(error.to_string()));
+                continue;
+            }
+        };
+        let result = match (bytes.get(0x04..0x14), bytes.get(0x34..0x38)) {
+            (Some(field), Some(word)) => {
+                let word = i32::from_be_bytes(word.try_into().expect("4 bytes"));
+                let assigned = worldmap::header_map_number(field, word, Some(&catalog));
+                if word != *number {
+                    Err(format!("header word {word} != {number}"))
+                } else if assigned != word {
+                    Err(format!(
+                        "header name {:?} takes number {assigned}, word {word}",
+                        String::from_utf8_lossy(field).trim_end_matches('\0')
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err("header shorter than 0x38 bytes".into()),
+        };
+        audit.record("header word 0x34", name, result);
+    }
+    for name in &present {
+        if !expected.iter().any(|(known, _)| known == name) {
+            audit.record("maps present", name, Err("not a corpus map".into()));
+        }
+    }
+    audit.record(
+        "maps present",
+        "count",
+        if present.len() == expected.len() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} maps, expected {}",
+                present.len(),
+                expected.len()
+            ))
+        },
+    );
+    for vector in MAP_NUMBER_VECTORS {
+        let mut field = [0_u8; 16];
+        field[..vector.name.len()].copy_from_slice(vector.name.as_bytes());
+        let assigned = worldmap::header_map_number(&field, vector.word, Some(&catalog));
+        let written = usize::try_from(assigned)
+            .is_ok_and(|number| !vault_formats::automap::EXCLUDED.contains(&number));
+        let actual = (
+            assigned,
+            worldmap::map_town(assigned),
+            worldmap::city_music(assigned),
+            written,
+        );
+        let expected = (vector.number, vector.town, vector.music, vector.saves);
+        let result = if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{actual:?} != {expected:?}"))
+        };
+        audit.record("SPEC-008 §4.5 vectors", vector.name, result);
+    }
+    Ok(audit)
+}
+
+/// SPEC-014 §3.36 corpus facts: the roofed squares of all 72 maps, and the
+/// maps that store hide bits, which loading clears (SPEC-003 §2.8).
+const ROOFED_SQUARES: u64 = 15_056;
+const STORED_HIDE_BITS: [(&str, u64); 1] = [("LAGUNRUN.MAP", 257)];
+
+/// SPEC-014 §3.36 / SPEC-003 §2.8 corpus checks on every map's roof words:
+/// no roofed square (roof index other than 1) has index 0 or the barrier
+/// bit `0x20000000`; only the maps listed store hide bits `0x10000000`, and
+/// exactly as many; parsing leaves no hide bit set; and the roofed squares
+/// add up to the corpus total.
+fn audit_roofs(vfs: &LocalDirProvider) -> Result<ui::UiAudit, Box<dyn Error>> {
+    let prototypes = LocalPrototypeCatalog::new(vfs);
+    let mut audit = ui::UiAudit::default();
+    let mut maps: Vec<String> = vfs
+        .files()
+        .filter(|path| path.extension() == Some("map") && path.as_str().starts_with("maps/"))
+        .map(|path| path.as_str().to_string())
+        .collect();
+    maps.sort();
+    let [mut roofed, mut stored_total] = [0_u64; 2];
+    for path in &maps {
+        let name = path["maps/".len()..].to_ascii_uppercase();
+        let map = match vfs
+            .read_bounded(path, MAX_ASSET_BYTES)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| MapFile::parse(&bytes, &prototypes).map_err(|e| e.to_string()))
+        {
+            Ok(map) => map,
+            Err(error) => {
+                audit.record("roof words", &name, Err(error));
+                continue;
+            }
+        };
+        let [mut squares, mut zero, mut barrier, mut stored, mut hidden] = [0_u64; 5];
+        for tile in map.tiles.iter().flatten().flatten() {
+            if tile.roof() != 1 {
+                squares += 1;
+            }
+            if tile.roof() == 0 {
+                zero += 1;
+            }
+            if tile.roof_barrier() {
+                barrier += 1;
+            }
+            if tile.stored & 0x1000_0000 != 0 {
+                stored += 1;
+            }
+            if tile.roof_hidden() {
+                hidden += 1;
+            }
+        }
+        roofed += squares;
+        stored_total += stored;
+        audit.record(
+            "roof index 0",
+            &name,
+            if zero == 0 {
+                Ok(())
+            } else {
+                Err(format!("{zero} roofed square(s) with index 0"))
+            },
+        );
+        audit.record(
+            "barrier bit",
+            &name,
+            if barrier == 0 {
+                Ok(())
+            } else {
+                Err(format!("{barrier} square(s) with the barrier bit"))
+            },
+        );
+        let expected = STORED_HIDE_BITS
+            .iter()
+            .find(|(map, _)| *map == name)
+            .map_or(0, |(_, count)| *count);
+        audit.record(
+            "stored hide bits",
+            &name,
+            if stored == expected {
+                Ok(())
+            } else {
+                Err(format!("{stored} stored hide bit(s), expected {expected}"))
+            },
+        );
+        audit.record(
+            "hidden after parse",
+            &name,
+            if hidden == 0 {
+                Ok(())
+            } else {
+                Err(format!("{hidden} hide bit(s) survived parsing"))
+            },
+        );
+    }
+    audit.record(
+        "roofed squares",
+        "total",
+        if roofed == ROOFED_SQUARES {
+            Ok(())
+        } else {
+            Err(format!("{roofed} != {ROOFED_SQUARES}"))
+        },
+    );
+    println!(
+        "Roofs: {} maps, {roofed} roofed squares, {stored_total} stored hide bits",
+        maps.len()
+    );
+    Ok(audit)
+}
+
 /// SPEC-009 corpus checks. Returns packets, parser diagnostics, critter
-/// prototypes resolved and falling back to entry 0, and nonempty taunt
-/// ranges with and without catalog lines.
-fn audit_ai(dir: &Path) -> Result<[u64; 6], Box<dyn Error>> {
-    let vfs = Arc::new(LocalDirProvider::mount(dir)?);
+/// prototypes resolved and falling back to entry 0, nonempty taunt ranges
+/// with and without catalog lines, and critter prototypes that cannot be
+/// read or parsed (reported; the scan continues).
+fn audit_ai(vfs: &Arc<LocalDirProvider>) -> Result<[u64; 7], Box<dyn Error>> {
     let assets = VfsWorldAssets::new(vfs.clone(), "english")?;
     let mut host = WorldHost::new(WorldState::new(CharacterSheet::default(), 1)?, assets);
     host.load_combat_ai()?;
@@ -342,14 +699,25 @@ fn audit_ai(dir: &Path) -> Result<[u64; 6], Box<dyn Error>> {
     ) else {
         return Err("combat AI did not initialize".into());
     };
-    let mut counts = [0_u64; 6];
+    let mut counts = [0_u64; 7];
     counts[0] = packets.len() as u64;
     counts[1] = packets.diagnostics.len() as u64;
     for path in vfs.files() {
         if path.extension() != Some("pro") || !path.as_str().starts_with("proto/critters/") {
             continue;
         }
-        let prototype = Prototype::parse(&vfs.read_bounded(path.as_str(), MAX_ASSET_BYTES)?)?;
+        let parsed = vfs
+            .read_bounded(path.as_str(), MAX_ASSET_BYTES)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| Prototype::parse(&bytes).map_err(|error| error.to_string()));
+        let prototype = match parsed {
+            Ok(prototype) => prototype,
+            Err(error) => {
+                counts[6] += 1;
+                eprintln!("FAIL {path}: {error}");
+                continue;
+            }
+        };
         if let PrototypeData::Critter(critter) = &prototype.data {
             counts[if packets.resolve(critter.ai).1 { 2 } else { 3 }] += 1;
         }
@@ -363,114 +731,168 @@ fn audit_ai(dir: &Path) -> Result<[u64; 6], Box<dyn Error>> {
             if end < start {
                 continue;
             }
-            let lines = (start..=end).any(|id| messages.get(id).is_some());
+            // The packet's message bounds are untrusted, so look the
+            // range up in the catalog instead of scanning every id in it.
+            let lines = messages.entries().range(start..=end).next().is_some();
             counts[if lines { 4 } else { 5 }] += 1;
         }
     }
     Ok(counts)
 }
 
+/// Failed categories of one run. Every requested category runs to the end
+/// and reports its own tallies; the process exits nonzero only after all of
+/// them have run (README "Loose-directory VFS and corpus audit").
+#[derive(Default)]
+struct Failures {
+    ran: usize,
+    failed: Vec<String>,
+}
+impl Failures {
+    /// Run one category. The check returns its failed-check count; an error
+    /// that stops the category early is recorded as a failure too.
+    fn run(
+        &mut self,
+        category: &str,
+        unit: &str,
+        check: impl FnOnce() -> Result<u64, Box<dyn Error>>,
+    ) {
+        self.ran += 1;
+        match check() {
+            Ok(0) => {}
+            Ok(failed) => self.failed.push(format!("{failed} {unit} failed")),
+            Err(error) => self.failed.push(format!("{category}: {error}")),
+        }
+    }
+}
+
 fn audit(args: Args) -> Result<(), Box<dyn Error>> {
-    if args.validate_acm || args.validate_sfx {
-        let vfs = LocalDirProvider::mount(&args.corpus_dir)?;
-        if args.validate_acm {
+    // One mount serves every category.
+    let vfs = Arc::new(LocalDirProvider::mount(&args.corpus_dir)?);
+    let mut failures = Failures::default();
+    if args.validate_acm {
+        failures.run("ACM", "ACM check(s)", || {
             let [rows, passed, failed, files, wrapped] = sound::audit_acm(&vfs, &args.oracle_dir)?;
             println!("ACM files: {files} in corpus, {rows} oracle rows");
             println!(
                 "ACM decoding: {passed} passed, {failed} failed; {wrapped} wrapped samples matched"
             );
-            if failed != 0 {
-                return Err(format!("{failed} ACM check(s) failed").into());
-            }
-        }
-        if args.validate_sfx {
+            Ok(failed)
+        });
+    }
+    if args.validate_sfx {
+        failures.run("SFX", "SFX check(s)", || {
             let [rows, passed, failed, bytes] = sound::audit_sfx(&vfs, &args.oracle_dir)?;
             println!("SFX resolution: {rows} rows, {passed} passed, {failed} failed");
             println!("SFX prototype sound bytes: {bytes} failures");
-            if failed + bytes != 0 {
-                return Err(format!("{} SFX check(s) failed", failed + bytes).into());
-            }
-        }
+            Ok(failed + bytes)
+        });
     }
-    if args.validate_interactions || args.validate_ui {
-        let vfs = LocalDirProvider::mount(&args.corpus_dir)?;
-        for (enabled, title, audit) in [
-            (
-                args.validate_interactions,
-                "Interactions",
-                ui::audit_interactions as fn(&LocalDirProvider) -> _,
-            ),
-            (args.validate_ui, "UI", ui::audit_ui),
-        ] {
-            if !enabled {
-                continue;
-            }
-            let audit = audit(&vfs)?;
-            audit.report(title);
-            if audit.failed() != 0 {
-                return Err(format!("{} {title} check(s) failed", audit.failed()).into());
-            }
+    for (enabled, title, check) in [
+        (
+            args.validate_interactions,
+            "Interactions",
+            ui::audit_interactions as fn(&LocalDirProvider) -> _,
+        ),
+        (args.validate_ui, "UI", ui::audit_ui),
+    ] {
+        if enabled {
+            failures.run(title, &format!("{title} check(s)"), || {
+                let audit = check(&vfs)?;
+                audit.report(title);
+                Ok(audit.failed())
+            });
         }
     }
     if args.validate_dat {
-        let beside = |name: &str| args.corpus_dir.join("..").join(name);
-        let master = args
-            .master_dat
-            .clone()
-            .unwrap_or_else(|| beside("MASTER.DAT"));
-        let critter = args
-            .critter_dat
-            .clone()
-            .unwrap_or_else(|| beside("CRITTER.DAT"));
-        let audit = archives::audit_dat(&args.corpus_dir, &[&master, &critter])?;
-        audit.report();
-        if audit.failed() != 0 {
-            return Err(format!("{} archive member check(s) failed", audit.failed()).into());
-        }
+        failures.run("DAT", "archive member check(s)", || {
+            let beside = |name: &str| args.corpus_dir.join("..").join(name);
+            let master = args
+                .master_dat
+                .clone()
+                .unwrap_or_else(|| beside("MASTER.DAT"));
+            let critter = args
+                .critter_dat
+                .clone()
+                .unwrap_or_else(|| beside("CRITTER.DAT"));
+            let audit = archives::audit_dat(&*vfs, &[&master, &critter]);
+            audit.report();
+            Ok(audit.failed())
+        });
     }
     if args.validate_movies {
-        let vfs = LocalDirProvider::mount(&args.corpus_dir)?;
-        let audit = movies::audit_movies(&vfs, &args.movie_oracle_dir)?;
-        audit.report();
-        if audit.failed() != 0 {
-            return Err(format!("{} movie check(s) failed", audit.failed()).into());
-        }
+        failures.run("Movies", "movie check(s)", || {
+            let audit = movies::audit_movies(&vfs, &args.movie_oracle_dir)?;
+            audit.report();
+            Ok(audit.failed())
+        });
     }
     if args.validate_items {
-        let vfs = LocalDirProvider::mount(&args.corpus_dir)?;
-        let audit = items::audit_items(&vfs)?;
-        audit.report();
-        if audit.failed() != 0 {
-            return Err(format!("{} item invariant(s) failed", audit.failed()).into());
-        }
-        let [consumed, queued, healed, failed] = items::consume_drugs(&args.corpus_dir)?;
-        println!(
-            "Drug consumption: {consumed} consumed, {queued} delayed stages queued, \
-             {healed} healed, {failed} failed"
-        );
-        if failed != 0 {
-            return Err(format!("{failed} drug consumption check(s) failed").into());
-        }
+        failures.run("Items", "item invariant(s)", || {
+            let audit = items::audit_items(&*vfs)?;
+            audit.report();
+            Ok(audit.failed() as u64)
+        });
+        failures.run("Drug consumption", "drug consumption check(s)", || {
+            let [consumed, queued, healed, failed] = items::consume_drugs(&vfs)?;
+            println!(
+                "Drug consumption: {consumed} consumed, {queued} delayed stages queued, \
+                 {healed} healed, {failed} failed"
+            );
+            Ok(failed as u64)
+        });
     }
     if args.validate_ai {
-        let [packets, diagnostics, resolved, fallback, lines, empty] = audit_ai(&args.corpus_dir)?;
-        println!("AI packets: {packets} parsed, {diagnostics} token diagnostics");
-        println!("Critter AI packets: {resolved} resolved, {fallback} fall back to entry 0");
-        println!("Taunt ranges: {lines} with catalog lines, {empty} without");
+        failures.run("AI", "AI critter prototype(s)", || {
+            let [
+                packets,
+                diagnostics,
+                resolved,
+                fallback,
+                lines,
+                empty,
+                unreadable,
+            ] = audit_ai(&vfs)?;
+            println!("AI packets: {packets} parsed, {diagnostics} token diagnostics");
+            println!(
+                "Critter AI packets: {resolved} resolved, {fallback} fall back to entry 0, \
+                 {unreadable} unreadable"
+            );
+            println!("Taunt ranges: {lines} with catalog lines, {empty} without");
+            Ok(unreadable)
+        });
+    }
+    if args.validate_map_numbers {
+        failures.run("Map numbers", "map number check(s)", || {
+            let audit = audit_map_numbers(&vfs)?;
+            audit.report("Map numbers");
+            Ok(audit.failed())
+        });
+    }
+    if args.validate_roofs {
+        failures.run("Roofs", "roof check(s)", || {
+            let audit = audit_roofs(&vfs)?;
+            audit.report("Roofs");
+            Ok(audit.failed())
+        });
     }
     if args.validate_saves {
-        let [entered, saved, failed] = audit_saves(&args.corpus_dir)?;
-        println!("Saves: {entered} maps entered, {saved} working saves, {failed} failed");
-        if failed != 0 {
-            return Err(format!("{failed} save check(s) failed").into());
-        }
+        failures.run("Saves", "save check(s)", || {
+            let [entered, saved, failed] = audit_saves(&vfs)?;
+            println!("Saves: {entered} maps entered, {saved} working saves, {failed} failed");
+            Ok(failed)
+        });
     }
-    let vfs = LocalDirProvider::mount(args.corpus_dir)?;
-    let prototypes = LocalPrototypeCatalog::new(&vfs);
+    let prototypes = LocalPrototypeCatalog::new(&*vfs);
     let mut counts = [0_u64; EXTENSIONS.len()];
     let mut total = 0_u64;
     let mut passed = [0_u64; VALIDATED.len()];
     let mut failed = [0_u64; VALIDATED.len()];
+    // SPEC-002 §3.5/§4.5: a message file that breaks the grammar stops
+    // loading at the bad record and keeps the earlier ones. The corpus ships
+    // such files; the engine reproduces that outcome, so they are reported,
+    // not failed.
+    let mut stopped_early = 0_u64;
     for path in vfs.files() {
         total += 1;
         if let Some(index) = EXTENSIONS
@@ -494,6 +916,17 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
                     Some("int") => IntProgram::parse(&bytes)
                         .map(|_| ())
                         .map_err(|error| error.to_string()),
+                    Some("msg") => MsgCatalog::parse(&bytes)
+                        .map(|catalog| {
+                            if let Some(error) = catalog.failure() {
+                                stopped_early += 1;
+                                println!(
+                                    "MSG STOPS EARLY {path}: {} record(s) kept: {error}",
+                                    catalog.entries().len()
+                                );
+                            }
+                        })
+                        .map_err(|error| error.to_string()),
                     _ => validate_asset(path, &bytes)
                         .expect("supported extension")
                         .map_err(|error| error.to_string()),
@@ -513,66 +946,90 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
         println!(".{extension}\t{count}");
     }
     if args.validate_formats {
-        println!("format\tpassed\tfailed");
-        for (index, extension) in VALIDATED.iter().enumerate() {
-            println!(".{extension}\t{}\t{}", passed[index], failed[index]);
-        }
-        let failures: u64 = failed.iter().sum();
-        println!(
-            "Validation: {} passed, {failures} failed",
-            passed.iter().sum::<u64>()
-        );
-        if failures != 0 {
-            return Err(format!("{failures} asset(s) failed validation").into());
-        }
+        failures.run("Formats", "asset(s) in format validation", || {
+            println!("format\tpassed\tfailed");
+            for (index, extension) in VALIDATED.iter().enumerate() {
+                println!(".{extension}\t{}\t{}", passed[index], failed[index]);
+            }
+            let failures: u64 = failed.iter().sum();
+            println!(
+                "Validation: {} passed, {failures} failed",
+                passed.iter().sum::<u64>()
+            );
+            println!("Message files stopping early (SPEC-002 §3.5): {stopped_early}");
+            Ok(failures)
+        });
     }
     if args.validate_writers {
-        let mut counts = [[0_u64; 2]; 2];
-        for path in vfs.files() {
-            let source = match path.extension() {
-                Some("pro") => 0,
-                Some("map") => 1,
-                _ => continue,
-            };
-            let result = vfs
-                .read_bounded(path.as_str(), MAX_ASSET_BYTES)
-                .map_err(|error| error.to_string())
-                .and_then(|bytes| check_writer(path, &bytes, &prototypes));
-            match result {
-                Ok(()) => counts[source][0] += 1,
-                Err(error) => {
-                    counts[source][1] += 1;
-                    eprintln!("FAIL {path}: {error}");
+        failures.run("Writers", "writer round trip(s)", || {
+            let mut counts = [[0_u64; 2]; 2];
+            for path in vfs.files() {
+                let source = match path.extension() {
+                    Some("pro") => 0,
+                    Some("map") => 1,
+                    _ => continue,
+                };
+                let result = vfs
+                    .read_bounded(path.as_str(), MAX_ASSET_BYTES)
+                    .map_err(|error| error.to_string())
+                    .and_then(|bytes| check_writer(path, &bytes, &prototypes));
+                match result {
+                    Ok(()) => counts[source][0] += 1,
+                    Err(error) => {
+                        counts[source][1] += 1;
+                        eprintln!("FAIL {path}: {error}");
+                    }
                 }
             }
-        }
-        println!("writer\tpassed\tfailed");
-        for (source, [passed, failed]) in ["pro", "map"].iter().zip(counts) {
-            println!(".{source}\t{passed}\t{failed}");
-        }
-        let failures = counts[0][1] + counts[1][1];
-        println!(
-            "Writers: {} passed, {failures} failed",
-            counts[0][0] + counts[1][0]
-        );
-        if failures != 0 {
-            return Err(format!("{failures} writer round trip(s) failed").into());
-        }
+            println!("writer\tpassed\tfailed");
+            for (source, [passed, failed]) in ["pro", "map"].iter().zip(counts) {
+                println!(".{source}\t{passed}\t{failed}");
+            }
+            let failures = counts[0][1] + counts[1][1];
+            println!(
+                "Writers: {} passed, {failures} failed",
+                counts[0][0] + counts[1][0]
+            );
+            Ok(failures)
+        });
     }
     if args.validate_art_ids {
-        let counts = audit_art_ids(&vfs)?;
-        println!("art-id source\tresolved\tmissing\tinvalid");
-        for (source, [resolved, missing, invalid]) in ["pro", "map"].iter().zip(counts) {
-            println!(".{source}\t{resolved}\t{missing}\t{invalid}");
-        }
-        let [resolved, missing, invalid] =
-            std::array::from_fn(|column| counts[0][column] + counts[1][column]);
-        println!("Art identifiers: {resolved} resolved, {missing} missing, {invalid} invalid");
-        if invalid != 0 {
-            return Err(format!("{invalid} art identifier(s) cannot be decoded").into());
-        }
+        failures.run("Art identifiers", "art identifier check(s)", || {
+            let counts = audit_art_ids(&vfs)?;
+            println!("art-id source\tresolved\tmissing\tinvalid\tunreadable");
+            for (source, [resolved, missing, invalid, unreadable]) in
+                ["pro", "map"].iter().zip(counts)
+            {
+                println!(".{source}\t{resolved}\t{missing}\t{invalid}\t{unreadable}");
+            }
+            let [resolved, missing, invalid, unreadable] =
+                std::array::from_fn(|column| counts[0][column] + counts[1][column]);
+            println!("Art identifiers: {resolved} resolved, {missing} missing, {invalid} invalid");
+            println!("Art-id source files: {unreadable} unreadable");
+            // Missing files are reported, not failed: the reference
+            // guarantees no fallback resource.
+            Ok(invalid + unreadable)
+        });
     }
-    Ok(())
+    if failures.ran != 0 {
+        println!(
+            "Audit categories: {} run, {} failed",
+            failures.ran,
+            failures.failed.len()
+        );
+    }
+    if failures.failed.is_empty() {
+        return Ok(());
+    }
+    for failure in &failures.failed {
+        eprintln!("asset-audit: {failure}");
+    }
+    Err(format!(
+        "{} of {} categories failed",
+        failures.failed.len(),
+        failures.ran
+    )
+    .into())
 }
 
 fn main() -> ExitCode {

@@ -1,10 +1,20 @@
 //! SPEC-008 §3.4-3.7 world map and town map screens. The world view is the
 //! 450 x 442 viewport at (22,21) over the 1400 x 1500 world, scroll origins
-//! clamped to 0-950 / 0-1058. The specifications name no world artwork, so
-//! cells are drawn from the fixed terrain grid and their discovery values
-//! (unknown black, seen dim, visited full). Travel runs at most two loop
-//! iterations per update, about 24 updates per second.
-use super::{MapPreview, Screen, button, dialog::Dialog, label, panel_text};
+//! clamped to 0-950 / 0-1058. Travel runs at most two loop iterations per
+//! update, about 24 updates per second. The town map draws its picture,
+//! interface art 156 + town (453 by 444) at (20,20), and one 164 x 25
+//! button per known entrance at (anchor X - 57, anchor Y - 6) labelled
+//! with message 200 + 10 x town + slot (290 and 501 for the destroyed
+//! Cathedral and Military Base) from `worldmap.msg`.
+//!
+//! Stand-ins, because no specification defines them: the world artwork
+//! (cells are drawn from the fixed terrain grid and their discovery values:
+//! unknown black, seen dim, visited full), the frame around the viewport,
+//! the town and destination markers, the side panel (date, town list,
+//! Enter and Close), the town-map buttons' art (the "masked 25 x 13
+//! hotspot image" is not named) and label placement, the fonts and colors,
+//! the town map's way back to the world map, and the blocked-travel note.
+use super::{MapPreview, Screen, button, dialog::Dialog, inventory::inside, label, panel_text};
 use crate::AppResult;
 use vault_core::{
     TravelOutcome,
@@ -31,6 +41,8 @@ pub(crate) struct WorldScreen {
     /// The town whose jittered center travel is heading for.
     pub town: Option<usize>,
     last_update: u64,
+    /// G-24 / SPEC-014 §3.17 the world-map pause window is open.
+    pub paused: bool,
 }
 pub(crate) struct TownScreen {
     pub town: usize,
@@ -44,10 +56,6 @@ fn centered(point: [i32; 2]) -> [i32; 2] {
         point[0] - VIEWPORT_SIZE[0] / 2,
         point[1] - VIEWPORT_SIZE[1] / 2,
     ])
-}
-fn inside(rect: [i32; 4], point: [i32; 2]) -> bool {
-    (rect[0]..rect[0] + rect[2]).contains(&point[0])
-        && (rect[1]..rect[1] + rect[3]).contains(&point[1])
 }
 fn town_button(index: usize) -> [i32; 4] {
     [
@@ -74,20 +82,36 @@ impl MapPreview {
             scroll: centered(position),
             town: None,
             last_update: 0,
+            paused: false,
         });
     }
+    /// The world map opened by the interface rather than by a world
+    /// transition (the town map's Escape and World Map button, the failure
+    /// path below, the preview's W key): SPEC-008 §3.10 the world map plays
+    /// `03wrldmp`, which a transition requests in the world itself.
+    pub(crate) fn open_world_map_with_music(&mut self) {
+        self.host.play_world_map_music();
+        self.open_world_map();
+    }
     /// The current town's map (SPEC-013 §3.22 map -1). Under the safe rule
-    /// a town out of range, or one without its picture, opens the world
-    /// map at the current town instead.
+    /// a town out of range (S-11: including a negative town, which has no
+    /// town map), or one without its picture, opens the world map at the
+    /// current town instead.
     pub(crate) fn open_town_map(&mut self) {
-        let town = self.host.world.world_map.saved.town.max(0) as usize;
+        let town = usize::try_from(self.host.world.world_map.saved.town)
+            .ok()
+            .filter(|town| *town < TOWNS.len());
+        let Some(town) = town else {
+            self.open_world_map_with_music();
+            return;
+        };
         let picture = self
             .host
             .assets
             .interface_path(worldmap::TOWN_PICTURE_BASE + town as i32)
             .and_then(|path| self.host.assets.frame(&path));
-        if town >= TOWNS.len() || picture.is_err() {
-            self.open_world_map();
+        if picture.is_err() {
+            self.open_world_map_with_music();
             return;
         }
         let gvars = self.host.world.gvars.clone().unwrap_or_default();
@@ -144,6 +168,21 @@ impl MapPreview {
         let Screen::World(world) = &mut self.screen else {
             return false;
         };
+        // G-24 / SPEC-014 §3.17: `p`, `P`, Ctrl+P and Alt+P open the pause
+        // window; it closes on any key except the brightness keys, which
+        // adjust brightness and keep it open.
+        if world.paused {
+            match key {
+                KeyCode::Equal | KeyCode::NumpadAdd => self.brightness_step(true),
+                KeyCode::Minus | KeyCode::NumpadSubtract => self.brightness_step(false),
+                _ => world.paused = false,
+            }
+            return true;
+        }
+        if key == KeyCode::KeyP {
+            world.paused = true;
+            return true;
+        }
         let delta = match key {
             KeyCode::ArrowLeft => [-CELL, 0],
             KeyCode::ArrowRight => [CELL, 0],
@@ -184,9 +223,14 @@ impl MapPreview {
         }
     }
     pub(crate) fn world_click(&mut self, point: [i32; 2]) -> bool {
-        let Screen::World(world) = &self.screen else {
+        let Screen::World(world) = &mut self.screen else {
             return false;
         };
+        // A button event closes the pause window.
+        if world.paused {
+            world.paused = false;
+            return true;
+        }
         let scroll = world.scroll;
         let viewport = [
             VIEWPORT_ORIGIN[0],
@@ -238,7 +282,9 @@ impl MapPreview {
         let Screen::World(world) = &mut self.screen else {
             return Ok(false);
         };
-        if self.host.world.world_map.travel.is_none()
+        // The pause window holds travel.
+        if world.paused
+            || self.host.world.world_map.travel.is_none()
             || now.saturating_sub(world.last_update) < TRAVEL_UPDATE_MS
         {
             return Ok(false);
@@ -389,13 +435,40 @@ impl MapPreview {
             }
             panel_text(&mut image, font, palette, &self.status, [22, 466], green);
         }
+        // G-24 / SPEC-014 §3.17: the world-map region (22, 21) 450 by 442 is
+        // converted through the grey lookup table, then the pause window
+        // shows at (185, 180).
+        if world.paused {
+            let grey = vault_core::ui::grey_table(palette);
+            let [x, y] = VIEWPORT_ORIGIN;
+            let [w, h] = VIEWPORT_SIZE;
+            let stride = image.width() as i32;
+            for row in y..y + h {
+                for column in x..x + w {
+                    if let Some(pixel) =
+                        image.pixels_mut().get_mut((row * stride + column) as usize)
+                    {
+                        *pixel = grey[usize::from(*pixel)];
+                    }
+                }
+            }
+            let painter = crate::interface::Painter {
+                assets: &self.host.assets,
+                palette,
+            };
+            super::options::draw_pause(
+                &painter,
+                &mut image,
+                vault_core::ui::options::PAUSE_WORLD_ORIGIN,
+            );
+        }
         Ok(image)
     }
     pub(crate) fn town_key(&mut self, key: KeyCode) -> bool {
         if key != KeyCode::Escape {
             return false;
         }
-        self.open_world_map();
+        self.open_world_map_with_music();
         true
     }
     pub(crate) fn town_click(&mut self, point: [i32; 2]) -> bool {
@@ -404,7 +477,7 @@ impl MapPreview {
         };
         if inside(CLOSE_BUTTON, point) {
             self.press();
-            self.open_world_map();
+            self.open_world_map_with_music();
             return true;
         }
         let Some(button) = town

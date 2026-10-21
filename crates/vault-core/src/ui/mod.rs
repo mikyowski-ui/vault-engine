@@ -16,6 +16,52 @@ use vault_formats::Palette;
 
 /// One modal UI frame lasts at least `trunc(1000 / 24)` milliseconds.
 pub const FRAME_MS: u64 = 1000 / 24;
+
+/// A held button's repeat (SPEC-014 §3.9 SPECIAL plus and minus from the
+/// 20th frame, §3.10 the age arrows from the 15th, §3.14 the save/load
+/// arrows after 13 idle frames): the press steps once at once; after the
+/// idle frames of `FRAME_MS` the steps come at 5 per second, rising by 1
+/// per step to 24 per second, each step waiting `trunc(1000 / rate)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoldRepeat {
+    next: u64,
+    steps: u32,
+}
+impl HoldRepeat {
+    /// A button pressed at `pressed_ms`, repeating after `idle_frames`.
+    pub fn new(pressed_ms: u64, idle_frames: u32) -> Self {
+        Self {
+            next: pressed_ms + u64::from(idle_frames) * FRAME_MS,
+            steps: 0,
+        }
+    }
+    /// Whether a repeated step is due at `now`; a due step schedules the
+    /// next one. At most one step per poll, as one per loop pass.
+    pub fn poll(&mut self, now: u64) -> bool {
+        if now < self.next {
+            return false;
+        }
+        // The step happens now, then waits for the rate's delay.
+        self.next = now + editor::repeat_delay(self.steps);
+        self.steps += 1;
+        true
+    }
+}
+
+/// SPEC-014 §3.17 the grey lookup table the pause window converts the view
+/// through. The specification names the table but not its rule; this
+/// provisional table maps each color to the palette entry for the grey of
+/// its mean five-bit level (index 0 stays 0).
+pub fn grey_table(palette: &Palette) -> [u8; 256] {
+    std::array::from_fn(|index| {
+        if index == 0 {
+            return 0;
+        }
+        let [r, g, b] = palette.rgb6(index as u8);
+        let level = ((u16::from(r) + u16::from(g) + u16::from(b)) / 3 / 2) as u8;
+        palette.lookup_rgb5([level; 3]).unwrap_or(index as u8)
+    })
+}
 /// Red-button press and release sounds.
 pub const BUTTON_PRESS: &str = "ib1p1xx1";
 pub const BUTTON_RELEASE: &str = "ib1lu1x1";

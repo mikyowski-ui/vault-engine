@@ -139,12 +139,11 @@ impl ArtCatalog {
         for (category, directory) in ART_DIRECTORIES.iter().enumerate() {
             let path = format!("art/{directory}/{directory}.lst");
             if vfs.files().any(|file| file.as_str() == path) {
+                // Bounded before reading: an oversized stray list is
+                // rejected from its size, not read into memory first.
                 let bytes = vfs
-                    .read(&path)
+                    .read_bounded(&path, MAX_ASSET_BYTES)
                     .map_err(|error| ParseError::new("LST", 0, error.to_string()))?;
-                if bytes.len() > MAX_ASSET_BYTES {
-                    return Err(ParseError::new("LST", 0, "asset exceeds 64 MiB limit"));
-                }
                 catalog.insert(category as u8, LstTable::parse(&bytes, LstKind::Art)?);
             }
         }

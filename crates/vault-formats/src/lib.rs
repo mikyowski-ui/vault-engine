@@ -55,8 +55,11 @@ pub fn validate_asset(path: &VfsPath, bytes: &[u8]) -> Option<Result<(), ParseEr
         "fon" => Font::parse_fon(bytes).map(|_| ()),
         "aaf" => Font::parse_aaf(bytes).map(|_| ()),
         "lst" => LstTable::parse(bytes, LstKind::for_path(path)).map(|_| ()),
-        "acm" => acm::decode(bytes).map(|_| ()),
-        "msg" => MsgCatalog::parse(bytes).map(|_| ()),
+        // A decode that stopped at a bad block, or a message load that
+        // stopped at a bad record, is a validation failure even though the
+        // runtime keeps the earlier samples/records.
+        "acm" => acm::decode(bytes).and_then(|decoded| decoded.failure.map_or(Ok(()), Err)),
+        "msg" => MsgCatalog::parse_strict(bytes).map(|_| ()),
         "pro" => Prototype::parse(bytes).map(|_| ()),
         "gcd" => GcdFile::parse(bytes).map(|_| ()),
         "rix" => rix::Splash::parse(bytes).map(|_| ()),

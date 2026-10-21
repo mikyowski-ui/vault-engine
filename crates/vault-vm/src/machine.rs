@@ -303,9 +303,15 @@ impl Vm {
         }
         self.return_address()
     }
+    /// SPEC-004 §3.3 `0x800E`/`0x800F`: unblock the parent and drop the
+    /// link. A parent the host no longer has cannot be blocked on this
+    /// program, so the link is simply dropped; that is not a fault.
     fn detach(&mut self, host: &mut impl VmHost, spawn_only: bool) -> Result<(), VmError> {
         if let Some(parent) = self.parent {
-            let caller = host.program_mut(parent)?;
+            let Ok(caller) = host.program_mut(parent) else {
+                self.parent = None;
+                return Ok(());
+            };
             if !spawn_only || caller.status.contains(VmStatus::SPAWN_BLOCKED) {
                 caller.status.0 &= !(VmStatus::ATTACHED | VmStatus::SPAWN_BLOCKED);
                 caller.child = None;
@@ -332,37 +338,41 @@ impl Vm {
             }
             0x8005 => {
                 let index = self.index(false)?;
-                let procedure = self.program.procedures[index].clone();
-                if procedure.flags & program::IMPORT != 0 {
+                // Only the scalar metadata is needed; the record's name is
+                // borrowed for an import rather than cloned on every call.
+                let procedure = &self.program.procedures[index];
+                let (flags, body) = (procedure.flags, procedure.body);
+                if flags & program::IMPORT != 0 {
                     host.import_procedure(&procedure.name)?;
                     return Err(VmError::ImportedAbi);
                 }
-                if procedure.flags & program::CRITICAL != 0 {
+                if flags & program::CRITICAL != 0 {
                     self.status.0 |= VmStatus::CRITICAL;
                 }
-                self.jump(procedure.body)?;
+                self.jump(body)?;
             }
             0x8006 | 0x8007 => {
                 let index = self.index(false)?;
                 let value = self.value_stack.pop()?.payload;
-                let old = self.program.procedures[index].clone();
+                let old = &self.program.procedures[index];
+                let (flags, deadline, condition) = (old.flags, old.deadline, old.condition);
                 if word == 0x8006 {
                     self.program.schedule(
                         index,
-                        old.flags | program::TIMED,
+                        flags | program::TIMED,
                         host.now_ms().wrapping_add(value.wrapping_mul(1000)),
-                        old.condition,
+                        condition,
                     );
                 } else {
-                    if value as usize != self.code().len() && !self.address_valid(value) {
+                    // SPEC-004 §3.8 safe rule: a condition stream must start
+                    // at a complete instruction, so an address that is not an
+                    // instruction boundary (the code end included) is
+                    // rejected here rather than when the condition first runs.
+                    if !self.address_valid(value) {
                         return Err(VmError::Address(value));
                     }
-                    self.program.schedule(
-                        index,
-                        old.flags | program::CONDITIONAL,
-                        old.deadline,
-                        value,
-                    );
+                    self.program
+                        .schedule(index, flags | program::CONDITIONAL, deadline, value);
                 }
             }
             0x8008..=0x800b => {
@@ -715,28 +725,38 @@ impl Vm {
         self.status.0 &= VmStatus::CRITICAL;
         self.jump(body)
     }
-    /// Fires at most one procedure per poll. Conditions execute with the real host
-    /// and can mutate globals/exports; they have no purity privilege.
+    /// Fires at most one procedure per poll: firing prepares the call on
+    /// this VM (its program counter now points at the procedure body), so a
+    /// second candidate would clobber it. Later candidates fire on later
+    /// polls, in procedure order. Conditions execute with the real host and
+    /// can mutate globals/exports; they have no purity privilege.
+    ///
+    /// Any failure, in a condition or in preparing the fired call, faults
+    /// the VM (ended/error with `last_error`), so a scheduled procedure
+    /// never silently disappears: SPEC-004 §3.8 safe rule.
     pub fn poll_scheduled(
         &mut self,
         host: &mut impl VmHost,
         condition_budget: u32,
     ) -> Result<Option<usize>, VmError> {
         for index in 0..self.program.procedures.len() {
-            let procedure = self.program.procedures[index].clone();
-            let fire = if procedure.flags & program::CONDITIONAL != 0 {
-                match self.condition(host, procedure.condition, condition_budget) {
+            let procedure = &self.program.procedures[index];
+            let (flags, deadline, condition) =
+                (procedure.flags, procedure.deadline, procedure.condition);
+            let fire = if flags & program::CONDITIONAL != 0 {
+                match self.condition(host, condition, condition_budget) {
                     Ok(result) => result,
                     Err(error) => return self.fault(error),
                 }
             } else {
-                procedure.flags & program::TIMED != 0 && procedure.deadline < host.now_ms()
+                flags & program::TIMED != 0 && deadline < host.now_ms()
             };
             if fire {
-                self.program
-                    .schedule(index, 0, procedure.deadline, procedure.condition);
-                self.prepare_host_call(index, false)?;
-                if procedure.flags & program::CRITICAL != 0 {
+                self.program.schedule(index, 0, deadline, condition);
+                if let Err(error) = self.prepare_host_call(index, false) {
+                    return self.fault(error);
+                }
+                if flags & program::CRITICAL != 0 {
                     self.status.0 |= VmStatus::CRITICAL;
                 }
                 return Ok(Some(index));

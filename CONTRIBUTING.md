@@ -55,16 +55,23 @@ Every pull request must pass:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
 
-`cargo xtask check` runs all three. CI also builds a Windows release and runs
-the `cargo audit` and `cargo deny` dependency checks. A new dependency must
-pass both and use a license allowed by `deny.toml`.
+`cargo xtask check` runs all three. `--locked` makes Cargo fail instead of
+changing `Cargo.lock`; commit lockfile changes deliberately. CI runs the same
+gates on Linux, checks the workspace on the minimum supported Rust version
+(`rust-version` in `Cargo.toml`, 1.88), builds and tests on Windows and macOS,
+and runs the `cargo audit` and `cargo deny` dependency checks over both
+`Cargo.lock` and `fuzz/Cargo.lock`. A new dependency must pass both and use a
+license allowed by `deny.toml`.
 
-Parser changes should keep the fuzz targets in `fuzz/` building
-(`cargo +nightly fuzz build`). Add a target for each new binary parser.
+Every binary parser has a fuzz target in `fuzz/` (see `fuzz/README.md`). Add a
+target for each new binary parser, and keep the targets building: CI checks
+them on every pull request (`cargo check --manifest-path fuzz/Cargo.toml --bins
+--locked`, which works on stable), and a scheduled nightly workflow builds them
+with `cargo +nightly fuzz build` and runs each briefly.
 
 ## Pull request checklist
 

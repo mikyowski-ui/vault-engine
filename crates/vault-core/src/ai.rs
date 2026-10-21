@@ -486,13 +486,11 @@ pub fn select_location(
 }
 
 /// §3.8 flee candidates: for N from AP down to 1, directions D, D+1, D+5.
-pub fn flee_candidates(direction: u8, ap: i32) -> Vec<(i32, u8)> {
-    (1..=ap.max(0))
-        .rev()
-        .flat_map(|steps| {
-            [direction % 6, (direction + 1) % 6, (direction + 5) % 6].map(|d| (steps, d))
-        })
-        .collect()
+/// Lazily enumerated: a crafted AP word is not allocated for.
+pub fn flee_candidates(direction: u8, ap: i32) -> impl Iterator<Item = (i32, u8)> {
+    (1..=ap.max(0)).rev().flat_map(move |steps| {
+        [direction % 6, (direction + 1) % 6, (direction + 5) % 6].map(|d| (steps, d))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

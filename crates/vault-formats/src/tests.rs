@@ -420,6 +420,9 @@ fn frm_rejects_unsafe_offsets_sizes_counts_and_truncation_but_retains_signed_tim
         (parsed.version, parsed.effective_fps(), parsed.action_frame),
         (123, -1, -2)
     );
+    // SPEC-001 §3.4: the signed interval is `1000 / -1`; the unsigned
+    // accessor has no positive value to offer.
+    assert_eq!(parsed.frame_interval_signed_ms(), -1000);
     assert_eq!(parsed.frame_interval_ms(), None);
 }
 
@@ -818,79 +821,88 @@ fn spec002_msg_exact_bytes_and_acceptance_boundaries() {
 }
 
 #[test]
-fn compatible_messages_trim_ids_skip_corrupt_records_and_recover_without_shifting_fields() {
+fn spec002_runtime_loading_stops_at_the_first_malformed_record() {
+    // SPEC-002 §3.5: IDs are not trimmed and there is no recovery. The
+    // first record with a bad ID ends the load; the records completed
+    // before it remain, and the failure is reported with its byte offset.
     let fixture = include_str!("../../../tests/fixtures/formats/messages-compatible.msg");
     for bytes in [
         fixture.as_bytes().to_vec(),
         fixture.replace('\n', "\r\n").into_bytes(),
     ] {
         let catalog = MsgCatalog::parse(&bytes).unwrap();
-        assert_eq!(catalog.warning_count(), 9);
-        assert_eq!(catalog.warnings().len(), 9);
-        assert!(
-            catalog
-                .warnings()
-                .iter()
-                .all(|warning| warning.offset < bytes.len())
+        assert_eq!(catalog.entries().keys().copied().collect::<Vec<_>>(), [0]);
+        assert_eq!(catalog.get(0).unwrap().text, b"Zero stays");
+        let failure = catalog.failure().unwrap();
+        let padded = bytes.windows(7).position(|w| w == b"{ 100 }").unwrap();
+        assert_eq!(
+            (failure.offset, failure.message.as_str()),
+            (padded, "invalid or empty decimal message ID")
         );
         assert_eq!(
-            catalog.entries().keys().copied().collect::<Vec<_>>(),
-            [
-                -7, 0, 8, 100, 101, 102, 103, 105, 106, 107, 108, 109, 110, 112, 114, 115
-            ]
+            (catalog.warning_count(), catalog.warnings()),
+            (1, &[failure.clone()][..])
         );
-        for (id, text) in [
-            (0, "Zero stays"),
-            (-7, "Negative"),
-            (8, "Positive"),
-            (100, "Replacement"),
-            (101, "Trailing"),
-            (102, "After empty"),
-            (103, "After annotation"),
-            (105, "After broken ID"),
-            (106, ""),
-            (107, "After extra field"),
-            (108, "voice"),
-            (109, "After extra field"),
-            (110, "After unmatched"),
-            (112, "After missing text"),
-            (114, "After unclosed"),
-            (115, "After overflow"),
-        ] {
-            assert_eq!(catalog.get(id).unwrap().text, text.as_bytes(), "ID {id}");
-        }
-        assert_eq!(catalog.get(-7).unwrap().sound, b"tone");
-        assert!(MsgCatalog::parse_strict(&bytes).is_err());
-        validate_asset(&VfsPath::new("text/dialog/synthetic.msg").unwrap(), &bytes)
-            .unwrap()
-            .unwrap();
+        // The strict reader surfaces the same failure as its error, and
+        // asset validation reports the file as malformed.
+        assert_eq!(MsgCatalog::parse_strict(&bytes).unwrap_err(), *failure);
+        assert!(
+            validate_asset(&VfsPath::new("text/dialog/synthetic.msg").unwrap(), &bytes)
+                .unwrap()
+                .is_err()
+        );
     }
+    // Whitespace inside an ID makes the very first record fail: no records.
     let catalog =
         MsgCatalog::parse(b"{ \t100 \t}{}{Padded}\n{1}\n{42}\n{Numeric sound}\n{2}{}{End}")
             .unwrap();
-    assert_eq!(catalog.get(100).unwrap().text, b"Padded");
+    assert!(catalog.entries().is_empty());
+    assert_eq!(catalog.failure().unwrap().offset, 0);
+    // Fields need not share a line (§3.4): a numeric field on its own line
+    // is the sound field of the record whose ID precedes it.
+    let catalog = MsgCatalog::parse(b"{1}\n{42}\n{Numeric sound}\n{2}{}{End}").unwrap();
+    assert!(catalog.failure().is_none());
     assert_eq!(catalog.get(1).unwrap().sound, b"42");
+    assert_eq!(catalog.get(1).unwrap().text, b"Numeric sound");
     assert_eq!(catalog.get(2).unwrap().text, b"End");
-    assert_eq!(catalog.warning_count(), 0);
 }
 
 #[test]
-fn compatible_message_recovery_keeps_resource_and_diagnostic_buffers_bounded() {
+fn spec002_load_failures_keep_earlier_records_and_resource_limits_hold() {
+    // §3.5 [May-improve]: an oversized field is a load failure, and the
+    // record after it is never reached.
     let mut oversized = b"{1}{}{".to_vec();
     oversized.extend(std::iter::repeat_n(b'A', 1024));
     oversized.extend_from_slice(b"}\n{2}{}{kept}");
     let catalog = MsgCatalog::parse(&oversized).unwrap();
-    assert!(catalog.get(1).is_none());
-    assert_eq!(catalog.get(2).unwrap().text, b"kept");
-    assert_eq!(catalog.warning_count(), 1);
+    assert!(catalog.entries().is_empty());
+    assert!(catalog.failure().unwrap().message.contains("1023"));
     assert!(MsgCatalog::parse_strict(&oversized).is_err());
-
+    // An empty ID fails the first record of a long file: one failure, no
+    // records, however many records follow.
     let malformed = b"{}{}{ignored}\n{1}{}{kept}\n".repeat(256);
     let catalog = MsgCatalog::parse(&malformed).unwrap();
-    assert_eq!(catalog.warning_count(), 256);
-    assert_eq!(catalog.warnings().len(), 128);
-    assert_eq!(catalog.entries().len(), 1);
-    assert_eq!(catalog.get(1).unwrap().text, b"kept");
+    assert_eq!(
+        (
+            catalog.entries().len(),
+            catalog.warning_count(),
+            catalog.warnings().len()
+        ),
+        (0, 1, 1)
+    );
+    // Records before a mid-file failure remain; `load` merges them into an
+    // existing catalog and returns the failure instead of recording it.
+    let mut catalog = MsgCatalog::parse(b"{1}{}{one}").unwrap();
+    assert!(
+        catalog
+            .load(b"{2}{}{two}{3}{}{three}{}{}{}", TextMode::Archive)
+            .is_err()
+    );
+    assert_eq!(
+        catalog.entries().keys().copied().collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert!(catalog.failure().is_none());
 }
 
 #[test]
@@ -1047,5 +1059,122 @@ fn spec002_font_startup_search_defaults_and_numbered_selection() {
             underline: true,
             monospaced: false
         }
+    );
+}
+
+/// The local game corpus for `#[ignore]` tests: `$VAULT_CORPUS`, else the
+/// `local-corpus` directory beside the repository. `None` (with a note on
+/// stderr) skips the test cleanly where no corpus is present.
+pub(crate) fn corpus_dir() -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("VAULT_CORPUS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-corpus")
+        });
+    if dir.is_dir() {
+        Some(dir)
+    } else {
+        eprintln!("skipping: no local corpus at {}", dir.display());
+        None
+    }
+}
+
+/// Every corpus `.msg` file, sorted, as `(relative path, bytes)`.
+fn corpus_messages(corpus: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let root = corpus.join("fallout1-unpacked/text");
+    let mut files = Vec::new();
+    for language in std::fs::read_dir(&root).unwrap().flatten() {
+        for subdirectory in ["dialog", "game"] {
+            let Ok(entries) = std::fs::read_dir(language.path().join(subdirectory)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("msg"))
+                {
+                    let relative = path.strip_prefix(&root).unwrap().display().to_string();
+                    files.push((relative, std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// SPEC-002 §3.5 over the real corpus: loading ends at the first malformed
+/// record and the earlier records remain. Run with `--ignored --nocapture`
+/// to see which files the reference never loads completely.
+#[test]
+#[ignore = "needs the local corpus"]
+fn corpus_every_msg_loads_per_spec002() {
+    let Some(corpus) = corpus_dir() else {
+        return;
+    };
+    let files = corpus_messages(&corpus);
+    assert!(!files.is_empty());
+    // The reference itself never loads these six files completely: each
+    // has a record whose ID field is not decimal (an indented ID).
+    const INCOMPLETE: [&str; 6] = [
+        "english/dialog/obj_dude.msg",
+        "french/dialog/obj_dude.msg",
+        "spanish/dialog/darl.msg",
+        "spanish/dialog/morph.msg",
+        "spanish/dialog/nicole.msg",
+        "spanish/dialog/obj_dude.msg",
+    ];
+    let mut failed = Vec::new();
+    for (name, bytes) in &files {
+        let catalog = MsgCatalog::parse(bytes).unwrap();
+        if let Some(failure) = catalog.failure() {
+            failed.push(format!(
+                "{name}: {} records loaded before {failure}",
+                catalog.entries().len()
+            ));
+            assert!(INCOMPLETE.contains(&name.as_str()), "{name}: {failure}");
+        }
+    }
+    eprintln!(
+        "{} corpus .msg files, {} with failures:",
+        files.len(),
+        failed.len()
+    );
+    for line in &failed {
+        eprintln!("  {line}");
+    }
+}
+
+#[test]
+fn lst_defective_lines_keep_their_positions_without_names() {
+    // SPEC-001 §3.6 safe rule: a line with an embedded NUL has no
+    // dependable name, so it keeps its position without one (and without
+    // metadata) while the lines after it still load.
+    let art = LstTable::parse(b"first.frm\nbad\0name.frm,3\nthird.frm,2\n", LstKind::Art).unwrap();
+    assert_eq!(art.entries().len(), 3);
+    assert_eq!(
+        (&art.entries()[1].name, art.entries()[1].alias),
+        (&None, None)
+    );
+    assert_eq!(art.entries()[2].name.as_deref(), Some(&b"third.frm"[..]));
+    assert_eq!(art.entries()[2].alias, Some(2));
+    assert_eq!(art.diagnostics().len(), 1);
+    assert!(art.diagnostics()[0].contains("embedded NUL"));
+    // Overflowing decimal metadata is withheld for its own line only.
+    let art = LstTable::parse(b"a,99999999999\nb,1\n", LstKind::Art).unwrap();
+    assert_eq!(
+        (art.entries()[0].alias, art.entries()[1].alias),
+        (None, Some(1))
+    );
+    assert_eq!(art.diagnostics().len(), 1);
+    let script = LstTable::parse(b"x.int # local_vars=99999999999\n", LstKind::Script).unwrap();
+    assert_eq!(script.entries()[0].local_vars, None);
+    assert_eq!(script.entries()[0].name.as_deref(), Some(&b"x.int"[..]));
+    assert!(
+        LstTable::parse(b"a\nb\n", LstKind::Art)
+            .unwrap()
+            .diagnostics()
+            .is_empty()
     );
 }

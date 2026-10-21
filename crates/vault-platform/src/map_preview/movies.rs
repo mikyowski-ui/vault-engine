@@ -39,6 +39,7 @@ impl MapPreview {
     }
     /// Play the next queued movie that opens, from the current screen.
     fn start_next_movie(&mut self) {
+        self.sync_volumes();
         while let Some(request) = self.movies.pop_front() {
             let style = request.subtitles.as_ref().and_then(|_| {
                 SubtitleStyle::load(
@@ -49,6 +50,7 @@ impl MapPreview {
             match MoviePlayer::load(&*self.host.assets.vfs, request, style) {
                 Ok(mut player) => {
                     player.audio = self.audio.clone();
+                    player.music_volume = self.volumes.music;
                     let resume = std::mem::replace(&mut self.screen, Screen::Map);
                     self.screen = Screen::Movie(Box::new(MovieScreen {
                         player,
@@ -76,7 +78,7 @@ impl MapPreview {
         let MovieScreen { player, resume } = *screen;
         self.fades.set_black();
         if player.request.flags & flags::FADE_AFTER != 0 {
-            self.fades.push(false, 0, false);
+            self.fades.push_game(false);
         } else {
             tracing::debug!(movie = %player.request.path, "movie left the palette black");
         }
@@ -84,7 +86,7 @@ impl MapPreview {
         self.start_next_movie();
         if self.startup_fade && !matches!(self.screen, Screen::Movie(_)) {
             self.startup_fade = false;
-            self.fades.push(false, 0, false);
+            self.fades.push_game(false);
         }
     }
     pub(crate) fn movie_active(&self) -> bool {
@@ -128,6 +130,15 @@ impl MapPreview {
         }
         true
     }
+    /// SPEC-012 §3.12: during a movie every mouse button counts, wherever
+    /// it is pressed (the letterbox too).
+    pub(crate) fn movie_button(&mut self, pressed: bool) -> bool {
+        if pressed {
+            self.movie_press()
+        } else {
+            self.movie_release()
+        }
+    }
     pub(crate) fn movie_image(&self) -> Option<IndexedImage> {
         match &self.screen {
             Screen::Movie(screen) => Some(screen.player.image()),
@@ -138,7 +149,7 @@ impl MapPreview {
     /// A running fade, or black left by a fade or movie, replaces it too.
     pub fn display_override(&self) -> Option<[[u8; 4]; 256]> {
         match &self.screen {
-            Screen::Movie(screen) => Some(screen.player.palette()),
+            Screen::Movie(screen) => Some(screen.player.palette(self.preferences.brightness)),
             Screen::Help(_) => self.help_display(self.preferences.brightness),
             _ => self
                 .fades

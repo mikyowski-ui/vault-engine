@@ -1,7 +1,8 @@
 //! SPEC-014 §3.13 modal dialog boxes over the current screen: Done boxes
 //! (the save/load errors at (169, 116), the Pip-Boy refusal in combat at
-//! (192, 116), the automap's motion-sensor refusals at (165, 140)) and the
-//! automap's Yes/No quit confirmation at (169, 117).
+//! (192, 116), the automap's motion-sensor refusals at (165, 140)), the
+//! save screen's Yes/No overwrite question at (169, 131), and the Yes/No
+//! quit confirmation at (169, 117) over the windows that offer it.
 //!
 //! Every box shown here is large, `lgdialog.frm` 302 by 127: the save/load
 //! boxes request it, a Yes/No box always is, and the other titles are wider
@@ -23,6 +24,8 @@ pub(crate) struct Dialog {
     /// The OK (Done) or Yes answer closes the screen and requests the
     /// return to the main menu (a failed load, a confirmed quit).
     quits: bool,
+    /// Yes continues the save over an occupied slot (§3.15 step 1).
+    overwrite: bool,
 }
 impl Dialog {
     /// A Done box with a title, an optional body, in `key`.
@@ -34,6 +37,16 @@ impl Dialog {
             key,
             yes_no: false,
             quits: false,
+            overwrite: false,
+        }
+    }
+    /// §3.15 the save screen's overwrite question: a large Yes/No box with
+    /// the title only.
+    pub fn overwrite(origin: [i32; 2], title: Vec<u8>, key: ColorKey) -> Self {
+        Self {
+            yes_no: true,
+            overwrite: true,
+            ..Self::done(origin, title, Vec::new(), key)
         }
     }
     /// A Yes/No box whose Yes requests the return to the main menu.
@@ -70,16 +83,45 @@ impl MapPreview {
     pub(crate) fn show_dialog(&mut self, dialog: Dialog) {
         self.dialog = Some(dialog);
     }
+    /// §3.17 the quit confirmation over the current window: a large Yes/No
+    /// box at (169, 117) with `misc.msg` 0 in key 32328.
+    pub(crate) fn confirm_quit(&mut self) {
+        let title = self.message("misc.msg", 0);
+        self.show_dialog(Dialog::quit_confirmation(
+            [169, 117],
+            title,
+            ColorKey::ERROR,
+        ));
+    }
     /// Close the box with the OK/Yes (`true`) or No/cancel answer. A Done
     /// box's procedure goes on whichever way it is closed.
     fn answer_dialog(&mut self, yes: bool) {
         let Some(dialog) = self.dialog.take() else {
             return;
         };
+        if dialog.overwrite {
+            if yes {
+                self.overwrite_accepted();
+            }
+            return;
+        }
         if dialog.quits && (yes || !dialog.yes_no) {
-            self.screen = Screen::Map;
+            self.leave_for_quit();
             self.quit_requested = true;
         }
+    }
+    /// A quit closes the window in front the way its own exit does: the
+    /// loot window restores the player's equipment, preferences act as
+    /// Cancel (§3.18), the inventory gives the player the figure's art, the
+    /// save/load screen closes as cancelled; then the map is in front.
+    fn leave_for_quit(&mut self) {
+        match &self.screen {
+            Screen::Loot(_) => self.close_loot_screen(),
+            Screen::Options(_) => self.close_preferences(false),
+            Screen::Inventory(_) => self.close_inventory(),
+            _ => {}
+        }
+        self.screen = Screen::Map;
     }
     pub(crate) fn draw_dialog(&self, image: &mut IndexedImage) {
         let Some(dialog) = &self.dialog else {

@@ -4,7 +4,7 @@ use vault_formats::{
     HexGrid, MapFile,
     frm::FrmFrame,
     geometry::GeometryError,
-    map::MapObject,
+    map::{MapObject, MapObjects},
     pro::{BasicFlags, Category},
 };
 
@@ -67,24 +67,57 @@ impl MapView {
         }
     }
 }
-/// The squares in drawing order, by corner row, then column, then index.
-/// A corner is the grid origin plus a fixed offset per square, so the order
-/// is the same for every view and is computed once.
-fn square_order() -> &'static [i32] {
-    static ORDER: OnceLock<Vec<i32>> = OnceLock::new();
+/// The squares in drawing order, by corner row, then column, then index,
+/// each with its floor corner's offset from the grid origin. A corner is the
+/// grid origin plus that fixed offset, so the order and the offsets are the
+/// same for every view and are computed once (P-02: a frame only adds its
+/// origin instead of recomputing 10000 corners).
+fn square_order() -> &'static [(i32, [i64; 2])] {
+    static ORDER: OnceLock<Vec<(i32, [i64; 2])>> = OnceLock::new();
     ORDER.get_or_init(|| {
-        let grid = HexGrid::default();
-        let mut squares: Vec<i32> = (0..10000).collect();
-        squares.sort_by_key(|index| {
-            let [x, y] = grid.square_corner(*index, false).expect("square in range");
-            (y, x, *index)
-        });
+        let grid = HexGrid { origin: [0, 0] };
+        let mut squares: Vec<(i32, [i64; 2])> = (0..10000)
+            .map(|index| {
+                let corner = grid.square_corner(index, false).expect("square in range");
+                (index, corner)
+            })
+            .collect();
+        squares.sort_by_key(|(index, [x, y])| (*y, *x, *index));
         squares
     })
+}
+/// The floor corners of every square by index, offset from the grid
+/// origin (the roof corner is 96 pixels higher).
+fn square_offsets() -> &'static [[i64; 2]] {
+    static OFFSETS: OnceLock<Vec<[i64; 2]>> = OnceLock::new();
+    OFFSETS.get_or_init(|| {
+        let mut offsets = vec![[0; 2]; 10000];
+        for (index, offset) in square_order() {
+            offsets[*index as usize] = *offset;
+        }
+        offsets
+    })
+}
+/// `origin + offset`; the origin is within the i32 range (checked by the
+/// callers) and the offsets are small, so the sum cannot overflow.
+fn corner(origin: [i64; 2], offset: [i64; 2]) -> [i64; 2] {
+    [origin[0] + offset[0], origin[1] + offset[1]]
 }
 
 pub fn render_map(
     map: &MapFile,
+    view: MapView,
+    art: &impl MapArt,
+) -> Result<IndexedImage, MapRenderError> {
+    render_map_with(map, &map.objects, view, art)
+}
+
+/// [`render_map`] drawing `objects` over `map`'s squares in place of the
+/// map's own object table (P-02: a live world passes its current objects
+/// without cloning the map file).
+pub fn render_map_with(
+    map: &MapFile,
+    objects: &MapObjects,
     view: MapView,
     art: &impl MapArt,
 ) -> Result<IndexedImage, MapRenderError> {
@@ -100,21 +133,12 @@ pub fn render_map(
         return Err(GeometryError::ProjectionOverflow.into());
     }
     let mut image = IndexedImage::new(view.width, view.height)?;
-    let squares: Vec<_> = square_order()
-        .iter()
-        .map(|index| {
-            (
-                view.grid
-                    .square_corner(*index, false)
-                    .expect("square in range"),
-                *index,
-            )
-        })
-        .collect();
+    let origin = view.grid.origin;
     // A square whose corner lies past the right or bottom edge draws nothing.
     let beyond = |[x, y]: [i64; 2]| x >= i64::from(view.width) || y >= i64::from(view.height);
-    for (corner, index) in &squares {
-        if beyond(*corner) {
+    for (index, offset) in square_order() {
+        let corner = corner(origin, *offset);
+        if beyond(corner) {
             continue;
         }
         let tile = map
@@ -125,11 +149,12 @@ pub fn render_map(
         if !tile.floor_hidden()
             && let Some((frame, _)) = art.frame(Category::Tile, u32::from(tile.floor()), 0, 0)
         {
-            image.blit(frame, *corner);
+            image.blit(frame, corner);
         }
     }
+    let table = objects;
     let mut objects = Vec::new();
-    for object in &map.objects.elevations[view.elevation as usize] {
+    for object in &table.elevations[view.elevation as usize] {
         if object.flags.contains(BasicFlags::HIDDEN) {
             continue;
         }
@@ -158,12 +183,13 @@ pub fn render_map(
         image.blit(frame, origin);
     }
     if view.roofs {
-        for (corner, index) in squares {
+        for (index, offset) in square_order() {
+            let corner = corner(origin, *offset);
             if beyond([corner[0], corner[1] - 96]) {
                 continue;
             }
             let tile = map
-                .tile(view.elevation as usize, index as usize)
+                .tile(view.elevation as usize, *index as usize)
                 .expect("validated map grid");
             if tile.roof() != 1
                 && !tile.roof_hidden()
@@ -243,6 +269,18 @@ pub fn pick_objects(
     art: &impl MapArt,
     point: [i32; 2],
 ) -> Option<Vec<u32>> {
+    pick_objects_with(map, &map.objects, view, art, point)
+}
+
+/// [`pick_objects`] over `objects` in place of the map's own object table
+/// (P-02: no map clone per pick).
+pub fn pick_objects_with(
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    point: [i32; 2],
+) -> Option<Vec<u32>> {
     if view.elevation > 2 {
         return None;
     }
@@ -256,19 +294,23 @@ pub fn pick_objects(
             && frame.pixels()[(y * i64::from(frame.width) + x) as usize] != 0
     };
     if view.roofs {
-        for square in 0..10000 {
+        let [ox, oy] = view.grid.origin;
+        for (square, offset) in square_offsets().iter().enumerate() {
             let tile = map.tile(view.elevation as usize, square)?;
             if tile.roof() != 1
                 && !tile.roof_hidden()
                 && let Some((frame, _)) = art.frame(Category::Tile, u32::from(tile.roof()), 0, 0)
-                && sample(frame, view.grid.square_corner(square as i32, true)?)
+                && sample(
+                    frame,
+                    [ox.checked_add(offset[0])?, oy.checked_add(offset[1] - 96)?],
+                )
             {
                 return None;
             }
         }
     }
     let mut hits = Vec::new();
-    for object in &map.objects.elevations[view.elevation as usize] {
+    for object in &objects.elevations[view.elevation as usize] {
         if object.flags.contains(BasicFlags::HIDDEN) {
             continue;
         }

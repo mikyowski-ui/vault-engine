@@ -131,7 +131,7 @@ fn spec013_elevator_window_moves_the_player() {
     preview.image().unwrap();
     assert!(matches!(&preview.screen, Screen::Elevator(screen) if screen.start == 2));
     assert!(preview.step(KeyCode::Digit1));
-    assert!(matches!(preview.screen, Screen::Map));
+    finish_elevator(&mut preview);
     let object = preview.host.world.get(player).unwrap();
     assert_eq!((object.raw.hex, object.raw.elevation), (Some(14104), 0));
     // Escape cancels without moving (the safe rule).
@@ -194,11 +194,16 @@ fn spec014_options_quit_and_preferences() {
     let [ox, oy] = vault_core::ui::options::OPTIONS_ORIGIN;
     assert!(preview.click([ox + 20, oy + 17 + 2 * 37 + 5], false));
     preview.image().unwrap();
+    // G-23: knobs and switches act on the release.
     assert!(preview.click([299 + 11, 338 + 12], false));
+    assert!(preview.hud.cues.is_empty());
+    assert!(preview.release(Some([299 + 11, 338 + 12]), false));
+    // The change plays `ib2p1xx1` now and `ib2lu1x1` 70 ms later.
+    assert_eq!(preview.hud.cues.len(), 1);
     // The game-difficulty label 1 (the current value) still turns the knob
     // downward, so the next center click steps to 0.
-    assert!(preview.click([76 + 20, 71 - 2], false));
-    assert!(preview.click([76 + 23, 71 + 21], false));
+    assert!(preview.tap([76 + 20, 71 - 2]));
+    assert!(preview.tap([76 + 23, 71 + 21]));
     assert!(preview.step(KeyCode::Enter));
     assert_eq!(preview.preferences.subtitles, 1);
     assert_eq!(preview.preferences.game_difficulty, 0);
@@ -440,7 +445,7 @@ fn spec013_set_timer_arms_an_explosive_from_the_inventory() {
     assert!(preview.click(at, true));
     let mut now = 0;
     menu_second_entry(&mut preview, at, &mut now);
-    assert!(matches!(&preview.screen, Screen::Inventory(screen) if screen.timer.is_some()));
+    assert!(matches!(&preview.screen, Screen::Inventory(_)) && preview.hud.timer.is_some());
     preview.image().unwrap();
     assert!(preview.click([140 + 196, 80 + 66], false));
     assert!(preview.step(KeyCode::Enter));
@@ -457,7 +462,35 @@ fn spec013_set_timer_arms_an_explosive_from_the_inventory() {
     assert!(matches!(delay, 0 | 350 | 700), "70 seconds: {delay}");
     // A second use refuses: the timer is already ticking.
     menu_second_entry(&mut preview, at, &mut now);
-    assert!(matches!(&preview.screen, Screen::Inventory(screen) if screen.timer.is_none()));
+    assert!(matches!(&preview.screen, Screen::Inventory(_)) && preview.hud.timer.is_none());
+}
+
+/// G-18 / SPEC-013 §3.21: a chosen level other than the start runs the
+/// travel animation first: the gauge steps every 23, 46 or 69 ms and a
+/// 200 ms pause follows; keys are swallowed meanwhile. Then the player
+/// moves.
+fn finish_elevator(preview: &mut MapPreview) {
+    let Screen::Elevator(screen) = &preview.screen else {
+        panic!("the elevator closed before its travel animation");
+    };
+    assert!(screen.travel.is_some());
+    let mut now = preview.clock;
+    assert!(preview.step(KeyCode::Escape));
+    assert!(matches!(preview.screen, Screen::Elevator(_)));
+    for frame in 0..1000 {
+        now += 16;
+        preview.tick(now).unwrap();
+        if matches!(preview.screen, Screen::Map) {
+            // Three buttons from level 2 to 0: 72 steps of 1/6 cell, 46 ms
+            // each, then the pause.
+            assert!(now >= 200, "{now}");
+            return;
+        }
+        if frame % 16 == 0 {
+            preview.image().unwrap();
+        }
+    }
+    panic!("the elevator travel did not end");
 }
 
 /// A frame pixel on the critter or item at `hex` (sprites stand on the
@@ -544,8 +577,10 @@ fn spec014_arrow_hover_outlines_an_item_until_the_pointer_moves() {
     preview.tick(16).unwrap();
     preview.image().unwrap();
     let point = on_hex(&preview, hex);
-    // The synthetic roofs would hide the item from picking.
-    preview.view.roofs = false;
+    // S-22 / SPEC-014 §3.36: roofs stay drawn. The player stands inside
+    // the synthetic roofed area, whose roof is hidden from the entrance
+    // placement on, so the item under it can be picked.
+    assert!(preview.view.roofs);
     assert_eq!(preview.object_at(point), Some(item));
     let color = vault_core::ui::cursor::ITEM_OUTLINE.resolve(&preview.palette);
     // The pixel just left of the item's 12-by-20 sprite, halfway down.
@@ -1135,6 +1170,8 @@ fn spec013_skill_books_read_from_the_inventory_and_the_item_slot() {
     assert!(preview.host.world.get(book).is_none());
     assert!(skill(&preview, 12) > science);
     assert!(preview.host.world.clock.ticks > clock);
+    // SPEC-014 §3.2: the book's fades block input until they end.
+    preview.finish_fades();
     assert!(preview.step(KeyCode::Escape));
     // From the item slot in combat: 2 AP are spent and the book is kept.
     let book = carry(&mut preview, 76);
@@ -1145,6 +1182,8 @@ fn spec013_skill_books_read_from_the_inventory_and_the_item_slot() {
         .unwrap();
     preview.host.world.active_hand = 0;
     preview.host.world.combat = true;
+    // SPEC-014 §3.27: the player's turn, or the combat lock discards input.
+    preview.host.world.combat_state.player_turn = true;
     preview.host.world.critter_state_mut(player).unwrap().ap = 5;
     let repair = skill(&preview, 13);
     preview.tap([360, 440]);
@@ -1333,6 +1372,8 @@ fn spec007_player_punch_upgrades_to_kick_through_the_crosshair() {
         preview.tick(16).unwrap();
         preview.image().unwrap();
         preview.host.world.combat = true;
+        // SPEC-014 §3.27: the player's turn, or the combat lock discards input.
+        preview.host.world.combat_state.player_turn = true;
         preview.host.world.critter_state_mut(player).unwrap().ap = 8;
         let mut stream = vault_core::ParkMiller::seeded(12345).unwrap();
         while {
@@ -1709,7 +1750,7 @@ fn spec013_elevator_buttons_draw_down_and_report_on_release() {
     // Released over it: level 1 (vault 6/0/14104).
     preview.hover(button);
     assert!(preview.tap(button));
-    assert!(matches!(preview.screen, Screen::Map));
+    finish_elevator(&mut preview);
     let object = preview.host.world.get(player).unwrap();
     assert_eq!((object.raw.hex, object.raw.elevation), (Some(14104), 0));
 }
@@ -2062,4 +2103,979 @@ fn spec005_player_art_follows_the_gender_and_the_inventory_window() {
     assert!(preview.step(KeyCode::KeyI));
     assert!(preview.step(KeyCode::Escape));
     assert_eq!(base(&preview), jumpsuit);
+}
+
+#[test]
+fn g01_g09_game_worlds_keep_escape_and_leave_the_preview_keys_to_debug() {
+    let dir = corpus();
+    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+    let start = |debug: bool| {
+        let mut game =
+            Game::new(vfs.clone(), "english", 1, dir.path().join("saves"), None).unwrap();
+        game.debug_keys = debug;
+        let mut preview = crate::preview::AssetPreview::Game(Box::new(game));
+        // G-01: the game never exits on a key; the standalone tools do.
+        assert!(!preview.escape_exits());
+        assert!(preview.step(KeyCode::KeyN));
+        assert!(preview.step(KeyCode::KeyT));
+        preview.tick(16).unwrap();
+        let crate::preview::AssetPreview::Game(game) = preview else {
+            unreachable!()
+        };
+        game
+    };
+    assert!(crate::preview::AssetPreview::Map(Box::new(world(dir.path()))).escape_exits());
+    let mut game = start(false);
+    let world = game.world().unwrap();
+    world.finish_fades();
+    // A script disabled the interface (SPEC-005 0x8133): Escape opens
+    // nothing, and it is consumed rather than left to quit the program.
+    world.host.world.ui_disabled = true;
+    assert!(world.step(KeyCode::Escape));
+    assert!(matches!(world.screen, Screen::Map));
+    world.host.world.ui_disabled = false;
+    // G-09: the map preview tool's keys do nothing in the game.
+    let (elevation, roofs) = (world.view.elevation, world.view.roofs);
+    for key in [
+        KeyCode::KeyW,
+        KeyCode::PageUp,
+        KeyCode::PageDown,
+        KeyCode::KeyR,
+        KeyCode::KeyL,
+        KeyCode::KeyD,
+        KeyCode::KeyU,
+        KeyCode::KeyG,
+        KeyCode::KeyT,
+    ] {
+        assert!(!world.step(key), "{key:?}");
+    }
+    assert!(matches!(world.screen, Screen::Map));
+    assert_eq!((world.view.elevation, world.view.roofs), (elevation, roofs));
+    assert!(!world.title().contains("world map") && !world.title().contains("roofs"));
+    // With --debug they work, but no key turns the roofs off (§3.36).
+    let mut game = start(true);
+    let world = game.world().unwrap();
+    world.finish_fades();
+    assert!(!world.step(KeyCode::KeyR));
+    assert_eq!(world.view.roofs, roofs);
+    assert!(world.step(KeyCode::PageUp));
+    assert_eq!(world.view.elevation, elevation + 1);
+    assert!(world.step(KeyCode::KeyW));
+    assert!(matches!(world.screen, Screen::World(_)));
+}
+
+/// The player beside the synthetic NPC, in a world with a frame drawn;
+/// returns the NPC's hex.
+fn beside_npc(preview: &mut MapPreview) -> i32 {
+    let player = preview.host.world.player;
+    let target = npc(preview);
+    let object = preview.host.world.get(target).unwrap();
+    let (hex, elevation) = (object.raw.hex.unwrap(), object.raw.elevation);
+    let beside = (0..6)
+        .filter_map(|direction| vault_formats::HexGrid::neighbor(hex, direction).ok()?)
+        .find(|tile| !preview.host.world.occupancy(elevation).contains_key(tile))
+        .unwrap();
+    preview
+        .host
+        .world
+        .move_object(player, beside, elevation, false)
+        .unwrap();
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    hex
+}
+
+#[test]
+fn spec014_item_slot_cycles_the_empty_hand_and_aims_the_crosshair_attack() {
+    use vault_core::{critical::hit_mode, ui::bar::WeaponMode};
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let hex = beside_npc(&mut preview);
+    let player = preview.host.world.player;
+    assert!(preview.active_item().is_none(), "bare hands");
+    // §3.23: an empty hand punches, with no secondary mode and nothing to
+    // reload: `n` runs primary, primary aimed, primary.
+    assert_eq!(preview.slot_mode(), WeaponMode::Primary);
+    assert!(preview.step(KeyCode::KeyN));
+    assert_eq!(preview.slot_mode(), WeaponMode::PrimaryAimed);
+    assert!(preview.attack_aimed());
+    assert_eq!(preview.attack_mode(), hit_mode::PUNCH);
+    assert!(preview.step(KeyCode::KeyN));
+    assert_eq!(preview.slot_mode(), WeaponMode::Primary);
+    assert!(preview.step(KeyCode::KeyN));
+    // The aimed punch costs 3 + 1 AP (SPEC-007 §3.4): with 3 AP the
+    // attack is refused before any draw.
+    preview.host.world.combat = true;
+    // SPEC-014 §3.27: the player's turn, or the combat lock discards input.
+    preview.host.world.combat_state.player_turn = true;
+    preview.host.world.critter_state_mut(player).unwrap().ap = 3;
+    preview.hud.mode = Mode::Crosshair;
+    let before = preview.host.world.rng.clone();
+    assert!(preview.tap(on_hex(&preview, hex)));
+    assert!(
+        preview.host.world.rng == before,
+        "refused: {}",
+        preview.status.escape_ascii()
+    );
+    // A right-click on the slot cycles back to the plain punch, which
+    // goes ahead (its kick draw comes first).
+    assert!(preview.click([360, 440], true));
+    assert_eq!(preview.slot_mode(), WeaponMode::Primary);
+    assert!(preview.tap(on_hex(&preview, hex)));
+    assert!(preview.host.world.rng != before, "the attack drew");
+}
+
+#[test]
+fn spec014_item_slot_weapon_modes_labels_and_reload() {
+    use vault_core::ui::bar::WeaponMode;
+    use vault_formats::pro::BasicFlags;
+    let dir = corpus();
+    write_art(
+        dir.path(),
+        &[
+            ("sattkbup.frm", 188, 67, 3),
+            ("single.frm", 20, 10, 5),
+            ("burst.frm", 20, 10, 6),
+            ("reload.frm", 20, 10, 7),
+            ("bullseye.frm", 18, 18, 8),
+        ],
+    );
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    // A rifle: primary single fire (6), secondary burst (7), 4 and 5 AP,
+    // caliber 1, 10 rounds with 5 loaded, no inventory art.
+    let mut weapon = super::fixture::prototype(0, 3);
+    super::fixture::word(&mut weapon, 0, 0x0000_0010);
+    super::fixture::word(&mut weapon, 0x18, 0x76);
+    super::fixture::word(&mut weapon, 0x34, -1);
+    super::fixture::word(&mut weapon, 0x39 + 32, 4);
+    super::fixture::word(&mut weapon, 0x39 + 36, 5);
+    super::fixture::word(&mut weapon, 0x39 + 52, 1);
+    super::fixture::word(&mut weapon, 0x39 + 60, 10);
+    let mut ammo = super::fixture::prototype(0, 4);
+    super::fixture::word(&mut ammo, 0, 0x0000_0011);
+    super::fixture::word(&mut ammo, 0x39, 1);
+    super::fixture::word(&mut ammo, 0x39 + 4, 5);
+    let spawn = |preview: &mut MapPreview, bytes: &[u8], quantity| {
+        let prototype = Arc::new(vault_formats::Prototype::parse(bytes).unwrap());
+        let item = preview.host.world.spawn(prototype, 0, 0).unwrap();
+        preview
+            .host
+            .world
+            .add_item(player, item, quantity, true)
+            .unwrap();
+        item
+    };
+    let gun = spawn(&mut preview, &weapon, 1);
+    spawn(&mut preview, &ammo, 2);
+    preview.host.world.get_mut(gun).unwrap().raw.state = ObjectState::Other {
+        word: 0,
+        detail: vault_formats::map::ObjectDetail::Weapon {
+            rounds: 5,
+            ammo_pid: 0x11,
+        },
+    };
+    preview
+        .host
+        .world
+        .equip_slot(player, gun, BasicFlags::RIGHT_HAND.0)
+        .unwrap();
+    preview.host.world.active_hand = 1;
+    // The label (right edge at slot x 181, y 7) and the bullseye (163, 42)
+    // in the slot at screen (267, 405).
+    let shown = |preview: &mut MapPreview| {
+        preview.image().unwrap();
+        (
+            frame_pixel(preview, [430, 414]),
+            frame_pixel(preview, [435, 452]),
+        )
+    };
+    assert_eq!(shown(&mut preview), (5, 3), "single, not aimed");
+    let mut cycle = Vec::new();
+    for _ in 0..4 {
+        assert!(preview.step(KeyCode::KeyN));
+        cycle.push((preview.slot_mode(), shown(&mut preview)));
+    }
+    // Burst fire cannot aim (SPEC-007 §3.4), so secondary aimed is skipped.
+    assert_eq!(
+        cycle,
+        [
+            (WeaponMode::PrimaryAimed, (5, 8)),
+            (WeaponMode::Secondary, (6, 3)),
+            (WeaponMode::Reload, (7, 3)),
+            (WeaponMode::Primary, (5, 3)),
+        ]
+    );
+    // The hand keeps its object's mode; the other (empty) hand has its own.
+    assert!(preview.step(KeyCode::KeyN));
+    assert!(preview.step(KeyCode::KeyN));
+    assert_eq!(preview.slot_mode(), WeaponMode::Secondary);
+    assert!(preview.step(KeyCode::KeyB));
+    assert_eq!(preview.slot_mode(), WeaponMode::Primary);
+    assert!(preview.step(KeyCode::KeyB));
+    assert_eq!(preview.slot_mode(), WeaponMode::Secondary);
+    assert!(preview.step(KeyCode::KeyN));
+    assert_eq!(preview.slot_mode(), WeaponMode::Reload);
+    // A left-click in reload mode reloads until full; in combat 2 AP are
+    // checked first (1 AP does nothing) and spent once something loaded.
+    // The mode then advances to primary.
+    preview.host.world.combat = true;
+    // SPEC-014 §3.27: the player's turn, or the combat lock discards input.
+    preview.host.world.combat_state.player_turn = true;
+    preview.host.world.critter_state_mut(player).unwrap().ap = 1;
+    preview.tap([360, 440]);
+    assert_eq!(preview.host.world.loaded(gun).0, 5);
+    assert_eq!(preview.slot_mode(), WeaponMode::Reload);
+    preview.host.world.critter_state_mut(player).unwrap().ap = 5;
+    preview.tap([360, 440]);
+    assert_eq!(preview.host.world.loaded(gun).0, 10);
+    assert_eq!(preview.host.world.critter_state(player).unwrap().ap, 3);
+    assert_eq!(preview.slot_mode(), WeaponMode::Primary);
+    // Full, the weapon has no reload mode.
+    for mode in [
+        WeaponMode::PrimaryAimed,
+        WeaponMode::Secondary,
+        WeaponMode::Primary,
+    ] {
+        assert!(preview.step(KeyCode::KeyN));
+        assert_eq!(preview.slot_mode(), mode);
+    }
+    // Another weapon mode sets the crosshair and, out of combat, asks for
+    // combat.
+    preview.host.world.combat = false;
+    preview.tap([360, 440]);
+    assert_eq!(preview.hud.mode, Mode::Crosshair);
+    assert!(preview.host.world.pending_combat.is_some());
+}
+
+#[test]
+fn g03_bar_buttons_do_nothing_while_the_interface_is_disabled() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.image().unwrap();
+    let button = [220, 429];
+    preview.hover(button);
+    preview.host.world.ui_disabled = true;
+    assert!(preview.click(button, false));
+    assert_eq!(preview.held_button(), None);
+    assert!(!preview.release(Some(button), false));
+    assert!(matches!(preview.screen, Screen::Map));
+    // Neither `n` nor the slot's right-click cycles the item mode.
+    assert!(!preview.step(KeyCode::KeyN));
+    assert!(preview.click([360, 440], true));
+    assert_eq!(
+        preview.slot_mode(),
+        vault_core::ui::bar::WeaponMode::Primary
+    );
+    // A button pressed before the interface was disabled sends nothing.
+    preview.host.world.ui_disabled = false;
+    assert!(preview.click(button, false));
+    preview.host.world.ui_disabled = true;
+    preview.release(Some(button), false);
+    assert!(matches!(preview.screen, Screen::Map));
+    preview.host.world.ui_disabled = false;
+    assert!(preview.tap(button));
+    assert!(matches!(preview.screen, Screen::Inventory(_)));
+}
+
+#[test]
+fn spec014_game_fades_hold_the_world_input_and_the_frame() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    let before = preview.image().unwrap();
+    let ticks = preview.host.world.clock.ticks;
+    // A script's `gfade_out; move_to; gfade_in` in one pass: both fades
+    // are requested, then the player moves.
+    for out in [true, false] {
+        preview.host.world.emit(WorldEffect::Fade {
+            out,
+            duration: 0,
+            from_black: false,
+        });
+    }
+    let player = preview.host.world.player;
+    let object = preview.host.world.get(player).unwrap();
+    let (hex, elevation) = (object.raw.hex.unwrap(), object.raw.elevation);
+    preview
+        .host
+        .world
+        .move_object(player, hex + 400, elevation, false)
+        .unwrap();
+    preview.tick(32).unwrap();
+    assert!(preview.fade_blocks());
+    // The frame stays while the screen goes black: the move is hidden.
+    assert_eq!(preview.image().unwrap().pixels(), before.pixels());
+    // Input is swallowed and the world waits.
+    assert!(preview.step(KeyCode::KeyI));
+    assert!(preview.tap([220, 429]));
+    preview.hover([100, 100]);
+    assert!(matches!(preview.screen, Screen::Map));
+    assert_eq!(preview.pointer.at, None);
+    let mut now = 32;
+    while preview.fade_blocks() {
+        now += 16;
+        preview.tick(now).unwrap();
+        assert!(now < 3000, "the fades end");
+    }
+    assert!(now >= 32 + 2 * super::FADE_MS);
+    assert_eq!(preview.host.world.clock.ticks, ticks, "the clock stood");
+    // Afterwards the pointer's move applies, the moved player shows under
+    // the game palette, and the world runs again.
+    assert_eq!(preview.pointer.at, Some([100, 100]));
+    assert_eq!(preview.display_override(), None);
+    assert_ne!(preview.image().unwrap().pixels(), before.pixels());
+    preview.tick(now + 200).unwrap();
+    assert!(preview.host.world.clock.ticks > ticks);
+    // A library fade services background work: it never blocks.
+    preview.host.world.emit(WorldEffect::Fade {
+        out: true,
+        duration: 300,
+        from_black: false,
+    });
+    preview.tick(now + 216).unwrap();
+    assert!(!preview.fade_blocks());
+    assert!(preview.step(KeyCode::KeyI));
+    assert!(matches!(preview.screen, Screen::Inventory(_)));
+}
+
+#[test]
+fn g22_a_window_opened_over_a_held_map_press_drops_it() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let target = npc(&preview);
+    let hex = preview.host.world.get(target).unwrap().raw.hex.unwrap();
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    let at = on_hex(&preview, hex);
+    preview.hud.mode = Mode::Arrow;
+    preview.hover(at);
+    assert!(preview.click(at, false));
+    assert!(preview.pointer.held.is_some());
+    // `i` opens the inventory with the button still down; the release
+    // lands in the inventory.
+    assert!(preview.step(KeyCode::KeyI));
+    assert!(preview.pointer.held.is_none());
+    preview.release(Some(at), false);
+    assert!(preview.step(KeyCode::Escape));
+    assert!(matches!(preview.screen, Screen::Map));
+    // Back on the map no hold pulse opens the action menu.
+    let mut now = preview.clock;
+    for _ in 0..40 {
+        now += 16;
+        preview.tick(now).unwrap();
+    }
+    assert!(preview.pointer.menu.is_none());
+}
+
+/// An item of misc subtype `pid` carried by the player.
+fn carried(preview: &mut MapPreview, pid: i32) -> vault_core::ObjectRef {
+    let player = preview.host.world.player;
+    let mut bytes = super::fixture::prototype(0, 5);
+    super::fixture::word(&mut bytes, 0, pid);
+    let prototype = Arc::new(vault_formats::Prototype::parse(&bytes).unwrap());
+    let item = preview.host.world.spawn(prototype, 0, 0).unwrap();
+    preview.host.world.add_item(player, item, 1, true).unwrap();
+    item
+}
+
+#[test]
+fn g15_a_use_only_explosive_in_the_slot_opens_set_timer() {
+    use vault_formats::pro::BasicFlags;
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let dynamite = carried(&mut preview, vault_core::skills::DYNAMITE as i32);
+    preview
+        .host
+        .world
+        .equip_slot(player, dynamite, BasicFlags::RIGHT_HAND.0)
+        .unwrap();
+    preview.host.world.active_hand = 1;
+    preview.image().unwrap();
+    // SPEC-014 §3.23: a use-only item is used at once (no use crosshair);
+    // in combat it needs and spends 2 AP. SPEC-013 §3.10: the use opens
+    // the Set Timer window over the map.
+    preview.host.world.combat = true;
+    // SPEC-014 §3.27: the player's turn, or the combat lock discards input.
+    preview.host.world.combat_state.player_turn = true;
+    preview.host.world.critter_state_mut(player).unwrap().ap = 5;
+    assert!(preview.tap([360, 440]));
+    assert_eq!(preview.host.world.critter_state(player).unwrap().ap, 3);
+    assert_eq!(preview.hud.mode, Mode::Movement);
+    assert!(preview.hud.timer.is_some());
+    preview.image().unwrap();
+    // Plus makes it 70 seconds (with the red-button sounds); Enter arms.
+    assert!(preview.click([140 + 196, 80 + 66], false));
+    assert!(preview.step(KeyCode::Enter));
+    assert!(preview.hud.timer.is_none());
+    let object = preview.host.world.get(dynamite).unwrap();
+    assert_eq!(object.raw.pid, vault_core::skills::DYNAMITE_ARMED);
+}
+
+#[test]
+fn g17_combat_panel_animates_lights_and_closes() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.image().unwrap();
+    assert_eq!(preview.hud.panel.frame, None);
+    // Entering combat: `iciboxx1`, frames 0-4 one every 200 ms, the bar
+    // blocking meanwhile; then the buttons appear with the red light.
+    preview.host.world.combat = true;
+    preview.host.world.combat_state.player_turn = false;
+    assert!(preview.panel_tick(1000));
+    assert_eq!(preview.hud.panel.frame, Some(0));
+    assert!(preview.bar_blocks());
+    assert!(!preview.hud.panel.buttons());
+    assert!(preview.panel_tick(1200));
+    assert_eq!(preview.hud.panel.frame, Some(1));
+    assert!(preview.panel_tick(1800));
+    assert_eq!(preview.hud.panel.frame, Some(4));
+    assert!(!preview.bar_blocks());
+    assert!(preview.hud.panel.buttons());
+    assert_eq!(preview.hud.panel.light, Some(false));
+    // Disabled (red), End turn takes no press.
+    assert!(preview.click([590 + 5, 379 + 43 + 5], false));
+    assert!(preview.hud.held.is_none());
+    // The player's turn lights it green; then the button presses.
+    preview.host.world.combat_state.player_turn = true;
+    assert!(preview.panel_tick(1900));
+    assert_eq!(preview.hud.panel.light, Some(true));
+    preview.image().unwrap();
+    // The combat end removes the buttons and runs frames 4-0.
+    preview.host.world.combat = false;
+    assert!(preview.panel_tick(2000));
+    assert_eq!(preview.hud.panel.frame, Some(4));
+    assert!(!preview.hud.panel.buttons());
+    assert!(preview.panel_tick(2800));
+    assert_eq!(preview.hud.panel.frame, Some(0));
+    assert!(!preview.bar_blocks());
+    // A load settles the panel without animation.
+    preview.host.world.combat = true;
+    preview.settle_panel();
+    assert!(preview.hud.panel.buttons());
+    assert_eq!(preview.hud.panel.frame, Some(4));
+}
+
+#[test]
+fn g17_crippled_arms_disable_the_slot_and_the_ammo_bar_is_drawn() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    preview.image().unwrap();
+    // The empty hand holds no ammunition: the bar is raw index 14 top to
+    // bottom at (463, 26) in the bar.
+    for y in [26, 60, 95] {
+        assert_eq!(frame_pixel(&preview, [463, 379 + y]), 14);
+    }
+    // Both arms crippled: the empty hand (a weapon) is disabled and its
+    // button takes no press.
+    preview
+        .host
+        .world
+        .critter_state_mut(player)
+        .unwrap()
+        .results
+        .0 |= effect::CRIPPLED_ARMS;
+    assert!(preview.slot_disabled());
+    assert!(preview.tap([360, 440]));
+    assert_eq!(preview.hud.mode, Mode::Movement);
+    assert!(preview.host.world.pending_combat.is_none());
+}
+
+#[test]
+fn g20_take_all_is_shift_a_only() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let npc = npc(&preview);
+    let item = widget(&mut preview, npc);
+    preview.host.world.pending_loot = Some(LootRequest {
+        looter: player,
+        target: npc,
+        steal: false,
+    });
+    preview.image().unwrap();
+    assert!(matches!(preview.screen, Screen::Loot(_)));
+    assert!(!preview.step(KeyCode::KeyA));
+    assert_eq!(preview.host.world.get(item).unwrap().owner, Some(npc));
+    preview.set_modifiers([true, false, false]);
+    assert!(preview.step(KeyCode::KeyA));
+    preview.set_modifiers([false, false, false]);
+    assert_eq!(preview.host.world.get(item).unwrap().owner, Some(player));
+    // Ctrl+Q opens the quit confirmation; Yes closes the window.
+    preview.set_modifiers([false, true, false]);
+    assert!(preview.step(KeyCode::KeyQ));
+    preview.set_modifiers([false, false, false]);
+    assert!(preview.step(KeyCode::KeyY));
+    assert!(matches!(preview.screen, Screen::Map));
+    assert!(preview.quit_requested);
+}
+
+#[test]
+fn g21_overwrite_question_and_description_box_take_the_mouse() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::F4));
+    preview.image().unwrap();
+    // An empty slot: the description box; its Cancel returns to the list.
+    assert!(preview.step(KeyCode::Enter));
+    let description = |preview: &MapPreview| matches!(&preview.screen, Screen::SaveLoad(screen) if screen.description_open());
+    assert!(description(&preview));
+    preview.image().unwrap();
+    assert!(preview.tap([169 + 160 + 2, 116 + 58 + 2]));
+    assert!(!description(&preview));
+    // Again, then Done saves.
+    assert!(preview.step(KeyCode::Enter));
+    preview.set_modifiers([true, false, false]);
+    assert!(preview.step(KeyCode::KeyB));
+    preview.set_modifiers([false, false, false]);
+    assert!(preview.tap([169 + 34 + 2, 116 + 58 + 2]));
+    assert!(matches!(preview.screen, Screen::Map));
+    // The occupied slot asks first: No returns to the list, Yes opens the
+    // description prefilled.
+    assert!(preview.step(KeyCode::F4));
+    assert!(preview.step(KeyCode::Enter));
+    assert!(preview.dialog.is_some());
+    preview.image().unwrap();
+    assert!(preview.tap([169 + 182 + 2, 131 + 102 + 2]));
+    assert!(preview.dialog.is_none() && !description(&preview));
+    assert!(preview.step(KeyCode::Enter));
+    assert!(preview.tap([169 + 50 + 2, 131 + 102 + 2]));
+    assert!(description(&preview));
+    // F10 in the list opens the quit confirmation (after Esc leaves the
+    // description); its Yes closes the screen as cancelled.
+    assert!(preview.step(KeyCode::Escape));
+    assert!(preview.step(KeyCode::F10));
+    assert!(preview.step(KeyCode::KeyY));
+    assert!(matches!(preview.screen, Screen::Map));
+    assert!(preview.quit_requested);
+}
+
+#[test]
+fn g21_a_held_save_list_arrow_repeats_after_13_frames() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::F4));
+    preview.image().unwrap();
+    let arrow = [36, 73];
+    preview.hover(arrow);
+    let start = preview.clock;
+    assert!(preview.click(arrow, false));
+    assert_eq!(preview.slot_session().0.selected, 1);
+    // Other input is discarded while the arrow is held.
+    assert!(preview.step(KeyCode::Escape));
+    assert!(matches!(preview.screen, Screen::SaveLoad(_)));
+    preview.tick(start + 13 * 41 - 1).unwrap();
+    assert_eq!(preview.slot_session().0.selected, 1);
+    preview.tick(start + 13 * 41).unwrap();
+    assert_eq!(preview.slot_session().0.selected, 2);
+    preview.tick(start + 13 * 41 + 200).unwrap();
+    assert_eq!(preview.slot_session().0.selected, 3);
+    // The release ends the repeat.
+    assert!(preview.release(Some(arrow), false));
+    preview.tick(start + 5000).unwrap();
+    assert_eq!(preview.slot_session().0.selected, 3);
+}
+
+#[test]
+fn g24_pause_windows_grey_the_view() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let before = preview.image().unwrap();
+    preview.set_modifiers([false, true, false]);
+    assert!(preview.step(KeyCode::KeyP));
+    preview.set_modifiers([false, false, false]);
+    assert!(matches!(preview.screen, Screen::Options(_)));
+    let paused = preview.image().unwrap();
+    let grey = vault_core::ui::grey_table(&preview.palette);
+    for at in [10 * 640 + 10, 300 * 640 + 600] {
+        assert_eq!(paused.pixels()[at], grey[usize::from(before.pixels()[at])]);
+    }
+    // The brightness keys keep it open; any other key closes it.
+    assert!(preview.step(KeyCode::Equal));
+    assert!(matches!(preview.screen, Screen::Options(_)));
+    assert!(preview.step(KeyCode::Space));
+    assert!(matches!(preview.screen, Screen::Map));
+    // The world map's `p` opens its own pause window.
+    preview.open_world_map();
+    assert!(preview.step(KeyCode::KeyP));
+    assert!(matches!(&preview.screen, Screen::World(world) if world.paused));
+    preview.image().unwrap();
+    assert!(preview.click([300, 300], false));
+    assert!(matches!(&preview.screen, Screen::World(world) if !world.paused));
+}
+
+#[test]
+fn g26_z_opens_the_alarm_clock_and_f12_saves_a_screenshot() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::F12));
+    assert!(dir.path().join("saves/scr00000.ppm").exists());
+    assert!(preview.step(KeyCode::KeyZ));
+    assert!(matches!(
+        &preview.screen,
+        Screen::PipBoy(pipboy) if pipboy.tab == super::pipboy::Tab::Alarm
+    ));
+}
+
+#[test]
+fn g31_diagnostics_never_reach_the_monitor() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.image().unwrap();
+    mark_monitor(&mut preview);
+    preview.status = b"invalid object reference".to_vec();
+    preview.image().unwrap();
+    assert_eq!(monitor_line(&preview), b"mark");
+}
+
+#[test]
+fn g23_preference_controls_act_on_release_and_sliders_drag() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.image().unwrap();
+    assert!(preview.step(KeyCode::Escape));
+    assert!(preview.step(KeyCode::KeyP));
+    preview.image().unwrap();
+    // A brightness hotkey inside preferences joins the cancellable state:
+    // Done keeps it (G-31).
+    assert!(preview.step(KeyCode::Equal));
+    let raised = preview.preferences.brightness;
+    assert!(raised > vault_core::ui::options::BRIGHTNESS_MIN);
+    // A slider press released before the first iteration changes nothing.
+    let strip = [600, 400];
+    preview.hover(strip);
+    assert!(preview.click(strip, false));
+    assert!(preview.release(Some(strip), false));
+    let now = preview.clock;
+    preview.tick(now + 40).unwrap();
+    assert_eq!(preview.preferences.brightness, raised);
+    // Held, the drag follows the pointer and applies the gamma at once.
+    assert!(preview.click(strip, false));
+    preview.tick(now + 80).unwrap();
+    assert_eq!(
+        preview.preferences.brightness,
+        vault_core::ui::options::slider_value(
+            594,
+            vault_core::ui::options::BRIGHTNESS_MIN,
+            vault_core::ui::options::BRIGHTNESS_MAX
+        )
+    );
+    assert!(preview.release(Some(strip), false));
+    preview.tick(now + 120).unwrap();
+    // Cancel restores the brightness on opening.
+    assert!(preview.step(KeyCode::Escape));
+    assert_eq!(
+        preview.preferences.brightness,
+        vault_core::ui::options::BRIGHTNESS_MIN
+    );
+}
+
+#[test]
+fn g31_menu_buttons_need_an_opaque_up_pixel_and_the_left_button() {
+    let dir = corpus();
+    write_art(
+        dir.path(),
+        &[("menuup.frm", 26, 26, 0), ("menudown.frm", 26, 26, 2)],
+    );
+    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+    let mut game = Game::new(vfs, "english", 1, dir.path().join("saves"), None).unwrap();
+    let button = [430, 90];
+    game.hover(button);
+    // A transparent up image has no clickable pixel.
+    game.click(button, false);
+    game.release(Some(button), false);
+    assert_eq!(game.title(), "Vault — main menu");
+    // A right press never presses a button.
+    assert!(!game.click(button, true));
+}
+
+/// Tick the world in 50 ms steps until the player's sequence ends.
+fn settle_player(preview: &mut MapPreview, now: &mut u64) {
+    let player = preview.host.world.player;
+    for _ in 0..400 {
+        if !preview.host.owns_motion(player) && !preview.host.presenting() {
+            return;
+        }
+        *now += 50;
+        preview.tick(*now).unwrap();
+    }
+    panic!("the player's sequence ends");
+}
+
+#[test]
+fn s04_a_combat_walk_locks_clicks_bar_and_keys_under_the_watch() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let mut now = 16;
+    preview.tick(now).unwrap();
+    preview.image().unwrap();
+    let start = preview.host.world.get(player).unwrap().raw.hex.unwrap();
+    // SPEC-014 §3.27: the player's turn with AP to walk.
+    preview.host.world.combat = true;
+    preview.host.world.combat_state.player_turn = true;
+    preview.host.world.critter_state_mut(player).unwrap().ap = 8;
+    preview.hud.panel = super::hud::Panel::settled(true, true);
+    let first = vault_formats::HexGrid::step(start, 1, 4).unwrap();
+    let second = vault_formats::HexGrid::step(start, 4, 3).unwrap();
+    assert!(preview.tap(on_hex(&preview, first)));
+    assert!(preview.host.owns_motion(player), "the walk registered");
+    // The walk locks the game mouse, the keyboard and the bar under the
+    // animated watch; clicks made meanwhile are discarded, never queued.
+    assert!(preview.combat_locked());
+    now += 16;
+    preview.tick(now).unwrap();
+    assert!(preview.hud.watch.is_some());
+    assert!(preview.tap(on_hex(&preview, second)));
+    assert!(preview.pointer.held.is_none());
+    // The Inventory button and `i` open nothing.
+    assert!(preview.tap([211 + 5, 379 + 40 + 5]));
+    assert!(preview.step(KeyCode::KeyI));
+    assert!(matches!(preview.screen, Screen::Map));
+    settle_player(&mut preview, &mut now);
+    let end = preview.host.world.get(player).unwrap().raw.hex.unwrap();
+    assert_ne!(end, second, "the second click did not re-route the walk");
+    // Once every sequence has ended the watch goes and input is back.
+    now += 16;
+    preview.tick(now).unwrap();
+    assert!(!preview.combat_locked());
+    assert!(preview.hud.watch.is_none());
+}
+
+#[test]
+fn s04_hotkeys_are_refused_on_the_enemy_turn() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    preview.host.world.combat = true;
+    preview.host.world.combat_state.player_turn = false;
+    preview.hud.panel = super::hud::Panel::settled(true, false);
+    assert!(preview.combat_locked());
+    // SPEC-014 §3.27: outside the player's turn the keyboard is disabled:
+    // no window opens and no end of combat is requested.
+    for key in [
+        KeyCode::KeyI,
+        KeyCode::KeyC,
+        KeyCode::KeyP,
+        KeyCode::KeyS,
+        KeyCode::Tab,
+        KeyCode::Escape,
+        KeyCode::Enter,
+    ] {
+        assert!(preview.step(key), "{key:?} is swallowed");
+        assert!(matches!(preview.screen, Screen::Map), "{key:?}");
+    }
+    assert!(preview.host.world.combat);
+    // The bar takes no press either.
+    assert!(preview.tap([211 + 5, 379 + 40 + 5]));
+    assert!(matches!(preview.screen, Screen::Map));
+    assert!(preview.watch_shown());
+    // The player's turn gives the keyboard back.
+    preview.host.world.combat_state.player_turn = true;
+    preview
+        .host
+        .world
+        .critter_state_mut(preview.host.world.player)
+        .unwrap()
+        .ap = 10;
+    assert!(!preview.combat_locked());
+    assert!(preview.step(KeyCode::KeyI));
+    assert!(matches!(preview.screen, Screen::Inventory(_)));
+}
+
+#[test]
+fn s18_rotating_needs_the_standing_art() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let mut now = 16;
+    preview.tick(now).unwrap();
+    preview.image().unwrap();
+    let facing = |preview: &MapPreview| preview.host.world.get(player).unwrap().raw.orientation;
+    // Standing: `.` rotates the player.
+    let before = facing(&preview);
+    assert!(preview.game_action(vault_core::ui::bar::Action::Rotate(true)));
+    assert_eq!(facing(&preview), (before + 1) % 6);
+    // Walking: SPEC-014 §3.27 rotate works only while standing.
+    let start = preview.host.world.get(player).unwrap().raw.hex.unwrap();
+    let target = vault_formats::HexGrid::step(start, 1, 6).unwrap();
+    assert!(preview.tap(on_hex(&preview, target)));
+    now += 100;
+    preview.tick(now).unwrap();
+    let state = preview.host.click_state();
+    assert!(state.busy && !state.standing, "{state:?}");
+    let walking = facing(&preview);
+    assert!(!preview.game_action(vault_core::ui::bar::Action::Rotate(true)));
+    assert_eq!(facing(&preview), walking);
+    settle_player(&mut preview, &mut now);
+    assert!(preview.game_action(vault_core::ui::bar::Action::Rotate(true)));
+}
+
+#[test]
+fn s03_a_movement_click_cancels_a_reach_with_interrupt_walk_on() {
+    for interrupt in [true, false] {
+        let dir = corpus();
+        // Six-frame reaches at 10 fps, acting on the last frame, so the
+        // reach is still in progress when the click comes.
+        let mut reach = super::fixture::frm(12, 20, 16);
+        let block = reach[62..].to_vec();
+        reach[4..6].copy_from_slice(&10_u16.to_be_bytes());
+        reach[6..8].copy_from_slice(&5_u16.to_be_bytes());
+        reach[8..10].copy_from_slice(&6_u16.to_be_bytes());
+        reach[58..62].copy_from_slice(&(6 * block.len() as u32).to_be_bytes());
+        for _ in 1..6 {
+            reach.extend_from_slice(&block);
+        }
+        for name in ["sampleak.frm", "sampleal.frm"] {
+            std::fs::write(dir.path().join("art/critters").join(name), &reach).unwrap();
+        }
+        let mut preview = world(dir.path());
+        preview.interrupt_walk = interrupt;
+        let player = preview.host.world.player;
+        let mut now = 16;
+        preview.tick(now).unwrap();
+        preview.image().unwrap();
+        let (start, elevation) = preview
+            .host
+            .world
+            .get(player)
+            .map(|object| (object.raw.hex.unwrap(), object.raw.elevation))
+            .unwrap();
+        let prototype =
+            Arc::new(vault_formats::Prototype::parse(&super::fixture::prototype(0, 5)).unwrap());
+        let next = vault_formats::HexGrid::step(start, 1, 1).unwrap();
+        let item = preview
+            .host
+            .world
+            .spawn(prototype, next, elevation)
+            .unwrap();
+        preview
+            .host
+            .action(player, item, vault_core::ObjectAction::Pickup)
+            .unwrap();
+        now += 100;
+        preview.tick(now).unwrap();
+        let state = preview.host.click_state();
+        assert!(state.busy && !state.walking && !state.standing, "{state:?}");
+        assert_eq!(preview.host.world.get(item).unwrap().owner, None);
+        // SPEC-014 §3.27: out of combat, a movement click with
+        // `interrupt_walk` on cancels the reach (its pickup dropped) and
+        // walks; off, it does nothing and the pickup completes.
+        let away = vault_formats::HexGrid::step(start, 4, 3).unwrap();
+        assert!(preview.tap(on_hex(&preview, away)));
+        settle_player(&mut preview, &mut now);
+        let owner = preview.host.world.get(item).unwrap().owner;
+        let hex = preview.host.world.get(player).unwrap().raw.hex.unwrap();
+        if interrupt {
+            assert_eq!(owner, None, "the pickup was dropped");
+            assert_ne!(hex, start, "the walk replaced the reach");
+        } else {
+            assert_eq!(owner, Some(player), "the pickup completed");
+            assert_eq!(hex, start, "the click did nothing");
+        }
+    }
+}
+
+#[test]
+fn s01_s19_roofs_hidden_at_the_entrance_are_drawn_again_once_restored() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let (start, elevation) = preview
+        .host
+        .world
+        .get(player)
+        .map(|object| (object.raw.hex.unwrap(), object.raw.elevation))
+        .unwrap();
+    // The fixture's one roofed square (5050) holds the entrance; the
+    // entrance placement hid it (SPEC-014 §3.36).
+    let roof = |preview: &MapPreview| {
+        preview
+            .host
+            .world
+            .map
+            .tile(elevation as usize, 5050)
+            .unwrap()
+            .roof_hidden()
+    };
+    assert!(roof(&preview));
+    let hex = vault_formats::HexGrid::step(start, 2, 3).unwrap();
+    let prototype =
+        Arc::new(vault_formats::Prototype::parse(&super::fixture::prototype(0, 5)).unwrap());
+    let item = preview.host.world.spawn(prototype, hex, elevation).unwrap();
+    preview.tick(16).unwrap();
+    let point = on_hex(&preview, hex);
+    let hidden = preview.map_view_image().unwrap().pixels()[(point[1] * 640 + point[0]) as usize];
+    assert_eq!(preview.object_at(point), Some(item));
+    // Stepping out onto an empty square restores the group: its art was
+    // bound although hidden when the map bound (S-19), so it draws again
+    // and blocks the pick (§3.27).
+    let out = vault_formats::HexGrid::step(start, 4, 4).unwrap();
+    preview
+        .host
+        .world
+        .move_object(player, out, elevation, false)
+        .unwrap();
+    assert!(!roof(&preview));
+    preview.tick(32).unwrap();
+    let drawn = preview.map_view_image().unwrap().pixels()[(point[1] * 640 + point[0]) as usize];
+    assert_ne!(drawn, hidden);
+    assert_eq!(preview.object_at(point), None);
+}
+
+#[test]
+fn g16_swap_hands_goes_through_the_world_and_returns_to_movement() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let mut now = 16;
+    preview.tick(now).unwrap();
+    preview.image().unwrap();
+    preview.hud.mode = Mode::Crosshair;
+    let hand = preview.host.world.active_hand;
+    // SPEC-014 §3.23: the hand flips at once; with both hands empty the
+    // swap's sequence only returns the player to the standing art. While
+    // a swap holds the player the bar and the mouse are disabled under the
+    // watch, and afterwards a crosshair returns to movement.
+    assert!(preview.step(KeyCode::KeyB));
+    assert_eq!(preview.host.world.active_hand, hand ^ 1);
+    if preview.hud.swapping {
+        assert!(preview.watch_shown());
+        assert!(preview.tap([211 + 5, 379 + 40 + 5]));
+        assert!(matches!(preview.screen, Screen::Map));
+    }
+    settle_player(&mut preview, &mut now);
+    now += 16;
+    preview.tick(now).unwrap();
+    assert!(!preview.hud.swapping && !preview.watch_shown());
+    assert_eq!(preview.hud.mode, Mode::Movement);
+    // A held swap (the player owning the swap's motion) locks the bar.
+    preview.hud.swapping = true;
+    let start = preview
+        .host
+        .world
+        .get(preview.host.world.player)
+        .unwrap()
+        .raw
+        .hex
+        .unwrap();
+    let target = vault_formats::HexGrid::step(start, 1, 6).unwrap();
+    assert!(
+        preview
+            .host
+            .walk_toward(preview.host.world.player, target, false, 0)
+            .unwrap()
+    );
+    assert!(preview.watch_shown());
+    preview.step(KeyCode::KeyI);
+    assert!(matches!(preview.screen, Screen::Map));
+    settle_player(&mut preview, &mut now);
+    now += 16;
+    preview.tick(now).unwrap();
+    assert!(!preview.hud.swapping);
 }

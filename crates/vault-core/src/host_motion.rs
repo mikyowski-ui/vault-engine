@@ -11,7 +11,8 @@ use crate::{
     LootRequest, ObjectAction, ObjectRef, ScriptEvent, WorldEffect, WorldError,
     assets::WorldAssets,
     choreography::{Begin, Driver, Entry, Frames, Refused, Stepped},
-    critical::effect,
+    clicks::{Click, ClickState, Policy, busy_policy},
+    critical::{effect, hit_mode},
     host::{DispatchResult, WorldHost},
     host_choreography::Playback,
     host_drugs::Arg,
@@ -60,55 +61,104 @@ const GIZMO_REMAINS: u32 = 213;
 /// §3.11.3 scenery prototype extended flag `0x01`: the ground reach.
 const SCENERY_GROUND_REACH: u32 = 0x01;
 
-/// A sequence being played, and whether something cancelled it meanwhile.
+/// A sequence being played (or halted), as its callbacks see it: which
+/// objects it holds under §3.10.1, whether something cancelled it
+/// meanwhile, and the entries a callback registered into it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Running {
+    id: u64,
+    /// The owners of its non-callback entries.
     owners: Vec<ObjectRef>,
+    insignificant: bool,
+    /// Cancelled from inside its own playback, or being halted: its
+    /// remaining entries do nothing, but its forced ones.
     cancelled: bool,
+    /// Entries a callback registered as it started, to follow it
+    /// (§3.11.4 the container use).
+    appends: Vec<(ObjectRef, i32, Motion)>,
+}
+impl Running {
+    fn of(sequence: &MotionSequence, cancelled: bool) -> Self {
+        Self {
+            id: sequence.id,
+            owners: sequence.owned(),
+            insignificant: sequence.insignificant,
+            cancelled,
+            appends: Vec::new(),
+        }
+    }
 }
 
 impl<A: WorldAssets> WorldHost<A> {
     /// Register a world sequence (§3.10.1): it is examined once now, and
-    /// instant playback plays it to its end at once.
-    pub(crate) fn register_motion(&mut self, mut sequence: MotionSequence) {
-        // §3.11.2: a later sequence naming a critter ends that critter's
-        // insignificant sequences.
-        let owners = sequence.owners();
+    /// instant playback plays it to its end at once. Returns whether it
+    /// registered.
+    ///
+    /// "One sequence per owner": an object that has a non-callback entry,
+    /// started or not, in a sequence that has not ended cannot own an
+    /// entry of a new one. The new sequence is then discarded whole, with
+    /// a diagnostic; the request is dropped, not queued. When the other
+    /// sequence is an idle fidget (§3.11.2, an insignificant sequence) it
+    /// is ended at once instead and registration continues. Callback
+    /// entries are not checked, so a sequence of callbacks always
+    /// registers. Attack shows are never involved: they are not world
+    /// sequences.
+    pub(crate) fn register_motion(&mut self, mut sequence: MotionSequence) -> bool {
+        let owners = sequence.owned();
+        let held = owners.iter().copied().find(|owner| {
+            self.running_motions.iter().any(|running| {
+                !running.cancelled && !running.insignificant && running.owners.contains(owner)
+            }) || self
+                .motions
+                .iter()
+                .any(|playing| !playing.insignificant && playing.owns(*owner))
+        });
+        if let Some(owner) = held {
+            self.world.diagnostic(format!(
+                "animation sequence discarded: object {owner} is in a sequence that has not ended"
+            ));
+            return false;
+        }
+        for running in &mut self.running_motions {
+            if running.insignificant && owners.iter().any(|owner| running.owners.contains(owner)) {
+                running.cancelled = true;
+            }
+        }
         let (ended, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.motions)
             .into_iter()
             .partition(|playing| {
-                playing.insignificant && owners.iter().any(|owner| playing.names(*owner))
+                playing.insignificant && owners.iter().any(|owner| playing.owns(*owner))
             });
         self.motions = kept;
-        for mut playing in ended {
-            playing.schedule.cancel();
-            self.end_motion(&playing);
+        for playing in ended {
+            self.halt_motion(playing);
         }
         self.next_motion += 1;
         sequence.id = self.next_motion;
         let now = self.motion_time.max(self.world.elapsed_ms);
-        self.running_motions.push(Running {
-            owners: sequence.owners(),
-            cancelled: false,
-        });
+        self.running_motions.push(Running::of(&sequence, false));
         match self.playback {
             Playback::Instant => {
                 sequence.schedule.run_to_end(now, self);
             }
             Playback::RealTime => sequence.schedule.register(now, self),
         }
-        if self
-            .running_motions
-            .pop()
-            .is_some_and(|running| running.cancelled)
-        {
-            sequence.schedule.cancel();
-        }
+        self.settle_running(&mut sequence, now);
         if sequence.schedule.finished() {
             self.end_motion(&sequence);
         } else {
             self.motions.push(sequence);
         }
+        true
+    }
+    /// After a sequence's registration or pass: a sequence cancelled
+    /// meanwhile is halted while its record is still the running one, so
+    /// its forced entries run under the halt; then the record leaves.
+    fn settle_running(&mut self, sequence: &mut MotionSequence, now_ms: u64) {
+        if self.halted() {
+            sequence.schedule.halt(now_ms, self);
+        }
+        self.running_motions.pop();
     }
     /// Play the world's sequences up to `now_ms`: one scheduler pass at
     /// each due frame step in turn, so a late update still keeps every
@@ -154,18 +204,9 @@ impl<A: WorldAssets> WorldHost<A> {
                 ..MotionSequence::default()
             };
             let mut sequence = std::mem::replace(&mut self.motions[index], placeholder);
-            self.running_motions.push(Running {
-                owners: sequence.owners(),
-                cancelled: false,
-            });
+            self.running_motions.push(Running::of(&sequence, false));
             sequence.schedule.pass(now_ms, self);
-            if self
-                .running_motions
-                .pop()
-                .is_some_and(|running| running.cancelled)
-            {
-                sequence.schedule.cancel();
-            }
+            self.settle_running(&mut sequence, now_ms);
             let slot = self.motions.iter().position(|sequence| sequence.id == id);
             if sequence.schedule.finished() {
                 if let Some(slot) = slot {
@@ -208,16 +249,20 @@ impl<A: WorldAssets> WorldHost<A> {
     /// callbacks, such as a door's finishing callback, run at once, the
     /// rest are dropped, and critters return to standing.
     pub(crate) fn stop_motions(&mut self) {
-        let now = self.motion_time.max(self.world.elapsed_ms);
-        for mut sequence in std::mem::take(&mut self.motions) {
-            self.running_motions.push(Running {
-                owners: sequence.owners(),
-                cancelled: false,
-            });
-            sequence.schedule.halt(now, self);
-            self.running_motions.pop();
-            self.end_motion(&sequence);
+        for sequence in std::mem::take(&mut self.motions) {
+            self.halt_motion(sequence);
         }
+    }
+    /// End a sequence taken out of the world's list, the §3.10.1 way: its
+    /// forced entries run under the halt (so a forced adjacency check
+    /// reports nothing, §3.11.3), the rest are dropped, and its critters
+    /// return to standing.
+    fn halt_motion(&mut self, mut sequence: MotionSequence) {
+        let now = self.motion_time.max(self.world.elapsed_ms);
+        self.running_motions.push(Running::of(&sequence, true));
+        sequence.schedule.halt(now, self);
+        self.running_motions.pop();
+        self.end_motion(&sequence);
     }
     /// §3.11.5 getting up at once: animation 37 after a fall back (20), 36
     /// otherwise, then the standing pose; without that art, the standing
@@ -253,24 +298,38 @@ impl<A: WorldAssets> WorldHost<A> {
             object.raw.displacement = [0; 2];
         }
     }
-    /// End every sequence with an entry of `object`'s: its critters return
-    /// to standing. A sequence playing now stops where it stands.
+    /// §3.10.1 cancelling an object's sequence (SPEC-014 §3.27, SPEC-005
+    /// `reg_anim_func` command 2): the first sequence that has not ended
+    /// and holds a non-callback entry of `object`'s ends. Its unstarted
+    /// entries are dropped except the forced ones, which run at once, and
+    /// its critters return to standing. One being played now stops where
+    /// it stands, running its forced entries as its pass ends. Attack
+    /// shows are prioritized and never cancelled this way.
     pub(crate) fn cancel_motions(&mut self, object: ObjectRef) {
-        let (ended, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.motions)
-            .into_iter()
-            .partition(|sequence| sequence.names(object));
-        self.motions = kept;
-        for mut sequence in ended {
-            sequence.schedule.cancel();
-            self.end_motion(&sequence);
-        }
-        for running in &mut self.running_motions {
-            if running.owners.contains(&object) {
-                running.cancelled = true;
+        let listed = self
+            .motions
+            .iter()
+            .position(|sequence| sequence.owns(object));
+        let running = self
+            .running_motions
+            .iter()
+            .position(|running| !running.cancelled && running.owners.contains(&object));
+        let first_listed = match (listed, running) {
+            (Some(index), Some(playing)) => {
+                self.motions[index].id < self.running_motions[playing].id
             }
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if first_listed {
+            let sequence = self.motions.remove(listed.unwrap_or_default());
+            self.halt_motion(sequence);
+        } else if let Some(playing) = running {
+            self.running_motions[playing].cancelled = true;
         }
     }
-    /// The sequence being played was cancelled: its entries do nothing.
+    /// The sequence being played was cancelled, or is being halted: its
+    /// entries do nothing, but its forced ones.
     fn halted(&self) -> bool {
         self.running_motions
             .last()
@@ -279,6 +338,48 @@ impl<A: WorldAssets> WorldHost<A> {
     /// Whether a world sequence still has an entry of `object`'s to run.
     pub fn moving(&self, object: ObjectRef) -> bool {
         self.motions.iter().any(|sequence| sequence.names(object))
+    }
+    /// §3.10.1 whether a sequence that has not ended holds `object`: a
+    /// non-callback entry of its, started or not, in a sequence other than
+    /// an idle fidget (which a new sequence ends). While this holds, no
+    /// new sequence can own an entry of the object's (`register_motion`),
+    /// and the player is busy for SPEC-014 §3.27.
+    pub fn owns_motion(&self, object: ObjectRef) -> bool {
+        self.motions
+            .iter()
+            .any(|sequence| !sequence.insignificant && sequence.owns(object))
+            || self.running_motions.iter().any(|running| {
+                !running.cancelled && !running.insignificant && running.owners.contains(&object)
+            })
+    }
+    /// SPEC-014 §3.27 what a player's click finds: combat and whose turn it
+    /// is, whether an attack or (in combat) any sequence is still playing,
+    /// whether a sequence holds the player, and the player's current pose
+    /// by its art (walk 1 or run 19; standing 0).
+    pub fn click_state(&self) -> ClickState {
+        let player = self.world.player;
+        let animation = self
+            .world
+            .get(player)
+            .map(|object| Fid(object.raw.art_id).animation());
+        ClickState {
+            combat: self.world.combat,
+            player_turn: self.world.combat_state.player_turn,
+            presenting: self.presenting(),
+            busy: self.owns_motion(player),
+            walking: matches!(animation, Some(animation::WALK | animation::RUN)),
+            standing: animation == Some(animation::STAND),
+        }
+    }
+    /// SPEC-014 §3.27 whether the player's talk with `target` is a near
+    /// talk: out of combat, at object distance below 9 with an unblocked
+    /// line (SPEC-007 §3.11.1), so it has no approach entry and registers
+    /// even while the player is busy (`Click::NearTalk`).
+    pub fn near_talk(&self, target: ObjectRef) -> bool {
+        let player = self.world.player;
+        !self.world.combat
+            && self.world.object_distance(player, target) < TALK_RUN_DISTANCE
+            && !self.world.shot(player, target).hard_obstruction
     }
     pub(crate) fn facing(&self, object: ObjectRef) -> u8 {
         self.world
@@ -330,7 +431,9 @@ impl<A: WorldAssets> WorldHost<A> {
         }
     }
     /// A walk entry starts: it plans its route (§3.1). Without a route it
-    /// fails, unless the mover is already where it was going.
+    /// fails, unless the mover is already where it was going: on the hex,
+    /// or for an object, a one-step route shortened to nothing (the mover
+    /// on the target's hex or a neighbor of it) moves nothing.
     pub(crate) fn start_walk(&mut self, mover: ObjectRef, walk: &mut Walk) -> Begin {
         let planned = match walk.goal {
             Goal::Hex(hex) => self.plan_to_tile(mover, hex, walk.limit),
@@ -345,7 +448,7 @@ impl<A: WorldAssets> WorldHost<A> {
         if movement.directions.is_empty() {
             let there = match walk.goal {
                 Goal::Hex(hex) => self.place(mover).is_some_and(|(at, _)| at == hex),
-                Goal::Object(target) => self.adjacent(mover, target),
+                Goal::Object(target) => self.world.distance(mover, target) <= 1,
             };
             return if there { Begin::Done } else { Begin::Failed };
         }
@@ -702,8 +805,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 if self.adjacent(owner, target) {
                     return Ok(Begin::Done);
                 }
-                // SPEC-013 §3.23 safe rule: the player is told.
-                if player {
+                // SPEC-007 §3.11.3 adjacency check, safe rule: a player
+                // actor whose approach failed is told `misc.msg` 2000. Not
+                // when an external stop (combat starting, leaving the map)
+                // or a cancel (SPEC-014 §3.27) runs this forced check: the
+                // approach did not fail, and the reference prints nothing.
+                if player && !self.halted() {
                     self.print_game("misc.msg", 2000, &[]);
                 }
                 return Ok(Begin::Failed);
@@ -735,6 +842,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     self.world.diagnostic(error.to_string());
                 }
             }
+            Call::SkillStage { target, skill } => self.skill_stage(owner, target, skill)?,
             Call::OpenBit { open } => {
                 if let Some(object) = self.world.get_mut(owner)
                     && let vault_formats::map::ObjectState::Other {
@@ -756,22 +864,27 @@ impl<A: WorldAssets> WorldHost<A> {
 
     // §3.11.3 the interaction sequences.
 
-    /// A sequence the actor starts. A player already walking or running
-    /// stops first; a player busy with anything else ignores the request.
+    /// A sequence the actor starts. For the player, SPEC-014 §3.27 "Clicks
+    /// while the player is busy" decides first ([`busy_policy`]): nothing
+    /// is queued, the click either cancels the player's current sequence
+    /// and starts its own, or does nothing and shows no message. Any actor
+    /// then registers under §3.10.1. Returns whether the sequence
+    /// registered.
     fn start_interaction(
         &mut self,
         actor: ObjectRef,
         sequence: MotionSequence,
-    ) -> Result<(), WorldError> {
+        click: Click,
+        interrupt_walk: bool,
+    ) -> Result<bool, WorldError> {
         if actor == self.world.player {
-            if self.motions.iter().any(|playing| playing.walking(actor)) {
-                self.cancel_motions(actor);
-            } else if self.moving(actor) {
-                return Ok(());
+            match busy_policy(click, &self.click_state(), interrupt_walk) {
+                Policy::Ignore => return Ok(false),
+                Policy::Cancel => self.cancel_motions(actor),
+                Policy::Proceed => {}
             }
         }
-        self.register_motion(sequence);
-        Ok(())
+        Ok(self.register_motion(sequence))
     }
     /// The route limit: the actor's action points in combat.
     fn move_limit(&self, actor: ObjectRef) -> usize {
@@ -781,10 +894,12 @@ impl<A: WorldAssets> WorldHost<A> {
             usize::MAX
         }
     }
-    /// The approach to `target` (§3.11.1) when the actor is not next to
-    /// it: a walk, or a run out of combat at object distance `run_at` or
-    /// more, limited in combat to the action points. Then a turn toward
-    /// the target, delay -1.
+    /// The approach to `target` (§3.11.1): a walk, or a run out of combat
+    /// at object distance `run_at` or more, limited in combat to the action
+    /// points. Then a turn toward the target, delay -1. §3.1: the move
+    /// entry is registered by route, not by distance; a one-step route
+    /// (the mover already adjacent) moves nothing, and only a mover on the
+    /// target's own hex and elevation registers no move entry at all.
     fn approach_entries(
         &self,
         sequence: &mut MotionSequence,
@@ -793,7 +908,8 @@ impl<A: WorldAssets> WorldHost<A> {
         run_at: i32,
     ) -> Result<(), Refused> {
         let distance = self.world.object_distance(actor, target);
-        if !self.adjacent(actor, target) {
+        let same_hex = self.place(actor).is_some() && self.place(actor) == self.place(target);
+        if !same_hex {
             let run = !self.world.combat && distance >= run_at;
             let walk = Walk::new(Goal::Object(target), run, self.move_limit(actor));
             sequence.push(actor, 0, Motion::Walk(Box::new(walk)))?;
@@ -884,10 +1000,12 @@ impl<A: WorldAssets> WorldHost<A> {
             animation::MIDDLE_REACH
         }
     }
-    /// The action frame A of a critter's reach art, or -1 when that art
-    /// cannot be loaded.
-    fn reach_frame(&self, critter: ObjectRef, reach: u8) -> i32 {
-        let art = self.critter_fid(critter, reach, None, self.facing(critter));
+    /// The action frame A of a critter's reach art for its current weapon
+    /// code, or for `weapon` (the container branch looks up with code 0,
+    /// the weapon being put away by then; the art is the same, §2.2), or
+    /// -1 when that art cannot be loaded.
+    fn reach_frame(&self, critter: ObjectRef, reach: u8, weapon: Option<u8>) -> i32 {
+        let art = self.critter_fid(critter, reach, weapon, self.facing(critter));
         self.assets
             .object_art(art)
             .map_or(-1, |art| i32::from(art.action_frame))
@@ -914,7 +1032,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.approach_entries(&mut sequence, actor, item, RUN_DISTANCE)?;
         self.checks(&mut sequence, actor, item)?;
         self.animate_entry(&mut sequence, actor, animation::GROUND_REACH, None, 0)?;
-        let a = self.reach_frame(actor, animation::GROUND_REACH);
+        let a = self.reach_frame(actor, animation::GROUND_REACH, None);
         let name = self.item_sound(item);
         sequence.push(actor, a, Motion::Sound { name })?;
         sequence.push(actor, a, Motion::Call(Call::Pickup { item }))?;
@@ -926,7 +1044,8 @@ impl<A: WorldAssets> WorldHost<A> {
         item: ObjectRef,
     ) -> Result<(), WorldError> {
         let sequence = self.pickup_motion(actor, item).map_err(refused)?;
-        self.start_interaction(actor, sequence)
+        self.start_interaction(actor, sequence, Click::Action, true)?;
+        Ok(())
     }
     /// The pickup sound: the item's art stem (its list row without the
     /// extension), uppercased.
@@ -948,9 +1067,18 @@ impl<A: WorldAssets> WorldHost<A> {
     /// §3.11.3 using a container that cannot be picked up: the approach
     /// and checks, putting away a held weapon, the reach, the container
     /// use (none for PID 213), taking the weapon out again, and the loot
-    /// request when the container was closed now or is PID 213. Under the
-    /// safe rule the container use waits for the reach's action frame
-    /// rather than its end.
+    /// request when the container was closed now or is PID 213.
+    ///
+    /// Container reach timing (§3.11.3, SPEC-013 §3.16 step 3): the
+    /// `[Must-match]` reference gives the container use delay -1 whenever
+    /// the reach art loads, because its art test is inverted. This takes
+    /// the `[May-improve]` rule instead: the delay is the action frame A of
+    /// the reach art looked up with weapon code 0, so the container opens
+    /// on the reach's action frame, and -1 only when that art does not
+    /// load. The take-out and the loot request keep delay -1 under either
+    /// rule, and the container's sound and animation join this sequence
+    /// as the use runs (`use_container`), so the loot window opens only
+    /// after the reach and the container animation have both finished.
     pub(crate) fn container_motion(
         &self,
         actor: ObjectRef,
@@ -970,7 +1098,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.animate_entry(&mut sequence, actor, reach, None, 0)?;
         if pid != GIZMO_REMAINS {
-            let delay = self.reach_frame(actor, reach);
+            let delay = self.reach_frame(actor, reach, Some(0));
             let call = Call::UseContainer { container };
             sequence.push(actor, delay, Motion::Call(call))?;
         }
@@ -989,7 +1117,8 @@ impl<A: WorldAssets> WorldHost<A> {
         container: ObjectRef,
     ) -> Result<(), WorldError> {
         let sequence = self.container_motion(actor, container).map_err(refused)?;
-        self.start_interaction(actor, sequence)
+        self.start_interaction(actor, sequence, Click::Action, true)?;
+        Ok(())
     }
     /// §3.11.3 using scenery or an object, or an item on one: the approach
     /// and checks, putting away a held weapon, the reach, the use, and
@@ -1022,7 +1151,8 @@ impl<A: WorldAssets> WorldHost<A> {
         call: Call,
     ) -> Result<(), WorldError> {
         let sequence = self.use_motion(actor, target, call).map_err(refused)?;
-        self.start_interaction(actor, sequence)
+        self.start_interaction(actor, sequence, Click::Action, true)?;
+        Ok(())
     }
     /// SPEC-013 §3.23 climbing a ladder up: a walk to the hex southeast of
     /// the ladder (a run out of combat at object distance 5 or more), the
@@ -1074,7 +1204,8 @@ impl<A: WorldAssets> WorldHost<A> {
         ladder: ObjectRef,
     ) -> Result<(), WorldError> {
         let sequence = self.ladder_motion(actor, ladder).map_err(refused)?;
-        self.start_interaction(actor, sequence)
+        self.start_interaction(actor, sequence, Click::Action, true)?;
+        Ok(())
     }
     /// SPEC-013 §3.16 looting a critter: the approach, the checks and the
     /// loot request.
@@ -1096,7 +1227,100 @@ impl<A: WorldAssets> WorldHost<A> {
         critter: ObjectRef,
     ) -> Result<(), WorldError> {
         let sequence = self.loot_motion(actor, critter).map_err(refused)?;
-        self.start_interaction(actor, sequence)
+        self.start_interaction(actor, sequence, Click::Action, true)?;
+        Ok(())
+    }
+    /// SPEC-013 §3.2 steps 2-5, an accepted skill-on request: out of
+    /// combat the actor runs to the target at object distance 5 or more,
+    /// otherwise walks (no movement when the target is the player), then
+    /// turns; the forced adjacency check (step 3, the shared check of
+    /// SPEC-007 §3.11.3); the manipulation animation, the ground reach
+    /// (10) for a prone critter target and the middle reach (11)
+    /// otherwise, whose action frame is not used; and the skill-on stage
+    /// after the whole animation, delay -1. No action points are charged.
+    pub(crate) fn skill_motion(
+        &self,
+        actor: ObjectRef,
+        target: ObjectRef,
+        skill: i32,
+    ) -> Result<MotionSequence, Refused> {
+        let mut sequence = MotionSequence::new();
+        if target != self.world.player {
+            self.approach_entries(&mut sequence, actor, target, RUN_DISTANCE)?;
+        }
+        sequence.push_forced(actor, -1, Motion::Call(Call::Adjacent { target }))?;
+        let reach = if self.world.critter_art(target) && self.world.is_prone(target) {
+            animation::GROUND_REACH
+        } else {
+            animation::MIDDLE_REACH
+        };
+        self.animate_entry(&mut sequence, actor, reach, None, -1)?;
+        let call = Call::SkillStage { target, skill };
+        sequence.push(actor, -1, Motion::Call(call))?;
+        Ok(sequence)
+    }
+    pub(crate) fn skill_sequence(
+        &mut self,
+        actor: ObjectRef,
+        target: ObjectRef,
+        skill: i32,
+    ) -> Result<(), WorldError> {
+        let sequence = self.skill_motion(actor, target, skill).map_err(refused)?;
+        self.start_interaction(actor, sequence, Click::Action, true)?;
+        Ok(())
+    }
+    /// SPEC-014 §3.23 swap hands: the active hand flips at once. Then one
+    /// sequence puts away the old weapon, its sound and animation 39, when
+    /// the player's art shows a weapon code; and takes out the new hand's
+    /// weapon by its animation code (38), or returns to the standing art
+    /// with weapon code 0. The sequence's end leaves the player standing
+    /// with the new code, so the player's art follows the hands. The
+    /// section gives the order of the entries and no delays; each waits
+    /// for the one before it (-1). Returns whether the animation
+    /// registered: under §3.10.1 it is discarded while another sequence
+    /// holds the player, and the hand stays flipped (step 1 comes first).
+    /// The bar, the mouse and the `wait2.frm` cursor during the animation,
+    /// and the cursor mode afterwards, are the interface's.
+    pub fn swap_hands(&mut self) -> bool {
+        let player = self.world.player;
+        self.world.active_hand ^= 1;
+        let old = self.weapon_code(player);
+        let new = self.active_weapon_code();
+        let mut sequence = MotionSequence::new();
+        let built = (|| {
+            if old != 0 {
+                self.put_away(&mut sequence, player, -1)?;
+            }
+            if new != 0 {
+                return self.take_out(&mut sequence, player, new);
+            }
+            let art = self.critter_fid(player, animation::STAND, Some(0), self.facing(player));
+            sequence.push(player, -1, Motion::SetArt { art })
+        })();
+        match built {
+            Ok(()) => self.register_motion(sequence),
+            Err(refused) => {
+                self.world
+                    .diagnostic(format!("swap hands sequence refused: {refused:?}"));
+                false
+            }
+        }
+    }
+    /// The weapon animation code of the item in the player's active hand
+    /// (SPEC-003 weapon payload), 0 for an empty hand or a non-weapon.
+    fn active_weapon_code(&self) -> u8 {
+        let mode = if self.world.active_hand == 0 {
+            hit_mode::LEFT_PRIMARY
+        } else {
+            hit_mode::RIGHT_PRIMARY
+        };
+        self.world
+            .wielded(self.world.player, mode)
+            .and_then(|item| self.world.item_data(item))
+            .map_or(0, |item| match &item.data {
+                ItemData::Weapon(weapon) => u8::try_from(weapon.animation).unwrap_or(0),
+                _ => 0,
+            })
     }
     /// An approach whose request then runs its own stage (talk, skills): a
     /// walk or run toward the target, a turn, and the arrival.
@@ -1120,12 +1344,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 sequence.push(actor, -1, Motion::Call(call))
             })
             .map_err(refused)?;
-        self.start_interaction(actor, sequence)
+        self.start_interaction(actor, sequence, Click::Action, true)?;
+        Ok(())
     }
-    /// SPEC-014 §3.27 a movement click: a walk, or a run, toward `tile`,
-    /// limited in combat to the action points and free movement less
-    /// `reserve`. A player's run clears sneaking without Silent Running.
-    /// Returns whether a route exists.
+    /// [`Self::walk_toward_with`] under the `fallout.cfg` default
+    /// `[system] interrupt_walk` = 1.
     pub fn walk_toward(
         &mut self,
         actor: ObjectRef,
@@ -1133,7 +1356,34 @@ impl<A: WorldAssets> WorldHost<A> {
         run: bool,
         reserve: i32,
     ) -> Result<bool, WorldError> {
+        self.walk_toward_with(actor, tile, run, reserve, true)
+    }
+    /// SPEC-014 §3.27 a movement click: a walk, or a run, toward `tile`,
+    /// limited in combat to the action points and free movement less
+    /// `reserve`. For a busy player (a sequence holding it is still
+    /// playing) `interrupt_walk` decides: on, the click first cancels the
+    /// player's current sequence, whatever it is doing, dropping its
+    /// unstarted use, take-out and loot; off, the walk cannot register and
+    /// the click does nothing. A player's run clears sneaking without
+    /// Silent Running. Returns whether the walk registered: false when the
+    /// click does nothing, without a route, or when the sequence cannot
+    /// register (SPEC-007 §3.10.1).
+    pub fn walk_toward_with(
+        &mut self,
+        actor: ObjectRef,
+        tile: i32,
+        run: bool,
+        reserve: i32,
+        interrupt_walk: bool,
+    ) -> Result<bool, WorldError> {
         let player = actor == self.world.player;
+        if player {
+            match busy_policy(Click::Movement, &self.click_state(), interrupt_walk) {
+                Policy::Ignore => return Ok(false),
+                Policy::Cancel => self.cancel_motions(actor),
+                Policy::Proceed => {}
+            }
+        }
         let limit = if self.world.combat {
             let free = if player { self.world.free_movement } else { 0 };
             let budget = self.world.action_points(actor) + free - reserve;
@@ -1158,8 +1408,7 @@ impl<A: WorldAssets> WorldHost<A> {
         sequence
             .push(actor, 0, Motion::Walk(Box::new(walk)))
             .map_err(refused)?;
-        self.start_interaction(actor, sequence)?;
-        Ok(true)
+        Ok(self.register_motion(sequence))
     }
 
     // §3.11.4 doors and containers, and the interaction callbacks.
@@ -1318,7 +1567,9 @@ impl<A: WorldAssets> WorldHost<A> {
             sequence.push_forced(object, -1, finish)
         });
         match built {
-            Ok(()) => self.register_motion(sequence),
+            Ok(()) => {
+                self.register_motion(sequence);
+            }
             Err(refused) => self
                 .world
                 .diagnostic(format!("door sequence refused: {refused:?}")),
@@ -1356,21 +1607,41 @@ impl<A: WorldAssets> WorldHost<A> {
         let effect = self
             .open_sound_name(container, if closed { sound::OPEN } else { sound::CLOSE })
             .unwrap_or_default();
-        let mut sequence = MotionSequence::new();
-        let built = sequence
-            .push(container, 0, Motion::Sound { name: effect })
-            .and_then(|()| {
-                let swing = Motion::Swing {
-                    forward: closed,
-                    interval_ms: 100,
-                };
-                sequence.push(container, 0, swing)
-            });
-        match built {
-            Ok(()) => self.register_motion(sequence),
-            Err(refused) => self
-                .world
-                .diagnostic(format!("container sequence refused: {refused:?}")),
+        let swing = Motion::Swing {
+            forward: closed,
+            interval_ms: 100,
+        };
+        let entries = [
+            (container, 0, Motion::Sound { name: effect }),
+            (container, 0, swing),
+        ];
+        // §3.11.3: the container's sound and animation join the user's
+        // sequence right after this use, so the take-out and the loot
+        // request (-1) wait for the container animation too. §3.10.1: a
+        // container another sequence still holds cannot register them.
+        if self.owns_motion(container) {
+            self.world.diagnostic(format!(
+                "container animation discarded: object {container} is in a sequence that has not ended"
+            ));
+        } else if let Some(running) = self.running_motions.last_mut() {
+            running.appends.extend(entries);
+            if !running.owners.contains(&container) {
+                running.owners.push(container);
+            }
+        } else {
+            let mut sequence = MotionSequence::new();
+            let mut built = Ok(());
+            for (owner, delay, motion) in entries {
+                built = built.and_then(|()| sequence.push(owner, delay, motion));
+            }
+            match built {
+                Ok(()) => {
+                    self.register_motion(sequence);
+                }
+                Err(refused) => self
+                    .world
+                    .diagnostic(format!("container sequence refused: {refused:?}")),
+            }
         }
         if player {
             let id = if closed { 485 } else { 486 };
@@ -1433,7 +1704,9 @@ fn refused(refused: Refused) -> WorldError {
 impl<A: WorldAssets> Driver<ObjectRef, Motion> for WorldHost<A> {
     fn start(&mut self, entry: &mut Entry<ObjectRef, Motion>, _now_ms: u64) -> Begin {
         let owner = entry.owner;
-        if self.halted() || self.world.get(owner).is_none() {
+        // §3.10.1 a cancelled or halted sequence runs nothing more, but
+        // its forced callbacks and erases, which run at once.
+        if self.world.get(owner).is_none() || (self.halted() && !entry.forced) {
             return Begin::Done;
         }
         match &mut entry.action {
@@ -1465,6 +1738,10 @@ impl<A: WorldAssets> Driver<ObjectRef, Motion> for WorldHost<A> {
                 Begin::Timed
             }
             Motion::Swing { interval_ms, .. } => {
+                // §3.10.1: a frame step every trunc(1000 / fps) ms at the
+                // art's own rate, stored 0 meaning 10 fps. Safe bound: a
+                // door or container whose art cannot be loaded steps at
+                // that 10 fps default, 100 ms, rather than not at all.
                 let art = self.world.get(owner).map_or(0, |object| object.raw.art_id);
                 *interval_ms = self.art_interval(art, 0);
                 Begin::Timed
@@ -1531,5 +1808,22 @@ impl<A: WorldAssets> Driver<ObjectRef, Motion> for WorldHost<A> {
             } => self.play_step(owner, *animation, *play, *art, frames, step),
             _ => Stepped::Done,
         }
+    }
+    fn appended(&mut self) -> Vec<(ObjectRef, i32, Motion)> {
+        self.running_motions
+            .last_mut()
+            .map(|running| std::mem::take(&mut running.appends))
+            .unwrap_or_default()
+    }
+    /// A repeating script animation (SPEC-005 `reg_anim_animate_forever`)
+    /// runs until something cancels it.
+    fn endless(&self, entry: &Entry<ObjectRef, Motion>) -> bool {
+        matches!(
+            entry.action,
+            Motion::Play {
+                play: Play::Forever,
+                ..
+            }
+        )
     }
 }

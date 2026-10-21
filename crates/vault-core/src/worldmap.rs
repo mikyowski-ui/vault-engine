@@ -3,7 +3,7 @@
 //! terrain schedules, discovery, encounter dice, and town knowledge.
 use crate::{RandomSource, WorldError};
 use std::sync::Arc;
-use vault_formats::savegame::WorldMapSave;
+use vault_formats::{MsgCatalog, savegame::WorldMapSave};
 
 /// One row of the fixed Section 3.7 town table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,8 +31,23 @@ impl Hotspot {
         map: "",
     };
 }
+/// One row of the fixed SPEC-008 §3.10 map table: the `map.msg` text, the
+/// town and the city music track of a map number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapEntry {
+    pub name: &'static str,
+    pub town: usize,
+    pub music: &'static str,
+}
 
 include!(concat!(env!("OUT_DIR"), "/world_tables.rs"));
+
+/// SPEC-008 §3.10: there are exactly 66 map numbers, `map.msg` 0-65.
+pub const MAP_COUNT: usize = 66;
+/// SPEC-008 §3.10 the track the world map plays.
+pub const WORLD_MAP_MUSIC: &str = "03wrldmp";
+/// SPEC-008 §3.10 the looping background track a map load starts first.
+pub const LOADING_MUSIC: &str = "wind2";
 
 pub const WORLD_SIZE: [i32; 2] = [1400, 1500];
 pub const CELL: i32 = 50;
@@ -150,32 +165,74 @@ pub fn hotspots(row: usize) -> impl Iterator<Item = (usize, &'static Hotspot)> {
         .take_while(|(_, hotspot)| hotspot.x != 0 && hotspot.y != 0)
 }
 
-/// The town whose hotspot catalog (§3.7) names a map file: knowledge rows
-/// 0-11 are towns 0-11, and the alternate rows 12, 13 and 14 belong to the
-/// Cathedral, the Military Base and the Brotherhood.
-pub fn town_of_map(file: &str) -> Option<usize> {
-    let row = (0..HOTSPOTS.len())
-        .find(|row| hotspots(*row).any(|(_, hotspot)| hotspot.map.eq_ignore_ascii_case(file)))?;
-    Some(match row {
-        12 => 11,
-        13 => 8,
-        14 => 7,
-        town => town,
-    })
-}
 /// The center of a town's cell.
 pub fn town_center(town: usize) -> Option<[i32; 2]> {
     let [column, row] = TOWNS.get(town)?.cell;
     Some([column as i32 * CELL + 25, row as i32 * CELL + 25])
 }
-/// SPEC-014 §3.12 the city music the specifications name, by the map
-/// header's world-map city number: only Vault 13's entrance (35) is given,
-/// so other maps start none.
-pub fn city_music(city: i32) -> Option<&'static str> {
-    match city {
-        35 => Some("06vault"),
-        _ => None,
+/// SPEC-008 §3.10 the fixed table row of a map number; none for an
+/// out-of-range number, including -1.
+pub fn map_entry(number: i32) -> Option<&'static MapEntry> {
+    usize::try_from(number)
+        .ok()
+        .and_then(|number| MAP_TABLE.get(number))
+}
+/// SPEC-008 §3.10 town lookup: every map number has one fixed town id, a
+/// plain table value even for the encounter and caravan maps; an
+/// out-of-range number, including -1, gives town -1.
+pub fn map_town(number: i32) -> i32 {
+    map_entry(number).map_or(-1, |entry| entry.town as i32)
+}
+/// SPEC-008 §3.10 city music: the track `sound/music/<name>.acm` that
+/// replaces `wind2` once a map's number is known; none for -1, where
+/// `wind2` keeps looping.
+pub fn city_music(number: i32) -> Option<&'static str> {
+    map_entry(number).map(|entry| entry.music)
+}
+/// SPEC-008 §3.10 the `map.msg` text of a map number in the fixed table
+/// (the corpus `map.msg` lists the same names in the same order).
+pub fn map_table_name(number: i32) -> Option<&'static str> {
+    map_entry(number).map(|entry| entry.name)
+}
+/// SPEC-008 §3.10 the form a name is matched in: cut at the first NUL,
+/// uppercased, with its first `.SAV` replaced by `.MAP`.
+pub fn canonical_map_name(name: &[u8]) -> Vec<u8> {
+    let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+    let mut upper = name[..end].to_ascii_uppercase();
+    if let Some(at) = upper.windows(4).position(|window| window == b".SAV") {
+        upper[at..at + 4].copy_from_slice(b".MAP");
     }
+    upper
+}
+/// SPEC-008 §3.10 name matching, shared by the header rule and `load_map`
+/// (SPEC-005 0x80E4): the canonical name is compared with the texts of
+/// `map.msg` messages 0-65 in order; the first exact match gives the
+/// number, and no match (or no `map.msg`) gives -1.
+pub fn map_number_of_name(name: &[u8], catalog: Option<&MsgCatalog>) -> i32 {
+    let Some(catalog) = catalog else {
+        return -1;
+    };
+    let wanted = canonical_map_name(name);
+    (0..MAP_COUNT as i32)
+        .find(|number| {
+            catalog
+                .get(*number)
+                .is_some_and(|message| message.text == wanted)
+        })
+        .unwrap_or(-1)
+}
+/// SPEC-008 §3.10 the current map number assigned after a map stream has
+/// loaded, from the header's name field rather than the requested file:
+/// a name containing the lowercase text `.sav`, or exactly `TMP$MAP#.MAP`,
+/// keeps the header's map-number word; any other name is matched against
+/// `map.msg`, so a renamed copy of a map takes the number of its name.
+pub fn header_map_number(name: &[u8], stored: i32, catalog: Option<&MsgCatalog>) -> i32 {
+    let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+    let name = &name[..end];
+    if name.windows(4).any(|window| window == b".sav") || name == b"TMP$MAP#.MAP" {
+        return stored;
+    }
+    map_number_of_name(name, catalog)
 }
 
 /// SPEC-008 §3.4 movement: absolute differences, signs, a zero error
@@ -628,11 +685,14 @@ impl WorldMap {
                 break;
             }
             let draw = rng.range(1, 100)?;
+            // The table ends at 100; only a foreign generator can draw past it.
             let (_, map, bit) = SPECIAL_ENCOUNTERS
                 .iter()
                 .find(|(last, ..)| draw <= *last)
                 .copied()
-                .expect("1-100 draw");
+                .ok_or_else(|| {
+                    WorldError::Invalid("special encounter draw outside 1-100".into())
+                })?;
             if self.saved.specials & bit == 0 {
                 self.saved.specials |= bit;
                 return Ok(Some(Encounter::Special { map, bit, region }));

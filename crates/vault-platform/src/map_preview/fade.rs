@@ -6,6 +6,11 @@
 //! n)` and the target is installed exactly at the end. Under the safe rule
 //! a fade lasts a fixed 700 ms instead of a calibrated step count; a library
 //! fade with a positive duration lasts that many milliseconds.
+//!
+//! A game fade blocks completely (§3.2): while one runs, or waits to run
+//! next, the world does not update and input is swallowed, and while it
+//! fades to black the frame on screen stays the one shown when it was
+//! requested. Library fades service background work, so they do not block.
 use std::collections::VecDeque;
 use vault_core::ui::flow;
 use vault_formats::{Palette, palette::display_rgb6};
@@ -21,6 +26,8 @@ struct Request {
     to_black: bool,
     from_black: bool,
     duration: u64,
+    /// A game fade, which blocks.
+    blocking: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -29,6 +36,7 @@ struct Active {
     to_black: bool,
     start: u64,
     duration: u64,
+    blocking: bool,
 }
 
 /// Queued and running fades, and whether black replaces the game palette.
@@ -47,8 +55,19 @@ fn levels(palette: &Palette) -> [[u8; 3]; 256] {
 }
 
 impl Fades {
-    /// Queue a fade; `duration` 0 (or less) is the standard fade.
-    pub fn push(&mut self, out: bool, duration: i32, from_black: bool) {
+    /// Queue a game fade (`gfade_out` / `gfade_in`, First Aid, Doctor and
+    /// skill books, the movie fade flags): the standard fade, which blocks.
+    pub fn push_game(&mut self, out: bool) {
+        self.queue.push_back(Request {
+            to_black: out,
+            from_black: false,
+            duration: FADE_MS,
+            blocking: true,
+        });
+    }
+    /// Queue a library `fadein` (from black) or `fadeout` over `duration`
+    /// ms, 0 or less being the standard length; it does not block.
+    pub fn push_library(&mut self, out: bool, duration: i32, from_black: bool) {
         self.queue.push_back(Request {
             to_black: out,
             from_black,
@@ -56,7 +75,26 @@ impl Fades {
                 .ok()
                 .filter(|ms| *ms > 0)
                 .unwrap_or(FADE_MS),
+            blocking: false,
         });
+    }
+    /// The fade running now, or else the one that starts next.
+    fn current(&self) -> Option<(bool, bool)> {
+        match (&self.active, self.queue.front()) {
+            (Some(active), _) => Some((active.blocking, active.to_black)),
+            (None, Some(request)) => Some((request.blocking, request.to_black)),
+            (None, None) => None,
+        }
+    }
+    /// A game fade runs, or starts next: the world waits and input is
+    /// swallowed.
+    pub fn blocking(&self) -> bool {
+        self.current().is_some_and(|(blocking, _)| blocking)
+    }
+    /// A blocking fade to black runs or starts next: the frame stays as it
+    /// was when the fade was requested.
+    pub fn freezes(&self) -> bool {
+        self.current() == Some((true, true))
     }
     /// Show black at once (a movie's end sets the palette to black).
     pub fn set_black(&mut self) {
@@ -85,6 +123,7 @@ impl Fades {
                 to_black: request.to_black,
                 start: now,
                 duration: request.duration,
+                blocking: request.blocking,
             });
             return true;
         }
@@ -134,8 +173,11 @@ mod tests {
         let game = palette();
         let mut fades = Fades::default();
         assert_eq!(fades.display(&game, 1.0), None);
-        fades.push(true, 0, false);
-        fades.push(false, 0, false);
+        fades.push_game(true);
+        fades.push_game(false);
+        // Game fades block from their request to their end, and the frame
+        // stays while the screen goes black.
+        assert!(fades.blocking() && fades.freezes());
         assert!(fades.tick(1000, &game));
         // Halfway (step 30 of 60): 63 - trunc(63 * 30 / 60) = 32.
         fades.tick(1350, &game);
@@ -144,13 +186,16 @@ mod tests {
         assert!(fades.tick(1700, &game));
         assert_eq!(fades.shown(&game)[5], [0, 0, 0]);
         assert!(fades.display(&game, 1.0).is_some());
+        // The fade back still blocks, but the frame may change under black.
+        assert!(fades.blocking() && !fades.freezes());
         assert!(fades.tick(1716, &game));
         assert!(fades.tick(2416, &game));
-        assert!(!fades.running());
+        assert!(!fades.running() && !fades.blocking());
         assert_eq!(fades.display(&game, 1.0), None);
         // `fadein` starts from black even when the game palette shows, and
-        // a library duration replaces the standard length.
-        fades.push(false, 100, true);
+        // a library duration replaces the standard length; it never blocks.
+        fades.push_library(false, 100, true);
+        assert!(!fades.blocking());
         fades.tick(3000, &game);
         fades.tick(3050, &game);
         assert_eq!(fades.shown(&game)[0], [31, 20, 0]);

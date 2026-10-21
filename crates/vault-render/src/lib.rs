@@ -1,6 +1,6 @@
 //! Minimal indexed-color rendering, independent of the windowing/event loop.
 
-use wgpu::util::{DeviceExt, TextureDataOrder};
+use wgpu::util::DeviceExt;
 
 pub mod dialogue;
 pub mod image;
@@ -35,10 +35,17 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    /// P-01: the index image and the palette live in persistent textures
+    /// that new frames overwrite in place; the sprite texture (and its bind
+    /// group) is recreated only when the image size changes.
+    sprite: wgpu::Texture,
     palette: wgpu::Texture,
     viewport_buffer: wgpu::Buffer,
     image_size: [u32; 2],
     drawable: bool,
+    /// The surface size last configured; the surface is reconfigured only
+    /// when the window size changes (or after a lost surface).
+    configured: Option<[u32; 2]>,
 }
 
 impl Renderer {
@@ -138,8 +145,20 @@ impl Renderer {
             contents: bytemuck::cast_slice(&[1.0_f32, 1.0, 0.0, 0.0]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let (bind_group, palette) =
-            image_bind_group(&device, &queue, &pipeline, &viewport_buffer, image, palette);
+        let sprite = sprite_texture(&device, [image.width(), image.height()]);
+        let palette_texture = texture(
+            &device,
+            "256-color palette",
+            [256, 1],
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let bind_group = image_bind_group(
+            &device,
+            &pipeline,
+            &viewport_buffer,
+            &sprite,
+            &palette_texture,
+        );
         let mut renderer = Self {
             surface,
             device,
@@ -147,11 +166,15 @@ impl Renderer {
             config,
             pipeline,
             bind_group,
-            palette,
+            sprite,
+            palette: palette_texture,
             viewport_buffer,
             image_size: [image.width(), image.height()],
             drawable: false,
+            configured: None,
         };
+        renderer.write_indices(image);
+        renderer.set_palette(palette);
         renderer.resize(width, height);
         Ok(renderer)
     }
@@ -180,16 +203,26 @@ impl Renderer {
         );
     }
 
-    /// Zero-sized/minimized windows are never configured or drawn.
+    /// Zero-sized/minimized windows are never configured or drawn. The
+    /// surface is configured only when its size changes (P-01).
     pub fn resize(&mut self, width: u32, height: u32) {
         self.drawable = width != 0 && height != 0;
         if !self.drawable {
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
-        // Integer pixel scaling when it fits, otherwise aspect-preserving downscale.
+        if self.configured != Some([width, height]) {
+            self.config.width = width;
+            self.config.height = height;
+            self.surface.configure(&self.device, &self.config);
+            self.configured = Some([width, height]);
+        }
+        self.update_viewport();
+    }
+
+    /// Integer pixel scaling when it fits, otherwise aspect-preserving
+    /// downscale, for the current image and surface sizes.
+    fn update_viewport(&mut self) {
+        let [width, height] = [self.config.width, self.config.height];
         let available_scale = (width as f32 / self.image_size[0] as f32)
             .min(height as f32 / self.image_size[1] as f32)
             * 0.75;
@@ -210,19 +243,50 @@ impl Renderer {
         );
     }
 
+    /// Present a new index image and palette. An image of the same size is
+    /// written into the existing texture (P-01: no texture, bind group or
+    /// swapchain is rebuilt); a new size recreates the sprite texture and
+    /// its bind group and rescales the quad.
     pub fn set_image(&mut self, image: &IndexedImage, palette: &[[u8; 4]; 256]) {
-        (self.bind_group, self.palette) = image_bind_group(
-            &self.device,
-            &self.queue,
-            &self.pipeline,
-            &self.viewport_buffer,
-            image,
-            palette,
-        );
-        self.image_size = [image.width(), image.height()];
-        if self.drawable {
-            self.resize(self.config.width, self.config.height);
+        let size = [image.width(), image.height()];
+        if size != self.image_size {
+            self.sprite = sprite_texture(&self.device, size);
+            self.bind_group = image_bind_group(
+                &self.device,
+                &self.pipeline,
+                &self.viewport_buffer,
+                &self.sprite,
+                &self.palette,
+            );
+            self.image_size = size;
+            if self.drawable {
+                self.update_viewport();
+            }
         }
+        self.write_indices(image);
+        self.set_palette(palette);
+    }
+
+    fn write_indices(&self, image: &IndexedImage) {
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.sprite,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            image.pixels(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(image.width()),
+                rows_per_image: Some(image.height()),
+            },
+            wgpu::Extent3d {
+                width: image.width(),
+                height: image.height(),
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Inverse of the centered image quad, for pointer picking in scene pixels.
@@ -308,31 +372,12 @@ impl Renderer {
 
 fn image_bind_group(
     device: &wgpu::Device,
-    queue: &wgpu::Queue,
     pipeline: &wgpu::RenderPipeline,
     viewport: &wgpu::Buffer,
-    image: &IndexedImage,
-    rgba: &[[u8; 4]; 256],
-) -> (wgpu::BindGroup, wgpu::Texture) {
-    let sprite = texture(
-        device,
-        queue,
-        "sprite indices",
-        image.width(),
-        image.height(),
-        wgpu::TextureFormat::R8Uint,
-        image.pixels(),
-    );
-    let palette = texture(
-        device,
-        queue,
-        "256-color palette",
-        256,
-        1,
-        wgpu::TextureFormat::Rgba8UnormSrgb,
-        bytemuck::cast_slice(rgba),
-    );
-    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    sprite: &wgpu::Texture,
+    palette: &wgpu::Texture,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("indexed sprite resources"),
         layout: &pipeline.get_bind_group_layout(0),
         entries: &[
@@ -353,38 +398,34 @@ fn image_bind_group(
                 resource: viewport.as_entire_binding(),
             },
         ],
-    });
-    (group, palette)
+    })
 }
 
+fn sprite_texture(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
+    texture(device, "sprite indices", size, wgpu::TextureFormat::R8Uint)
+}
+
+/// A sampled texture written through the queue.
 fn texture(
     device: &wgpu::Device,
-    queue: &wgpu::Queue,
     label: &str,
-    width: u32,
-    height: u32,
+    [width, height]: [u32; 2],
     format: wgpu::TextureFormat,
-    bytes: &[u8],
 ) -> wgpu::Texture {
-    device.create_texture_with_data(
-        queue,
-        &wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
         },
-        TextureDataOrder::LayerMajor,
-        bytes,
-    )
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
 }
 
 /// The image pixel under a point of a `surface`-sized window presenting an

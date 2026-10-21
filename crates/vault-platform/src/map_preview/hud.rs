@@ -5,19 +5,21 @@
 use super::MapPreview;
 use crate::interface::Painter;
 use vault_core::{
-    ObjectAction, ObjectRef,
+    ObjectAction, ObjectRef, WorldEffect,
     assets::WorldAssets,
-    critical::hit_mode,
+    clicks::{self, Click, Policy},
+    combat::attack_mode,
+    critical::{hit_mode, location},
     progression, skills,
     ui::{
         Rect,
-        bar::{self, Action, BarButton, Key},
+        bar::{self, Action, BarButton, Key, WeaponMode},
         cursor::{self, Mode},
     },
 };
 use vault_formats::{
     Fid,
-    pro::{Category, ExtendedFlags, ItemData, PrototypeData},
+    pro::{Category, ExtendedFlags, ItemData, ItemSubtype, PrototypeData},
 };
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
@@ -98,12 +100,39 @@ impl Counter {
     }
 }
 
+/// §3.25 the combat panel: whether it is open (its End turn and End
+/// combat buttons exist once the open animation has played), the running
+/// open or close animation (opening, start), the light (green on the
+/// player's turn), and the last `endanim.frm` frame drawn (none before the
+/// first open).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Panel {
+    pub open: bool,
+    pub animation: Option<(bool, u64)>,
+    pub light: Option<bool>,
+    pub frame: Option<u8>,
+}
+impl Panel {
+    /// The state restored by a load, without animation or sound (§3.19:
+    /// "on load the panel state is restored without animation").
+    pub fn settled(combat: bool, your_turn: bool) -> Self {
+        Self {
+            open: combat,
+            animation: None,
+            light: combat.then_some(your_turn),
+            frame: Some(if combat { 4 } else { 0 }),
+        }
+    }
+    /// The End turn and End combat buttons exist.
+    pub fn buttons(&self) -> bool {
+        self.open && self.animation.is_none()
+    }
+}
+
 /// Interface state that lives with the map view.
 pub(crate) struct Hud {
     pub monitor: bar::Monitor,
     pub mode: Mode,
-    /// The status text last mirrored into the monitor.
-    shown_status: Vec<u8>,
     /// Held modifiers: shift, control, alt.
     pub modifiers: [bool; 3],
     /// The player has had a turn in this combat: until then the pips keep
@@ -114,21 +143,50 @@ pub(crate) struct Hud {
     pub ac: Counter,
     /// The bar button pressed and still held: it reports on the release.
     pub held: Option<BarButton>,
+    /// §3.23 the left and right hands' slot actions.
+    pub slots: [bar::HandSlot; 2],
+    /// §3.25 the combat panel.
+    pub panel: Panel,
+    /// SPEC-013 §3.15 the Set Timer window, over whichever window opened it.
+    pub timer: Option<(ObjectRef, vault_core::skills::SetTimer)>,
+    /// §3.28 a frame pixel the system pointer is to be moved to (the
+    /// action menu's release); the shell takes it.
+    pub warp: Option<[i32; 2]>,
+    /// Sounds due later: a knob or switch's release cue 70 ms after its
+    /// press cue (§3.18).
+    pub cues: Vec<(u64, &'static [u8])>,
+    /// §3.23 a swap-hands animation was registered and has not ended: the
+    /// bar and the mouse are disabled and the cursor is `wait2.frm`.
+    pub swapping: bool,
+    /// §3.26 the animated watch: when it was set and the frame last drawn.
+    pub watch: Option<(u64, u32)>,
 }
 impl Default for Hud {
     fn default() -> Self {
         Self {
             monitor: bar::Monitor::default(),
             mode: Mode::Movement,
-            shown_status: Vec::new(),
             modifiers: [false; 3],
             turn_seen: false,
             hp: Counter::default(),
             ac: Counter::default(),
             held: None,
+            slots: Default::default(),
+            panel: Panel::default(),
+            timer: None,
+            warp: None,
+            cues: Vec::new(),
+            swapping: false,
+            watch: None,
         }
     }
 }
+
+/// §3.26 `wait2.frm`: 6 frames at 10 fps.
+pub(crate) const WATCH_FRAMES: u32 = cursor::ANIMATED[1].1;
+
+/// A cap on the slot's reload loop (see `reload_from_slot`).
+const RELOAD_LIMIT: usize = 1000;
 
 /// A bar button's screen rectangle.
 fn bar_button_rect(button: BarButton) -> Rect {
@@ -183,19 +241,13 @@ pub(crate) fn game_key(key: KeyCode, [shift, control, _]: [bool; 3]) -> Option<K
 }
 
 impl MapPreview {
-    /// Mirror a new status line into the monitor.
-    fn sync_monitor(&mut self) {
-        if self.status != self.hud.shown_status {
-            self.hud.shown_status = self.status.clone();
-            let status = self.status.clone();
-            self.monitor_push(&status);
-        }
-    }
     /// A message for the monitor (and the status line); the monitor sound
-    /// plays out of combat at most once per 500 ms.
+    /// plays out of combat at most once per 500 ms. G-31: only the game's
+    /// own messages come here (world messages and the `.msg` texts the
+    /// specifications name); diagnostics stay in the status line and the
+    /// log and never reach the monitor.
     pub(crate) fn notify(&mut self, text: Vec<u8>) {
         self.monitor_push(&text);
-        self.hud.shown_status = text.clone();
         self.status = text;
     }
     fn monitor_push(&mut self, text: &[u8]) {
@@ -218,7 +270,6 @@ impl MapPreview {
     }
     /// The 640-by-480 frame: the map view, the indicator boxes and the bar.
     pub(crate) fn compose_world(&mut self, view: IndexedImage) -> IndexedImage {
-        self.sync_monitor();
         if !self.host.world.combat {
             self.hud.turn_seen = false;
         } else if self.host.world.combat_state.player_turn {
@@ -272,10 +323,19 @@ impl MapPreview {
     fn draw_bar(&self, painter: &Painter, image: &mut IndexedImage) {
         let [bx, by] = bar::BAR_ORIGIN;
         painter.blit_opaque(image, bar::BAR_BACKGROUND, 0, [bx, by]);
-        let combat = self.host.world.combat;
+        let panel = self.hud.panel;
         for (button, _, up, down, _) in bar::BAR_BUTTONS {
-            if matches!(button, BarButton::EndTurn | BarButton::EndCombat) && !combat {
-                continue;
+            // The End turn and End combat buttons exist only while the
+            // panel is open; disabled (the red light) they show the up art.
+            if matches!(button, BarButton::EndTurn | BarButton::EndCombat) {
+                if !panel.buttons() {
+                    continue;
+                }
+                if panel.light != Some(true) {
+                    let rect = bar_button_rect(button);
+                    painter.blit(image, up, 0, [rect.x, rect.y]);
+                    continue;
+                }
             }
             if button != BarButton::ItemSlot {
                 let rect = bar_button_rect(button);
@@ -314,6 +374,7 @@ impl MapPreview {
         }
         // AP pips: green on the player's turn, red otherwise, none outside
         // combat or before the player's first turn.
+        let combat = self.host.world.combat;
         let ap = (combat && self.hud.turn_seen).then(|| {
             self.host
                 .world
@@ -330,17 +391,196 @@ impl MapPreview {
             painter.blit_opaque(image, art, 0, [bx + bar::pip_x(i), by + bar::PIP_STRIP.y]);
         }
         self.draw_item_slot(painter, image);
-        // The combat panel, lit green on the player's turn.
-        if combat {
-            let (art, origin) = bar::PANEL;
-            painter.blit_opaque(image, art, 4, [bx + origin[0], by + origin[1]]);
-            let light = if your_turn {
+        self.draw_ammo_bar(image);
+        // §3.25 the combat panel: its animation frame (or the last one
+        // drawn), and once open the light over it.
+        let (art, origin) = bar::PANEL;
+        let at = [bx + origin[0], by + origin[1]];
+        if let Some(frame) = panel.frame {
+            painter.blit_opaque(image, art, usize::from(frame), at);
+        }
+        if panel.buttons()
+            && let Some(green) = panel.light
+        {
+            let light = if green {
                 bar::LIGHTS[0].0
             } else {
                 bar::LIGHTS[1].0
             };
-            painter.blit(image, light, 0, [bx + origin[0], by + origin[1]]);
+            painter.blit(image, light, 0, at);
         }
+    }
+    /// §3.23 the ammo bar: one pixel wide at (463, 26), 70 tall, filled from
+    /// the bottom in raw indices 196 and 14 by the active item's rounds
+    /// (a weapon) or charges (a miscellaneous item), else empty.
+    fn draw_ammo_bar(&self, image: &mut IndexedImage) {
+        let [bx, by] = bar::BAR_ORIGIN;
+        let world = &self.host.world;
+        let (current, max) = self.active_item().map_or((0, 0), |item| {
+            let data = world
+                .get(item)
+                .and_then(|object| match &object.prototype.as_ref()?.data {
+                    PrototypeData::Item(item) => Some(&item.data),
+                    _ => None,
+                });
+            match data {
+                Some(ItemData::Weapon(_)) => world
+                    .weapon_profile(item, self.slot_hit_mode(self.slot_mode()))
+                    .map_or((0, 0), |weapon| (weapon.rounds, weapon.capacity)),
+                Some(ItemData::Misc { charges, .. }) => {
+                    (world.charges(item).unwrap_or(0), *charges)
+                }
+                _ => (0, 0),
+            }
+        });
+        for (y, color) in bar::ammo_bar(current, max).iter().enumerate() {
+            let (x, y) = (bx + bar::AMMO_BAR[0], by + bar::AMMO_BAR[1] + y as i32);
+            if let Some(pixel) = image.pixels_mut().get_mut((y * 640 + x) as usize) {
+                *pixel = *color;
+            }
+        }
+    }
+    /// §3.23 the active weapon is disabled: both arms crippled, or one with
+    /// a two-handed weapon (an empty hand is a weapon too). The slot then
+    /// shows only the disabled background and the item art, and its button
+    /// does nothing.
+    pub(crate) fn slot_disabled(&self) -> bool {
+        use vault_core::critical::effect::{CRIPPLED_LEFT_ARM, CRIPPLED_RIGHT_ARM};
+        let item = self.active_item();
+        if !self.slot_weapon(item) {
+            return false;
+        }
+        let flags = self
+            .host
+            .world
+            .critter_state(self.host.world.player)
+            .map_or(0, |state| state.results.0);
+        let two_handed = item
+            .and_then(|item| self.host.world.get(item))
+            .and_then(|object| object.prototype.as_ref())
+            .is_some_and(|prototype| prototype.extended.contains(ExtendedFlags::TWO_HANDED));
+        bar::slot_disabled(
+            flags & CRIPPLED_LEFT_ARM != 0,
+            flags & CRIPPLED_RIGHT_ARM != 0,
+            two_handed,
+        )
+    }
+    /// §3.25 one frame of the combat panel: entering combat plays
+    /// `iciboxx1` and shows frames 0-4, one every 200 ms (the bar blocks
+    /// meanwhile), then the buttons appear disabled with the red light and
+    /// `icombat1`; the player's turn lights it green with `icombat2`, its
+    /// end red again with `icombat1`; a combat end removes the buttons,
+    /// plays `icibcxx1` and shows frames 4-0. Returns whether it changed.
+    pub(crate) fn panel_tick(&mut self, now: u64) -> bool {
+        let panel = &mut self.hud.panel;
+        if let Some((opening, start)) = panel.animation {
+            let elapsed = now.saturating_sub(start);
+            let frame = bar::panel_frame(elapsed, opening);
+            let changed = panel.frame != Some(frame);
+            panel.frame = Some(frame);
+            if elapsed >= 4 * bar::PANEL_FRAME_MS {
+                panel.animation = None;
+                if opening {
+                    panel.light = Some(false);
+                    self.play_effect(bar::LIGHTS[1].1.as_bytes(), None);
+                }
+                return true;
+            }
+            return changed;
+        }
+        let world = &self.host.world;
+        let combat = world.combat;
+        let your_turn = combat && world.combat_state.player_turn;
+        if combat != panel.open {
+            panel.open = combat;
+            panel.light = None;
+            let (frame, sound) = if combat {
+                (0, bar::PANEL_OPEN_SOUND)
+            } else {
+                (4, bar::PANEL_CLOSE_SOUND)
+            };
+            panel.frame = Some(frame);
+            panel.animation = Some((combat, now));
+            self.play_effect(sound.as_bytes(), None);
+            return true;
+        }
+        if panel.open && panel.light != Some(your_turn) {
+            panel.light = Some(your_turn);
+            let sound = if your_turn {
+                bar::LIGHTS[0].1
+            } else {
+                bar::LIGHTS[1].1
+            };
+            self.play_effect(sound.as_bytes(), None);
+            return true;
+        }
+        false
+    }
+    /// The bar blocks game input and the world: a counter roll (§3.21) or
+    /// the panel's animation, which busy-waits (§3.25).
+    pub(crate) fn bar_blocks(&self) -> bool {
+        self.counters_rolling() || self.hud.panel.animation.is_some()
+    }
+    /// SPEC-014 §3.26-§3.27 the combat lock: in combat outside the
+    /// player's turn, or while a sequence registered on it (an attack, a
+    /// walk) still runs, the game mouse, the keyboard and the bar take
+    /// nothing and clicks are discarded.
+    pub(crate) fn combat_locked(&self) -> bool {
+        clicks::input_locked(&self.host.click_state())
+    }
+    /// §3.23 swap hands, step 4: while its animation holds the player the
+    /// bar and the mouse are disabled.
+    pub(crate) fn swapping_hands(&self) -> bool {
+        self.hud.swapping && self.host.owns_motion(self.host.world.player)
+    }
+    /// §3.26 the animated watch `wait2.frm` shows: the combat lock or a
+    /// hand swap. Meanwhile the in-world cursor is hidden and map clicks
+    /// and bar presses are ignored.
+    pub(crate) fn watch_shown(&self) -> bool {
+        self.combat_locked() || self.swapping_hands()
+    }
+    /// The §3.27 policy for a player's click that passed the lock.
+    pub(crate) fn click_policy(&self, click: Click) -> Policy {
+        clicks::click_policy(click, &self.host.click_state(), self.interrupt_walk)
+    }
+    /// One frame of the swap and the watch: a finished swap returns a
+    /// crosshair or use mode to movement (§3.23 step 5), and the watch
+    /// advances one frame every 100 ms from when it was set (§3.26).
+    /// Returns whether the frame changed.
+    pub(crate) fn watch_tick(&mut self, now: u64) -> bool {
+        let mut changed = false;
+        if self.hud.swapping && !self.host.owns_motion(self.host.world.player) {
+            self.hud.swapping = false;
+            if matches!(self.hud.mode, Mode::Crosshair | Mode::UseCrosshair) {
+                self.hud.mode = Mode::Movement;
+            }
+            changed = true;
+        }
+        let shown = self.watch_shown();
+        match (shown, self.hud.watch) {
+            (false, None) => {}
+            (false, Some(_)) => {
+                self.hud.watch = None;
+                changed = true;
+            }
+            (true, None) => {
+                self.hud.watch = Some((now, 0));
+                changed = true;
+            }
+            (true, Some((since, frame))) => {
+                let current = cursor::animated_frame(now.saturating_sub(since), WATCH_FRAMES);
+                if current != frame {
+                    self.hud.watch = Some((since, current));
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+    /// After a load the panel shows the restored combat state at once.
+    pub(crate) fn settle_panel(&mut self) {
+        let world = &self.host.world;
+        self.hud.panel = Panel::settled(world.combat, world.combat_state.player_turn);
     }
     /// §3.21 advance the counters: an unrequested change is drawn at once,
     /// a requested one rolls one unit at a time. Returns whether the bar
@@ -383,38 +623,43 @@ impl MapPreview {
         let pressed = self.held_button() == Some(Rect::new(origin[0], origin[1], slot.w, slot.h));
         let level = |light: u32| (light * 128 / 65536) as u8;
         let item = self.active_item();
-        let weapon = item
-            .and_then(|item| self.host.world.get(item))
-            .and_then(|object| {
-                object
-                    .prototype
-                    .as_ref()
-                    .and_then(|prototype| match &prototype.data {
-                        // The primary attack mode is the extended flags' low nibble.
-                        PrototypeData::Item(data) => match &data.data {
-                            ItemData::Weapon(weapon) => {
-                                Some(((prototype.extended.0 & 15) as u8, weapon.ap_cost[0]))
-                            }
-                            _ => None,
-                        },
-                        _ => None,
-                    })
-            });
         let use_on = item
             .and_then(|item| self.host.world.get(item))
             .and_then(|object| object.prototype.as_ref())
             .is_some_and(|prototype| prototype.permits_use_on());
-        let (action, cost) = match (item, weapon) {
-            (None, _) => (
-                bar::SlotAction::Attack(vault_core::combat::attack_mode::PUNCH),
-                3,
-            ),
-            (Some(_), Some((mode, cost))) => (bar::SlotAction::Attack(mode), cost),
-            (Some(_), None) if use_on => (bar::SlotAction::UseOn, 2),
-            (Some(_), None) => (bar::SlotAction::Use, 2),
+        // A weapon (or the empty hand, which punches) shows its chosen
+        // mode: reload, or the attack animation of the mode's hit mode with
+        // the bullseye when aimed; a non-weapon shows use or use-on.
+        let mode = self.slot_mode();
+        let disabled = self.slot_disabled();
+        let (action, cost, aimed) = if !self.slot_weapon(item) {
+            let action = if use_on {
+                bar::SlotAction::UseOn
+            } else {
+                bar::SlotAction::Use
+            };
+            (action, 2, false)
+        } else if mode == WeaponMode::Reload {
+            (bar::SlotAction::Reload, 2, false)
+        } else {
+            let hit = self.slot_hit_mode(mode);
+            let animation = match item {
+                None => attack_mode::PUNCH,
+                Some(item) => self
+                    .host
+                    .world
+                    .weapon_profile(item, hit)
+                    .map_or(attack_mode::NONE, |weapon| weapon.mode),
+            };
+            (
+                bar::SlotAction::Attack(animation),
+                self.slot_attack_cost(hit, mode.aimed()),
+                mode.aimed(),
+            )
         };
-        match bar::cost_digit(cost) {
-            // No cost: the plain background replaces the labels.
+        match bar::cost_digit(cost).filter(|_| !disabled) {
+            // No cost, or a disabled weapon: the plain background replaces
+            // the labels.
             None => {
                 painter.blit_opaque(image, bar::SLOT_DISABLED, 0, origin);
             }
@@ -435,6 +680,11 @@ impl MapPreview {
                     } else {
                         painter.blit(image, label, 0, at);
                     }
+                }
+                if aimed {
+                    let (art, up_at, down_at) = bar::BULLSEYE;
+                    let at = if pressed { down_at } else { up_at };
+                    painter.blit(image, art, 0, [origin[0] + at[0], origin[1] + at[1]]);
                 }
                 let (art, up_at, down_at) = bar::COST_LABEL;
                 let label_at = if pressed { down_at } else { up_at };
@@ -480,6 +730,7 @@ impl MapPreview {
             let (w, h) = (i32::from(frame.width), i32::from(frame.height));
             let [mut x, mut y] = bar::item_art_origin(w, h);
             let mut rows = h;
+            let pressed = pressed && !disabled;
             if pressed {
                 x += 1;
                 y -= 2;
@@ -522,13 +773,29 @@ impl MapPreview {
             self.hud.monitor.newer();
             return true;
         }
-        let combat = self.host.world.combat;
+        let panel = self.hud.panel;
         let Some(&(button, ..)) = bar::BAR_BUTTONS.iter().find(|(button, rect, ..)| {
             rect.contains(local)
-                && (combat || !matches!(button, BarButton::EndTurn | BarButton::EndCombat))
+                && (panel.buttons() || !matches!(button, BarButton::EndTurn | BarButton::EndCombat))
         }) else {
             return local[1] >= 0;
         };
+        // §3.25 disabled combat buttons (the red light) and §3.23 a disabled
+        // item slot take no press.
+        let disabled = match button {
+            BarButton::EndTurn | BarButton::EndCombat => panel.light != Some(true),
+            BarButton::ItemSlot => self.slot_disabled(),
+            _ => false,
+        };
+        if disabled {
+            return true;
+        }
+        // G-03 / SPEC-005 0x8133: while a script has the interface disabled
+        // the §3.19 buttons do nothing (no press, sound or key). The
+        // message monitor's scroll areas (§3.20) are not among them.
+        if self.host.world.ui_disabled {
+            return true;
+        }
         let (press, release) = if button == BarButton::ItemSlot {
             bar::SLOT_SOUNDS
         } else {
@@ -557,10 +824,21 @@ impl MapPreview {
         let Some(button) = button else {
             return false;
         };
-        // The combat buttons are gone once combat has ended.
-        let gone =
-            matches!(button, BarButton::EndTurn | BarButton::EndCombat) && !self.host.world.combat;
-        if over != Some(bar_button_rect(button)) || gone {
+        // The combat buttons are gone once the panel closes, and do nothing
+        // while disabled.
+        let panel = self.hud.panel;
+        let gone = matches!(button, BarButton::EndTurn | BarButton::EndCombat)
+            && (!panel.buttons() || panel.light != Some(true))
+            || (button == BarButton::ItemSlot && self.slot_disabled());
+        // A button sends its key on the release, which a disabled interface
+        // ignores too (G-03).
+        // §3.23, §3.27: nor while the watch shows (the combat lock or a
+        // hand swap).
+        if over != Some(bar_button_rect(button))
+            || gone
+            || self.host.world.ui_disabled
+            || self.watch_shown()
+        {
             return false;
         }
         if let Some(cue) = self.pressed.take() {
@@ -601,18 +879,27 @@ impl MapPreview {
         true
     }
     /// §3.23 left click on the item slot: a weapon sets the crosshair (and
-    /// starts combat), a skill book is used at once (SPEC-013 §3.25), any
-    /// other non-weapon sets the use crosshair.
+    /// starts combat) or reloads; a non-weapon used on a target sets the
+    /// use crosshair; a use-only non-weapon is used at once.
     fn use_item_slot(&mut self) {
-        // A use-only item is used at once; in combat it needs and spends
-        // 2 AP, and a book then refuses with 902 but the AP stay spent.
-        if let Some(item) = self.active_item()
-            && self
+        let item = self.active_item();
+        if let Some(item) = item.filter(|item| !self.slot_weapon(Some(*item))) {
+            let use_on = self
                 .host
                 .world
                 .get(item)
-                .is_some_and(|o| skills::skill_book(o.raw.pid).is_some())
-        {
+                .and_then(|object| object.prototype.as_ref())
+                .is_some_and(|prototype| prototype.permits_use_on());
+            if use_on {
+                self.hud.mode = Mode::UseCrosshair;
+                return;
+            }
+            // G-15: a use-only item is used at once; in combat it needs and
+            // spends 2 AP (a book then refuses with 902 but the AP stay
+            // spent, SPEC-013 §3.25). The use is the inventory's: a skill
+            // book by the item-slot route, an explosive's Set Timer window
+            // (SPEC-013 §3.10), a Motion Sensor's automap (§3.33), a drug,
+            // a kit on the player, else the use procedure.
             if self.host.world.combat {
                 let player = self.host.world.player;
                 let Some(state) = self.host.world.critter_state_mut(player) else {
@@ -623,39 +910,186 @@ impl MapPreview {
                 }
                 state.ap -= 2;
             }
-            if let Err(error) = self.host.read_book(item, vault_core::BookRoute::ItemSlot) {
-                self.status = error.to_string().into_bytes();
-            }
-            self.drain_effects();
+            self.use_item_now(item, vault_core::BookRoute::ItemSlot);
             return;
         }
-        // SPEC-014 §3.33: using a Motion Sensor from the slot opens the
-        // automap with the scanner on.
-        if let Some(item) = self.active_item()
-            && self.host.world.get(item).map(|o| o.raw.pid)
-                == Some(vault_core::ui::automap::MOTION_SENSOR)
+        if let Some(weapon) = item
+            && self.slot_mode() == WeaponMode::Reload
         {
-            self.use_motion_sensor(item);
+            self.reload_from_slot(weapon);
             return;
         }
-        let weapon = self.active_item().is_none_or(|item| {
-            self.host
+        // Another weapon mode (the empty hand too): the crosshair, starting
+        // combat when not in combat.
+        self.hud.mode = Mode::Crosshair;
+        self.request_combat();
+    }
+    /// §3.23 left-click in reload mode: reload from the inventory until a
+    /// reload fails (the SPEC-011 §3.15 search reload, so several stacks
+    /// can go). In combat 2 AP are needed, checked first, and spent only
+    /// when something loaded. Then the mode advances and the weapon's
+    /// ready sound plays (SPEC-010).
+    fn reload_from_slot(&mut self, weapon: ObjectRef) {
+        let player = self.host.world.player;
+        let combat = self.host.world.combat;
+        if combat
+            && self
+                .host
                 .world
-                .item_subtype(item)
-                .is_some_and(|subtype| subtype == vault_formats::pro::ItemSubtype::Weapon)
+                .critter_state(player)
+                .is_none_or(|state| state.ap < 2)
+        {
+            return;
+        }
+        let mut loaded = false;
+        // Each reload fills the magazine or uses up (and destroys) one unit,
+        // so the loop ends; the cap only bounds malformed empty packs.
+        for _ in 0..RELOAD_LIMIT {
+            match self.host.world.search_reload(player, weapon) {
+                Ok(true) => loaded = true,
+                Ok(false) => break,
+                Err(error) => {
+                    self.status = error.to_string().into_bytes();
+                    break;
+                }
+            }
+        }
+        if loaded
+            && combat
+            && let Some(state) = self.host.world.critter_state_mut(player)
+        {
+            state.ap = (state.ap - 2).max(0);
+        }
+        let next = bar::next_weapon_mode(WeaponMode::Reload, |mode| self.slot_mode_available(mode));
+        let hand = self.hand();
+        self.hud.slots[hand].set(Some(weapon), next);
+        let name = self
+            .host
+            .weapon_sound_name(
+                vault_core::ai::READY_SOUND,
+                weapon,
+                hit_mode::RIGHT_PRIMARY,
+                0,
+            )
+            .unwrap_or_default();
+        self.host.world.emit(WorldEffect::WeaponSound {
+            object: player,
+            weapon,
+            effect: vault_core::ai::READY_SOUND,
+            name,
         });
-        self.hud.mode = if weapon {
-            Mode::Crosshair
-        } else {
-            Mode::UseCrosshair
-        };
+        self.drain_effects();
+    }
+    /// The player asks for combat when not in it (`a`, and the item slot's
+    /// attack modes).
+    fn request_combat(&mut self) {
+        if !self.host.world.combat {
+            let player = self.host.world.player;
+            self.host.world.pending_combat = Some(vault_core::combat_state::CombatRequest {
+                attacker: player,
+                defender: 0,
+                accuracy: 0,
+                damage: [0, i32::MAX],
+                flags: None,
+            });
+        }
+    }
+    /// The active hand: 0 left, 1 right.
+    fn hand(&self) -> usize {
+        usize::from(self.host.world.active_hand != 0)
+    }
+    /// §3.23 a hand holding a weapon, or an empty hand (a weapon with punch
+    /// as both its primary and secondary hit mode).
+    pub(crate) fn slot_weapon(&self, item: Option<ObjectRef>) -> bool {
+        item.is_none_or(|item| self.host.world.item_subtype(item) == Some(ItemSubtype::Weapon))
+    }
+    /// §3.23 the active hand's chosen action mode: the object in the hand
+    /// keeps it; another object starts at the primary attack.
+    pub(crate) fn slot_mode(&self) -> WeaponMode {
+        self.hud.slots[self.hand()].mode(self.active_item())
+    }
+    /// The active hand's hit mode in `mode` (SPEC-007 §3.6): punch for an
+    /// empty hand, else the hand's primary or secondary hit mode. Reload
+    /// is not an attack; an attack made then uses the primary hit mode.
+    fn slot_hit_mode(&self, mode: WeaponMode) -> u8 {
+        if self.active_item().is_none() {
+            return hit_mode::PUNCH;
+        }
+        match (self.hand(), mode.secondary()) {
+            (0, false) => hit_mode::LEFT_PRIMARY,
+            (0, true) => hit_mode::LEFT_SECONDARY,
+            (_, false) => hit_mode::RIGHT_PRIMARY,
+            (_, true) => hit_mode::RIGHT_SECONDARY,
+        }
+    }
+    /// §3.23 the AP cost the slot shows for an attack: SPEC-007 §3.4's cost
+    /// (base cost, the player's reductions, +1 when aimed, at least 1).
+    fn slot_attack_cost(&self, hit: u8, aimed: bool) -> i32 {
+        let world = &self.host.world;
+        let player = world.player;
+        match world.attack_profile(player, player, hit, location::UNCALLED, aimed) {
+            Ok(attack) => attack.ap_cost(),
+            // No character to cost it against: the prototype's cost.
+            Err(_) => {
+                let base = self
+                    .active_item()
+                    .and_then(|item| world.weapon_profile(item, hit))
+                    .map_or(3, |weapon| weapon.ap_cost);
+                base + i32::from(aimed)
+            }
+        }
+    }
+    /// §3.23 whether the active hand can take `mode` when the slot cycles:
+    /// aimed modes need called shots allowed (SPEC-007 §3.4); secondary
+    /// modes a secondary hit mode that is not punch or kick (an empty
+    /// hand's is punch) and has an attack type; reload current ammunition
+    /// different from the maximum.
+    fn slot_mode_available(&self, mode: WeaponMode) -> bool {
+        let world = &self.host.world;
+        let player = world.player;
+        let item = self.active_item();
+        let hit = self.slot_hit_mode(mode);
+        match mode {
+            WeaponMode::Primary => true,
+            WeaponMode::Reload => item
+                .and_then(|item| world.weapon_profile(item, hit))
+                .is_some_and(|weapon| weapon.rounds != weapon.capacity),
+            _ => {
+                // An attack type: modes 9-15 count as none, as 0 does
+                // (SPEC-007 §3.5 safe rule).
+                let secondary = !mode.secondary()
+                    || item
+                        .and_then(|item| world.weapon_profile(item, hit))
+                        .is_some_and(|weapon| {
+                            vault_core::combat::Subtype::of(weapon.mode).is_some()
+                        });
+                secondary
+                    && (!mode.aimed()
+                        || world
+                            .attack_profile(player, player, hit, location::UNCALLED, true)
+                            .is_ok_and(|attack| attack.aimed_shot_available()))
+            }
+        }
+    }
+    /// §3.23 right-click on the slot or `n`: a weapon or the empty hand
+    /// runs primary, primary aimed, secondary, secondary aimed, reload,
+    /// then primary again, skipping the modes it does not have. A
+    /// non-weapon keeps its action.
+    fn cycle_item_mode(&mut self) {
+        let item = self.active_item();
+        if !self.slot_weapon(item) {
+            return;
+        }
+        let next = bar::next_weapon_mode(self.slot_mode(), |mode| self.slot_mode_available(mode));
+        let hand = self.hand();
+        self.hud.slots[hand].set(item, next);
     }
     /// One game-loop action (SPEC-014 §3.19). Returns whether it acted.
     pub(crate) fn game_action(&mut self, action: Action) -> bool {
         match action {
             Action::Inventory => self.open_inventory(),
             Action::Character => self.open_character(),
-            Action::PipBoy | Action::AlarmClock => {
+            action @ (Action::PipBoy | Action::AlarmClock) => {
                 if self.host.world.combat {
                     // §3.13: a title-only large box at (192, 116), key 32328.
                     self.play_effect(vault_core::ui::ERROR_SOUND.as_bytes(), None);
@@ -666,6 +1100,9 @@ impl MapPreview {
                         Vec::new(),
                         vault_core::ui::ColorKey::ERROR,
                     ));
+                } else if action == Action::AlarmClock {
+                    // G-26: `z` opens the Pip-Boy on its alarm-clock page.
+                    self.open_pipboy_on(super::pipboy::Tab::Alarm);
                 } else {
                     self.open_pipboy();
                 }
@@ -679,27 +1116,21 @@ impl MapPreview {
             Action::QuickSave => self.quick_save(),
             Action::QuickLoad => self.quick_load(),
             Action::SwapHands => {
-                self.host.world.active_hand ^= 1;
-                if matches!(self.hud.mode, Mode::Crosshair | Mode::UseCrosshair) {
+                // §3.23: the core flips the hand and registers the put-away
+                // and take-out; while that animation holds the player the
+                // bar and the mouse are disabled under the watch, and its
+                // end returns a crosshair or use mode to movement
+                // (`watch_tick`). Discarded (§3.10.1), the mode returns now.
+                if self.host.swap_hands() && self.host.owns_motion(self.host.world.player) {
+                    self.hud.swapping = true;
+                } else if matches!(self.hud.mode, Mode::Crosshair | Mode::UseCrosshair) {
                     self.hud.mode = Mode::Movement;
                 }
             }
             Action::CycleCursor => self.cycle_cursor(),
-            Action::CycleItemMode => {}
+            Action::CycleItemMode => self.cycle_item_mode(),
             Action::Automap => self.open_automap(false),
-            Action::StartCombat => {
-                if !self.host.world.combat {
-                    let player = self.host.world.player;
-                    self.host.world.pending_combat =
-                        Some(vault_core::combat_state::CombatRequest {
-                            attacker: player,
-                            defender: 0,
-                            accuracy: 0,
-                            damage: [0, i32::MAX],
-                            flags: None,
-                        });
-                }
-            }
+            Action::StartCombat => self.request_combat(),
             Action::Skill(row) => {
                 if let Some(index) = skills::skill_hotkey(row) {
                     self.play_effect(vault_core::ui::BUTTON_PRESS.as_bytes(), None);
@@ -708,6 +1139,11 @@ impl MapPreview {
             }
             Action::CenterPlayer => self.center_on_player(),
             Action::Rotate(clockwise) => {
+                // §3.27: rotating works only while the player's art is
+                // standing (and never under the combat lock).
+                if self.click_policy(Click::Rotate) != Policy::Proceed {
+                    return false;
+                }
                 let player = self.host.world.player;
                 if let Some(object) = self.host.world.get_mut(player) {
                     object.raw.orientation =
@@ -719,7 +1155,8 @@ impl MapPreview {
                 let text = self.clock_text();
                 self.notify(text);
             }
-            Action::MasterVolume(_) | Action::Screenshot => return false,
+            Action::Screenshot => self.screenshot(),
+            Action::MasterVolume(delta) => self.master_volume_step(delta),
         }
         true
     }
@@ -771,16 +1208,16 @@ impl MapPreview {
             _ => cursor::Target::Wall { usable },
         })
     }
-    /// The player's attack request (SPEC-007 §3.6): an empty active hand
-    /// requests punch (4), else the hand's primary mode.
+    /// The player's attack request (SPEC-007 §3.6): the item slot's hit
+    /// mode, punch (4) for an empty active hand, else the hand's primary or
+    /// secondary mode as chosen in the slot (§3.23).
     pub(crate) fn attack_mode(&self) -> u8 {
-        if self.active_item().is_none() {
-            hit_mode::PUNCH
-        } else if self.host.world.active_hand == 0 {
-            hit_mode::LEFT_PRIMARY
-        } else {
-            hit_mode::RIGHT_PRIMARY
-        }
+        self.slot_hit_mode(self.slot_mode())
+    }
+    /// The player's UI aiming flag: the slot shows the bullseye (§3.23).
+    /// SPEC-007 §3.4: an uncalled attack then costs the aiming AP.
+    pub(crate) fn attack_aimed(&self) -> bool {
+        self.slot_mode().aimed()
     }
     /// A left release in the map area by cursor mode (SPEC-014 §3.27).
     pub(crate) fn map_click(&mut self, point: [i32; 2], object: Option<ObjectRef>) {
@@ -796,8 +1233,8 @@ impl MapPreview {
                             player,
                             player,
                             self.attack_mode(),
-                            vault_core::critical::location::UNCALLED,
-                            false,
+                            location::UNCALLED,
+                            self.attack_aimed(),
                         )
                         .map_or(0, |attack| attack.ap_cost())
                 } else {
@@ -806,10 +1243,20 @@ impl MapPreview {
                 // SPEC-007 §3.11.1: a run when the `running` preference is
                 // on, which Shift inverts.
                 let run = (self.preferences.running != 0) != self.hud.modifiers[0];
+                // §3.27 a busy player: with `interrupt_walk` on the walk
+                // cancels its sequence out of combat; otherwise the click
+                // does nothing.
+                if self.click_policy(Click::Movement) == Policy::Ignore {
+                    return;
+                }
                 if let Some(hex) = self.view.grid.pick_hex(point) {
-                    match self.host.walk_toward(player, hex, run, reserve) {
+                    let interrupt = self.interrupt_walk;
+                    match self
+                        .host
+                        .walk_toward_with(player, hex, run, reserve, interrupt)
+                    {
                         Ok(true) => {}
-                        Ok(false) => self.status = b"You cannot get there".to_vec(),
+                        Ok(false) => tracing::debug!(hex, "no route for the player's walk"),
                         Err(error) => self.status = error.to_string().into_bytes(),
                     }
                 }
@@ -834,6 +1281,9 @@ impl MapPreview {
                         return;
                     }
                 };
+                if !self.action_allowed(object, action) {
+                    return;
+                }
                 self.interact(action);
             }
             Mode::Crosshair => {
@@ -854,16 +1304,22 @@ impl MapPreview {
                         return;
                     }
                     // The kick draw follows the player's preflight (no draws).
+                    // An aimed slot mode makes the attack aimed (SPEC-014
+                    // §3.23); no called-shot window is specified, so the
+                    // location stays uncalled and the aiming AP is paid
+                    // (SPEC-007 §3.4).
                     let mode = self.attack_mode();
-                    let uncalled = vault_core::critical::location::UNCALLED;
+                    let aimed = self.attack_aimed();
+                    let uncalled = location::UNCALLED;
                     let preflight = self
                         .host
                         .world
-                        .attack_profile(player, target, mode, uncalled, false)
+                        .attack_profile(player, target, mode, uncalled, aimed)
                         .map(|attack| self.host.world.preflight(player, target, &attack));
                     match preflight {
+                        // A refusal is no game message (G-31): only logged.
                         Ok(Err(refusal)) => {
-                            self.status = format!("{refusal:?}").into_bytes();
+                            tracing::debug!(?refusal, "player attack refused");
                             return;
                         }
                         Err(error) => {
@@ -874,10 +1330,10 @@ impl MapPreview {
                     }
                     match self
                         .host
-                        .perform_attack(player, target, mode, uncalled, false)
+                        .perform_attack(player, target, mode, uncalled, aimed)
                     {
                         Ok(Ok(_)) => {}
-                        Ok(Err(refusal)) => self.status = format!("{refusal:?}").into_bytes(),
+                        Ok(Err(refusal)) => tracing::debug!(?refusal, "player attack refused"),
                         Err(error) => self.status = error.to_string().into_bytes(),
                     }
                 } else {
@@ -899,6 +1355,9 @@ impl MapPreview {
                 let (Some(target), Some(item)) = (object, self.active_item()) else {
                     return;
                 };
+                if !self.action_allowed(target, ObjectAction::UseObject(item)) {
+                    return;
+                }
                 if self.host.world.combat {
                     let Some(state) = self.host.world.critter_state_mut(player) else {
                         return;
@@ -918,6 +1377,9 @@ impl MapPreview {
                     self.hud.mode = Mode::Movement;
                     return;
                 };
+                if !self.action_allowed(target, ObjectAction::UseSkill(i32::from(index))) {
+                    return;
+                }
                 match self.host.use_skill_on(player, target, i32::from(index)) {
                     Ok(true) => self.hud.mode = Mode::Movement,
                     Ok(false) => {}
@@ -926,6 +1388,19 @@ impl MapPreview {
                 self.drain_effects();
             }
         }
+    }
+    /// §3.27 "Clicks while the player is busy" for an arrow click or an
+    /// action-menu entry: pick up, use, loot, talk and skill uses follow
+    /// the click policy (a near talk registers even while the player is
+    /// busy); examining starts no sequence and always acts. The world
+    /// applies the same rules again as it registers.
+    pub(crate) fn action_allowed(&self, target: ObjectRef, action: ObjectAction) -> bool {
+        let click = match action {
+            ObjectAction::LookAt | ObjectAction::Description => return true,
+            ObjectAction::Talk if self.host.near_talk(target) => Click::NearTalk,
+            _ => Click::Action,
+        };
+        self.click_policy(click) != Policy::Ignore
     }
     /// A chosen skill: Sneak toggles (after clearing the player's
     /// animation); any other enters its targeting mode.
@@ -956,7 +1431,14 @@ impl MapPreview {
         let Some(key) = game_key(key, self.hud.modifiers) else {
             return false;
         };
-        let enabled = !self.host.world.ui_disabled;
+        // §3.27: under the combat lock the keyboard is disabled and its
+        // keys are discarded (S-04: no window opens and no end of combat is
+        // requested on the enemy turn).
+        if self.combat_locked() {
+            return true;
+        }
+        // §3.23: a hand swap disables the bar, whose keys go with it.
+        let enabled = !self.host.world.ui_disabled && !self.swapping_hands();
         match bar::game_key(key, enabled, self.hud.modifiers[2]) {
             Some(action) => {
                 if !matches!(action, Action::Skill(_)) {
@@ -982,11 +1464,41 @@ impl MapPreview {
             None => false,
         }
     }
+    /// F12 in game, in the options and on the automap (§3.17, §3.33): the
+    /// last composed frame, without the cursor, as displayed.
+    pub(crate) fn screenshot(&mut self) {
+        let Some(frame) = self.frame.clone() else {
+            return;
+        };
+        let palette = self.display_override().unwrap_or_else(|| {
+            self.game_palette()
+                .display_rgba8(self.preferences.brightness)
+        });
+        crate::interface::save_screenshot(&self.save_root, &frame, &palette);
+    }
+    /// The system pointer's pending warp (§3.28), for the shell.
+    pub fn take_warp(&mut self) -> Option<[i32; 2]> {
+        self.hud.warp.take()
+    }
+    /// A sound to play `delay` milliseconds from now.
+    pub(crate) fn cue_later(&mut self, delay: u64, sound: &'static [u8]) {
+        self.hud.cues.push((self.clock + delay, sound));
+    }
+    /// Play the sounds that have come due.
+    pub(crate) fn cues_tick(&mut self, now: u64) {
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.hud.cues)
+            .into_iter()
+            .partition(|(at, _)| *at <= now);
+        self.hud.cues = later;
+        for (_, sound) in due {
+            self.play_effect(sound, None);
+        }
+    }
     /// The menu, selection and editor share brightness (SPEC-014 §3.18).
     /// Brightness hotkeys apply, store and write the configuration at once.
     pub(crate) fn brightness_step(&mut self, up: bool) {
         self.preferences.brightness =
             vault_core::ui::options::brightness_step(self.preferences.brightness, up);
-        self.apply_preferences();
+        self.store_preferences();
     }
 }

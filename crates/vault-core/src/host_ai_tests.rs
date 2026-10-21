@@ -2572,6 +2572,46 @@ fn row(object: ObjectRef, delay: i32, label: &str) -> (ObjectRef, i32, String) {
 }
 
 #[test]
+fn spec007_a_throw_without_a_projectile_phase_ends_standing_with_code_0() {
+    use crate::choreography::{Action, Owner};
+    // F4 again: a Throwing Knife (code 1) whose critical failure keeps its
+    // critical bit launches nothing (§3.9). §3.10.4 step 11 still applies
+    // §3.9 step 11 to the throw, and with no refill item the attacker's
+    // art changes to standing with weapon code 0, delay -1: the literal
+    // reading, while the knife stays in the hand.
+    let (mut host, knife, defender, _) = fixture_f(45, 1, 0, 1, 0);
+    let player = host.world.player;
+    let attack = host
+        .world
+        .attack_profile(
+            player,
+            defender,
+            hit_mode::RIGHT_PRIMARY,
+            location::UNCALLED,
+            false,
+        )
+        .unwrap();
+    let spray = crate::Spray {
+        main: Resolution {
+            code: 1,
+            attacker_flags: effect::CRITICAL,
+            ..Resolution::default()
+        },
+        extras: Vec::new(),
+    };
+    let built = build(&mut host, player, defender, &attack, &spray);
+    assert!(built.thrown.is_none(), "nothing flies");
+    let last = built.show.main.entries().last().unwrap();
+    assert_eq!((last.owner, last.delay), (Owner::World(player), -1));
+    assert!(matches!(
+        last.action,
+        Action::SetArt { art } if Fid(art).animation() == 0 && Fid(art).weapon() == 0
+    ));
+    let (hand, _) = hands(&host);
+    assert_eq!(hand, vec![(knife, 1)]);
+}
+
+#[test]
 fn spec007_melee_contact_and_dodges_follow_the_action_frames() {
     // §3.10.3 a punch hit: the contact sound waits the punch art's action
     // frame (3); the defender, hit from the front, flinches (14) then.

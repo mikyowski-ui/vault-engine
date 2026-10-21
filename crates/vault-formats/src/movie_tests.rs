@@ -11,6 +11,30 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 
+#[test]
+fn palette_push_and_fade_level_are_total() {
+    // §3.6/§3.7 safe rule: a push is clipped to the 256 entries, so one
+    // starting at or past the end reaches nothing.
+    let table = [7_u8; 768];
+    let mut device = [0_u8; 768];
+    mve::push_palette(&table, &mut device, 300, 10);
+    mve::push_palette(&table, &mut device, 256, 1);
+    assert!(device.iter().all(|level| *level == 0));
+    mve::push_palette(&table, &mut device, 255, 10);
+    assert_eq!(device[765..], [7, 7, 7]);
+    assert!(device[..765].iter().all(|level| *level == 0));
+    // §3.11 safe rule: an effect with no steps covers no frame and, asked
+    // directly, leaves the source level unchanged.
+    let effect = moviefx::FadeEffect {
+        start: 1,
+        steps: 0,
+        out: false,
+        color: [63, 0, 0],
+    };
+    assert!(!effect.covers(1));
+    assert_eq!(effect.level(1, 20, 0), 20);
+}
+
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/movie/support.rs"]
 mod movie;

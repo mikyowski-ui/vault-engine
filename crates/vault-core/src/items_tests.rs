@@ -149,6 +149,14 @@ fn spec011_fixture_e_carry_body_container_and_power_limits() {
     );
     // Forced transfers exceed the limit.
     host.world.add_item(carrier, heavy, 1, true).unwrap();
+    // SPEC-011 §3.13: re-adding the representative itself is a no-op that
+    // succeeds, forced or not, ahead of the limits.
+    host.world.add_item(carrier, heavy, 1, false).unwrap();
+    let entries = host.world.get(carrier).unwrap().inventory.clone();
+    assert_eq!(
+        entries.iter().filter(|(entry, _)| *entry == heavy).count(),
+        1
+    );
     // Non-biped critters refuse everything.
     let dog = npc(&mut host, 0x0100_0203, 1);
     assert_eq!(
@@ -254,6 +262,39 @@ fn spec011_stacking_conditions_and_caps() {
     assert_eq!(host.world.caps(owner), 50);
     assert_eq!(host.world.inventory_value(wallet), 30, "caps at face value");
     assert!(host.world.get(coins).is_none(), "merged into the new money");
+}
+
+#[test]
+fn spec014_swap_hands_flips_the_hand_and_animates_the_weapon_change() {
+    use vault_formats::{Fid, pro::ItemData};
+    let mut host = support::host();
+    let player = host.world.player;
+    let weapon = support::carry(&mut host, player, WEAPON_W, 1);
+    host.wield_object(player, weapon).unwrap();
+    let code = match &host.world.item_data(weapon).unwrap().data {
+        ItemData::Weapon(weapon) => u8::try_from(weapon.animation).unwrap(),
+        _ => 0,
+    };
+    assert_ne!(code, 0);
+    let art = |host: &WorldHost<ItemAssets>| {
+        let fid = Fid(host.world.get(player).unwrap().raw.art_id);
+        (fid.animation(), fid.weapon())
+    };
+    assert_eq!(host.world.active_hand, 1);
+    assert_eq!(art(&host), (0, 0));
+    // SPEC-014 §3.23: to the empty left hand. Nothing is shown to put
+    // away; the player returns to the standing art with code 0.
+    assert!(host.swap_hands());
+    assert_eq!(host.world.active_hand, 0);
+    assert_eq!(art(&host), (0, 0));
+    // Back to the weapon: it is taken out, and the player stands with its
+    // animation code.
+    assert!(host.swap_hands());
+    assert_eq!(host.world.active_hand, 1);
+    assert_eq!(art(&host), (0, code));
+    // Away again: the put-away animation, then the standing art, code 0.
+    assert!(host.swap_hands());
+    assert_eq!(art(&host), (0, 0));
 }
 
 #[test]

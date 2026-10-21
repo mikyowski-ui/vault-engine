@@ -74,7 +74,8 @@ fn validates_maps_with_prototype_lists_and_int_images() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 43 passed, 0 failed"));
+    // The fixture corpus's `map.msg` (SPEC-008 §3.10) validates as well.
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 44 passed, 0 failed"));
     std::fs::write(
         temp.path().join("proto/items/synthetic.pro"),
         &world::container()[..64],
@@ -89,7 +90,7 @@ fn validates_maps_with_prototype_lists_and_int_images() {
     assert!(errors.contains("FAIL maps/synthetic.map: MAP"));
     assert!(errors.contains("FAIL proto/items/synthetic.pro: PRO"));
     assert!(errors.contains("FAIL scripts/synthetic.int: INT"));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 40 passed, 3 failed"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Validation: 41 passed, 3 failed"));
 }
 
 #[test]
@@ -119,6 +120,24 @@ fn validates_all_formats_and_reports_multiple_failures_without_stopping() {
     let errors = String::from_utf8_lossy(&output.stderr);
     assert!(errors.contains("FAIL color.pal: PAL at byte"));
     assert!(errors.contains("FAIL font0.aaf: AAF at byte"));
+}
+
+#[test]
+fn a_message_file_stopping_early_is_reported_not_failed() {
+    // SPEC-002 §4.5: `{1}{}{ok}}` fails after inserting ID 1, which stays.
+    let temp = tempfile::tempdir().unwrap();
+    fixtures::write_corpus(temp.path());
+    let dir = temp.path().join("text/english/game");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("early.msg"), b"{1}{}{ok}}{2}{}{lost}").unwrap();
+    let (success, _, stdout, stderr) = audit(temp.path(), &["--validate-formats"]);
+    assert!(success, "{stderr}");
+    assert!(
+        stdout.contains("Validation: 17 passed, 0 failed"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("MSG STOPS EARLY text/english/game/early.msg: 1 record(s) kept"));
+    assert!(stdout.contains("Message files stopping early (SPEC-002 §3.5): 1"));
 }
 
 #[test]
@@ -276,6 +295,32 @@ fn validates_spec008_working_saves_and_slot_round_trip() {
         temp.path().join("maps/synth.map"),
     )
     .unwrap();
+    // SPEC-008 §3.10: a map's number comes from its header name matched
+    // against `map.msg`. The dialogue map is a copy of the fixture map, so
+    // it gets its own header name and number; a third map `map.msg` does
+    // not list is unnumbered and never joins the working set.
+    let named = |name: &str, number: i32| {
+        let mut map = state::interactive_map();
+        map[4..20].fill(0);
+        map[4..4 + name.len()].copy_from_slice(name.as_bytes());
+        world::word(&mut map, 0x34, number);
+        map
+    };
+    std::fs::write(
+        temp.path().join("maps/dialogue.map"),
+        named("DIALOGUE.MAP", 8),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("maps/zunlistd.map"),
+        named("ZUNLISTD.MAP", -1),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("text/english/game/map.msg"),
+        "{7}{}{SYNTH.MAP}\n{8}{}{DIALOGUE.MAP}\n",
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_asset-audit"))
         .arg("--corpus-dir")
         .arg(temp.path())
@@ -290,12 +335,116 @@ fn validates_spec008_working_saves_and_slot_round_trip() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("highest fixed SPEC-008 index: 600"), "{text}");
     assert!(
-        text.contains("Saves: 2 maps entered, 2 working saves, 0 failed"),
+        text.contains("Saves: 3 maps entered, 2 working saves, 0 failed"),
         "{text}"
     );
     assert!(
         text.contains("Save slot round trip: restored SYNTH.SAV"),
         "{text}"
+    );
+}
+
+#[test]
+fn validates_spec008_map_numbers_against_map_msg_and_the_fixed_table() {
+    use vault_core::worldmap::MAP_TABLE;
+    let temp = tempfile::tempdir().unwrap();
+    state::write_corpus(temp.path());
+    std::fs::remove_file(temp.path().join("maps/synthetic.map")).unwrap();
+    std::fs::remove_file(temp.path().join("maps/dialogue.map")).unwrap();
+    // The 66 numbered maps and the six unlisted ones, each a header whose
+    // name field and word 0x34 follow SPEC-008 §3.10.
+    let header = |name: &str, number: i32| {
+        let mut map = world::empty_map();
+        map[4..20].fill(0);
+        map[4..4 + name.len()].copy_from_slice(name.as_bytes());
+        world::word(&mut map, 0x34, number);
+        map
+    };
+    let unlisted = [
+        "CARAVAN.MAP",
+        "JUNKDEMO.MAP",
+        "TEMPLAT1.MAP",
+        "ZDESERT1.MAP",
+        "ZDESERT2.MAP",
+        "ZDESERT3.MAP",
+    ];
+    for (number, entry) in MAP_TABLE.iter().enumerate() {
+        std::fs::write(
+            temp.path()
+                .join(format!("maps/{}", entry.name.to_ascii_lowercase())),
+            header(entry.name, number as i32),
+        )
+        .unwrap();
+    }
+    for name in unlisted {
+        std::fs::write(
+            temp.path()
+                .join(format!("maps/{}", name.to_ascii_lowercase())),
+            header(name, -1),
+        )
+        .unwrap();
+    }
+    let catalog: String = MAP_TABLE
+        .iter()
+        .enumerate()
+        .map(|(number, entry)| format!("{{{number}}}{{}}{{{}}}\n", entry.name))
+        .collect();
+    std::fs::write(temp.path().join("text/english/game/map.msg"), &catalog).unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+            .arg("--corpus-dir")
+            .arg(temp.path())
+            .arg("--validate-map-numbers")
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("Map numbers map.msg: 66 passed, 0 failed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Map numbers maps present: 73 passed, 0 failed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Map numbers header word 0x34: 72 passed, 0 failed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Map numbers SPEC-008 §4.5 vectors: 6 passed, 0 failed"),
+        "{text}"
+    );
+    // A map whose word disagrees with the number its name takes, an extra
+    // map, and a `map.msg` text that differs from the table all fail.
+    std::fs::write(temp.path().join("maps/hubent.map"), header("HUBENT.MAP", 7)).unwrap();
+    std::fs::write(temp.path().join("maps/extra.map"), header("EXTRA.MAP", -1)).unwrap();
+    std::fs::write(
+        temp.path().join("text/english/game/map.msg"),
+        catalog.replace("{0}{}{DESERT1.MAP}", "{0}{}{DESERT9.MAP}"),
+    )
+    .unwrap();
+    let output = run();
+    assert!(!output.status.success());
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        errors.contains("FAIL header word 0x34: HUBENT.MAP: header word 7 != 36"),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("FAIL maps present: EXTRA.MAP: not a corpus map"),
+        "{errors}"
+    );
+    assert!(errors.contains("FAIL map.msg: message 0:"), "{errors}");
+    assert!(
+        errors.contains("FAIL maps present: count: 73 maps, expected 72"),
+        "{errors}"
     );
 }
 
@@ -351,6 +500,23 @@ fn validates_spec009_packets_critter_resolution_and_taunt_ranges() {
         text.contains("Critter AI packets: 1 resolved, 1 fall back to entry 0"),
         "{text}"
     );
+    assert!(
+        text.contains("Taunt ranges: 2 with catalog lines, 10 without"),
+        "{text}"
+    );
+    // The taunt ranges come from the packet, so an enormous range
+    // (here the last hit range up to i32::MAX) is looked up, not scanned.
+    std::fs::write(
+        temp.path().join("data/ai.txt"),
+        format!(
+            "[Synthetic]\r\n{}",
+            section.replace("last_msg=1119", "last_msg=2147483647")
+        ),
+    )
+    .unwrap();
+    let output = run();
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
     assert!(
         text.contains("Taunt ranges: 2 with catalog lines, 10 without"),
         "{text}"
@@ -656,6 +822,21 @@ fn validates_spec011_item_invariants_and_reports_violations() {
         "{errors}"
     );
     assert!(errors.contains("2 item invariant(s) failed"), "{errors}");
+    // Without armor the three armor invariants have nothing to check: they
+    // stay in the table, marked, instead of dropping out of it.
+    for pid in [0x502, 0x503] {
+        std::fs::remove_file(items.join(format!("{pid:08}.pro"))).unwrap();
+    }
+    let output = run();
+    assert!(!output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in [
+        "armor perks are -1, 62, or 63\t0\t0",
+        "NOT EXERCISED armor DT is 0-100",
+        "Item invariants: 14 passed, 1 failed, 3 not exercised",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
 }
 
 #[test]
@@ -685,4 +866,425 @@ fn interaction_and_ui_audits_report_categories_and_fail_on_a_partial_corpus() {
         assert!(errors.contains("FAIL messages:"), "{errors}");
         assert!(errors.contains("check(s) failed"), "{errors}");
     }
+}
+
+#[test]
+fn validates_spec014_roof_words_and_stored_hide_bits_across_the_corpus_maps() {
+    use vault_core::worldmap::MAP_TABLE;
+    let temp = tempfile::tempdir().unwrap();
+    state::write_corpus(temp.path());
+    std::fs::remove_file(temp.path().join("maps/synthetic.map")).unwrap();
+    std::fs::remove_file(temp.path().join("maps/dialogue.map")).unwrap();
+    // A map with an elevation-0 tile block whose first `roofed` squares
+    // carry roof art `index`, the first `hidden` of them with the stored
+    // hide bit and the first `barrier` with the barrier bit.
+    let roofed_map = |name: &str, roofed: u32, index: u32, hidden: u32, barrier: u32| {
+        let mut map = world::empty_map();
+        map.truncate(248);
+        map[4..20].fill(0);
+        map[4..4 + name.len()].copy_from_slice(name.as_bytes());
+        world::word(&mut map, 0x28, 0x0D);
+        for square in 0..10000_u32 {
+            let word = if square < roofed {
+                (index << 16)
+                    | 1
+                    | if square < hidden { 0x1000_0000 } else { 0 }
+                    | if square < barrier { 0x2000_0000 } else { 0 }
+            } else {
+                0x0001_0001
+            };
+            map.extend(word.to_be_bytes());
+        }
+        map.extend(world::words(&[0; 5]));
+        map.extend(world::words(&[0; 4]));
+        map
+    };
+    let unlisted = [
+        "CARAVAN.MAP",
+        "JUNKDEMO.MAP",
+        "TEMPLAT1.MAP",
+        "ZDESERT1.MAP",
+        "ZDESERT2.MAP",
+        "ZDESERT3.MAP",
+    ];
+    let names: Vec<&str> = MAP_TABLE
+        .iter()
+        .map(|entry| entry.name)
+        .chain(unlisted)
+        .collect();
+    assert_eq!(names.len(), 72);
+    // 71 maps with 208 roofed squares and LAGUNRUN.MAP with 288, 257 of
+    // them stored hidden: 15056 in all.
+    for name in &names {
+        let (roofed, hidden) = if *name == "LAGUNRUN.MAP" {
+            (288, 257)
+        } else {
+            (208, 0)
+        };
+        std::fs::write(
+            temp.path()
+                .join(format!("maps/{}", name.to_ascii_lowercase())),
+            roofed_map(name, roofed, 5, hidden, 0),
+        )
+        .unwrap();
+    }
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+            .arg("--corpus-dir")
+            .arg(temp.path())
+            .arg("--validate-roofs")
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in [
+        "Roofs: 72 maps, 15056 roofed squares, 257 stored hide bits",
+        "Roofs roof index 0: 72 passed, 0 failed",
+        "Roofs barrier bit: 72 passed, 0 failed",
+        "Roofs stored hide bits: 72 passed, 0 failed",
+        "Roofs hidden after parse: 72 passed, 0 failed",
+        "Roofs roofed squares: 1 passed, 0 failed",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    // Roof index 0, a barrier bit, a stored hide bit outside LAGUNRUN.MAP
+    // and a changed total all fail.
+    std::fs::write(
+        temp.path().join("maps/hubent.map"),
+        roofed_map("HUBENT.MAP", 209, 0, 1, 1),
+    )
+    .unwrap();
+    let output = run();
+    assert!(!output.status.success());
+    let errors = String::from_utf8_lossy(&output.stderr);
+    for line in [
+        "FAIL roof index 0: HUBENT.MAP: 209 roofed square(s) with index 0",
+        "FAIL barrier bit: HUBENT.MAP: 1 square(s) with the barrier bit",
+        "FAIL stored hide bits: HUBENT.MAP: 1 stored hide bit(s), expected 0",
+        "FAIL roofed squares: total: 15057 != 15056",
+    ] {
+        assert!(errors.contains(line), "{line}\n{errors}");
+    }
+}
+
+fn audit(corpus: &std::path::Path, flags: &[&str]) -> (bool, Option<i32>, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+        .arg("--corpus-dir")
+        .arg(corpus)
+        .args(flags)
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn every_requested_category_runs_and_reports_before_the_failing_exit() {
+    let temp = tempfile::tempdir().unwrap();
+    world::write_corpus(temp.path());
+    std::fs::write(
+        temp.path().join("proto/walls/synthetic.pro"),
+        &world::prototype(3, 0)[..20],
+    )
+    .unwrap();
+    // The movie category stops at its missing oracle; the others still run
+    // and print their tallies, and one bad PRO does not end the art audit.
+    let (success, code, text, errors) = audit(
+        temp.path(),
+        &[
+            "--validate-movies",
+            "--movie-oracle-dir",
+            "no-such-oracle",
+            "--validate-formats",
+            "--validate-writers",
+            "--validate-art-ids",
+        ],
+    );
+    assert!(!success && code == Some(1), "{errors}");
+    for line in [
+        "Validation: 42 passed, 1 failed",
+        "Writers: 6 passed, 1 failed",
+        "Art identifiers: 12 resolved, 0 missing, 0 invalid",
+        "Art-id source files: 1 unreadable",
+        "Audit categories: 4 run, 4 failed",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    for line in [
+        // (the path separator is the platform's)
+        "asset-audit: Movies: no-such-oracle",
+        "mve-summary.tsv: ",
+        "asset-audit: 1 asset(s) in format validation failed",
+        "asset-audit: 1 writer round trip(s) failed",
+        "asset-audit: 1 art identifier check(s) failed",
+        "asset-audit: 4 of 4 categories failed",
+    ] {
+        assert!(errors.contains(line), "{line}\n{errors}");
+    }
+}
+
+#[test]
+fn validates_spec008_archive_members_against_the_loose_corpus() {
+    let temp = tempfile::tempdir().unwrap();
+    let corpus = temp.path().join("game");
+    std::fs::create_dir_all(&corpus).unwrap();
+    // SPEC-008 §4.1: the synthetic archive holds PACK.TXT and PLAIN.TXT.
+    std::fs::write(
+        temp.path().join("MASTER.DAT"),
+        fixtures::sparse(include_str!(
+            "../../../tests/fixtures/archive/synthetic.dat.hex"
+        )),
+    )
+    .unwrap();
+    std::fs::write(corpus.join("pack.txt"), b"ABCABCABC").unwrap();
+    std::fs::write(corpus.join("plain.txt"), b"XYZ").unwrap();
+    std::fs::write(corpus.join("loose.txt"), b"only loose").unwrap();
+    let master = temp.path().join("MASTER.DAT");
+    let master = master.to_str().unwrap();
+
+    // The default CRITTER.DAT beside the corpus is absent: that archive
+    // fails, and the master archive is still audited.
+    let (success, _, text, errors) = audit(&corpus, &["--validate-dat"]);
+    assert!(!success);
+    assert!(
+        text.contains("MASTER.DAT: 2 members, 2 matched, 0 differ, 0 missing loose, 0 failed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("CRITTER.DAT: 0 members, 0 matched, 0 differ, 0 missing loose, 1 failed"),
+        "{text}"
+    );
+    assert!(text.contains("Loose files: 3, 1 supplied by no archive"));
+    assert!(errors.contains("FAIL "), "{errors}");
+    assert!(errors.contains("asset-audit: 1 archive member check(s) failed"));
+
+    let both = ["--validate-dat", "--critter-dat", master];
+    let (success, _, text, errors) = audit(&corpus, &both);
+    assert!(success, "{errors}");
+    assert!(text.contains("Loose files: 3, 1 supplied by no archive"));
+
+    // A loose copy that differs, and a member with no loose file.
+    std::fs::write(corpus.join("plain.txt"), b"XYW").unwrap();
+    std::fs::remove_file(corpus.join("pack.txt")).unwrap();
+    let (success, _, text, errors) = audit(&corpus, &both);
+    assert!(!success);
+    assert!(
+        text.contains("2 members, 0 matched, 1 differ, 1 missing loose, 0 failed"),
+        "{text}"
+    );
+    assert!(errors.contains("DIFF "), "{errors}");
+    assert!(errors.contains("MISSING "), "{errors}");
+    assert!(errors.contains("asset-audit: 4 archive member check(s) failed"));
+}
+
+/// SPEC-012 oracle tables for the synthetic movie A, built from its
+/// expected-hash table (`oracle/SPEC-012/synthetic`), with `summary` as the
+/// summary row's values after the file name.
+fn movie_oracle(dir: &std::path::Path, summary: &[String], subtitles: &str) {
+    let (_, expected, _) = movie::synthetic('A');
+    let value = |cell: &str| cell.split_once('=').unwrap().1.to_owned();
+    let (mut frames, mut audio) = (String::from("header\n"), String::from("header\n"));
+    let mut index = 0;
+    for line in expected.lines() {
+        let cells: Vec<&str> = line.split('\t').collect();
+        match cells[0] {
+            "frame" => {
+                let (start, count) = value(cells[4])
+                    .split_once('+')
+                    .map(|(a, b)| (a.to_owned(), b.to_owned()))
+                    .unwrap();
+                frames += &format!(
+                    "synthetic-a.mve\t{}\t{}\t{}\t{start}\t{count}\t{}\t{}\t\n",
+                    cells[1],
+                    value(cells[2]),
+                    value(cells[3]),
+                    &value(cells[5])[..16],
+                    &value(cells[6])[..16],
+                );
+            }
+            "audio" => {
+                index += 1;
+                audio += &format!(
+                    "synthetic-a.mve\t{index}\t{}\t{}\t{}\n",
+                    value(cells[1]),
+                    value(cells[2]),
+                    &value(cells[3])[..16],
+                );
+            }
+            _ => {}
+        }
+    }
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("mve-summary.tsv"),
+        format!("header\nsynthetic-a.mve\t{}\n", summary.join("\t")),
+    )
+    .unwrap();
+    std::fs::write(dir.join("mve-frames.tsv"), frames).unwrap();
+    std::fs::write(dir.join("mve-audio.tsv"), audio).unwrap();
+    std::fs::write(dir.join("moviefx.tsv"), "header\n").unwrap();
+    std::fs::write(
+        dir.join("sve-subtitles.tsv"),
+        format!("header\n{subtitles}"),
+    )
+    .unwrap();
+}
+
+#[allow(dead_code)]
+#[path = "../../../tests/fixtures/movie/support.rs"]
+mod movie;
+
+#[test]
+fn validates_spec012_movies_fades_and_subtitles_against_oracle_tables() {
+    let temp = tempfile::tempdir().unwrap();
+    let corpus = temp.path().join("game");
+    let oracle = temp.path().join("oracle");
+    std::fs::create_dir_all(corpus.join("art/cuts")).unwrap();
+    std::fs::create_dir_all(corpus.join("text/english/cuts")).unwrap();
+    let (bytes, expected, _) = movie::synthetic('A');
+    std::fs::write(corpus.join("art/cuts/synthetic-a.mve"), bytes).unwrap();
+    // Fixture G has no movie of its name: parsed, reported, and skipped.
+    std::fs::write(corpus.join("art/cuts/fixture-g.cfg"), movie::fades()).unwrap();
+    std::fs::write(
+        corpus.join("text/english/cuts/synthetic-a.sve"),
+        b"1:Hello\r\n3:World\r\n",
+    )
+    .unwrap();
+    let subtitles = format!(
+        "english\tsynthetic-a.sve\t1\t1\t1\t5\t{}\nenglish\tsynthetic-a.sve\t2\t3\t3\t5\t{}\n",
+        &sha256(b"Hello")[..16],
+        &sha256(b"World")[..16],
+    );
+    let pcm = expected
+        .lines()
+        .find(|line| line.starts_with("pcm_total"))
+        .unwrap();
+    let pcm: Vec<&str> = pcm
+        .split('\t')
+        .map(|cell| cell.split_once('=').map_or(cell, |(_, v)| v))
+        .collect();
+    // Size, file hash, frame size, and PCM come from the fixture; the
+    // decoder's own counts (`?`) are filled in from its mismatch reports,
+    // one field per run, and only those fields may be filled that way.
+    let mut summary: Vec<String> = [
+        bytes.len().to_string(),
+        sha256(bytes),
+        "64".into(),
+        "64".into(),
+    ]
+    .into_iter()
+    .chain(std::iter::repeat_n("?".to_string(), 10))
+    .chain([pcm[1].to_owned(), pcm[2].to_owned()])
+    .chain(std::iter::repeat_n("?".to_string(), 2))
+    .collect();
+    let unknown = [
+        "chunks",
+        "frames",
+        "video frames",
+        "timer rate",
+        "timer subdivision",
+        "audio rate",
+        "stereo",
+        "16-bit",
+        "compressed",
+        "audio buffer",
+        "block counts",
+        "opcode counts",
+    ];
+    let flags = [
+        "--validate-movies",
+        "--movie-oracle-dir",
+        oracle.to_str().unwrap(),
+    ];
+    let mut filled = 0;
+    let (text, errors) = loop {
+        movie_oracle(&oracle, &summary, &subtitles);
+        let (success, _, text, errors) = audit(&corpus, &flags);
+        if success {
+            break (text, errors);
+        }
+        let report = errors
+            .lines()
+            .find_map(|line| line.strip_prefix("FAIL art/cuts/synthetic-a.mve: "))
+            .unwrap_or_else(|| panic!("{errors}"));
+        let (name, rest) = report.split_once(": ").unwrap();
+        let (value, wanted) = rest.split_once(" != ").unwrap();
+        assert!(unknown.contains(&name) && wanted == "?", "{report}");
+        let index = [
+            "bytes",
+            "file SHA-256",
+            "width",
+            "height",
+            "chunks",
+            "frames",
+            "video frames",
+            "timer rate",
+            "timer subdivision",
+            "audio rate",
+            "stereo",
+            "16-bit",
+            "compressed",
+            "audio buffer",
+            "PCM bytes",
+            "PCM SHA-256",
+            "block counts",
+            "opcode counts",
+        ]
+        .iter()
+        .position(|field| *field == name)
+        .unwrap();
+        summary[index] = value.to_owned();
+        filled += 1;
+        assert!(filled <= unknown.len());
+    };
+    assert_eq!(filled, 12, "{errors}");
+    for line in [
+        "MVE files: 1 in corpus; summaries 1 passed, 0 failed",
+        "MVE frames: 5 passed, 0 failed; audio opcodes: 6 passed, 0 failed",
+        "Fade effects: 0 passed, 0 failed; 1 fade file(s) without a movie",
+        "SVE files: 1 in corpus; entries 2 passed, 0 failed",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+
+    // A fade file that does not parse is one failed effect check,
+    // and the movie and subtitles are still compared.
+    std::fs::write(corpus.join("art/cuts/broken.cfg"), b"[info]\0\n").unwrap();
+    let (success, _, text, errors) = audit(&corpus, &flags);
+    assert!(!success);
+    assert!(text.contains("Fade effects: 0 passed, 1 failed"), "{text}");
+    assert!(text.contains("entries 2 passed, 0 failed"), "{text}");
+    assert!(
+        errors.contains("FAIL art/cuts/broken.cfg: CONFIG"),
+        "{errors}"
+    );
+    std::fs::remove_file(corpus.join("art/cuts/broken.cfg")).unwrap();
+
+    // A changed oracle hash fails that frame only.
+    let frames = std::fs::read_to_string(oracle.join("mve-frames.tsv")).unwrap();
+    let mut rows: Vec<String> = frames.lines().map(str::to_owned).collect();
+    rows[2] = rows[2].replace("\t1\t0\t", "\t1\t1\t");
+    std::fs::write(oracle.join("mve-frames.tsv"), rows.join("\n") + "\n").unwrap();
+    let (success, _, text, _) = audit(&corpus, &flags);
+    assert!(!success);
+    assert!(text.contains("MVE frames: 4 passed, 1 failed"), "{text}");
+
+    // A short user-supplied oracle row is an error, not a panic.
+    movie_oracle(&oracle, &summary, "english\n");
+    let (success, code, _, errors) = audit(&corpus, &flags);
+    assert!(!success && code == Some(1), "{errors}");
+    assert!(
+        errors.contains("sve-subtitles.tsv line 2: 1 column(s), expected at least 2"),
+        "{errors}"
+    );
 }

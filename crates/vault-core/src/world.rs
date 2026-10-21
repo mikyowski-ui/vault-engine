@@ -567,6 +567,11 @@ pub enum WorldTrace {
 pub struct WorldState {
     pub entities: EntityStore<WorldObject>,
     references: BTreeMap<ObjectRef, EntityId>,
+    /// Unique object number to reference, mirroring the live objects so an
+    /// insert checks uniqueness in logarithmic time. `id_index` rebuilds it
+    /// when a bulk clear of the stores or a rewritten player record
+    /// (restore) has left it behind.
+    unique_ids: BTreeMap<u32, ObjectRef>,
     next_reference: u32,
     pub(crate) next_uid: u32,
     pub player: ObjectRef,
@@ -643,6 +648,9 @@ pub struct WorldState {
     /// SPEC-014 §3.33 the hexes the player entered since the seen state was
     /// last processed: 40000 bits, 8 hexes per byte in hex order.
     pub visited: Vec<u8>,
+    /// SPEC-014 §3.36 roof tracking: the player's last roof square, its
+    /// elevation, and whether that square was empty.
+    pub roof: crate::roof::RoofTracker,
     pub combat_quit: bool,
     pub combat_actor: ObjectRef,
     pub ui_disabled: bool,
@@ -755,6 +763,7 @@ impl WorldState {
         Ok(Self {
             entities: EntityStore::with_key(),
             references: BTreeMap::new(),
+            unique_ids: BTreeMap::new(),
             next_reference: 0x10000,
             next_uid: 1,
             player: 0,
@@ -804,6 +813,7 @@ impl WorldState {
             player_speedup: false,
             default_player_art: 0,
             visited: vec![0; crate::persistence::VISITED_BYTES],
+            roof: crate::roof::RoofTracker::NONE,
             combat_quit: false,
             combat_actor: 0,
             ui_disabled: false,
@@ -829,6 +839,19 @@ impl WorldState {
     pub fn new(player: CharacterSheet, seed: i32) -> Result<Self, WorldError> {
         let mut world = Self::empty(seed)?;
         world.rng.startup_diagnostic();
+        world.insert_player(player)?;
+        Ok(world)
+    }
+    /// A world like `new` whose generator skips the startup diagnostic: a
+    /// game reset keeps the running generator, so those draws would only
+    /// be discarded.
+    pub fn fresh(player: CharacterSheet, seed: i32) -> Result<Self, WorldError> {
+        let mut world = Self::empty(seed)?;
+        world.insert_player(player)?;
+        Ok(world)
+    }
+    fn insert_player(&mut self, player: CharacterSheet) -> Result<(), WorldError> {
+        let world = self;
         let mut raw = object_record(0x01000000, 0);
         raw.hex = Some(20100);
         raw.state = ObjectState::Critter(CritterState {
@@ -856,14 +879,17 @@ impl WorldState {
             active: true,
             opponent: 0,
         })?;
-        Ok(world)
+        Ok(())
     }
     pub fn insert(&mut self, mut object: WorldObject) -> Result<ObjectRef, WorldError> {
         if self.references.len() >= 200_000 {
             return Err(WorldError::Invalid("world object limit exceeded".into()));
         }
-        if object.raw.id == 0 || self.iter().any(|(_, other)| other.raw.id == object.raw.id) {
-            while self.iter().any(|(_, other)| other.raw.id == self.next_uid) {
+        if object.raw.id == 0 || self.id_index().contains_key(&object.raw.id) {
+            while {
+                let next = self.next_uid;
+                self.id_index().contains_key(&next)
+            } {
                 self.next_uid = self.next_uid.checked_add(1).ok_or(WorldError::Arithmetic)?;
             }
             object.raw.id = self.next_uid;
@@ -879,9 +905,25 @@ impl WorldState {
                 .entry(prototype.pid)
                 .or_insert_with(|| prototype.clone());
         }
+        let id = object.raw.id;
         let key = self.entities.insert(object);
         self.references.insert(reference, key);
+        self.unique_ids.insert(id, reference);
         Ok(reference)
+    }
+    /// The unique-id index, rebuilt when it no longer mirrors the live
+    /// objects (see `unique_ids`).
+    fn id_index(&mut self) -> &BTreeMap<u32, ObjectRef> {
+        let player_id = self.get(self.player).map(|object| object.raw.id);
+        let stale = self.unique_ids.len() != self.references.len()
+            || player_id.is_some_and(|id| self.unique_ids.get(&id) != Some(&self.player));
+        if stale {
+            self.unique_ids = self
+                .iter()
+                .map(|(reference, object)| (object.raw.id, reference))
+                .collect();
+        }
+        &self.unique_ids
     }
     pub fn get(&self, reference: ObjectRef) -> Option<&WorldObject> {
         self.entities.get(*self.references.get(&reference)?)
@@ -979,6 +1021,38 @@ impl WorldState {
         for reference in remove {
             self.erase(reference);
         }
+        // SPEC-014 §3.36: removing all objects resets the roof tracking to
+        // "none"; the entrance placement then hides the roof over the player.
+        self.roof = crate::roof::RoofTracker::NONE;
+        // SPEC-014 §3.33: the visited hexes belong to the map that is left
+        // (a map saved on leaving has already folded them into its seen
+        // flags; an excluded or unnumbered map drops them).
+        self.visited.fill(0);
+        // SPEC-006 §3.5 steps 1 and 7: the kept objects' script instances
+        // and local variables travel with them, under ids that cannot
+        // alias the new map's scripts; a kept object whose script instance
+        // is gone loses its reference instead of dangling.
+        let mut carried = Vec::new();
+        for reference in &keep {
+            let Some(sid) = self
+                .get(*reference)
+                .map(|object| object.raw.script_id)
+                .filter(|sid| *sid != -1)
+            else {
+                continue;
+            };
+            let Some(instance) = self.scripts.get(&(sid as u32)).cloned() else {
+                if let Some(object) = self.get_mut(*reference) {
+                    object.raw.script_id = -1;
+                }
+                continue;
+            };
+            let locals = usize::try_from(instance.local_base)
+                .ok()
+                .and_then(|base| self.lvars.get(base..base + instance.local_count))
+                .map(<[i32]>::to_vec);
+            carried.push((*reference, instance, locals));
+        }
         self.scripts.clear();
         self.script_order.clear();
         self.map_script = None;
@@ -1024,6 +1098,38 @@ impl WorldState {
         self.map = map;
         for root in roots {
             self.import_object(root, None, assets)?;
+        }
+        for (reference, mut instance, locals) in carried {
+            let category = (instance.id >> 24).min(4);
+            let id = (1..0x1000000)
+                .map(|n| (category << 24) | n)
+                .find(|id| !self.scripts.contains_key(id))
+                .ok_or(WorldError::Arithmetic)?;
+            instance.id = id;
+            // The left map's programs were purged: the script runs its
+            // initial stream again on its next request.
+            instance.initialized = false;
+            instance.program = 0;
+            instance.source = 0;
+            instance.target = instance.owner;
+            match locals {
+                Some(values) => {
+                    instance.local_base = self.lvars.len() as i32;
+                    instance.local_count = values.len();
+                    self.lvars.extend(values);
+                }
+                None => instance.local_base = -1,
+            }
+            self.scripts.insert(id, instance);
+            let position = self
+                .script_order
+                .iter()
+                .position(|sid| sid >> 24 > category)
+                .unwrap_or(self.script_order.len());
+            self.script_order.insert(position, id);
+            if let Some(object) = self.get_mut(reference) {
+                object.raw.script_id = id as i32;
+            }
         }
         self.rebuild_lighting();
         Ok(())
@@ -1215,6 +1321,9 @@ impl WorldState {
             return;
         };
         if let Some(object) = self.entities.remove(key) {
+            if self.unique_ids.get(&object.raw.id) == Some(&reference) {
+                self.unique_ids.remove(&object.raw.id);
+            }
             if let Some(owner) = object.owner
                 && let Some(owner) = self.get_mut(owner)
             {
@@ -1231,24 +1340,28 @@ impl WorldState {
         }
         self.queue.remove_object(reference);
         self.party.remove(&reference);
-        // SPEC-009: a removed critter is swap-removed from the snapshot, and
-        // no last-attacker reference to it is retained. Combat cleanup clears
-        // every reference, so only an active combat can hold one.
-        if let Some(index) = self.ai.snapshot.iter().position(|e| *e == reference) {
-            self.ai.snapshot.swap_remove(index);
-        }
-        if self.combat {
-            for object in self.entities.values_mut() {
-                if object.opponent == reference {
-                    object.opponent = 0;
-                }
-            }
-        }
+        // SPEC-005 0x80F4: destruction clears combat membership.
+        self.remove_from_combat(reference);
     }
+    /// The map with its object table replaced by `render_objects`. This
+    /// clones the whole map file; a per-frame caller should draw from
+    /// `map` by reference and `render_objects` instead.
     pub fn render_snapshot(&self) -> MapFile {
         let mut map = self.map.clone();
-        map.objects.elevations = std::array::from_fn(|_| Vec::new());
-        map.objects.total = 0;
+        let consumed_len = map.objects.consumed_len;
+        map.objects = self.render_objects();
+        map.objects.consumed_len = consumed_len;
+        map
+    }
+    /// The object table to draw: the active, unowned world objects on the
+    /// three elevations plus the records the attack shows and explosions
+    /// present, without cloning the map's tiles, scripts or variables.
+    pub fn render_objects(&self) -> MapObjects {
+        let mut objects = MapObjects {
+            total: 0,
+            elevations: std::array::from_fn(|_| Vec::new()),
+            consumed_len: 0,
+        };
         // SPEC-007 §3.10: an object an attack presentation owns is drawn as
         // the earliest one still to finish draws it. Owners only the
         // presentation knows (a created projectile, explosion art, an
@@ -1259,9 +1372,9 @@ impl WorldState {
             owned.entry(*owner).or_insert(display);
         }
         let mut push = |record: MapObject| {
-            if let Some(elevation) = map.objects.elevations.get_mut(record.elevation as usize) {
+            if let Some(elevation) = objects.elevations.get_mut(record.elevation as usize) {
                 elevation.push(record);
-                map.objects.total += 1;
+                objects.total += 1;
             }
         };
         for (reference, object) in self.iter() {
@@ -1289,12 +1402,9 @@ impl WorldState {
             .iter()
             .flat_map(|explosion| explosion.art.records())
         {
-            if let Some(elevation) = map.objects.elevations.get_mut(record.elevation as usize) {
-                elevation.push(record);
-                map.objects.total += 1;
-            }
+            push(record);
         }
-        map
+        objects
     }
     /// SPEC-014 §3.29: a view center outside the map border is refused and
     /// leaves the view where it was. Returns whether the view moved there.
@@ -1470,7 +1580,9 @@ impl WorldState {
             .get_mut(reference)
             .ok_or_else(|| WorldError::Invalid("invalid object reference".into()))?;
         let previous = object.raw.hex;
-        if object.raw.elevation != elevation {
+        let previous_elevation = object.raw.elevation;
+        let changed_elevation = previous_elevation != elevation;
+        if changed_elevation {
             object.opponent = 0;
             if let ObjectState::Critter(state) = &mut object.raw.state {
                 state.maneuvers = 0;
@@ -1478,13 +1590,24 @@ impl WorldState {
         }
         object.raw.hex = Some(hex);
         object.raw.elevation = elevation;
+        // SPEC-005 0x80B6/0x80FF: changing a critter's elevation removes its
+        // combat membership.
+        if changed_elevation {
+            self.remove_from_combat(reference);
+        }
         if reference == self.player {
             self.set_view_center(hex);
             self.set_current_elevation(elevation);
             self.mark_visited(hex);
             self.check_exit_grids(hex, elevation);
+            // SPEC-014 §3.36: every placement of the player runs the roof
+            // rule after that hex's exit grids are checked.
+            self.place_player_roof(hex, elevation);
         }
-        self.rebuild_lighting();
+        // P-02: the light map is rebuilt only when this move can change it.
+        if self.move_changes_lighting(reference, previous, previous_elevation, hex, elevation) {
+            self.rebuild_lighting();
+        }
         if animated && previous != Some(hex) {
             self.check_spatials(reference);
         }
@@ -1635,6 +1758,79 @@ impl WorldState {
             };
         }
         self.rebuild_lighting();
+    }
+    /// The lattice distance beyond a light's radius within which a line
+    /// from the source can still pass: `hex_line` rounds each point to the
+    /// nearest hex, so an interior tile can lie one hex beyond the distance
+    /// of the line's end (`lighting_tests` checks this bound).
+    pub(crate) const LIGHT_LINE_SLACK: i32 = 1;
+    /// P-02: whether moving `reference` from `from` on `from_elevation` to
+    /// `hex` on `elevation` can change the light map, so `move_object`
+    /// rebuilds it only then. `rebuild_lighting` reads only the sources
+    /// (active, not hidden, lit) and the blockers (not hidden, not
+    /// light-through): a hidden mover, or a light-through one without
+    /// light, changes neither; a source always does; a blocker changes the
+    /// map only where it vacates a hex no other blocker holds, or enters a
+    /// hex none held, within reach of a source on that elevation.
+    pub(crate) fn move_changes_lighting(
+        &self,
+        reference: ObjectRef,
+        from: Option<i32>,
+        from_elevation: u8,
+        hex: i32,
+        elevation: u8,
+    ) -> bool {
+        if from == Some(hex) && from_elevation == elevation {
+            return false;
+        }
+        let Some(object) = self.get(reference) else {
+            return true;
+        };
+        if object.raw.flags.contains(BasicFlags::HIDDEN) {
+            return false;
+        }
+        if object.active && object.raw.light.intensity > 0 {
+            return true;
+        }
+        if object.raw.flags.contains(BasicFlags::LIGHT_THROUGH) {
+            return false;
+        }
+        let mut changed = [
+            from.map(|from| (from_elevation, from)),
+            Some((elevation, hex)),
+        ];
+        for (other, object) in self.iter() {
+            if other == reference
+                || object.raw.flags.contains(BasicFlags::HIDDEN)
+                || object.raw.flags.contains(BasicFlags::LIGHT_THROUGH)
+            {
+                continue;
+            }
+            let Some(held) = object.raw.hex else {
+                continue;
+            };
+            for slot in &mut changed {
+                if *slot == Some((object.raw.elevation, held)) {
+                    *slot = None;
+                }
+            }
+        }
+        let changed: Vec<_> = changed.into_iter().flatten().collect();
+        !changed.is_empty()
+            && self.iter().any(|(_, object)| {
+                object.active
+                    && !object.raw.flags.contains(BasicFlags::HIDDEN)
+                    && object.raw.light.intensity > 0
+                    && object.raw.elevation < 3
+                    && object.raw.hex.is_some_and(|center| {
+                        let reach = object.raw.light.radius.clamp(0, 8) + Self::LIGHT_LINE_SLACK;
+                        changed.iter().any(|(layer, hex)| {
+                            *layer == object.raw.elevation
+                                && vault_formats::HexGrid::lattice_distance(center, *hex)
+                                    .is_ok_and(|distance| distance <= reach)
+                        })
+                    })
+            })
     }
     pub fn rebuild_lighting(&mut self) {
         for layer in &mut self.tile_light {

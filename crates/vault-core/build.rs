@@ -173,6 +173,7 @@ fn world_tables() {
 
     let towns = section(&text, "### 3.7");
     let mut rows = Vec::new();
+    let mut town_names = Vec::new();
     for line in towns.lines() {
         let row = cells(line);
         if row.len() != 7 {
@@ -182,6 +183,7 @@ fn world_tables() {
             continue;
         };
         assert_eq!(id, rows.len(), "towns are in id order");
+        town_names.push(row[2].to_owned());
         let (column, cell_row) = row[3].split_once(',').expect("cell column,row");
         let entrances: Vec<usize> = row[5]
             .split(',')
@@ -229,9 +231,53 @@ fn world_tables() {
         "pub static HOTSPOTS: [[Hotspot; 7]; 15] = [{}];\n",
         hotspots.join(",")
     ));
+    source.push_str(&map_table(&text, &town_names));
     fs::write(
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("world_tables.rs"),
         source,
     )
     .unwrap();
+}
+
+/// SPEC-008 Section 3.10: the 66 map numbers with their `map.msg` text,
+/// fixed town and city music track. The table is exact data, so any change
+/// of its shape fails the build.
+fn map_table(text: &str, town_names: &[String]) -> String {
+    let mut rows = Vec::new();
+    for line in section(text, "### 3.10").lines() {
+        let row = cells(line);
+        if row.len() != 6 {
+            continue;
+        }
+        let Ok(number) = row[1].parse::<usize>() else {
+            continue;
+        };
+        assert_eq!(number, rows.len(), "map numbers are in order");
+        let name = row[2].trim_matches('`');
+        assert!(
+            name.ends_with(".MAP") && name == name.to_ascii_uppercase() && name.len() <= 12,
+            "map {number} needs an uppercase 8.3 `.MAP` name, not {name:?}"
+        );
+        let (town, label) = row[3].split_once(' ').expect("town id and name");
+        let town: usize = town.parse().expect("town id");
+        assert!(
+            town_names
+                .get(town)
+                .is_some_and(|known| known.starts_with(label)),
+            "map {number} names town {town} {label:?}, which Section 3.7 does not"
+        );
+        let music = row[4].trim_matches('`');
+        assert!(
+            !music.is_empty() && music.is_ascii() && !music.contains(['/', '\\', '.']),
+            "map {number} needs a bare track name, not {music:?}"
+        );
+        rows.push(format!(
+            "MapEntry{{name:{name:?},town:{town},music:{music:?}}}"
+        ));
+    }
+    assert_eq!(rows.len(), 66, "maps 0-65");
+    format!(
+        "pub static MAP_TABLE: [MapEntry; 66] = [{}];\n",
+        rows.join(",")
+    )
 }

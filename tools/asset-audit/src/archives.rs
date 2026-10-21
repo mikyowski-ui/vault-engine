@@ -4,14 +4,13 @@
 //! unpacked corpus.
 use std::{
     collections::BTreeSet,
-    error::Error,
     fs::File,
     io::BufReader,
     path::{Path, PathBuf},
 };
 
 use sha2::{Digest, Sha256};
-use vault_formats::{LocalDirProvider, MAX_ASSET_BYTES, Vfs, VfsPath, dat::DatTables};
+use vault_formats::{MAX_ASSET_BYTES, Vfs, VfsPath, dat::DatTables};
 
 /// One archive's results.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -66,9 +65,10 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-/// Audit `archives` against the loose corpus at `corpus`.
-pub fn audit_dat(corpus: &Path, archives: &[&Path]) -> Result<DatAudit, Box<dyn Error>> {
-    let vfs = LocalDirProvider::mount(corpus)?;
+/// Audit `archives` against the mounted loose corpus. An archive that
+/// cannot be opened or whose directory tables do not parse counts as one
+/// failed member, and the remaining archives are still audited.
+pub fn audit_dat(vfs: &dyn Vfs, archives: &[&Path]) -> DatAudit {
     let loose: BTreeSet<&str> = vfs.files().map(VfsPath::as_str).collect();
     let mut unseen = loose.clone();
     let mut audit = DatAudit {
@@ -77,9 +77,26 @@ pub fn audit_dat(corpus: &Path, archives: &[&Path]) -> Result<DatAudit, Box<dyn 
     };
     for &archive in archives {
         let name = archive.display();
-        let mut reader =
-            BufReader::new(File::open(archive).map_err(|error| format!("{name}: {error}"))?);
-        let tables = DatTables::read(&mut reader).map_err(|error| format!("{name}: {error}"))?;
+        let mut counts = ArchiveCounts {
+            archive: archive.to_path_buf(),
+            ..ArchiveCounts::default()
+        };
+        let opened = File::open(archive)
+            .map_err(|error| error.to_string())
+            .map(BufReader::new)
+            .and_then(|mut reader| {
+                let tables = DatTables::read(&mut reader).map_err(|error| error.to_string())?;
+                Ok((reader, tables))
+            });
+        let (mut reader, tables) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                counts.failed += 1;
+                eprintln!("FAIL {name}: {error}");
+                audit.archives.push(counts);
+                continue;
+            }
+        };
         // Members in payload order, so the stream mostly reads forward.
         let mut members: Vec<_> = tables
             .directories
@@ -92,10 +109,6 @@ pub fn audit_dat(corpus: &Path, archives: &[&Path]) -> Result<DatAudit, Box<dyn 
             })
             .collect();
         members.sort_by_key(|(_, file)| file.offset);
-        let mut counts = ArchiveCounts {
-            archive: archive.to_path_buf(),
-            ..ArchiveCounts::default()
-        };
         for (stored, entry) in members {
             counts.members += 1;
             let stored = String::from_utf8_lossy(&stored).replace('\\', "/");
@@ -140,5 +153,5 @@ pub fn audit_dat(corpus: &Path, archives: &[&Path]) -> Result<DatAudit, Box<dyn 
         audit.archives.push(counts);
     }
     audit.loose_only = unseen.len() as u64;
-    Ok(audit)
+    audit
 }

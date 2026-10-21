@@ -45,6 +45,10 @@ impl Mode {
 }
 
 /// A slot's state, from its `SAVE.DAT` header.
+///
+/// §3.14 `[May-improve]`: the reference's "old version" state (`lsgame.msg`
+/// 113, 116 and 136) is unreachable in R1, because the header reader reports
+/// only short reads and bad signatures; it is omitted here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotState {
     Occupied(SlotInfo),
@@ -178,7 +182,9 @@ impl SlotList {
 pub fn slot_at(y: i32) -> usize {
     ((y - 87).max(0) / 34).min(SLOTS as i32 - 1) as usize
 }
-/// The reference mapping `trunc((y - 79) / 34)`, clamped to 0-9.
+/// The reference mapping `trunc((y - 79) / 34)`, clamped to 0-9 (P-08:
+/// kept for the tests that pin the difference from the safe rule).
+#[cfg(test)]
 pub fn reference_slot_at(y: i32) -> usize {
     ((y - 79).max(0) / 34).min(SLOTS as i32 - 1) as usize
 }
@@ -215,7 +221,9 @@ pub fn thumbnail(view: &[u8], stride: usize) -> Vec<u8> {
     );
     out
 }
-/// The source column or row a destination column or row takes.
+/// The source column or row a destination column or row takes (P-08: the
+/// tests' statement of the scaler's mapping).
+#[cfg(test)]
 pub fn thumbnail_source(destination: usize) -> Option<usize> {
     (0..640).rev().find(|x| {
         let start = (SCALE * *x as u64 / 65536) as usize;
@@ -236,6 +244,29 @@ pub fn date_line(info: &SlotInfo, month_name: &[u8]) -> Vec<u8> {
     line
 }
 pub const INFO_LINES: [[i32; 2]; 3] = [[396, 254], [397, 266], [399, 279]];
+/// Info line 3 (the location) wraps to the 164-pixel box with a 12-pixel
+/// line step.
+pub const LOCATION_WIDTH: i32 = 164;
+pub const LOCATION_STEP: i32 = 12;
+/// §3.14 info line 3: the location text word-wrapped to 164 pixels (breaks
+/// at spaces; a word wider than a line stands alone and is clipped when
+/// drawn). The reference shows only the first wrapped line, because its
+/// wrapper ends the text at the next line start; `[May-improve]`: up to
+/// three wrapped lines, at y = 279, 291 and 303.
+pub fn location_lines(text: &[u8], width: impl Fn(&[u8]) -> i32) -> Vec<Vec<u8>> {
+    let mut lines: Vec<Vec<u8>> = Vec::new();
+    for word in text.split(|b| *b == b' ').filter(|word| !word.is_empty()) {
+        match lines.last_mut() {
+            Some(line) if width(&[line.as_slice(), b" ", word].concat()) <= LOCATION_WIDTH => {
+                line.push(b' ');
+                line.extend_from_slice(word);
+            }
+            _ => lines.push(word.to_vec()),
+        }
+    }
+    lines.truncate(3);
+    lines
+}
 
 /// The location short-name table: `map.msg` index by map number (66 maps).
 pub const MAP_SHORT_NAMES: [i32; 66] = {

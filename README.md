@@ -28,12 +28,18 @@ grids and the loot/steal window; SPEC-014 adds the game flow (splash, main menu,
 character selection and creation), the save/load and options screens, the
 interface bar, cursor modes and the endgame. The SPEC-007 revision adds the
 punch-to-kick draw and missed-shot bystanders, and the SPEC-001 revision the
-shipped 33536-byte palette form. The final SPEC-005/007/009/013/014 revisions
+shipped 33536-byte palette form. Later SPEC-005/007/009/013/014 revisions
 add the single intended-target retaliation rule, center-only explosions with
 the scenery `damage_p_proc` notice and the 50-tick retry, scripted explosions,
 the automap and inventory windows, rolling HP/AC counters, the white death
 fade, the large dialog boxes and the help screen; the desktop now streams DAT
 members lazily and can run the vault-debug inspector live (`--debug`, F9).
+The current revisions (SPEC-007 R1-rev7, SPEC-008 with §3.10 and §4.5,
+SPEC-013 R1-rev5, SPEC-014 R1-rev6) add attack and non-combat animation
+choreography with projectile flight, one sequence per owner, the busy-click
+policy, map numbers with city music, and roof hiding (see "Spec completion
+notes"). The approved specs are revised as builder questions are answered; the
+open ones are listed under "Open spec questions for the research vault".
 
 `AGENTS.md` is the repository's implementation policy. `PROVENANCE.md` records
 the two-team clean-room process, and `CONTRIBUTING.md` the clean-room
@@ -48,7 +54,7 @@ data is needed to build, test, or run the synthetic shell and preview fixtures.
 | Package | Responsibility |
 | --- | --- |
 | `vault-formats` | VFS, asset/prototype/map parsers, projection and picking |
-| `vault-core` | Authoritative world, host services, stats/RNG, dialogue, save foundations |
+| `vault-core` | Authoritative world, host services, stats/RNG, dialogue, combat and AI, animation sequences, roofs, click policy, world travel, legacy save slots |
 | `vault-vm` | INT loader, two-stack core interpreter, explicit host interfaces |
 | `vault-guidance` | Pip-Boy holodisk and quest status from campaign globals |
 | `vault-render` | Indexed sprite/text/map/dialogue composition and palette rendering |
@@ -64,20 +70,35 @@ pins the workspace dependencies. Standard checks need no desktop, GPU, or corpus
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 # Run all three gates:
 cargo xtask check
 ```
+
+`--locked` fails instead of updating `Cargo.lock`, so CI and local gates build
+the committed dependency set.
 
 The dev profile builds `vault-formats` and `vault-core` at `opt-level = 2`, so
 debug runs of the desktop decode, decompress, light and route at near-release
 speed while the other crates keep full debug builds.
 
-CI also builds a Windows release (`vault-platform.exe`, `asset-audit.exe`),
-checks dependencies with `cargo audit` and `cargo deny check` (policy in
-`deny.toml`). A scheduled nightly workflow builds the `fuzz/` targets and runs
-each briefly on synthetic seeds (see `fuzz/README.md`).
+CI (`.github/workflows/ci.yml`, read-only permissions, cached builds, every
+Cargo command `--locked`) runs these jobs on each push and pull request:
+- `check` (Linux): the three gates.
+- `msrv`: `cargo check --workspace --all-targets` on the `rust-version` from
+  `Cargo.toml` (1.88).
+- `fuzz-check`: rustfmt over `fuzz/fuzz_targets/` and
+  `cargo check --manifest-path fuzz/Cargo.toml --bins` on stable.
+- `windows-release`: a release build (`vault-platform.exe`, `asset-audit.exe`,
+  uploaded as artifacts) and the workspace tests.
+- `macos`: build and test.
+- `supply-chain`: `cargo audit` and `cargo deny check` (policy in `deny.toml`)
+  over both `Cargo.lock` and `fuzz/Cargo.lock`.
+
+A scheduled nightly workflow (`fuzz.yml`) builds the `fuzz/` targets with
+nightly and runs each for 60 seconds on synthetic seeds (see
+`fuzz/README.md`).
 
 On Linux the desktop shell needs a Wayland or X11 session, the corresponding
 window-system libraries (including libxkbcommon), and a Vulkan or OpenGL driver.
@@ -123,8 +144,11 @@ cargo run -p vault-platform -- --master-dat /path/to/MASTER.DAT --critter-dat /p
 # {"commands":8,"elapsed_ms":128,"state_sha256":"…"}
 ```
 
-Logs have no timestamps, so each command advances a simulated 16 ms frame.
-Command identifiers must increase; replay stops at `quit` or an unconsumed
+The desktop logs its initial window size (`surface`, the first record) and
+every frame's clock (`tick`), so a replay ticks at exactly the logged times,
+with the same engine key repeats (SPEC-014 §3.29). A log without a leading
+`surface` record comes from an older desktop: each command then advances a
+simulated 16 ms frame on a 960 x 640 surface. Command identifiers must increase; replay stops at `quit` or an unconsumed
 Escape. The digest covers the central save (or its encoding error), every
 working saved map, the automap (for a map preview or the game's world), and the
 presented frame with its palette.
@@ -140,6 +164,10 @@ cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game
 cargo run -p asset-audit -- --corpus-dir tests/fixtures/loose
 # Validate every supported asset and report all failures:
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-formats
+# SPEC-008 §3.10: map.msg against the fixed map table, header map numbers, §4.5 vectors:
+cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-map-numbers
+# SPEC-014 §3.36: roof words of every map (roofed squares, stored hide bits):
+cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-roofs
 # Resolve every PRO/MAP art identifier through the SPEC-007 codec:
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-art-ids
 # Round-trip every PRO/MAP through the SPEC-003 writers:
@@ -167,6 +195,31 @@ cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
 cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-dat \
     [--master-dat /path/to/MASTER.DAT --critter-dat /path/to/CRITTER.DAT]
 ```
+
+The `--validate-*` flags combine freely. All requested categories share one
+mount, and each runs to the end even when an earlier one failed. The run then
+prints `Audit categories: N run, M failed`, lists each failed category on
+stderr, and exits nonzero if any failed. Without a validation flag the tool
+only counts files.
+
+On the local corpus every category passes. Besides the counts quoted below,
+the full run reports: 17760 assets parsed by `--validate-formats` with 0
+failures; 137427 art identifiers resolved, 27 missing and 0 invalid; 4378
+writer round trips; 72 maps entered, 42 working saves written, 0 failures;
+95 AI packets, 312 critters, and 1140 taunt ranges; and every DAT member
+(19784 in `MASTER.DAT`, 5459 in `CRITTER.DAT`) matching its loose file.
+
+`--validate-map-numbers` checks that `map.msg` 0-65 equals the fixed SPEC-008
+§3.10 table, that the 66 numbered maps and the six unlisted ones are present
+and no other `.map` is, that each header's word `0x34` equals the number its
+header name takes (-1 for the unlisted six), and the §4.5 vectors (number,
+town, music, and whether a save is written). On the local corpus 66 table
+rows, 73 presence checks, 72 header words, and 6 vectors pass.
+
+`--validate-roofs` reads every map's roof words: no roofed square (roof index
+other than 1) has index 0 or the barrier bit `0x20000000`, stored hide bits
+`0x10000000` appear only in `LAGUNRUN.MAP` (257 of them), parsing clears every
+hide bit (SPEC-003 §2.8), and the roofed squares total 15056 over the 72 maps.
 
 `--validate-movies` requires every corpus `.mve` to have an `mve-summary.tsv`
 row and every row to match: file size and SHA-256, frame size, chunk, frame,
@@ -226,14 +279,18 @@ order and omits the reference's scenery suffix), and MAP output to be a parse/wr
 fixpoint that keeps every saved object and retained script.
 
 The CLI prints total mounted files and counts for `.frm`, `.pal`, `.fon`, `.aaf`,
-`.pro`, `.map`, `.int`, `.msg`, and `.lst`, including zero counts. It traverses the
+`.pro`, `.map`, `.int`, `.msg`, `.lst`, `.gam`, and `.gcd`, including zero counts. It traverses the
 VFS namespace without parsing file contents. Invalid arguments or mounts exit
 unsuccessfully with a diagnostic. With `--validate-formats`, the tool additionally
 parses every `.pal`, `.frm`, `.fr0`–`.fr5`, `.lst`, `.fon`, `.aaf`, `.msg`,
 `.pro`, `.map`, `.int`, `.gam`, and `.gcd`,
 prints per-format pass/fail counts, and reports failing paths, formats, byte
 offsets, and reasons on stderr. Any failure produces a nonzero exit after the
-remaining assets have been checked. Phase 0's `loose/` markers are deliberately
+remaining assets have been checked. A `.msg` file that stops early under the
+strict SPEC-002 rules (see "Format safety and compatibility") is reported, not
+failed: `MSG STOPS EARLY <path>: <n> record(s) kept: <error>` on stdout, and a
+`Message files stopping early (SPEC-002 §3.5)` count in the summary. The local
+corpus has 6 such files. Phase 0's `loose/` markers are deliberately
 not valid binary formats; use `tests/fixtures/formats/materialize.py` for a valid
 synthetic corpus.
 
@@ -330,7 +387,8 @@ the palette's intensity table.
 
 On the local map, **W** opens the world map and **P** the Pip-Boy; script
 `world_map`/`town_map` requests open them too. Both are modal, so the local map's
-scripts and clock wait. The world map is the 450 x 442 viewport over the
+scripts and clock wait. Opening the world map (and leaving the town map for it)
+plays `03wrldmp`. The world map is the 450 x 442 viewport over the
 1400 x 1500 world. The specifications name no world artwork, so the view is drawn
 from the fixed terrain grid and discovery values (unknown black, seen dim,
 visited bright). It shows known towns (with the specification's town names), the
@@ -341,7 +399,9 @@ Arriving in a town enters it: a first visit loads its slot-zero map, later visit
 show the town map. **Enter** enters the current town or drops out into the
 terrain here. Arrows scroll, and **Escape** returns. The town map draws interface
 art `156 + town` at (20,20) with its known entrance buttons, labelled from
-`worldmap.msg`.
+`worldmap.msg`; a request for town -1 (an unnumbered map), an unknown town, or
+a missing picture opens the world map instead. Both views, and the Pip-Boy
+below, are stand-ins where no spec names art or layout (see "Known gaps").
 
 The Pip-Boy shows quests by location (active green, completed dimmed and struck
 through) and the holodisk list and pages, read from `pipboy.msg`. Its alarm clock
@@ -353,7 +413,19 @@ catalog; these two hold the specified message ranges.
 Audio plays SPEC-010 sounds on the default device (`--no-audio` keeps it silent):
 - Effect requests resolve through the lookup chain, with the owner's gender
   alias. They are decoded with the exact ACM decoder, cached, and played mono at
-  22050 Hz at the relative volume of their owner, at the full effect setting.
+  22050 Hz at the relative volume of their owner, scaled by the effect volume.
+- Background music plays as interleaved stereo at 22050 Hz (SPEC-010 §3.6). A
+  track is decoded on a worker thread and cached, so a repeated request restarts
+  it at once. The main menu loops `07desert`; maps request their city track
+  (SPEC-008 §3.10) after `wind2`, which loops while a map loads (and on an
+  unnumbered map), and the world map plays `03wrldmp`; a dead player
+  hears the narrator's death line on the speech channel.
+- The preference volumes (SPEC-014 §3.18) apply to every channel: master scales
+  every voice except a movie, music the music, effects and speech each sound as
+  it starts. The setting becomes a gain through the one conversion the specs
+  give, SPEC-012 §3.8's `-1000 x log2(32767 / v)` hundredths of a decibel.
+  **F2** and **F3** lower and raise the mixer master by 2047 without changing
+  the preference, so the next preferences sync restores it.
 - At most four effects play at once. A fifth request fails rather than evicting
   one.
 - Talking-head speech plays `sound/speech/<head>/<stem>.ACM`. Its completion
@@ -389,7 +461,10 @@ cargo run -p vault-platform -- --corpus-dir /path/to/unpacked/game \
 - One movie step runs per shell update. Sync points wait on the frame timer,
   late frames without a palette push are dropped, and the movie's device
   palette replaces the display palette (color cycling stops). Audio streams
-  through the mixer from the first sync point at 0.94 x the full music volume.
+  through the mixer from the first sync point at `trunc(0.94 x music volume)`
+  (silent while music is off). After a stall the stream plays silence while
+  its clock runs on, then rejoins. Movie flag `0x04` stops the background
+  music and `0x08` pauses it for the movie.
 - Any key skips a movie. So does a mouse button pressed during the movie,
   once every button is released. Holding a button does not skip.
 - Subtitles use font 101 and `art/cuts/subtitle.pal` with the RGB555 white
@@ -425,9 +500,14 @@ On the local map, **I** opens the inventory and **C** the character screen
   The use-on window (the world action menu's Inventory entry) is `use.frm`
   with the list, scroll buttons, figure and Cancel at (313, 328), plus Home,
   End, PgUp and PgDn.
-- The character screen reconciles levels on opening. It shows SPECIAL, derived
+- The character screen reconciles levels on opening. It is the character
+  editor outside creation mode, drawn with the SPEC-014 §3.8 pieces the two
+  modes share (the SPECIAL column, condition and derived lists, skill list,
+  info card, and the DONE and CANCEL buttons) and the `stat.msg`, `skill.msg`,
+  `trait.msg`, `perk.msg` and `editor.msg` texts. It shows SPECIAL, derived
   statistics, skills (tagged ones starred), traits, and perks, and clicking a
-  skill spends an unspent point. When a perk is pending, the chooser lists the
+  skill spends an unspent point. The parts no specification defines are
+  stand-ins (see "Known gaps"). When a perk is pending, the chooser lists the
   eligible perks by name. Tag! asks for a fourth tag skill and Mutate! for a
   trait to drop and one to take; cancelling either removes the rank. Done
   keeps the sheet, while Cancel or Escape restores the sheet saved on opening.
@@ -458,10 +538,12 @@ age, **S** sex, **Enter** done with the specification's validation). Taking a
 character plays `ovrintro` and starts `maps/v13ent.map` at 07:21, 5 December 2161.
 A dead player sees the death scene; `endgame_slideshow` shows the slides chosen by
 the campaign globals, and the ending plays `walkm` or `walkw` and the credits.
-Quitting returns to the menu. Outside the world, palette fades are presented
-as instant changes; in the world they run for 700 ms (SPEC-014 §3.2 safe rule):
-the library `fadein`/`fadeout`, `gfade_in`/`gfade_out`, First Aid and Doctor,
-and the movie flags (playback ends on black; flag `0x02` fades back). A
+Quitting returns to the menu. Palette fades run over 700 ms (SPEC-014 §3.2
+safe rule), outside the world too. In the world a game fade blocks: the world
+does not update, input is swallowed, and the frame stays frozen until it
+ends. This covers `gfade_in`/`gfade_out`, First Aid and Doctor, and the movie
+flags (playback ends on black; flag `0x02` fades back); the library
+`fadein`/`fadeout` run without blocking. A
 session ends on a fade to white; the death scene then fades from white into
 `death.pal`, to black when it is dismissed, and the menu fades in. Knockout
 and death are checked between world passes, and ending combat wakes a
@@ -542,16 +624,19 @@ cargo run -p vault-platform -- --corpus-dir target/state-corpus \
 ```
 
 The fixture output directory must be empty. `--preview-map` and `--preview-frm`
-are mutually exclusive. Arrow keys pan, **R** toggles roofs, and **PageUp** and
-**PageDown** change the viewed elevation. Hover records on stdout include hex, floor-square, roof-square,
+are mutually exclusive. Arrow keys pan, **R** toggles roofs (a preview-tool key; `--game` disables it),
+and **PageUp** and **PageDown** change the viewed elevation. Otherwise the
+roofs follow the SPEC-014 §3.36 hide and restore rules. Hover records on stdout include hex, floor-square, roof-square,
 and elevation coordinates; picking reverses the displayed image's scale and
 letterbox offset before applying the specification's inverse projection.
 
 A left click acts on its release by the SPEC-014 cursor mode (see "Game flow and interface"):
 movement walks, the arrow performs the object's primary action (pick up, talk,
 loot, use or look) and selects it, the crosshair attacks; a right-click cycles
-the mode. The **L/D/U/G/T** keys route look, description, use, pickup ("get") and
-talk on the selected object through the authoritative world and object scripts. Approaches move one hex per animation
+the mode. The **L/D/U/G/T** preview keys route look, description, use, pickup ("get") and
+talk on the selected object through the authoritative world and object scripts
+(a script `key_callback` sees each key first). Under `--game` these and the
+other preview keys work only with `--debug`. Approaches move one hex per animation
 step and run spatial checks. Pickup updates inventory and removes the world
 representation only after insertion succeeds.
 
@@ -564,8 +649,9 @@ two nodes with a real VM callback.
 
 `--player-gcd <VFS_PATH>`, `--language <directory>`, and `--seed <integer>` select
 the player sheet, language, and deterministic RNG initialization. Defaults are
-a neutral character, English, and seed 1. Seed -1 requires explicit host entropy
-and is not silently derived from a wall clock.
+a neutral character, English, and seed 1. Seed -1 asks for an ambient seed,
+drawn from the host's hash-seed entropy (never from a wall clock) and masked to
+31 bits.
 
 The map view uses a 640×380 logical viewport, framed with the SPEC-014
 indicator boxes and interface bar into a 640×480 image. Floor/roof images use the exact
@@ -626,22 +712,24 @@ required-data truncation, and deterministic mutation/random-byte fuzz cases.
   no pair kerning. Rendering supports proportional/monospaced text, underline,
   shadow, and the specified palette blend levels, including 8–13.
 - `MsgCatalog` preserves byte encodings, concatenates multiline fields, honors
-  duplicate replacement, and supports merging. Default loading trims ASCII
-  whitespace around signed decimal IDs and skips empty/invalid IDs, extra fields,
-  and other malformed input while retaining earlier complete messages. Recovery
-  resumes at an indented decimal ID followed by another opening field on the same
-  physical line, so a broken record does not consume the following valid record.
-  `warnings()` retains the first 128 diagnostics and `warning_count()` counts all
-  recoveries. Fields remain capped at 1023 retained bytes, IDs at signed 32-bit
-  range, and file/record resource-limit violations remain errors.
-  `parse_strict`/`load_strict` retain the original SPEC-002 validation rules for
-  authoring and regression tests. `parse` uses archive/raw Ctrl-Z semantics;
+  duplicate replacement, and supports merging. Loading is strict (SPEC-002
+  §3.4-3.5): the first malformed record (an unmatched brace, an unterminated or
+  missing field, an empty or out-of-range ID, a field over 1023 retained bytes,
+  or a record or entry limit) ends the load. Records completed before it stay
+  loaded; nothing after it is recovered. `parse` and `parse_with_mode` keep
+  that error as `failure()` (with its byte offset) and return the partial
+  catalog; `load` merges into an existing catalog and returns the error;
+  `parse_strict` discards the partial catalog. The world host logs each file
+  that stops early as a diagnostic. On the local corpus six files stop early
+  (`--validate-formats` lists them): `obj_dude.msg` in English, French and
+  Spanish keeps 392 of 865 records, and Spanish `darl`, `morph` and `nicole`
+  keep 56 of 102, 182 of 188 and 260 of 269. `parse` uses archive/raw Ctrl-Z semantics;
   `parse_with_mode(..., TextMode::WindowsLoose)` exposes the original Windows
   loose-stream EOF behavior. Both translate CRLF. Audit/preview consistently use
   raw VFS byte semantics on every host.
 
-Base PAL acceptance, split-animation area metadata, and tolerant MSG recovery
-implement the requested real-corpus compatibility corrections to the initial
+Base PAL acceptance and split-animation area metadata implement the requested
+real-corpus compatibility corrections to the initial
 strict interpretation of the approved specifications. Automated regressions use
 synthetic fixtures; original corpus data is not included in tests.
 
@@ -666,8 +754,14 @@ involved. Negative header pool counts consume zero words. Tile omission flags
 omit only the corresponding tile block, and roof-hide bits clear on loaded tiles.
 
 All 16 script slots in each block are decoded using their individual category,
-including padding slots. Active occupancy, local slices, and unique active script
-IDs are checked. Object trees are consumed depth-first, quantities represent
+including padding slots. Active occupancy is checked. These records, which SPEC-003
+permits, load with a diagnostic in `MapFile::diagnostics` instead of failing
+the map: a script ID whose category differs from its block, a saved local
+slice past the pool (an access past it reads zero, SPEC-003 §3.2), an
+entry or object orientation outside 0-5 and a negative object frame (read as
+0), and an inventory quantity of 0 (kept). For a duplicate active script ID the
+first record binds and later ones are diagnosed. On the local corpus all 72
+maps parse with no diagnostics. Object trees are consumed depth-first, quantities represent
 one child tree, and enclosing elevations/owners are restored. Script bindings,
 outlines, critter flags, stock ammunition, and exit-grid art receive the specified
 loading adjustments. Obsolete pointer words never become offsets or live pointers.
@@ -706,7 +800,11 @@ interned per program with an 8 MiB content budget; cross-program transfers copy 
 
 `update` uses ten instructions by default. Critical state can continue beyond the
 ordinary budget; a separate 100,000-instruction hard limit prevents an unbounded
-critical invocation. The SPEC-004 §3.5 safe rules define the remaining cases:
+critical invocation. In the world host a run that ends in an error, including
+an exhausted instruction budget, faults its program (ended with the error bit),
+so it is never resumed mid-procedure (the `[May-improve]` bound on a runaway
+script). A scheduled procedure whose condition or call fails faults the VM
+instead of silently disappearing (SPEC-004 §3.8 safe rule). The SPEC-004 §3.5 safe rules define the remaining cases:
 integer subtraction, multiplication, negation, and division wrap modulo 2^32
 (`MIN / -1` is `MIN`), out-of-range or NaN float-to-integer conversions give
 `80 00 00 00`, nonfinite floats format as `nan`, `inf`, and `-inf`, and every
@@ -836,18 +934,43 @@ fall-front art exists, else 20, under the safe rule), and corpse rules.
 `combat_state` implements initialization, the first unsorted pass, the round
 sweep, turns, explicit end requests, automatic ending, and cleanup. Critical-
 failure self damage and its flags are committed to a living attacker (safe rule).
-AI behavior is unspecified, so NPC turns and danger targets come from a
-host-supplied `CombatAi` (default: none). The weapon-splash helper adds no victims
-(its setup is absent in the reference), and the miss-impact fallback beyond
-grenade scatter is not specified enough to simulate. A single-shot ranged miss
-can hit an accidental target under the safe rule (see the next section).
+NPC turns and danger targets come from a `CombatAi`; the default is the
+built-in SPEC-009 `PacketAi` (see "Combat AI"). The weapon-splash helper adds no
+victims (its setup is absent in the reference). A ranged or throw miss resolves
+bystanders through §3.7.1 Stages A and B (see "Spec completion notes").
 
-Registered animation sequences now execute: commands run in order, one frame step
-at a time (the art's frame interval, 10 FPS without art); nonnegative delays wait
-that many frame steps; moves follow SPEC-007 routes with unlimited AP; forward
-death animations end on their static art; completed sequences retire (returning
-critters to standing unless flag 4), so `anim_busy` reports `-1` only while a
-nontrivial registration is active.
+Animation runs as sequences under the §3.10.1 start rule (`choreography`,
+`motion`): delay 0 starts with the entry before it, -1 once every earlier
+entry has finished, and N > 0 after N examinations; frames step at the art's
+frame interval (10 FPS without art); forward death animations end on their
+static art; completed sequences retire (returning critters to standing unless
+flag 4), so `anim_busy` reports `-1` only while a nontrivial registration is
+active.
+- Attacks play the §3.10 choreography (`host_choreography`): the attack
+  animation, sounds and action frame for each mode, the melee and ranged
+  sequences, and every reaction (dodge, flinch, knockdown, knockback, death,
+  blood, fire). Thrown weapons and projectiles follow §3.9: one unit is
+  consumed (with the hand refill), the projectile appears on the hex next to
+  the attacker on the action frame and flies along the stride-32 ray to the
+  defender or impact hex, then explodes, lands with its own art and light, or
+  is erased.
+- Non-combat animation follows §3.11 (`host_motion`, `host_fidget`): walk and
+  run art with the per-frame step and hex-crossing rule, idle fidgets, the
+  reaches for pickup, use, containers and ladders, door and container opening
+  with the `use_p_proc` order, and getting up after knockback.
+- Move-to-object plans with a non-strict goal (§3.1, R1-rev7): the target's hex
+  is never tested for a blocker, and the mover stops on the route's
+  next-to-last hex.
+- One sequence per owner (§3.10.1, R1-rev7): a sequence with an entry owned by
+  an object that a running sequence already holds is discarded, not queued; an
+  idle fidget in the way is ended instead. Cancelling ends the first sequence
+  holding the object (forced entries still run, owners return to standing);
+  attacks are never cancelled. Under the `[May-improve]` rule the use-item-on
+  callback has no owner, like every other callback.
+- In combat every move is cut to the mover's action points (plus free
+  movement, less the player's reserve) and each hex debits its cost. Script
+  `reg_anim_*` moves are unlimited, because those opcodes run only outside
+  combat.
 
 ## Archives, saves, world travel, and Pip-Boy (SPEC-008)
 
@@ -855,11 +978,12 @@ nontrivial registration is active.
 lengths, big-endian words, `data_size` of at least 16) and extracts members by
 attribute word: exactly zero or `0x10` is the legacy single LZSS stream whose
 output must equal the logical length, `0x20` is raw, and `0x40` is the blocked
-form (two-byte headers; every block must produce exactly
-`min(16384, remaining)` bytes). The LZSS decoder uses the 4096-byte ring with
+form (two-byte headers; every block but the last must produce exactly 16384
+bytes, and output the final block decodes past the remaining length is
+discarded, SPEC-008 §2.3). The LZSS decoder uses the 4096-byte ring with
 4078 leading spaces, cursor `0xFEE`, LSB-first control bits, absolute 12-bit
-starts, and sequential overlapping copies. Truncated tokens, over-expansion,
-short or empty blocks, and offsets past EOF are errors rather than unbounded
+starts, and sequential overlapping copies. Truncated tokens, over-expansion
+of a legacy stream, short or empty blocks, and offsets past EOF are errors rather than unbounded
 reads or loops. The reference leaves the ring tail uninitialized; under the
 SPEC-008 §3.1 safe rule it is zeroed at the start of every compressed block,
 which only matters for streams that read the tail before writing it.
@@ -889,9 +1013,29 @@ raw entries, since the specification defines no encoder: rewriting an entry
 shifts later offsets and the recorded length, and appending requires EOF to equal
 the recorded length.
 
+Map numbers follow SPEC-008 §3.10 (`worldmap::MAP_TABLE`, generated from the
+spec at build time). After a map stream loads, its number comes from the
+header's name field, not from the requested file (`header_map_number`): a
+name containing `.sav`, or exactly `TMP$MAP#.MAP`, keeps the header's
+map-number word, and any other name is matched against `map.msg` 0-65, so a
+renamed copy takes the number of its name and an unlisted name gets -1. The
+number selects the fixed table town (`map_town`), used by rest, town-map entry
+and the transition's script-directed town travel (`move_to_map_town`), and
+the city track that replaces the loading track `wind2` (`city_music`, once per
+map change; an unnumbered map keeps `wind2`). Script `load_map` by name
+(`0x80E4`) matches the same `map.msg` texts, and an unmatched name makes no
+transition. `WorldHost::set_music_enabled` records the music on/off state,
+which the desktop keeps in step with its mixer; no spec names a setting that
+turns music off, so it stays on.
+
 Leaving a map writes its `.SAV` image (saved bit set, live globals/locals,
 scripts, and placed objects with inventories) into an in-memory working
-saved-map set and captures its automap rasters. Entering a map prefers that image
+saved-map set under the name `map.msg` gives its number, and captures its
+automap rasters. A map in the excluded set, or with no number, is never
+written (SPEC-014 §3.35 step 5): its working copy is deleted, so it is rebuilt
+from its `.MAP` on every visit. Re-entering a saved map applies the §3.35
+revisit rules (lock unjamming, healing, and old corpses replaced by remains;
+`host_revisit`). Entering a map prefers that image
 over the asset. The player is saved centrally. Party members travel with the
 player between maps but are written to the current map in a save slot. The
 per-load map-script instance is recreated on each entry, as in SPEC-006 step 6,
@@ -1010,17 +1154,17 @@ Where SPEC-009 leaves details open, this engine makes these choices:
 - Restoring an in-combat save rebuilds the snapshot from the restored combat
   list, but last-attacker references are not rebuilt from saved combat
   identifiers.
-- Explosion attribution and explosive-drop noticing are host entry points
-  (`attribute_explosion`, `notice_explosive_drop`). Nothing calls them yet:
+- Explosion attribution and explosive-drop noticing (`attribute_explosion`,
+  `notice_explosive_drop`) exist only as test helpers (`#[cfg(test)]`):
   SPEC-007's weapon splash adds no victims, and SPEC-013 §3.10 explosions
   (timed and scripted) damage only the center critter and credit their source
   themselves. Every explosion shows its §3.10 art on the center and the six
   adjacent hexes, at the art's own rate: a timed or scripted one stays in
   progress until its `roktxpd.frm` art has played, then notifies the scenery
   scripts and applies its damage. A weapon explosion's art (rockets and
-  grenades, by damage type and throwing) plays where the projectile ended,
-  after the attack has applied its damage; the attack resolution has no
-  projectile flight, so the grenade's own art is not shown in flight.
+  grenades, by damage type and throwing) plays where the projectile lands, at
+  the end of its SPEC-007 §3.9 flight, in which the projectile's own art is
+  drawn.
 - `float_msg` texts count as floating text for taunt suppression, with the same
   default lifetime and 200-pixel wrap.
 - Fixture H lists R2's rating as 22. By the §3.4 rule it is `max(2, 20) + 0 = 20`.
@@ -1135,8 +1279,9 @@ these choices:
   and §3.3 halves delays for it, so they are halved as in A2.
 - The inventory screen's held-outside-the-list item is not modeled. The
   desktop's inventory, character, and barter screens (see "Desktop game
-  shell") present these rules. Their skill and trait labels are built-in
-  English names, since no approved specification names their catalogs.
+  shell") present these rules. Skill and trait labels come from `skill.msg`
+  and `trait.msg` (SPEC-014 §3.8); only the level and experience captions stay
+  built-in English (see "Known gaps").
 
 ## Movies and subtitles (SPEC-012)
 
@@ -1192,16 +1337,14 @@ these choices:
   and the oracle) put it at code 120, so codes 120-127 are negative.
 - The device audio scheduler is replaced by one stream, fed in decode order,
   that starts at the first sync point after the audio configuration. The
-  movie volume is `trunc(0.94 x music)`. The attenuation
-  `trunc(-1000 x log2(32767 / v))`, in hundredths of a decibel, becomes gain
-  `10^(A/2000)`. The desktop has no background music, so it uses the full
-  music volume, and the music flags (`0x04`, `0x08`) have no effect.
+  movie volume is `trunc(0.94 x music)`, or 0 while music is off. The
+  attenuation `trunc(-1000 x log2(32767 / v))`, in hundredths of a decibel,
+  becomes gain `10^(A/2000)`. The master volume does not scale the movie.
+  Flag `0x04` stops the background music and `0x08` pauses it until the
+  movie ends.
 - A partial decode region is copied from its offset in the frame to the
   centered frame origin. Subtitle text wraps at the window width, with each
   line centered and the first line 2 pixels below the band top.
-- The desktop does not present script palette fades, so after a movie
-  without flag `0x02` the game palette returns at once instead of staying
-  black until the caller fades in.
 - No approved specification names the remaining-water global or the
   world-map event triggers. The midnight countdown runs only with
   `WorldRules::water_global`. While the water-chip quest (global 101) is at
@@ -1209,8 +1352,8 @@ these choices:
   threshold reached plays its movie if not yet played: boil3 at 0 or less
   (`0x05`, then `WorldEffect::EndGame` as the quit request), boil2 at 50 or
   less, and boil1 at 100 or less (`0x07`). The world-map events can call
-  `play_game_movie` directly. There is no main menu or new-game flow, so the
-  main-menu intro and `ovrintro` callers are not wired.
+  `play_game_movie` directly. The `--game` flow plays the main menu's attract
+  intro (flag `0x08`) and `ovrintro` (flag `0x04`) before a new game.
 - Movies play modally, so `play_gmovie`'s suspension of dialogue background
   processing is the modal wait itself.
 
@@ -1284,15 +1427,12 @@ Deliberate exceptions and gaps:
   is not applied: every corpus palette (19 files, `color.pal` included) is the
   33,536-byte base layout without a discriminator, and `[May-improve]` rules are
   optional.
-- MSG loading keeps the tolerant recovery described above (`parse_strict`
-  applies the SPEC-002 rules), and `TextMode::WindowsLoose` remains the
-  reference-behavior switch for loose-file Ctrl-Z.
+- `TextMode::WindowsLoose` remains the reference-behavior switch for
+  loose-file Ctrl-Z in MSG loading.
 - SPEC-005's optional rule rejecting invalid nonzero object references with the
   row's null result is not applied; such references remain VM errors.
 - SPEC-007's selection and damage of the accidental target are not specified;
-  the rule above is this engine's choice. The `[Must-match]` one-in-four
-  punch-to-kick cosmetic draw is not modeled, because the spec gives neither its
-  bounds nor its place in the draw sequence.
+  the rule above is this engine's choice.
 - The SPEC-003 mapper inventory-repair mode is omitted, as the safe rule allows.
 
 ## Spec completion notes
@@ -1309,8 +1449,8 @@ These close behaviors that the earlier phases left open:
   omission bits, grid-order top-level saving without temporary or unplaced
   objects, `NO_SAVE` scripts omitted, temporary inventory children skipped),
   extended-flag interaction permissions, and out-of-range MVAR/LVAR diagnostics.
-  The roof-hide flood fill is named but not specified; unknown item/scenery
-  subtypes are rejected, as the safe rule now states.
+  The roof-hide flood fill is implemented from SPEC-014 §3.36 (below); unknown
+  item/scenery subtypes are rejected, as the safe rule now states.
 - SPEC-004: scheduled procedures fire from the host's interpreter pass, and
   `launch` starts attached, replacing, spawned, and independent programs.
 - SPEC-005: executing animation sequences, armor-aware `critter_damage`, the exact
@@ -1349,6 +1489,50 @@ These close behaviors that the earlier phases left open:
   highlight is clamped, and a right-click from use or skill mode returns to
   movement.
 
+- SPEC-007 R1-rev4 to R1-rev7: thrown-weapon consumption and projectile flight
+  (§3.9), the attack choreography (§3.10), non-combat animation (§3.11), the
+  move-to-object goal (§3.1), one sequence per owner (§3.10.1), and the shared
+  adjacency check (§3.11.3); see "Art identifiers, routing, and combat". The
+  adjacency check follows the `[May-improve]` rule: `misc.msg` 2000 ("You
+  cannot get there.") prints when the player is the actor whose approach
+  failed, not when the target is the player, and not when combat or leaving
+  the map stopped the approach. Talk is the exception the spec states: after
+  the approach, a shot-blocked line or an object distance of 9 or more prints
+  2000.
+- SPEC-013 R1-rev5: container reach timing takes the shared `[May-improve]`
+  rule of SPEC-013 §3.16 and SPEC-007 §3.11.3. When the reach art (looked up
+  with weapon code 0) loads, the container use starts on its action frame;
+  otherwise after the reach. The take-out and the loot request keep delay -1,
+  so the loot window still opens after the reach and the container animation.
+  A skill used on an object approaches, checks adjacency, plays the ground or
+  middle reach, then runs the stage (§3.2).
+- SPEC-008 §3.10 and §4.5: the fixed map table, header-derived map numbers,
+  table towns, city music, `load_map` by name, and unnumbered maps that are
+  never saved; see "Archives, saves, world travel, and Pip-Boy" and
+  `--validate-map-numbers`.
+- SPEC-014 R1-rev4: the working map set (§3.35), including the revisit rules.
+- SPEC-014 R1-rev5, clicks while the player is busy (§3.27, `vault_core::clicks`).
+  Nothing is queued: a click either cancels the player's current sequence and
+  starts its own, or does nothing. In combat, the first sequence registered on
+  the player's turn locks the game mouse, keyboard and interface bar until
+  every running sequence has ended (outside the player's turn nothing is
+  accepted), and the animated watch `wait2.frm` shows meanwhile. Out of combat
+  a movement click cancels any player sequence when `fallout.cfg`
+  `[system] interrupt_walk` is on (the default) and is ignored while the player
+  is busy when it is off; an action click cancels only while the player walks
+  or runs; a near talk (distance below 9, clear line) always registers; and
+  rotating works only while the player stands. Swap hands
+  (`WorldHost::swap_hands`) plays the put-away and take-out sequence.
+- SPEC-014 R1-rev6, roof hiding and restoring (§3.36, `vault_core::roof`): each
+  placement of the player maps its hex to a roof square and runs the
+  edge-connected hide and restore fills (barrier bit `0x20000000`, blank index
+  1); loading a map resets the tracker and leaving restores. Two
+  `[May-improve]` choices: the first placement after a reset compares only the
+  empty test instead of reading outside the grid, and an elevation change
+  restores on the elevation where the group was hidden. The renderer skips
+  hidden roofs, and every non-blank roof is bound whatever its hide bit, so a
+  restored roof reappears.
+
 ## Core contracts
 
 `EntityStore<T>` is a `slotmap::SlotMap<EntityId, T>`. Construct it with
@@ -1361,18 +1545,159 @@ uses checked increments, and returns an error after issuing `u64::MAX`. Persist
 the counters with world state (Serde or `from_last`) to avoid reusing IDs after
 restore. Allocation does not use clocks, global counters, or randomness.
 
-The engine-owned save envelope has a fixed **24-byte little-endian** header:
+Saves use the legacy SPEC-008 slot layout only (see "Archives, saves, world
+travel, and Pip-Boy"); there is no engine-specific save envelope.
 
-| Offset | Size | Meaning |
-| --- | --- | --- |
-| 0 | 8 | ASCII magic `VAULTSAV` |
-| 8 | 2 | Version, currently 1 |
-| 10 | 2 | Header size, currently 24 |
-| 12 | 4 | Reserved flags, must be zero |
-| 16 | 8 | Payload byte length |
+## Open spec questions for the research vault
 
-`SaveHeader::decode` validates the header prefix. `decode_envelope` also validates
-the exact payload length, rejecting truncation and trailing bytes without
-allocating from the declared length. Unknown versions, header sizes, and flags
-are rejected. Payload encoding and integrity checks are for future phases; this
-envelope does not claim compatibility with legacy game saves.
+Each needs a sanitized spec answer; until then the code takes the most literal
+reading (or the stated choice) and comments it. Items 1-13 keep their earlier
+numbering, which code comments cite.
+
+1. SPEC-012 §2.8: the prose puts the first negative audio delta at code 121,
+   but the table (and Fixture E and the oracle) put `-29973` at 120. The code
+   follows the table (`vault-formats/src/mve.rs`, `AUDIO_DELTAS`).
+2. SPEC-009 Fixture H lists candidate R2's rating as 22; the §3.4 rule gives
+   20. The code follows the rule (`vault-core/src/ai_tests.rs`, Fixture H).
+3. SPEC-009 §2.5 cites a SPEC-002 "language filter" that SPEC-002 never
+   defines. Its preference state is tracked, but text is unchanged
+   (`vault-core/src/host_ai.rs`, `AiState::filtered`).
+4. SPEC-014 §3.27 mentions the player's see-through cutout, but no spec gives
+   its geometry, so nothing draws it.
+5. SPEC-007 §3.9 vs §3.10.4 step 11: does a throw whose projectile phase did
+   not run (a critical failure that kept its critical bit, or no valid
+   projectile) keep its weapon code, or return to standing with code 0 like
+   any throw without a refill? The code takes the literal reading, code 0
+   (`vault-core/src/host_choreography.rs`, `ranged`).
+6. SPEC-003 §3.3: the exit-grid +16 art shift applies on every parse, so a map
+   saved and reloaded twice moves 5 -> 21 -> 37. Is the shift draw-time only?
+   (`vault-formats/src/map.rs`, exit-grid art adjustment)
+7. SPEC-008 §2.5 vs SPEC-003 §2.10: `clear_tree` writes -1 into word `0x40`.
+   Should it be `0x44`, the retained script association?
+   (`vault-formats/src/savegame.rs`, `clear_tree`)
+8. SPEC-014 §3.33 vs SPEC-008 §2.8: the Pip-Boy automap cell is 1 pixel tall
+   in one and 2 rows in the other (`vault-platform/src/map_preview/pipboy.rs`
+   uses 2 x 1). The inventory row formula is `[Must-match]` in SPEC-014 §3.34
+   but `[May-improve]` in SPEC-013 §3.16.
+9. SPEC-004 §2.5: `0xC801` and `0xA801` are accepted as pushes but not
+   listed, and `0x8401` may be valid but is rejected (`vault-vm/src/program.rs`
+   and `vault-debug/src/decode.rs` agree).
+10. SPEC-007 §3.7.1: do burst and continuous sprays get the Jinxed/Sniper
+    critical post-processing? `Attack::resolve_spray` skips it; a wrong
+    reading shifts the RNG draw count (`vault-core/src/combat.rs`).
+11. SPEC-008 §3.4: is the town-target jitter one signed draw per axis, or a
+    magnitude then a sign? The code draws once per axis
+    (`vault-core/src/worldmap.rs`, `town_target`).
+12. SPEC-008 §3.8: a gap inside a holodisk's message window is treated as
+    fatal, so the disk is not shown (`vault-guidance/src/lib.rs`).
+13. SPEC-006 §3.11: does a talking head draw a fidget at session start? None is
+    drawn, which matters for RNG order (`vault-core/src/dialogue.rs`).
+14. SPEC-008 §4.5: the working `.SAV` name of map 7 comes from `map.msg`
+    (`VAULTENT.SAV`); the spec does not name it. Header word 7 of `hubent.sav`
+    is covered by the vector only (`vault-core/src/persistence.rs`).
+15. SPEC-008 §3.4/§3.10: script-directed town travel keeps the
+    every-third-iteration discovery reveal; the spec does not say whether it
+    applies (`vault-core/src/host_skills.rs`, `move_to_map_town`).
+16. SPEC-008 §3.10: under the literal matching rule a `load_map` name without
+    `.map` never matches a `map.msg` text, so it makes no transition
+    (`vault-core/src/worldmap.rs`, `canonical_map_name`).
+17. SPEC-007 §3.3 names an initial scripted combat-request AP bonus, but no
+    SPEC-005 opcode sets it, so it was removed (`vault-core/src/combat_state.rs`).
+18. SPEC-014 §3.36: on leaving a map the literal rule restores roofs from the
+    player's current elevation, while the placement rule's improvement uses
+    the elevation where the group was hidden (`vault-core/src/roof.rs`,
+    `restore_roofs`).
+19. Entrance placement does not check exit grids; no spec says whether it
+    should (`vault-core/src/host.rs`, map entry).
+20. SPEC-014 §3.27 "until every running sequence has ended" is read as "no
+    show is presenting" (`WorldHost::presenting`, `vault-core/src/clicks.rs`).
+21. SPEC-010 §3.11 leaves the volume-to-loudness mapping open; every channel
+    uses SPEC-012 §3.8's conversion, and the master volume does not scale movie
+    audio (`vault-platform/src/audio.rs`, `volume_gain`). No spec gives a volume
+    rule for library sounds.
+22. SPEC-012 §3.10: the subtitle band is one text height plus 4 pixels, so only
+    the first wrapped line of a long subtitle shows (`vault-core/src/movie.rs`).
+23. SPEC-010 §3.11: the on-screen test of the relative-volume rule has no
+    elevation condition (`vault-formats/src/sfx.rs`).
+24. SPEC-013 §3.15 Set Timer: the +/- button sounds are not named; the
+    move-items counter's pair is used (`vault-platform/src/map_preview/timer.rs`).
+25. SPEC-014 §3.17: the pause greyscale table (mean 5-bit grey, provisional)
+    and the converted rows 0-378 are inferred (`vault-core/src/ui/mod.rs`,
+    `grey_table`; `vault-platform/src/map_preview/options.rs`).
+26. SPEC-014 does not specify the object outline geometry (a one-pixel ring
+    around the sprite, `vault-render/src/image.rs`, `outline`), the F12
+    screenshot name and format (`scrNNNNN.ppm` in the save root,
+    `vault-platform/src/interface.rs`), or the `/` date line format
+    (`vault-platform/src/map_preview/hud.rs`).
+27. SPEC-014 §3.13: the medium dialog box's Done offsets are not given; the
+    large box's are reused (`vault-platform/src/editor_screen.rs`).
+28. SPEC-014 §3.18: the 70 ms between a knob's press and release cues does not
+    block input (`vault-platform/src/map_preview/options.rs`).
+29. SPEC-007 §3.4 / SPEC-014 §3.23: no called-shot window is specified, so an
+    aimed slot mode makes an uncalled attack and pays the aiming AP
+    (`vault-platform/src/map_preview/hud.rs`). The hit mode of a slot in reload
+    mode is unspecified; the primary is used.
+30. SPEC-005/SPEC-014 §3.2: a library `fadeout(0)` cannot be told apart from a
+    game fade and is treated as a blocking one (`vault-platform/src/map_preview.rs`).
+31. SPEC-014 §3.29: window-toggle keys (F1, Tab, Escape) are not repeated, and
+    the message monitor's scroll areas keep working while the UI is disabled
+    (`vault-platform/src/input.rs`, `map_preview/hud.rs`).
+32. SPEC-003: with duplicate active script IDs in a map, the first record binds
+    (`vault-formats/src/map.rs`). SPEC-008 §2.3: whether a legacy `0x10` LZSS
+    stream also truncates its final output; it is left strict
+    (`vault-formats/src/dat.rs`).
+33. SPEC-014 §2.4 and §3.8, the character editor outside creation mode:
+    `editor.msg` 109-115 are not in the §2.4 ranges, the caption IDs within
+    116-158 are inferred (124, 130, 136, 152-156), when condition lines 314-318
+    light is not given, and the info card's picture and description for each
+    line are not mapped (`vault-platform/src/map_preview/character.rs`,
+    `editor_screen.rs`).
+34. SPEC-008/SPEC-014: the Pip-Boy art, layout and alarm-menu message IDs, and
+    the world-map artwork, town hotspot image and town-button anchors are not
+    named (see "Known gaps").
+35. SPEC-006 phonemes: the 42 phoneme mappings are specified, but the `.LIP`
+    phoneme source is out of scope (SPEC-010 §1), so nothing drives
+    `WorldHost::speech_phoneme` (`vault-core/src/host.rs`).
+36. SPEC-002: the AAF blend's destination sampling order is unresolved; the
+    preview samples the same coordinate (see "Format safety and
+    compatibility").
+37. SPEC-014 §3.27 "keyboard disabled" is read literally, so the always-on
+    keys (Ctrl+Q, F6/F7, F12) are also discarded while combat locks input
+    (`vault-platform/src/map_preview/hud.rs`, `clicks::input_locked`).
+38. SPEC-014 §3.23: a hand swap disables only "the bar and the mouse", so the
+    other keys keep working while it plays (`vault-platform/src/map_preview/hud.rs`).
+39. Should the `wait2.frm` watch show on every enemy turn? It shows whenever
+    combat locks input, including outside the player's turn
+    (`vault-platform/src/map_preview/hud.rs`, `pointer.rs`).
+40. SPEC-008 §3.10 has a music on/off state, but no spec names the setting
+    that toggles it; the core and the mixer keep it in step, and nothing turns
+    it off (`vault-platform/src/map_preview.rs`, `set_music_enabled`).
+41. SPEC-014 §3.27 near talk: are the distance (below 9) and the clear line
+    measured at click time? The code measures them when the click is made
+    (`WorldHost::near_talk`, `vault-platform/src/map_preview/hud.rs`).
+
+## Known gaps
+
+These parts are stand-ins or missing because no approved spec defines them:
+
+- Pip-Boy (`vault-platform/src/map_preview/pipboy.rs`): its art, layout, fonts
+  and colors, page buttons and sounds, alarm-menu labels, holodisk controls,
+  video-archive titles (file names stand in), and the rest and refusal notes.
+- World and town map (`vault-platform/src/map_preview/world.rs`): the world
+  artwork (the terrain grid is drawn dim or bright instead), the viewport
+  frame, markers, the side panel (date, town list, Enter/Close), the
+  town-button art and label placement, fonts and colors, the way back from the
+  town map, and the blocked-travel note. A town map with no town or picture
+  falls back to the world map.
+- In-game character screen (`vault-platform/src/map_preview/character.rs`):
+  the creation background `edtrcrte.frm` stands in; the level, experience,
+  unspent points, traits and perks, the perk chooser and the Tag!/Mutate!
+  windows reuse creation-mode areas; the level and experience captions are
+  English; condition lines 314-318 never light; spending by clicking a skill
+  row and the refusal texts are engine choices.
+- The character editor's SAVE, LOAD and PRINT TO FILE options do nothing: the
+  file dialog they open is unspecified (`vault-platform/src/editor_screen.rs`).
+- Lip-sync: talking heads do not move their mouths with speech, because the
+  `.LIP` format is out of scope (item 35).
+- No called-shot window (item 29).
+- The object outline geometry is the engine's choice (item 26).

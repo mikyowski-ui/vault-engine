@@ -160,7 +160,6 @@ pub fn stat_check(
 ) -> Result<Check, WorldError> {
     let margin = stat
         .checked_add(modifier)
-        .and_then(|v| v.checked_sub(0))
         .ok_or(WorldError::Arithmetic)?
         .checked_sub(rng.range(1, 10)?)
         .ok_or(WorldError::Arithmetic)?;

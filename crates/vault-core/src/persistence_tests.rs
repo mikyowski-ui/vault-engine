@@ -13,18 +13,58 @@ use vault_formats::{
     LocalDirProvider, MapFile, ParseError, map::ObjectState, pro::BasicFlags, savegame::SaveHeader,
 };
 
+/// The interactive fixture map as a fresh stream whose header names it
+/// `<NAME>.MAP` (SPEC-008 §3.10 assigns the number from that name), with
+/// the given map script reference and map-number word.
+fn fixture_map(name: &str, script: i32, number: i32) -> Vec<u8> {
+    let mut map = fixture::interactive_map();
+    let header = format!("{}.MAP", name.to_ascii_uppercase());
+    map[4..20].fill(0);
+    map[4..4 + header.len()].copy_from_slice(header.as_bytes());
+    fixture::world::word(&mut map, 0x24, script);
+    fixture::world::word(&mut map, 0x28, 0);
+    fixture::world::word(&mut map, 0x34, number);
+    map
+}
+/// The corpus `map.msg` (SPEC-008 §3.10): the 66 table names, with the
+/// synthetic maps standing in for the overridden numbers.
+fn write_map_msg(dir: &Path, overrides: &[(i32, &str)]) {
+    let text: String = crate::worldmap::MAP_TABLE
+        .iter()
+        .enumerate()
+        .map(|(number, entry)| {
+            let name = overrides
+                .iter()
+                .find(|(over, _)| *over == number as i32)
+                .map_or(entry.name, |(_, name)| name);
+            format!("{{{number}}}{{}}{{{name}}}\n")
+        })
+        .collect();
+    fs::write(dir.join("text/english/game/map.msg"), text).unwrap();
+}
 /// The interactive fixture map as fresh `synth.map` (map script, number 7)
-/// and `second.map` (no map script, number 8), both with 8.3 names.
+/// and `second.map` (no map script, number 8), both with 8.3 names that
+/// `map.msg` lists under those numbers (19 and 36 are reserved for the
+/// desert and broken maps some tests add).
 fn corpus() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fixture::write_corpus(dir.path());
     for (name, script, number) in [("synth", 1, 7), ("second", 0, 8)] {
-        let mut map = fixture::interactive_map();
-        fixture::world::word(&mut map, 0x24, script);
-        fixture::world::word(&mut map, 0x28, 0);
-        fixture::world::word(&mut map, 0x34, number);
-        fs::write(dir.path().join(format!("maps/{name}.map")), map).unwrap();
+        fs::write(
+            dir.path().join(format!("maps/{name}.map")),
+            fixture_map(name, script, number),
+        )
+        .unwrap();
     }
+    write_map_msg(
+        dir.path(),
+        &[
+            (7, "SYNTH.MAP"),
+            (8, "SECOND.MAP"),
+            (19, "DESERT.MAP"),
+            (36, "BROKEN.MAP"),
+        ],
+    );
     dir
 }
 fn host(dir: &Path) -> WorldHost<VfsWorldAssets> {
@@ -439,10 +479,11 @@ fn spec008_saved_active_combat_resumes_the_player_turn() {
 fn spec008_missing_map_script_does_not_trap_map_transitions() {
     let dir = corpus();
     // Map script index 9 has no scripts.lst entry or compiled program.
-    let mut map = fixture::interactive_map();
-    fixture::world::word(&mut map, 0x24, 10);
-    fixture::world::word(&mut map, 0x28, 0);
-    fs::write(dir.path().join("maps/broken.map"), map).unwrap();
+    fs::write(
+        dir.path().join("maps/broken.map"),
+        fixture_map("broken", 10, 36),
+    )
+    .unwrap();
     let mut host = host(dir.path());
     host.load_map("maps/broken.map").unwrap();
     host.world.effects.clear();
@@ -636,11 +677,11 @@ fn spec014_seen_state_marks_a_window_around_visited_hexes() {
 /// The corpus plus `desert.map`, map 19: an excluded encounter map.
 fn corpus_with_desert() -> tempfile::TempDir {
     let dir = corpus();
-    let mut map = fixture::interactive_map();
-    fixture::world::word(&mut map, 0x24, 0);
-    fixture::world::word(&mut map, 0x28, 0);
-    fixture::world::word(&mut map, 0x34, 19);
-    fs::write(dir.path().join("maps/desert.map"), map).unwrap();
+    fs::write(
+        dir.path().join("maps/desert.map"),
+        fixture_map("desert", 0, 19),
+    )
+    .unwrap();
     dir
 }
 fn save_info() -> SaveInfo {
@@ -832,38 +873,60 @@ fn spec013_the_world_and_town_maps_save_and_clear_the_outgoing_map() {
 }
 
 /// A corpus map file with no map script and world-map map number `number`.
+/// A fixture map under one of the SPEC-008 §3.10 table names (the corpus
+/// `map.msg` lists it under `number`).
 fn corpus_map(dir: &Path, name: &str, number: i32) {
-    let mut map = fixture::interactive_map();
-    fixture::world::word(&mut map, 0x24, 0);
-    fixture::world::word(&mut map, 0x28, 0);
-    fixture::world::word(&mut map, 0x34, number);
-    fs::write(dir.join(format!("maps/{name}.map")), map).unwrap();
+    assert_eq!(
+        crate::worldmap::map_table_name(number),
+        Some(format!("{}.MAP", name.to_ascii_uppercase()).as_str())
+    );
+    fs::write(
+        dir.join(format!("maps/{name}.map")),
+        fixture_map(name, 0, number),
+    )
+    .unwrap();
 }
 
 #[test]
 fn spec013_transitions_move_the_world_map_to_the_destination_town() {
     let dir = corpus();
-    // Junktown's slot-0 hotspot map (SPEC-008 §3.7).
-    corpus_map(dir.path(), "junkent", 9);
+    // JUNKENT.MAP is map 10, town 3 Junktown (SPEC-008 §3.10).
+    corpus_map(dir.path(), "junkent", 10);
     let mut host = host(dir.path());
     host.load_map("maps/synth.map").unwrap();
+    // A direct load moves nothing: the party is still at Vault 13.
+    assert_eq!(host.world.world_map.cell(), Some([16, 1]));
     let to = |map: i32| crate::Transition {
         map,
         elevation: -1,
         hex: -1,
         facing: -1,
     };
-    host.request_transition(to(9));
+    // SPEC-013 §3.22 step 3: the party travels to the map's town by the
+    // script-directed town travel of SPEC-008 §3.4, which charges game
+    // time and ends within 16 pixels of the town center.
+    let start = host.world.clock.ticks;
+    host.request_transition(to(10));
     assert!(host.process_transition().unwrap());
+    assert_eq!(host.world.map.header.map_number, 10);
     assert_eq!(host.world.world_map.saved.town, 3);
-    assert_eq!(
-        host.world.world_map.position(),
-        [17 * 50 + 25, 10 * 50 + 25]
-    );
-    // A map outside the hotspot catalog keeps the town.
+    assert_eq!(host.world.world_map.cell(), Some([17, 10]));
+    let [x, y] = host.world.world_map.position();
+    assert!((x - (17 * 50 + 25)).abs() <= 16 && (y - (10 * 50 + 25)).abs() <= 16);
+    assert!(host.world.world_map.travel.is_none());
+    assert!(host.world.clock.ticks > start, "travel charges time");
+    // Already in that town's cell: nothing moves and no time passes.
+    let (position, now) = (host.world.world_map.position(), host.world.clock.ticks);
+    host.request_transition(to(10));
+    assert!(host.process_transition().unwrap());
+    assert_eq!(host.world.world_map.position(), position);
+    assert_eq!(host.world.clock.ticks, now);
+    // Every numbered map has a table town: SECOND.MAP stands in for map 8,
+    // whose town is 1 (Vault 15).
     host.request_transition(to(8));
     assert!(host.process_transition().unwrap());
-    assert_eq!(host.world.world_map.saved.town, 3);
+    assert_eq!(host.world.world_map.saved.town, 1);
+    assert_eq!(host.world.world_map.cell(), Some([25, 1]));
 }
 
 #[test]
@@ -882,13 +945,17 @@ fn spec014_leaving_requeues_the_game_time_event_restores_the_roof_and_starts_cit
             })
             .collect()
     };
-    assert!(music(&host).is_empty(), "map 7 has no music the specs name");
-    // A roof square over the player's elevation, hidden.
-    host.world.map.tiles[0].as_mut().unwrap()[5050].word |= 0x1000_0000;
+    // SPEC-008 §3.10: loading starts `wind2`; once the number is known the
+    // table track replaces it (map 7, VAULTENT's number, plays 13carvrn).
+    assert_eq!(music(&host), ["wind2", "13carvrn"]);
+    // SPEC-014 §3.36: the entrance placement hid the roofed square (index
+    // 2) over the entry hex, square 5050.
+    assert_eq!(host.world.hidden_roof_squares(0), [5050]);
     host.world.effects.clear();
     host.load_map("maps/v13ent.map").unwrap();
-    assert_eq!(music(&host), ["06vault"]);
-    // The saved copy shows the roof again.
+    assert_eq!(music(&host), ["wind2", "06vault"]);
+    // Leaving restored the group from the last square (SPEC-014 §3.35
+    // step 3), so the saved copy shows the roof again.
     let saved = parse_saved(&host, "SYNTH.SAV");
     assert_eq!(
         saved.tiles[0].as_ref().unwrap()[5050].stored & 0x1000_0000,
@@ -896,6 +963,7 @@ fn spec014_leaving_requeues_the_game_time_event_restores_the_roof_and_starts_cit
     );
     // Leaving for the world map queues the game-time (midnight) event
     // again, so the days go on while the map is cleared.
+    host.world.effects.clear();
     host.request_transition(crate::Transition {
         map: -2,
         elevation: -1,
@@ -910,4 +978,200 @@ fn spec014_leaving_requeues_the_game_time_event_restores_the_roof_and_starts_cit
             .events()
             .any(|event| event.kind == EventKind::Midnight)
     );
+    // SPEC-008 §3.10: the world map plays 03wrldmp.
+    assert_eq!(music(&host), ["03wrldmp"]);
+}
+
+#[test]
+fn spec008_disabled_music_records_the_request_and_resumes_the_last_track() {
+    let dir = corpus();
+    let mut host = host(dir.path());
+    let music = |host: &WorldHost<VfsWorldAssets>| -> Vec<String> {
+        host.world
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                crate::WorldEffect::Music(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    host.set_music_enabled(false);
+    host.load_map("maps/synth.map").unwrap();
+    assert!(music(&host).is_empty(), "nothing plays while disabled");
+    assert_eq!(host.last_music.as_deref(), Some("13carvrn"));
+    host.set_music_enabled(true);
+    assert_eq!(music(&host), ["13carvrn"]);
+    // Enabling music that is already on replays nothing.
+    host.world.effects.clear();
+    host.set_music_enabled(true);
+    assert!(music(&host).is_empty());
+}
+
+#[test]
+fn spec008_unnumbered_maps_keep_wind2_and_are_never_saved() {
+    let dir = corpus();
+    // A header name `map.msg` does not list: no number, no town, no city
+    // music, no working `.SAV` (SPEC-008 §3.10, SPEC-014 §3.35 step 5).
+    fs::write(
+        dir.path().join("maps/caravan.map"),
+        fixture_map("caravan", 0, 7),
+    )
+    .unwrap();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let position = host.world.world_map.position();
+    host.world.effects.clear();
+    host.load_map("maps/caravan.map").unwrap();
+    assert_eq!(host.world.map.header.map_number, -1);
+    assert_eq!(host.world.current_map_name(), None);
+    let music: Vec<_> = host
+        .world
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            crate::WorldEffect::Music(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(music, ["wind2"]);
+    assert_eq!(host.world.world_map.position(), position);
+    // Saving needs a numbered map.
+    assert!(host.build_save(&save_info()).is_err());
+    host.load_map("maps/second.map").unwrap();
+    assert!(!host.world.persistence.maps.contains_key("CARAVAN.SAV"));
+    assert_eq!(
+        host.world.persistence.maps.keys().collect::<Vec<_>>(),
+        ["SYNTH.SAV"]
+    );
+}
+
+#[test]
+fn spec003_saved_top_level_objects_follow_grid_position_and_skip_temporaries() {
+    let dir = corpus();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    // A temporary object (an explosion's art, a projectile) is never written.
+    let critter =
+        Arc::new(vault_formats::Prototype::parse(&crate::fixture_world::prototype(1, 0)).unwrap());
+    let temporary = host.world.spawn(critter, 20500, 0).unwrap();
+    host.world.get_mut(temporary).unwrap().raw.flags.0 |= BasicFlags::TEMPORARY.0;
+    host.load_map("maps/second.map").unwrap();
+    let saved = parse_saved(&host, "SYNTH.SAV");
+    // SPEC-003 §3.3: the stream listed its objects at 20100, 20099, 20301,
+    // 20101 and 20300; the save traverses grid positions in order.
+    let hexes: Vec<i32> = saved.objects.elevations[0]
+        .iter()
+        .map(|object| object.hex.unwrap())
+        .collect();
+    assert_eq!(hexes, [20099, 20100, 20101, 20300, 20301]);
+    assert!(
+        saved.objects.elevations[0]
+            .iter()
+            .all(|object| !object.flags.contains(BasicFlags::TEMPORARY))
+    );
+    // SPEC-008 §3.10: the engine-written `.SAV` names itself `<NAME>.SAV`.
+    assert_eq!(
+        String::from_utf8_lossy(&saved.header.name).trim_end_matches('\0'),
+        "SYNTH.SAV"
+    );
+}
+
+#[test]
+fn spec006_party_members_keep_their_scripts_and_locals_across_maps() {
+    let dir = corpus();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let companion = find(&host, CRITTER, None);
+    // A companion with its own script instance and local state.
+    let sid = host.world.add_script(companion, 0, 4, 2).unwrap();
+    assert!(host.world.set_local(Some(sid), 0, 42));
+    host.world.party.insert(companion);
+    host.load_map("maps/second.map").unwrap();
+    // SPEC-006 §3.5 steps 1 and 7: the member travels with its script and
+    // locals, under an id that is not one of the new map's.
+    assert!(host.world.get(companion).is_some());
+    let carried = host
+        .world
+        .script_for(companion)
+        .expect("the companion keeps a script");
+    assert_eq!(host.world.local(Some(carried), 0), 42);
+    assert_eq!(
+        host.world.scripts.get(&carried).map(|script| script.owner),
+        Some(companion)
+    );
+    assert_eq!(
+        host.world
+            .script_order
+            .iter()
+            .filter(|id| **id == carried)
+            .count(),
+        1
+    );
+    // The new map's own critter still owns the new map's script.
+    let stranger = host
+        .world
+        .iter()
+        .find(|(reference, object)| object.raw.pid == CRITTER && *reference != companion)
+        .map(|(reference, _)| reference)
+        .expect("the new map's critter");
+    assert_ne!(host.world.script_for(stranger), Some(carried));
+}
+
+#[test]
+fn spec014_roofs_hide_at_the_entrance_restore_on_leaving_and_come_back_drawn() {
+    use crate::roof::RoofTracker;
+    let dir = corpus();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    // SPEC-014 §3.36: the entrance placement, from "none", hides the roofed
+    // square (index 2) over the entry hex 20100, square (50, 50).
+    assert_eq!(host.world.hidden_roof_squares(0), [5050]);
+    assert_eq!(
+        host.world.roof,
+        RoofTracker {
+            column: 50,
+            row: 50,
+            elevation: 0,
+            last_empty: false
+        }
+    );
+    // A roofed square elsewhere, hidden by hand, stands in for a group the
+    // player left hidden.
+    host.world.map.tiles[0].as_mut().unwrap()[7000].word = 0x1002_0001;
+    // SPEC-014 §3.35: saving without leaving writes the hide bits as they
+    // are ...
+    assert!(host.world.persist_current_map(true));
+    let saved = parse_saved(&host, "SYNTH.SAV");
+    let tiles = saved.tiles[0].as_ref().unwrap();
+    assert_eq!(tiles[5050].stored & 0x1000_0000, 0x1000_0000);
+    assert_eq!(tiles[7000].stored & 0x1000_0000, 0x1000_0000);
+    // ... and loading clears them (SPEC-003 §2.8), so hidden roofs come
+    // back drawn; the entrance placement hides the entry group again.
+    assert!(!tiles[5050].roof_hidden() && !tiles[7000].roof_hidden());
+    host.load_map("maps/synth.map").unwrap();
+    assert_eq!(host.world.hidden_roof_squares(0), [5050]);
+    // Leaving for another map restores the group under the player before
+    // the map is written (§3.35 step 3): the saved copy stores no hide bit.
+    host.load_map("maps/second.map").unwrap();
+    let saved = parse_saved(&host, "SYNTH.SAV");
+    assert!(
+        saved.tiles[0]
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|tile| tile.stored & 0x1000_0000 == 0)
+    );
+    // The new map starts from "none" and its own entrance group is hidden.
+    assert_eq!(host.world.hidden_roof_squares(0), [5050]);
+    // Leaving for the world map clears the map and the tracking state.
+    host.request_transition(crate::Transition {
+        map: -2,
+        elevation: -1,
+        hex: -1,
+        facing: -1,
+    });
+    assert!(host.process_transition().unwrap());
+    assert!(host.world.unloaded);
+    assert_eq!(host.world.roof, RoofTracker::NONE);
 }

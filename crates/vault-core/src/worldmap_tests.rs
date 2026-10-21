@@ -757,13 +757,23 @@ fn spec008_rest_eligibility_attackers_and_team_locations() {
     if let Some(ObjectState::Critter(state)) = host.world.get_mut(other).map(|o| &mut o.raw.state) {
         state.team = 7;
     }
-    // Town 0 omits the team check.
-    assert_eq!(host.world.world_map.saved.town, 0);
-    assert!(host.rest_allowed());
-    // Other towns check teams regardless of distance or visibility.
+    // SPEC-008 §3.10: the town is the current map's fixed table town. Town
+    // 0 (VAULT13.MAP, map 6) omits the team check; the world-map component
+    // plays no part.
+    host.world.map.header.map_number = 6;
     host.world.world_map.saved.town = 5;
+    assert!(host.rest_allowed());
+    // Other towns check teams regardless of distance or visibility
+    // (HOTEL.MAP, map 4, is Necropolis).
+    host.world.map.header.map_number = 4;
+    host.world.world_map.saved.town = 0;
     assert!(!host.rest_allowed());
     assert_eq!(rest(&mut host, RestRequest::Hours(1)), RestOutcome::Refused);
+    // §4.5: map 34 (Cathedral) checks teams, map 36 (the Hub) does not.
+    host.world.map.header.map_number = 34;
+    assert!(!host.rest_allowed());
+    host.world.map.header.map_number = 36;
+    assert!(host.rest_allowed());
     // Map 17 omits it; map 3 omits it above elevation zero only.
     host.world.map.header.map_number = 17;
     assert!(host.rest_allowed());
@@ -771,10 +781,12 @@ fn spec008_rest_eligibility_attackers_and_team_locations() {
     assert!(!host.rest_allowed());
     host.world.elevation = 1;
     assert!(host.rest_allowed());
-    // Forced maps check even in exempt towns.
+    // Forced maps check even in exempt towns (V13ENT.MAP, town 0).
     host.world.elevation = 0;
-    host.world.world_map.saved.town = 0;
     host.world.map.header.map_number = 35;
+    assert!(!host.rest_allowed());
+    // An unnumbered map has town -1, the team-checking default.
+    host.world.map.header.map_number = -1;
     assert!(!host.rest_allowed());
     // Only the current elevation counts.
     host.world.get_mut(other).unwrap().raw.elevation = 1;
@@ -792,25 +804,126 @@ fn spec008_rest_eligibility_attackers_and_team_locations() {
 }
 
 #[test]
-fn spec013_maps_belong_to_the_town_of_their_hotspot_row() {
-    use crate::worldmap::{city_music, town_center, town_of_map};
-    for (file, town) in [
-        ("V13ENT.MAP", 0),
-        ("vault13.map", 0),
-        ("JUNKENT.MAP", 3),
-        ("HUBDWNTN.MAP", 6),
-        ("LAGUNRUN.MAP", 10),
-        // The alternate rows: the Cathedral, the Military Base and the
-        // Brotherhood.
-        ("CHILDEAD.MAP", 11),
-        ("MBDEAD.MAP", 8),
-        ("BRODEAD.MAP", 7),
+fn spec008_map_table_gives_every_number_a_town_and_a_track() {
+    use crate::worldmap::{
+        MAP_COUNT, MAP_TABLE, TOWNS, city_music, map_table_name, map_town, town_center,
+    };
+    assert_eq!(MAP_TABLE.len(), MAP_COUNT);
+    // SPEC-008 §3.10 town lookup: the interior maps no hotspot names, the
+    // encounter and caravan maps (town 1, except 63-65 with town 0), and a
+    // few hotspot maps.
+    for (number, town) in [
+        (9, 5),
+        (16, 2),
+        (18, 11),
+        (31, 8),
+        (32, 8),
+        (33, 11),
+        (34, 11),
+        (43, 9),
+        (65, 0),
+        (63, 0),
+        (64, 0),
+        (0, 1),
+        (23, 1),
+        (52, 1),
+        (62, 1),
+        (6, 0),
+        (35, 0),
+        (36, 6),
+        (47, 11),
+        (55, 7),
     ] {
-        assert_eq!(town_of_map(file), Some(town), "{file}");
+        assert_eq!(map_town(number), town, "map {number}");
     }
-    assert_eq!(town_of_map("DESERT1.MAP"), None);
+    assert!(MAP_TABLE.iter().all(|entry| entry.town < TOWNS.len()));
+    assert_eq!(map_town(-1), -1);
+    assert_eq!(map_town(66), -1);
+    // City music, grouped as §3.10 lists the tracks.
+    let groups: [(&str, &[i32]); 15] = [
+        ("01hub", &[36, 38, 39, 40, 41, 65]),
+        ("02mstrlr", &[33, 34]),
+        ("04brthrh", &[13, 14, 15]),
+        ("05raider", &[24]),
+        ("06vault", &[6, 35]),
+        (
+            "07desert",
+            &[
+                0, 1, 2, 20, 21, 22, 23, 49, 50, 51, 52, 53, 54, 56, 57, 58, 59, 60, 61, 62, 63, 64,
+            ],
+        ),
+        ("08vats", &[30, 31, 32, 47, 48, 55]),
+        ("09glow", &[27, 42, 43]),
+        ("10labone", &[28, 44, 45, 46]),
+        ("11chilrn", &[17, 18, 19]),
+        ("12junktn", &[10, 11, 12]),
+        ("13carvrn", &[7, 8, 16, 37]),
+        ("14necro", &[3, 4, 5, 9]),
+        ("15shady", &[25, 26]),
+        ("16follow", &[29]),
+    ];
+    let mut covered = 0;
+    for (track, numbers) in groups {
+        for number in numbers {
+            assert_eq!(city_music(*number), Some(track), "map {number}");
+            covered += 1;
+        }
+    }
+    assert_eq!(covered, MAP_COUNT);
+    assert_eq!(city_music(-1), None);
+    assert_eq!(map_table_name(0), Some("DESERT1.MAP"));
+    assert_eq!(map_table_name(36), Some("HUBENT.MAP"));
+    assert_eq!(map_table_name(65), Some("HUBMIS1.MAP"));
+    assert_eq!(map_table_name(66), None);
     assert_eq!(town_center(3), Some([17 * 50 + 25, 10 * 50 + 25]));
-    // SPEC-014 §3.12: city 35 (Vault 13's entrance) plays 06vault.
-    assert_eq!(city_music(35), Some("06vault"));
-    assert_eq!(city_music(7), None);
+}
+
+#[test]
+fn spec008_map_numbers_come_from_the_header_name_matched_against_map_msg() {
+    use crate::worldmap::{
+        MAP_TABLE, canonical_map_name, city_music, header_map_number, map_number_of_name, map_town,
+    };
+    use vault_formats::{MsgCatalog, automap};
+    let text: String = MAP_TABLE
+        .iter()
+        .enumerate()
+        .map(|(number, entry)| format!("{{{number}}}{{}}{{{}}}\n", entry.name))
+        .collect();
+    let catalog = MsgCatalog::parse(text.as_bytes()).unwrap();
+    let field = |name: &str| {
+        let mut field = [0_u8; 16];
+        field[..name.len()].copy_from_slice(name.as_bytes());
+        field
+    };
+    // SPEC-008 §4.5: header name, word 0x34, number, town, music, and
+    // whether leaving writes a working `.SAV`.
+    for (name, word, number, town, music, saves) in [
+        ("hubent.map", 7, 36, 6, Some("01hub"), true),
+        ("HUBENT.SAV", -1, 36, 6, Some("01hub"), true),
+        ("hubent.sav", 7, 7, 1, Some("13carvrn"), true),
+        ("MSTRLR34.MAP", 34, 34, 11, Some("02mstrlr"), true),
+        ("DESCRVN4.MAP", 63, 63, 0, Some("07desert"), false),
+        ("CARAVAN.MAP", -1, -1, -1, None, false),
+    ] {
+        let assigned = header_map_number(&field(name), word, Some(&catalog));
+        assert_eq!(assigned, number, "{name}");
+        assert_eq!(map_town(assigned), town, "{name}");
+        assert_eq!(city_music(assigned), music, "{name}");
+        let written =
+            usize::try_from(assigned).is_ok_and(|number| !automap::EXCLUDED.contains(&number));
+        assert_eq!(written, saves, "{name}");
+    }
+    // `TMP$MAP#.MAP` keeps the word; without `map.msg` nothing matches.
+    assert_eq!(
+        header_map_number(&field("TMP$MAP#.MAP"), 12, Some(&catalog)),
+        12
+    );
+    assert_eq!(header_map_number(&field("hubent.map"), 7, None), -1);
+    assert_eq!(canonical_map_name(b"hubent.sav\0\0"), b"HUBENT.MAP");
+    assert_eq!(canonical_map_name(b"a.sav.sav"), b"A.MAP.SAV");
+    // SPEC-005 0x80E4 names match the same way: the corpus scripts name
+    // `Watrshd.map` (map 5) and `master34.map` (unlisted, no transition).
+    assert_eq!(map_number_of_name(b"Watrshd.map", Some(&catalog)), 5);
+    assert_eq!(map_number_of_name(b"master34.map", Some(&catalog)), -1);
+    assert_eq!(map_number_of_name(b"HUBENT", Some(&catalog)), -1);
 }

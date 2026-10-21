@@ -5,7 +5,17 @@
 //! archive lists the played movies and replays one with flags `0x0B`. The
 //! SPEC-014 §3.33 automap page draws the current map's stored automap
 //! raster for the player's elevation.
-use super::{MapPreview, Screen, button, panel_text};
+//!
+//! The page texts are the localized Pip-Boy messages SPEC-008 §3.8 names
+//! by number: disk titles 400 + ordinal and their records, location titles
+//! 700 + 10 x town and quest lines 701 + 10 x town + row. Everything else
+//! is a stand-in, because no specification defines it: the Pip-Boy's art,
+//! window layout, fonts and colors (beyond active quests in green and
+//! completed ones struck through and dimmed), the page buttons and their
+//! sounds, the alarm-menu labels (§3.9 lists the choices but no message
+//! numbers), the holodisk page controls, the video archive's titles (the
+//! movie file names stand in), and the rest and refusal notes.
+use super::{MapPreview, Screen, button, inventory::inside, panel_text};
 use crate::AppResult;
 use std::sync::Arc;
 use vault_core::{
@@ -62,7 +72,13 @@ pub(crate) struct PipBoy {
     pub disk: Option<(Holodisk, usize)>,
     pub rest: Option<RestSession>,
     last_step: u64,
+    /// P-02: the automap raster decoded for (map number, elevation), kept
+    /// while the Pip-Boy is open; a rest step, which can change the map,
+    /// drops it.
+    raster: Option<AutomapRaster>,
 }
+/// A decoded automap raster (or none) for a map number and elevation.
+type AutomapRaster = ((i32, u8), Option<Vec<u8>>);
 
 fn menu_button(index: usize) -> [i32; 4] {
     [20, 60 + 30 * index as i32, 140, 20]
@@ -78,10 +94,6 @@ fn row(index: usize) -> [i32; 4] {
 const PREVIOUS: [i32; 4] = [180, 440, 100, 16];
 const NEXT: [i32; 4] = [300, 440, 100, 16];
 const BACK: [i32; 4] = [420, 440, 100, 16];
-fn inside(rect: [i32; 4], point: [i32; 2]) -> bool {
-    (rect[0]..rect[0] + rect[2]).contains(&point[0])
-        && (rect[1]..rect[1] + rect[3]).contains(&point[1])
-}
 
 impl MapPreview {
     fn pipboy_messages(&self) -> Option<Arc<MsgCatalog>> {
@@ -92,12 +104,18 @@ impl MapPreview {
     }
     /// Opening the Pip-Boy resets the credited rest minutes.
     pub(crate) fn open_pipboy(&mut self) {
+        self.open_pipboy_on(Tab::Status);
+    }
+    /// The Pip-Boy on page `tab` (`z` opens the alarm clock, SPEC-014
+    /// §3.19).
+    pub(crate) fn open_pipboy_on(&mut self, tab: Tab) {
         self.host.open_pipboy();
         self.screen = Screen::PipBoy(PipBoy {
-            tab: Tab::Status,
+            tab,
             disk: None,
             rest: None,
             last_step: 0,
+            raster: None,
         });
     }
     pub(crate) fn pipboy_key(&mut self, key: KeyCode) -> bool {
@@ -241,6 +259,7 @@ impl MapPreview {
             return Ok(false);
         }
         pipboy.last_step = now;
+        pipboy.raster = None;
         let outcome = match self.host.advance_rest(session) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -262,7 +281,8 @@ impl MapPreview {
         }
         Ok(true)
     }
-    pub(crate) fn pipboy_image(&self) -> AppResult<IndexedImage> {
+    pub(crate) fn pipboy_image(&mut self) -> AppResult<IndexedImage> {
+        self.decode_pipboy_raster();
         let Screen::PipBoy(pipboy) = &self.screen else {
             return Err("Pip-Boy is not open".into());
         };
@@ -384,25 +404,44 @@ impl MapPreview {
         panel_text(&mut image, font, palette, &self.status, [22, 466], green);
         Ok(image)
     }
-    /// §3.33 the stored raster (current up to the last database write),
-    /// each cell 2 pixels wide and 1 tall from (238, 105): walls key 992,
-    /// scenery key 480. Rows below the window are clipped (safe rule).
-    fn draw_pipboy_automap(&self, image: &mut IndexedImage) {
+    /// The automap raster the Pip-Boy shows, decoded once for the map and
+    /// elevation on screen (P-02: not on every frame).
+    fn decode_pipboy_raster(&mut self) {
         let world = &self.host.world;
         let elevation = world
             .get(world.player)
             .map_or(world.elevation, |object| object.raw.elevation);
-        let raster = usize::try_from(world.map.header.map_number)
-            .ok()
-            .and_then(|map| {
-                world
-                    .persistence
-                    .automap
-                    .raster(map, usize::from(elevation))
-                    .ok()
-                    .flatten()
-            });
-        let Some(raster) = raster else {
+        let key = (world.map.header.map_number, elevation);
+        let Screen::PipBoy(pipboy) = &self.screen else {
+            return;
+        };
+        if pipboy.rest.is_some()
+            || pipboy.tab != Tab::Automap
+            || pipboy.raster.as_ref().is_some_and(|(seen, _)| *seen == key)
+        {
+            return;
+        }
+        let raster = usize::try_from(key.0).ok().and_then(|map| {
+            world
+                .persistence
+                .automap
+                .raster(map, usize::from(elevation))
+                .ok()
+                .flatten()
+        });
+        if let Screen::PipBoy(pipboy) = &mut self.screen {
+            pipboy.raster = Some((key, raster));
+        }
+    }
+    /// §3.33 the stored raster (current up to the last database write),
+    /// each cell 2 pixels wide and 1 tall from (238, 105): walls key 992,
+    /// scenery key 480. Rows below the window are clipped (safe rule).
+    fn draw_pipboy_automap(&self, image: &mut IndexedImage) {
+        let Screen::PipBoy(PipBoy {
+            raster: Some((_, Some(raster))),
+            ..
+        }) = &self.screen
+        else {
             return;
         };
         let painter = crate::interface::Painter {
@@ -412,7 +451,7 @@ impl MapPreview {
         for row in 0..200 {
             for column in 0..200 {
                 let Some(key) =
-                    automap::pipboy_color(vault_formats::automap::cell(&raster, row, column))
+                    automap::pipboy_color(vault_formats::automap::cell(raster, row, column))
                 else {
                     continue;
                 };

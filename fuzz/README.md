@@ -13,10 +13,27 @@ parsers. This crate is excluded from the main workspace (it has its own
 | `acm` | `acm::decode` |
 | `mve` | `mve::Movie::open`, then `next_event` until `Finished` or an error |
 | `map` | `MapFile::parse`, then `vault_core::WorldState::import_map` on every successful parse |
+| `int` | `IntProgram::parse`, then a bounded run under `BasicHost` (64 budgeted updates with scheduled-procedure polls) |
+| `save` | `SaveHeader::parse` and `SaveGame::parse` (campaign count 618) |
+| `automap` | `AutomapDb::parse`, then `raster` for 160 maps x 3 elevations |
+| `pro` | `Prototype::parse`, then `info` |
+| `font` | `Font::parse_fon` and `Font::parse_aaf`, then every glyph lookup and `text_width` over the input |
+| `msg` | `MsgCatalog::parse`, `parse_with_mode(WindowsLoose)`, and `parse_strict` |
+| `lst` | `LstTable::parse` for every `LstKind`, then the ID lookups |
+| `gcd` | `GcdFile::parse` |
+| `gam` | `GamFile::parse` as the campaign file and as a map file |
+| `rix` | `rix::Splash::parse` |
+| `sve` | `sve::parse` |
+| `moviefx` | `moviefx::parse`, then a `FadeHook` over 256 frames |
+| `ai` | `ai::Config::parse` and `ai::Packets::parse`, then `resolve` |
+| `validate` | `validate_asset`: the first input byte selects one of 16 asset paths (so the parser and its path-dependent rules), the rest is the asset |
 
-The `map` target resolves each PID from its own bits (type byte, subtype from
-the low byte), so every prototype-dependent object layout is reachable without a
-prototype corpus. The import runs against a `WorldAssets` that has no
+The `map` and `save` targets resolve each PID from its own bits (type byte,
+subtype from the low byte; `fuzz_targets/common.rs`), so every
+prototype-dependent object layout is reachable without a prototype corpus.
+The `acm` target skips inputs whose header would allocate more than 2^20
+samples or a 2^18-element block, since the decoder's own 64 MiB bound is too
+generous for a fuzzing loop. The import runs against a `WorldAssets` that has no
 prototypes, programs, or messages, so missing resources must be reported, not
 assumed.
 
@@ -90,7 +107,7 @@ coverage instrumentation, so this only proves that they compile and that the
 seeds run:
 
 ```sh
-cargo check --manifest-path fuzz/Cargo.toml --bins
+cargo check --manifest-path fuzz/Cargo.toml --bins --locked   # what PR CI runs
 cargo build --manifest-path fuzz/Cargo.toml --bins
 fuzz/target/debug/dat fuzz/corpus/dat -runs=0
 ```

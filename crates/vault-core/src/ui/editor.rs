@@ -187,7 +187,11 @@ impl Editor {
         if self.character_points <= 0 || self.shown(stat) >= 10 || base + 1 > 10 {
             return false;
         }
-        self.sheet.set_base(stat, base + 1, self.context);
+        // R-10: a step the sheet refuses (a base outside 1-10) spends
+        // nothing.
+        if !self.sheet.set_base(stat, base + 1, self.context) {
+            return false;
+        }
         self.character_points -= 1;
         self.selected = InfoLine::Special(stat);
         true
@@ -199,7 +203,12 @@ impl Editor {
         if base - 1 < 1 {
             return false;
         }
-        self.sheet.set_base(stat, base - 1, self.context);
+        // R-10: the sheet keeps SPECIAL bases within 1-10, so a loaded base
+        // of 12 cannot step to 11; a refused step refunds nothing (else
+        // every press on such a sheet minted a character point).
+        if !self.sheet.set_base(stat, base - 1, self.context) {
+            return false;
+        }
         self.character_points += 1;
         self.selected = InfoLine::Special(stat);
         true

@@ -278,7 +278,9 @@ impl<A: WorldAssets> WorldHost<A> {
     fn register_art_change(&mut self, object: ObjectRef, fid: u32) {
         let mut sequence = crate::motion::MotionSequence::new();
         match sequence.push(object, 0, crate::motion::Motion::SetArt { art: fid }) {
-            Ok(()) => self.register_motion(sequence),
+            Ok(()) => {
+                self.register_motion(sequence);
+            }
             Err(refused) => self
                 .world
                 .diagnostic(format!("art change refused: {refused:?}")),

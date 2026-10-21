@@ -27,11 +27,13 @@ pub const START_TICKS: u64 = 264_600;
 pub const START_MOVIES: [(&str, u32); 2] =
     [("art/cuts/iplogo.mve", 0x01), ("art/cuts/intro.mve", 0)];
 
-/// §3.2 fade calibration: one timed 60-step fade sets the step count so a
-/// fade lasts about 700 ms; a zero measurement counts as 46 ms.
+/// §3.2 fade calibration: one timed 60-step fade of M milliseconds sets the
+/// step count `n = trunc(60 / (M / 700)) = trunc(42000 / M)`, computed
+/// exactly in integers (a measurement above 42000 gives 0); a zero
+/// measurement counts as 46 ms, giving 913.
 pub fn fade_steps(elapsed_ms: u64) -> u32 {
     let elapsed = if elapsed_ms == 0 { 46 } else { elapsed_ms };
-    (60.0 / (elapsed as f64 / 700.0)) as u32
+    (42_000 / elapsed) as u32
 }
 /// Step `k` of `n` toward `new` from `old` six-bit levels.
 pub fn fade_level(old: u8, new: u8, k: u32, n: u32) -> u8 {
@@ -353,6 +355,17 @@ impl DialogSize {
             Self::Medium => ("medialog.frm", [215, 113]),
         }
     }
+    /// §3.13 title y for `body_lines` body lines: a large box lays out six
+    /// lines, `27 + 30 - trunc((body lines + 1) * 10 / 2)`; a medium box
+    /// five, `23 + 25 - trunc((body lines + 1) * 10 / 2)`. Body lines
+    /// follow 10 apart.
+    pub fn title_y(self, body_lines: usize) -> i32 {
+        let half = (body_lines as i32 + 1) * 10 / 2;
+        match self {
+            Self::Large => 27 + 30 - half,
+            Self::Medium => 23 + 25 - half,
+        }
+    }
 }
 /// A Yes/No or two-button box is always large; otherwise the request, else
 /// large when the widest line exceeds 168 pixels or there are more than five
@@ -372,9 +385,10 @@ pub fn dialog_size(
         DialogSize::Medium
     })
 }
-/// Title y for `body_lines` body lines; body lines follow 10 apart.
+/// A large box's title y for `body_lines` body lines (see
+/// [`DialogSize::title_y`] for both sizes); body lines follow 10 apart.
 pub fn dialog_title_y(body_lines: usize) -> i32 {
-    27 + 30 - (body_lines as i32 + 1) * 10 / 2
+    DialogSize::Large.title_y(body_lines)
 }
 /// Body lines wider than this wrap.
 pub const DIALOG_WRAP: i32 = 276;

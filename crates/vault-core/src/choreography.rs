@@ -170,6 +170,20 @@ pub trait Driver<O, A> {
     fn start(&mut self, entry: &mut Entry<O, A>, now_ms: u64) -> Begin;
     /// Frame step `step` (1 for the first) of a running entry.
     fn step(&mut self, entry: &mut Entry<O, A>, step: usize, now_ms: u64) -> Stepped;
+    /// Entries (owner, delay, action) that the entry which just started
+    /// registered as it ran: they follow it in its sequence, so a delay 0
+    /// starts them in the same examination (SPEC-007 §3.11.4: a container
+    /// use registers the container's sound and animation from inside the
+    /// user's sequence, and the entries after it wait for them).
+    fn appended(&mut self) -> Vec<(O, i32, A)> {
+        Vec::new()
+    }
+    /// Whether a running entry never finishes on its own (a repeating
+    /// script animation): instant playback stops once only such entries
+    /// run, instead of stepping them to its pass limit.
+    fn endless(&self, _entry: &Entry<O, A>) -> bool {
+        false
+    }
 }
 
 /// What an examination or a pass started that the host acts on.
@@ -295,6 +309,9 @@ impl<O, A> Schedule<O, A> {
     }
     /// Start an entry: an instant one takes effect and finishes; a timed
     /// one takes its first frame step at the next pass that reaches it.
+    /// Entries the driver registered meanwhile are placed right after it,
+    /// as the next to start; past [`CAPACITY`] they are dropped (safe
+    /// bound: the reference's full-list registration failure).
     fn start(&mut self, index: usize, now_ms: u64, driver: &mut impl Driver<O, A>) {
         let begin = driver.start(&mut self.entries[index], now_ms);
         let entry = &mut self.entries[index];
@@ -305,6 +322,21 @@ impl<O, A> Schedule<O, A> {
             },
             Begin::Done | Begin::Failed => State::Finished,
         };
+        for (offset, (owner, delay, action)) in driver.appended().into_iter().enumerate() {
+            if self.entries.len() >= CAPACITY {
+                break;
+            }
+            self.entries.insert(
+                self.next + offset,
+                Entry {
+                    owner,
+                    delay,
+                    action,
+                    forced: false,
+                    state: State::Waiting,
+                },
+            );
+        }
         if begin == Begin::Failed {
             self.stop(now_ms, driver);
         }
@@ -389,6 +421,9 @@ impl<O, A> Schedule<O, A> {
         }
     }
     /// Run every remaining step at once. Returns the time of the last pass.
+    /// A sequence whose only running entries never finish (a repeating
+    /// animation, [`Driver::endless`]) is left running after their first
+    /// step rather than stepped to the pass limit.
     pub fn run_to_end(&mut self, mut now_ms: u64, driver: &mut impl Driver<O, A>) -> u64 {
         if !self.registered {
             self.register(now_ms, driver);
@@ -399,6 +434,14 @@ impl<O, A> Schedule<O, A> {
             };
             now_ms = now_ms.max(due);
             self.pass(now_ms, driver);
+            let settled = self
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry.state, State::Running { .. }))
+                .all(|entry| driver.endless(entry));
+            if settled {
+                break;
+            }
         }
         now_ms
     }

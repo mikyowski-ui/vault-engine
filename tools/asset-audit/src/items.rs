@@ -2,7 +2,7 @@
 //! that the drug, armor, weapon, ammunition, and money rules depend on.
 //! Counts are reported next to the specification's survey; only the
 //! invariants decide success.
-use std::{collections::BTreeMap, error::Error, path::Path, sync::Arc};
+use std::{collections::BTreeMap, error::Error, sync::Arc};
 use vault_core::{
     CharacterSheet, WorldEffect, WorldHost, WorldState,
     assets::{VfsWorldAssets, WorldAssets},
@@ -26,6 +26,39 @@ const SUBTYPES: [&str; 7] = [
     "key",
 ];
 
+/// Every §4.12 invariant, in report order. Each one is listed in the report
+/// even when this corpus has nothing it applies to, so an invariant can
+/// never drop out of the table (or the pass count) silently.
+const INVARIANTS: [&str; 18] = [
+    "item files parse with subtype 0-6",
+    "item file length equals the SPEC-003 reader size",
+    "drug selectors are -1, 0-37, or -2 in slot 0",
+    "range-form drugs heal through slot 1",
+    "no delayed stage pairs a delay with all-zero amounts",
+    "addiction chances are 0-100",
+    "addictive drugs name withdrawal perks 53-57",
+    "addiction-table PIDs are drugs",
+    "alcohol PIDs 124 and 125 are not addictive",
+    "healing PIDs 40 and 144 are drugs selecting current HP",
+    "armor perks are -1, 62, or 63",
+    "armor DR is 0-90 (EMP above 100)",
+    "armor DT is 0-100",
+    "magazine weapons have matching ammunition",
+    "weapon minimum strength is 0-10",
+    "ammunition pack sizes are above 0",
+    "money PID 41 costs 1",
+    "perk.msg names 101-164 and descriptions 201-264",
+];
+
+/// One invariant: how many subjects it was checked against, and the
+/// violations among them.
+#[derive(Debug)]
+pub struct Invariant {
+    pub name: &'static str,
+    pub checked: usize,
+    pub violations: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct ItemAudit {
     pub subtypes: [usize; 7],
@@ -33,14 +66,21 @@ pub struct ItemAudit {
     pub delayed: usize,
     pub two_handed: usize,
     pub magazines: usize,
-    /// (invariant, violations): every invariant appears, passing at zero.
-    pub invariants: Vec<(&'static str, Vec<String>)>,
+    /// Every entry of [`INVARIANTS`], passing at zero violations.
+    pub invariants: Vec<Invariant>,
 }
 impl ItemAudit {
     pub fn failed(&self) -> usize {
         self.invariants
             .iter()
-            .filter(|(_, violations)| !violations.is_empty())
+            .filter(|invariant| !invariant.violations.is_empty())
+            .count()
+    }
+    /// Invariants this corpus gives nothing to check (reported, not failed).
+    pub fn unexercised(&self) -> usize {
+        self.invariants
+            .iter()
+            .filter(|invariant| invariant.checked == 0)
             .count()
     }
     /// The survey counts this corpus reproduces.
@@ -75,34 +115,63 @@ impl ItemAudit {
         if self.subtypes != SURVEY_SUBTYPES {
             println!("subtype counts differ from the §4.12 survey {SURVEY_SUBTYPES:?}");
         }
-        println!("invariant\tviolations");
-        for (name, violations) in &self.invariants {
-            println!("{name}\t{}", violations.len());
-            for violation in violations.iter().take(5) {
-                eprintln!("FAIL {name}: {violation}");
+        println!("invariant\tchecked\tviolations");
+        for invariant in &self.invariants {
+            println!(
+                "{}\t{}\t{}",
+                invariant.name,
+                invariant.checked,
+                invariant.violations.len()
+            );
+            if invariant.checked == 0 {
+                println!(
+                    "NOT EXERCISED {}: nothing in this corpus to check",
+                    invariant.name
+                );
+            }
+            for violation in invariant.violations.iter().take(5) {
+                eprintln!("FAIL {}: {violation}", invariant.name);
             }
         }
         println!(
-            "Item invariants: {} passed, {} failed",
-            self.invariants.len() - self.failed(),
-            self.failed()
+            "Item invariants: {} passed, {} failed, {} not exercised",
+            self.invariants.len() - self.failed() - self.unexercised(),
+            self.failed(),
+            self.unexercised()
         );
     }
 }
 
-struct Checks(BTreeMap<&'static str, Vec<String>>);
+struct Checks(Vec<Invariant>);
 impl Checks {
+    fn new() -> Self {
+        Self(
+            INVARIANTS
+                .iter()
+                .map(|name| Invariant {
+                    name,
+                    checked: 0,
+                    violations: Vec::new(),
+                })
+                .collect(),
+        )
+    }
     fn check(&mut self, name: &'static str, ok: bool, violation: impl FnOnce() -> String) {
-        let entry = self.0.entry(name).or_default();
+        let invariant = self
+            .0
+            .iter_mut()
+            .find(|invariant| invariant.name == name)
+            .expect("every checked invariant is listed in INVARIANTS");
+        invariant.checked += 1;
         if !ok {
-            entry.push(violation());
+            invariant.violations.push(violation());
         }
     }
 }
 
 pub fn audit_items(vfs: &dyn Vfs) -> Result<ItemAudit, Box<dyn Error>> {
     let mut audit = ItemAudit::default();
-    let mut checks = Checks(BTreeMap::new());
+    let mut checks = Checks::new();
     let mut items: BTreeMap<u32, Item> = BTreeMap::new();
     for path in vfs.files() {
         if path.extension() != Some("pro") || !path.as_str().starts_with("proto/items/") {
@@ -295,7 +364,7 @@ pub fn audit_items(vfs: &dyn Vfs) -> Result<ItemAudit, Box<dyn Error>> {
             || error,
         ),
     }
-    audit.invariants = checks.0.into_iter().collect();
+    audit.invariants = checks.0;
     Ok(audit)
 }
 
@@ -305,14 +374,20 @@ pub fn audit_items(vfs: &dyn Vfs) -> Result<ItemAudit, Box<dyn Error>> {
 /// delayed stages, and show at least one stage message; the current-HP
 /// drugs must heal. Returns drugs consumed, delayed stages queued, healing
 /// drugs, and failures.
-pub fn consume_drugs(corpus: &Path) -> Result<[usize; 4], Box<dyn Error>> {
-    let vfs = Arc::new(LocalDirProvider::mount(corpus)?);
+pub fn consume_drugs(vfs: &Arc<LocalDirProvider>) -> Result<[usize; 4], Box<dyn Error>> {
     let mut pids = Vec::new();
     for path in vfs.files() {
         if path.extension() != Some("pro") || !path.as_str().starts_with("proto/items/") {
             continue;
         }
-        let prototype = Prototype::parse(&vfs.read_bounded(path.as_str(), MAX_ASSET_BYTES)?)?;
+        // Unreadable item files are the invariant audit's failures.
+        let Ok(prototype) = vfs
+            .read_bounded(path.as_str(), MAX_ASSET_BYTES)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| Prototype::parse(&bytes).map_err(|error| error.to_string()))
+        else {
+            continue;
+        };
         if let PrototypeData::Item(Item {
             data: ItemData::Drug(drug),
             ..
@@ -328,9 +403,21 @@ pub fn consume_drugs(corpus: &Path) -> Result<[usize; 4], Box<dyn Error>> {
         host.load_campaign()?;
         let player = host.world.player;
         host.world.set_hit_points(player, 1);
-        let item = host.world.spawn(host.assets.prototype(pid)?, 0, 0)?;
-        host.world.effects.clear();
-        let result = host.consume_drug(player, item)?;
+        // One drug that cannot be spawned or consumed is a failure; the
+        // remaining drugs are still consumed.
+        let consumed_by = |host: &mut WorldHost<VfsWorldAssets>| -> Result<i32, Box<dyn Error>> {
+            let item = host.world.spawn(host.assets.prototype(pid)?, 0, 0)?;
+            host.world.effects.clear();
+            Ok(host.consume_drug(player, item)?)
+        };
+        let result = match consumed_by(&mut host) {
+            Ok(result) => result,
+            Err(error) => {
+                failures += 1;
+                eprintln!("FAIL drug consumption PID {pid}: {error}");
+                continue;
+            }
+        };
         let stages = Stage::delayed(&drug)
             .iter()
             .filter(|(_, stage)| stage.scheduled())

@@ -398,10 +398,11 @@ impl Attack {
     ) -> Result<i64, WorldError> {
         let subtype = self.subtype();
         let mut base = i64::from(match &self.weapon {
-            None => rng.range(1, self.melee_damage + 2)?,
-            Some(weapon) if subtype.is_some_and(Subtype::close) => {
-                rng.range(weapon.damage[0], weapon.damage[1] + self.melee_damage)?
-            }
+            None => rng.range(1, self.melee_damage.saturating_add(2))?,
+            Some(weapon) if subtype.is_some_and(Subtype::close) => rng.range(
+                weapon.damage[0],
+                weapon.damage[1].saturating_add(self.melee_damage),
+            )?,
             Some(weapon) => rng.range(weapon.damage[0], weapon.damage[1])?,
         });
         if self.attacker_player && subtype == Some(Subtype::Ranged) {
@@ -520,13 +521,18 @@ impl Attack {
         if self.defender_pid == PROTECTED_PID {
             return Ok(());
         }
+        // SPEC-007 §2.5 safe rule: the victim tables are numbered 0-14 and
+        // the prototype's kill-category word is not validated anywhere (the
+        // reference indexes past the table). An out-of-range category uses
+        // table 0 (man); the host diagnoses it when it builds the profile,
+        // so the attack and its consumed draws are not refused here.
         let matrix = if self.defender_player {
             PLAYER_MATRIX
         } else {
             usize::try_from(self.kill_category)
                 .ok()
                 .filter(|category| *category <= 14)
-                .ok_or_else(|| WorldError::Invalid("kill category must be 0-14".into()))?
+                .unwrap_or(0)
         };
         let tier = critical::success_tier(rng.range(1, 100)? + self.better_criticals);
         // Uncalled is normalized to torso before the normal effect lookup.

@@ -255,8 +255,9 @@ impl WorldState {
                 && self
                     .get(owner)
                     .is_some_and(|o| o.inventory.iter().any(|(entry, _)| *entry == item));
-            // Re-adding the representative itself is a successful no-op.
-            if force && representative {
+            // SPEC-011 §3.13: adding the exact object that is already the
+            // representative is a no-op that succeeds, forced or not.
+            if representative {
                 return Ok(());
             }
             return Err(WorldError::Invalid("item already owned".into()));

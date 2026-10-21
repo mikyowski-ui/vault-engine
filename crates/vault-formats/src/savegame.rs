@@ -421,6 +421,9 @@ impl SaveGame {
                     healing: r.be_i32()?,
                 },
                 1 | 4 | 5 | 7..=12 => QueuePayload::None,
+                // SPEC-008 §2.6 [May-improve]: the reference indexes its
+                // handler table with the stored type unchecked; a type
+                // outside 0-12 is rejected instead.
                 _ => return Err(r.error(format!("unknown timed-event type {kind}"))),
             };
             queue.push(QueueRecord {

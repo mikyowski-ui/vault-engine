@@ -402,7 +402,16 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.library.window_mut(vm.window)?;
                 self.library.current = vm.window;
                 if !self.assets.available(call.text(0).unwrap_or(b"")) {
-                    return Err(error("managed image resource missing"));
+                    // SPEC-005: `fillwin3x3` makes a load failure a VM
+                    // error; `display`/`displayraw` push nothing and name no
+                    // error, so a missing resource there is diagnosed only.
+                    if word == 0x806a {
+                        return Err(error("managed image resource missing"));
+                    }
+                    self.world.diagnostic(format!(
+                        "{word:#06x}: image resource {} missing",
+                        String::from_utf8_lossy(call.text(0).unwrap_or(b""))
+                    ));
                 }
             }
             0x806c => {

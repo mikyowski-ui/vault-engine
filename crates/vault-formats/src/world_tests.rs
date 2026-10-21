@@ -257,11 +257,63 @@ fn map_tiles_and_per_slot_script_dispatch() {
     let active = base.scripts[0].active().next().unwrap();
     assert_eq!((active.stored_local_count, active.local_count), (3, 0));
     assert_eq!(base.lvar(active, 0), None);
+    // SPEC-003 §3.2: a saved slice past the local pool is a runtime
+    // out-of-range access (reading zero), not a load failure: diagnosed.
     fixture::word(&mut unsaved, 40, 0x0d);
-    assert!(MapFile::parse(&unsaved, &lookup).is_err());
+    let saved = MapFile::parse(&unsaved, &lookup).unwrap();
+    assert_eq!(
+        saved.lvar(saved.scripts[0].active().next().unwrap(), 0),
+        None
+    );
+    assert!(saved.diagnostics.iter().any(|line| line.contains("beyond")));
+    // §2.9 [May-improve]: a negative category count is rejected.
     let mut bad = bytes;
     fixture::word(&mut bad, 248 + 40000, -1);
     assert!(MapFile::parse(&bad, &lookup).is_err());
+}
+
+#[test]
+fn spec003_unmandated_record_checks_are_diagnostics() {
+    // Object frame, orientation, and inventory quantity have no validation
+    // rule in SPEC-003 §2.10/§2.12: out-of-range values are substituted
+    // or kept with a diagnostic rather than failing the map.
+    let mut full = fixture::empty_map();
+    full.truncate(268);
+    full.extend(fixture::inventory());
+    let mut mutated = full.clone();
+    fixture::word(&mut mutated, 268 + 8 + 0x18, -3);
+    fixture::word(&mut mutated, 268 + 8 + 0x1c, 6);
+    fixture::word(&mut mutated, 268 + 96, 0);
+    let map = MapFile::parse(&mutated, &lookup).unwrap();
+    let parent = &map.objects.elevations[0][0];
+    assert_eq!((parent.frame, parent.orientation), (0, 0));
+    assert_eq!(parent.inventory[0].quantity, 0);
+    assert_eq!(map.diagnostics.len(), 3);
+    assert!(map.diagnostics[0].contains("frame -3"));
+    assert!(map.diagnostics[1].contains("orientation 6"));
+    assert!(map.diagnostics[2].contains("quantity 0"));
+    // A negative quantity cannot be represented and is still rejected.
+    fixture::word(&mut mutated, 268 + 96, -1);
+    assert!(MapFile::parse(&mutated, &lookup).is_err());
+    // Script records: an active slot whose identifier names another
+    // category, or repeats an earlier identifier, is reported (§2.9, §3.3)
+    // and the first record binds.
+    let mut bytes = fixture::empty_map();
+    bytes.truncate(248);
+    bytes.extend(3_i32.to_be_bytes());
+    bytes.extend(fixture::script_slot(0, 5));
+    bytes.extend(fixture::script_slot(3, 6));
+    bytes.extend(fixture::script_slot(0, 5));
+    for slot in 3..16 {
+        bytes.extend(fixture::script_slot(0, slot));
+    }
+    bytes.extend(fixture::words(&[3, 0]));
+    bytes.extend(fixture::words(&[0; 8]));
+    let map = MapFile::parse(&bytes, &lookup).unwrap();
+    assert_eq!(map.scripts[0].active().count(), 3);
+    assert_eq!(map.diagnostics.len(), 2);
+    assert!(map.diagnostics[0].contains("0x03000006"));
+    assert!(map.diagnostics[1].contains("duplicate active script 0x00000005"));
 }
 #[test]
 fn subtype_trailers_saved_state_and_depth_limits() {
@@ -683,4 +735,44 @@ fn spec003_map_writer_grid_order_exclusions_and_script_compaction() {
             .iter()
             .all(|entry| !entry.object.flags.contains(BasicFlags::TEMPORARY))
     );
+}
+
+/// SPEC-003 over the real corpus: every shipped `.map` parses against the
+/// corpus prototypes, with safe-rule substitutions reported as diagnostics
+/// rather than errors.
+#[test]
+#[ignore = "needs the local corpus"]
+fn corpus_every_map_parses() {
+    let Some(corpus) = crate::tests::corpus_dir() else {
+        return;
+    };
+    let vfs = LocalDirProvider::mount(corpus.join("fallout1-unpacked")).unwrap();
+    let catalog = LocalPrototypeCatalog::new(&vfs);
+    let maps: Vec<&VfsPath> = vfs
+        .files()
+        .filter(|path| path.as_str().starts_with("maps/") && path.as_str().ends_with(".map"))
+        .collect();
+    let mut failures = Vec::new();
+    let mut diagnostics = 0;
+    for path in &maps {
+        match MapFile::parse(&vfs.read(path.as_str()).unwrap(), &catalog) {
+            Ok(map) => {
+                diagnostics += map.diagnostics.len();
+                for line in &map.diagnostics {
+                    eprintln!("  {}: {line}", path.as_str());
+                }
+            }
+            Err(error) => failures.push(format!("{}: {error}", path.as_str())),
+        }
+    }
+    eprintln!(
+        "{} corpus maps, {} failures, {diagnostics} diagnostics",
+        maps.len(),
+        failures.len()
+    );
+    for line in &failures {
+        eprintln!("  {line}");
+    }
+    assert_eq!(maps.len(), 72);
+    assert!(failures.is_empty(), "{} maps failed", failures.len());
 }

@@ -107,6 +107,8 @@ fn spec008_fixture_holodisk_acquisition_pages_and_markers() {
     assert_eq!(disk.last_page, 0);
     assert_eq!(disk.page(0).len(), 35);
     assert!(disk.page(1).is_empty());
+    // A page index whose record offset overflows is simply past the end.
+    assert!(disk.page(usize::MAX).is_empty());
     assert_eq!(disk.records[3], DiskLine::Paragraph);
     assert_eq!(disk.records[0], DiskLine::Text(b"line 0".to_vec()));
     // 36 records: still page index 1, now non-empty.
@@ -133,6 +135,18 @@ fn spec008_fixture_holodisk_acquisition_pages_and_markers() {
     assert_eq!(
         holodisk(0, &catalog(&[(400, "Gap"), (1001, "**END-DISK**")])),
         Err(DiskError::MissingRecord(1000))
+    );
+    // A gap is fatal (SPEC-008 §3.8 open question); the message names the
+    // disk, the id, and the window it falls in.
+    let gap = holodisk(
+        1,
+        &catalog(&[(401, "Gap"), (2000, "a"), (2002, "**END-DISK**")]),
+    );
+    assert_eq!(gap, Err(DiskError::MissingRecord(2001)));
+    assert_eq!(
+        gap.unwrap_err().to_string(),
+        "holodisk 1 content message 2001 is missing: a gap in the 2000-2499 window \
+         before **END-DISK** (SPEC-008 §3.8 leaves gaps undefined, so the disk is not shown)"
     );
     assert_eq!(
         holodisk(0, &catalog(&[])),

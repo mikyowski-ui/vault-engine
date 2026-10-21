@@ -22,7 +22,9 @@ impl EventId {
 
 /// World-owned counters, independent of wall clocks, threads, or process globals.
 ///
-/// Persist these alongside world state to resume either stream without reusing IDs.
+/// `WorldState` carries them, but the SPEC-008 save has no field for them,
+/// so a loaded game restarts both streams. Serializing them with any other
+/// state (as below) resumes a stream without reusing IDs.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SequenceIds {
     last_command: u64,

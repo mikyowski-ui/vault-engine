@@ -834,6 +834,11 @@ fn spec013_fixture_f_counter_and_set_timer() {
     assert_eq!(skills::quantity_label(1, None), None);
     assert_eq!(skills::quantity_label(3, Some((10, 4))).unwrap(), b"x24");
     assert_eq!(skills::quantity_label(200_000, None).unwrap(), b"x99999");
+    // Widened arithmetic: a crafted pack size cannot overflow the label.
+    assert_eq!(
+        skills::quantity_label(i32::MAX, Some((i32::MAX, 1))).unwrap(),
+        b"x99999"
+    );
     assert_eq!(skills::loot_drop_target([510, 100]), Some(true));
     assert_eq!(skills::loot_drop_target([130, 323]), Some(false));
     assert_eq!(skills::loot_drop_target([300, 100]), None);
@@ -936,6 +941,39 @@ fn spec013_skill_gate_jam_check_and_defaults() {
 }
 
 #[test]
+fn spec013_the_skill_stage_follows_the_manipulation_animation() {
+    use crate::{
+        host_choreography::Playback,
+        motion::{Call, Motion},
+    };
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let player = host.world.player;
+    let item = items::spawn(&mut host, ITEM_PID);
+    host.world.move_object(item, adjacent(2), 0, false).unwrap();
+    assert!(host.use_skill_on(player, item, 11).unwrap());
+    // §3.2 steps 2-5 as one sequence: the approach (moving nothing next to
+    // the item), the forced adjacency check, the middle reach, and the
+    // stage after it. Nothing of the stage has run yet.
+    assert!(messages(&mut host).is_empty());
+    let entries = host.motions[0].schedule.entries();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| matches!(entry.action, Motion::Animate { animation: 11, .. }))
+    );
+    assert!(matches!(
+        entries.last().map(|entry| &entry.action),
+        Some(Motion::Call(Call::SkillStage { target, skill: 11 })) if *target == item
+    ));
+    // The animation completes on its first step (no art here); the stage
+    // runs after it.
+    host.step_motions(0);
+    assert_eq!(messages(&mut host), ["no traps"]);
+    assert!(host.motions.is_empty());
+}
+
+#[test]
 fn spec013_steal_and_loot_sessions() {
     let mut host = host();
     let player = host.world.player;
@@ -998,10 +1036,12 @@ fn spec013_steal_and_loot_sessions() {
     assert!(host.loot_take_all(&session).unwrap());
     assert!(host.loot_items(&session, true).is_empty());
     host.close_loot(session).unwrap();
-    // A party member is robbed with no draws and no experience.
+    // A party member is robbed with no draws and no experience; SPEC-013
+    // §3.9.3 step 8 still displays `skill.msg` 571 with the item's name.
     let friend = critter(&mut host, adjacent(4), &[]);
     host.world.party.insert(friend);
     let gift = items::carry(&mut host, friend, ITEM_PID, 1);
+    let gift_name = String::from_utf8_lossy(&host.world.get(gift).unwrap().name).into_owned();
     let mut session = host
         .open_loot(LootRequest {
             looter: player,
@@ -1011,12 +1051,14 @@ fn spec013_steal_and_loot_sessions() {
         .unwrap()
         .unwrap();
     session.press();
+    let draws = host.world.rng.state().clone();
     assert_eq!(
         host.loot_move(&mut session, true, gift, 1).unwrap(),
         LootMove::Moved
     );
+    assert_eq!(host.world.rng.state(), &draws, "no steal or catch draw");
     host.close_loot(session).unwrap();
-    assert!(messages(&mut host).is_empty());
+    assert_eq!(messages(&mut host), [format!("take {gift_name}")]);
 }
 
 #[test]

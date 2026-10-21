@@ -52,18 +52,19 @@ pub struct InspectorConfig {
     pub trace_capacity: usize,
     pub watches: WatchList,
     pub objects: ObjectFilter,
-    /// Diff objects on every tick (snapshots cost one pass over the world).
+    /// Diff objects on every tick. Off by default: each tick then snapshots
+    /// every object the filter selects, a full pass over the world, which
+    /// a frontend should opt into only while an object view is open.
     pub track_objects: bool,
 }
 impl Default for InspectorConfig {
-    /// A 256-entry trace, no variable watches, and every active object
-    /// tracked.
+    /// A 256-entry trace, no variable watches, and no object tracking.
     fn default() -> Self {
         Self {
             trace_capacity: 256,
             watches: WatchList::new(),
             objects: ObjectFilter::default(),
-            track_objects: true,
+            track_objects: false,
         }
     }
 }

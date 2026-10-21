@@ -1,9 +1,65 @@
 //! SPEC-008 §4.1-4.2 archives and LZSS, and §3.2 database precedence.
 use crate::{
-    DatArchive, DatProvider, Database, LocalDirProvider, Vfs,
+    DatArchive, DatProvider, Database, LocalDirProvider, Vfs, VfsError,
     dat::{DatTables, Storage, decode_blocks, decode_until},
 };
 use std::{io::Cursor, sync::Arc};
+
+#[test]
+fn spec008_final_block_truncation_and_bounded_reads() {
+    // §2.3: the final block is limited by the remaining logical length, so
+    // output past it is discarded (a literal, a match cut mid-way, or raw
+    // bytes), while a final block that stops short still fails.
+    assert_eq!(
+        decode_blocks(&[0x00, 0x03, 0x00, 0x00, 0x00], 2).unwrap(),
+        b"  "
+    );
+    assert_eq!(
+        decode_blocks(&[0x00, 0x04, 0x01, 0x41, 0xee, 0xf2], 4).unwrap(),
+        b"AAAA"
+    );
+    assert_eq!(
+        decode_blocks(&[0x80, 0x03, 0x58, 0x59, 0x5a], 2).unwrap(),
+        b"XY"
+    );
+    assert!(decode_blocks(&[0x80, 0x03, 0x58, 0x59, 0x5a], 4).is_err());
+    // Bounded reads: an archive member over the cap is refused from its
+    // table entry, before any payload is read.
+    let bytes = raw_archive(&[(b"BIG.TXT", b"0123456789")]);
+    let archive = Arc::new(DatArchive::parse(bytes).unwrap());
+    let database = Database {
+        loose: None,
+        archive: Some(archive.clone()),
+    };
+    assert_eq!(database.read_bounded("big.txt", 10).unwrap(), b"0123456789");
+    assert!(matches!(
+        database.read_bounded("big.txt", 9),
+        Err(VfsError::FileTooLarge { max_bytes: 9, .. })
+    ));
+    let provider = DatProvider::new(database, Database::default());
+    assert!(matches!(
+        provider.read_bounded("big.txt", 9),
+        Err(VfsError::FileTooLarge { .. })
+    ));
+    assert_eq!(provider.read("big.txt").unwrap(), b"0123456789");
+    // §3.2: only an absent loose file falls through to the archive; an
+    // oversize loose copy is reported, not masked by the archive member.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("big.txt"), b"loose copy, longer").unwrap();
+    let database = Database {
+        loose: Some(Arc::new(LocalDirProvider::mount(dir.path()).unwrap())),
+        archive: Some(archive),
+    };
+    assert_eq!(database.read("big.txt").unwrap(), b"loose copy, longer");
+    assert!(matches!(
+        database.read_bounded("big.txt", 10),
+        Err(VfsError::FileTooLarge { max_bytes: 10, .. })
+    ));
+    assert!(matches!(
+        database.read("missing.txt"),
+        Err(VfsError::NotFound(_))
+    ));
+}
 
 fn archive_bytes() -> Vec<u8> {
     crate::fixture_assets::sparse(include_str!(
@@ -175,9 +231,12 @@ fn spec008_fixture_lzss_outer_blocks_and_dictionary_reset() {
     let mut short = vec![0x80, 0x03, 0x58, 0x59, 0x5a];
     short.extend([0x80, 0x03, 0x58, 0x59, 0x5a]);
     assert!(decode_blocks(&short, 6).is_err());
-    // Truncated match token, over-expansion, and zero-output blocks.
+    // Truncated match token, non-final over-expansion, and zero-output blocks.
     assert!(decode_blocks(&[0x00, 0x02, 0x00, 0xee], 3).is_err());
-    assert!(decode_blocks(&[0x00, 0x03, 0x00, 0x00, 0x00], 2).is_err());
+    let mut over = vec![0xc0, 0x01];
+    over.extend(std::iter::repeat_n(0x41, 16385));
+    over.extend([0x80, 0x01, 0x42]);
+    assert!(decode_blocks(&over, 16386).is_err());
     assert!(decode_blocks(&[0x00, 0x00], 3).is_err());
     assert!(decode_blocks(&[0x80, 0x00], 1).is_err());
     // Attribute dispatch: exact zero aliases legacy 0x10; low bits do not
@@ -403,4 +462,43 @@ fn spec008_streamed_archive_serves_the_database_vfs() {
     assert_eq!(provider.read_critter("SHARED.TXT").unwrap(), b"streamed");
     assert!(provider.read("missing.txt").is_err());
     assert!(provider.files().any(|path| path.as_str() == "shared.txt"));
+}
+
+/// SPEC-008 §2.2-§2.3 over the real archives: every member of `MASTER.DAT`
+/// and `CRITTER.DAT` extracts to exactly its logical length.
+#[test]
+#[ignore = "needs the local corpus"]
+fn corpus_every_archive_member_extracts() {
+    let Some(corpus) = crate::tests::corpus_dir() else {
+        return;
+    };
+    for name in ["MASTER.DAT", "CRITTER.DAT"] {
+        let archive = DatArchive::open(corpus.join(name)).unwrap();
+        let mut members = 0;
+        let mut failures = Vec::new();
+        for directory in &archive.directories {
+            for file in &directory.files {
+                members += 1;
+                let path = String::from_utf8_lossy(&directory.path(file)).into_owned();
+                match archive.extract(file) {
+                    Ok(bytes) if bytes.len() == file.length as usize => {}
+                    Ok(bytes) => failures.push(format!(
+                        "{path}: {} bytes, entry says {}",
+                        bytes.len(),
+                        file.length
+                    )),
+                    Err(error) => failures.push(format!("{path}: {error}")),
+                }
+            }
+        }
+        eprintln!("{name}: {members} members, {} failures", failures.len());
+        for line in failures.iter().take(20) {
+            eprintln!("  {line}");
+        }
+        assert!(
+            failures.is_empty(),
+            "{name}: {} members failed",
+            failures.len()
+        );
+    }
 }

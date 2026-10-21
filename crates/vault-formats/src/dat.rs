@@ -19,6 +19,8 @@ pub const BLOCK_SIZE: usize = 16384;
 const RING: usize = 4096;
 /// Initial LZSS write cursor, `0xFEE`.
 pub const RING_START: usize = 4078;
+/// Entries reserved up front per directory table, whatever its count says.
+const RESERVED_ENTRIES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Storage {
@@ -180,7 +182,9 @@ impl DatTables {
     pub fn read(input: impl Read) -> Result<Self, ParseError> {
         let mut r = TableReader { input, pos: 0 };
         let root = r.prefix()?;
-        let mut names = Vec::with_capacity(root.count as usize);
+        // Table counts are untrusted: reserve at most a small fixed amount
+        // and let the vectors grow with the entries actually read.
+        let mut names = Vec::with_capacity((root.count as usize).min(RESERVED_ENTRIES));
         for _ in 0..root.count {
             names.push(r.name()?);
             r.skip(root.data_size as usize)?;
@@ -191,7 +195,7 @@ impl DatTables {
             if (table.data_size as usize) < 16 {
                 return Err(r.error("file table associated size is below 16"));
             }
-            let mut files = Vec::with_capacity(table.count as usize);
+            let mut files = Vec::with_capacity((table.count as usize).min(RESERVED_ENTRIES));
             for _ in 0..table.count {
                 let file = r.name()?;
                 let attributes = r.word()?;
@@ -266,7 +270,7 @@ impl DatEntry {
             Storage::Raw => Ok(body.to_vec()),
             Storage::Legacy => {
                 let mut ring = Ring::new();
-                let output = ring.decode(body, length)?;
+                let output = ring.decode(body, length, false)?;
                 if output.len() != length {
                     return Err(error("legacy stream length differs from the entry"));
                 }
@@ -402,8 +406,16 @@ impl Ring {
     fn new() -> Self {
         Self { data: [0; RING] }
     }
-    /// Decode an entire compressed input, bounding output to `limit`.
-    fn decode(&mut self, input: &[u8], limit: usize) -> Result<Vec<u8>, ParseError> {
+    /// Decode an entire compressed input, bounding output to `limit`. With
+    /// `truncate`, output past the bound is discarded and decoding stops
+    /// (the final block of a `0x40` stream, SPEC-008 §2.3); otherwise
+    /// expanding past the bound is an error.
+    fn decode(
+        &mut self,
+        input: &[u8],
+        limit: usize,
+        truncate: bool,
+    ) -> Result<Vec<u8>, ParseError> {
         self.data[..RING_START].fill(b' ');
         self.data[RING_START..].fill(0);
         let mut cursor = RING_START;
@@ -421,6 +433,9 @@ impl Ring {
                     let byte = input[position];
                     position += 1;
                     if output.len() == limit {
+                        if truncate {
+                            return Ok(output);
+                        }
                         return Err(error(
                             position - 1,
                             "literal expands beyond the block bound",
@@ -437,10 +452,13 @@ impl Ring {
                     position += 2;
                     let start = usize::from(a) + 256 * usize::from(b >> 4);
                     let count = usize::from(b & 15) + 3;
-                    if output.len() + count > limit {
+                    if output.len() + count > limit && !truncate {
                         return Err(error(position - 2, "match expands beyond the block bound"));
                     }
                     for k in 0..count {
+                        if output.len() == limit {
+                            return Ok(output);
+                        }
                         let byte = self.data[(start + k) % RING];
                         output.push(byte);
                         self.data[cursor] = byte;
@@ -453,10 +471,13 @@ impl Ring {
     }
 }
 
-/// Decode a `0x40` block stream to exactly `length` bytes. Each block must
-/// produce `min(16384, remaining)` bytes; a zero-length or nonprogressing
-/// block or a truncated body is rejected, and bytes after the last needed
-/// block are not read.
+/// Decode a `0x40` block stream to exactly `length` bytes. Every non-final
+/// block must produce exactly 16384 bytes; the final block is limited by
+/// the remaining logical length (SPEC-008 §2.3), so output past it is
+/// discarded as the reference's logical-length termination discards it,
+/// while a final block that stops short still fails length validation. A
+/// zero-length or nonprogressing block or a truncated body is rejected,
+/// and bytes after the last needed block are not read.
 pub fn decode_blocks(body: &[u8], length: usize) -> Result<Vec<u8>, ParseError> {
     let mut output = Vec::with_capacity(length.min(MAX_ASSET_BYTES));
     let mut position = 0;
@@ -471,11 +492,13 @@ pub fn decode_blocks(body: &[u8], length: usize) -> Result<Vec<u8>, ParseError> 
         let block = body.get(position..position + size).ok_or_else(|| {
             ParseError::new("DAT", position, "block body exceeds the packed extent")
         })?;
-        let expected = BLOCK_SIZE.min(length - output.len());
+        let remaining = length - output.len();
+        let last = remaining <= BLOCK_SIZE;
+        let expected = BLOCK_SIZE.min(remaining);
         let produced = if header & 0x8000 != 0 {
-            block.to_vec()
+            block[..if last { size.min(expected) } else { size }].to_vec()
         } else {
-            ring.decode(block, expected).map_err(|mut failure| {
+            ring.decode(block, expected, last).map_err(|mut failure| {
                 failure.offset += position;
                 failure
             })?
@@ -505,11 +528,23 @@ pub struct Database {
 }
 impl Database {
     pub fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        self.read_bounded(path, usize::MAX)
+    }
+    /// `read` that stops at `max_bytes` without reading the whole file:
+    /// the loose root checks the file size before reading, and an archive
+    /// member is rejected from its table entry's logical length before any
+    /// payload is read.
+    pub fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
         let normalized = VfsPath::new(path)?;
-        if let Some(loose) = &self.loose
-            && let Ok(bytes) = loose.read(normalized.as_str())
-        {
-            return Ok(bytes);
+        if let Some(loose) = &self.loose {
+            match loose.read_bounded(normalized.as_str(), max_bytes) {
+                Ok(bytes) => return Ok(bytes),
+                // SPEC-008 §3.2: only an absent loose file falls through to
+                // the archive; a collision, link, oversize or I/O failure on
+                // the loose root is reported, not masked by the archive copy.
+                Err(VfsError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
         let archive = self
             .archive
@@ -519,6 +554,12 @@ impl Database {
         let entry = archive
             .entry(request.as_bytes())
             .ok_or_else(|| VfsError::NotFound(normalized.clone()))?;
+        if entry.length as usize > max_bytes {
+            return Err(VfsError::FileTooLarge {
+                path: std::path::PathBuf::from(normalized.as_str()),
+                max_bytes,
+            });
+        }
         archive
             .extract(entry)
             .map_err(|error| VfsError::Archive(error.to_string()))
@@ -566,11 +607,14 @@ impl Vfs for DatProvider {
     /// Ordinary opens use the master database only. Critter art (paths under
     /// `art/critters/`) selects the critter database for that request.
     fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        self.read_bounded(path, usize::MAX)
+    }
+    fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
         let normalized = VfsPath::new(path)?;
         if normalized.as_str().starts_with("art/critters/") {
-            self.critter.read(normalized.as_str())
+            self.critter.read_bounded(normalized.as_str(), max_bytes)
         } else {
-            self.master.read(normalized.as_str())
+            self.master.read_bounded(normalized.as_str(), max_bytes)
         }
     }
     fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {

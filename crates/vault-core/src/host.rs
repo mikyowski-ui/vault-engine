@@ -43,6 +43,13 @@ pub struct AnimationSequence {
     /// Sound-cue names by command index.
     pub sounds: BTreeMap<usize, Vec<u8>>,
 }
+/// SPEC-005 0x80A5 and the other D-returning rows push "no name" as D
+/// offset zero, which is also where a program's first interned string would
+/// live (SPEC-004 §3.1 says nothing of offset zero). Reserving the empty
+/// string there keeps the null value from aliasing a real string.
+fn reserve_null_string(vm: &mut Vm) -> Result<(), VmError> {
+    vm.intern(b"").map(|_| ())
+}
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DispatchResult {
     pub overridden: bool,
@@ -75,6 +82,8 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// NPC combat policy: the built-in SPEC-009 packet AI by default.
     pub combat_ai: Box<dyn crate::combat_state::CombatAi>,
     pub building_animation: Option<AnimationSequence>,
+    /// The program that opened `building_animation`; its fault drops it.
+    pub(crate) building_program: Option<u32>,
     /// SPEC-007 §3.10-3.11 how attack shows and the world's own sequences
     /// play: at once (the default for headless runs) or over time, with
     /// combat waiting for them.
@@ -101,6 +110,11 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// Presentation-only draws (a dead critter's look-at line), apart from
     /// the world's generator so looking never moves its sequence.
     pub presentation_rng: crate::ParkMiller,
+    /// SPEC-008 §3.10: while music is disabled, requests are recorded but
+    /// nothing plays; re-enabling plays the last recorded track.
+    pub music_enabled: bool,
+    /// The last requested music track (`sound/music/<track>.acm`).
+    pub last_music: Option<String>,
 }
 impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn prototype(&self, pid: u32) -> Result<std::sync::Arc<vault_formats::Prototype>, WorldError> {
@@ -225,6 +239,7 @@ impl<A: WorldAssets> WorldHost<A> {
             next_program: 1,
             combat_ai: Box::new(crate::combat_state::PacketAi),
             building_animation: None,
+            building_program: None,
             playback: Default::default(),
             floating_style: 1,
             dialogue_waiters: Vec::new(),
@@ -238,7 +253,36 @@ impl<A: WorldAssets> WorldHost<A> {
             arriving: false,
             vm_observer: None,
             presentation_rng: crate::ParkMiller::seeded(1).expect("a positive seed"),
+            music_enabled: true,
+            last_music: None,
         }
+    }
+    /// SPEC-008 §3.10 a music request: the track is recorded as the last
+    /// one and, while music is enabled, requested from the presentation
+    /// layer (`sound/music/<track>.acm`, looping, restarted even when the
+    /// same track is already playing). While music is disabled only the
+    /// record is kept.
+    pub fn request_music(&mut self, track: &str) {
+        self.last_music = Some(track.to_string());
+        if self.music_enabled {
+            self.world.emit(WorldEffect::Music(track.to_string()));
+        }
+    }
+    /// SPEC-008 §3.10 enabling or disabling music: re-enabling it plays the
+    /// last recorded track.
+    pub fn set_music_enabled(&mut self, enabled: bool) {
+        let resumed = enabled && !self.music_enabled;
+        self.music_enabled = enabled;
+        if resumed && let Some(track) = self.last_music.clone() {
+            self.world.emit(WorldEffect::Music(track));
+        }
+    }
+    /// SPEC-008 §3.10: the world map plays `03wrldmp`. A transition to the
+    /// world map requests it here; a presentation layer that opens the
+    /// world map on its own (a key, the town map's World Map button) calls
+    /// this when it does.
+    pub fn play_world_map_music(&mut self) {
+        self.request_music(crate::worldmap::WORLD_MAP_MUSIC);
     }
     pub fn rules(&mut self, rules: WorldRules) {
         self.world.rules = rules;
@@ -331,6 +375,26 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.programs.clear();
         self.program_scripts.clear();
+        // Nothing queued for the left map's programs may run against the
+        // next map's script table, where ids can alias: callbacks (named
+        // handlers, `key_callback`), dialogue waiters and script requests
+        // deferred while a program was active or broadcast by the exit
+        // procedures end with the map.
+        self.callbacks.clear();
+        self.dialogue_waiters.clear();
+        self.dialogue_callbacks.clear();
+        self.world.requests.clear();
+        // SPEC-014 §3.35 step 1 stopped every animation; the presentations
+        // and deferred requests that reference the left map's objects
+        // (attack shows, an explosion and its art, a loot or combat request,
+        // floating text) do not survive it either.
+        self.world.shows.clear();
+        self.world.explosion = None;
+        self.world.pending_explosion = None;
+        self.world.pending_loot = None;
+        self.world.pending_combat = None;
+        self.world.floating.clear();
+        self.arriving = false;
         self.world.loading = true;
         if let Some(player) = self.world.get_mut(self.world.player) {
             player.raw.light = Light {
@@ -356,18 +420,15 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.trace.push(WorldTrace::LoadStep(1));
         self.leave_map()?;
         self.teardown_map()?;
+        // SPEC-008 §3.10 / SPEC-013 §3.22: loading first starts the
+        // background track `wind2`, looping, until the city music starts.
+        self.request_music(crate::worldmap::LOADING_MUSIC);
         self.world.trace.push(WorldTrace::LoadStep(2));
-        let (map, saved, load_error) = match self.read_map(path) {
+        let (map, mut saved, mut load_error) = match self.read_map(path) {
             Ok((map, saved)) => (map, saved, None),
             Err(error) => (empty_map(), false, Some(error)),
         };
-        self.world.persistence.current_map = load_error
-            .is_none()
-            .then(|| {
-                let file = path.rsplit('/').next().unwrap_or(path);
-                crate::persistence::saved_map_name(file.as_bytes())
-            })
-            .flatten();
+        self.world.persistence.current_map = None;
         self.world.restoring = map.header.flags.0 & 1 != 0;
         for message in &map.diagnostics {
             self.world.diagnostic(message.clone());
@@ -385,9 +446,17 @@ impl<A: WorldAssets> WorldHost<A> {
         // SPEC-014 §3.29: an entry hex outside the map border fails the load.
         let entry = self.world.map.header.entry_hex;
         if !self.world.set_view_center(entry) {
-            return Err(WorldError::Invalid(format!(
+            // SPEC-006 §3.5 [May-improve] safe rule: a map that cannot be
+            // entered is reported, and the engine is left on the reset empty
+            // map, which still goes through the shared post-load stages.
+            load_error = Some(WorldError::Invalid(format!(
                 "map entry hex {entry} is outside the map border"
             )));
+            self.world.import_map(empty_map(), &self.assets)?;
+            self.world.restoring = false;
+            saved = false;
+            self.world.elevation = self.world.map.header.entry_elevation;
+            self.world.set_view_center(self.world.map.header.entry_hex);
         }
         self.world.trace.push(WorldTrace::LoadStep(5));
         self.world.set_ambient(65536);
@@ -400,6 +469,29 @@ impl<A: WorldAssets> WorldHost<A> {
             player.raw.hex = Some(hex);
             player.raw.elevation = elevation;
             player.raw.orientation = orientation;
+        }
+        // SPEC-014 §3.36: the entrance placement, from "none" after the
+        // import, hides the roof group over the player, if any.
+        self.world.place_player_roof(hex, elevation);
+        // SPEC-008 §3.10: the current map is identified from the header's
+        // name field, not the requested file, and the header's map-number
+        // word is overwritten with that number. The working `.SAV` name
+        // (SPEC-014 §3.35) and the current town follow from the number; an
+        // unnumbered map has neither.
+        let catalog = self.assets.game_messages("map.msg").ok();
+        let number = crate::worldmap::header_map_number(
+            &self.world.map.header.name,
+            self.world.map.header.map_number,
+            catalog.as_deref(),
+        );
+        self.world.map.header.map_number = number;
+        self.world.persistence.current_map = load_error
+            .is_none()
+            .then(|| crate::persistence::working_map_name(number, catalog.as_deref()))
+            .flatten();
+        let town = crate::worldmap::map_town(number);
+        if town >= 0 {
+            self.world.world_map.saved.town = town;
         }
         if !self.world.restoring {
             self.world.trace.push(WorldTrace::InventoryRefresh);
@@ -507,8 +599,14 @@ impl<A: WorldAssets> WorldHost<A> {
         if saved && load_error.is_none() {
             self.revisit()?;
         }
+        // SPEC-008 §3.10: once the map number is known its city track
+        // replaces `wind2`; an unnumbered map leaves `wind2` looping. One
+        // map change makes the reference request the track two or three
+        // times; under the [May-improve] rule it is requested once per map
+        // change here (the presentation layer still restarts a track that
+        // already plays, the `[Must-match]` rule).
         if let Some(track) = crate::worldmap::city_music(self.world.map.header.map_number) {
-            self.world.emit(WorldEffect::Music(track.to_string()));
+            self.request_music(track);
         }
         self.drain_requests()?;
         if let Some(error) = load_error {
@@ -570,6 +668,7 @@ impl<A: WorldAssets> WorldHost<A> {
         let mut vm = if !instance.initialized {
             let (filename, program) = self.assets.program(instance.file)?;
             let mut vm = Vm::new(program);
+            reserve_null_string(&mut vm)?;
             vm.id = self.next_program;
             self.next_program = self
                 .next_program
@@ -682,7 +781,28 @@ impl<A: WorldAssets> WorldHost<A> {
             }
         }
         self.active.remove(&vm.id);
+        if let Err(error) = &outcome {
+            self.program_faulted(vm, error);
+        }
         outcome
+    }
+    /// A program's run ended in an error. The program is faulted (ended with
+    /// the error bit), so a run that exhausted the host's instruction budget
+    /// is never resumed mid-procedure by `update_programs` or stacked on by
+    /// `poll_scheduled`: the budget is the `[May-improve]` safe bound on a
+    /// runaway script (SPEC-004 §3.3 makes a budget boundary alone no
+    /// termination, so the choice is the fault, not a pending request). A
+    /// registration the program left open is dropped (SPEC-005 0x810E).
+    fn program_faulted(&mut self, vm: &mut Vm, error: &VmError) {
+        vm.status.0 |= VmStatus::ENDED | VmStatus::ERROR;
+        if self.building_program == Some(vm.id) {
+            self.building_program = None;
+            self.building_animation = None;
+            self.world.diagnostic(format!(
+                "program {}: open animation registration dropped ({error})",
+                vm.id
+            ));
+        }
     }
     pub fn drain_requests(&mut self) -> Result<(), WorldError> {
         let mut count = 0;
@@ -728,6 +848,29 @@ impl<A: WorldAssets> WorldHost<A> {
             && let Some(head) = &mut self.world.dialogue.head
         {
             head.speech_end();
+        }
+    }
+    /// SPEC-006 §3.11: during speech the presentation layer's speech-timing
+    /// system selects the head's frame by phoneme index 0-41 from the
+    /// mood's speech art; the phoneme source (the `.LIP` companion of the
+    /// speech file) and its timing are outside the specifications, so the
+    /// presentation layer calls this at each phoneme's time. Returns whether
+    /// a frame was set; outside speech nothing changes, and an index past the
+    /// table is diagnosed and ignored (safe bound).
+    pub fn speech_phoneme(&mut self, index: usize) -> bool {
+        if self.world.dialogue.speech.is_none() {
+            return false;
+        }
+        let result = match &mut self.world.dialogue.head {
+            Some(head) => head.phoneme(index),
+            None => return false,
+        };
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.world.diagnostic(format!("speech phoneme: {error}"));
+                false
+            }
         }
     }
     pub fn map_update(&mut self) -> Result<(), WorldError> {
@@ -911,6 +1054,10 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     pub fn tick(&mut self, now_ms: u64) -> Result<bool, WorldError> {
         self.world.elapsed_ms = now_ms;
+        // Asset load problems that did not stop a load (SPEC-002 §3.5).
+        for message in self.assets.take_diagnostics() {
+            self.world.diagnostic(message);
+        }
         self.update_programs()?;
         let mut changed_by_animation = false;
         // SPEC-007 §3.10 attack shows play in order; SPEC-013 §3.10: a timed
@@ -994,7 +1141,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.callbacks.push_front((program, procedure));
                 break;
             }
-            self.callback(program, procedure)?;
+            // A callback whose program is gone or whose procedure index (a
+            // script-supplied `addkey` value) is bad is reported like a
+            // failed program update, not a failed frame.
+            if let Err(error) = self.callback(program, procedure) {
+                self.world
+                    .diagnostic(format!("callback {program}/{procedure}: {error}"));
+            }
             self.library.release_named(program, procedure);
             changed = true;
         }
@@ -1341,14 +1494,13 @@ impl<A: WorldAssets> WorldHost<A> {
             if (far || blocked) && !self.arriving {
                 return self.approach(actor, target, action, true);
             }
-            if far {
-                return Err(WorldError::Invalid("talk target is out of reach".into()));
-            }
-            // Post-movement: an unobstructed shot line (SPEC-007 shot query).
-            if blocked {
-                return Err(WorldError::Invalid(
-                    "talk requires an unobstructed shot line".into(),
-                ));
+            // SPEC-007 §3.11.3, the talk exception: after the approach, a
+            // target still at object distance 9 or more, or behind a
+            // shot-blocked line, tells the player `misc.msg` 2000 ("You
+            // cannot get there.") and the talk ends.
+            if far || blocked {
+                self.print_game("misc.msg", 2000, &[]);
+                return Ok(());
             }
             // Dialogue entry: tile-distance limit 12 and a reachability path.
             let reachable = match (
@@ -1743,6 +1895,7 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
     ) -> Result<u32, VmError> {
         let (path, program) = self.assets.program_by_name(name)?;
         let mut vm = Vm::new(program);
+        reserve_null_string(&mut vm)?;
         vm.id = self.next_program;
         self.next_program = self
             .next_program

@@ -344,8 +344,10 @@ pub fn skill_book(pid: u32) -> Option<(i32, i32)> {
 pub fn book_points(percent: i32) -> i32 {
     (100 - percent) / 10
 }
-/// §3.25 the reading time: `36000 × (11 - IN)` ticks, 1 to 10 game hours
-/// (effective Intelligence clamped to 1-10).
+/// §3.25 step 5 the reading time: `36000 × (11 - IN)` ticks, 1 to 10 game
+/// hours. An effective stat is already 1-10 (SPEC-006 §3.3); the clamp is
+/// the safe bound for a caller passing an unclamped value, which would
+/// otherwise yield a negative or zero-hour read.
 pub fn book_ticks(intelligence: i32) -> u64 {
     36_000 * (11 - intelligence.clamp(1, 10)) as u64
 }
@@ -555,9 +557,10 @@ pub fn loot_drop_target(point: [i32; 2]) -> Option<bool> {
 /// The quantity label: `x` and the quantity above 1 (capped at 99999);
 /// ammunition counts rounds `pack × (quantity - 1) + front`.
 pub fn quantity_label(quantity: i32, ammo: Option<(i32, i32)>) -> Option<Vec<u8>> {
+    // Widened arithmetic: a crafted quantity or pack size cannot overflow.
     let count = match ammo {
-        Some((pack, front)) => pack * (quantity - 1) + front,
-        None if quantity > 1 => quantity,
+        Some((pack, front)) => i64::from(pack) * (i64::from(quantity) - 1) + i64::from(front),
+        None if quantity > 1 => i64::from(quantity),
         None => return None,
     };
     Some(format!("x{}", count.min(99_999)).into_bytes())

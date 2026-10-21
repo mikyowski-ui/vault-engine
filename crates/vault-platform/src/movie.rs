@@ -7,7 +7,10 @@ use crate::{
     audio::{AudioHandle, Channel},
 };
 use std::sync::Arc;
-use vault_core::movie::{self, MoviePlayback, MovieRequest, Step};
+use vault_core::movie::{
+    self, MoviePlayback, MovieRequest, Step,
+    flags::{PAUSE_MUSIC, STOP_MUSIC},
+};
 use vault_formats::{
     Font, FontSet, MAX_ASSET_BYTES, Palette, Vfs, moviefx, mve::AudioFormat, palette::display_rgb6,
     sve,
@@ -17,9 +20,6 @@ use vault_render::{IndexedImage, movie::MovieWindow};
 /// SPEC-012 §3.10: subtitles use font 101 and this color table.
 pub const SUBTITLE_FONT: i32 = 101;
 pub const SUBTITLE_PALETTE: &str = "art/cuts/subtitle.pal";
-/// The desktop has no background music, so movie audio follows the full
-/// music volume.
-const MUSIC_VOLUME: i32 = 32767;
 
 /// The subtitle font, color table, and text color (RGB555 31,31,31).
 pub struct SubtitleStyle {
@@ -69,6 +69,11 @@ pub struct MoviePlayer {
     subtitles: Option<SubtitleStyle>,
     /// Audio output (silent until the shell attaches a device).
     pub audio: AudioHandle,
+    /// The background-music volume setting (SPEC-014 §3.18), which sets the
+    /// movie's level (SPEC-012 §3.8).
+    pub music_volume: i32,
+    /// The §3.12 music flags have been applied.
+    begun: bool,
     streaming: bool,
     /// The host clock (ms) when playback began.
     origin: Option<u64>,
@@ -112,6 +117,8 @@ impl MoviePlayer {
             window: MovieWindow::new(),
             subtitles,
             audio: AudioHandle::default(),
+            music_volume: vault_core::ui::options::DEFAULT_VOLUME,
+            begun: false,
             streaming: false,
             origin: None,
             clicked: false,
@@ -122,11 +129,29 @@ impl MoviePlayer {
     pub fn finished(&self) -> bool {
         self.done
     }
-    /// Stop playback and its audio.
+    /// SPEC-012 §3.12 step 3, once, when playback begins (or a skip comes
+    /// first): flag `0x04` stops the background music, otherwise `0x08`
+    /// pauses it.
+    fn begin(&mut self) {
+        if std::mem::replace(&mut self.begun, true) {
+            return;
+        }
+        if self.request.flags & STOP_MUSIC != 0 {
+            self.audio.stop_music();
+        } else if self.request.flags & PAUSE_MUSIC != 0 {
+            self.audio.pause_music(true);
+        }
+    }
+    /// Stop playback and its audio; the cleanup unpauses the music when the
+    /// flags have `0x08` (§3.12 step 7).
     pub fn stop(&mut self) {
         if !self.done {
+            self.begin();
             self.done = true;
             self.audio.stop(Channel::Movie);
+            if self.request.flags & PAUSE_MUSIC != 0 {
+                self.audio.pause_music(false);
+            }
             tracing::info!(movie = %self.request.path, dropped = self.playback.dropped(), "movie ended");
         }
     }
@@ -152,6 +177,7 @@ impl MoviePlayer {
         if self.done {
             return false;
         }
+        self.begin();
         let origin = *self.origin.get_or_insert(now_ms);
         let now = now_ms.saturating_sub(origin).saturating_mul(1000);
         let step = self.playback.step(now);
@@ -197,9 +223,11 @@ impl MoviePlayer {
             return;
         }
         if !self.streaming {
+            // §3.8: 0.94 x the music volume (0 while music is disabled),
+            // converted to device attenuation.
             let gain = movie::attenuation_gain(movie::attenuation(movie::movie_volume(
-                MUSIC_VOLUME,
-                true,
+                self.music_volume,
+                self.audio.music_enabled(),
             )));
             self.streaming = self.audio.open_stream(
                 Channel::Movie,
@@ -216,8 +244,10 @@ impl MoviePlayer {
     pub fn image(&self) -> IndexedImage {
         self.window.image.clone()
     }
-    /// The device palette at neutral gamma; black once the movie ends.
-    pub fn palette(&self) -> [[u8; 4]; 256] {
+    /// The device palette through the brightness `gamma` (SPEC-012 §3.9:
+    /// pixel indexes map through the 6-bit levels and gamma); black once
+    /// the movie ends.
+    pub fn palette(&self, gamma: f64) -> [[u8; 4]; 256] {
         if self.done {
             return [[0, 0, 0, 255]; 256];
         }
@@ -229,7 +259,7 @@ impl MoviePlayer {
                     levels[3 * index + 1],
                     levels[3 * index + 2],
                 ],
-                1.0,
+                gamma,
             )
         })
     }
@@ -283,14 +313,19 @@ pub(crate) mod tests {
         assert!(mixer.lock().unwrap().playing(Channel::Movie));
         assert!(mixer.lock().unwrap().queued(Channel::Movie) > 0);
         // Fixture G fades in from black: frame 1 is k = 2 of 10.
-        assert!(player.palette().iter().any(|entry| entry[..3] != [0, 0, 0]));
+        assert!(
+            player
+                .palette(1.0)
+                .iter()
+                .any(|entry| entry[..3] != [0, 0, 0])
+        );
         // Holding a button does not skip; releasing it does.
         player.press();
         assert!(!player.finished());
         player.release();
         assert!(player.finished());
         assert!(!mixer.lock().unwrap().playing(Channel::Movie));
-        assert_eq!(player.palette(), [[0, 0, 0, 255]; 256]);
+        assert_eq!(player.palette(1.0), [[0, 0, 0, 255]; 256]);
         // A release without a press during the movie does not skip, and
         // the movie finishes on its own.
         let mut player = MoviePlayer::load(&vfs, request, None).unwrap();

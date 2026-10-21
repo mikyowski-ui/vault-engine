@@ -480,6 +480,15 @@ fn spec014_menu_loop_attract_dialogs_and_fades() {
     // Fades: about 700 ms; step k of n; the target exactly at the end.
     assert_eq!(flow::fade_steps(0), 913);
     assert_eq!(flow::fade_steps(700), 60);
+    // §3.2 the exact `trunc(42000 / M)`: 42000 / 7 = 6000 and 42000 / 701
+    // = 59, and a measurement above 42000 ms makes every fade instant.
+    assert_eq!(flow::fade_steps(7), 6000);
+    assert_eq!(flow::fade_steps(701), 59);
+    assert_eq!(flow::fade_steps(42_001), 0);
+    // §3.13 the medium box lays out five lines: 23 + 25 - trunc(n * 10 / 2).
+    assert_eq!(flow::DialogSize::Medium.title_y(0), 43);
+    assert_eq!(flow::DialogSize::Medium.title_y(2), 33);
+    assert_eq!(flow::DialogSize::Large.title_y(1), 47);
     assert_eq!(flow::fade_level(63, 0, 30, 60), 32);
     assert_eq!(flow::fade_level(10, 20, 1, 3), 13);
     assert_eq!(flow::fade_level(63, 0, 60, 60), 0);
@@ -740,6 +749,40 @@ fn spec014_counters_item_slot_and_keys() {
         bar::next_weapon_mode(WeaponMode::Reload, only_reload),
         WeaponMode::Primary
     );
+    // §3.23 the full cycle skips what is unavailable: primary, primary
+    // aimed, secondary, secondary aimed, reload, then primary again.
+    let mut mode = WeaponMode::Primary;
+    let mut seen = Vec::new();
+    for _ in 0..5 {
+        mode = bar::next_weapon_mode(mode, |_| true);
+        seen.push(mode);
+    }
+    assert_eq!(
+        seen,
+        [
+            WeaponMode::PrimaryAimed,
+            WeaponMode::Secondary,
+            WeaponMode::SecondaryAimed,
+            WeaponMode::Reload,
+            WeaponMode::Primary
+        ]
+    );
+    let no_secondary = |mode: WeaponMode| !mode.secondary();
+    assert_eq!(
+        bar::next_weapon_mode(WeaponMode::PrimaryAimed, no_secondary),
+        WeaponMode::Reload
+    );
+    assert!(WeaponMode::SecondaryAimed.aimed() && !WeaponMode::Secondary.aimed());
+    // The same object keeps its action; another object, or an empty hand
+    // after an item, starts again at the primary attack.
+    let mut slot = bar::HandSlot::default();
+    assert_eq!(slot.mode(None), WeaponMode::Primary);
+    slot.set(Some(7), WeaponMode::Secondary);
+    assert_eq!(slot.mode(Some(7)), WeaponMode::Secondary);
+    assert_eq!(slot.mode(Some(8)), WeaponMode::Primary);
+    assert_eq!(slot.mode(None), WeaponMode::Primary);
+    slot.set(None, WeaponMode::PrimaryAimed);
+    assert_eq!(slot.mode(None), WeaponMode::PrimaryAimed);
     assert!(bar::slot_disabled(true, false, true));
     assert!(!bar::slot_disabled(true, false, false));
     use bar::{Action, Key, game_key};
@@ -1007,4 +1050,71 @@ fn spec014_inventory_examine_wrapping_and_menu_placement() {
         menu_place([300, 260], 3, USE_ON_EDGES),
         (260 - (260 + 119 - 376 + 2), false)
     );
+}
+
+#[test]
+fn held_button_repeat_and_grey_table() {
+    // §3.14: after 13 idle frames (13 * 41 ms) the steps come at 5, 6, 7 ...
+    // per second; each waits trunc(1000 / rate).
+    let mut repeat = super::HoldRepeat::new(1000, 13);
+    assert!(!repeat.poll(1000 + 13 * 41 - 1));
+    assert!(repeat.poll(1533));
+    assert!(!repeat.poll(1533 + 199));
+    assert!(repeat.poll(1733));
+    assert!(!repeat.poll(1733 + 165));
+    assert!(repeat.poll(1899));
+    // The grey table keeps the transparent index and maps greys to greys.
+    let mut bytes = vec![0u8; 0x8300];
+    for index in 0..256usize {
+        let level = (index / 4) as u8;
+        bytes[3 * index..3 * index + 3].copy_from_slice(&[level, level, level]);
+    }
+    bytes[3..6].copy_from_slice(&[62, 0, 0]);
+    let palette = vault_formats::Palette::parse(&bytes).unwrap();
+    let grey = super::grey_table(&palette);
+    assert_eq!(grey[0], 0);
+    let [r, g, b] = palette.rgb6(grey[1]);
+    assert!(r == g && g == b, "{r} {g} {b}");
+}
+
+#[test]
+fn editor_steps_refused_by_the_sheet_spend_and_refund_nothing() {
+    // R-10: a loaded base of 12 cannot step to 11, so it refunds no point.
+    let context = crate::stats::StatContext::default();
+    let mut sheet = editor::blank_sheet(context);
+    sheet.base[0] = 12;
+    let mut edit = editor::Editor::open(sheet, false, context);
+    let points = edit.character_points;
+    for _ in 0..5 {
+        assert!(!edit.decrement(0));
+    }
+    assert_eq!(edit.character_points, points);
+}
+
+#[test]
+fn non_finite_configuration_reals_keep_their_defaults() {
+    // R-05: `brightness=nan` used to survive the clamp.
+    let config = vault_formats::cfg::ConfigFile::parse(
+        "[preferences]\nbrightness=nan\ntext_base_delay=inf\n",
+    );
+    let preferences = options::Preferences::from_config(&config);
+    assert_eq!(preferences.brightness, options::BRIGHTNESS_MIN);
+    assert_eq!(preferences.text_base_delay, 3.5);
+}
+
+#[test]
+fn location_line_wraps_to_three_lines() {
+    // Five-pixel glyphs: 32 characters fit in 164 pixels.
+    let width = |text: &[u8]| 5 * text.len() as i32;
+    let lines = saveload::location_lines(
+        b"VAULT 13 LIVING QUARTERS AND THE OVERSEER OFFICE ON THE LOWEST LEVEL OF ALL",
+        width,
+    );
+    assert_eq!(lines.len(), 3);
+    assert!(
+        lines
+            .iter()
+            .all(|line| width(line) <= saveload::LOCATION_WIDTH)
+    );
+    assert_eq!(lines[0], b"VAULT 13 LIVING QUARTERS AND THE");
 }

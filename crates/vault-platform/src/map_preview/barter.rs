@@ -449,6 +449,11 @@ impl MapPreview {
             }
             return self.barter_counter(input);
         }
+        // G-25 / SPEC-014 §3.34: all other input is ignored during a drag,
+        // and the open item menu takes the keys too.
+        if screen.held.is_some() || screen.menu.is_some() {
+            return true;
+        }
         let control = self.hud.modifiers[1];
         match key {
             KeyCode::Escape | KeyCode::KeyT => self.end_barter_screen(),
@@ -481,9 +486,9 @@ impl MapPreview {
             self.barter_counter(input);
             return true;
         }
-        screen.held = None;
-        // An open menu takes every other input.
-        if screen.menu.is_some() {
+        // G-25 / SPEC-014 §3.34: a drag or an open menu takes every other
+        // input (the drag ends only with its release).
+        if screen.held.is_some() || screen.menu.is_some() {
             return true;
         }
         // The right button toggles the hand and arrow cursors.
@@ -739,7 +744,9 @@ impl MapPreview {
                         [size[0] as u32, size[1] as u32],
                     );
                 }
-                if let Some(label) = skills::quantity_label(shown, None) {
+                // G-19: ammunition counts rounds (SPEC-013 §3.16).
+                let ammo = self.ammo_label(*item, lifted);
+                if let Some(label) = skills::quantity_label(shown, ammo) {
                     painter.text(&mut image, 101, ColorKey::WHITE, &label, origin, 80);
                 }
             }

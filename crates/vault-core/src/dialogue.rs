@@ -130,6 +130,9 @@ pub struct TalkingHead {
     pub missing_art: Option<String>,
     frame_ms: u64,
     idle_ms: u64,
+    /// Restart idle accumulation at the next tick: speech completion and a
+    /// user choice set the counter outright (SPEC-006 §3.11).
+    idle_resync: bool,
     wait_ms: u64,
     pending: Option<(u8, Mood)>,
     destination: Option<Mood>,
@@ -210,6 +213,7 @@ impl TalkingHead {
             last_fidget_ms: now,
             frame_ms: now,
             idle_ms: now,
+            idle_resync: false,
             wait_ms: 10000,
             pending: None,
             destination: None,
@@ -255,12 +259,14 @@ impl TalkingHead {
         self.frame = 0;
         self.phase = HeadPhase::Waiting;
         self.idle_seconds = 3;
+        self.idle_resync = true;
     }
     pub fn react(&mut self, reaction: i32) {
         if self.phase == HeadPhase::Speech {
             self.speech_end();
         }
         self.idle_seconds = 0;
+        self.idle_resync = true;
         self.pending = self.mood.transition(reaction);
     }
     pub fn tick(
@@ -279,6 +285,13 @@ impl TalkingHead {
             return Ok(false);
         }
         if self.phase == HeadPhase::Waiting {
+            // SPEC-006 §3.11: the counter accumulates waiting time only;
+            // speech time is not idle time (speech completion sets 3, a
+            // user choice resets to 0, and accumulation restarts from there).
+            if self.idle_resync {
+                self.idle_resync = false;
+                self.idle_ms = now;
+            }
             let elapsed = now.saturating_sub(self.idle_ms) / 1000;
             self.idle_seconds = self
                 .idle_seconds

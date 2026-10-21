@@ -51,9 +51,10 @@ impl<A: WorldAssets> WorldHost<A> {
     /// Move-to-object: plan with the destination object temporarily hidden,
     /// then drop one step (two for a multihex mover; only the mover's flag
     /// matters). The core search does not dilate obstacles for the mover.
-    /// The goal is permissive: SPEC-007 §3.1 does not say, and a strict goal
-    /// would make every container sharing its hex with a wall (as corpus
-    /// lockers do) unreachable.
+    /// The goal is permissive (SPEC-007 §3.1 "Move-to-object goal"): the
+    /// target's own hex is never tested for a blocker, so a container
+    /// sharing its hex with a wall (as corpus lockers do) is reached from
+    /// the route's next-to-last hex.
     pub fn plan_to_object(&mut self, actor: ObjectRef, target: ObjectRef) -> Option<Movement> {
         let start = self.world.get(actor)?.raw.hex?;
         let goal = self.world.get(target)?.raw.hex?;

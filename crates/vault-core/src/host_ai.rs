@@ -12,13 +12,13 @@ use crate::{
     },
     assets::WorldAssets,
     combat::{Attack, Resolution, weapon_skill},
-    combat_state::CombatRequest,
     critical::{effect, hit_mode, location},
     host::WorldHost,
     host_combat::{Refusal, Spray},
-    rng::stat_check,
     routing::rotation,
 };
+#[cfg(test)]
+use crate::{combat_state::CombatRequest, rng::stat_check};
 use std::sync::Arc;
 use vault_formats::{
     Fid, HexGrid,
@@ -187,6 +187,8 @@ impl WorldState {
 }
 
 /// Map a preflight refusal to its SPEC-009 result code.
+/// §3.8 flee candidates beyond this step count repeat the border goal.
+const FLEE_STEP_BOUND: i32 = 200;
 fn refusal_code(refusal: Refusal) -> u8 {
     match refusal {
         Refusal::NoAmmunition => 1,
@@ -326,7 +328,11 @@ impl<A: WorldAssets> WorldHost<A> {
     /// §3.4 explosion attribution with a known source: each surviving victim
     /// other than the source references it. (The explosion geometry belongs
     /// to SPEC-007 §3.7.)
-    pub fn attribute_explosion(&mut self, source: ObjectRef, victims: &[ObjectRef]) {
+    /// Test-only: SPEC-007 §3.7 splash enumeration adds no victims and
+    /// SPEC-013 §3.10 explosions credit their source themselves, so no
+    /// game path needs it.
+    #[cfg(test)]
+    pub(crate) fn attribute_explosion(&mut self, source: ObjectRef, victims: &[ObjectRef]) {
         for victim in victims {
             if *victim != source && !self.world.is_dead(*victim) {
                 self.set_last_attacker(*victim, source);
@@ -338,7 +344,9 @@ impl<A: WorldAssets> WorldHost<A> {
     /// makes a Perception check (one D10 each, in set order); a success
     /// references the player, and the first such critter starts a combat
     /// request outside combat.
-    pub fn notice_explosive_drop(&mut self, extras: &[ObjectRef]) -> Result<(), WorldError> {
+    /// Test-only, for the same reason as `attribute_explosion`.
+    #[cfg(test)]
+    pub(crate) fn notice_explosive_drop(&mut self, extras: &[ObjectRef]) -> Result<(), WorldError> {
         let player = self.world.player;
         let team = ThreatView::team(&self.world, player);
         let mut first = true;
@@ -916,9 +924,12 @@ impl<A: WorldAssets> WorldHost<A> {
         };
         let direction = rotation(origin, from).unwrap_or(0);
         let ap = self.world.action_points(critter);
-        let goal = ai::flee_candidates(direction, ap)
-            .into_iter()
-            .find_map(|(steps, toward)| {
+        // SPEC-003 §3.4: every direction moves a column or a row by one per
+        // step, so a walk stops at the border of the 200-by-200 grid within
+        // 200 steps; larger N repeat the same goals and route verdicts. The
+        // bound keeps a crafted AP word from being walked (safe bound).
+        let goal =
+            ai::flee_candidates(direction, ap.min(FLEE_STEP_BOUND)).find_map(|(steps, toward)| {
                 let goal = HexGrid::step(from, toward, steps).ok()?;
                 (!self.world.route(critter, from, goal, true).is_empty()).then_some(goal)
             });
@@ -1631,12 +1642,28 @@ impl<A: WorldAssets> AttackEnv for Engagement<'_, A> {
     }
     fn preflight(&mut self, mode: u8) -> Result<u8, WorldError> {
         let world = &self.host.world;
-        let Ok(attack) =
-            world.attack_profile(self.critter, self.target, mode, location::UNCALLED, false)
-        else {
-            return Ok(4);
+        let attack = match world.attack_profile(
+            self.critter,
+            self.target,
+            mode,
+            location::UNCALLED,
+            false,
+        ) {
+            Ok(attack) => attack,
+            Err(error) => {
+                // SPEC-009 §3.11 has no result for a profile that cannot be
+                // built (a non-critter or a missing party): it is diagnosed
+                // and treated as result 4, whose attempt is consumed without
+                // any action.
+                self.host
+                    .world
+                    .diagnostic(format!("AI attack profile: {error}"));
+                return Ok(4);
+            }
         };
-        Ok(world
+        Ok(self
+            .host
+            .world
             .preflight(self.critter, self.target, &attack)
             .map_or_else(refusal_code, |()| 0))
     }

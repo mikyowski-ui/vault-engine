@@ -60,14 +60,22 @@ pub trait WorldAssets {
     fn gam(&self, _path: &str, _section: GamSection) -> Result<Option<GamFile>, WorldError> {
         Ok(None)
     }
+    /// Load problems noticed since the last call that did not stop a load
+    /// (a message file that stopped early, SPEC-002 §3.5), for the world's
+    /// diagnostics.
+    fn take_diagnostics(&self) -> Vec<String> {
+        Vec::new()
+    }
     fn map(&self, _path: &str) -> Result<MapFile, WorldError> {
         Err(WorldError::Invalid("map resource unavailable".into()))
     }
+    /// SPEC-008 §3.10 / SPEC-005 0x80E4: the map number a `load_map` name
+    /// matches in `map.msg` 0-65, or none (no transition) when unlisted.
     fn map_index(&self, _name: &[u8]) -> Option<i32> {
         None
     }
-    /// The map file whose header carries `number` (SPEC-013 §3.22 loads
-    /// transitions by number).
+    /// The map file `map.msg` names for `number` (SPEC-013 §3.22 loads
+    /// transitions by number; SPEC-014 §3.35 takes the name from `map.msg`).
     fn map_path(&self, _number: i32) -> Option<String> {
         None
     }
@@ -130,6 +138,25 @@ pub trait WorldAssets {
 /// Decoded frames kept at once; past it the frame cache starts over (the
 /// frames callers hold stay valid).
 const FRAME_CACHE_BYTES: usize = 256 * 1024 * 1024;
+/// The frame cache's cost of one archive: its stored frame area plus the
+/// header, the one measure both the budget and `release_dialogue_art` use.
+fn frame_cost(frame: &FrmArchive) -> usize {
+    frame.stored_frame_area_len() as usize + 62
+}
+/// Failures are cached so a missing file is probed once, but a script or a
+/// save can name unbounded distinct missing identifiers: past this many
+/// cached failures in one cache, its failures are dropped (safe bound).
+const FAILURE_CACHE_LIMIT: usize = 1024;
+fn bound_failures<K: Ord, V, E>(cache: &mut BTreeMap<K, Result<V, E>>) {
+    if cache.values().filter(|entry| entry.is_err()).count() >= FAILURE_CACHE_LIMIT {
+        cache.retain(|_, entry| entry.is_ok());
+    }
+}
+fn bound_missing<K: Ord, V>(cache: &mut BTreeMap<K, Option<V>>) {
+    if cache.values().filter(|entry| entry.is_none()).count() >= FAILURE_CACHE_LIMIT {
+        cache.retain(|_, entry| entry.is_some());
+    }
+}
 
 /// Resources over a VFS. Every decoded resource (prototypes, lists, message
 /// catalogs, frames and palettes) is cached by identifier or path, failures
@@ -150,6 +177,9 @@ pub struct VfsWorldAssets {
     files: OnceCell<BTreeSet<VfsPath>>,
     art: RefCell<Option<Arc<ArtCatalog>>>,
     fonts: RefCell<Option<Arc<FontSet>>>,
+    /// Load problems not yet taken (`take_diagnostics`), at most
+    /// `FAILURE_CACHE_LIMIT`.
+    diagnostics: RefCell<Vec<String>>,
 }
 impl VfsWorldAssets {
     pub fn new(vfs: Arc<dyn Vfs>, language: &str) -> Result<Self, WorldError> {
@@ -176,7 +206,22 @@ impl VfsWorldAssets {
             files: OnceCell::new(),
             art: RefCell::new(None),
             fonts: RefCell::new(None),
+            diagnostics: RefCell::new(Vec::new()),
         })
+    }
+    /// SPEC-002 §3.5: a message file that stops early keeps the records
+    /// before the failure, which still load; the failure is reported as a
+    /// diagnostic.
+    fn note_message_failure(&self, path: &str, catalog: &MsgCatalog) {
+        if let Some(failure) = catalog.failure() {
+            let mut diagnostics = self.diagnostics.borrow_mut();
+            if diagnostics.len() < FAILURE_CACHE_LIMIT {
+                diagnostics.push(format!(
+                    "{path}: message file stopped early ({} records kept): {failure}",
+                    catalog.entries().len()
+                ));
+            }
+        }
     }
     /// Category art lists, parsed once on first use.
     pub fn art_catalog(&self) -> Result<Arc<ArtCatalog>, WorldError> {
@@ -213,7 +258,11 @@ impl VfsWorldAssets {
         let list = self
             .read(path)
             .and_then(|bytes| Ok(Arc::new(LstTable::parse(&bytes, kind)?)));
-        self.lists.borrow_mut().insert(path.into(), list.clone());
+        let mut lists = self.lists.borrow_mut();
+        if list.is_err() {
+            bound_failures(&mut lists);
+        }
+        lists.insert(path.into(), list.clone());
         list
     }
     fn art_name(&self, folder: &str, index: i32) -> Result<String, WorldError> {
@@ -240,7 +289,14 @@ impl VfsWorldAssets {
                 .read(path)
                 .ok()
                 .and_then(|bytes| MsgCatalog::parse(&bytes).ok());
-            self.messages.borrow_mut().insert(path.into(), catalog);
+            if let Some(catalog) = &catalog {
+                self.note_message_failure(path, catalog);
+            }
+            let mut messages = self.messages.borrow_mut();
+            if catalog.is_none() {
+                bound_missing(&mut messages);
+            }
+            messages.insert(path.into(), catalog);
         }
         self.messages.borrow().get(path)?.as_ref()?.get(id).cloned()
     }
@@ -273,12 +329,19 @@ impl VfsWorldAssets {
     }
 }
 impl WorldAssets for VfsWorldAssets {
+    fn take_diagnostics(&self) -> Vec<String> {
+        std::mem::take(&mut *self.diagnostics.borrow_mut())
+    }
     fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
         if let Some(prototype) = self.prototypes.borrow().get(&pid) {
             return prototype.clone();
         }
         let prototype = self.load_prototype(pid);
-        self.prototypes.borrow_mut().insert(pid, prototype.clone());
+        let mut prototypes = self.prototypes.borrow_mut();
+        if prototype.is_err() {
+            bound_failures(&mut prototypes);
+        }
+        prototypes.insert(pid, prototype.clone());
         prototype
     }
     fn program(&self, index: i32) -> Result<(String, IntProgram), WorldError> {
@@ -403,17 +466,21 @@ impl WorldAssets for VfsWorldAssets {
         }
         let loaded = self
             .read(path)
-            .and_then(|bytes| Ok((Arc::new(FrmArchive::parse(&bytes)?), bytes.len())));
-        let frame = loaded.map(|(frame, size)| {
+            .and_then(|bytes| Ok(Arc::new(FrmArchive::parse(&bytes)?)));
+        let frame = loaded.inspect(|frame| {
+            let size = frame_cost(frame);
             let mut total = self.frame_bytes.borrow_mut();
             if total.saturating_add(size) > FRAME_CACHE_BYTES {
                 self.frames.borrow_mut().retain(|_, cached| cached.is_err());
                 *total = 0;
             }
             *total += size;
-            frame
         });
-        self.frames.borrow_mut().insert(path.into(), frame.clone());
+        let mut frames = self.frames.borrow_mut();
+        if frame.is_err() {
+            bound_failures(&mut frames);
+        }
+        frames.insert(path.into(), frame.clone());
         frame
     }
     fn object_art(&self, fid: u32) -> Result<Arc<FrmArchive>, WorldError> {
@@ -470,9 +537,14 @@ impl WorldAssets for VfsWorldAssets {
         let catalog = self
             .read(&path)
             .and_then(|bytes| Ok(Arc::new(MsgCatalog::parse(&bytes)?)));
-        self.game_catalogs
-            .borrow_mut()
-            .insert(path, catalog.clone());
+        if let Ok(catalog) = &catalog {
+            self.note_message_failure(&path, catalog);
+        }
+        let mut catalogs = self.game_catalogs.borrow_mut();
+        if catalog.is_err() {
+            bound_failures(&mut catalogs);
+        }
+        catalogs.insert(path, catalog.clone());
         catalog
     }
     fn background_path(&self, index: i32) -> Result<String, WorldError> {
@@ -502,9 +574,11 @@ impl WorldAssets for VfsWorldAssets {
         let palette = self
             .read(name)
             .and_then(|bytes| Ok(vault_formats::Palette::parse(&bytes)?));
-        self.palettes
-            .borrow_mut()
-            .insert(name.into(), palette.clone());
+        let mut palettes = self.palettes.borrow_mut();
+        if palette.is_err() {
+            bound_failures(&mut palettes);
+        }
+        palettes.insert(name.into(), palette.clone());
         palette
     }
     fn gam(&self, path: &str, section: GamSection) -> Result<Option<GamFile>, WorldError> {
@@ -514,49 +588,32 @@ impl WorldAssets for VfsWorldAssets {
             Err(error) => Err(WorldError::Invalid(error.to_string())),
         }
     }
+    /// The requested stream only: SPEC-014 §3.35 saved copies come from the
+    /// working map set the host keeps in memory, never from a stray
+    /// `<stem>.sav` beside the data files.
     fn map(&self, path: &str) -> Result<MapFile, WorldError> {
-        let saved = path.strip_suffix(".map").map(|stem| format!("{stem}.sav"));
-        if let Some(saved) = saved
-            && let Ok(bytes) = self.read(&saved)
-            && let Ok(map) = MapFile::parse(&bytes, &LocalPrototypeCatalog::new(&*self.vfs))
-        {
-            return Ok(map);
-        }
         Ok(MapFile::parse(
             &self.read(path)?,
             &LocalPrototypeCatalog::new(&*self.vfs),
         )?)
     }
+    /// SPEC-008 §3.10: a name is matched against `map.msg` 0-65 (uppercased,
+    /// `.SAV` read as `.MAP`); an unlisted name has no number.
     fn map_index(&self, name: &[u8]) -> Option<i32> {
-        let text = std::str::from_utf8(name).ok()?.to_ascii_lowercase();
-        for path in self
-            .vfs
-            .files()
-            .filter(|path| path.extension() == Some("map"))
-        {
-            let file = path.as_str().rsplit('/').next()?;
-            if file == text || file.strip_suffix(".map") == Some(text.as_str()) {
-                let bytes = self.read(path.as_str()).ok()?;
-                return Some(i32::from_be_bytes(bytes.get(0x34..0x38)?.try_into().ok()?));
-            }
-        }
-        None
+        let catalog = self.game_messages("map.msg").ok();
+        let number = crate::worldmap::map_number_of_name(name, catalog.as_deref());
+        (number >= 0).then_some(number)
     }
+    /// SPEC-014 §3.35: the file name comes from `map.msg` by map number.
     fn map_path(&self, number: i32) -> Option<String> {
-        let mut maps: Vec<_> = self
-            .vfs
-            .files()
-            .filter(|path| path.extension() == Some("map"))
-            .map(|path| path.as_str().to_owned())
-            .collect();
-        maps.sort();
-        maps.into_iter().find(|path| {
-            self.read(path).ok().is_some_and(|bytes| {
-                bytes.get(0x34..0x38).is_some_and(|word| {
-                    i32::from_be_bytes(word.try_into().expect("4 bytes")) == number
-                })
-            })
-        })
+        if !(0..crate::worldmap::MAP_COUNT as i32).contains(&number) {
+            return None;
+        }
+        let catalog = self.game_messages("map.msg").ok()?;
+        let name = std::str::from_utf8(&catalog.get(number)?.text).ok()?;
+        let name = name.trim();
+        (!name.is_empty() && !name.contains(['/', '\\']))
+            .then(|| format!("maps/{}", name.to_ascii_lowercase()))
     }
     /// Either slash style; names compare case-insensitively.
     fn available(&self, path: &[u8]) -> bool {
@@ -593,7 +650,7 @@ impl WorldAssets for VfsWorldAssets {
             .borrow()
             .values()
             .filter_map(|frame| frame.as_ref().ok())
-            .map(|frame| frame.stored_frame_area_len() as usize + 62)
+            .map(|frame| frame_cost(frame))
             .sum();
     }
 }

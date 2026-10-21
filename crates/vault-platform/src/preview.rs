@@ -28,7 +28,8 @@ pub struct PreviewArgs {
     /// Sprite path relative to the case-insensitive VFS root.
     #[arg(long, group = "preview_asset", value_name = "VFS_PATH")]
     pub preview_frm: Option<String>,
-    /// Map path relative to the VFS root; arrows pan, R toggles roofs, 0-2 select elevation.
+    /// Map path relative to the VFS root; arrows scroll, R toggles roofs,
+    /// PageUp/PageDown change the elevation.
     #[arg(
         long,
         group = "preview_asset",
@@ -71,8 +72,9 @@ pub struct PreviewArgs {
     /// Dialogue and subtitle language directory; defaults to english.
     #[arg(long)]
     pub language: Option<String>,
-    /// Deterministic game RNG seed; defaults to 1.
-    #[arg(long, requires = "preview_map")]
+    /// Deterministic game RNG seed; defaults to 1. -1 asks for an ambient,
+    /// nondeterministic seed (SPEC-006 §3.4).
+    #[arg(long, requires = "preview_map", allow_negative_numbers = true)]
     pub seed: Option<i32>,
     /// Font path (default: font0.aaf, font0.fon, then another root font).
     #[arg(long, requires = "preview_frm", value_name = "VFS_PATH")]
@@ -86,6 +88,8 @@ pub struct PreviewArgs {
     /// Start the vault-debug inspector in the interactive world: GVAR, MVAR
     /// and LVAR watches and a live script trace in an overlay, also logged
     /// at debug level (target `vault_debug`). F9 toggles it during a run.
+    /// With --game it also enables the map preview's keys (W world map,
+    /// PageUp/PageDown elevation, L/D/U/G/T actions on the selection).
     #[arg(long)]
     pub debug: bool,
     /// Set by a headless replay: the world's movies complete without
@@ -116,7 +120,34 @@ pub struct MoviePreview {
     pub player: crate::movie::MoviePlayer,
     black: Palette,
 }
+
+/// Where a key press lands, for the engine key repeat (SPEC-014 §3.29):
+/// the game's stage (and an open editor name field), and in a world its
+/// window, conversation and dialog box. A repeat stops once it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeyLayer {
+    pub(crate) stage: u8,
+    pub(crate) field: bool,
+    pub(crate) world: Option<crate::map_preview::WorldLayer>,
+}
+
 impl AssetPreview {
+    /// The standalone sprite and map preview tools exit on an Escape they
+    /// do not consume. The game never exits on a key (G-01): it leaves
+    /// through its own menus only.
+    pub fn escape_exits(&self) -> bool {
+        matches!(self, Self::Sprite(_) | Self::Map(_))
+    }
+    pub fn key_layer(&self) -> KeyLayer {
+        match self {
+            Self::Sprite(_) | Self::Movie(_) => KeyLayer::default(),
+            Self::Map(preview) => KeyLayer {
+                world: Some(preview.key_layer()),
+                ..KeyLayer::default()
+            },
+            Self::Game(game) => game.key_layer(),
+        }
+    }
     pub fn image(&mut self) -> AppResult<IndexedImage> {
         match self {
             Self::Sprite(preview) => Ok(preview.image()?),
@@ -144,7 +175,7 @@ impl AssetPreview {
         match self {
             Self::Sprite(_) => None,
             Self::Map(preview) => preview.display_override(),
-            Self::Movie(movie) => Some(movie.player.palette()),
+            Self::Movie(movie) => Some(movie.player.palette(1.0)),
             Self::Game(game) => game.display_override(),
         }
     }
@@ -185,8 +216,9 @@ impl AssetPreview {
     pub fn palette_cycling(&self) -> bool {
         match self {
             Self::Sprite(_) => true,
-            // SPEC-012 §3.12: movies disable color cycling.
-            Self::Map(preview) => preview.host.library.palette_cycling && !preview.movie_active(),
+            // SPEC-012 §3.12: movies disable color cycling (and so do some
+            // windows, `MapPreview::palette_cycling`).
+            Self::Map(preview) => preview.palette_cycling(),
             Self::Movie(_) => false,
             Self::Game(game) => game.palette_cycling(),
         }
@@ -252,7 +284,34 @@ impl AssetPreview {
             Self::Game(game) => game.release(point, right),
         }
     }
+    /// SPEC-012 §3.12: a mouse button the frame-pixel paths do not see (a
+    /// middle or extra button, or a press in the letterbox) still counts
+    /// while a movie plays. Returns whether a movie took it.
+    pub fn movie_button(&mut self, pressed: bool) -> bool {
+        match self {
+            Self::Movie(movie) => {
+                if pressed {
+                    movie.player.press();
+                } else {
+                    movie.player.release();
+                }
+                true
+            }
+            Self::Map(preview) => preview.movie_button(pressed),
+            Self::Game(game) => game.movie_button(pressed),
+            Self::Sprite(_) => false,
+        }
+    }
     /// The pointer left the window.
+    /// A frame pixel the system pointer is to be moved to (SPEC-014 §3.28
+    /// action-menu release).
+    pub fn take_warp(&mut self) -> Option<[i32; 2]> {
+        match self {
+            Self::Map(preview) => preview.take_warp(),
+            Self::Game(game) => game.take_warp(),
+            _ => None,
+        }
+    }
     pub fn pointer_left(&mut self) {
         match self {
             Self::Map(preview) => preview.pointer_left(),
@@ -297,6 +356,26 @@ fn parse_asset<T>(
 }
 
 impl PreviewArgs {
+    /// The game RNG seed: `--seed`, else 1. SPEC-006 §3.4: -1 asks for an
+    /// ambient host-generated seed, two host draws combined as
+    /// `first x 65536 + second` keeping the low 31 bits (the host entropy
+    /// source is not part of the contract), which the generator then seeds
+    /// like any other value.
+    pub fn resolved_seed(&self) -> i32 {
+        match self.seed {
+            Some(-1) => {
+                use std::hash::{BuildHasher, Hasher};
+                let draw = || {
+                    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+                    hasher.write_u8(0);
+                    hasher.finish() as u32
+                };
+                let [first, second] = [draw(), draw()];
+                (first.wrapping_mul(65536).wrapping_add(second) & 0x7fff_ffff) as i32
+            }
+            seed => seed.unwrap_or(1),
+        }
+    }
     /// The asset namespace: SPEC-008 master and critter databases (each
     /// consulting the optional loose root first, with no fallback to the
     /// other archive, and each opened lazily: only its directory tables are
@@ -340,12 +419,15 @@ impl PreviewArgs {
             let mut game = crate::game::Game::new(
                 self.source()?,
                 language,
-                self.seed.unwrap_or(1),
+                self.resolved_seed(),
                 save_root,
                 self.config.clone(),
             )?;
             game.headless = self.headless;
             game.debug = self.debug;
+            // G-09: the preview and debug keys work in the game only with
+            // the explicit flag.
+            game.debug_keys = self.debug;
             return Ok(Some(AssetPreview::Game(Box::new(game))));
         }
         if let Some(path) = &self.preview_map {
@@ -355,7 +437,7 @@ impl PreviewArgs {
                 path,
                 language,
                 self.player_gcd.as_deref(),
-                self.seed.unwrap_or(1),
+                self.resolved_seed(),
             )?;
             map.host.set_subtitles(self.subtitles);
             map.save_root = save_root;
@@ -534,6 +616,24 @@ use crate::fixture_assets as fixtures;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_negative_seed_parses_and_minus_one_is_ambient() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            preview: PreviewArgs,
+        }
+        let parse = |seed: &str| {
+            Cli::try_parse_from(["vault", "--preview-map", "m.map", "--seed", seed])
+                .map(|cli| cli.preview)
+        };
+        assert_eq!(parse("-5").unwrap().resolved_seed(), -5);
+        assert_eq!(parse("7").unwrap().resolved_seed(), 7);
+        assert!((0..=i32::MAX).contains(&parse("-1").unwrap().resolved_seed()));
+        assert_eq!(PreviewArgs::default().resolved_seed(), 1);
+    }
 
     #[test]
     fn loads_both_fonts_message_selection_and_directional_suffixes() {

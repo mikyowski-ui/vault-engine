@@ -52,6 +52,13 @@ impl MovieWindow {
     /// to the window width and center each line, the first line two pixels
     /// below the band top. `palette` is the subtitle color table and
     /// `color` the text color index.
+    ///
+    /// G-13 / SPEC-012 §3.10: a subtitle draws only inside its band, which
+    /// is one text height plus 4 pixels tall, so a wrapped line that does
+    /// not fit in the band is not drawn. Nothing spills below the band,
+    /// and the next subtitle's fill clears everything this one drew. (The
+    /// first line always draws; the window bottom clips a band cut short
+    /// by it.)
     pub fn draw_subtitle(&mut self, font: &Font, palette: &Palette, color: u8, text: &[u8]) {
         let height = font.height() as i32;
         let band = subtitle_band(height, self.shown[0], self.shown[1]);
@@ -60,10 +67,14 @@ impl MovieWindow {
             foreground: color,
             ..Default::default()
         };
+        let bottom = band[1] + band[3];
         for (line, (start, end)) in lines(font, text, WINDOW[0] as u32).into_iter().enumerate() {
             let piece = &text[start..end];
             let width = font.text_width(piece, false).min(WINDOW[0] as u64) as i32;
             let y = band[1] + 2 + line as i32 * font.line_height() as i32;
+            if line > 0 && y + height > bottom {
+                break;
+            }
             self.image.draw_text(
                 font,
                 palette,
@@ -125,5 +136,15 @@ mod tests {
             .collect();
         let (left, right) = (columns.iter().min().unwrap(), columns.iter().max().unwrap());
         assert!((left + right - 639).abs() <= font.text_width(b"A", false) as i32);
+        // G-13: a subtitle wrapped onto several lines draws nothing below
+        // its band, so the next, shorter subtitle leaves no ghost text.
+        let long: Vec<u8> = b"AB ".iter().copied().cycle().take(900).collect();
+        assert!(lines(&font, &long, 640).len() > 1);
+        window.image.fill_rect([0, 400, 640, 80], 9);
+        window.draw_subtitle(&font, &palette, 5, &long);
+        let below = band[1] + band[3];
+        assert!((below..480).all(|y| (0..640).all(|x| at(&window, x, y) == 9)));
+        window.draw_subtitle(&font, &palette, 5, b"");
+        assert!((band[1]..below).all(|y| (0..640).all(|x| at(&window, x, y) == 0)));
     }
 }

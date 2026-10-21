@@ -6,11 +6,31 @@ fn main() {
         .join("../../specs/approved/SPEC-008-dat-saves-and-worldmap.md");
     println!("cargo:rerun-if-changed={}", spec.display());
     let text = fs::read_to_string(spec).expect("approved SPEC-008 must be present");
-    let start = text.find("### 3.8").expect("SPEC-008 section 3.8");
-    let section = &text[start..];
-    let section = &section[..section[4..]
-        .find("\n### ")
-        .map_or(section.len(), |end| end + 4)];
+    // The section is the lines after the one heading whose number is exactly
+    // 3.8 ("### 3.8 Title"), up to the next heading of level 3 or higher;
+    // a heading such as "### 3.80" or a "3.8" mention elsewhere never matches.
+    let is_heading = |line: &str| line.starts_with("### ") || line.starts_with("## ");
+    let headings: Vec<usize> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            line.strip_prefix("### 3.8")
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        headings.len(),
+        1,
+        "exactly one SPEC-008 section 3.8 heading"
+    );
+    let section: String = text
+        .lines()
+        .skip(headings[0] + 1)
+        .take_while(|line| !is_heading(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let section = section.as_str();
 
     let numbers = |prefix: &str| -> Vec<usize> {
         let line = section

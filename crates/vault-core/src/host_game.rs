@@ -39,11 +39,31 @@ fn text_argument(call: &HostCall, text: usize, list: usize) -> DialogueText {
         }
     }
 }
+/// The error prefix of a nonzero reference that names no object. SPEC-005
+/// §2.1 `[May-improve]`: such a reference is diagnosed and the row pushes
+/// its null result instead of faulting the program (`game_call` intercepts
+/// the error; references are never reused, so a stale one is unambiguous).
+const STALE_REFERENCE: &str = "invalid opaque object reference";
+fn stale_reference(reference: ObjectRef) -> VmError {
+    VmError::Host(format!("{STALE_REFERENCE} {reference:#x}"))
+}
+/// SPEC-005 §2.1: the null result of each row that resolves an object
+/// reference, as its null-operand path pushes it.
+fn null_result(op: u16) -> Option<ExternalValue> {
+    match op {
+        0x80a4 => string(b"<Critter>".to_vec()),
+        0x80a5 | 0x813d | 0x8141 => dynamic_null(),
+        0x80c8 | 0x80ca | 0x80d4 | 0x8100 | 0x8102 | 0x8103 => integer(-1),
+        0x80d3 => integer(9999),
+        0x80ec | 0x80f3 | 0x80f5 | 0x8106 | 0x8144 | 0x8149 => integer(0),
+        _ => None,
+    }
+}
 impl<A: WorldAssets> WorldHost<A> {
     fn object(&self, reference: ObjectRef) -> Result<&WorldObject, VmError> {
         self.world
             .get(reference)
-            .ok_or_else(|| VmError::Host(format!("invalid opaque object reference {reference:#x}")))
+            .ok_or_else(|| stale_reference(reference))
     }
     fn change_hp(&mut self, reference: ObjectRef, amount: i32) -> Result<(), VmError> {
         let context = self.world.context(reference);
@@ -393,6 +413,18 @@ impl<A: WorldAssets> WorldHost<A> {
         Ok(integer(value))
     }
     pub(crate) fn game_call(&mut self, vm: &mut Vm, call: &HostCall) -> HostResult {
+        match self.game_call_row(vm, call) {
+            // SPEC-005 §2.1 safe rule: a stale nonzero reference gives a
+            // diagnostic and the row's null result, not a VM error.
+            Err(VmError::Host(message)) if message.starts_with(STALE_REFERENCE) => {
+                let op = call.spec.word;
+                self.world.diagnostic(format!("{op:#06x}: {message}"));
+                Ok(null_result(op))
+            }
+            result => result,
+        }
+    }
+    fn game_call_row(&mut self, vm: &mut Vm, call: &HostCall) -> HostResult {
         let op = call.spec.word;
         let values: Vec<_> = call.args.iter().map(|arg| arg.int()).collect();
         let result = match op {
@@ -1017,6 +1049,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x80e4 => {
+                // SPEC-005 0x80E4 / SPEC-008 §3.10: a name is matched
+                // against `map.msg` 0-65 (its campaign parameter is stored
+                // even when the name fails to match); a negative numeric
+                // index stores nothing. An unmatched name or a negative
+                // index makes no transition.
                 let index = if let Some(name) = call.text(1) {
                     if let Some(slot) = self.world.gvars.as_mut().and_then(|a| a.get_mut(32)) {
                         *slot = call.int(0);
@@ -1032,7 +1069,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 };
                 // SPEC-005: a transition to the map's default entrance
                 // (hex, elevation and orientation all -1).
-                if let Some(index) = index {
+                if let Some(index) = index.filter(|index| *index >= 0) {
                     self.world.emit(WorldEffect::MapTransition {
                         index,
                         parameter: call.int(0),
@@ -1288,10 +1325,12 @@ impl<A: WorldAssets> WorldHost<A> {
                         .diagnostic("critter_attempt_placement: null object");
                     integer(-1)
                 } else {
-                    let old = self.object(call.uint(2))?.raw.elevation;
+                    self.object(call.uint(2))?;
                     if !(0..3).contains(&call.int(0)) {
                         integer(-1)
                     } else {
+                        // An elevation change removes the critter from combat
+                        // (`move_object`); the object first goes to hex 0.
                         self.world
                             .move_object(call.uint(2), 0, call.int(0) as u8, false)?;
                         let mut candidates = vec![call.int(1)];
@@ -1312,7 +1351,6 @@ impl<A: WorldAssets> WorldHost<A> {
                                 .move_object(call.uint(2), hex, call.int(0) as u8, false)
                                 .is_ok()
                         });
-                        let _ = old;
                         integer(if success { 0 } else { -1 })
                     }
                 }
@@ -1504,10 +1542,11 @@ impl<A: WorldAssets> WorldHost<A> {
             }),
             0x810c => {
                 if call.uint(2) != 0 {
+                    let mut negative_frame = false;
                     let object = self
                         .world
                         .get_mut(call.uint(2))
-                        .ok_or_else(|| VmError::Host("invalid animation object".into()))?;
+                        .ok_or_else(|| stale_reference(call.uint(2)))?;
                     match call.int(1) {
                         // Selector 1000 sets orientation only for control below 6;
                         // larger controls are a no-op. Negative controls are not
@@ -1517,10 +1556,13 @@ impl<A: WorldAssets> WorldHost<A> {
                                 object.raw.orientation = call.int(0) as u8;
                             }
                         }
-                        1010 => {
-                            object.raw.frame =
-                                usize::try_from(call.int(0)).map_err(|_| VmError::Arithmetic)?
-                        }
+                        // SPEC-005: 1010's lower bound is unchecked in the
+                        // reference; a negative frame is diagnosed and
+                        // ignored (safe bound), not a VM error.
+                        1010 => match usize::try_from(call.int(0)) {
+                            Ok(frame) => object.raw.frame = frame,
+                            Err(_) => negative_frame = true,
+                        },
                         // A registered forward (control 0) or reverse animation;
                         // a forward death animation ends on its static art.
                         animation if (0..65).contains(&animation) => {
@@ -1535,6 +1577,9 @@ impl<A: WorldAssets> WorldHost<A> {
                         }
                         _ => {}
                     }
+                    if negative_frame {
+                        self.world.diagnostic("anim: negative frame ignored");
+                    }
                 }
                 None
             }
@@ -1543,13 +1588,22 @@ impl<A: WorldAssets> WorldHost<A> {
                 if !self.world.combat {
                     match call.int(1) {
                         1 => {
+                            // A registration left open (its builder faulted,
+                            // or never sent command 3) must not absorb this
+                            // program's entries.
+                            if self.building_animation.is_some() {
+                                self.world
+                                    .diagnostic("reg_anim_func 1 discards an open registration");
+                            }
                             self.building_animation = Some(AnimationSequence {
                                 flags: call.int(0),
                                 ..Default::default()
-                            })
+                            });
+                            self.building_program = Some(vm.id);
                         }
                         2 => self.clear_animation(call.uint(0)),
                         3 => {
+                            self.building_program = None;
                             if let Some(sequence) = self.building_animation.take() {
                                 self.register_script_sequence(&sequence);
                             }

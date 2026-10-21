@@ -4,7 +4,7 @@
 use crate::{ObjectRef, WorldState, world::ScriptInstance};
 use std::collections::BTreeMap;
 use vault_formats::{
-    AutomapDb, automap,
+    AutomapDb, MsgCatalog, automap,
     map::{
         InventoryEntry, MapFile, MapObject, MapScript, ObjectState, ScriptBlock, ScriptCategory,
         ScriptPrefix,
@@ -14,8 +14,6 @@ use vault_formats::{
 
 /// SPEC-014 §3.33 the visited set: 40000 hexes, 8 per byte.
 pub const VISITED_BYTES: usize = 5000;
-/// SPEC-003 §2.8 the transient roof-hide bit of a tile word.
-const ROOF_HIDDEN: u32 = 0x1000_0000;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Persistence {
@@ -42,6 +40,20 @@ pub fn saved_map_name(name: &[u8]) -> Option<String> {
     let file = std::str::from_utf8(name).ok()?.rsplit(['/', '\\']).next()?;
     let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
     (!stem.is_empty() && stem.is_ascii()).then(|| format!("{}.SAV", stem.to_ascii_uppercase()))
+}
+/// SPEC-014 §3.35 the working `.SAV` name of a numbered map: the `map.msg`
+/// text for its number (the fixed SPEC-008 §3.10 table without a catalog)
+/// as `<NAME>.SAV` in upper case. An unnumbered map has none, so no working
+/// copy is ever written for it (SPEC-008 §3.10).
+pub fn working_map_name(number: i32, catalog: Option<&MsgCatalog>) -> Option<String> {
+    if !(0..crate::worldmap::MAP_COUNT as i32).contains(&number) {
+        return None;
+    }
+    let text = catalog
+        .and_then(|catalog| catalog.get(number))
+        .map(|message| message.text.clone())
+        .or_else(|| crate::worldmap::map_table_name(number).map(|name| name.as_bytes().to_vec()))?;
+    saved_map_name(&text)
 }
 
 impl WorldState {
@@ -156,6 +168,15 @@ impl WorldState {
     pub fn export_map(&self, include_party: bool) -> MapFile {
         let mut map = self.map.clone();
         map.header.flags = MapFlags(map.header.flags.0 | MapFlags::SAVED.0);
+        // SPEC-008 §3.10: a `.SAV` written by the engine stores its name as
+        // `<NAME>.SAV` in upper case, so it matches its original map.
+        if let Some(name) = self.current_map_name() {
+            let mut field = [0_u8; 16];
+            let bytes = name.as_bytes();
+            let len = bytes.len().min(field.len() - 1);
+            field[..len].copy_from_slice(&bytes[..len]);
+            map.header.name = field;
+        }
         map.mvars = self.mvars.clone();
         map.lvars = self.lvars.clone();
         let templates: BTreeMap<u32, &MapScript> = self
@@ -183,20 +204,30 @@ impl WorldState {
                 slots,
             }],
         });
-        map.objects.elevations = std::array::from_fn(|_| Vec::new());
+        // SPEC-003 §3.3: top-level objects are written by grid position
+        // 0-39999 within each elevation (insertion order within a hex),
+        // and temporary objects are excluded.
+        let mut roots: [Vec<(i32, MapObject)>; 3] = Default::default();
         for (reference, object) in self.iter() {
+            let Some(hex) = object.raw.hex else {
+                continue;
+            };
             if reference == self.player
                 || object.owner.is_some()
-                || object.raw.hex.is_none()
                 || object.raw.elevation > 2
+                || object.raw.flags.contains(BasicFlags::TEMPORARY)
                 || (!include_party && self.party.contains(&reference))
             {
                 continue;
             }
             if let Some(tree) = self.object_tree(reference) {
-                map.objects.elevations[usize::from(object.raw.elevation)].push(tree);
+                roots[usize::from(object.raw.elevation)].push((hex, tree));
             }
         }
+        map.objects.elevations = roots.map(|mut roots| {
+            roots.sort_by_key(|(hex, _)| *hex);
+            roots.into_iter().map(|(_, tree)| tree).collect()
+        });
         map.objects.total = map.objects.elevations.iter().map(Vec::len).sum();
         map
     }
@@ -298,22 +329,14 @@ impl WorldState {
             self.diagnostic(format!("automap capture failed: {error}"));
         }
     }
-    /// SPEC-014 §3.35 step 3: the roof over the player's position is shown
-    /// again. Only the roof-hide bit (SPEC-003 §2.8) hides a roof, so every
-    /// hidden roof square on the player's elevation is cleared.
-    pub fn restore_roofs(&mut self) {
-        let elevation = self
-            .get(self.player)
-            .map_or(self.elevation, |player| player.raw.elevation);
-        if let Some(Some(tiles)) = self.map.tiles.get_mut(usize::from(elevation)) {
-            for tile in tiles {
-                tile.word &= !ROOF_HIDDEN;
-            }
-        }
-    }
-    /// The current map's working `.SAV` name: its requested file name, else
-    /// its header resource name.
+    /// The current map's working `.SAV` name (SPEC-014 §3.35): the name
+    /// `map.msg` gives its number, recorded when it loaded; a map installed
+    /// without a load falls back to its header resource name. An unnumbered
+    /// map has no working name (SPEC-008 §3.10).
     pub fn current_map_name(&self) -> Option<String> {
+        if self.map.header.map_number < 0 {
+            return None;
+        }
         self.persistence
             .current_map
             .clone()
@@ -345,14 +368,14 @@ impl WorldState {
         self.capture_automap_at(elevation);
         written
     }
-    /// SPEC-014 §3.35 the save on leaving a map: a map whose number is in
-    /// the SPEC-008 §2.8 excluded set (the desert and encounter maps) has
-    /// its working copy deleted and writes nothing, so it is rebuilt from
-    /// its `.MAP` on every visit; any other map is persisted. Returns false
-    /// when the write failed.
+    /// SPEC-014 §3.35 step 5, the save on leaving a map: a map whose number
+    /// is in the SPEC-008 §2.8 excluded set (the desert and encounter maps),
+    /// or that has no number (SPEC-008 §3.10), has its working copy deleted
+    /// and writes nothing, so it is rebuilt from its `.MAP` on every visit;
+    /// any other map is persisted. Returns false when the write failed.
     pub fn save_left_map(&mut self) -> bool {
         let excluded = usize::try_from(self.map.header.map_number)
-            .is_ok_and(|number| automap::EXCLUDED.contains(&number));
+            .map_or(true, |number| automap::EXCLUDED.contains(&number));
         if excluded {
             if let Some(name) = self.current_map_name() {
                 self.persistence.maps.remove(&name);

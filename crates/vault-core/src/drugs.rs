@@ -76,7 +76,10 @@ impl Stage {
     /// §3.2 slot amounts in processing order. With S0 = -2 slot 0 is
     /// skipped and the first processed slot draws `roll(A0, A1)` (a skipped
     /// -1 slot moves the draw on); other slots use their amounts. Slots
-    /// with a selector outside 0-37 are skipped and draw nothing.
+    /// with a selector outside 0-37 are skipped and draw nothing: §3.1's
+    /// layout admits only -1, -2 (slot 0) or a stat index 0-37, and the
+    /// reference indexes its stat table with the raw word (`[May-improve]`
+    /// safe bound, no spec rule for other values).
     pub fn slots(&self, rng: &mut impl RandomSource) -> Result<Vec<(i32, i32)>, WorldError> {
         let range = self.selectors[0] == RANGE_FORM;
         let mut pending = range;

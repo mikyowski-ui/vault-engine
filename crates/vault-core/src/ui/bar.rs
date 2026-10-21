@@ -447,6 +447,10 @@ pub fn roll_segments(old: i32, new: i32, max: i32, shown: Band) -> Vec<(i32, i32
 /// is followed by one wait of `roll_delay(old, new)`.
 pub fn roll(old: i32, segments: &[(i32, i32, Band)]) -> Vec<([Glyph; 4], Band)> {
     let first = segments.first().map_or(Band::White, |(_, _, band)| *band);
+    // §3.21 `[May-improve]`: the reference's first frame draws the previous
+    // value's digits without taking the absolute value, so a negative value
+    // reads outside the band. The safe rule draws the absolute value's
+    // digits with a separate sign (`counter_glyphs`).
     let mut frames = vec![(counter_glyphs(old), first)];
     for (start, end, band) in segments {
         let mut value = *start;
@@ -543,6 +547,8 @@ pub fn cost_digit(cost: i32) -> Option<u8> {
 pub fn item_art_origin(w: i32, h: i32) -> [i32; 2] {
     [(188 - w) / 2, (67 - h) / 2]
 }
+/// The ammo bar's top pixel in the bar window.
+pub const AMMO_BAR: [i32; 2] = [463, 26];
 /// The ammo bar: x = 463 from y = 26, 70 tall; the fill is
 /// `trunc(current / max * 70)` rounded down to even. Pixels from the top:
 /// raw index 14, then alternately 196 and 14.
@@ -561,13 +567,50 @@ pub fn ammo_bar(current: i32, max: i32) -> [u8; 70] {
     })
 }
 /// Weapon modes cycled by right-click or `n`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WeaponMode {
+    #[default]
     Primary,
     PrimaryAimed,
     Secondary,
     SecondaryAimed,
     Reload,
+}
+impl WeaponMode {
+    /// The aimed modes: the bullseye shows and the attack is aimed.
+    pub fn aimed(self) -> bool {
+        matches!(self, Self::PrimaryAimed | Self::SecondaryAimed)
+    }
+    /// The modes that attack with the hand's secondary hit mode.
+    pub fn secondary(self) -> bool {
+        matches!(self, Self::Secondary | Self::SecondaryAimed)
+    }
+}
+/// §3.23 one hand's slot state: the object the hand held when its action
+/// was last chosen, and that action. The same object keeps its chosen
+/// action; any other object (an empty hand included) starts again at the
+/// primary attack, or at "use" for a non-weapon, whose mode is unused. A
+/// slot that has never been shown counts as changed, as both hands are
+/// marked changed at start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HandSlot {
+    item: Option<Option<crate::ObjectRef>>,
+    mode: WeaponMode,
+}
+impl HandSlot {
+    /// The action mode for the hand while it holds `item`.
+    pub fn mode(&self, item: Option<crate::ObjectRef>) -> WeaponMode {
+        if self.item == Some(item) {
+            self.mode
+        } else {
+            WeaponMode::Primary
+        }
+    }
+    /// Choose `mode` for the hand holding `item`.
+    pub fn set(&mut self, item: Option<crate::ObjectRef>, mode: WeaponMode) {
+        self.item = Some(item);
+        self.mode = mode;
+    }
 }
 const CYCLE: [WeaponMode; 5] = [
     WeaponMode::Primary,

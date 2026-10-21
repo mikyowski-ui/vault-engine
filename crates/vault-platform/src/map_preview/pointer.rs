@@ -3,8 +3,9 @@
 //! feedback once the pointer rests 250 ms, map clicks on the left release,
 //! the held-button action menu, and edge and arrow-key scrolling.
 //!
-//! Time is the shell clock passed to `tick`, so a replay sees the same
-//! rests, holds and scroll steps as the desktop did.
+//! Time is the shell clock passed to `tick`, and the desktop logs each
+//! frame's clock, so a replay of its input log ticks at the same times and
+//! sees the same rests, holds and scroll steps (D-11).
 use super::{MapPreview, Screen};
 use crate::interface::Painter;
 use vault_core::{
@@ -22,7 +23,7 @@ use vault_formats::{
 };
 use vault_render::{
     IndexedImage,
-    map::{object_sprite, pick_objects},
+    map::{object_sprite, pick_objects_with},
 };
 
 /// The scroll blocker (misc PID `0x0500000C`).
@@ -150,6 +151,43 @@ fn outlined(
     painter.text(image, 101, key, text, origin, 80);
 }
 
+/// SPEC-014 §3.27 the movement cursor's translucent red outline (G-31): one
+/// pixel around the hex outline's opaque pixels, above the bar window's
+/// top row, each pixel an even mix of red (key 31744) and the pixel
+/// beneath. The specification names the outline but not its geometry or
+/// translucency, so this rule is provisional.
+fn red_outline(
+    palette: &vault_formats::Palette,
+    image: &mut IndexedImage,
+    frame: &vault_formats::frm::FrmFrame,
+    origin: [i64; 2],
+) {
+    let (width, height) = (i64::from(frame.width), i64::from(frame.height));
+    let opaque = |x: i64, y: i64| {
+        (0..width).contains(&x)
+            && (0..height).contains(&y)
+            && frame.pixels()[(y * width + x) as usize] != 0
+    };
+    let stride = i64::from(image.width());
+    let [red, ..] = ColorKey::RED.rgb5();
+    for y in -1..=height {
+        for x in -1..=width {
+            if opaque(x, y) || !(-1..=1).any(|dy| (-1..=1).any(|dx| opaque(x + dx, y + dy))) {
+                continue;
+            }
+            let (px, py) = (origin[0] + x, origin[1] + y);
+            if !(0..stride).contains(&px) || !(0..i64::from(map_bottom())).contains(&py) {
+                continue;
+            }
+            let pixel = &mut image.pixels_mut()[(py * stride + px) as usize];
+            let [r, g, b] = palette.rgb6(*pixel).map(|level| level / 2);
+            if let Some(mixed) = palette.lookup_rgb5([(r + red) / 2, g / 2, b / 2]) {
+                *pixel = mixed;
+            }
+        }
+    }
+}
+
 impl MapPreview {
     /// Hover, menu and edge input apply: the map is in front with no
     /// conversation or notice over it.
@@ -157,6 +195,7 @@ impl MapPreview {
         matches!(self.screen, Screen::Map)
             && !self.host.world.dialogue.open
             && self.dialog.is_none()
+            && self.hud.timer.is_none()
     }
     /// The item a window's drag holds, drawn as the cursor.
     fn dragged_item(&self) -> Option<ObjectRef> {
@@ -173,8 +212,10 @@ impl MapPreview {
     /// otherwise the topmost one that is not a dead or knocked-out critter,
     /// falling back to the bottom-most one hit.
     pub(crate) fn object_at(&self, point: [i32; 2]) -> Option<ObjectRef> {
-        let map = self.host.world.render_snapshot();
-        let hits: Vec<_> = pick_objects(&map, self.view, &self.art, point)?
+        // P-02: the world's map by reference; no map clone per pick.
+        let objects = self.host.world.render_objects();
+        let map = &self.host.world.map;
+        let hits: Vec<_> = pick_objects_with(map, &objects, self.view, &self.art, point)?
             .into_iter()
             .filter_map(|id| self.host.world.reference_for_id(id))
             .collect();
@@ -237,6 +278,11 @@ impl MapPreview {
     }
     /// The pointer left the window: no cursor, hover or scrolling.
     pub fn pointer_left(&mut self) {
+        // SPEC-014 §3.2: not polled during a game fade; applied after it.
+        if self.fade_blocks() {
+            self.fade_pointer = Some(None);
+            return;
+        }
         self.pointer.at = None;
         self.pointer.rested = false;
         self.pointer.feedback = None;
@@ -255,10 +301,12 @@ impl MapPreview {
     pub(crate) fn map_release(&mut self, point: Option<[i32; 2]>) -> bool {
         let held = self.pointer.held.take();
         if let Some(menu) = self.pointer.menu.take() {
-            // The pointer returns to the menu's column at the last anchor,
-            // and the rest restarts.
+            // The pointer returns to the menu's column at the last anchor
+            // (G-31: the system pointer is warped there too), and the rest
+            // restarts.
             let at = [menu.origin[0], menu.tracker.anchor];
             self.pointer.at = Some(at);
+            self.hud.warp = Some(at);
             self.restart_rest(false);
             let entry = if self.quit_requested {
                 Entry::Cancel
@@ -275,7 +323,12 @@ impl MapPreview {
         let (Some(_), Some(point)) = (held, point) else {
             return false;
         };
-        if !self.world_pointer() || point[1] > map_bottom() || self.host.world.ui_disabled {
+        // §3.26: map clicks are ignored while the animated watch shows.
+        if !self.world_pointer()
+            || point[1] > map_bottom()
+            || self.host.world.ui_disabled
+            || self.watch_shown()
+        {
             return false;
         }
         let object = self.object_at(point);
@@ -288,6 +341,16 @@ impl MapPreview {
         }
         true
     }
+    /// G-22: a press in the map belongs to the map. Once a window, a
+    /// conversation or a dialog box is in front, its release no longer
+    /// reaches the map, so the press (and any action menu) is dropped;
+    /// kept, it would open the menu later with the button up.
+    pub(crate) fn drop_map_press(&mut self) {
+        if !self.world_pointer() {
+            self.pointer.held = None;
+            self.pointer.menu = None;
+        }
+    }
     /// Keys are dropped while the action menu is open or edge scrolling is
     /// under way.
     pub(crate) fn pointer_swallows_keys(&self) -> bool {
@@ -298,14 +361,17 @@ impl MapPreview {
     /// whether the frame changed.
     pub(crate) fn pointer_tick(&mut self) -> bool {
         if !self.world_pointer() {
+            self.drop_map_press();
             return self.pointer.edge.take().is_some();
         }
         // A mode change restarts the rest; the start of a player turn, and
         // the interface coming back on, force the hover on the next poll.
+        // The watch going away turns the in-world cursor back on too.
+        let watch = self.watch_shown();
         let seen = (
             self.hud.mode,
             self.host.world.combat && self.host.world.combat_state.player_turn,
-            self.host.world.ui_disabled,
+            self.host.world.ui_disabled || watch,
         );
         if let Some((mode, turn, disabled)) = self.pointer.seen.replace(seen) {
             if mode != seen.0 {
@@ -314,6 +380,13 @@ impl MapPreview {
             if (!turn && seen.1) || (disabled && !seen.2) {
                 self.restart_rest(true);
             }
+        }
+        // §3.26-§3.27: while the watch shows the game mouse is disabled: a
+        // held press is dropped, and no menu, edge scroll or hover runs.
+        if watch {
+            self.pointer.held = None;
+            let scrolling = self.pointer.edge.take().is_some();
+            return scrolling | self.pointer.feedback.take().is_some();
         }
         let mut changed = self.menu_repeat();
         if self.pointer.menu.is_some() {
@@ -359,14 +432,23 @@ impl MapPreview {
     /// §3.28 the chosen entry.
     fn menu_entry(&mut self, entry: Entry, object: ObjectRef, target: Target) {
         self.selected = Some(object);
+        // §3.27: an entry that starts a sequence follows the click policy.
+        let act = |preview: &mut Self, action: ObjectAction| {
+            if preview.action_allowed(object, action) {
+                preview.interact(action);
+            }
+        };
         match entry {
-            Entry::Use => self.interact(if matches!(target, Target::Item { .. }) {
-                ObjectAction::Pickup
-            } else {
-                ObjectAction::Use
-            }),
+            Entry::Use => act(
+                self,
+                if matches!(target, Target::Item { .. }) {
+                    ObjectAction::Pickup
+                } else {
+                    ObjectAction::Use
+                },
+            ),
             Entry::Look => self.interact(ObjectAction::Description),
-            Entry::Talk => self.interact(ObjectAction::Talk),
+            Entry::Talk => act(self, ObjectAction::Talk),
             Entry::Rotate => {
                 self.game_action(Action::Rotate(true));
             }
@@ -591,11 +673,13 @@ impl MapPreview {
             }
             Mode::Crosshair => {
                 // Crosshair hovers record the object too, so switching to
-                // the arrow over the same critter prints nothing.
-                if let Some(object) = self.object_at(at) {
+                // the arrow over the same critter prints nothing. One pick
+                // (P-02: one world snapshot) serves both.
+                let hit = self.object_at(at);
+                if let Some(object) = hit {
                     self.pointer.looked = Some(object);
                 }
-                let target = self.object_at(at).filter(|object| {
+                let target = hit.filter(|object| {
                     *object != player
                         && self
                             .host
@@ -616,8 +700,10 @@ impl MapPreview {
             Mode::UseCrosshair | Mode::Skill(_) => None,
         }
     }
-    /// The uncalled torso hit chance of the player's attack request, or
-    /// `None` when the preflight refuses it (SPEC-007 §3.2).
+    /// The uncalled torso hit chance of the player's attack request, even
+    /// in an aimed mode, or `None` when the preflight refuses it (SPEC-007
+    /// §3.2). The item slot's aiming still counts in the AP the attack
+    /// needs.
     fn hover_hit_chance(&self, target: ObjectRef) -> Option<i32> {
         let player = self.host.world.player;
         let world = &self.host.world;
@@ -627,7 +713,7 @@ impl MapPreview {
                 target,
                 self.attack_mode(),
                 location::UNCALLED,
-                false,
+                self.attack_aimed(),
             )
             .ok()?;
         world.preflight(player, target, &attack).ok()?;
@@ -646,6 +732,11 @@ impl MapPreview {
             assets: &self.host.assets,
             palette: &self.palette,
         };
+        // The Set Timer window shows the arrow over any window.
+        if self.hud.timer.is_some() {
+            painter.cursor(image, cursor::ARROW.art, at);
+            return;
+        }
         self.draw_outline(&painter, image);
         if let Some(item) = self.dragged_item() {
             if let Some(icon) = self.item_icon(item)
@@ -704,6 +795,15 @@ impl MapPreview {
             }
             _ => {}
         }
+        // §3.26: the animated watch replaces the in-world cursor while the
+        // combat lock or a hand swap holds.
+        if self.world_pointer()
+            && let Some((_, frame)) = self.hud.watch
+        {
+            let art = cursor::ANIMATED_WATCH.art;
+            painter.cursor_frame(image, art, frame as usize, at);
+            return;
+        }
         if let Some(edge) = self.pointer.edge {
             let art = if edge.blocked {
                 cursor::SCROLL_BLOCKED
@@ -752,18 +852,18 @@ impl MapPreview {
                 let Ok(center) = self.view.grid.hex_center(hex) else {
                     return;
                 };
-                // The 32-by-16 hex outline drawn as a flat object at the hex.
+                // The 32-by-16 hex outline drawn as a flat object at the hex,
+                // with its translucent red outline (movement mode only).
                 if let Some(art) = painter.art(Mode::Movement.art())
                     && let Some(frame) = art.frame(0, 0)
                 {
                     let [sx, sy] = art.shifts[0].map(i64::from);
-                    image.blit(
-                        frame,
-                        [
-                            center[0] + sx - i64::from(frame.width / 2),
-                            center[1] + sy - i64::from(frame.height) + 1,
-                        ],
-                    );
+                    let origin = [
+                        center[0] + sx - i64::from(frame.width / 2),
+                        center[1] + sy - i64::from(frame.height) + 1,
+                    ];
+                    red_outline(painter.palette, image, frame, origin);
+                    image.blit(frame, origin);
                 }
                 if let Some(Feedback::Cost(text, key)) = feedback {
                     let cell = [center[0] as i32 - 16, center[1] as i32 - 8];
@@ -844,5 +944,9 @@ impl MapPreview {
     pub(crate) fn tap(&mut self, point: [i32; 2]) -> bool {
         let pressed = self.click(point, false);
         self.release(Some(point), false) || pressed
+    }
+    /// Whether the action menu is open.
+    pub(crate) fn menu_open(&self) -> bool {
+        self.pointer.menu.is_some()
     }
 }

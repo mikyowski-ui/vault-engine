@@ -810,8 +810,12 @@ impl Movie {
 }
 
 /// §3.7 palette push: entries `start .. start + count` of the table reach
-/// the device palette; the others keep their values.
+/// the device palette; the others keep their values. Safe rule: the range
+/// is clipped to the 256 entries, so a start at or past the end pushes
+/// nothing instead of indexing outside the palettes.
 pub fn push_palette(table: &[u8; 768], device: &mut [u8; 768], start: u16, count: u16) {
-    let range = 3 * usize::from(start)..3 * (usize::from(start) + usize::from(count)).min(256);
+    let start = usize::from(start).min(256);
+    let end = (start + usize::from(count)).min(256);
+    let range = 3 * start..3 * end;
     device[range.clone()].copy_from_slice(&table[range]);
 }

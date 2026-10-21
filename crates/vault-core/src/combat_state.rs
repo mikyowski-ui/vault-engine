@@ -32,8 +32,6 @@ pub struct CombatState {
     pub player_turn: bool,
     /// The player ended the current turn (end-turn / space).
     pub turn_ended: bool,
-    /// Initial scripted combat-request AP bonus.
-    pub ap_bonus: i32,
     /// The initiating scripted request, consumed by the attacker's first attack.
     pub request: Option<CombatRequest>,
 }
@@ -63,7 +61,6 @@ impl Default for CombatState {
             resumed: false,
             player_turn: false,
             turn_ended: false,
-            ap_bonus: 0,
             request: None,
         }
     }
@@ -118,6 +115,34 @@ impl WorldState {
     /// "Active critter": not knocked out, dead, or losing its turn.
     pub fn combat_active(&self, critter: ObjectRef) -> bool {
         self.status(critter) & (effect::KNOCKED_OUT | effect::DEAD | effect::LOSE_TURN) == 0
+    }
+    /// Combat membership ends (SPEC-005 0x80B6, 0x80F4, 0x80FF): the critter
+    /// leaves the combat list and its partition, the AI snapshot (SPEC-009
+    /// swap removal) and every last-attacker reference to it (combat cleanup
+    /// clears them all, so only an active combat holds one).
+    pub fn remove_from_combat(&mut self, critter: ObjectRef) {
+        if let Some(index) = self.ai.snapshot.iter().position(|e| *e == critter) {
+            self.ai.snapshot.swap_remove(index);
+        }
+        let combat = &mut self.combat_state;
+        if let Some(position) = combat.list.iter().position(|c| *c == critter) {
+            combat.list.remove(position);
+            if position < combat.active {
+                combat.active -= 1;
+            }
+            // The cursor keeps naming the next actor; the current actor's
+            // own removal is noticed by `advance_combat`.
+            if position < combat.cursor {
+                combat.cursor -= 1;
+            }
+        }
+        if self.combat {
+            for object in self.entities.values_mut() {
+                if object.opponent == critter {
+                    object.opponent = 0;
+                }
+            }
+        }
     }
     /// The dead query also recognizes nonpositive HP.
     pub fn is_dead(&self, critter: ObjectRef) -> bool {
@@ -443,7 +468,10 @@ impl<A: WorldAssets> WorldHost<A> {
             return Ok(false);
         }
         if !resumed {
-            let ap = self.world.maximum_ap(critter) + self.world.combat_state.ap_bonus;
+            // SPEC-007 §3.3 names an initial scripted combat-request AP
+            // bonus in this refill, but SPEC-005's request words (accuracy,
+            // damage bounds, flag pair) carry none, so nothing is added.
+            let ap = self.world.maximum_ap(critter);
             self.world.set_ap(critter, ap);
         }
         if critter == self.world.player {
@@ -550,9 +578,18 @@ impl<A: WorldAssets> WorldHost<A> {
             if self.take_turn(critter, ai)? {
                 continue;
             }
-            self.world.combat_state.cursor += 1;
+            self.pass_turn(critter);
         }
         Err(WorldError::Invalid("combat turn limit exceeded".into()))
+    }
+    /// The turn of `critter` is over: the cursor moves on unless the actor
+    /// left combat during its turn (`remove_from_combat`), in which case the
+    /// cursor already names the next actor.
+    fn pass_turn(&mut self, critter: ObjectRef) {
+        let combat = &mut self.world.combat_state;
+        if combat.list.get(combat.cursor) == Some(&critter) {
+            combat.cursor += 1;
+        }
     }
     /// The player ends the current turn (end-turn / space).
     pub fn end_player_turn(&mut self) {

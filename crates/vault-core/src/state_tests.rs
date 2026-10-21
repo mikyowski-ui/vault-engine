@@ -319,6 +319,21 @@ fn spec006_queue_iq_reaction_and_art_vectors() {
     );
     assert_eq!((waiting.phase, waiting.frame), (HeadPhase::Waiting, 1));
     assert!(waiting.diagnostic.is_some());
+    // SPEC-006 §3.11: speech time is not idle time. Speech completion sets
+    // the counter to 3, and only the waiting that follows accumulates: a
+    // 6-second line adds nothing, the next 2 seconds add 2.
+    let mut speaking =
+        TalkingHead::new(head.clone(), Mood::Neutral, 0, &mut Dice::new(&[77])).unwrap();
+    speaking.phoneme(3).unwrap();
+    speaking.speech_end();
+    assert_eq!(speaking.idle_seconds, 3);
+    speaking.tick(6000, 2, 10, &mut Dice::default()).unwrap();
+    assert_eq!(speaking.idle_seconds, 3);
+    speaking.tick(8000, 2, 10, &mut Dice::default()).unwrap();
+    assert_eq!(
+        (speaking.idle_seconds, speaking.phase),
+        (5, HeadPhase::Waiting)
+    );
     let mut session = GDialog::default();
     session.start(1, 1, 5, None).unwrap();
     assert_eq!(session.background_art(), 0x09000005);

@@ -307,8 +307,11 @@ impl<A: WorldAssets> WorldHost<A> {
         let source = session.shown(from_target);
         let destination = session.shown(!from_target);
         let party = self.world.party.contains(&session.root);
-        if session.steal && !party {
-            let caught = self.loot_steal_check(session, item)?;
+        if session.steal {
+            // SPEC-013 §3.9.3 steps 5-6, §3.9.5: a party member's move is a
+            // critical success with no draws and never a catch; step 8's
+            // 571/573 message is still displayed.
+            let caught = !party && self.loot_steal_check(session, item)?;
             let name = self
                 .world
                 .get(item)

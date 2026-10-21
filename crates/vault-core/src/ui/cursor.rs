@@ -104,7 +104,9 @@ pub fn cycle_mode(current: Mode, combat: bool, weapon_in_hand: bool) -> Mode {
         other => other,
     }
 }
-/// The reference transition by numeric value, for every mode.
+/// The reference transition by numeric value, for every mode (P-08: kept
+/// for the tests that pin the `[May-improve]` difference).
+#[cfg(test)]
 pub fn reference_cycle(current: Mode) -> i32 {
     (current.value() + 1) % 3
 }

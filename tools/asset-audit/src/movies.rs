@@ -23,16 +23,29 @@ fn hex(bytes: &[u8]) -> String {
 fn h16(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))[..16].to_owned()
 }
-/// Tab-separated rows after the header line.
-fn table(path: &Path) -> Result<Vec<Vec<String>>, Box<dyn Error>> {
+/// Tab-separated rows after the header line. The oracle is user-supplied,
+/// so a row with fewer than `columns` fields is an error, not a panic.
+fn table(path: &Path, columns: usize) -> Result<Vec<Vec<String>>, Box<dyn Error>> {
     let text =
         std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    Ok(text
-        .lines()
-        .skip(1)
-        .filter(|line| !line.is_empty())
-        .map(|line| line.split('\t').map(str::to_owned).collect())
-        .collect())
+    let mut rows = Vec::new();
+    for (index, line) in text.lines().enumerate().skip(1) {
+        if line.is_empty() {
+            continue;
+        }
+        let row: Vec<String> = line.split('\t').map(str::to_owned).collect();
+        if row.len() < columns {
+            return Err(format!(
+                "{} line {}: {} column(s), expected at least {columns}",
+                path.display(),
+                index + 1,
+                row.len()
+            )
+            .into());
+        }
+        rows.push(row);
+    }
+    Ok(rows)
 }
 /// Rows grouped by their first column, in file order.
 fn grouped(rows: Vec<Vec<String>>, key: usize) -> BTreeMap<String, Vec<Vec<String>>> {
@@ -236,11 +249,12 @@ const FRAME: [&str; 8] = [
 ];
 
 pub fn audit_movies(vfs: &LocalDirProvider, oracle: &Path) -> Result<MovieAudit, Box<dyn Error>> {
-    let summaries = table(&oracle.join("mve-summary.tsv"))?;
-    let mut frame_rows = grouped(table(&oracle.join("mve-frames.tsv"))?, 0);
-    let mut audio_rows = grouped(table(&oracle.join("mve-audio.tsv"))?, 0);
-    let fx_rows = grouped(table(&oracle.join("moviefx.tsv"))?, 0);
-    let subtitle_rows = table(&oracle.join("sve-subtitles.tsv"))?;
+    let summaries = table(&oracle.join("mve-summary.tsv"), 1)?;
+    let mut frame_rows = grouped(table(&oracle.join("mve-frames.tsv"), 1)?, 0);
+    let mut audio_rows = grouped(table(&oracle.join("mve-audio.tsv"), 1)?, 0);
+    let fx_rows = grouped(table(&oracle.join("moviefx.tsv"), 1)?, 0);
+    // Language and file name.
+    let subtitle_rows = table(&oracle.join("sve-subtitles.tsv"), 2)?;
     let mut audit = MovieAudit::default();
     let corpus = |extension: &str| -> BTreeSet<String> {
         vfs.files()
@@ -268,7 +282,19 @@ pub fn audit_movies(vfs: &LocalDirProvider, oracle: &Path) -> Result<MovieAudit,
             continue;
         };
         let movie = format!("{stem}.mve");
-        let effects = moviefx::parse(&vfs.read_bounded(&path, MAX_ASSET_BYTES)?)?;
+        // A fade file that cannot be read or parsed is one failed effect
+        // check; the remaining files and movies are still audited.
+        let effects = match vfs
+            .read_bounded(&path, MAX_ASSET_BYTES)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| moviefx::parse(&bytes).map_err(|error| error.to_string()))
+        {
+            Ok(effects) => effects,
+            Err(error) => {
+                tally(&mut audit.effects, &path, Err(error));
+                continue;
+            }
+        };
         // A fade file applies only to the movie with its name (the corpus
         // `movie.cfg` is a commented example that no movie uses).
         if !vfs
@@ -382,7 +408,14 @@ pub fn audit_movies(vfs: &LocalDirProvider, oracle: &Path) -> Result<MovieAudit,
             .push(row);
     }
     for (path, rows) in by_file {
-        let entries = sve::parse(&vfs.read_bounded(&path, MAX_ASSET_BYTES)?);
+        let bytes = match vfs.read_bounded(&path, MAX_ASSET_BYTES) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tally(&mut audit.subtitles, &path, Err(error.to_string()));
+                continue;
+            }
+        };
+        let entries = sve::parse(&bytes);
         let movie = rows[0][1].replace(".sve", ".mve");
         let frames = frame_counts.get(&movie).copied().unwrap_or(0);
         let mut track = SubtitleTrack::new(entries.clone());
@@ -390,7 +423,9 @@ pub fn audit_movies(vfs: &LocalDirProvider, oracle: &Path) -> Result<MovieAudit,
         let mut next = 0;
         for frame in 1..=frames {
             for _ in track.update(frame) {
-                drawn[next] = Some(frame);
+                if let Some(slot) = drawn.get_mut(next) {
+                    *slot = Some(frame);
+                }
                 next += 1;
             }
         }

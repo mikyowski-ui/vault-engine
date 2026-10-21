@@ -2,11 +2,12 @@
 //! movies, the main menu and attract mode, credits and quotes, premade
 //! selection, the character editor in creation mode, the new-game hand-off,
 //! loading from the menu, the death scene, the endgame slideshow and the
-//! ending sequence. The world itself is a `MapPreview`. Palette fades are
-//! presented as instant palette changes.
+//! ending sequence. The world itself is a `MapPreview`. Palette fades run
+//! over the fixed 700 ms of the SPEC-014 §3.2 safe rule.
 use crate::{
     AppResult,
-    audio::AudioHandle,
+    audio::{AudioHandle, Channel, MusicRequest, Volumes, volume_gain},
+    editor_screen::{EditorDialog, EditorExit, EditorStage, draw_editor},
     interface::Painter,
     map_preview::MapPreview,
     movie::{MoviePlayer, SubtitleStyle},
@@ -18,8 +19,8 @@ use vault_core::{
     movie::{self, MovieRequest},
     stats::StatContext,
     ui::{
-        ColorKey, Rect,
-        editor::{self, Editor, InfoLine, NameField},
+        Rect,
+        editor::{self, Editor},
         endgame::{self, CreditInput, CreditStyle, Credits, Slide},
         flow::{self, MenuChoice, MenuInput, SelectionAction, SelectionKey},
         options::Preferences,
@@ -59,10 +60,21 @@ enum Stage {
     World(Box<MapPreview>),
     Load(Box<MapPreview>),
     Death {
+        /// When the narration (or its silent wait) began.
         since: u64,
         palette: Palette,
         /// The scene is over and the fade to black runs.
         leaving: bool,
+        /// §3.5 step 3: the D(1, 4) draw naming the narration.
+        draw: i32,
+        /// The narration began after the fade from white; whether its
+        /// speech started.
+        narration: Option<bool>,
+        /// Input arrived during the fade from white: it ends the wait the
+        /// moment the narration would start.
+        input: bool,
+        /// The wait ended without input: the 500 ms tail runs from here.
+        tail: Option<u64>,
     },
     /// SPEC-014 §3.5 the end of a game session: the world's last frame
     /// fades to white, then the map is unloaded; `death` leads to the
@@ -80,13 +92,6 @@ enum Stage {
         world: Box<MapPreview>,
     },
 }
-struct EditorStage {
-    editor: Editor,
-    /// The open name field, if any.
-    name: Option<NameField>,
-    /// A validation refusal on screen.
-    refusal: Option<editor::Refusal>,
-}
 
 pub struct Game {
     vfs: Arc<dyn Vfs>,
@@ -97,6 +102,9 @@ pub struct Game {
     save_root: PathBuf,
     config_path: Option<PathBuf>,
     pub preferences: Preferences,
+    /// `fallout.cfg` `[system] interrupt_walk` (SPEC-014 §3.27), read once
+    /// at startup beside the splash.
+    interrupt_walk: bool,
     stage: Stage,
     movies: VecDeque<(String, u32, Next)>,
     now: u64,
@@ -114,6 +122,9 @@ pub struct Game {
     /// The vault-debug inspector runs in each world (`--debug`; F9 in a
     /// world toggles it, and the setting carries to the next world).
     pub debug: bool,
+    /// `--debug` was given: the worlds accept the map preview's keys
+    /// (G-09); without it they keep only the game's own keys.
+    pub debug_keys: bool,
     sounds: crate::map_preview::SoundBank,
     finished: bool,
     /// SPEC-014 §3.2 a fade outside the world, and the six-bit levels shown
@@ -127,6 +138,11 @@ pub struct Game {
     pointer: Option<[i32; 2]>,
     /// The last frame drew the held button down.
     held_shown: bool,
+    /// The preference volumes the mixer last took (outside a world, which
+    /// applies its own).
+    volume_source: Option<Volumes>,
+    /// The selected premade's bio text, read once per selection (P-02).
+    bio: Option<(usize, Vec<u8>)>,
 }
 
 /// One fade over the fixed 700 ms of the §3.2 safe rule: step k of n sets
@@ -187,6 +203,7 @@ impl Game {
             save_root,
             config_path,
             preferences,
+            interrupt_walk: true,
             stage: Stage::Menu { since: 0 },
             movies: VecDeque::new(),
             now: 0,
@@ -199,6 +216,7 @@ impl Game {
             quick: Default::default(),
             headless: false,
             debug: false,
+            debug_keys: false,
             sounds: Default::default(),
             finished: false,
             fade: None,
@@ -206,9 +224,13 @@ impl Game {
             held: None,
             pointer: None,
             held_shown: false,
+            volume_source: None,
+            bio: None,
         };
         // §3.1 splash: the configured start, without wrapping the stored value.
         let start = config.get_int("system", "splash").unwrap_or(0);
+        // §3.27: whether a movement click interrupts a busy player.
+        game.interrupt_walk = vault_core::clicks::interrupt_walk(&config);
         let exists = |path: &str| game.assets.available(path.as_bytes());
         if let Some((path, stored)) = flow::choose_splash(start, exists)
             && let Ok(splash) = game
@@ -232,6 +254,26 @@ impl Game {
     }
     pub fn finished(&self) -> bool {
         self.finished
+    }
+    /// Attach the audio output. A menu entered before it was attached
+    /// (no splash or start movies) starts its music now.
+    pub fn set_audio(&mut self, audio: AudioHandle) {
+        self.audio = audio;
+        self.volume_source = None;
+        if matches!(self.stage, Stage::Menu { .. }) {
+            self.sync_volumes();
+            self.request_menu_music();
+        }
+    }
+    /// §3.4 the menu music, from its beginning, looping.
+    fn request_menu_music(&mut self) {
+        self.audio.request_music(
+            self.vfs.clone(),
+            MusicRequest {
+                path: flow::MENU_MUSIC.to_owned(),
+                looping: true,
+            },
+        );
     }
     /// §3.1 step 9: iplogo, then intro, on every start; then the menu.
     fn start_movies(&mut self) {
@@ -275,6 +317,7 @@ impl Game {
             match MoviePlayer::load(&*self.vfs, request, style) {
                 Ok(mut player) => {
                     player.audio = self.audio.clone();
+                    player.music_volume = self.preferences.music_volume;
                     self.stage = Stage::Movie {
                         player: Box::new(player),
                         next,
@@ -297,9 +340,12 @@ impl Game {
         }
     }
     /// The menu is shown with a fade (§3.4): from a white or black screen
-    /// left by the end of a session, to the game palette.
+    /// left by the end of a session, to the game palette. Every loop top
+    /// stops the menu music and restarts it from its beginning, looping.
     fn enter_menu(&mut self) {
         self.stage = Stage::Menu { since: self.now };
+        self.sync_volumes();
+        self.request_menu_music();
         if self.shown.is_some() || self.fade.is_some() {
             let target = levels(&self.palette);
             self.fade_to(target);
@@ -396,8 +442,19 @@ impl Game {
             _ => self.preferences.brightness,
         }
     }
-    /// Leaving a world keeps its preferences and save-slot session state.
+    /// SPEC-014 §3.18: the preference volumes reach the mixer when they
+    /// change (a world applies its own while it runs).
+    fn sync_volumes(&mut self) {
+        let wanted = Volumes::from_preferences(&self.preferences);
+        if self.volume_source != Some(wanted) {
+            self.volume_source = Some(wanted);
+            self.audio.apply_volumes(wanted);
+        }
+    }
+    /// Leaving a world keeps its preferences and save-slot session state;
+    /// the mixer takes the preference volumes again.
     fn leave_world(&mut self, world: &MapPreview) {
+        self.volume_source = None;
         self.preferences = world.preferences.clone();
         (self.slot_list, self.quick) = world.slot_session();
         self.debug = world.debug_enabled();
@@ -410,12 +467,20 @@ impl Game {
         world.save_root = self.save_root.clone();
         world.config_path = self.config_path.clone();
         world.preferences = self.preferences.clone();
+        world.interrupt_walk = self.interrupt_walk;
+        // SPEC-008 §3.10: the world starts with the mixer's music state.
+        let music = self.audio.music_enabled();
+        world.set_music_enabled(music);
         world.apply_preferences();
         world.set_slot_session(self.slot_list.clone(), self.quick);
         if self.headless {
             world.host.movie_policy = vault_core::movie::MoviePolicy::CompleteImmediately;
         }
         world.set_debug(self.debug);
+        // G-09: the map preview tool's keys need `--debug` here, and no key
+        // turns the roofs off in the game (SPEC-014 §3.36).
+        world.preview_keys = self.debug_keys;
+        world.roof_key = false;
         Ok(world)
     }
     fn premade(&self, index: usize) -> CharacterSheet {
@@ -446,7 +511,11 @@ impl Game {
                 self.enter_credits("quotes.txt", CreditStyle::Reversed)
             }
             MenuChoice::Quotes => {}
-            MenuChoice::Exit => self.finished = true,
+            // §3.5: Exit stops the music.
+            MenuChoice::Exit => {
+                self.audio.stop_music();
+                self.finished = true;
+            }
             MenuChoice::Timeout => match self.attract.trigger(0) {
                 flow::AttractAction::Intro | flow::AttractAction::Demo(_) => {
                     self.play_movie("art/cuts/intro.mve", flow::ATTRACT_INTRO_FLAGS, Next::Menu)
@@ -469,12 +538,13 @@ impl Game {
             self.menu_choice(choice);
         }
     }
-    /// An interface sound, `sound/sfx/<name>.acm`.
+    /// An interface sound, `sound/sfx/<name>.acm`, at the effects volume
+    /// (SPEC-010 §3.11 with no object: V = 32767).
     fn audio_cue(&mut self, name: &str) {
         let path = format!("sound/sfx/{name}.acm");
+        let gain = volume_gain(self.preferences.sndfx_volume);
         if let Some(samples) = self.sounds.load(&*self.vfs, &path) {
-            self.audio
-                .play(samples, 1.0, crate::audio::Channel::Effect, false);
+            self.audio.play(samples, gain, Channel::Effect, false);
         }
     }
     /// Take the selected (or edited) character into the game: the
@@ -488,18 +558,18 @@ impl Game {
         match action {
             SelectionAction::Take => self.start_game(self.sheet.clone()),
             SelectionAction::Modify => {
-                self.stage = Stage::Editor(Box::new(EditorStage {
-                    editor: Editor::open(self.sheet.clone(), false, context),
-                    name: None,
-                    refusal: None,
-                }))
+                self.stage = Stage::Editor(Box::new(EditorStage::new(Editor::open(
+                    self.sheet.clone(),
+                    false,
+                    context,
+                ))))
             }
             SelectionAction::Create => {
-                self.stage = Stage::Editor(Box::new(EditorStage {
-                    editor: Editor::open(editor::blank_sheet(context), true, context),
-                    name: None,
-                    refusal: None,
-                }))
+                self.stage = Stage::Editor(Box::new(EditorStage::new(Editor::open(
+                    editor::blank_sheet(context),
+                    true,
+                    context,
+                ))))
             }
             SelectionAction::Back => self.enter_menu(),
             SelectionAction::Previous | SelectionAction::Next => {
@@ -533,7 +603,7 @@ impl Game {
     }
     pub fn display_override(&self) -> Option<[[u8; 4]; 256]> {
         match &self.stage {
-            Stage::Movie { player, .. } => Some(player.palette()),
+            Stage::Movie { player, .. } => Some(player.palette(self.preferences.brightness)),
             Stage::World(world) | Stage::Load(world) => world.display_override(),
             _ if self.fade.is_some() || self.shown.is_some() => {
                 let gamma = self.brightness();
@@ -547,7 +617,7 @@ impl Game {
     }
     pub fn palette_cycling(&self) -> bool {
         match &self.stage {
-            Stage::World(world) => world.host.library.palette_cycling && !world.movie_active(),
+            Stage::World(world) => world.palette_cycling(),
             _ => false,
         }
     }
@@ -584,7 +654,10 @@ impl Game {
     }
 
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
-        self.now = now;
+        let before = std::mem::replace(&mut self.now, now);
+        if !matches!(self.stage, Stage::World(_) | Stage::Load(_)) {
+            self.sync_volumes();
+        }
         let faded = self.fade_tick();
         let fading = self.fade.is_some();
         match &mut self.stage {
@@ -594,25 +667,34 @@ impl Game {
                     return Ok(fading);
                 }
                 let death = *death;
-                let Stage::Ending { world, .. } =
+                let Stage::Ending { mut world, .. } =
                     std::mem::replace(&mut self.stage, Stage::Menu { since: now })
                 else {
                     unreachable!()
                 };
                 self.leave_world(&world);
+                // §3.5 step 3's D(1, 4), from the game's generator before
+                // the reset discards it.
+                let draw = death.then(|| {
+                    vault_core::RandomSource::range(&mut world.host.world.rng, 1, 4).unwrap_or(1)
+                });
                 drop(world);
-                if death {
-                    self.enter_death();
+                if let Some(draw) = draw {
+                    self.enter_death(draw);
                 } else {
                     self.enter_menu();
                 }
                 Ok(true)
             }
+            // P-02: the splash is still; only its first poll and the start
+            // of the movies redraw.
             Stage::Splash { since, .. } => {
                 if *since == 0 {
                     *since = now.max(1);
                 } else if now >= *since + 1000 {
                     self.start_movies();
+                } else {
+                    return Ok(faded || fading);
                 }
                 Ok(true)
             }
@@ -640,19 +722,54 @@ impl Game {
                 }
                 Ok(changed)
             }
-            // §3.5: after the narration (or its 3000 ms stand-in and the
-            // 500 ms tail), a fade to black; then the menu fades in.
-            Stage::Death { since, leaving, .. } => {
+            // §3.5: after the fade from white, the narration plays; the
+            // scene waits for input or the end of the speech (3000 ms when
+            // it did not start), then 500 ms more unless input ended it,
+            // then fades to black; then the menu fades in.
+            Stage::Death {
+                since,
+                leaving,
+                draw,
+                narration,
+                input,
+                tail,
+                ..
+            } => {
                 if *leaving {
                     if faded {
                         self.enter_menu();
                     }
                     return Ok(true);
                 }
-                if now >= *since + flow::DEATH_SILENT_MS + flow::DEATH_TAIL_MS {
+                if fading {
+                    return Ok(true);
+                }
+                let leave = match *narration {
+                    None => {
+                        *since = now;
+                        let path = flow::death_narration(*draw);
+                        let gain = volume_gain(self.preferences.speech_volume);
+                        let started = !*input
+                            && self.sounds.load(&*self.vfs, &path).is_some_and(|samples| {
+                                self.audio.play(samples, gain, Channel::Speech, false)
+                            });
+                        *narration = Some(started);
+                        *input
+                    }
+                    Some(speaking) => {
+                        if tail.is_none()
+                            && (speaking && !self.audio.playing(Channel::Speech)
+                                || !speaking && now >= *since + flow::DEATH_SILENT_MS)
+                        {
+                            *tail = Some(now);
+                        }
+                        tail.is_some_and(|tail| now >= tail + flow::DEATH_TAIL_MS)
+                    }
+                };
+                if leave {
                     self.leave_death();
                 }
-                Ok(faded || fading)
+                Ok(faded || leave)
             }
             Stage::Slides {
                 since,
@@ -662,14 +779,20 @@ impl Game {
             } => {
                 // A still slide: the pauses and the silent timeout; a desert
                 // pan: one column per step across D = 640.
-                let length = match slides[*index].pan {
-                    Some(_) => endgame::pan_step_ms(None) * endgame::PAN_DISTANCE as u64,
-                    None => endgame::SLIDE_SILENT_MS,
+                let pan = slides[*index].pan.is_some();
+                let length = if pan {
+                    endgame::pan_step_ms(None) * endgame::PAN_DISTANCE as u64
+                } else {
+                    endgame::SLIDE_SILENT_MS
                 } + 2 * endgame::SLIDE_PAUSE_MS;
+                // P-02: a slide redraws when it changes or its pan moves.
+                let step = |time: u64| time.saturating_sub(*since) / endgame::PAN_STEP_MS;
+                let moved = pan && (before < *since || step(before) != step(now));
                 if now >= *since + length {
                     self.next_slide();
+                    return Ok(true);
                 }
-                Ok(true)
+                Ok(moved || faded || fading)
             }
             Stage::World(world) => {
                 let changed = world.tick(now)?;
@@ -692,8 +815,48 @@ impl Game {
                 }
                 Ok(changed)
             }
-            Stage::Selection | Stage::Editor(_) => Ok(self.held_moved()),
+            Stage::Editor(stage) => {
+                let stepped = stage.tick(now, self.pointer);
+                self.editor_sounds();
+                Ok(stepped || self.held_moved())
+            }
+            Stage::Selection => Ok(self.held_moved()),
         }
+    }
+    /// The editor's interface sounds.
+    fn editor_sounds(&mut self) {
+        let Stage::Editor(stage) = &mut self.stage else {
+            return;
+        };
+        for sound in std::mem::take(&mut stage.sounds) {
+            self.audio_cue(sound);
+        }
+    }
+    /// An editor result: the new game, or back to the selection screen.
+    fn editor_exit(&mut self, exit: EditorExit) -> bool {
+        self.editor_sounds();
+        match exit {
+            EditorExit::Stay(handled) => handled,
+            EditorExit::Done(sheet) => {
+                self.start_game(*sheet);
+                true
+            }
+            EditorExit::Cancel => {
+                self.sheet = self.premade(self.selection);
+                self.stage = Stage::Selection;
+                true
+            }
+        }
+    }
+    /// F12 (SPEC-014 §3.9): the screen as shown, saved by the platform.
+    fn screenshot(&mut self) {
+        let Ok(image) = self.image() else {
+            return;
+        };
+        let palette = self
+            .display_override()
+            .unwrap_or_else(|| self.palette().display_rgba8(self.brightness()));
+        crate::interface::save_screenshot(&self.save_root, &image, &palette);
     }
     /// The held button, while the pointer is over it.
     fn held_button(&self) -> Option<Rect> {
@@ -777,8 +940,8 @@ impl Game {
         }
     }
     /// §3.5 the death scene: `death.frm` over the white screen the session's
-    /// end left, fading from white to `death.pal`.
-    fn enter_death(&mut self) {
+    /// end left, fading from white to `death.pal`; `draw` is D(1, 4).
+    fn enter_death(&mut self, draw: i32) {
         let palette = self
             .assets
             .palette(flow::DEATH_PALETTE.as_bytes())
@@ -789,17 +952,37 @@ impl Game {
             since: self.now,
             palette,
             leaving: false,
+            draw,
+            narration: None,
+            input: false,
+            tail: None,
         };
         self.fade_to(target);
     }
-    /// Step 6: fade to black; the game palette is then loaded without a
-    /// fade, so the screen stays black until the menu fades in.
+    /// Steps 5-6: stop the speech and fade to black; the game palette is
+    /// then loaded without a fade, so the screen stays black until the menu
+    /// fades in.
     fn leave_death(&mut self) {
         if let Stage::Death { leaving, .. } = &mut self.stage
             && !*leaving
         {
             *leaving = true;
+            self.audio.stop(Channel::Speech);
             self.fade_to(flow::BLACK);
+        }
+    }
+    /// §3.5 step 4: input ends the narration's wait, without the 500 ms
+    /// tail; input during the fade from white is seen when the wait
+    /// begins.
+    fn death_input(&mut self) {
+        match &mut self.stage {
+            Stage::Death {
+                narration: None,
+                input,
+                ..
+            } => *input = true,
+            Stage::Death { .. } => self.leave_death(),
+            _ => {}
         }
     }
     /// Show slide `index`, or return to the world after the last (§3.30
@@ -835,6 +1018,18 @@ impl Game {
     }
 
     pub fn image(&mut self) -> AppResult<IndexedImage> {
+        if matches!(self.stage, Stage::Selection)
+            && self
+                .bio
+                .as_ref()
+                .is_none_or(|(selection, _)| *selection != self.selection)
+        {
+            let bio = self
+                .vfs
+                .read_bounded(flow::PREMADES[self.selection].bio, MAX_ASSET_BYTES)
+                .unwrap_or_default();
+            self.bio = Some((self.selection, bio));
+        }
         let held = self.held_button();
         self.held_shown = held.is_some();
         let art = |rect: Rect, (up, down): (&'static str, &'static str)| {
@@ -1033,8 +1228,8 @@ impl Game {
                 200,
             );
         }
-        if let Ok(bio) = self.vfs.read_bounded(premade.bio, MAX_ASSET_BYTES) {
-            for (index, line) in flow::bio_lines(&bio).iter().enumerate() {
+        if let Some((_, bio)) = &self.bio {
+            for (index, line) in flow::bio_lines(bio).iter().enumerate() {
                 if let Some(y) = flow::bio_line_y(index) {
                     painter.text(
                         image,
@@ -1118,23 +1313,16 @@ impl Game {
                     None => false,
                 }
             }
+            Stage::Editor(_) if key == KeyCode::F12 => {
+                self.screenshot();
+                true
+            }
             Stage::Editor(stage) => {
-                let handled = editor_key(stage, key, self.modifiers[0]);
-                match handled {
-                    EditorExit::Stay(handled) => handled,
-                    EditorExit::Done(sheet) => {
-                        self.start_game(*sheet);
-                        true
-                    }
-                    EditorExit::Cancel => {
-                        self.sheet = self.premade(self.selection);
-                        self.stage = Stage::Selection;
-                        true
-                    }
-                }
+                let exit = stage.key(key, self.modifiers[0]);
+                self.editor_exit(exit)
             }
             Stage::Death { .. } => {
-                self.leave_death();
+                self.death_input();
                 true
             }
             Stage::Ending { .. } => true,
@@ -1145,6 +1333,16 @@ impl Game {
         }
     }
     pub fn click(&mut self, point: [i32; 2], right: bool) -> bool {
+        // G-31: the menu, selection and editor buttons take the left button
+        // only.
+        if right
+            && matches!(
+                self.stage,
+                Stage::Menu { .. } | Stage::Selection | Stage::Editor(_)
+            )
+        {
+            return false;
+        }
         match &mut self.stage {
             Stage::World(world) | Stage::Load(world) => world.click(point, right),
             Stage::Movie { player, .. } => {
@@ -1153,53 +1351,54 @@ impl Game {
             }
             // §3.4: a press plays `nmselec0`; the release over the button
             // selects it.
+            // §3.3 only the nonzero pixels of the up image are clickable.
             Stage::Menu { .. } => {
-                if let Some(button) = flow::MENU_BUTTONS
-                    .into_iter()
-                    .find(|b| b.rect().contains(point))
-                {
+                let painter = Painter {
+                    assets: &self.assets,
+                    palette: &self.palette,
+                };
+                let mask = painter.art(flow::MENU_BUTTON_ART.0);
+                let opaque = |rect: Rect| {
+                    rect.contains(point)
+                        && mask
+                            .as_ref()
+                            .and_then(|art| art.frame(0, 0))
+                            .is_none_or(|frame| {
+                                let (w, h) = (i32::from(frame.width), i32::from(frame.height));
+                                let (x, y) = (point[0] - rect.x, point[1] - rect.y);
+                                (0..w).contains(&x)
+                                    && (0..h).contains(&y)
+                                    && frame.pixels()[(y * w + x) as usize] != 0
+                            })
+                };
+                if let Some(button) = flow::MENU_BUTTONS.into_iter().find(|b| opaque(b.rect())) {
                     self.held = Some(button.rect());
                     self.menu_poll(MenuInput::Press(button));
                 }
                 true
             }
+            // §3.7 the red buttons (`ib1p1xx1` / `ib1lu1x1`) and the arrows
+            // (`ib2p1xx1` / `ib2lu1x1`) press here and act on the release.
             Stage::Selection => {
-                let actions = [
-                    SelectionAction::Take,
-                    SelectionAction::Modify,
-                    SelectionAction::Create,
-                    SelectionAction::Back,
-                ];
-                if let Some(index) = flow::SELECTION_BUTTONS
-                    .iter()
-                    .position(|origin| red_button(*origin).contains(point))
-                {
-                    self.held = Some(red_button(flow::SELECTION_BUTTONS[index]));
-                    self.selection_action(actions[index]);
-                } else if flow::SELECTION_PREVIOUS.contains(point) {
-                    self.held = Some(flow::SELECTION_PREVIOUS);
-                    self.selection_action(SelectionAction::Previous);
-                } else if flow::SELECTION_NEXT.contains(point) {
-                    self.held = Some(flow::SELECTION_NEXT);
-                    self.selection_action(SelectionAction::Next);
+                if let Some((rect, _)) = selection_button(point) {
+                    let sound = if rect.w == 15 {
+                        vault_core::ui::BUTTON_PRESS
+                    } else {
+                        "ib2p1xx1"
+                    };
+                    self.held = Some(rect);
+                    self.audio_cue(sound);
                 }
                 true
             }
             Stage::Editor(stage) => {
-                // A press that closes the refusal box presses nothing.
-                self.held = editor_button(point).filter(|_| stage.refusal.is_none());
-                match editor_click(stage, point) {
-                    EditorExit::Stay(handled) => handled,
-                    EditorExit::Done(sheet) => {
-                        self.start_game(*sheet);
-                        true
-                    }
-                    EditorExit::Cancel => {
-                        self.sheet = self.premade(self.selection);
-                        self.stage = Stage::Selection;
-                        true
-                    }
-                }
+                let painter = Painter {
+                    assets: &self.assets,
+                    palette: &self.palette,
+                };
+                self.held = stage.press(&painter, point, self.now);
+                self.editor_sounds();
+                true
             }
             Stage::Credits { scroll, .. } => {
                 scroll.input(CreditInput::Other, self.preferences.violence_level);
@@ -1214,6 +1413,33 @@ impl Game {
     }
     /// The world (or the menu's load screen) is in front: it draws its own
     /// cursor.
+    /// Where keys land now (SPEC-014 §3.29 engine key repeat).
+    pub fn key_layer(&self) -> crate::preview::KeyLayer {
+        let stage = match &self.stage {
+            Stage::Splash { .. } => 0,
+            Stage::Movie { .. } => 1,
+            Stage::Menu { .. } => 2,
+            Stage::Credits { .. } => 3,
+            Stage::Selection => 4,
+            Stage::Editor(_) => 5,
+            Stage::World(_) => 6,
+            Stage::Load(_) => 7,
+            Stage::Death { .. } => 8,
+            Stage::Ending { .. } => 9,
+            Stage::Slides { .. } => 10,
+        };
+        crate::preview::KeyLayer {
+            stage,
+            field: matches!(
+                &self.stage,
+                Stage::Editor(editor) if matches!(editor.dialog, Some(EditorDialog::Name(_)))
+            ),
+            world: match &self.stage {
+                Stage::World(world) | Stage::Load(world) => Some(world.key_layer()),
+                _ => None,
+            },
+        }
+    }
     pub fn world_shown(&self) -> bool {
         matches!(self.stage, Stage::World(_) | Stage::Load(_))
     }
@@ -1239,7 +1465,54 @@ impl Game {
                 }
                 held.is_some()
             }
+            Stage::Selection => {
+                let Some(rect) = held else {
+                    return false;
+                };
+                let red = rect.w == 15;
+                self.audio_cue(if red {
+                    vault_core::ui::BUTTON_RELEASE
+                } else {
+                    "ib2lu1x1"
+                });
+                if let Some(action) = over
+                    .and_then(|rect| selection_button([rect.x, rect.y]).map(|(_, action)| action))
+                {
+                    // The arrows act as the Left and Right keys, which play
+                    // `ib2p1xx1`.
+                    if !red {
+                        self.audio_cue("ib2p1xx1");
+                    }
+                    self.selection_action(action);
+                }
+                true
+            }
+            Stage::Editor(stage) if !right => {
+                let exit = stage.release(over.is_some());
+                self.editor_exit(exit);
+                true
+            }
             _ => held.is_some(),
+        }
+    }
+    /// SPEC-012 §3.12: during a movie every mouse button counts, wherever
+    /// it is pressed (the letterbox around the frame too). Returns whether
+    /// a movie took the button.
+    pub fn movie_button(&mut self, pressed: bool) -> bool {
+        match &mut self.stage {
+            Stage::Movie { player, .. } => {
+                if pressed {
+                    player.press();
+                } else {
+                    player.release();
+                    if player.finished() {
+                        self.movie_done();
+                    }
+                }
+                true
+            }
+            Stage::World(world) | Stage::Load(world) => world.movie_button(pressed),
+            _ => false,
         }
     }
     /// The pointer left the window.
@@ -1262,334 +1535,137 @@ impl Game {
             world.set_modifiers(modifiers);
         }
     }
+    /// A world's pending system-pointer warp (SPEC-014 §3.28).
+    pub fn take_warp(&mut self) -> Option<[i32; 2]> {
+        self.world()?.take_warp()
+    }
 }
-
-enum EditorExit {
-    Stay(bool),
-    Done(Box<CharacterSheet>),
-    Cancel,
-}
-
-/// SPEC-014 §3.8 element positions used for clicks.
-const EDITOR_DONE: Rect = Rect::new(455, 454, 15, 16);
-const EDITOR_CANCEL: Rect = Rect::new(552, 454, 15, 16);
 
 /// A red button at `origin`.
 fn red_button(origin: [i32; 2]) -> Rect {
     Rect::new(origin[0], origin[1], 15, 16)
 }
-/// The SPECIAL plus and minus buttons of row `y`.
-fn special_buttons(y: i32) -> [Rect; 2] {
-    [Rect::new(149, y, 16, 12), Rect::new(149, y + 11, 17, 12)]
-}
-/// The editor button with down art under `point`: Done, Cancel, or a
-/// SPECIAL plus or minus.
-fn editor_button(point: [i32; 2]) -> Option<Rect> {
-    [EDITOR_DONE, EDITOR_CANCEL]
-        .into_iter()
-        .chain(editor::SPECIAL_Y.iter().flat_map(|y| special_buttons(*y)))
-        .find(|rect| rect.contains(point))
+/// §3.7 the selection button under `point` and the key it acts as: Take,
+/// Modify, Create and Back (`t`, `m`, `c`, Esc), then the arrows.
+fn selection_button(point: [i32; 2]) -> Option<(Rect, SelectionAction)> {
+    let actions = [
+        SelectionAction::Take,
+        SelectionAction::Modify,
+        SelectionAction::Create,
+        SelectionAction::Back,
+    ];
+    flow::SELECTION_BUTTONS
+        .iter()
+        .map(|origin| red_button(*origin))
+        .zip(actions)
+        .chain([
+            (flow::SELECTION_PREVIOUS, SelectionAction::Previous),
+            (flow::SELECTION_NEXT, SelectionAction::Next),
+        ])
+        .find(|(rect, _)| rect.contains(point))
 }
 
-fn editor_done(stage: &mut EditorStage) -> EditorExit {
-    match stage.editor.done() {
-        Ok(sheet) => EditorExit::Done(Box::new(sheet)),
-        Err(refusal) => {
-            stage.refusal = Some(refusal);
-            EditorExit::Stay(true)
-        }
-    }
-}
-fn editor_key(stage: &mut EditorStage, key: KeyCode, shift: bool) -> EditorExit {
-    if let Some(field) = &mut stage.name {
-        match key {
-            KeyCode::Enter | KeyCode::NumpadEnter => {
-                if let Some(name) = field.accept() {
-                    stage.editor.sheet.name = name;
-                }
-                stage.name = None;
-            }
-            KeyCode::Escape => stage.name = None,
-            KeyCode::Backspace | KeyCode::Delete => field.backspace(),
-            KeyCode::Space => field.key(b' '),
-            _ => {
-                let Some(c) = letter(key) else {
-                    return EditorExit::Stay(false);
-                };
-                field.key(if shift { c.to_ascii_uppercase() } else { c } as u8);
-            }
-        }
-        return EditorExit::Stay(true);
-    }
-    if stage.refusal.take().is_some() {
-        return EditorExit::Stay(true);
-    }
-    match key {
-        KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::KeyD => editor_done(stage),
-        KeyCode::Escape => EditorExit::Cancel,
-        KeyCode::KeyN => {
-            stage.name = Some(NameField::open(&stage.editor.sheet.name));
-            EditorExit::Stay(true)
-        }
-        KeyCode::KeyA | KeyCode::Equal | KeyCode::Minus => {
-            let up = key != KeyCode::Minus;
-            stage.editor.sheet.base[33] = editor::age_step(stage.editor.sheet.base[33], up);
-            EditorExit::Stay(true)
-        }
-        KeyCode::KeyS => {
-            stage.editor.sheet.base[34] ^= 1;
-            EditorExit::Stay(true)
-        }
-        _ => EditorExit::Stay(false),
-    }
-}
-fn editor_click(stage: &mut EditorStage, point: [i32; 2]) -> EditorExit {
-    if stage.refusal.take().is_some() {
-        return EditorExit::Stay(true);
-    }
-    if EDITOR_DONE.contains(point) {
-        return editor_done(stage);
-    }
-    if EDITOR_CANCEL.contains(point) {
-        return EditorExit::Cancel;
-    }
-    let editor = &mut stage.editor;
-    for (stat, y) in editor::SPECIAL_Y.iter().enumerate() {
-        let [plus, minus] = special_buttons(*y);
-        if plus.contains(point) {
-            editor.increment(stat);
-            return EditorExit::Stay(true);
-        }
-        if minus.contains(point) {
-            editor.decrement(stat);
-            return EditorExit::Stay(true);
-        }
-    }
-    for k in 0..18 {
-        if Rect::new(347, 26 + 11 * k, 17, 11).contains(point) {
-            let _ = editor.toggle_tag(k);
-            return EditorExit::Stay(true);
-        }
-    }
-    for k in 0..16 {
-        let (x, row) = if k < 8 { (23, k) } else { (298, k - 8) };
-        if Rect::new(x, 352 + 13 * row, 17, 11).contains(point) {
-            let _ = editor.toggle_trait(k);
-            return EditorExit::Stay(true);
-        }
-    }
-    if let Some(line) = editor::info_hit(point) {
-        editor.selected = line;
-    }
-    EditorExit::Stay(true)
-}
-fn draw_editor(
-    painter: &Painter,
-    image: &mut IndexedImage,
-    stage: &EditorStage,
-    held: Option<Rect>,
-) {
-    let art = |rect: Rect, up, down| if held == Some(rect) { down } else { up };
-    let editor = &stage.editor;
-    let context = StatContext::default();
-    painter.blit_opaque(image, editor::BACKGROUND, 0, [0, 0]);
-    painter.blit(image, "nameoff.frm", 0, [9, 0]);
-    painter.blit(image, "ageoff.frm", 0, [154, 0]);
-    painter.blit(image, "sexoff.frm", 0, [235, 0]);
-    let name = editor::caption_name(&editor.sheet.name, |text| painter.width(103, text));
-    painter.text(
-        image,
-        103,
-        ColorKey::LABEL,
-        &name,
-        [9 + 75 - painter.width(103, &name) / 2, 6],
-        145,
-    );
-    let mut age = painter.message("editor.msg", 104);
-    age.extend(format!(" {}", editor.sheet.stat(33, context)).bytes());
-    painter.text(
-        image,
-        103,
-        ColorKey::LABEL,
-        &age,
-        [154 + 41 - painter.width(103, &age) / 2, 6],
-        81,
-    );
-    let sex = painter.message("editor.msg", 107 + editor.sheet.stat(34, context));
-    painter.text(
-        image,
-        103,
-        ColorKey::LABEL,
-        &sex,
-        [235 + 40 - painter.width(103, &sex) / 2, 6],
-        80,
-    );
-    for (stat, y) in editor::SPECIAL_Y.iter().enumerate() {
-        let shown = editor.shown(stat);
-        let red = shown > 10;
-        for (cell, x) in editor::big_number_cells(shown, shown).iter().zip([58, 72]) {
-            painter.big_digit(image, *cell, [x, *y], red);
-        }
-        let word = painter.message("editor.msg", 199 + shown.clamp(1, 10));
-        let key = if editor.selected == InfoLine::Special(stat) {
-            ColorKey::SELECTED
-        } else {
-            ColorKey::GREEN
-        };
-        painter.text(image, 101, key, &word, [103, y + 8], 50);
-        let [plus, minus] = special_buttons(*y);
-        painter.blit(image, art(plus, "splsoff.frm", "splson.frm"), 0, [149, *y]);
-        painter.blit(
-            image,
-            art(minus, "snegoff.frm", "snegon.frm"),
-            0,
-            [149, y + 11],
-        );
-    }
-    // Conditions: Hit Points with "max/max", then the (inactive at
-    // creation) condition lines; the derived list beneath.
-    let selected = |line: InfoLine, active: bool| match (active, editor.selected == line) {
-        (true, false) => ColorKey::GREEN,
-        (true, true) => ColorKey::SELECTED,
-        (false, false) => ColorKey::DARK_GREEN,
-        (false, true) => ColorKey::DARK_OLIVE,
-    };
-    for (k, id) in editor::CONDITIONS.iter().enumerate() {
-        let mut text = painter.message("editor.msg", *id);
-        if k == 0 {
-            let max = editor.sheet.stat(7, context);
-            text.extend(format!(" {max}/{max}").bytes());
-        }
-        let key = selected(InfoLine::Condition(k), k == 0);
-        painter.text(image, 101, key, &text, [194, 46 + 13 * k as i32], 120);
-    }
-    for (k, (id, stat, percent)) in editor::DERIVED.iter().enumerate() {
-        let key = selected(InfoLine::Derived(k), true);
-        let y = 179 + 13 * k as i32;
-        let label = painter.message("editor.msg", *id);
-        painter.text(image, 101, key, &label, [194, y], 94);
-        let value = editor.sheet.stat(*stat, context);
-        let value = if *percent {
-            format!("{value}%")
-        } else {
-            value.to_string()
-        };
-        painter.text(image, 101, key, value.as_bytes(), [288, y], 30);
-    }
-    // The info card's title and rules.
-    let (file, id) = match editor.selected {
-        InfoLine::Special(i) => ("stat.msg", 100 + i as i32),
-        InfoLine::Skill(k) => ("skill.msg", 100 + k as i32),
-        InfoLine::Trait(k) => ("trait.msg", 100 + k as i32),
-        InfoLine::Condition(k) => ("editor.msg", editor::CONDITIONS[k.min(7)]),
-        InfoLine::Derived(k) => ("editor.msg", editor::DERIVED[k.min(9)].0),
-        InfoLine::CharacterPoints => ("editor.msg", 116),
-        InfoLine::OptionalTraits => ("editor.msg", 139),
-        InfoLine::SkillsCard => ("editor.msg", 117),
-        InfoLine::TagSkillsCard => ("editor.msg", 138),
-    };
-    let title = painter.message(file, id);
-    painter.text(image, 102, ColorKey::BLACK, &title, [348, 272], 266);
-    image.fill_rect([348, 300, 266, 2], painter.color(ColorKey::BLACK));
-    let points = painter.message("editor.msg", 116);
-    painter.text(image, 103, ColorKey::LABEL, &points, [14, 286], 120);
-    for (cell, x) in editor::big_number_cells(editor.character_points, editor.character_points)
-        .iter()
-        .zip([126, 140])
-    {
-        painter.big_digit(image, *cell, [x, 282], false);
-    }
-    let caption = painter.message("editor.msg", 139);
-    painter.text(image, 103, ColorKey::LABEL, &caption, [52, 326], 160);
-    for k in 0..16 {
-        let (x, row) = if k < 8 { (47, k) } else { (199, k - 8) };
-        let picked = editor.sheet.traits.contains(&k);
-        let key = row_key(picked, editor.selected == InfoLine::Trait(k as usize));
-        let text = painter.message("trait.msg", 100 + k);
-        painter.text(
-            image,
-            101,
-            key,
-            &text,
-            [x, editor::trait_label_y(row as usize)],
-            120,
-        );
-    }
-    let skills = painter.message("editor.msg", 117);
-    painter.text(image, 103, ColorKey::LABEL, &skills, [380, 5], 200);
-    for k in 0..18 {
-        let tagged = editor.sheet.tags.contains(&(k as i32));
-        let key = row_key(tagged, editor.selected == InfoLine::Skill(k));
-        let name = painter.message("skill.msg", 100 + k as i32);
-        let y = editor::skill_y(k);
-        painter.text(image, 101, key, &name, [380, y], 190);
-        let value = format!("{}%", editor.sheet.skill(k, context)).into_bytes();
-        painter.text(image, 101, key, &value, [573, y], 50);
-        painter.blit(
-            image,
-            if tagged {
-                "tgsklon.frm"
-            } else {
-                "tgskloff.frm"
-            },
-            0,
-            [347, 26 + 11 * k as i32],
-        );
-    }
-    let tags = painter.message("editor.msg", 138);
-    painter.text(image, 103, ColorKey::LABEL, &tags, [422, 233], 100);
-    for (cell, x) in editor::big_number_cells(editor.tag_picks, editor.tag_picks)
-        .iter()
-        .zip([522, 536])
-    {
-        painter.big_digit(image, *cell, [x, 228], false);
-    }
-    for ((button, caption), id) in editor::OPTIONS_BUTTONS
-        .iter()
-        .zip([[363, 454], [475, 454], [571, 454]])
-        .zip([101, 100, 102])
-    {
-        let up = art(red_button(*button), "lilredup.frm", "lilreddn.frm");
-        painter.blit(image, up, 0, *button);
-        let text = painter.message("editor.msg", id);
-        painter.text(image, 103, ColorKey::LABEL, &text, caption, 80);
-    }
-    if let Some(field) = &stage.name {
-        painter.blit_opaque(image, "charwin.frm", 0, [17, 0]);
-        painter.blit_opaque(image, "namebox.frm", 0, [17 + 13, 13]);
-        painter.text(image, 101, ColorKey::GREEN, &field.text, [17 + 23, 19], 100);
-    }
-    if let Some(refusal) = stage.refusal {
-        let [ox, oy] = editor::DIALOG_ORIGIN;
-        painter.blit_opaque(image, flow::DialogSize::Large.art().0, 0, [ox, oy]);
-        let title = painter.message("editor.msg", refusal.title);
-        let body = painter.message("editor.msg", refusal.body);
-        painter.centered(
-            image,
-            101,
-            editor::DIALOG_COLOR,
-            &title,
-            [ox, oy + flow::dialog_title_y(1)],
-            302,
-        );
-        painter.centered(
-            image,
-            101,
-            editor::DIALOG_COLOR,
-            &body,
-            [ox, oy + flow::dialog_title_y(1) + 10],
-            302,
-        );
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{audio::sound_fixture, map_preview::state_fixture};
+    use vault_formats::LocalDirProvider;
 
-/// SPEC-014 §3.8 skill and trait rows: untagged 992 (selected 32747),
-/// tagged or picked 21140 (selected 32767).
-fn row_key(marked: bool, selected: bool) -> ColorKey {
-    match (marked, selected) {
-        (false, false) => ColorKey::GREEN,
-        (false, true) => ColorKey::SELECTED,
-        (true, false) => ColorKey::GREY,
-        (true, true) => ColorKey::WHITE,
+    #[test]
+    fn menu_music_volumes_and_the_death_narration() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        state_fixture::write_corpus(root);
+        let map = std::fs::read(root.join("maps/synthetic.map")).unwrap();
+        std::fs::write(root.join("maps/v13ent.map"), &map).unwrap();
+        std::fs::create_dir_all(root.join("sound/music")).unwrap();
+        std::fs::create_dir_all(root.join("sound/speech/narrator")).unwrap();
+        std::fs::write(
+            root.join("sound/music/07desert.acm"),
+            sound_fixture::acm('B'),
+        )
+        .unwrap();
+        for draw in 3..=6 {
+            std::fs::write(
+                root.join(format!("sound/speech/narrator/nar_{draw}.acm")),
+                sound_fixture::acm('H'),
+            )
+            .unwrap();
+        }
+        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(root).unwrap());
+        let mut game = Game::new(vfs, "english", 1, root.join("saves"), None).unwrap();
+        // No start movies: the menu is up before the output is attached,
+        // and its music starts once it is (SPEC-014 §3.4).
+        let (audio, mixer) = AudioHandle::detached();
+        game.set_audio(audio.clone());
+        let menu = MusicRequest {
+            path: flow::MENU_MUSIC.into(),
+            looping: true,
+        };
+        assert_eq!(audio.last_music(), Some(menu.clone()));
+        audio.wait_music();
+        assert!(mixer.lock().unwrap().playing(Channel::Music));
+        // The preference volumes reach the mixer (SPEC-014 §3.18).
+        game.tick(16).unwrap();
+        assert_eq!(mixer.lock().unwrap().master(), volume_gain(22281));
+        // A new game, then a knockout: white, the death scene's fade from
+        // white, then the narration nar_<D(1, 4) + 2> as speech.
+        assert!(game.step(KeyCode::KeyN));
+        assert!(game.step(KeyCode::KeyT));
+        game.tick(32).unwrap();
+        let world = game.world().unwrap();
+        let player = world.host.world.player;
+        world
+            .host
+            .world
+            .critter_state_mut(player)
+            .unwrap()
+            .results
+            .0 |= 0x01;
+        game.tick(48).unwrap();
+        game.tick(48 + 700).unwrap();
+        assert!(matches!(game.stage, Stage::Death { .. }));
+        // The narration waits for the fade from white (SPEC-014 §3.5).
+        game.tick(48 + 900).unwrap();
+        assert!(!mixer.lock().unwrap().playing(Channel::Speech));
+        game.tick(48 + 1500).unwrap();
+        let Stage::Death {
+            narration, draw, ..
+        } = &game.stage
+        else {
+            panic!("the death scene");
+        };
+        assert_eq!(*narration, Some(true));
+        assert!((1..=4).contains(draw));
+        assert!(mixer.lock().unwrap().playing(Channel::Speech));
+        // A key ends the wait at once: the speech stops and the scene
+        // fades to black, then the menu (and its music) return.
+        assert!(game.step(KeyCode::Space));
+        assert!(!mixer.lock().unwrap().playing(Channel::Speech));
+        assert!(matches!(game.stage, Stage::Death { leaving: true, .. }));
+        game.tick(48 + 2300).unwrap();
+        assert_eq!(game.title(), "Vault — main menu");
+        assert_eq!(audio.last_music(), Some(menu));
+    }
+
+    #[test]
+    fn a_still_splash_and_slides_do_not_recompose_every_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+        let mut game =
+            Game::new(vfs.clone(), "english", 1, dir.path().join("saves"), None).unwrap();
+        game.stage = Stage::Splash {
+            image: IndexedImage::new(640, 480).unwrap(),
+            palette: black(),
+            since: 0,
+        };
+        assert!(game.tick(16).unwrap(), "the first poll shows it");
+        assert!(!game.tick(32).unwrap());
+        assert!(!game.tick(500).unwrap());
+        // The selection screen reads its bio once per premade.
+        game.stage = Stage::Selection;
+        game.image().unwrap();
+        assert_eq!(game.bio.as_ref().map(|(index, _)| *index), Some(0));
     }
 }

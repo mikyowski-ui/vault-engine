@@ -14,6 +14,11 @@ pub enum OpcodeClass {
     Library,
     /// `0x80A1`-`0x8155`, game-specific extensions.
     Game,
+    /// A word outside every registered range. `decode` never produces one
+    /// (it reports `DecodeError::Invalid`); only an `Instruction` built by
+    /// hand can carry such a word, and it is classified here instead of
+    /// panicking.
+    Invalid,
 }
 
 /// One decoded instruction.
@@ -136,7 +141,7 @@ impl Instruction {
         self.address + self.length()
     }
     pub fn class(&self) -> OpcodeClass {
-        classify(self.word).expect("decoded instructions are classified")
+        classify(self.word).unwrap_or(OpcodeClass::Invalid)
     }
     /// A short mnemonic for core and push words; extensions, whose catalogs
     /// SPEC-004 defers, are `lib`/`ext` with their word.
@@ -154,7 +159,7 @@ impl Instruction {
             ),
             (_, Some(payload)) => format!("{mnemonic} {payload:#x}"),
             _ => match self.class() {
-                OpcodeClass::Library | OpcodeClass::Game => {
+                OpcodeClass::Library | OpcodeClass::Game | OpcodeClass::Invalid => {
                     format!("{mnemonic} {:#06x}", self.word)
                 }
                 _ => mnemonic.to_string(),

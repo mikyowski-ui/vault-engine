@@ -4,6 +4,7 @@ pub mod ai;
 pub mod assets;
 pub mod barter;
 pub mod choreography;
+pub mod clicks;
 pub mod combat;
 pub mod combat_state;
 pub mod critical;
@@ -37,8 +38,8 @@ pub mod persistence;
 pub mod progression;
 pub mod queue;
 pub mod rng;
+pub mod roof;
 pub mod routing;
-pub mod save;
 pub mod sequence;
 pub mod skills;
 pub mod stats;
@@ -92,6 +93,8 @@ mod barter_tests;
 #[cfg(test)]
 mod choreography_tests;
 #[cfg(test)]
+mod clicks_tests;
+#[cfg(test)]
 mod combat_tests;
 #[cfg(test)]
 mod drugs_tests;
@@ -122,6 +125,8 @@ mod host_sound_tests;
 #[cfg(test)]
 mod items_tests;
 #[cfg(test)]
+mod lighting_tests;
+#[cfg(test)]
 mod motion_tests;
 #[cfg(test)]
 mod movie_tests;
@@ -131,6 +136,8 @@ mod persistence_tests;
 mod player_art_tests;
 #[cfg(test)]
 mod progression_tests;
+#[cfg(test)]
+mod roof_tests;
 #[cfg(test)]
 mod skills_tests;
 #[cfg(test)]

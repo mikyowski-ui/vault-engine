@@ -1,6 +1,6 @@
 use crate::{
     AppResult,
-    audio::{AudioHandle, Channel},
+    audio::{AudioHandle, Channel, MusicRequest, Volumes, volume_gain},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -13,13 +13,14 @@ use vault_core::{
 };
 use vault_formats::{
     Fid, Font, FrmArchive, HexGrid, MAX_ASSET_BYTES, MapFile, Palette, Vfs, VfsPath, acm,
+    map::MapObjects,
     pro::{BasicFlags, Category},
     sfx,
 };
 use vault_render::{
     IndexedImage, TextStyle,
     dialogue::{self, ChoiceHit},
-    map::{MapArt, MapHover, MapView, render_map},
+    map::{MapArt, MapHover, MapView, render_map_with},
 };
 use winit::keyboard::KeyCode;
 
@@ -43,11 +44,9 @@ mod pipboy;
 mod pointer;
 mod saveload;
 mod skilldex;
+mod timer;
 mod world;
 
-/// The effect volume setting S (SPEC-010 §3.11): the desktop plays effects
-/// at the full setting.
-const EFFECT_SETTING: i32 = 32767;
 /// Fixed interface button cues (small red button press/release).
 const BUTTON_PRESS: &[u8] = b"ib1p1xx1";
 const BUTTON_RELEASE: &[u8] = b"ib1lu1x1";
@@ -100,6 +99,11 @@ impl SoundBank {
             .and_then(|bytes| acm::decode(&bytes).map_err(|error| error.to_string()));
         match decoded {
             Ok(decoded) => {
+                // SPEC-010 §3.7: a stream that fails at a block keeps every
+                // block before it and plays them; the failure is reported.
+                if let Some(failure) = &decoded.failure {
+                    tracing::warn!(path, %failure, blocks = decoded.blocks, "sound truncated at a bad block");
+                }
                 let samples: Arc<[i16]> = decoded.samples.into();
                 if self.samples + samples.len() > MAX_CACHED_SAMPLES {
                     self.cache.clear();
@@ -222,6 +226,39 @@ pub struct MapPreview {
     held: Option<vault_core::ui::Rect>,
     /// The last frame drew the held button down.
     held_shown: bool,
+    /// G-09 the map preview tool's own keys: W opens the world map,
+    /// PageUp/PageDown change the elevation, L/D/U/G/T act on the
+    /// selection. The game's worlds have them only with `--debug`.
+    pub(crate) preview_keys: bool,
+    /// R toggles the roofs: the map preview tool only. In the game no key
+    /// turns roofs off (SPEC-014 §3.36).
+    pub(crate) roof_key: bool,
+    /// SPEC-014 §3.2: where the pointer went (`None`: it left the window)
+    /// while a game fade swallowed input; the move is applied when the
+    /// fade ends, as the first poll after it would see it.
+    fade_pointer: Option<Option<[i32; 2]>>,
+    /// SPEC-014 §3.18 the mixer's volume settings (F2/F3 move the master
+    /// without touching the preference), and the preference volumes they
+    /// were last taken from.
+    volumes: Volumes,
+    volume_source: Option<Volumes>,
+    /// P-02: the world is frozen behind a modal window, so its view is
+    /// rendered once and reused until input or a world change.
+    frozen_view: Option<IndexedImage>,
+    /// `fallout.cfg` `[system] interrupt_walk` (SPEC-014 §3.27, default on):
+    /// a movement click out of combat cancels a busy player's sequence.
+    pub interrupt_walk: bool,
+}
+
+/// Where keys land in the world, for the engine key repeat (SPEC-014
+/// §3.29): the window in front (with the options window's page), and
+/// whether a conversation or a dialog box is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorldLayer {
+    screen: std::mem::Discriminant<Screen>,
+    page: Option<std::mem::Discriminant<options::OptionsScreen>>,
+    dialogue: bool,
+    dialog: bool,
 }
 /// The map's sprites by tile index or object art. Each art file is read and
 /// decoded once, through the world's asset cache, and object art that is
@@ -236,6 +273,10 @@ struct MapSprites {
     missing: BTreeSet<(Category, u32, u8)>,
     /// The map whose tiles are bound (its header name and number).
     tiles: Option<([u8; 16], i32)>,
+    /// A fingerprint of the drawn objects' art when everything they need
+    /// was last bound: an unchanged scene skips the per-object lookups
+    /// (P-02).
+    objects: Option<u64>,
 }
 impl MapArt for MapSprites {
     fn frame(
@@ -260,9 +301,9 @@ impl MapArt for MapSprites {
 }
 impl MapSprites {
     /// The visible objects' art not yet bound or known missing.
-    fn unbound_objects(&self, map: &MapFile) -> AppResult<BTreeSet<(Category, u32, u8)>> {
+    fn unbound_objects(&self, objects: &MapObjects) -> AppResult<BTreeSet<(Category, u32, u8)>> {
         let mut needed = BTreeSet::new();
-        for object in map.objects.elevations.iter().flatten() {
+        for object in objects.elevations.iter().flatten() {
             if !object.flags.contains(BasicFlags::HIDDEN) {
                 let key = (
                     Category::from_pid(object.pid)?,
@@ -276,17 +317,50 @@ impl MapSprites {
         }
         Ok(needed)
     }
-    /// Bind the art `map` draws that is not bound yet: every tile of a map
-    /// not seen before, and each new object art.
-    fn bind(&mut self, assets: &VfsWorldAssets, map: &MapFile) -> AppResult<()> {
-        let mut needed = self.unbound_objects(map)?;
+    /// FNV-1a over each object's prototype, art, orientation and hidden
+    /// flag, the inputs of `unbound_objects`.
+    fn object_fingerprint(objects: &MapObjects) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for object in objects.elevations.iter().flatten() {
+            let hidden = u32::from(object.flags.contains(BasicFlags::HIDDEN));
+            for word in [
+                object.pid,
+                object.art_id,
+                u32::from(object.orientation),
+                hidden,
+            ] {
+                for byte in word.to_le_bytes() {
+                    hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+        hash
+    }
+    /// Bind the art `map` and `objects` draw that is not bound yet: every
+    /// tile of a map not seen before, and each new object art. The objects
+    /// are passed apart from the map so a live world binds its current
+    /// objects without cloning the map file (P-02).
+    fn bind(
+        &mut self,
+        assets: &VfsWorldAssets,
+        map: &MapFile,
+        objects: &MapObjects,
+    ) -> AppResult<()> {
         let identity = (map.header.name, map.header.map_number);
+        let fingerprint = Self::object_fingerprint(objects);
+        if self.tiles == Some(identity) && self.objects == Some(fingerprint) {
+            return Ok(());
+        }
+        let mut needed = self.unbound_objects(objects)?;
         if self.tiles != Some(identity) {
             for tiles in map.tiles.iter().flatten() {
                 for tile in tiles {
+                    // S-19 / SPEC-014 §3.36: every roof but the blank index 1
+                    // is bound whatever its hide bit, so a group hidden when
+                    // the map binds draws once it is restored.
                     for (index, skip) in [
                         (tile.floor(), tile.floor_hidden()),
-                        (tile.roof(), tile.roof_hidden() || tile.roof() == 1),
+                        (tile.roof(), tile.roof() == 1),
                     ] {
                         let key = (Category::Tile, u32::from(index), 0_u8);
                         if !skip && !self.bindings.contains_key(&key) {
@@ -298,6 +372,7 @@ impl MapSprites {
         }
         if needed.is_empty() {
             self.tiles = Some(identity);
+            self.objects = Some(fingerprint);
             return Ok(());
         }
         let catalog = assets.art_catalog()?;
@@ -333,7 +408,8 @@ impl MapSprites {
             }
         }
         self.tiles = Some(identity);
-        for object in map.objects.elevations.iter().flatten() {
+        self.objects = Some(fingerprint);
+        for object in objects.elevations.iter().flatten() {
             let category = Category::from_pid(object.pid)?;
             if let Some(archive) = self
                 .bindings
@@ -394,13 +470,14 @@ impl MapPreview {
             tracing::warn!(%error, "combat AI unavailable");
         }
         host.load_map(path.as_str())?;
-        let map = host.world.render_snapshot();
+        let objects = host.world.render_objects();
         let mut art = MapSprites::default();
-        art.bind(&host.assets, &map)?;
-        let mut view = MapView::new(&map, 640, 380)?;
+        art.bind(&host.assets, &host.world.map, &objects)?;
+        let mut view = MapView::new(&host.world.map, 640, 380)?;
         view.grid = HexGrid::centered(host.world.camera_hex, 640, 380)?;
         view.elevation = host.world.elevation;
-        tracing::info!(map=%path,objects=map.objects.total,"interactive map preview loaded");
+        let count: usize = objects.elevations.iter().map(Vec::len).sum();
+        tracing::info!(map=%path,objects=count,"interactive map preview loaded");
         Ok(Self {
             host,
             palette,
@@ -439,7 +516,45 @@ impl MapPreview {
             figure: (0, 0),
             held: None,
             held_shown: false,
+            preview_keys: true,
+            roof_key: true,
+            fade_pointer: None,
+            volumes: Volumes::default(),
+            volume_source: None,
+            frozen_view: None,
+            interrupt_walk: true,
         })
+    }
+    /// Where keys land now (SPEC-014 §3.29 engine key repeat).
+    pub(crate) fn key_layer(&self) -> WorldLayer {
+        WorldLayer {
+            screen: std::mem::discriminant(&self.screen),
+            page: match &self.screen {
+                Screen::Options(page) => Some(std::mem::discriminant(page)),
+                _ => None,
+            },
+            dialogue: self.host.world.dialogue.open,
+            dialog: self.dialog.is_some(),
+        }
+    }
+    /// SPEC-014 §3.2: a game fade blocks completely, outside a movie (whose
+    /// own palette hides a fade queued behind it).
+    pub(crate) fn fade_blocks(&self) -> bool {
+        self.fades.blocking() && !self.movie_active()
+    }
+    /// Tick past every queued or running fade (tests): a game fade holds
+    /// the world and input until it ends (SPEC-014 §3.2).
+    #[cfg(test)]
+    pub(crate) fn finish_fades(&mut self) {
+        let mut now = self.clock;
+        for _ in 0..64 {
+            if !self.fades.running() {
+                return;
+            }
+            now += FADE_MS + 16;
+            self.tick(now).unwrap();
+        }
+        panic!("the fades did not end");
     }
     /// Whether the save/load screen is open (the main menu's load stage).
     pub fn load_screen_open(&self) -> bool {
@@ -467,14 +582,54 @@ impl MapPreview {
     pub fn set_modifiers(&mut self, modifiers: [bool; 3]) {
         self.hud.modifiers = modifiers;
     }
+    /// Every press still held is forgotten (its release was swallowed).
+    fn drop_presses(&mut self) {
+        self.held = None;
+        self.hud.held = None;
+        self.pressed = None;
+        self.pointer.held = None;
+        self.pointer.menu = None;
+    }
+    /// The last game fade ended: the pointer's move during it applies.
+    fn fade_ended(&mut self) {
+        match self.fade_pointer.take() {
+            Some(Some(point)) => {
+                self.hover(point);
+            }
+            Some(None) => self.pointer_left(),
+            None => {}
+        }
+    }
     /// Back to the (possibly newly loaded) local map.
     pub(crate) fn return_to_map(&mut self) {
         self.screen = Screen::Map;
         self.last_hover = None;
         self.selected = None;
-        if let Some(name) = self.host.world.current_map_name() {
-            self.path = name;
-        }
+        // An unnumbered map has no working name (SPEC-008 §3.10): its
+        // header name titles it instead of the map before it.
+        self.path = self.host.world.current_map_name().unwrap_or_else(|| {
+            let name = &self.host.world.map.header.name;
+            let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+            String::from_utf8_lossy(&name[..end]).into_owned()
+        });
+    }
+    /// Whether the shell may cycle the palette now: the library's flag,
+    /// except while a window that suspends cycling is open. SPEC-012 §3.12
+    /// movies; SPEC-014 §3.17 the in-game pause window (not the world
+    /// map's), §3.14 in-game save/load, §3.2 the help screen, §3.8 the
+    /// character editor; SPEC-013 §3.15 the Skilldex and §3.21 elevators.
+    pub(crate) fn palette_cycling(&self) -> bool {
+        self.host.library.palette_cycling
+            && !matches!(
+                self.screen,
+                Screen::Movie(_)
+                    | Screen::Options(options::OptionsScreen::Pause)
+                    | Screen::SaveLoad(_)
+                    | Screen::Help(_)
+                    | Screen::Character(_)
+                    | Screen::Skilldex(_)
+                    | Screen::Elevator(_)
+            )
     }
     /// A red button press: its cue, and the release cue to follow.
     pub(crate) fn press(&mut self) {
@@ -528,6 +683,15 @@ impl MapPreview {
     /// drops, a map click acts, a held desktop button plays its release
     /// cue, and a button that reports on release acts when it is over it.
     pub fn release(&mut self, point: Option<[i32; 2]>, right: bool) -> bool {
+        self.thaw_view();
+        // SPEC-014 §3.2: a release during a game fade is swallowed with its
+        // press, so nothing pressed before the fade acts or stays held.
+        if self.fade_blocks() {
+            if !right {
+                self.drop_presses();
+            }
+            return true;
+        }
         // A left release ends the held button's down art.
         let (held, bar) = if right {
             (None, None)
@@ -547,6 +711,7 @@ impl MapPreview {
                 Screen::Inventory(_) => self.inventory_release(point),
                 Screen::Barter(_) => self.barter_release(point),
                 Screen::Automap(_) => self.automap_release(point),
+                Screen::Options(_) => self.options_release(point),
                 _ => false,
             };
         if let Some(cue) = self.pressed.take() {
@@ -573,8 +738,10 @@ impl MapPreview {
         )
         .into_bytes()
     }
-    /// Whether an object (or its outermost owner) lies in the displayed map
-    /// window, for SPEC-010 relative volume.
+    /// Whether an object (or its outermost owner) is on screen, for SPEC-010
+    /// §3.11 relative volume: its screen bounding rectangle (the sprite it
+    /// shows) overlaps the 640 x 380 map window, inclusive pixel bounds.
+    /// An object without art counts by its hex centre.
     fn on_screen(&self, object: ObjectRef) -> bool {
         let world = &self.host.world;
         let mut object = object;
@@ -587,12 +754,48 @@ impl MapPreview {
         let Some(found) = world.get(object) else {
             return false;
         };
-        found.raw.elevation == self.view.elevation
-            && found
+        let [width, height] = [i64::from(self.view.width), i64::from(self.view.height)];
+        let rect = match vault_render::map::object_sprite(self.view, &self.art, &found.raw) {
+            Some((frame, [x, y])) => [x, y, i64::from(frame.width), i64::from(frame.height)],
+            None => match found
                 .raw
                 .hex
                 .and_then(|hex| self.view.grid.hex_center(hex).ok())
-                .is_some_and(|[x, y]| (-32..672).contains(&x) && (-32..412).contains(&y))
+            {
+                Some([x, y]) => [x, y, 1, 1],
+                None => return false,
+            },
+        };
+        rect[2] > 0
+            && rect[3] > 0
+            && rect[0] < width
+            && rect[0] + rect[2] > 0
+            && rect[1] < height
+            && rect[1] + rect[3] > 0
+    }
+    /// SPEC-014 §3.18: the preference volumes reach the mixer whenever they
+    /// change (a Done, Cancel, Default or a loaded save), resetting the
+    /// master volume F2/F3 moved.
+    fn sync_volumes(&mut self) {
+        let wanted = Volumes::from_preferences(&self.preferences);
+        if self.volume_source != Some(wanted) {
+            self.volume_source = Some(wanted);
+            self.apply_volumes(wanted);
+        }
+    }
+    /// Apply volume settings to the mixer now (the preferences sliders'
+    /// live preview, SPEC-014 §3.18).
+    pub(crate) fn apply_volumes(&mut self, volumes: Volumes) {
+        self.volumes = volumes;
+        self.audio.apply_volumes(volumes);
+    }
+    /// SPEC-014 §3.18: F2 and F3 change the mixer master volume by -2047
+    /// and +2047 without updating the preference, so the next preference
+    /// application resets it.
+    pub(crate) fn master_volume_step(&mut self, delta: i32) {
+        self.sync_volumes();
+        self.volumes.master = (self.volumes.master + delta).clamp(0, 32767);
+        self.audio.set_master(self.volumes.master);
     }
     /// A SPEC-010 effect: resolve the name through the lookup chain (with
     /// the owner's gender alias), decode, and play at the relative volume.
@@ -605,13 +808,16 @@ impl MapPreview {
             return;
         };
         let on_screen = owner.is_some_and(|owner| self.on_screen(owner));
+        self.sync_volumes();
+        // SPEC-010 §3.11: the applied volume `floor(V x S / 32767)` with S
+        // the effects volume setting.
         let volume = sfx::applied_volume(
             self.host.world.effect_volume(owner, on_screen),
-            EFFECT_SETTING,
+            self.volumes.effects,
         );
         if !self
             .audio
-            .play(samples, volume as f32 / 32767.0, Channel::Effect, false)
+            .play(samples, volume_gain(volume), Channel::Effect, false)
         {
             tracing::debug!(%path, "effect not played (silent output or four effects active)");
         }
@@ -619,27 +825,39 @@ impl MapPreview {
     /// Talking-head speech: `sound/speech/<head>/<stem>.ACM`. Without a file
     /// or output, speech finishes at once.
     fn play_speech(&mut self, sound: &[u8]) {
+        self.sync_volumes();
+        let gain = volume_gain(self.volumes.speech);
         let started = self
             .host
             .speech_file(sound)
             .and_then(|path| self.sounds.load(&*self.host.assets.vfs, &path))
-            .is_some_and(|samples| self.audio.play(samples, 1.0, Channel::Speech, false));
+            .is_some_and(|samples| self.audio.play(samples, gain, Channel::Speech, false));
         if started {
             self.speaking = true;
         } else {
             self.host.speech_finished();
         }
     }
-    /// SPEC-014 §3.35 a map's city music, `sound/music/<name>.acm`, looping
-    /// in place of the track before it; without the file, silence.
-    fn play_music(&mut self, name: &str) {
-        let path = format!("sound/music/{name}.acm");
-        match self.sounds.load(&*self.host.assets.vfs, &path) {
-            Some(samples) => {
-                self.audio.play(samples, 1.0, Channel::Music, true);
-            }
-            None => self.audio.stop(Channel::Music),
-        }
+    /// Background music, the platform's entry point for every music
+    /// request the world makes (SPEC-008 §3.10: `wind2`, `03wrldmp` and the
+    /// city tracks, each `MusicRequest::track(name, looping)`): it replaces
+    /// the track before it, from its beginning, decoded off the event loop;
+    /// while music is disabled it is only recorded; a missing track leaves
+    /// silence. See `AudioHandle::request_music`.
+    pub(crate) fn request_music(&mut self, request: MusicRequest) {
+        self.sync_volumes();
+        self.audio
+            .request_music(self.host.assets.vfs.clone(), request);
+    }
+    /// SPEC-008 §3.10 music on or off, kept the same in the world and the
+    /// mixer. The world records every request and, while music is
+    /// disabled, emits none; re-enabling replays its last recorded track
+    /// (`WorldEffect::Music`), so the mixer only follows the state: off
+    /// stops the track at once, on waits for the world's replay, which the
+    /// next tick drains.
+    pub fn set_music_enabled(&mut self, enabled: bool) {
+        self.audio.follow_music_enabled(enabled);
+        self.host.set_music_enabled(enabled);
     }
     /// A library sound slot: the named file with its looping mode bit.
     fn play_library(&mut self, slot: usize, filename: &[u8], mode: i32) {
@@ -666,6 +884,9 @@ impl MapPreview {
         }
     }
     fn drain_effects(&mut self) {
+        if !self.host.world.effects.is_empty() {
+            self.thaw_view();
+        }
         while let Some(effect) = self.host.world.effects.pop_front() {
             match effect {
                 WorldEffect::Message(text) => self.notify(text),
@@ -690,17 +911,30 @@ impl MapPreview {
                     mode,
                 } => self.play_library(slot, &filename, mode),
                 WorldEffect::Movie(request) => self.queue_movie(request),
+                // SPEC-014 §3.2: the world requests a game fade (`gfade_out`
+                // / `gfade_in`, First Aid, Doctor, books) as the standard
+                // fade (0) without a forced black start; a library `fadein`
+                // or `fadeout` starts from black or carries its duration.
+                // A library `fadeout(0)` cannot be told apart and is taken
+                // as the game fade it looks like.
                 WorldEffect::Fade {
                     out,
                     duration,
                     from_black,
-                } => self.fades.push(out, duration, from_black),
+                } => {
+                    if duration <= 0 && !from_black {
+                        self.fades.push_game(out);
+                    } else {
+                        self.fades.push_library(out, duration, from_black);
+                    }
+                }
                 WorldEffect::RollHitPoints => self.hud.hp.animate = true,
                 WorldEffect::RollArmorClass => self.hud.ac.animate = true,
                 WorldEffect::WorldMap => self.open_world_map(),
                 WorldEffect::TownMap => self.open_town_map(),
                 WorldEffect::MapSaveFailed => self.map_save_failed(),
-                WorldEffect::Music(name) => self.play_music(&name),
+                // SPEC-008 §3.10: a city track loops.
+                WorldEffect::Music(name) => self.request_music(MusicRequest::track(&name, true)),
                 // Look and examine already printed their text.
                 WorldEffect::DefaultAction {
                     action: ObjectAction::LookAt | ObjectAction::Description,
@@ -720,6 +954,17 @@ impl MapPreview {
     }
     pub fn image(&mut self) -> AppResult<IndexedImage> {
         self.drain_effects();
+        // SPEC-014 §3.2: a game fade to black blocks before anything after
+        // its request shows: the frame on screen stays until the screen is
+        // black, so `gfade_out; move_to; gfade_in` hides the move.
+        if self.fade_blocks()
+            && self.fades.freezes()
+            && let Some(frame) = &self.frame
+        {
+            let mut image = frame.clone();
+            self.draw_cursor(&mut image);
+            return Ok(image);
+        }
         self.check_barter();
         self.check_loot();
         let mut image = match &self.screen {
@@ -739,6 +984,7 @@ impl MapPreview {
             Screen::Automap(_) => self.automap_image(),
             Screen::Help(_) => self.help_image(),
         }?;
+        self.draw_timer(&mut image);
         self.draw_dialog(&mut image);
         self.draw_debug(&mut image);
         self.held_shown = self.held_button().is_some();
@@ -761,11 +1007,21 @@ impl MapPreview {
             .as_deref()
             .unwrap_or(&self.palette)
     }
-    /// The 640-by-380 map view: sprites under the world lighting.
+    /// The 640-by-380 map view: sprites under the world lighting. Behind a
+    /// modal window the world does not run, so the view is rendered once
+    /// and reused (P-02: an animated window such as the inventory figure
+    /// does not re-render the map) until `thaw_view`.
     pub(crate) fn map_view_image(&mut self) -> AppResult<IndexedImage> {
-        let map = self.host.world.render_snapshot();
-        self.art.bind(&self.host.assets, &map)?;
-        let mut image = render_map(&map, self.view, &self.art)?;
+        let modal = !matches!(self.screen, Screen::Map);
+        if modal && let Some(view) = &self.frozen_view {
+            return Ok(view.clone());
+        }
+        // P-02: the world's map by reference and its drawn objects; no map
+        // clone per frame.
+        let objects = self.host.world.render_objects();
+        let map = &self.host.world.map;
+        self.art.bind(&self.host.assets, map, &objects)?;
+        let mut image = render_map_with(map, &objects, self.view, &self.art)?;
         let size = [image.width(), image.height()];
         self.light.shade(
             image.pixels_mut(),
@@ -775,7 +1031,12 @@ impl MapPreview {
             &self.host.world.tile_light[self.view.elevation as usize],
             self.host.world.ambient,
         );
+        self.frozen_view = modal.then(|| image.clone());
         Ok(image)
+    }
+    /// Input or a world change may have changed what the map view shows.
+    fn thaw_view(&mut self) {
+        self.frozen_view = None;
     }
     /// The map screen: a conversation's window, or the map view with the
     /// indicator boxes and the interface bar.
@@ -832,7 +1093,7 @@ impl MapPreview {
                 return "Vault — elevator — choose a level; Escape cancels".into();
             }
             Screen::Loot(_) => {
-                return "Vault — loot — drag an item to the other pane; A takes all; Escape closes"
+                return "Vault — loot — drag an item to the other pane; Shift+A takes all; Escape closes"
                     .into();
             }
             Screen::Options(_) => return "Vault — options".into(),
@@ -845,16 +1106,38 @@ impl MapPreview {
             Screen::Help(_) => return "Vault — help — any key or a click returns".into(),
             Screen::Map => {}
         }
+        let roofs = if !self.roof_key {
+            String::new()
+        } else if self.view.roofs {
+            " — roofs on".into()
+        } else {
+            " — roofs off".into()
+        };
+        let keys = if self.preview_keys {
+            "; L/D/U/G/T actions; W world map"
+        } else {
+            ""
+        };
         format!(
-            "Vault — {} — elevation {} — roofs {} — {} cursor; right-click cycles; L/D/U/G/T actions; W world map",
+            "Vault — {} — elevation {}{roofs} — {} cursor; right-click cycles{keys}",
             self.path,
             self.view.elevation,
-            if self.view.roofs { "on" } else { "off" },
             self.mode_name()
         )
     }
     pub fn step(&mut self, key: KeyCode) -> bool {
-        if self.movie_key() || self.dialog_key(key) {
+        self.thaw_view();
+        let handled = self.step_key(key);
+        // G-22: a key that opened a window over a held map press drops it.
+        self.drop_map_press();
+        handled
+    }
+    fn step_key(&mut self, key: KeyCode) -> bool {
+        // SPEC-014 §3.2: no input is polled while a game fade runs.
+        if self.fade_blocks() {
+            return true;
+        }
+        if self.movie_key() || self.dialog_key(key) || self.timer_key(key) {
             return true;
         }
         // F9 toggles the vault-debug inspector.
@@ -866,7 +1149,7 @@ impl MapPreview {
         // SPEC-014 §3.28-3.29: keyboard input is discarded while the action
         // menu is open or edge scrolling is under way, and §3.21 while a
         // counter rolls.
-        if self.pointer_swallows_keys() || self.counters_rolling() {
+        if self.pointer_swallows_keys() || self.bar_blocks() {
             return true;
         }
         if matches!(self.screen, Screen::Barter(_)) {
@@ -929,6 +1212,11 @@ impl MapPreview {
             Screen::Help(_) => return self.close_help(),
             Screen::Barter(_) | Screen::Movie(_) | Screen::Map => {}
         }
+        // SPEC-014 §3.27: under the combat lock the keyboard is disabled;
+        // keys are discarded (Escape included, as with the bar disabled).
+        if matches!(self.screen, Screen::Map) && self.combat_locked() {
+            return true;
+        }
         // SPEC-014 §3.2: F1 shows the help screen.
         if key == KeyCode::F1 && matches!(self.screen, Screen::Map) && !self.host.world.ui_disabled
         {
@@ -939,11 +1227,17 @@ impl MapPreview {
         if self.game_hotkey(key) {
             return true;
         }
+        // SPEC-014 §3.17: Escape opens the options only while the bar is
+        // enabled, and otherwise does nothing; it never leaves the game
+        // (G-01: a script that disabled the interface made it quit).
+        if key == KeyCode::Escape {
+            return true;
+        }
         if self.host.world.ui_disabled {
             return false;
         }
-        if key == KeyCode::KeyW {
-            self.open_world_map();
+        if key == KeyCode::KeyW && self.preview_keys {
+            self.open_world_map_with_music();
             return true;
         }
         let key_number = match key {
@@ -967,7 +1261,9 @@ impl MapPreview {
             KeyCode::KeyT => Some(ObjectAction::Talk),
             _ => None,
         };
-        if let Some(action) = action {
+        if let Some(action) = action
+            && self.preview_keys
+        {
             self.interact(action);
             return true;
         }
@@ -985,9 +1281,13 @@ impl MapPreview {
             return true;
         }
         match key {
-            KeyCode::KeyR => self.view.roofs = !self.view.roofs,
-            KeyCode::PageUp => self.view.elevation = (self.view.elevation + 1).min(2),
-            KeyCode::PageDown => self.view.elevation = self.view.elevation.saturating_sub(1),
+            KeyCode::KeyR if self.roof_key => self.view.roofs = !self.view.roofs,
+            KeyCode::PageUp if self.preview_keys => {
+                self.view.elevation = (self.view.elevation + 1).min(2)
+            }
+            KeyCode::PageDown if self.preview_keys => {
+                self.view.elevation = self.view.elevation.saturating_sub(1)
+            }
             _ => return false,
         }
         self.last_hover = None;
@@ -1016,11 +1316,17 @@ impl MapPreview {
         self.drain_effects();
     }
     pub fn click(&mut self, point: [i32; 2], right: bool) -> bool {
-        if self.movie_press() || self.dialog_click(point) {
+        self.thaw_view();
+        // SPEC-014 §3.2: no input is polled while a game fade runs.
+        if self.fade_blocks() {
             return true;
         }
-        // SPEC-014 §3.21: game input waits while a counter rolls.
-        if self.counters_rolling() {
+        if self.movie_press() || self.dialog_click(point) || self.timer_click(point) {
+            return true;
+        }
+        // SPEC-014 §3.21, §3.25: game input waits while a counter rolls or
+        // the combat panel animates.
+        if self.bar_blocks() {
             return true;
         }
         if matches!(self.screen, Screen::Barter(_)) {
@@ -1056,6 +1362,12 @@ impl MapPreview {
         // SPEC-014 §3.19: the interface bar, then the map area by cursor
         // mode; a right-click in the map cycles the mode.
         // The map area runs through y = 379 (the bar window overlaps it).
+        // SPEC-014 §3.26-§3.27, §3.23: while the animated watch shows (the
+        // combat lock or a hand swap) the game mouse and the bar take
+        // nothing; clicks are discarded, never queued.
+        if self.watch_shown() {
+            return true;
+        }
         if point[1] > vault_core::ui::bar::BAR_ORIGIN[1] {
             return self.bar_click(point, right);
         }
@@ -1070,7 +1382,11 @@ impl MapPreview {
         true
     }
     pub fn scroll(&mut self, delta: f64) -> bool {
-        if !matches!(self.screen, Screen::Map) || !self.host.world.dialogue.open {
+        self.thaw_view();
+        if self.fade_blocks()
+            || !matches!(self.screen, Screen::Map)
+            || !self.host.world.dialogue.open
+        {
             return false;
         }
         if delta < 0.0 {
@@ -1083,13 +1399,28 @@ impl MapPreview {
     }
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
         self.clock = now;
+        self.sync_volumes();
+        // SPEC-014 §3.2: a game fade blocks completely: no world update,
+        // animation, game clock, hover or background task runs until it
+        // ends; only the fade advances, and sound keeps playing.
+        if self.fade_blocks() {
+            let game = self.host.library.palette.clone();
+            let changed = self
+                .fades
+                .tick(now, game.as_deref().unwrap_or(&self.palette));
+            self.update_audio();
+            if !self.fade_blocks() {
+                self.fade_ended();
+            }
+            return Ok(changed);
+        }
         // The world and Pip-Boy screens are modal: the local map's scripts
         // and clock wait while travel or rest advances time. An open action
         // menu pauses background map processing.
         let screen = match &self.screen {
             // A counter roll or an open action menu pauses the world.
-            _ if self.counters_rolling() => Ok(false),
-            Screen::Map if self.pointer.menu.is_some() => Ok(false),
+            _ if self.bar_blocks() => Ok(false),
+            Screen::Map if self.pointer.menu.is_some() || self.timer_open() => Ok(false),
             Screen::Map => self.host.tick(now),
             Screen::World(_) | Screen::Town(_) => self
                 .world_tick(now)
@@ -1106,13 +1437,10 @@ impl MapPreview {
             Screen::Character(_) => Ok(false),
             // SPEC-013/014 windows suspend the world.
             Screen::Skilldex(_) => Ok(self.skilldex_tick()),
-            Screen::Elevator(_) | Screen::Options(_) | Screen::Automap(_) | Screen::Help(_) => {
-                Ok(false)
-            }
-            Screen::SaveLoad(_) => {
-                self.saveload_frame();
-                Ok(false)
-            }
+            Screen::Elevator(_) => Ok(self.elevator_tick(now)),
+            Screen::Options(_) => Ok(self.options_tick(now)),
+            Screen::Automap(_) | Screen::Help(_) => Ok(false),
+            Screen::SaveLoad(_) => Ok(self.saveload_frame(now)),
         };
         let mut changed = match screen {
             Ok(changed) => changed,
@@ -1142,12 +1470,21 @@ impl MapPreview {
         changed |= self.pointer_tick();
         changed |= self.held_moved();
         changed |= self.counters_tick(now);
+        changed |= self.panel_tick(now);
+        changed |= self.watch_tick(now);
+        self.cues_tick(now);
         changed |= self.debug_tick();
         Ok(changed)
     }
     /// The pointer moved over the frame; returns the map hover once per hex
     /// change, for the shell's log.
     pub fn hover(&mut self, point: [i32; 2]) -> Option<MapHover> {
+        // SPEC-014 §3.2: the pointer is not polled during a game fade; its
+        // last position applies when the fade ends.
+        if self.fade_blocks() {
+            self.fade_pointer = Some(Some(point));
+            return None;
+        }
         self.pointer_moved(point);
         if self.host.world.dialogue.open || !matches!(self.screen, Screen::Map) {
             return None;
@@ -1168,9 +1505,7 @@ pub(crate) mod fixture;
 #[cfg(test)]
 mod interface_tests;
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/sound/support.rs"]
-mod sound_fixture;
+use crate::audio::sound_fixture;
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/state/support.rs"]
@@ -1477,6 +1812,12 @@ mod tests {
             assert!(now < 100_000, "the movie ends by itself");
         }
         assert_eq!(preview.host.world.persistence.movies[..3], [0, 0, 1]);
+        // The map fades in from black (a game fade), which holds input
+        // until it ends (SPEC-014 §3.2).
+        assert!(preview.fade_blocks());
+        assert!(preview.step(KeyCode::KeyP), "swallowed");
+        assert!(matches!(preview.screen, Screen::Map));
+        preview.finish_fades();
         // The Pip-Boy archive lists boil1 (index 11) and replays it; a
         // click then release skips it, back to the Pip-Boy.
         assert!(preview.step(KeyCode::KeyP));
@@ -1496,9 +1837,181 @@ mod tests {
     }
 
     #[test]
+    fn world_map_music_and_the_music_switch_reach_the_mixer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        state_fixture::write_corpus(root);
+        std::fs::create_dir_all(root.join("sound/music")).unwrap();
+        for track in ["03wrldmp", "wind2", "13carvrn"] {
+            std::fs::write(
+                root.join(format!("sound/music/{track}.acm")),
+                sound_fixture::acm('B'),
+            )
+            .unwrap();
+        }
+        let mut preview = interactive(root);
+        let (audio, mixer) = AudioHandle::detached();
+        preview.audio = audio.clone();
+        preview.tick(0).unwrap();
+        // SPEC-008 §3.10: the load's `wind2` and the city track (map 7,
+        // `13carvrn`) reached the world; the last one is the city's.
+        assert_eq!(
+            preview.host.last_music.as_deref(),
+            Some("13carvrn"),
+            "the world's record"
+        );
+        // The preview's W opens the world map outside a transition: its
+        // music is requested here.
+        assert!(preview.step(KeyCode::KeyW));
+        preview.tick(16).unwrap();
+        assert_eq!(
+            audio.last_music(),
+            Some(MusicRequest::track("03wrldmp", true))
+        );
+        audio.wait_music();
+        assert!(mixer.lock().unwrap().playing(Channel::Music));
+        // Music off silences the mixer; a request is only recorded, and
+        // music on plays the last recorded track once.
+        preview.set_music_enabled(false);
+        assert!(!audio.music_enabled() && !preview.host.music_enabled);
+        assert!(!mixer.lock().unwrap().playing(Channel::Music));
+        preview.host.request_music("wind2");
+        preview.tick(32).unwrap();
+        assert!(!mixer.lock().unwrap().playing(Channel::Music));
+        assert_eq!(
+            audio.last_music(),
+            Some(MusicRequest::track("03wrldmp", true))
+        );
+        preview.set_music_enabled(true);
+        preview.tick(48).unwrap();
+        assert_eq!(audio.last_music(), Some(MusicRequest::track("wind2", true)));
+        audio.wait_music();
+        assert!(mixer.lock().unwrap().playing(Channel::Music));
+        // S-11: a negative town has no town map; the failure path opens
+        // the world map, with its music.
+        preview.return_to_map();
+        preview.host.world.world_map.saved.town = -1;
+        preview.open_town_map();
+        assert!(matches!(preview.screen, Screen::World(_)));
+        preview.tick(64).unwrap();
+        assert_eq!(
+            audio.last_music(),
+            Some(MusicRequest::track("03wrldmp", true))
+        );
+    }
+
+    #[test]
+    fn world_audio_takes_volumes_music_requests_and_movie_music_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        state_fixture::write_corpus(root);
+        crate::movie::tests::movie_corpus(root);
+        std::fs::create_dir_all(root.join("sound/sfx")).unwrap();
+        std::fs::create_dir_all(root.join("sound/music")).unwrap();
+        std::fs::write(root.join("sound/sfx/IB1P1XX1.ACM"), sound_fixture::acm('A')).unwrap();
+        std::fs::write(root.join("sound/music/01hub.acm"), sound_fixture::acm('B')).unwrap();
+        let mut preview = interactive(root);
+        let (audio, mixer) = AudioHandle::detached();
+        preview.audio = audio.clone();
+        preview.tick(0).unwrap();
+        let default = volume_gain(22281);
+        assert_eq!(mixer.lock().unwrap().master(), default);
+        // SPEC-010 §3.11: an effect without an object plays at the effects
+        // volume (V = 32767, so floor(V x S / 32767) = S).
+        preview
+            .host
+            .world
+            .effects
+            .push_back(WorldEffect::SoundEffect {
+                name: b"IB1P1XX1".to_vec(),
+                owner: None,
+            });
+        preview.image().unwrap();
+        assert_eq!(mixer.lock().unwrap().gain(Channel::Effect), Some(default));
+        // F2 lowers the mixer master by 2047, not the preference; the next
+        // preference application resets it (SPEC-014 §3.18).
+        assert!(preview.step(KeyCode::F2));
+        assert_eq!(mixer.lock().unwrap().master(), volume_gain(22281 - 2047));
+        assert_eq!(preview.preferences.master_volume, 22281);
+        assert!(preview.step(KeyCode::F3));
+        assert!(preview.step(KeyCode::F3));
+        assert_eq!(mixer.lock().unwrap().master(), volume_gain(22281 + 2047));
+        // Cancelling the preferences reapplies them, the unchanged volumes
+        // included, which drops the F2/F3 offset.
+        assert!(preview.step(KeyCode::Escape));
+        assert!(preview.step(KeyCode::KeyP));
+        assert!(matches!(
+            preview.screen,
+            Screen::Options(options::OptionsScreen::Preferences(_))
+        ));
+        assert!(preview.step(KeyCode::Escape));
+        assert_eq!(mixer.lock().unwrap().master(), default);
+        assert!(preview.step(KeyCode::Escape));
+        assert!(matches!(preview.screen, Screen::Map));
+        assert!(preview.step(KeyCode::F3));
+        assert_eq!(mixer.lock().unwrap().master(), volume_gain(22281 + 2047));
+        preview.preferences.master_volume = 30000;
+        preview.tick(16).unwrap();
+        assert_eq!(mixer.lock().unwrap().master(), volume_gain(30000));
+        // A city-music request plays its track, looping, as stereo frames
+        // (SPEC-008 §3.10, SPEC-010 §3.6), at the music volume.
+        preview
+            .host
+            .world
+            .effects
+            .push_back(WorldEffect::Music("01hub".into()));
+        preview.image().unwrap();
+        assert_eq!(audio.last_music(), Some(MusicRequest::track("01hub", true)));
+        audio.wait_music();
+        assert!(mixer.lock().unwrap().playing(Channel::Music));
+        assert_eq!(mixer.lock().unwrap().gain(Channel::Music), Some(default));
+        // SPEC-012 §3.12: flag 0x08 pauses the music for the movie and its
+        // cleanup resumes it; 0x04 stops it.
+        assert!(preview.host.play_game_movie(vault_core::movie::INTRO, 0x08));
+        preview.image().unwrap();
+        preview.tick(32).unwrap();
+        assert!(preview.movie_active() && mixer.lock().unwrap().paused(Channel::Music));
+        // A middle button (or a press in the letterbox) skips it too.
+        assert!(preview.movie_button(true));
+        assert!(preview.movie_button(false));
+        assert!(!preview.movie_active());
+        assert!(!mixer.lock().unwrap().paused(Channel::Music));
+        assert!(mixer.lock().unwrap().playing(Channel::Music));
+        assert!(preview.host.play_game_movie(vault_core::movie::INTRO, 0x04));
+        preview.image().unwrap();
+        preview.tick(48).unwrap();
+        assert!(!mixer.lock().unwrap().playing(Channel::Music));
+        assert!(preview.step(KeyCode::Space));
+        // SPEC-010 §3.11: the player's sprite overlaps the map window.
+        assert!(preview.on_screen(preview.host.world.player));
+    }
+
+    #[test]
+    fn a_modal_window_reuses_the_frozen_world_view() {
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        let mut preview = interactive(dir.path());
+        preview.image().unwrap();
+        assert!(preview.frozen_view.is_none(), "the map screen renders live");
+        assert!(preview.step(KeyCode::KeyS));
+        assert!(matches!(preview.screen, Screen::Skilldex(_)));
+        let first = preview.image().unwrap();
+        assert!(preview.frozen_view.is_some());
+        assert_eq!(preview.image().unwrap().pixels(), first.pixels());
+        // Input may change the world: the view is rendered again.
+        preview.release(None, false);
+        assert!(preview.frozen_view.is_none());
+    }
+
+    #[test]
     fn inventory_character_and_barter_screens_drive_the_spec011_rules() {
         let dir = tempfile::tempdir().unwrap();
         state_fixture::write_corpus(dir.path());
+        std::fs::write(
+            dir.path().join("text/english/game/editor.msg"),
+            b"{136}{}{No free skill points available.}\n",
+        )
+        .unwrap();
         let mut preview = interactive(dir.path());
         preview.image().unwrap();
         // Pick up the synthetic item with an arrow-mode click.
@@ -1526,11 +2039,25 @@ mod tests {
         assert!(flags(&preview).contains(BasicFlags::RIGHT_HAND));
         assert!(preview.step(KeyCode::Escape));
         assert!(matches!(preview.screen, Screen::Map));
-        // Character: spending needs points; Cancel restores the sheet.
+        // Character: spending needs points; Cancel restores the sheet. The
+        // skill list is SPEC-014 §3.8's: Small Guns is the row at y = 27 in
+        // the hot region (370, 27) 223 by 195; CANCEL is the red button at
+        // (552, 454) and DONE the one at (455, 454).
         assert!(preview.step(KeyCode::KeyC));
         preview.image().unwrap();
-        assert!(preview.click([210, 72], false), "Small Guns");
-        assert_eq!(preview.status, b"No skill points left");
+        assert!(preview.click([400, 30], false), "Small Guns");
+        assert_eq!(preview.status, b"No free skill points available.");
+        assert!(matches!(
+            &preview.screen,
+            Screen::Character(screen)
+                if screen.selected == vault_core::ui::editor::InfoLine::Skill(0)
+        ));
+        assert!(preview.click([200, 180], false), "Armor Class");
+        assert!(matches!(
+            &preview.screen,
+            Screen::Character(screen)
+                if screen.selected == vault_core::ui::editor::InfoLine::Derived(0)
+        ));
         assert!(preview.step(KeyCode::Escape));
         preview
             .host
@@ -1540,10 +2067,10 @@ mod tests {
             .unspent_skills = 2;
         let invested = preview.host.world.player_sheet().unwrap().invested[0];
         assert!(preview.step(KeyCode::KeyC));
-        assert!(preview.click([210, 72], false));
+        assert!(preview.click([400, 30], false));
         let sheet = preview.host.world.player_sheet().unwrap();
         assert_eq!((sheet.invested[0], sheet.unspent_skills), (invested + 1, 1));
-        assert!(preview.click([530, 445], false), "Cancel");
+        assert!(preview.click([558, 460], false), "Cancel");
         let sheet = preview.host.world.player_sheet().unwrap();
         assert_eq!((sheet.invested[0], sheet.unspent_skills), (invested, 2));
         // Reaching level 3 sets the pending perk on the next visit; the
@@ -1560,14 +2087,14 @@ mod tests {
         assert!(!choices.is_empty());
         preview.image().unwrap();
         let perk = choices[0].0;
-        assert!(preview.click([210, 72], false));
+        assert!(preview.click([400, 30], false));
         let sheet = preview.host.world.player_sheet().unwrap();
         assert!(sheet.rank(perk) == 1 && !sheet.pending_perk);
         preview.image().unwrap();
         if let Screen::Character(screen) = &preview.screen
             && screen.mode == character::Mode::Sheet
         {
-            assert!(preview.click([430, 445], false), "Done");
+            assert!(preview.click([460, 460], false), "Done");
         } else {
             assert!(preview.step(KeyCode::Escape));
         }
@@ -1627,11 +2154,18 @@ mod tests {
     fn world_map_travels_to_a_town_and_enters_an_area_from_the_town_map() {
         let dir = tempfile::tempdir().unwrap();
         state_fixture::write_corpus(dir.path());
-        std::fs::copy(
-            dir.path().join("maps/synthetic.map"),
-            dir.path().join("maps/v13ent.map"),
-        )
-        .unwrap();
+        // The entrance's map is a copy of the fixture map renamed in its
+        // header (bytes 4..20) to `V13ENT.MAP`, which `map.msg` lists as map
+        // 35: SPEC-008 §3.10 numbers a map by its header name.
+        let mut map = std::fs::read(dir.path().join("maps/synthetic.map")).unwrap();
+        let mut name = [0_u8; 16];
+        name[..10].copy_from_slice(b"V13ENT.MAP");
+        map[4..20].copy_from_slice(&name);
+        std::fs::write(dir.path().join("maps/v13ent.map"), map).unwrap();
+        let catalog = dir.path().join("text/english/game/map.msg");
+        let mut messages = std::fs::read(&catalog).unwrap();
+        messages.extend_from_slice(b"{35}{}{V13ENT.MAP}\n");
+        std::fs::write(&catalog, messages).unwrap();
         let mut preview = interactive(dir.path());
         preview.image().unwrap();
         assert!(preview.step(KeyCode::KeyW));
@@ -1765,6 +2299,54 @@ mod tests {
             preview.image().unwrap();
         }
         assert!(!preview.step(KeyCode::Space));
+    }
+    #[test]
+    fn roof_art_binds_whatever_the_hide_bit_except_the_blank_index() {
+        // S-19 / SPEC-014 §3.36: a roof group hidden when the map's art is
+        // bound must still draw once it is restored.
+        let dir = tempfile::tempdir().unwrap();
+        fixture::write_corpus(dir.path());
+        let vfs = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+        let preview = MapPreview::load(vfs, r"MAPS\SYNTHETIC.MAP", "english", None, 1).unwrap();
+        let mut map = preview.host.world.map.clone();
+        // Roof index 0 (`tile.frm`, used by no floor), hidden, over the
+        // blank floor; every other roof is the blank index 1.
+        let square = &mut map.tiles[0].as_mut().unwrap()[5050];
+        square.word = 0x1000_0001;
+        assert!(square.roof_hidden() && square.roof() == 0);
+        let mut art = MapSprites::default();
+        art.bind(
+            &preview.host.assets,
+            &map,
+            &preview.host.world.render_objects(),
+        )
+        .unwrap();
+        assert!(art.tile_art.first().is_some_and(Option::is_some));
+    }
+    #[test]
+    fn the_pause_window_and_modal_windows_suspend_palette_cycling() {
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        let mut preview = interactive(dir.path());
+        preview.image().unwrap();
+        assert!(preview.palette_cycling());
+        // SPEC-014 §3.17: in game, the pause window suspends cycling until
+        // a key closes it.
+        preview.open_pause();
+        assert!(!preview.palette_cycling());
+        assert!(preview.step(KeyCode::KeyA));
+        assert!(matches!(preview.screen, Screen::Map));
+        assert!(preview.palette_cycling());
+        // §3.8: so does the character editor, here the character screen.
+        assert!(preview.step(KeyCode::KeyC));
+        assert!(!preview.palette_cycling());
+        assert!(preview.step(KeyCode::Escape));
+        assert!(preview.palette_cycling());
+        // The world map's pause window does not.
+        assert!(preview.step(KeyCode::KeyW));
+        assert!(preview.step(KeyCode::KeyP));
+        assert!(matches!(&preview.screen, Screen::World(world) if world.paused));
+        assert!(preview.palette_cycling());
     }
     #[test]
     fn clicking_npc_renders_choices_executes_callbacks_and_returns_to_map() {

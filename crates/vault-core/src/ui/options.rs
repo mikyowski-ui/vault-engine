@@ -135,7 +135,12 @@ impl Preferences {
             }
         }
         for ((key, low, high), value) in REAL_KEYS.iter().zip(preferences.reals()) {
-            if let Some(read) = config.get_real("preferences", key) {
+            // R-05: a non-finite real (`brightness=nan`) would survive the
+            // clamp, so it keeps the default as a missing key does.
+            if let Some(read) = config
+                .get_real("preferences", key)
+                .filter(|read| read.is_finite())
+            {
                 *value = read.clamp(*low, *high);
             }
         }

@@ -157,7 +157,10 @@ impl MapPreview {
                 {
                     image.draw_frame(frame, [(ox + x) as u32, (oy + y) as u32], [56, 40]);
                 }
-                if let Some(label) = skills::quantity_label(shown, None) {
+                // G-19: ammunition counts rounds, pack size × (quantity - 1)
+                // plus the front pack (omitted while lifted).
+                let ammo = self.ammo_label(*item, lifted);
+                if let Some(label) = skills::quantity_label(shown, ammo) {
                     painter.text(
                         &mut image,
                         101,
@@ -250,7 +253,7 @@ impl MapPreview {
             [rect.x, rect.y, rect.w, rect.h].map(i64::from),
         );
     }
-    fn close_loot_screen(&mut self) {
+    pub(super) fn close_loot_screen(&mut self) {
         let Screen::Loot(screen) = std::mem::replace(&mut self.screen, Screen::Map) else {
             return;
         };
@@ -551,11 +554,20 @@ impl MapPreview {
             }
             return self.loot_counter(input);
         }
-        let control = self.hud.modifiers[1];
+        // SPEC-014 §3.34: all other input is ignored during a drag.
+        if screen.held.is_some() {
+            return true;
+        }
+        let [shift, control, _] = self.hud.modifiers;
         match key {
             KeyCode::Escape => self.close_loot_screen(),
-            // Take All is Shift+A in non-steal sessions; the refusal is silent.
-            KeyCode::KeyA => {
+            // G-31: Ctrl+Q, Ctrl+X and F10 open the quit confirmation; its
+            // Yes closes the window (a quit request) and returns to the menu.
+            KeyCode::KeyQ | KeyCode::KeyX if control => self.confirm_quit(),
+            KeyCode::F10 => self.confirm_quit(),
+            // G-20: Take All is Shift+A (code `A`) only, in non-steal
+            // sessions; the refusal is silent.
+            KeyCode::KeyA if shift => {
                 let session = screen.session.clone();
                 if let Err(error) = self.host.loot_take_all(&session) {
                     self.status = error.to_string().into_bytes();

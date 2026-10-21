@@ -5,6 +5,13 @@ on:
     - cron: "0 5 * * *"
   workflow_dispatch:
 
+# The job only reads the repository.
+permissions:
+  contents: read
+
+# Third-party actions are pinned by version tag, not by commit SHA: the
+# repository's clean-room ingestion tooling rejects 40-character hashes.
+
 jobs:
   fuzz:
     runs-on: ubuntu-latest
@@ -13,6 +20,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
@@ -20,6 +30,9 @@ jobs:
       - run: rustfmt --edition 2024 --check fuzz/fuzz_targets/*.rs
       # Synthetic seeds only; no game data enters the corpora.
       - run: python3 -I fuzz/seed.py
+      # Fails if fuzz/Cargo.lock is out of date, so the fuzz build below
+      # resolves exactly the locked versions (the `--locked` guarantee).
+      - run: cargo fetch --manifest-path fuzz/Cargo.toml --locked
       - run: cargo +nightly fuzz build
       - run: |
           for target in $(cargo +nightly fuzz list); do
