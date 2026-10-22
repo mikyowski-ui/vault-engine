@@ -162,7 +162,7 @@ FFE0 FFE1 FFE2 FFE3 FFE4 FFE5 FFE6 FFE7 FFE8 FFE9 FFEA FFEB FFEC FFEE FFED FFEF
 FFF0 FFF1 FFF2 FFF3 FFF4 FFF5 FFF6 FFF7 FFF8 FFF9 FFFA FFFB FFFC FFFD FFFE FFFF
 ```
 
-The table is engine data and is `[Must-match]` exactly. Read as signed 16-bit, codes 121-127 are negative (-29973 … -1), codes 128 and 129 are both +1, and code 137 is -32589. Codes 237 and 238 hold `FFEE` and `FFED`, out of monotonic order, and must be reproduced as listed.
+The table is engine data and is `[Must-match]` exactly. Read as signed 16-bit, codes 120-127 are negative (`8AEB` = -29973 at code 120 … `FFFF` = -1 at code 127), codes 128 and 129 are both +1, codes 130-136 are positive, and codes 137-255 are negative, starting at `80B3` = -32589. Codes 237 and 238 hold `FFEE` and `FFED`, out of monotonic order, and must be reproduced as listed.
 
 ### 2.9 `.SVE` Subtitle File
 

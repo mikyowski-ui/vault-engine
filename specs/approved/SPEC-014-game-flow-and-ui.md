@@ -91,6 +91,7 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
     - the revisit rules: lock unjamming, healing, and replacing old corpses with remains.
 - **R1-rev5 (2026-10-20).** Section 3.27 gains "Clicks while the player is busy": a click is never queued, and the section states which clicks cancel the player's current sequence and which are ignored, in and out of combat. The movement-click rule for `interrupt_walk` now says that it cancels any player sequence, not only a walk.
 - **R1-rev6 (2026-10-20).** New section 3.36 Roof Hiding and Restoring: the hex-to-roof-square mapping, the empty test (art index 1), the hide and restore fills, the per-placement rule, map load and leave, and two `[May-improve]` defects (the first-placement read outside the grid, and the elevation-change restore on the wrong elevation). New Fixture G. Section 3.35 step 5 now states that a map with no number is never saved.
+- **R1-rev7 (2026-10-21).** New section 3.37 Player See-Through Cutout: the `egg.frm` mask, its position on the player, roofs, the wall and scenery orientation table, compositing, and two `[May-improve]` failure cases. Section 3.27's pointer rule now uses it. Section 3.33 gives the Pip-Boy automap cell as 2 by 1 pixels on a two-row pitch, matching SPEC-008 §2.8. Section 3.34's drop-row formula is now `[May-improve]`, as in SPEC-013 §3.16.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -880,7 +881,7 @@ In movement mode the hex snaps to the hovered hex; a second object for the AP te
 
 - **Rest timer.** It restarts on any one-pixel move of the hotspot, on a mode change, and after the action menu closes. When the in-world cursor is turned back on, the timer is back-dated by 250 milliseconds, so hover is computed on the next idle poll. This happens on entering the map window, after an edge scroll, and when the interface is re-enabled.
 - **When hover runs.** Only while the in-world cursor is shown over the map window. It does not run during NPC combat turns, when the game mouse is disabled.
-- **Object under the pointer.** No object is found while the pointer is over a visible roof outside the player's see-through cutout. Otherwise the topmost solid object that is not dead or knocked out wins, falling back to the bottom-most object hit.
+- **Object under the pointer.** No object is found while the pointer is over a visible roof, unless the pointer is on a nonzero pixel of the player cutout mask (section 3.37). Otherwise the candidates are the objects with a nonzero art pixel under the pointer. A candidate with any translucency bit `0x4000`-`0x80000` other than "explicitly no translucency" `0x8000` is never solid. A wall or scenery candidate with none of those bits is "inside the cutout", and never solid, when it passes the section 3.37 orientation table **without** the wall-transparency-end exceptions (and whether or not the player is hidden) and the cutout mask pixel under the pointer is nonzero. The topmost solid candidate that is not dead or knocked out wins, falling back to the bottom-most candidate.
 
 - **Movement.** Compute a path from the player to the hovered hex (SPEC-007 §3.1).
   - No path, including the player's own hex: a red `X`, key 31744.
@@ -1150,7 +1151,7 @@ When the map has an index (SPEC-008), two labels are printed in key 992 with a t
 - Every object on a hex of a marked byte and on the player's current elevation gets the seen flag permanently, and the flag is saved with the object. The visited set is then cleared.
 - Near a row's start or end, d crosses into the neighboring row because bytes run continuously. `[Must-match]`
 
-**Pip-Boy automap page.** This page draws from the saved automap database (SPEC-008), not from live objects. It is current only up to the last database write: leaving the map, saving the game, or taking an elevator. Each stored cell is 2 pixels wide and 1 pixel tall at origin (238, 105) of the Pip-Boy window, wall cells in key 992 and scenery cells in key 480. The player, critters and items are not drawn. Rows from 188 on would fall below the 480-pixel window; R1 relies on those rows being empty. `[Must-match]` `[May-improve]`: clip cells to the window.
+**Pip-Boy automap page.** This page draws from the saved automap database (SPEC-008), not from live objects. It is current only up to the last database write: leaving the map, saving the game, or taking an elevator. Each stored cell paints 2 pixels wide and 1 pixel tall, on a 2-row vertical pitch: cell (c, r) of the raster paints window pixels (238 + 2c, 105 + 2r) and (239 + 2c, 105 + 2r), and the row between two cell rows is never painted, so the page shows every other line. This matches the two-row pitch in SPEC-008 §2.8: the 200 cell rows span 400 window rows, but only the first of each pair is drawn. Wall cells use key 992 and scenery cells key 480. The player, critters and items are not drawn. Rows from 188 on would fall below the 480-pixel window; R1 relies on those rows being empty. `[Must-match]` `[May-improve]`: clip cells to the window.
 
 ### 3.34 Player Inventory Window: Cursor Modes and Dragging
 
@@ -1238,7 +1239,7 @@ Each hand block, at x = 377:
 
 **Dropping.** Targets are tested in this order:
 
-1. **List area**, x 124-188 and y 35 through the bottom of the visible rows. The row is `trunc((y - 39) / 48)`, the same 4-pixel offset as SPEC-013 §3.16.
+1. **List area**, x 124-188 and y 35 through the bottom of the visible rows. The row is `trunc((y - 39) / 48)` although rows start at y 35, the same 4-pixel offset as SPEC-013 §3.16: the top 4 pixels of rows 1-5 drop into the row above. `[May-improve]`: use `trunc((y - 35) / 48)`, as in SPEC-013 §3.16.
    - A different container item in that row receives the dragged item. A stack opens the move-items counter (SPEC-013 §3.17), and Cancel aborts.
    - A weapon there that accepts the dragged ammunition is reloaded, with the counter for a stack, and plays the weapon's ready sound.
    - Otherwise an item dragged from the list stays put. An item from a hand or armor slot is unequipped into the list, and armor stats are removed. A failed add restores the slot.
@@ -1367,6 +1368,49 @@ Only the player triggers this. Party members and other critters never hide or re
 
 - The first placement after a reset reads the "previous" nibble at position `-1 + 100 × -1`, 101 words before the start of the grid. With last-empty still true, the value read never changes the result. `[May-improve]`: when there is no last square, skip the nibble comparison and test only E against last-empty.
 - On an elevation change, step 2 reads p and step 3a restores on the **new** elevation, at the old square's position. A group hidden on the old elevation therefore stays hidden there. It reappears only when the player later enters and leaves it on that elevation, or when the map is reloaded. A matching group on the new elevation at the old position, if hidden, is restored instead. `[May-improve]`: run the restore fill on the elevation where the group was hidden, and take p from that elevation.
+
+### 3.37 Player See-Through Cutout
+
+Roofs, and walls and scenery that would hide the player, are drawn partly transparent inside an elliptical "egg" around the player. Nothing else uses the cutout. `[Must-match]` unless tagged.
+
+**Mask.** `egg.frm`, `intrface.lst` index 2: one direction-independent frame, 129 by 98, with all six direction shifts (0, 25) and frame offset (0, 0). Each pixel value m is a mask weight. m = 0 lies outside an ellipse centered on mask column 64, between rows 48 and 49; inside it the flat core is m = 1 (4716 pixels), rising toward the rim to a maximum of 122. The mask itself is never drawn.
+
+**Position.** The mask follows the player. It is placed on the player's hex every time the player is placed on a hex, which resets its displacement to 0, and it receives every pixel displacement the player receives while animating. Its rectangle uses the ordinary world-object placement (SPEC-001 frame anchor, SPEC-003 §2.10) with direction 0 and frame 0: with the player hex's projected center (cx, cy), meaning its hex screen position plus (16, 8), and the player's current displacement (dx, dy), the mask covers screen x `cx + dx - 64` through `cx + dx + 64` and y `cy + dy - 72` through `cy + dy + 25`, inclusive. Mask pixel (u, v) lies at `(cx + dx - 64 + u, cy + dy - 72 + v)`. Elevation plays no part.
+
+**Roofs.** Every drawn roof square (not hidden, art index not 1, section 3.36) is drawn through the mask at the ambient light level, whether or not the player is hidden and whatever the square's position relative to the player.
+
+**Walls and scenery.** An object whose art type is scenery (2) or wall (3) is drawn through the mask only when all of these hold:
+
+1. The player is not hidden.
+2. The object has none of the basic translucency bits `0x4000`, `0x8000`, `0x10000`, `0x20000`, `0x40000`, `0x80000` (SPEC-003 §2.10). "Explicitly no translucency" therefore also excludes it.
+3. The orientation test below passes.
+
+For the orientation test let (dx, dy) be the object's hex screen position minus the player's, as integers, and evaluate in IEEE-754 double precision with K the double `0x3FF5555555555556` (1.3333333333333335; not the nearest double to 4/3, and the difference decides real cases at equality):
+
+- R: `dx <= dy × K`.
+- R′: `dx >= dy × K`.
+- F: `dx >= -4 × dy`.
+- F′: `dx <= -4 × dy`.
+
+Let END be the object's basic flag `0x10000000` (wall transparency end marker). The first row matching the object **prototype's** extended flags applies:
+
+| Prototype extended flags | Cut when |
+| --- | --- |
+| `0x08000000` or `0x80000000` set | F and not (R′ and END) |
+| else `0x10000000` set | F or R |
+| else `0x20000000` set | F and R |
+| otherwise, including `0x40000000` or none of these | R and not (F′ and END) |
+
+When the cut applies and the mask rectangle overlaps the object's clipped screen rectangle, only the overlap is drawn through the mask; the up to four strips of the object rectangle outside it use the normal lit draw. Otherwise the object uses its normal translucent or lit draw.
+
+**Compositing.** For each pixel of the masked area, with L the light level divided by 512 (0-128) and the intensity and additive-mix tables of SPEC-001:
+
+- Source index 0 leaves the destination unchanged.
+- Otherwise s = intensity[source][L]. With mask weight m = 0 the result is s; otherwise the result is mix[intensity[s][m]][intensity[destination][128 - m]].
+
+So m/128 is the drawn object's opacity: the core (m = 1) shows almost only what was drawn beneath, and opacity rises toward the rim. The normal lit draw leaves source indexes 229-255 unlit; the masked draw lights them as well, even where m = 0. `[May-improve]`: apply the same 229-255 exemption in the masked draw.
+
+**Failures.** When the mask art cannot be loaded, the reference draws neither the roof square nor the object whose cut applied. When the player has no hex, the mask position is undefined. `[May-improve]`: in both cases draw normally, without a cutout.
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 

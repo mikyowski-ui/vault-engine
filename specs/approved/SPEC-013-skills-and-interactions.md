@@ -65,6 +65,7 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 - **R1-rev5 (2026-10-20).**
   - Section 3.16 step 3 now states the same container reach timing as SPEC-007 §3.11.3. The previous text put the missing-art fault on the wrong branch and gave a different improvement rule. The current rule opens the container on the reach's action frame when the art loads.
   - Sections 3.2 and 3.23 now point to the shared adjacency check and approach-goal rule in SPEC-007.
+- **R1-rev6 (2026-10-21).** Section 3.16: the row-formula offset affects rows 1-5 only; SPEC-014 §3.34 now uses the same `[May-improve]` tag.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -639,7 +640,7 @@ Digit keys and Backspace are ignored. Enter accepts a value from 10 through 180 
 
 - An opened container becomes that pane's list, scroll and portrait. Transfers into the player side go into the bag open there, with the container size and owner weight checks.
 - If the player opens one of the player's own bags during steal mode, that bag becomes the thief for later steal checks, read through critter data. `[May-improve]`: the thief is always the player.
-- In the ordinary inventory window, the list row under the cursor is computed as `trunc((screen y - 39) / 48)` although rows start at 35, so the top 4 pixels of each row map to the row above. `[May-improve]`: use `trunc((screen y - 35) / 48)`.
+- In the ordinary inventory window, the list row under the cursor is computed as `trunc((screen y - 39) / 48)` although rows start at 35, so the top 4 pixels of rows 1-5 map to the row above (row 0's top pixels truncate toward zero and stay in row 0). SPEC-014 §3.34 uses the same formula and tag for drops. `[May-improve]`: use `trunc((screen y - 35) / 48)`.
 
 **Closing**, in this order: `[Must-match]`
 

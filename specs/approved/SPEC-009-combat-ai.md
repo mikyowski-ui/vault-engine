@@ -43,6 +43,7 @@ Terminology used in this document (descriptive, not reference identifiers):
 ### Revision history
 
 - **R1-rev2 (2026-10-19).** Section 3.3 onlooker alerting and the section 3.4 retaliation rows now follow the authoritative rule in SPEC-007 §3.6. The exception that allows a same-team retaliation check applies to the attack's **intended** target, not to an unintended victim. The earlier wording had this reversed.
+- **R1-rev3 (2026-10-21).** Fixture H candidate R2 now has AC 2, so its rating is 22 and the tie row matches the section 3.4 rule. Section 2.5 corrects the language-filter consequences (value 2 is never filtered; a startup value of 1 filters twice; the save-load ordering defect is `[May-improve]`) and cites the new SPEC-002 §3.7 filter definition. Section 3.19 gains the filter's draw.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -184,9 +185,9 @@ The flee test (section 3.6) is `(damage flags AND mask) != 0`, so for example `c
 
 ### 2.5 Message Resources
 
-`text\<language>\game\combatai.msg` is a SPEC-002 message catalog loaded at AI initialization. Taunt IDs come from packet ranges (section 3.17). When the `language_filter` preference in the game configuration's `preferences` section is nonzero at load, the SPEC-002 language filter is applied. `[Must-match]`
+`text\<language>\game\combatai.msg` is a SPEC-002 message catalog loaded at AI initialization. Taunt IDs come from packet ranges (section 3.17). After loading, when the `language_filter` preference in the game configuration's `preferences` section is nonzero, the SPEC-002 §3.7 language filter is invoked. The filter itself acts, and makes its one random draw, only when the value is exactly 1. `[Must-match]`
 
-A preference change re-evaluates the filter. The remembered previous state starts at -1, so the first evaluation always acts. If the new value differs from the remembered one: value exactly 1 applies the filter to the loaded catalog; any other value (0, or nonzero values other than 1) unloads and reloads the catalog unfiltered. `[Must-match]` Consequently, preference value 2 loads filtered at initialization but becomes unfiltered on the first preference re-evaluation. `[Must-match]`
+Each reapplication of preferences re-evaluates the filter: at startup after the options module initializes (which follows AI initialization), when the preferences screen closes with changes, on cancel, and on loading a saved game. The remembered previous state starts at -1, so the first evaluation always acts. If the configuration value differs from the remembered one, it is remembered; value exactly 1 applies the filter to the loaded catalog again, and any other value (0, or nonzero values other than 1) unloads and reloads the catalog, which applies no filtering. `[Must-match]` Consequently a value of 2 is never filtered (the load-time call returns without acting), and a startup value of 1 filters the catalog twice, making two draws; the second pass changes no text. `[Must-match]` On loading a saved game the re-evaluation runs before the loaded preference values are written to the configuration, so it sees the previous value and the AI catalog keeps its old filter state until the next reapplication. `[May-improve]`: re-evaluate after the loaded values are stored.
 
 The AI also prints fixed lines from the general `misc.msg` catalog into the message monitor:
 
@@ -575,6 +576,7 @@ All draws use the single SPEC-006 generator. A clean-room engine must consume dr
 | Taunt line | `random(start, end)` | Chance passed and end >= start |
 | Random retarget | `random(0, n - 1)` | Snapshot nonempty |
 | Explosive-drop noticing | D10 Perception check per eligible critter | Section 3.4 |
+| Language-filter cursor | `random(1, 29)` | Each filter application to `combatai.msg` (section 2.5, SPEC-002 §3.7): preference exactly 1, nonempty catalog, nonempty word list |
 
 Within one attempt that attacks, draws interleave as: called-shot draws → SPEC-007 attack resolution draws → attack-taunt draws (registered while the attack animation is constructed) → hit/miss taunt draws. An approach attempt draws only its approach taunt. A secondary-mode draw happens at loop entry and again inside each weapon switch that selects a weapon. `[Must-match]`
 
@@ -790,7 +792,7 @@ The chance draw must be ≤ 35 to continue. A ranged attack that hits location 4
 | --- | ---: | --- | ---: | ---: |
 | Current reference Q | 3 | right 12 | 10 | 22 |
 | Candidate R1 | 5 | none | 20 | 25, so switch to R1 |
-| Candidate R2 | 2 | left 20 | 0 | 22, a tie, so keep Q |
+| Candidate R2 | 2 | left 20 | 2 | 22 (20 + 2), a tie, so keep Q |
 | Candidate R3 (knocked out) | 9 | right 30 | 40 | 0, so keep Q |
 
 ### 4.9 Fixture I: Healing Loop
