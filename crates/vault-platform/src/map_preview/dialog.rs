@@ -120,6 +120,8 @@ impl MapPreview {
             Screen::Options(_) => self.close_preferences(false),
             Screen::Inventory(_) => self.close_inventory(),
             Screen::PipBoy(_) => self.close_pipboy(),
+            // SPEC-014 §3.42: Yes cancels the character screen.
+            Screen::Character(_) => self.close_character(false),
             _ => {}
         }
         self.screen = Screen::Map;

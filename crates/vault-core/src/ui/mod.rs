@@ -5,6 +5,7 @@
 pub mod automap;
 pub mod bar;
 pub mod called;
+pub mod character;
 pub mod cursor;
 pub mod editor;
 pub mod endgame;
@@ -13,6 +14,7 @@ pub mod inventory;
 pub mod options;
 pub mod pipboy;
 pub mod saveload;
+pub mod sheet;
 
 use vault_formats::Palette;
 

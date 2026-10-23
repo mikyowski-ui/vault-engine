@@ -189,12 +189,6 @@ impl InventoryScreen {
     }
 }
 
-/// A screen rectangle `[x, y, w, h]` contains `point`.
-pub(crate) fn inside(rect: [i32; 4], point: [i32; 2]) -> bool {
-    (rect[0]..rect[0] + rect[2]).contains(&point[0])
-        && (rect[1]..rect[1] + rect[3]).contains(&point[1])
-}
-
 /// How deep containers open (SPEC-013 §3.16).
 const MAX_DEPTH: usize = 9;
 /// The stats panel's font color, key 992.

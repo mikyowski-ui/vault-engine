@@ -39,10 +39,64 @@ pub enum InfoLine {
     SkillsCard,
     Skill(usize),
     TagSkillsCard,
+    /// SPEC-014 §3.42 in game: the level block's lines (Level, Exp, Next
+    /// Level), info lines 7-9.
+    Level(usize),
+    /// §3.42 in game: folder line j, info line 10 + j.
+    Folder(usize),
+}
+impl InfoLine {
+    /// The reference's info line number (§3.42 "Info card mapping"): 0-6
+    /// SPECIAL, 7 character points or Level, 8-9 the level block, 10 on the
+    /// folder lines, 43 Hit Points, 44-50 conditions, 51-60 derived, 61-78
+    /// skills, 79 tag skills or skill points, 80 Skills, 81 optional traits,
+    /// 82-97 traits.
+    pub fn number(self) -> usize {
+        match self {
+            Self::Special(i) => i,
+            Self::CharacterPoints => 7,
+            Self::Level(k) => 7 + k,
+            Self::Folder(j) => 10 + j,
+            Self::Condition(k) => 43 + k,
+            Self::Derived(k) => 51 + k,
+            Self::Skill(s) => 61 + s,
+            Self::TagSkillsCard => 79,
+            Self::SkillsCard => 80,
+            Self::OptionalTraits => 81,
+            Self::Trait(t) => 82 + t,
+        }
+    }
+    /// The line with a reference number; `game` picks the in-game meaning
+    /// of 7-42 (the level block and folder lines).
+    pub fn from_number(number: usize, game: bool) -> Option<Self> {
+        Some(match number {
+            0..=6 => Self::Special(number),
+            7 if !game => Self::CharacterPoints,
+            7..=9 if game => Self::Level(number - 7),
+            10..=42 if game => Self::Folder(number - 10),
+            43..=50 => Self::Condition(number - 43),
+            51..=60 => Self::Derived(number - 51),
+            61..=78 => Self::Skill(number - 61),
+            79 => Self::TagSkillsCard,
+            80 => Self::SkillsCard,
+            81 => Self::OptionalTraits,
+            82..=97 => Self::Trait(number - 82),
+            _ => return None,
+        })
+    }
 }
 
-/// §3.8 info hot regions for a mouse press.
+/// §3.8 info hot regions for a mouse press, under the safe rule of §3.42
+/// (the condition and derived regions clamp to their own blocks).
 pub fn info_hit(point: [i32; 2]) -> Option<InfoLine> {
+    info_hit_with(point, true)
+}
+
+/// §3.8 info hot regions. SPEC-014 §3.42: the condition and derived
+/// formulas are not clamped, so y = 145-150 gives line 51 (the Armor Class
+/// card) and y = 305-309 line 61 (Small Guns); `[May-improve]` safe rule
+/// (`clamp`): stop at lines 50 and 60.
+pub fn info_hit_with(point: [i32; 2], clamp: bool) -> Option<InfoLine> {
     let [x, y] = point;
     if Rect::new(19, 38, 125, 227).contains(point) {
         return SPECIAL_Y.iter().enumerate().find_map(|(i, top)| {
@@ -66,15 +120,15 @@ pub fn info_hit(point: [i32; 2]) -> Option<InfoLine> {
             })
             .map(|k| InfoLine::Trait(if x >= 169 { k + 8 } else { k }));
     }
+    let block = |row: i32, first: usize, last: usize| {
+        let line = first + row.max(0) as usize;
+        InfoLine::from_number(if clamp { line.min(last) } else { line }, false)
+    };
     if Rect::new(191, 41, 122, 110).contains(point) {
-        return Some(InfoLine::Condition(
-            (((y - 41) / 13) as usize).min(CONDITIONS.len() - 1),
-        ));
+        return block((y - 41) / 13, 43, 50);
     }
     if Rect::new(191, 175, 122, 135).contains(point) {
-        return Some(InfoLine::Derived(
-            (((y - 175) / 13) as usize).min(DERIVED.len() - 1),
-        ));
+        return block((y - 175) / 13, 51, 60);
     }
     if Rect::new(376, 5, 223, 20).contains(point) {
         return Some(InfoLine::SkillsCard);
@@ -302,6 +356,26 @@ impl Editor {
         self.character_points = 5;
         self.tag_picks = 3;
         self.selected = InfoLine::Special(0);
+    }
+    /// §3.11 / SPEC-014 §3.43 Load: the player is reset to the read sheet
+    /// with its bonus statistics zeroed, then recomputed and healed. The
+    /// character points and tag picks are the loaded sheet's (as on
+    /// opening), and the info line resets. Cancel still restores the
+    /// snapshot taken on opening.
+    pub fn load(&mut self, mut sheet: CharacterSheet) {
+        sheet.bonus = [0; 35];
+        sheet.perks.clear();
+        sheet.recompute(self.context);
+        sheet.heal(10000, self.context);
+        let trailing = sheet.tags.iter().rev().take_while(|tag| **tag < 0).count() as i32;
+        self.tag_picks = (trailing - 1).max(0);
+        self.character_points = sheet.remaining_creation;
+        self.sheet = sheet;
+        self.selected = InfoLine::Special(0);
+    }
+    /// The context the editor computes with.
+    pub fn context(&self) -> StatContext {
+        self.context
     }
 }
 
