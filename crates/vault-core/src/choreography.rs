@@ -39,6 +39,18 @@ pub struct Display {
     pub displacement: [i32; 2],
     pub hidden: bool,
     pub flat: bool,
+    /// SPEC-014 §3.44 the display's latest reinsertion into its hex list
+    /// (a [`crate::world::next_insertion`] stamp), or `None` while it keeps
+    /// the place its world object has.
+    pub inserted: Option<u64>,
+}
+
+impl Display {
+    /// SPEC-014 §3.44 the display is moved to the end of its group on its
+    /// hex: a hex move, a pixel-offset change or a frame step.
+    fn reinsert(&mut self) {
+        self.inserted = Some(crate::world::next_insertion());
+    }
 }
 
 /// A timed entry's frames: each frame's displacement in the owner's
@@ -459,6 +471,7 @@ impl Driver<Owner, Action> for Present<'_> {
         if entry.action.timed() {
             if let Some(display) = self.displays.get_mut(&owner) {
                 display.displacement = [0; 2];
+                display.reinsert();
             }
             return Begin::Timed;
         }
@@ -477,12 +490,14 @@ impl Driver<Owner, Action> for Present<'_> {
             } => {
                 if *flat && let Some(display) = self.displays.get_mut(&owner) {
                     display.flat = true;
+                    display.reinsert();
                 }
                 for item in dropped {
                     if let Some(display) = self.displays.get_mut(&Owner::World(*item)) {
                         display.hex = Some(*hex);
                         display.elevation = *elevation;
                         display.hidden = false;
+                        display.reinsert();
                     }
                 }
             }
@@ -521,6 +536,7 @@ impl Driver<Owner, Action> for Present<'_> {
                         display.hidden = false;
                         display.displacement[0] += shift[0];
                         display.displacement[1] += shift[1];
+                        display.reinsert();
                     }
                     Stepped::After(frames.interval_ms)
                 } else {
@@ -543,6 +559,7 @@ impl Driver<Owner, Action> for Present<'_> {
                     display.frame = (step - 1) % frames.shifts.len().max(1);
                     display.hex = Some(*hex);
                     display.displacement = *offset;
+                    display.reinsert();
                 }
                 if step >= nodes.len() {
                     Stepped::Done
@@ -564,7 +581,12 @@ pub struct Sequence {
 }
 impl Sequence {
     /// An owner's display before the sequence plays.
-    pub fn show(&mut self, owner: Owner, display: Display) {
+    pub fn show(&mut self, owner: Owner, mut display: Display) {
+        // SPEC-014 §3.44: an object only the presentation knows is created
+        // now, at the end of its group.
+        if matches!(owner, Owner::Shown(_)) && display.inserted.is_none() {
+            display.reinsert();
+        }
         self.displays.entry(owner).or_insert(display);
     }
     /// Append an entry; past [`CAPACITY`] the sequence cannot register.
@@ -664,6 +686,9 @@ fn walk(
     frame: &mut usize,
     step_number: usize,
 ) -> Stepped {
+    // SPEC-014 §3.44: every walk step is an offset change, which moves
+    // the walker to the end of its group on its hex.
+    display.reinsert();
     let Some(&facing) = route.get(*cursor) else {
         display.displacement = [0; 2];
         return Stepped::Done;
@@ -715,6 +740,7 @@ fn apply(display: &mut Display, action: &Action) {
             display.art = *art;
             display.frame = 0;
             display.displacement = [0; 2];
+            display.reinsert();
         }
         Action::Hide => display.hidden = true,
         Action::Unhide => display.hidden = false,
@@ -726,6 +752,7 @@ fn apply(display: &mut Display, action: &Action) {
             display.hex = Some(*hex);
             display.elevation = *elevation;
             display.hidden = false;
+            display.reinsert();
         }
         Action::Remove => display.hex = None,
         _ => {}
@@ -745,6 +772,10 @@ pub struct Show {
     /// Queued while combat was active: it counts toward the SPEC-014 §3.27
     /// combat lock until it has played (`clicks::CombatLock`).
     pub combat: bool,
+    /// SPEC-014 §3.44 a player attack under `target_highlight` 2: the
+    /// target outlines, disabled as it started, are enabled again once it
+    /// has played (its damage applied).
+    pub outlines: bool,
 }
 impl Show {
     pub fn finished(&self) -> bool {

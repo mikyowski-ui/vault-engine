@@ -680,6 +680,7 @@ impl<A: WorldAssets> WorldHost<A> {
             round: 1,
             cursor,
             resumed: true,
+            highlight: world.target_highlight,
             ..CombatState::default()
         };
         // SPEC-009 §3.2 (improved): rebuild the snapshot from the restored

@@ -135,8 +135,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 if let Some(object) = self.world.get_mut(movement.actor) {
                     object.raw.orientation = rebuilt[0];
                     object.raw.frame = 0;
-                    object.raw.displacement = [0, 0];
                 }
+                self.world.set_offset(movement.actor, [0, 0]);
                 movement.directions = rebuilt;
                 movement.cursor = 0;
                 return Ok(StepOutcome::Replanned);

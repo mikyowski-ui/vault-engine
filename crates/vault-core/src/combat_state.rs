@@ -34,6 +34,10 @@ pub struct CombatState {
     pub turn_ended: bool,
     /// The initiating scripted request, consumed by the attacker's first attack.
     pub request: Option<CombatRequest>,
+    /// SPEC-014 §3.44 the `target_highlight` setting read at combat start:
+    /// when nonzero, each player turn enables the target outlines.
+    #[serde(default)]
+    pub highlight: i32,
 }
 
 /// A scripted combat request (SPEC-005 `attack`/`attack_setup`).
@@ -62,6 +66,7 @@ impl Default for CombatState {
             player_turn: false,
             turn_ended: false,
             request: None,
+            highlight: 0,
         }
     }
 }
@@ -127,6 +132,9 @@ impl WorldState {
         let combat = &mut self.combat_state;
         if let Some(position) = combat.list.iter().position(|c| *c == critter) {
             combat.list.remove(position);
+            // SPEC-014 §3.44: leaving the combat list removes the outline.
+            self.remove_outline(critter);
+            let combat = &mut self.combat_state;
             if position < combat.active {
                 combat.active -= 1;
             }
@@ -316,6 +324,10 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.combat = true;
         self.world.combat_quit = false;
         self.world.combat_experience = 0;
+        // SPEC-014 §3.44: the setting is read now, and every combatant's
+        // outline is set, disabled.
+        self.world.combat_state.highlight = self.world.target_highlight;
+        self.world.start_combat_outlines();
         Ok(())
     }
     fn combat_script(&mut self, critter: ObjectRef, parameter: i32) -> bool {
@@ -412,6 +424,8 @@ impl<A: WorldAssets> WorldHost<A> {
             .filter(|critter| self.world.is_dead(*critter))
             .collect();
         for critter in dead {
+            // SPEC-014 §3.44: leaving the combat list removes the outline.
+            self.world.remove_outline(critter);
             let combat = &mut self.world.combat_state;
             if let Some(position) = combat.list.iter().position(|c| *c == critter) {
                 if position < combat.active {
@@ -500,10 +514,17 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         if critter == self.world.player {
             self.world.combat_state.player_turn = true;
+            // SPEC-014 §3.44: with the setting read at combat start
+            // nonzero, the turn enables the target outlines.
+            if self.world.combat_state.highlight != 0 {
+                self.world.enable_target_outlines();
+            }
             // SPEC-014 §3.21: the AC counter rolls at the turn's start.
             self.world.emit(crate::WorldEffect::RollArmorClass);
             return Ok(true);
         }
+        // SPEC-014 §3.44: the acting NPC is outlined for its whole turn.
+        self.world.enable_outline(critter);
         if ai.builtin() {
             let (target, accuracy) = requested.map_or((None, 0), |(t, a)| (Some(t), a));
             self.world.ai.accuracy = accuracy;
@@ -520,6 +541,12 @@ impl<A: WorldAssets> WorldHost<A> {
     fn end_turn(&mut self, critter: ObjectRef) {
         if let Some(state) = self.world.critter_state_mut(critter) {
             state.damage = 0;
+        }
+        // SPEC-014 §3.44: the turn's outlines are disabled as it ends.
+        if critter == self.world.player {
+            self.world.disable_target_outlines();
+        } else {
+            self.world.disable_outline(critter);
         }
         if critter == self.world.player {
             // SPEC-014 §3.27: input stays locked until the next player turn.
@@ -672,8 +699,9 @@ impl<A: WorldAssets> WorldHost<A> {
         for critter in &list {
             if let Some(object) = self.world.get_mut(*critter) {
                 object.opponent = 0;
-                object.raw.outline = 0;
             }
+            // SPEC-014 §3.44: combat end removes the outline.
+            self.world.remove_outline(*critter);
             if let Some(state) = self.world.critter_state_mut(*critter) {
                 state.damage = 0;
                 state.maneuvers = 0;

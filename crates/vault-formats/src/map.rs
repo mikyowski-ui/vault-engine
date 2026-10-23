@@ -171,6 +171,8 @@ pub struct MapObject {
     pub pid: u32,
     pub combat_id: i32,
     pub light: Light,
+    /// The runtime outline word (SPEC-014 §3.44, [`outline`]): discarded on
+    /// load (SPEC-003 §2.10), written as it stands on save.
     pub outline: u32,
     pub script_id: i32,
     pub cached_script_file: i32,
@@ -179,6 +181,31 @@ pub struct MapObject {
     pub inventory: Vec<InventoryEntry>,
     pub owner: Option<u32>,
     pub file_offset: usize,
+}
+/// SPEC-014 §3.44 the 32-bit runtime outline word: the type in bits 0-23,
+/// compared whole, the translucent bit 30 and the disabled bit 31.
+pub mod outline {
+    /// Bits 0-23, the outline type; 0 is no outline.
+    pub const TYPE: u32 = 0x00FF_FFFF;
+    /// Translucent, honored for the red, grey and item types only.
+    pub const TRANSLUCENT: u32 = 0x4000_0000;
+    /// The type is kept, but the object is not outlined.
+    pub const DISABLED: u32 = 0x8000_0000;
+    pub const HOSTILE: u32 = 1;
+    pub const RED: u32 = 2;
+    pub const GREY: u32 = 4;
+    pub const FRIENDLY: u32 = 8;
+    pub const ITEM: u32 = 16;
+
+    /// The word's outline type (0 for none).
+    pub fn kind(word: u32) -> u32 {
+        word & TYPE
+    }
+    /// Whether a word draws an outline: a type is set and it is not
+    /// disabled.
+    pub fn outlined(word: u32) -> bool {
+        kind(word) != 0 && word & DISABLED == 0
+    }
 }
 #[derive(Debug, Clone)]
 pub struct MapObjects {
@@ -523,6 +550,12 @@ impl MapObjects {
     }
 }
 impl MapObject {
+    /// SPEC-014 §3.44 whether the object is outlined now: its outline word
+    /// has a type and is not disabled. (SPEC-010 §3.11 widens an outlined
+    /// object's on-screen rectangle by 1 pixel on every side.)
+    pub fn outlined(&self) -> bool {
+        outline::outlined(self.outline)
+    }
     /// One object tree outside a map stream (the save's player record):
     /// the same record/containment grammar with no count prefixes.
     pub(crate) fn read_tree(

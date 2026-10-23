@@ -34,6 +34,7 @@ pub mod library;
 pub mod loot;
 pub mod motion;
 pub mod movie;
+pub mod outline;
 pub mod persistence;
 pub mod progression;
 pub mod queue;

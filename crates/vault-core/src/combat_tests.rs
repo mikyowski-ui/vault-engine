@@ -1801,3 +1801,135 @@ fn spec007_a_kill_category_outside_the_tables_uses_table_0() {
     assert_eq!(resolution, expected);
     assert_ne!(resolution.defender_flags & effect::CRITICAL, 0);
 }
+
+/// SPEC-014 §3.44 and Fixture T: the outline word's operations.
+#[test]
+fn spec014_outline_word_operations() {
+    use vault_formats::map::outline;
+    let mut world = world();
+    let a = fighter(&mut world, 20102, 8, 0);
+    // Fixture T: setting type 16 over 0x80000008 is refused.
+    world.get_mut(a).unwrap().raw.outline = 0x8000_0008;
+    assert!(!world.set_outline(a, outline::ITEM));
+    assert_eq!(world.outline_word(a), 0x8000_0008);
+    assert!(
+        !world.outlined(a),
+        "hostile or friendly, disabled: not drawn"
+    );
+    world.enable_outline(a);
+    assert_eq!(world.outline_word(a), 8);
+    assert!(world.outlined(a));
+    world.remove_outline(a);
+    assert_eq!(world.outline_word(a), 0);
+    // Disabling needs a type.
+    world.disable_outline(a);
+    assert_eq!(world.outline_word(a), 0);
+    // A hidden object's new type is set disabled; showing enables it and
+    // hiding disables it again.
+    world.set_hidden(a, true);
+    assert!(world.set_outline(a, outline::RED | outline::TRANSLUCENT));
+    assert_eq!(world.outline_word(a), 0xC000_0002);
+    world.set_hidden(a, false);
+    assert_eq!(world.outline_word(a), 0x4000_0002);
+    world.set_hidden(a, true);
+    assert_eq!(world.outline_word(a), 0xC000_0002);
+    // The no-highlight flag refuses a type.
+    let b = fighter(&mut world, 20104, 8, 0);
+    world.get_mut(b).unwrap().raw.flags.0 |= BasicFlags::NO_HIGHLIGHT.0;
+    assert!(!world.set_outline(b, outline::ITEM));
+    assert_eq!(world.outline_word(b), 0);
+}
+
+/// An AI that records whether each acting NPC is outlined during its turn.
+#[derive(Default)]
+struct OutlineWatch {
+    seen: Vec<(ObjectRef, bool)>,
+}
+impl CombatAi for OutlineWatch {
+    fn take_turn(
+        &mut self,
+        world: &mut WorldState,
+        critter: ObjectRef,
+    ) -> Result<(), crate::WorldError> {
+        self.seen.push((critter, world.outlined(critter)));
+        Ok(())
+    }
+}
+
+/// SPEC-014 §3.44 combat outlines: types at combat start (Friendly Foe),
+/// the player's turn under `target_highlight` and the crosshair, NPC turns,
+/// team changes, death and the end of combat; then the outside-combat
+/// steps.
+#[test]
+fn spec014_combat_sets_and_clears_target_outlines() {
+    use crate::stats::Perk;
+    use vault_formats::map::outline;
+    let mut world = world();
+    let player = world.player;
+    let a = fighter(&mut world, 20102, 12, 0);
+    let b = fighter(&mut world, 20104, 6, 0);
+    world.critter_state_mut(player).unwrap().team = 0;
+    world.critter_state_mut(a).unwrap().team = 1;
+    world.critter_state_mut(b).unwrap().team = 0;
+    let context = world.context(player);
+    world
+        .player_sheet_mut()
+        .unwrap()
+        .set_perk(Perk::FriendlyFoe, 1, context);
+    world.target_highlight = 1;
+    world.crosshair = true;
+    let mut host = crate::WorldHost::new(world, NoAssets);
+    host.start_combat(player, a).unwrap();
+    assert_eq!(host.world.combat_state.highlight, 1);
+    assert_eq!(host.world.outline_word(a), 0x8000_0001);
+    assert_eq!(host.world.outline_word(b), 0x8000_0008, "Friendly Foe");
+    // The player's turn enables every living combatant but the player.
+    let mut ai = OutlineWatch::default();
+    assert_eq!(
+        host.advance_combat(&mut ai).unwrap(),
+        CombatProgress::PlayerTurn
+    );
+    assert!(host.world.outlined(a) && host.world.outlined(b));
+    assert!(!host.world.outlined(player));
+    // Ending it disables them; the acting NPC is outlined for its turn.
+    host.end_player_turn();
+    host.world.crosshair = false;
+    assert_eq!(
+        host.advance_combat(&mut ai).unwrap(),
+        CombatProgress::PlayerTurn
+    );
+    assert!(
+        ai.seen.iter().all(|(_, outlined)| *outlined),
+        "{:?}",
+        ai.seen
+    );
+    assert!(!ai.seen.is_empty());
+    // Without the crosshair the player's turn enables nothing.
+    assert!(!host.world.outlined(a) && !host.world.outlined(b));
+    // Entering crosshair mode enables them.
+    host.world.crosshair = true;
+    host.world.enable_target_outlines();
+    assert!(host.world.outlined(a));
+    // A team change rebuilds the type and keeps it enabled.
+    host.set_team(a, 0);
+    assert_eq!(host.world.outline_word(a), outline::FRIENDLY);
+    // Death disables it.
+    host.damage_critter(b, None, 1000, 0).unwrap();
+    assert_eq!(host.world.outline_word(b), 0x8000_0008);
+    // The end of combat removes every outline.
+    host.end_combat().unwrap();
+    assert_eq!(host.world.outline_word(a), 0);
+    assert_eq!(host.world.outline_word(player), 0);
+    // Outside combat: type 8 for the player's team, 1 for the others, no
+    // Friendly Foe test, enabled; the disable step removes them.
+    host.world.critter_state_mut(a).unwrap().team = 2;
+    host.world.enable_target_outlines();
+    assert_eq!(host.world.outline_word(a), outline::HOSTILE);
+    assert_eq!(host.world.outline_word(player), 0);
+    host.world.disable_target_outlines();
+    assert_eq!(host.world.outline_word(a), 0);
+    // With the setting 0 nothing is enabled.
+    host.world.target_highlight = 0;
+    host.world.enable_target_outlines();
+    assert_eq!(host.world.outline_word(a), 0);
+}
