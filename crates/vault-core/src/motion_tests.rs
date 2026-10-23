@@ -1352,3 +1352,145 @@ fn spec007_combat_cleanup_gets_a_prone_player_up_unless_a_script_ended_it() {
     );
     assert!(waking(&host) && host.motions.is_empty());
 }
+
+#[test]
+fn spec014_the_combat_lock_counts_sequences_registered_in_combat() {
+    use crate::clicks::input_locked;
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let shifts = HEX_STEPS.map(|[x, y]| [(x / 4) as i16, (y / 4) as i16]);
+    host.assets.art.insert(critter(1, 0), frm(8, 10, 0, shifts));
+    let player = host.world.player;
+    let walker = npc(&mut host, 20104);
+    let locked = |host: &WorldHost<Assets>| input_locked(&host.click_state());
+    let play = |host: &mut WorldHost<Assets>, now: &mut u64| {
+        while host.moving(player) || host.moving(walker) {
+            *now += 100;
+            host.step_motions(*now);
+            assert!(*now < 10_000, "the walks end");
+        }
+    };
+    let mut now = 0;
+    // A walk registered before combat began never counts.
+    assert!(
+        host.walk_toward(walker, hexes(20104, 1, 4), false, 0)
+            .unwrap()
+    );
+    host.world.combat = true;
+    for critter in [player, walker] {
+        host.world.critter_state_mut(critter).unwrap().ap = 10;
+    }
+    assert!(locked(&host), "combat start locks input");
+    host.combat_lock.begin_turn();
+    host.sync_combat_lock();
+    assert_eq!(host.combat_lock.count, 0);
+    assert!(!locked(&host), "the player's turn gives it back");
+    // The player's walk counts: 0 -> 1 during the player's turn engages
+    // the lock under the watch until the count is 0 again.
+    assert!(
+        host.walk_toward(player, hexes(20100, 4, 2), false, 0)
+            .unwrap()
+    );
+    assert_eq!(host.combat_lock.count, 1);
+    assert!(locked(&host));
+    play(&mut host, &mut now);
+    assert_eq!(host.combat_lock.count, 0);
+    assert!(!locked(&host));
+    // Between player turns: an NPC's walk counts, but only the turn order
+    // locks; the next player turn releases the lock while it still runs,
+    // and a rise from 1 to 2 does not engage it.
+    host.combat_lock.end_turn();
+    assert!(locked(&host));
+    let back = hex(&host, walker);
+    assert!(
+        host.walk_toward(walker, hexes(back, 4, 3), false, 0)
+            .unwrap()
+    );
+    assert_eq!(host.combat_lock.count, 1);
+    assert!(!host.combat_lock.engaged);
+    host.combat_lock.begin_turn();
+    assert_eq!(host.combat_lock.turns, 2, "each turn start flushes keys");
+    assert!(
+        host.walk_toward(player, hexes(hex(&host, player), 1, 1), false, 0)
+            .unwrap()
+    );
+    assert_eq!(host.combat_lock.count, 2);
+    assert!(!locked(&host));
+    play(&mut host, &mut now);
+    // A sequence whose registration fails never counts.
+    host.motions.clear();
+    host.sync_combat_lock();
+    let mut blocked = MotionSequence::new();
+    let walk = Walk::new(Goal::Hex(hexes(20104, 4, 1)), false, 10);
+    blocked
+        .push(walker, 0, Motion::Walk(Box::new(walk.clone())))
+        .unwrap();
+    assert!(host.register_motion(blocked));
+    let mut again = MotionSequence::new();
+    again.push(walker, 0, Motion::Walk(Box::new(walk))).unwrap();
+    assert!(!host.register_motion(again), "one sequence per owner");
+    assert_eq!(host.combat_lock.count, 1);
+    // The end of combat releases everything without a flush.
+    host.world.combat_state.player_turn = false;
+    let turns = host.combat_lock.turns;
+    host.end_combat().unwrap();
+    assert!(!locked(&host));
+    assert_eq!(host.combat_lock.turns, turns);
+}
+
+#[test]
+fn spec014_talk_tests_distance_and_line_from_the_player_at_each_moment() {
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let shifts = HEX_STEPS.map(|[x, y]| [(x / 4) as i16, (y / 4) as i16]);
+    host.assets.art.insert(critter(1, 0), frm(8, 10, 0, shifts));
+    host.assets
+        .art
+        .insert(critter(19, 0), frm(8, 10, 0, shifts));
+    let player = host.world.player;
+    let far = hexes(20100, 1, 10);
+    let target = npc(&mut host, far);
+    let cannot = "You cannot get there.".to_string();
+    // The first test, at the click: object distance 10, so a run to the
+    // target is registered first.
+    assert!(!host.near_talk(target));
+    host.action(player, target, ObjectAction::Talk).unwrap();
+    assert!(host.moving(player), "the approach");
+    let mut now = 0;
+    host.step_motions(now);
+    // The target leaves while the player runs: the second test is made
+    // from where the player stands after the approach, and fails.
+    host.world
+        .move_object(target, hexes(far, 1, 12), 0, false)
+        .unwrap();
+    while host.moving(player) {
+        now += 100;
+        host.step_motions(now);
+        assert!(now < 10_000, "the approach ends");
+    }
+    assert!(hex(&host, player) != 20100, "the player ran");
+    assert!(messages(&mut host).contains(&cannot));
+    assert!(!host.world.dialogue.open);
+    // Within range after the approach the check passes and the dialogue
+    // is requested in the same examination (this target has no script).
+    host.world.effects.clear();
+    let near = hexes(hex(&host, player), 1, 10);
+    host.world.move_object(target, near, 0, false).unwrap();
+    host.action(player, target, ObjectAction::Talk).unwrap();
+    while host.moving(player) {
+        now += 100;
+        host.step_motions(now);
+        assert!(now < 20_000, "the approach ends");
+    }
+    assert!(!messages(&mut host).contains(&cannot));
+    assert!(
+        diagnostics(&host)
+            .iter()
+            .any(|text| text.contains("no dialogue script"))
+    );
+    // Near the target the first test passes: no approach, at once.
+    host.world.effects.clear();
+    assert!(host.near_talk(target));
+    host.action(player, target, ObjectAction::Talk).unwrap_err();
+    assert!(!host.moving(player));
+}

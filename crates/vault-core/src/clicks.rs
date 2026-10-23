@@ -1,11 +1,11 @@
-//! SPEC-014 §3.26-§3.27 clicks while sequences play: the pure policy for
-//! a player's map click, action-menu entry, bar press or game hotkey. The
-//! interface applies it before acting (showing the animated watch while
-//! combat locks input), and the world applies its busy rules again as it
-//! registers (`WorldHost::walk_toward_with` and the interaction
-//! sequences). Nothing is ever queued: a click either cancels the player's
-//! current sequence and starts its own, or does nothing. The rules come
-//! from SPEC-007 §3.10.1 "One sequence per owner".
+//! SPEC-014 §3.26-§3.27 clicks while sequences play: the combat input lock
+//! and the pure policy for a player's map click, action-menu entry, bar
+//! press or game hotkey. The interface applies it before acting (showing
+//! the animated watch while combat locks input), and the world applies its
+//! busy rules again as it registers (`WorldHost::walk_toward_with` and the
+//! interaction sequences). Nothing is ever queued: a click either cancels
+//! the player's current sequence and starts its own, or does nothing. The
+//! rules come from SPEC-007 §3.10.1 "One sequence per owner".
 
 /// What the player asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,10 +41,12 @@ pub enum Policy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ClickState {
     pub combat: bool,
-    /// In combat, whether it is the player's turn.
+    /// In combat, whether it is the player's turn: from its start, before
+    /// the player's combat script and stand-up, to its end.
     pub player_turn: bool,
-    /// An attack show is playing, or in combat any sequence still runs.
-    pub presenting: bool,
+    /// The combat lock a running sequence engaged during the player's turn
+    /// ([`CombatLock`]).
+    pub engaged: bool,
     /// A sequence holding the player has not ended: a non-callback entry
     /// of the player's, started or not, in a sequence other than an idle
     /// fidget (`WorldHost::owns_motion`).
@@ -55,14 +57,69 @@ pub struct ClickState {
     pub standing: bool,
 }
 
-/// §3.27: in combat, the first sequence registered on the player's turn
-/// disables the game mouse, the keyboard and the interface bar until every
-/// running sequence has ended, and clicks made meanwhile are discarded;
-/// outside the player's turn nothing is accepted either. Every map click,
-/// bar press and game hotkey is gated on this, and the animated watch
-/// `wait2.frm` shows while it holds (§3.26).
+/// §3.27 the combat input lock: from combat start the game mouse, the
+/// keyboard and the interface bar are disabled (edge scrolling stays on)
+/// under the animated watch `wait2.frm` (list index 295), except during
+/// the player's turn while [`CombatLock`] is not engaged. Every map click,
+/// bar press and game hotkey is gated on this; clicks are discarded and
+/// keys held (§3.26-§3.27).
 pub fn input_locked(state: &ClickState) -> bool {
-    state.combat && (!state.player_turn || state.presenting)
+    state.combat && (!state.player_turn || state.engaged)
+}
+
+/// SPEC-014 §3.27 the combat-wide count of running sequences and the lock
+/// it drives.
+///
+/// - Every sequence that registers while combat is active counts until it
+///   ends, normally, by failing while it plays or by being cancelled,
+///   whatever it holds: the player, an NPC, a door, a projectile or an
+///   extra victim's reaction. A sequence whose registration fails never
+///   counts, and neither does one registered before combat began.
+/// - During the player's turn, the count rising from 0 engages the lock
+///   and its falling back to 0 releases it. A sequence that starts while
+///   another still runs extends the lock. Sequences registered outside the
+///   player's turn change the count but not the lock.
+/// - The player's turn start releases the lock and flushes held keys
+///   (`turns` counts the starts); between player turns the input stays
+///   locked, and the end of combat releases everything without a flush.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CombatLock {
+    /// Running sequences registered while combat was active.
+    pub count: usize,
+    /// The player's turn has started (before its combat script and any
+    /// stand-up) and not ended.
+    pub turn: bool,
+    /// A sequence engaged the lock during the player's turn.
+    pub engaged: bool,
+    /// Player turns started: each one flushes the held keys.
+    pub turns: u64,
+}
+impl CombatLock {
+    /// The player's turn starts: the input comes back and held keys are
+    /// flushed.
+    pub fn begin_turn(&mut self) {
+        self.turn = true;
+        self.engaged = false;
+        self.turns += 1;
+    }
+    /// The player's turn ended, or combat started or ended: while combat
+    /// lasts the input stays locked until the next player turn.
+    pub fn end_turn(&mut self) {
+        self.turn = false;
+        self.engaged = false;
+    }
+    /// The count is now `count`; `player_turn` is whether the player's turn
+    /// is under way.
+    pub fn counted(&mut self, count: usize, player_turn: bool) {
+        if player_turn {
+            if self.count == 0 && count > 0 {
+                self.engaged = true;
+            } else if count == 0 {
+                self.engaged = false;
+            }
+        }
+        self.count = count;
+    }
 }
 
 /// §3.27 "Clicks while the player is busy", for a click that passed the

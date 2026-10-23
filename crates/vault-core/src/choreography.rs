@@ -742,6 +742,9 @@ pub struct Show {
     pub taunts: Vec<TauntCallback>,
     /// It shows an explosion (SPEC-013 §3.10 in progress).
     pub explosive: bool,
+    /// Queued while combat was active: it counts toward the SPEC-014 §3.27
+    /// combat lock until it has played (`clicks::CombatLock`).
+    pub combat: bool,
 }
 impl Show {
     pub fn finished(&self) -> bool {

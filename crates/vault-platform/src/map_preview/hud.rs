@@ -4,6 +4,7 @@
 //! the in-world cursor modes and their clicks, and the game-loop hotkeys.
 use super::MapPreview;
 use crate::interface::Painter;
+use std::collections::VecDeque;
 use vault_core::{
     ObjectAction, ObjectRef, WorldEffect,
     assets::WorldAssets,
@@ -160,7 +161,29 @@ pub(crate) struct Hud {
     pub swapping: bool,
     /// §3.26 the animated watch: when it was set and the frame last drawn.
     pub watch: Option<(u64, u32)>,
+    /// §3.27 key presses and releases typed while combat locks the
+    /// keyboard, read in order once it is enabled again.
+    pub held_keys: VecDeque<HeldKey>,
+    /// The player turns started (`CombatLock::turns`) when the held keys
+    /// were last flushed.
+    pub key_turns: u64,
+    /// §3.38 step 3: an out-of-combat crosshair click that started combat,
+    /// replayed once on the player's first turn.
+    pub replay: Option<ObjectRef>,
+    /// §3.38 the called-shot window.
+    pub called: Option<super::called::CalledShot>,
 }
+
+/// §3.27 a key event held while combat locks the keyboard: a press, with
+/// the modifiers it was typed with, or a release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldKey {
+    Press(KeyCode, [bool; 3]),
+    Release,
+}
+/// §3.27 at most 32 key presses and releases are held. Which survive when
+/// more are typed is `[May-improve]`; the safe rule keeps the first 32.
+pub(crate) const HELD_KEYS: usize = 32;
 impl Default for Hud {
     fn default() -> Self {
         Self {
@@ -178,6 +201,10 @@ impl Default for Hud {
             cues: Vec::new(),
             swapping: false,
             watch: None,
+            held_keys: VecDeque::new(),
+            key_turns: 0,
+            replay: None,
+            called: None,
         }
     }
 }
@@ -196,6 +223,14 @@ fn bar_button_rect(button: BarButton) -> Rect {
         .find(|(found, ..)| *found == button)
         .expect("a bar button");
     Rect::new(bx + rect.x, by + rect.y, rect.w, rect.h)
+}
+
+/// A message with its first `%d` replaced by `value`.
+fn replace_number(text: &[u8], value: i32) -> Vec<u8> {
+    match text.windows(2).position(|pair| pair == b"%d") {
+        Some(at) => [&text[..at], value.to_string().as_bytes(), &text[at + 2..]].concat(),
+        None => text.to_vec(),
+    }
 }
 
 /// The game-loop key for a physical key (with Shift for the shifted digits).
@@ -521,12 +556,60 @@ impl MapPreview {
     pub(crate) fn bar_blocks(&self) -> bool {
         self.counters_rolling() || self.hud.panel.animation.is_some()
     }
-    /// SPEC-014 §3.26-§3.27 the combat lock: in combat outside the
-    /// player's turn, or while a sequence registered on it (an attack, a
-    /// walk) still runs, the game mouse, the keyboard and the bar take
-    /// nothing and clicks are discarded.
+    /// SPEC-014 §3.26-§3.27 the combat lock: from combat start to the
+    /// player's turn, between player turns, and while the combat-wide count
+    /// of running sequences that rose during the player's turn is above 0,
+    /// the game mouse, the keyboard and the bar take nothing: clicks are
+    /// discarded and keys held.
     pub(crate) fn combat_locked(&self) -> bool {
         clicks::input_locked(&self.host.click_state())
+    }
+    /// §3.27 the keyboard is disabled by the combat lock: no key is read.
+    pub(crate) fn keyboard_locked(&self) -> bool {
+        matches!(self.screen, super::Screen::Map)
+            && !self.host.world.dialogue.open
+            && self.combat_locked()
+    }
+    /// §3.27 a key event typed while the keyboard is disabled is held, up
+    /// to 32 (the first 32 are kept).
+    pub(crate) fn hold_key(&mut self, event: HeldKey) {
+        if self.hud.held_keys.len() < HELD_KEYS {
+            self.hud.held_keys.push_back(event);
+        }
+    }
+    /// A key went up: held while the keyboard is disabled, so it counts
+    /// toward the 32 events (§3.27). Game input acts on presses only.
+    pub fn key_up(&mut self, _key: KeyCode) {
+        if !self.fade_blocks() && self.keyboard_locked() {
+            self.hold_key(HeldKey::Release);
+        }
+    }
+    /// §3.27 the held keys: flushed at the start of each player turn,
+    /// before its combat script and stand-up (keys typed at combat start,
+    /// on NPC turns or in the last sequence of the player's previous turn
+    /// are lost), and otherwise read in order once the keyboard is enabled
+    /// again, the end of combat included. A key that locks it again (a
+    /// sequence it starts) leaves the rest held. Returns whether any acted.
+    pub(crate) fn read_held_keys(&mut self) -> bool {
+        let turns = self.host.combat_lock.turns;
+        if self.hud.key_turns != turns {
+            self.hud.key_turns = turns;
+            self.hud.held_keys.clear();
+        }
+        let mut read = false;
+        // A fade or a counter roll still holds input back (§3.2, §3.21).
+        while !self.keyboard_locked() && !self.fade_blocks() && !self.bar_blocks() {
+            let Some(event) = self.hud.held_keys.pop_front() else {
+                break;
+            };
+            if let HeldKey::Press(key, modifiers) = event {
+                let current = std::mem::replace(&mut self.hud.modifiers, modifiers);
+                self.step(key);
+                self.hud.modifiers = current;
+                read = true;
+            }
+        }
+        read
     }
     /// §3.23 swap hands, step 4: while its animation holds the player the
     /// bar and the mouse are disabled.
@@ -816,6 +899,20 @@ impl MapPreview {
         self.hud.held = Some(button);
         true
     }
+    /// §3.27 a left press in the bar while the watch shows: the other bar
+    /// buttons are disabled, but the Swap hands button never is. It still
+    /// shows its pressed art and plays its sounds; the `b` its release
+    /// sends does nothing while the bar is disabled (`bar_release`).
+    /// `[May-improve]` (disable it too) is not taken.
+    pub(crate) fn swap_button_press(&mut self, point: [i32; 2]) {
+        let rect = bar_button_rect(BarButton::SwapHands);
+        if !rect.contains(point) || self.host.world.ui_disabled {
+            return;
+        }
+        let (press, release) = bar::BUTTON_SOUNDS;
+        self.press_button_cue(press.as_bytes(), release.as_bytes(), rect);
+        self.hud.held = Some(BarButton::SwapHands);
+    }
     /// A left release over the held bar button `button` (`over` is the
     /// held rectangle when the release is over it): the button's release
     /// sound, then its key, which plays `ib1p1xx1` as the game loop does,
@@ -1010,7 +1107,8 @@ impl MapPreview {
     }
     /// The active hand's hit mode in `mode` (SPEC-007 §3.6): punch for an
     /// empty hand, else the hand's primary or secondary hit mode. Reload
-    /// is not an attack; an attack made then uses the primary hit mode.
+    /// reports no attack (`slot_attack`); here it reads the primary, for
+    /// the ammo bar.
     fn slot_hit_mode(&self, mode: WeaponMode) -> u8 {
         if self.active_item().is_none() {
             return hit_mode::PUNCH;
@@ -1208,16 +1306,120 @@ impl MapPreview {
             _ => cursor::Target::Wall { usable },
         })
     }
-    /// The player's attack request (SPEC-007 §3.6): the item slot's hit
-    /// mode, punch (4) for an empty active hand, else the hand's primary or
-    /// secondary mode as chosen in the slot (§3.23).
-    pub(crate) fn attack_mode(&self) -> u8 {
-        self.slot_hit_mode(self.slot_mode())
+    /// §3.23 the attack query: the active slot's current attack, its hit
+    /// mode (punch for an empty hand, else the hand's primary or secondary
+    /// mode) and aimed flag. Reload, use and use-on report no attack, and
+    /// with it the UI aiming flag is false (SPEC-007 §3.4).
+    pub(crate) fn slot_attack(&self) -> Option<(u8, bool)> {
+        let mode = self.slot_mode();
+        (self.slot_weapon(self.active_item()) && mode != WeaponMode::Reload)
+            .then(|| (self.slot_hit_mode(mode), mode.aimed()))
     }
-    /// The player's UI aiming flag: the slot shows the bullseye (§3.23).
-    /// SPEC-007 §3.4: an uncalled attack then costs the aiming AP.
-    pub(crate) fn attack_aimed(&self) -> bool {
-        self.slot_mode().aimed()
+    /// §3.38 the player's attack request against `target` from a crosshair
+    /// click (or its replay): nothing unless the input gate is set and the
+    /// slot reports an attack; then the preflight, whose first failing test
+    /// prints its `combat.msg` line. Out of combat a passing click starts
+    /// combat and is replayed once on the player's first turn; in combat a
+    /// mode that is not aimed attacks at once, uncalled, and an aimed mode
+    /// opens the called-shot window.
+    pub(crate) fn attack_request(&mut self, target: ObjectRef) {
+        use vault_core::critical::state::INPUT_GATE;
+        let player = self.host.world.player;
+        let gate = self.host.world.combat_state.flags & INPUT_GATE != 0;
+        let Some((mode, aimed)) = self.slot_attack().filter(|_| gate) else {
+            return;
+        };
+        let attack =
+            match self
+                .host
+                .world
+                .attack_profile(player, target, mode, location::UNCALLED, aimed)
+            {
+                Ok(attack) => attack,
+                Err(error) => {
+                    self.status = error.to_string().into_bytes();
+                    return;
+                }
+            };
+        if let Err(refusal) = self.host.world.preflight(player, target, &attack) {
+            self.refuse_attack(refusal, attack.ap_cost(), mode);
+            return;
+        }
+        if !self.host.world.combat {
+            self.host.world.pending_combat = Some(vault_core::combat_state::CombatRequest {
+                attacker: player,
+                defender: target,
+                accuracy: 0,
+                damage: [0, i32::MAX],
+                flags: None,
+            });
+            self.hud.replay = Some(target);
+            return;
+        }
+        if aimed {
+            self.open_called(target, mode);
+            return;
+        }
+        // The kick draw follows the preflight (no draws).
+        match self
+            .host
+            .perform_attack(player, target, mode, location::UNCALLED, false)
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(refusal)) => self.refuse_attack(refusal, attack.ap_cost(), mode),
+            Err(error) => self.status = error.to_string().into_bytes(),
+        }
+    }
+    /// §3.38 step 2: a refused attack prints its `combat.msg` line (100
+    /// with the AP cost), and an empty magazine plays the weapon's
+    /// out-of-ammo sound (SPEC-010 effect `O`).
+    pub(crate) fn refuse_attack(&mut self, refusal: vault_core::Refusal, cost: i32, mode: u8) {
+        tracing::debug!(?refusal, "player attack refused");
+        if let Some(id) = vault_core::ui::called::refusal_message(refusal) {
+            let text = self.message("combat.msg", id);
+            let text = replace_number(&text, cost);
+            self.notify(text);
+        }
+        if refusal == vault_core::Refusal::NoAmmunition
+            && let Some(weapon) = self.active_item()
+        {
+            let player = self.host.world.player;
+            let effect = vault_core::ai::OUT_OF_AMMO_SOUND;
+            let name = self
+                .host
+                .weapon_sound_name(effect, weapon, mode, 0)
+                .unwrap_or_default();
+            self.host.world.emit(WorldEffect::WeaponSound {
+                object: player,
+                weapon,
+                effect,
+                name,
+            });
+        }
+    }
+    /// §3.38 step 3: the click that started combat is replayed once the
+    /// player's first turn has given the input back (steps 1 and 2 again,
+    /// with the refilled AP, then step 4). A combat that ends first drops
+    /// it.
+    pub(crate) fn replay_attack(&mut self) -> bool {
+        let Some(target) = self.hud.replay else {
+            return false;
+        };
+        if !self.host.world.combat {
+            if self.host.world.pending_combat.is_none() {
+                self.hud.replay = None;
+            }
+            return false;
+        }
+        if !self.host.world.combat_state.player_turn
+            || self.combat_locked()
+            || !matches!(self.screen, super::Screen::Map)
+        {
+            return false;
+        }
+        self.hud.replay = None;
+        self.attack_request(target);
+        true
     }
     /// A left release in the map area by cursor mode (SPEC-014 §3.27).
     pub(crate) fn map_click(&mut self, point: [i32; 2], object: Option<ObjectRef>) {
@@ -1225,18 +1427,18 @@ impl MapPreview {
         match self.hud.mode {
             Mode::Movement => {
                 // With Ctrl in combat the current attack's AP cost is kept
-                // out of the route's budget.
+                // out of the route's budget. A slot reporting no attack
+                // would subtract an undefined cost (`[May-improve]`): 2, the
+                // cost the slot shows for reload, use and use-on (§3.23).
                 let reserve = if self.host.world.combat && self.hud.modifiers[1] {
-                    self.host
-                        .world
-                        .attack_profile(
-                            player,
-                            player,
-                            self.attack_mode(),
-                            location::UNCALLED,
-                            self.attack_aimed(),
-                        )
-                        .map_or(0, |attack| attack.ap_cost())
+                    match self.slot_attack() {
+                        Some((mode, aimed)) => self
+                            .host
+                            .world
+                            .attack_profile(player, player, mode, location::UNCALLED, aimed)
+                            .map_or(0, |attack| attack.ap_cost()),
+                        None => 2,
+                    }
                 } else {
                     0
                 };
@@ -1297,55 +1499,15 @@ impl MapPreview {
                 }) else {
                     return;
                 };
-                if self.host.world.combat {
-                    // SPEC-007 §3.10: the player acts again once every attack
-                    // has finished playing.
-                    if self.host.presenting() {
-                        return;
-                    }
-                    // The kick draw follows the player's preflight (no draws).
-                    // An aimed slot mode makes the attack aimed (SPEC-014
-                    // §3.23); no called-shot window is specified, so the
-                    // location stays uncalled and the aiming AP is paid
-                    // (SPEC-007 §3.4).
-                    let mode = self.attack_mode();
-                    let aimed = self.attack_aimed();
-                    let uncalled = location::UNCALLED;
-                    let preflight = self
-                        .host
-                        .world
-                        .attack_profile(player, target, mode, uncalled, aimed)
-                        .map(|attack| self.host.world.preflight(player, target, &attack));
-                    match preflight {
-                        // A refusal is no game message (G-31): only logged.
-                        Ok(Err(refusal)) => {
-                            tracing::debug!(?refusal, "player attack refused");
-                            return;
-                        }
-                        Err(error) => {
-                            self.status = error.to_string().into_bytes();
-                            return;
-                        }
-                        Ok(Ok(())) => {}
-                    }
-                    match self
-                        .host
-                        .perform_attack(player, target, mode, uncalled, aimed)
-                    {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(refusal)) => tracing::debug!(?refusal, "player attack refused"),
-                        Err(error) => self.status = error.to_string().into_bytes(),
-                    }
-                } else {
-                    self.host.world.pending_combat =
-                        Some(vault_core::combat_state::CombatRequest {
-                            attacker: player,
-                            defender: target,
-                            accuracy: 0,
-                            damage: [0, i32::MAX],
-                            flags: None,
-                        });
+                // SPEC-007 §3.10: the player acts again once every attack
+                // has finished playing.
+                if self.host.world.combat && self.host.presenting() {
+                    return;
                 }
+                // §3.38: the preflight, combat start out of combat, and the
+                // called-shot window in an aimed mode. While the slot
+                // reports no attack (reload mode) the click does nothing.
+                self.attack_request(target);
             }
             Mode::UseCrosshair => {
                 // §3.27: the mode returns to movement in every case; in
@@ -1431,14 +1593,14 @@ impl MapPreview {
         let Some(key) = game_key(key, self.hud.modifiers) else {
             return false;
         };
-        // §3.27: under the combat lock the keyboard is disabled and its
-        // keys are discarded (S-04: no window opens and no end of combat is
-        // requested on the enemy turn).
+        // §3.27: under the combat lock the keyboard is not read (`step`
+        // holds its keys), so no hotkey acts (S-04: no window opens and no
+        // end of combat is requested on the enemy turn).
         if self.combat_locked() {
             return true;
         }
-        // §3.23: a hand swap disables the bar, whose keys go with it.
-        let enabled = !self.host.world.ui_disabled && !self.swapping_hands();
+        // §3.23: a hand swap's wait discards its keys before they get here.
+        let enabled = !self.host.world.ui_disabled;
         match bar::game_key(key, enabled, self.hud.modifiers[2]) {
             Some(action) => {
                 if !matches!(action, Action::Skill(_)) {

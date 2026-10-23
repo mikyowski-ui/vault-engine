@@ -2198,8 +2198,7 @@ fn spec014_item_slot_cycles_the_empty_hand_and_aims_the_crosshair_attack() {
     assert_eq!(preview.slot_mode(), WeaponMode::Primary);
     assert!(preview.step(KeyCode::KeyN));
     assert_eq!(preview.slot_mode(), WeaponMode::PrimaryAimed);
-    assert!(preview.attack_aimed());
-    assert_eq!(preview.attack_mode(), hit_mode::PUNCH);
+    assert_eq!(preview.slot_attack(), Some((hit_mode::PUNCH, true)));
     assert!(preview.step(KeyCode::KeyN));
     assert_eq!(preview.slot_mode(), WeaponMode::Primary);
     assert!(preview.step(KeyCode::KeyN));
@@ -2833,13 +2832,18 @@ fn s04_a_combat_walk_locks_clicks_bar_and_keys_under_the_watch() {
     assert!(preview.hud.watch.is_some());
     assert!(preview.tap(on_hex(&preview, second)));
     assert!(preview.pointer.held.is_none());
-    // The Inventory button and `i` open nothing.
+    // The Inventory button opens nothing; `i` is not read but held.
     assert!(preview.tap([211 + 5, 379 + 40 + 5]));
     assert!(preview.step(KeyCode::KeyI));
     assert!(matches!(preview.screen, Screen::Map));
+    assert_eq!(preview.hud.held_keys.len(), 1);
     settle_player(&mut preview, &mut now);
     let end = preview.host.world.get(player).unwrap().raw.hex.unwrap();
     assert_ne!(end, second, "the second click did not re-route the walk");
+    // A key typed during the player's own sequence takes effect when it
+    // ends.
+    assert!(matches!(preview.screen, Screen::Inventory(_)));
+    assert!(preview.hud.held_keys.is_empty());
     // Once every sequence has ended the watch goes and input is back.
     now += 16;
     preview.tick(now).unwrap();
@@ -2858,8 +2862,10 @@ fn s04_hotkeys_are_refused_on_the_enemy_turn() {
     preview.hud.panel = super::hud::Panel::settled(true, false);
     assert!(preview.combat_locked());
     // SPEC-014 §3.27: outside the player's turn the keyboard is disabled:
-    // no window opens and no end of combat is requested.
+    // no window opens, no end of combat is requested and no screenshot is
+    // taken; the keys are held.
     for key in [
+        KeyCode::F12,
         KeyCode::KeyI,
         KeyCode::KeyC,
         KeyCode::KeyP,
@@ -2876,7 +2882,11 @@ fn s04_hotkeys_are_refused_on_the_enemy_turn() {
     assert!(preview.tap([211 + 5, 379 + 40 + 5]));
     assert!(matches!(preview.screen, Screen::Map));
     assert!(preview.watch_shown());
-    // The player's turn gives the keyboard back.
+    assert_eq!(preview.hud.held_keys.len(), 8);
+    assert!(!preview.save_root.exists(), "no screenshot");
+    // The player's turn gives the keyboard back and flushes the keys typed
+    // on the enemy turn.
+    preview.host.combat_lock.begin_turn();
     preview.host.world.combat_state.player_turn = true;
     preview
         .host
@@ -2885,8 +2895,42 @@ fn s04_hotkeys_are_refused_on_the_enemy_turn() {
         .unwrap()
         .ap = 10;
     assert!(!preview.combat_locked());
+    preview.tick(32).unwrap();
+    assert!(preview.hud.held_keys.is_empty());
+    assert!(matches!(preview.screen, Screen::Map));
+    assert!(preview.host.world.combat);
     assert!(preview.step(KeyCode::KeyI));
     assert!(matches!(preview.screen, Screen::Inventory(_)));
+}
+
+#[test]
+fn spec014_held_keys_keep_the_first_32_and_survive_the_end_of_combat() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    preview.host.world.combat = true;
+    preview.hud.panel = super::hud::Panel::settled(true, false);
+    assert!(preview.keyboard_locked());
+    // Presses and releases both count toward the 32 held events.
+    for _ in 0..20 {
+        assert!(preview.step(KeyCode::KeyM));
+        preview.key_up(KeyCode::KeyM);
+    }
+    assert_eq!(preview.hud.held_keys.len(), 32);
+    // The end of combat re-enables the keyboard without a flush: the 16
+    // held `m` presses cycle the cursor mode in order.
+    preview.host.world.combat = false;
+    preview.host.combat_lock.end_turn();
+    preview.hud.panel = super::hud::Panel::settled(false, false);
+    let before = preview.hud.mode;
+    preview.tick(32).unwrap();
+    assert!(preview.hud.held_keys.is_empty());
+    let mut expected = before;
+    for _ in 0..16 {
+        expected = vault_core::ui::cursor::cycle_mode(expected, false, true);
+    }
+    assert_eq!(preview.hud.mode, expected);
 }
 
 #[test]
@@ -3072,10 +3116,288 @@ fn g16_swap_hands_goes_through_the_world_and_returns_to_movement() {
             .unwrap()
     );
     assert!(preview.watch_shown());
+    // §3.23: every key read during the swap is discarded but F12, which
+    // takes its screenshot; nothing is held.
     preview.step(KeyCode::KeyI);
     assert!(matches!(preview.screen, Screen::Map));
+    assert!(preview.step(KeyCode::Escape));
+    assert!(matches!(preview.screen, Screen::Map));
+    assert!(preview.step(KeyCode::F12));
+    assert!(preview.save_root.join("scr00000.ppm").exists());
+    assert!(preview.hud.held_keys.is_empty());
+    // The Swap hands button still presses (its art and sounds), but the
+    // `b` it sends does nothing while the bar is disabled.
+    let hand = preview.host.world.active_hand;
+    let swap = [218 + 5, 379 + 6 + 5];
+    preview.hover(swap);
+    assert!(preview.click(swap, false));
+    assert!(preview.held_button().is_some(), "pressed art");
+    assert!(preview.release(Some(swap), false));
+    assert_eq!(preview.host.world.active_hand, hand);
     settle_player(&mut preview, &mut now);
     now += 16;
     preview.tick(now).unwrap();
     assert!(!preview.hud.swapping);
+}
+
+/// A rifle in the active right hand with 5 of 10 rounds and ammunition
+/// in the pack (SPEC-014 §3.23 weapon modes).
+fn wield_rifle(preview: &mut MapPreview) -> vault_core::ObjectRef {
+    use vault_formats::pro::BasicFlags;
+    let player = preview.host.world.player;
+    let mut weapon = super::fixture::prototype(0, 3);
+    super::fixture::word(&mut weapon, 0, 0x0000_0010);
+    super::fixture::word(&mut weapon, 0x18, 0x76);
+    super::fixture::word(&mut weapon, 0x34, -1);
+    super::fixture::word(&mut weapon, 0x39 + 32, 4);
+    super::fixture::word(&mut weapon, 0x39 + 36, 5);
+    super::fixture::word(&mut weapon, 0x39 + 52, 1);
+    super::fixture::word(&mut weapon, 0x39 + 60, 10);
+    let prototype = Arc::new(vault_formats::Prototype::parse(&weapon).unwrap());
+    let gun = preview.host.world.spawn(prototype, 0, 0).unwrap();
+    preview.host.world.add_item(player, gun, 1, true).unwrap();
+    preview.host.world.get_mut(gun).unwrap().raw.state = ObjectState::Other {
+        word: 0,
+        detail: vault_formats::map::ObjectDetail::Weapon {
+            rounds: 5,
+            ammo_pid: 0x11,
+        },
+    };
+    preview
+        .host
+        .world
+        .equip_slot(player, gun, BasicFlags::RIGHT_HAND.0)
+        .unwrap();
+    preview.host.world.active_hand = 1;
+    gun
+}
+
+#[test]
+fn spec014_reload_mode_reports_no_attack() {
+    use super::pointer::Feedback;
+    use vault_core::ui::{ColorKey, bar::WeaponMode};
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let hex = beside_npc(&mut preview);
+    let player = preview.host.world.player;
+    wield_rifle(&mut preview);
+    while preview.slot_mode() != WeaponMode::Reload {
+        assert!(preview.step(KeyCode::KeyN));
+    }
+    // §3.23: reload, use and use-on report no attack, so the aiming flag
+    // is false too.
+    assert_eq!(preview.slot_attack(), None);
+    preview.hud.mode = Mode::Crosshair;
+    // Out of combat the crosshair click starts no combat.
+    assert!(preview.tap(on_hex(&preview, hex)));
+    assert!(preview.host.world.pending_combat.is_none() && !preview.host.world.combat);
+    assert!(preview.hud.replay.is_none());
+    // In combat it does nothing: no attack, no message, no AP.
+    preview.host.world.combat = true;
+    preview.host.world.combat_state.player_turn = true;
+    preview.host.world.critter_state_mut(player).unwrap().ap = 8;
+    mark_monitor(&mut preview);
+    let line = monitor_line(&preview);
+    let before = preview.host.world.rng.clone();
+    assert!(preview.tap(on_hex(&preview, hex)));
+    assert!(preview.host.world.rng == before);
+    assert_eq!(preview.host.world.critter_state(player).unwrap().ap, 8);
+    assert!(preview.hud.called.is_none());
+    preview.image().unwrap();
+    assert_eq!(monitor_line(&preview), line);
+    // The crosshair hover shows the red ` X ` over the critter.
+    let feedback = preview.hover_feedback(on_hex(&preview, hex));
+    assert!(
+        matches!(&feedback, Some(Feedback::Hit(text, ColorKey::RED)) if text == b" X "),
+        "{feedback:?}"
+    );
+}
+
+#[test]
+fn spec014_called_shot_window_opens_in_an_aimed_mode_and_chooses_a_part() {
+    use vault_core::{
+        critical::{hit_mode, location},
+        ui::{bar::WeaponMode, called},
+    };
+    let dir = corpus();
+    write_art(
+        dir.path(),
+        &[
+            ("called.frm", 424, 309, 3),
+            ("lilredup.frm", 15, 16, 4),
+            ("lilreddn.frm", 15, 16, 5),
+            ("numbers.frm", 360, 17, 6),
+        ],
+    );
+    // The punch, kick and every reaction get art, so the attack's sequence
+    // registers (SPEC-007 §3.10.1).
+    for suffix in [
+        "aq", "ar", "an", "ao", "ap", "ba", "bb", "bo", "bp", "ch", "cj",
+    ] {
+        std::fs::copy(
+            dir.path().join("art/critters/sampleaa.frm"),
+            dir.path().join(format!("art/critters/sample{suffix}.frm")),
+        )
+        .unwrap();
+    }
+    // Row 0 (`sample`) aliases itself: labels 1000-1007 and `samplena.frm`.
+    std::fs::write(
+        dir.path().join("art/critters/samplena.frm"),
+        super::fixture::frm(170, 225, 9),
+    )
+    .unwrap();
+    let labels: String = (0..8)
+        .map(|part| format!("{{{}}}{{}}{{the part {part}}}\n", 1000 + part))
+        .collect();
+    std::fs::write(
+        dir.path().join("text/english/game/combat.msg"),
+        format!("{{100}}{{}}{{You need %d action points.}}\n{labels}"),
+    )
+    .unwrap();
+    let mut preview = world(dir.path());
+    preview.host.playback = vault_core::host_choreography::Playback::Instant;
+    let hex = beside_npc(&mut preview);
+    let target = npc(&preview);
+    let player = preview.host.world.player;
+    preview.host.world.critter_state_mut(target).unwrap().hp = 999;
+    assert!(preview.step(KeyCode::KeyN));
+    assert_eq!(preview.slot_mode(), WeaponMode::PrimaryAimed);
+    preview.host.world.combat = true;
+    preview.host.world.combat_state.player_turn = true;
+    preview.hud.panel = super::hud::Panel::settled(true, true);
+    let ap = |preview: &MapPreview| preview.host.world.critter_state(player).unwrap().ap;
+    let reset = |preview: &mut MapPreview| {
+        preview.host.world.shows.clear();
+        preview.host.motions.clear();
+        preview.host.world.critter_state_mut(player).unwrap().ap = 8;
+    };
+    reset(&mut preview);
+    preview.hud.mode = Mode::Crosshair;
+    let before = preview.host.world.rng.clone();
+    // An aimed mode's crosshair click opens the window: no draw, no AP.
+    assert!(preview.tap(on_hex(&preview, hex)));
+    let window = preview.hud.called.as_ref().expect("the window opens");
+    assert_eq!(window.target, target);
+    let attack = preview
+        .host
+        .world
+        .attack_profile(player, target, hit_mode::PUNCH, location::UNCALLED, true)
+        .unwrap();
+    assert_eq!(window.chances, called::chances(&attack).unwrap());
+    assert_eq!(
+        window.labels[usize::from(location::LEFT_LEG)]
+            .as_ref()
+            .map(|(text, _)| text.as_slice()),
+        Some(b"the part 5".as_slice())
+    );
+    assert!(preview.host.world.rng == before);
+    assert_eq!(ap(&preview), 8);
+    // The opaque background and the `na` picture, 170 by 225 at (128, 31).
+    preview.image().unwrap();
+    assert_eq!(frame_pixel(&preview, [108 + 5, 20 + 5]), 3);
+    assert_eq!(frame_pixel(&preview, [108 + 128, 20 + 31]), 9);
+    assert_eq!(frame_pixel(&preview, [108 + 297, 20 + 255]), 9);
+    assert_eq!(frame_pixel(&preview, [108 + 298, 20 + 256]), 3);
+    // The digit keys do nothing; Esc closes it with nothing done, and the
+    // cursor stays in crosshair mode.
+    assert!(preview.step(KeyCode::Digit4));
+    assert!(preview.hud.called.is_some());
+    assert!(preview.step(KeyCode::Escape));
+    assert!(preview.hud.called.is_none());
+    assert_eq!(preview.hud.mode, Mode::Crosshair);
+    assert!(preview.host.world.rng == before && ap(&preview) == 8);
+    // Cancel's release is Esc too.
+    assert!(preview.tap(on_hex(&preview, hex)));
+    assert!(preview.tap([108 + 170 + 2, 20 + 268 + 2]));
+    assert!(preview.hud.called.is_none());
+    assert!(preview.host.world.rng == before && ap(&preview) == 8);
+    // Ctrl+D chooses the torso: location 3, aimed, 3 + 1 AP.
+    assert!(preview.tap(on_hex(&preview, hex)));
+    preview.set_modifiers([false, true, false]);
+    assert!(preview.step(KeyCode::KeyD));
+    preview.set_modifiers([false; 3]);
+    assert!(preview.hud.called.is_none());
+    assert!(preview.host.world.rng != before, "the attack drew");
+    assert_eq!(ap(&preview), 4);
+    // A release at window (125, 236) is outside the right-leg button;
+    // one pressed and released at (40, 236) chooses the right leg.
+    reset(&mut preview);
+    assert!(preview.tap(on_hex(&preview, hex)));
+    assert!(preview.tap([108 + 125, 20 + 236]));
+    assert!(preview.hud.called.is_some());
+    let chosen = preview.host.world.rng.clone();
+    assert!(preview.tap([108 + 40, 20 + 236]));
+    assert!(preview.hud.called.is_none());
+    assert!(preview.host.world.rng != chosen);
+    assert_eq!(ap(&preview), 4);
+    // A pending quit request (a script's world-map request) ends the
+    // window as Esc (`[May-improve]`): no attack.
+    reset(&mut preview);
+    assert!(preview.tap(on_hex(&preview, hex)));
+    let quiet = preview.host.world.rng.clone();
+    preview.host.world.pending_transition = Some(vault_core::world::Transition {
+        map: 0,
+        elevation: 0,
+        hex: 0,
+        facing: 0,
+    });
+    let now = preview.clock + 16;
+    preview.tick(now).unwrap();
+    assert!(preview.hud.called.is_none());
+    assert!(preview.host.world.rng == quiet && ap(&preview) == 8);
+    preview.host.world.pending_transition = None;
+    // Too few AP for the aimed cost: message 100 with the cost, no window.
+    reset(&mut preview);
+    preview.host.world.critter_state_mut(player).unwrap().ap = 3;
+    assert!(preview.tap(on_hex(&preview, hex)));
+    assert!(preview.hud.called.is_none());
+    preview.image().unwrap();
+    assert_eq!(monitor_line(&preview), b"You need 4 action points.");
+}
+
+#[test]
+fn spec014_an_attack_click_out_of_combat_starts_combat_and_is_replayed() {
+    use vault_core::ui::bar::WeaponMode;
+    let dir = corpus();
+    write_art(
+        dir.path(),
+        &[
+            ("called.frm", 424, 309, 3),
+            ("lilredup.frm", 15, 16, 4),
+            ("lilreddn.frm", 15, 16, 5),
+        ],
+    );
+    let mut preview = world(dir.path());
+    let hex = beside_npc(&mut preview);
+    let target = npc(&preview);
+    let player = preview.host.world.player;
+    preview.host.world.critter_state_mut(player).unwrap().ap = 8;
+    assert!(preview.step(KeyCode::KeyN));
+    assert_eq!(preview.slot_mode(), WeaponMode::PrimaryAimed);
+    preview.hud.mode = Mode::Crosshair;
+    // §3.38 step 3: a passing click starts combat; no window opens yet.
+    assert!(preview.tap(on_hex(&preview, hex)));
+    assert_eq!(
+        preview
+            .host
+            .world
+            .pending_combat
+            .map(|request| request.defender),
+        Some(target)
+    );
+    assert!(preview.hud.called.is_none());
+    assert_eq!(preview.hud.replay, Some(target));
+    // The player's first turn gives the input back; the click is then
+    // replayed with the refilled AP and, aimed, opens the window.
+    let mut now = 16;
+    for _ in 0..200 {
+        if preview.hud.called.is_some() {
+            break;
+        }
+        now += 50;
+        preview.tick(now).unwrap();
+    }
+    assert!(preview.host.world.combat);
+    assert!(preview.hud.replay.is_none());
+    assert!(preview.hud.called.is_some(), "the replay opened the window");
 }

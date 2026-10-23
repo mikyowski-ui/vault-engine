@@ -450,6 +450,9 @@ impl ApplicationHandler for Shell {
                 };
                 if !pressed {
                     self.repeat.release(key);
+                    if let Some(preview) = &mut self.preview {
+                        preview.key_up(key);
+                    }
                 } else if !event.repeat {
                     if let Some(preview) = &self.preview {
                         self.repeat.press(key, preview.key_layer());

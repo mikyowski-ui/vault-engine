@@ -198,3 +198,44 @@ fn egg_mask_matches_spec014_and_the_cave_view_renders() {
         std::fs::write(path, ppm).unwrap();
     }
 }
+
+/// SPEC-014 §3.38 over the corpus: `called.frm` is 424 by 309, every `na`
+/// picture reached through the critter-list alias is 170 by 225 with one
+/// frame, and the labels follow the alias (Fixture H: `hmmaxx`, row 13,
+/// aliases 11; `mabrom`, row 15, labels 1150-1157).
+#[test]
+#[ignore = "needs the local corpus"]
+fn called_shot_art_and_labels_follow_the_alias() {
+    use vault_core::assets::WorldAssets;
+    let Some(preview) = map("v13ent.map") else {
+        return;
+    };
+    let painter = crate::interface::Painter {
+        assets: &preview.host.assets,
+        palette: &preview.palette,
+    };
+    assert_eq!(painter.size("called.frm"), Some([424, 309]));
+    let catalog = preview.host.assets.art_catalog().unwrap();
+    assert_eq!(catalog.critter_alias(13), Some(11));
+    assert_eq!(catalog.critter_alias(0), Some(0));
+    let mut pictures = 0;
+    for base in 0..100u16 {
+        if catalog.critter_alias(base).is_none() {
+            break;
+        }
+        let fid = vault_formats::Fid::new(1, base, 64, 0, 0).0;
+        if let Ok(art) = preview.host.assets.object_art(fid) {
+            let frame = art.frame(0, 0).unwrap();
+            assert_eq!((frame.width, frame.height), (170, 225), "row {base}");
+            assert_eq!(art.frame_count(), 1);
+            pictures += 1;
+        }
+    }
+    assert!(pictures > 0);
+    let combat = preview.host.assets.game_messages("combat.msg").unwrap();
+    let text = |id| combat.get(id).map(|message| message.text.clone());
+    assert_eq!(text(1110).as_deref(), Some(b"the head".as_slice()));
+    assert_eq!(text(1113).as_deref(), Some(b"the torso".as_slice()));
+    assert_eq!(text(1155).as_deref(), Some(b"the left foreleg".as_slice()));
+    assert_eq!(text(1000), None);
+}

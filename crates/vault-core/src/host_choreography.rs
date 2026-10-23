@@ -191,6 +191,7 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.shows.pop_front();
             changed = true;
         }
+        self.sync_combat_lock();
         changed
     }
     /// Sounds and taunts a show started.
@@ -231,7 +232,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 let taunts = std::mem::take(&mut show.taunts);
                 self.start_all(&started, &taunts);
             }
-            Playback::RealTime => self.world.shows.push_back(show),
+            Playback::RealTime => {
+                show.combat = self.world.combat;
+                self.world.shows.push_back(show);
+                self.sync_combat_lock();
+            }
         }
     }
     /// A world object takes a show's final display.

@@ -172,6 +172,9 @@ pub struct MotionSequence {
     /// critters ends it (§3.11.2).
     pub insignificant: bool,
     pub id: u64,
+    /// Registered while combat was active: it counts toward the SPEC-014
+    /// §3.27 combat lock until it ends (`clicks::CombatLock`).
+    pub combat: bool,
 }
 impl MotionSequence {
     pub fn new() -> Self {

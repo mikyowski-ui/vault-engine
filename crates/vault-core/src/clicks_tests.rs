@@ -1,13 +1,13 @@
 //! SPEC-014 §3.26-§3.27 the click policy while sequences play.
 use crate::clicks::{
-    Click, ClickState, Policy, busy_policy, click_policy, input_locked, interrupt_walk,
+    Click, ClickState, CombatLock, Policy, busy_policy, click_policy, input_locked, interrupt_walk,
 };
 
 fn state(busy: bool, walking: bool, standing: bool) -> ClickState {
     ClickState {
         combat: false,
         player_turn: false,
-        presenting: false,
+        engaged: false,
         busy,
         walking,
         standing,
@@ -67,14 +67,14 @@ fn spec014_combat_locks_input_outside_the_player_turn_and_while_sequences_play()
     assert!(input_locked(&combat), "not the player's turn");
     combat.player_turn = true;
     assert!(!input_locked(&combat));
-    combat.presenting = true;
+    combat.engaged = true;
     assert!(
         input_locked(&combat),
         "until every running sequence has ended"
     );
     assert_eq!(click_policy(Click::Movement, &combat, true), Policy::Ignore);
     assert_eq!(click_policy(Click::Rotate, &combat, true), Policy::Ignore);
-    combat.presenting = false;
+    combat.engaged = false;
     assert_eq!(click_policy(Click::Rotate, &combat, true), Policy::Proceed);
     // In combat a movement click never interrupts a busy player.
     let busy = ClickState {
@@ -96,4 +96,58 @@ fn spec014_interrupt_walk_is_a_system_key_defaulting_to_on() {
     assert!(parse("[system]\ninterrupt_walk=1\n"));
     assert!(!parse("[system]\ninterrupt_walk=0\n"));
     assert!(parse("[preferences]\ninterrupt_walk=0\n"));
+}
+
+#[test]
+fn spec014_the_combat_lock_follows_the_sequence_count_and_the_turn_order() {
+    let locked = |lock: &CombatLock, combat: bool| {
+        input_locked(&ClickState {
+            combat,
+            player_turn: lock.turn,
+            engaged: lock.engaged,
+            ..ClickState::default()
+        })
+    };
+    let mut lock = CombatLock::default();
+    // Combat start locks input until the player's turn; sequences during
+    // an NPC's turn change the count but not the lock.
+    lock.end_turn();
+    assert!(locked(&lock, true));
+    lock.counted(2, false);
+    assert!(locked(&lock, true) && !lock.engaged);
+    lock.counted(0, false);
+    // The player's turn gives the input back and flushes held keys.
+    lock.begin_turn();
+    assert_eq!(lock.turns, 1);
+    assert!(!locked(&lock, true));
+    // 0 -> 1 engages the lock; a sequence that starts meanwhile (a door,
+    // an extra victim's reaction) extends it; 0 releases it.
+    lock.counted(1, true);
+    assert!(locked(&lock, true));
+    lock.counted(2, true);
+    lock.counted(1, true);
+    assert!(
+        locked(&lock, true),
+        "until every running sequence has ended"
+    );
+    lock.counted(0, true);
+    assert!(!locked(&lock, true));
+    // A count already running when the turn starts does not engage it on
+    // a rise from 1 to 2; only 0 -> 1 does.
+    lock.counted(1, false);
+    lock.begin_turn();
+    lock.counted(2, true);
+    assert!(!locked(&lock, true));
+    lock.counted(0, true);
+    lock.counted(1, true);
+    assert!(locked(&lock, true));
+    // The turn's end locks again until the next turn; the end of combat
+    // re-enables everything without a flush.
+    lock.counted(0, true);
+    lock.end_turn();
+    assert!(locked(&lock, true));
+    let turns = lock.turns;
+    lock.end_turn();
+    assert!(!locked(&lock, false));
+    assert_eq!(lock.turns, turns);
 }
