@@ -206,8 +206,14 @@ On the local corpus every category passes. Besides the counts quoted below,
 the full run reports: 17760 assets parsed by `--validate-formats` with 0
 failures; 137427 art identifiers resolved, 27 missing and 0 invalid; 4378
 writer round trips; 72 maps entered, 42 working saves written, 0 failures;
-95 AI packets, 312 critters, and 1140 taunt ranges; and every DAT member
-(19784 in `MASTER.DAT`, 5459 in `CRITTER.DAT`) matching its loose file.
+95 AI packets, 312 critters, and 1140 taunt ranges; every DAT member
+(19784 in `MASTER.DAT`, 5459 in `CRITTER.DAT`) matching its loose file; and
+`LIP files: 1601, 1601 passed, 0 failed; 202 end before the audio`. With every
+flag the run ends `Audit categories: 16 run, 0 failed`.
+
+`--validate-lip` parses every `.lip` (version 2, exact size, P = M - 1, no
+loading-check findings, markers increasing from 0) and checks its stored stem,
+length word (2N or 2N + 1) and final marker against the companion ACM header.
 
 `--validate-map-numbers` checks that `map.msg` 0-65 equals the fixed SPEC-008
 §3.10 table, that the 66 numbered maps and the six unlisted ones are present
@@ -565,7 +571,8 @@ safe rule), outside the world too. In the world a game fade blocks: the world
 does not update, input is swallowed, and the frame stays frozen until it
 ends. This covers `gfade_in`/`gfade_out`, First Aid and Doctor, and the movie
 flags (playback ends on black; flag `0x02` fades back); the library
-`fadein`/`fadeout` run without blocking. A
+`fadein`/`fadeout` run over their own duration without blocking
+(`fadeout(0)` is instant; `WorldEffect::LibraryFade`). A
 session ends on a fade to white; the death scene then fades from white into
 `death.pal`, to black when it is dismissed, and the menu fades in. Knockout
 and death are checked between world passes, and ending combat wakes a
@@ -781,8 +788,11 @@ permits, load with a diagnostic in `MapFile::diagnostics` instead of failing
 the map: a script ID whose category differs from its block, a saved local
 slice past the pool (an access past it reads zero, SPEC-003 §3.2), an
 entry or object orientation outside 0-5 and a negative object frame (read as
-0), and an inventory quantity of 0 (kept). For a duplicate active script ID the
-first record binds and later ones are diagnosed. On the local corpus all 72
+0), and an inventory quantity of 0 (kept). For a duplicate active script ID,
+the first record in its own category's stream binds and later ones are
+diagnosed; they stay in the record list, pass their startup request,
+critter-cycle turn and spatial location to the bound record, and are written
+back unchanged (SPEC-003 §3.3). On the local corpus all 72
 maps parse with no diagnostics. Object trees are consumed depth-first, quantities represent
 one child tree, and enclosing elevations/owners are restored. Script bindings,
 outlines, critter flags, stock ammunition, and exit-grid art receive the specified
@@ -810,6 +820,10 @@ addresses beyond EOF remain parse errors. Identifier-consuming operations resolv
 their raw operand against the identifier table even if pushed with a string tag;
 literal bounds are enforced when a value is consumed as a string. The image is
 bounded to 64 MiB, procedure count to 65,536, and declared arguments to stack capacity.
+All 32 slot-1 words `0x8001 + n x 0x0400` decode as six-byte pushes that keep
+their full word as the tag (SPEC-004 §2.5); a non-standard tag such as `0x8401`
+fails later at a type check, and `vault-debug`'s decoder agrees. Other words
+with bits 10-14 set are rejected under the `[May-improve]` rule.
 
 `Vm` implements all 76 core dispatch slots, including distinct raw/type-dependent
 truth rules, asymmetric integer-addition promotion, float-bitwise conversion,
@@ -877,7 +891,14 @@ specified stages, including full ambient before entry and player light after
 the initial map-script request. Timers use stable insertion order at equal due
 times; spatial callbacks are checked on each animated movement step with reentry
 suppressed. Inventory stack splits preserve a distinct removed representative
-(SPEC-011 §3.13).
+(SPEC-011 §3.13). Each `WorldHost::tick` is one SPEC-006 §3.7 background pass:
+the idle-fidget step, object animation, then the script task (VM slice, script
+windows, one critter-script cycle step and the background clock checker);
+combat advances after it. The cycle step requests one critter-stream record per
+pass in list order with a program-wide counter (`critter_cycle`, kept across map
+changes, loads and new games); a script without `critter_p_proc` runs procedure
+1, and programs stopped by a VM error or suspended are skipped. A map's entrance
+placement checks exit grids like any placement (SPEC-013 §3.22).
 
 The extension ABI is compiled from the approved SPEC-005 table at build time.
 All 266 slots are present: 264 registered words and holes `0x807D`/`0x807E`.
@@ -998,14 +1019,13 @@ active.
 
 `DatArchive` reads the byte-zero root and per-directory tables (one-byte name
 lengths, big-endian words, `data_size` of at least 16) and extracts members by
-attribute word: exactly zero or `0x10` is the legacy single LZSS stream whose
-output must equal the logical length, `0x20` is raw, and `0x40` is the blocked
-form (two-byte headers; every block but the last must produce exactly 16384
-bytes, and output the final block decodes past the remaining length is
-discarded, SPEC-008 §2.3). The LZSS decoder uses the 4096-byte ring with
+attribute word: exactly zero or `0x10` is the legacy single LZSS stream, `0x20`
+is raw, and `0x40` is the blocked form (two-byte headers). Output is bounded to
+the logical length (16384 bytes for a non-final block) and the rest is
+discarded; a stream or block that stops short is rejected (SPEC-008 §2.3). The LZSS decoder uses the 4096-byte ring with
 4078 leading spaces, cursor `0xFEE`, LSB-first control bits, absolute 12-bit
-starts, and sequential overlapping copies. Truncated tokens, over-expansion
-of a legacy stream, short or empty blocks, and offsets past EOF are errors rather than unbounded
+starts, and sequential overlapping copies. Truncated tokens, short or empty
+blocks, and offsets past EOF are errors rather than unbounded
 reads or loops. The reference leaves the ring tail uninitialized; under the
 SPEC-008 §3.1 safe rule it is zeroed at the start of every compressed block,
 which only matters for streams that read the tail before writing it.
@@ -1041,21 +1061,25 @@ header's name field, not from the requested file (`header_map_number`): a
 name containing `.sav`, or exactly `TMP$MAP#.MAP`, keeps the header's
 map-number word, and any other name is matched against `map.msg` 0-65, so a
 renamed copy takes the number of its name and an unlisted name gets -1. The
-number selects the fixed table town (`map_town`), used by rest, town-map entry
-and the transition's script-directed town travel (`move_to_map_town`), and
+number selects the fixed table town (`map_town`), used by rest and the
+transition's script-directed town travel (`move_to_map_town`); the current town
+changes only when a town is entered on the world or town map. It also selects
 the city track that replaces the loading track `wind2` (`city_music`, once per
 map change; an unnumbered map keeps `wind2`). Script `load_map` by name
-(`0x80E4`) matches the same `map.msg` texts, and an unmatched name makes no
-transition. `WorldHost::set_music_enabled` records the music on/off state,
+(`0x80E4`) is uppercased with its first `.SAV` read as `.MAP` and matched
+against the same `map.msg` texts; an unmatched name (no extension or directory
+is normalized; 16 or more bytes, safe rule) makes no transition. `WorldHost::set_music_enabled` records the music on/off state,
 which the desktop keeps in step with its mixer; no spec names a setting that
 turns music off, so it stays on.
 
 Leaving a map writes its `.SAV` image (saved bit set, live globals/locals,
 scripts, and placed objects with inventories) into an in-memory working
-saved-map set under the name `map.msg` gives its number, and captures its
+saved-map set under its working name, the stem of the uppercased file name it
+was opened under plus `.SAV` (SPEC-008 §3.10), and captures its
 automap rasters. A map in the excluded set, or with no number, is never
 written (SPEC-014 §3.35 step 5): its working copy is deleted, so it is rebuilt
-from its `.MAP` on every visit. Re-entering a saved map applies the §3.35
+from its `.MAP` on every visit. A game save on such a map still writes it, and
+`SAVE.DAT` 0x73 stores the stem with a lower-case `.sav`. Re-entering a saved map applies the §3.35
 revisit rules (lock unjamming, healing, and old corpses replaced by remains;
 `host_revisit`). Entering a map prefers that image
 over the asset. The player is saved centrally. Party members travel with the
@@ -1096,10 +1120,13 @@ full 32-bit entrance tests under the safe rule, Vault 13's tick rule, alternate
 rows 12-14), buttons,
 labels, and first entry. `WorldHost::travel_iteration` runs one loop iteration:
 schedule steps and walk-mask stops, then the Q charge with queue interruption,
-discovery every third iteration, then 24-hour party healing and the encounter
-check every W iterations. Script-directed town travel skips encounters and the
-mask and charges no city time. `vault-guidance` derives holodisk lists, pages,
-and quest status from the fixed tables. Pip-Boy rest (`WorldHost::rest`)
+discovery and the travel dot on iterations 1, 4, 7, ... since the screen was
+built, then 24-hour party healing and the encounter check every W iterations.
+Script-directed town travel (`scripted_town_travel`) runs to completion: no
+encounters, walk mask, queue processing, reveal or path marks, and no city
+time. `vault-guidance` derives holodisk lists, pages, and quest status from the
+fixed tables, and the Pip-Boy Automaps page's area groups from the SPEC-014
+§3.41.4 related-map table. Pip-Boy rest (`WorldHost::rest`)
 implements eligibility, the A/N/K step allocation, queue-interrupted steps, the
 strict final catch-up, credited minutes with three-hour healing at 180,
 until-healed (including the extra chunk after full HP), and wake-up presets.
@@ -1159,9 +1186,10 @@ Where SPEC-009 leaves details open, this engine makes these choices:
 - Movement "limited to the current AP" truncates the route to that many hexes;
   each committed hex still charges its leg-dependent cost, saturating at zero.
 - NPC healing consumes each unit through the SPEC-011 §3.7 contract
-  (`WorldHost::consume_drug`). No approved specification defines the SPEC-002
-  language filter: its preference state machine is tracked
-  (`AiState::filtered`), but catalog text is unchanged.
+  (`WorldHost::consume_drug`). The SPEC-002 §3.7 language filter rewrites
+  `combatai.msg` and each per-script dialogue catalog as it loads only when the
+  preference is exactly 1 (`AiState::filtered` records that it acted; value 2
+  never filters).
 - Party membership applies the 18000 object-identifier floor literally. Object
   identifiers come from map and save data and the insertion counter, so members
   with lower identifiers never follow.
@@ -1217,7 +1245,12 @@ Opcodes `0x80A5`, `0x813D`, and `0x8141` call these builders, and the SPEC-009
 AI's ready and out-of-ammunition requests carry their names.
 `WorldHost::effect_file` resolves a name with an optional owner. `speech_file`
 uses the active talking head, and `WorldState::effect_volume` gives the relative
-volume.
+volume. `vault_formats::lip` parses `.LIP` files (big-endian; version 2, and
+version 1 with its handle words ignored). The core loads the lip file for each
+reply's speech, plays the ACM named by its stored stem, and steps the §3.12 rule
+on every head tick from the position the platform reports. A missing `.LIP`, or
+one of another version, plays as one phoneme 0; a short file or zero counts
+abandons the speech. The first tick of every speech draws its frame (safe rule).
 
 Where SPEC-010 leaves details open, this engine makes these choices:
 
