@@ -424,9 +424,9 @@ impl<A: WorldAssets> WorldHost<A> {
         // background track `wind2`, looping, until the city music starts.
         self.request_music(crate::worldmap::LOADING_MUSIC);
         self.world.trace.push(WorldTrace::LoadStep(2));
-        let (map, mut saved, mut load_error) = match self.read_map(path) {
-            Ok((map, saved)) => (map, saved, None),
-            Err(error) => (empty_map(), false, Some(error)),
+        let (map, mut saved, mut load_error, file) = match self.read_map(path) {
+            Ok((map, saved, file)) => (map, saved, None, file),
+            Err(error) => (empty_map(), false, Some(error), String::new()),
         };
         self.world.persistence.current_map = None;
         self.world.restoring = map.header.flags.0 & 1 != 0;
@@ -476,8 +476,9 @@ impl<A: WorldAssets> WorldHost<A> {
         // SPEC-008 §3.10: the current map is identified from the header's
         // name field, not the requested file, and the header's map-number
         // word is overwritten with that number. The working `.SAV` name
-        // (SPEC-014 §3.35) and the current town follow from the number; an
-        // unnumbered map has neither.
+        // (SPEC-014 §3.35) comes from the file name the map was opened
+        // under, never from the number; the current town is not changed by
+        // a map load (SPEC-014 §3.39).
         let catalog = self.assets.game_messages("map.msg").ok();
         let number = crate::worldmap::header_map_number(
             &self.world.map.header.name,
@@ -487,12 +488,8 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.map.header.map_number = number;
         self.world.persistence.current_map = load_error
             .is_none()
-            .then(|| crate::persistence::working_map_name(number, catalog.as_deref()))
+            .then(|| crate::persistence::saved_map_name(file.as_bytes()))
             .flatten();
-        let town = crate::worldmap::map_town(number);
-        if town >= 0 {
-            self.world.world_map.saved.town = town;
-        }
         if !self.world.restoring {
             self.world.trace.push(WorldTrace::InventoryRefresh);
             let name = &self.world.map.header.name;
@@ -620,14 +617,16 @@ impl<A: WorldAssets> WorldHost<A> {
         self.active.clear();
         self.motions.clear();
     }
-    /// A working saved-map `.SAV` takes precedence over the asset lookup;
-    /// the flag tells which was read.
-    fn read_map(&self, path: &str) -> Result<(vault_formats::MapFile, bool), WorldError> {
-        let saved = path
-            .rsplit('/')
-            .next()
-            .and_then(|file| crate::persistence::saved_map_name(file.as_bytes()));
-        if let Some(bytes) = saved.and_then(|name| self.world.persistence.maps.get(&name)) {
+    /// SPEC-008 §3.10 opening a map by name: the file name is uppercased; a
+    /// name containing `.MAP` first probes its saved copy (the first `.MAP`
+    /// read as `.SAV`) in the working map set, which then becomes the file
+    /// name; a name without `.MAP` is opened as given, from the working set
+    /// (the master patch root) before the assets. Returns the map, whether
+    /// it came from the working set, and the file name it was opened under.
+    fn read_map(&self, path: &str) -> Result<(vault_formats::MapFile, bool, String), WorldError> {
+        let file = crate::persistence::requested_file_name(path);
+        let saved = crate::persistence::saved_probe(&file).unwrap_or_else(|| file.clone());
+        if let Some(bytes) = self.world.persistence.maps.get(&saved) {
             let lookup = |pid| {
                 self.assets
                     .prototype(pid)
@@ -638,9 +637,9 @@ impl<A: WorldAssets> WorldHost<A> {
                         message: error.to_string(),
                     })
             };
-            return Ok((vault_formats::MapFile::parse(bytes, &lookup)?, true));
+            return Ok((vault_formats::MapFile::parse(bytes, &lookup)?, true, saved));
         }
-        Ok((self.assets.map(path)?, false))
+        Ok((self.assets.map(path)?, false, file))
     }
     /// Whether a loaded script's program defines the event's procedure.
     pub(crate) fn has_procedure(&self, script: u32, event: ScriptEvent) -> bool {

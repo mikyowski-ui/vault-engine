@@ -1446,38 +1446,14 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// SPEC-008 §3.10 / §3.22 step 3: after a map is loaded by number the
     /// party is moved on the world map to the map's fixed table town by the
-    /// script-directed town travel of SPEC-008 §3.4, driven to completion
-    /// here: a jittered target within 16 pixels of the town center (four
-    /// draws, SPEC-008 §3.7), the shared terrain stepping counters, time charges off the
-    /// city branch and 24-hour party healing every W iterations, with no
-    /// encounter tests or walk-mask checks. Nothing moves for town -1 (an
-    /// unnumbered map) or when the party's cell is already the town's cell.
+    /// script-directed town travel of SPEC-008 §3.4, run to completion
+    /// (`scripted_town_travel`): no discovery reveal, path marks, encounter
+    /// tests, walk-mask checks or queue processing. Nothing moves for town
+    /// -1 (an unnumbered map) or when the party's cell is already the
+    /// town's cell. The current town does not change (SPEC-014 §3.39).
     pub fn move_to_map_town(&mut self) -> Result<(), WorldError> {
         let town = crate::worldmap::map_town(self.world.map.header.map_number);
-        let Some(cell) = usize::try_from(town)
-            .ok()
-            .and_then(|town| crate::worldmap::TOWNS.get(town))
-            .map(|town| town.cell)
-        else {
-            return Ok(());
-        };
-        if self.world.world_map.cell() == Some(cell) {
-            return Ok(());
-        }
-        self.travel_to_town(town as usize)?;
-        // The scripted path runs inside the transition rather than frame by
-        // frame; a bound keeps a malformed world position from looping
-        // forever ([May-improve] safe bound: a crossing of the whole map
-        // takes under 10,000 iterations).
-        for _ in 0..100_000 {
-            if self.travel_iteration()? != crate::TravelOutcome::Moving {
-                return Ok(());
-            }
-        }
-        self.world.world_map.travel = None;
-        Err(WorldError::Invalid(
-            "script-directed town travel did not finish".into(),
-        ))
+        self.scripted_town_travel(town)
     }
     /// §3.22 a transition request: one made in combat ends combat; the last
     /// request wins.

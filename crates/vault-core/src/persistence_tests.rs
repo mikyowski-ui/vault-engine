@@ -265,7 +265,8 @@ fn spec008_save_slot_round_trip_restores_the_world() {
     let header = SaveHeader::parse(&central).unwrap();
     assert_eq!(header.name_text(), b"Saver");
     assert_eq!(header.description_text(), b"Round trip");
-    assert_eq!(header.map_file_text(), b"SYNTH.SAV");
+    // SPEC-008 §3.10: the working name's stem and a lower-case `.sav`.
+    assert_eq!(header.map_file_text(), b"SYNTH.sav");
     assert_eq!(
         (header.game_ticks, header.map, header.host_time),
         (now as u32, 7, 46)
@@ -326,7 +327,7 @@ fn spec008_save_slot_round_trip_restores_the_world() {
         ["AUTOMAP.SAV", "SAVE.DAT", "SECOND.SAV", "SYNTH.SAV"]
     );
     let header = SaveHeader::parse(&fs::read(slot.join("SAVE.DAT")).unwrap()).unwrap();
-    assert_eq!(header.map_file_text(), b"SECOND.SAV");
+    assert_eq!(header.map_file_text(), b"SECOND.sav");
 }
 
 #[test]
@@ -909,7 +910,9 @@ fn spec013_transitions_move_the_world_map_to_the_destination_town() {
     host.request_transition(to(10));
     assert!(host.process_transition().unwrap());
     assert_eq!(host.world.map.header.map_number, 10);
-    assert_eq!(host.world.world_map.saved.town, 3);
+    // SPEC-014 §3.39: neither map changes nor script-directed travel
+    // change the current town.
+    assert_eq!(host.world.world_map.saved.town, 0);
     assert_eq!(host.world.world_map.cell(), Some([17, 10]));
     let [x, y] = host.world.world_map.position();
     assert!((x - (17 * 50 + 25)).abs() <= 16 && (y - (10 * 50 + 25)).abs() <= 16);
@@ -925,8 +928,10 @@ fn spec013_transitions_move_the_world_map_to_the_destination_town() {
     // whose town is 1 (Vault 15).
     host.request_transition(to(8));
     assert!(host.process_transition().unwrap());
-    assert_eq!(host.world.world_map.saved.town, 1);
+    assert_eq!(host.world.world_map.saved.town, 0);
     assert_eq!(host.world.world_map.cell(), Some([25, 1]));
+    // SPEC-008 §3.4: the trip made no discovery reveal on the way.
+    assert_eq!(host.world.world_map.discovery([20, 1]), 0);
 }
 
 #[test]
@@ -1009,22 +1014,28 @@ fn spec008_disabled_music_records_the_request_and_resumes_the_last_track() {
 }
 
 #[test]
-fn spec008_unnumbered_maps_keep_wind2_and_are_never_saved() {
+fn spec008_unnumbered_maps_keep_wind2_and_save_only_with_a_game() {
     let dir = corpus();
     // A header name `map.msg` does not list: no number, no town, no city
-    // music, no working `.SAV` (SPEC-008 §3.10, SPEC-014 §3.35 step 5).
+    // music; leaving writes no working `.SAV` (SPEC-008 §3.10, SPEC-014
+    // §3.35 step 5).
     fs::write(
         dir.path().join("maps/caravan.map"),
         fixture_map("caravan", 0, 7),
     )
     .unwrap();
+    let root = tempfile::tempdir().unwrap();
     let mut host = host(dir.path());
     host.load_map("maps/synth.map").unwrap();
     let position = host.world.world_map.position();
     host.world.effects.clear();
     host.load_map("maps/caravan.map").unwrap();
     assert_eq!(host.world.map.header.map_number, -1);
-    assert_eq!(host.world.current_map_name(), None);
+    // Its working name still comes from its file name.
+    assert_eq!(
+        host.world.current_map_name().as_deref(),
+        Some("CARAVAN.SAV")
+    );
     let music: Vec<_> = host
         .world
         .effects
@@ -1036,14 +1047,139 @@ fn spec008_unnumbered_maps_keep_wind2_and_are_never_saved() {
         .collect();
     assert_eq!(music, ["wind2"]);
     assert_eq!(host.world.world_map.position(), position);
-    // Saving needs a numbered map.
-    assert!(host.build_save(&save_info()).is_err());
+    // A game save on it writes its working `.SAV` (the exclusion is tested
+    // only when leaving), with map number -1 and no automap capture.
+    let automap = host.world.persistence.automap.clone();
+    host.save_game(root.path(), 1, &save_info()).unwrap();
+    assert!(host.world.persistence.maps.contains_key("CARAVAN.SAV"));
+    assert_eq!(host.world.persistence.automap, automap);
+    let slot = slot_directory(root.path(), 1).unwrap();
+    let header = SaveHeader::parse(&fs::read(slot.join("SAVE.DAT")).unwrap()).unwrap();
+    assert_eq!(
+        (header.map_file_text(), header.map),
+        (b"CARAVAN.sav".as_slice(), 0xffff)
+    );
+    // The next departure deletes it again.
     host.load_map("maps/second.map").unwrap();
     assert!(!host.world.persistence.maps.contains_key("CARAVAN.SAV"));
     assert_eq!(
         host.world.persistence.maps.keys().collect::<Vec<_>>(),
         ["SYNTH.SAV"]
     );
+}
+
+/// The SPEC-008 §4.5 working-name vectors: a fixture map stream with
+/// header name `header` and word `0x34` `word`, opened as `MAPS\<file>`.
+fn named_map(header: &str, word: i32) -> Vec<u8> {
+    let mut map = fixture::interactive_map();
+    map[4..20].fill(0);
+    map[4..4 + header.len()].copy_from_slice(header.as_bytes());
+    fixture::world::word(&mut map, 0x24, 0);
+    fixture::world::word(&mut map, 0x28, 0);
+    fixture::world::word(&mut map, 0x34, word);
+    map
+}
+
+#[test]
+fn spec008_fixture_working_sav_names_follow_the_opened_file() {
+    let dir = corpus();
+    // The fixture `map.msg` with the corpus names at 7, 34, 36 and 63.
+    write_map_msg(dir.path(), &[(8, "SECOND.MAP")]);
+    let mut host = host(dir.path());
+    let numbers = |host: &WorldHost<VfsWorldAssets>| {
+        (
+            host.world.map.header.map_number,
+            crate::worldmap::map_town(host.world.map.header.map_number),
+            host.world.current_map_name(),
+        )
+    };
+    // Row 1: `MAPS\HUBENT.MAP` with no saved copy, header `hubent.map`.
+    fs::write(
+        dir.path().join("maps/hubent.map"),
+        named_map("hubent.map", 7),
+    )
+    .unwrap();
+    host.load_map("maps/hubent.map").unwrap();
+    assert_eq!(numbers(&host), (36, 6, Some("HUBENT.SAV".into())));
+    host.load_map("maps/second.map").unwrap();
+    assert_eq!(
+        &parse_saved(&host, "HUBENT.SAV").header.name[..11],
+        b"HUBENT.SAV\0"
+    );
+    // Row 3: a stream opened as `MAPS\HUBENT.SAV` whose header keeps word
+    // 7 under a lower-case `.sav` name has map 7's number and town, but
+    // still works as `HUBENT.SAV`, not `VAULTENT.SAV`.
+    host.world
+        .persistence
+        .maps
+        .insert("HUBENT.SAV".into(), named_map("hubent.sav", 7));
+    host.load_map("maps/hubent.map").unwrap();
+    assert_eq!(numbers(&host), (7, 1, Some("HUBENT.SAV".into())));
+    host.load_map("maps/second.map").unwrap();
+    assert!(!host.world.persistence.maps.contains_key("VAULTENT.SAV"));
+    // Its written header name is the working name, so the next load gives
+    // map 36 (row 2: `HUBENT.SAV` with word -1 matches by name).
+    assert_eq!(
+        &parse_saved(&host, "HUBENT.SAV").header.name[..11],
+        b"HUBENT.SAV\0"
+    );
+    host.load_map("maps/hubent.map").unwrap();
+    assert_eq!(numbers(&host), (36, 6, Some("HUBENT.SAV".into())));
+    // Row 4 and a load by number: map 7 loads as `VAULTENT.MAP` and works
+    // as `VAULTENT.SAV`.
+    fs::write(
+        dir.path().join("maps/mstrlr34.map"),
+        named_map("MSTRLR34.MAP", 34),
+    )
+    .unwrap();
+    host.load_map("maps/mstrlr34.map").unwrap();
+    assert_eq!(numbers(&host), (34, 11, Some("MSTRLR34.SAV".into())));
+    fs::write(
+        dir.path().join("maps/vaultent.map"),
+        named_map("VAULTENT.MAP", 7),
+    )
+    .unwrap();
+    host.request_transition(crate::Transition {
+        map: 7,
+        elevation: -1,
+        hex: -1,
+        facing: -1,
+    });
+    assert!(host.process_transition().unwrap());
+    assert_eq!(numbers(&host), (7, 1, Some("VAULTENT.SAV".into())));
+    assert!(host.world.persistence.maps.contains_key("MSTRLR34.SAV"));
+    // Row 5: an excluded map writes nothing and deletes its working copy.
+    fs::write(
+        dir.path().join("maps/descrvn4.map"),
+        named_map("DESCRVN4.MAP", 63),
+    )
+    .unwrap();
+    host.load_map("maps/descrvn4.map").unwrap();
+    assert_eq!(numbers(&host), (63, 0, Some("DESCRVN4.SAV".into())));
+    host.world
+        .persistence
+        .maps
+        .insert("DESCRVN4.SAV".into(), named_map("DESCRVN4.SAV", 63));
+    host.load_map("maps/second.map").unwrap();
+    assert!(!host.world.persistence.maps.contains_key("DESCRVN4.SAV"));
+    // A game save in row 3 stores `HUBENT.sav` and map number 7, and a
+    // game load opens `HUBENT.SAV` again.
+    let root = tempfile::tempdir().unwrap();
+    host.world
+        .persistence
+        .maps
+        .insert("HUBENT.SAV".into(), named_map("hubent.sav", 7));
+    host.load_map("maps/hubent.map").unwrap();
+    host.save_game(root.path(), 2, &save_info()).unwrap();
+    let slot = slot_directory(root.path(), 2).unwrap();
+    let header = SaveHeader::parse(&fs::read(slot.join("SAVE.DAT")).unwrap()).unwrap();
+    assert_eq!(
+        (header.map_file_text(), header.map),
+        (b"HUBENT.sav".as_slice(), 7)
+    );
+    host.load_map("maps/second.map").unwrap();
+    host.load_game(root.path(), 2).unwrap();
+    assert_eq!(numbers(&host).2.as_deref(), Some("HUBENT.SAV"));
 }
 
 #[test]

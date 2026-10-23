@@ -804,6 +804,12 @@ impl MapPreview {
                 painter.cursor(image, art, at);
                 return;
             }
+            // SPEC-014 §3.39-§3.40: the world map's scroll art, else the
+            // arrow.
+            Screen::World(_) | Screen::Town(_) => {
+                painter.cursor(image, self.world_cursor(at), at);
+                return;
+            }
             _ => {}
         }
         // §3.26: the animated watch replaces the in-world cursor while the

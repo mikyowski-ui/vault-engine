@@ -2208,3 +2208,24 @@ fn spec014_an_entry_hex_outside_the_map_border_fails_the_load() {
     host.load_map("maps/synthetic.map").unwrap();
     assert!(crate::ui::cursor::inside_border(host.world.camera_hex));
 }
+
+#[test]
+fn spec005_world_map_opens_the_town_map_first_and_town_map_the_world_map() {
+    // SPEC-005 0x8108 `world_map` requests map -1 (the current town's town
+    // map, then the world map); 0x8109 `town_map` requests map -2 (the
+    // world map directly), SPEC-014 §3.39.
+    for (op, map) in [(0x8108, -1), (0x8109, -2)] {
+        let (mut host, base, _) = host(&[b"Hello"]);
+        run_fragment(&mut host, &base, &fixture::instruction(op)).unwrap();
+        assert_eq!(
+            host.world.pending_transition,
+            Some(crate::Transition {
+                map,
+                elevation: -1,
+                hex: -1,
+                facing: -1
+            }),
+            "{op:#x}"
+        );
+    }
+}

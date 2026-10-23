@@ -598,10 +598,11 @@ impl WorldAssets for VfsWorldAssets {
         )?)
     }
     /// SPEC-008 §3.10: a name is matched against `map.msg` 0-65 (uppercased,
-    /// `.SAV` read as `.MAP`); an unlisted name has no number.
+    /// `.SAV` read as `.MAP`); an unlisted name, or one of 16 or more bytes
+    /// (safe rule), has no number.
     fn map_index(&self, name: &[u8]) -> Option<i32> {
         let catalog = self.game_messages("map.msg").ok();
-        let number = crate::worldmap::map_number_of_name(name, catalog.as_deref());
+        let number = crate::worldmap::load_map_number(name, catalog.as_deref());
         (number >= 0).then_some(number)
     }
     /// SPEC-014 §3.35: the file name comes from `map.msg` by map number.
