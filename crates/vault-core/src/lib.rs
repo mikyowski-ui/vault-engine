@@ -28,6 +28,7 @@ mod host_revisit;
 pub mod host_save;
 mod host_skills;
 mod host_sound;
+pub mod host_talk;
 mod host_travel;
 pub mod items;
 pub mod library;
@@ -147,6 +148,8 @@ mod script_cycle_tests;
 mod skills_tests;
 #[cfg(test)]
 mod state_tests;
+#[cfg(test)]
+mod talk_tests;
 #[cfg(test)]
 mod worldmap_tests;
 

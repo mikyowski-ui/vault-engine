@@ -1263,6 +1263,12 @@ impl<A: WorldAssets> WorldHost<A> {
     /// `0x02` shows `proto.msg` 903 in the reply area instead of switching.
     pub fn request_barter(&mut self, modifier: i32) -> bool {
         self.world.dialogue.barter_modifier = modifier;
+        self.barter_entry()
+    }
+    /// §3.18 the barter request from the dialogue control panel (the
+    /// Barter button or `b`, SPEC-014 §3.45): the same merchant test,
+    /// keeping the script barter modifier.
+    pub fn barter_entry(&mut self) -> bool {
         let merchant = self.world.dialogue.target;
         let barters = self
             .world

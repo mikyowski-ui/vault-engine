@@ -126,9 +126,11 @@ pub fn compose(
     if let Some(frame) = shell.frame(0, 0) {
         image.blit(frame, [0, 0]);
     }
+    // SPEC-014 §3.45: the control panel `di_talk.frm` (640 by 190) is the
+    // window at screen (0, 290); the option area (127, 335) lies inside it.
     let panel = assets.frame(&assets.interface_path(99)?)?;
     if let Some(frame) = panel.frame(0, 0) {
-        image.blit(frame, [0, 335]);
+        image.blit(frame, [0, 290]);
     }
     if let Some(head) = &dialogue.head {
         let background = assets.frame(&assets.background_path(dialogue.background)?)?;

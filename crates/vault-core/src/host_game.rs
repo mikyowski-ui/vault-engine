@@ -1405,19 +1405,16 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
             }
             0x8104 => return self.proto_data(call.uint(1), call.int(0)),
+            // SPEC-005 §3.3 `message_str`: a positive message number goes
+            // through the speech-enabled lookup, so during a talking-head
+            // dialogue its speech and lip-sync start at once, as a reply's
+            // do (SPEC-006 §3.9 "Speech requests").
             0x8105 => {
                 let message = if call.int(0) > 0 {
-                    self.script_message(call.int(1), call.int(0))
+                    self.spoken_message(call.int(1), call.int(0))
                 } else {
                     None
                 };
-                if let Some(message) = &message
-                    && self.world.dialogue.open
-                    && self.world.dialogue.head.is_some()
-                    && !message.sound.is_empty()
-                {
-                    self.world.emit(WorldEffect::Speech(message.sound.clone()));
-                }
                 string(message.map_or_else(|| b"Error".to_vec(), |message| message.text))
             }
             0x8106 => {
@@ -1703,9 +1700,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x811e => {
-                self.world
-                    .dialogue
-                    .set_reply(vm.id, text_argument(call, 0, 1))?;
+                self.reply(vm.id, text_argument(call, 0, 1))?;
                 None
             }
             0x811f | 0x8121 => {
@@ -1732,9 +1727,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x8120 => {
-                self.world
-                    .dialogue
-                    .set_reply(vm.id, text_argument(call, 1, 2))?;
+                self.reply(vm.id, text_argument(call, 1, 2))?;
                 self.world.dialogue.add_option(DialogueOption {
                     text: DialogueText::Message {
                         list: -2,

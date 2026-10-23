@@ -15,6 +15,7 @@ pub mod options;
 pub mod pipboy;
 pub mod saveload;
 pub mod sheet;
+pub mod talk;
 
 use vault_formats::Palette;
 

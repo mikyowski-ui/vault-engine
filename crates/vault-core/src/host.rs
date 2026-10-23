@@ -1293,11 +1293,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 },
                 Vec::new(),
             )),
+            // A missing message reads `Error` (SPEC-006 §3.9).
             DialogueText::Message { list, message } if *list > 0 => {
-                let value = self.script_message(*list, *message).ok_or_else(|| {
-                    WorldError::Invalid(format!("missing dialogue message {list}:{message}"))
-                })?;
-                Ok((value.text, value.sound))
+                Ok(self.script_message(*list, *message).map_or_else(
+                    || (b"Error".to_vec(), Vec::new()),
+                    |value| (value.text, value.sound),
+                ))
             }
             _ => Err(WorldError::Invalid(
                 "invalid dialogue message selectors".into(),
@@ -1311,7 +1312,16 @@ impl<A: WorldAssets> WorldHost<A> {
             .reply
             .clone()
             .ok_or_else(|| WorldError::Invalid("no dialogue reply".into()))?;
-        let (mut text, sound) = self.text_resource(&reply, false, false)?;
+        // SPEC-006 §3.9: a message-backed reply goes through the
+        // speech-enabled lookup at display time, so its speech starts before
+        // the reply text is drawn and before the next head updater tick
+        // (SPEC-010 §3.12). Literal replies make no request.
+        let mut text = match reply {
+            DialogueText::Message { list, message } if list > 0 => self
+                .spoken_message(list, message)
+                .map_or_else(|| b"Error".to_vec(), |value| value.text),
+            other => self.text_resource(&other, false, false)?.0,
+        };
         text.truncate(899);
         self.world.dialogue.resolved_reply = text;
         self.world.dialogue.resolved_options.clear();
@@ -1322,11 +1332,6 @@ impl<A: WorldAssets> WorldHost<A> {
                 .dialogue
                 .resolved_options
                 .push([b"\x95 ".as_slice(), text.as_slice()].concat());
-        }
-        // SPEC-010 §3.12: the reply's speech loads and starts before the
-        // next head updater tick.
-        if self.world.dialogue.head.is_some() && !sound.is_empty() {
-            self.request_speech(&sound);
         }
         Ok(())
     }
@@ -1617,7 +1622,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 .ok_or_else(|| WorldError::Invalid("target has no dialogue script".into()))?;
             self.world.background_enabled = false;
             self.world.dialogue.target = target;
-            self.dispatch(ScriptRequest {
+            // SPEC-006 §3.9: the talk session runs from here, before
+            // `talk_p_proc`, until the talk returns: at once when no
+            // dialogue opened, else when the dialogue closes.
+            self.world.dialogue.talking = true;
+            let dispatched = self.dispatch(ScriptRequest {
                 script: sid,
                 event: ScriptEvent::Talk,
                 source: 0,
@@ -1625,7 +1634,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 fixed: 0,
                 action: -1,
                 only_present: false,
-            })?;
+            });
+            if !self.world.dialogue.open {
+                self.world.dialogue.talking = false;
+            }
+            dispatched?;
             if !self.world.dialogue.open {
                 self.world.background_enabled = true;
                 self.map_update()?;

@@ -239,3 +239,54 @@ fn called_shot_art_and_labels_follow_the_alias() {
     assert_eq!(text(1155).as_deref(), Some(b"the left foreleg".as_slice()));
     assert_eq!(text(1000), None);
 }
+
+/// SPEC-014 §3.45 and Fixture R over the corpus: the panel and window art
+/// sizes, the font widths and title centering, the messages the windows
+/// show, and map 35 (`V13ENT`), where no one has anything to tell.
+#[test]
+#[ignore = "needs the local corpus"]
+fn dialogue_review_and_ask_about_resources() {
+    use vault_core::ui::talk;
+    let Some(preview) = map("v13ent.map") else {
+        return;
+    };
+    assert_eq!(
+        preview.host.world.map.header.map_number,
+        vault_core::host_talk::SILENT_MAP
+    );
+    let painter = crate::interface::Painter {
+        assets: &preview.host.assets,
+        palette: &preview.palette,
+    };
+    for (art, size) in [
+        (talk::PANEL, [640, 190]),
+        (talk::REVIEW_BACKGROUND, [640, 480]),
+        (talk::ASK_BACKGROUND, talk::ASK_SIZE),
+        (talk::SMALL_ART.0, [14, 14]),
+        (talk::REVIEW_ART.0, [51, 29]),
+        (talk::SCROLL_UP.1.0, [35, 35]),
+        (talk::SCROLL_DOWN.1.0, [35, 37]),
+        (talk::DONE.1.0, [82, 46]),
+    ] {
+        assert_eq!(painter.size(art), Some(size), "{art}");
+    }
+    assert_eq!(painter.width(101, b"Abel:"), 29);
+    assert_eq!(painter.width(101, b"_"), 8);
+    assert_eq!(painter.width(101, b"Water"), 35);
+    let title = painter.message(talk::ASK_TITLE.0, talk::ASK_TITLE.1);
+    assert_eq!(title, b"Ask about what?");
+    let width = painter.width(talk::ASK_FONT, &title);
+    assert_eq!(width, 107);
+    assert_eq!(vault_core::ui::centered(talk::ASK_SIZE[0], width), 91);
+    assert_eq!(painter.message("proto.msg", 650), b"[Done]");
+    assert_eq!(
+        painter.message("proto.msg", 903),
+        b"This person will not barter with you."
+    );
+    assert_eq!(
+        painter.message("proto.msg", 904),
+        b"This person has nothing to tell you about."
+    );
+    assert_eq!(painter.message("dbox.msg", 100), b"DONE");
+    assert_eq!(painter.message("dbox.msg", 103), b"CANCEL");
+}

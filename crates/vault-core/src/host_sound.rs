@@ -257,8 +257,9 @@ impl<A: WorldAssets> WorldHost<A> {
             lip_sync.set_clock(position.unwrap_or(0), position.is_some());
         }
     }
-    /// §3.12 stop without an ending (Barter, Review, Ask About): release
-    /// the speech without drawing a frame.
+    /// §3.12 stop without an ending (Barter, Review, Tell Me About under
+    /// its safe rule, closing Ask About with Escape): release the speech
+    /// without drawing a frame.
     pub fn stop_speech(&mut self) {
         if self.world.dialogue.stop_speech() {
             self.world.emit(WorldEffect::StopSpeech);

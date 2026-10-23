@@ -604,10 +604,16 @@ pub struct DialogueOption {
     pub procedure: u32,
     pub reaction: i32,
 }
+/// SPEC-006 §3.9 review history: 80 entries.
+pub const REVIEW_CAPACITY: usize = 80;
+/// One review entry: a reply (its message list and number, or a copy of a
+/// literal reply) and the option chosen after it, if any (its message list
+/// and number, the continuation -1/-1 or Done -2/-2 sentinel, or a literal
+/// option's displayed text with its `95 20` bullet).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReviewEntry {
-    Reply(DialogueText),
-    Choice(DialogueText),
+pub struct ReviewEntry {
+    pub reply: DialogueText,
+    pub choice: Option<DialogueText>,
 }
 #[derive(Debug, Clone)]
 pub struct GDialog {
@@ -620,6 +626,10 @@ pub struct GDialog {
     pub options: Vec<DialogueOption>,
     pub review: Vec<ReviewEntry>,
     pub review_cursor: usize,
+    /// SPEC-006 §3.9 a talk session is active: from the player's talk
+    /// action entering dialogue, before `talk_p_proc` runs, until that talk
+    /// returns, which here is when the dialogue it opened closes.
+    pub talking: bool,
     pub depth: usize,
     pub waiting: bool,
     pub pending_barter: bool,
@@ -652,6 +662,7 @@ impl Default for GDialog {
             options: Vec::new(),
             review: Vec::new(),
             review_cursor: 0,
+            talking: false,
             depth: 0,
             waiting: false,
             pending_barter: false,
@@ -701,39 +712,50 @@ impl GDialog {
     pub fn background_art(&self) -> u32 {
         0x09000000 | (self.background as u32 & 0xfff)
     }
+    /// `gsay_start`: the option count and review cursor reset, and the
+    /// review history becomes empty (SPEC-006 §3.9).
     pub fn reset_options(&mut self) {
         self.options.clear();
         self.resolved_options.clear();
         self.review_cursor = 0;
+        self.review.clear();
     }
     /// A literal reply is truncated to 899 bytes (SPEC-006 §3.10 safe rule).
-    pub fn set_reply(&mut self, program: u32, mut text: DialogueText) -> Result<(), WorldError> {
+    /// The reply adds a review entry with no chosen option. Returns `false`
+    /// when the 80-entry history is full, so the reply was not recorded
+    /// (the caller logs it).
+    pub fn set_reply(&mut self, program: u32, mut text: DialogueText) -> Result<bool, WorldError> {
         if let DialogueText::Literal(text) = &mut text {
             text.truncate(899);
         }
-        if self
-            .review
-            .iter()
-            .filter(|entry| matches!(entry, ReviewEntry::Reply(_)))
-            .count()
-            == 80
-        {
-            let end = self
-                .review
-                .iter()
-                .skip(1)
-                .position(|entry| matches!(entry, ReviewEntry::Reply(_)))
-                .map_or(self.review.len(), |index| index + 1);
-            self.review.drain(..end);
+        let recorded = self.review.len() < REVIEW_CAPACITY;
+        if recorded {
+            self.review.push(ReviewEntry {
+                reply: text.clone(),
+                choice: None,
+            });
         }
-        self.review.push(ReviewEntry::Reply(text.clone()));
         self.reply = Some(text);
         self.program = program;
         self.page = 0;
         self.page_offsets = vec![0];
         self.options.clear();
         self.resolved_options.clear();
-        Ok(())
+        Ok(recorded)
+    }
+    /// Record a chosen option in the latest review entry, a literal option
+    /// as its displayed text with the `95 20` bullet. The reference also
+    /// refuses the 80th entry's choice, by the same full test; safe rule:
+    /// record it. A choice made before any reply is recorded writes before
+    /// the first entry there; safe rule: ignore it (SPEC-006 §3.9).
+    fn record_choice(&mut self, text: &DialogueText) {
+        let Some(entry) = self.review.last_mut() else {
+            return;
+        };
+        entry.choice = Some(match text {
+            DialogueText::Literal(text) => DialogueText::Literal([b"\x95 ", &text[..]].concat()),
+            message => message.clone(),
+        });
     }
     /// SPEC-006 §3.10 safe rules: the thirty-first and later options are
     /// rejected before any option state is written, and literal option text
@@ -801,19 +823,24 @@ impl GDialog {
                 "dialogue is not waiting for a choice".into(),
             ));
         }
+        // Digit 0 (`None`) is the safe rule's choice with no option and no
+        // callback: nothing is recorded for it.
         let choice = match index {
-            Some(index) => self
-                .options
-                .get(index)
-                .cloned()
-                .ok_or_else(|| WorldError::Invalid("invalid dialogue option".into()))?,
+            Some(index) => {
+                let option = self
+                    .options
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| WorldError::Invalid("invalid dialogue option".into()))?;
+                self.record_choice(&option.text);
+                option
+            }
             None => DialogueOption {
                 text: DialogueText::Literal(Vec::new()),
                 procedure: 0,
                 reaction: 50,
             },
         };
-        self.review.push(ReviewEntry::Choice(choice.text));
         self.stop_speech();
         if let Some(head) = &mut self.head {
             head.react(choice.reaction);

@@ -50,6 +50,7 @@ mod pipboy;
 mod pointer;
 mod saveload;
 mod skilldex;
+mod talk;
 mod timer;
 mod world;
 
@@ -176,6 +177,8 @@ pub struct MapPreview {
     pub loaded: bool,
     /// SPEC-014 §3.13 a dialog box over the current screen.
     dialog: Option<dialog::Dialog>,
+    /// SPEC-014 §3.45 the Review or Ask About window over a conversation.
+    talk: Option<talk::TalkWindow>,
     /// SPEC-014 §3.26-3.29 pointer, hover, action menu and edge scrolling.
     pointer: pointer::PointerState,
     /// The shell clock at the last tick, in milliseconds.
@@ -504,6 +507,7 @@ impl MapPreview {
             endgame: None,
             loaded: false,
             dialog: None,
+            talk: None,
             pointer: Default::default(),
             clock: 0,
             frame: None,
@@ -712,7 +716,8 @@ impl MapPreview {
             && (self.timer_release(over)
                 || match self.screen {
                     Screen::Map => {
-                        self.called_release(point, over)
+                        self.talk_release(over)
+                            || self.called_release(point, over)
                             || self.map_release(point)
                             || self.bar_release(bar, over)
                     }
@@ -1102,6 +1107,12 @@ impl MapPreview {
                 .font
                 .as_ref()
                 .ok_or("dialogue requires a loaded FON/AAF font")?;
+            // SPEC-014 §3.45: the Ask About window hides the reply window
+            // until it shows an answer, and the option window while open.
+            let (reply_hidden, options_hidden) = self.talk_hides();
+            let dialogue = &mut self.host.world.dialogue;
+            let reply = reply_hidden.then(|| std::mem::take(&mut dialogue.resolved_reply));
+            let options = options_hidden.then(|| std::mem::take(&mut dialogue.resolved_options));
             let layout = dialogue::compose(
                 &image,
                 &self.host.world.dialogue,
@@ -1110,10 +1121,22 @@ impl MapPreview {
                 &self.host.assets,
                 self.host.world.perk(Perk::Empathy) > 0,
                 self.option_scroll,
-            )?;
-            self.host.world.dialogue.page_offsets = layout.page_offsets;
+            );
+            let dialogue = &mut self.host.world.dialogue;
+            if let Some(reply) = reply {
+                dialogue.resolved_reply = reply;
+            }
+            if let Some(options) = options {
+                dialogue.resolved_options = options;
+            }
+            let layout = layout?;
+            if !reply_hidden {
+                self.host.world.dialogue.page_offsets = layout.page_offsets;
+            }
             self.choices = layout.choices;
-            return Ok(layout.image);
+            let mut image = layout.image;
+            self.draw_talk(&mut image);
+            return Ok(image);
         }
         self.choices.clear();
         Ok(self.compose_world(image))
@@ -1232,7 +1255,14 @@ impl MapPreview {
         if matches!(self.screen, Screen::Barter(_)) {
             return self.barter_key(key);
         }
+        // SPEC-014 §3.45: the Review and Ask About windows are modal.
+        if self.host.world.dialogue.open && self.talk.is_some() {
+            return self.talk_key(key);
+        }
         if self.host.world.dialogue.open {
+            if self.panel_key(key) {
+                return true;
+            }
             let choice = match key {
                 KeyCode::Digit1 => Some(Some(0)),
                 KeyCode::Digit2 => Some(Some(1)),
@@ -1408,7 +1438,13 @@ impl MapPreview {
         if matches!(self.screen, Screen::Barter(_)) {
             return self.barter_click(point, right);
         }
+        if self.host.world.dialogue.open && !right && self.talk_click(point) {
+            return true;
+        }
         if self.host.world.dialogue.open {
+            if self.talk.is_some() {
+                return true;
+            }
             if let Some(choice) = self.choices.iter().find(|choice| choice.contains(point)) {
                 let index = choice.index;
                 self.press();
@@ -1466,6 +1502,7 @@ impl MapPreview {
         if self.fade_blocks()
             || !matches!(self.screen, Screen::Map)
             || !self.host.world.dialogue.open
+            || self.talk.is_some()
         {
             return false;
         }
@@ -1534,6 +1571,7 @@ impl MapPreview {
                 true
             }
         };
+        changed |= self.talk_tick(now);
         self.update_audio();
         if self.view.grid.pick_hex([320, 190]) != Some(self.host.world.camera_hex) {
             self.view.grid = HexGrid::centered(self.host.world.camera_hex, 640, 380)?;
