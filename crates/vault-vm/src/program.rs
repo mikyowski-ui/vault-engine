@@ -103,12 +103,13 @@ fn strings(
 pub(crate) fn instruction_length(word: u16) -> usize {
     if word & 0x3ff == 1 { 6 } else { 2 }
 }
+/// SPEC-004 §2.5: bit 15 must be set. All 32 slot-1 words `0x8001 + n *
+/// 0x0400` are valid pushes that keep their full word as the tag (a
+/// non-standard tag such as `0x8401` fails later, at a type check). Other
+/// words with bits 10-14 set are rejected (the `[May-improve]` rule).
 pub(crate) fn valid_word(word: u16) -> bool {
     if word & 0x3ff == 1 {
-        matches!(
-            word,
-            0x8001 | 0xc001 | 0xc801 | 0xa001 | 0xa801 | 0x9001 | 0x9801
-        )
+        word & 0x8000 != 0
     } else {
         (0x8000..=0x8155).contains(&word)
     }

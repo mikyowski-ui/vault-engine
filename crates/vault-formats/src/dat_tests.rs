@@ -231,12 +231,33 @@ fn spec008_fixture_lzss_outer_blocks_and_dictionary_reset() {
     let mut short = vec![0x80, 0x03, 0x58, 0x59, 0x5a];
     short.extend([0x80, 0x03, 0x58, 0x59, 0x5a]);
     assert!(decode_blocks(&short, 6).is_err());
-    // Truncated match token, non-final over-expansion, and zero-output blocks.
+    // Truncated match token and zero-output blocks.
     assert!(decode_blocks(&[0x00, 0x02, 0x00, 0xee], 3).is_err());
+    // §2.3 final output length: a non-final block's output past 16384
+    // bytes is discarded, raw or compressed (the [May-improve] bound on the
+    // reference's buffer overrun keeps the same visible bytes).
     let mut over = vec![0xc0, 0x01];
     over.extend(std::iter::repeat_n(0x41, 16385));
     over.extend([0x80, 0x01, 0x42]);
+    let decoded = decode_blocks(&over, 16385).unwrap();
+    assert!(decoded[..16384].iter().all(|byte| *byte == b'A'));
+    assert_eq!(decoded[16384], b'B');
+    // ...but the entry still has to reach its logical length.
     assert!(decode_blocks(&over, 16386).is_err());
+    // Compressed: 2048 groups of eight literals, then a match of three
+    // spaces' worth past the bound, in one non-final block.
+    let mut packed = Vec::new();
+    for _ in 0..2048 {
+        packed.push(0xff);
+        packed.extend([0x41; 8]);
+    }
+    packed.extend([0x00, 0x00, 0x00]);
+    let mut over = (packed.len() as u16).to_be_bytes().to_vec();
+    over.extend(&packed);
+    over.extend([0x80, 0x01, 0x42]);
+    let decoded = decode_blocks(&over, 16385).unwrap();
+    assert_eq!(decoded.len(), 16385);
+    assert_eq!(decoded[16384], b'B');
     assert!(decode_blocks(&[0x00, 0x00], 3).is_err());
     assert!(decode_blocks(&[0x80, 0x00], 1).is_err());
     // Attribute dispatch: exact zero aliases legacy 0x10; low bits do not
@@ -246,6 +267,23 @@ fn spec008_fixture_lzss_outer_blocks_and_dictionary_reset() {
     assert_eq!(Storage::from_attributes(0x2f), Some(Storage::Raw));
     assert_eq!(Storage::from_attributes(0x41), Some(Storage::Blocks));
     assert_eq!(Storage::from_attributes(0x01), None);
+    // §2.3: a legacy 0x10 stream is decoded in one pass into an L-byte
+    // buffer: output past L is cut off, and a stream that ends before L is
+    // rejected (the reference would leave the rest of its buffer unset).
+    let legacy = |packed: &[u8], length: u32| {
+        crate::dat::DatEntry {
+            name: b"A.TXT".to_vec(),
+            attributes: 0x10,
+            offset: 0,
+            length,
+            packed: packed.len() as u32,
+        }
+        .decode(packed)
+    };
+    let stream = [0x01, 0x41, 0xee, 0xf2];
+    assert_eq!(legacy(&stream, 4).unwrap(), b"AAAA");
+    assert_eq!(legacy(&stream, 6).unwrap(), b"AAAAAA");
+    assert!(legacy(&stream, 7).is_err());
     // The automap variant stops on an exact output count, truncating a match.
     assert_eq!(decode_until(&[0x01, 0x41, 0xee, 0xf2], 4).unwrap(), b"AAAA");
     assert!(decode_until(&[0x01, 0x41], 2).is_err());

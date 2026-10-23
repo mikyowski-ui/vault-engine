@@ -5,7 +5,7 @@
 //! it starts; step k of n sets each level to `old - trunc((old - new) * k /
 //! n)` and the target is installed exactly at the end. Under the safe rule
 //! a fade lasts a fixed 700 ms instead of a calibrated step count; a library
-//! fade with a positive duration lasts that many milliseconds.
+//! fade lasts its duration in milliseconds, so `fadeout(0)` is instant.
 //!
 //! A game fade blocks completely (§3.2): while one runs, or waits to run
 //! next, the world does not update and input is swallowed, and while it
@@ -66,15 +66,13 @@ impl Fades {
         });
     }
     /// Queue a library `fadein` (from black) or `fadeout` over `duration`
-    /// ms, 0 or less being the standard length; it does not block.
+    /// ms (§3.2: timed, not stepped), 0 or less installing the target on
+    /// the next update; it does not block.
     pub fn push_library(&mut self, out: bool, duration: i32, from_black: bool) {
         self.queue.push_back(Request {
             to_black: out,
             from_black,
-            duration: u64::try_from(duration)
-                .ok()
-                .filter(|ms| *ms > 0)
-                .unwrap_or(FADE_MS),
+            duration: u64::try_from(duration).unwrap_or(0),
             blocking: false,
         });
     }
@@ -201,5 +199,13 @@ mod tests {
         assert_eq!(fades.shown(&game)[0], [31, 20, 0]);
         fades.tick(3100, &game);
         assert_eq!(fades.display(&game, 1.0), None);
+        // A library `fadeout(0)` is no game fade: it never blocks, and the
+        // update after it starts installs black.
+        fades.push_library(true, 0, false);
+        assert!(!fades.blocking() && !fades.freezes());
+        fades.tick(3200, &game);
+        fades.tick(3216, &game);
+        assert!(!fades.running());
+        assert_eq!(fades.shown(&game)[0], [0, 0, 0]);
     }
 }

@@ -921,10 +921,7 @@ impl MapPreview {
                 WorldEffect::Movie(request) => self.queue_movie(request),
                 // SPEC-014 §3.2: the world requests a game fade (`gfade_out`
                 // / `gfade_in`, First Aid, Doctor, books) as the standard
-                // fade (0) without a forced black start; a library `fadein`
-                // or `fadeout` starts from black or carries its duration.
-                // A library `fadeout(0)` cannot be told apart and is taken
-                // as the game fade it looks like.
+                // fade (0) without a forced black start, which blocks.
                 WorldEffect::Fade {
                     out,
                     duration,
@@ -936,6 +933,13 @@ impl MapPreview {
                         self.fades.push_library(out, duration, from_black);
                     }
                 }
+                // The library `fadein` / `fadeout` is timed by its duration
+                // and never blocks, `fadeout(0)` included.
+                WorldEffect::LibraryFade {
+                    out,
+                    duration,
+                    from_black,
+                } => self.fades.push_library(out, duration, from_black),
                 WorldEffect::RollHitPoints => self.hud.hp.animate = true,
                 WorldEffect::RollArmorClass => self.hud.ac.animate = true,
                 WorldEffect::WorldMap => self.open_world_map(),

@@ -396,18 +396,25 @@ impl MapFile {
             )?);
         }
         let scripts: [ScriptCategory; 5] = scripts.try_into().expect("five categories");
-        // SPEC-003 §3.3 resolves object script references against the
-        // loaded records without a uniqueness rule: a repeated identifier
-        // keeps its first record and is reported.
+        // SPEC-003 §3.3: a lookup searches only the stream the identifier's
+        // top byte names, in block and slot order, and the first equal
+        // record binds. A repeated identifier, or one in another
+        // category's stream, is never found; it is reported.
         let mut bindings = BTreeMap::new();
-        for record in scripts.iter().flat_map(ScriptCategory::active) {
-            if let std::collections::btree_map::Entry::Vacant(slot) = bindings.entry(record.id) {
-                slot.insert(record.file_index);
-            } else {
-                diagnostics.push(format!(
-                    "duplicate active script {:#010x} at byte {:#x}; the first record binds",
-                    record.id, record.file_offset
-                ));
+        for (stream, category) in scripts.iter().enumerate() {
+            for record in category.active() {
+                if record.id >> 24 != stream as u32 {
+                    continue;
+                }
+                if let std::collections::btree_map::Entry::Vacant(slot) = bindings.entry(record.id)
+                {
+                    slot.insert(record.file_index);
+                } else {
+                    diagnostics.push(format!(
+                        "duplicate active script {:#010x} at byte {:#x}; the first record binds",
+                        record.id, record.file_offset
+                    ));
+                }
             }
         }
         let mut objects = MapObjects::read(
@@ -702,6 +709,12 @@ impl MapObject {
                 )?,
             });
         }
+        // SPEC-003 §3.3: on every read (base and saved maps alike), an exit
+        // grid to map 0 or below whose art index is below 33 is rebuilt as
+        // miscellaneous art with index + 16, the same animation field and
+        // every other field zero. The literal rule is kept (the
+        // `[May-improve]` base-map-only shift is not taken), so an index
+        // from 1 to 16 moves again on the next saved-map read.
         let mut art_id = p[8] as u32;
         if let ObjectState::Other {
             detail: ObjectDetail::ExitGrid { map, .. },
@@ -710,7 +723,7 @@ impl MapObject {
             && *map <= 0
             && art_id & 0xfff < 33
         {
-            art_id = (art_id & !0xfff) | ((art_id & 0xfff) + 16);
+            art_id = 0x0500_0000 | (art_id & 0x00ff_0000) | ((art_id & 0xfff) + 16);
         }
         let flags = BasicFlags(if owner.is_none() && category == Category::Critter {
             p[9] as u32 & !0x400

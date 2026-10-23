@@ -179,23 +179,29 @@ impl WorldState {
         }
         map.mvars = self.mvars.clone();
         map.lvars = self.lvars.clone();
-        let templates: BTreeMap<u32, &MapScript> = self
-            .map
-            .scripts
-            .iter()
-            .flat_map(ScriptCategory::active)
-            .map(|script| (script.id, script))
-            .collect();
+        // SPEC-003 §3.3: the template of an identifier is the record that
+        // bound it, the first in its own category's stream.
+        let mut templates: BTreeMap<u32, &MapScript> = BTreeMap::new();
+        for (stream, category) in self.map.scripts.iter().enumerate() {
+            for script in category.active().filter(|s| s.id >> 24 == stream as u32) {
+                templates.entry(script.id).or_insert(script);
+            }
+        }
         let mut records: [Vec<MapScript>; 5] = Default::default();
-        for sid in &self.script_order {
-            let Some(instance) = self.scripts.get(sid) else {
-                continue;
-            };
-            let category = (*sid >> 24) as usize;
-            if Some(*sid) == self.map_script || category >= 5 {
+        for slot in &self.script_order {
+            let stream = usize::from(slot.stream);
+            // An inert record is written back unchanged.
+            if let Some(record) = &slot.inert {
+                records[stream].push((**record).clone());
                 continue;
             }
-            records[category].push(self.script_record(instance, templates.get(sid).copied()));
+            let Some(instance) = self.scripts.get(&slot.id) else {
+                continue;
+            };
+            if Some(slot.id) == self.map_script {
+                continue;
+            }
+            records[stream].push(self.script_record(instance, templates.get(&slot.id).copied()));
         }
         map.scripts = records.map(|slots| ScriptCategory {
             declared_count: slots.len(),

@@ -36,8 +36,8 @@ pub enum ScriptEvent {
     UseObject,
     Pickup,
     Talk,
-    /// The background checker's per-critter pass (see
-    /// `WorldHost::critter_scripts`).
+    /// The critter-script cycle step's request (SPEC-006 §3.7, see
+    /// `WorldHost::critter_cycle_step`).
     Critter,
     /// SPEC-007 combat invocations (fixed parameter 4 turn, 5 join check).
     Combat,
@@ -121,6 +121,55 @@ pub struct ScriptInstance {
     pub result: i32,
     pub overridden: bool,
     pub margin: i32,
+}
+/// One active script record in stored list order (SPEC-003 §2.9): its
+/// category stream (0 system to 4 critter) and identifier. Lookup by
+/// identifier searches only the stream the identifier's top byte names and
+/// binds the first equal record there (SPEC-003 §3.3), so a later duplicate
+/// or a record in another category's stream is never found: it keeps its
+/// stored record, which spatial checks read and saves write back unchanged.
+/// Passes that walk the list still visit it and request its identifier.
+#[derive(Debug, Clone)]
+pub struct ScriptSlot {
+    pub stream: u8,
+    pub id: u32,
+    pub inert: Option<Box<vault_formats::map::MapScript>>,
+}
+impl ScriptSlot {
+    fn live(id: u32) -> Self {
+        Self {
+            stream: (id >> 24).min(4) as u8,
+            id,
+            inert: None,
+        }
+    }
+}
+/// A script instance from its stored record.
+fn script_instance(script: &vault_formats::map::MapScript, local_count: usize) -> ScriptInstance {
+    let spatial = if let ScriptPrefix::Spatial { location, radius } = script.prefix {
+        Some((location.hex() as i32, location.elevation(), radius))
+    } else {
+        None
+    };
+    ScriptInstance {
+        id: script.id,
+        owner: 0,
+        file: script.file_index,
+        flags: script.flags.0,
+        local_base: script.local_base,
+        local_count,
+        spatial,
+        initialized: false,
+        program: 0,
+        source: 0,
+        target: 0,
+        event: script.event,
+        fixed: script.parameter,
+        action: script.action,
+        result: script.result,
+        overridden: false,
+        margin: 0,
+    }
 }
 #[derive(Debug, Clone)]
 pub struct WorldObject {
@@ -468,6 +517,14 @@ pub enum WorldEffect {
         duration: i32,
         from_black: bool,
     },
+    /// The general-library `fadein` (`from_black`) or `fadeout`: a timed
+    /// fade over `duration` host milliseconds (0 or less is instant) that
+    /// services background work, so it never blocks (SPEC-014 §3.2).
+    LibraryFade {
+        out: bool,
+        duration: i32,
+        from_black: bool,
+    },
     Gui {
         opcode: u16,
         values: Vec<i32>,
@@ -585,7 +642,11 @@ pub struct WorldState {
     pub mvars: Vec<i32>,
     pub lvars: Vec<i32>,
     pub scripts: BTreeMap<u32, ScriptInstance>,
-    pub script_order: Vec<u32>,
+    /// Every active script record in stored list order: the five category
+    /// streams in order, then block and slot order (SPEC-003 §2.9). New
+    /// records join the end of their stream; removing one moves its
+    /// stream's last record into the freed slot (SPEC-006 §3.7).
+    pub script_order: Vec<ScriptSlot>,
     pub map_script: Option<u32>,
     pub requests: VecDeque<ScriptRequest>,
     pub clock: WorldClock,
@@ -1062,40 +1123,27 @@ impl WorldState {
         self.map_script = None;
         self.mvars = map.mvars.clone();
         self.lvars = map.lvars.clone();
-        for category in &map.scripts {
+        // SPEC-003 §3.3: the first record of an identifier in the stream
+        // its top byte names binds; a later duplicate, or a record in
+        // another category's stream, is kept inert.
+        for (stream, category) in map.scripts.iter().enumerate() {
             for script in category.active() {
-                let spatial = if let ScriptPrefix::Spatial { location, radius } = script.prefix {
-                    Some((location.hex() as i32, location.elevation(), radius))
-                } else {
-                    None
-                };
-                self.script_order.push(script.id);
-                self.scripts.insert(
-                    script.id,
-                    ScriptInstance {
-                        id: script.id,
-                        owner: 0,
-                        file: script.file_index,
-                        flags: script.flags.0,
-                        local_base: script.local_base,
-                        local_count: if script.local_count > 0 {
-                            script.local_count as usize
-                        } else {
-                            assets.local_count(script.file_index)
-                        },
-                        spatial,
-                        initialized: false,
-                        program: 0,
-                        source: 0,
-                        target: 0,
-                        event: script.event,
-                        fixed: script.parameter,
-                        action: script.action,
-                        result: script.result,
-                        overridden: false,
-                        margin: 0,
-                    },
-                );
+                let found =
+                    script.id >> 24 == stream as u32 && !self.scripts.contains_key(&script.id);
+                self.script_order.push(ScriptSlot {
+                    stream: stream as u8,
+                    id: script.id,
+                    inert: (!found).then(|| Box::new(script.clone())),
+                });
+                if found {
+                    let locals = if script.local_count > 0 {
+                        script.local_count as usize
+                    } else {
+                        assets.local_count(script.file_index)
+                    };
+                    self.scripts
+                        .insert(script.id, script_instance(script, locals));
+                }
             }
         }
         let roots: Vec<_> = map.objects.elevations.iter().flatten().cloned().collect();
@@ -1125,12 +1173,7 @@ impl WorldState {
                 None => instance.local_base = -1,
             }
             self.scripts.insert(id, instance);
-            let position = self
-                .script_order
-                .iter()
-                .position(|sid| sid >> 24 > category)
-                .unwrap_or(self.script_order.len());
-            self.script_order.insert(position, id);
+            self.append_script(id);
             if let Some(object) = self.get_mut(reference) {
                 object.raw.script_id = id as i32;
             }
@@ -1337,9 +1380,7 @@ impl WorldState {
                 self.erase(child);
             }
             if object.raw.script_id != -1 {
-                self.scripts.remove(&(object.raw.script_id as u32));
-                self.script_order
-                    .retain(|sid| *sid != object.raw.script_id as u32);
+                self.remove_script(object.raw.script_id as u32);
             }
         }
         self.queue.remove_object(reference);
@@ -1459,17 +1500,56 @@ impl WorldState {
                 margin: 0,
             },
         );
-        let position = self
-            .script_order
-            .iter()
-            .position(|sid| sid >> 24 > u32::from(category))
-            .unwrap_or(self.script_order.len());
-        self.script_order.insert(position, id);
+        self.append_script(id);
         if let Some(object) = self.get_mut(owner) {
             object.raw.script_id = id as i32;
             object.raw.cached_script_file = file;
         }
         Ok(id)
+    }
+    /// A new record joins the end of its category's stream.
+    fn append_script(&mut self, id: u32) {
+        let slot = ScriptSlot::live(id);
+        let position = self
+            .script_order
+            .iter()
+            .position(|other| other.stream > slot.stream)
+            .unwrap_or(self.script_order.len());
+        self.script_order.insert(position, slot);
+    }
+    /// Remove the record an identifier finds (SPEC-006 §3.7): its stream's
+    /// last record moves into the freed slot. A later record of the same
+    /// identifier in that stream is found from then on.
+    pub fn remove_script(&mut self, id: u32) {
+        self.scripts.remove(&id);
+        let Some(at) = self
+            .script_order
+            .iter()
+            .position(|slot| slot.id == id && slot.inert.is_none())
+        else {
+            return;
+        };
+        let stream = self.script_order[at].stream;
+        let last = self
+            .script_order
+            .iter()
+            .rposition(|slot| slot.stream == stream)
+            .unwrap_or(at);
+        self.script_order.swap(at, last);
+        self.script_order.remove(last);
+        let promoted = self.script_order.iter_mut().find(|slot| {
+            slot.id == id && u32::from(slot.stream) == id >> 24 && slot.inert.is_some()
+        });
+        if let Some(slot) = promoted
+            && let Some(record) = slot.inert.take()
+        {
+            let locals = usize::try_from(record.local_count).unwrap_or(0);
+            self.scripts.insert(id, script_instance(&record, locals));
+        }
+    }
+    /// The identifiers of the script records, in stored list order.
+    pub fn script_ids(&self) -> Vec<u32> {
+        self.script_order.iter().map(|slot| slot.id).collect()
     }
     pub fn ensure_locals(&mut self, sid: u32) -> Result<usize, WorldError> {
         let script = self
@@ -1556,7 +1636,7 @@ impl WorldState {
                 only_present: false,
             });
         }
-        for script in self.script_order.clone() {
+        for script in self.script_ids() {
             if Some(script) != self.map_script {
                 self.request(ScriptRequest {
                     script,
@@ -1620,7 +1700,7 @@ impl WorldState {
     /// SPEC-013 §3.22: the player moved onto `hex`: every exit grid there
     /// requests a transition, the last one winning; a request in combat
     /// ends combat.
-    fn check_exit_grids(&mut self, hex: i32, elevation: u8) {
+    pub(crate) fn check_exit_grids(&mut self, hex: i32, elevation: u8) {
         let grid = self
             .iter()
             .filter(|(_, object)| {
@@ -1679,26 +1759,40 @@ impl WorldState {
         }
         let elevation = object.raw.elevation;
         self.spatial_enabled = false;
-        for id in self.script_order.clone() {
-            if let Some(script) = self.scripts.get(&id)
-                && script.flags & 2 == 0
-                && let Some((center, layer, radius)) = script.spatial
-                && layer == elevation
-                && (hex == center
-                    || (radius != 0
-                        && vault_formats::HexGrid::lattice_distance(hex, center)
-                            .is_ok_and(|distance| distance <= radius)))
-            {
-                self.request(ScriptRequest {
-                    script: id,
-                    event: ScriptEvent::Spatial,
-                    source: mover,
-                    target: 0,
-                    fixed: 0,
-                    action: -1,
-                    only_present: false,
-                });
-            }
+        // SPEC-003 §3.3: an inert record's own location and radius request
+        // the procedure of the record its identifier finds.
+        let triggered = |flags: u32, spatial: Option<(i32, u8, i32)>| {
+            flags & 2 == 0
+                && spatial.is_some_and(|(center, layer, radius)| {
+                    layer == elevation
+                        && (hex == center
+                            || (radius != 0
+                                && vault_formats::HexGrid::lattice_distance(hex, center)
+                                    .is_ok_and(|distance| distance <= radius)))
+                })
+        };
+        let ids: Vec<u32> = self
+            .script_order
+            .iter()
+            .filter(|slot| match &slot.inert {
+                Some(record) => triggered(record.flags.0, script_instance(record, 0).spatial),
+                None => self
+                    .scripts
+                    .get(&slot.id)
+                    .is_some_and(|script| triggered(script.flags, script.spatial)),
+            })
+            .map(|slot| slot.id)
+            .collect();
+        for id in ids {
+            self.request(ScriptRequest {
+                script: id,
+                event: ScriptEvent::Spatial,
+                source: mover,
+                target: 0,
+                fixed: 0,
+                action: -1,
+                only_present: false,
+            });
         }
         self.spatial_enabled = true;
     }

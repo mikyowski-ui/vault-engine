@@ -91,6 +91,11 @@ fn spec004_every_isolated_fragment() {
         if parts[0] == "static-string" {
             assert_eq!(vm.string(vm.value_stack.top().unwrap()).unwrap(), b"hi");
         }
+        // SPEC-004 §4.2: `0xC801` with bit `0x0800` cleared is `0xC001`, so
+        // the jump to 8 (the fragment's end) is accepted.
+        if parts[0] == "masked-c801-jump" {
+            assert_eq!(vm.pc, 8);
+        }
     }
 }
 #[test]
@@ -106,6 +111,9 @@ fn spec004_errors_structural_boundaries_and_stack_capacity() {
             "underflow" => error == VmError::Underflow,
             "division" => error == VmError::DivisionByZero,
             "opcode" => matches!(error, VmError::Opcode(_)),
+            // SPEC-004 §4.3: the `0x8401` push executes; the jump's masked
+            // integer check then rejects it.
+            "type" => error == VmError::Type(0x8401),
             _ => false,
         });
         if parts[2] == "division" {

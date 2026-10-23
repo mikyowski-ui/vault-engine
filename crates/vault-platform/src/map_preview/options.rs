@@ -29,6 +29,9 @@ pub(crate) struct PreferenceState {
     armed: Option<Control>,
     /// A slider's modal drag loop.
     drag: Option<SliderDrag>,
+    /// §3.18: a knob or switch change blocks for 70 ms between its press
+    /// and release cues; input until then is discarded.
+    blocked_until: u64,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Control {
@@ -48,7 +51,8 @@ struct SliderDrag {
 }
 /// One drag iteration lasts at least 35 ms.
 const DRAG_ITERATION_MS: u64 = 35;
-/// A knob or switch's release cue follows its press cue after 70 ms.
+/// A knob or switch's release cue follows its press cue after 70 ms, and
+/// the screen blocks meanwhile.
 const CONTROL_CUE_MS: u64 = 70;
 /// The effects slider's sample sound, every 8th iteration; the speech
 /// slider's, every 41st.
@@ -163,6 +167,7 @@ impl MapPreview {
             knob_up: [true; 5],
             armed: None,
             drag: None,
+            blocked_until: 0,
         })));
     }
     /// Apply preferences to the world (the save words included) and the
@@ -377,16 +382,18 @@ impl MapPreview {
             painter.text(image, 103, ColorKey::LABEL, &text, caption, 100);
         }
     }
-    /// A slider drag is under way.
-    fn preference_drag(&self) -> bool {
-        matches!(&self.screen, Screen::Options(OptionsScreen::Preferences(state)) if state.drag.is_some())
+    /// A slider drag is under way, or a knob or switch change blocks.
+    fn preferences_busy(&self) -> bool {
+        matches!(&self.screen, Screen::Options(OptionsScreen::Preferences(state))
+            if state.drag.is_some() || self.clock < state.blocked_until)
     }
     /// A left release over the preferences: the armed knob or switch acts
     /// when the release is inside its rectangle (any release there marks
     /// "changed", even in a dead zone); a change plays the press cue, then
-    /// the release cue 70 ms later. A drag notes its release for its next
-    /// iteration.
+    /// blocks input for 70 ms and plays the release cue. A drag notes its
+    /// release for its next iteration.
     pub(crate) fn options_release(&mut self, point: Option<[i32; 2]>) -> bool {
+        let now = self.clock;
         let painter = Painter {
             assets: &self.host.assets,
             palette: &self.palette,
@@ -397,6 +404,9 @@ impl MapPreview {
         };
         if let Some(drag) = &mut state.drag {
             drag.released = true;
+            return true;
+        }
+        if now < state.blocked_until {
             return true;
         }
         let (Some(control), Some(point)) = (state.armed.take(), point) else {
@@ -435,6 +445,7 @@ impl MapPreview {
                 (b"ib2p1xx1", b"ib2lu1x1")
             }
         };
+        state.blocked_until = now + CONTROL_CUE_MS;
         self.play_effect(cues.0, None);
         self.cue_later(CONTROL_CUE_MS, cues.1);
         true
@@ -529,8 +540,9 @@ impl MapPreview {
     }
     pub(crate) fn options_key(&mut self, key: KeyCode) -> bool {
         let control = self.hud.modifiers[1];
-        // A slider drag is modal: it ignores other input.
-        if self.preference_drag() {
+        // A slider drag is modal and a knob change blocks: other input is
+        // ignored.
+        if self.preferences_busy() {
             return true;
         }
         let brightness = matches!(
@@ -615,7 +627,7 @@ impl MapPreview {
         }
     }
     pub(crate) fn options_click(&mut self, point: [i32; 2]) -> bool {
-        if self.preference_drag() {
+        if self.preferences_busy() {
             return true;
         }
         let Screen::Options(screen) = &mut self.screen else {

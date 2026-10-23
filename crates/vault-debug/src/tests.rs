@@ -112,11 +112,26 @@ fn decode_registration_ranges_and_invalid_words() {
         (0x8156, None),
         (0x7fff, None),
         (0xc801, Some(OpcodeClass::Push)),
-        // Slot 1 with an unlisted tag.
-        (0x8401, None),
+        // SPEC-004 §2.5: all 32 slot-1 words with bit 15 are pushes, the
+        // non-standard tags included; the VM agrees.
+        (0x8401, Some(OpcodeClass::Push)),
+        (0xfc01, Some(OpcodeClass::Push)),
+        (0x0001, None),
+        // Other words with bits 10-14 set stay rejected.
+        (0xc039, None),
     ] {
         assert_eq!(decode::classify(word), class, "{word:#06x}");
     }
+    let tagged = decode(&[0x84, 0x01, 0, 0, 0, 5], 0).unwrap();
+    assert_eq!(
+        (tagged.class(), tagged.text()),
+        (OpcodeClass::Push, "push.tag 0x8401 0x5".to_string())
+    );
+    let mut vm = fragment(&[vec![0x84, 0x01, 0, 0, 0, 5]]);
+    assert_eq!(decode_next(&vm).unwrap(), tagged);
+    let mut host = BasicHost::default();
+    assert_eq!(vm.update(&mut host).unwrap(), RunOutcome::FragmentEnd);
+    assert_eq!(vm.value_stack.top().unwrap().tag, 0x8401);
     assert_eq!(
         decode(&op(0x8156), 0),
         Err(DecodeError::Invalid {

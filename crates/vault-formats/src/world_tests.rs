@@ -273,6 +273,41 @@ fn map_tiles_and_per_slot_script_dispatch() {
 }
 
 #[test]
+fn spec003_exit_grid_art_is_rebuilt_on_every_read() {
+    let lookup = |pid: u32| {
+        assert_eq!(pid, 0x0500_0010);
+        let mut bytes = fixture::prototype(5, 0);
+        fixture::word(&mut bytes, 0, pid as i32);
+        Ok(Prototype::parse(&bytes)?.info())
+    };
+    let map = |art: u32, destination: i32| {
+        let mut bytes = fixture::empty_map();
+        bytes.truncate(248);
+        bytes.extend(fixture::words(&[0, 0, 0, 0, 0, 1, 1]));
+        let mut grid = fixture::object(5, 20100, 1, &[destination, 12345, 0, 2]);
+        fixture::word(&mut grid, 0x20, art as i32);
+        fixture::word(&mut grid, 0x2c, 0x0500_0010);
+        bytes.extend(grid);
+        bytes.extend(fixture::words(&[0, 0]));
+        bytes
+    };
+    let art = |bytes: &[u8]| {
+        let map = MapFile::parse(bytes, &lookup).unwrap();
+        (map.objects.elevations[0][0].art_id, map.write().unwrap())
+    };
+    // Index 5 (with a selector, a weapon code and animation 3) becomes
+    // misc art 21 with only the animation kept; a saved copy read again
+    // moves to 37 and then stays.
+    let (first, saved) = art(&map(0x1503_7005, -2));
+    assert_eq!(first, 0x0503_0015);
+    let (second, saved) = art(&saved);
+    assert_eq!(second, 0x0503_0025);
+    assert_eq!(art(&saved).0, 0x0503_0025);
+    // A positive destination keeps its art.
+    assert_eq!(art(&map(0x1503_7005, 4)).0, 0x1503_7005);
+}
+
+#[test]
 fn spec003_unmandated_record_checks_are_diagnostics() {
     // Object frame, orientation, and inventory quantity have no validation
     // rule in SPEC-003 §2.10/§2.12: out-of-range values are substituted

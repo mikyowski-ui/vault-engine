@@ -193,7 +193,9 @@ impl<A: WorldAssets> WorldHost<A> {
     pub fn enter_encounter(&mut self, encounter: Encounter) -> Result<(), WorldError> {
         self.set_global(REGION_GLOBAL, i32::from(encounter.region()));
         self.set_global(ENTRY_GLOBAL, encounter.context());
-        self.load_map(&format!("maps/{}", encounter.map().to_ascii_lowercase()))
+        self.load_map(&format!("maps/{}", encounter.map().to_ascii_lowercase()))?;
+        self.world_map_closed();
+        Ok(())
     }
     /// Derive town and entrance knowledge from the campaign globals.
     pub fn refresh_world_knowledge(&mut self) {
@@ -223,6 +225,8 @@ impl<A: WorldAssets> WorldHost<A> {
         self.set_global(ENTRY_GLOBAL, button.entry);
         self.world.world_map.saved.town = town as i32;
         self.world.world_map.saved.section = button.slot as i32;
-        self.load_map(&format!("maps/{}", button.map.to_ascii_lowercase()))
+        self.load_map(&format!("maps/{}", button.map.to_ascii_lowercase()))?;
+        self.world_map_closed();
+        Ok(())
     }
 }
