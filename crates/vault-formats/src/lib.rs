@@ -13,6 +13,7 @@ pub mod frm;
 pub mod gam;
 pub mod gcd;
 pub mod geometry;
+pub mod lip;
 pub mod lst;
 pub mod map;
 pub mod moviefx;
@@ -36,6 +37,7 @@ pub use frm::FrmArchive;
 pub use gam::{GamFile, GamSection};
 pub use gcd::GcdFile;
 pub use geometry::HexGrid;
+pub use lip::LipFile;
 pub use lst::{LstKind, LstTable};
 pub use map::MapFile;
 pub use msg::{MsgCatalog, TextMode};
@@ -89,6 +91,10 @@ mod automap_tests;
 mod dat_tests;
 #[cfg(test)]
 mod fid_tests;
+#[cfg(test)]
+mod filter_tests;
+#[cfg(test)]
+mod lip_tests;
 #[cfg(test)]
 mod movie_tests;
 #[cfg(test)]

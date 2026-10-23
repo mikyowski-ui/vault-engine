@@ -82,6 +82,12 @@ struct Args {
     /// check the `sfx-proto-bytes.tsv` prototype sound bytes.
     #[arg(long)]
     validate_sfx: bool,
+    /// SPEC-010 §2.6: parse every `.LIP` (version 2, exact size, P = M - 1,
+    /// no loading-check findings, increasing markers from 0) and compare
+    /// its stored stem, length word and final marker with the companion
+    /// ACM header.
+    #[arg(long)]
+    validate_lip: bool,
     /// Directory holding the SPEC-010 oracle tables.
     #[arg(long, value_name = "PATH", default_value = "oracle/SPEC-010")]
     oracle_dir: PathBuf,
@@ -786,6 +792,15 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
             println!("SFX resolution: {rows} rows, {passed} passed, {failed} failed");
             println!("SFX prototype sound bytes: {bytes} failures");
             Ok(failed + bytes)
+        });
+    }
+    if args.validate_lip {
+        failures.run("LIP", "LIP check(s)", || {
+            let [files, passed, failed, before_end] = sound::audit_lip(&vfs);
+            println!(
+                "LIP files: {files}, {passed} passed, {failed} failed; {before_end} end before the audio"
+            );
+            Ok(failed)
         });
     }
     for (enabled, title, check) in [

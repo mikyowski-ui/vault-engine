@@ -242,4 +242,108 @@ impl MsgCatalog {
     pub fn warning_count(&self) -> usize {
         self.warnings().len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+    /// SPEC-002 §3.7: rewrite every record's text in place, in ascending ID
+    /// order, from cursor `k` (the caller's one `random(1, 29)` draw minus
+    /// 1); returns the cursor after the application. Sound fields and IDs
+    /// are never filtered.
+    pub fn apply_language_filter(&mut self, words: &BadWords, mut k: usize) -> usize {
+        k %= FILTER_ALPHABET.len();
+        for message in self.messages.values_mut() {
+            k = words.filter_text(&mut message.text, k);
+        }
+        k
+    }
+}
+
+/// SPEC-002 §3.7 language-filter replacement alphabet.
+pub const FILTER_ALPHABET: &[u8; 29] = b"!@#$%&*@#*!&$%#&%#*%!$&%@*$@&";
+/// Bytes per `badwords.txt` read: a longer line becomes several entries.
+const BAD_WORD_CHUNK: usize = 78;
+
+/// SPEC-002 §3.7 word list, `data/badwords.txt`: case-folded entries in
+/// file order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BadWords {
+    entries: Vec<Vec<u8>>,
+}
+
+/// ASCII letters only; the end of the text and bytes `0x80`-`0xFF` are
+/// non-letters (§3.7 `[May-improve]`).
+fn filter_letter(byte: Option<&u8>) -> bool {
+    byte.is_some_and(u8::is_ascii_alphabetic)
+}
+
+impl BadWords {
+    /// Text-mode lines (CRLF becomes LF, one trailing LF per line removed),
+    /// read in chunks of at most 78 bytes, untrimmed, without comments, and
+    /// case-folded (`a`-`z` only). A final line without LF is still an
+    /// entry. `[May-improve]`: zero-length entries, which make the
+    /// reference filter loop without end, are ignored.
+    pub fn parse(bytes: &[u8]) -> Self {
+        let mut text = Vec::with_capacity(bytes.len());
+        for (index, &byte) in bytes.iter().enumerate() {
+            if byte != b'\r' || bytes.get(index + 1) != Some(&b'\n') {
+                text.push(byte);
+            }
+        }
+        let mut entries = Vec::new();
+        let mut start = 0;
+        while start < text.len() {
+            let chunk = &text[start..text.len().min(start + BAD_WORD_CHUNK)];
+            let (entry, consumed) = match chunk.iter().position(|byte| *byte == b'\n') {
+                Some(end) => (&chunk[..end], end + 1),
+                None => (chunk, chunk.len()),
+            };
+            start += consumed;
+            if !entry.is_empty() {
+                entries.push(entry.to_ascii_uppercase());
+            }
+        }
+        Self { entries }
+    }
+    pub fn entries(&self) -> &[Vec<u8>] {
+        &self.entries
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+    /// One §3.7 pass over `text` from cursor `k` (0-28), returning the
+    /// cursor after it. Matching uses an unchanged case-folded copy, so
+    /// every occurrence is judged against the original text. After each
+    /// find the search restarts one byte after its previous start (not
+    /// after the find), so a qualifying occurrence is rewritten once per
+    /// start position up to it, using L cursor positions each time, and
+    /// the last rewrite's bytes remain.
+    pub fn filter_text(&self, text: &mut [u8], mut k: usize) -> usize {
+        let folded = text.to_ascii_uppercase();
+        for word in &self.entries {
+            let mut from = 0;
+            while let Some(found) = folded
+                .get(from..)
+                .and_then(|rest| rest.windows(word.len()).position(|w| w == word.as_slice()))
+            {
+                let start = from + found;
+                let end = start + word.len();
+                // An occurrence at offset 0 qualifies without testing the
+                // byte after it.
+                if start == 0
+                    || !filter_letter(folded.get(start - 1)) && !filter_letter(folded.get(end))
+                {
+                    // The searches from `from` through `start` all find
+                    // this occurrence; only the last rewrite stays visible.
+                    let skipped = (start - from) * word.len();
+                    k = (k + skipped) % FILTER_ALPHABET.len();
+                    for byte in &mut text[start..end] {
+                        *byte = FILTER_ALPHABET[k];
+                        k = (k + 1) % FILTER_ALPHABET.len();
+                    }
+                }
+                from = start + 1;
+            }
+        }
+        k
+    }
 }

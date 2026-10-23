@@ -472,6 +472,9 @@ impl MapPreview {
         if let Err(error) = host.load_campaign() {
             tracing::warn!(%error, "campaign initializer unavailable");
         }
+        // SPEC-002 §3.7: the language filter's word list, read at startup
+        // before any catalog is filtered.
+        host.load_language_filter();
         // SPEC-009 AI initialization; without it NPC combat turns are skipped.
         if let Err(error) = host.load_combat_ai() {
             tracing::warn!(%error, "combat AI unavailable");
@@ -833,21 +836,21 @@ impl MapPreview {
             tracing::debug!(%path, "effect not played (silent output or four effects active)");
         }
     }
-    /// Talking-head speech: `sound/speech/<head>/<stem>.ACM`. Without a file
-    /// or output, speech finishes at once.
+    /// Talking-head speech: `sound/speech/<head>/<stem>.ACM`, decoded whole
+    /// and played once at `floor(69 x V / 100)` of the speech volume V
+    /// (SPEC-010 §3.12; volume 0 plays silently and still lip-syncs). The
+    /// world hears whether it started: without a file or output lip-sync
+    /// stops and the next head tick ends the speech.
     fn play_speech(&mut self, sound: &[u8]) {
         self.sync_volumes();
-        let gain = volume_gain(self.volumes.speech);
+        let gain = volume_gain(vault_formats::lip::speech_volume(self.volumes.speech));
         let started = self
             .host
             .speech_file(sound)
             .and_then(|path| self.sounds.load(&*self.host.assets.vfs, &path))
             .is_some_and(|samples| self.audio.play(samples, gain, Channel::Speech, false));
-        if started {
-            self.speaking = true;
-        } else {
-            self.host.speech_finished();
-        }
+        self.speaking = started;
+        self.host.speech_started(started);
     }
     /// Background music, the platform's entry point for every music
     /// request the world makes (SPEC-008 §3.10: `wind2`, `03wrldmp` and the
@@ -878,13 +881,13 @@ impl MapPreview {
                 .play(samples, 1.0, Channel::Library(slot), mode & 1 != 0);
         }
     }
-    /// Audio follows the world: finished speech completes the head's speech
-    /// phase, and stopped, paused, or freed library slots fall silent.
+    /// Audio follows the world: the speech's playback position reaches the
+    /// head's lip-sync (its next tick ends finished speech, SPEC-010
+    /// §3.12), and stopped, paused, or freed library slots fall silent.
     fn update_audio(&mut self) {
-        if self.speaking && !self.audio.playing(Channel::Speech) {
-            self.speaking = false;
-            self.host.speech_finished();
-        }
+        let position = self.audio.speech_position();
+        self.speaking = position.is_some();
+        self.host.speech_clock(position);
         for (slot, sound) in self.host.library.sounds.iter().enumerate() {
             if sound
                 .as_ref()
@@ -1478,6 +1481,9 @@ impl MapPreview {
             }
             return Ok(changed);
         }
+        // SPEC-010 §3.12: the head updater reads the speech position once
+        // per tick.
+        self.host.speech_clock(self.audio.speech_position());
         // The world and Pip-Boy screens are modal: the local map's scripts
         // and clock wait while travel or rest advances time. An open action
         // menu pauses background map processing.
@@ -1810,6 +1816,82 @@ mod tests {
             !mixer.lock().unwrap().playing(Channel::Library(2)),
             "the slot is free"
         );
+    }
+
+    /// SPEC-010 §3.12: the speech voice's position drives the talking
+    /// head's mouth, at 69% of the speech volume (0 still lip-syncs).
+    #[test]
+    fn talking_heads_lip_sync_with_their_speech() {
+        use vault_core::dialogue::{HeadDefinition, HeadIdle, Mood, TalkingHead};
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        let speech = dir.path().join("sound/speech/synth");
+        std::fs::create_dir_all(&speech).unwrap();
+        std::fs::write(speech.join("hello.acm"), sound_fixture::acm('H')).unwrap();
+        // Vector H holds 4 samples (8 bytes). Phoneme 9 (frame 8) shows from
+        // byte 2; the final marker lies past the
+        // audio end.
+        let mut lip = Vec::new();
+        for word in [2, 0x5800, 0, 0, 0, 2, 0, 3] {
+            lip.extend_from_slice(&i32::to_be_bytes(word));
+        }
+        lip.extend_from_slice(b"HELLO\0\0\0VOC\0");
+        lip.extend_from_slice(&[0, 9]);
+        for (kind, position) in [(1, 0), (1, 2), (1, i32::MAX)] {
+            lip.extend_from_slice(&i32::to_be_bytes(kind));
+            lip.extend_from_slice(&i32::to_be_bytes(position));
+        }
+        std::fs::write(speech.join("hello.lip"), lip).unwrap();
+        let mut preview = interactive(dir.path());
+        let (audio, mixer) = AudioHandle::detached();
+        preview.audio = audio;
+        preview.image().unwrap();
+        for volume in [22281, 0] {
+            preview.preferences.speech_volume = volume;
+            preview.host.world.dialogue.head = Some(TalkingHead::without_fidget(
+                HeadDefinition {
+                    index: 0,
+                    stem: "synth".into(),
+                    counts: [0; 3],
+                },
+                Mood::Neutral,
+                HeadIdle::default(),
+            ));
+            preview.host.world.dialogue.updater = true;
+            preview.host.request_speech(b"hello");
+            preview.image().unwrap();
+            assert!(preview.speaking);
+            assert_eq!(
+                mixer.lock().unwrap().gain(Channel::Speech),
+                Some(volume_gain(volume * 69 / 100))
+            );
+            let shown = |preview: &MapPreview| {
+                let head = preview.host.world.dialogue.head.as_ref().unwrap();
+                head.shown.map(|shown| (shown.animation, shown.frame))
+            };
+            mixer
+                .lock()
+                .unwrap()
+                .fill(&mut [0.0; 2], 1, acm::MIXER_RATE);
+            preview.tick(100).unwrap();
+            assert_eq!(shown(&preview), Some((10, 8)), "volume {volume}");
+            // The voice runs out: the next tick ends the speech normally.
+            mixer
+                .lock()
+                .unwrap()
+                .fill(&mut vec![0.0; 1 << 20], 1, acm::MIXER_RATE);
+            preview.tick(200).unwrap();
+            assert_eq!(shown(&preview), Some((10, 0)));
+            assert!(preview.host.world.dialogue.speech.is_none());
+            let head = preview.host.world.dialogue.head.as_ref().unwrap();
+            assert_eq!(head.idle_seconds, 3);
+        }
+        // Without the audio file the speech ends on the next tick.
+        preview.host.request_speech(b"missing");
+        preview.image().unwrap();
+        assert!(!preview.speaking);
+        preview.tick(300).unwrap();
+        assert!(preview.host.world.dialogue.speech.is_none());
     }
 
     #[test]

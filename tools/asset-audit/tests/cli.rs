@@ -973,6 +973,50 @@ fn validates_spec014_roof_words_and_stored_hide_bits_across_the_corpus_maps() {
     }
 }
 
+/// SPEC-010 §2.6: every `.LIP` against its layout and companion ACM.
+#[test]
+fn validates_spec010_lip_files_against_their_audio() {
+    let temp = tempfile::tempdir().unwrap();
+    state::write_corpus(temp.path());
+    let speech = temp.path().join("sound/speech/synth");
+    std::fs::create_dir_all(&speech).unwrap();
+    // Vector H: 4 samples, so 2N = 8.
+    std::fs::write(speech.join("hello.acm"), sound::acm('H')).unwrap();
+    let mut lip = Vec::new();
+    for word in [2, 0x5800, 0, 0, 9, 2, 0, 3] {
+        lip.extend_from_slice(&i32::to_be_bytes(word));
+    }
+    lip.extend_from_slice(b"HELLO\0\0\0VOC\0");
+    lip.extend_from_slice(&[0, 9]);
+    for (kind, position) in [(1, 0), (0, 2), (1, 10)] {
+        lip.extend_from_slice(&i32::to_be_bytes(kind));
+        lip.extend_from_slice(&i32::to_be_bytes(position));
+    }
+    std::fs::write(speech.join("hello.lip"), &lip).unwrap();
+    std::fs::write(speech.join("short.lip"), &lip[..50]).unwrap();
+    let (ok, _, stdout, stderr) = audit(temp.path(), &["--validate-lip"]);
+    assert!(!ok);
+    assert!(
+        stdout.contains("LIP files: 2, 1 passed, 1 failed; 0 end before the audio"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("FAIL sound/speech/synth/short.lip"),
+        "{stderr}"
+    );
+    std::fs::remove_file(speech.join("short.lip")).unwrap();
+    // A final marker before the audio end is counted.
+    let last = lip.len() - 1;
+    lip[last] = 6;
+    std::fs::write(speech.join("hello.lip"), &lip).unwrap();
+    let (ok, _, stdout, stderr) = audit(temp.path(), &["--validate-lip"]);
+    assert!(ok, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("LIP files: 1, 1 passed, 0 failed; 1 end before the audio"),
+        "{stdout}"
+    );
+}
+
 fn audit(corpus: &std::path::Path, flags: &[&str]) -> (bool, Option<i32>, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_asset-audit"))
         .arg("--corpus-dir")

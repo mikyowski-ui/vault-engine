@@ -192,6 +192,9 @@ impl MapPreview {
         }
         match self.host.begin_barter(dialogue.target) {
             Ok(session) => {
+                // SPEC-010 §3.12: switching to Barter stops speech without
+                // an ending.
+                self.host.stop_speech();
                 self.screen = Screen::Barter(Box::new(BarterScreen {
                     session,
                     offsets: [0; 4],

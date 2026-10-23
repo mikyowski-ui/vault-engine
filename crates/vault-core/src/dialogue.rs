@@ -1,4 +1,40 @@
 use crate::{RandomSource, WorldError};
+use std::{collections::BTreeMap, sync::Arc};
+use vault_formats::{
+    MsgCatalog,
+    lip::LipFile,
+    msg::{BadWords, Message},
+};
+
+/// SPEC-002 §3.7 language-filter state for script messages: the
+/// `badwords.txt` list read at startup, and each per-script
+/// `dialog\<script>.msg` catalog as it was loaded on first use (filtered
+/// when the preference was 1 then). Reapplying preferences discards the
+/// catalogs.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptMessages {
+    pub words: Arc<BadWords>,
+    catalogs: BTreeMap<i32, Option<Arc<MsgCatalog>>>,
+}
+impl ScriptMessages {
+    /// Message `id` of list `list`; `None` while the list is not loaded.
+    pub fn get(&self, list: i32, id: i32) -> Option<Option<Message>> {
+        let catalog = self.catalogs.get(&list)?;
+        Some(
+            catalog
+                .as_ref()
+                .and_then(|catalog| catalog.get(id).cloned()),
+        )
+    }
+    /// Keep a loaded (or missing) catalog.
+    pub fn insert(&mut self, list: i32, catalog: Option<MsgCatalog>) {
+        self.catalogs.insert(list, catalog.map(Arc::new));
+    }
+    /// Discard every loaded catalog; each reloads on demand.
+    pub fn discard(&mut self) {
+        self.catalogs.clear();
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mood {
@@ -107,12 +143,21 @@ pub const PHONEMES: [u8; 42] = [
     0, 3, 1, 1, 3, 1, 1, 1, 7, 8, 7, 3, 1, 8, 1, 7, 7, 6, 6, 2, 2, 2, 2, 4, 4, 5, 5, 2, 2, 2, 2, 2,
     6, 2, 2, 5, 8, 2, 2, 2, 2, 8,
 ];
+/// The head's fidget state. While speech plays it is frozen, whatever its
+/// phase (SPEC-010 §3.12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadPhase {
     Fidget,
     Waiting,
     Transition,
-    Speech,
+}
+/// An image the head view drew: a head art selector, its variant, and a
+/// frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadFrame {
+    pub animation: u8,
+    pub variant: i32,
+    pub frame: usize,
 }
 /// The head updater's idle state that outlives a dialogue session: the
 /// idle-second counter (0 at program start) and the current idle-wait
@@ -136,9 +181,14 @@ pub struct TalkingHead {
     pub definition: HeadDefinition,
     pub mood: Mood,
     pub phase: HeadPhase,
+    /// The fidget or transition art and its frame counter.
     pub animation: u8,
     pub variant: i32,
     pub frame: usize,
+    /// What the head view last drew. `None` while the session opens: the
+    /// view first changes on the head updater's first tick (SPEC-006
+    /// §3.11), and until something draws it keeps its image.
+    pub shown: Option<HeadFrame>,
     pub idle_seconds: i32,
     /// The current idle-wait threshold in milliseconds.
     pub wait_ms: u64,
@@ -199,9 +249,10 @@ pub fn choose_fidget(
 }
 impl TalkingHead {
     /// SPEC-006 §3.11 session start: the mood fidget is chosen at once, with
-    /// its `random(1, 100)` draw and no threshold draw. The retained
-    /// timestamp starts at zero, so the first tick shows frame 0 of the
-    /// chosen fidget.
+    /// its `random(1, 100)` draw (the only draw opening a session) and no
+    /// threshold draw. Nothing is drawn yet. The retained timestamp starts
+    /// at zero, so a first tick without speech shows frame 0 of the chosen
+    /// fidget; speech that runs to its end means it is never shown.
     pub fn new(
         definition: HeadDefinition,
         mood: Mood,
@@ -242,6 +293,7 @@ impl TalkingHead {
             animation: mood.speech(),
             variant: 0,
             frame: 0,
+            shown: None,
             idle_seconds: idle.idle_seconds,
             wait_ms: idle.wait_ms,
             last_fidget_ms: 0,
@@ -285,30 +337,71 @@ impl TalkingHead {
     pub fn path(&self) -> Result<String, WorldError> {
         self.definition.path(self.animation, self.variant)
     }
+    /// The art path of the image the view shows, if any.
+    pub fn shown_path(&self) -> Option<String> {
+        let shown = self.shown?;
+        self.definition.path(shown.animation, shown.variant).ok()
+    }
+    fn draw(&mut self) {
+        self.shown = Some(HeadFrame {
+            animation: self.animation,
+            variant: self.variant,
+            frame: self.frame,
+        });
+    }
+    /// Draw the speech frame of phoneme `index` (0-41) from the current
+    /// mood's speech art (SPEC-006 §3.11 table). The fidget state is left
+    /// as it is, to resume when speech stops without an ending.
     pub fn phoneme(&mut self, index: usize) -> Result<(), WorldError> {
-        self.frame = usize::from(
+        let frame = usize::from(
             *PHONEMES
                 .get(index)
                 .ok_or_else(|| WorldError::Invalid("phoneme index must be 0..41".into()))?,
         );
-        self.animation = self.mood.speech();
-        self.phase = HeadPhase::Speech;
+        self.shown = Some(HeadFrame {
+            animation: self.mood.speech(),
+            variant: 0,
+            frame,
+        });
         Ok(())
     }
+    /// SPEC-010 §3.12 normal speech ending: draw speech frame 0, enter the
+    /// waiting state, set the idle counter to 3 and reset the fidget frame
+    /// counter. The retained timestamp keeps its value.
     pub fn speech_end(&mut self) {
+        self.animation = self.mood.speech();
+        self.variant = 0;
         self.frame = 0;
         self.unshown = false;
         self.phase = HeadPhase::Waiting;
         self.idle_seconds = 3;
+        self.draw();
+    }
+    /// A reaction transition is pending or playing: it runs even while
+    /// speech plays, with no lip updates (SPEC-010 §3.12).
+    pub fn transitioning(&self) -> bool {
+        self.pending.is_some() || self.phase == HeadPhase::Transition
     }
     pub fn react(&mut self, reaction: i32) {
-        if self.phase == HeadPhase::Speech {
-            self.speech_end();
-        }
         self.idle_seconds = 0;
         self.pending = self.mood.transition(reaction);
     }
+    /// One idle head updater tick: fidgets, idle waits and reaction
+    /// transitions. Returns whether a frame was drawn.
     pub fn tick(
+        &mut self,
+        now: u64,
+        frames: usize,
+        fps: i16,
+        rng: &mut impl RandomSource,
+    ) -> Result<bool, WorldError> {
+        let drawn = self.step(now, frames, fps, rng)?;
+        if drawn {
+            self.draw();
+        }
+        Ok(drawn)
+    }
+    fn step(
         &mut self,
         now: u64,
         frames: usize,
@@ -319,9 +412,6 @@ impl TalkingHead {
             return Err(WorldError::Invalid(
                 "invalid talking-head frame metadata".into(),
             ));
-        }
-        if self.phase == HeadPhase::Speech {
-            return Ok(false);
         }
         if self.phase == HeadPhase::Waiting {
             if let Some((animation, mood)) = self.pending.take() {
@@ -386,6 +476,123 @@ impl TalkingHead {
         Ok(true)
     }
 }
+/// What one lip-sync tick asks of the head and the audio.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LipStep {
+    /// Draw the speech frame of this phoneme.
+    pub draw: Option<u8>,
+    /// The final marker was passed: stop the audio at once.
+    pub stop_audio: bool,
+    /// The audio is no longer playing: end the speech normally.
+    pub ended: bool,
+}
+/// SPEC-010 §3.12 lip-sync for one speech: the `.LIP` tables, the marker
+/// index and current phoneme, and the playback clock the presentation
+/// layer reports.
+#[derive(Debug, Clone)]
+pub struct LipSync {
+    pub lip: LipFile,
+    /// The ACM to play: `sound/speech/<head>/<stored stem>.ACM` (§3.10).
+    pub audio: String,
+    pub marker: usize,
+    pub phoneme: u8,
+    pub running: bool,
+    /// The last phoneme drawn and whether a redraw is marked.
+    pub last_drawn: u8,
+    redraw: bool,
+    /// The playback position in decoded PCM bytes and whether the audio
+    /// still plays, as last reported; `None` until the audio's start is
+    /// reported, and the per-tick rule waits for it.
+    pub clock: Option<(u64, bool)>,
+}
+impl LipSync {
+    /// Loading step 7: marker index 0, current phoneme `ph(0)`. `carried`
+    /// is the last drawn phoneme left by earlier speech, with no redraw
+    /// marked (the reference's carry-over). `None` takes the §3.12
+    /// `[May-improve]` safe rule instead: the first tick of every speech
+    /// draws its current phoneme.
+    pub fn new(lip: LipFile, audio: String, carried: Option<u8>) -> Self {
+        let phoneme = lip.phoneme(0);
+        Self {
+            lip,
+            audio,
+            marker: 0,
+            phoneme,
+            running: false,
+            last_drawn: carried.unwrap_or(phoneme),
+            redraw: carried.is_none(),
+            clock: None,
+        }
+    }
+    /// Start steps 1-5 once the audio was asked to start: lip-sync runs
+    /// from byte 0, or, when the audio could not start, stops running and
+    /// the next tick ends the speech. Negative marker positions count as 0
+    /// (safe rule), so the start skips no marker.
+    pub fn start(&mut self, started: bool) {
+        self.running = started;
+        self.clock = Some((0, started));
+    }
+    /// The audio was stopped from outside lip-sync (a speech abandoned
+    /// after it): the next tick ends it normally.
+    pub fn audio_stopped(&mut self) {
+        self.running = false;
+        self.clock = Some((0, false));
+    }
+    /// Record the playback position (bytes) and whether the audio plays;
+    /// audio that no longer plays keeps its last position. Before the
+    /// start is reported nothing is recorded.
+    pub fn set_clock(&mut self, position: u64, playing: bool) {
+        if let Some((last, _)) = self.clock {
+            self.clock = Some((if playing { position } else { last }, playing));
+        }
+    }
+    fn passed_final(&mut self, step: &mut LipStep) {
+        self.marker = 0;
+        self.phoneme = self.lip.phoneme(0);
+        if !self.lip.repeat() {
+            step.stop_audio = true;
+            self.running = false;
+        }
+    }
+    /// The §3.12 per-tick rule, with the position read once.
+    pub fn tick(&mut self) -> LipStep {
+        let mut step = LipStep::default();
+        let Some((position, playing)) = self.clock else {
+            return step;
+        };
+        let markers = self.lip.markers.len();
+        if self.running {
+            // Strictly greater: at a marker's own position the phoneme
+            // before it still shows.
+            while position > self.lip.position(self.marker) {
+                self.phoneme = self.lip.phoneme(self.marker);
+                self.marker += 1;
+                if self.marker >= markers {
+                    self.passed_final(&mut step);
+                    break;
+                }
+            }
+            // A position that jumped back to the start ends the speech.
+            if self.running && self.marker + 1 >= markers {
+                let k = if markers > 5 { 3 } else { 0 };
+                if position < self.lip.position(k) {
+                    self.passed_final(&mut step);
+                }
+            }
+        }
+        if self.phoneme != self.last_drawn {
+            self.last_drawn = self.phoneme;
+            self.redraw = true;
+        }
+        if std::mem::take(&mut self.redraw) {
+            self.last_drawn = self.phoneme;
+            step.draw = Some(self.phoneme);
+        }
+        step.ended = !playing || step.stop_audio;
+        self.clock = Some((position, playing && !step.stop_audio));
+        step
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogueText {
     Literal(Vec<u8>),
@@ -422,7 +629,13 @@ pub struct GDialog {
     pub page: usize,
     pub page_offsets: Vec<usize>,
     pub page_ms: u64,
+    /// The speech state: the reply's sound field while its speech exists.
     pub speech: Option<Vec<u8>>,
+    /// Its SPEC-010 §3.12 lip-sync.
+    pub lip_sync: Option<LipSync>,
+    /// The head updater ticks: from the choice loop's start (SPEC-006
+    /// §3.11: no head frame is drawn while the session opens).
+    pub updater: bool,
     pub reaction: i32,
     /// The head updater's idle state between sessions.
     pub idle: HeadIdle,
@@ -449,6 +662,8 @@ impl Default for GDialog {
             page_offsets: vec![0],
             page_ms: 0,
             speech: None,
+            lip_sync: None,
+            updater: false,
             reaction: 0,
             idle: HeadIdle::default(),
         }
@@ -568,8 +783,17 @@ impl GDialog {
         }
         self.depth += 1;
         self.waiting = true;
+        self.updater = true;
         self.page_ms = now;
         Ok(true)
+    }
+    /// SPEC-010 §3.12 stop without an ending (an option choice, Barter, a
+    /// new speech request, the session's end): release the speech with no
+    /// frame drawn, the head's fidget state untouched. Returns whether a
+    /// speech existed.
+    pub fn stop_speech(&mut self) -> bool {
+        self.lip_sync = None;
+        self.speech.take().is_some()
     }
     pub fn choose(&mut self, index: Option<usize>) -> Result<Option<(u32, u32)>, WorldError> {
         if !self.waiting {
@@ -590,7 +814,7 @@ impl GDialog {
             },
         };
         self.review.push(ReviewEntry::Choice(choice.text));
-        self.speech = None;
+        self.stop_speech();
         if let Some(head) = &mut self.head {
             head.react(choice.reaction);
         }

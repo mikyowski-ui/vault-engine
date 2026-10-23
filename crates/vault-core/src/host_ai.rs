@@ -21,9 +21,10 @@ use crate::{
 use crate::{combat_state::CombatRequest, rng::stat_check};
 use std::sync::Arc;
 use vault_formats::{
-    Fid, HexGrid,
+    Fid, HexGrid, MsgCatalog,
     ai::{Packet, Packets},
     map::{ObjectDetail, ObjectState},
+    msg::{BadWords, Message},
     pro::{
         BasicFlags, Category, ExtendedFlags, Item, ItemData, ItemSubtype, PrototypeData, Weapon,
     },
@@ -215,17 +216,23 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.world.ai.packets = Some(Arc::new(packets));
         self.world.ai.messages = Some(messages);
-        // A nonzero language-filter preference at load applies the filter.
+        // A nonzero language-filter preference at load invokes the filter,
+        // which acts only for exactly 1.
         self.world.ai.filtered = false;
         if self.world.ai.language_filter.unwrap_or(0) != 0 {
-            self.apply_language_filter();
+            self.apply_language_filter()?;
         }
         Ok(())
     }
-    /// §2.5 preference re-evaluation. The remembered state starts at -1, so
-    /// the first evaluation acts. A changed value of exactly 1 filters the
-    /// loaded catalog; any other changed value reloads it unfiltered.
+    /// §2.5 preference re-evaluation, part of every reapplication of
+    /// preferences (startup, the preferences screen's close or cancel, a
+    /// game load). It first discards the per-script catalogs, which reload
+    /// under the setting then in force (SPEC-002 §3.7). The remembered
+    /// state starts at -1, so the first evaluation acts. A changed value of
+    /// exactly 1 filters the loaded catalog again; any other changed value
+    /// reloads it unfiltered.
     pub fn reevaluate_language_filter(&mut self) -> Result<(), WorldError> {
+        self.script_messages.discard();
         let value = self.world.ai.language_filter.unwrap_or(0);
         if value == self.world.ai.filter_state {
             return Ok(());
@@ -235,19 +242,65 @@ impl<A: WorldAssets> WorldHost<A> {
             return Ok(());
         }
         if value == 1 {
-            self.apply_language_filter();
+            self.apply_language_filter()?;
         } else {
             self.world.ai.messages = Some(self.assets.game_messages("combatai.msg")?);
             self.world.ai.filtered = false;
         }
         Ok(())
     }
-    fn apply_language_filter(&mut self) {
-        // SPEC-002 defines no language-filter transform: the state is
-        // tracked, and the catalog text is kept unchanged.
-        self.world.ai.filtered = true;
-        self.world
-            .diagnostic("no language-filter transform is specified; combatai.msg is unchanged");
+    fn apply_language_filter(&mut self) -> Result<(), WorldError> {
+        let Some(messages) = &self.world.ai.messages else {
+            return Ok(());
+        };
+        let mut catalog = MsgCatalog::clone(messages);
+        if self.language_filter(&mut catalog)? {
+            self.world.ai.messages = Some(Arc::new(catalog));
+            self.world.ai.filtered = true;
+        }
+        Ok(())
+    }
+    /// SPEC-002 §3.7 startup: read `data/badwords.txt` (relative to the
+    /// data root). A missing or unreadable file gives an empty list, with
+    /// which the filter does nothing and draws nothing.
+    pub fn load_language_filter(&mut self) {
+        let words = self
+            .assets
+            .resource("data/badwords.txt")
+            .map(|bytes| BadWords::parse(&bytes))
+            .unwrap_or_default();
+        self.script_messages.words = Arc::new(words);
+    }
+    /// One SPEC-002 §3.7 application: only with the `language_filter`
+    /// preference exactly 1, a nonempty catalog and a nonempty word list,
+    /// and then with exactly one `random(1, 29)` draw. Returns whether it
+    /// acted.
+    pub(crate) fn language_filter(&mut self, catalog: &mut MsgCatalog) -> Result<bool, WorldError> {
+        let words = self.script_messages.words.clone();
+        if self.world.ai.language_filter != Some(1) || catalog.is_empty() || words.is_empty() {
+            return Ok(false);
+        }
+        let k = self.world.rng.range(1, 29)? - 1;
+        catalog.apply_language_filter(&words, k as usize);
+        Ok(true)
+    }
+    /// A script message (`dialog\<script>.msg` of one-based list `list`):
+    /// each catalog is loaded on first use and filtered then, once, when
+    /// the preference is 1 (SPEC-002 §3.7). Assets that offer only single
+    /// messages are read unfiltered.
+    pub(crate) fn script_message(&mut self, list: i32, id: i32) -> Option<Message> {
+        if let Some(message) = self.script_messages.get(list, id) {
+            return message;
+        }
+        let Some(mut catalog) = self.assets.dialogue_catalog(list) else {
+            return self.assets.message(list, id);
+        };
+        if let Err(error) = self.language_filter(&mut catalog) {
+            self.world.diagnostic(format!("language filter: {error}"));
+        }
+        let message = catalog.get(id).cloned();
+        self.script_messages.insert(list, Some(catalog));
+        message
     }
     /// §3.1 packet resolution at every query: the first sorted packet with
     /// the critter's instance number, else table entry 0 (diagnosed).
