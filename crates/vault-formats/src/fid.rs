@@ -156,6 +156,13 @@ impl ArtCatalog {
             .art_id(u32::from(index))
             .ok_or(FidError::MissingEntry { category, index })
     }
+    /// The critter-list alias of an art row (SPEC-007 §2.1): its alias
+    /// field, or the list's default alias without one (SPEC-014 §3.38
+    /// picks the called-shot labels by it). `None` without that row.
+    pub fn critter_alias(&self, index: u16) -> Option<i32> {
+        let entry = self.entry(CRITTER_CATEGORY, index).ok()?;
+        Some(entry.critter_alias(self.default_alias))
+    }
     /// The unaliased list token for an art index (SPEC-010 effect stems).
     pub fn base_token(&self, category: u8, index: u16) -> Option<&[u8]> {
         self.entry(category, index).ok()?.name.as_deref()

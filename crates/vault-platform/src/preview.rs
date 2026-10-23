@@ -235,6 +235,14 @@ impl AssetPreview {
             Self::Game(game) => game.title(),
         }
     }
+    /// A key went up (SPEC-014 §3.27 holds releases during the combat lock).
+    pub fn key_up(&mut self, key: KeyCode) {
+        match self {
+            Self::Map(preview) => preview.key_up(key),
+            Self::Game(game) => game.key_up(key),
+            _ => {}
+        }
+    }
     pub fn step(&mut self, key: KeyCode) -> bool {
         match self {
             Self::Sprite(preview) => preview.step(key),

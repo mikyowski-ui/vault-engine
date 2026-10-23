@@ -29,6 +29,7 @@ const EGG_ART: u32 = 0x0600_0002;
 
 mod automap;
 mod barter;
+mod called;
 mod character;
 mod counter;
 mod debug;
@@ -709,7 +710,11 @@ impl MapPreview {
         }
         let mut handled = !right
             && match self.screen {
-                Screen::Map => self.map_release(point) || self.bar_release(bar, over),
+                Screen::Map => {
+                    self.called_release(point, over)
+                        || self.map_release(point)
+                        || self.bar_release(bar, over)
+                }
                 Screen::Elevator(_) => self.elevator_release(over),
                 Screen::Loot(_) => self.loot_release(point),
                 Screen::Inventory(_) => self.inventory_release(point),
@@ -986,6 +991,7 @@ impl MapPreview {
             Screen::Help(_) => self.help_image(),
         }?;
         self.draw_timer(&mut image);
+        self.draw_called(&mut image);
         self.draw_dialog(&mut image);
         self.draw_debug(&mut image);
         self.held_shown = self.held_button().is_some();
@@ -1191,13 +1197,29 @@ impl MapPreview {
         if self.fade_blocks() {
             return true;
         }
-        if self.movie_key() || self.dialog_key(key) || self.timer_key(key) {
+        if self.movie_key() || self.dialog_key(key) || self.timer_key(key) || self.called_key(key) {
             return true;
         }
         // F9 toggles the vault-debug inspector.
         if key == KeyCode::F9 {
             let on = !self.debug_enabled();
             self.set_debug(on);
+            return true;
+        }
+        // SPEC-014 §3.27: while combat locks the keyboard no key is read,
+        // F12 included; presses and releases are held (up to 32) and read
+        // in order once it is enabled (`read_held_keys`).
+        if self.keyboard_locked() {
+            let modifiers = self.hud.modifiers;
+            self.hold_key(hud::HeldKey::Press(key, modifiers));
+            return true;
+        }
+        // §3.23: a hand swap's wait reads and discards every key but F12,
+        // which takes its screenshot as soon as it is read.
+        if matches!(self.screen, Screen::Map) && self.swapping_hands() {
+            if key == KeyCode::F12 {
+                self.screenshot();
+            }
             return true;
         }
         // SPEC-014 §3.28-3.29: keyboard input is discarded while the action
@@ -1265,11 +1287,6 @@ impl MapPreview {
             Screen::Automap(_) => return self.automap_key(key),
             Screen::Help(_) => return self.close_help(),
             Screen::Barter(_) | Screen::Movie(_) | Screen::Map => {}
-        }
-        // SPEC-014 §3.27: under the combat lock the keyboard is disabled;
-        // keys are discarded (Escape included, as with the bar disabled).
-        if matches!(self.screen, Screen::Map) && self.combat_locked() {
-            return true;
         }
         // SPEC-014 §3.2: F1 shows the help screen.
         if key == KeyCode::F1 && matches!(self.screen, Screen::Map) && !self.host.world.ui_disabled
@@ -1375,7 +1392,11 @@ impl MapPreview {
         if self.fade_blocks() {
             return true;
         }
-        if self.movie_press() || self.dialog_click(point) || self.timer_click(point) {
+        if self.movie_press()
+            || self.dialog_click(point)
+            || self.timer_click(point)
+            || self.called_click(point, right)
+        {
             return true;
         }
         // SPEC-014 §3.21, §3.25: game input waits while a counter rolls or
@@ -1418,8 +1439,12 @@ impl MapPreview {
         // The map area runs through y = 379 (the bar window overlaps it).
         // SPEC-014 §3.26-§3.27, §3.23: while the animated watch shows (the
         // combat lock or a hand swap) the game mouse and the bar take
-        // nothing; clicks are discarded, never queued.
+        // nothing; clicks are discarded, never queued. The Swap hands
+        // button alone still presses (§3.27).
         if self.watch_shown() {
+            if !right && point[1] > vault_core::ui::bar::BAR_ORIGIN[1] {
+                self.swap_button_press(point);
+            }
             return true;
         }
         if point[1] > vault_core::ui::bar::BAR_ORIGIN[1] {
@@ -1529,6 +1554,9 @@ impl MapPreview {
         changed |= self.counters_tick(now);
         changed |= self.panel_tick(now);
         changed |= self.watch_tick(now);
+        changed |= self.called_tick();
+        changed |= self.read_held_keys();
+        changed |= self.replay_attack();
         self.cues_tick(now);
         changed |= self.debug_tick();
         Ok(changed)

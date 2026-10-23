@@ -251,6 +251,8 @@ impl<A: WorldAssets> WorldHost<A> {
         // Starting a fresh combat stops registered animations.
         self.stop_motions();
         self.building_animation = None;
+        // SPEC-014 §3.27: combat start locks input until the player's turn.
+        self.combat_lock.end_turn();
         let elevation = self
             .world
             .get(self.world.player)
@@ -467,6 +469,11 @@ impl<A: WorldAssets> WorldHost<A> {
             self.end_turn(critter);
             return Ok(false);
         }
+        if critter == self.world.player {
+            // SPEC-014 §3.27: the player's turn gives the input back and
+            // flushes held keys, before its combat script and stand-up.
+            self.combat_lock.begin_turn();
+        }
         if !resumed {
             // SPEC-007 §3.3 names an initial scripted combat-request AP
             // bonus in this refill, but SPEC-005's request words (accuracy,
@@ -515,6 +522,8 @@ impl<A: WorldAssets> WorldHost<A> {
             state.damage = 0;
         }
         if critter == self.world.player {
+            // SPEC-014 §3.27: input stays locked until the next player turn.
+            self.combat_lock.end_turn();
             self.world.free_movement = 0;
             self.world.combat_state.player_turn = false;
             self.world.combat_state.turn_ended = false;
@@ -677,6 +686,9 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.ai.requested = None;
         let player = self.world.player;
         self.world.combat = false;
+        // SPEC-014 §3.27: the end of combat re-enables input without a
+        // flush.
+        self.combat_lock.end_turn();
         self.world.combat_actor = 0;
         self.world.free_movement = 0;
         self.world.combat_state = CombatState::default();

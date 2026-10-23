@@ -91,7 +91,7 @@ pub(crate) struct PointerState {
     /// When the pointer came to rest at `at`.
     rest_since: u64,
     /// The hover ran for this rest.
-    rested: bool,
+    pub rested: bool,
     pub feedback: Option<Feedback>,
     /// The object whose look-at text the monitor last received.
     looked: Option<ObjectRef>,
@@ -197,6 +197,7 @@ impl MapPreview {
             && !self.host.world.dialogue.open
             && self.dialog.is_none()
             && self.hud.timer.is_none()
+            && self.hud.called.is_none()
     }
     /// The item a window's drag holds, drawn as the cursor.
     fn dragged_item(&self) -> Option<ObjectRef> {
@@ -713,19 +714,14 @@ impl MapPreview {
     }
     /// The uncalled torso hit chance of the player's attack request, even
     /// in an aimed mode, or `None` when the preflight refuses it (SPEC-007
-    /// §3.2). The item slot's aiming still counts in the AP the attack
-    /// needs.
+    /// §3.2) or the slot reports no attack, as in reload mode (§3.23). The
+    /// item slot's aiming still counts in the AP the attack needs.
     fn hover_hit_chance(&self, target: ObjectRef) -> Option<i32> {
         let player = self.host.world.player;
         let world = &self.host.world;
+        let (mode, aimed) = self.slot_attack()?;
         let attack = world
-            .attack_profile(
-                player,
-                target,
-                self.attack_mode(),
-                location::UNCALLED,
-                self.attack_aimed(),
-            )
+            .attack_profile(player, target, mode, location::UNCALLED, aimed)
             .ok()?;
         world.preflight(player, target, &attack).ok()?;
         attack.hit_chance(true).ok()
@@ -743,8 +739,9 @@ impl MapPreview {
             assets: &self.host.assets,
             palette: &self.palette,
         };
-        // The Set Timer window shows the arrow over any window.
-        if self.hud.timer.is_some() {
+        // The Set Timer window shows the arrow over any window, and the
+        // called-shot window over the map (SPEC-014 §3.38).
+        if self.hud.timer.is_some() || self.hud.called.is_some() {
             painter.cursor(image, cursor::ARROW.art, at);
             return;
         }

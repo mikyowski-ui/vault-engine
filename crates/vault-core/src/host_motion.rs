@@ -135,6 +135,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.next_motion += 1;
         sequence.id = self.next_motion;
+        sequence.combat = self.world.combat;
         let now = self.motion_time.max(self.world.elapsed_ms);
         self.running_motions.push(Running::of(&sequence, false));
         match self.playback {
@@ -149,7 +150,22 @@ impl<A: WorldAssets> WorldHost<A> {
         } else {
             self.motions.push(sequence);
         }
+        self.sync_combat_lock();
         true
+    }
+    /// SPEC-014 §3.27 whether the player's turn is under way for the combat
+    /// lock: from its start (before the combat script and any stand-up)
+    /// until it ends.
+    pub(crate) fn lock_turn(&self) -> bool {
+        self.combat_lock.turn || self.world.combat_state.player_turn
+    }
+    /// SPEC-014 §3.27 recount the running sequences registered in combat:
+    /// the world's sequences and the attack shows queued to play.
+    pub(crate) fn sync_combat_lock(&mut self) {
+        let count = self.motions.iter().filter(|m| m.combat).count()
+            + self.world.shows.iter().filter(|show| show.combat).count();
+        let turn = self.lock_turn();
+        self.combat_lock.counted(count, turn);
     }
     /// After a sequence's registration or pass: a sequence cancelled
     /// meanwhile is halted while its record is still the running one, so
@@ -180,6 +196,7 @@ impl<A: WorldAssets> WorldHost<A> {
             changed = true;
         }
         self.motion_time = now_ms;
+        self.sync_combat_lock();
         changed
     }
     /// One scheduler pass over the sequences registered before it, in
@@ -201,6 +218,7 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             let placeholder = MotionSequence {
                 id,
+                combat: self.motions[index].combat,
                 ..MotionSequence::default()
             };
             let mut sequence = std::mem::replace(&mut self.motions[index], placeholder);
@@ -263,6 +281,7 @@ impl<A: WorldAssets> WorldHost<A> {
         sequence.schedule.halt(now, self);
         self.running_motions.pop();
         self.end_motion(&sequence);
+        self.sync_combat_lock();
     }
     /// §3.11.5 getting up at once: animation 37 after a fall back (20), 36
     /// otherwise, then the standing pose; without that art, the standing
@@ -353,9 +372,9 @@ impl<A: WorldAssets> WorldHost<A> {
             })
     }
     /// SPEC-014 §3.27 what a player's click finds: combat and whose turn it
-    /// is, whether an attack or (in combat) any sequence is still playing,
-    /// whether a sequence holds the player, and the player's current pose
-    /// by its art (walk 1 or run 19; standing 0).
+    /// is, whether the combat lock is engaged by running sequences, whether
+    /// a sequence holds the player, and the player's current pose by its
+    /// art (walk 1 or run 19; standing 0).
     pub fn click_state(&self) -> ClickState {
         let player = self.world.player;
         let animation = self
@@ -364,8 +383,8 @@ impl<A: WorldAssets> WorldHost<A> {
             .map(|object| Fid(object.raw.art_id).animation());
         ClickState {
             combat: self.world.combat,
-            player_turn: self.world.combat_state.player_turn,
-            presenting: self.presenting(),
+            player_turn: self.lock_turn(),
+            engaged: self.combat_lock.engaged,
             busy: self.owns_motion(player),
             walking: matches!(animation, Some(animation::WALK | animation::RUN)),
             standing: animation == Some(animation::STAND),

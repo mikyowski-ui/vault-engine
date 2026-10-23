@@ -276,3 +276,21 @@ fn spec005_jumpsuit_rows_match_base_names_without_case_and_the_last_wins() {
     assert_eq!(catalog.last_row(1, b"hapowr"), None);
     assert_eq!(catalog.last_row(0, b"hmjmps"), None, "no list");
 }
+
+#[test]
+fn spec014_called_shot_picture_and_labels_follow_the_critter_alias() {
+    // SPEC-014 §3.38: the `na` picture (code 64) and the label messages use
+    // the row's alias; row 0 has no alias field and takes the default 0.
+    let mut catalog = ArtCatalog::default();
+    catalog.insert(
+        1,
+        LstTable::parse(b"reserv\nhmjmps,1\nhmmaxx,1\n", LstKind::Art).unwrap(),
+    );
+    assert_eq!(catalog.critter_alias(0), Some(0));
+    assert_eq!(catalog.critter_alias(2), Some(1));
+    assert_eq!(catalog.critter_alias(3), None);
+    assert_eq!(
+        catalog.filename(Fid::new(1, 2, 64, 0, 0)).as_deref(),
+        Ok("hmjmpsna.frm")
+    );
+}

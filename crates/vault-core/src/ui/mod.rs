@@ -4,6 +4,7 @@
 //! "screen"; durations are milliseconds.
 pub mod automap;
 pub mod bar;
+pub mod called;
 pub mod cursor;
 pub mod editor;
 pub mod endgame;

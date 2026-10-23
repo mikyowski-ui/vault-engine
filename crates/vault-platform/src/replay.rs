@@ -221,6 +221,7 @@ impl Replay {
                     }
                 } else if !pressed {
                     self.repeat.release(key);
+                    self.preview.key_up(key);
                 } else if !repeat {
                     // The desktop ignores the OS repeats; the engine repeats.
                     self.repeat.press(key, self.preview.key_layer());

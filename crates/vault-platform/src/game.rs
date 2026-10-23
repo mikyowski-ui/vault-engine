@@ -1255,6 +1255,12 @@ impl Game {
         }
     }
 
+    /// A key went up: only the world holds releases (SPEC-014 §3.27).
+    pub fn key_up(&mut self, key: KeyCode) {
+        if let Stage::World(world) | Stage::Load(world) = &mut self.stage {
+            world.key_up(key);
+        }
+    }
     pub fn step(&mut self, key: KeyCode) -> bool {
         match &mut self.stage {
             Stage::Splash { .. } => {

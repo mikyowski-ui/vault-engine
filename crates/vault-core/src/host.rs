@@ -97,6 +97,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// The sequences being played (a callback can register another).
     pub(crate) running_motions: Vec<crate::host_motion::Running>,
     pub(crate) next_motion: u64,
+    /// SPEC-014 §3.27 the combat-wide count of running sequences and the
+    /// input lock it drives.
+    pub combat_lock: crate::clicks::CombatLock,
     /// The scheduler time of the world's sequences.
     pub(crate) motion_time: u64,
     /// SPEC-007 §3.11.2 the idle-fidget background task, while it runs.
@@ -253,6 +256,7 @@ impl<A: WorldAssets> WorldHost<A> {
             motions: Vec::new(),
             running_motions: Vec::new(),
             next_motion: 0,
+            combat_lock: Default::default(),
             motion_time: 0,
             fidget: None,
             presentation: None,
@@ -1182,6 +1186,7 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.service_explosion_request()? {
             changed = true;
         }
+        self.sync_combat_lock();
         Ok(changed)
     }
     pub fn key_callback(&mut self, key: i32) -> bool {
