@@ -141,6 +141,8 @@ mod progression_tests;
 #[cfg(test)]
 mod roof_tests;
 #[cfg(test)]
+mod script_cycle_tests;
+#[cfg(test)]
 mod skills_tests;
 #[cfg(test)]
 mod state_tests;

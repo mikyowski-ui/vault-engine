@@ -10,3 +10,5 @@ retain-positive-limit | C0 01 7F FF FF FF C0 01 00 00 00 00 80 39 | 7F FF FF FF 
 float-bitwise-quirk | A0 01 3F 80 00 01 C0 01 FF FF FF FF 80 40 | 3F 80 00 00 C0 01
 fixed-count-discard | C0 01 00 00 00 07 C0 01 00 00 00 00 C0 01 00 00 00 02 80 2E | 
 true-loop | C0 01 00 00 00 12 C0 01 00 00 00 01 80 30 | 00 00 00 12 C0 01
+nonstandard-push-8401 | 84 01 00 00 00 05 | 00 00 00 05 84 01
+masked-c801-jump | C8 01 00 00 00 08 80 04 | 

@@ -104,6 +104,14 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub(crate) motion_time: u64,
     /// SPEC-007 §3.11.2 the idle-fidget background task, while it runs.
     pub(crate) fidget: Option<crate::host_fidget::Fidget>,
+    /// SPEC-006 §3.7 the critter-script cycle counter: 0 at program start
+    /// and never reset by a map change, a game load or a new game (a shell
+    /// that builds a new host for a new game carries it over).
+    pub critter_cycle: usize,
+    /// SPEC-013 §3.22: the open town or world map was started by a
+    /// transition to map -1 or -2, so the request pending when it closes
+    /// is discarded.
+    pub(crate) transition_world_map: bool,
     presentation: Option<PresentationState>,
     /// An interaction's approach has just ended: its action runs as the
     /// sequence's proximity step (SPEC-013 §3.2), not a new approach.
@@ -259,6 +267,8 @@ impl<A: WorldAssets> WorldHost<A> {
             combat_lock: Default::default(),
             motion_time: 0,
             fidget: None,
+            critter_cycle: 0,
+            transition_world_map: false,
             presentation: None,
             arriving: false,
             vm_observer: None,
@@ -481,8 +491,11 @@ impl<A: WorldAssets> WorldHost<A> {
             player.raw.elevation = elevation;
             player.raw.orientation = orientation;
         }
-        // SPEC-014 §3.36: the entrance placement, from "none" after the
-        // import, hides the roof group over the player, if any.
+        // SPEC-013 §3.22: the entrance placement is an ordinary player
+        // placement, so exit grids on its hex request a transition (the
+        // player is not moved off them). SPEC-014 §3.36: then, from "none"
+        // after the import, it hides the roof group over the player, if any.
+        self.world.check_exit_grids(hex, elevation);
         self.world.place_player_roof(hex, elevation);
         // SPEC-008 §3.10: the current map is identified from the header's
         // name field, not the requested file, and the header's map-number
@@ -566,7 +579,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.rebuild_lighting();
         self.world.background_enabled = true;
         self.world.trace.push(WorldTrace::LoadStep(8));
-        for script in self.world.script_order.clone() {
+        for script in self.world.script_ids() {
             let result = self.dispatch(ScriptRequest {
                 script,
                 event: ScriptEvent::Start,
@@ -579,7 +592,7 @@ impl<A: WorldAssets> WorldHost<A> {
             self.report_load_dispatch(result);
         }
         self.world.spatial_enabled = false;
-        for script in self.world.script_order.clone() {
+        for script in self.world.script_ids() {
             if Some(script) != self.world.map_script {
                 let result = self.dispatch(ScriptRequest {
                     script,
@@ -674,6 +687,21 @@ impl<A: WorldAssets> WorldHost<A> {
                 pending: true,
                 ..Default::default()
             });
+        }
+        // SPEC-006 §3.7: a program a VM error stopped, or one suspended on
+        // another program or a blocking library call, is skipped with no
+        // effect; one whose root run simply ended is still requested.
+        if instance.initialized
+            && self.programs.get(&instance.program).is_some_and(|vm| {
+                vm.status.0
+                    & (VmStatus::ERROR
+                        | VmStatus::WAITING
+                        | VmStatus::ATTACHED
+                        | VmStatus::SPAWN_BLOCKED)
+                    != 0
+            })
+        {
+            return Ok(DispatchResult::default());
         }
         let mut vm = if !instance.initialized {
             let (filename, program) = self.assets.program(instance.file)?;
@@ -891,36 +919,54 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.spatial_enabled = previous;
         result
     }
-    /// The background checker's critter pass: on every out-of-combat
-    /// real-time tick (one game tick per 100 ms, never in combat or
-    /// dialogue; SPEC-006 §3.7, SPEC-014 §3.27 "critter scripts"), every
-    /// critter on the map with a script runs its `critter_p_proc`, in world
-    /// order. A script without that procedure is skipped rather than falling
-    /// back to procedure 1. No approved spec gives this pass's cadence or
-    /// order (README "Open spec questions").
-    pub fn critter_scripts(&mut self) -> Result<(), WorldError> {
-        let scripts: Vec<u32> = self
-            .world
-            .iter()
-            .filter(|(_, object)| {
-                object.owner.is_none()
-                    && object.active
-                    && object.raw.hex.is_some()
-                    && Category::from_pid(object.raw.pid).ok() == Some(Category::Critter)
-            })
-            .filter_map(|(reference, _)| self.world.script_for(reference))
-            .collect();
-        for script in scripts {
-            self.world.request(ScriptRequest {
-                script,
-                event: ScriptEvent::Critter,
-                source: 0,
-                target: 0,
-                fixed: 0,
-                action: -1,
-                only_present: true,
-            });
+    /// SPEC-013 §3.22: the town or world map closed (a location was
+    /// entered). When a transition to map -1 or -2 opened it, the pending
+    /// request, such as one from an exit grid at the entered map's
+    /// entrance, is cleared; after a world map a script opened it stays
+    /// pending for the next main-loop pass.
+    pub fn world_map_closed(&mut self) {
+        if std::mem::take(&mut self.transition_world_map) {
+            self.world.pending_transition = None;
         }
+    }
+    /// SPEC-006 §3.7 the critter-script cycle step, one per background
+    /// pass. Nothing happens in combat or during dialogue. Otherwise N is
+    /// the number of records in the critter stream (every elevation, dead
+    /// or hidden owners included); the program-wide counter advances and
+    /// wraps to 0 at N or more; and with N above 0 the record at the
+    /// counter's position in list order gets a `critter_p_proc` request
+    /// through the generic dispatcher, by identifier (an inert duplicate
+    /// gives its turn to the record it names, SPEC-003 §3.3). A script
+    /// without the procedure runs procedure-table index 1; one whose file
+    /// cannot be loaded does nothing (the map load already reported it).
+    pub fn critter_cycle_step(&mut self) -> Result<(), WorldError> {
+        if self.world.combat || self.world.dialogue.open {
+            return Ok(());
+        }
+        let critters = self
+            .world
+            .script_order
+            .iter()
+            .filter(|slot| slot.stream == 4);
+        let count = critters.clone().count();
+        self.critter_cycle = self.critter_cycle.saturating_add(1);
+        if self.critter_cycle >= count {
+            self.critter_cycle = 0;
+        }
+        let Some(script) = critters.map(|slot| slot.id).nth(self.critter_cycle) else {
+            return Ok(());
+        };
+        let request = ScriptRequest {
+            script,
+            event: ScriptEvent::Critter,
+            source: 0,
+            target: 0,
+            fixed: 0,
+            action: -1,
+            only_present: false,
+        };
+        // An active program defers the request to the drain below.
+        let _ = self.dispatch(request);
         self.drain_requests()
     }
     /// SPEC-006 queue pass: snapshot the clock once, remove each due event
@@ -1100,8 +1146,14 @@ impl<A: WorldAssets> WorldHost<A> {
         for message in self.assets.take_diagnostics() {
             self.world.diagnostic(message);
         }
-        self.update_programs()?;
+        // SPEC-006 §3.7: one background pass per call. The tasks run
+        // newest-registered-first: the idle-fidget step, object animation,
+        // then the script task.
         let mut changed_by_animation = false;
+        // SPEC-007 §3.11.2 the idle-fidget background task.
+        if !self.world.dialogue.open && self.idle_fidget(now_ms)? {
+            changed_by_animation = true;
+        }
         // SPEC-007 §3.10 attack shows play in order; SPEC-013 §3.10: a timed
         // or scripted explosion's art plays at its own rate, and its damage
         // step follows its last art.
@@ -1117,10 +1169,29 @@ impl<A: WorldAssets> WorldHost<A> {
             changed_by_animation = true;
             self.drain_requests()?;
         }
-        // SPEC-007 §3.11.2 the idle-fidget background task.
-        if !self.world.dialogue.open && self.idle_fidget(now_ms)? {
-            changed_by_animation = true;
+        // The script task: the VM's time slice, the script-created windows,
+        // and, with scripts running, critter scripts enabled (map background
+        // processing on) and no dialogue, one critter-script cycle step and
+        // then the background clock checker.
+        self.update_programs()?;
+        self.callbacks.extend(self.library.callbacks());
+        if self.world.scripts_enabled && self.world.background_enabled && !self.world.dialogue.open
+        {
+            self.critter_cycle_step()?;
+            let background = self.world.clock.background(
+                now_ms,
+                self.world.combat,
+                self.world.dialogue.open,
+                self.world.mode,
+            )?;
+            if background.queue {
+                self.process_queue()?;
+            }
+            if background.update {
+                self.map_update()?;
+            }
         }
+        self.drain_requests()?;
         // SPEC-007: service scripted combat requests and advance turns until
         // the player must act (host-configured AI drives NPC turns). Combat
         // waits while an attack still plays.
@@ -1131,23 +1202,6 @@ impl<A: WorldAssets> WorldHost<A> {
             self.combat_ai = ai;
             progress?;
         }
-        let background = self.world.clock.background(
-            now_ms,
-            self.world.combat,
-            self.world.dialogue.open,
-            self.world.mode,
-        )?;
-        if background.queue {
-            self.process_queue()?;
-        }
-        if background.ticked {
-            self.critter_scripts()?;
-        }
-        if background.update {
-            self.map_update()?;
-        }
-        self.callbacks.extend(self.library.callbacks());
-        self.drain_requests()?;
         let mut changed = changed_by_animation;
         // SPEC-006 §3.11 / SPEC-010 §3.12 the talking-head updater.
         changed |= self.update_head(now_ms)?;

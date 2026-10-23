@@ -268,11 +268,13 @@ impl DatEntry {
             })?;
         match storage {
             Storage::Raw => Ok(body.to_vec()),
+            // SPEC-008 §2.3: one pass into an L-byte buffer; output past L
+            // is cut off, and a stream that ends before L is rejected.
             Storage::Legacy => {
                 let mut ring = Ring::new();
-                let output = ring.decode(body, length, false)?;
+                let output = ring.decode(body, length)?;
                 if output.len() != length {
-                    return Err(error("legacy stream length differs from the entry"));
+                    return Err(error("legacy stream ends before the entry's length"));
                 }
                 Ok(output)
             }
@@ -406,16 +408,12 @@ impl Ring {
     fn new() -> Self {
         Self { data: [0; RING] }
     }
-    /// Decode an entire compressed input, bounding output to `limit`. With
-    /// `truncate`, output past the bound is discarded and decoding stops
-    /// (the final block of a `0x40` stream, SPEC-008 §2.3); otherwise
-    /// expanding past the bound is an error.
-    fn decode(
-        &mut self,
-        input: &[u8],
-        limit: usize,
-        truncate: bool,
-    ) -> Result<Vec<u8>, ParseError> {
+    /// Decode an entire compressed input, bounding output to `limit`
+    /// (SPEC-008 §2.3 final output length): the reference writes past its
+    /// buffer, but only the bytes within the bound are visible, so under
+    /// the `[May-improve]` rule decoding stops at the bound and the rest is
+    /// discarded.
+    fn decode(&mut self, input: &[u8], limit: usize) -> Result<Vec<u8>, ParseError> {
         self.data[..RING_START].fill(b' ');
         self.data[RING_START..].fill(0);
         let mut cursor = RING_START;
@@ -433,13 +431,7 @@ impl Ring {
                     let byte = input[position];
                     position += 1;
                     if output.len() == limit {
-                        if truncate {
-                            return Ok(output);
-                        }
-                        return Err(error(
-                            position - 1,
-                            "literal expands beyond the block bound",
-                        ));
+                        return Ok(output);
                     }
                     output.push(byte);
                     self.data[cursor] = byte;
@@ -452,9 +444,6 @@ impl Ring {
                     position += 2;
                     let start = usize::from(a) + 256 * usize::from(b >> 4);
                     let count = usize::from(b & 15) + 3;
-                    if output.len() + count > limit && !truncate {
-                        return Err(error(position - 2, "match expands beyond the block bound"));
-                    }
                     for k in 0..count {
                         if output.len() == limit {
                             return Ok(output);
@@ -471,13 +460,13 @@ impl Ring {
     }
 }
 
-/// Decode a `0x40` block stream to exactly `length` bytes. Every non-final
-/// block must produce exactly 16384 bytes; the final block is limited by
-/// the remaining logical length (SPEC-008 §2.3), so output past it is
-/// discarded as the reference's logical-length termination discards it,
-/// while a final block that stops short still fails length validation. A
-/// zero-length or nonprogressing block or a truncated body is rejected,
-/// and bytes after the last needed block are not read.
+/// Decode a `0x40` block stream to exactly `length` bytes (SPEC-008 §2.3).
+/// Each block's output is bounded by 16384 bytes, or for the final block by
+/// the remaining logical length; output past the bound is discarded, which
+/// leaves the bytes the reference shows. A block that stops short of its
+/// bound is rejected (a non-final one under the `[May-improve]` rule), as
+/// are a zero-length or nonprogressing block and a truncated body; bytes
+/// after the last needed block are not read.
 pub fn decode_blocks(body: &[u8], length: usize) -> Result<Vec<u8>, ParseError> {
     let mut output = Vec::with_capacity(length.min(MAX_ASSET_BYTES));
     let mut position = 0;
@@ -493,12 +482,11 @@ pub fn decode_blocks(body: &[u8], length: usize) -> Result<Vec<u8>, ParseError> 
             ParseError::new("DAT", position, "block body exceeds the packed extent")
         })?;
         let remaining = length - output.len();
-        let last = remaining <= BLOCK_SIZE;
         let expected = BLOCK_SIZE.min(remaining);
         let produced = if header & 0x8000 != 0 {
-            block[..if last { size.min(expected) } else { size }].to_vec()
+            block[..size.min(expected)].to_vec()
         } else {
-            ring.decode(block, expected, last).map_err(|mut failure| {
+            ring.decode(block, expected).map_err(|mut failure| {
                 failure.offset += position;
                 failure
             })?

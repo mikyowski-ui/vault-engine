@@ -299,7 +299,7 @@ fn spec012_fixture_e_audio() {
     let pcm = decode_audio(&mono, 4, &[0x00, 0x7d, 0x6f]).unwrap();
     assert_eq!(i16::from_le_bytes([pcm[2], pcm[3]]), -17330);
     assert_eq!(pcm[2..], [0x4e, 0xbc]);
-    // The table puts -29973 at code 120 (§2.8's prose says 121); codes
+    // §2.8: -29973 (`8AEB`) is at code 120; codes
     // 120-127 are negative and 128-129 are both +1.
     assert_eq!(mve::AUDIO_DELTAS[120] as i16, -29973);
     assert!(

@@ -1240,7 +1240,7 @@ fn spec006_party_members_keep_their_scripts_and_locals_across_maps() {
         host.world
             .script_order
             .iter()
-            .filter(|id| **id == carried)
+            .filter(|slot| slot.id == carried)
             .count(),
         1
     );

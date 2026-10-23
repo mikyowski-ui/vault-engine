@@ -305,7 +305,9 @@ impl<A: WorldAssets> WorldHost<A> {
     pub fn enter_encounter(&mut self, encounter: Encounter) -> Result<(), WorldError> {
         self.set_global(REGION_GLOBAL, i32::from(encounter.region()));
         self.set_global(ENTRY_GLOBAL, encounter.context());
-        self.load_map(&format!("maps/{}", encounter.map().to_ascii_lowercase()))
+        self.load_map(&format!("maps/{}", encounter.map().to_ascii_lowercase()))?;
+        self.world_map_closed();
+        Ok(())
     }
     /// Derive town and entrance knowledge from the campaign globals.
     pub fn refresh_world_knowledge(&mut self) {
@@ -347,10 +349,13 @@ impl<A: WorldAssets> WorldHost<A> {
         self.load_world_map_destination(button.map, button.entry)
     }
     /// SPEC-014 §3.39 leaving to a map: campaign index 32 receives the entry
-    /// selector, and the map loads by name.
+    /// selector, and the map loads by name. Closing the world map discards a
+    /// transition request made during the load (SPEC-013 §3.22).
     pub fn load_world_map_destination(&mut self, map: &str, entry: i32) -> Result<(), WorldError> {
         self.set_global(ENTRY_GLOBAL, entry);
-        self.load_map(&format!("maps/{}", map.to_ascii_lowercase()))
+        self.load_map(&format!("maps/{}", map.to_ascii_lowercase()))?;
+        self.world_map_closed();
+        Ok(())
     }
     /// SPEC-014 §3.39 the campaign checks of every world-map pass, after
     /// any travel iterations:

@@ -198,12 +198,19 @@ fn spec014_options_quit_and_preferences() {
     assert!(preview.click([299 + 11, 338 + 12], false));
     assert!(preview.hud.cues.is_empty());
     assert!(preview.release(Some([299 + 11, 338 + 12]), false));
-    // The change plays `ib2p1xx1` now and `ib2lu1x1` 70 ms later.
+    // The change plays `ib2p1xx1` now and `ib2lu1x1` 70 ms later, and
+    // blocks input meanwhile (§3.18).
     assert_eq!(preview.hud.cues.len(), 1);
+    let now = preview.clock;
+    assert!(preview.tap([76 + 23, 71 + 21]));
+    assert_eq!(preview.hud.cues.len(), 1, "the knob click was discarded");
+    preview.tick(now + 70).unwrap();
+    assert!(preview.hud.cues.is_empty());
     // The game-difficulty label 1 (the current value) still turns the knob
     // downward, so the next center click steps to 0.
     assert!(preview.tap([76 + 20, 71 - 2]));
     assert!(preview.tap([76 + 23, 71 + 21]));
+    preview.tick(now + 140).unwrap();
     assert!(preview.step(KeyCode::Enter));
     assert_eq!(preview.preferences.subtitles, 1);
     assert_eq!(preview.preferences.game_difficulty, 0);
@@ -2426,10 +2433,11 @@ fn spec014_game_fades_hold_the_world_input_and_the_frame() {
     assert_ne!(preview.image().unwrap().pixels(), before.pixels());
     preview.tick(now + 200).unwrap();
     assert!(preview.host.world.clock.ticks > ticks);
-    // A library fade services background work: it never blocks.
-    preview.host.world.emit(WorldEffect::Fade {
+    // A library fade services background work: it never blocks, not even
+    // a `fadeout(0)`, which looks like a game fade's request.
+    preview.host.world.emit(WorldEffect::LibraryFade {
         out: true,
-        duration: 300,
+        duration: 0,
         from_black: false,
     });
     preview.tick(now + 216).unwrap();

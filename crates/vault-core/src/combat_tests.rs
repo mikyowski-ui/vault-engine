@@ -1299,6 +1299,112 @@ fn spec007_spray_stage_a_extra_damage_order_and_post_processing() {
 }
 
 #[test]
+fn spec007_fixture_i_spray_draw_order() {
+    use crate::{
+        combat::attack_mode,
+        routing::{extend_line, rotation, step},
+    };
+    // Shared inputs: a burst with 3 rounds of a 10-round burst count
+    // (budgets 0/1/1, one direct trial), spray accuracy 70, Critical Chance
+    // 5, Luck 6, no Better Criticals, normal difficulty, first day over,
+    // 10-20 normal damage. The extra critter is placed per case.
+    let fixture = |sniper: bool, jinxed: bool| {
+        let (mut host, defender, extra) = spray_world(attack_mode::BURST);
+        host.world.clock.set(864000);
+        let mut attack = host
+            .world
+            .attack_profile(
+                host.world.player,
+                defender,
+                critical::hit_mode::RIGHT_PRIMARY,
+                location::TORSO,
+                false,
+            )
+            .unwrap();
+        let weapon = attack.weapon.as_mut().unwrap();
+        (weapon.rounds, weapon.burst, weapon.damage) = (3, 10, [10, 20]);
+        attack.attacker_player = true;
+        attack.player.sniper = sniper;
+        attack.jinxed = jinxed;
+        (attack.luck, attack.critical_chance, attack.better_criticals) = (6, 5, 0);
+        attack.ticks = 864000;
+        attack.combat_difficulty = 1;
+        // The chance is capped at 95, so step the adjustment down to 70.
+        for _ in 0..100 {
+            attack.accuracy_bonus += 70 - attack.hit_chance(true).unwrap();
+        }
+        assert_eq!(attack.hit_chance(true).unwrap(), 70);
+        (host, defender, extra, attack)
+    };
+    type Host = crate::WorldHost<NoAssets>;
+    fn run(
+        host: &Host,
+        defender: ObjectRef,
+        attack: &crate::combat::Attack,
+        draws: &[i32],
+    ) -> (crate::Spray, Vec<(i32, i32)>) {
+        let mut rng = Traced::new(draws, false);
+        let spray = host
+            .resolve_spray(host.world.player, defender, attack, &mut rng)
+            .unwrap();
+        assert!(rng.script.is_empty(), "every listed outcome is drawn");
+        (spray, rng.ranges)
+    }
+    let d100 = (1, 100);
+
+    // I1, Sniper, no critter on any ray: 7 draws.
+    let (mut host, defender, extra, attack) = fixture(true, false);
+    host.world.erase(extra);
+    let (spray, ranges) = run(&host, defender, &attack, &[40, 50, 20, 90, 4, 30, 15]);
+    assert_eq!(&ranges[..5], &[d100, d100, d100, d100, (1, 10)]);
+    assert_eq!(ranges[5], d100, "the critical tier draw");
+    assert_eq!(ranges.last(), Some(&(10, 20)));
+    assert_eq!(ranges.len(), 7);
+    assert_eq!((spray.main.code, spray.main.rounds), (3, 1));
+
+    // I2, Sniper, critter X on the left ray only: 8 draws, the extra-only
+    // outcome (under the safe rule the target takes no hit bit).
+    let (mut host, defender, x, attack) = fixture(true, false);
+    let from = host.world.get(host.world.player).unwrap().raw.hex.unwrap();
+    let to = host.world.get(defender).unwrap().raw.hex.unwrap();
+    let range = usize::try_from(attack.range()).unwrap();
+    let back = rotation(to, from).unwrap();
+    let center = extend_line(from, to, range);
+    let right = extend_line(from, step(to, (back + 5) % 6), range);
+    let left = extend_line(from, step(to, (back + 1) % 6), range);
+    let at = *left
+        .iter()
+        .find(|hex| !center.contains(hex) && !right.contains(hex))
+        .expect("a hex on the left ray only");
+    host.world.move_object(x, at, 0, false).unwrap();
+    let (spray, ranges) = run(&host, defender, &attack, &[80, 50, 95, 60, 30, 10, 12, 9]);
+    assert_eq!(
+        ranges,
+        [d100, d100, d100, d100, d100, d100, (10, 20), (1, 10)]
+    );
+    assert_eq!((spray.main.code, spray.main.rounds), (2, 0));
+    assert_eq!(spray.main.defender_flags & effect::HIT, 0);
+    assert_eq!((spray.extras[0].0, spray.extras[0].2.rounds), (x, 1));
+
+    // I3, Jinxed without Sniper, no critter anywhere: the coin is the
+    // fifth and last draw, and 0 keeps the failure.
+    let (mut host, defender, extra, attack) = fixture(false, true);
+    host.world.erase(extra);
+    let (spray, ranges) = run(&host, defender, &attack, &[80, 50, 95, 60, 0]);
+    assert_eq!(ranges, [d100, d100, d100, d100, (0, 1)]);
+    assert_eq!(spray.main.code, 1);
+
+    // I4, Jinxed: 100 then 2 is a critical failure; the spray returns at
+    // once, and 40 is the critical-failure table draw.
+    let (host, defender, _, attack) = fixture(false, true);
+    let (spray, ranges) = run(&host, defender, &attack, &[100, 2, 40]);
+    assert_eq!(&ranges[..2], &[d100, d100]);
+    assert!(!ranges[2..].contains(&(0, 1)), "no Jinxed coin");
+    assert_eq!(spray.main.code, 0);
+    assert!(spray.extras.is_empty());
+}
+
+#[test]
 fn spec007_aimed_shot_availability_and_grenade_scatter() {
     let attack = fixture_c();
     assert!(attack.aimed_shot_available());

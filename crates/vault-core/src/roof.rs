@@ -203,9 +203,14 @@ impl WorldState {
     }
     /// SPEC-014 §3.35 step 3 and §3.36 leaving a map: if the last square,
     /// read on the player's current elevation, is not empty, the restore
-    /// fill runs from it before the map is written. With no last square the
-    /// reference would read outside the grid; nothing was hidden, so
-    /// nothing is restored (`[May-improve]` safe bound).
+    /// fill runs from it before the map is written. Every player placement
+    /// records its elevation, so that is the last recorded elevation and
+    /// the group hidden at the last square is restored under either
+    /// elevation-change rule; a group the reference's defect leaves hidden
+    /// on another elevation is written hidden and drawn again on the next
+    /// load. With no last square the reference would read outside the
+    /// grid; nothing was hidden, so nothing is restored (`[May-improve]`
+    /// safe bound).
     pub fn restore_roofs(&mut self) {
         let Some((_, column, row)) = self.roof.last() else {
             return;

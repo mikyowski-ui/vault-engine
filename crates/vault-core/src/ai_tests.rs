@@ -392,15 +392,13 @@ fn spec009_fixture_h_retaliation_rating() {
     };
     let q = rating(3, [Some(12), None], 10, true);
     let r1 = rating(5, [None, None], 20, true);
-    let r2 = rating(2, [None, Some(20)], 0, true);
+    // R1-rev3: R2 has AC 2, so max(2, 20) + 2 = 22, a tie with Q.
+    let r2 = rating(2, [None, Some(20)], 2, true);
     let r3 = rating(9, [Some(30), None], 40, false);
-    // The fixture table lists R2 as 22 ("a tie"), but the section 3.4 rule
-    // gives max(2, 20) + 0 = 20; the outcome (keep Q) is the same.
-    assert_eq!((q, r1, r2, r3), (22, 25, 20, 0));
-    // The check switches only on a strictly greater rating.
-    assert!(r1 > q && r2 <= q && r3 <= q);
-    // An exact tie also keeps the current reference.
-    assert_eq!(rating(2, [None, Some(20)], 2, true), q);
+    assert_eq!((q, r1, r2, r3), (22, 25, 22, 0));
+    // The check switches only on a strictly greater rating, so the exact
+    // tie keeps the current reference.
+    assert!(r1 > q && r2 == q && r3 <= q);
     assert_eq!(retaliation_rating(None), 0);
     // A weapon maximum must exceed Melee Damage to replace it.
     assert_eq!(rating(12, [Some(12), Some(4)], 1, true), 13);

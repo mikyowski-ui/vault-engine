@@ -1098,7 +1098,8 @@ impl<A: WorldAssets> WorldHost<A> {
             .world
             .script_order
             .iter()
-            .filter_map(|id| self.world.scripts.get(id))
+            .filter(|slot| slot.inert.is_none())
+            .filter_map(|slot| self.world.scripts.get(&slot.id))
         {
             if let Some((at, level, _)) = script.spatial {
                 if level == elevation && near(at) {
@@ -1481,8 +1482,10 @@ impl<A: WorldAssets> WorldHost<A> {
                 if !self.unload_map()? {
                     self.world.emit(WorldEffect::MapSaveFailed);
                 } else if transition.map == -1 {
+                    self.transition_world_map = true;
                     self.world.emit(WorldEffect::TownMap);
                 } else {
+                    self.transition_world_map = true;
                     // SPEC-008 §3.10: the world map plays `03wrldmp`.
                     self.play_world_map_music();
                     self.world.emit(WorldEffect::WorldMap);
@@ -1505,6 +1508,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 {
                     object.raw.orientation = transition.facing.clamp(0, 5) as u8;
                 }
+                // SPEC-013 §3.22 [May-improve]: steps 2 and 4 use the hex,
+                // elevation and facing saved when processing started, and
+                // a request made during the load (an exit grid at the
+                // entrance or the step-2 hex, a script's `load_map`) is
+                // cleared rather than replacing them.
+                self.world.pending_transition = None;
             }
         }
         Ok(true)

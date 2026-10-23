@@ -190,7 +190,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 target.raw.flags.0 |= BasicFlags::HIDDEN.0 | BasicFlags::TEMPORARY.0;
                 target.raw.script_id = -1;
                 if let Some(sid) = self.sid(vm) {
-                    self.world.scripts.remove(&sid);
+                    self.world.remove_script(sid);
                 }
                 return Ok(());
             }

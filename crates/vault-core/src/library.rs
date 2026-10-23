@@ -434,7 +434,7 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             0x806f | 0x8070 => {
                 self.library.faded_out = word == 0x8070;
-                self.world.emit(WorldEffect::Fade {
+                self.world.emit(WorldEffect::LibraryFade {
                     out: word == 0x8070,
                     duration: call.int(0),
                     from_black: word == 0x806f,

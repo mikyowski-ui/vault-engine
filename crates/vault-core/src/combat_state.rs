@@ -475,9 +475,9 @@ impl<A: WorldAssets> WorldHost<A> {
             self.combat_lock.begin_turn();
         }
         if !resumed {
-            // SPEC-007 §3.3 names an initial scripted combat-request AP
-            // bonus in this refill, but SPEC-005's request words (accuracy,
-            // damage bounds, flag pair) carry none, so nothing is added.
+            // SPEC-007 §3.3 (R1-rev9): a combat request's AP bonus joins
+            // the first turn's refill, but every R1 request source supplies
+            // 0, so the refill is exactly effective maximum AP.
             let ap = self.world.maximum_ap(critter);
             self.world.set_ap(critter, ap);
         }

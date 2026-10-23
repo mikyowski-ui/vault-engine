@@ -61,14 +61,12 @@ pub fn instruction_length(word: u16) -> u32 {
     if word & 0x3ff == 1 { 6 } else { 2 }
 }
 
-/// The class of a word the VM accepts, or `None` for one it rejects.
+/// The class of a word the VM accepts, or `None` for one it rejects. As in
+/// the VM, every slot-1 word with bit 15 set is a push (SPEC-004 §2.5),
+/// including the non-standard tags such as `0x8401`.
 pub fn classify(word: u16) -> Option<OpcodeClass> {
     if word & 0x3ff == 1 {
-        return matches!(
-            word,
-            0x8001 | 0xc001 | 0xc801 | 0xa001 | 0xa801 | 0x9001 | 0x9801
-        )
-        .then_some(OpcodeClass::Push);
+        return (word & 0x8000 != 0).then_some(OpcodeClass::Push);
     }
     match word {
         0x8000..=0x804b => Some(OpcodeClass::Core),
@@ -157,6 +155,9 @@ impl Instruction {
                 "{mnemonic} {}",
                 String::from_utf8_lossy(&vault_vm::float_text(f32::from_bits(payload)))
             ),
+            (word, Some(payload)) if mnemonic == "push.tag" => {
+                format!("{mnemonic} {word:#06x} {payload:#x}")
+            }
             (_, Some(payload)) => format!("{mnemonic} {payload:#x}"),
             _ => match self.class() {
                 OpcodeClass::Library | OpcodeClass::Game | OpcodeClass::Invalid => {
@@ -269,6 +270,8 @@ pub fn mnemonic(word: u16) -> &'static str {
         0x8049 => "cancel.all",
         0x804c..=0x80a0 => "lib",
         0x80a1..=0x8155 => "ext",
+        // §2.5: a push whose tag has no defined value semantics.
+        word if word & 0x83ff == 0x8001 => "push.tag",
         _ => "invalid",
     }
 }

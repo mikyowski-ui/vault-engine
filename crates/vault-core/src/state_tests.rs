@@ -1106,6 +1106,10 @@ fn scheduled_image(flags: u32, deadline: u32) -> (IntProgram, u32) {
 fn spec004_host_tick_fires_scheduled_procedures_and_launches_programs() {
     use vault_vm::{VmHost, VmStatus, procedure_flags};
     let (mut host, base, _) = host(&[b"Hello", b"Continue"]);
+    // The player's critter script is bound to the fixture's own VM, which
+    // the host does not hold; with map background processing off the
+    // critter-script cycle step (SPEC-006 §3.7) leaves it alone.
+    host.world.background_enabled = false;
     let install = |host: &mut WorldHost<Assets>, flags: u32, deadline: u32| {
         let mut vm = Vm::new(scheduled_image(flags, deadline).0);
         vm.id = 77;

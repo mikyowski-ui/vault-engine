@@ -801,6 +801,11 @@ impl<A: WorldAssets> WorldHost<A> {
         extras: &mut Vec<ExtraHit>,
         rng: &mut impl crate::RandomSource,
     ) -> Result<i32, WorldError> {
+        // SPEC-007 Fixture I: a burst ray cast with no budget left (the
+        // center after the direct hits) draws nothing.
+        if budget <= 0 && !continuous {
+            return Ok(0);
+        }
         let elevation = self.world.get(attacker).map_or(0, |o| o.raw.elevation);
         let occupancy = self.world.occupancy(elevation);
         let mut visited = BTreeSet::new();

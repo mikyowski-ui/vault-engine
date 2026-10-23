@@ -117,6 +117,11 @@ pub struct Game {
     /// The save/load selection and quick-slot flag, kept for the session.
     slot_list: vault_core::ui::saveload::SlotList,
     quick: vault_core::ui::saveload::QuickSlot,
+    /// State that lasts the whole program run, not one game: the critter
+    /// script cycle counter (SPEC-006 §3.7) and the talking head's idle
+    /// counter and threshold (SPEC-006 §3.11).
+    critter_cycle: usize,
+    head_idle: vault_core::dialogue::HeadIdle,
     /// A headless replay: worlds complete movies instead of waiting.
     pub headless: bool,
     /// The vault-debug inspector runs in each world (`--debug`; F9 in a
@@ -214,6 +219,8 @@ impl Game {
             audio: AudioHandle::default(),
             slot_list: Default::default(),
             quick: Default::default(),
+            critter_cycle: 0,
+            head_idle: Default::default(),
             headless: false,
             debug: false,
             debug_keys: false,
@@ -457,6 +464,8 @@ impl Game {
         self.volume_source = None;
         self.preferences = world.preferences.clone();
         (self.slot_list, self.quick) = world.slot_session();
+        self.critter_cycle = world.host.critter_cycle;
+        self.head_idle = world.host.world.dialogue.idle;
         self.debug = world.debug_enabled();
     }
     fn world_with(&self, sheet: CharacterSheet) -> AppResult<MapPreview> {
@@ -473,6 +482,8 @@ impl Game {
         world.set_music_enabled(music);
         world.apply_preferences();
         world.set_slot_session(self.slot_list.clone(), self.quick);
+        world.host.critter_cycle = self.critter_cycle;
+        world.host.world.dialogue.idle = self.head_idle;
         if self.headless {
             world.host.movie_policy = vault_core::movie::MoviePolicy::CompleteImmediately;
         }
