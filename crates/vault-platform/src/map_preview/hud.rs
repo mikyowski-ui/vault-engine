@@ -257,6 +257,7 @@ pub(crate) fn game_key(key: KeyCode, [shift, control, _]: [bool; 3]) -> Option<K
         F12 => Key::F12,
         Comma => Key::Char(','),
         Period => Key::Char('.'),
+        Slash if shift => Key::Char('?'),
         Slash => Key::Char('/'),
         Minus | NumpadSubtract => Key::Char('-'),
         Equal | NumpadAdd => Key::Char('='),
@@ -841,6 +842,24 @@ impl MapPreview {
             }
         }
     }
+    /// §3.20 the message monitor scroll area under screen `point`: `true`
+    /// the upper half (one line older), `false` the lower (newer). Both
+    /// belong to the bar's enable state, so neither exists while the bar
+    /// is disabled: by a script, the combat lock or a hand swap.
+    pub(crate) fn monitor_area(&self, point: [i32; 2]) -> Option<bool> {
+        if self.host.world.ui_disabled || self.watch_shown() {
+            return None;
+        }
+        let [bx, by] = bar::BAR_ORIGIN;
+        let local = [point[0] - bx, point[1] - by];
+        if bar::MONITOR_OLDER.contains(local) {
+            Some(true)
+        } else if bar::MONITOR_NEWER.contains(local) {
+            Some(false)
+        } else {
+            None
+        }
+    }
     /// A press in the bar (screen y of at least 379): a left press holds a
     /// button down until the release, which sends its key; a right press
     /// on the item slot cycles the item mode. Returns whether it was
@@ -848,12 +867,15 @@ impl MapPreview {
     pub(crate) fn bar_click(&mut self, point: [i32; 2], right: bool) -> bool {
         let [bx, by] = bar::BAR_ORIGIN;
         let local = [point[0] - bx, point[1] - by];
-        if bar::MONITOR_OLDER.contains(local) {
-            self.hud.monitor.older();
-            return true;
-        }
-        if bar::MONITOR_NEWER.contains(local) {
-            self.hud.monitor.newer();
+        // §3.20: the monitor's scroll areas scroll once on the press, with
+        // no sound and no repeat, and only while the bar is enabled (the
+        // combat lock and a hand swap were refused before this).
+        if let Some(older) = self.monitor_area(point) {
+            if older {
+                self.hud.monitor.older();
+            } else {
+                self.hud.monitor.newer();
+            }
             return true;
         }
         let panel = self.hud.panel;
@@ -874,8 +896,8 @@ impl MapPreview {
             return true;
         }
         // G-03 / SPEC-005 0x8133: while a script has the interface disabled
-        // the §3.19 buttons do nothing (no press, sound or key). The
-        // message monitor's scroll areas (§3.20) are not among them.
+        // the §3.19 buttons do nothing (no press, sound or key), and the
+        // message monitor's scroll areas (§3.20) with them.
         if self.host.world.ui_disabled {
             return true;
         }
@@ -1626,17 +1648,37 @@ impl MapPreview {
             None => false,
         }
     }
-    /// F12 in game, in the options and on the automap (§3.17, §3.33): the
-    /// last composed frame, without the cursor, as displayed.
+    /// §3.19 F12, caught as the key enters the input queue (`step_key`), so
+    /// it works in every window: the whole screen recomposed, the cursor
+    /// included when it shows, written as the §2.5 bitmap under the
+    /// installed palette before brightness into `screenshot_dir`. The
+    /// monitor then prints `misc.msg` 3 "Saved screenshot.", or 8 "Error
+    /// saving screenshot." when no name is free or the file cannot be
+    /// written (`save_screenshot`). No button sound plays.
     pub(crate) fn screenshot(&mut self) {
-        let Some(frame) = self.frame.clone() else {
-            return;
+        let image = match self.image() {
+            Ok(image) => Some(image),
+            Err(error) => {
+                tracing::warn!(%error, "screen not composed for the screenshot");
+                self.pointer_frame()
+            }
         };
-        let palette = self.display_override().unwrap_or_else(|| {
-            self.game_palette()
-                .display_rgba8(self.preferences.brightness)
-        });
-        crate::interface::save_screenshot(&self.save_root, &frame, &palette);
+        let saved = match image {
+            Some(image) => {
+                let palette = self.installed_palette();
+                crate::interface::save_screenshot(&self.screenshot_dir, &image, &palette)
+            }
+            None => Err("no screen to save".into()),
+        };
+        let id = match saved {
+            Ok(_) => 3,
+            Err(error) => {
+                tracing::warn!(%error, "screenshot not saved");
+                8
+            }
+        };
+        let text = self.message("misc.msg", id);
+        self.notify(text);
     }
     /// The system pointer's pending warp (§3.28), for the shell.
     pub fn take_warp(&mut self) -> Option<[i32; 2]> {

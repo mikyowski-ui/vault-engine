@@ -129,6 +129,11 @@ impl SoundBank {
 pub struct MapPreview {
     pub host: WorldHost<VfsWorldAssets>,
     pub palette: Palette,
+    /// SPEC-014 §3.17 the pause window's grey lookup table, built from
+    /// `color.pal` when the game starts. A load (the game reset) reads the
+    /// same palette, so the table never changes afterwards; brightness and
+    /// palette cycling do not touch it.
+    pub(crate) grey: [u8; 256],
     art: MapSprites,
     pub view: MapView,
     path: String,
@@ -155,6 +160,9 @@ pub struct MapPreview {
     pub config_path: Option<std::path::PathBuf>,
     /// The directory holding `SAVEGAME/SLOTnn`.
     pub save_root: std::path::PathBuf,
+    /// SPEC-014 §3.19 where F12 writes `scrNNNNN.bmp`: the process's
+    /// working directory (the empty path) in the game.
+    pub screenshot_dir: std::path::PathBuf,
     quick: vault_core::ui::saveload::QuickSlot,
     slot_list: vault_core::ui::saveload::SlotList,
     /// A confirmed quit: return to the main menu (or leave the preview).
@@ -220,16 +228,6 @@ pub struct MapPreview {
     character_memory: character::Remembered,
 }
 
-/// Where keys land in the world, for the engine key repeat (SPEC-014
-/// §3.29): the window in front (with the options window's page), and
-/// whether a conversation or a dialog box is open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WorldLayer {
-    screen: std::mem::Discriminant<Screen>,
-    page: Option<std::mem::Discriminant<options::OptionsScreen>>,
-    dialogue: bool,
-    dialog: bool,
-}
 /// The map's sprites by tile index or object art. Each art file is read and
 /// decoded once, through the world's asset cache, and object art that is
 /// missing or unreadable is remembered, so a frame binds only art it has not
@@ -477,6 +475,7 @@ impl MapPreview {
         tracing::info!(map=%path,objects=count,"interactive map preview loaded");
         Ok(Self {
             host,
+            grey: vault_core::ui::grey_table(&palette),
             palette,
             art,
             view,
@@ -497,6 +496,7 @@ impl MapPreview {
             preferences: Default::default(),
             config_path: None,
             save_root: std::path::PathBuf::from("."),
+            screenshot_dir: std::path::PathBuf::new(),
             quick: Default::default(),
             slot_list: Default::default(),
             quit_requested: false,
@@ -524,16 +524,14 @@ impl MapPreview {
             character_memory: character::Remembered::default(),
         })
     }
-    /// Where keys land now (SPEC-014 §3.29 engine key repeat).
-    pub(crate) fn key_layer(&self) -> WorldLayer {
-        WorldLayer {
-            screen: std::mem::discriminant(&self.screen),
-            page: match &self.screen {
-                Screen::Options(page) => Some(std::mem::discriminant(page)),
-                _ => None,
-            },
-            dialogue: self.host.world.dialogue.open,
-            dialog: self.dialog.is_some(),
+    /// SPEC-014 §3.29 the keyboard for the engine key repeat: no input is
+    /// polled during a game fade (§3.2) and no key is read while combat
+    /// disables the keyboard (§3.27); each player combat turn start clears
+    /// the keyboard.
+    pub(crate) fn keyboard(&self) -> crate::input::Keyboard {
+        crate::input::Keyboard {
+            enabled: !self.fade_blocks() && !self.keyboard_locked(),
+            clears: self.host.combat_lock.turns,
         }
     }
     /// SPEC-014 §3.2: a game fade blocks completely, outside a movie (whose
@@ -709,42 +707,40 @@ impl MapPreview {
             self.pressed = None;
             return true;
         }
+        // SPEC-013 §3.15: the Set Timer window is modal over any window.
         let mut handled = !right
-            && match self.screen {
-                Screen::Map => {
-                    self.called_release(point, over)
-                        || self.map_release(point)
-                        || self.bar_release(bar, over)
-                }
-                Screen::Elevator(_) => self.elevator_release(over),
-                Screen::Loot(_) => self.loot_release(point),
-                Screen::Inventory(_) => self.inventory_release(point),
-                Screen::Barter(_) => self.barter_release(point),
-                Screen::Automap(_) => self.automap_release(point),
-                Screen::Options(_) => self.options_release(point),
-                Screen::PipBoy(_) => self.pipboy_release(point),
-                Screen::World(_) => self.world_release(point),
-                Screen::Town(_) => self.town_release(point),
-                Screen::Character(_) => self.character_release(point, over.is_some()),
-                _ => false,
-            };
+            && (self.timer_release(over)
+                || match self.screen {
+                    Screen::Map => {
+                        self.called_release(point, over)
+                            || self.map_release(point)
+                            || self.bar_release(bar, over)
+                    }
+                    Screen::Elevator(_) => self.elevator_release(over),
+                    Screen::Loot(_) => self.loot_release(point),
+                    Screen::Inventory(_) => self.inventory_release(point),
+                    Screen::Barter(_) => self.barter_release(point),
+                    Screen::Automap(_) => self.automap_release(point),
+                    Screen::Options(_) => self.options_release(point),
+                    Screen::PipBoy(_) => self.pipboy_release(point),
+                    Screen::World(_) => self.world_release(point),
+                    Screen::Town(_) => self.town_release(point),
+                    Screen::Character(_) => self.character_release(point, over.is_some()),
+                    _ => false,
+                });
         if let Some(cue) = self.pressed.take() {
             self.play_effect(cue, None);
             handled = true;
         }
         handled || held.is_some()
     }
-    /// Game date and time, `MM/DD/YYYY HH:MM`.
+    /// SPEC-014 §3.19 the `/` and `?` date line, "December: 5/2161 7:21":
+    /// the month name is `editor.msg` 500 + month - 1.
     pub(crate) fn clock_text(&self) -> Vec<u8> {
         let world = &self.host.world;
         let [month, day, year] = vault_core::host_save::game_date(world.clock.ticks);
-        let time = world.clock.hhmm();
-        format!(
-            "{month:02}/{day:02}/{year:04} {:02}:{:02}",
-            time / 100,
-            time % 100
-        )
-        .into_bytes()
+        let name = self.message("editor.msg", 500 + i32::from(month) - 1);
+        vault_core::ui::bar::date_line(&name, [day, year], world.clock.hhmm())
     }
     /// Whether an object (or its outermost owner) is on screen, for SPEC-010
     /// §3.11 relative volume: its screen bounding rectangle overlaps the
@@ -1203,6 +1199,15 @@ impl MapPreview {
         if self.fade_blocks() {
             return true;
         }
+        // SPEC-014 §3.19: F12 is caught as the key enters the common input
+        // queue, before any window, movie or dialog box sees it, so it works
+        // everywhere (a hand swap's wait included, §3.23) and no screen
+        // receives it. While combat disables the keyboard (§3.27) it is not
+        // read: it is held below with the other keys and acts when read.
+        if key == KeyCode::F12 && !self.keyboard_locked() {
+            self.screenshot();
+            return true;
+        }
         if self.movie_key() || self.dialog_key(key) || self.timer_key(key) || self.called_key(key) {
             return true;
         }
@@ -1220,12 +1225,9 @@ impl MapPreview {
             self.hold_key(hud::HeldKey::Press(key, modifiers));
             return true;
         }
-        // §3.23: a hand swap's wait reads and discards every key but F12,
-        // which takes its screenshot as soon as it is read.
+        // §3.23: a hand swap's wait reads and discards every key (F12 was
+        // caught above).
         if matches!(self.screen, Screen::Map) && self.swapping_hands() {
-            if key == KeyCode::F12 {
-                self.screenshot();
-            }
             return true;
         }
         // SPEC-014 §3.28-3.29: keyboard input is discarded while the action

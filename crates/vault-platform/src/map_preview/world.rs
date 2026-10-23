@@ -56,6 +56,11 @@ pub(crate) struct WorldScreen {
     pub follow: bool,
     /// G-24 / SPEC-014 §3.17 the world-map pause window is open.
     pub paused: bool,
+    /// §3.17 the pause greyed the view: the view origin, follow mode and
+    /// hover state when it did. The region stays grey until a pass
+    /// redraws the view (§3.39 "Drawing a pass": follow mode on, a scroll,
+    /// a hover change or a travel iteration).
+    pub grey: Option<([i32; 2], bool, bool)>,
     /// The pointer hovers on the party (at rest).
     pub hover: bool,
     /// Travel dots: one bit per world pixel.
@@ -111,6 +116,7 @@ impl WorldScreen {
             view: screen::centered(position),
             follow: true,
             paused: false,
+            grey: None,
             hover: false,
             dots: vec![0; DOT_WORDS],
             journey: None,
@@ -204,6 +210,7 @@ impl MapPreview {
     fn return_to_world(&mut self, mut world: WorldScreen, follow: bool) {
         self.host.play_world_map_music();
         world.follow = follow;
+        world.grey = None;
         self.show_world(world, false);
     }
     /// A town map for `town`, or none when it fails: a town outside 0-11
@@ -401,7 +408,10 @@ impl MapPreview {
         }
         let position = self.host.world.world_map.position();
         match key {
-            KeyCode::KeyP => world.paused = true,
+            KeyCode::KeyP => {
+                world.paused = true;
+                world.grey = Some((world.view, world.follow, world.hover));
+            }
             KeyCode::KeyA => world.follow = !world.follow,
             KeyCode::KeyC => world.view = screen::centered(position),
             KeyCode::ArrowLeft | KeyCode::ArrowRight | KeyCode::ArrowUp | KeyCode::ArrowDown => {
@@ -533,6 +543,7 @@ impl MapPreview {
                 world.view = screen::scroll(world.view, direction).0;
             }
         }
+        let mut travelled = false;
         for _ in 0..2 {
             let outcome = self.host.travel_iteration()?;
             let mark = self.host.world.world_map.mark;
@@ -542,6 +553,7 @@ impl MapPreview {
             if let Some(pixel) = mark {
                 world.mark(pixel);
             }
+            travelled |= outcome != TravelOutcome::Idle;
             match outcome {
                 TravelOutcome::Moving => continue,
                 TravelOutcome::Idle => break,
@@ -595,6 +607,16 @@ impl MapPreview {
         }
         let party = screen::window(position, world.view);
         world.hover = at_rest && pointer.is_some_and(|at| screen::hovers(at, party));
+        // §3.17: a pass that redraws the view ends the pause's grey.
+        if let Some((view, follow, hover)) = world.grey
+            && (world.follow
+                || travelled
+                || view != world.view
+                || follow != world.follow
+                || hover != world.hover)
+        {
+            world.grey = None;
+        }
         Ok(true)
     }
     /// The world-map cursor: the scroll art on an edge (the blocked art
@@ -906,9 +928,10 @@ impl MapPreview {
         self.draw_panel(&painter, &mut image, world.names, world.held);
         // G-24 / SPEC-014 §3.17: the world-map region (22, 21) 450 by 442 is
         // converted through the grey lookup table, then the pause window
-        // shows at (185, 180).
-        if world.paused {
-            let grey = vault_core::ui::grey_table(&self.palette);
+        // shows at (185, 180). The conversion is not undone when it closes:
+        // the region stays grey until the screen next redraws its view.
+        if world.paused || world.grey.is_some() {
+            let grey = &self.grey;
             let [x, y] = VIEWPORT_ORIGIN;
             let [w, h] = VIEWPORT_SIZE;
             let stride = image.width() as i32;
@@ -921,6 +944,8 @@ impl MapPreview {
                     }
                 }
             }
+        }
+        if world.paused {
             super::options::draw_pause(
                 &painter,
                 &mut image,

@@ -147,12 +147,20 @@ impl MapPreview {
     /// The movie's device palette replaces the display palette.
     /// A running fade, or black left by a fade or movie, replaces it too.
     pub fn display_override(&self) -> Option<[[u8; 4]; 256]> {
+        self.display_at(self.preferences.brightness)
+    }
+    /// The display palette at `gamma` when something replaces the game's.
+    fn display_at(&self, gamma: f64) -> Option<[[u8; 4]; 256]> {
         match &self.screen {
-            Screen::Movie(screen) => Some(screen.player.palette(self.preferences.brightness)),
-            Screen::Help(_) => self.help_display(self.preferences.brightness),
-            _ => self
-                .fades
-                .display(self.game_palette(), self.preferences.brightness),
+            Screen::Movie(screen) => Some(screen.player.palette(gamma)),
+            Screen::Help(_) => self.help_display(gamma),
+            _ => self.fades.display(self.game_palette(), gamma),
         }
+    }
+    /// SPEC-014 §2.5 the palette the game last installed (SPEC-014 §3.2),
+    /// before the brightness of SPEC-001 §3.1: each six-bit level times 4.
+    pub(crate) fn installed_palette(&self) -> [[u8; 4]; 256] {
+        self.display_at(1.0)
+            .unwrap_or_else(|| self.game_palette().display_rgba8(1.0))
     }
 }

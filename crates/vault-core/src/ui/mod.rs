@@ -53,17 +53,25 @@ impl HoldRepeat {
 }
 
 /// SPEC-014 §3.17 the grey lookup table the pause window converts the view
-/// through. The specification names the table but not its rule; this
-/// provisional table maps each color to the palette entry for the grey of
-/// its mean five-bit level (index 0 stays 0).
+/// through, built from the `color.pal` palette (not the brightness-adjusted
+/// or cycled display): for each entry, s is the largest plus the smallest of
+/// its five-bit components (an unmapped entry counts as zero), `v =
+/// trunc(s × 240 / 510)` (0-29), and the grey index is the palette's RGB555
+/// lookup of (v, v, v), key `1057 v`. Unmapped entries therefore map to the
+/// lookup of key 0 (index 228 in the corpus).
 pub fn grey_table(palette: &Palette) -> [u8; 256] {
     std::array::from_fn(|index| {
-        if index == 0 {
-            return 0;
-        }
-        let [r, g, b] = palette.rgb6(index as u8);
-        let level = ((u16::from(r) + u16::from(g) + u16::from(b)) / 3 / 2) as u8;
-        palette.lookup_rgb5([level; 3]).unwrap_or(index as u8)
+        let index = index as u8;
+        let components = if palette.is_mapped(index) {
+            palette.rgb6(index).map(|level| u16::from(level / 2))
+        } else {
+            [0; 3]
+        };
+        let largest = components.into_iter().max().unwrap_or(0);
+        let smallest = components.into_iter().min().unwrap_or(0);
+        let v = ((largest + smallest) * 240 / 510) as u8;
+        // v is at most 29, always a valid five-bit level.
+        palette.lookup_rgb5([v; 3]).unwrap_or(0)
     })
 }
 /// Red-button press and release sounds.

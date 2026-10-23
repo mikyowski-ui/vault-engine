@@ -2,14 +2,16 @@
 //! displayed frame is copied unscaled and centered (the recorded region's
 //! offset in the frame, the region's size), and subtitles are drawn into a
 //! band below it. The window keeps what earlier frames and subtitles drew.
-use crate::{IndexedImage, TextStyle, dialogue::lines};
-use vault_core::movie::{WINDOW, frame_origin, subtitle_band};
+use crate::{IndexedImage, TextStyle};
+use vault_core::movie::{WINDOW, frame_origin, subtitle_band_lines, subtitle_lines};
 use vault_formats::{Font, Palette};
 
 pub struct MovieWindow {
     pub image: IndexedImage,
     /// The last displayed frame's height and top.
     shown: [i32; 2],
+    /// The band the last subtitle filled.
+    band: Option<[i32; 4]>,
 }
 impl Default for MovieWindow {
     fn default() -> Self {
@@ -22,6 +24,7 @@ impl MovieWindow {
             image: IndexedImage::new(WINDOW[0] as u32, WINDOW[1] as u32)
                 .expect("the movie window is a valid image"),
             shown: [0, 0],
+            band: None,
         }
     }
     /// Copy a displayed frame of `size` pixels; `region` is the recorded
@@ -48,41 +51,47 @@ impl MovieWindow {
         }
         self.shown = [h as i32, origin[1]];
     }
-    /// Draw one subtitle: fill the band with index 0, then wrap the text
-    /// to the window width and center each line, the first line two pixels
-    /// below the band top. `palette` is the subtitle color table and
-    /// `color` the text color index.
+    /// Draw one subtitle (SPEC-012 §3.10 steps 5-6): fill the band with
+    /// index 0, then wrap the text for the 640-pixel width and draw each
+    /// line i transparently at `y0 + i × th`, centered at
+    /// `trunc((640 - w) / 2)` for its width w including the final letter
+    /// spacing. `palette` is the subtitle color table and `color` the text
+    /// color index.
     ///
-    /// G-13 / SPEC-012 §3.10: a subtitle draws only inside its band, which
-    /// is one text height plus 4 pixels tall, so a wrapped line that does
-    /// not fit in the band is not drawn. Nothing spills below the band,
-    /// and the next subtitle's fill clears everything this one drew. (The
-    /// first line always draws; the window bottom clips a band cut short
-    /// by it.)
+    /// The reference band is one text height plus 4 pixels, so only line 0
+    /// of a wrapped entry is drawn and the rest is lost. `[May-improve]`
+    /// safe rule: the band grows downward by one text height per extra
+    /// line, to the window bottom, and every line whose bottom fits in it
+    /// is drawn. Nothing is drawn below the band, and the next entry's
+    /// fill also clears what is left of a grown band below the frame, so a
+    /// wrapped entry leaves no ghost lines under a shorter one.
     pub fn draw_subtitle(&mut self, font: &Font, palette: &Palette, color: u8, text: &[u8]) {
         let height = font.height() as i32;
-        let band = subtitle_band(height, self.shown[0], self.shown[1]);
+        let lines = subtitle_lines(font, text);
+        let band = subtitle_band_lines(height, self.shown[0], self.shown[1], lines.len());
+        if let Some([_, top, width, rows]) = self.band.replace(band) {
+            let from = top.max(self.shown[0] + self.shown[1]);
+            let to = top + rows;
+            if to > from {
+                self.image.fill_rect([0, from, width, to - from], 0);
+            }
+        }
         self.image.fill_rect(band, 0);
         let style = TextStyle {
             foreground: color,
             ..Default::default()
         };
         let bottom = band[1] + band[3];
-        for (line, (start, end)) in lines(font, text, WINDOW[0] as u32).into_iter().enumerate() {
-            let piece = &text[start..end];
-            let width = font.text_width(piece, false).min(WINDOW[0] as u64) as i32;
-            let y = band[1] + 2 + line as i32 * font.line_height() as i32;
-            if line > 0 && y + height > bottom {
+        for (line, (start, end)) in lines.into_iter().enumerate() {
+            let y = band[1] + line as i32 * height;
+            if y + height > bottom {
                 break;
             }
-            self.image.draw_text(
-                font,
-                palette,
-                piece,
-                [(WINDOW[0] - width) / 2, y],
-                WINDOW[0] as u32,
-                style,
-            );
+            let piece = &text[start..end];
+            let width = font.text_width(piece, false).min(u64::from(u32::MAX)) as u32;
+            let x = (WINDOW[0] - width.min(i32::MAX as u32) as i32) / 2;
+            self.image
+                .draw_text(font, palette, piece, [x, y], width, style);
         }
     }
 }
@@ -118,7 +127,7 @@ mod tests {
         let font = Font::parse_fon(&fixtures::fon()).unwrap();
         window.image.fill_rect([0, 400, 640, 80], 9);
         window.draw_subtitle(&font, &palette, 5, b"AB");
-        let band = subtitle_band(font.height() as i32, 320, 80);
+        let band = vault_core::movie::subtitle_band(font.height() as i32, 320, 80);
         let rows = band[1]..band[1] + band[3];
         let colors: Vec<u8> = rows
             .clone()
@@ -136,14 +145,28 @@ mod tests {
             .collect();
         let (left, right) = (columns.iter().min().unwrap(), columns.iter().max().unwrap());
         assert!((left + right - 639).abs() <= font.text_width(b"A", false) as i32);
-        // G-13: a subtitle wrapped onto several lines draws nothing below
-        // its band, so the next, shorter subtitle leaves no ghost text.
+        // SPEC-012 §3.10 safe rule (Fixture S): an entry wider than 640
+        // pixels shows its second line at y0 + th in a band grown to
+        // 2 th + 4, and nothing below that.
         let long: Vec<u8> = b"AB ".iter().copied().cycle().take(900).collect();
-        assert!(lines(&font, &long, 640).len() > 1);
+        let wrapped = subtitle_lines(&font, &long);
+        assert!(wrapped.len() > 1);
+        let th = font.height() as i32;
+        let grown = subtitle_band_lines(th, 320, 80, wrapped.len());
+        assert_eq!(grown[1], band[1]);
+        assert_eq!(grown[3], (wrapped.len() as i32 * th + 4).min(480 - band[1]));
         window.image.fill_rect([0, 400, 640, 80], 9);
         window.draw_subtitle(&font, &palette, 5, &long);
-        let below = band[1] + band[3];
+        let second = band[1] + th..band[1] + 2 * th;
+        assert!(
+            second
+                .clone()
+                .any(|y| (0..640).any(|x| at(&window, x, y) == 5)),
+            "the second line is drawn"
+        );
+        let below = grown[1] + grown[3];
         assert!((below..480).all(|y| (0..640).all(|x| at(&window, x, y) == 9)));
+        // The next, shorter entry clears the grown band: no ghost lines.
         window.draw_subtitle(&font, &palette, 5, b"");
         assert!((band[1]..below).all(|y| (0..640).all(|x| at(&window, x, y) == 0)));
     }

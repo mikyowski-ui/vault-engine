@@ -7,7 +7,7 @@
 use crate::{
     AppResult,
     audio::{AudioHandle, Channel, MusicRequest, Volumes},
-    editor_screen::{EditorDialog, EditorExit, EditorStage, draw_editor},
+    editor_screen::{EditorExit, EditorStage, draw_editor},
     interface::Painter,
     map_preview::MapPreview,
     movie::{MoviePlayer, SubtitleStyle},
@@ -100,6 +100,12 @@ pub struct Game {
     language: String,
     seed: i32,
     save_root: PathBuf,
+    /// SPEC-014 §3.19 where F12 writes `scrNNNNN.bmp`: the process's
+    /// working directory (the empty path).
+    pub(crate) screenshot_dir: PathBuf,
+    /// SPEC-014 §3.29 main-menu loop passes, each of which clears the
+    /// keyboard.
+    menu_passes: u64,
     config_path: Option<PathBuf>,
     pub preferences: Preferences,
     /// `fallout.cfg` `[system] interrupt_walk` (SPEC-014 §3.27), read once
@@ -209,6 +215,8 @@ impl Game {
             language: language.to_owned(),
             seed,
             save_root,
+            screenshot_dir: PathBuf::new(),
+            menu_passes: 0,
             config_path,
             preferences,
             interrupt_walk: true,
@@ -487,6 +495,7 @@ impl Game {
         world.host.world.clock.ticks = flow::START_TICKS;
         world.audio = self.audio.clone();
         world.save_root = self.save_root.clone();
+        world.screenshot_dir = self.screenshot_dir.clone();
         world.config_path = self.config_path.clone();
         world.preferences = self.preferences.clone();
         world.interrupt_walk = self.interrupt_walk;
@@ -744,6 +753,9 @@ impl Game {
                 Ok(changed)
             }
             Stage::Menu { .. } => {
+                // §3.29: the top of each main-menu loop pass clears the
+                // keyboard, cancelling every key repeat.
+                self.menu_passes = self.menu_passes.wrapping_add(1);
                 self.menu_poll(MenuInput::None);
                 Ok(faded || fading || self.held_moved())
             }
@@ -887,15 +899,34 @@ impl Game {
             }
         }
     }
-    /// F12 (SPEC-014 §3.9): the screen as shown, saved by the platform.
+    /// SPEC-014 §3.19 F12 outside a world: the screen recomposed, written
+    /// as the §2.5 bitmap under the installed palette before brightness
+    /// into the working directory. These screens have no message monitor,
+    /// so the result is only logged. (The menu and editor use the system
+    /// pointer, which is not part of the composed screen.)
     fn screenshot(&mut self) {
-        let Ok(image) = self.image() else {
-            return;
+        let image = match self.image() {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::warn!(%error, "screenshot not saved");
+                return;
+            }
         };
-        let palette = self
-            .display_override()
-            .unwrap_or_else(|| self.palette().display_rgba8(self.brightness()));
-        crate::interface::save_screenshot(&self.save_root, &image, &palette);
+        let palette = match &self.stage {
+            Stage::Movie { player, .. } => player.palette(1.0),
+            Stage::World(world) | Stage::Load(world) | Stage::Ending { world, .. } => {
+                world.installed_palette()
+            }
+            _ if self.fade.is_some() || self.shown.is_some() => self
+                .shown_levels()
+                .map(|rgb6| vault_formats::palette::display_rgb6(rgb6, 1.0)),
+            _ => self.palette().display_rgba8(1.0),
+        };
+        if let Err(error) =
+            crate::interface::save_screenshot(&self.screenshot_dir, &image, &palette)
+        {
+            tracing::warn!(%error, "screenshot not saved");
+        }
     }
     /// The held button, while the pointer is over it.
     fn held_button(&self) -> Option<Rect> {
@@ -1301,6 +1332,13 @@ impl Game {
         }
     }
     pub fn step(&mut self, key: KeyCode) -> bool {
+        // SPEC-014 §3.19: F12 is caught as the key enters the common input
+        // queue, so no screen sees it; a world catches it itself (it holds
+        // keys while combat disables the keyboard).
+        if key == KeyCode::F12 && !matches!(self.stage, Stage::World(_) | Stage::Load(_)) {
+            self.screenshot();
+            return true;
+        }
         match &mut self.stage {
             Stage::Splash { .. } => {
                 self.start_movies();
@@ -1357,10 +1395,6 @@ impl Game {
                     }
                     None => false,
                 }
-            }
-            Stage::Editor(_) if key == KeyCode::F12 => {
-                self.screenshot();
-                true
             }
             Stage::Editor(stage) => {
                 let exit = stage.key(key, self.modifiers[0]);
@@ -1456,33 +1490,17 @@ impl Game {
             Stage::Ending { .. } => true,
         }
     }
-    /// The world (or the menu's load screen) is in front: it draws its own
-    /// cursor.
-    /// Where keys land now (SPEC-014 §3.29 engine key repeat).
-    pub fn key_layer(&self) -> crate::preview::KeyLayer {
-        let stage = match &self.stage {
-            Stage::Splash { .. } => 0,
-            Stage::Movie { .. } => 1,
-            Stage::Menu { .. } => 2,
-            Stage::Credits { .. } => 3,
-            Stage::Selection => 4,
-            Stage::Editor(_) => 5,
-            Stage::World(_) => 6,
-            Stage::Load(_) => 7,
-            Stage::Death { .. } => 8,
-            Stage::Ending { .. } => 9,
-            Stage::Slides { .. } => 10,
+    /// SPEC-014 §3.29 the keyboard for the engine key repeat: a world's
+    /// (its enable state and player turns), and the main-menu loop, which
+    /// clears the keyboard at the top of every pass.
+    pub fn keyboard(&self) -> crate::input::Keyboard {
+        let world = match &self.stage {
+            Stage::World(world) | Stage::Load(world) => world.keyboard(),
+            _ => crate::input::Keyboard::default(),
         };
-        crate::preview::KeyLayer {
-            stage,
-            field: matches!(
-                &self.stage,
-                Stage::Editor(editor) if matches!(editor.dialog, Some(EditorDialog::Name(_)))
-            ),
-            world: match &self.stage {
-                Stage::World(world) | Stage::Load(world) => Some(world.key_layer()),
-                _ => None,
-            },
+        crate::input::Keyboard {
+            clears: world.clears.wrapping_add(self.menu_passes),
+            ..world
         }
     }
     pub fn world_shown(&self) -> bool {

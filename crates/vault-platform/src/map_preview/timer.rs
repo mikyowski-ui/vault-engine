@@ -2,7 +2,8 @@
 //! (SPEC-013 §3.10), opened by the inventory's "use" action or by the item
 //! slot (SPEC-014 §3.23): `movemult.frm` at screen (140, 80), the title, the
 //! item picture, `timer.frm`, the minutes and seconds digits, plus, minus,
-//! Done and Cancel. It is modal over whichever window opened it.
+//! Done and Cancel (all four drawn transparently). The title is in key
+//! 21091. It is modal over whichever window opened it.
 use super::MapPreview;
 use crate::interface::Painter;
 use vault_core::{
@@ -108,10 +109,10 @@ impl MapPreview {
         }
         true
     }
-    /// A press on a button. Done and Cancel are little red buttons with the
-    /// red-button sounds (SPEC-014 conventions) and act as Enter and Esc.
-    /// SPEC-013 §3.15 names no sounds for plus and minus; they take the same
-    /// pair as the move-items counter that shares this window art (§3.17).
+    /// A press on a button: every button, plus and minus included, plays
+    /// `ib1p1xx1` now and `ib1lu1x1` on its release. Plus and minus act on
+    /// the press, once (holding them does not repeat); Done and Cancel act
+    /// on the release (`timer_release`).
     pub(crate) fn timer_click(&mut self, point: [i32; 2]) -> bool {
         let Some((_, timer)) = &mut self.hud.timer else {
             return false;
@@ -128,9 +129,22 @@ impl MapPreview {
             timer.minus();
         }
         self.press_button(button(pressed));
-        if pressed == DONE {
+        true
+    }
+    /// A left release while the window is open (it is modal): Done and
+    /// Cancel act as Enter and Esc when the release is over the button
+    /// pressed. `over` is that button's screen rectangle.
+    pub(crate) fn timer_release(&mut self, over: Option<Rect>) -> bool {
+        if self.hud.timer.is_none() {
+            return false;
+        }
+        // The release cue sounds before the button acts.
+        if let Some(cue) = self.pressed.take() {
+            self.play_effect(cue, None);
+        }
+        if over == Some(button(DONE)) {
             self.finish_timer(true);
-        } else if pressed == CANCEL {
+        } else if over == Some(button(CANCEL)) {
             self.finish_timer(false);
         }
         true

@@ -112,7 +112,7 @@ struct Shell {
     /// The output stream, kept alive for the whole session.
     _audio: Option<audio::Audio>,
     /// SPEC-014 §3.29 the engine's key repeat (the OS repeat is ignored).
-    repeat: input::KeyRepeat<preview::KeyLayer>,
+    repeat: input::KeyRepeat,
     input_log: InputLog,
     /// The window title last set (P-02: set only when it changes).
     title: String,
@@ -368,11 +368,12 @@ impl ApplicationHandler for Shell {
             event_loop.exit();
             return;
         }
-        // SPEC-014 §3.29: a held key repeats on the frame clock.
-        if let Some(key) = self.repeat.poll(now, preview.key_layer())
-            && let Some(window) = self.window.clone()
-        {
-            self.press_key(event_loop, &window, key);
+        // SPEC-014 §3.29: held keys repeat on the frame clock.
+        let due = self.repeat.poll(now, preview.keyboard());
+        if let Some(window) = self.window.clone() {
+            for key in due {
+                self.press_key(event_loop, &window, key);
+            }
         }
         let Some(preview) = self.preview.as_mut() else {
             return;
@@ -455,7 +456,7 @@ impl ApplicationHandler for Shell {
                     }
                 } else if !event.repeat {
                     if let Some(preview) = &self.preview {
-                        self.repeat.press(key, preview.key_layer());
+                        self.repeat.press(key, preview.keyboard());
                     }
                     self.press_key(event_loop, &window, key);
                 }

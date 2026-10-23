@@ -164,6 +164,8 @@ pub fn game_key(key: Key, enabled: bool, alt: bool) -> Option<Action> {
         Key::F2 => Some(Action::MasterVolume(-2047)),
         Key::F3 => Some(Action::MasterVolume(2047)),
         Key::F12 => Some(Action::Screenshot),
+        // §3.19: the date line prints also while the bar is disabled.
+        Key::Char('/' | '?') => Some(Action::DateTime),
         _ => None,
     };
     if always.is_some() || !enabled {
@@ -190,9 +192,19 @@ pub fn game_key(key: Key, enabled: bool, alt: bool) -> Option<Action> {
         Key::Char('.') => Action::Rotate(true),
         Key::Char('=' | '+') => Action::Brightness(1),
         Key::Char('-' | '_') => Action::Brightness(-1),
-        Key::Char('/') => Action::DateTime,
         _ => return None,
     })
+}
+
+/// §3.19 the `/` and `?` date line: the month name (`editor.msg` 500 +
+/// month - 1), a colon and a space, the day, `/`, the year, a space, then
+/// the hour without a leading zero, `:` and two-digit minutes, as in
+/// "December: 5/2161 7:21". `[day, year]` are the game date's and `hhmm`
+/// the clock's `hour × 100 + minutes`.
+pub fn date_line(month_name: &[u8], [day, year]: [u16; 2], hhmm: i32) -> Vec<u8> {
+    let mut line = month_name.to_vec();
+    line.extend_from_slice(format!(": {day}/{year} {}:{:02}", hhmm / 100, hhmm % 100).as_bytes());
+    line
 }
 
 /// §3.20 the message monitor: a ring of 100 lines of up to 79 characters,

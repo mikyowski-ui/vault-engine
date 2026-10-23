@@ -183,9 +183,10 @@ fn dialog_done(x: i32, sex: bool) -> Rect {
         red_button([x + 26, 44])
     }
 }
-/// A Yes/No or Done box's red buttons at `origin`, with Yes first.
-fn box_buttons(origin: [i32; 2], yes_no: bool) -> Vec<Rect> {
-    flow::dialog_buttons(yes_no)
+/// A Yes/No or Done box's red buttons at `origin` in a box of `size`, with
+/// Yes first.
+fn box_buttons(origin: [i32; 2], yes_no: bool, size: DialogSize) -> Vec<Rect> {
+    flow::dialog_buttons_for(yes_no, size)
         .into_iter()
         .map(|button| red_button([origin[0] + button.button[0], origin[1] + button.button[1]]))
         .collect()
@@ -613,9 +614,13 @@ impl EditorStage {
             self.take_sounds();
             return held;
         }
-        if self.refusal.is_some() {
-            let [ox, oy] = editor::DIALOG_ORIGIN;
-            let done = box_buttons([ox, oy], false)[0];
+        if let Some(refusal) = self.refusal {
+            let lines = [
+                painter.message("editor.msg", refusal.title),
+                painter.message("editor.msg", refusal.body),
+            ];
+            let size = box_size(painter, &lines, false, None);
+            let done = box_buttons(editor::DIALOG_ORIGIN, false, size)[0];
             return self.press_red(done, point, Press::RefusalDone);
         }
         match &self.dialog {
@@ -651,7 +656,7 @@ impl EditorStage {
                 return self.press_red(dialog_done(SEX_X, true), point, Press::DialogDone);
             }
             Some(EditorDialog::Options { erase: true }) => {
-                let buttons = box_buttons(ERASE_ORIGIN, true);
+                let buttons = box_buttons(ERASE_ORIGIN, true, DialogSize::Large);
                 if let Some(rect) = self.press_red(buttons[0], point, Press::EraseYes) {
                     return Some(rect);
                 }
@@ -848,6 +853,23 @@ pub(crate) fn row_key(marked: bool, selected: bool) -> ColorKey {
     }
 }
 
+/// §3.13 a box's size: a Yes/No box is always large; otherwise the
+/// requested size, else large when the widest line exceeds 168 pixels or
+/// there are more than five lines, else medium.
+pub(crate) fn box_size(
+    painter: &Painter,
+    lines: &[Vec<u8>],
+    yes_no: bool,
+    requested: Option<DialogSize>,
+) -> DialogSize {
+    let widest = lines
+        .iter()
+        .map(|line| painter.width(101, line))
+        .max()
+        .unwrap_or(0);
+    flow::dialog_size(yes_no, requested, widest, lines.len())
+}
+
 /// A §3.13 box at `origin` with centered lines in `key` and its buttons,
 /// in the `requested` size or by the size rule.
 #[allow(clippy::too_many_arguments)]
@@ -862,16 +884,7 @@ pub(crate) fn draw_box(
     held: Option<Rect>,
 ) {
     let [ox, oy] = origin;
-    let widest = lines
-        .iter()
-        .map(|line| painter.width(101, line))
-        .max()
-        .unwrap_or(0);
-    // §3.13: a Yes/No box is always large; otherwise the requested size,
-    // else large when the widest line exceeds 168 pixels or there are more
-    // than five lines, else medium, with the matching vertical layout. The
-    // Done box offsets the specification gives are used for both sizes.
-    let size = flow::dialog_size(yes_no, requested, widest, lines.len());
+    let size = box_size(painter, lines, yes_no, requested);
     let (art, [width, _]) = size.art();
     painter.blit_opaque(image, art, 0, origin);
     let mut y = oy + size.title_y(lines.len().saturating_sub(1));
@@ -879,7 +892,8 @@ pub(crate) fn draw_box(
         painter.centered(image, 101, key, line, [ox, y], width);
         y += 10;
     }
-    for button in flow::dialog_buttons(yes_no) {
+    // The Done box centered for the size: (97, 98) large, (53, 81) medium.
+    for button in flow::dialog_buttons_for(yes_no, size) {
         let [bx, by] = button.box_origin;
         if button.transparent_box {
             painter.blit(image, flow::DONE_BOX.0, 0, [ox + bx, oy + by]);
@@ -1365,6 +1379,9 @@ pub(crate) struct Notice {
     /// The pressed button's answer, until its release.
     pressed: Option<(Rect, bool)>,
     pub sounds: Vec<&'static str>,
+    /// The size the last draw resolved (the size rule measures the text),
+    /// so a press tests the buttons where they were drawn.
+    shown: std::cell::Cell<Option<DialogSize>>,
 }
 impl Notice {
     pub fn new(
@@ -1382,12 +1399,17 @@ impl Notice {
             yes_no,
             pressed: None,
             sounds: Vec::new(),
+            shown: std::cell::Cell::new(None),
         }
     }
-    /// The red buttons and their answers (Done and Yes are `true`).
+    /// The red buttons and their answers (Done and Yes are `true`), in the
+    /// size the box was drawn (§3.13: a medium box's Done box sits at
+    /// (53, 81)). A box not drawn yet counts as its requested size, else
+    /// large.
     fn buttons(&self) -> Vec<(Rect, bool)> {
         let [ox, oy] = self.origin;
-        flow::dialog_buttons(self.yes_no)
+        let size = self.shown.get().or(self.size).unwrap_or(DialogSize::Large);
+        flow::dialog_buttons_for(self.yes_no, size)
             .into_iter()
             .map(|button| {
                 let rect = red_button([ox + button.button[0], oy + button.button[1]]);
@@ -1424,6 +1446,8 @@ impl Notice {
         over.then_some(answer)
     }
     pub fn draw(&self, painter: &Painter, image: &mut IndexedImage, held: Option<Rect>) {
+        self.shown
+            .set(Some(box_size(painter, &self.lines, self.yes_no, self.size)));
         draw_box(
             painter,
             image,

@@ -68,41 +68,69 @@ pub const REPEAT_DELAY_MS: u64 = 500;
 /// ...then repeats every more than 80 ms.
 pub const REPEAT_INTERVAL_MS: u64 = 80;
 
-/// SPEC-014 §3.29 keyboard auto-repeat, driven by the shell clock instead
-/// of the operating system's repeat: the last key pressed repeats once
-/// more than 500 ms have passed since its press, then each time more than
-/// 80 ms have passed since the previous repeat, until it is released.
-/// Modifier keys neither repeat nor interrupt a repeat. Times are frame
-/// times: a press counts from the first frame after it, so no repeat comes
-/// early, and a replay of the logged frames repeats as the desktop did.
+/// The keyboard state the key repeat reads from the game at each poll
+/// (SPEC-014 §3.29).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Keyboard {
+    /// Input is polled and the keyboard is enabled: not during a game fade
+    /// (§3.2) or while combat disables the keyboard (§3.27).
+    pub enabled: bool,
+    /// How many times the game has cleared the keyboard (each player
+    /// combat turn start and each main-menu loop pass); any change cancels
+    /// the repeat of every held key.
+    pub clears: u64,
+}
+impl Default for Keyboard {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            clears: 0,
+        }
+    }
+}
+
+/// SPEC-014 §3.29 keyboard auto-repeat, produced by the game from the
+/// shell clock instead of the operating system's repeat. At each poll with
+/// the keyboard enabled every key still held makes one more press, when
+/// more than 500 ms have passed since its press or more than 80 ms since
+/// its previous repeat. Every physical key repeats alike, window toggles
+/// included (F1, Tab, Esc and the window hotkeys): a held toggle opens its
+/// window, its repeats then reach that window, which may close it, and so
+/// on until the key is released. Clearing the keyboard cancels every held
+/// key's repeat until that key is pressed again.
 ///
-/// A repeat goes only to the input layer `L` the key was pressed in (the
-/// game stage, the world's window, conversation or dialog box): once the
-/// press or a repeat opens or closes a window, the key stops repeating
-/// until it is pressed again, so window-toggle keys (F1, Tab, Escape,
-/// Ctrl+P and the window hotkeys) never re-toggle.
-#[derive(Debug)]
-pub struct KeyRepeat<L> {
-    held: Option<HeldKey<L>>,
+/// Times are frame times: a press counts from the first poll after it, so
+/// no repeat comes early, and a replay of the logged frames repeats as the
+/// desktop did. Modifier keys are not repeated: the game reads them as the
+/// Shift, Ctrl and Alt state of other keys, not as key presses of their
+/// own.
+#[derive(Debug, Default)]
+pub struct KeyRepeat {
+    /// The held keys, in press order.
+    held: Vec<HeldKey>,
+    /// The keyboard clears last seen.
+    clears: u64,
 }
 #[derive(Debug, Clone, Copy)]
-struct HeldKey<L> {
+struct HeldKey {
     key: winit::keyboard::KeyCode,
-    layer: L,
-    /// The frame of the press (`None` until the first frame after it), then
-    /// of the last repeat.
+    /// The poll after the press (`None` until it comes), then the last
+    /// repeat.
     last: Option<u64>,
     repeating: bool,
 }
-impl<L> Default for KeyRepeat<L> {
-    fn default() -> Self {
-        Self { held: None }
+impl KeyRepeat {
+    /// A clear since the last look cancels every held key.
+    fn sync(&mut self, keyboard: Keyboard) {
+        if keyboard.clears != self.clears {
+            self.clears = keyboard.clears;
+            self.held.clear();
+        }
     }
-}
-impl<L: Copy + PartialEq> KeyRepeat<L> {
-    /// A key went down in `layer` (before the press was handled).
-    pub fn press(&mut self, key: winit::keyboard::KeyCode, layer: L) {
+    /// A key went down (before the press was handled).
+    pub fn press(&mut self, key: winit::keyboard::KeyCode, keyboard: Keyboard) {
         use winit::keyboard::KeyCode::*;
+        self.sync(keyboard);
         if matches!(
             key,
             ShiftLeft
@@ -116,46 +144,44 @@ impl<L: Copy + PartialEq> KeyRepeat<L> {
         ) {
             return;
         }
-        self.held = Some(HeldKey {
+        self.held.retain(|held| held.key != key);
+        self.held.push(HeldKey {
             key,
-            layer,
             last: None,
             repeating: false,
         });
     }
     /// A key went up: it stops repeating.
     pub fn release(&mut self, key: winit::keyboard::KeyCode) {
-        if self.held.as_ref().is_some_and(|held| held.key == key) {
-            self.held = None;
-        }
+        self.held.retain(|held| held.key != key);
     }
     /// The window lost the keyboard: nothing repeats.
     pub fn clear(&mut self) {
-        self.held = None;
+        self.held.clear();
     }
-    /// The frame at `now` with the input in `layer`: the key to repeat, if
-    /// one is due.
-    pub fn poll(&mut self, now: u64, layer: L) -> Option<winit::keyboard::KeyCode> {
-        let held = self.held.as_mut()?;
-        if held.layer != layer {
-            self.held = None;
-            return None;
-        }
-        let Some(last) = held.last else {
+    /// The poll at `now`: the held keys whose repeat is due, in press
+    /// order. Nothing repeats while the keyboard is disabled.
+    pub fn poll(&mut self, now: u64, keyboard: Keyboard) -> Vec<winit::keyboard::KeyCode> {
+        self.sync(keyboard);
+        let mut due = Vec::new();
+        for held in &mut self.held {
+            let Some(last) = held.last else {
+                held.last = Some(now);
+                continue;
+            };
+            let wait = if held.repeating {
+                REPEAT_INTERVAL_MS
+            } else {
+                REPEAT_DELAY_MS
+            };
+            if !keyboard.enabled || now.saturating_sub(last) <= wait {
+                continue;
+            }
             held.last = Some(now);
-            return None;
-        };
-        let wait = if held.repeating {
-            REPEAT_INTERVAL_MS
-        } else {
-            REPEAT_DELAY_MS
-        };
-        if now.saturating_sub(last) <= wait {
-            return None;
+            held.repeating = true;
+            due.push(held.key);
         }
-        held.last = Some(now);
-        held.repeating = true;
-        Some(held.key)
+        due
     }
 }
 
@@ -226,8 +252,9 @@ mod tests {
     #[test]
     fn keys_repeat_after_more_than_500_ms_then_more_than_80_ms() {
         use winit::keyboard::KeyCode;
+        let on = Keyboard::default();
         let mut repeat = KeyRepeat::default();
-        repeat.press(KeyCode::ArrowUp, 0);
+        repeat.press(KeyCode::ArrowUp, on);
         // Frames every 16 ms, the first after the press at 1000: the first
         // repeat comes on the first frame more than 500 ms later (512 ms),
         // the next on the first frame more than 80 ms after it (96 ms).
@@ -235,36 +262,64 @@ mod tests {
         let mut now = 984;
         while now < 1800 {
             now += 16;
-            if let Some(key) = repeat.poll(now, 0) {
+            for key in repeat.poll(now, on) {
                 assert_eq!(key, KeyCode::ArrowUp);
                 fired.push(now);
             }
         }
         assert_eq!(fired[0], 1512, "500 ms is not yet more than 500");
         assert_eq!(fired[1] - fired[0], 96, "the first frame past 80 ms");
-        // Exactly 500 ms does not repeat; a modifier does not interrupt.
-        repeat.press(KeyCode::ArrowLeft, 0);
-        assert_eq!(repeat.poll(0, 0), None);
-        repeat.press(KeyCode::ShiftLeft, 0);
-        assert_eq!(repeat.poll(500, 0), None);
-        assert_eq!(repeat.poll(501, 0), Some(KeyCode::ArrowLeft));
-        assert_eq!(repeat.poll(581, 0), None);
-        assert_eq!(repeat.poll(582, 0), Some(KeyCode::ArrowLeft));
-        // Releasing another key changes nothing; releasing it stops it.
         repeat.release(KeyCode::ArrowUp);
-        assert_eq!(repeat.poll(700, 0), Some(KeyCode::ArrowLeft));
+        // Exactly 500 ms does not repeat; a modifier does not repeat.
+        repeat.press(KeyCode::ArrowLeft, on);
+        assert!(repeat.poll(0, on).is_empty());
+        repeat.press(KeyCode::ShiftLeft, on);
+        assert!(repeat.poll(500, on).is_empty());
+        assert_eq!(repeat.poll(501, on), [KeyCode::ArrowLeft]);
+        assert!(repeat.poll(581, on).is_empty());
+        assert_eq!(repeat.poll(582, on), [KeyCode::ArrowLeft]);
+        // Every held key repeats, each on its own clock, in press order.
+        repeat.press(KeyCode::KeyA, on);
+        assert!(repeat.poll(600, on).is_empty());
+        assert_eq!(repeat.poll(663, on), [KeyCode::ArrowLeft]);
+        assert_eq!(repeat.poll(1101, on), [KeyCode::ArrowLeft, KeyCode::KeyA]);
+        // Releasing another key changes nothing; releasing it stops it.
+        repeat.release(KeyCode::KeyA);
+        assert_eq!(repeat.poll(1200, on), [KeyCode::ArrowLeft]);
         repeat.release(KeyCode::ArrowLeft);
-        assert_eq!(repeat.poll(2000, 0), None);
-        // A press that opened a window (its layer changed) never repeats,
-        // even back in the first layer.
-        repeat.press(KeyCode::Tab, 0);
-        assert_eq!(repeat.poll(0, 1), None);
-        assert_eq!(repeat.poll(700, 0), None);
+        assert!(repeat.poll(2000, on).is_empty());
+        // Fixture S: Tab held from 0 ms with polls every 41 ms repeats at
+        // 533, 615 and 697 ms: window toggles repeat like any key.
+        repeat.press(KeyCode::Tab, on);
+        let fired: Vec<u64> = (0..18)
+            .map(|poll| poll * 41)
+            .filter(|now| !repeat.poll(*now, on).is_empty())
+            .collect();
+        assert_eq!(fired, [533, 615, 697]);
+        // No repeat while the keyboard is disabled; the next enabled poll
+        // past the interval repeats.
+        let off = Keyboard {
+            enabled: false,
+            ..on
+        };
+        assert!(repeat.poll(1000, off).is_empty());
+        assert_eq!(repeat.poll(1001, on), [KeyCode::Tab]);
+        // Clearing the keyboard (a player turn start, a main-menu pass)
+        // cancels the repeat until the key is pressed again.
+        let cleared = Keyboard { clears: 1, ..on };
+        assert!(repeat.poll(3000, cleared).is_empty());
+        assert!(repeat.poll(5000, cleared).is_empty());
+        repeat.press(KeyCode::Tab, cleared);
+        assert!(repeat.poll(5000, cleared).is_empty());
+        assert_eq!(repeat.poll(5501, cleared), [KeyCode::Tab]);
+        // A clear between a press and the next poll cancels it too.
+        repeat.press(KeyCode::Escape, cleared);
+        assert!(repeat.poll(6000, Keyboard { clears: 2, ..on }).is_empty());
+        assert!(repeat.poll(7000, Keyboard { clears: 2, ..on }).is_empty());
         // Focus loss stops a repeat.
-        repeat.press(KeyCode::ArrowDown, 0);
-        assert_eq!(repeat.poll(0, 0), None);
+        repeat.press(KeyCode::ArrowDown, on);
         repeat.clear();
-        assert_eq!(repeat.poll(600, 0), None);
+        assert!(repeat.poll(9000, on).is_empty());
     }
 
     #[test]

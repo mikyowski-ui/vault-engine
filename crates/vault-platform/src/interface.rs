@@ -233,51 +233,53 @@ impl Painter<'_> {
     }
 }
 
-/// F12 (SPEC-014 §3.9, §3.17, §3.33) saves a screenshot. The
-/// specification leaves the file to the platform (a platform-specific
-/// facility, `[May-improve]`): the frame as displayed (through `palette`)
-/// becomes a binary PPM named `scrNNNNN.ppm`, the first free number, in
-/// `directory`. A failure is logged and changes nothing else.
+/// SPEC-014 §3.19 F12: write `image` (the composed 640-by-480 screen) as
+/// the §2.5 bitmap under `palette`, the installed palette before brightness
+/// (levels `6-bit × 4`, as a neutral-gamma display palette gives them). The
+/// name is the first of `scr00000.bmp` to `scr99999.bmp` in `directory`
+/// (the process's working directory in the game) that cannot be opened
+/// for reading, so a gap in the numbering is filled first.
+///
+/// The reference reports a failure only when every name exists or the
+/// file cannot be created; a write error after that still counts as
+/// saved. `[May-improve]` safe rule: a failed write is reported as an
+/// error too.
 pub(crate) fn save_screenshot(
     directory: &std::path::Path,
     image: &IndexedImage,
     palette: &[[u8; 4]; 256],
-) -> Option<std::path::PathBuf> {
-    if let Err(error) = std::fs::create_dir_all(directory) {
-        tracing::warn!(%error, path = %directory.display(), "screenshot not saved");
-        return None;
-    }
-    let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
-    for index in image.pixels() {
-        ppm.extend_from_slice(&palette[usize::from(*index)][..3]);
-    }
-    for number in 0..100_000 {
-        let path = directory.join(format!("scr{number:05}.ppm"));
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path);
-        match file {
-            Ok(mut file) => {
-                use std::io::Write;
-                return match file.write_all(&ppm) {
-                    Ok(()) => {
-                        tracing::info!(path = %path.display(), "screenshot saved");
-                        Some(path)
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, path = %path.display(), "screenshot not saved");
-                        None
-                    }
-                };
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                tracing::warn!(%error, path = %path.display(), "screenshot not saved");
-                return None;
-            }
+) -> Result<std::path::PathBuf, String> {
+    let levels = palette.map(|[r, g, b, _]| [r / 4, g / 4, b / 4]);
+    let bytes =
+        vault_formats::screenshot::write(image.width(), image.height(), image.pixels(), &levels)
+            .ok_or("the screenshot does not fit a bitmap")?;
+    let path = (0..100_000)
+        .map(|number| directory.join(format!("scr{number:05}.bmp")))
+        .find(|path| std::fs::File::open(path).is_err())
+        .ok_or("no free screenshot name")?;
+    std::fs::write(&path, bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+    tracing::info!(path = %path.display(), "screenshot saved");
+    Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fixture_s_screenshots_fill_the_first_gap_in_the_numbering() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["scr00000.bmp", "scr00002.bmp"] {
+            std::fs::write(dir.path().join(name), b"").unwrap();
         }
+        let image = vault_render::IndexedImage::new(640, 480).unwrap();
+        let mut palette = [[0, 0, 0, 255]; 256];
+        palette[5] = [252, 128, 0, 255];
+        let path = super::save_screenshot(dir.path(), &image, &palette).unwrap();
+        assert_eq!(path, dir.path().join("scr00001.bmp"));
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), 308_278);
+        assert_eq!(bytes[0x36 + 20..0x36 + 24], [0x00, 0x80, 0xFC, 0x00]);
+        // Safe rule: a file that cannot be written is an error.
+        let missing = dir.path().join("missing");
+        assert!(super::save_screenshot(&missing, &image, &palette).is_err());
     }
-    tracing::warn!("no free screenshot name");
-    None
 }

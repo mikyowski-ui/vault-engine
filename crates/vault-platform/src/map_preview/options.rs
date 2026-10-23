@@ -212,7 +212,18 @@ impl MapPreview {
         }
     }
     pub(crate) fn options_image(&mut self) -> AppResult<IndexedImage> {
-        let view = self.map_view_image()?;
+        let mut view = self.map_view_image()?;
+        // §3.17: before the pause window opens, every pixel of the map
+        // window (rows 0-380) is converted through the grey lookup table.
+        // The bar (and the indicator boxes) are separate windows drawn on
+        // top unconverted, so screen rows 0-378 show grey.
+        if matches!(self.screen, Screen::Options(OptionsScreen::Pause)) {
+            let rows = view.height().min(MAP_WINDOW_ROWS) as usize;
+            let width = view.width() as usize;
+            for pixel in &mut view.pixels_mut()[..width * rows] {
+                *pixel = self.grey[usize::from(*pixel)];
+            }
+        }
         let mut image = self.compose_world(view);
         let Screen::Options(screen) = &self.screen else {
             return Ok(image);
@@ -239,15 +250,7 @@ impl MapPreview {
                     painter.centered(&mut image, 103, key, &caption, [rect.x, rect.y + 8], rect.w);
                 }
             }
-            OptionsScreen::Pause => {
-                // G-24 / §3.17: the game window (the map view above the bar)
-                // is converted through the grey lookup table first.
-                let grey = vault_core::ui::grey_table(self.game_palette());
-                for pixel in &mut image.pixels_mut()[..640 * bar_top()] {
-                    *pixel = grey[usize::from(*pixel)];
-                }
-                draw_pause(&painter, &mut image, options::PAUSE_ORIGIN);
-            }
+            OptionsScreen::Pause => draw_pause(&painter, &mut image, options::PAUSE_ORIGIN),
             OptionsScreen::Quit => {
                 let [ox, oy] = options::QUIT_ORIGIN;
                 let (art, [width, _]) = flow::DialogSize::Large.art();
@@ -762,11 +765,8 @@ impl MapPreview {
     }
 }
 
-/// The bar window's top row: the game window above it is what the pause
-/// greys (the bar is a separate window).
-fn bar_top() -> usize {
-    vault_core::ui::bar::BAR_ORIGIN[1] as usize
-}
+/// §3.17 the map window is 640 by 381; the pause converts rows 0-380.
+const MAP_WINDOW_ROWS: u32 = 381;
 
 /// §3.17 the pause window at `origin`: `charwin.frm`, `donebox.frm` drawn
 /// transparently at (13, 42), DONE (`options.msg` 300) at (52, 45) in font

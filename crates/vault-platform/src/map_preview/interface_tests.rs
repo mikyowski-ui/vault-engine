@@ -32,6 +32,7 @@ fn world(dir: &std::path::Path) -> MapPreview {
     )
     .unwrap();
     preview.save_root = dir.join("saves");
+    preview.screenshot_dir = dir.to_path_buf();
     preview
 }
 fn npc(preview: &MapPreview) -> vault_core::ObjectRef {
@@ -2512,9 +2513,25 @@ fn g15_a_use_only_explosive_in_the_slot_opens_set_timer() {
     assert_eq!(preview.hud.mode, Mode::Movement);
     assert!(preview.hud.timer.is_some());
     preview.image().unwrap();
-    // Plus makes it 70 seconds (with the red-button sounds); Enter arms.
-    assert!(preview.click([140 + 196, 80 + 66], false));
-    assert!(preview.step(KeyCode::Enter));
+    // Plus makes it 70 seconds on the press, once (with the red-button
+    // sounds); minus and plus again, 70.
+    let plus = [140 + 196, 80 + 66];
+    let minus = [140 + 196, 80 + 78];
+    assert!(preview.click(plus, false));
+    let seconds = |preview: &MapPreview| preview.hud.timer.as_ref().unwrap().1.seconds;
+    assert_eq!(seconds(&preview), 70);
+    assert!(preview.release(Some(plus), false));
+    assert!(preview.tap(minus));
+    assert!(preview.tap(plus));
+    assert_eq!(seconds(&preview), 70);
+    // SPEC-013 §3.15: Done acts on the release, and only over the button.
+    let done = [140 + 98 + 5, 80 + 128 + 5];
+    assert!(preview.click(done, false));
+    assert!(preview.hud.timer.is_some(), "a press does not act");
+    assert!(preview.release(Some([10, 10]), false));
+    assert!(preview.hud.timer.is_some(), "released off the button");
+    assert!(preview.click(done, false));
+    assert!(preview.release(Some(done), false));
     assert!(preview.hud.timer.is_none());
     let object = preview.host.world.get(dynamite).unwrap();
     assert_eq!(object.raw.pid, vault_core::skills::DYNAMITE_ARMED);
@@ -2698,21 +2715,44 @@ fn g24_pause_windows_grey_the_view() {
     assert!(matches!(preview.screen, Screen::Options(_)));
     let paused = preview.image().unwrap();
     let grey = vault_core::ui::grey_table(&preview.palette);
-    for at in [10 * 640 + 10, 300 * 640 + 600] {
+    assert_eq!(preview.grey, grey, "built from color.pal at the start");
+    // §3.17: map rows 0-378 turn grey; the bar from row 379 stays on top.
+    for at in [10 * 640 + 10, 300 * 640 + 600, 378 * 640 + 5] {
         assert_eq!(paused.pixels()[at], grey[usize::from(before.pixels()[at])]);
+    }
+    for at in [379 * 640 + 5, 400 * 640 + 300] {
+        assert_eq!(paused.pixels()[at], before.pixels()[at], "the bar");
     }
     // The brightness keys keep it open; any other key closes it.
     assert!(preview.step(KeyCode::Equal));
     assert!(matches!(preview.screen, Screen::Options(_)));
+    assert_eq!(preview.grey, grey, "brightness does not change the table");
     assert!(preview.step(KeyCode::Space));
     assert!(matches!(preview.screen, Screen::Map));
     // The world map's `p` opens its own pause window.
     preview.open_world_map();
+    let mut now = 1000;
+    preview.tick(now).unwrap();
+    let shown = preview.image().unwrap();
     assert!(preview.step(KeyCode::KeyP));
     assert!(matches!(&preview.screen, Screen::World(world) if world.paused));
-    preview.image().unwrap();
+    let at = 200 * 640 + 200;
+    assert_eq!(
+        preview.image().unwrap().pixels()[at],
+        grey[usize::from(shown.pixels()[at])]
+    );
     assert!(preview.click([300, 300], false));
     assert!(matches!(&preview.screen, Screen::World(world) if !world.paused));
+    // The region stays grey until the next pass redraws the view, which
+    // follow mode does on the next loop pass.
+    assert_eq!(
+        preview.image().unwrap().pixels()[at],
+        grey[usize::from(shown.pixels()[at])]
+    );
+    now += 1000;
+    preview.tick(now).unwrap();
+    assert!(matches!(&preview.screen, Screen::World(world) if world.grey.is_none()));
+    assert_eq!(preview.image().unwrap().pixels()[at], shown.pixels()[at]);
 }
 
 #[test]
@@ -2721,12 +2761,110 @@ fn g26_z_opens_the_alarm_clock_and_f12_saves_a_screenshot() {
     let mut preview = world(dir.path());
     preview.image().unwrap();
     assert!(preview.step(KeyCode::F12));
-    assert!(dir.path().join("saves/scr00000.ppm").exists());
+    assert!(dir.path().join("scr00000.bmp").exists());
     assert!(preview.step(KeyCode::KeyZ));
     assert!(matches!(
         &preview.screen,
         Screen::PipBoy(pipboy) if pipboy.tab() == Some(super::pipboy::Tab::Alarm)
     ));
+}
+
+#[test]
+fn fixture_s_f12_fills_the_first_gap_from_any_window_and_reports_it() {
+    let dir = corpus();
+    let text = dir.path().join("text/english/game");
+    std::fs::write(
+        text.join("misc.msg"),
+        "{3}{}{Saved screenshot.}\n{8}{}{Error saving screenshot.}\n",
+    )
+    .unwrap();
+    for name in ["scr00000.bmp", "scr00002.bmp"] {
+        std::fs::write(dir.path().join(name), b"").unwrap();
+    }
+    let mut preview = world(dir.path());
+    preview.image().unwrap();
+    // SPEC-014 §3.19: F12 is caught before any window sees it, so it works
+    // over the Pip-Boy and leaves it open.
+    assert!(preview.step(KeyCode::KeyZ));
+    assert!(matches!(&preview.screen, Screen::PipBoy(_)));
+    assert!(preview.step(KeyCode::F12));
+    assert!(matches!(&preview.screen, Screen::PipBoy(_)));
+    let shot = std::fs::read(dir.path().join("scr00001.bmp")).unwrap();
+    assert_eq!(shot.len(), 308_278);
+    assert_eq!(&shot[..2], b"BM");
+    assert_eq!(monitor_line(&preview), b"Saved screenshot.");
+    // The palette is the installed one before brightness: six-bit levels
+    // times 4, whatever the brightness setting.
+    let levels = preview.game_palette().rgb6(220);
+    assert_eq!(
+        shot[0x36 + 4 * 220..0x36 + 4 * 220 + 3],
+        [levels[2] * 4, levels[1] * 4, levels[0] * 4]
+    );
+    // Safe rule: a file that cannot be written reports misc.msg 8.
+    preview.screenshot_dir = dir.path().join("missing");
+    assert!(preview.step(KeyCode::F12));
+    assert_eq!(monitor_line(&preview), b"Error saving screenshot.");
+}
+
+#[test]
+fn spec014_monitor_scroll_areas_belong_to_the_bar_enable_state() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.image().unwrap();
+    for line in 0..8 {
+        preview
+            .host
+            .world
+            .effects
+            .push_back(WorldEffect::Message(format!("line {line}").into_bytes()));
+    }
+    preview.image().unwrap();
+    assert_eq!(monitor_line(&preview), b"line 7");
+    let upper = [23 + 5, 379 + 24 + 5];
+    let lower = [23 + 5, 379 + 54 + 5];
+    // §3.20: while a script has the bar disabled a press does not scroll
+    // and the areas change no cursor.
+    preview.host.world.ui_disabled = true;
+    assert_eq!(preview.monitor_area(upper), None);
+    preview.tap(upper);
+    assert_eq!(monitor_line(&preview), b"line 7");
+    // Enabled: one line per press, with no repeat while held.
+    preview.host.world.ui_disabled = false;
+    assert_eq!(preview.monitor_area(upper), Some(true));
+    assert_eq!(preview.monitor_area(lower), Some(false));
+    assert!(preview.click(upper, false));
+    preview.tick(5000).unwrap();
+    preview.release(Some(upper), false);
+    assert_eq!(monitor_line(&preview), b"line 6");
+    assert!(preview.tap(lower));
+    assert_eq!(monitor_line(&preview), b"line 7");
+    // The combat lock disables the bar, and the areas with it.
+    preview.host.world.combat = true;
+    preview.hud.panel = super::hud::Panel::settled(true, false);
+    assert!(preview.combat_locked());
+    assert_eq!(preview.monitor_area(upper), None);
+}
+
+#[test]
+fn fixture_s_the_date_line_prints_also_while_the_bar_is_disabled() {
+    let dir = corpus();
+    std::fs::write(
+        dir.path().join("text/english/game/editor.msg"),
+        "{511}{}{December}\n",
+    )
+    .unwrap();
+    let mut preview = world(dir.path());
+    preview.image().unwrap();
+    preview.host.world.clock.ticks = 264_600;
+    assert!(preview.step(KeyCode::Slash));
+    assert_eq!(monitor_line(&preview), b"December: 5/2161 7:21");
+    // `?` (Shift+/) while a script has the interface disabled.
+    preview.host.world.ui_disabled = true;
+    preview.host.world.clock.ticks = 264_600 + 23_400;
+    preview.set_modifiers([true, false, false]);
+    assert!(preview.step(KeyCode::Slash));
+    preview.set_modifiers([false, false, false]);
+    assert_eq!(monitor_line(&preview), b"December: 5/2161 8:00");
 }
 
 #[test]
@@ -2891,7 +3029,7 @@ fn s04_hotkeys_are_refused_on_the_enemy_turn() {
     assert!(matches!(preview.screen, Screen::Map));
     assert!(preview.watch_shown());
     assert_eq!(preview.hud.held_keys.len(), 8);
-    assert!(!preview.save_root.exists(), "no screenshot");
+    assert!(!dir.path().join("scr00000.bmp").exists(), "no screenshot");
     // The player's turn gives the keyboard back and flushes the keys typed
     // on the enemy turn.
     preview.host.combat_lock.begin_turn();
@@ -3131,7 +3269,7 @@ fn g16_swap_hands_goes_through_the_world_and_returns_to_movement() {
     assert!(preview.step(KeyCode::Escape));
     assert!(matches!(preview.screen, Screen::Map));
     assert!(preview.step(KeyCode::F12));
-    assert!(preview.save_root.join("scr00000.ppm").exists());
+    assert!(dir.path().join("scr00000.bmp").exists());
     assert!(preview.hud.held_keys.is_empty());
     // The Swap hands button still presses (its art and sounds), but the
     // `b` it sends does nothing while the bar is disabled.

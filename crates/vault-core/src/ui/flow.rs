@@ -402,8 +402,16 @@ pub struct DialogButton {
     pub caption: i32,
     pub transparent_box: bool,
 }
-/// Done box, or the Yes and No boxes.
+/// A large box's Done box, or the Yes and No boxes.
 pub fn dialog_buttons(yes_no: bool) -> Vec<DialogButton> {
+    dialog_buttons_for(yes_no, DialogSize::Large)
+}
+/// §3.13 the buttons of a box of `size`. The Done box is copied opaquely,
+/// centered: x = `trunc((box width - 108) / 2)`, its top at 98 in the
+/// large box and 81 in the medium one, the caption at (x + 35, top + 3)
+/// and the red button at (x + 13, top + 4). A Yes/No box is always large
+/// (`dialog_size`), so its two boxes have one layout.
+pub fn dialog_buttons_for(yes_no: bool, size: DialogSize) -> Vec<DialogButton> {
     if yes_no {
         vec![
             DialogButton {
@@ -422,10 +430,16 @@ pub fn dialog_buttons(yes_no: bool) -> Vec<DialogButton> {
             },
         ]
     } else {
+        let (_, [width, _]) = size.art();
+        let x = (width - DONE_BOX.1[0]) / 2;
+        let top = match size {
+            DialogSize::Large => 98,
+            DialogSize::Medium => 81,
+        };
         vec![DialogButton {
-            box_origin: [97, 98],
-            caption_origin: [132, 101],
-            button: [110, 102],
+            box_origin: [x, top],
+            caption_origin: [x + 35, top + 3],
+            button: [x + 13, top + 4],
             caption: 100,
             transparent_box: false,
         }]

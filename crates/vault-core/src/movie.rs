@@ -215,13 +215,64 @@ pub fn frame_origin(size: [usize; 2]) -> [i32; 2] {
 /// `(480 - H - Y - th) / 2 + H + Y` for the last displayed frame's height
 /// H and top Y.
 pub fn subtitle_band(text_height: i32, frame_height: i32, frame_top: i32) -> [i32; 4] {
+    subtitle_band_lines(text_height, frame_height, frame_top, 1)
+}
+/// §3.10 step 6 `[May-improve]` safe rule: the band for an entry wrapped
+/// onto `lines` lines grows downward by one text height per extra line,
+/// `lines × th + 4` tall, clipped to the window bottom (one line gives the
+/// reference band).
+pub fn subtitle_band_lines(
+    text_height: i32,
+    frame_height: i32,
+    frame_top: i32,
+    lines: usize,
+) -> [i32; 4] {
     let top = (WINDOW[1] - frame_height - frame_top - text_height) / 2 + frame_height + frame_top;
-    [
-        0,
-        top,
-        WINDOW[0],
-        (text_height + 4).min(WINDOW[1] - top).max(0),
-    ]
+    let lines = i32::try_from(lines.max(1)).unwrap_or(i32::MAX);
+    let height = text_height.saturating_mul(lines).saturating_add(4);
+    [0, top, WINDOW[0], height.min(WINDOW[1] - top).max(0)]
+}
+/// §3.10 step 6 subtitle wrapping for the 640-pixel window: `(start, end)`
+/// byte ranges of the lines. Each character adds its width (SPEC-002 §3.1;
+/// a space counts as the space width); while the sum is at most 640 the
+/// letter spacing is added and the scan continues. At the first character
+/// that takes the sum past 640 the line steps back to the last space before
+/// that character and ends just before it; the following spaces are
+/// skipped, and the next line starts at the first non-space character.
+///
+/// `[May-improve]`: text with no space before the overflow point makes the
+/// reference wrapper loop forever; here such a line breaks before the
+/// overflowing character (and holds at least one character, so a single
+/// glyph wider than the window still advances).
+pub fn subtitle_lines(font: &vault_formats::Font, text: &[u8]) -> Vec<(usize, usize)> {
+    let limit = i64::from(WINDOW[0]);
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut sum = 0_i64;
+        let mut end = text.len();
+        for (at, code) in text.iter().enumerate().skip(start) {
+            // An unsupported code neither draws nor advances (SPEC-002).
+            let Some(width) = font.character_width(*code) else {
+                continue;
+            };
+            sum += i64::from(width);
+            if sum > limit {
+                end = match text[start..at].iter().rposition(|byte| *byte == b' ') {
+                    Some(space) => start + space,
+                    None => at.max(start + 1),
+                };
+                break;
+            }
+            sum += i64::from(font.spacing());
+        }
+        lines.push((start, end));
+        start = end;
+        while text.get(start) == Some(&b' ') {
+            start += 1;
+        }
+    }
+    lines
 }
 
 /// A game movie request for the presentation layer (§3.12): the movie was
