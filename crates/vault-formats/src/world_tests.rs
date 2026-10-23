@@ -305,6 +305,21 @@ fn spec003_exit_grid_art_is_rebuilt_on_every_read() {
     assert_eq!(art(&saved).0, 0x0503_0025);
     // A positive destination keeps its art.
     assert_eq!(art(&map(0x1503_7005, 4)).0, 0x1503_7005);
+    // SPEC-003 §2.10 row 0x3C: a stored outline word is discarded on load,
+    // and saving writes the current runtime word (SPEC-014 §3.44).
+    let mut stored = map(0x1503_7005, 4);
+    let object = stored.len() - 8 - fixture::object(5, 20100, 1, &[4, 12345, 0, 2]).len();
+    fixture::word(&mut stored, object + 0x3c, 0x8000_0001_u32 as i32);
+    let mut loaded = MapFile::parse(&stored, &lookup).unwrap();
+    assert_eq!(loaded.objects.elevations[0][0].outline, 0);
+    loaded.objects.elevations[0][0].outline = 0x8000_0001;
+    assert!(!loaded.objects.elevations[0][0].outlined());
+    let saved = loaded.write().unwrap();
+    let saved_object = saved.len() - 8 - fixture::object(5, 20100, 1, &[4, 12345, 0, 2]).len();
+    assert_eq!(
+        saved[saved_object + 0x3c..saved_object + 0x40],
+        0x8000_0001_u32.to_be_bytes()
+    );
 }
 
 #[test]

@@ -18,13 +18,11 @@ use vault_core::{
         cursor::{self, Entry, MenuTracker, Mode, MoveHover, Primary, Target},
     },
 };
-use vault_formats::{
-    Fid, HexGrid,
-    pro::{BasicFlags, Category},
-};
+use vault_formats::{Fid, HexGrid, map::outline, pro::Category};
 use vault_render::{
     IndexedImage,
-    map::{object_sprite, pick_candidates},
+    map::pick_candidates,
+    outline::{OutlineInks, draw_outline},
 };
 
 /// The scroll blocker (misc PID `0x0500000C`).
@@ -104,8 +102,11 @@ pub(crate) struct PointerState {
     seen: Option<(Mode, bool, bool)>,
     /// The last movement hover's inputs and feedback.
     route: Option<(RouteKey, Option<Feedback>)>,
-    /// The item the arrow hover outlines, until the pointer moves.
+    /// The item the arrow hover outlined (type 16 in its outline word),
+    /// until the pointer moves.
     pub outlined: Option<ObjectRef>,
+    /// The hover outline was removed: the scene is drawn again.
+    pub redraw: bool,
     /// Paths planned for movement hovers.
     #[cfg(test)]
     pub routes_planned: u32,
@@ -150,43 +151,6 @@ fn outlined(
         }
     }
     painter.text(image, 101, key, text, origin, 80);
-}
-
-/// SPEC-014 §3.27 the movement cursor's translucent red outline (G-31): one
-/// pixel around the hex outline's opaque pixels, above the bar window's
-/// top row, each pixel an even mix of red (key 31744) and the pixel
-/// beneath. The specification names the outline but not its geometry or
-/// translucency, so this rule is provisional.
-fn red_outline(
-    palette: &vault_formats::Palette,
-    image: &mut IndexedImage,
-    frame: &vault_formats::frm::FrmFrame,
-    origin: [i64; 2],
-) {
-    let (width, height) = (i64::from(frame.width), i64::from(frame.height));
-    let opaque = |x: i64, y: i64| {
-        (0..width).contains(&x)
-            && (0..height).contains(&y)
-            && frame.pixels()[(y * width + x) as usize] != 0
-    };
-    let stride = i64::from(image.width());
-    let [red, ..] = ColorKey::RED.rgb5();
-    for y in -1..=height {
-        for x in -1..=width {
-            if opaque(x, y) || !(-1..=1).any(|dy| (-1..=1).any(|dx| opaque(x + dx, y + dy))) {
-                continue;
-            }
-            let (px, py) = (origin[0] + x, origin[1] + y);
-            if !(0..stride).contains(&px) || !(0..i64::from(map_bottom())).contains(&py) {
-                continue;
-            }
-            let pixel = &mut image.pixels_mut()[(py * stride + px) as usize];
-            let [r, g, b] = palette.rgb6(*pixel).map(|level| level / 2);
-            if let Some(mixed) = palette.lookup_rgb5([(r + red) / 2, g / 2, b / 2]) {
-                *pixel = mixed;
-            }
-        }
-    }
 }
 
 impl MapPreview {
@@ -256,7 +220,34 @@ impl MapPreview {
         };
         self.pointer.rested = false;
         self.pointer.feedback = None;
-        self.pointer.outlined = None;
+        self.clear_item_outline();
+    }
+    /// SPEC-014 §3.27 and §3.44: the world sees the `target_highlight`
+    /// setting and the cursor mode; entering crosshair mode runs the
+    /// target-outline enable step and leaving it the disable step. Returns
+    /// whether the mode changed.
+    pub(crate) fn sync_crosshair(&mut self) -> bool {
+        let crosshair = self.hud.mode == Mode::Crosshair;
+        let world = &mut self.host.world;
+        world.target_highlight = self.preferences.target_highlight;
+        if world.crosshair == crosshair {
+            return false;
+        }
+        world.crosshair = crosshair;
+        if crosshair {
+            world.enable_target_outlines();
+        } else {
+            world.disable_target_outlines();
+        }
+        true
+    }
+    /// SPEC-014 §3.27 and §3.44: the arrow hover's item outline is removed
+    /// (its outline word set to 0) and the scene is drawn again.
+    pub(crate) fn clear_item_outline(&mut self) {
+        if let Some(item) = self.pointer.outlined.take() {
+            self.host.world.remove_outline(item);
+            self.pointer.redraw = true;
+        }
     }
     /// The pointer moved to a frame pixel: the rest restarts, the hover art
     /// reverts, and an open menu tracks the vertical motion.
@@ -298,7 +289,7 @@ impl MapPreview {
         self.pointer.at = None;
         self.pointer.rested = false;
         self.pointer.feedback = None;
-        self.pointer.outlined = None;
+        self.clear_item_outline();
         self.pointer.edge = None;
     }
     /// A left press in the map area: the click waits for the release, and
@@ -656,13 +647,13 @@ impl MapPreview {
             Mode::Arrow => {
                 let object = self.object_at(at)?;
                 let target = self.target_kind(object)?;
-                // With item highlight on, an item gets the outline unless
-                // it has one already or carries the no-highlight flag.
+                // With item highlight on, an item gets outline type 16
+                // (opaque) unless it has a type already or carries the
+                // no-highlight flag (SPEC-014 §3.44 "set a type").
                 if matches!(target, Target::Item { .. })
                     && self.preferences.item_highlight != 0
-                    && self.host.world.get(object).is_some_and(|item| {
-                        item.raw.outline == 0 && !item.raw.flags.contains(BasicFlags::NO_HIGHLIGHT)
-                    })
+                    && self.pointer.outlined != Some(object)
+                    && self.host.world.set_outline(object, outline::ITEM)
                 {
                     self.pointer.outlined = Some(object);
                 }
@@ -745,7 +736,6 @@ impl MapPreview {
             painter.cursor(image, cursor::ARROW.art, at);
             return;
         }
-        self.draw_outline(&painter, image);
         if let Some(item) = self.dragged_item() {
             if let Some(icon) = self.item_icon(item)
                 && let Some(frame) = icon.frame(0, 0)
@@ -838,29 +828,6 @@ impl MapPreview {
         }
         painter.cursor(image, cursor::ARROW.art, at);
     }
-    /// §3.27 the hovered item's outline in key 30632, drawn with the cursor
-    /// so that a move removes it at once. No approved spec gives its
-    /// geometry: it is one pixel around the item's opaque pixels, over the
-    /// composed map view (provisional).
-    fn draw_outline(&self, painter: &Painter, image: &mut IndexedImage) {
-        let Some(item) = self.pointer.outlined else {
-            return;
-        };
-        if !self.world_pointer() {
-            return;
-        }
-        let Some(object) = self.host.world.get(item) else {
-            return;
-        };
-        if object.owner.is_some() || object.raw.elevation != self.view.elevation {
-            return;
-        }
-        if let Some((frame, origin)) = object_sprite(self.view, &self.art, &object.raw) {
-            let color = painter.color(cursor::ITEM_OUTLINE);
-            // The bar window covers row 379 down.
-            image.outline(frame, origin, color, [0, i64::from(map_bottom())]);
-        }
-    }
     fn draw_world_cursor(&self, painter: &Painter, image: &mut IndexedImage, at: [i32; 2]) {
         let feedback = self.pointer.feedback.as_ref();
         match self.hud.mode {
@@ -872,7 +839,9 @@ impl MapPreview {
                     return;
                 };
                 // The 32-by-16 hex outline drawn as a flat object at the hex,
-                // with its translucent red outline (movement mode only).
+                // with outline type 2 and the translucent bit (movement mode
+                // only): the SPEC-014 §3.44 ring, blended through the red
+                // translucency table, over the 640-by-380 map buffer.
                 if let Some(art) = painter.art(Mode::Movement.art())
                     && let Some(frame) = art.frame(0, 0)
                 {
@@ -881,8 +850,12 @@ impl MapPreview {
                         center[0] + sx - i64::from(frame.width / 2),
                         center[1] + sy - i64::from(frame.height) + 1,
                     ];
-                    red_outline(painter.palette, image, frame, origin);
                     image.blit(frame, origin);
+                    let inks = OutlineInks::new(painter.palette);
+                    if let Some(ink) = inks.ink(outline::RED | outline::TRANSLUCENT) {
+                        let map = [640, i64::from(map_bottom())];
+                        draw_outline(image, frame, origin, ink, [0, 0, map[0], map[1]], map);
+                    }
                 }
                 if let Some(Feedback::Cost(text, key)) = feedback {
                     let cell = [center[0] as i32 - 16, center[1] as i32 - 8];

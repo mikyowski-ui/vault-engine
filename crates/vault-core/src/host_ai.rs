@@ -435,8 +435,8 @@ impl<A: WorldAssets> WorldHost<A> {
         found
     }
     /// §3.15 team switching: store the team, then clear a last attacker now
-    /// on that team. (The combat outline rebuild of step 4 is presentation
-    /// with no approved encoding; outlines are not modeled.)
+    /// on that team; in combat the outline is rebuilt (step 4, SPEC-014
+    /// §3.44).
     pub fn set_team(&mut self, critter: ObjectRef, team: i32) {
         let Some(state) = self.world.critter_state_mut(critter) else {
             return;
@@ -447,6 +447,7 @@ impl<A: WorldAssets> WorldHost<A> {
         {
             self.set_last_attacker(critter, 0);
         }
+        self.world.rebuild_combat_outline(critter);
     }
     /// §3.16 replacement defender for a random-hit critical failure: no draw
     /// for an empty snapshot; otherwise scan from `random(0, n - 1)`,

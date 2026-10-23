@@ -178,34 +178,6 @@ impl IndexedImage {
         }
     }
 
-    /// A one-pixel, one-color outline around `frame` drawn at `origin`:
-    /// every transparent pixel (inside the frame or in the one-pixel ring
-    /// around it) with an opaque neighbor among its eight takes `color`,
-    /// within the `clip` rows `[top, bottom)`.
-    pub fn outline(&mut self, frame: &FrmFrame, origin: [i64; 2], color: u8, clip: [i64; 2]) {
-        let (width, height) = (i64::from(frame.width), i64::from(frame.height));
-        let opaque = |x: i64, y: i64| {
-            (0..width).contains(&x)
-                && (0..height).contains(&y)
-                && frame.pixels()[(y * width + x) as usize] != 0
-        };
-        for y in -1..=height {
-            for x in -1..=width {
-                if opaque(x, y) {
-                    continue;
-                }
-                let row = origin[1] + y;
-                let edge = (-1..=1).any(|dy| (-1..=1).any(|dx| opaque(x + dx, y + dy)));
-                if edge
-                    && (clip[0]..clip[1]).contains(&row)
-                    && let Some(pixel) = self.pixel_mut(origin[0] + x, row)
-                {
-                    *pixel = color;
-                }
-            }
-        }
-    }
-
     /// UI rectangle centering: no world shifts or accumulated animation movement.
     /// Nearest-neighbor fit, with at most 4x magnification.
     pub fn draw_frame(&mut self, frame: &FrmFrame, origin: [u32; 2], size: [u32; 2]) {
@@ -449,6 +421,52 @@ mod tests {
         assert_eq!(&image.pixels()[6..9], &[28; 3]);
         assert_eq!(&image.pixels()[9..12], &[0; 3]);
     }
+    /// SPEC-002 §3.2 destination sampling: each glyph pixel reads the index
+    /// already at the pixel it writes, with no snapshot, so a later string
+    /// blends over an earlier one, and the shadow pass is drawn first at
+    /// (1, 1).
+    #[test]
+    fn spec002_aaf_blends_read_the_destination_being_written() {
+        let palette = Palette::parse(&fixtures::grayscale_palette()).unwrap();
+        let font = Font::parse_aaf(&fixtures::aaf()).unwrap();
+        let style = TextStyle {
+            foreground: 28,
+            ..Default::default()
+        };
+        let blend = |coverage: u8, destination: u8| {
+            palette.blend_coverage(coverage, 28, destination).unwrap()
+        };
+        let mut image = IndexedImage::new(5, 5).unwrap();
+        image.draw_text(&font, &palette, b"A", [0, 0], 4, style);
+        image.draw_text(&font, &palette, b"A", [0, 0], 4, style);
+        // Coverage 1 at (1, 1) and 3 at (1, 2) blend over the first pass.
+        assert_eq!(image.pixels()[5 + 1], blend(1, blend(1, 0)));
+        assert_eq!(image.pixels()[10 + 1], blend(3, blend(3, 0)));
+        assert_eq!(image.pixels()[5 + 2], 28);
+        // With a shadow: the black pass at (1, 1) first, then the main pass
+        // over it. (2, 2) and (3, 2) hold only shadow pixels; (0, 2) the
+        // main coverage 8 over the background.
+        let black = palette.lookup_rgb5([0, 0, 0]).unwrap();
+        let mut image = IndexedImage::from_pixels(5, 5, vec![20; 25]).unwrap();
+        image.draw_text(
+            &font,
+            &palette,
+            b"A",
+            [0, 0],
+            4,
+            TextStyle {
+                shadow: true,
+                ..style
+            },
+        );
+        let shadow = |coverage: u8| palette.blend_coverage(coverage, black, 20).unwrap();
+        assert_eq!(image.pixels()[10 + 2], shadow(1));
+        assert_eq!(image.pixels()[10 + 3], shadow(7));
+        assert_eq!(image.pixels()[10], blend(8, 20));
+        // (1, 2): the main coverage 3 over the shadow's untouched pixel.
+        assert_eq!(image.pixels()[10 + 1], blend(3, 20));
+    }
+
     #[test]
     fn fon_drawing_copies_foreground_directly_and_clips_safely() {
         let palette = Palette::parse(&fixtures::palette()).unwrap();

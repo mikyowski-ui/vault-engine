@@ -20,7 +20,10 @@ use vault_formats::{
 use vault_render::{
     IndexedImage,
     dialogue::{self, ChoiceHit},
-    map::{Cutout, MapArt, MapHover, MapLight, MapScene, MapView, draw_map_scene, render_floor},
+    map::{
+        Cutout, MapArt, MapHover, MapLight, MapScene, MapView, draw_map_scene, render_floor_lit,
+    },
+    outline::OutlineInks,
 };
 use winit::keyboard::KeyCode;
 
@@ -40,7 +43,6 @@ pub(crate) use fade::FADE_MS;
 mod help;
 mod hud;
 mod inventory;
-mod light;
 mod loot;
 mod movies;
 mod options;
@@ -180,7 +182,6 @@ pub struct MapPreview {
     /// The vault-debug inspector and its overlay, when on.
     debug: Option<debug::DebugOverlay>,
     /// The map view's light levels.
-    light: light::LightCache,
     /// SPEC-014 §3.34 the inventory figure's facing and when it last
     /// turned; the counter persists between openings.
     figure: (u8, u64),
@@ -485,7 +486,6 @@ impl MapPreview {
             fades: Default::default(),
             startup_fade: false,
             debug: None,
-            light: Default::default(),
             figure: (0, 0),
             held: None,
             held_shown: false,
@@ -1011,20 +1011,18 @@ impl MapPreview {
         let objects = self.host.world.render_objects();
         let map = &self.host.world.map;
         self.art.bind(&self.host.assets, map, &objects)?;
-        // SPEC-014 §3.44 names no floor light: each floor pixel takes its
-        // hex's light. Objects take their hex's light and roofs the ambient.
-        let mut image = render_floor(map, self.view, &self.art)?;
-        let size = [image.width(), image.height()];
+        // SPEC-014 §3.44: floor tiles are lit per pixel from ten hex
+        // lights around each tile; objects take their hex's light and roofs
+        // the ambient.
         let tiles = &self.host.world.tile_light[self.view.elevation as usize];
         let ambient = self.host.world.ambient;
-        self.light.shade(
-            image.pixels_mut(),
-            size,
-            self.view.grid,
-            &self.palette,
-            tiles,
+        let light = MapLight {
+            palette: &self.palette,
             ambient,
-        );
+            tiles,
+        };
+        let mut image = render_floor_lit(map, self.view, &self.art, light)?;
+        let inks = OutlineInks::new(&self.palette);
         let extended = |pid: u32| {
             self.host
                 .assets
@@ -1032,15 +1030,10 @@ impl MapPreview {
                 .map_or(0, |prototype| prototype.extended.0)
         };
         let cutout = self.cutout(egg.as_deref(), &extended);
-        let light = MapLight {
-            palette: &self.palette,
-            ambient,
-            tiles,
-        };
         let scene = MapScene {
             cutout: cutout.as_ref(),
             light: Some(light),
-            outline: None,
+            outlines: Some(&inks),
         };
         draw_map_scene(&mut image, map, &objects, self.view, &self.art, scene)?;
         self.frozen_view = modal.then(|| image.clone());
@@ -1475,6 +1468,7 @@ impl MapPreview {
             }
             return Ok(changed);
         }
+        let crosshair = self.sync_crosshair();
         // SPEC-010 §3.12: the head updater reads the speech position once
         // per tick.
         self.host.speech_clock(self.audio.speech_position());
@@ -1507,7 +1501,7 @@ impl MapPreview {
             Screen::SaveLoad(_) => Ok(self.saveload_frame(now)),
         };
         let mut changed = match screen {
-            Ok(changed) => changed,
+            Ok(changed) => changed | crosshair,
             Err(error) => {
                 self.status = error.to_string().into_bytes();
                 tracing::warn!(%error,"world update failed");
@@ -1532,6 +1526,7 @@ impl MapPreview {
             .fades
             .tick(now, game.as_deref().unwrap_or(&self.palette));
         changed |= self.pointer_tick();
+        changed |= std::mem::take(&mut self.pointer.redraw);
         changed |= self.held_moved();
         changed |= self.counters_tick(now);
         changed |= self.panel_tick(now);
@@ -1658,6 +1653,23 @@ mod tests {
             }
         }
         [root, table, payload].concat()
+    }
+    /// SPEC-014 §3.44: the entrance placement reinserts the player last
+    /// on its hex, over the synthetic item there; the item is moved onto
+    /// that hex again, so it is drawn (and picked) on top.
+    fn raise_item(preview: &mut MapPreview) {
+        let item = preview
+            .host
+            .world
+            .iter()
+            .find(|(_, object)| object.raw.pid == 1 && object.raw.hex == Some(20100))
+            .map(|(reference, _)| reference)
+            .unwrap();
+        preview
+            .host
+            .world
+            .move_object(item, 20100, 0, false)
+            .unwrap();
     }
     fn interactive(dir: &std::path::Path) -> MapPreview {
         let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir).unwrap());
@@ -2162,6 +2174,7 @@ mod tests {
         )
         .unwrap();
         let mut preview = interactive(dir.path());
+        raise_item(&mut preview);
         preview.image().unwrap();
         // Pick up the synthetic item with an arrow-mode click.
         preview.hud.mode = vault_core::ui::cursor::Mode::Arrow;
@@ -2436,6 +2449,8 @@ mod tests {
         // The map frame now carries the interface bar below the view.
         assert_eq!(preview.image().unwrap().height(), 480);
         // An arrow click on an item picks it up into authoritative inventory.
+        raise_item(&mut preview);
+        preview.image().unwrap();
         preview.tap([320, 185]);
         let item = preview.selected.unwrap();
         assert_eq!(

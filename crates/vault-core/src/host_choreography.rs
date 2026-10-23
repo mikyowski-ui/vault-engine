@@ -188,7 +188,14 @@ impl<A: WorldAssets> WorldHost<A> {
             if !self.world.shows.front().is_some_and(Show::finished) {
                 break;
             }
-            self.world.shows.pop_front();
+            if self
+                .world
+                .shows
+                .pop_front()
+                .is_some_and(|show| show.outlines)
+            {
+                self.world.enable_target_outlines();
+            }
             changed = true;
         }
         self.sync_combat_lock();
@@ -231,6 +238,9 @@ impl<A: WorldAssets> WorldHost<A> {
             Playback::Instant => {
                 let taunts = std::mem::take(&mut show.taunts);
                 self.start_all(&started, &taunts);
+                if show.outlines {
+                    self.world.enable_target_outlines();
+                }
             }
             Playback::RealTime => {
                 show.combat = self.world.combat;
@@ -257,15 +267,21 @@ impl<A: WorldAssets> WorldHost<A> {
         } else {
             display.art
         };
+        let offset = if resting {
+            [0; 2]
+        } else {
+            display.displacement
+        };
         if let Some(found) = self.world.get_mut(object) {
             found.raw.art_id = fid;
             found.raw.frame = if resting { 0 } else { display.frame };
             found.raw.orientation = display.orientation;
-            found.raw.displacement = if resting {
-                [0; 2]
-            } else {
-                display.displacement
-            };
+            found.raw.displacement = offset;
+        }
+        // SPEC-014 §3.44: an object the show stepped or moved ends at the
+        // end of its group, as the show's own frame steps left it.
+        if display.inserted.is_some() {
+            self.world.set_offset(object, offset);
         }
     }
 
@@ -492,6 +508,7 @@ impl<A: WorldAssets> WorldHost<A> {
             displacement: found.raw.displacement,
             hidden: found.raw.flags.contains(BasicFlags::HIDDEN),
             flat: found.raw.flags.contains(BasicFlags::FLAT),
+            inserted: None,
         })
     }
     /// A critter art identifier: `critter`'s base, `animation`, its art's
@@ -969,6 +986,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 displacement: [0; 2],
                 hidden: true,
                 flat: false,
+                inserted: None,
             },
         );
         let options = RayOptions {
@@ -1059,6 +1077,7 @@ impl<A: WorldAssets> WorldHost<A> {
                         displacement: [0; 2],
                         hidden: true,
                         flat: false,
+                        inserted: None,
                     },
                 );
                 draft.show.main.push(

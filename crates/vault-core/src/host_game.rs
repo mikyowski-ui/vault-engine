@@ -357,12 +357,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 .map(|(reference, _)| reference)
                 .collect();
             for reference in matching {
-                if let Some(object) = self.world.get_mut(reference) {
-                    if hide {
-                        object.raw.flags.0 |= BasicFlags::HIDDEN.0;
-                    } else {
-                        object.raw.flags.0 &= !BasicFlags::HIDDEN.0;
-                    }
+                if self.world.get(reference).is_some() {
+                    self.world.set_hidden(reference, hide);
                     changed = true;
                 }
             }
@@ -1033,17 +1029,20 @@ impl<A: WorldAssets> WorldHost<A> {
                         .world
                         .get_mut(call.uint(1))
                         .ok_or_else(|| VmError::Host("invalid visibility object".into()))?;
-                    let mask = BasicFlags::HIDDEN.0
-                        | if object.category() == Category::Critter {
-                            BasicFlags::NONBLOCKING.0
-                        } else {
-                            0
-                        };
-                    if call.int(0) != 0 {
+                    let mask = if object.category() == Category::Critter {
+                        BasicFlags::NONBLOCKING.0
+                    } else {
+                        0
+                    };
+                    let hide = call.int(0) != 0;
+                    if hide {
                         object.raw.flags.0 |= mask;
                     } else {
                         object.raw.flags.0 &= !mask;
                     }
+                    // SPEC-014 §3.44: hiding disables the outline, showing
+                    // enables it.
+                    self.world.set_hidden(call.uint(1), hide);
                     self.world.rebuild_lighting();
                 }
                 None

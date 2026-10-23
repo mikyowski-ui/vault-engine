@@ -608,17 +608,23 @@ fn spec014_arrow_hover_outlines_an_item_until_the_pointer_moves() {
         preview.tick(*now).unwrap();
     };
     let mut now = 16;
+    let plain = preview.image().unwrap().pixels()[ring];
+    assert_ne!(plain, color);
     preview.hud.mode = Mode::Arrow;
     rest(&mut preview, point, &mut now);
+    // SPEC-014 §3.44: the hover sets outline type 16 (opaque) on the item,
+    // drawn with the scene after the roofs.
     assert_eq!(preview.pointer.outlined, Some(item));
-    preview.image().unwrap();
-    let plain = preview.frame.as_ref().unwrap().pixels()[ring];
-    assert_ne!(plain, color);
-    assert_eq!(preview.pointer_frame().unwrap().pixels()[ring], color);
-    // A one-pixel move removes the outline at once (§3.27).
+    assert_eq!(preview.host.world.outline_word(item), 16);
+    assert_eq!(preview.image().unwrap().pixels()[ring], color);
+    // A one-pixel move removes the outline at once (§3.27), and the next
+    // tick draws the scene again.
     preview.hover([point[0] + 1, point[1]]);
     assert_eq!(preview.pointer.outlined, None);
-    assert_eq!(preview.pointer_frame().unwrap().pixels()[ring], plain);
+    assert_eq!(preview.host.world.outline_word(item), 0);
+    now += 16;
+    assert!(preview.tick(now).unwrap());
+    assert_eq!(preview.image().unwrap().pixels()[ring], plain);
     // Item highlight off, or the no-highlight flag, skips the outline.
     preview.preferences.item_highlight = 0;
     rest(&mut preview, point, &mut now);

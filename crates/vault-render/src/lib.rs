@@ -6,6 +6,7 @@ pub mod dialogue;
 pub mod image;
 pub mod map;
 pub mod movie;
+pub mod outline;
 
 #[cfg(test)]
 #[allow(dead_code)]

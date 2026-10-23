@@ -260,8 +260,9 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Some(object) = self.world.get_mut(critter) {
             object.raw.art_id = art;
             object.raw.frame = 0;
-            object.raw.displacement = [0; 2];
         }
+        // SPEC-014 §3.44: the offset reset reinserts the critter.
+        self.world.set_offset(critter, [0; 2]);
     }
     /// Stop every world sequence as a failing entry would (§3.10.1): forced
     /// callbacks, such as a door's finishing callback, run at once, the
@@ -314,8 +315,8 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Some(object) = self.world.get_mut(critter) {
             object.raw.art_id = standing;
             object.raw.frame = 0;
-            object.raw.displacement = [0; 2];
         }
+        self.world.set_offset(critter, [0; 2]);
     }
     /// §3.10.1 cancelling an object's sequence (SPEC-014 §3.27, SPEC-005
     /// `reg_anim_func` command 2): the first sequence that has not ended
@@ -531,8 +532,10 @@ impl<A: WorldAssets> WorldHost<A> {
             object.raw.displacement[0] + shift[0],
             object.raw.displacement[1] + shift[1],
         ];
+        // SPEC-014 §3.44: every walk step is an offset change, which
+        // reinserts the walker at the end of its group on its hex.
         if art.is_some() && !crosses(displacement, facing) {
-            object.raw.displacement = displacement;
+            self.world.set_offset(mover, displacement);
             return Stepped::After(walk.interval_ms);
         }
         let pixel = HEX_STEPS[usize::from(facing % 6)];
@@ -558,17 +561,15 @@ impl<A: WorldAssets> WorldHost<A> {
                 walk.frame = 0;
                 let fid = self.critter_fid(mover, walk.animation, None, first);
                 if let Some(object) = self.world.get_mut(mover) {
-                    object.raw.displacement = [0; 2];
                     object.raw.frame = 0;
                     object.raw.orientation = first;
                     object.raw.art_id = fid;
                 }
+                self.world.set_offset(mover, [0; 2]);
                 return Stepped::After(walk.interval_ms);
             }
         }
-        if let Some(object) = self.world.get_mut(mover) {
-            object.raw.displacement = [0; 2];
-        }
+        // The move to the next hex resets the offset and reinserts.
         if let Err(error) = self.world.move_object(mover, next, elevation, true) {
             self.world.diagnostic(error.to_string());
             return Stepped::Done;
@@ -589,15 +590,13 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Some(object) = self.world.get_mut(mover) {
             object.raw.orientation = facing;
             object.raw.art_id = fid;
-            object.raw.displacement = residual;
         }
+        self.world.set_offset(mover, residual);
         Stepped::After(walk.interval_ms)
     }
     /// The walk ends: the last residual is dropped.
     fn stand_on_hex(&mut self, mover: ObjectRef) {
-        if let Some(object) = self.world.get_mut(mover) {
-            object.raw.displacement = [0; 2];
-        }
+        self.world.set_offset(mover, [0; 2]);
     }
 
     // Entries.
@@ -625,8 +624,10 @@ impl<A: WorldAssets> WorldHost<A> {
             if let Some(art) = art {
                 object.raw.art_id = art;
                 object.raw.frame = 0;
-                object.raw.displacement = [0; 2];
             }
+        }
+        if art.is_some() {
+            self.world.set_offset(owner, [0; 2]);
         }
     }
     /// One frame step of a critter animation: step k shows frame k - 1,
@@ -645,8 +646,9 @@ impl<A: WorldAssets> WorldHost<A> {
             Some(shift) => {
                 object.raw.art_id = art;
                 object.raw.frame = step_number - 1;
-                object.raw.displacement[0] += shift[0];
-                object.raw.displacement[1] += shift[1];
+                // SPEC-014 §3.44: the frame's shift is an offset change,
+                // even when zero.
+                self.world.shift_offset(owner, *shift);
                 Stepped::After(frames.interval_ms)
             }
             None => {
@@ -694,8 +696,8 @@ impl<A: WorldAssets> WorldHost<A> {
                     return Stepped::Done;
                 };
                 object.raw.frame = step_number - 1;
-                object.raw.displacement[0] += shift[0];
-                object.raw.displacement[1] += shift[1];
+                // SPEC-014 §3.44: every frame step is an offset change.
+                self.world.shift_offset(owner, *shift);
             }
             Play::Reverse => {
                 if step_number > count {
@@ -703,13 +705,18 @@ impl<A: WorldAssets> WorldHost<A> {
                     return Stepped::Done;
                 }
                 let frame = count - step_number;
-                if let Some(left) = frames.shifts.get(frame + 1).filter(|_| step_number > 1) {
-                    object.raw.displacement[0] -= left[0];
-                    object.raw.displacement[1] -= left[1];
-                }
+                let left = frames
+                    .shifts
+                    .get(frame + 1)
+                    .filter(|_| step_number > 1)
+                    .map_or([0; 2], |left| [-left[0], -left[1]]);
                 object.raw.frame = frame;
+                self.world.shift_offset(owner, left);
             }
-            Play::Forever => object.raw.frame = (step_number - 1) % count.max(1),
+            Play::Forever => {
+                object.raw.frame = (step_number - 1) % count.max(1);
+                self.world.reinsert(owner);
+            }
         }
         Stepped::After(frames.interval_ms)
     }
@@ -735,6 +742,9 @@ impl<A: WorldAssets> WorldHost<A> {
         step_number: usize,
     ) -> Stepped {
         if step_number == 1 {
+            // SPEC-014 §3.44: the first frame of the animation (its zero
+            // shift) reinserts the object too.
+            self.world.reinsert(object);
             return Stepped::After(interval_ms);
         }
         let (count, art) = self.frame_count(object);
@@ -751,18 +761,16 @@ impl<A: WorldAssets> WorldHost<A> {
             if frame + 1 >= count {
                 return Stepped::Done;
             }
-            let [x, y] = shift(frame + 1);
+            let entered = shift(frame + 1);
             found.raw.frame = frame + 1;
-            found.raw.displacement[0] += x;
-            found.raw.displacement[1] += y;
+            self.world.shift_offset(object, entered);
         } else {
             if frame == 0 {
                 return Stepped::Done;
             }
             let [x, y] = shift(frame);
             found.raw.frame = frame - 1;
-            found.raw.displacement[0] -= x;
-            found.raw.displacement[1] -= y;
+            self.world.shift_offset(object, [-x, -y]);
         }
         Stepped::After(interval_ms)
     }
@@ -789,22 +797,29 @@ impl<A: WorldAssets> WorldHost<A> {
                 .map_or([0; 2], |art| Self::shift(art, direction, frame))
         };
         let frame = found.raw.frame;
+        // Each frame passed is an offset change (SPEC-014 §3.44), so the
+        // object is reinserted when any is.
+        let mut total = [0; 2];
+        let mut passed = false;
         if open {
             found.raw.flags.0 |= OPEN_DOOR_FLAGS;
             for later in frame + 1..count {
                 let [x, y] = shift(later);
-                found.raw.displacement[0] += x;
-                found.raw.displacement[1] += y;
+                total = [total[0] + x, total[1] + y];
+                passed = true;
             }
             found.raw.frame = count - 1;
         } else {
             found.raw.flags.0 &= !OPEN_DOOR_FLAGS;
             for current in (1..=frame).rev() {
                 let [x, y] = shift(current);
-                found.raw.displacement[0] -= x;
-                found.raw.displacement[1] -= y;
+                total = [total[0] - x, total[1] - y];
+                passed = true;
             }
             found.raw.frame = 0;
+        }
+        if passed {
+            self.world.shift_offset(object, total);
         }
         self.world.rebuild_lighting();
     }
@@ -1751,9 +1766,7 @@ impl<A: WorldAssets> Driver<ObjectRef, Motion> for WorldHost<A> {
                 let facing = self.facing(owner);
                 *art = self.critter_fid(owner, *animation, *weapon, facing);
                 *frames = self.frames(*art, facing, 0);
-                if let Some(object) = self.world.get_mut(owner) {
-                    object.raw.displacement = [0; 2];
-                }
+                self.world.set_offset(owner, [0; 2]);
                 Begin::Timed
             }
             Motion::Swing { interval_ms, .. } => {

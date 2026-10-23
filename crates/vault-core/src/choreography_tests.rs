@@ -38,6 +38,7 @@ fn shown() -> Display {
         displacement: [0; 2],
         hidden: false,
         flat: false,
+        inserted: None,
     }
 }
 /// A sequence over the three owners from `(owner, delay, action)` rows.

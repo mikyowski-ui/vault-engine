@@ -704,6 +704,13 @@ pub struct WorldState {
     /// which lets the player's walking use it too.
     pub combat_speed: i32,
     pub player_speedup: bool,
+    /// SPEC-014 §3.44 the `target_highlight` preference now (0-2, default
+    /// 2), which the target-outline enable step reads.
+    pub target_highlight: i32,
+    /// SPEC-014 §3.27 the in-world cursor is in crosshair mode (the
+    /// presentation layer keeps it current): enabling target outlines
+    /// needs it.
+    pub crosshair: bool,
     /// SPEC-005 §3.8 the default player art index: the jumpsuit for the
     /// player's gender, set by each gender update (0 before the first).
     pub default_player_art: u16,
@@ -739,40 +746,20 @@ pub struct WorldState {
     pub effects: VecDeque<WorldEffect>,
     pub trace: Vec<WorldTrace>,
     pub elapsed_ms: u64,
-    /// SPEC-014 §3.44 each drawn owner's insertion into its hex list, kept
-    /// by `render_objects`.
-    draw_order: std::sync::Mutex<DrawOrder>,
+    /// SPEC-014 §3.44 each object's latest insertion into its hex list
+    /// (a [`next_insertion`] stamp): set when it is inserted and renewed by
+    /// [`WorldState::reinsert`].
+    insertions: BTreeMap<ObjectRef, u64>,
 }
-/// SPEC-014 §3.44 per-hex list bookkeeping: an object is (re)inserted at the
-/// end of its group when it first appears on the map or its elevation, hex,
-/// pixel offset or flat flag changes, and keeps its place otherwise. Each
-/// owner keeps its insertion stamp and the placement it was inserted with.
-#[derive(Debug, Default)]
-struct DrawOrder {
-    next: u64,
-    placed: BTreeMap<crate::choreography::Owner, (u64, Placement)>,
-}
-/// Elevation, hex, pixel offset and flat flag.
-type Placement = (u8, Option<i32>, [i32; 2], bool);
-impl DrawOrder {
-    /// The insertion stamp of `owner` drawn as `record`.
-    fn stamp(&mut self, owner: crate::choreography::Owner, record: &MapObject) -> u64 {
-        let placement = (
-            record.elevation,
-            record.hex,
-            record.displacement,
-            record.flags.contains(BasicFlags::FLAT),
-        );
-        match self.placed.get(&owner) {
-            Some((stamp, at)) if *at == placement => *stamp,
-            _ => {
-                let stamp = self.next;
-                self.next += 1;
-                self.placed.insert(owner, (stamp, placement));
-                stamp
-            }
-        }
-    }
+/// SPEC-014 §3.44 the next per-hex list insertion stamp. Within one group
+/// of a hex list (elevation, then flat class) objects are drawn by
+/// ascending stamp, so the latest insertion comes last. The sequence is
+/// shared by the world's objects and the attack shows' displays, so a
+/// display that steps a frame goes after the world objects inserted
+/// before it; only the stamps' relative order matters.
+pub fn next_insertion() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 pub fn empty_map() -> MapFile {
     MapFile {
@@ -907,6 +894,8 @@ impl WorldState {
             shows: VecDeque::new(),
             combat_speed: 0,
             player_speedup: false,
+            target_highlight: 2,
+            crosshair: false,
             default_player_art: 0,
             visited: vec![0; crate::persistence::VISITED_BYTES],
             roof: crate::roof::RoofTracker::NONE,
@@ -930,7 +919,7 @@ impl WorldState {
             effects: VecDeque::new(),
             trace: Vec::new(),
             elapsed_ms: 0,
-            draw_order: Default::default(),
+            insertions: BTreeMap::new(),
         })
     }
     pub fn new(player: CharacterSheet, seed: i32) -> Result<Self, WorldError> {
@@ -1006,7 +995,50 @@ impl WorldState {
         let key = self.entities.insert(object);
         self.references.insert(reference, key);
         self.unique_ids.insert(id, reference);
+        // SPEC-014 §3.44: loading (in file order), creating and copying
+        // insert the object at the end of its group.
+        self.insertions.insert(reference, next_insertion());
         Ok(reference)
+    }
+    /// SPEC-014 §3.44 remove the object from its hex list and insert it
+    /// again at the end of its group, whatever changed (even nothing).
+    pub fn reinsert(&mut self, reference: ObjectRef) {
+        if self.references.contains_key(&reference) {
+            self.insertions.insert(reference, next_insertion());
+        }
+    }
+    /// SPEC-014 §3.44 a pixel-offset change: it always reinserts the
+    /// object, even when the offset is unchanged.
+    pub fn set_offset(&mut self, reference: ObjectRef, offset: [i32; 2]) {
+        if let Some(object) = self.get_mut(reference) {
+            object.raw.displacement = offset;
+            self.reinsert(reference);
+        }
+    }
+    /// [`Self::set_offset`] to the current offset plus `shift` (an
+    /// animation frame's shift, applied even when it is zero).
+    pub fn shift_offset(&mut self, reference: ObjectRef, shift: [i32; 2]) {
+        if let Some(object) = self.get(reference) {
+            let [x, y] = object.raw.displacement;
+            self.set_offset(
+                reference,
+                [x.wrapping_add(shift[0]), y.wrapping_add(shift[1])],
+            );
+        }
+    }
+    /// SPEC-014 §3.44 an object flipped between flat and not flat changes
+    /// group and is reinserted.
+    pub fn set_flat(&mut self, reference: ObjectRef, flat: bool) {
+        if let Some(object) = self.get_mut(reference)
+            && object.raw.flags.contains(BasicFlags::FLAT) != flat
+        {
+            if flat {
+                object.raw.flags.0 |= BasicFlags::FLAT.0;
+            } else {
+                object.raw.flags.0 &= !BasicFlags::FLAT.0;
+            }
+            self.reinsert(reference);
+        }
     }
     /// The unique-id index, rebuilt when it no longer mirrors the live
     /// objects (see `unique_ids`).
@@ -1304,6 +1336,7 @@ impl WorldState {
         let object = self.get_mut(reference).expect("instantiated object");
         object.raw.hex = Some(hex);
         object.raw.elevation = elevation;
+        self.reinsert(reference);
         self.rebuild_lighting();
         Ok(reference)
     }
@@ -1399,6 +1432,7 @@ impl WorldState {
         let Some(key) = self.references.remove(&reference) else {
             return;
         };
+        self.insertions.remove(&reference);
         if let Some(object) = self.entities.remove(key) {
             if self.unique_ids.get(&object.raw.id) == Some(&reference) {
                 self.unique_ids.remove(&object.raw.id);
@@ -1449,43 +1483,33 @@ impl WorldState {
         for (owner, display) in self.shows.iter().flat_map(|show| show.displays()) {
             owned.entry(*owner).or_insert(display);
         }
-        // SPEC-014 §3.44: each elevation lists its objects in insertion
-        // order. Records only an explosion draws are inserted afresh on
-        // every refresh, after the others.
-        let mut order = self
-            .draw_order
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        // SPEC-014 §3.44: each elevation lists its objects by their latest
+        // insertion. A display that has stepped since its show began keeps
+        // its own; records only an explosion draws come after the others.
         let mut drawn: Vec<(u64, MapObject)> = Vec::new();
-        let mut seen = BTreeSet::new();
-        let mut push = |owner: Option<Owner>, record: MapObject| {
-            if record.elevation >= 3 {
-                return;
+        let mut push = |stamp: u64, record: MapObject| {
+            if record.elevation < 3 {
+                drawn.push((stamp, record));
             }
-            let stamp = owner.map_or(u64::MAX, |owner| {
-                seen.insert(owner);
-                order.stamp(owner, &record)
-            });
-            drawn.push((stamp, record));
         };
         for (reference, object) in self.iter() {
             if object.owner.is_some() || !object.active || object.raw.elevation >= 3 {
                 continue;
             }
-            let owner = Owner::World(reference);
-            match owned.remove(&owner) {
+            let stamp = self.insertions.get(&reference).copied().unwrap_or(0);
+            match owned.remove(&Owner::World(reference)) {
                 Some(display) => {
                     if let Some(record) = displayed(object.raw.clone(), display) {
-                        push(Some(owner), record);
+                        push(display.inserted.unwrap_or(stamp), record);
                     }
                 }
-                None => push(Some(owner), object.raw.clone()),
+                None => push(stamp, object.raw.clone()),
             }
         }
-        for (owner, display) in owned {
+        for display in owned.into_values() {
             let record = object_record(display.pid, EXPLOSION_ART_ID);
             if let Some(record) = displayed(record, display) {
-                push(Some(owner), record);
+                push(display.inserted.unwrap_or(0), record);
             }
         }
         // SPEC-013 §3.10 the timed or scripted explosion's art playing now.
@@ -1494,11 +1518,8 @@ impl WorldState {
             .iter()
             .flat_map(|explosion| explosion.art.records())
         {
-            push(None, record);
+            push(u64::MAX, record);
         }
-        // An owner no longer drawn is inserted afresh when it returns.
-        order.placed.retain(|owner, _| seen.contains(owner));
-        drop(order);
         // A stable sort keeps equal stamps in drawing order.
         drawn.sort_by_key(|(stamp, _)| *stamp);
         for (_, record) in drawn {
@@ -1730,6 +1751,10 @@ impl WorldState {
         }
         object.raw.hex = Some(hex);
         object.raw.elevation = elevation;
+        // SPEC-014 §3.44: a move to a hex always reinserts the object, even
+        // onto the hex it is on, and resets its pixel offset.
+        object.raw.displacement = [0; 2];
+        self.reinsert(reference);
         // SPEC-005 0x80B6/0x80FF: changing a critter's elevation removes its
         // combat membership.
         if changed_elevation {
@@ -2320,17 +2345,67 @@ mod draw_order_tests {
                 .collect()
         };
         assert_eq!(ids(&world), [1, 2, 3, 4]);
+        // Art, frame, light, hiding and outline changes do not reinsert.
         world.get_mut(c).unwrap().raw.art_id = 7;
         world.get_mut(a).unwrap().raw.frame = 2;
+        world.get_mut(a).unwrap().raw.outline = 1;
+        world.set_light(c, 4, 65536);
+        world.set_hidden(c, true);
+        world.set_hidden(c, false);
         assert_eq!(ids(&world), [1, 2, 3, 4]);
-        world.get_mut(c).unwrap().raw.displacement = [4, -2];
+        // A walk step's new pixel offset does.
+        world.set_offset(c, [4, -2]);
         assert_eq!(ids(&world), [1, 2, 4, 3]);
-        world.get_mut(a).unwrap().raw.flags.0 |= BasicFlags::FLAT.0;
+        world.set_flat(a, true);
         assert_eq!(ids(&world), [2, 4, 3, 1]);
-        // Taken off the map and put back: inserted afresh.
-        world.get_mut(c).unwrap().active = false;
-        assert_eq!(ids(&world), [2, 4, 1]);
-        world.get_mut(c).unwrap().active = true;
+        // A move to another hex, or the same one, reinserts and resets the
+        // pixel offset.
+        world.move_object(c, 20101, 0, false).unwrap();
         assert_eq!(ids(&world), [2, 4, 1, 3]);
+        assert_eq!(world.get(c).unwrap().raw.displacement, [0; 2]);
+    }
+
+    /// SPEC-014 Fixture T per-hex order: a zero-shift frame step, a step
+    /// of the other object, then a move to the hex the object is on.
+    #[test]
+    fn spec014_fixture_t_every_step_and_move_reinserts() {
+        let mut world = WorldState::empty(1).unwrap();
+        let mut add = |id: u32| {
+            let mut raw = object_record(0x0100_0001, id);
+            raw.hex = Some(20100);
+            world
+                .insert(WorldObject {
+                    name: Vec::new(),
+                    description: Vec::new(),
+                    raw,
+                    prototype: None,
+                    character: None,
+                    owner: None,
+                    inventory: Vec::new(),
+                    money: None,
+                    active: true,
+                    opponent: 0,
+                })
+                .unwrap()
+        };
+        let a = add(1);
+        let b = add(2);
+        let ids = |world: &WorldState| -> Vec<u32> {
+            world.render_objects().elevations[0]
+                .iter()
+                .map(|object| object.id)
+                .collect()
+        };
+        world.shift_offset(b, [0, 0]);
+        assert_eq!(ids(&world), [1, 2]);
+        world.shift_offset(a, [0, 0]);
+        assert_eq!(ids(&world), [2, 1]);
+        world.set_offset(b, [3, 1]);
+        world.move_object(b, 20100, 0, false).unwrap();
+        assert_eq!(ids(&world), [1, 2]);
+        assert_eq!(world.get(b).unwrap().raw.displacement, [0; 2]);
+        // An offset change to (0, 0) from (0, 0) still reinserts.
+        world.set_offset(a, [0, 0]);
+        assert_eq!(ids(&world), [2, 1]);
     }
 }

@@ -429,6 +429,8 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         if dead {
             self.world.queue.remove_object(victim);
+            // SPEC-014 §3.44: death disables the critter's outline.
+            self.world.disable_outline(victim);
         } else if flags & effect::KNOCKED_OUT != 0 {
             self.world.queue.insert(
                 self.world.clock.ticks,
@@ -588,9 +590,14 @@ impl<A: WorldAssets> WorldHost<A> {
         };
         object.raw.outline = 0;
         object.raw.flags.0 |= BasicFlags::NONBLOCKING.0;
-        if corpse_flattens(object.raw.pid) {
-            object.raw.flags.0 |= BasicFlags::FLAT.0;
+        let flattens = corpse_flattens(object.raw.pid);
+        if flattens {
+            // SPEC-014 §3.44: flattening moves the corpse to the flat group.
+            self.world.set_flat(victim, true);
         }
+        let Some(object) = self.world.get(victim) else {
+            return Ok(());
+        };
         let (pid, place) = (
             object.raw.pid,
             object.raw.hex.map(|hex| (hex, object.raw.elevation)),
@@ -1092,7 +1099,14 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.emit(crate::WorldEffect::RollHitPoints);
         }
         application?;
-        self.present(built.show);
+        let mut show = built.show;
+        // SPEC-014 §3.44: with setting 2 a player's attack animation turns
+        // the target outlines off until its damage has been applied.
+        if attacker == player && self.world.combat && self.world.combat_state.highlight == 2 {
+            self.world.disable_target_outlines();
+            show.outlines = true;
+        }
+        self.present(show);
         Ok(Ok(recorded))
     }
     /// SPEC-013 §3.10 a weapon explosion: the wielded weapon explodes when

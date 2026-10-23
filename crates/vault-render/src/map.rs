@@ -1,4 +1,7 @@
-use crate::{ImageError, IndexedImage};
+use crate::{
+    ImageError, IndexedImage,
+    outline::{BlendTable, OutlineInks, blend_table, draw_outline},
+};
 use std::sync::OnceLock;
 use vault_formats::{
     HexGrid, MapFile, Palette,
@@ -149,22 +152,20 @@ impl MapLight<'_> {
                 .and_then(|hex| self.tiles.get(hex))
                 .copied()
                 .unwrap_or_default();
-            tile.max(i64::from(self.ambient))
+            // The hex light is capped at 65536.
+            tile.min(65536).max(i64::from(self.ambient))
         }))
     }
 }
 
-/// The outline color of an object whose outline type is set and not
-/// disabled, or `None`.
-pub type OutlineColor<'a> = &'a dyn Fn(&MapObject) -> Option<u8>;
-
 /// SPEC-014 §3.44 what a refresh draws besides the floor: the cutout,
-/// the light (none draws every pixel unlit) and the outlines.
+/// the light (none draws every pixel unlit) and the outlines (none draws
+/// no outline): each drawn object's outline word selects its ink.
 #[derive(Clone, Copy, Default)]
 pub struct MapScene<'a> {
     pub cutout: Option<&'a Cutout<'a>>,
     pub light: Option<MapLight<'a>>,
-    pub outline: Option<OutlineColor<'a>>,
+    pub outlines: Option<&'a OutlineInks>,
 }
 
 /// SPEC-014 §3.37 the player see-through cutout: the `egg.frm` mask placed
@@ -304,7 +305,7 @@ struct Pens<'a> {
     /// The common and glass gray levels of every entry.
     gray: [[u8; 256]; 2],
     /// Each translucent row's blend table, `blend_F[g][D]`, once built.
-    blends: [Option<Box<[[u8; 256]; 8]>>; 5],
+    blends: [Option<Box<BlendTable>>; 5],
 }
 
 impl<'a> Pens<'a> {
@@ -352,24 +353,7 @@ impl<'a> Pens<'a> {
             return;
         };
         let (_, key, glass, full) = TRANSLUCENT[row];
-        let blend = self.blends[row].get_or_insert_with(|| {
-            let palette = light.palette;
-            let key = u32::from(key);
-            let foreground = palette
-                .lookup_rgb5([
-                    (key >> 10) as u8 & 31,
-                    (key >> 5) as u8 & 31,
-                    key as u8 & 31,
-                ])
-                .unwrap_or(0);
-            Box::new(std::array::from_fn(|gray| {
-                std::array::from_fn(|destination| {
-                    palette
-                        .blend_coverage(gray as u8, foreground, destination as u8)
-                        .unwrap_or(destination as u8)
-                })
-            }))
-        });
+        let blend = self.blends[row].get_or_insert_with(|| blend_table(light.palette, key));
         let gray = &self.gray[usize::from(glass)];
         let level = usize::from(if full { 128 } else { level });
         let intensity = self.intensity;
@@ -522,6 +506,33 @@ pub fn render_floor(
     view: MapView,
     art: &impl MapArt,
 ) -> Result<IndexedImage, MapRenderError> {
+    floor(map, view, art, |image, frame, corner| {
+        image.blit(frame, corner)
+    })
+}
+
+/// The floor squares of the view (SPEC-003 §2.8) under the SPEC-014 §3.44
+/// floor light: each tile lit per pixel from the light of ten hexes around
+/// it. A tile with no hex under its base point is not drawn.
+pub fn render_floor_lit(
+    map: &MapFile,
+    view: MapView,
+    art: &impl MapArt,
+    light: MapLight,
+) -> Result<IndexedImage, MapRenderError> {
+    let mut floor_light = FloorLight::new(light);
+    floor(map, view, art, |image, frame, corner| {
+        floor_light.draw(image, view, frame, corner);
+    })
+}
+
+/// Each drawn floor square's art at its corner, by `draw`.
+fn floor(
+    map: &MapFile,
+    view: MapView,
+    art: &impl MapArt,
+    mut draw: impl FnMut(&mut IndexedImage, &FrmFrame, [i64; 2]),
+) -> Result<IndexedImage, MapRenderError> {
     if view.elevation > 2 {
         return Err(MapRenderError::Elevation);
     }
@@ -548,10 +559,231 @@ pub fn render_floor(
         if !tile.floor_hidden()
             && let Some((frame, _)) = art.frame(Category::Tile, u32::from(tile.floor()), 0, 0)
         {
-            image.blit(frame, corner);
+            draw(&mut image, frame, corner);
         }
     }
     Ok(image)
+}
+
+/// SPEC-014 §3.44 the floor light's ten vertices: each one's position in
+/// the 41-row, 80-column light map (row × 80 + column) and its hex offset
+/// from the base hex for an even and an odd base hex.
+const FLOOR_VERTICES: [(usize, i32, i32); 10] = [
+    (16, -1, -201),
+    (48, -2, -2),
+    (960, 0, 0),
+    (992, 199, -1),
+    (1024, 198, 198),
+    (1936, 200, 200),
+    (1968, 399, 199),
+    (2000, 398, 398),
+    (2912, 400, 400),
+    (2944, 599, 399),
+];
+/// The light map's size: 41 rows of 80 entries.
+const FLOOR_MAP: usize = 41 * 80;
+/// The five upright triangles as (B, C, A): base left, base right, apex.
+const UPRIGHT: [[usize; 3]; 5] = [[2, 3, 0], [3, 4, 1], [5, 6, 3], [6, 7, 4], [8, 9, 6]];
+/// The upright triangles' (step, n) row pairs.
+const UPRIGHT_ROWS: [(isize, usize); 13] = [
+    (-1, 2),
+    (78, 2),
+    (76, 6),
+    (73, 8),
+    (71, 10),
+    (68, 14),
+    (65, 16),
+    (63, 18),
+    (61, 20),
+    (58, 24),
+    (55, 26),
+    (53, 28),
+    (50, 32),
+];
+/// The five inverted triangles as (T, A, R): top left, bottom apex, top
+/// right.
+const INVERTED: [[usize; 3]; 5] = [[0, 3, 1], [2, 5, 3], [3, 6, 4], [5, 8, 6], [6, 9, 7]];
+/// The inverted triangles' (step, n) row pairs.
+const INVERTED_ROWS: [(isize, usize); 13] = [
+    (0, 32),
+    (48, 32),
+    (49, 30),
+    (52, 26),
+    (55, 24),
+    (57, 22),
+    (60, 18),
+    (63, 16),
+    (65, 14),
+    (67, 12),
+    (70, 8),
+    (73, 6),
+    (75, 4),
+];
+
+/// Fill 13 rows of a triangle into `map`: from cursor `start` and row
+/// value `value`, each row advances the cursor by its step, then gives its
+/// n entries `value`, `value + dx`, ... (the cursor moving past them), and
+/// then `value` grows by `dy`. Every written entry is marked in `written`.
+fn fill_rows(
+    map: &mut [i32; FLOOR_MAP],
+    written: &mut [bool; FLOOR_MAP],
+    rows: &[(isize, usize); 13],
+    start: usize,
+    [mut value, dx, dy]: [i32; 3],
+) {
+    let mut cursor = start as isize;
+    for (step, count) in rows {
+        cursor += step;
+        for entry in 0..*count as i32 {
+            if let Ok(at) = usize::try_from(cursor)
+                && at < FLOOR_MAP
+            {
+                map[at] = value.wrapping_add(entry.wrapping_mul(dx));
+                written[at] = true;
+            }
+            cursor += 1;
+        }
+        value = value.wrapping_add(dy);
+    }
+}
+
+/// Fill the light map from the ten vertex lights: the five upright
+/// triangles, then the five inverted ones, a later triangle overwriting
+/// shared entries. Divisions truncate toward zero.
+fn fill_floor_map(lights: &[i32; 10], map: &mut [i32; FLOOR_MAP], written: &mut [bool; FLOOR_MAP]) {
+    for [b, c, a] in UPRIGHT {
+        let dx = (lights[c] - lights[b]) / 32;
+        let dy = (lights[b] - lights[a]) / 13;
+        let start = FLOOR_VERTICES[a].0;
+        fill_rows(map, written, &UPRIGHT_ROWS, start, [lights[a], dx, dy]);
+    }
+    for [t, a, r] in INVERTED {
+        let dx = (lights[r] - lights[t]) / 32;
+        let dy = (lights[a] - lights[t]) / 13;
+        let start = FLOOR_VERTICES[t].0;
+        fill_rows(map, written, &INVERTED_ROWS, start, [lights[t], dx, dy]);
+    }
+}
+
+/// The entry each light-map entry is read from. R1 reads the entry itself,
+/// and an entry no triangle writes keeps whatever an earlier tile left
+/// there (zero at first). `[May-improve]`: an entry no triangle writes
+/// reads the nearest written entry above it in the same column (and,
+/// with none above, the nearest one below). The written set does not
+/// depend on the lights, so this is computed once.
+fn floor_sources() -> &'static [u16; FLOOR_MAP] {
+    static SOURCES: OnceLock<[u16; FLOOR_MAP]> = OnceLock::new();
+    SOURCES.get_or_init(|| {
+        let mut map = [0; FLOOR_MAP];
+        let mut written = [false; FLOOR_MAP];
+        fill_floor_map(&[0; 10], &mut map, &mut written);
+        std::array::from_fn(|entry| {
+            let column = entry % 80;
+            let above = (0..entry / 80)
+                .rev()
+                .map(|row| row * 80 + column)
+                .find(|at| written[*at]);
+            let below = (entry / 80 + 1..41)
+                .map(|row| row * 80 + column)
+                .find(|at| written[*at]);
+            let source = if written[entry] {
+                entry
+            } else {
+                above.or(below).unwrap_or(entry)
+            };
+            source as u16
+        })
+    })
+}
+
+/// SPEC-014 §3.44 the floor light of one refresh.
+struct FloorLight<'a> {
+    light: MapLight<'a>,
+    intensity: &'a [u8],
+    map: Box<[i32; FLOOR_MAP]>,
+    written: Box<[bool; FLOOR_MAP]>,
+}
+
+impl<'a> FloorLight<'a> {
+    fn new(light: MapLight<'a>) -> Self {
+        Self {
+            light,
+            intensity: light.palette.intensity_table(),
+            map: Box::new([0; FLOOR_MAP]),
+            written: Box::new([false; FLOOR_MAP]),
+        }
+    }
+    /// The ten vertex lights of a tile on `base`: each the larger of the
+    /// ambient light and its hex's light (capped at 65536), a hex off the
+    /// grid giving hex light 0. `[May-improve]`: R1 always uses the
+    /// even-hex offsets and, for an odd base hex, skips vertex 0 (keeping
+    /// the previous tile's); here all ten are computed, with the odd-hex
+    /// offsets for an odd base hex.
+    fn vertices(&self, base: i32) -> [i32; 10] {
+        let odd = base.rem_euclid(2) == 1;
+        let ambient = self.light.ambient;
+        FLOOR_VERTICES.map(|(_, even_offset, odd_offset)| {
+            let hex = base + if odd { odd_offset } else { even_offset };
+            let tile = usize::try_from(hex)
+                .ok()
+                .filter(|hex| *hex < 40000)
+                .and_then(|hex| self.light.tiles.get(hex))
+                .copied()
+                .unwrap_or_default()
+                .clamp(0, 65536) as i32;
+            tile.max(ambient)
+        })
+    }
+    /// Draw one floor tile whose art's top-left is at `corner`.
+    fn draw(
+        &mut self,
+        image: &mut IndexedImage,
+        view: MapView,
+        frame: &FrmFrame,
+        corner: [i64; 2],
+    ) {
+        let (Ok(x), Ok(y)) = (i32::try_from(corner[0]), i32::try_from(corner[1] + 13)) else {
+            return;
+        };
+        let Some(base) = view.grid.pick_hex([x, y]) else {
+            return;
+        };
+        let lights = self.vertices(base);
+        let intensity = self.intensity;
+        if lights.iter().all(|light| *light == lights[0]) {
+            // Uniform: the lit draw, so indexes 229 and up are not lit.
+            let level = MapLight::level(i64::from(lights[0]));
+            blit_with(image, frame, corner, |source, _, _| {
+                if source >= 229 {
+                    source
+                } else {
+                    intensity[usize::from(source) * 256 + usize::from(level)]
+                }
+            });
+            return;
+        }
+        // The map is filled afresh: with the safe rule below no entry is
+        // read that this tile's triangles did not write (unless its whole
+        // column is unwritten, when it reads 0).
+        self.map.fill(0);
+        fill_floor_map(&lights, &mut self.map, &mut self.written);
+        let (map, sources) = (&self.map, floor_sources());
+        blit_with(image, frame, corner, |source, _, [px, py]| {
+            // `[May-improve]`: indexes 229-255 stay unlit, as in a uniform
+            // tile (R1 draws them through their unmapped intensity rows,
+            // as index 0).
+            if source >= 229 {
+                return source;
+            }
+            let entry = 160 + 80 * (py - corner[1]) + (px - corner[0]);
+            let light = usize::try_from(entry)
+                .ok()
+                .filter(|entry| *entry < FLOOR_MAP)
+                .map_or(0, |entry| map[usize::from(sources[entry])]);
+            let level = (light / 512).clamp(0, 128) as usize;
+            intensity[usize::from(source) * 256 + level]
+        });
+    }
 }
 
 /// A square whose corner lies past the right or bottom edge draws nothing.
@@ -629,10 +861,12 @@ pub fn draw_map_scene(
             }
             _ => pens.draw(image, frame, origin, object.flags.0, level),
         }
+        // At most 100 outlined objects per refresh, in drawing order; an
+        // object without a hex is never outlined.
         if outlines.len() < 100
-            && let Some(color) = scene.outline.and_then(|outline| outline(object))
+            && let Some(ink) = scene.outlines.and_then(|inks| inks.ink(object.outline))
         {
-            outlines.push((frame, origin, color));
+            outlines.push((frame, origin, ink));
         }
     }
     if view.roofs {
@@ -660,9 +894,17 @@ pub fn draw_map_scene(
             }
         }
     }
-    let bottom = i64::from(image.height());
-    for (frame, origin, color) in outlines {
-        image.outline(frame, origin, color, [0, bottom]);
+    // The refresh covers the whole view, which is the map buffer.
+    let (width, height) = (i64::from(image.width()), i64::from(image.height()));
+    for (frame, origin, ink) in outlines {
+        draw_outline(
+            image,
+            frame,
+            origin,
+            ink,
+            [0, 0, width, height],
+            [width, height],
+        );
     }
     for index in hexless {
         let object = &objects[index];
@@ -1294,17 +1536,28 @@ mod tests {
         );
         let art = Keyed(art);
         let view = view();
-        // 101 objects two hexes apart, all outlined in color 9.
+        // 101 objects two hexes apart, all outlined in the other key (type
+        // 3), and a disabled hostile one that is never collected.
         let hexes: Vec<i32> = (95..106)
             .flat_map(|row| (90..110).step_by(2).map(move |column| row * 200 + column))
             .take(101)
             .collect();
-        let objects: Vec<_> = hexes
+        let mut objects: Vec<_> = hexes
             .iter()
             .enumerate()
-            .map(|(id, hex)| object(&map, id as u32, 0x0200_0001, *hex))
+            .map(|(id, hex)| {
+                let mut object = object(&map, id as u32 + 1, 0x0200_0001, *hex);
+                object.outline = 3;
+                object
+            })
             .collect();
-        let outline = |_: &MapObject| Some(9);
+        let mut disabled = object(&map, 0, 0x0200_0001, 20111);
+        disabled.outline = 0x8000_0001;
+        objects.insert(0, disabled);
+        let palette = grey_palette();
+        let inks = OutlineInks::new(&palette);
+        let other = crate::outline::key_index(&palette, crate::outline::OTHER_KEY);
+        assert_ne!(other, 0);
         let mut image = render_floor(&map, view, &art).unwrap();
         let mut sorted = objects.clone();
         sorted.sort_by_key(|object| object.hex);
@@ -1315,19 +1568,22 @@ mod tests {
             view,
             &art,
             MapScene {
-                outline: Some(&outline),
+                outlines: Some(&inks),
                 ..MapScene::default()
             },
         )
         .unwrap();
         // The ring left of each sprite: the 100 first in drawing order are
-        // outlined, the last is not.
+        // outlined, the last is not; the disabled one never is.
         let ring = |object: &MapObject| {
             let (_, origin) = object_sprite(view, &art, object).unwrap();
             image.pixels()[origin[1] as usize * 640 + origin[0] as usize - 1]
         };
-        assert!(sorted[..100].iter().all(|object| ring(object) == 9));
-        assert_eq!(ring(&sorted[100]), 0);
+        let (disabled, sorted): (Vec<_>, Vec<_>) =
+            sorted.into_iter().partition(|object| object.id == 0);
+        assert_ne!(ring(&disabled[0]), other);
+        assert!(sorted[..100].iter().all(|object| ring(object) == other));
+        assert_ne!(ring(&sorted[100]), other);
     }
 
     #[test]
@@ -1418,7 +1674,7 @@ mod tests {
             let scene_cut = MapScene {
                 cutout: cut,
                 light: Some(light),
-                outline: None,
+                outlines: None,
             };
             draw_map_scene(&mut image, &map, &scene(vec![wall]), view, &art, scene_cut).unwrap();
             let [x, y] = view.grid.hex_center(20300).unwrap();
@@ -1475,6 +1731,14 @@ mod tests {
         };
         assert_eq!(lit_pixel(215, 100, 0x10000, light), 6);
         assert_eq!(lit_pixel(215, 100, 0x20000, light), 214);
+        // SPEC-014 §3.44 the outline keys: red 133 (gray level 2), grey 9,
+        // item 58 and other 49.
+        use crate::outline::{GREY_KEY, ITEM_KEY, OTHER_KEY, RED_KEY, key_index};
+        assert_eq!(
+            [RED_KEY, GREY_KEY, ITEM_KEY, OTHER_KEY].map(|key| key_index(&palette, key)),
+            [133, 9, 58, 49]
+        );
+        assert_eq!(palette.gray_level(133, false), 2);
     }
 
     #[test]
@@ -1517,5 +1781,128 @@ mod tests {
         let mut view = MapView::new(&map, 640, 380).unwrap();
         view.roofs = false;
         assert_eq!(pixel(&render_map(&map, view, &opaque).unwrap(), 256, 84), 9);
+    }
+
+    /// SPEC-014 Fixture T floor light: an even base hex, every vertex
+    /// light 65536 except V3 = 0.
+    #[test]
+    fn spec014_fixture_t_floor_light_map() {
+        let mut lights = [65536; 10];
+        lights[3] = 0;
+        let mut map = [0; FLOOR_MAP];
+        let mut written = [false; FLOOR_MAP];
+        fill_floor_map(&lights, &mut map, &mut written);
+        let entry = |[px, py]: [usize; 2]| 160 + 80 * py + px;
+        for (pixel, expected_entry, value, column) in [
+            ([32, 10], 992, 0, 0),
+            ([40, 10], 1000, 16384, 32),
+            ([48, 10], 1008, 32768, 64),
+            ([16, 4], 496, 49152, 96),
+            ([32, 0], 192, 55454, 108),
+            ([20, 20], 1780, 50410, 98),
+            ([0, 10], 960, 65536, 128),
+            ([64, 10], 1024, 65536, 128),
+            ([48, 22], 1968, 65536, 128),
+        ] {
+            assert_eq!(entry(pixel), expected_entry, "{pixel:?}");
+            assert_eq!(map[expected_entry], value, "{pixel:?}");
+            assert_eq!(map[expected_entry] / 512, column, "{pixel:?}");
+        }
+        // (33, 35) reads entry 2993, which no triangle writes: light 0 in
+        // R1. Under the safe rule it reads the nearest written entry above
+        // in its column.
+        assert_eq!(entry([33, 35]), 2993);
+        assert!(!written[2993]);
+        assert_eq!(map[2993], 0);
+        let source = usize::from(floor_sources()[2993]);
+        assert_eq!(source % 80, 33);
+        assert!(source < 2993 && written[source]);
+        assert!((source + 80..2993).step_by(80).all(|at| !written[at]));
+        // Written entries read themselves.
+        assert_eq!(floor_sources()[1000], 1000);
+    }
+
+    /// The vertex lights: the larger of the ambient and the hex light
+    /// (capped at 65536), with the even or odd offsets, off the grid 0.
+    #[test]
+    fn spec014_floor_vertices_take_the_base_hex_parity() {
+        let palette = grey_palette();
+        let mut tiles = vec![0_i64; 40000];
+        for (hex, light) in tiles.iter_mut().enumerate() {
+            *light = hex as i64 % 5000 * 10;
+        }
+        tiles[20100 + 599] = 100_000;
+        let light = MapLight {
+            palette: &palette,
+            ambient: 500,
+            tiles: &tiles,
+        };
+        let floor = FloorLight::new(light);
+        let even = floor.vertices(20100);
+        assert_eq!(even[0], 99 * 10);
+        assert_eq!(even[3], 299 * 10);
+        assert_eq!(even[9], 65536);
+        let odd = floor.vertices(20101);
+        assert_eq!(odd[0], (101 - 201 + 5000) * 10);
+        assert_eq!(odd[3], 100 * 10);
+        assert_eq!(odd[9], (101 + 399) * 10);
+        // Off the grid: hex light 0, so the ambient.
+        let edge = floor.vertices(1);
+        assert_eq!(edge[0], 500);
+    }
+
+    /// A tile with all ten lights equal uses the lit draw (229 and up
+    /// unlit); an interpolated tile leaves 229-255 unlit too (the safe
+    /// rule) and lights the rest per pixel.
+    #[test]
+    fn spec014_floor_tiles_light_uniform_and_interpolated() {
+        let map = preview();
+        let palette = grey_palette();
+        let mut art = std::collections::BTreeMap::new();
+        art.insert(
+            (true, 1),
+            FrmArchive::parse(&fixture::frm(80, 36, 200)).unwrap(),
+        );
+        art.insert(
+            (true, 2),
+            FrmArchive::parse(&fixture::frm(80, 36, 240)).unwrap(),
+        );
+        let art = Keyed(art);
+        let view = view();
+        let tiles = vec![0_i64; 40000];
+        let draw = |ambient: i32, tiles: &[i64]| {
+            render_floor_lit(
+                &map,
+                view,
+                &art,
+                MapLight {
+                    palette: &palette,
+                    ambient,
+                    tiles,
+                },
+            )
+            .unwrap()
+        };
+        let image = draw(40000, &tiles);
+        // Fixture T: the lit draw at column trunc(40000 / 512) = 78.
+        let lit = palette.intensity(200, 78);
+        assert_ne!(lit, 200);
+        assert!(image.pixels().contains(&lit));
+        assert!(!image.pixels().contains(&200));
+        // Square 5050 (tile 2, index 240) stays unlit.
+        assert!(image.pixels().contains(&240));
+        // A bright hex makes nearby tiles interpolated: some pixels of index
+        // 200 get a level between ambient and full light.
+        let mut bright = tiles.clone();
+        bright[20100] = 65536;
+        let image = draw(0, &bright);
+        let levels: std::collections::BTreeSet<u8> = image
+            .pixels()
+            .iter()
+            .copied()
+            .filter(|pixel| *pixel != 0 && *pixel != 240)
+            .collect();
+        assert!(levels.len() > 2, "{levels:?}");
+        assert!(image.pixels().contains(&240));
     }
 }

@@ -194,7 +194,7 @@ impl MapPreview {
     /// The hover feedback and outline go while the window is open.
     fn pointer_feedback_off(&mut self) {
         self.pointer.feedback = None;
-        self.pointer.outlined = None;
+        self.clear_item_outline();
         self.pointer.held = None;
     }
     /// A press while the window is open: the Cancel red button presses
