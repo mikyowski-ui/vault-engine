@@ -806,6 +806,11 @@ impl MapPreview {
             }
             _ => {}
         }
+        // SPEC-014 §3.41.6: the animated watch while the Pip-Boy rests.
+        if let Some(frame) = self.pipboy_watch() {
+            painter.cursor_frame(image, cursor::ANIMATED_WATCH.art, frame, at);
+            return;
+        }
         // §3.26: the animated watch replaces the in-world cursor while the
         // combat lock or a hand swap holds.
         if self.world_pointer()

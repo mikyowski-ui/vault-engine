@@ -10,6 +10,7 @@ pub mod endgame;
 pub mod flow;
 pub mod inventory;
 pub mod options;
+pub mod pipboy;
 pub mod saveload;
 
 use vault_formats::Palette;

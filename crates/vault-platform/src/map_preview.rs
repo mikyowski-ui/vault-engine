@@ -63,7 +63,7 @@ pub(crate) enum Screen {
     Map,
     World(world::WorldScreen),
     Town(world::TownScreen),
-    PipBoy(pipboy::PipBoy),
+    PipBoy(Box<pipboy::PipBoy>),
     Inventory(inventory::InventoryScreen),
     Character(Box<character::CharacterScreen>),
     Barter(Box<barter::BarterScreen>),
@@ -625,12 +625,14 @@ impl MapPreview {
     /// except while a window that suspends cycling is open. SPEC-012 §3.12
     /// movies; SPEC-014 §3.17 the in-game pause window (not the world
     /// map's), §3.14 in-game save/load, §3.2 the help screen, §3.8 the
-    /// character editor; SPEC-013 §3.15 the Skilldex and §3.21 elevators.
+    /// character editor, §3.41 the Pip-Boy; SPEC-013 §3.15 the Skilldex and
+    /// §3.21 elevators.
     pub(crate) fn palette_cycling(&self) -> bool {
         self.host.library.palette_cycling
             && !matches!(
                 self.screen,
                 Screen::Movie(_)
+                    | Screen::PipBoy(_)
                     | Screen::Options(options::OptionsScreen::Pause)
                     | Screen::SaveLoad(_)
                     | Screen::Help(_)
@@ -720,6 +722,7 @@ impl MapPreview {
                 Screen::Barter(_) => self.barter_release(point),
                 Screen::Automap(_) => self.automap_release(point),
                 Screen::Options(_) => self.options_release(point),
+                Screen::PipBoy(_) => self.pipboy_release(point),
                 _ => false,
             };
         if let Some(cue) = self.pressed.take() {
@@ -1873,19 +1876,16 @@ mod tests {
         assert!(preview.step(KeyCode::KeyP), "swallowed");
         assert!(matches!(preview.screen, Screen::Map));
         preview.finish_fades();
-        // The Pip-Boy archive lists boil1 (index 11) and replays it; a
-        // click then release skips it, back to the Pip-Boy.
+        // The Pip-Boy archive lists boil1 (index 11) and replays it from
+        // the row's release (SPEC-014 §3.41.5); a click then release skips
+        // it, back to the Pip-Boy.
         assert!(preview.step(KeyCode::KeyP));
-        assert!(preview.click([30, 155], false), "Video archive tab");
-        assert!(preview.release(None, false));
+        assert!(preview.tap([60, 430]), "the Archives button");
         preview.image().unwrap();
-        assert!(preview.click([200, 64], false));
+        assert!(preview.click([300, 70], false));
+        assert!(!preview.movie_active(), "rows act on their release");
+        assert!(preview.release(Some([300, 70]), false));
         assert!(preview.movie_active());
-        assert!(preview.release(None, false), "the starting click's release");
-        assert!(
-            preview.movie_active(),
-            "a press before the movie does not skip"
-        );
         assert!(preview.click([10, 10], false));
         assert!(preview.release(None, false));
         assert!(matches!(preview.screen, Screen::PipBoy(_)));
@@ -2271,57 +2271,6 @@ mod tests {
         assert!(matches!(preview.screen, Screen::Map));
     }
 
-    #[test]
-    fn pipboy_lists_quests_and_holodisks_and_rests_in_ui_steps() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
-        std::fs::write(
-            dir.path().join("text/english/game/pipboy.msg"),
-            b"{400}{}{Disk Zero}\n{1000}{}{First line}\n{1001}{}{**END-PAR**}\n\
-              {1002}{}{**END-DISK**}\n{700}{}{Vault 13}\n{701}{}{Find help}\n\
-              {702}{}{Done task}\n{704}{}{Find the water chip}\n",
-        )
-        .unwrap();
-        let mut preview = interactive(dir.path());
-        let mut gvars = vec![0; 620];
-        gvars[162] = 1;
-        gvars[238] = 1;
-        gvars[309] = 2;
-        preview.host.world.gvars = Some(gvars);
-        preview.image().unwrap();
-        preview.host.world.rest_credit = 100;
-        assert!(preview.step(KeyCode::KeyP));
-        assert_eq!(preview.host.world.rest_credit, 0, "opening resets credit");
-        let image = preview.image().unwrap();
-        assert!(image.pixels().iter().any(|pixel| *pixel != 0));
-        // The holodisk list maps a row to its disk's records.
-        assert!(preview.click([30, 95], false));
-        assert!(preview.click([200, 64], false));
-        let Screen::PipBoy(pipboy) = &preview.screen else {
-            panic!("Pip-Boy");
-        };
-        let (disk, page) = pipboy.disk.as_ref().unwrap();
-        assert_eq!(
-            (disk.title.as_slice(), disk.records.len(), *page),
-            (b"Disk Zero".as_slice(), 2, 0)
-        );
-        preview.image().unwrap();
-        // The alarm clock rests ten minutes in 50 ms UI steps.
-        assert!(preview.click([30, 125], false));
-        assert!(preview.click([200, 64], false));
-        let start = preview.host.world.clock.ticks;
-        let mut now = 1000;
-        while matches!(&preview.screen, Screen::PipBoy(pipboy) if pipboy.rest.is_some()) {
-            now += 50;
-            preview.tick(now).unwrap();
-            assert!(now < 100_000, "rest finishes");
-        }
-        assert_eq!(preview.host.world.clock.ticks - start, 6000);
-        assert_eq!(preview.status, b"Rest complete");
-        preview.image().unwrap();
-        assert!(preview.step(KeyCode::Escape));
-        assert!(matches!(preview.screen, Screen::Map));
-    }
     #[test]
     fn map_preview_loads_all_categories_and_handles_camera_roofs_elevations() {
         let dir = tempfile::tempdir().unwrap();

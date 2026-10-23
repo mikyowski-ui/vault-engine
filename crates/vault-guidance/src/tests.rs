@@ -174,3 +174,47 @@ fn spec008_fixture_holodisk_acquisition_pages_and_markers() {
     assert_eq!(disk.diagnostics, [DiskDiagnostic::MissingTitle(400)]);
     assert_eq!(holodisk(18, &catalog(&[])), Err(DiskError::Ordinal(18)));
 }
+
+#[test]
+fn spec014_fixture_j_automap_groups_and_elevations() {
+    use automaps::{area_groups, elevation_entries, related};
+    // The related rows are symmetric groups; 36-41 list the other five.
+    assert_eq!(related(3), [9, 4, 5]);
+    assert_eq!(related(33), [34, 47, 17, 18]);
+    assert_eq!(related(38), [36, 37, 39, 40, 41]);
+    assert!(related(0).is_empty() && related(65).is_empty());
+    for map in 0..66 {
+        for other in related(map) {
+            assert!(related(*other).contains(&map), "{map} and {other}");
+        }
+    }
+    // Map 6 elevations 0 and 1, map 35 elevation 0, map 36 elevation 0, map
+    // 3 elevation 0: Necropolis (3), Vault 13 (6, which 35 joins) and the
+    // Hub (36), each under its lowest-numbered captured map.
+    let held = [(6, 0), (6, 1), (35, 0), (36, 0), (3, 0)];
+    let captured = |map: usize, elevation: usize| held.contains(&(map, elevation));
+    assert_eq!(area_groups(captured), [3, 6, 36]);
+    // The Hub: its own entrance only under the safe rule (R1 adds map 3's
+    // "Sewers" through position 3).
+    assert_eq!(elevation_entries(36, captured), [(36, 0)]);
+    // Vault 13: its two elevations, then the related cave entrance.
+    assert_eq!(elevation_entries(6, captured), [(6, 0), (6, 1), (35, 0)]);
+    // The database form: a positive offset is a capture.
+    let db = vault_formats::AutomapDb::default();
+    assert!(!automaps::captured(&db, 6, 0));
+    assert!(!automaps::captured(&db, 0, 0), "excluded (-1)");
+    assert!(area_groups(|map, elevation| automaps::captured(&db, map, elevation)).is_empty());
+}
+
+#[test]
+fn spec014_fixture_j_holodisk_page_count() {
+    // 94 records: last-page index 2, three pages of 35, 35 and 24.
+    let mut entries = vec![(400, "FEV Experiment Tape".to_string())];
+    entries.extend((0..94).map(|line| (1000 + line, format!("Line {line}"))));
+    entries.push((1094, "**END-DISK**".to_string()));
+    let refs: Vec<_> = entries.iter().map(|(id, t)| (*id, t.as_str())).collect();
+    let disk = holodisk(0, &catalog(&refs)).unwrap();
+    assert_eq!((disk.last_page, disk.page_count()), (2, 3));
+    assert_eq!(disk.page(1).len(), 35);
+    assert_eq!(disk.page(2).len(), 24);
+}

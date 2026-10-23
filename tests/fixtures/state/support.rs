@@ -373,6 +373,7 @@ pub fn write_corpus(root: &std::path::Path) {
     .unwrap();
     std::fs::write(root.join("art/intrface/shell.frm"), world::frm(640, 480, 0)).unwrap();
     std::fs::write(root.join("art/intrface/panel.frm"), world::frm(640, 145, 8)).unwrap();
+    write_pipboy(root);
     for suffix in ["gf", "nf", "bf"] {
         for variant in 1..=3 {
             std::fs::write(
@@ -404,4 +405,38 @@ pub fn write_corpus(root: &std::path::Path) {
     ] {
         std::fs::write(root.join(format!("text/english/game/pro_{file}.msg")),format!("{{100}}{{}}{{Synthetic {name}}}\n{{101}}{{}}{{A synthetic {name} for interaction tests.}}\n")).unwrap();
     }
+}
+/// SPEC-014 §3.41 the Pip-Boy's eleven art files at their corpus sizes,
+/// each one color, and a `pipboy.msg` with the texts it shows.
+pub fn write_pipboy(root: &std::path::Path) {
+    for (name, width, height, color) in [
+        ("pip.frm", 640, 480, 3),
+        ("lilredup.frm", 15, 16, 30),
+        ("lilreddn.frm", 15, 16, 31),
+        ("numbers.frm", 360, 17, 32),
+        ("pip2.frm", 148, 227, 33),
+        ("months.frm", 29, 179, 34),
+        ("notenums.frm", 120, 13, 35),
+        ("alarmout.frm", 28, 24, 36),
+        ("alarmin.frm", 28, 24, 37),
+        ("pipx.frm", 204, 141, 38),
+        ("bomb1.frm", 65, 65, 39),
+    ] {
+        std::fs::write(
+            root.join(format!("art/intrface/{name}")),
+            world::frm(width, height, color),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        root.join("text/english/game/pipboy.msg"),
+        "{107}{}{Merry Christmas!}\n{200}{}{MORE}\n{201}{}{BACK}\n{202}{}{STATUS}\n\
+         {203}{}{No current tasks.}\n{205}{}{AUTOMAPS}\n{206}{}{VIDEO ARCHIVES}\n\
+         {210}{}{Status}\n{211}{}{DATA}\n{212}{}{of}\n{214}{}{DONE}\n\
+         {215}{}{You can not rest at this location!}\n{300}{}{ALARM CLOCK}\n\
+         {301}{}{Hit Points}\n{302}{}{Rest for ten minutes}\n{314}{}{Rest until healed}\n\
+         {400}{}{FEV Experiment Tape}\n{511}{}{Vault 13 Water}\n\
+         {700}{}{Vault 13}\n{704}{}{Find the Water Chip.}\n",
+    )
+    .unwrap();
 }

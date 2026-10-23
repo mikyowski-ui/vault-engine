@@ -2,7 +2,10 @@
 //! status. Disk acquisition and quest progress derive only from campaign
 //! globals and localized messages; this version parses no disk/quest
 //! definition text files, and the Pip-Boy save component has zero bytes.
+//! The SPEC-014 §3.41.4 Automaps page grouping is in [`automaps`].
 use vault_formats::MsgCatalog;
+
+pub mod automaps;
 
 include!(concat!(env!("OUT_DIR"), "/pipboy_tables.rs"));
 
@@ -15,6 +18,8 @@ pub const END_PARAGRAPH: &[u8] = b"**END-PAR**";
 /// The water-chip quest always shows: active at most 1, completed above.
 pub const WATER_CHIP_GLOBAL: usize = 101;
 pub const LOCATION_TITLE_BASE: i32 = 700;
+/// SPEC-014 §3.41.5 archive titles: `pipboy.msg` 500 + movie index.
+pub const ARCHIVE_TITLE_BASE: i32 = 500;
 
 fn global(gvars: &[i32], index: usize) -> i32 {
     gvars.get(index).copied().unwrap_or(0)
@@ -66,6 +71,11 @@ impl Holodisk {
             .min(self.records.len());
         let end = (start + RECORDS_PER_PAGE).min(self.records.len());
         &self.records[start..end]
+    }
+    /// The page count the reading view's counter shows: last-page index + 1
+    /// (SPEC-014 §3.41.3).
+    pub fn page_count(&self) -> usize {
+        self.last_page + 1
     }
 }
 

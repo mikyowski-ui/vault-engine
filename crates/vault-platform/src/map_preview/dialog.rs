@@ -119,6 +119,7 @@ impl MapPreview {
             Screen::Loot(_) => self.close_loot_screen(),
             Screen::Options(_) => self.close_preferences(false),
             Screen::Inventory(_) => self.close_inventory(),
+            Screen::PipBoy(_) => self.close_pipboy(),
             _ => {}
         }
         self.screen = Screen::Map;

@@ -2718,7 +2718,7 @@ fn g26_z_opens_the_alarm_clock_and_f12_saves_a_screenshot() {
     assert!(preview.step(KeyCode::KeyZ));
     assert!(matches!(
         &preview.screen,
-        Screen::PipBoy(pipboy) if pipboy.tab == super::pipboy::Tab::Alarm
+        Screen::PipBoy(pipboy) if pipboy.tab() == Some(super::pipboy::Tab::Alarm)
     ));
 }
 
