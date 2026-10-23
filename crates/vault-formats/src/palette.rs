@@ -1,4 +1,5 @@
-//! SPEC-001 §2.1/3.1/3.2 and SPEC-002 §3.2.
+//! SPEC-001 §2.1/3.1/3.2/3.7, SPEC-002 §3.2 and the SPEC-014 §3.44 gray
+//! levels.
 use crate::{ParseError, binary::Reader};
 use std::sync::OnceLock;
 
@@ -16,6 +17,8 @@ pub struct Palette {
     generated: OnceLock<Box<[u8]>>,
     /// The generated additive mix, evaluated on first use.
     generated_mix: OnceLock<Box<[u8]>>,
+    /// The generated multiplicative mix, evaluated on first use.
+    generated_product: OnceLock<Box<[u8]>>,
 }
 
 impl Palette {
@@ -49,6 +52,7 @@ impl Palette {
             tables,
             generated: OnceLock::new(),
             generated_mix: OnceLock::new(),
+            generated_product: OnceLock::new(),
         })
     }
 
@@ -85,17 +89,24 @@ impl Palette {
         )
     }
 
-    /// Generated intensity is evaluated lazily; supplied tables take precedence.
+    /// P(i), the five-bit components of a mapped entry (SPEC-001 §3.7).
+    fn components(&self, index: u8) -> Option<[u8; 3]> {
+        self.is_mapped(index)
+            .then(|| self.rgb6(index).map(|channel| channel / 2))
+    }
+
+    /// SPEC-001 §3.7 the intensity table, row `foreground` and column
+    /// `level`; supplied tables take precedence, and a generated entry is
+    /// evaluated on demand.
     pub fn intensity(&self, foreground: u8, level: u8) -> u8 {
         if let Some(tables) = &self.tables {
             return tables[usize::from(foreground) * 256 + usize::from(level)];
         }
-        if !self.is_mapped(foreground) {
+        let Some(rgb) = self.components(foreground) else {
             return 0;
-        }
-        let rgb = self.rgb6(foreground).map(|channel| {
-            let c = u16::from(channel / 2);
-            let k = u16::from(level);
+        };
+        let rgb = rgb.map(|c| {
+            let (c, k) = (u16::from(c), u16::from(level));
             (if k < 128 {
                 c * k / 128
             } else {
@@ -118,29 +129,79 @@ impl Palette {
         })
     }
 
-    /// The additive mix of two colors: the supplied table, or else each
-    /// five-bit channel summed and saturated at 31, through the RGB555
-    /// lookup (an unmapped color counts as black).
+    /// SPEC-001 §3.7 the additive mix table, row `first` and column
+    /// `second`: the supplied table, or else the channel-wise sum through
+    /// the RGB555 lookup. A sum whose largest channel exceeds 31 by e loses
+    /// e from every channel (clamped at 0) and is lightened through
+    /// intensity column 128 + e; it is not clamped channel by channel.
     pub fn additive(&self, first: u8, second: u8) -> u8 {
         let index = usize::from(first) * 256 + usize::from(second);
         if let Some(tables) = &self.tables {
             return tables[65536 + index];
         }
         self.generated_mix.get_or_init(|| {
-            (0..=u16::MAX)
-                .map(|index| {
-                    let [a, b] = [(index >> 8) as u8, index as u8].map(|color| {
-                        if self.is_mapped(color) {
-                            self.rgb6(color).map(|channel| channel / 2)
-                        } else {
-                            [0; 3]
-                        }
-                    });
-                    let rgb = std::array::from_fn(|channel| (a[channel] + b[channel]).min(31));
-                    self.lookup_rgb5(rgb).expect("saturated five-bit channels")
-                })
-                .collect()
+            self.generate_mix(|a, b| {
+                let sum: [u8; 3] = std::array::from_fn(|channel| a[channel] + b[channel]);
+                let largest = sum.into_iter().max().unwrap_or(0);
+                if largest <= 31 {
+                    return self.lookup_rgb5(sum).expect("five-bit sum");
+                }
+                let excess = largest - 31;
+                let rest = sum.map(|channel| channel.saturating_sub(excess));
+                let base = self.lookup_rgb5(rest).expect("five-bit remainder");
+                self.intensity_table()[usize::from(base) * 256 + 128 + usize::from(excess)]
+            })
         })[index]
+    }
+
+    /// SPEC-001 §3.7 the multiplicative mix table: the supplied table, or
+    /// else the channel-wise `trunc(a × b / 32)` through the RGB555 lookup.
+    pub fn multiplicative(&self, first: u8, second: u8) -> u8 {
+        let index = usize::from(first) * 256 + usize::from(second);
+        if let Some(tables) = &self.tables {
+            return tables[2 * 65536 + index];
+        }
+        self.generated_product.get_or_init(|| {
+            self.generate_mix(|a, b| {
+                let product = std::array::from_fn(|channel| {
+                    (u16::from(a[channel]) * u16::from(b[channel]) / 32) as u8
+                });
+                self.lookup_rgb5(product).expect("five-bit product")
+            })
+        })[index]
+    }
+
+    /// A generated mix table over every pair of mapped entries; a pair with
+    /// an unmapped entry passes the other entry through, or the row entry
+    /// when neither is mapped.
+    fn generate_mix(&self, mix: impl Fn([u8; 3], [u8; 3]) -> u8) -> Box<[u8]> {
+        (0..=u16::MAX)
+            .map(|index| {
+                let (a, b) = ((index >> 8) as u8, index as u8);
+                match (self.components(a), self.components(b)) {
+                    (Some(pa), Some(pb)) => mix(pa, pb),
+                    (_, Some(_)) => b,
+                    _ => a,
+                }
+            })
+            .collect()
+    }
+
+    /// SPEC-014 §3.44 the gray level 0-7 of an entry for translucent draws:
+    /// `trunc(trunc((b + 3r + 6g) / 10) / 4)` for the common table, or
+    /// `trunc(trunc((r + 5g + 4b) / 10) / 4)` for the glass table, over the
+    /// five-bit components (an unmapped entry, like index 0, is level 0).
+    pub fn gray_level(&self, index: u8, glass: bool) -> u8 {
+        if index == 0 {
+            return 0;
+        }
+        let [r, g, b] = self.components(index).unwrap_or_default().map(u16::from);
+        let sum = if glass {
+            r + 5 * g + 4 * b
+        } else {
+            b + 3 * r + 6 * g
+        };
+        (sum / 10 / 4) as u8
     }
 
     /// SPEC-014 §3.37 a pixel drawn through a mask weight `weight` (0-128)
@@ -347,5 +408,97 @@ impl PaletteCycler {
             display[RED_PULSE_INDEX] = display_rgb6([self.red as u8, 0, 0], self.gamma);
         }
         ready.into_iter().any(|ready| ready)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A palette whose entries 1, 2, ... hold `triples` as five-bit
+    /// components, with the RGB555 lookup returning exactly those entries
+    /// (every other lookup is entry 0), and entries 240 and 241 unmapped.
+    fn fixture(triples: &[[u8; 3]]) -> Palette {
+        let mut bytes = vec![0; 0x8300];
+        for (index, rgb) in triples.iter().enumerate() {
+            let entry = index + 1;
+            for channel in 0..3 {
+                bytes[entry * 3 + channel] = rgb[channel] * 2;
+            }
+            let key = usize::from(rgb[0]) * 1024 + usize::from(rgb[1]) * 32 + usize::from(rgb[2]);
+            bytes[0x300 + key] = entry as u8;
+        }
+        bytes[240 * 3..240 * 3 + 6].copy_from_slice(&[64, 0, 0, 0, 64, 0]);
+        Palette::parse(&bytes).unwrap()
+    }
+
+    #[test]
+    fn spec001_fixture_d_generated_table_arithmetic() {
+        let triples = [
+            [20, 10, 0],
+            [10, 5, 0],
+            [25, 20, 15],
+            [10, 12, 3],
+            [15, 10, 3],
+            [25, 22, 6],
+            [31, 20, 10],
+            [31, 5, 2],
+            [31, 0, 0],
+            [31, 7, 7],
+            [30, 3, 0],
+        ];
+        let palette = fixture(&triples);
+        let at = |rgb: [u8; 3]| triples.iter().position(|t| *t == rgb).unwrap() as u8 + 1;
+        assert!(!palette.is_mapped(240));
+        // Intensity, columns 64 and 192; an unmapped row is index 0.
+        assert_eq!(palette.intensity(at([20, 10, 0]), 64), at([10, 5, 0]));
+        assert_eq!(palette.intensity(at([20, 10, 0]), 192), at([25, 20, 15]));
+        for column in [0, 64, 128, 255] {
+            assert_eq!(palette.intensity(240, column), 0);
+        }
+        // Additive mix: in range, then an excess of 31 lightened through
+        // column 159 instead of a channel-wise clamp.
+        assert_eq!(
+            palette.additive(at([10, 12, 3]), at([15, 10, 3])),
+            at([25, 22, 6])
+        );
+        assert_eq!(
+            palette.additive(at([31, 20, 10]), at([31, 5, 2])),
+            at([31, 7, 7])
+        );
+        assert_eq!(palette.intensity(at([31, 0, 0]), 159), at([31, 7, 7]));
+        // Multiplicative mix of the same two entries.
+        assert_eq!(
+            palette.multiplicative(at([31, 20, 10]), at([31, 5, 2])),
+            at([30, 3, 0])
+        );
+        // An unmapped entry passes the other through in either mix.
+        let a = at([10, 12, 3]);
+        for mix in [Palette::additive, Palette::multiplicative] {
+            assert_eq!(mix(&palette, a, 240), a);
+            assert_eq!(mix(&palette, 240, a), a);
+            assert_eq!(mix(&palette, 240, 241), 240);
+        }
+    }
+
+    #[test]
+    fn supplied_mix_tables_are_read_as_stored() {
+        let mut bytes = vec![0; 0x8300];
+        bytes.extend(b"CWEN");
+        bytes.extend((0..3 * 65536).map(|index| (index / 65536 + 1) as u8));
+        let palette = Palette::parse(&bytes).unwrap();
+        assert_eq!(palette.intensity(9, 9), 1);
+        assert_eq!(palette.additive(9, 9), 2);
+        assert_eq!(palette.multiplicative(9, 9), 3);
+    }
+
+    #[test]
+    fn spec014_fixture_q_gray_levels() {
+        let palette = fixture(&[[7, 31, 0], [0, 1, 0]]);
+        assert_eq!(palette.gray_level(1, false), 5);
+        assert_eq!(palette.gray_level(1, true), 4);
+        assert_eq!(palette.gray_level(2, false), 0);
+        assert_eq!(palette.gray_level(0, false), 0);
+        assert_eq!(palette.gray_level(240, true), 0);
     }
 }
