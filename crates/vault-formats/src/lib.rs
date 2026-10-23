@@ -24,6 +24,7 @@ pub mod pro;
 pub mod pro_catalog;
 pub mod rix;
 pub mod savegame;
+pub mod screenshot;
 pub mod sfx;
 pub mod sve;
 pub mod vfs;

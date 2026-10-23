@@ -122,16 +122,6 @@ pub struct MoviePreview {
     black: Palette,
 }
 
-/// Where a key press lands, for the engine key repeat (SPEC-014 §3.29):
-/// the game's stage (and an open editor name field), and in a world its
-/// window, conversation and dialog box. A repeat stops once it changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct KeyLayer {
-    pub(crate) stage: u8,
-    pub(crate) field: bool,
-    pub(crate) world: Option<crate::map_preview::WorldLayer>,
-}
-
 impl AssetPreview {
     /// The standalone sprite and map preview tools exit on an Escape they
     /// do not consume. The game never exits on a key (G-01): it leaves
@@ -139,14 +129,12 @@ impl AssetPreview {
     pub fn escape_exits(&self) -> bool {
         matches!(self, Self::Sprite(_) | Self::Map(_))
     }
-    pub fn key_layer(&self) -> KeyLayer {
+    /// The keyboard state for the engine key repeat (SPEC-014 §3.29).
+    pub fn keyboard(&self) -> crate::input::Keyboard {
         match self {
-            Self::Sprite(_) | Self::Movie(_) => KeyLayer::default(),
-            Self::Map(preview) => KeyLayer {
-                world: Some(preview.key_layer()),
-                ..KeyLayer::default()
-            },
-            Self::Game(game) => game.key_layer(),
+            Self::Sprite(_) | Self::Movie(_) => crate::input::Keyboard::default(),
+            Self::Map(preview) => preview.keyboard(),
+            Self::Game(game) => game.keyboard(),
         }
     }
     pub fn image(&mut self) -> AppResult<IndexedImage> {

@@ -141,6 +141,62 @@ fn spec012_pipboy_selection_volume_and_placement() {
         [0, 475, 640, 5],
         "clipped"
     );
+    // §3.10 safe rule: a wrapped entry's band grows by one text height per
+    // extra line, to the window bottom.
+    assert_eq!(
+        movie::subtitle_band_lines(10, 320, 80, 2),
+        [0, 435, 640, 24]
+    );
+    assert_eq!(
+        movie::subtitle_band_lines(10, 320, 80, 9),
+        [0, 435, 640, 45]
+    );
+}
+
+/// A `.FON` of 128 glyphs, 10 high with letter spacing 1: every glyph 9
+/// wide except the space, 4 wide; all bitmaps blank.
+fn subtitle_font() -> vault_formats::Font {
+    let mut bytes = Vec::new();
+    for word in [128, 10, 1, 0, 0] {
+        bytes.extend_from_slice(&i32::to_le_bytes(word));
+    }
+    for code in 0..128 {
+        let width = if code == 32 { 4 } else { 9 };
+        bytes.extend_from_slice(&i32::to_le_bytes(width));
+        bytes.extend_from_slice(&i32::to_le_bytes(0));
+    }
+    bytes.extend_from_slice(&[0; 20]);
+    vault_formats::Font::parse_fon(&bytes).unwrap()
+}
+
+#[test]
+fn spec012_subtitles_wrap_at_the_last_space_before_640_pixels() {
+    let font = subtitle_font();
+    // "AAAA" is 40 pixels with its spacing, a space 5. Fourteen words and
+    // their spaces reach 630; the fifteenth word's second character takes
+    // the sum to 649, past 640, so the line ends before the last space.
+    let words = vec!["AAAA"; 16].join(" ").into_bytes();
+    let lines = movie::subtitle_lines(&font, &words);
+    assert_eq!(lines, [(0, 14 * 5 - 1), (14 * 5, words.len())]);
+    let first = &words[lines[0].0..lines[0].1];
+    let width = font.text_width(first, false) as i32;
+    assert_eq!(width, 14 * 40 + 13 * 5);
+    assert_eq!((640 - width) / 2, 7, "line 0 centered");
+    // The line ends just before the last space before the overflow, so a
+    // double space leaves one on the line; the spaces after the break are
+    // skipped.
+    let doubled = [vec!["AAAA"; 14].join(" ").as_str(), "  AAAA"]
+        .concat()
+        .into_bytes();
+    let lines = movie::subtitle_lines(&font, &doubled);
+    assert_eq!(lines, [(0, 14 * 5), (14 * 5 + 1, doubled.len())]);
+    // Safe rule: no space before the overflow breaks before the
+    // overflowing character (64 characters fill 640 pixels exactly).
+    let solid = vec![b'A'; 80];
+    assert_eq!(movie::subtitle_lines(&font, &solid), [(0, 64), (64, 80)]);
+    // An entry that fits is one line; an empty one has none.
+    assert_eq!(movie::subtitle_lines(&font, b"AB C"), [(0, 4)]);
+    assert!(movie::subtitle_lines(&font, b"").is_empty());
 }
 
 #[test]

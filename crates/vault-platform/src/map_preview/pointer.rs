@@ -836,6 +836,20 @@ impl MapPreview {
             self.draw_world_cursor(&painter, image, at);
             return;
         }
+        // SPEC-014 §3.20: over the message monitor's scroll areas, while
+        // the bar is enabled, `suparrow.frm` or `sdnarrow.frm`; leaving
+        // them restores the arrow.
+        if self.world_pointer()
+            && let Some(older) = self.monitor_area(at)
+        {
+            let art = if older {
+                cursor::SMALL_UP
+            } else {
+                cursor::SMALL_DOWN
+            };
+            painter.cursor(image, art.art, at);
+            return;
+        }
         painter.cursor(image, cursor::ARROW.art, at);
     }
     /// §3.27 the hovered item's outline in key 30632, drawn with the cursor

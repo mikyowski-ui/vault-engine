@@ -1054,7 +1054,7 @@ fn spec014_inventory_examine_wrapping_and_menu_placement() {
 }
 
 #[test]
-fn held_button_repeat_and_grey_table() {
+fn held_button_repeat() {
     // §3.14: after 13 idle frames (13 * 41 ms) the steps come at 5, 6, 7 ...
     // per second; each waits trunc(1000 / rate).
     let mut repeat = super::HoldRepeat::new(1000, 13);
@@ -1064,18 +1064,71 @@ fn held_button_repeat_and_grey_table() {
     assert!(repeat.poll(1733));
     assert!(!repeat.poll(1733 + 165));
     assert!(repeat.poll(1899));
-    // The grey table keeps the transparent index and maps greys to greys.
+}
+
+/// A synthetic `.pal`: entry levels as given (others black), and an RGB555
+/// lookup whose entry for key k is `k % 251`.
+fn lookup_palette(entries: &[(usize, [u8; 3])]) -> vault_formats::Palette {
     let mut bytes = vec![0u8; 0x8300];
-    for index in 0..256usize {
-        let level = (index / 4) as u8;
-        bytes[3 * index..3 * index + 3].copy_from_slice(&[level, level, level]);
+    for (index, levels) in entries {
+        bytes[3 * index..3 * index + 3].copy_from_slice(levels);
     }
-    bytes[3..6].copy_from_slice(&[62, 0, 0]);
+    for key in 0..32768usize {
+        bytes[768 + key] = (key % 251) as u8;
+    }
+    vault_formats::Palette::parse(&bytes).unwrap()
+}
+
+#[test]
+fn spec014_grey_table_uses_max_plus_min_of_the_five_bit_components() {
+    // §3.17: s = max + min of P(i), v = trunc(s * 240 / 510), and the grey
+    // index is the RGB555 lookup of key 1057 v.
+    let palette = lookup_palette(&[
+        (1, [59, 59, 59]),
+        (57, [63, 63, 31]),
+        (145, [63, 39, 18]),
+        (215, [15, 62, 0]),
+        (220, [63, 63, 63]),
+        // An unmapped entry (a level above 63) counts as zero.
+        (229, [64, 0, 0]),
+    ]);
+    let grey = super::grey_table(&palette);
+    let key = |v: usize| ((1057 * v) % 251) as u8;
+    for (index, v) in [
+        (0, 0),
+        (1, 27),
+        (57, 21),
+        (145, 18),
+        (215, 14),
+        (220, 29),
+        (229, 0),
+    ] {
+        assert_eq!(grey[index], key(v), "index {index}");
+    }
+}
+
+/// §4.20 Fixture T over the corpus `color.pal`.
+#[test]
+#[ignore = "needs the local corpus"]
+fn fixture_t_grey_table_over_the_corpus_palette() {
+    let dir = std::env::var_os("VAULT_CORPUS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-corpus")
+        });
+    let Ok(bytes) = std::fs::read(dir.join("fallout1-unpacked/color.pal")) else {
+        eprintln!("skipping: no local corpus at {}", dir.display());
+        return;
+    };
     let palette = vault_formats::Palette::parse(&bytes).unwrap();
     let grey = super::grey_table(&palette);
-    assert_eq!(grey[0], 0);
-    let [r, g, b] = palette.rgb6(grey[1]);
-    assert!(r == g && g == b, "{r} {g} {b}");
+    for (index, expected) in [(0, 228), (1, 2), (57, 5), (145, 7), (215, 9), (220, 1)] {
+        assert_eq!(grey[index], expected, "index {index}");
+    }
+    for (index, entry) in grey.iter().enumerate().skip(229) {
+        assert!(!palette.is_mapped(index as u8));
+        assert_eq!(*entry, 228, "index {index}");
+    }
 }
 
 #[test]
@@ -1118,4 +1171,60 @@ fn location_line_wraps_to_three_lines() {
             .all(|line| width(line) <= saveload::LOCATION_WIDTH)
     );
     assert_eq!(lines[0], b"VAULT 13 LIVING QUARTERS AND THE");
+}
+
+#[test]
+fn fixture_s_date_line_and_dialog_done_boxes() {
+    // §4.19 Fixture S: `/` at tick 264600, then 39 minutes later.
+    let line = |ticks: u64| {
+        let [month, day, year] = crate::host_save::game_date(ticks);
+        assert_eq!(month, 12);
+        let clock = crate::queue::WorldClock {
+            ticks,
+            ..Default::default()
+        };
+        bar::date_line(b"December", [day, year], clock.hhmm())
+    };
+    assert_eq!(line(264_600), b"December: 5/2161 7:21");
+    assert_eq!(line(264_600 + 23_400), b"December: 5/2161 8:00");
+    // `/` and `?` print it also while the bar is disabled.
+    use bar::{Action, Key, game_key};
+    for key in ['/', '?'] {
+        assert_eq!(
+            game_key(Key::Char(key), false, false),
+            Some(Action::DateTime)
+        );
+        assert_eq!(
+            game_key(Key::Char(key), true, false),
+            Some(Action::DateTime)
+        );
+    }
+    // §3.13: a medium Done box at screen (200, 150).
+    use flow::{DialogSize, dialog_buttons_for};
+    let [done] = dialog_buttons_for(false, DialogSize::Medium)[..] else {
+        panic!("one Done button");
+    };
+    assert_eq!(done.box_origin, [53, 81]);
+    assert_eq!([200 + 53, 150 + 81], [253, 231]);
+    assert_eq!(done.caption_origin, [88, 84]);
+    assert_eq!(done.button, [66, 85]);
+    assert_eq!(
+        dialog_buttons_for(false, DialogSize::Large),
+        flow::dialog_buttons(false)
+    );
+    let [large] = flow::dialog_buttons(false)[..] else {
+        panic!("one Done button");
+    };
+    assert_eq!(
+        (large.box_origin, large.caption_origin, large.button),
+        ([97, 98], [132, 101], [110, 102])
+    );
+    // Medium requested with a second button: forced large.
+    let size = flow::dialog_size(true, Some(DialogSize::Medium), 0, 1);
+    assert_eq!(size, DialogSize::Large);
+    let boxes: Vec<_> = dialog_buttons_for(true, size)
+        .iter()
+        .map(|button| button.box_origin)
+        .collect();
+    assert_eq!(boxes, [[37, 98], [169, 98]]);
 }

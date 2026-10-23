@@ -17,7 +17,7 @@
 use crate::{
     AppResult,
     input::{InputCommand, KeyRepeat, LoggedCommand},
-    preview::{AssetPreview, KeyLayer},
+    preview::AssetPreview,
 };
 use sha2::{Digest, Sha256};
 use std::io::BufRead;
@@ -55,7 +55,7 @@ pub struct Replay {
     /// `None` until the first record is read.
     timed: Option<bool>,
     /// SPEC-014 §3.29 the engine key repeat, as on the desktop.
-    repeat: KeyRepeat<KeyLayer>,
+    repeat: KeyRepeat,
 }
 
 impl Replay {
@@ -148,7 +148,7 @@ impl Replay {
             self.stopped = true;
             return Ok(());
         }
-        if let Some(key) = self.repeat.poll(now, self.preview.key_layer()) {
+        for key in self.repeat.poll(now, self.preview.keyboard()) {
             self.press_key(key, self.preview.escape_exits())?;
         }
         if changed {
@@ -224,7 +224,7 @@ impl Replay {
                     self.preview.key_up(key);
                 } else if !repeat {
                     // The desktop ignores the OS repeats; the engine repeats.
-                    self.repeat.press(key, self.preview.key_layer());
+                    self.repeat.press(key, self.preview.keyboard());
                     self.press_key(key, self.preview.escape_exits())?;
                 }
             }
