@@ -271,7 +271,7 @@ fn spec008_save_slot_round_trip_restores_the_world() {
         (header.game_ticks, header.map, header.host_time),
         (now as u32, 7, 46)
     );
-    assert_eq!(header.game_date[..2], [1, 4]);
+    assert_eq!(header.game_date, crate::host_save::game_date(now));
     // The automap companion length is recorded in the manifest component.
     assert_eq!(
         fs::read(slot.join("AUTOMAP.SAV")).unwrap(),
@@ -1310,4 +1310,17 @@ fn spec014_roofs_hide_at_the_entrance_restore_on_leaving_and_come_back_drawn() {
     assert!(host.process_transition().unwrap());
     assert!(host.world.unloaded);
     assert_eq!(host.world.roof, RoofTracker::NONE);
+}
+
+#[test]
+fn spec014_the_game_calendar_starts_on_5_december_2161() {
+    use crate::host_save::game_date;
+    // SPEC-014 §3.1 step 8 / Fixtures I and J: tick 264600 is 07:21 on
+    // 5 December 2161; SPEC-008's save fixture: tick 864000 is 6 December.
+    assert_eq!(game_date(0), [12, 5, 2161]);
+    assert_eq!(game_date(264_600), [12, 5, 2161]);
+    assert_eq!(game_date(864_000), [12, 6, 2161]);
+    // 27 days on the year turns over on the fixed non-leap calendar.
+    assert_eq!(game_date(27 * 864_000), [1, 1, 2162]);
+    assert_eq!(game_date(27 * 864_000 + 59 * 864_000), [3, 1, 2162]);
 }

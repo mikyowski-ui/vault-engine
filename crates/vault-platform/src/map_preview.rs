@@ -730,8 +730,7 @@ impl MapPreview {
     /// Game date and time, `MM/DD/YYYY HH:MM`.
     pub(crate) fn clock_text(&self) -> Vec<u8> {
         let world = &self.host.world;
-        let [month, day, year] =
-            vault_core::host_save::game_date(world.clock.ticks, world.rules.calendar_year);
+        let [month, day, year] = vault_core::host_save::game_date(world.clock.ticks);
         let time = world.clock.hhmm();
         format!(
             "{month:02}/{day:02}/{year:04} {:02}:{:02}",

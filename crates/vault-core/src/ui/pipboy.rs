@@ -106,14 +106,10 @@ impl Button {
     }
 }
 
-/// SPEC-014 §3.1 step 8: the game clock starts at tick 264600, 07:21:00 on
-/// 5 December 2161, so tick 0 is midnight on 5 December 2161, day 338 of
-/// the fixed non-leap calendar (SPEC-005 §3.5).
-pub const CALENDAR_YEAR: u16 = 2161;
-pub const CALENDAR_DAY: u64 = 338;
-/// Month, day and year of a game tick.
+pub use crate::host_save::{CALENDAR_DAY, CALENDAR_YEAR};
+/// Month, day and year of a game tick (tick 0 is 5 December 2161).
 pub fn date(ticks: u64) -> [u16; 3] {
-    crate::host_save::game_date(ticks.saturating_add(CALENDAR_DAY * 864_000), CALENDAR_YEAR)
+    crate::host_save::game_date(ticks)
 }
 
 /// A copy of `source` from an art file to window `at`.

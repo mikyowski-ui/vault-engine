@@ -1669,16 +1669,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
             }
             0x8118 | 0x8119 => {
-                let mut day = (self.world.clock.ticks / 864000) % 365;
-                let mut month = 1;
-                for days in [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] {
-                    if day < days {
-                        break;
-                    }
-                    day -= days;
-                    month += 1;
-                }
-                integer(if op == 0x8118 { month } else { day as i32 + 1 })
+                let [month, day, _] = crate::host_save::game_date(self.world.clock.ticks);
+                integer(i32::from(if op == 0x8118 { month } else { day }))
             }
             // SPEC-013 §3.10: one pending request, serviced by the request
             // pass; a second request before that pass overwrites the first.

@@ -145,11 +145,10 @@ fn spec014_fixture_i_world_view_darkening_markers_and_date() {
     // not drawn.
     assert_eq!(pixel(&image, [531, 61]), 100);
     assert_eq!(pixel(&image, [531, 88]), 9);
-    // The date and time cells from the shared calendar (SPEC-005; tick
-    // 264600 is 07:21): two day digits, the month row, four year digits
-    // and HHMM 0721.
-    let [month, day, year] =
-        vault_core::host_save::game_date(264_600, preview.host.world.rules.calendar_year);
+    // Fixture I: tick 264600 is 07:21 on 05 DEC 2161: two day digits, the
+    // month row, four year digits and HHMM 0721.
+    let [month, day, year] = vault_core::host_save::game_date(264_600);
+    assert_eq!([month, day, year], [12, 5, 2161]);
     let digits = |value: u16, count: u32| -> Vec<u8> {
         (0..count)
             .map(|k| (value / 10_u16.pow(count - 1 - k) % 10) as u8)

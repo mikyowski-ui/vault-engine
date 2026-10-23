@@ -804,8 +804,7 @@ impl MapPreview {
     /// opaque: day, month row, year, and HHMM.
     fn draw_date(&self, painter: &Painter, image: &mut IndexedImage) {
         let world = &self.host.world;
-        let [month, day, year] =
-            vault_core::host_save::game_date(world.clock.ticks, world.rules.calendar_year);
+        let [month, day, year] = vault_core::host_save::game_date(world.clock.ticks);
         let digits = |image: &mut IndexedImage, value: i32, count: u32, origin: [i32; 2]| {
             for k in 0..count {
                 let digit = value / 10_i32.pow(count - 1 - k) % 10;

@@ -51,10 +51,17 @@ pub fn slot_directory(root: &Path, slot: u8) -> Result<PathBuf, WorldError> {
     Ok(root.join("SAVEGAME").join(format!("SLOT{slot:02}")))
 }
 
-/// Month, day, year on the opcodes' fixed non-leap calendar.
-pub fn game_date(ticks: u64, base_year: u16) -> [u16; 3] {
-    let mut day = (ticks / 864000) % 365;
-    let year = (u64::from(base_year) + ticks / (864000 * 365)).min(u64::from(u16::MAX)) as u16;
+/// SPEC-014 §3.1 step 8 sets the clock to tick 264600, 07:21 on 5 December
+/// 2161, so tick 0 is midnight on 5 December 2161, day 338 of the fixed
+/// non-leap calendar (SPEC-005 §3.5); the SPEC-008 save fixture's tick
+/// 864000 is 6 December 2161.
+pub const CALENDAR_YEAR: u16 = 2161;
+pub const CALENDAR_DAY: u64 = 338;
+/// Month, day, year of a game tick on the fixed non-leap calendar.
+pub fn game_date(ticks: u64) -> [u16; 3] {
+    let days = ticks / 864000 + CALENDAR_DAY;
+    let mut day = days % 365;
+    let year = (u64::from(CALENDAR_YEAR) + days / 365).min(u64::from(u16::MAX)) as u16;
     let mut month = 1;
     for days in [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] {
         if day < days {
@@ -212,7 +219,7 @@ impl<A: WorldAssets> WorldHost<A> {
             description: fixed(&info.description),
             host_date: info.host_date,
             host_time: info.host_time,
-            game_date: game_date(world.clock.ticks, world.rules.calendar_year),
+            game_date: game_date(world.clock.ticks),
             game_ticks: u32::try_from(world.clock.ticks).map_err(|_| WorldError::Arithmetic)?,
             elevation: u16::from(world.elevation),
             // The number as its 16-bit truncation (-1 on an unnumbered map).

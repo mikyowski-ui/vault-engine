@@ -243,9 +243,6 @@ pub struct WorldRules {
     pub currency_pid: Option<u32>,
     pub doctor_bag_pid: Option<u32>,
     pub first_aid_kit_pid: Option<u32>,
-    /// Game-calendar year for day zero; the approved specs define the
-    /// non-leap month/day calendar but no base year.
-    pub calendar_year: u16,
     /// The campaign global holding the remaining water for the SPEC-012
     /// midnight countdown; no approved specification names it.
     pub water_global: Option<usize>,
