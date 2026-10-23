@@ -489,8 +489,9 @@ impl Attack {
         Ok(resolution)
     }
     /// Forced upgrades after the roll: global Jinxed, then player Slayer and
-    /// Sniper. These are not disabled by the first-day critical gate.
-    fn postprocess(
+    /// Sniper. These are not disabled by the first-day critical gate. A
+    /// spray runs them once, on its final result (SPEC-007 §3.7).
+    pub(crate) fn postprocess(
         &self,
         mut code: i32,
         subtype: Subtype,

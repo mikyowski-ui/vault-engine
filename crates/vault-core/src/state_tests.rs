@@ -257,8 +257,13 @@ fn spec006_queue_iq_reaction_and_art_vectors() {
     assert_eq!(head.path(4, 2).unwrap(), "art/heads/synthnf2.frm");
     assert_eq!(head.art_id(10, 0).unwrap(), 0x080a0007);
     assert_eq!(head.art_id(3, 0).unwrap(), 0x08030007);
-    let mut animation =
-        TalkingHead::new(head.clone(), Mood::Neutral, 0, &mut Dice::new(&[77])).unwrap();
+    let mut animation = TalkingHead::new(
+        head.clone(),
+        Mood::Neutral,
+        HeadIdle::default(),
+        &mut Dice::new(&[77]),
+    )
+    .unwrap();
     animation.phoneme(41).unwrap();
     assert_eq!(
         (animation.art_id().unwrap(), animation.frame),
@@ -305,35 +310,100 @@ fn spec006_queue_iq_reaction_and_art_vectors() {
     }
     let mut empty = head.clone();
     empty.counts = [0; 3];
-    let mut waiting = TalkingHead::new(empty, Mood::Bad, 0, &mut Dice::new(&[40])).unwrap();
+    let mut waiting =
+        TalkingHead::new(empty, Mood::Bad, HeadIdle::default(), &mut Dice::new(&[40])).unwrap();
     assert_eq!(
         (waiting.phase, waiting.animation, waiting.frame),
         (HeadPhase::Waiting, 11, 0)
     );
     assert!(waiting.diagnostic.take().is_some());
     waiting.frame = 1;
+    // The idle wait elapses: threshold draw first, then the fidget draw.
     assert!(
         !waiting
-            .tick(20000, 3, 10, &mut Dice::new(&[40, 5]))
+            .tick(20000, 3, 10, &mut Dice::new(&[1, 40]))
             .unwrap()
     );
     assert_eq!((waiting.phase, waiting.frame), (HeadPhase::Waiting, 1));
+    assert_eq!((waiting.idle_seconds, waiting.wait_ms), (10, 5000));
     assert!(waiting.diagnostic.is_some());
-    // SPEC-006 §3.11: speech time is not idle time. Speech completion sets
-    // the counter to 3, and only the waiting that follows accumulates: a
-    // 6-second line adds nothing, the next 2 seconds add 2.
-    let mut speaking =
-        TalkingHead::new(head.clone(), Mood::Neutral, 0, &mut Dice::new(&[77])).unwrap();
+    // SPEC-006 §3.11 session start: the fidget is drawn at once, and with the
+    // retained timestamp at zero the first tick shows its frame 0.
+    let mut opening = TalkingHead::new(
+        head.clone(),
+        Mood::Neutral,
+        HeadIdle {
+            idle_seconds: 50,
+            wait_ms: 6000,
+        },
+        &mut Dice::new(&[30]),
+    )
+    .unwrap();
+    // 30 + 50 / 2 = 55 selects variant 2, and a three-variant draw resets
+    // the carried idle counter.
+    assert_eq!(
+        (opening.phase, opening.animation, opening.variant),
+        (HeadPhase::Fidget, 4, 2)
+    );
+    assert_eq!(opening.idle_seconds, 0);
+    assert!(opening.tick(5000, 2, 10, &mut Dice::default()).unwrap());
+    assert_eq!((opening.frame, opening.last_fidget_ms), (0, 5000));
+    assert!(!opening.tick(5050, 2, 10, &mut Dice::default()).unwrap());
+    assert!(opening.tick(5100, 2, 10, &mut Dice::default()).unwrap());
+    assert_eq!(opening.frame, 1);
+    // The fidget finishes on frame 0 without moving the retained timestamp,
+    // so the carried 6-second threshold runs from its last shown frame.
+    assert!(opening.tick(5200, 2, 10, &mut Dice::default()).unwrap());
+    assert_eq!(
+        (opening.phase, opening.frame, opening.last_fidget_ms),
+        (HeadPhase::Waiting, 0, 5100)
+    );
+    assert!(!opening.tick(11099, 2, 10, &mut Dice::default()).unwrap());
+    let mut dice = Dice::new(&[3, 90]);
+    assert!(opening.tick(11100, 2, 10, &mut dice).unwrap());
+    assert_eq!(dice.draws, 2);
+    assert_eq!(
+        (opening.idle_seconds, opening.wait_ms, opening.variant),
+        (0, 7000, 3)
+    );
+    assert_eq!(
+        opening.idle(),
+        HeadIdle {
+            idle_seconds: 0,
+            wait_ms: 7000
+        }
+    );
+    // The idle counter changes only by the threshold's whole seconds, speech
+    // completion (3) and user choice (0); waiting time alone adds nothing.
+    let mut speaking = TalkingHead::new(
+        HeadDefinition {
+            counts: [2; 3],
+            ..head.clone()
+        },
+        Mood::Neutral,
+        HeadIdle::default(),
+        &mut Dice::new(&[77]),
+    )
+    .unwrap();
     speaking.phoneme(3).unwrap();
     speaking.speech_end();
-    assert_eq!(speaking.idle_seconds, 3);
-    speaking.tick(6000, 2, 10, &mut Dice::default()).unwrap();
     assert_eq!(speaking.idle_seconds, 3);
     speaking.tick(8000, 2, 10, &mut Dice::default()).unwrap();
     assert_eq!(
         (speaking.idle_seconds, speaking.phase),
-        (5, HeadPhase::Waiting)
+        (3, HeadPhase::Waiting)
     );
+    // No fidget frame was shown yet (timestamp zero): the first wait is
+    // measured from zero and adds the 10-second threshold.
+    speaking
+        .tick(10000, 2, 10, &mut Dice::new(&[0, 50]))
+        .unwrap();
+    assert_eq!(
+        (speaking.idle_seconds, speaking.wait_ms, speaking.phase),
+        (13, 4000, HeadPhase::Fidget)
+    );
+    speaking.react(0);
+    assert_eq!(speaking.idle_seconds, 0);
     let mut session = GDialog::default();
     session.start(1, 1, 5, None).unwrap();
     assert_eq!(session.background_art(), 0x09000005);
@@ -1352,7 +1422,13 @@ fn spec006_live_queue_stop_elevation_updates_speech_reputation_and_campaign_fail
         stem: "synth".into(),
         counts: [3; 3],
     };
-    let mut head = TalkingHead::new(definition, Mood::Neutral, 0, &mut Dice::new(&[77])).unwrap();
+    let mut head = TalkingHead::new(
+        definition,
+        Mood::Neutral,
+        HeadIdle::default(),
+        &mut Dice::new(&[77]),
+    )
+    .unwrap();
     head.phoneme(9).unwrap();
     host.world.dialogue.head = Some(head);
     host.world.dialogue.speech = Some(b"voice".to_vec());

@@ -36,6 +36,9 @@ pub enum ScriptEvent {
     UseObject,
     Pickup,
     Talk,
+    /// The background checker's per-critter pass (see
+    /// `WorldHost::critter_scripts`).
+    Critter,
     /// SPEC-007 combat invocations (fixed parameter 4 turn, 5 join check).
     Combat,
     Damage,
@@ -57,6 +60,7 @@ impl ScriptEvent {
             Self::UseObject => b"use_obj_on_p_proc",
             Self::Pickup => b"pickup_p_proc",
             Self::Talk => b"talk_p_proc",
+            Self::Critter => b"critter_p_proc",
             Self::Combat => b"combat_p_proc",
             Self::Damage => b"damage_p_proc",
             Self::Destroy => b"destroy_p_proc",

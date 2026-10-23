@@ -114,6 +114,23 @@ pub enum HeadPhase {
     Transition,
     Speech,
 }
+/// The head updater's idle state that outlives a dialogue session: the
+/// idle-second counter (0 at program start) and the current idle-wait
+/// threshold (10 seconds until the first threshold draw). Neither is reset
+/// when a session opens (SPEC-006 §3.11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadIdle {
+    pub idle_seconds: i32,
+    pub wait_ms: u64,
+}
+impl Default for HeadIdle {
+    fn default() -> Self {
+        Self {
+            idle_seconds: 0,
+            wait_ms: 10000,
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub struct TalkingHead {
     pub definition: HeadDefinition,
@@ -123,17 +140,18 @@ pub struct TalkingHead {
     pub variant: i32,
     pub frame: usize,
     pub idle_seconds: i32,
+    /// The current idle-wait threshold in milliseconds.
+    pub wait_ms: u64,
+    /// The retained timestamp: when a head frame was last shown. It starts
+    /// at zero, and a finished fidget does not update it, so idle waits are
+    /// measured from the fidget's last shown frame.
     pub last_fidget_ms: u64,
     /// A pending safe-rule diagnostic for the host to report.
     pub diagnostic: Option<String>,
     /// Set once the host has reported this head's art as unavailable.
     pub missing_art: Option<String>,
-    frame_ms: u64,
-    idle_ms: u64,
-    /// Restart idle accumulation at the next tick: speech completion and a
-    /// user choice set the counter outright (SPEC-006 §3.11).
-    idle_resync: bool,
-    wait_ms: u64,
+    /// The current frame has been chosen but not shown yet.
+    unshown: bool,
     pending: Option<(u8, Mood)>,
     destination: Option<Mood>,
 }
@@ -180,44 +198,66 @@ pub fn choose_fidget(
     }))
 }
 impl TalkingHead {
+    /// SPEC-006 §3.11 session start: the mood fidget is chosen at once, with
+    /// its `random(1, 100)` draw and no threshold draw. The retained
+    /// timestamp starts at zero, so the first tick shows frame 0 of the
+    /// chosen fidget.
     pub fn new(
         definition: HeadDefinition,
         mood: Mood,
-        now: u64,
+        idle: HeadIdle,
         rng: &mut impl RandomSource,
     ) -> Result<Self, WorldError> {
-        let mut idle = 0;
-        let variant = choose_fidget(definition.count(mood), &mut idle, rng)?;
-        // With no fidget the head starts waiting on its speech frame zero.
-        let diagnostic = variant
-            .is_none()
-            .then(|| format!("head {} has no fidget art to select", definition.index));
-        Ok(Self {
+        let mut idle_seconds = idle.idle_seconds;
+        let variant = choose_fidget(definition.count(mood), &mut idle_seconds, rng)?;
+        let mut head = Self::waiting(definition, mood, idle);
+        head.idle_seconds = idle_seconds;
+        match variant {
+            Some(variant) => {
+                head.variant = variant;
+                head.animation = mood.fidget();
+                head.phase = HeadPhase::Fidget;
+                head.unshown = true;
+            }
+            // With no fidget the head starts waiting on its speech frame zero.
+            None => {
+                head.diagnostic = Some(format!(
+                    "head {} has no fidget art to select",
+                    head.definition.index
+                ));
+            }
+        }
+        Ok(head)
+    }
+    /// A head whose fidget count could not be looked up: the session opens
+    /// without the session-start draw, waiting on speech frame zero.
+    pub fn without_fidget(definition: HeadDefinition, mood: Mood, idle: HeadIdle) -> Self {
+        Self::waiting(definition, mood, idle)
+    }
+    fn waiting(definition: HeadDefinition, mood: Mood, idle: HeadIdle) -> Self {
+        Self {
             definition,
             mood,
-            phase: if variant.is_some() {
-                HeadPhase::Fidget
-            } else {
-                HeadPhase::Waiting
-            },
-            animation: if variant.is_some() {
-                mood.fidget()
-            } else {
-                mood.speech()
-            },
-            variant: variant.unwrap_or(0),
+            phase: HeadPhase::Waiting,
+            animation: mood.speech(),
+            variant: 0,
             frame: 0,
-            diagnostic,
+            idle_seconds: idle.idle_seconds,
+            wait_ms: idle.wait_ms,
+            last_fidget_ms: 0,
+            diagnostic: None,
             missing_art: None,
-            idle_seconds: idle,
-            last_fidget_ms: now,
-            frame_ms: now,
-            idle_ms: now,
-            idle_resync: false,
-            wait_ms: 10000,
+            unshown: false,
             pending: None,
             destination: None,
-        })
+        }
+    }
+    /// The state the next session starts from.
+    pub fn idle(&self) -> HeadIdle {
+        HeadIdle {
+            idle_seconds: self.idle_seconds,
+            wait_ms: self.wait_ms,
+        }
     }
     /// A fidget choice for the current mood, recording a diagnostic when
     /// none can be selected.
@@ -257,16 +297,15 @@ impl TalkingHead {
     }
     pub fn speech_end(&mut self) {
         self.frame = 0;
+        self.unshown = false;
         self.phase = HeadPhase::Waiting;
         self.idle_seconds = 3;
-        self.idle_resync = true;
     }
     pub fn react(&mut self, reaction: i32) {
         if self.phase == HeadPhase::Speech {
             self.speech_end();
         }
         self.idle_seconds = 0;
-        self.idle_resync = true;
         self.pending = self.mood.transition(reaction);
     }
     pub fn tick(
@@ -285,69 +324,64 @@ impl TalkingHead {
             return Ok(false);
         }
         if self.phase == HeadPhase::Waiting {
-            // SPEC-006 §3.11: the counter accumulates waiting time only;
-            // speech time is not idle time (speech completion sets 3, a
-            // user choice resets to 0, and accumulation restarts from there).
-            if self.idle_resync {
-                self.idle_resync = false;
-                self.idle_ms = now;
-            }
-            let elapsed = now.saturating_sub(self.idle_ms) / 1000;
-            self.idle_seconds = self
-                .idle_seconds
-                .saturating_add(elapsed.min(i32::MAX as u64) as i32);
-            self.idle_ms = self.idle_ms.saturating_add(elapsed * 1000);
             if let Some((animation, mood)) = self.pending.take() {
                 self.animation = animation;
                 self.destination = Some(mood);
                 self.phase = HeadPhase::Transition;
                 self.frame = 0;
-                self.frame_ms = now;
+                self.last_fidget_ms = now;
                 return Ok(true);
             }
             if now.saturating_sub(self.last_fidget_ms) < self.wait_ms {
                 return Ok(false);
             }
-            let chosen = self.fidget(rng)?;
-            self.last_fidget_ms = now;
-            self.wait_ms = rng.range(4, 7)? as u64 * 1000;
-            let Some(variant) = chosen else {
-                // No fidget: keep the current frame and keep waiting.
+            // SPEC-006 §3.11 idle sequence, in order: the threshold's whole
+            // seconds join the idle counter, the next threshold is drawn, and
+            // then the next fidget.
+            let seconds = (self.wait_ms / 1000).min(i32::MAX as u64) as i32;
+            self.idle_seconds = self.idle_seconds.saturating_add(seconds);
+            self.wait_ms = 1000 * (rng.range(0, 3)? as u64 + 4);
+            let Some(variant) = self.fidget(rng)? else {
+                // No fidget: keep the current frame and wait again.
+                self.last_fidget_ms = now;
                 return Ok(false);
             };
             self.variant = variant;
             self.animation = self.mood.fidget();
             self.phase = HeadPhase::Fidget;
             self.frame = 0;
-            self.frame_ms = now;
-            return Ok(true);
+            self.unshown = true;
         }
         let interval = 1000 / u64::from(if fps == 0 { 10 } else { fps as u16 });
-        if now.saturating_sub(self.frame_ms) < interval {
+        if now.saturating_sub(self.last_fidget_ms) < interval {
             return Ok(false);
         }
-        self.frame_ms = now;
-        self.frame += 1;
-        if self.frame >= frames {
-            self.frame = 0;
-            if self.phase == HeadPhase::Transition {
-                self.mood = self.destination.take().unwrap_or(self.mood);
-                self.last_fidget_ms = now;
-                if let Some(variant) = self.fidget(rng)? {
-                    self.variant = variant;
-                    self.animation = self.mood.fidget();
-                    self.phase = HeadPhase::Fidget;
-                } else {
-                    // No fidget: keep the transition's final frame.
-                    self.frame = frames - 1;
-                    self.phase = HeadPhase::Waiting;
-                    self.idle_ms = now;
-                }
+        if std::mem::take(&mut self.unshown) {
+            self.last_fidget_ms = now;
+            return Ok(true);
+        }
+        if self.frame + 1 < frames {
+            self.frame += 1;
+            self.last_fidget_ms = now;
+            return Ok(true);
+        }
+        self.frame = 0;
+        if self.phase == HeadPhase::Transition {
+            self.mood = self.destination.take().unwrap_or(self.mood);
+            self.last_fidget_ms = now;
+            if let Some(variant) = self.fidget(rng)? {
+                self.variant = variant;
+                self.animation = self.mood.fidget();
+                self.phase = HeadPhase::Fidget;
             } else {
+                // No fidget: keep the transition's final frame.
+                self.frame = frames - 1;
                 self.phase = HeadPhase::Waiting;
-                self.last_fidget_ms = now;
-                self.idle_ms = now;
             }
+        } else {
+            // A finished fidget shows frame 0 and waits, measured from its
+            // last shown frame.
+            self.phase = HeadPhase::Waiting;
         }
         Ok(true)
     }
@@ -390,6 +424,8 @@ pub struct GDialog {
     pub page_ms: u64,
     pub speech: Option<Vec<u8>>,
     pub reaction: i32,
+    /// The head updater's idle state between sessions.
+    pub idle: HeadIdle,
 }
 impl Default for GDialog {
     fn default() -> Self {
@@ -414,6 +450,7 @@ impl Default for GDialog {
             page_ms: 0,
             speech: None,
             reaction: 0,
+            idle: HeadIdle::default(),
         }
     }
 }
@@ -436,6 +473,10 @@ impl GDialog {
         self.open = true;
         self.target = target;
         self.program = program;
+        // A head being replaced keeps its idle state for later sessions.
+        if let Some(old) = &self.head {
+            self.idle = old.idle();
+        }
         self.head = head;
         self.pending_barter = false;
         // SPEC-011 §3.17: the script barter modifier resets per dialogue.
@@ -578,8 +619,10 @@ impl GDialog {
             return false;
         }
         let background = self.background;
+        let idle = self.head.as_ref().map_or(self.idle, TalkingHead::idle);
         *self = Self::default();
         self.background = background;
+        self.idle = idle;
         true
     }
 }

@@ -1219,6 +1219,85 @@ fn spec007_spray_budgets_rays_extras_and_continuous_fire() {
     assert_eq!(spray.extras[0].2.damage, 45);
 }
 
+/// Scripted draws, then the lowest (or highest) bound; records every range.
+struct Traced {
+    script: std::collections::VecDeque<i32>,
+    high: bool,
+    ranges: Vec<(i32, i32)>,
+}
+impl Traced {
+    fn new(script: &[i32], high: bool) -> Self {
+        Self {
+            script: script.iter().copied().collect(),
+            high,
+            ranges: Vec::new(),
+        }
+    }
+}
+impl crate::RandomSource for Traced {
+    fn range(&mut self, first: i32, last: i32) -> Result<i32, crate::WorldError> {
+        self.ranges.push((first, last));
+        Ok(self
+            .script
+            .pop_front()
+            .unwrap_or(if self.high { last } else { first }))
+    }
+}
+
+#[test]
+fn spec007_spray_stage_a_extra_damage_order_and_post_processing() {
+    use crate::combat::attack_mode;
+    let (host, defender, extra) = spray_world(attack_mode::BURST);
+    let mut attack = host
+        .world
+        .attack_profile(
+            host.world.player,
+            defender,
+            critical::hit_mode::RIGHT_PRIMARY,
+            location::TORSO,
+            false,
+        )
+        .unwrap();
+    attack.attacker_player = true;
+    attack.player.sniper = true;
+    attack.luck = 5;
+    // Spray roll succeeds, the one direct trial misses, and the in-spray
+    // Stage A pass draws once for the extra critter in the line and does not
+    // select it. Every later D100 hits.
+    let mut rng = Traced::new(&[1, 100, 100], false);
+    let spray = host
+        .resolve_spray(host.world.player, defender, &attack, &mut rng)
+        .unwrap();
+    // Roll, direct trial, Stage A, then the center ray's trials at the
+    // extra (hits plus one) and at once its three damage draws.
+    assert_eq!(&rng.ranges[..3], &[(1, 100); 3]);
+    assert_eq!(&rng.ranges[3..7], &[(1, 100); 4]);
+    assert_eq!(&rng.ranges[7..10], &[(5, 5); 3]);
+    // Only the extra was hit, so the spray stays a success, and the Sniper
+    // D10 is the final draw; under the safe rule the target gets no hit bit
+    // and no critical processing.
+    assert_eq!(rng.ranges.last(), Some(&(1, 10)));
+    assert_eq!(spray.main.code, 3);
+    assert_eq!(spray.main.defender_flags & effect::HIT, 0);
+    assert_eq!((spray.extras[0].0, spray.extras[0].2.rounds), (extra, 10));
+
+    // Every D100 misses: the final ordinary failure draws the Jinxed coin
+    // once, and a heads makes it a critical failure.
+    let mut jinxed = attack.clone();
+    jinxed.player.sniper = false;
+    jinxed.jinxed = true;
+    let mut rng = Traced::new(&[], true);
+    let spray = host
+        .resolve_spray(host.world.player, defender, &jinxed, &mut rng)
+        .unwrap();
+    assert_eq!(
+        rng.ranges.iter().filter(|range| **range == (0, 1)).count(),
+        1
+    );
+    assert_eq!(spray.main.code, 0);
+    assert!(spray.extras.is_empty());
+}
+
 #[test]
 fn spec007_aimed_shot_availability_and_grenade_scatter() {
     let attack = fixture_c();

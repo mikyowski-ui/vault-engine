@@ -123,34 +123,54 @@ fn spec008_fixture_holodisk_acquisition_pages_and_markers() {
     let disk = holodisk(1, &short).unwrap();
     assert_eq!((disk.records.len(), disk.last_page), (0, 0));
 
-    // Missing termination is diagnosed within the 500-record window.
+    // Missing termination is diagnosed, and the disk shows the whole
+    // 500-record window (the safe rule stops at the window bound).
     let mut open = vec![(400, "Open".to_string())];
     open.extend((1000..1500).map(|id| (id, "text".to_string())));
     open.push((1500, "**END-DISK**".to_string()));
     let refs: Vec<_> = open.iter().map(|(id, t)| (*id, t.as_str())).collect();
-    assert_eq!(
-        holodisk(0, &catalog(&refs)),
-        Err(DiskError::Unterminated(0))
-    );
-    assert_eq!(
-        holodisk(0, &catalog(&[(400, "Gap"), (1001, "**END-DISK**")])),
-        Err(DiskError::MissingRecord(1000))
-    );
-    // A gap is fatal (SPEC-008 §3.8 open question); the message names the
-    // disk, the id, and the window it falls in.
+    let disk = holodisk(0, &catalog(&refs)).unwrap();
+    assert_eq!((disk.records.len(), disk.last_page), (500, 14));
+    assert_eq!(disk.page(14).len(), 10);
+    assert_eq!(disk.diagnostics, [DiskDiagnostic::Unterminated(0)]);
+    // A gap is neither skipped nor fatal: it reads as one `Error` record.
+    let disk = holodisk(0, &catalog(&[(400, "Gap"), (1001, "**END-DISK**")])).unwrap();
+    assert_eq!(disk.records, [DiskLine::Text(b"Error".to_vec())]);
+    assert_eq!(disk.diagnostics, [DiskDiagnostic::MissingRecord(1000)]);
     let gap = holodisk(
         1,
         &catalog(&[(401, "Gap"), (2000, "a"), (2002, "**END-DISK**")]),
-    );
-    assert_eq!(gap, Err(DiskError::MissingRecord(2001)));
+    )
+    .unwrap();
     assert_eq!(
-        gap.unwrap_err().to_string(),
-        "holodisk 1 content message 2001 is missing: a gap in the 2000-2499 window \
-         before **END-DISK** (SPEC-008 §3.8 leaves gaps undefined, so the disk is not shown)"
+        gap.records,
+        [
+            DiskLine::Text(b"a".to_vec()),
+            DiskLine::Text(b"Error".to_vec())
+        ]
     );
     assert_eq!(
-        holodisk(0, &catalog(&[])),
-        Err(DiskError::MissingTitle(400))
+        gap.diagnostics[0].to_string(),
+        "holodisk 1 content message 2001 is missing from the 2000-2499 window; showing Error"
     );
+    // A gap counts toward the 35-record page budget.
+    let mut gappy: Vec<(i32, String)> = vec![(400, "Paged".to_string())];
+    gappy.extend(
+        (1000..1040)
+            .filter(|id| id % 2 == 0)
+            .map(|id| (id, "x".to_string())),
+    );
+    gappy.push((1040, "**END-DISK**".to_string()));
+    let refs: Vec<_> = gappy.iter().map(|(id, t)| (*id, t.as_str())).collect();
+    let disk = holodisk(0, &catalog(&refs)).unwrap();
+    assert_eq!(
+        (disk.records.len(), disk.last_page, disk.page(1).len()),
+        (40, 1, 5)
+    );
+    assert_eq!(disk.diagnostics.len(), 20);
+    // A missing title shows the placeholder too; the window is still read.
+    let disk = holodisk(0, &catalog(&[(1000, "**END-DISK**")])).unwrap();
+    assert_eq!(disk.title, b"Error");
+    assert_eq!(disk.diagnostics, [DiskDiagnostic::MissingTitle(400)]);
     assert_eq!(holodisk(18, &catalog(&[])), Err(DiskError::Ordinal(18)));
 }

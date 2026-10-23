@@ -930,7 +930,8 @@ fn spec014_automap_colors_and_mirrored_pixels() {
     assert_eq!(automap::color(Mark::Other, true, true, true), None);
     // The Pip-Boy page: 2 by 1 cells from (238, 105).
     assert_eq!(automap::pipboy_cell(0, 0), [238, 105]);
-    assert_eq!(automap::pipboy_cell(3, 10), [258, 108]);
+    // A two-row pitch: cell row 3 paints window row 111.
+    assert_eq!(automap::pipboy_cell(3, 10), [258, 111]);
     assert_eq!(automap::pipboy_color(2), Some(automap::DARK_GREEN));
 }
 

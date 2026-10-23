@@ -854,7 +854,8 @@ impl<A: WorldAssets> WorldHost<A> {
             None => {
                 // §3.10.4 step 7: without a projectile the defender dodges a
                 // miss on the attacker's action frame, with no sound; under
-                // the safe rule only when its dodge art exists.
+                // the safe rule only when its dodge art exists. A critical
+                // failure that keeps its critical bit registers no dodge.
                 let result = &scene.spray.main;
                 if matches!(anim, 18 | 45 | 46)
                     && !scene.hit
@@ -887,11 +888,10 @@ impl<A: WorldAssets> WorldHost<A> {
                 // §3.10.4 step 11 sends every throw to §3.9 step 11, where
                 // without a refill item the attacker's art changes to
                 // standing with weapon code 0. A throw whose projectile
-                // phase did not run (§3.9: a critical failure that kept its
-                // critical bit, or no valid projectile) has no refill item,
-                // so it ends the same way under the literal reading; the
-                // spec does not say whether such a throw keeps its weapon
-                // code instead (README "Open spec questions", item 5).
+                // phase did not run (a critical failure that kept its
+                // critical bit, or no valid projectile) never has a refill
+                // item, so it always ends on weapon code 0 (§3.9 R1-rev8),
+                // until the art is next rebuilt from the equipped item.
                 Some(_) | None if thrown => {
                     let facing = draft.facing.get(&attacker).copied().unwrap_or(0);
                     let art = self.critter_fid(attacker, animation::STAND, Some(0), facing);

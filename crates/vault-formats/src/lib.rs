@@ -42,7 +42,7 @@ pub use msg::{MsgCatalog, TextMode};
 pub use palette::Palette;
 pub use pro::Prototype;
 pub use pro_catalog::LocalPrototypeCatalog;
-pub use vfs::{LocalDirProvider, Vfs, VfsError, VfsPath};
+pub use vfs::{LocalDirProvider, PrefixMount, Vfs, VfsError, VfsPath};
 
 /// Validate a supported asset. Unknown extensions return `None`.
 /// Unknown LST consumers receive structural line parsing without invented ID rules.

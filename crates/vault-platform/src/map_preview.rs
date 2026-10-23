@@ -20,9 +20,12 @@ use vault_formats::{
 use vault_render::{
     IndexedImage, TextStyle,
     dialogue::{self, ChoiceHit},
-    map::{MapArt, MapHover, MapView, render_map_with},
+    map::{Cutout, MapArt, MapHover, MapView, render_map_cut},
 };
 use winit::keyboard::KeyCode;
+
+/// SPEC-014 §3.37 `egg.frm`, interface art (`intrface.lst`) index 2.
+const EGG_ART: u32 = 0x0600_0002;
 
 mod automap;
 mod barter;
@@ -245,6 +248,10 @@ pub struct MapPreview {
     /// P-02: the world is frozen behind a modal window, so its view is
     /// rendered once and reused until input or a world change.
     frozen_view: Option<IndexedImage>,
+    /// SPEC-014 §3.37 the see-through cutout mask, `egg.frm`
+    /// (`intrface.lst` index 2), loaded on first use; `Some(None)` when it
+    /// cannot load.
+    egg: Option<Option<Arc<FrmArchive>>>,
     /// `fallout.cfg` `[system] interrupt_walk` (SPEC-014 §3.27, default on):
     /// a movement click out of combat cancels a busy player's sequence.
     pub interrupt_walk: bool,
@@ -522,6 +529,7 @@ impl MapPreview {
             volumes: Volumes::default(),
             volume_source: None,
             frozen_view: None,
+            egg: None,
             interrupt_walk: true,
         })
     }
@@ -1018,10 +1026,18 @@ impl MapPreview {
         }
         // P-02: the world's map by reference and its drawn objects; no map
         // clone per frame.
+        let egg = self.egg_mask();
         let objects = self.host.world.render_objects();
         let map = &self.host.world.map;
         self.art.bind(&self.host.assets, map, &objects)?;
-        let mut image = render_map_with(map, &objects, self.view, &self.art)?;
+        let extended = |pid: u32| {
+            self.host
+                .assets
+                .prototype(pid)
+                .map_or(0, |prototype| prototype.extended.0)
+        };
+        let cutout = self.cutout(egg.as_deref(), &extended);
+        let mut image = render_map_cut(map, &objects, self.view, &self.art, cutout.as_ref())?;
         let size = [image.width(), image.height()];
         self.light.shade(
             image.pixels_mut(),
@@ -1033,6 +1049,36 @@ impl MapPreview {
         );
         self.frozen_view = modal.then(|| image.clone());
         Ok(image)
+    }
+    /// SPEC-014 §3.37 the cutout mask, loaded once. Without it everything
+    /// draws normally (the safe rule), and the failure is reported once.
+    pub(crate) fn egg_mask(&mut self) -> Option<Arc<FrmArchive>> {
+        if self.egg.is_none() {
+            let loaded = self.host.assets.object_art(EGG_ART);
+            if let Err(error) = &loaded {
+                tracing::warn!(%error, "see-through cutout unavailable");
+            }
+            self.egg = Some(loaded.ok());
+        }
+        self.egg.clone().flatten()
+    }
+    /// The player's cutout over the current view: none without the mask
+    /// art or a placed player (the SPEC-014 §3.37 safe rule).
+    pub(crate) fn cutout<'a>(
+        &'a self,
+        egg: Option<&'a FrmArchive>,
+        extended: &'a dyn Fn(u32) -> u32,
+    ) -> Option<Cutout<'a>> {
+        let mask = egg?.frame(0, 0)?;
+        let player = self.host.world.get(self.host.world.player)?;
+        Some(Cutout {
+            mask,
+            hex: player.raw.hex?,
+            displacement: player.raw.displacement,
+            hidden: player.raw.flags.contains(BasicFlags::HIDDEN),
+            extended,
+            palette: &self.palette,
+        })
     }
     /// Input or a world change may have changed what the map view shows.
     fn thaw_view(&mut self) {
@@ -1499,6 +1545,8 @@ impl MapPreview {
 }
 
 #[cfg(test)]
+mod corpus_tests;
+#[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../tests/fixtures/world/support.rs"]
 pub(crate) mod fixture;
@@ -1704,8 +1752,15 @@ mod tests {
             stem: "synth".into(),
             counts: [1; 3],
         };
-        preview.host.world.dialogue.head =
-            Some(TalkingHead::new(head, Mood::Neutral, 0, &mut preview.host.world.rng).unwrap());
+        preview.host.world.dialogue.head = Some(
+            TalkingHead::new(
+                head,
+                Mood::Neutral,
+                Default::default(),
+                &mut preview.host.world.rng,
+            )
+            .unwrap(),
+        );
         preview
             .host
             .world

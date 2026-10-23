@@ -47,11 +47,15 @@ pub enum DiskLine {
 pub struct Holodisk {
     pub ordinal: usize,
     pub title: Vec<u8>,
-    /// Records before `**END-DISK**`, at most 35 per page.
+    /// Records before `**END-DISK**` (or the whole window), at most 35 per
+    /// page.
     pub records: Vec<DiskLine>,
     /// `floor((records - 1) / 35)`, at least 0: under the SPEC-008 §3.8 safe
     /// rule an exact multiple of 35 exposes no extra empty final page.
     pub last_page: usize,
+    /// Lookups that fell back to the `Error` placeholder, and a missing
+    /// terminator; none of them stops the disk from showing.
+    pub diagnostics: Vec<DiskDiagnostic>,
 }
 impl Holodisk {
     /// Records of `page`; a page past the end is empty (the multiplication
@@ -65,30 +69,44 @@ impl Holodisk {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiskError {
     Ordinal(usize),
-    MissingTitle(i32),
-    /// A content id inside the disk's 500-record window that has no message
-    /// before `**END-DISK**`. SPEC-008 §3.8 does not say whether a gap ends
-    /// the disk or is skipped (open spec question), so it is an error.
-    MissingRecord(i32),
-    /// No `**END-DISK**` within the 500-record search window.
-    Unterminated(usize),
 }
 impl std::fmt::Display for DiskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ordinal(ordinal) => write!(f, "holodisk ordinal {ordinal} outside 0-17"),
-            Self::MissingTitle(id) => write!(f, "holodisk title message {id} is missing"),
+        }
+    }
+}
+impl std::error::Error for DiskError {}
+
+/// A logged, non-fatal holodisk lookup problem (SPEC-008 §3.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskDiagnostic {
+    /// The title id is absent; the title shows the `Error` placeholder.
+    MissingTitle(i32),
+    /// A gap: a content id absent inside the window. It shows as one
+    /// `Error` record (SPEC-002 §3.5) and does not end the disk.
+    MissingRecord(i32),
+    /// No `**END-DISK**` within the 500-record window; the disk shows the
+    /// whole window.
+    Unterminated(usize),
+}
+impl std::fmt::Display for DiskDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingTitle(id) => {
+                write!(f, "holodisk title message {id} is missing; showing Error")
+            }
             Self::MissingRecord(id) => {
                 // Content ids run from `1000 x ordinal + 1000`.
                 let first = id.div_euclid(1000) * 1000;
                 write!(
                     f,
-                    "holodisk {} content message {id} is missing: a gap in the \
-                     {first}-{} window before **END-DISK** (SPEC-008 §3.8 leaves \
-                     gaps undefined, so the disk is not shown)",
+                    "holodisk {} content message {id} is missing from the {first}-{} \
+                     window; showing Error",
                     id.div_euclid(1000) - 1,
                     first + DISK_RECORD_LIMIT - 1
                 )
@@ -102,31 +120,41 @@ impl std::fmt::Display for DiskError {
         }
     }
 }
-impl std::error::Error for DiskError {}
+
+/// The fixed text an absent message id yields (SPEC-002 §3.5).
+pub const MISSING_TEXT: &[u8] = b"Error";
 
 /// Read a disk's title (`400 + ordinal`) and content records from
-/// `1000 x ordinal + 1000`, stopping at exact `**END-DISK**` text.
+/// `1000 x ordinal + 1000`, stopping at exact `**END-DISK**` text. Content is
+/// enumerated by id: a gap reads as the `Error` placeholder and counts as one
+/// record. An unterminated disk stops at the window bound (the SPEC-008 §3.8
+/// safe rule), so its last page never reads past `+ 499`.
 pub fn holodisk(ordinal: usize, messages: &MsgCatalog) -> Result<Holodisk, DiskError> {
     if ordinal >= DISK_GLOBALS.len() {
         return Err(DiskError::Ordinal(ordinal));
     }
+    let mut diagnostics = Vec::new();
     let title_id = DISK_TITLE_BASE + ordinal as i32;
-    let title = messages
-        .get(title_id)
-        .ok_or(DiskError::MissingTitle(title_id))?
-        .text
-        .clone();
+    let title = match messages.get(title_id) {
+        Some(message) => message.text.clone(),
+        None => {
+            diagnostics.push(DiskDiagnostic::MissingTitle(title_id));
+            MISSING_TEXT.to_vec()
+        }
+    };
     let first = 1000 * ordinal as i32 + 1000;
     let mut records = Vec::new();
+    let mut terminated = false;
     for id in first..first + DISK_RECORD_LIMIT {
-        let text = &messages.get(id).ok_or(DiskError::MissingRecord(id))?.text;
+        let Some(message) = messages.get(id) else {
+            diagnostics.push(DiskDiagnostic::MissingRecord(id));
+            records.push(DiskLine::Text(MISSING_TEXT.to_vec()));
+            continue;
+        };
+        let text = &message.text;
         if text == END_DISK {
-            return Ok(Holodisk {
-                ordinal,
-                title,
-                last_page: records.len().saturating_sub(1) / RECORDS_PER_PAGE,
-                records,
-            });
+            terminated = true;
+            break;
         }
         records.push(if text == END_PARAGRAPH {
             DiskLine::Paragraph
@@ -134,7 +162,16 @@ pub fn holodisk(ordinal: usize, messages: &MsgCatalog) -> Result<Holodisk, DiskE
             DiskLine::Text(text.clone())
         });
     }
-    Err(DiskError::Unterminated(ordinal))
+    if !terminated {
+        diagnostics.push(DiskDiagnostic::Unterminated(ordinal));
+    }
+    Ok(Holodisk {
+        ordinal,
+        title,
+        last_page: records.len().saturating_sub(1) / RECORDS_PER_PAGE,
+        records,
+        diagnostics,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

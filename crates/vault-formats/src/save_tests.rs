@@ -84,7 +84,7 @@ fn player_tree() -> MapObject {
         frame: 0,
         orientation: 0,
         art_id: 0,
-        flags: BasicFlags(BasicFlags::TEMPORARY.0),
+        flags: BasicFlags(0),
         stored_elevation: 1,
         elevation: 1,
         pid: 1,
@@ -266,10 +266,11 @@ fn spec008_save_payload_grammar_round_trips_all_components() {
     assert_eq!(parsed.preference_float(13), Some(1.5));
     assert_eq!(parsed.preference_float(12), None);
     assert_eq!(parsed.world_map, save.world_map);
-    // The player tree is written with temporary clear and script -1.
+    // Only the player's own record is written with temporary clear and
+    // script -1; its inventory children keep their words (SPEC-008 §2.5).
     assert_eq!(parsed.player.flags.0 & BasicFlags::TEMPORARY.0, 0);
     assert_eq!(parsed.player.script_id, -1);
-    assert_eq!(parsed.player.inventory[0].object.script_id, -1);
+    assert_eq!(parsed.player.inventory[0].object.script_id, 0x0300_0002);
     assert_eq!(parsed.player.inventory[0].quantity, 2);
     // G is not stored: another installed campaign count misparses.
     assert!(SaveGame::parse(&bytes, 6, &lookup).is_err());

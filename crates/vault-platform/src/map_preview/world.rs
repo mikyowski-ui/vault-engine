@@ -136,8 +136,19 @@ impl MapPreview {
         );
         self.show_dialog(dialog.quitting());
     }
-    /// Head for a town: its center with signed 0-16 pixel jitter per axis.
+    /// Head for a town: its center with 0-16 pixel jitter per axis. A click
+    /// on the town already being travelled to makes no draws, and one on the
+    /// town the party occupies enters it without travelling (SPEC-008 §3.7).
     fn travel_to_town(&mut self, town: usize) {
+        let travelling = self.host.world.world_map.travel.is_some();
+        if travelling && matches!(&self.screen, Screen::World(world) if world.town == Some(town)) {
+            return;
+        }
+        let occupied = self.host.world.world_map.cell().and_then(worldmap::town_at);
+        if !travelling && occupied == Some(town) {
+            self.enter_town(town);
+            return;
+        }
         match worldmap::town_target(town, &mut self.host.world.rng) {
             Ok(target) => {
                 self.host.travel_to(target);

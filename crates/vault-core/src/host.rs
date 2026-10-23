@@ -881,6 +881,38 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.spatial_enabled = previous;
         result
     }
+    /// The background checker's critter pass: on every out-of-combat
+    /// real-time tick (one game tick per 100 ms, never in combat or
+    /// dialogue; SPEC-006 §3.7, SPEC-014 §3.27 "critter scripts"), every
+    /// critter on the map with a script runs its `critter_p_proc`, in world
+    /// order. A script without that procedure is skipped rather than falling
+    /// back to procedure 1. No approved spec gives this pass's cadence or
+    /// order (README "Open spec questions").
+    pub fn critter_scripts(&mut self) -> Result<(), WorldError> {
+        let scripts: Vec<u32> = self
+            .world
+            .iter()
+            .filter(|(_, object)| {
+                object.owner.is_none()
+                    && object.active
+                    && object.raw.hex.is_some()
+                    && Category::from_pid(object.raw.pid).ok() == Some(Category::Critter)
+            })
+            .filter_map(|(reference, _)| self.world.script_for(reference))
+            .collect();
+        for script in scripts {
+            self.world.request(ScriptRequest {
+                script,
+                event: ScriptEvent::Critter,
+                source: 0,
+                target: 0,
+                fixed: 0,
+                action: -1,
+                only_present: true,
+            });
+        }
+        self.drain_requests()
+    }
     /// SPEC-006 queue pass: snapshot the clock once, remove each due event
     /// before handling it, and stop the pass at the first nonzero handler
     /// result (later due events stay pending). Returns that result, or zero.
@@ -1089,16 +1121,19 @@ impl<A: WorldAssets> WorldHost<A> {
             self.combat_ai = ai;
             progress?;
         }
-        let (queue, update) = self.world.clock.background(
+        let background = self.world.clock.background(
             now_ms,
             self.world.combat,
             self.world.dialogue.open,
             self.world.mode,
         )?;
-        if queue {
+        if background.queue {
             self.process_queue()?;
         }
-        if update {
+        if background.ticked {
+            self.critter_scripts()?;
+        }
+        if background.update {
             self.map_update()?;
         }
         self.callbacks.extend(self.library.callbacks());
@@ -1379,6 +1414,10 @@ impl<A: WorldAssets> WorldHost<A> {
         let owner = self.self_object(vm);
         let head = if head == -1 {
             None
+        } else if self.world.dialogue.open {
+            // SPEC-006 §3.11: no session-start draw while a session is open;
+            // the open session keeps its head.
+            self.world.dialogue.head.take()
         } else {
             // SPEC-005 §3.3 safe rule: with no dialogue target yet, the mood
             // comes from the new self target.
@@ -1387,23 +1426,31 @@ impl<A: WorldAssets> WorldHost<A> {
                 target => target,
             };
             let mood = Mood::from_reaction(self.reaction(source));
+            let idle = self.world.dialogue.idle;
             // SPEC-006 §3.11 safe rule: a head outside the list selects no
-            // fidget art and is diagnosed; the session still opens.
-            let definition = self.assets.head(head).unwrap_or_else(|error| {
-                self.world
-                    .diagnostic(format!("head {head} is unavailable: {error}"));
-                HeadDefinition {
-                    index: (head & 0xfff) as u16,
-                    stem: String::new(),
-                    counts: [0; 3],
+            // fidget art and is diagnosed; the session still opens, without
+            // the session-start draw because no count was looked up.
+            match self.assets.head(head) {
+                Ok(definition) => Some(TalkingHead::new(
+                    definition,
+                    mood,
+                    idle,
+                    &mut self.world.rng,
+                )?),
+                Err(error) => {
+                    self.world
+                        .diagnostic(format!("head {head} is unavailable: {error}"));
+                    Some(TalkingHead::without_fidget(
+                        HeadDefinition {
+                            index: (head & 0xfff) as u16,
+                            stem: String::new(),
+                            counts: [0; 3],
+                        },
+                        mood,
+                        idle,
+                    ))
                 }
-            });
-            Some(TalkingHead::new(
-                definition,
-                mood,
-                self.world.elapsed_ms,
-                &mut self.world.rng,
-            )?)
+            }
         };
         self.world.dialogue.reaction = head
             .as_ref()

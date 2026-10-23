@@ -90,14 +90,15 @@ pub fn pixel(hex: i32) -> Option<[i32; 2]> {
 pub fn player_cross([x, y]: [i32; 2]) -> [[i32; 2]; 3] {
     [[x - 1, y], [x, y - 1], [x, y + 1]]
 }
-/// The Pip-Boy automap page draws the stored raster: each cell 2 pixels
-/// wide and 1 tall from (238, 105) of the Pip-Boy window, walls in key 992
-/// and scenery in key 480.
+/// The Pip-Boy automap page draws the stored raster: each cell paints 2
+/// pixels wide and 1 tall on a two-row pitch from (238, 105) of the Pip-Boy
+/// window, so the row between two cell rows is never painted (SPEC-014
+/// §3.33, SPEC-008 §2.8); walls in key 992 and scenery in key 480.
 pub const PIPBOY_ORIGIN: [i32; 2] = [238, 105];
 pub fn pipboy_cell(row: usize, column: usize) -> [i32; 2] {
     [
         PIPBOY_ORIGIN[0] + 2 * column as i32,
-        PIPBOY_ORIGIN[1] + row as i32,
+        PIPBOY_ORIGIN[1] + 2 * row as i32,
     ]
 }
 pub fn pipboy_color(cell: u8) -> Option<ColorKey> {

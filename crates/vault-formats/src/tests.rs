@@ -986,6 +986,46 @@ fn bounded_mutation_and_random_byte_fuzz_smoke() {
 }
 
 #[test]
+fn prefix_mount_serves_loose_music_behind_the_primary_provider() {
+    use crate::PrefixMount;
+    use std::sync::Arc;
+    let primary = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(primary.path().join("sound/music")).unwrap();
+    std::fs::write(primary.path().join("sound/music/01hub.acm"), b"primary").unwrap();
+    std::fs::write(primary.path().join("other.txt"), b"x").unwrap();
+    let music = tempfile::tempdir().unwrap();
+    std::fs::write(music.path().join("01HUB.ACM"), b"loose").unwrap();
+    std::fs::write(music.path().join("07DESERT.ACM"), b"desert").unwrap();
+    let vfs = PrefixMount::new(
+        Arc::new(LocalDirProvider::mount(primary.path()).unwrap()),
+        "SOUND\\MUSIC",
+        LocalDirProvider::mount(music.path()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(vfs.mounted(), 2);
+    // The primary provider wins; the mount fills what it lacks.
+    assert_eq!(vfs.read("sound/music/01hub.acm").unwrap(), b"primary");
+    assert_eq!(vfs.read("SOUND/MUSIC/07desert.ACM").unwrap(), b"desert");
+    assert!(matches!(
+        vfs.read("sound/music/missing.acm"),
+        Err(VfsError::NotFound(path)) if path.as_str() == "sound/music/missing.acm"
+    ));
+    assert!(matches!(
+        vfs.read("07desert.acm"),
+        Err(VfsError::NotFound(_))
+    ));
+    let files: Vec<_> = vfs.files().map(VfsPath::as_str).collect();
+    assert_eq!(
+        files,
+        [
+            "other.txt",
+            "sound/music/01hub.acm",
+            "sound/music/07desert.acm"
+        ]
+    );
+}
+
+#[test]
 fn validation_dispatch_covers_every_supported_extension() {
     let temp = tempfile::tempdir().unwrap();
     fixtures::write_corpus(temp.path());

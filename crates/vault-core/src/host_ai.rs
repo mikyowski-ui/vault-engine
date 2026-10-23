@@ -436,7 +436,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// along the pixel line from the attacker's hex center through the
     /// defender's (stopping at an outer-border hex); the attacker's hex for a
     /// range of at most 0 or a shared hex.
-    fn extension_hex(&self, from: i32, through: i32, range: i32) -> i32 {
+    pub(crate) fn extension_hex(&self, from: i32, through: i32, range: i32) -> i32 {
         if range <= 0 || from == through {
             return from;
         }

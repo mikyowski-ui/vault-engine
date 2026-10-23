@@ -142,17 +142,25 @@ pub fn clamp_scroll(origin: [i32; 2]) -> [i32; 2] {
         origin[1].clamp(0, SCROLL_LIMIT[1]),
     ]
 }
-/// A town destination near the cell center with independent signed 0-16
-/// pixel jitter on each axis.
+/// A town destination near the cell center with 0-16 pixels of jitter per
+/// axis: four draws, X magnitude 0-16, X sign 0-1, Y magnitude 0-16, Y sign
+/// 0-1, where sign 1 adds and 0 subtracts (SPEC-008 §3.7).
 pub fn town_target(town: usize, rng: &mut impl RandomSource) -> Result<[i32; 2], WorldError> {
     let town = TOWNS
         .get(town)
         .ok_or_else(|| WorldError::Invalid(format!("town {town} outside 0-11")))?;
     let [column, row] = town.cell.map(|value| value as i32);
-    Ok([
-        CELL * column + 25 + rng.range(-16, 16)?,
-        CELL * row + 25 + rng.range(-16, 16)?,
-    ])
+    let mut jitter = || -> Result<i32, WorldError> {
+        let magnitude = rng.range(0, 16)?;
+        Ok(if rng.range(0, 1)? == 1 {
+            magnitude
+        } else {
+            -magnitude
+        })
+    };
+    let x = CELL * column + 25 + jitter()?;
+    let y = CELL * row + 25 + jitter()?;
+    Ok([x, y])
 }
 /// A knowledge row's hotspots in slot order, stopping at the first zero X
 /// or Y.

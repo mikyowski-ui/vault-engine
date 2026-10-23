@@ -185,8 +185,15 @@ fn spec010_character_names_lookup_speech_and_volume() {
         stem: "aradesh".into(),
         counts: [1; 3],
     };
-    host.world.dialogue.head =
-        Some(TalkingHead::new(definition, Mood::Neutral, 0, &mut host.world.rng).unwrap());
+    host.world.dialogue.head = Some(
+        TalkingHead::new(
+            definition,
+            Mood::Neutral,
+            Default::default(),
+            &mut host.world.rng,
+        )
+        .unwrap(),
+    );
     assert_eq!(
         host.speech_file(b"ara_1001.lip").as_deref(),
         Some("sound/speech/aradesh/ara_1001.ACM")

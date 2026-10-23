@@ -472,6 +472,8 @@ impl<A: WorldAssets> WorldHost<A> {
         let mut world = WorldState::fresh(sheet, 1)?;
         world.rules = std::mem::take(&mut self.world.rules);
         world.rng = self.world.rng.clone();
+        // The head updater's idle state lasts the whole program run.
+        world.dialogue.idle = self.world.dialogue.idle;
         self.world = world;
         Ok(())
     }

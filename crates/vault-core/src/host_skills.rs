@@ -1447,8 +1447,8 @@ impl<A: WorldAssets> WorldHost<A> {
     /// SPEC-008 §3.10 / §3.22 step 3: after a map is loaded by number the
     /// party is moved on the world map to the map's fixed table town by the
     /// script-directed town travel of SPEC-008 §3.4, driven to completion
-    /// here: a jittered target within 16 pixels of the town center (two
-    /// draws), the shared terrain stepping counters, time charges off the
+    /// here: a jittered target within 16 pixels of the town center (four
+    /// draws, SPEC-008 §3.7), the shared terrain stepping counters, time charges off the
     /// city branch and 24-hour party healing every W iterations, with no
     /// encounter tests or walk-mask checks. Nothing moves for town -1 (an
     /// unnumbered map) or when the party's cell is already the town's cell.

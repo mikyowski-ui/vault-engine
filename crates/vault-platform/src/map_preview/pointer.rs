@@ -10,6 +10,7 @@ use super::{MapPreview, Screen};
 use crate::interface::Painter;
 use vault_core::{
     ObjectAction, ObjectRef,
+    assets::WorldAssets,
     critical::location,
     ui::{
         ColorKey,
@@ -23,7 +24,7 @@ use vault_formats::{
 };
 use vault_render::{
     IndexedImage,
-    map::{object_sprite, pick_objects_with},
+    map::{object_sprite, pick_candidates},
 };
 
 /// The scroll blocker (misc PID `0x0500000C`).
@@ -208,17 +209,27 @@ impl MapPreview {
             _ => None,
         }
     }
-    /// §3.27 the object under a frame pixel: none under a visible roof;
-    /// otherwise the topmost one that is not a dead or knocked-out critter,
-    /// falling back to the bottom-most one hit.
+    /// §3.27 the object under a frame pixel: none under a visible roof
+    /// outside the player's cutout mask; otherwise the topmost solid one
+    /// that is not a dead or knocked-out critter, falling back to the
+    /// bottom-most one hit.
     pub(crate) fn object_at(&self, point: [i32; 2]) -> Option<ObjectRef> {
         // P-02: the world's map by reference; no map clone per pick.
         let objects = self.host.world.render_objects();
         let map = &self.host.world.map;
-        let hits: Vec<_> = pick_objects_with(map, &objects, self.view, &self.art, point)?
-            .into_iter()
-            .filter_map(|id| self.host.world.reference_for_id(id))
-            .collect();
+        let egg = self.egg.clone().flatten();
+        let extended = |pid: u32| {
+            self.host
+                .assets
+                .prototype(pid)
+                .map_or(0, |prototype| prototype.extended.0)
+        };
+        let cutout = self.cutout(egg.as_deref(), &extended);
+        let hits: Vec<_> =
+            pick_candidates(map, &objects, self.view, &self.art, point, cutout.as_ref())?
+                .into_iter()
+                .filter_map(|(id, solid)| Some((self.host.world.reference_for_id(id)?, solid)))
+                .collect();
         let world = &self.host.world;
         let down = |object: ObjectRef| {
             world
@@ -230,9 +241,9 @@ impl MapPreview {
                         .is_some_and(|s| s.results.0 & 0x01 != 0))
         };
         hits.iter()
-            .copied()
-            .find(|object| !down(*object))
-            .or_else(|| hits.last().copied())
+            .find(|(object, solid)| *solid && !down(*object))
+            .or_else(|| hits.last())
+            .map(|(object, _)| *object)
     }
     /// Restart the hover's rest now, or back-date it 250 ms so the next
     /// idle poll computes it (the in-world cursor turned back on).

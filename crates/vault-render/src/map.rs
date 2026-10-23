@@ -1,7 +1,7 @@
 use crate::{ImageError, IndexedImage};
 use std::sync::OnceLock;
 use vault_formats::{
-    HexGrid, MapFile,
+    HexGrid, MapFile, Palette,
     frm::FrmFrame,
     geometry::GeometryError,
     map::{MapObject, MapObjects},
@@ -121,6 +121,139 @@ pub fn render_map_with(
     view: MapView,
     art: &impl MapArt,
 ) -> Result<IndexedImage, MapRenderError> {
+    render_map_cut(map, objects, view, art, None)
+}
+
+/// SPEC-014 §3.37 the player see-through cutout: the `egg.frm` mask placed
+/// on the player, through which roofs and the walls and scenery that would
+/// hide the player are drawn partly transparent.
+#[derive(Clone, Copy)]
+pub struct Cutout<'a> {
+    /// The mask frame (129 by 98); each pixel is a weight 0-122.
+    pub mask: &'a FrmFrame,
+    /// The player's hex and current pixel displacement.
+    pub hex: i32,
+    pub displacement: [i32; 2],
+    /// A hidden player cuts roofs only.
+    pub hidden: bool,
+    /// A prototype's extended flags by PID (0 when unknown).
+    pub extended: &'a dyn Fn(u32) -> u32,
+    pub palette: &'a Palette,
+}
+
+/// The basic translucency bits `0x4000`-`0x80000` (SPEC-003 §2.10).
+const TRANSLUCENCY: u32 = 0x4000 | 0x8000 | 0x10000 | 0x20000 | 0x40000 | 0x80000;
+/// "Explicitly no translucency".
+const NO_TRANSLUCENCY: u32 = 0x8000;
+/// The basic wall-transparency end marker.
+const TRANSPARENCY_END: u32 = 0x1000_0000;
+/// The orientation constant, `0x3FF5555555555556` (not the nearest double
+/// to 4/3).
+const K: f64 = f64::from_bits(0x3FF5_5555_5555_5556);
+
+impl Cutout<'_> {
+    /// The mask's top-left corner in the view: the player's hex center plus
+    /// its displacement, less (64, 72).
+    fn origin(&self, view: MapView) -> Option<[i64; 2]> {
+        let [x, y] = view.grid.hex_center(self.hex).ok()?;
+        Some([
+            x + i64::from(self.displacement[0]) - 64,
+            y + i64::from(self.displacement[1]) - 72,
+        ])
+    }
+    /// The mask weight at a view pixel, or `None` outside the mask.
+    fn weight(&self, origin: [i64; 2], [x, y]: [i64; 2]) -> Option<u8> {
+        let (u, v) = (x - origin[0], y - origin[1]);
+        let (width, height) = (i64::from(self.mask.width), i64::from(self.mask.height));
+        ((0..width).contains(&u) && (0..height).contains(&v))
+            .then(|| self.mask.pixels()[(v * width + u) as usize])
+    }
+    /// The §3.37 orientation table for a wall or scenery object, with or
+    /// without the wall-transparency-end exceptions.
+    fn oriented(&self, view: MapView, object: &MapObject, ends: bool) -> bool {
+        let Some(hex) = object.hex else {
+            return false;
+        };
+        let (Ok(at), Ok(player)) = (
+            view.grid.hex_reference(hex),
+            view.grid.hex_reference(self.hex),
+        ) else {
+            return false;
+        };
+        let (dx, dy) = ((at[0] - player[0]) as f64, (at[1] - player[1]) as f64);
+        let r = dx <= dy * K;
+        let r_prime = dx >= dy * K;
+        let f = dx >= -4.0 * dy;
+        let f_prime = dx <= -4.0 * dy;
+        let end = ends && object.flags.0 & TRANSPARENCY_END != 0;
+        let extended = (self.extended)(object.pid);
+        if extended & (0x0800_0000 | 0x8000_0000) != 0 {
+            f && !(r_prime && end)
+        } else if extended & 0x1000_0000 != 0 {
+            f || r
+        } else if extended & 0x2000_0000 != 0 {
+            f && r
+        } else {
+            r && !(f_prime && end)
+        }
+    }
+    /// Whether a drawn object is cut: a scenery or wall art type, a visible
+    /// player, no translucency bit, and the orientation test.
+    fn cuts(&self, view: MapView, object: &MapObject) -> bool {
+        matches!((object.art_id >> 24) & 0x0f, 2 | 3)
+            && !self.hidden
+            && object.flags.0 & TRANSLUCENCY == 0
+            && self.oriented(view, object, true)
+    }
+}
+
+/// A blit whose pixels inside the mask are blended by their weight.
+fn blit_cut(
+    image: &mut IndexedImage,
+    frame: &FrmFrame,
+    origin: [i64; 2],
+    cut: &Cutout,
+    mask: [i64; 2],
+) {
+    let (width, height) = (i64::from(image.width()), i64::from(image.height()));
+    let frame_width = i64::from(frame.width);
+    let source = frame.pixels();
+    let pixels = image.pixels_mut();
+    for y in origin[1].max(0)..(origin[1] + i64::from(frame.height)).min(height) {
+        for x in origin[0].max(0)..(origin[0] + frame_width).min(width) {
+            let color = source[((y - origin[1]) * frame_width + x - origin[0]) as usize];
+            if color == 0 {
+                continue;
+            }
+            let target = &mut pixels[(y * width + x) as usize];
+            *target = match cut.weight(mask, [x, y]) {
+                Some(weight) => cut.palette.mask_blend(color, *target, weight),
+                None => color,
+            };
+        }
+    }
+}
+
+/// The draw order: flat objects first, then the rest; within each pass in
+/// object order, ascending hex and then the order on the hex (an object
+/// without a hex, placed by screen position, after the placed ones).
+fn draw_key(object: &MapObject) -> (bool, i64) {
+    (
+        !object.flags.contains(BasicFlags::FLAT),
+        object.hex.map_or(i64::MAX, i64::from),
+    )
+}
+
+/// [`render_map_with`] with the player's see-through cutout. Without a
+/// cutout (no mask art, or no player hex) everything draws normally (the
+/// SPEC-014 §3.37 safe rule).
+pub fn render_map_cut(
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    cutout: Option<&Cutout>,
+) -> Result<IndexedImage, MapRenderError> {
     if view.elevation > 2 {
         return Err(MapRenderError::Elevation);
     }
@@ -134,6 +267,7 @@ pub fn render_map_with(
     }
     let mut image = IndexedImage::new(view.width, view.height)?;
     let origin = view.grid.origin;
+    let cutout = cutout.and_then(|cut| Some((cut, cut.origin(view)?)));
     // A square whose corner lies past the right or bottom edge draws nothing.
     let beyond = |[x, y]: [i64; 2]| x >= i64::from(view.width) || y >= i64::from(view.height);
     for (index, offset) in square_order() {
@@ -166,21 +300,18 @@ pub fn render_map_with(
         else {
             continue;
         };
-        let (origin, anchor) = placement(view, frame, shift, object)?;
-        objects.push((
-            (
-                !object.flags.contains(BasicFlags::FLAT),
-                anchor[1],
-                anchor[0],
-                object.id,
-            ),
-            frame,
-            origin,
-        ));
+        let (origin, _) = placement(view, frame, shift, object)?;
+        objects.push((draw_key(object), object, frame, origin));
     }
-    objects.sort_by_key(|(key, _, _)| *key);
-    for (_, frame, origin) in objects {
-        image.blit(frame, origin);
+    // A stable sort keeps the order on each hex.
+    objects.sort_by_key(|(key, ..)| *key);
+    for (_, object, frame, origin) in objects {
+        match cutout {
+            Some((cut, mask)) if cut.cuts(view, object) => {
+                blit_cut(&mut image, frame, origin, cut, mask);
+            }
+            _ => image.blit(frame, origin),
+        }
     }
     if view.roofs {
         for (index, offset) in square_order() {
@@ -195,7 +326,12 @@ pub fn render_map_with(
                 && !tile.roof_hidden()
                 && let Some((frame, _)) = art.frame(Category::Tile, u32::from(tile.roof()), 0, 0)
             {
-                image.blit(frame, [corner[0], corner[1] - 96]);
+                let corner = [corner[0], corner[1] - 96];
+                // Every drawn roof square goes through the mask.
+                match cutout {
+                    Some((cut, mask)) => blit_cut(&mut image, frame, corner, cut, mask),
+                    None => image.blit(frame, corner),
+                }
             }
         }
     }
@@ -281,6 +417,30 @@ pub fn pick_objects_with(
     art: &impl MapArt,
     point: [i32; 2],
 ) -> Option<Vec<u32>> {
+    Some(
+        pick_candidates(map, objects, view, art, point, None)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect(),
+    )
+}
+
+/// SPEC-014 §3.27 the pointer's candidates, frontmost first, each with
+/// whether it is solid: `None` over a visible roof unless the pointer is on
+/// a nonzero pixel of the cutout mask. A candidate with a translucency bit
+/// other than "explicitly no translucency" is never solid, nor is a wall or
+/// scenery candidate inside the cutout: without translucency bits, passing
+/// the orientation table without the transparency-end exceptions (whether
+/// or not the player is hidden), with a nonzero mask pixel under the
+/// pointer.
+pub fn pick_candidates(
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    point: [i32; 2],
+    cutout: Option<&Cutout>,
+) -> Option<Vec<(u32, bool)>> {
     if view.elevation > 2 {
         return None;
     }
@@ -293,7 +453,12 @@ pub fn pick_objects_with(
             && y < i64::from(frame.height)
             && frame.pixels()[(y * i64::from(frame.width) + x) as usize] != 0
     };
-    if view.roofs {
+    let in_mask = cutout.is_some_and(|cut| {
+        cut.origin(view)
+            .and_then(|mask| cut.weight(mask, point.map(i64::from)))
+            .is_some_and(|weight| weight != 0)
+    });
+    if view.roofs && !in_mask {
         let [ox, oy] = view.grid.origin;
         for (square, offset) in square_offsets().iter().enumerate() {
             let tile = map.tile(view.elevation as usize, square)?;
@@ -310,7 +475,10 @@ pub fn pick_objects_with(
         }
     }
     let mut hits = Vec::new();
-    for object in &objects.elevations[view.elevation as usize] {
+    for (order, object) in objects.elevations[view.elevation as usize]
+        .iter()
+        .enumerate()
+    {
         if object.flags.contains(BasicFlags::HIDDEN) {
             continue;
         }
@@ -320,19 +488,23 @@ pub fn pick_objects_with(
         else {
             continue;
         };
-        let (origin, anchor) = placement(view, frame, shift, object).ok()?;
+        let (origin, _) = placement(view, frame, shift, object).ok()?;
         if sample(frame, origin) {
-            let key = (
-                !object.flags.contains(BasicFlags::FLAT),
-                anchor[1],
-                anchor[0],
+            let bits = object.flags.0 & TRANSLUCENCY;
+            let translucent = bits != 0 && bits != NO_TRANSLUCENCY;
+            let inside = in_mask
+                && bits == 0
+                && matches!((object.art_id >> 24) & 0x0f, 2 | 3)
+                && cutout.is_some_and(|cut| cut.oriented(view, object, false));
+            hits.push((
+                (draw_key(object), order),
                 object.id,
-            );
-            hits.push((key, object.id));
+                !translucent && !inside,
+            ));
         }
     }
-    hits.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
-    Some(hits.into_iter().map(|(_, id)| id).collect())
+    hits.sort_by_key(|(key, ..)| std::cmp::Reverse(*key));
+    Some(hits.into_iter().map(|(_, id, solid)| (id, solid)).collect())
 }
 
 #[cfg(test)]
@@ -365,6 +537,264 @@ mod tests {
             Some((archive.frame(direction as usize, frame)?, [0, 0]))
         }
     }
+    /// A grey palette: index i is grey `i / 4` (six-bit), and five-bit grey
+    /// g looks up index `8 g`.
+    fn grey_palette() -> Palette {
+        let mut bytes = Vec::with_capacity(0x8300);
+        for index in 0..256_u32 {
+            let grey = (index / 4) as u8;
+            bytes.extend([grey; 3]);
+        }
+        for red in 0..32_u32 {
+            bytes.extend(std::iter::repeat_n((red * 8) as u8, 1024));
+        }
+        Palette::parse(&bytes).unwrap()
+    }
+    fn preview() -> MapFile {
+        MapFile::parse(&fixture::preview_map(), &|pid| {
+            let category = (pid >> 24) as u8;
+            Ok(Prototype::parse(&fixture::prototype(
+                category,
+                if category == 0 { 1 } else { 5 },
+            ))?
+            .info())
+        })
+        .unwrap()
+    }
+    /// Art by identifier: tiles and objects keyed by their art id.
+    struct Keyed(std::collections::BTreeMap<(bool, u32), FrmArchive>);
+    impl MapArt for Keyed {
+        fn frame(
+            &self,
+            category: Category,
+            id: u32,
+            direction: u8,
+            frame: usize,
+        ) -> Option<(&FrmFrame, [i16; 2])> {
+            let archive = self.0.get(&(category == Category::Tile, id))?;
+            Some((archive.frame(direction as usize, frame)?, [0, 0]))
+        }
+    }
+    /// An object of `art` on `hex`, from the fixture map's first object.
+    fn object(map: &MapFile, id: u32, art: u32, hex: i32) -> MapObject {
+        let mut object = map.objects.elevations[0][0].clone();
+        object.id = id;
+        object.pid = art & 0x0f00_0000 | 1;
+        object.art_id = art;
+        object.hex = Some(hex);
+        object.flags = BasicFlags(0);
+        object.displacement = [0; 2];
+        object.frame = 0;
+        object.orientation = 0;
+        object
+    }
+    fn scene(objects: Vec<MapObject>) -> MapObjects {
+        MapObjects {
+            total: objects.len(),
+            elevations: [objects, Vec::new(), Vec::new()],
+            consumed_len: 0,
+        }
+    }
+    fn view() -> MapView {
+        MapView {
+            grid: HexGrid::centered(20100, 640, 380).unwrap(),
+            elevation: 0,
+            roofs: false,
+            width: 640,
+            height: 380,
+        }
+    }
+
+    #[test]
+    fn spec014_cutout_orientation_table_uses_the_exact_constant() {
+        let map = preview();
+        let mask = FrmArchive::parse(&fixture::frm(129, 98, 64)).unwrap();
+        let palette = grey_palette();
+        let cut = |extended: &'static dyn Fn(u32) -> u32| Cutout {
+            mask: mask.frame(0, 0).unwrap(),
+            hex: 20100,
+            displacement: [0; 2],
+            hidden: false,
+            extended,
+            palette: &palette,
+        };
+        let view = view();
+        let wall = |hex: i32, end: bool| {
+            let mut wall = object(&map, 1, 0x0300_0001, hex);
+            if end {
+                wall.flags.0 |= TRANSPARENCY_END;
+            }
+            wall
+        };
+        // Rows on and back (+-16, +-12) are exact equalities (12 K rounds
+        // to 16), so R and R' both hold. Three rows back (-48, -36) is where
+        // K decides: 36 K exceeds 48, so R fails there (it would hold with
+        // the nearest double to 4/3).
+        let plain = cut(&|_| 0);
+        assert_eq!(12.0 * K, 16.0);
+        const { assert!(36.0 * K > 48.0 && 36.0 * (4.0_f64 / 3.0) == 48.0) };
+        assert!(plain.oriented(view, &wall(20300, false), true));
+        assert!(plain.oriented(view, &wall(19900, false), true));
+        assert!(!plain.oriented(view, &wall(19500, false), true));
+        // Two columns on (-48, +12): R, F and F' all hold, so the end marker
+        // decides the default row.
+        assert!(plain.oriented(view, &wall(20102, false), true));
+        assert!(!plain.oriented(view, &wall(20102, true), true));
+        assert!(plain.oriented(view, &wall(20102, true), false));
+        // The other rows of the table.
+        let east = cut(&|_| 0x0800_0000);
+        assert!(east.oriented(view, &wall(20102, true), true));
+        assert!(!east.oriented(view, &wall(19500, false), true));
+        let either = cut(&|_| 0x1000_0000);
+        assert!(either.oriented(view, &wall(20300, false), true));
+        assert!(!either.oriented(view, &wall(19500, false), true));
+        let both = cut(&|_| 0x2000_0000);
+        assert!(both.oriented(view, &wall(20300, false), true));
+        // Three rows back (-48, -36): F' only.
+        assert!(!both.oriented(view, &wall(19500, false), true));
+    }
+
+    #[test]
+    fn spec014_cutout_blends_walls_and_roofs_through_the_mask() {
+        let map = preview();
+        let mask = FrmArchive::parse(&fixture::frm(129, 98, 64)).unwrap();
+        let palette = grey_palette();
+        let none = |_| 0;
+        let mut art = std::collections::BTreeMap::new();
+        art.insert(
+            (true, 1),
+            FrmArchive::parse(&fixture::frm(80, 36, 0)).unwrap(),
+        );
+        art.insert(
+            (true, 2),
+            FrmArchive::parse(&fixture::frm(80, 36, 200)).unwrap(),
+        );
+        art.insert(
+            (false, 0x0300_0001),
+            FrmArchive::parse(&fixture::frm(2, 2, 20)).unwrap(),
+        );
+        art.insert(
+            (false, 0x0200_0001),
+            FrmArchive::parse(&fixture::frm(2, 2, 20)).unwrap(),
+        );
+        let art = Keyed(art);
+        let mut view = view();
+        let at = |hex: i32| view.grid.hex_center(hex).unwrap();
+        let pixel =
+            |image: &IndexedImage, [x, y]: [i64; 2]| image.pixels()[y as usize * 640 + x as usize];
+        let cutout = Cutout {
+            mask: mask.frame(0, 0).unwrap(),
+            hex: 20100,
+            displacement: [0; 2],
+            hidden: false,
+            extended: &none,
+            palette: &palette,
+        };
+        // A wall one row in front of the player is cut; scenery three rows
+        // behind is not. The floor under the wall is index 0 (black).
+        let wall = object(&map, 1, 0x0300_0001, 20300);
+        let behind = object(&map, 2, 0x0200_0001, 19500);
+        let objects = scene(vec![wall.clone(), behind]);
+        let image = render_map_cut(&map, &objects, view, &art, Some(&cutout)).unwrap();
+        // 20 is five-bit grey 2: at weight 64 it halves to 1 (index 8), and
+        // black adds nothing.
+        assert_eq!(pixel(&image, at(20300)), 8);
+        assert_eq!(pixel(&image, at(19500)), 20);
+        assert_eq!(palette.mask_blend(20, 0, 64), 8);
+        assert_eq!(palette.mask_blend(20, 0, 0), 20);
+        // Without the cutout, for a hidden player, or with a translucency
+        // bit the wall draws normally.
+        let image = render_map_cut(&map, &objects, view, &art, None).unwrap();
+        assert_eq!(pixel(&image, at(20300)), 20);
+        let hidden = Cutout {
+            hidden: true,
+            ..cutout
+        };
+        let image = render_map_cut(&map, &objects, view, &art, Some(&hidden)).unwrap();
+        assert_eq!(pixel(&image, at(20300)), 20);
+        let mut glass = wall.clone();
+        glass.flags.0 |= 0x8000;
+        let image = render_map_cut(&map, &scene(vec![glass]), view, &art, Some(&cutout)).unwrap();
+        assert_eq!(pixel(&image, at(20300)), 20);
+        // The mask moves with the player's displacement: shifted well away,
+        // the wall is outside it.
+        let away = Cutout {
+            displacement: [200, 0],
+            ..cutout
+        };
+        let image = render_map_cut(&map, &objects, view, &art, Some(&away)).unwrap();
+        assert_eq!(pixel(&image, at(20300)), 20);
+        // Every roof square goes through the mask, even for a hidden player:
+        // grey 25 at weight 64 over the blank floor gives grey 12.
+        view.roofs = true;
+        let roof = [256, 84];
+        let player = view.grid.pick_hex([256, 124]).unwrap();
+        let over = Cutout {
+            hex: player,
+            hidden: true,
+            ..cutout
+        };
+        let image = render_map_cut(&map, &scene(Vec::new()), view, &art, Some(&over)).unwrap();
+        assert_eq!(pixel(&image, roof), 96);
+        let image = render_map_cut(&map, &scene(Vec::new()), view, &art, None).unwrap();
+        assert_eq!(pixel(&image, roof), 200);
+        // Picking: over the roof only inside the mask; there the wall in
+        // front is "inside the cutout" and not solid, a translucent object
+        // never is, and a plain one is.
+        view.roofs = false;
+        let point = at(20300).map(|value| value as i32);
+        let candidates = pick_candidates(&map, &objects, view, &art, point, Some(&cutout)).unwrap();
+        assert_eq!(candidates, [(1, false)]);
+        assert_eq!(
+            pick_candidates(&map, &objects, view, &art, point, None).unwrap(),
+            [(1, true)]
+        );
+        let mut tinted = object(&map, 3, 0x0200_0001, 20300);
+        tinted.flags.0 |= 0x4000;
+        assert_eq!(
+            pick_candidates(&map, &scene(vec![tinted]), view, &art, point, None).unwrap(),
+            [(3, false)]
+        );
+    }
+
+    #[test]
+    fn objects_draw_flat_first_then_in_hex_order() {
+        let map = preview();
+        let mut art = std::collections::BTreeMap::new();
+        art.insert(
+            (false, 0x0200_0001),
+            FrmArchive::parse(&fixture::frm(200, 40, 30)).unwrap(),
+        );
+        art.insert(
+            (false, 0x0200_0002),
+            FrmArchive::parse(&fixture::frm(200, 40, 40)).unwrap(),
+        );
+        let art = Keyed(art);
+        let view = view();
+        // Hex 20104 sits 96 pixels left of and 24 below 20100; hex 20300
+        // sits 16 right of and 12 below it. By screen height 20104 would
+        // draw last; in object order 20300 does.
+        let left = object(&map, 1, 0x0200_0001, 20104);
+        let right = object(&map, 2, 0x0200_0002, 20300);
+        let [x, y] = view.grid.hex_center(20300).unwrap();
+        let image = render_map_cut(
+            &map,
+            &scene(vec![right.clone(), left.clone()]),
+            view,
+            &art,
+            None,
+        )
+        .unwrap();
+        let pixel = image.pixels()[(y - 5) as usize * 640 + (x - 40) as usize];
+        assert_eq!(pixel, 40);
+        // A flat object draws before every non-flat one.
+        let mut flat = right;
+        flat.flags.0 |= BasicFlags::FLAT.0;
+        let image = render_map_cut(&map, &scene(vec![flat, left]), view, &art, None).unwrap();
+        let pixel = image.pixels()[(y - 5) as usize * 640 + (x - 40) as usize];
+        assert_eq!(pixel, 30);
+    }
+
     #[test]
     fn map_composition_uses_exact_floor_roof_and_object_coordinates() {
         let map = MapFile::parse(&fixture::preview_map(), &|pid| {

@@ -638,8 +638,20 @@ pub struct Spray {
     pub extras: Vec<(ObjectRef, Attack, Resolution)>,
 }
 
+/// An extra spray target: its hits, torso profile and damage so far.
+struct ExtraHit {
+    object: ObjectRef,
+    hits: i32,
+    profile: Attack,
+    damage: i32,
+}
+
 impl<A: WorldAssets> WorldHost<A> {
-    /// SPEC-007 §3.7 burst/continuous fire against `defender`.
+    /// SPEC-007 §3.7 burst/continuous fire against `defender`, in the spray
+    /// draw order: the spray roll, the direct trials, the in-spray Stage A
+    /// pass when no direct trial hit, the three rays (each extra's damage
+    /// drawn where the ray meets it), Jinxed and Sniper once on the final
+    /// result, then the main target's critical and damage draws.
     pub fn resolve_spray(
         &self,
         attacker: ObjectRef,
@@ -684,6 +696,12 @@ impl<A: WorldAssets> WorldHost<A> {
         ) else {
             return Err(WorldError::Invalid("spray requires placed critters".into()));
         };
+        // §3.7 Stage A inside the spray: its draws are consumed, but it never
+        // commits, so the recorded defender and the center budget stand.
+        if main_hits == 0 {
+            let extension = self.extension_hex(from, to, attack.range());
+            self.line_of_fire(attacker, defender, attack, extension, rng)?;
+        }
         let range = usize::try_from(attack.range().max(0)).unwrap_or(0);
         let spread = if attack.distance <= 3 {
             extend_line(from, to, 3).last().copied().unwrap_or(to)
@@ -692,7 +710,7 @@ impl<A: WorldAssets> WorldHost<A> {
         };
         let back = rotation(spread, from).unwrap_or(0);
         let sides = [step(spread, (back + 1) % 6), step(spread, (back + 5) % 6)];
-        let mut extras: Vec<(ObjectRef, i32)> = Vec::new();
+        let mut extras: Vec<ExtraHit> = Vec::new();
         for (line, budget) in [
             (extend_line(from, to, range), center - main_hits),
             (extend_line(from, sides[0], range), left),
@@ -712,45 +730,39 @@ impl<A: WorldAssets> WorldHost<A> {
                 main_hits += hits;
             }
         }
-        let extra_hits: i32 = extras.iter().map(|(_, hits)| *hits).sum();
+        let extra_hits: i32 = extras.iter().map(|extra| extra.hits).sum();
         if code == 1 && main_hits + extra_hits > 0 {
             code = 2;
         } else if code >= 2 && main_hits + extra_hits == 0 {
             code = 1;
         }
+        // Jinxed and Sniper once, on the final result; a spray is ranged, so
+        // Slayer and Silent Death never apply.
+        code = attack.postprocess(code, Subtype::Ranged, rng)?;
         main.code = code;
-        // Extra targets take normal-scale damage before any main critical.
-        let mut resolved = Vec::new();
-        for (object, hits) in extras {
-            // SPEC-007 §3.7/§3.7.1: an extra or Stage B victim takes
-            // normal-scale rounds through its own effective DT/DR, so its
-            // profile is built at the torso (uncalled normalized, no aiming)
-            // and serves damage, armor and knockback only; the AP debit stays
-            // the request's own cost (§3.4).
-            let mut profile = self.world.attack_profile(
-                attacker,
-                object,
-                attack.hit_mode,
-                crate::critical::location::TORSO,
-                false,
-            )?;
-            profile.weapon = attack.weapon.clone();
-            let mut outcome = Resolution {
-                code: 2,
-                multiplier: 2,
-                rounds: hits,
-                defender_flags: effect::HIT,
-                ..Resolution::default()
-            };
-            for _ in 0..hits {
-                outcome.damage = outcome
-                    .damage
-                    .saturating_add(profile.round_damage(2, false, false, rng)? as i32);
-            }
-            profile.finish(&mut outcome);
-            resolved.push((object, profile, outcome));
-        }
-        if code >= 2 && main_hits > 0 {
+        // Extra targets took normal-scale damage before any main critical.
+        let resolved = extras
+            .into_iter()
+            .map(|extra| {
+                let mut outcome = Resolution {
+                    code: 2,
+                    multiplier: 2,
+                    rounds: extra.hits,
+                    damage: extra.damage,
+                    defender_flags: effect::HIT,
+                    ..Resolution::default()
+                };
+                extra.profile.finish(&mut outcome);
+                (extra.object, extra.profile, outcome)
+            })
+            .collect();
+        if code == 0 {
+            // A Jinxed final failure: the scheduled ammunition stays the
+            // round count for self and random-target damage.
+            attack.critical_failure(&mut main, Subtype::Ranged, rng)?;
+        } else if code >= 2 && main_hits > 0 {
+            // §3.7 extra hits only: under the safe rule the intended target
+            // gets neither the hit bit nor critical processing.
             main.defender_flags |= effect::HIT;
             main.rounds = main_hits;
             if code == 3 {
@@ -775,7 +787,8 @@ impl<A: WorldAssets> WorldHost<A> {
     /// One spray ray: stops at a hard non-critter obstruction; at each critter
     /// recompute ordinary torso accuracy and take consecutive successful plain
     /// D100 trials until a miss or an exhausted budget (the comparison is
-    /// drawn before the budget test). Returns main-target hits.
+    /// drawn before the budget test). An extra target hit here takes its
+    /// damage draws at once. Returns main-target hits.
     #[allow(clippy::too_many_arguments)]
     fn spray_ray(
         &self,
@@ -785,7 +798,7 @@ impl<A: WorldAssets> WorldHost<A> {
         line: &[i32],
         mut budget: i32,
         continuous: bool,
-        extras: &mut Vec<(ObjectRef, i32)>,
+        extras: &mut Vec<ExtraHit>,
         rng: &mut impl crate::RandomSource,
     ) -> Result<i32, WorldError> {
         let elevation = self.world.get(attacker).map_or(0, |o| o.raw.elevation);
@@ -836,11 +849,29 @@ impl<A: WorldAssets> WorldHost<A> {
                 main += hits;
             } else if hits > 0 {
                 // Continuous fire ignores later duplicate-extra accumulation.
-                match extras.iter().position(|(extra, _)| *extra == object) {
-                    Some(slot) if !continuous => extras[slot].1 += hits,
-                    Some(_) => {}
-                    None if extras.len() < 6 => extras.push((object, hits)),
-                    None => {}
+                let slot = match extras.iter().position(|extra| extra.object == object) {
+                    Some(slot) if !continuous => {
+                        extras[slot].hits += hits;
+                        Some(slot)
+                    }
+                    Some(_) => None,
+                    None if extras.len() < 6 => {
+                        extras.push(ExtraHit {
+                            object,
+                            hits,
+                            profile,
+                            damage: 0,
+                        });
+                        Some(extras.len() - 1)
+                    }
+                    None => None,
+                };
+                if let Some(slot) = slot {
+                    let extra = &mut extras[slot];
+                    for _ in 0..hits {
+                        let round = extra.profile.round_damage(2, false, false, rng)?;
+                        extra.damage = extra.damage.saturating_add(round as i32);
+                    }
                 }
             }
             if budget <= 0 && !continuous {

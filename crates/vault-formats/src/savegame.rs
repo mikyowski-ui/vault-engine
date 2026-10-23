@@ -634,10 +634,11 @@ impl SaveGame {
     }
 }
 
+/// SPEC-008 §2.5: only the player's own top-level record is altered, with
+/// the temporary flag clear and the script instance word `+0x40` at -1; the
+/// cached script-file word `+0x44` and every inventory child are written
+/// unchanged.
 fn clear_tree(object: &mut MapObject) {
     object.flags.0 &= !BasicFlags::TEMPORARY.0;
     object.script_id = -1;
-    for entry in &mut object.inventory {
-        clear_tree(&mut entry.object);
-    }
 }

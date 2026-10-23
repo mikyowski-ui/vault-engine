@@ -204,6 +204,9 @@ impl MapPreview {
                 });
                 match opened {
                     Some(Ok(disk)) => {
+                        for diagnostic in &disk.diagnostics {
+                            tracing::warn!(%diagnostic, "holodisk diagnostic");
+                        }
                         if let Screen::PipBoy(pipboy) = &mut self.screen {
                             pipboy.disk = Some((disk, 0));
                         }
@@ -434,8 +437,9 @@ impl MapPreview {
         }
     }
     /// §3.33 the stored raster (current up to the last database write),
-    /// each cell 2 pixels wide and 1 tall from (238, 105): walls key 992,
-    /// scenery key 480. Rows below the window are clipped (safe rule).
+    /// each cell 2 pixels wide and 1 tall on a two-row pitch from
+    /// (238, 105): walls key 992, scenery key 480. Rows below the window are
+    /// clipped (safe rule).
     fn draw_pipboy_automap(&self, image: &mut IndexedImage) {
         let Screen::PipBoy(PipBoy {
             raster: Some((_, Some(raster))),

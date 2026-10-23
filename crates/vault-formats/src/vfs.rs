@@ -1,8 +1,9 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use cap_std::{ambient_authority, fs::Dir};
@@ -338,5 +339,69 @@ impl Vfs for LocalDirProvider {
 
     fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {
         Box::new(self.files.keys())
+    }
+}
+
+/// A loose directory mounted under a fixed VFS prefix behind another
+/// provider. A read under the prefix that the primary provider does not
+/// find falls back to the directory, so the primary (and its own loose
+/// root) always wins. Used for loose `.ACM` music kept beside the DAT
+/// archives rather than inside them.
+pub struct PrefixMount {
+    primary: Arc<dyn Vfs>,
+    prefix: String,
+    dir: LocalDirProvider,
+    files: Vec<VfsPath>,
+}
+
+impl PrefixMount {
+    /// Mount `dir` as `prefix/...` (a relative VFS directory path).
+    pub fn new(
+        primary: Arc<dyn Vfs>,
+        prefix: &str,
+        dir: LocalDirProvider,
+    ) -> Result<Self, VfsError> {
+        let prefix = format!("{}/", VfsPath::new(prefix)?.as_str());
+        let mut files: BTreeSet<VfsPath> = primary.files().cloned().collect();
+        for file in dir.files() {
+            files.insert(VfsPath::new(&format!("{prefix}{file}"))?);
+        }
+        Ok(Self {
+            primary,
+            prefix,
+            dir,
+            files: files.into_iter().collect(),
+        })
+    }
+
+    /// Files served from the mounted directory.
+    pub fn mounted(&self) -> usize {
+        self.dir.files().count()
+    }
+}
+
+impl Vfs for PrefixMount {
+    fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        self.read_bounded(path, usize::MAX)
+    }
+
+    fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
+        match self.primary.read_bounded(path, max_bytes) {
+            Err(VfsError::NotFound(missing)) => match missing.as_str().strip_prefix(&self.prefix) {
+                Some(rest) => self
+                    .dir
+                    .read_bounded(rest, max_bytes)
+                    .map_err(|error| match error {
+                        VfsError::NotFound(_) => VfsError::NotFound(missing),
+                        other => other,
+                    }),
+                None => Err(VfsError::NotFound(missing)),
+            },
+            result => result,
+        }
+    }
+
+    fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {
+        Box::new(self.files.iter())
     }
 }

@@ -381,9 +381,13 @@ fn spec008_encounter_dice_specials_and_terrain_choices() {
         terrain_map(Terrain::Mountain, &mut draws),
         Ok("MOUNTN1.MAP")
     );
-    // Town destinations jitter around the cell center.
-    let mut draws = Draws::new(&[-16, 16]);
+    // Town destinations jitter around the cell center: magnitude then sign
+    // on each axis, sign 0 subtracting and 1 adding.
+    let mut draws = Draws::new(&[16, 0, 16, 1]);
     assert_eq!(town_target(2, &mut draws), Ok([1059, 91]));
+    assert!(draws.0.is_empty());
+    let mut draws = Draws::new(&[0, 0, 5, 0]);
+    assert_eq!(town_target(2, &mut draws), Ok([1075, 70]));
     assert!(town_target(12, &mut Draws::new(&[])).is_err());
 }
 

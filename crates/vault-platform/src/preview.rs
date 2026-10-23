@@ -1,8 +1,9 @@
 use crate::AppResult;
+use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
 use vault_formats::{
     DatArchive, DatProvider, Database, Font, FrmArchive, LocalDirProvider, MAX_ASSET_BYTES,
-    MsgCatalog, Palette, ParseError, Vfs, VfsPath,
+    MsgCatalog, Palette, ParseError, PrefixMount, Vfs, VfsPath,
 };
 use vault_render::{ImageError, IndexedImage, compose_preview};
 use winit::keyboard::KeyCode;
@@ -410,7 +411,23 @@ impl PreviewArgs {
         };
         let provider = DatProvider::new(master, critter);
         tracing::info!(files = provider.files().count(), "DAT databases mounted");
-        Ok(Arc::new(provider))
+        let provider: Arc<dyn Vfs> = Arc::new(provider);
+        // Loose `.ACM` music ships beside the archives, not inside them.
+        let Some(music) = self.master_dat.as_deref().and_then(music_dir) else {
+            return Ok(provider);
+        };
+        match LocalDirProvider::mount(&music)
+            .and_then(|dir| PrefixMount::new(provider.clone(), MUSIC_DIR, dir))
+        {
+            Ok(mount) => {
+                tracing::info!(dir = %music.display(), files = mount.mounted(), "music mounted");
+                Ok(Arc::new(mount))
+            }
+            Err(error) => {
+                tracing::warn!(dir = %music.display(), %error, "music directory not mounted");
+                Ok(provider)
+            }
+        }
     }
     pub fn load(&self) -> AppResult<Option<AssetPreview>> {
         let language = self.language.as_deref().unwrap_or("english");
@@ -610,12 +627,95 @@ impl Preview {
     }
 }
 
+/// The VFS directory music tracks are requested from (SPEC-008 §3.10).
+const MUSIC_DIR: &str = "sound/music";
+
+/// A loose music directory beside the master database: `sound/music` or
+/// `data/sound/music`, matched without regard to case.
+pub(crate) fn music_dir(master: &Path) -> Option<PathBuf> {
+    let base = match master.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let child = |dir: &Path, name: &str| -> Option<PathBuf> {
+        std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|entry| entry.eq_ignore_ascii_case(name))
+                    && entry.path().is_dir()
+            })
+            .map(|entry| entry.path())
+    };
+    [&["sound", "music"][..], &["data", "sound", "music"]]
+        .iter()
+        .find_map(|names| {
+            names
+                .iter()
+                .try_fold(base.clone(), |dir, name| child(&dir, name))
+        })
+}
+
 #[cfg(test)]
 use crate::fixture_assets as fixtures;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn music_beside_the_master_database_is_found_in_either_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let master = temp.path().join("MASTER.DAT");
+        assert_eq!(music_dir(&master), None);
+        std::fs::create_dir_all(temp.path().join("DATA/SOUND/MUSIC")).unwrap();
+        assert_eq!(
+            music_dir(&master),
+            Some(temp.path().join("DATA/SOUND/MUSIC"))
+        );
+        // A `sound/music` directory directly beside the archive comes first.
+        std::fs::create_dir_all(temp.path().join("Sound/music")).unwrap();
+        assert_eq!(music_dir(&master), Some(temp.path().join("Sound/music")));
+        // A file with the directory's name is not a mount point.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(other.path().join("sound")).unwrap();
+        std::fs::write(other.path().join("sound/music"), b"").unwrap();
+        assert_eq!(music_dir(&other.path().join("master.dat")), None);
+    }
+
+    #[test]
+    #[ignore = "needs the local corpus"]
+    fn the_dat_source_serves_loose_music_beside_the_master_database() {
+        let root = std::env::var_os("VAULT_CORPUS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-corpus"));
+        let (master, critter) = (root.join("MASTER.DAT"), root.join("CRITTER.DAT"));
+        if !master.is_file() || !critter.is_file() {
+            eprintln!("skipping: no DAT archives in {}", root.display());
+            return;
+        }
+        let args = PreviewArgs {
+            master_dat: Some(master.clone()),
+            critter_dat: Some(critter),
+            game: true,
+            ..Default::default()
+        };
+        let vfs = args.source().unwrap();
+        if music_dir(&master).is_none() {
+            eprintln!("skipping: no music directory beside {}", master.display());
+            return;
+        }
+        assert!(!vfs.read("sound/music/01hub.acm").unwrap().is_empty());
+        assert!(
+            vfs.files()
+                .any(|path| path.as_str() == "sound/music/03wrldmp.acm")
+        );
+        // Archive members still resolve through the mount.
+        assert!(vfs.read("color.pal").is_ok());
+    }
 
     #[test]
     fn a_negative_seed_parses_and_minus_one_is_ambient() {

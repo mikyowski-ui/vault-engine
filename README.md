@@ -1559,39 +1559,36 @@ numbering, which code comments cite.
    follows the table (`vault-formats/src/mve.rs`, `AUDIO_DELTAS`).
 2. SPEC-009 Fixture H lists candidate R2's rating as 22; the §3.4 rule gives
    20. The code follows the rule (`vault-core/src/ai_tests.rs`, Fixture H).
-3. SPEC-009 §2.5 cites a SPEC-002 "language filter" that SPEC-002 never
-   defines. Its preference state is tracked, but text is unchanged
-   (`vault-core/src/host_ai.rs`, `AiState::filtered`).
-4. SPEC-014 §3.27 mentions the player's see-through cutout, but no spec gives
-   its geometry, so nothing draws it.
-5. SPEC-007 §3.9 vs §3.10.4 step 11: does a throw whose projectile phase did
-   not run (a critical failure that kept its critical bit, or no valid
-   projectile) keep its weapon code, or return to standing with code 0 like
-   any throw without a refill? The code takes the literal reading, code 0
-   (`vault-core/src/host_choreography.rs`, `ranged`).
+3. SPEC-009 §2.5 cites a SPEC-002 "language filter". SPEC-002 now defines it
+   (§3.7, `badwords.txt`), but it is not implemented yet: its preference
+   state is tracked and text is unchanged (`vault-core/src/host_ai.rs`,
+   `AiState::filtered`).
+4. Answered by SPEC-014 R1-rev7 §3.37: the `egg.frm` cutout is drawn
+   (`vault-render/src/map.rs`, `Cutout`).
+5. Answered by SPEC-007 R1-rev8 §3.9: a throw whose projectile phase did not
+   run ends on weapon code 0 (`vault-core/src/host_choreography.rs`, `ranged`).
 6. SPEC-003 §3.3: the exit-grid +16 art shift applies on every parse, so a map
    saved and reloaded twice moves 5 -> 21 -> 37. Is the shift draw-time only?
    (`vault-formats/src/map.rs`, exit-grid art adjustment)
-7. SPEC-008 §2.5 vs SPEC-003 §2.10: `clear_tree` writes -1 into word `0x40`.
-   Should it be `0x44`, the retained script association?
-   (`vault-formats/src/savegame.rs`, `clear_tree`)
-8. SPEC-014 §3.33 vs SPEC-008 §2.8: the Pip-Boy automap cell is 1 pixel tall
-   in one and 2 rows in the other (`vault-platform/src/map_preview/pipboy.rs`
-   uses 2 x 1). The inventory row formula is `[Must-match]` in SPEC-014 §3.34
-   but `[May-improve]` in SPEC-013 §3.16.
+7. Answered by SPEC-008 §2.5: word `0x40` of the player's top-level record
+   only; inventory children are written unchanged
+   (`vault-formats/src/savegame.rs`, `clear_tree`).
+8. Answered by SPEC-014 R1-rev7 §3.33/§3.34: a 2-by-1 cell on a two-row
+   pitch (`vault-core/src/ui/automap.rs`, `pipboy_cell`), and the inventory
+   row formula is `[May-improve]` in both specs.
 9. SPEC-004 §2.5: `0xC801` and `0xA801` are accepted as pushes but not
    listed, and `0x8401` may be valid but is rejected (`vault-vm/src/program.rs`
    and `vault-debug/src/decode.rs` agree).
-10. SPEC-007 §3.7.1: do burst and continuous sprays get the Jinxed/Sniper
-    critical post-processing? `Attack::resolve_spray` skips it; a wrong
-    reading shifts the RNG draw count (`vault-core/src/combat.rs`).
-11. SPEC-008 §3.4: is the town-target jitter one signed draw per axis, or a
-    magnitude then a sign? The code draws once per axis
+10. Answered by SPEC-007 R1-rev8 §3.7: a spray runs Stage A inside it and
+    Jinxed/Sniper once on its final result (`vault-core/src/host_combat.rs`,
+    `resolve_spray`).
+11. Answered by SPEC-008 §3.7: four draws, magnitude then sign per axis
     (`vault-core/src/worldmap.rs`, `town_target`).
-12. SPEC-008 §3.8: a gap inside a holodisk's message window is treated as
-    fatal, so the disk is not shown (`vault-guidance/src/lib.rs`).
-13. SPEC-006 §3.11: does a talking head draw a fidget at session start? None is
-    drawn, which matters for RNG order (`vault-core/src/dialogue.rs`).
+12. Answered by SPEC-008 §3.8: a gap reads as the `Error` placeholder record
+    (`vault-guidance/src/lib.rs`).
+13. Answered by SPEC-006 §3.11: the fidget is drawn at session start, and the
+    idle counter and threshold persist across sessions
+    (`vault-core/src/dialogue.rs`).
 14. SPEC-008 §4.5: the working `.SAV` name of map 7 comes from `map.msg`
     (`VAULTENT.SAV`); the spec does not name it. Header word 7 of `hubent.sav`
     is covered by the vector only (`vault-core/src/persistence.rs`).
@@ -1675,6 +1672,17 @@ numbering, which code comments cite.
 41. SPEC-014 §3.27 near talk: are the distance (below 9) and the clear line
     measured at click time? The code measures them when the click is made
     (`WorldHost::near_talk`, `vault-platform/src/map_preview/hud.rs`).
+42. SPEC-006 §3.7 and SPEC-014 §3.27 put "critter scripts" in the background
+    checker but give no cadence or order for `critter_p_proc`. Every placed
+    critter with a script runs it on each out-of-combat real-time tick (one
+    per 100 ms, never in combat or dialogue), in world order, skipping scripts
+    without the procedure (`vault-core/src/host.rs`, `critter_scripts`).
+43. No spec gives the object draw order. Flat objects draw first, then the
+    rest, each pass in object order: ascending hex, then the order on the hex
+    (`vault-render/src/map.rs`, `draw_key`). Picking uses the same order.
+44. SPEC-001 says the additive-mix table is generated for the shipped
+    palettes but not how; the five-bit channels are summed and saturated at
+    31 through the RGB555 lookup (`vault-formats/src/palette.rs`, `additive`).
 
 ## Known gaps
 

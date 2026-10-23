@@ -159,22 +159,26 @@ impl WorldClock {
         let minute = (self.ticks / 600 % 60) as i64;
         10 * (60 * (60 - minute - 1) + 3600 * (24 - hour - 1) + 60)
     }
-    /// Returns queue permission and the independent 30-second update request.
+    /// Returns queue permission, the independent 30-second update request,
+    /// and whether this call added the out-of-combat real-time tick (the
+    /// background critter-script pass runs on that tick).
     pub fn background(
         &mut self,
         now_ms: u64,
         combat: bool,
         dialogue: bool,
         mode: i32,
-    ) -> Result<(bool, bool), WorldError> {
+    ) -> Result<Background, WorldError> {
         if dialogue {
-            return Ok((false, false));
+            return Ok(Background::default());
         }
         let mut queue = !combat && mode != 4;
+        let mut ticked = false;
         if now_ms.saturating_sub(self.last_tick_ms) >= 100 {
             self.last_tick_ms = now_ms;
             if !combat {
                 self.advance(1)?;
+                ticked = true;
             }
             queue = true;
         }
@@ -182,6 +186,17 @@ impl WorldClock {
         if update {
             self.last_update_ms = now_ms;
         }
-        Ok((queue, update))
+        Ok(Background {
+            queue,
+            update,
+            ticked,
+        })
     }
+}
+/// One background-checker pass (SPEC-006 §3.7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Background {
+    pub queue: bool,
+    pub update: bool,
+    pub ticked: bool,
 }

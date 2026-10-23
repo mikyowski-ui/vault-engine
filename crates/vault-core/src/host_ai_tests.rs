@@ -2577,8 +2577,8 @@ fn spec007_a_throw_without_a_projectile_phase_ends_standing_with_code_0() {
     // F4 again: a Throwing Knife (code 1) whose critical failure keeps its
     // critical bit launches nothing (§3.9). §3.10.4 step 11 still applies
     // §3.9 step 11 to the throw, and with no refill item the attacker's
-    // art changes to standing with weapon code 0, delay -1: the literal
-    // reading, while the knife stays in the hand.
+    // art changes to standing with weapon code 0, delay -1 (§3.9 R1-rev8),
+    // while the knife stays in the hand.
     let (mut host, knife, defender, _) = fixture_f(45, 1, 0, 1, 0);
     let player = host.world.player;
     let attack = host

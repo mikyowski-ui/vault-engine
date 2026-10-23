@@ -14,6 +14,8 @@ pub struct Palette {
     tables: Option<Vec<u8>>,
     /// Every generated intensity, evaluated on the first bulk use.
     generated: OnceLock<Box<[u8]>>,
+    /// The generated additive mix, evaluated on first use.
+    generated_mix: OnceLock<Box<[u8]>>,
 }
 
 impl Palette {
@@ -46,6 +48,7 @@ impl Palette {
             rgb555: base[768..0x8300].to_vec(),
             tables,
             generated: OnceLock::new(),
+            generated_mix: OnceLock::new(),
         })
     }
 
@@ -113,6 +116,46 @@ impl Palette {
                 .map(|index| self.intensity((index >> 8) as u8, index as u8))
                 .collect()
         })
+    }
+
+    /// The additive mix of two colors: the supplied table, or else each
+    /// five-bit channel summed and saturated at 31, through the RGB555
+    /// lookup (an unmapped color counts as black).
+    pub fn additive(&self, first: u8, second: u8) -> u8 {
+        let index = usize::from(first) * 256 + usize::from(second);
+        if let Some(tables) = &self.tables {
+            return tables[65536 + index];
+        }
+        self.generated_mix.get_or_init(|| {
+            (0..=u16::MAX)
+                .map(|index| {
+                    let [a, b] = [(index >> 8) as u8, index as u8].map(|color| {
+                        if self.is_mapped(color) {
+                            self.rgb6(color).map(|channel| channel / 2)
+                        } else {
+                            [0; 3]
+                        }
+                    });
+                    let rgb = std::array::from_fn(|channel| (a[channel] + b[channel]).min(31));
+                    self.lookup_rgb5(rgb).expect("saturated five-bit channels")
+                })
+                .collect()
+        })[index]
+    }
+
+    /// SPEC-014 §3.37 a pixel drawn through a mask weight `weight` (0-128)
+    /// over `destination`: weight 0 draws the source, otherwise
+    /// `mix[intensity[source][weight]][intensity[destination][128 - weight]]`.
+    pub fn mask_blend(&self, source: u8, destination: u8, weight: u8) -> u8 {
+        if weight == 0 {
+            return source;
+        }
+        let weight = weight.min(128);
+        let table = self.intensity_table();
+        self.additive(
+            table[usize::from(source) * 256 + usize::from(weight)],
+            table[usize::from(destination) * 256 + usize::from(128 - weight)],
+        )
     }
 
     /// Shade `pixels` in place, each by its level in `levels`, through the

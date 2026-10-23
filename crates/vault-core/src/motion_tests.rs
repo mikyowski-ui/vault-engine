@@ -380,6 +380,49 @@ fn spec007_walks_step_at_the_art_rate_and_end_standing() {
 }
 
 #[test]
+fn spec013_a_walk_stops_on_the_exit_grid_hex_and_transitions() {
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let shifts = HEX_STEPS.map(|[x, y]| [(x / 4) as i16, (y / 4) as i16]);
+    host.assets.art.insert(critter(1, 0), frm(8, 10, 0, shifts));
+    let player = host.world.player;
+    let on_route = hexes(20100, 1, 2);
+    let grid = place(
+        &mut host,
+        prototype(5, 0, &[(0, 0x0500_0010)], &[]),
+        on_route,
+    );
+    let object = host.world.get_mut(grid).unwrap();
+    object.raw.flags = BasicFlags(BasicFlags::NONBLOCKING.0 | BasicFlags::FLAT.0);
+    object.raw.state = ObjectState::Other {
+        word: 0,
+        detail: ObjectDetail::ExitGrid {
+            map: 0,
+            hex: 12000,
+            elevation: 0,
+            orientation: 2,
+        },
+    };
+    let goal = hexes(20100, 1, 5);
+    assert!(host.walk_toward(player, goal, false, 0).unwrap());
+    let mut now = 0;
+    let mut path = vec![hex(&host, player)];
+    while host.moving(player) {
+        host.tick(now).unwrap();
+        path.push(hex(&host, player));
+        now += 100;
+        assert!(now < 5000, "the walk ends");
+    }
+    // The step onto the grid hex requests the transition, the walk ends
+    // there, and the main loop runs it on the same tick.
+    path.dedup();
+    assert_eq!(path, [20100, hexes(20100, 1, 1), on_route]);
+    assert_eq!(now, 800);
+    assert!(host.world.effects.contains(&WorldEffect::WorldMap));
+    assert!(host.world.pending_transition.is_none());
+}
+
+#[test]
 fn spec007_run_requests_walk_when_crippled_sneaking_or_without_run_art() {
     let mut host = host();
     let player = host.world.player;
