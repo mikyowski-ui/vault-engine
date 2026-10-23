@@ -31,7 +31,9 @@ impl WorldState {
     /// §3.11 relative volume of an effect tied to `object`: its outermost
     /// owner's hex distance to the player against the player's Perception
     /// (full when `on_screen`). No object, or a category other than item,
-    /// critter, or scenery, gives full volume.
+    /// critter, or scenery, gives full volume. The distance has no
+    /// elevation condition and drops by 1 for each multi-hex object of the
+    /// two, not below 0; an object without a hex is out of range.
     pub fn effect_volume(&self, object: Option<ObjectRef>, on_screen: bool) -> i32 {
         let Some(mut object) = object.filter(|object| {
             self.get(*object).is_some_and(|found| {
@@ -49,11 +51,18 @@ impl WorldState {
                 None => break,
             }
         }
-        sfx::relative_volume(
-            on_screen,
-            self.distance(object, self.player),
-            self.player_stat(1),
-        )
+        let hexes = [object, self.player].map(|end| self.get(end).and_then(|found| found.raw.hex));
+        let distance = match hexes {
+            [Some(a), Some(b)] => vault_formats::HexGrid::angular_distance(a, b).ok(),
+            _ => None,
+        }
+        .map_or(9999, |distance| {
+            sfx::effect_distance(
+                distance,
+                [object, self.player].map(|end| self.multihex(end)),
+            )
+        });
+        sfx::relative_volume(on_screen, distance, self.player_stat(1))
     }
 }
 

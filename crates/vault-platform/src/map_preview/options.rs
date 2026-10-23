@@ -511,12 +511,15 @@ impl MapPreview {
         if index == 4 && iteration.is_multiple_of(EFFECTS_SAMPLE.1) {
             self.play_effect(EFFECTS_SAMPLE.0, None);
         }
+        // The options narrator is narration (SPEC-010 §3.13): it plays at
+        // `trunc(0.69 x speech_volume)` and follows the slider while it
+        // plays.
         if index == 5
             && iteration.is_multiple_of(SPEECH_SAMPLE.1)
             && let Some(samples) = self.sounds.load(&*self.host.assets.vfs, SPEECH_SAMPLE.0)
         {
-            self.audio
-                .play(samples, 1.0, crate::audio::Channel::Speech, false);
+            self.sync_volumes();
+            self.audio.play_narration(samples, self.volumes.speech);
         }
         true
     }

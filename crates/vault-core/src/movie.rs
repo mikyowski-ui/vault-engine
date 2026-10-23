@@ -183,26 +183,23 @@ pub fn archive_movies(played: &[u8; 14]) -> Vec<usize> {
     (3..14).filter(|index| played[*index] != 0).collect()
 }
 /// §3.8 movie volume: `0.94 ×` the background-music volume (truncated), or
-/// 0 when music is disabled.
+/// 0 when music is disabled (SPEC-010 §3.13: not scaled by master volume).
 pub fn movie_volume(music_volume: i32, music_enabled: bool) -> i32 {
     if music_enabled {
-        (f64::from(music_volume) * 0.94) as i32
+        vault_formats::sfx::music_level(music_volume)
     } else {
         0
     }
 }
 /// §3.8 device attenuation `-1000 × log2(32767 / v)`, clamped to
 /// -10000..0 (truncated); `v = 0` gives -10000. The value is in the
-/// device's hundredths of a decibel.
+/// device's hundredths of a decibel (SPEC-010 §3.13).
 pub fn attenuation(volume: i32) -> i32 {
-    if volume <= 0 {
-        return -10000;
-    }
-    (-1000.0 * (32767.0 / f64::from(volume)).log2()).clamp(-10000.0, 0.0) as i32
+    vault_formats::sfx::attenuation(volume)
 }
 /// The linear gain of an attenuation in hundredths of a decibel.
 pub fn attenuation_gain(attenuation: i32) -> f32 {
-    10_f32.powf(attenuation as f32 / 2000.0)
+    vault_formats::sfx::attenuation_gain(attenuation)
 }
 /// The 640 x 480 movie window.
 pub const WINDOW: [i32; 2] = [640, 480];

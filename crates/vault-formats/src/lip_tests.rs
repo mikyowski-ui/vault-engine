@@ -157,10 +157,10 @@ fn spec010_lip_paths_units_and_volume() {
     assert_eq!(lip::lip_path(b"bad.stem", b"x"), None);
     // LIP-D: 44100 bytes is one second, sample 22050.
     assert_eq!(lip::BYTES_PER_SECOND, 2 * 22050);
-    // §3.12 safe rule: floor(69 x V / 100).
+    // §3.12 / §3.13: trunc(0.69 x V) in double precision.
     assert_eq!(lip::speech_volume(32767), 22609);
     assert_eq!(lip::speech_volume(22281), 15373);
-    assert_eq!(lip::speech_volume(300), 207);
+    assert_eq!(lip::speech_volume(300), 206);
     assert_eq!(lip::speech_volume(0), 0);
     // The missing-file rule: one phoneme 0 that lasts past the audio end.
     let silent = LipFile::silent();

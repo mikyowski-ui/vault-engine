@@ -197,6 +197,63 @@ pub fn map_town(number: i32) -> i32 {
 pub fn city_music(number: i32) -> Option<&'static str> {
     map_entry(number).map(|entry| entry.music)
 }
+
+/// SPEC-008 §3.10 the music on/off state, for the whole run (no key,
+/// preference control or opcode toggles it, and no save stores it).
+/// `configured` is the `fallout.cfg` `[sound] music` key (SPEC-014 §2.3,
+/// default 1): with 0, music stays off whatever the volumes do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MusicSwitch {
+    configured: bool,
+    on: bool,
+}
+impl Default for MusicSwitch {
+    /// The default configuration (`music=1`) at nonzero volumes: on.
+    fn default() -> Self {
+        Self {
+            configured: true,
+            on: true,
+        }
+    }
+}
+impl MusicSwitch {
+    /// Rule 1: music starts off and a nonzero `music` key turns it on; the
+    /// startup volumes then apply as any other setting does (rule 2).
+    pub fn startup(configured: bool, master_volume: i32, music_volume: i32) -> Self {
+        let mut switch = Self {
+            configured,
+            on: configured,
+        };
+        switch.set_volumes(master_volume, music_volume);
+        switch
+    }
+    pub fn on(self) -> bool {
+        self.on
+    }
+    pub fn configured(self) -> bool {
+        self.configured
+    }
+    /// Master and music volume were set: by the preferences sliders, a
+    /// save's preference words, the startup configuration, or a game reset.
+    /// Returns the new state when it changed.
+    ///
+    /// - Rule 2: music that is on turns off by volume when either is 0.
+    /// - Rule 3: music off by volume turns back on when music volume is set
+    ///   again, when master volume is set nonzero while music volume is
+    ///   nonzero, or at a game reset, and turns off again at once when
+    ///   either is still 0. So after any setting it is on exactly when the
+    ///   key allows it and both volumes are nonzero; an on-then-off-at-once
+    ///   pair leaves nothing to hear and reports no change.
+    /// - Rule 4: dialogue's halved music volume is just a setting here, so
+    ///   halving a volume of 1 to 0 turns music off by volume.
+    pub fn set_volumes(&mut self, master_volume: i32, music_volume: i32) -> Option<bool> {
+        let on = self.configured && master_volume > 0 && music_volume > 0;
+        (on != self.on).then(|| {
+            self.on = on;
+            on
+        })
+    }
+}
 /// SPEC-008 §3.10 the `map.msg` text of a map number in the fixed table
 /// (the corpus `map.msg` lists the same names in the same order).
 pub fn map_table_name(number: i32) -> Option<&'static str> {

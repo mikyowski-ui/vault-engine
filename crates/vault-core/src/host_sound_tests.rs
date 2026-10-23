@@ -212,6 +212,23 @@ fn spec010_character_names_lookup_speech_and_volume() {
     host.world.get_mut(critter).unwrap().raw.hex = Some(20100 + 9 * 200);
     assert_eq!(host.world.effect_volume(Some(held), false), 15292);
     assert_eq!(host.world.effect_volume(Some(player), false), 32767);
+
+    // No elevation condition: the same hexes on another elevation keep
+    // their distance (9 against Perception 5).
+    host.world.get_mut(critter).unwrap().raw.elevation = 2;
+    assert_eq!(host.world.effect_volume(Some(held), false), 15292);
+    // Each multi-hex object of the two takes 1 off the distance: 8, then 7.
+    let multihex = vault_formats::pro::BasicFlags::MULTIHEX;
+    host.world.get_mut(critter).unwrap().raw.flags.0 |= multihex.0;
+    assert_eq!(host.world.effect_volume(Some(held), false), 19661);
+    host.world.get_mut(player).unwrap().raw.flags.0 |= multihex.0;
+    assert_eq!(host.world.effect_volume(Some(held), false), 24030);
+    // Not below 0: a multi-hex pair one hex apart is in range.
+    host.world.get_mut(critter).unwrap().raw.hex = Some(20100 + 200);
+    assert_eq!(host.world.effect_volume(Some(held), false), 32767);
+    // An owner without a hex is out of range.
+    host.world.get_mut(critter).unwrap().raw.hex = None;
+    assert_eq!(host.world.effect_volume(Some(held), false), 10922);
 }
 
 fn effects(host: &mut WorldHost<SoundAssets>) -> Vec<(String, Option<ObjectRef>)> {

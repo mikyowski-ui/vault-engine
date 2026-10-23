@@ -6,7 +6,7 @@
 //! over the fixed 700 ms of the SPEC-014 §3.2 safe rule.
 use crate::{
     AppResult,
-    audio::{AudioHandle, Channel, MusicRequest, Volumes, volume_gain},
+    audio::{AudioHandle, Channel, MusicRequest, Volumes},
     editor_screen::{EditorDialog, EditorExit, EditorStage, draw_editor},
     interface::Painter,
     map_preview::MapPreview,
@@ -105,6 +105,9 @@ pub struct Game {
     /// `fallout.cfg` `[system] interrupt_walk` (SPEC-014 §3.27), read once
     /// at startup beside the splash.
     interrupt_walk: bool,
+    /// `fallout.cfg` `[sound] music` (SPEC-014 §2.3, default 1), read once
+    /// at startup: 0 keeps music off for the whole run (SPEC-008 §3.10).
+    music_configured: bool,
     stage: Stage,
     movies: VecDeque<(String, u32, Next)>,
     now: u64,
@@ -209,6 +212,7 @@ impl Game {
             config_path,
             preferences,
             interrupt_walk: true,
+            music_configured: config.get_int("sound", "music").unwrap_or(1) != 0,
             stage: Stage::Menu { since: 0 },
             movies: VecDeque::new(),
             now: 0,
@@ -262,11 +266,15 @@ impl Game {
     pub fn finished(&self) -> bool {
         self.finished
     }
-    /// Attach the audio output. A menu entered before it was attached
-    /// (no splash or start movies) starts its music now.
+    /// Attach the audio output: SPEC-008 §3.10 rule 1 sets the music
+    /// on/off state from the startup configuration and its volumes. A menu
+    /// entered before it was attached (no splash or start movies) starts
+    /// its music now.
     pub fn set_audio(&mut self, audio: AudioHandle) {
         self.audio = audio;
-        self.volume_source = None;
+        let volumes = Volumes::from_preferences(&self.preferences);
+        self.audio.configure_music(self.music_configured, volumes);
+        self.volume_source = Some(volumes);
         if matches!(self.stage, Stage::Menu { .. }) {
             self.sync_volumes();
             self.request_menu_music();
@@ -323,8 +331,10 @@ impl Game {
             };
             match MoviePlayer::load(&*self.vfs, request, style) {
                 Ok(mut player) => {
+                    // The movie level follows the music volume (SPEC-012
+                    // §3.8).
+                    self.sync_volumes();
                     player.audio = self.audio.clone();
-                    player.music_volume = self.preferences.music_volume;
                     self.stage = Stage::Movie {
                         player: Box::new(player),
                         next,
@@ -450,12 +460,15 @@ impl Game {
         }
     }
     /// SPEC-014 §3.18: the preference volumes reach the mixer when they
-    /// change (a world applies its own while it runs).
+    /// change (a world applies its own while it runs). Music that they
+    /// turn back on replays the last recorded track (SPEC-008 §3.10).
     fn sync_volumes(&mut self) {
         let wanted = Volumes::from_preferences(&self.preferences);
         if self.volume_source != Some(wanted) {
             self.volume_source = Some(wanted);
-            self.audio.apply_volumes(wanted);
+            if self.audio.apply_volumes(wanted) == Some(true) {
+                self.audio.replay_music(self.vfs.clone());
+            }
         }
     }
     /// Leaving a world keeps its preferences and save-slot session state;
@@ -477,9 +490,10 @@ impl Game {
         world.config_path = self.config_path.clone();
         world.preferences = self.preferences.clone();
         world.interrupt_walk = self.interrupt_walk;
-        // SPEC-008 §3.10: the world starts with the mixer's music state.
-        let music = self.audio.music_enabled();
-        world.set_music_enabled(music);
+        // SPEC-008 §3.10: the world starts with the mixer's music state,
+        // which lasts the whole run; the new game's preferences then set
+        // the volumes as any game reset does.
+        world.host.set_music_enabled(self.audio.music_enabled());
         world.apply_preferences();
         world.set_slot_session(self.slot_list.clone(), self.quick);
         world.host.critter_cycle = self.critter_cycle;
@@ -550,12 +564,18 @@ impl Game {
         }
     }
     /// An interface sound, `sound/sfx/<name>.acm`, at the effects volume
-    /// (SPEC-010 §3.11 with no object: V = 32767).
+    /// (SPEC-010 §3.13: an effect without an object has level
+    /// `sndfx_volume`).
     fn audio_cue(&mut self, name: &str) {
         let path = format!("sound/sfx/{name}.acm");
-        let gain = volume_gain(self.preferences.sndfx_volume);
+        self.sync_volumes();
         if let Some(samples) = self.sounds.load(&*self.vfs, &path) {
-            self.audio.play(samples, gain, Channel::Effect, false);
+            self.audio.play(
+                samples,
+                self.preferences.sndfx_volume,
+                Channel::Effect,
+                false,
+            );
         }
     }
     /// Take the selected (or edited) character into the game: the
@@ -765,11 +785,13 @@ impl Game {
                     None => {
                         *since = now;
                         let path = flow::death_narration(*draw);
-                        let gain = volume_gain(self.preferences.speech_volume);
+                        // SPEC-010 §3.13 narration: trunc(0.69 x speech).
+                        let speech = self.preferences.speech_volume;
                         let started = !*input
-                            && self.sounds.load(&*self.vfs, &path).is_some_and(|samples| {
-                                self.audio.play(samples, gain, Channel::Speech, false)
-                            });
+                            && self
+                                .sounds
+                                .load(&*self.vfs, &path)
+                                .is_some_and(|samples| self.audio.play_narration(samples, speech));
                         *narration = Some(started);
                         *input
                     }
@@ -1630,7 +1652,8 @@ mod tests {
         assert!(mixer.lock().unwrap().playing(Channel::Music));
         // The preference volumes reach the mixer (SPEC-014 §3.18).
         game.tick(16).unwrap();
-        assert_eq!(mixer.lock().unwrap().master(), volume_gain(22281));
+        assert_eq!(mixer.lock().unwrap().master(), 22281);
+        assert_eq!(mixer.lock().unwrap().level(Channel::Music), Some(20944));
         // A new game, then a knockout: white, the death scene's fade from
         // white, then the narration nar_<D(1, 4) + 2> as speech.
         assert!(game.step(KeyCode::KeyN));
@@ -1661,6 +1684,8 @@ mod tests {
         assert_eq!(*narration, Some(true));
         assert!((1..=4).contains(draw));
         assert!(mixer.lock().unwrap().playing(Channel::Speech));
+        // SPEC-010 §3.13: narration plays at trunc(0.69 x 22281).
+        assert_eq!(mixer.lock().unwrap().level(Channel::Speech), Some(15373));
         // A key ends the wait at once: the speech stops and the scene
         // fades to black, then the menu (and its music) return.
         assert!(game.step(KeyCode::Space));
@@ -1669,6 +1694,62 @@ mod tests {
         game.tick(48 + 2300).unwrap();
         assert_eq!(game.title(), "Vault — main menu");
         assert_eq!(audio.last_music(), Some(menu));
+    }
+
+    #[test]
+    fn the_configured_music_key_and_volumes_set_the_music_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        state_fixture::write_corpus(root);
+        std::fs::create_dir_all(root.join("sound/music")).unwrap();
+        std::fs::write(
+            root.join("sound/music/07desert.acm"),
+            sound_fixture::acm('B'),
+        )
+        .unwrap();
+        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(root).unwrap());
+        let config = root.join("fallout.cfg");
+        let start = |text: &str| {
+            std::fs::write(&config, text).unwrap();
+            let mut game = Game::new(
+                vfs.clone(),
+                "english",
+                1,
+                root.join("saves"),
+                Some(config.clone()),
+            )
+            .unwrap();
+            let (audio, mixer) = AudioHandle::detached();
+            game.set_audio(audio.clone());
+            audio.wait_music();
+            (game, audio, mixer)
+        };
+        // SPEC-008 §3.10 rule 1: `music=0` keeps music off; the menu track
+        // is recorded but never plays, and no volume turns it on.
+        let (mut game, audio, mixer) = start("[sound]\nmusic=0\n");
+        assert!(!audio.music_enabled());
+        assert!(audio.last_music().is_some());
+        assert!(!mixer.lock().unwrap().playing(Channel::Music));
+        assert_eq!(mixer.lock().unwrap().movie_level(), 0);
+        game.preferences.music_volume = 30000;
+        game.tick(16).unwrap();
+        assert!(!audio.music_enabled());
+        // Rule 2 from configuration: master volume 0 starts it off by
+        // volume; setting it nonzero turns it on and replays the menu
+        // track. The movie level ignores master (SPEC-012 §3.8).
+        let (mut game, audio, mixer) = start("[sound]\nmaster_volume=0\n");
+        assert!(!audio.music_enabled());
+        assert!(!mixer.lock().unwrap().playing(Channel::Music));
+        game.preferences.master_volume = 22281;
+        game.tick(16).unwrap();
+        audio.wait_music();
+        assert!(audio.music_enabled());
+        assert!(mixer.lock().unwrap().playing(Channel::Music));
+        assert_eq!(mixer.lock().unwrap().movie_level(), 20944);
+        // The default key plays the menu music at once.
+        let (_, audio, mixer) = start("[sound]\nmusic=1\n");
+        assert!(audio.music_enabled());
+        assert!(mixer.lock().unwrap().playing(Channel::Music));
     }
 
     #[test]

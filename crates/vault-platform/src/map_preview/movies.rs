@@ -50,7 +50,6 @@ impl MapPreview {
             match MoviePlayer::load(&*self.host.assets.vfs, request, style) {
                 Ok(mut player) => {
                     player.audio = self.audio.clone();
-                    player.music_volume = self.volumes.music;
                     let resume = std::mem::replace(&mut self.screen, Screen::Map);
                     self.screen = Screen::Movie(Box::new(MovieScreen {
                         player,

@@ -1,5 +1,5 @@
-//! SPEC-010 §4.3-4.5 name construction, lookup, volume, and speech-path
-//! vectors.
+//! SPEC-010 §4.3-4.5 and §4.8 name construction, lookup, volume,
+//! speech-path, and device-attenuation vectors.
 use crate::sfx::*;
 
 #[test]
@@ -205,4 +205,55 @@ fn spec010_relative_volume_and_speech_paths() {
         narration_path(b"narrator\\options"),
         "sound/speech/narrator/options.ACM"
     );
+}
+
+#[test]
+fn spec010_multihex_effect_distance() {
+    // §3.11 step 3: minus 1 for each multi-hex object, not below 0.
+    assert_eq!(effect_distance(6, [false, false]), 6);
+    assert_eq!(effect_distance(6, [true, false]), 5);
+    assert_eq!(effect_distance(6, [false, true]), 5);
+    assert_eq!(effect_distance(6, [true, true]), 4);
+    assert_eq!(effect_distance(1, [true, true]), 0);
+    assert_eq!(effect_distance(0, [true, false]), 0);
+}
+
+#[test]
+fn spec010_volume_level_vectors() {
+    // §4.8: (master M, level L, v, A).
+    let effect = applied_volume(FAR_VOLUME, 22281);
+    assert_eq!(effect, 7426);
+    let music = music_level(22281);
+    assert_eq!(music, 20944);
+    let speech = speech_level(22281);
+    assert_eq!(speech, 15373);
+    for (master, level, volume, decibels) in [
+        (22281, 22281, 15150, -1112),
+        (22281, effect, 5049, -2698),
+        (22281, music, 14241, -1202),
+        (22281, speech, 10453, -1648),
+        (22281, LIBRARY_LEVEL, 22281, -556),
+        (32767, 32, 32, -9999),
+        (32767, 31, 31, -10000),
+        (0, 32767, 0, -10000),
+        (0, 1, 0, -10000),
+    ] {
+        assert_eq!(device_volume(master, level), volume, "M {master} L {level}");
+        assert_eq!(attenuation(volume), decibels, "v {volume}");
+        assert_eq!(device_attenuation(master, level), decibels);
+    }
+    // Movie audio: v = trunc(0.94 x music_volume), unscaled by master.
+    assert_eq!(attenuation(music_level(22281)), -645);
+    // v is capped at 32767; full volume is 0 dB.
+    assert_eq!(device_volume(32767, 32767), 32767);
+    assert_eq!(attenuation(32767), 0);
+    // The double-precision products: 0.69 x 300 truncates to 206.
+    assert_eq!(speech_level(300), 206);
+    assert_eq!(speech_level(32767), 22609);
+    assert_eq!(speech_level(0), 0);
+    assert_eq!(music_level(32767), 30800);
+    assert_eq!(music_level(1), 0);
+    // Amplitude 10^(A / 2000): every 2000 is a factor of 10.
+    assert!((attenuation_gain(-2000) - 0.1).abs() < 1e-6);
+    assert_eq!(attenuation_gain(0), 1.0);
 }

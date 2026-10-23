@@ -930,6 +930,40 @@ fn spec008_map_table_gives_every_number_a_town_and_a_track() {
 }
 
 #[test]
+fn spec008_music_on_off_state_follows_the_key_and_the_volumes() {
+    use crate::worldmap::MusicSwitch;
+    // Rule 1: off at startup; the `music` key (default 1) turns it on.
+    assert!(MusicSwitch::startup(true, 22281, 22281).on());
+    assert!(MusicSwitch::default().on());
+    // Rule 2 from configuration: a startup volume of 0 keeps it off.
+    assert!(!MusicSwitch::startup(true, 0, 22281).on());
+    assert!(!MusicSwitch::startup(true, 22281, 0).on());
+    // `music=0`: off for the whole run, whatever the volumes.
+    let mut never = MusicSwitch::startup(false, 22281, 22281);
+    assert!(!never.on() && !never.configured());
+    assert_eq!(never.set_volumes(32767, 32767), None);
+    assert!(!never.on());
+
+    let mut switch = MusicSwitch::startup(true, 22281, 22281);
+    // Rule 2: a music or master volume of 0 turns it off by volume.
+    assert_eq!(switch.set_volumes(22281, 0), Some(false));
+    assert_eq!(switch.set_volumes(22281, 0), None, "already off");
+    // Rule 3: master set nonzero while music volume is 0 stays off; music
+    // volume set nonzero turns it back on.
+    assert_eq!(switch.set_volumes(30000, 0), None);
+    assert_eq!(switch.set_volumes(30000, 5), Some(true));
+    assert_eq!(switch.set_volumes(0, 5), Some(false));
+    // Music volume set again while master is 0: on, then off at once.
+    assert_eq!(switch.set_volumes(0, 9000), None);
+    assert!(!switch.on());
+    assert_eq!(switch.set_volumes(1, 9000), Some(true));
+    // Rule 4: dialogue's halving of a music volume of 1 gives 0.
+    let halved = 1 / 2;
+    assert_eq!(switch.set_volumes(1, halved), Some(false));
+    assert_eq!(switch.set_volumes(1, 1), Some(true));
+}
+
+#[test]
 fn spec008_map_numbers_come_from_the_header_name_matched_against_map_msg() {
     use crate::worldmap::{
         MAP_TABLE, canonical_map_name, city_music, header_map_number, map_number_of_name, map_town,

@@ -227,9 +227,11 @@ pub fn lip_path(head: &[u8], sound: &[u8]) -> Option<String> {
     ))
 }
 
-/// §3.12 start step 4: the speech plays at `floor(69 x V / 100)` of the
-/// speech volume setting *V* (0-32767), the `[May-improve]` safe rule for
-/// the reference's floating-point `trunc(0.69 x V)`.
+/// §3.12 start step 4: the speech plays at `trunc(0.69 x V)` of the
+/// speech volume setting *V* (0-32767). §3.13's level table makes the
+/// reference's double-precision product `[Must-match]`, so §3.12's
+/// `floor(69 x V / 100)` safe rule is not used (they differ by one for
+/// some multiples of 100, such as 300).
 pub fn speech_volume(setting: i32) -> i32 {
-    (69 * i64::from(setting.clamp(0, 32767)) / 100) as i32
+    crate::sfx::speech_level(setting)
 }

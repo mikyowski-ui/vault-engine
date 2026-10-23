@@ -380,7 +380,7 @@ impl WorldState {
     fn art_category(&self, object: ObjectRef) -> Option<u8> {
         self.get(object).map(|o| Fid(o.raw.art_id).category())
     }
-    fn multihex(&self, object: ObjectRef) -> bool {
+    pub(crate) fn multihex(&self, object: ObjectRef) -> bool {
         self.get(object)
             .is_some_and(|o| o.raw.flags.contains(BasicFlags::MULTIHEX))
     }

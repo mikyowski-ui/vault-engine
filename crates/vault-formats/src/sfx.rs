@@ -1,5 +1,7 @@
-//! SPEC-010 §3.8-3.11: sound-effect name builders, the effect lookup and
-//! alias chain, speech file paths, and distance-based relative volume.
+//! SPEC-010 §3.8-3.11 and §3.13: sound-effect name builders, the effect
+//! lookup and alias chain, speech file paths, distance-based relative
+//! volume, and every sound's level with its master-volume device
+//! attenuation.
 //! Builders return names without a directory or extension.
 use crate::fid::critter_suffix;
 
@@ -242,4 +244,52 @@ pub fn relative_volume(on_screen: bool, distance: i32, perception: i32) -> i32 {
 /// The applied effect volume `floor(V x S / 32767)`.
 pub fn applied_volume(relative: i32, setting: i32) -> i32 {
     (i64::from(relative) * i64::from(setting) / i64::from(FULL_VOLUME)) as i32
+}
+/// §3.11 the hex distance an effect's volume uses: the plain hex distance
+/// (no elevation condition), minus 1 for each of the two objects that is
+/// multi-hex, not below 0.
+pub fn effect_distance(distance: i32, multihex: [bool; 2]) -> i32 {
+    (distance - multihex.map(i32::from).iter().sum::<i32>()).max(0)
+}
+
+/// §3.13 level of a library sound started by `soundplay` (`0x8098`): full,
+/// changed by no opcode; only master volume scales it.
+pub const LIBRARY_LEVEL: i32 = FULL_VOLUME;
+/// §3.13 silence, in hundredths of a decibel.
+pub const SILENT_ATTENUATION: i32 = -10000;
+/// §3.13 level of talking-head speech and narration:
+/// `trunc(0.69 x speech_volume)`, a double-precision product (so 300 gives
+/// 206, one below `floor(69 x 300 / 100)`).
+pub fn speech_level(speech_volume: i32) -> i32 {
+    (f64::from(speech_volume.clamp(0, FULL_VOLUME)) * 0.69) as i32
+}
+/// §3.13 level of background music, and SPEC-012 §3.8's movie level while
+/// music is on: `trunc(0.94 x music_volume)` in double precision.
+pub fn music_level(music_volume: i32) -> i32 {
+    (f64::from(music_volume.clamp(0, FULL_VOLUME)) * 0.94) as i32
+}
+/// §3.13 step 1: the level scaled by master volume,
+/// `floor(master_volume x L / 32767)`, capped at 32767.
+pub fn device_volume(master_volume: i32, level: i32) -> i32 {
+    let scaled = i64::from(master_volume.max(0)) * i64::from(level.max(0)) / i64::from(FULL_VOLUME);
+    scaled.min(i64::from(FULL_VOLUME)) as i32
+}
+/// §3.13 steps 2-3: the attenuation of a scaled volume v, in hundredths of
+/// a decibel. v = 0 gives -10000; otherwise `-1000 x log2(32767 / v)` in
+/// double precision, clamped to -10000..0 and truncated toward zero. Any v
+/// of 31 or less is silent.
+pub fn attenuation(volume: i32) -> i32 {
+    if volume <= 0 {
+        return SILENT_ATTENUATION;
+    }
+    let decibels = -1000.0 * (f64::from(FULL_VOLUME) / f64::from(volume)).log2();
+    decibels.clamp(f64::from(SILENT_ATTENUATION), 0.0) as i32
+}
+/// §3.13 the attenuation of a sound at `level` under `master_volume`.
+pub fn device_attenuation(master_volume: i32, level: i32) -> i32 {
+    attenuation(device_volume(master_volume, level))
+}
+/// §3.13 the output amplitude factor `10^(A / 2000)` of an attenuation A.
+pub fn attenuation_gain(attenuation: i32) -> f32 {
+    10_f32.powf(attenuation as f32 / 2000.0)
 }

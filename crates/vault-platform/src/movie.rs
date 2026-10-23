@@ -8,7 +8,7 @@ use crate::{
 };
 use std::sync::Arc;
 use vault_core::movie::{
-    self, MoviePlayback, MovieRequest, Step,
+    MoviePlayback, MovieRequest, Step,
     flags::{PAUSE_MUSIC, STOP_MUSIC},
 };
 use vault_formats::{
@@ -67,11 +67,9 @@ pub struct MoviePlayer {
     playback: MoviePlayback,
     window: MovieWindow,
     subtitles: Option<SubtitleStyle>,
-    /// Audio output (silent until the shell attaches a device).
+    /// Audio output (silent until the shell attaches a device). Its movie
+    /// level follows the music volume and the music on/off state.
     pub audio: AudioHandle,
-    /// The background-music volume setting (SPEC-014 §3.18), which sets the
-    /// movie's level (SPEC-012 §3.8).
-    pub music_volume: i32,
     /// The §3.12 music flags have been applied.
     begun: bool,
     streaming: bool,
@@ -117,7 +115,6 @@ impl MoviePlayer {
             window: MovieWindow::new(),
             subtitles,
             audio: AudioHandle::default(),
-            music_volume: vault_core::ui::options::DEFAULT_VOLUME,
             begun: false,
             streaming: false,
             origin: None,
@@ -223,18 +220,14 @@ impl MoviePlayer {
             return;
         }
         if !self.streaming {
-            // §3.8: 0.94 x the music volume (0 while music is disabled),
-            // converted to device attenuation.
-            let gain = movie::attenuation_gain(movie::attenuation(movie::movie_volume(
-                self.music_volume,
-                self.audio.music_enabled(),
-            )));
-            self.streaming = self.audio.open_stream(
-                Channel::Movie,
-                u32::from(format.rate),
-                format.channels(),
-                gain,
-            );
+            // §3.8: the stream plays at the mixer's movie level, 0.94 x the
+            // music volume (0 while music is off) converted to device
+            // attenuation, unscaled by master; the level changes at once
+            // with the music volume or the on/off state
+            // (`AudioHandle::apply_volumes`).
+            self.streaming =
+                self.audio
+                    .open_stream(Channel::Movie, u32::from(format.rate), format.channels());
         }
         let pcm = self.playback.take_audio();
         if self.streaming && !pcm.is_empty() {

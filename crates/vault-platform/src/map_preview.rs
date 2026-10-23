@@ -1,6 +1,6 @@
 use crate::{
     AppResult,
-    audio::{AudioHandle, Channel, MusicRequest, Volumes, volume_gain},
+    audio::{AudioHandle, Channel, MusicRequest, Volumes},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -396,6 +396,30 @@ impl MapSprites {
         Ok(())
     }
 }
+
+/// SPEC-010 §3.11 an effect owner's screen rectangle, as inclusive corners
+/// `[left, top, right, bottom]`: the drawn frame (`origin`, `size`), 1 pixel
+/// larger on every side while the object is outlined (SPEC-014 §3.44
+/// outline word: a type in bits 0-23, not disabled by bit 31). Art that
+/// cannot be read (`None`) gives (0, 0)-(0, 0).
+fn effect_rect(sprite: Option<([i64; 2], [i64; 2])>, outline: u32) -> [i64; 4] {
+    let Some(([x, y], [width, height])) = sprite else {
+        return [0; 4];
+    };
+    let grow = i64::from(outline & 0x00ff_ffff != 0 && outline & 0x8000_0000 == 0);
+    [
+        x - grow,
+        y - grow,
+        x + width - 1 + grow,
+        y + height - 1 + grow,
+    ]
+}
+/// SPEC-010 §3.11 whether inclusive corners overlap a window of `size` at
+/// (0, 0), inclusive pixel bounds.
+fn overlaps_window([left, top, right, bottom]: [i64; 4], [width, height]: [i64; 2]) -> bool {
+    left < width && right >= 0 && top < height && bottom >= 0
+}
+
 impl MapPreview {
     pub fn load(
         vfs: Arc<dyn Vfs>,
@@ -723,9 +747,12 @@ impl MapPreview {
         .into_bytes()
     }
     /// Whether an object (or its outermost owner) is on screen, for SPEC-010
-    /// §3.11 relative volume: its screen bounding rectangle (the sprite it
-    /// shows) overlaps the 640 x 380 map window, inclusive pixel bounds.
-    /// An object without art counts by its hex centre.
+    /// §3.11 relative volume: its screen bounding rectangle overlaps the
+    /// 640 x 380 map window, inclusive pixel bounds. The rectangle is its
+    /// current frame placed at its hex as drawn (SPEC-014 §3.44), or at its
+    /// stored screen position when it has no hex, 1 pixel larger on every
+    /// side while it is outlined. There is no elevation condition. Art that
+    /// cannot be read gives the rectangle (0, 0)-(0, 0), which is on screen.
     fn on_screen(&self, object: ObjectRef) -> bool {
         let world = &self.host.world;
         let mut object = object;
@@ -738,24 +765,21 @@ impl MapPreview {
         let Some(found) = world.get(object) else {
             return false;
         };
-        let [width, height] = [i64::from(self.view.width), i64::from(self.view.height)];
-        let rect = match vault_render::map::object_sprite(self.view, &self.art, &found.raw) {
-            Some((frame, [x, y])) => [x, y, i64::from(frame.width), i64::from(frame.height)],
-            None => match found
+        let sprite = vault_render::map::object_sprite(self.view, &self.art, &found.raw)
+            .map(|(frame, origin)| (origin, [frame.width, frame.height].map(i64::from)));
+        // A hex off the grid is nowhere on screen.
+        if sprite.is_none()
+            && found
                 .raw
                 .hex
-                .and_then(|hex| self.view.grid.hex_center(hex).ok())
-            {
-                Some([x, y]) => [x, y, 1, 1],
-                None => return false,
-            },
-        };
-        rect[2] > 0
-            && rect[3] > 0
-            && rect[0] < width
-            && rect[0] + rect[2] > 0
-            && rect[1] < height
-            && rect[1] + rect[3] > 0
+                .is_some_and(|hex| self.view.grid.hex_center(hex).is_err())
+        {
+            return false;
+        }
+        overlaps_window(
+            effect_rect(sprite, found.raw.outline),
+            [self.view.width, self.view.height].map(i64::from),
+        )
     }
     /// SPEC-014 §3.18: the preference volumes reach the mixer whenever they
     /// change (a Done, Cancel, Default or a loaded save), resetting the
@@ -768,10 +792,15 @@ impl MapPreview {
         }
     }
     /// Apply volume settings to the mixer now (the preferences sliders'
-    /// live preview, SPEC-014 §3.18).
+    /// live preview, SPEC-014 §3.18). SPEC-008 §3.10: master or music
+    /// volume 0 turns music off by volume in the mixer and the world;
+    /// turning it back on lets the world replay its last recorded track
+    /// (`WorldEffect::Music`, drained on the next tick).
     pub(crate) fn apply_volumes(&mut self, volumes: Volumes) {
         self.volumes = volumes;
-        self.audio.apply_volumes(volumes);
+        if let Some(on) = self.audio.apply_volumes(volumes) {
+            self.host.set_music_enabled(on);
+        }
     }
     /// SPEC-014 §3.18: F2 and F3 change the mixer master volume by -2047
     /// and +2047 without updating the preference, so the next preference
@@ -793,32 +822,31 @@ impl MapPreview {
         };
         let on_screen = owner.is_some_and(|owner| self.on_screen(owner));
         self.sync_volumes();
-        // SPEC-010 §3.11: the applied volume `floor(V x S / 32767)` with S
-        // the effects volume setting.
-        let volume = sfx::applied_volume(
+        // SPEC-010 §3.11 / §3.13: the level `floor(V x S / 32767)` with S
+        // the effects volume setting; without an object V = 32767, so the
+        // level is S.
+        let level = sfx::applied_volume(
             self.host.world.effect_volume(owner, on_screen),
             self.volumes.effects,
         );
-        if !self
-            .audio
-            .play(samples, volume_gain(volume), Channel::Effect, false)
-        {
+        if !self.audio.play(samples, level, Channel::Effect, false) {
             tracing::debug!(%path, "effect not played (silent output or four effects active)");
         }
     }
     /// Talking-head speech: `sound/speech/<head>/<stem>.ACM`, decoded whole
-    /// and played once at `floor(69 x V / 100)` of the speech volume V
-    /// (SPEC-010 §3.12; volume 0 plays silently and still lip-syncs). The
+    /// and played once at level `trunc(0.69 x V)` of the speech volume V,
+    /// kept while it plays (SPEC-010 §3.12-3.13; volume 0 plays silently
+    /// and still lip-syncs). The
     /// world hears whether it started: without a file or output lip-sync
     /// stops and the next head tick ends the speech.
     fn play_speech(&mut self, sound: &[u8]) {
         self.sync_volumes();
-        let gain = volume_gain(vault_formats::lip::speech_volume(self.volumes.speech));
+        let level = vault_formats::lip::speech_volume(self.volumes.speech);
         let started = self
             .host
             .speech_file(sound)
             .and_then(|path| self.sounds.load(&*self.host.assets.vfs, &path))
-            .is_some_and(|samples| self.audio.play(samples, gain, Channel::Speech, false));
+            .is_some_and(|samples| self.audio.play(samples, level, Channel::Speech, false));
         self.speaking = started;
         self.host.speech_started(started);
     }
@@ -833,22 +861,18 @@ impl MapPreview {
         self.audio
             .request_music(self.host.assets.vfs.clone(), request);
     }
-    /// SPEC-008 §3.10 music on or off, kept the same in the world and the
-    /// mixer. The world records every request and, while music is
-    /// disabled, emits none; re-enabling replays its last recorded track
-    /// (`WorldEffect::Music`), so the mixer only follows the state: off
-    /// stops the track at once, on waits for the world's replay, which the
-    /// next tick drains.
-    pub fn set_music_enabled(&mut self, enabled: bool) {
-        self.audio.follow_music_enabled(enabled);
-        self.host.set_music_enabled(enabled);
-    }
-    /// A library sound slot: the named file with its looping mode bit.
+    /// A library sound slot: the named file with its looping mode bit, at
+    /// SPEC-010 §3.13's full library level (only master volume scales it).
     fn play_library(&mut self, slot: usize, filename: &[u8], mode: i32) {
         let path = String::from_utf8_lossy(filename).replace('\\', "/");
         if let Some(samples) = self.sounds.load(&*self.host.assets.vfs, &path) {
-            self.audio
-                .play(samples, 1.0, Channel::Library(slot), mode & 1 != 0);
+            self.sync_volumes();
+            self.audio.play(
+                samples,
+                sfx::LIBRARY_LEVEL,
+                Channel::Library(slot),
+                mode & 1 != 0,
+            );
         }
     }
     /// Audio follows the world: the speech's playback position reaches the
@@ -1584,6 +1608,40 @@ mod tests {
     use super::*;
     use vault_formats::LocalDirProvider;
 
+    #[test]
+    fn spec010_effect_rectangles_grow_while_outlined() {
+        let window = [640, 380];
+        // A 20 x 30 frame whose right column is x = -1: off screen, until
+        // an outline grows it by a pixel on every side.
+        let sprite = Some(([-20, 100], [20, 30]));
+        assert_eq!(effect_rect(sprite, 0), [-20, 100, -1, 129]);
+        assert!(!overlaps_window(effect_rect(sprite, 0), window));
+        assert_eq!(effect_rect(sprite, 1), [-21, 99, 0, 130]);
+        assert!(overlaps_window(effect_rect(sprite, 1), window));
+        // Any outline type counts (16 item, an unlisted 3); bit 31
+        // disables it and type 0 is no outline.
+        assert!(overlaps_window(effect_rect(sprite, 16), window));
+        assert!(overlaps_window(effect_rect(sprite, 3), window));
+        assert!(!overlaps_window(effect_rect(sprite, 0x8000_0001), window));
+        assert!(!overlaps_window(effect_rect(sprite, 0x0100_0000), window));
+        // Inclusive bounds at the far edges.
+        assert!(overlaps_window(
+            effect_rect(Some(([639, 379], [5, 5])), 0),
+            window
+        ));
+        assert!(!overlaps_window(
+            effect_rect(Some(([640, 0], [5, 5])), 0),
+            window
+        ));
+        assert!(!overlaps_window(
+            effect_rect(Some(([0, 380], [5, 5])), 0),
+            window
+        ));
+        // Unreadable art: (0, 0)-(0, 0), which overlaps the window.
+        assert_eq!(effect_rect(None, 1), [0; 4]);
+        assert!(overlaps_window(effect_rect(None, 0), window));
+    }
+
     /// Every file under `root`, as VFS-relative paths and bytes.
     fn files(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
         let mut found = Vec::new();
@@ -1858,9 +1916,10 @@ mod tests {
             preview.host.request_speech(b"hello");
             preview.image().unwrap();
             assert!(preview.speaking);
+            // SPEC-010 §3.13: trunc(0.69 x V), 15373 at the default.
             assert_eq!(
-                mixer.lock().unwrap().gain(Channel::Speech),
-                Some(volume_gain(volume * 69 / 100))
+                mixer.lock().unwrap().level(Channel::Speech),
+                Some(sfx::speech_level(volume))
             );
             let shown = |preview: &MapPreview| {
                 let head = preview.host.world.dialogue.head.as_ref().unwrap();
@@ -2019,9 +2078,11 @@ mod tests {
         );
         audio.wait_music();
         assert!(mixer.lock().unwrap().playing(Channel::Music));
-        // Music off silences the mixer; a request is only recorded, and
-        // music on plays the last recorded track once.
-        preview.set_music_enabled(false);
+        // SPEC-008 §3.10: a music volume of 0 turns music off by volume in
+        // the mixer and the world; a request is only recorded, and setting
+        // the volume again plays the last recorded track once.
+        preview.preferences.music_volume = 0;
+        preview.tick(24).unwrap();
         assert!(!audio.music_enabled() && !preview.host.music_enabled);
         assert!(!mixer.lock().unwrap().playing(Channel::Music));
         preview.host.request_music("wind2");
@@ -2031,7 +2092,9 @@ mod tests {
             audio.last_music(),
             Some(MusicRequest::track("03wrldmp", true))
         );
-        preview.set_music_enabled(true);
+        preview.preferences.music_volume = 9000;
+        preview.tick(40).unwrap();
+        assert!(audio.music_enabled() && preview.host.music_enabled);
         preview.tick(48).unwrap();
         assert_eq!(audio.last_music(), Some(MusicRequest::track("wind2", true)));
         audio.wait_music();
@@ -2063,9 +2126,9 @@ mod tests {
         let (audio, mixer) = AudioHandle::detached();
         preview.audio = audio.clone();
         preview.tick(0).unwrap();
-        let default = volume_gain(22281);
+        let default = 22281;
         assert_eq!(mixer.lock().unwrap().master(), default);
-        // SPEC-010 §3.11: an effect without an object plays at the effects
+        // SPEC-010 §3.13: an effect without an object plays at the effects
         // volume (V = 32767, so floor(V x S / 32767) = S).
         preview
             .host
@@ -2076,15 +2139,20 @@ mod tests {
                 owner: None,
             });
         preview.image().unwrap();
-        assert_eq!(mixer.lock().unwrap().gain(Channel::Effect), Some(default));
+        assert_eq!(mixer.lock().unwrap().level(Channel::Effect), Some(default));
+        // At master 22281 that is -1112 hundredths of a decibel (§4.8).
+        let gain = mixer.lock().unwrap().gain(Channel::Effect).unwrap();
+        assert!((gain - 10_f32.powf(-1112.0 / 2000.0)).abs() < 1e-6);
         // F2 lowers the mixer master by 2047, not the preference; the next
-        // preference application resets it (SPEC-014 §3.18).
+        // preference application resets it (SPEC-014 §3.18). It re-applies
+        // to the playing effect at once (SPEC-010 §3.13).
         assert!(preview.step(KeyCode::F2));
-        assert_eq!(mixer.lock().unwrap().master(), volume_gain(22281 - 2047));
+        assert_eq!(mixer.lock().unwrap().master(), 22281 - 2047);
+        assert!(mixer.lock().unwrap().gain(Channel::Effect).unwrap() < gain);
         assert_eq!(preview.preferences.master_volume, 22281);
         assert!(preview.step(KeyCode::F3));
         assert!(preview.step(KeyCode::F3));
-        assert_eq!(mixer.lock().unwrap().master(), volume_gain(22281 + 2047));
+        assert_eq!(mixer.lock().unwrap().master(), 22281 + 2047);
         // Cancelling the preferences reapplies them, the unchanged volumes
         // included, which drops the F2/F3 offset.
         assert!(preview.step(KeyCode::Escape));
@@ -2098,10 +2166,10 @@ mod tests {
         assert!(preview.step(KeyCode::Escape));
         assert!(matches!(preview.screen, Screen::Map));
         assert!(preview.step(KeyCode::F3));
-        assert_eq!(mixer.lock().unwrap().master(), volume_gain(22281 + 2047));
+        assert_eq!(mixer.lock().unwrap().master(), 22281 + 2047);
         preview.preferences.master_volume = 30000;
         preview.tick(16).unwrap();
-        assert_eq!(mixer.lock().unwrap().master(), volume_gain(30000));
+        assert_eq!(mixer.lock().unwrap().master(), 30000);
         // A city-music request plays its track, looping, as stereo frames
         // (SPEC-008 §3.10, SPEC-010 §3.6), at the music volume.
         preview
@@ -2113,7 +2181,7 @@ mod tests {
         assert_eq!(audio.last_music(), Some(MusicRequest::track("01hub", true)));
         audio.wait_music();
         assert!(mixer.lock().unwrap().playing(Channel::Music));
-        assert_eq!(mixer.lock().unwrap().gain(Channel::Music), Some(default));
+        assert_eq!(mixer.lock().unwrap().level(Channel::Music), Some(20944));
         // SPEC-012 §3.12: flag 0x08 pauses the music for the movie and its
         // cleanup resumes it; 0x04 stops it.
         assert!(preview.host.play_game_movie(vault_core::movie::INTRO, 0x08));
@@ -2131,8 +2199,18 @@ mod tests {
         preview.tick(48).unwrap();
         assert!(!mixer.lock().unwrap().playing(Channel::Music));
         assert!(preview.step(KeyCode::Space));
-        // SPEC-010 §3.11: the player's sprite overlaps the map window.
-        assert!(preview.on_screen(preview.host.world.player));
+        // SPEC-010 §3.11: the player's sprite overlaps the map window, on
+        // any elevation (no elevation condition).
+        let player = preview.host.world.player;
+        assert!(preview.on_screen(player));
+        preview.host.world.get_mut(player).unwrap().raw.elevation = 2;
+        assert!(preview.on_screen(player));
+        // Far off at hex 0 it is off screen, unless its art cannot be
+        // read: then its rectangle is (0, 0)-(0, 0), on screen.
+        preview.host.world.get_mut(player).unwrap().raw.hex = Some(0);
+        assert!(!preview.on_screen(player));
+        preview.host.world.get_mut(player).unwrap().raw.art_id = 0x0fff_ffff;
+        assert!(preview.on_screen(player));
     }
 
     #[test]
