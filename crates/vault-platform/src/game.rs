@@ -555,21 +555,27 @@ impl Game {
     }
     fn selection_action(&mut self, action: SelectionAction) {
         let context = StatContext::default();
+        // SPEC-014 §3.43: the sheet files live in the master patch root.
+        let files = || {
+            crate::editor_screen::SheetFiles::new(
+                self.vfs.clone(),
+                &self.language,
+                self.save_root.clone(),
+            )
+        };
         match action {
             SelectionAction::Take => self.start_game(self.sheet.clone()),
             SelectionAction::Modify => {
-                self.stage = Stage::Editor(Box::new(EditorStage::new(Editor::open(
-                    self.sheet.clone(),
-                    false,
-                    context,
-                ))))
+                self.stage = Stage::Editor(Box::new(
+                    EditorStage::new(Editor::open(self.sheet.clone(), false, context))
+                        .with_files(files()),
+                ))
             }
             SelectionAction::Create => {
-                self.stage = Stage::Editor(Box::new(EditorStage::new(Editor::open(
-                    editor::blank_sheet(context),
-                    true,
-                    context,
-                ))))
+                self.stage = Stage::Editor(Box::new(
+                    EditorStage::new(Editor::open(editor::blank_sheet(context), true, context))
+                        .with_files(files()),
+                ))
             }
             SelectionAction::Back => self.enter_menu(),
             SelectionAction::Previous | SelectionAction::Next => {
@@ -1488,7 +1494,7 @@ impl Game {
                 true
             }
             Stage::Editor(stage) if !right => {
-                let exit = stage.release(over.is_some());
+                let exit = stage.release(over.is_some(), point);
                 self.editor_exit(exit);
                 true
             }

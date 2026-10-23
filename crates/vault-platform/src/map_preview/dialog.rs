@@ -119,6 +119,8 @@ impl MapPreview {
             Screen::Loot(_) => self.close_loot_screen(),
             Screen::Options(_) => self.close_preferences(false),
             Screen::Inventory(_) => self.close_inventory(),
+            // SPEC-014 §3.42: Yes cancels the character screen.
+            Screen::Character(_) => self.close_character(false),
             _ => {}
         }
         self.screen = Screen::Map;

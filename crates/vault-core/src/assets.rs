@@ -303,6 +303,10 @@ impl VfsWorldAssets {
     pub fn gcd(&self, path: &str) -> Result<GcdFile, WorldError> {
         Ok(GcdFile::parse(&self.read(path)?)?)
     }
+    /// SPEC-014 §3.42 info-card pictures: `art/skilldex/` art by list index.
+    pub fn skilldex_path(&self, index: i32) -> Result<String, WorldError> {
+        self.art_name("skilldex", index)
+    }
     fn load_prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
         let category = Category::from_pid(pid)?;
         let folder = category.directory();

@@ -171,9 +171,11 @@ pub enum PerkChoice {
     Refused,
     /// The rank (and any Lifegiver/Educated extra) is granted.
     Granted,
-    /// Tag! opens the fourth-tag selection; cancelling it removes the rank.
+    /// Tag! opens the fourth-tag selection; cancelling it removes the rank
+    /// and still consumes the pick.
     TagSelection,
-    /// Mutate! opens trait replacement; cancelling it removes the rank.
+    /// Mutate! opens trait replacement; cancelling it removes the rank and
+    /// still consumes the pick.
     TraitSelection,
 }
 
@@ -310,12 +312,13 @@ impl CharacterSheet {
             _ => PerkChoice::Granted,
         }
     }
-    /// A cancelled Tag!/Mutate! sub-selection removes the rank again; the
-    /// pick was not made, so the pending byte stays for the next choice.
+    /// A cancelled Tag!/Mutate! sub-selection removes the rank again, and
+    /// the pending pick is still consumed (§3.21, SPEC-014 §3.42; the
+    /// `[May-improve]` safe rule of leaving it pending is not applied).
+    /// Cancelling the whole screen restores the pick with the snapshot.
     pub fn cancel_perk_choice(&mut self, perk: Perk, context: StatContext) {
         if matches!(perk, Perk::Tag | Perk::Mutate) && self.rank(perk) > 0 {
             self.set_perk(perk, self.rank(perk) - 1, context);
-            self.pending_perk = true;
         }
     }
 }

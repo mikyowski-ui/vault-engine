@@ -170,17 +170,25 @@ fn spec011_chooser_extras_and_player_stat_setter() {
     sheet_mut.unspent_skills = 99;
     assert_eq!(host.choose_perk(Perk::Educated), PerkChoice::Granted);
     assert_eq!(sheet(&host).unspent_skills, 101);
-    // Tag! opens the fourth tag; cancelling removes the rank again and
-    // keeps the pick.
+    // Tag! opens the fourth tag; cancelling removes the rank again, and
+    // the pick is still consumed (SPEC-011 §3.21).
     host.world.player_sheet_mut().unwrap().pending_perk = true;
     assert_eq!(host.choose_perk(Perk::Tag), PerkChoice::TagSelection);
     let sheet_mut = host.world.player_sheet_mut().unwrap();
     sheet_mut.cancel_perk_choice(Perk::Tag, context());
     assert_eq!(
         (sheet_mut.rank(Perk::Tag), sheet_mut.pending_perk),
-        (0, true)
+        (0, false)
     );
+    assert_eq!(host.choose_perk(Perk::Mutate), PerkChoice::Refused);
+    host.world.player_sheet_mut().unwrap().pending_perk = true;
     assert_eq!(host.choose_perk(Perk::Mutate), PerkChoice::TraitSelection);
+    let sheet_mut = host.world.player_sheet_mut().unwrap();
+    sheet_mut.cancel_perk_choice(Perk::Mutate, context());
+    assert_eq!(
+        (sheet_mut.rank(Perk::Mutate), sheet_mut.pending_perk),
+        (0, false)
+    );
 
     // The player-stat setter: selectors 0-4 within bounds; XP re-runs the
     // level loop; anything else is rejected.

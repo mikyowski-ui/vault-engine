@@ -4,6 +4,7 @@
 //! "screen"; durations are milliseconds.
 pub mod automap;
 pub mod bar;
+pub mod character;
 pub mod cursor;
 pub mod editor;
 pub mod endgame;
@@ -11,6 +12,7 @@ pub mod flow;
 pub mod inventory;
 pub mod options;
 pub mod saveload;
+pub mod sheet;
 
 use vault_formats::Palette;
 

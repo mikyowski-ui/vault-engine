@@ -255,6 +255,9 @@ pub struct MapPreview {
     /// `fallout.cfg` `[system] interrupt_walk` (SPEC-014 §3.27, default on):
     /// a movement click out of combat cancels a busy player's sequence.
     pub interrupt_walk: bool,
+    /// SPEC-014 §3.42 the character screen's info line, folder and skill
+    /// cursor, kept from one opening to the next.
+    character_memory: character::Remembered,
 }
 
 /// Where keys land in the world, for the engine key repeat (SPEC-014
@@ -531,6 +534,7 @@ impl MapPreview {
             frozen_view: None,
             egg: None,
             interrupt_walk: true,
+            character_memory: character::Remembered::default(),
         })
     }
     /// Where keys land now (SPEC-014 §3.29 engine key repeat).
@@ -720,6 +724,7 @@ impl MapPreview {
                 Screen::Barter(_) => self.barter_release(point),
                 Screen::Automap(_) => self.automap_release(point),
                 Screen::Options(_) => self.options_release(point),
+                Screen::Character(_) => self.character_release(point, over.is_some()),
                 _ => false,
             };
         if let Some(cue) = self.pressed.take() {
@@ -1480,7 +1485,7 @@ impl MapPreview {
             Screen::Inventory(_) => Ok(self.inventory_tick()),
             Screen::Barter(_) => Ok(self.barter_tick()),
             Screen::Loot(_) => Ok(self.loot_tick()),
-            Screen::Character(_) => Ok(false),
+            Screen::Character(_) => Ok(self.character_tick(now)),
             // SPEC-013/014 windows suspend the world.
             Screen::Skilldex(_) => Ok(self.skilldex_tick()),
             Screen::Elevator(_) => Ok(self.elevator_tick(now)),
@@ -2094,18 +2099,30 @@ mod tests {
         assert!(flags(&preview).contains(BasicFlags::RIGHT_HAND));
         assert!(preview.step(KeyCode::Escape));
         assert!(matches!(preview.screen, Screen::Map));
-        // Character: spending needs points; Cancel restores the sheet. The
-        // skill list is SPEC-014 §3.8's: Small Guns is the row at y = 27 in
-        // the hot region (370, 27) 223 by 195; CANCEL is the red button at
-        // (552, 454) and DONE the one at (455, 454).
+        // Character (SPEC-014 §3.42): a press on a skill row moves the
+        // cursor; the slider's plus with no points is refusal A; Cancel
+        // restores the sheet. Small Guns is the row at y = 27 in the hot
+        // region (370, 27) 223 by 195; the plus button is at (614, 20).
         assert!(preview.step(KeyCode::KeyC));
         preview.image().unwrap();
         assert!(preview.click([400, 30], false), "Small Guns");
-        assert_eq!(preview.status, b"No free skill points available.");
+        assert!(preview.click([616, 22], false), "plus");
+        let refused = |preview: &MapPreview| {
+            matches!(
+                &preview.screen,
+                Screen::Character(screen)
+                    if matches!(&screen.modal, Some(character::Modal::Refusal(notice))
+                        if notice.lines == [b"No free skill points available.".to_vec()])
+            )
+        };
+        assert!(refused(&preview));
+        preview.image().unwrap();
+        assert!(preview.step(KeyCode::Escape), "the refusal closes");
         assert!(matches!(
             &preview.screen,
             Screen::Character(screen)
                 if screen.selected == vault_core::ui::editor::InfoLine::Skill(0)
+                    && screen.modal.is_none()
         ));
         assert!(preview.click([200, 180], false), "Armor Class");
         assert!(matches!(
@@ -2122,10 +2139,12 @@ mod tests {
             .unspent_skills = 2;
         let invested = preview.host.world.player_sheet().unwrap().invested[0];
         assert!(preview.step(KeyCode::KeyC));
-        assert!(preview.click([400, 30], false));
+        // The skill cursor is remembered: `+` steps Small Guns.
+        assert!(preview.step(KeyCode::NumpadAdd));
         let sheet = preview.host.world.player_sheet().unwrap();
         assert_eq!((sheet.invested[0], sheet.unspent_skills), (invested + 1, 1));
         assert!(preview.click([558, 460], false), "Cancel");
+        assert!(preview.release(Some([558, 460]), false));
         let sheet = preview.host.world.player_sheet().unwrap();
         assert_eq!((sheet.invested[0], sheet.unspent_skills), (invested, 2));
         // Reaching level 3 sets the pending perk on the next visit; the
@@ -2136,20 +2155,20 @@ mod tests {
         let Screen::Character(screen) = &preview.screen else {
             panic!("character screen");
         };
-        let character::Mode::Chooser(choices) = screen.mode.clone() else {
+        let Some(character::Modal::Chooser(chooser)) = &screen.modal else {
             panic!("perk chooser at level 3");
         };
-        assert!(!choices.is_empty());
+        assert!(!chooser.entries.is_empty());
+        let perk = vault_core::Perk::from_index(chooser.entries[0].0).unwrap();
         preview.image().unwrap();
-        let perk = choices[0].0;
-        assert!(preview.click([400, 30], false));
+        assert!(preview.step(KeyCode::Enter), "Return chooses");
         let sheet = preview.host.world.player_sheet().unwrap();
         assert!(sheet.rank(perk) == 1 && !sheet.pending_perk);
         preview.image().unwrap();
         if let Screen::Character(screen) = &preview.screen
-            && screen.mode == character::Mode::Sheet
+            && screen.modal.is_none()
         {
-            assert!(preview.click([460, 460], false), "Done");
+            assert!(preview.step(KeyCode::Enter), "Done");
         } else {
             assert!(preview.step(KeyCode::Escape));
         }

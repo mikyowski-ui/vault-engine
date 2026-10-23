@@ -71,6 +71,27 @@ impl GcdFile {
         result.kill_category = 0;
         result
     }
+    /// The 428-byte big-endian sheet (SPEC-014 §3.43 writes it in binary
+    /// mode).
+    pub fn write(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(428);
+        bytes.extend(self.flags.to_be_bytes());
+        let words = self
+            .base
+            .iter()
+            .chain(&self.bonus)
+            .chain(&self.skills)
+            .chain([&self.body, &self.experience_reward, &self.kill_category]);
+        for word in words {
+            bytes.extend(word.to_be_bytes());
+        }
+        bytes.extend(self.name);
+        for word in self.tags.iter().chain(&self.traits) {
+            bytes.extend(word.to_be_bytes());
+        }
+        bytes.extend(self.remaining_points.to_be_bytes());
+        bytes
+    }
     pub fn name_bytes(&self) -> &[u8] {
         &self.name[..self.name.iter().position(|b| *b == 0).unwrap_or(32)]
     }
