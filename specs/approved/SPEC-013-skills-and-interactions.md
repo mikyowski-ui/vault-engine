@@ -66,6 +66,7 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
   - Section 3.16 step 3 now states the same container reach timing as SPEC-007 §3.11.3. The previous text put the missing-art fault on the wrong branch and gave a different improvement rule. The current rule opens the container on the reach's action frame when the art loads.
   - Sections 3.2 and 3.23 now point to the shared adjacency check and approach-goal rule in SPEC-007.
 - **R1-rev6 (2026-10-21).** Section 3.16: the row-formula offset affects rows 1-5 only; SPEC-014 §3.34 now uses the same `[May-improve]` tag.
+- **R1-rev7 (2026-10-22).** Section 3.22: exit grids at the entrance hex are checked as usual, and a request made while a map loads replaces the pending one (new `[May-improve]` for transition processing). A town-map hotspot in another town opens the world map travelling there; arrival does not enter the town (SPEC-014 §3.39).
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -878,13 +879,21 @@ No type names a Vault 15 map (`map.msg` 7 or 8), so any level change there is sc
 
 There is no palette fade. Loading shows the busy cursor and plays background sound `wind2` until the city music starts.
 
+**Exit grids at the entrance.** The entrance placement of a map load (SPEC-006 §3.5 step 5) and the step-2 placement are ordinary player placements. Exit grids on that hex and elevation request a transition as usual: R1 neither skips the check nor moves the player off the grid. `[Must-match]` There is only one pending request. Any request made while a map loads replaces it: such an exit grid, `load_map` from the outgoing map's `map_exit_p_proc` or from a `map_enter_p_proc`, or any other request. What follows depends on what started the load. `[Must-match]` unless tagged.
+
+- **Transition processing (steps 1-4).** Steps 2 and 4 read the replaced request, and the request is then cleared. The replacing request's map never loads. Instead, its destination hex, elevation and facing are applied on the map just loaded, when they pass the step-2 test. `[May-improve]`: save the hex, elevation and facing when processing starts and use them in steps 2 and 4; still clear the requests made during the load.
+- **A town-map or world-map load started by map -1 or -2.** The request is cleared when the world map closes, so it is discarded.
+- **A game load, the new game's first map, or a world map opened by a script.** The request stays pending, and the next main-loop pass processes it, so the player leaves the new map at once.
+
+Example: an exit grid on map A leads to hex 12345, elevation 0 of map B. Map B's default entrance, hex 20100 on elevation 0, holds an exit grid to map C, hex 5000, elevation 1, facing 2. Map B loads, and at the end of the load the player turns to facing 2. The player is then moved to hex 5000 on elevation 1 **of map B**, and the request is cleared, so map C never loads. Under the safe rule the player stands on hex 12345, elevation 0 of map B, with the facing of map A's grid. No corpus map has an exit grid on its default entrance hex and elevation, or on the hex and elevation an exit grid leads to. The 72 corpus maps hold 13055 exit grids, 6409 of them with a positive destination map. On shipped data these cases can therefore arise only through scripts.
+
 **Leaving a map.** `[Must-match]` Before the destination loads, the outgoing map is saved into the working map set and then cleared. The destination is then loaded from its working `.SAV` when one exists, otherwise from its original `.MAP`. SPEC-014 §3.35 gives both steps, the revisit aging and the maps that are never saved.
 
 **World map and town map destinations.** `[Must-match]` These run in the main loop, out of combat, after all animations are stopped.
 
 - **Map -2** (an exit grid holding map 0): open the world map at the current town.
 - **Map -1:** open the town map of the current town first. Its result decides what follows:
-  - **A hotspot was chosen.** If the party is already in that town on the world map, load the hotspot's map directly. Otherwise travel there on the world map and enter it on arrival. SPEC-008 §3.7 gives the hotspots, their maps and their entry selectors.
+  - **A hotspot was chosen.** If the party is already in that town on the world map, load the hotspot's map directly. Otherwise the world map opens with the party already travelling to that town. On arrival the party stops at rest on the world map: it is not entered automatically, and the chosen hotspot is not used (SPEC-014 §3.39). SPEC-008 §3.7 gives the hotspots, their maps and their entry selectors.
   - **The World Map button:** open the world map normally.
   - **Failure** (an out-of-range town or a missing town picture): the world map is entered with a failure state and returns at once. The outgoing map has already been saved and unloaded, so no map is loaded and play is left on an empty map. `[May-improve]`: open the world map at the current town.
   - **A quit request:** nothing more.
@@ -1071,3 +1080,5 @@ All cases are out of combat with effective Intelligence 6, unless stated.
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
 Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 23 plain-word warnings were reviewed and are benign: this spec's own formula and UI words ("value", "level", "draw", "maximum", "position", "size", "current", "trunc", "slot", "count", "counter", "attempt"). The public opcode names `sfx_build_open_name` and `sfx_build_char_name` appear only as naming-rule references. The fenced blocks hold no code; fixtures are tables. Cross-spec note (resolved): SPEC-007 §3.7 now states the same rule as section 3.10. Every explosion, whether weapon, grenade, timed or scripted, uses the one disabled victim enumeration, so in R1 only the center target takes damage. Retaliation and onlooker wording now matches the single rule in SPEC-007 §3.6. The added warning "start" is the public SSL procedure name start, used in section 3.10. Explosion art, sound and skill-book names in sections 3.10 and 3.25 are corpus file and prototype names, checked against `art/misc/misc.lst`, the corpus FRM headers, `sound/sfx` and `pro_item.msg`. The section 3.21 coverage note was checked against `art/intrface/intrface.lst` and `map.msg`. Section 3.16 step 3 and the pointers in sections 3.2 and 3.23 were checked against SPEC-007 §3.11.3 (R1-rev7) so that both specs state one container reach timing rule and one adjacency check. Tag count, excluding the two tag definitions: 98 `[Must-match]`, 36 `[May-improve]`.
+
+Update notes (2026-10-22, R1-rev7): section 3.22's exit-grid and hotspot-travel rules; the corpus scan found no exit grid on any default entrance hex or exit-grid destination among 13055 grids. Tag count is now 100 `[Must-match]`, 37 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.

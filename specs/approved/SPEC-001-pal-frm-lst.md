@@ -40,6 +40,7 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 ### Revision history
 
 - **R1-rev2 (2026-10-18).** Section 2.1 and section 3.1: a palette of exactly `0x8300` (33536) bytes, with no discriminator, is the ordinary shipped form and is accepted with generated intensity/mix tables; the previous safe rule wrongly rejected it. Corpus evidence and the reference's end-of-file read behavior are recorded, and Fixture A2 is added. Source paths and the raw revision hash were replaced by area descriptions and the label R1.
+- **R1-rev3 (2026-10-22).** New section 3.7 gives the generated intensity, additive-mix and multiplicative-mix tables: the additive table removes the excess from all three channels and lightens through intensity column 128 + e, not a channel-wise clamp. New Fixture D.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -216,6 +217,32 @@ A sprite used as a mouse cursor uses direction 0 and hotspot `(floor(width / 2) 
 - Actual art entry counts use successful bounded reads. Script bookkeeping instead records LF count plus 1, even with a trailing LF or an empty file; that does not make a final phantom line readable. Prototype allocation bookkeeping records LF count plus 2 in this revision, independently of its actual readable entries. No supported lookup in this revision consults either bookkeeping count. `[May-improve]`: derive any entry count from successful bounded reads.
 - Prototype EOF handling is not a reliable bounds check: for a nonempty list, a request exactly one successful-read position beyond the end can return the last line's name again. It does not establish an extra actual entry. Empty-list lookup and malformed binary/text inputs do not have a dependable compatibility result; an independent implementation should distinguish these defects from supported ID mappings. `[May-improve]`: fail the lookup for any position beyond the last successful read, for an empty list, and for a list file that cannot be opened.
 
+### 3.7 Generated intensity and mix tables
+
+**When.** A palette file is loaded at startup (`color.pal`), and again by the movie subtitle palette, the death screen, the credits and the `loadpalettetable` opcode (`0x806E`). On each load, without the recognized extension (section 3.1), the three 256-by-256 tables of section 2.1 are generated from that palette, intensity table first. With the extension they are read as stored and nothing is generated. Either way, every per-color blend table in use is then rebuilt from the new palette (SPEC-002 §3.2; SPEC-014 §3.44). Palette fades and display-palette changes do not regenerate any table. `[Must-match]`
+
+**Notation.** All arithmetic is integer, and every division truncates. `[Must-match]`
+
+- Entry i is **mapped** when its three stored channels are all at most 63 (section 3.1). An unmapped entry has been zeroed. In the shipped `color.pal`, entries 0 and 229-255 are unmapped.
+- P(i) gives the 5-bit components (r, g, b): each stored six-bit channel of entry i divided by 2.
+- M(r, g, b) is the byte at offset `0x300 + 1024r + 32g + b` of the palette file: the RGB555 lookup of section 2.1.
+- The tables use the stored six-bit channels, never gamma-corrected display values.
+
+**Intensity table**, row i and column k. Each component c of P(i) becomes `trunc(c × k / 128)` for k below 128, and `c + trunc((31 - c) × (k - 128) / 128)` for k of 128 or more. The result is M of the three new components. Every column of an unmapped row is 0. Column 128 is the color itself, as M maps it. Lower columns darken toward black, and higher columns lighten toward white, reaching 127/128 of the way at column 255. `[Must-match]`
+
+**Additive mix table**, row a and column b, both mapped. Let S be the channel-wise sum P(a) + P(b), and m the largest of its three channels. `[Must-match]`
+
+- When m is at most 31, the result is M(S).
+- Otherwise let e = m - 31, from 1 to 31. Subtract e from every channel of S and clamp each at 0, giving T. The result is intensity[M(T)][128 + e]. The excess is taken from all three channels alike and given back as lightening toward white.
+- Clamping each channel at 31 is **not** the reference rule.
+- The reference derives the column from a floating-point product, `((m - 31) × 0.0078125 + 1) × 65536`, divided by 512. That is exact for every m, so the column is always 128 + e.
+
+**Multiplicative mix table**, row a and column b, both mapped: M of the channel-wise `trunc(P(a) × P(b) / 32)`. `[Must-match]`
+
+**Unmapped entries** in either mix table: the result is b when b is mapped, and a otherwise. So a row or column for a cycling index passes the other index through. `[Must-match]`
+
+Uses: the player cutout composites with the intensity and additive tables (SPEC-014 §3.37). Lit and translucent object draws use the intensity table (SPEC-014 §3.44), and so does font levels 8-13 (SPEC-002 §3.2).
+
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
 These fixtures are invented, not extracted game assets. Hex offsets are zero-based; address labels are not file bytes. The PAL fixture specifies repeated-byte ranges explicitly to keep it small. The two sprite dumps list every byte and contain no implicit padding.
@@ -355,6 +382,21 @@ second.ssl
 
 Expected runtime script index 0 resolves to `first.int` with local-variable count 3; index 1 resolves to `second.int`. Map script references 1 and 2 select those same indexes after subtracting one. An object/prototype script reference already containing index 0 selects the first line without subtraction.
 
+### 4.5 Fixture D: generated table arithmetic
+
+These rows use component values only. They assume a palette whose RGB555 lookup returns, for each listed component triple, an entry with exactly those 5-bit components, so the results can be read as components.
+
+| Input | Expected |
+| --- | --- |
+| Intensity, P(i) = (20, 10, 0), column 64 | (10, 5, 0) |
+| Intensity, same entry, column 192 | (25, 20, 15): `20 + trunc(11 × 64 / 128)`, `10 + trunc(21 × 64 / 128)`, `0 + trunc(31 × 64 / 128)` |
+| Intensity, any unmapped row, any column | Palette index 0 |
+| Additive mix, P(a) = (10, 12, 3), P(b) = (15, 10, 3) | S = (25, 22, 6), m = 25: M(25, 22, 6) |
+| Additive mix, P(a) = (31, 20, 10), P(b) = (31, 5, 2) | S = (62, 25, 12), m = 62, e = 31, T = (31, 0, 0); column 159 gives (31, 7, 7). A channel-wise clamp would give (31, 25, 12) instead |
+| Multiplicative mix, same two entries | (30, 3, 0) |
+| Either mix, a mapped and b = 240 (unmapped) | a |
+| Either mix, a = 240 and b mapped | b |
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -364,3 +406,5 @@ Expected runtime script index 0 resolves to `first.int` with local-variable coun
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
 Verification notes (R1-rev2): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 25 plain-word warnings were reviewed and are benign. They are this spec's own formula words ("start", "column", "data", "byte", "count", "width", "height", "direction", "offset", "frames") and the public art category directory names (items, critters, scenery, tiles, misc). The fenced blocks are synthetic hex dumps and text-list vectors. Tag count, excluding the two tag definitions: 41 `[Must-match]`, 8 `[May-improve]`.
+
+Verification notes (R1-rev3): section 3.7 was checked against the reference palette loader and table builders, and modelled over the corpus `color.pal`: entries 0 and 229-255 are unmapped, the additive mix of index 215 with itself is 196, and of 220 with itself is 220. Fixture D was computed by hand. Tag count is now 47 `[Must-match]`, 8 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.

@@ -345,8 +345,8 @@ Map/world/combat requests are often deferred state requests, not synchronous cha
 | `0x80F6` | `game_time_hour` | none | I clock | Current time in HHMM form, not raw elapsed hours. `[Must-match]` |
 | `0x80F8` | `tile_is_visible` | hex | I bool | Rough numeric-strip heuristic: true when absolute camera-hex difference modulo 200 is below 5 **or** its quotient by 200 is below 5. No actual screen/occlusion test. `[Must-match]` |
 | `0x80FC` | `game_time_advance` | ticks | none | Advance one full 864000-tick day at a time and process queued events after each, then advance remainder and process again. Can invoke queued host/script effects. `[Must-match]` |
-| `0x8108` | `world_map` | none | none | Queue world-map request. `[Must-match]` |
-| `0x8109` | `town_map` | none | none | Queue town-map request. `[Must-match]` |
+| `0x8108` | `world_map` | none | none | Queue world-map request; it opens the current town's town map first, then the world map (SPEC-014 §3.39). `[Must-match]` |
+| `0x8109` | `town_map` | none | none | Queue town-map request; it opens the world map directly, with no town map (SPEC-014 §3.39). `[Must-match]` |
 | `0x810B` | `metarule` | parameter, rule | I value | Rules 13 end-game request, 14 first-run test, 15 elevator request, 16 party count, 22 loading-state test; other rules return zero. `[Must-match]` |
 | `0x8118` | `get_month` | none | I month | Current calendar month, numbered 1-12. `[Must-match]` |
 | `0x8119` | `get_day` | none | I day | Current calendar day of month, numbered from 1. `[Must-match]` |
@@ -676,3 +676,5 @@ Both stacks finish empty, and no statement has pushed an implicit status. Host-b
 - [x] Every documented quirk tagged `[Must-match]` or `[May-improve]`
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
+
+Update notes (2026-10-22): the `world_map` and `town_map` rows now say what each request opens (SPEC-014 §3.39), checked against the reference request dispatcher. `tools/spec_lint.py` gives 0 errors.

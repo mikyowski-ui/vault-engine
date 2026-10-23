@@ -452,6 +452,8 @@ These are instruction fragments, **not complete `.INT` files**. Run each indepen
 | Floating-tag bitwise conversion quirk | `A0 01 3F 80 00 01 C0 01 FF FF FF FF 80 40` | Tag `C0 01`, payload `3F 80 00 00`; the low input payload bit is rounded away |
 | Changing-limit discard | `C0 01 00 00 00 07 C0 01 00 00 00 00 C0 01 00 00 00 02 80 2E` | Reference: only integer 7 remains. Under the Section 3.2 `[May-improve]` fixed-count rule the stack is empty |
 | True loop condition retains its target | `C0 01 00 00 00 12 C0 01 00 00 00 01 80 30` | Only integer target 18 remains; execution continues after the fragment |
+| Non-standard push tag `0x8401` | `84 01 00 00 00 05` | A valid push with no error: stack bytes `00 00 00 05 84 01` |
+| Non-standard tag accepted by a masked integer check | `C8 01 00 00 00 08 80 04` | `0xC801` with bit `0x0800` cleared is `0xC001`, so the jump is accepted: the stack is empty and the instruction address is 8, the end of the fragment |
 
 ### 4.3 Error and Structural Mutations
 
@@ -464,6 +466,7 @@ These are instruction fragments, **not complete `.INT` files**. Run each indepen
 | Replace the complete fixture's helper body address at `0x0056` with `00 00 02 00` | Out-of-file target; a safe validator rejects it, while the reference lacks a guaranteed clean rejection |
 | Replace literal payload length at `0x0076` with `00 00 00 07`, leaving all other bytes unchanged | A strict table validator rejects the inconsistent length/terminator boundary; the reference loader does not use that word to locate execution |
 | Set procedure record 1's flags at `0x004A` to `00 00 00 20` | No verified pure-procedure behavior is activated; this bit is not tested by the local call path |
+| Fragment `84 01 00 00 00 08 80 04` | The push executes; the jump then raises a VM type error, because `0x8401` with bit `0x0800` cleared is still not `0xC001` |
 
 For the value-stack capacity boundary, execute 341 copies of `C0 01 00 00 00 00` under a fragment harness: they fit in 2046 stack bytes. A 342nd complete push raises stack overflow. This construction is a byte count and repeat rule, not an abbreviated complete script image.
 
@@ -474,3 +477,5 @@ For the value-stack capacity boundary, execute 341 copies of `C0 01 00 00 00 00`
 - [x] Every documented quirk tagged `[Must-match]` or `[May-improve]`
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
+
+Update notes (2026-10-22): fixture rows for the non-standard push tags `0x8401` and `0xC801` were added to sections 4.2 and 4.3 and stepped by hand through the section 2.5 decode rule. `tools/spec_lint.py` gives 0 errors.

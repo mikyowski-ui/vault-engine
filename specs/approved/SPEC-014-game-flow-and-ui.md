@@ -14,15 +14,19 @@ This document covers:
 - the startup sequence, splash screen and palette fades;
 - the main-menu loop (Intro, New Game, Load Game, Credits, Exit) and attract mode;
 - premade character selection, the character editor in creation mode, and the hand-off to the starting map;
+- the character screen in game (folders, skill spending, perk chooser, Tag! and Mutate!) and the character-sheet file dialogs and printed sheet;
 - the save/load slot screens, quick save and quick load;
 - the in-game options menu, pause window, quit confirmation, preferences screen and generic dialog box;
 - the bottom interface bar: buttons, message monitor, HP/AC counters, AP pips, active item slot, indicator boxes and combat panel animation;
 - mouse cursor shapes and modes: movement hex, action pick, action menu, targeting crosshair, edge scrolling and busy cursors;
 - the in-game automap window and the Pip-Boy automap page;
+- the Pip-Boy screen: opening, art and layout, date and note, Status and holodisk pages, Automaps, Video Archives, the Alarm Clock and its rest display, and the screen saver (section 3.41);
+- the world map screen and the town map screen: art, view and scrolling, fog drawing, markers, encounter flashes, the side panel, entrance markers, input, and what each exit leads to.
 - the player inventory and use-on windows: art, layout, stats panel, rotating figure, action menu, cursor modes and item dragging;
 - the endgame slideshow, ending movie and scrolling credits;
 - the working map set: how visited maps persist across map changes, saves and loads, and how a revisited map ages;
-- when roofs are hidden as the player walks under them and restored when the player walks out.
+- when roofs are hidden as the player walks under them and restored when the player walks out;
+- the draw order of map objects, their lighting, and the translucent draw modes (section 3.44).
 
 The reference main menu has **no Options button**: its five buttons are Intro, New Game, Load Game, Credits and Exit. Options and Preferences are reached in game (section 3.17). `[Must-match]`
 
@@ -64,6 +68,8 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 | Cursors and action menu | Game-mouse module and low-level mouse repeat |
 | Palette fades | Game palette layer, color fade primitive, script fade opcodes and their callers |
 | Automap | Automap module, seen-state update, Pip-Boy map page |
+| Pip-Boy screen | Pip-Boy module, rest eligibility test, word wrapper, game-mouse enable and disable, button and window library |
+| World map and town map | World-map module, window button module, script request dispatcher, indicator-box and color layers |
 | Inventory and use-on windows | Inventory module, item-art scaler, action-menu frame builder |
 | Map border and scroll limits | Tile module, map scroll and map load |
 | Endgame, credits | Endgame and credits modules, word wrapper |
@@ -92,6 +98,14 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 - **R1-rev5 (2026-10-20).** Section 3.27 gains "Clicks while the player is busy": a click is never queued, and the section states which clicks cancel the player's current sequence and which are ignored, in and out of combat. The movement-click rule for `interrupt_walk` now says that it cancels any player sequence, not only a walk.
 - **R1-rev6 (2026-10-20).** New section 3.36 Roof Hiding and Restoring: the hex-to-roof-square mapping, the empty test (art index 1), the hide and restore fills, the per-placement rule, map load and leave, and two `[May-improve]` defects (the first-placement read outside the grid, and the elevation-change restore on the wrong elevation). New Fixture G. Section 3.35 step 5 now states that a map with no number is never saved.
 - **R1-rev7 (2026-10-21).** New section 3.37 Player See-Through Cutout: the `egg.frm` mask, its position on the player, roofs, the wall and scenery orientation table, compositing, and two `[May-improve]` failure cases. Section 3.27's pointer rule now uses it. Section 3.33 gives the Pip-Boy automap cell as 2 by 1 pixels on a two-row pitch, matching SPEC-008 §2.8. Section 3.34's drop-row formula is now `[May-improve]`, as in SPEC-013 §3.16.
+- **R1-rev8 (2026-10-22).** Vanilla-parity pass: the remaining interface stand-ins and Builder questions.
+  - New section 3.38 Called-Shot Window: the attack preflight and its `combat.msg` refusals, `called.frm` (there is no `targbox.frm`), the `na` critter picture, the eight body-part rows and chance digits, labels chosen by art alias for every corpus alias, hover, Cancel, the Ctrl+A-G input codes (the digit keys do nothing), and two out-of-table `[May-improve]` defects. Section 3.23 gains the slot attack query: reload, use and use-on report no attack. New Fixture H.
+  - New sections 3.39 World Map Screen and 3.40 Town Map Screen: `worldmap.frm` (there are no `wrldmp` tiles), view, scrolling, fog drawing, markers, travel dots, encounter flashes, the side panel and its town buttons, the town pictures `twnmap00`-`twnmap11`, the full entrance table (Vault 15 is `VAULTENT.MAP` and `VAULTBUR.MAP`), and the rule that arriving at a town never enters it. New Fixture I.
+  - New section 3.41 Pip-Boy Screen: `pip.frm` and its companion art (there is no `pipboy.frm`), opening and closing, buttons and keys, date, time and the vault-water note, the text area and row zones, the Status, holodisk, Automaps, Video Archives and Alarm Clock pages, the screen saver, and every `pipboy.msg` ID. New Fixture J.
+  - New section 3.42 Character Screen Outside Creation Mode (`edtredt.frm`, level block, skill spending, the Perks, Karma and Kills folders, condition lines, the info-card mapping, the perk chooser, Tag! and Mutate!) and section 3.43 Character Sheet Save, Load and Print (file list, load and save dialogs, messages, the printed sheet). Section 2.4 lists the added message IDs. New Fixtures K-P.
+  - Section 3.27: the combat input lock is a combat-wide count of running sequences; no key acts during the lock, and held keys are flushed at each player turn; the animated watch shows on every NPC turn; talk re-tests distance and line after its approach. Section 3.23: every key and click read during a hand swap is discarded except F12.
+  - Sections 3.35 and 3.36: the working `.SAV` name follows SPEC-008 §3.10, and the roof restore on leaving a map is unaffected by the elevation safe rule.
+- **R1-rev9 (2026-10-22).** New section 3.44 Map Object Draw Order, Lighting and Translucency: per-hex list order (flat first, then insertion order; every offset step reinserts), the fixed visiting lattice in ascending hex number, the flat and upright passes, the 100-outline limit, and the five translucent draws with their colors and gray tables. Section 3.37 points to it. New Fixture Q.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -152,11 +166,14 @@ All files are under `text/<language>/game/`. The listed indices are exact data; 
 | `misc.msg` | 0 "Are you sure you want to quit?"; 4 "Quick load game successfully loaded."; 5 "Quick save game successfully saved."; 7 "Pipboy not available in combat!"; 9-13 menu labels INTRO, NEW GAME, LOAD GAME, CREDITS, EXIT; 14 copyright line; 15 "Action Points"; 16 "Hit Points" |
 | `lsgame.msg` | 100-103 screen titles; 104 DONE; 105 CANCEL; 106-108 slot-list error; 109 SAVE GAME; 110 LOAD GAME; 111 "- EMPTY -"; 112 "- CORRUPT SAVE  FILE -"; 113 "- OLD VERSION -"; 114 "Empty."; 115 "Error!"; 116 "Old version."; 117-128 JAN-DEC; 130 DESCRIPTION; 131 overwrite question; 132-133 save error; 134-136 load error; 140 "Game Saved."; 141 "Game Loaded." |
 | `options.msg` | 0-4 options buttons; 100 GAME PREFERENCES; 101-122 preference captions and buttons; 201-224 value labels; 300 DONE; 301 PAUSED |
-| `dbox.msg` | 100 DONE, 101 YES, 102 NO |
-| `editor.msg` | 100-102 DONE / OPTIONS / CANCEL labels; 104 AGE; 107 MALE; 108 FEMALE; 116-158 editor captions and validation; 200-209 stat level words; 300-318 condition and derived labels; 400-406 condition descriptions; 500-511 month names; 600-618 editor options dialog |
+| `dbox.msg` | 100 DONE, 101 YES, 102 NO, 103 CANCEL (file dialogs, section 3.43) |
+| `editor.msg` | 100-102 DONE / OPTIONS / CANCEL labels; 103 PRINT; 104 AGE; 107 MALE; 108 FEMALE; 109-115 in-game folder tabs, SKILL POINTS and level block; 116-158 editor captions, cards, refusals and validation; 200-209 stat level words; 300-318 condition and derived labels; 400-406 condition descriptions; 500-511 month names; 600-618 editor options and file messages; 620-655 printed sheet; 1000-1009 and 1100-1109 karma names and descriptions. Per-ID use is tabled in section 3.42 |
+| `proto.msg` | 450-464 kill-type names; 465-479 kill-type descriptions (section 3.42) |
+| `perk.msg` | 101 + perk names; 201 + perk descriptions (SPEC-011 §3.22) |
 | `intrface.msg` | 100 SNEAK, 101 LEVEL, 102 CHEM |
 | `map.msg` | Location short names and elevation names (section 3.14) |
-| `stat.msg`, `skill.msg`, `trait.msg` | Names and descriptions for the selection screen and editor (SPEC-006) |
+| `stat.msg`, `skill.msg`, `trait.msg` | Names and descriptions for the selection screen and editor (SPEC-006); `stat.msg` 301-310 in-game level words and 401-402, 501-502 level and experience cards; `skill.msg` 300-317 skill-card formulas (section 3.42) |
+| `pipboy.msg` | 100-107 holidays; 200-203, 205, 206, 210-212, 214, 215 controls and titles; 300-314 alarm clock; 400-417 holodisk titles and their text; 503-513 archive titles; 700-810 quests (section 3.41.9) |
 
 ## 3. Behavioral Rules & Edge Cases
 
@@ -411,7 +428,7 @@ Window at screen (238, 90), `opbase.frm` (164 by 217). Five buttons 137 by 34 at
 
 - **Save** lists `*.GCD`, opens a file dialog titled "SAVE" at (168, 80) with default name `editor.msg` 617, and appends `.GCD`. An existing file prompts 609 / 610 (Yes/No). Saving commits the working tags and traits, then writes the sheet (SPEC-006 §2.2). Success shows 607 and closes the options dialog. Failure shows the file name followed by "Error saving !", a swapped format. `[May-improve]`: show "Error saving <name>!". A list failure shows 615.
 - **Load** resets the player, reads the sheet, zeroes bonus stats, resets player statistics and perks, recomputes, heals and closes the dialog. A read failure restores the snapshot and points and shows `iisxxxx1` with "Error loading <file>!" (612). If the file dialog itself fails, the reference returns without closing the options window. `[May-improve]`: close it.
-- **Print to file** (`*.TXT`, default name 616) inverts its existence test: it asks "already exists / overwrite?" when the file does not exist and overwrites an existing file silently. `[May-improve]`: prompt only when the file exists. The printed sheet layout is outside this document.
+- **Print to file** (`*.TXT`, default name 616) inverts its existence test: it asks "already exists / overwrite?" when the file does not exist and overwrites an existing file silently. `[May-improve]`: prompt only when the file exists. The file dialogs, every message of the three operations and the printed sheet layout are in section 3.43.
 - **Erase** asks 605 / 606 (Yes/No, key 992, at (169, 126)). Yes resets the player to blank defaults: 5 points, all SPECIAL 5, age 25, male, name "None", no tags or traits, info line 0. The dialog stays open.
 
 ### 3.12 New-Game Hand-Off
@@ -820,10 +837,24 @@ The remembered previous value starts at 0 for both counters and is updated after
 1. Flip the active hand.
 2. Animate putting away the old weapon (with its sound) when it has a weapon animation; the slot redraws midway.
 3. Animate taking out the new weapon, or return to the plain standing frame.
-4. During the animation the bar and the mouse are disabled and the cursor is `wait2.frm`.
+4. While the animation plays, the game waits in a modal loop. The bar's buttons and the game mouse are disabled, and the cursor is `wait2.frm`. Out of combat edge scrolling is also off. In combat on the player's turn it stays on, because the combat input lock (section 3.27) already disabled the game mouse with scrolling left on. Every input event read during the wait, key or click, is consumed and discarded: no hotkey acts, including Ctrl+Q, Ctrl+X, F10, Ctrl+P, F6, F7, the arrow keys, Space and Enter. Only F12 still takes its screenshot, because that key is handled as soon as it is read. In combat on the player's turn the keyboard is not read at all, so keys typed during the swap are held and read once the lock ends (section 3.27). The wait ends early when a quit request is pending. Afterwards the cursor returns to the in-world cursor, and the bar is re-enabled only if it was enabled before the swap. `[Must-match]` If the swap's sequence cannot be registered, there is no wait and nothing is disabled, and the active hand is flipped without the slot being redrawn. `[May-improve]`: redraw the slot when the sequence fails to register.
 5. Afterwards a crosshair or use mode returns to movement.
 
 When combat ends the hands are refreshed with animation if their items changed. `[Must-match]`
+
+**Attack query.** Other modules ask the active slot for its current attack, which is a hit mode and an aimed flag. `[Must-match]` unless tagged.
+
+- Primary and primary aimed report the hand's primary hit mode (section 2.4 of SPEC-007: 0 or 2 for a weapon, 4 for an empty hand).
+- Secondary and secondary aimed report the secondary hit mode.
+- The aimed modes report the aimed flag as true.
+- Reload, use and use-on report **no attack** with the aimed flag false. No hit mode is reported. The reload hit modes 6 and 7 are used only by the slot's own reload cost and AP check.
+
+Reload mode and crosshair mode can coexist. This happens when the slot is cycled to reload after a crosshair was set from it, or when crosshair is chosen by right-click or `m` in combat with a weapon in reload mode. While the slot reports no attack:
+
+- Crosshair hover shows the red ` X ` over every critter (section 3.27).
+- A crosshair click does nothing. No attack is made, no message prints, no AP are spent, and out of combat no combat starts (section 3.38).
+- A player attack made at torso or uncalled by another path reads the aimed flag as false for its AP debit (SPEC-007 §3.4).
+- A Ctrl+movement click in combat (section 3.27) subtracts the cost of a hit mode that was never reported, so the amount is undefined. `[May-improve]`: subtract 2, the cost the slot shows for reload, use and use-on.
 
 ### 3.24 Indicator Boxes
 
@@ -900,7 +931,7 @@ In movement mode the hex snaps to the hovered hex; a second object for the AP te
   - When `y + 39` is at least 381, the art shifts up by `y + 39 - 381 + 2`.
 - **Crosshair.** Over a critter other than the player, the cursor becomes `acttohit.frm` (50 by 21): the crosshair at the left and text in font 101 at (22, 1) with a black outline.
   - The text is `NN%` in white: the hit chance for an uncalled torso shot, even in an aimed mode.
-  - It is ` X ` in red when the attack is impossible: dead target, the crippled-arm conditions, not enough AP, out of range, an empty magazine, a blocked ranged shot, or no valid attack (SPEC-007 §3.2).
+  - It is ` X ` in red when the attack is impossible: dead target, the crippled-arm conditions, not enough AP, out of range, an empty magazine, a blocked ranged shot, or no valid attack (SPEC-007 §3.2). It is also ` X ` over every critter while the active slot reports no attack, as in reload mode (section 3.23, "Attack query").
   - Without a critter under the pointer the plain crosshair is shown.
 
 **Clicks** (left release in the map area, y at most 379). Every left-button map action fires on **release**, at the release position; the press itself does nothing. A release before the 250-millisecond hold pulse is an ordinary click. A right click acts on press. `[Must-match]`
@@ -913,13 +944,22 @@ In movement mode the hex snaps to the hovered hex; a second object for the AP te
   - other critter: loot;
   - scenery: use if usable, else examine;
   - wall: examine.
-- **Crosshair.** Attack the critter under the pointer. The hover is then marked done at the click position, so the to-hit text stays as it was until the pointer moves. It is recomputed by force only at the start of each player combat turn and when the in-world cursor is turned back on.
+- **Crosshair.** Attack the critter under the pointer: preflight, combat start when out of combat, and the called-shot window in an aimed mode, as in section 3.38. The hover is then marked done at the click position, so the to-hit text stays as it was until the pointer moves. It is recomputed by force only at the start of each player combat turn and when the in-world cursor is turned back on.
 - **Use crosshair.** In combat a non-weapon needs and spends 2 AP; when the AP cannot be paid nothing happens and no message is shown. Otherwise use the active item on the target. The mode returns to movement in every case, even with no target.
 - **Skill modes.** As SPEC-013 §3.1.
 
 **Clicks while the player is busy.** `[Must-match]` unless tagged. Busy means that a sequence holding the player is still playing, such as an approach, a reach, a put-away, a take-out or a door use. Nothing is ever queued. A click either cancels the current sequence and starts its own, or does nothing. The rules come from SPEC-007 §3.10.1 ("One sequence per owner").
 
-- **In combat**, the first sequence registered on the player's turn disables the game mouse, keyboard and interface bar. It shows the animated watch until every running sequence has ended. Clicks made meanwhile are discarded (section 3.26).
+- **In combat**, player input is locked by a combat-wide count of running sequences and by the turn order. `[Must-match]` unless tagged.
+  - **Sequence count.** Every sequence that registers while combat is active adds 1 to the count, whatever it holds: the player, an NPC, a door, a projectile, or an extra victim's reaction. It subtracts 1 when it ends, whether normally, by failing while it plays, or by being cancelled. A sequence whose registration fails never counts, and neither does a sequence registered before combat began.
+  - **Lock during the player's turn.** When the count rises from 0 to 1 during the player's turn, the game mouse, the keyboard and the interface bar are disabled, with edge scrolling left on, and the cursor becomes the animated watch `wait2.frm` (list index 295). When the count falls back to 0 during the player's turn, they are re-enabled and the in-world cursor returns. "Until every running sequence has ended" therefore means until this count is 0. A sequence that starts while another is still running, such as a door the player opens or an extra victim's reaction, extends the lock.
+  - **Lock between player turns.** Combat start disables the same three and shows the animated watch. At the start of each player turn they are re-enabled and the in-world cursor returns. When the player's turn ends, after the count has returned to 0, they are disabled again and the animated watch is shown. It stays through every NPC turn until the next player turn begins. Sequences registered during an NPC's turn change the count but not the cursor or the lock. The end of combat re-enables everything. The animated watch therefore shows from combat start to the player's first turn, during the player's own sequences, and on every NPC turn. Only edge scrolling replaces it, and then only for a moment (section 3.29).
+  - **Mouse.** Map clicks made while locked are discarded (section 3.26), and the disabled bar buttons ignore clicks. The Swap hands button is never disabled. During the lock it still shows its pressed art and plays its sounds, but the `b` it sends does nothing because the bar is disabled. `[May-improve]`: disable the Swap hands button with the other bar buttons.
+  - **Keyboard.** No key is read while the keyboard is disabled, so no key works during the lock: not Ctrl+Q, Ctrl+X, F10, Ctrl+P, F6, F7, F12, the arrow keys, Space, Enter or any other key. The key presses and releases are not discarded. Up to 32 of them are held and are read in order once the keyboard is enabled again.
+    - Keys typed during one of the player's own sequences, while the player still has AP, therefore take effect when the sequence ends.
+    - At the start of each player turn, before the player's combat script runs and before any automatic stand-up, held keys are flushed. Keys typed at combat start, during NPC turns, or during the last sequence of the player's previous turn are therefore lost.
+    - The end of combat re-enables the keyboard without a flush. Keys typed during the last turns of a combat are read after it ends.
+    - `[May-improve]`: which key events survive when more than 32 are typed during one lock depends on the reference's input library. Safe rule: keep the first 32.
 - **Movement click, out of combat.**
   - With `interrupt_walk` on, the click cancels the player's current sequence and the new walk starts. A reach or container use in progress is abandoned. Its unstarted entries are dropped: the use itself, the weapon take-out and the loot request.
   - A sequence the player is not part of keeps playing. An example is a door's opening animation that the use already started.
@@ -927,7 +967,11 @@ In movement mode the hex snaps to the hovered hex; a second object for the AP te
 - **Arrow click or action-menu entry** (pick up, use, loot, talk, skill use).
   - If the player's current art is walk or run, the current sequence is cancelled first. A click during the approach of an earlier action therefore replaces that whole action, not only its movement.
   - In any other pose, such as a reach, put-away, take-out or standing inside a sequence, nothing is cancelled. The new action's first player-owned entry cannot register, so the click does nothing and shows no message.
-  - Talk out of combat, at object distance below 9 with an unblocked line, has no approach entry. It consists only of callbacks, so it registers even while the player is busy. Its dialogue request is then made while the earlier animation plays.
+  - Talk tests the object distance (below 9) and the line from the player's hex to the target's hex, which must not be shot-blocked (SPEC-007 §3.2, target ignored). It measures both twice, each time from the player's position at that moment. `[Must-match]`
+    - The first test is made when the click or action-menu choice is handled, and only out of combat. It decides whether there is an approach. When either test fails, a run to the target is registered first (SPEC-007 §3.11.1 gives when it walks instead). In combat there is always an approach: a walk to the target limited to the player's current AP.
+    - The second test is a check entry that runs after the approach, or at once when there is none. A failure prints `misc.msg` 2000 "You cannot get there." and ends the sequence, so no dialogue is requested. On success the dialogue request is made in the same examination.
+    - Without an approach the sequence consists only of callbacks, so it registers even while the player is busy. Its dialogue request is then made at once, while the earlier animation plays.
+    - The check entry is forced (SPEC-007 §3.10.1). When the sequence ends before the check has run, for example because a new walk cancels the approach, the check runs at that moment. It prints message 2000 when the player is not yet within range or the line is blocked, and the dialogue is never requested either way. `[May-improve]`: print nothing when the sequence is cancelled before its check runs.
 - **Player click (rotate)** works only while the player's art is standing (above).
 
 ### 3.28 Action Menu
@@ -1293,12 +1337,12 @@ Campaign variables are not in it; they live in the save slot's `SAVE.DAT` (SPEC-
 2. Run the map-exit queue cleanup, then request `map_exit_p_proc` (SPEC-006 §3.5).
 3. Re-queue the game-time event, and restore the roof over the player's position.
 4. Set the map's saved bit `0x01` and record the current game time as its last visit.
-5. If the map number at the player's elevation is in the excluded set, or the map has no number (SPEC-008 §3.10), delete any working `.SAV` for it and write nothing. The excluded set is SPEC-008 §2.8's initial set: maps 0-2, 19-23, 49-54 and 56-65, which are the desert and encounter maps. Those maps are rebuilt from their `.MAP` on every visit. Otherwise write `MAPS\<name>.SAV` and capture the automap for that elevation.
+5. If the map number at the player's elevation is in the excluded set, or the map has no number (SPEC-008 §3.10), delete any working `.SAV` for it and write nothing. The excluded set is SPEC-008 §2.8's initial set: maps 0-2, 19-23, 49-54 and 56-65, which are the desert and encounter maps. Those maps are rebuilt from their `.MAP` on every visit. Otherwise write `MAPS\<stem>.SAV`, named by SPEC-008 §3.10 "Working `.SAV` names", and capture the automap for that elevation.
 6. Remove every object, the prototype cache and the tile data.
 
 **Loading a map.** `[Must-match]`
 
-- The name comes from `map.msg` by map number and is uppercased. Probe `MAPS\<name>.SAV`.
+- The name comes from `map.msg` by map number and is uppercased. Probe `MAPS\` plus that name with its first `.MAP` replaced by `.SAV`, for example `MAPS\VAULTENT.SAV` for map 7. Loads by file name probe the same way (SPEC-008 §3.10).
 - If it opens, load the saved copy. Under SPEC-006 §3.5 this means no `.GAM` initialization, and `map_enter_p_proc` receives 0. When that load finishes, including its map scripts, apply the revisit rules below and start the city music.
 - Otherwise load `<name>.MAP` fresh and clear the player's last-attacker reference.
 - Requesting the current map again still saves it and then reloads it.
@@ -1362,7 +1406,7 @@ Only the player triggers this. Party members and other critters never hide or re
 **Loading and leaving a map.** `[Must-match]`
 
 - Loading a map clears the hide bit on every square of each tile block present in the file (SPEC-003 §2.8). Hidden roofs saved in a `.SAV` therefore come back drawn. The entrance placement, a placement from "none", then hides the group under the player, if any.
-- Leaving a map (section 3.35 step 3): if the last square, read on the player's current elevation, is not empty, run the restore fill from it before the map is written.
+- Leaving a map (section 3.35 step 3): if the last square, read on the player's current elevation, is not empty, run the restore fill from it before the map is written. Every player placement records its elevation (step 4), so the player's current elevation is always the last recorded one. This step therefore restores the group hidden at the last square, whether or not the elevation-change safe rule below is applied. A group left hidden on another elevation by the elevation-change defect is written still hidden, and it comes back drawn on the next load (first bullet). A game save does not leave the map and restores no roof: hidden roofs are written hidden and come back drawn when that save is loaded.
 
 **Defects.**
 
@@ -1401,7 +1445,7 @@ Let END be the object's basic flag `0x10000000` (wall transparency end marker). 
 | else `0x20000000` set | F and R |
 | otherwise, including `0x40000000` or none of these | R and not (F′ and END) |
 
-When the cut applies and the mask rectangle overlaps the object's clipped screen rectangle, only the overlap is drawn through the mask; the up to four strips of the object rectangle outside it use the normal lit draw. Otherwise the object uses its normal translucent or lit draw.
+When the cut applies and the mask rectangle overlaps the object's clipped screen rectangle, only the overlap is drawn through the mask; the up to four strips of the object rectangle outside it use the normal lit draw. Otherwise the object uses its normal translucent or lit draw (section 3.44).
 
 **Compositing.** For each pixel of the masked area, with L the light level divided by 512 (0-128) and the intensity and additive-mix tables of SPEC-001:
 
@@ -1411,6 +1455,1376 @@ When the cut applies and the mask rectangle overlaps the object's clipped screen
 So m/128 is the drawn object's opacity: the core (m = 1) shows almost only what was drawn beneath, and opacity rises toward the rim. The normal lit draw leaves source indexes 229-255 unlit; the masked draw lights them as well, even where m = 0. `[May-improve]`: apply the same 229-255 exemption in the masked draw.
 
 **Failures.** When the mask art cannot be loaded, the reference draws neither the roof square nor the object whose cut applied. When the player has no hex, the mask position is undefined. `[May-improve]`: in both cases draw normally, without a cutout.
+
+### 3.38 Called-Shot Window
+
+The called-shot window lets the player choose one of eight body parts for an aimed attack. Only the player uses it; NPCs choose called locations through the AI (SPEC-009). `[Must-match]` unless tagged.
+
+**From click to window.** A crosshair click on a critter (section 3.27) makes the player's attack request against it:
+
+1. Nothing happens unless the player-input gate bit `0x02` is set (SPEC-007 §2.4) and the active slot reports an attack (section 3.23, "Attack query"). Reload mode reports none, so a click then does nothing.
+2. The attack preflight of SPEC-007 §3.2 runs with the slot's hit mode and aimed flag. The first failing test, in this order, prints its `combat.msg` line and opens no window:
+
+   | Test | Message |
+   | --- | --- |
+   | Target dead | None |
+   | Weapon in use and both arms crippled | 105 "You cannot use weapons with both arms crippled." |
+   | Weapon in use, one arm crippled, two-handed weapon | 106 "You cannot use two-handed weapons with a crippled arm." |
+   | AP below the attack cost (aimed cost in an aimed mode, SPEC-007 §3.4) | 100 "You need %d action points.", with that cost |
+   | Distance beyond range | 102 "Target out of range." |
+   | Magazine empty | 101 "Out of ammo.", plus the weapon's out-of-ammo sound (effect `O`, SPEC-010) |
+   | Ranged or thrown shot blocked | 104 "Your aim is blocked." |
+
+3. **Out of combat**, a passing click starts combat with the player as attacker and the critter as defender (SPEC-007 §3.3). No window opens yet. The player's first turn refills AP and stands the player up if prone, then re-enables the interface. The click is then replayed once: steps 1 and 2 run again with the refilled AP, then step 4.
+4. **In combat**, a mode that is not aimed attacks at once with the uncalled location 8. An aimed mode opens the window.
+
+**Window.** A modal window at screen (108, 20), 424 by 309, horizontally centered. Windows beneath it get no button input, and the interface bar (from y = 379) stays uncovered. The background is `called.frm` (list index 118, 424 by 309, one frame), copied opaquely. Its art already contains the frame, the eight chance boxes, the leader lines and the word CANCEL. No other background art is used.
+
+**Critter picture.** The picture is the critter art with animation code 64 (suffix `na`, SPEC-007 §2.2) for the target's current art base index. It uses weapon code 0 and file selector 0, and goes through the critter-list alias, which applies to code 64 (SPEC-007 §2.1). The file is therefore `<alias stem>na.frm`. Frame 0 is copied opaquely, index 0 pixels included, as 170 by 225 pixels at (128, 31). It is not scaled or animated, and the target's facing, pose and weapon have no effect. When the file is missing, that area keeps the background and the window still opens. All 21 corpus `na` files are 170 by 225 with one frame. The reference copies 170 by 225 with a 170-pixel row stride whatever the frame's real size. `[May-improve]`: copy only the frame's own pixels, clipped to 170 by 225.
+
+**Rows.** Four rows with tops y = 36, 102, 166 and 230. Each row has a left and a right body part. A part's button index is its selection code.
+
+| Row | Top y | Left part (code) | Right part (code) |
+| ---: | ---: | --- | --- |
+| 0 | 36 | Head, location 0 (code 0) | Torso, location 3 (code 4) |
+| 1 | 102 | Eyes, location 6 (code 1) | Groin, location 7 (code 5) |
+| 2 | 166 | Right arm, location 2 (code 2) | Left arm, location 1 (code 6) |
+| 3 | 230 | Right leg, location 4 (code 3) | Left leg, location 5 (code 7) |
+
+Each row is drawn in this order: left chance, left label, right chance, right label. In each part:
+
+- **Chance.** The section 3.5 range-aware hit chance of SPEC-007, for the player against the target with the slot's hit mode and this location. The location adjustment is the full value for ranged and thrown attacks and half for melee and unarmed (SPEC-007 §2.4). It is computed once, when the window opens. The digits come from the white band of `numbers.frm` (list index 82, 360 by 17; section 3.21): the tens digit at (x, y) and the ones digit at (x + 9, y), each a 9-by-17 cell from source x = 9d, copied opaquely. Here x = 33 on the left and 373 on the right, and y is the row top.
+  - 0 through 9 show a leading zero, for example `05`.
+  - The cap of SPEC-007 §3.5 keeps every chance at 95 or below.
+  - A negative chance draws the 6-by-17 minus glyph (source x = 108) at (x, y) and again at (x + 9, y). Columns x + 6 through x + 8 and x + 15 through x + 17 keep the background, so every negative chance looks the same.
+- **Label.** The text of `combat.msg` message 1000 + 10 × A + L, where L is the location number and A is the alias of the target's current art base index in `critters.lst` (SPEC-007 §2.1). The picture uses the same alias. Font 101 draws the label over the art without a background fill, in key 992 [215]. A left label starts at (74, y). A right label of width w ends at x = 350: it is drawn at (351 - w, y). When the message is missing, no label is drawn.
+- **Button.** An invisible 88-by-10 rectangle with no art and no sound. On the left it is at (33, y + 4); on the right at (351 - w, y + 4), with w = 10 when the label is missing. The rectangle does not follow the text:
+  - it starts 4 rows below the label top;
+  - on the left it covers the chance digits and only label columns 74 through 120, so the end of a longer label is not clickable;
+  - on the right it runs 88 pixels from the label's left edge and may cover the right chance digits.
+
+**Hover.** When the pointer enters a part's rectangle, its label is redrawn at once in red, key 31744 [133]. When the pointer leaves, it is redrawn in green, key 992 [215]. Nothing else changes and no sound plays. Each redraw goes over the previous text without restoring the background, so the partial-coverage pixels of the font (SPEC-002 §3.2) blend with the earlier label color. `[May-improve]`: restore the label's background before each redraw.
+
+**Cancel.** A Red button at (170, 268): `lilredup.frm` / `lilreddn.frm` (list indexes 8 and 9), drawn transparently over the art. Its release returns Esc.
+
+**Input.** The window polls input until one of these ends it:
+
+- **Esc**, by key or by the Cancel button, closes the window and does nothing else. No attack is made, no AP are spent, no message prints, and no sound plays apart from the Red button's own sounds. The cursor stays in crosshair mode. Out of combat (step 3) combat has already started, and the player's turn continues with full AP.
+- **A left click on a part's rectangle**, pressed and released on the same rectangle, chooses that part. Right clicks do nothing.
+- **Input codes 1-7** choose by selection code, like the buttons. The keyboard produces them for Ctrl+A through Ctrl+G, by the letter of the current layout. Ctrl+A chooses the eyes, Ctrl+B the right arm, Ctrl+C the right leg, Ctrl+D the torso, Ctrl+E the groin, Ctrl+F the left arm and Ctrl+G the left leg. The digit keys 1-8 do nothing, and there are no other hotkeys. All other keys and clicks are discarded.
+- **Input code 8**, from Backspace or Ctrl+H, is also accepted as a choice. It reads past the end of the right-hand location table, so the location is undefined. `[May-improve]`: ignore code 8 and keep the window open.
+- **A pending quit request** (for example a script's map or world-map request during combat) ends the loop and takes the last input code as the choice. That code is normally "no input", which reads before the start of the left-hand table. The sound then plays and the attack runs with an undefined location. `[May-improve]`: treat a pending quit request as Esc.
+
+While the window is open:
+
+- the system cursor is the arrow;
+- the in-world cursor is hidden, and edge scrolling is off when the game mouse was on at entry;
+- an interface that was disabled is enabled, then disabled again when the window closes;
+- map background processing keeps running, unlike in the action menu (section 3.28). That covers object animation, idle fidgets, floating text, palette cycling and running scripts.
+
+On close the game mouse is turned back on with edge scrolling enabled.
+
+**Result.** When a part is chosen:
+
+1. The window closes and `icsxxxx1` plays.
+2. The player's attack request runs with the slot's hit mode and the chosen location 0-7 (SPEC-007 §3.6 and §3.10).
+3. The attack is debited at the aimed cost, the weapon or punch cost plus 1 after reductions, once the attack is done (SPEC-007 §3.4). The preflight has already confirmed that cost.
+
+Choosing the torso requests location 3, not the uncalled location 8. Its accuracy adjustment is the same 0, but it still pays the aimed cost. Afterwards the crosshair hover is recomputed as for any crosshair click (section 3.27).
+
+**Random draws.** Neither the window nor its chance figures draw from the shared generator. Every draw of the attack request comes after the choice, starting with the punch-to-kick draw for a punch (SPEC-007 §3.6). Esc draws nothing.
+
+**Failures.** When the window cannot be created, or the background or either Cancel art cannot be loaded, the window closes at once and the result is the same as Esc. A missing picture or label leaves out only that element. `[Must-match]`
+
+**Body types.** Every critter gets the same layout, the same eight parts and the same hit-chance rules. Only the picture and the labels change, and both are chosen by the art alias. Prototype kill type and body type play no part. All eight parts can always be chosen, even where the labels repeat or read `???`.
+
+The table lists every alias in the corpus `critters.lst`. Every label is prefixed with "the "; it is omitted in the table, and "the head" is shown as head. Locations are given in order 0-7: head, left arm, right arm, torso, right leg, left leg, eyes, groin.
+
+| Alias row (stem) | Messages | Rows that use it | Labels for locations 0-7 |
+| --- | --- | --- | --- |
+| 11 (`hmjmps`) | 1110-1117 | 2-14, 26, 28, 29, 31-41, 43-45, 47, 48, 56, 57 | head, left arm, right arm, torso, right leg, left leg, eyes, groin |
+| 15 (`mabrom`) | 1150-1157 | 15 | head, left hindleg, right hindleg, torso, right foreleg, left foreleg, eyes, udder |
+| 16 (`maddog`) | 1160-1167 | 16 | head, hindleg, hindleg, body, foreleg, foreleg, eyes, groin |
+| 17 (`mahand`) | 1170-1177 | 17 | CPU, manipulator, manipulator, frame, motivator, motivator, sensors, regulator |
+| 18 (`malieu`) | 1180-1187 | 18 | As alias 11 |
+| 19 (`mamrat`) | 1190-1197 | 19 | head, left paw, right paw, body, right leg, left leg, eyes, groin |
+| 21 (`mamtnt`) | 1210-1217 | 1, 20, 21, 30 | As alias 11 |
+| 22 (`mascrp`) | 1220-1227 | 22 | head, tail, claw, carapace, forelegs, hindlegs, eyes, brain |
+| 23 (`masphn`) | 1230-1237 | 23 | head, mouth, fore mouth, body, float sac, tail, ganglion, ovipositor |
+| 24 (`masrat`) | 1240-1247 | 24 | As alias 19 |
+| 25 (`mathng`) | 1250-1257 | 25 | head, left arm, right arm, body, right leg, left leg, eyes, groin |
+| 27 (`nachld`) | 1270-1277 | 27, 42 | As alias 11 |
+| 46 (`nmover`) | 1460-1467 | 46 | As alias 11 |
+| 49 (`nmgzmo`) | 1490-1497 | 49 | As alias 11 |
+| 50 (`mamstr`) | 1500-1507 | 50 | head, ???, ???, frame, ???, ???, eyes, CPU |
+| 51 (`maclaw`) | 1510-1517 | 51 | As alias 11 |
+| 52 (`mamant`) | 1520-1527 | 52 | head, raptorial leg, raptorial leg, abdomen, legs, wings, eyes, metathorax |
+| 53 (`marobo`) | 1530-1537 | 53 | As alias 17 |
+| 54 (`mafeye`) | 1540-1547 | 54 | As alias 17 |
+| 55 (`mamurt`) | 1550-1557 | 55 | As alias 19 |
+| 58 (`madegg`) | 1580-1587 | 58 | shell, all eight |
+
+"Row" is the zero-based `critters.lst` line, which is the art base index.
+
+- Row 0 (`reserv`) has no alias field. It takes the default alias 0: messages 1000-1007 and `reservna.frm` do not exist, so the window shows no labels and no picture.
+- The female player and every female human or ghoul row alias to `hmjmps`, so the window shows the male human picture.
+- The player's picture follows the current armor art; every player armor row aliases to 11 or 21.
+
+### 3.39 World Map Screen
+
+SPEC-008 owns the rules behind this screen: world coordinates, the travel step, travel time and healing (§3.4), discovery and encounters (§3.5), the lookup grids (§3.6), town cells, knowledge, target jitter and the hotspot catalog (§3.7), and map numbers and music (§3.10). This section adds the screen itself: its art, drawing, scrolling, markers, side panel and input, and what each exit leads to. The town map is in section 3.40. Coordinates are window coordinates; the window is at screen (0, 0), so they are also screen coordinates.
+
+**Opening.** `[Must-match]`
+
+- The world map opens:
+  - from an exit grid holding map 0, and after a town map opened by an exit grid holding map -1 (SPEC-013 §3.22);
+  - from the Town/World button of a town map (section 3.40);
+  - from the script opcodes below.
+- First the current map is saved into the working map set (section 3.35). If that save fails, the dialog and return to the main menu of SPEC-013 §3.22 follow. A pending quit request makes the screen return at once.
+- The window is 640 by 480 at screen (0, 0) and covers the game view and the interface bar. The indicator boxes (section 3.24) are switched off and switched on again when a map is loaded from this screen.
+- Map background processing and palette cycling are suspended while the screen is open. The text font is 101 and the cursor the arrow.
+- The party's world position, discovery grid and known towns are kept from before. Opening the screen again from a town's map therefore shows the party at rest on that town. The only exception is a town-map choice that starts a journey, described under "Town-map results" below.
+- The world-map music `03wrldmp` (SPEC-008 §3.10) starts from its beginning each time the screen is built. That happens on opening and again on every return from a town map.
+- The speed values W and Q of SPEC-008 §3.4 are computed once, at opening.
+
+**Script requests.** `[Must-match]` The opcode `world_map` (`0x8108`) first opens the town map of the current town and then the world map with that town map's result, exactly like an exit grid holding map -1. The opcode `town_map` (`0x8109`) opens the world map directly, without a town map. The main loop serves both requests out of combat. A request made during combat ends combat first. The current town is the last town entered through this screen or a town map. It starts as Vault 13 (SPEC-008 §3.4), and neither map changes nor script-directed travel change it.
+
+**Art.** All of it is in `art/intrface/`. Sizes are from the corpus FRM headers, and each file has one frame. `[Must-match]`
+
+| List index | Art | Size | Use |
+| ---: | --- | --- | --- |
+| 135 | `worldmap.frm` | 1400 by 1500 | The whole world as one image. There are no tiles |
+| 136 | `wmapbox.frm` | 640 by 480 | Frame. It has a transparent hole at (22, 21), 450 by 442, with rounded corners, and painted plates for the date, the 12 town lamps and the Town/World button |
+| 137 | `wmaplabs.frm` | 82 by 216 | Twelve town-name plates of 18 rows each, in town-id order (`VAULT 13` through `CATHEDRAL`). The names are art, not message text |
+| 138 | `wmaploc.frm` | 5 by 5 | Party while travelling: a red plus sign |
+| 139 | `wmaptarg.frm` | 11 by 11 | Destination crosshair, bright red |
+| 153 | `wmaptrg2.frm` | 11 by 11 | The same crosshair in dark red, used for the special-encounter flash |
+| 154 | `wmapfgt0.frm` | 7 by 11 | Random-encounter lightning bolt, bright |
+| 155 | `wmapfgt1.frm` | 7 by 11 | The same bolt, dark |
+| 168 | `hotspot1.frm` | 25 by 13 | Party at rest: a hollow green triangle pointing down |
+| 223 | `hotspot2.frm` | 25 by 13 | The same triangle filled, shown while entering a location |
+| 129 | `months.frm` | 29 by 179 | Month names, one per 15 rows |
+| 82 | `numbers.frm` | 360 by 17 | Digits. Only the white band is used (section 3.21) |
+| 8, 9 | `lilredup.frm`, `lilreddn.frm` | 15 by 16 | Red buttons, up and down |
+
+No other art is drawn. The map shows no town circles and no town names, and there is no vehicle marker: R1 has no car. `tmapcirc.frm` (43 by 43) exists in the art directory, but it is not in `intrface.lst` and nothing uses it. `[Must-match]`
+
+**Layout.** `[Must-match]`
+
+| Element | Position and size | Notes |
+| --- | --- | --- |
+| World view | (22, 21), 450 by 442 | The frame's hole. View origin (vx, vy) is the world pixel shown at (22, 21), clamped to 0-950 and 0-1058 (SPEC-008 §3.4) |
+| Day | (487, 12), 2 digits | Each digit cell is 9 by 17, written opaque, with leading zeros. Digit d comes from `numbers.frm` x = 9d |
+| Month | (513, 12), 29 by 14 | Rows `15 (m - 1)` through `15 (m - 1) + 13` of `months.frm`, written opaque |
+| Year | (548, 12), 4 digits | |
+| Time | (593, 12), 4 digits | HHMM, as `game_time_hour` (SPEC-005) |
+| Town buttons | (508, Y), 15 by 15 | One per town t = 0-11, with Y = 61, 88, 115, 143, 171, 200, 228, 256, 283, 310, 338, 367. Red button art; only its top 15 rows are shown. Sounds `ib1p1xx1` on press and `ib1lu1x1` on release; the event comes on release |
+| Town names | (531, Y), 82 by 18 | Plate t of `wmaplabs.frm`, drawn with transparency for every town whose known/visited bit (SPEC-008 §2.7) is set |
+| Town/World | (520, 439), 15 by 15 | Red button with the same sounds, on the frame's painted `TOWN / WORLD` plate |
+
+The date is month, day and year from the game clock, using the calendar of SPEC-005. All 12 town buttons are always present and always clickable. A town that is not known has an empty plate and its button does nothing. The town names are drawn only when the screen is built, so they do not change while it stays open. `[Must-match]`
+
+**Window position of a world pixel.** World pixel (x, y) appears at `(x - vx + 22, y - vy + 21)`. Let (px, py) be the party's window position. Centering on the party sets `vx = X - 247` and `vy = Y - 242`, clamped, where (X, Y) is the party's world position. An unclamped centered party therefore appears at (269, 263), which is 22 pixels right of and 21 below the view's center. `[Must-match]`
+
+**Follow mode.** `[Must-match]`
+
+- Follow mode is on when the screen opens. While it is on, every loop pass centers the view on the party and redraws.
+- `A` or `a` toggles it.
+- Edge scrolling, an arrow key, Home and End switch it off. An edge position switches it off even when the view cannot move.
+- A destination click or a town-button journey switches it on when the party was at rest and off when the party was already travelling.
+- When the World button returns from a town map, it is off if the town map was opened with the Town/World button and on if the town map was opened by entering a town. A journey chosen on a town map switches it on.
+- `C`, `c` and Home center the view once, even while follow mode is off.
+
+**Scrolling.** `[Must-match]` unless tagged.
+
+- **Edges.** Scrolling starts when the pointer is at x 0-1 (west), x 638-639 (east), y 0-1 (north) or y 478-479 (south); corners scroll diagonally. These edges are 2 pixels wide, unlike the in-game edges of section 3.29.
+- **Step.** Each loop pass moves 16 pixels on each requested axis. Each axis is clamped on its own, so a diagonal against one limit still slides along the other axis.
+- **Cursor.** It is set on every pass. The pointer shows the direction's scroll art (section 3.26), or the blocked art when every requested axis is already at its limit. With one axis of a diagonal blocked, the normal diagonal art shows. Away from the edges it shows the arrow.
+- **Arrow keys.** Each key event moves 16 pixels. A key is ignored when the view is already at that limit. On that axis, for that pass, the key replaces any direction from the edge.
+- **End** sets vy to 1058; vx is unchanged.
+- **Home** first centers both axes on the party, then sets vy to 0 and applies a 16-pixel southward step, so vy ends at 16. `[May-improve]`: leave vy at 0.
+- **Speed.** A pass that redraws lasts at least `trunc(1000 / 24)` = 41 milliseconds, measured from the start of the pass, so continuous scrolling moves about 16 pixels every 41 milliseconds.
+
+**Drawing a pass.** These steps happen whenever anything changed: follow mode, a scroll, a change of the hover state below, a travel iteration, or a state change. `[Must-match]`
+
+1. Copy the world art's 450-by-442 rectangle at (vx, vy) to (22, 21).
+2. Darken the view by discovery cell (SPEC-008 §2.7, §3.5). Cell (c, r) covers world x `50c` through `50c + 49` and y `50r` through `50r + 49`, clipped to the view:
+   - Value 0: fill the cell with key 0 [228] (black).
+   - Value 1: replace each pixel index P that is neither 0 nor 229-255 by intensity-table entry (P, 64) (SPEC-001 §2.1). When the table is generated (SPEC-002 §3.2, K below 128), this halves each 5-bit RGB component, `floor(C / 2)`, and maps the result back through the color lookup. With the corpus palette, for example, 50 becomes 52, 150 becomes 153 and 100 becomes 228. The corpus world art has no pixels of index 0 or 229-255, so every pixel of a seen cell is darkened.
+   - Value 2, or any other value: leave the cell unchanged.
+3. Draw the party marker, with transparency:
+   - At rest: `hotspot1.frm` at (px - 12, py - 6). Its tip is at (px, py + 6).
+   - Travelling: `wmaploc.frm` at (px - 2, py - 2).
+4. At rest, draw the hover label (below).
+5. While travelling, draw `wmaptarg.frm` at the destination's window position minus (5, 5), then the travel dots (below).
+6. Redraw the frame over the view's margins. Columns 0-34 and 455-486 are drawn with transparency over the full height. Rows 0-20 and rows 463-479 of columns 35-456 are copied opaque. The side panel, columns 487-639, is drawn only when the screen is built.
+7. Draw the date and time, and present the window.
+
+A pass that changes nothing only redraws the date and presents the window, without the 41-millisecond wait. Markers are skipped unless their top-left corner (x, y) lies in these ranges: `[Must-match]`
+
+| Marker | x | y | Notes |
+| --- | --- | --- | --- |
+| Triangle | -2 through 483 | 9 through 462 | Width cut to `485 - x` when x is above 460 |
+| Plus sign | 18 through 473 | 17 through 462 | |
+| Crosshair | 12 through 473 | 11 through 462 | |
+| Lightning bolt | 16 through 471 | 11 through 462 | |
+
+Step 6 hides whatever lands on the frame. The exception is a triangle at x = -2 or -1, whose first columns land at x 638-639 of the row above. The side panel is not redrawn on each pass, so up to three stray triangle pixels stay at its right edge until the screen is next built. `[May-improve]`: clip all markers and labels to the view, (22, 21) through (471, 462). Step 6 also misses one corner pixel of the frame, (35, 462), which therefore shows world art. `[May-improve]`: draw the whole frame on every pass.
+
+**Building the screen.** `[Must-match]` On opening and on each return from a town map, the screen is built in this order:
+
+1. Apply the SPEC-008 §3.5 reveal once at the party's cell.
+2. Draw the world art, darkening and the whole frame.
+3. Draw the town names.
+4. Draw the at-rest triangle, even when a journey is already under way.
+5. Draw the date, and present the window.
+
+Opening the world map therefore always marks the party's cell as visited.
+
+**Travel dots.** `[Must-match]`
+
+- One bit is kept per world pixel, 1400 by 1500.
+- The party's current pixel is marked on the 1st, 4th, 7th and every later third travel iteration, at the same moment as the SPEC-008 §3.5 reveal. The count starts at 0 when the screen is built.
+- While the party travels, every marked pixel inside the view is painted key 27648 [134] (dark red), over the markers.
+- All marks are cleared as soon as travel stops, whether by arrival, the walking mask, an encounter or entering a location, and whenever the screen is built.
+- A new destination clicked during travel keeps the existing marks and does not reset the count.
+
+**Hover state.** `[Must-match]` On every pass, wherever the pointer (mx, my) is, let `dx = |mx - px|` and `dy = |my - (py - 1)|`. The smaller of the two is halved and truncated; dy is the one halved when they are equal. The pointer hovers on the party when `dx + dy` is at most 10. A change of the hover state triggers a redraw.
+
+**Hover label.** It is shown only while the party is at rest and the pointer hovers. `[Must-match]`
+
+- The text is chosen like this:
+  - In the cell of town t: `map.msg` 500 + t (Vault 13, Vault 15, Shady Sands, Junktown, Raiders, Necropolis, Hub, Brotherhood, Military Base, Glow, Boneyard, Cathedral). The name is used when the town's known-town campaign value is 1 or its known/visited bit is set; otherwise the text is `worldmap.msg` 1004 "Unknown".
+  - Elsewhere: `worldmap.msg` 1000 plus the cell's terrain code (SPEC-008 §3.4), giving "Desert", "Mountains", "City" or "Coast".
+- The text is drawn in font 101, key 992 [215], with shadow.
+- For text width w, the left edge is `x = px - 12 + trunc((25 - w) / 2)`, truncated toward zero, and the top is `y = py - 17`.
+- The label is drawn only when `x > 22 - w`, `x < 472` and `11 < y < 463`. It is cut horizontally to x 22-471.
+- Only the w-by-10 rectangle is written, so shadow pixels to its right or below it do not appear. Rows above 21 are covered by the frame.
+
+**Clicks in the view.** `[Must-match]` A left-button release with the pointer at x 23-471 and y 22-462 is a view click. Right clicks do nothing, and the sidebar and Town/World events take precedence in the same pass.
+
+- **Party at rest, pointer hovering:** enter here. Play `ib2p1xx1`.
+  - In a town cell, enter that town (see "Entering a town" below).
+  - Elsewhere, drop to a terrain map: SPEC-008 §3.5 choice, campaign index 65 set, index 32 = 1.
+- **Otherwise:** play `ib1p1xx1` and set the destination to `(vx + mx - 22, vy + my - 21)` for pointer (mx, my), with no jitter. Travel starts, or restarts from the current pixel, as in SPEC-008 §3.4. Travel needs no known town or discovered cell. While the party travels, a click near it retargets instead of entering.
+
+**Town buttons.** `[Must-match]` On the event for town t:
+
+- Nothing happens unless t's known/visited bit is set. The button sounds still play.
+- Nothing happens while the party is already travelling to a target inside t's cell.
+- If the party's cell is not t's cell, the party travels to t's jittered center (SPEC-008 §3.7).
+- If the party is in t's cell, the party enters town t. That holds even while it is travelling away inside the cell.
+
+**Arrival.** `[Must-match]`
+
+- When a journey ends inside a town cell, the party stops at rest on the map. The town is never entered automatically, whatever started the journey, and a hotspot chosen on a town map before the journey is not used.
+- The player enters by clicking the party marker or the town's button.
+- A journey that ends elsewhere also leaves the party at rest.
+- When the walking mask stops travel (SPEC-008 §3.4), the party simply stops at its last legal pixel, with no text and no sound.
+- Crossing a town cell without stopping discovers nothing beyond the SPEC-008 reveal. Stopping in an undiscovered town's cell shows "Unknown" on hover, and entering it there discovers the town (below).
+
+**Entering a town or dropping to terrain.** `[Must-match]`
+
+1. The view is redrawn without markers and is not recentered.
+2. `hotspot2.frm` is drawn at the triangle's position, with the hover label when the pointer hovers, and the window is presented.
+3. The wait depends on how entry started. A town-button entry while travelling waits 500 milliseconds. Any other entry waits until the left button is no longer held, then 300 milliseconds.
+4. A terrain drop then loads its map. Entering town t continues as follows:
+   - **t's known/visited bit is clear:** load the map of t's slot 0 directly (SPEC-008 §3.7, including the destroyed-area substitutions) and set the bit. This is how a town is first discovered.
+   - **Otherwise:** t becomes the current town, and the town map of t opens (section 3.40).
+
+**Town-map results.** `[Must-match]` unless tagged. The town map returns a choice, which this screen handles as follows:
+
+- **A hotspot of the town the party is in:** load that hotspot's map (section 3.40).
+- **A hotspot of another town:** the party travels to that town's jittered center and the world map stays open. Arrival is as above.
+- **The World button:** return to this screen at rest. Any journey in progress is cancelled.
+- **A failure** (section 3.40): leave with no map loaded, as in SPEC-013 §3.22.
+- **A quit request:** leave without loading.
+  - When the town map was opened by entering a town, the reference reads the result's town even though the town map never set it. It then travels toward, or loads a map of, an undefined town before quitting. `[May-improve]`: leave at once, with no draw, travel or load.
+
+**Town/World button** (event 512). `[Must-match]`
+
+- The button opens the town map. It shows the destination town while a journey chosen on a town map is under way, and the current town otherwise.
+- A journey in progress stops where the party is.
+- The results are handled as above. A hotspot chosen in the town the party stands in is loaded at once.
+
+**Encounters.** When SPEC-008 §3.5 selects an encounter, the following happens. `[Must-match]`
+
+1. The view is centered on the party (clamped) and redrawn without markers.
+2. The party's position flashes 7 times, and nothing interrupts the flash:
+   - **Ordinary encounter:** `wmapfgt0.frm`, then `wmapfgt1.frm`, at (px - 3, py - 5).
+   - **Special encounter:** `wmaptrg2.frm`, then `wmaptarg.frm`, at (px - 5, py - 5).
+   - Each image is presented and held for 199 milliseconds, so the 14 images take 2786 milliseconds.
+3. The encounter map loads as in SPEC-008 §3.5.
+
+A queue event that stops travel (SPEC-008 §3.4) leaves without the pressed triangle or the flash. In a town cell it enters the town (slot 0 on first discovery, otherwise the town map). Elsewhere it drops to a terrain map with campaign index 32 = 1.
+
+**Campaign checks on every pass.** These checks run after any travel iterations, on every pass, travelling or not. They exist only on this screen. `[Must-match]`
+
+1. If campaign index 10 is 0 and index 101 is not 2:
+   - the screen turns black (key 0 [228]) and the buttons are disabled;
+   - `boil3` plays (SPEC-012);
+   - a quit request is made and the screen leaves.
+2. Otherwise, the Military Base vats explode when index 147 is nonzero and the clock is at least 2410 ticks past it:
+   - `vexpld` plays and index 308 becomes 2.
+   - If index 18 is nonzero, the party is moved to Vault 13 by script-directed travel (SPEC-008 §3.4). `V13ENT.MAP` (map 35) then loads with entry selector 0, and the screen leaves after this pass.
+   - The player gains 10000 experience (SPEC-011), and index 155 increases by 5, clamped to -100 through 100.
+   - `worldmap.msg` 500 ("You gained 10,000 experience points!") is printed to the message monitor.
+   - Index 147 becomes 0 and index 17 becomes 1.
+3. Then, under the same timing rule for index 55, the Master's lair explodes:
+   - `cathexp` plays and index 309 becomes 2.
+   - If index 17 is nonzero, the same travel and load follow.
+   - The player gains 10000 experience and index 155 increases by 10, with the same clamp. No message is printed.
+   - Index 55 becomes 0 and index 18 becomes 1.
+
+When both countdowns expire in the same pass, step 2 still sees index 18 as 0, and step 3 sees the index 17 that step 2 has just set, so only step 3 moves the party. The tick difference is taken as unsigned 32-bit, so a stored tick later than the clock fires at once. `[May-improve]`: fire only when the clock is at least 2410 ticks past the stored tick.
+
+**Keys.** `[Must-match]`
+
+| Key | Effect |
+| --- | --- |
+| `A`, `a` | Toggle follow mode |
+| `C`, `c` | Center on the party once |
+| Arrows, Home, End | Scroll as above |
+| `P`, `p`, Ctrl+P, Alt+P | World-map pause window (section 3.17) |
+| Ctrl+Q, Ctrl+X, F10 | Quit confirmation (section 3.17). A confirmed quit leaves without loading a map |
+| F12 | Screenshot |
+| `+`, `=` / `-`, `_` | Brightness up / down, saved immediately (section 3.4) |
+
+No key and no button closes the world map; Esc does nothing. The screen is left only by entering a location, an encounter, a queue event, a campaign check, a town-map result or a quit. `[Must-match]`
+
+**Leaving to a map.** `[Must-match]`
+
+1. The buttons are disabled, and the window is filled with key 0 [228] and presented.
+2. Campaign index 32 is set to the entry selector, and the map loads by name, so map numbers are assigned per SPEC-008 §3.10.
+3. The city music starts (SPEC-008 §3.10) and the player is shown.
+4. The indicator boxes are switched on again if they were on when the screen was last built.
+5. The world-map window is removed after the screen returns.
+
+Step 4 tests the state at the last build, and a rebuild finds the boxes already switched off. So once a town map has returned to this screen (World button, or a journey to another town), the next map load leaves the boxes off. A load straight from a town-map choice, without a rebuild, restores them. Only a game load, a new game or closing the character editor brings them back. `[May-improve]`: restore the indicator boxes to their state when the world map first opened.
+
+### 3.40 Town Map Screen
+
+The town map shows one town's picture with a marker for each known entrance. SPEC-008 §3.7 owns the hotspot catalog (anchors, entry selectors, file names), entrance knowledge, the event numbering and the destroyed-area substitutions. This section adds the screen, the per-town details and what a choice leads to.
+
+**Opening.** `[Must-match]` unless tagged.
+
+- The town map opens from:
+  - an exit grid holding map -1, or the `world_map` opcode, for the current town (section 3.39);
+  - the world map's Town/World button;
+  - entering a known/visited town on the world map.
+- First the current map is saved into the working map set, with the same failure handling as section 3.39. A pending quit request returns at once.
+- The town's knowledge is refreshed as in SPEC-008 §3.7.
+- Music is unchanged: the map's city track continues, or `03wrldmp` when the town map was opened from the world map.
+- Map background processing and palette cycling are suspended until the town map closes. The cursor is the arrow and the font is 101.
+- Town ids above 12 fail. Town id 12 and negative ids are not rejected and use the wrong art. `[May-improve]`: treat any town outside 0-11 as a failure. A failure means art that cannot be loaded or an invalid town; it returns at once and leads to the empty-map case of SPEC-013 §3.22.
+
+**Window and art.** `[Must-match]`
+
+- The window is the 640-by-480 window of section 3.39 at screen (0, 0), created by whichever screen opens first.
+- The town picture, list index 156 + t for town t (table below, 453 by 444), is copied opaque to (20, 20).
+- `wmapbox.frm` is then drawn over it with transparency. Only picture columns 2-451 and rows 1-442 show, through the same hole at (22, 21), 450 by 442.
+- The side panel is the world map's:
+  - the town buttons and names, which follow the same known/visited rule;
+  - the Town/World button;
+  - the date and time.
+  The same list indices are used.
+
+| Town | Picture | List index |
+| ---: | --- | ---: |
+| 0 Vault 13 | `twnmap00.frm` | 156 |
+| 1 Vault 15 | `twnmap01.frm` | 157 |
+| 2 Shady Sands | `twnmap02.frm` | 158 |
+| 3 Junktown | `twnmap03.frm` | 159 |
+| 4 Raiders | `twnmap04.frm` | 160 |
+| 5 Necropolis | `twnmap05.frm` | 161 |
+| 6 Hub | `twnmap06.frm` | 162 |
+| 7 Brotherhood | `twnmap07.frm` | 163 |
+| 8 Military Base | `twnmap08.frm` | 164 |
+| 9 Glow | `twnmap09.frm` | 165 |
+| 10 Boneyard | `twnmap10.frm` | 166 |
+| 11 Cathedral | `twnmap11.frm` | 167 |
+
+A destroyed Cathedral or Military Base keeps its picture. Only its markers change. `[Must-match]`
+
+**Which markers are shown.** `[Must-match]`
+
+- The shown row of the SPEC-008 §3.7 catalog is the town's own row, with two exceptions: row 12 for the Cathedral when campaign index 18 is nonzero, and row 13 for the Military Base when index 17 is nonzero.
+- Row 14 (`BRODEAD.MAP`) is never shown and never loaded from this screen.
+- Slots are taken in order until the first zero anchor. Only known slots get a marker, so a town shows between 0 and its number of catalog slots.
+- Vault 13 shows only "Cavern Entrance" before tick 864000 and all four markers from that tick on. Its campaign entrance indices are never read.
+
+**Marker geometry.** `[Must-match]` For anchor (X, Y), each marker is a 164-by-25 button at (X - 57, Y - 6). It has three images:
+
+| State | Image |
+| --- | --- |
+| Normal | `hotspot1.frm` at (69, 12) within the button, that is, at window (X + 12, Y + 6): the hollow triangle |
+| Pressed | `hotspot2.frm` at the same place: the filled triangle |
+| Pointer over the marker | The hollow triangle, plus the label at the top of the button |
+
+- **Label.** For town t and slot k, the text is `worldmap.msg` 200 + 10t + k. Row 12 uses 290 ("Crater") and row 13 uses 501 ("Ruins"). It is drawn in font 101, key 992 [215], with shadow, at button x `max(0, trunc((164 - w) / 2))` and y 0, and it is cut at 164 pixels. Labels appear only while the pointer is over a marker. Only the picture's own printed captions are always visible.
+- **Hit area.** Only the pixels where `hotspot1.frm` or `hotspot2.frm` is not transparent count, which is the filled triangle's shape. The label and the rest of the button rectangle do not react.
+- **Sounds.** `ib2p1xx1` plays on press. There is no release sound. The choice is made on release.
+- When the pointer leaves a marker, the town picture is restored under the label and the triangle, and the normal triangle is drawn again.
+
+**Hotspot table.** The table is exact data. `[Must-match]`
+
+- Anchor and selector are those of SPEC-008 §3.7.
+- Triangle is the window position of the 25-by-13 marker image.
+- Label is the `worldmap.msg` id and its English text.
+- Known index is the campaign index whose low byte enables the slot, per SPEC-008 §3.7. Slot 0 is also known when the town's known-town value is 1.
+- Header entry is the map file's default entry hex and elevation (SPEC-003 §2.7, corpus values).
+
+| Town | Slot | Anchor | Triangle | Label | Map | Selector | Known index | Header entry |
+| ---: | ---: | --- | --- | --- | --- | ---: | ---: | --- |
+| 0 | 0 | 202, 303 | (214, 309) | 200 "Cavern Entrance" | 35 `V13ENT.MAP` | 0 | time | 20100, 0 |
+| 0 | 1 | 271, 282 | (283, 288) | 201 "Entrance" | 6 `VAULT13.MAP` | 1 | time | 17095, 0 |
+| 0 | 2 | 292, 237 | (304, 243) | 202 "Living Quarters" | 6 `VAULT13.MAP` | 2 | time | 17095, 0 |
+| 0 | 3 | 309, 204 | (321, 210) | 203 "Command Center" | 6 `VAULT13.MAP` | 3 | time | 17095, 0 |
+| 1 | 0 | 68, 250 | (80, 256) | 210 "Desert Entrance" | 7 `VAULTENT.MAP` | 0 | 562 | 20100, 0 |
+| 1 | 1 | 107, 209 | (119, 215) | 211 "Caverns/Entrance" | 8 `VAULTBUR.MAP` | 1 | 563 | 20100, 0 |
+| 1 | 2 | 298, 187 | (310, 193) | 212 "Living Quarters" | 8 `VAULTBUR.MAP` | 2 | 564 | 20100, 0 |
+| 1 | 3 | 135, 290 | (147, 296) | 213 "Command Center" | 8 `VAULTBUR.MAP` | 3 | 565 | 20100, 0 |
+| 2 | 0 | 158, 192 | (170, 198) | 220 "Entrance" | 26 `SHADYW.MAP` | 1 | 566 | 20100, 0 |
+| 2 | 1 | 270, 253 | (282, 259) | 221 "Garden" | 25 `SHADYE.MAP` | 2 | 567 | 20100, 0 |
+| 2 | 2 | 314, 217 | (326, 223) | 222 "Brahmin Pen" | 25 `SHADYE.MAP` | 3 | 568 | 20100, 0 |
+| 3 | 0 | 400, 317 | (412, 323) | 230 "Entrance" | 10 `JUNKENT.MAP` | 3 | 569 | 27307, 0 |
+| 3 | 1 | 304, 257 | (316, 263) | 231 "Crash House" | 12 `JUNKKILL.MAP` | 2 | 570 | 22703, 0 |
+| 3 | 2 | 200, 279 | (212, 285) | 232 "Casino" | 11 `JUNKCSNO.MAP` | 1 | 571 | 20100, 0 |
+| 4 | 0 | 241, 398 | (253, 404) | 240 "Base" | 24 `RAIDERS.MAP` | 1 | 572 | 20100, 0 |
+| 5 | 0 | 398, 265 | (410, 271) | 250 "Hotel" | 4 `HOTEL.MAP` | 3 | 573 | 16325, 1 |
+| 5 | 1 | 239, 224 | (251, 230) | 251 "Hall" | 3 `HALLDED.MAP` | 2 | 574 | 20100, 0 |
+| 5 | 2 | 79, 207 | (91, 213) | 252 "Watershed" | 5 `WATRSHD.MAP` | 1 | 575 | 20100, 0 |
+| 6 | 0 | 238, 78 | (250, 84) | 260 "Entrance" | 36 `HUBENT.MAP` | 1 | 576 | 20100, 0 |
+| 6 | 1 | 205, 172 | (217, 178) | 261 "Downtown" | 38 `HUBDWNTN.MAP` | 3 | 577 | 15097, 0 |
+| 6 | 2 | 128, 138 | (140, 144) | 262 "Heights" | 39 `HUBHEIGT.MAP` | 5 | 578 | 18693, 0 |
+| 6 | 3 | 306, 137 | (318, 143) | 263 "Old Town" | 40 `HUBOLDTN.MAP` | 2 | 579 | 17920, 0 |
+| 6 | 4 | 272, 238 | (284, 244) | 264 "Merchants" | 41 `HUBWATER.MAP` | 4 | 580 | 20100, 0 |
+| 6 | 5 | 125, 216 | (137, 222) | 265 "Cave" | 37 `DETHCLAW.MAP` | 0 | 581 | 13929, 0 |
+| 7 | 0 | 172, 167 | (184, 173) | 270 "Entrance" | 13 `BROHDENT.MAP` | 1 | 582 | 25103, 0 |
+| 7 | 1 | 254, 194 | (266, 200) | 271 "Level 1" | 14 `BROHD12.MAP` | 2 | 583 | 20100, 0 |
+| 7 | 2 | 136, 263 | (148, 269) | 272 "Level 2" | 14 `BROHD12.MAP` | 3 | 584 | 20100, 0 |
+| 7 | 3 | 280, 306 | (292, 312) | 273 "Level 3" | 15 `BROHD34.MAP` | 4 | 585 | 20100, 0 |
+| 7 | 4 | 161, 373 | (173, 379) | 274 "Level 4" | 15 `BROHD34.MAP` | 5 | 586 | 20100, 0 |
+| 8 | 0 | 197, 83 | (209, 89) | 280 "Entrance" | 30 `MBENT.MAP` | 0 | 587 | 20100, 0 |
+| 9 | 0 | 340, 149 | (352, 155) | 290 "Crater" | 27 `GLOWENT.MAP` | 0 | 592 | 16292, 0 |
+| 9 | 1 | 334, 195 | (346, 201) | 291 "Level 1" | 42 `GLOW1.MAP` | 1 | 593 | 20100, 0 |
+| 10 | 0 | 276, 239 | (288, 245) | 300 "Adytum" | 28 `LAADYTUM.MAP` | 3 | 594 | 20100, 0 |
+| 10 | 1 | 229, 195 | (241, 201) | 301 "Downtown" | 44 `LABLADES.MAP` | 4 | 595 | 20100, 0 |
+| 10 | 2 | 179, 185 | (191, 191) | 302 "Library" | 29 `LAFOLLWR.MAP` | 5 | 596 | 22882, 0 |
+| 10 | 3 | 346, 114 | (358, 120) | 303 "Fortress" | 46 `LAGUNRUN.MAP` | 1 | 597 | 20100, 0 |
+| 10 | 4 | 285, 159 | (297, 165) | 304 "Warehouse" | 45 `LARIPPER.MAP` | 2 | 598 | 24503, 0 |
+| 11 | 0 | 86, 328 | (98, 334) | 310 "Entrance" | 17 `CHILDRN1.MAP` | 0 | 599 | 20500, 0 |
+| 11 | 1 | 229, 313 | (241, 319) | 311 "Interior" | 17 `CHILDRN1.MAP` | 1 | 600 | 20500, 0 |
+| 11, destroyed (row 12) | 0 | 235, 301 | (247, 307) | 290 "Crater" | 47 `CHILDEAD.MAP` | 0 | always | 23099, 0 |
+| 8, destroyed (row 13) | 0 | 106, 64 | (118, 70) | 501 "Ruins" | 48 `MBDEAD.MAP` | 0 | always | 20100, 0 |
+
+"Time" means the Vault 13 rule above. "Always" means that the alternate slot is known whenever the row is shown. Military Base entrance indices 588-591 and labels 281-284 have no catalog slot and are never shown. Vault 15 has no `V15ENT` or `VAULT15` map. Its surface entrance is `VAULTENT.MAP` (map 7, "Buried Vault Entrance" in the `map.msg` comments), reached by slot 0 with selector 0. Slots 1-3 all load the buried vault `VAULTBUR.MAP` (map 8), with selectors 1, 2 and 3. Both maps have the area name "Vault 15" (`map.msg` 107, 108). `[Must-match]`
+
+**Where a chosen entrance places the player.** `[Must-match]` The choice returns the shown town and the slot. When the party is in that town's world-map cell, the following happens:
+
+1. The town becomes the current town.
+2. The slot's file loads by name, with the destroyed-area substitutions of SPEC-008 §3.7. Choosing either Cathedral slot while index 18 is set loads `CHILDEAD.MAP` with selector 0. Choosing `MBENT.MAP` while index 17 is set loads `MBDEAD.MAP` with selector 0.
+3. Campaign index 32 is set to the selector, and the player is placed at the map's header entry (or at the saved position of a working copy, section 3.35).
+4. The map's own script then moves the player according to index 32.
+
+The engine itself derives no tile and no elevation from the selector. Most header entries are the placeholder hex 20100 on elevation 0, so the script's placement is what the player sees. When the party is elsewhere, the world map takes over and the party travels to that town (section 3.39).
+
+**Side panel on the town map.** `[Must-match]`
+
+- A known/visited town's button switches the screen to that town's picture and markers. It does not travel, and it does not change the current town.
+- Buttons of other towns do nothing.
+- The Town/World button returns "World map", and the world map follows at rest (section 3.39).
+
+**Keys.** `[Must-match]` Ctrl+Q, Ctrl+X and F10 open the quit confirmation; a confirmed quit closes the town map with a quit result. F12 takes a screenshot. `+`, `=`, `-` and `_` change brightness. There is no Esc, no close button and no pause key. The screen is left only by a marker, the Town/World button or a quit.
+
+**Closing.** `[Must-match]`
+
+1. The markers are removed.
+2. The picture, the frame, the town names and the date are drawn again, together with the normal triangle of every known marker (no labels), and the window is presented.
+3. This image stays until the next screen draws over it: the world map, or the black fill of a map load.
+4. Background processing is resumed if the town map suspended it, and palette cycling is resumed.
+
+### 3.41 Pip-Boy Screen
+
+The Pip-Boy 2000 is a full-screen modal window with four pages: Status (quests and holodisks), Automaps, Video Archives and Alarm Clock (rest). This section owns its art, layout, text, input and sounds. The game rules stay where they are: quest and holodisk state in SPEC-008 §3.8, rest eligibility, time advance and healing in SPEC-008 §3.9, the automap raster in section 3.33 and SPEC-008 §2.8, and archive movie selection and playback in SPEC-012 §3.12. R1 has no Clues page. The art shows a scratched-out second label with no button behind it. `[Must-match]`
+
+**Art.** All art is under `art/intrface/`, one frame each. Sizes are from the corpus FRM headers. There is no `pipboy.frm`. `[Must-match]`
+
+| Use | Art (list index) | Size |
+| --- | --- | --- |
+| Background, the whole window | `pip.frm` (127) | 640 by 480 |
+| Page buttons | `lilredup.frm` (8) up, `lilreddn.frm` (9) down: the Red button | 15 by 16 |
+| Date and time digits | `numbers.frm` (82), white band: digit d is the 9-by-17 cell at source x = 9d | 360 by 17 |
+| Vault-water note | `pip2.frm` (128) | 148 by 227 |
+| Month names | `months.frm` (129): month m (1-12) uses source rows 15(m - 1) through 15(m - 1) + 13 | 29 by 179 |
+| Note digits | `notenums.frm` (130): digit d is the 12-by-13 cell at source x = 12d | 120 by 13 |
+| Alarm-clock button | `alarmout.frm` (132) up, `alarmin.frm` (131) down | 28 by 24 |
+| Start-screen logo | `pipx.frm` (133) | 204 by 141 |
+| Screen-saver bomb | `bomb1.frm` (226) | 65 by 65 |
+
+The interface bar's `pipup.frm` and `pipdn.frm` (41 by 19) are only the bar's Pip-Boy button (section 3.19). The Pip-Boy window does not use them.
+
+#### 3.41.1 Opening and Closing
+
+**Ways in.** `[Must-match]`
+
+- **`p` or `P`** in the game loop, while the interface bar is enabled. The bar's Pip-Boy button sends `p` (section 3.19). The game loop plays `ib1p1xx1` and opens the Pip-Boy on its start screen.
+- **`z` or `Z`**, under the same condition. It plays `ib1p1xx1` and opens the Pip-Boy with the rest intent, which shows the Alarm Clock page at once (see the opening steps below).
+- **In combat** both keys are refused. The game plays `iisxxxx1` and shows `misc.msg` 7 "Pipboy not available in combat!" in a dialog box at screen (192, 116) (section 3.13), and the Pip-Boy does not open.
+- Nothing else opens the Pip-Boy: no script opcode, no world-map control, and no other window.
+
+**Opening steps**, in order. `[Must-match]` unless tagged.
+
+1. Map background processing is paused if it is running, with the same coverage as in section 3.28: object animation, idle fidgets, critter scripts, timed events, the game clock, floating text, the game mouse and edge scrolling. Palette cycling is suspended. The in-world cursor is turned off and the arrow cursor (section 3.26) is set. Font 101 is selected, and the previous font is remembered.
+2. The credited-rest-minute counter of SPEC-008 §3.9 is reset to 0. No page is current yet, and no row zones exist (section 3.41.2).
+3. `pipboy.msg` is loaded from `text/<language>/game/`, then the eleven art files above. If any of them fails, the Pip-Boy does not open and gives no message. The reference then leaves step 1 in force: background processing stays paused, cycling stays off and font 101 stays selected. `[May-improve]`: undo step 1 when opening fails.
+4. A modal window is created at screen (0, 0), 640 by 480. It covers the map and the interface bar. `pip.frm` is copied into it opaquely. Its art already contains the frame, the five button plates with their labels STATUS, a scratched-out second label, AUTOMAPS, ARCHIVES and CLOSE, and the empty green screen.
+5. The vault-water note, the time and the date are drawn (below).
+6. The buttons are created (below).
+7. The start screen is drawn, except when the rest intent is used and resting is allowed here:
+   - `pipx.frm` is drawn transparently at (323, 156).
+   - If the game date (SPEC-005 §3.5 calendar) is one of the holidays below, its `pipboy.msg` text is drawn in font 101, key 992 [215], with no background. It goes at y = 315 and x = `431 - trunc(w / 2)`, w being the text width, which centers it on x = 431, the logo center plus 6.
+
+   | Date | ID | Text |
+   | --- | ---: | --- |
+   | 1 January | 100 | Happy New Year's Day! |
+   | 14 February | 101 | Happy Valentine's Day! |
+   | 1 April | 102 | Happy All Fool's Day! |
+   | 4 July | 104 | Happy Independence Day! |
+   | 6 October | 103 | Happy Ship Day! |
+   | 31 October | 105 | Happy Halloween! |
+   | 28 November | 106 | Happy Thanksgiving Day! |
+   | 25 December | 107 | Merry Christmas! |
+
+8. **Rest intent, resting refused** (the SPEC-008 §3.9 eligibility test fails): the start screen is drawn as in step 7 and shown. Then `iisxxxx1` plays and `pipboy.msg` 215 "You can not rest at this location!" appears in a large dialog box at screen (192, 135). Its title is drawn in key 32328 [145] at box x = `trunc((302 - 209) / 2) = 46`, y = 52 (section 3.13). After Done, the Pip-Boy stays open on the start screen with no current page.
+9. The sound `pipon` is requested. The corpus has no `pipon.acm`, so nothing is heard (SPEC-010 §3.9).
+10. **Rest intent, resting allowed:** in the first loop pass, the polled input is discarded and the pass acts as a press of the Alarm Clock button. The Alarm Clock page then appears without the start screen.
+
+There is no palette fade on opening or closing (section 3.2), and no animation other than the screen saver (section 3.41.8).
+
+**Closing.** Esc, Enter, `p`, `P`, the Close button, a pending quit request, or an Alarm Clock rest that a timed event interrupts (SPEC-008 §3.9) closes the window. Closing then runs these steps in order. `[Must-match]`
+
+1. The map-update scripts run (`map_update_p_proc`, SPEC-006), on every close, whether or not time passed.
+2. The window and all its buttons are removed, and `pipboy.msg` is unloaded.
+3. The remembered font is restored.
+4. Map background processing resumes only if step 1 of opening paused it. Palette cycling resumes.
+5. The arrow cursor is set and the interface bar is redrawn.
+
+No closing sound plays.
+
+**Window controls.** Coordinates are window coordinates, which equal screen coordinates here. Each control acts on mouse release inside its rectangle. `[Must-match]`
+
+| Control | Rectangle | Art | Sounds | Sends |
+| --- | --- | --- | --- | --- |
+| Status | (53, 341) 15 by 16 | Red button, drawn transparently | `ib1p1xx1` press, `ib1lu1x1` release | Status page |
+| (none) | (53, 368) | No button: the scratched-out label | | |
+| Automaps | (53, 395) 15 by 16 | Red button | Red-button sounds | Automaps page |
+| Archives | (53, 422) 15 by 16 | Red button | Red-button sounds | Video Archives page |
+| Close | (53, 449) 15 by 16 | Red button | Red-button sounds | Close |
+| Alarm clock | (124, 13) 28 by 24 | `alarmout.frm` up, `alarmin.frm` down, drawn transparently | `ib2p1xx1` press, `ib2lu1x1` release | Alarm Clock page |
+
+The whole rectangle of each button is clickable; no mask is used. The page buttons, labels included, are part of `pip.frm`. A page button pressed while its page is already shown redraws that page from its initial state. `[Must-match]`
+
+**Keys.** `[Must-match]`
+
+| Key | Action |
+| --- | --- |
+| Esc, Enter, `p`, `P` | Close |
+| Ctrl+Q, Ctrl+X, F10 | Quit confirmation (section 3.17); the Pip-Boy then closes whatever the answer |
+| F12 | Screenshot |
+| PageDown, PageUp | Sent to the current page as "next" and "previous". Only a holodisk reading page uses them |
+
+Every other key does nothing. That includes the arrow keys, Home, End, the digit keys, Tab, F1 and the in-game hotkeys of section 3.19.
+
+**Date and time.** Digits are copied opaquely from the white band of `numbers.frm`, 9 pixels apart, with leading zeros. They are drawn at opening and after every rest step. The display is not otherwise refreshed, since the game clock is paused while the window is open. `[Must-match]`
+
+| Item | Position | Format |
+| --- | --- | --- |
+| Day of month | (20, 17), 2 digits | `05` |
+| Month | (46, 18): a 29-by-14 block from `months.frm`, copied opaquely | JAN through DEC art |
+| Year | (83, 17), 4 digits | `2161` |
+| Time | (155, 17), 4 digits, 24-hour clock, no separator | `0721` |
+
+**Vault-water note.** The note shows unless campaign global 101 (the water chip) equals 2 or campaign global 10 (the vault-water days) equals 0. Otherwise the 148-by-227 rectangle at (32, 83) is restored from `pip.frm`. A shown note is `pip2.frm` copied opaquely at (32, 83), with the days left in `notenums.frm` digits drawn transparently over it. The digits are drawn from the ones digit up: the ones digit at (92, 180), and each next digit 12 pixels further left and 2 pixels lower. After a digit 1, the next digit moves only 6 pixels left. The note is redrawn at opening and after every rest step. `[Must-match]` A negative day count shows the note and draws cells from outside the digit art. `[May-improve]`: hide the note when the day count is not positive.
+
+#### 3.41.2 The Screen Area and Row Zones
+
+**Screen area.** The page text area is the rectangle (254, 46) 374 by 410, that is x 254-627 and y 46-455. Drawing a page first restores this rectangle from `pip.frm`. The start-screen logo and any earlier page vanish with it. Pixels outside the rectangle are never restored by a page. `[Must-match]`
+
+**Lines.** Text is in font 101, with a line height of 10 (SPEC-002 §2.4). Line n, for n from 0 to 40, has its text origin at y = `46 + 10 n`. Line 40, at y = 446, is the bottom line. Printing a line moves the text cursor to the next line, but never past line 40. A page's layout often skips a line after each entry, so lists use every other line. `[Must-match]`
+
+**Horizontal placement.** w is the text width (SPEC-002 §3.1). `[Must-match]`
+
+| Mode | Text starts at x |
+| --- | --- |
+| Normal | 262 |
+| No indent (holodisk text) | 255 |
+| Centered | `254 + trunc((350 - w) / 2)`, centered on x = 429 |
+| Right column | 437 |
+| Left-header alignment | `364 - w`, so the text ends at x = 364 |
+| Right-header alignment | `522 - w`, so the text ends at x = 522 |
+
+Text is drawn over the screen with no background fill. Its drawing limit is 640 pixels, so a long line is not clipped at the screen edge. Underlined text uses the font underline of SPEC-002 §3.1, row 8 below the text origin. A struck-through line has a 1-pixel line at text origin y + 3, from the text's left x across its full advance width w, in the text color. `[Must-match]`
+
+**Colors.** `[Must-match]`
+
+- Ordinary text: key 992 [215].
+- The selected or pressed row: key 32747 [57], selection yellow.
+- Completed quests: key 8804 [218], struck through.
+- No hover color exists. Nothing changes when the pointer moves over a row.
+
+**Row zones.** Clickable rows are invisible, art-less rectangles 350 by 10 at x = 254, one line tall. They make no sound of their own; the page plays `ib1p1xx1` when it accepts a click. A zone created for line n covers y = `46 + 10 n` through `+ 9`. A page creates its zones starting at a first line s, one per entry, on lines s, s + 2, s + 4 and so on. Zone k, counted from 0, reports row number `s + k - 1`. A zone is created only while `s + k` is below 20, so at most 18 zones exist for s = 2. A page may also create a **Back zone** on line 40, (254, 446) 350 by 10. `[Must-match]`
+
+A click's horizontal position, where a page tests it, is the pointer x when the release is processed. A page that accepts a click usually redraws the clicked entry in yellow, shows it for 200 milliseconds, then acts. `[Must-match]`
+
+Zone defects in R1:
+
+- **Back zones stay.** A Back zone is never removed when its page is left. It stays until the window closes, and every new one stacks over it. On the Status list (section 3.41.3), a release on line 40 left of x = 429 then plays `ib1p1xx1` twice, flashes a yellow BACK there for 200 milliseconds, and redraws the list. On the other list pages it does nothing. `[May-improve]`: remove the Back zone when leaving the page that created it.
+- **Removal overrun.** Removing a page's zones visits as many entries as the page asked for, even beyond the 18 that exist. When quest locations plus holodisks reach 18 or more, the Status page asks for more than 18, and the removal goes past its table. `[May-improve]`: remove only the zones that were created.
+
+**Text cursor overflow.** Lines printed after line 40 overprint line 40. No shipped content reaches it. `[Must-match]`
+
+#### 3.41.3 Status Page
+
+Quest visibility, the water-chip rule, holodisk acquisition, and the 35-record page budget are SPEC-008 §3.8's. This section places them. `[Must-match]` unless tagged.
+
+**List view**, drawn by the Status button:
+
+- Line 0: `pipboy.msg` 202 "STATUS", underlined. When any holodisk global is nonzero, it is right-aligned to end at x = 364, and 211 "DATA", underlined, is right-aligned to end at x = 522 on the same line. Otherwise STATUS is centered (x = 405).
+- From line 2, every other line: one location title per visible quest group (`pipboy.msg` 700 + 10 × town), at x = 262. The water-chip quest keeps Vault 13 always listed, so the alternative text 203 "No current tasks." can never show in R1.
+- From line 2, every other line, right column x = 437: the titles of acquired holodisks (`pipboy.msg` 400 + ordinal), in ordinal order.
+- Zones start at line 2. The page asks for one zone per quest location plus one per holodisk plus one more, and at most 18 are created. Row number r (from 1) is the r-th location on the left and the r-th holodisk on the right.
+
+**Clicks on the list.**
+
+- **Left, x < 429**, row r: `ib1p1xx1`, then location r in yellow for 200 milliseconds, then its detail view. A left click on a row past the last location still plays the sound and the 200-millisecond pause, but leaves the list in a state where only location rows respond, by opening their detail views directly. Holodisk rows stop working until the Status button is pressed again. PageUp and PageDown with the pointer left of x = 429 do the same. `[May-improve]`: ignore left clicks below the last location and page keys on the list.
+- **Right, x > 429**, row r no greater than the holodisk count: `ib1p1xx1`, then holodisk mapping (SPEC-008 §3.8). Then one title in yellow for 200 milliseconds, and the reading view. The highlighted title is the row whose position equals the chosen disk's ordinal, not the clicked row. Unless every lower-ordinal disk is also held, the wrong title or none lights. `[May-improve]`: highlight the clicked row.
+- x = 429 exactly does nothing.
+
+**Detail view** of a quest location:
+
+- Line 1: location title, a space, and `pipboy.msg` 210 "Status", underlined, at x = 262, for example "Junktown Status".
+- From line 3: each visible quest of the group, numbered `1.`, `2.` and so on, compactly, as "N. text" from `pipboy.msg` 701 + 10 × town + position. Each is wrapped to 350 pixels by the rule below. Every wrapped line is followed by one blank line. An active quest uses key 992; a completed quest uses key 8804 [218], struck through.
+- Line 40: 201 "BACK", centered (x = 413), and a Back zone.
+- Back: `ib1p1xx1`, BACK in yellow for 200 milliseconds, then the list view. Page keys do nothing here.
+
+**Wrapping.** This is the shared word wrapper, here at width 350. `[Must-match]`
+
+1. If the string's width is below 350, it is one line.
+2. Otherwise, scan character by character, summing each character's advance: its width plus the letter spacing, with a space taking the font's space width (SPEC-002 §3.1).
+3. While the sum is at most 350, remember the last space-class character (space, tab, line feed, vertical tab, form feed, carriage return) or hyphen.
+4. When the sum exceeds 350, end the line just after the remembered character, which stays at the end of the earlier line, and rescan from the character after it with the sum at 0. With nothing remembered, the line ends before the current character, which starts the next line.
+5. At most 63 lines are made. A wrap failure skips that quest's text, though its number is still used.
+
+No shipped English quest needs a second line: the widest, "9. " plus `pipboy.msg` 751, is 301 pixels.
+
+**Reading view** of holodisk ordinal o, with page p counted from 0:
+
+- Line 0, on page 0 only: the title (`pipboy.msg` 400 + o), centered and underlined.
+- When the disk has more than one page, a counter is drawn at y = 48: the page number p + 1, a space, `pipboy.msg` 212 "of", a space, and the page count (last-page index + 1). Its x is 580 minus the width of "of", which is 567 in font 101. It appears on every page. Only the width of "of" is subtracted, so the counter's left edge is fixed and longer counters grow to the right. `[Must-match]`
+- From line 3: up to 35 records in no-indent mode (x = 255), one record per line with no wrapping. `**END-PAR**` leaves a blank line. The widest shipped English line is 359 pixels wide and runs to x = 613.
+- Line 40: 201 "BACK" right-aligned to end at x = 364, and 200 "MORE" or, on the last page, 214 "DONE", right-aligned to end at x = 522. A Back zone covers the line.
+- **Zone and keys:**
+
+  | Input | Not last page | Last page |
+  | --- | --- | --- |
+  | Release on line 40 with x ≥ 460, or PageDown | Next page | Release: list view; PageDown: nothing |
+  | Release on line 40 with x ≤ 395 | Previous page; list view from page 0 | Same |
+  | Release on line 40 with x 396-459 | Nothing | Nothing |
+  | PageUp | Previous page; list view from page 0 | Same |
+
+  Every accepted action plays `ib1p1xx1` and redraws BACK and MORE or DONE, both in key 992, so the press shows no color change. It then waits 200 milliseconds before acting.
+
+#### 3.41.4 Automaps Page
+
+The page lists areas from the automap database (SPEC-008 §2.8), then the captured elevations of the chosen area, then shows the raster of section 3.33. The database is read again each time a list is drawn. If it cannot be read, only the title is shown. `[Must-match]` unless tagged.
+
+**Area list.**
+
+- Line 0: `pipboy.msg` 205 "AUTOMAPS", centered and underlined.
+- From line 2, every other line, at x = 262: one entry per **area group**. Maps are scanned from 0 to 65. A map with a positive offset on at least one elevation joins the list unless an already-listed map appears in its related-map row (table below). Each group is therefore listed under its lowest-numbered captured map.
+- The entry text is that map's short name (`map.msg`, section 3.14 table). Entries are sorted by byte-wise text comparison, ascending. The shipped groups have distinct names.
+- Zones start at line 2, one per entry. Row r (from 1) selects entry r: `ib1p1xx1`, then the elevation view.
+- Before the elevation view replaces it, the list is drawn once with the "selected" entry in yellow. That entry is chosen as the one on line r + 1. It is right only for row 1, and the list is replaced in the same instant. `[May-improve]`: highlight the clicked row, or skip this redraw.
+
+**Related-map table.** This is a fixed table of five positions per map number, in position order. Maps not listed have five empty positions. The relation is used only by this page. `[Must-match]`
+
+| Maps | Row entries, by position |
+| --- | --- |
+| 3 / 4 / 5 / 9 | 9, 4, 5 / 3, 9, 5 / 3, 4, 9 / 3, 4, 5 |
+| 6 / 35 | 35 / 6 |
+| 7 / 8 | 8 / 7 |
+| 10 / 11 / 12 | 11, 12 / 10, 12 / 10, 11 |
+| 13 / 14 / 15 / 55 | 14, 15, 55 / 13, 15, 55 / 13, 14, 55 / 13, 14, 15 |
+| 16 / 25 / 26 | 25, 26 / 16, 26 / 16, 25 |
+| 17 / 18 / 33 / 34 / 47 | 18, 47, 33, 34 / 17, 47, 33, 34 / 34, 47, 17, 18 / 33, 47, 17, 18 / 17, 18, 33, 34 |
+| 27 / 42 / 43 | 42, 43 / 27, 43 / 27, 42 |
+| 28 / 29 / 44 / 45 / 46 | 29, 44, 45, 46 / 28, 44, 45, 46 / 28, 29, 45, 46 / 28, 29, 44, 46 / 28, 29, 44, 45 |
+| 30 / 31 / 32 / 48 | 31, 32, 48 / 30, 32, 48 / 30, 31, 48 / 30, 31, 32 |
+| 36 through 41 | The other five of 36-41, ascending |
+
+**Elevation view** of the chosen map A:
+
+- Line 0: AUTOMAPS, centered and underlined.
+- Line 2: `map.msg` 100 + A (the map's area description), centered.
+- From line 4, every other line, at x = 262: first each elevation e of A, from 0 to 2, with a positive offset. Its text is `map.msg` 200 + 3A + e, which is often empty, but the row still counts.
+- Then R1 visits positions i = 0 through 4 of A's related-map row. For each position i that holds a map, skipping i = A, it lists the captured elevations of **map number i** itself, not of the map stored there, with map i's elevation names. Two results follow:
+  - The other maps of a group never appear.
+  - Necropolis maps 3 (`HALLDED`) and 4 (`HOTEL`) appear under areas whose rows have entries at those positions: the Hub group for both, and the Cathedral and Boneyard groups for map 3, when those maps have captures.
+
+  `[May-improve]`: for each position holding a map M other than A, list M's captured elevations under M's names.
+- Line 40: BACK, centered, with a Back zone.
+- Zones start at line 0, covering the entries plus two: line 0 reports row -1, line 2 row 0, and line 4 + 2(r - 1) row r.
+- The first entry is shown in yellow, and its raster is drawn at once (section 3.33) over the text, from window (238, 105).
+
+**Clicks in the elevation view.**
+
+- Row r (from 1): `ib1p1xx1`. The view is redrawn with entry r in yellow and its raster drawn.
+- Back, or the title line (row -1): the area list is redrawn, then `ib1p1xx1` plays.
+- The description line (row 0) does nothing.
+- Page keys do nothing.
+
+Raster cells that fall outside the screen area, at x 238-253, x 628-637, and y beyond 455, are drawn over the frame art. No later page erases them until the window closes. `[May-improve]`: restore those pixels from `pip.frm` whenever the screen area is redrawn.
+
+#### 3.41.5 Video Archives Page
+
+`[Must-match]`
+
+- Line 0: `pipboy.msg` 206 "VIDEO ARCHIVES", centered and underlined.
+- From line 2, every other line, at x = 262: one entry per movie index 3 through 13 whose played byte is set (SPEC-012), in index order. The text is `pipboy.msg` 500 + index:
+  - 503 Vat Destruction; 504 Cathedral Destruction; 505 Overseer Briefing; 506 Vault 13 Water Deprivation; 507 Vault 13 Invasion;
+  - 508 and 509 Leaving Vault; 510 Dipped in the Vats; 511 Vault 13 Water; 512 Vault 13 Water Running Low; 513 Rae Kills the Master.
+- IDs 500-502 (logos and intro) are never listed. Index 13 never is either, because its movie is absent from the corpus and is never marked played (SPEC-012). Overseer Briefing is listed in every game, since the new-game movie marks it.
+- Zones start at line 2, one per entry. Row r: `ib1p1xx1`, then entry r in yellow. The movie chosen by the SPEC-012 §3.12 Pip-Boy selection plays with flags `0x0B`: fade out first, fade the game palette back in after, pause music.
+- Afterwards font 101 is selected again, the idle timer of section 3.41.8 restarts, and the list is redrawn without a highlight.
+- Page keys do nothing.
+
+#### 3.41.6 Alarm Clock Page
+
+The Alarm Clock button, or the rest intent, first runs the rest eligibility test of SPEC-008 §3.9. `[Must-match]` unless tagged.
+
+**Refused.** `iisxxxx1` plays, and `pipboy.msg` 215 "You can not rest at this location!" is shown in the large dialog box at screen (192, 135), as in section 3.41.1, step 8. The screen area is left as it was. However, the Alarm Clock becomes the current page while the previous page's row zones remain. A later click on such a zone, at row 4 through 16, starts the rest option for that row (row 4 is ten minutes) with no eligibility test. `[May-improve]`: after a refusal, keep the previous page current, so its zones keep their own meaning.
+
+**Allowed: the page.**
+
+- Line 0: `pipboy.msg` 300 "ALARM CLOCK", centered and underlined.
+- At y = 66, the strip (254, 66) 350 by 10 is restored from `pip.frm`. Then "Hit Points cur/max" (301 "Hit Points", a space, current HP, `/`, maximum HP), centered in key 992, for example "Hit Points 25/30" at x = 377.
+- From line 5, every other line (y = 96 + 20j for j = 0 to 12), at x = 262: options j, with text 302 + j, as below. A zone covers each option line, and option j reports row j + 4.
+
+| j | ID | Text | Rest (SPEC-008 §3.9) |
+| ---: | ---: | --- | --- |
+| 0 | 302 | Rest for ten minutes | 0 h 10 min |
+| 1 | 303 | Rest for thirty minutes | 0 h 30 min |
+| 2-7 | 304-309 | Rest for an hour; two; three; four; five; six hours | j - 1 hours |
+| 8 | 310 | Rest until morning (0600) | Until 06:00 |
+| 9 | 311 | Rest until noon (1200) | Until 12:00 |
+| 10 | 312 | Rest until evening (1800) | Until 18:00 |
+| 11 | 313 | Rest until midnight (0000) | Until 00:00 |
+| 12 | 314 | Rest until healed | Until healed |
+
+An "until" option with wake hour W, at current time h:m, uses d = (W - h) mod 24, in 0 through 23. With m = 0 it rests d hours, or 24 hours when d = 0. With m > 0 it rests (d - 1) mod 24 hours and 60 - m minutes. Either way it ends at the next W:00 strictly after now. No message lists an "until party healed" option.
+
+**Choosing an option.**
+
+1. `ib1p1xx1` plays and the option is redrawn in yellow.
+2. The animated watch cursor `wait2.frm` (section 3.26) is shown.
+3. The rest runs in steps of at least 50 milliseconds each (SPEC-008 §3.9). After each step, the time digits, the date, the note, and (in the hour phase) the Hit Points line are redrawn and shown. The Hit Points line is also redrawn after the minute phase. There are no clock hands: the digits change.
+4. Input is polled once per step. Esc stops the rest and the Pip-Boy stays open. Every other key and click polled during the rest is discarded. A pending quit request also stops it.
+5. At the end, the time, date and note are drawn once more, and the arrow cursor returns.
+6. `ib2lu1x1` plays and the page is redrawn with no option highlighted.
+7. If a timed event ended the rest, the Pip-Boy then closes. If a quit request did, it closes on the next loop pass.
+
+"Rest until healed" with full HP passes no time, though steps 1, 6 and the redraw still happen.
+
+Long rests do not restart the idle timer of section 3.41.8. When a rest took more than 120 seconds of real time, the screen saver can start right after it.
+
+Page keys do nothing on this page.
+
+#### 3.41.7 Start-of-Session State
+
+R1 keeps the current page and its private view state between openings of the Pip-Boy. Opening shows no page, but PageUp and PageDown are still sent to the page current at the last close. After closing on a holodisk reading view, PageDown at the next opening draws that disk's next page. PageUp draws its previous page, or the Status list. After closing on the Status list, a page key with the pointer left of x = 429 draws the remembered Status list over the start screen. `[May-improve]`: ignore page keys until a page button has been pressed in the current opening.
+
+#### 3.41.8 Screen Saver
+
+`[Must-match]` unless tagged.
+
+**Start.** Each main-loop pass that polls no input and finds the pointer where it was compares the time against the idle timer. The timer restarts at opening, on any input or pointer movement, after an archive movie, and when the screen saver ends. Once more than 120000 milliseconds have passed, the screen saver runs. The Alarm Clock rest steps do not restart the timer.
+
+**Run.**
+
+1. The screen area (section 3.41.2) is saved and restored to the bare `pip.frm` screen. Sixteen bomb slots start inactive, and a warm-up counter starts at 50.
+2. Each pass first checks for input and pointer movement. Any input or movement from the starting pointer position ends the screen saver, and that input is consumed.
+3. One draw in the range 0 through 32767 is made from the game random generator (SPEC-006 §3.4). If it is below 3047.3311, so 0 through 3047, and a slot is free, the lowest free slot gets a new bomb, with two more draws in this order:
+   - **Position.** Let v be the second draw and P = `trunc(v / 32767 × 724)` in double precision, where 724 = `(350 - 16) + (406 - 16)`. If P ≤ 394, the bomb starts at (602, P + 48) on the right edge. Otherwise it starts at (P - 124, -17), above the top.
+   - **Speed.** Let s be the third draw. The speed is `s × 2.75 / 32767 + 0.15`, stored in single precision, with progress 0.
+   
+   With no free slot, only the first draw is made.
+4. While the warm-up counter is above 0, nothing is drawn and there is no wait; the counter drops by 1 at the end of the pass. Once it reaches 0, each pass restores the screen area from `pip.frm`, draws the bombs, shows the screen area, and waits until 50 milliseconds have passed since the pass began.
+5. Each active bomb is clipped against x 254-603 and y 46-451, then drawn transparently from `bomb1.frm`, in slot order:
+   - **Horizontal.** If x ≥ 254, the width is 65, or `604 - x` when `x + 65 ≥ 604`; a width below 1 frees the slot. If x < 254, `254 - x` columns are skipped (65 or more frees the slot), and the rest is drawn from x = 254.
+   - **Vertical.** If y ≥ 46, the height is 65, or `452 - y` when `y + 65 ≥ 452`; a height below 1 frees the slot. If y < 46, the slot is freed when `y + 65 < 46`; otherwise `46 - y` rows are skipped and the rest is drawn from y = 46.
+6. Then every bomb that was active at the start of step 5 gains its speed in progress. When the progress reaches 1.0, the bomb moves to x = `trunc(x - progress)` and y = `trunc(y + progress)`, computed in single precision, and the progress returns to 0. Bombs drift down and to the left.
+
+**End.** The saved screen area is put back and shown. The reference also turns the game mouse back on, which background processing had turned off. For the rest of this opening, the cursor at a screen edge becomes a scroll arrow and the hidden map behind the Pip-Boy edge-scrolls (section 3.29). `[May-improve]`: leave the game mouse off until the Pip-Boy closes.
+
+#### 3.41.9 Message IDs
+
+All `pipboy.msg` IDs used, with English corpus texts. `[Must-match]`
+
+| IDs | Use |
+| --- | --- |
+| 100-107 | Holiday greetings (section 3.41.1) |
+| 200 MORE, 201 BACK, 214 DONE | Paging and Back controls |
+| 202 STATUS, 211 DATA, 210 Status, 212 of | Status headers, detail header suffix, page counter |
+| 203 No current tasks. | Status fallback, unreachable in R1 |
+| 205 AUTOMAPS, 206 VIDEO ARCHIVES, 300 ALARM CLOCK | Page titles |
+| 215 You can not rest at this location! | Rest refusal |
+| 301 Hit Points | Alarm Clock HP line |
+| 302-314 | Rest options |
+| 400-417 | Holodisk titles; 1000 × (ordinal + 1) onward holds their text (SPEC-008 §3.8) |
+| 503-513 | Archive titles; 500-502 exist but are never listed |
+| 700-810 | Quest location titles (700 + 10 × town) and quests (SPEC-008 §3.8) |
+
+IDs 204, 207-209, 213 and 600-608 exist in the corpus but are not used by R1. They include CLUES, "Page", the button names, and "Welcome to the Rob Co Pipboy 2000.".
+
+### 3.42 Character Screen Outside Creation Mode
+
+This section covers the character editor when it is opened during play. Only the differences from creation mode (sections 3.8-3.11) and the parts that exist only in game are listed. Everything not mentioned here is as in section 3.8. Progression rules (skill points per level, perk timing, eligibility, the perk table) are in SPEC-011 §3.20-§3.22. `[Must-match]` unless tagged.
+
+**Opening.** The screen opens from the `c` key or the Character button of the interface bar (section 3.19), only while the bar is enabled. That includes the player's turn in combat. The key plays `ib1p1xx1`; a button click plays the button's own pair first. Map background processing is suspended while the screen is open.
+
+- A level-up never opens the screen. It sets the pending level-up flag, which shows the LEVEL indicator box (section 3.24).
+- Every exit, Done or Cancel, clears that flag, so the LEVEL box goes away even after Cancel.
+- There is no palette fade (section 3.2). Palette cycling is off, the cursor is the arrow, and the indicator-box window is hidden while the screen is open.
+- On exit the interface bar is redrawn and the HP counter is updated without its drum roll (section 3.21).
+
+**Open sequence.**
+
+1. Take the snapshot used by Cancel. It holds:
+   - base and bonus stats and invested skill points;
+   - current HP and the name;
+   - perk ranks and unspent skill points;
+   - tags and traits;
+   - the last reconciled level and the pending-perk flag;
+   - every skill's current value, used as the decrement floor below.
+2. Draw the whole screen.
+3. Reconcile skill points and perk picks for the levels gained since the last visit (SPEC-011 §3.21).
+4. If a perk pick is pending, switch to the Perks folder and open the perk chooser (below) over the screen.
+5. Redraw the skills, SPECIAL rows, derived stats and info card, then run the input loop.
+
+**Remembered state.** These persist from one opening to the next:
+
+- the selected info line, and with it the card;
+- the selected folder;
+- the skill cursor.
+
+A new game or a reset sets them to the Strength card, the Perks folder and the first skill. Leaving creation mode resets the info line only. Erase and Load in creation mode reset all three.
+
+**Window and background.** The window is screen (0, 0) 640 by 480. Its background is `edtredt.frm` (list index 177, 640 by 480, one frame), copied opaquely. The creation-mode background `edtrcrte.frm` (list index 169) is used only in creation mode.
+
+**What is drawn differently.**
+
+| Element | In game |
+| --- | --- |
+| Name, Age, Sex | The three "off" images with their captions (section 3.8), drawn transparently at (9, 0), (154, 0) and (235, 0). They are not buttons |
+| SPECIAL number | Big number at (58, Y): the effective value E (SPEC-006 §3.1, 1-10), always the white set, never animated. There are no plus/minus buttons |
+| SPECIAL word | `stat.msg` 300 + E: "V. Bad", "Bad", "Poor", "Fair", "Average", "Good", "V. Good", "Great", "Excellent", "Heroic". Font 101 at (103, Y + 8), key 992, or 32747 when selected. Creation mode uses `editor.msg` 200-209 instead |
+| CHAR POINTS caption and counter | Replaced by the level block (below) |
+| OPTIONAL TRAITS caption, trait list, trait buttons, tag buttons | Absent. The folder tabs and folder lists use the lower-left area |
+| TAG SKILLS caption and counter | "SKILL POINTS" (`editor.msg` 112), font 103, key 18979, at (400, 233). The big number at (522, 228) shows the unspent skill points: two digits, "99" for values above 99, not animated on redraw |
+| Skill slider | Present (below) |
+| OPTIONS button | The same Red button at (343, 454), captioned PRINT (`editor.msg` 103) at (363, 454) in font 103, key 18979. It opens the print file dialog directly (section 3.43) |
+| Hit Points condition line | "Hit Points cur/max" shows the current HP; creation mode shows max/max |
+
+DONE and CANCEL are as in section 3.8.
+
+**Level block.** Before each draw the strip (32, 280) 124 by 32 is restored from the background. Font 101, x = 32. Each line is key 992, or 32747 while its info line is selected.
+
+| y | Info line | Text |
+| ---: | ---: | --- |
+| 280 | 7 | "Level:" (`editor.msg` 113), a space, the level in decimal |
+| 291 | 8 | "Exp:" (114), a space, the experience grouped |
+| 302 | 9 | "Next Level:" (115), a space, the next threshold grouped (SPEC-011 §3.20), or `------` at level 21 |
+
+**Grouped numbers.** A grouped number is the decimal value without leading zeros. A comma follows the millions digit and the thousands digit whenever those digits are printed: 0 gives "0", 1000 gives "1,000", 15500 gives "15,500", and 1234567 gives "1,234,567". A negative value gives an empty string. The same rule formats experience and quantities in the printed sheet (section 3.43).
+
+**Skill slider.** The skill list is as in section 3.8. One row, the skill cursor c (0-17), carries the slider:
+
+- `slider.frm` (list index 190, 43 by 29), drawn transparently at (592, 16 + 11c);
+- a plus button, `splsoff.frm` / `splson.frm` (193 / 194, 16 by 12), at (614, 20 + 11c);
+- a minus button, `snegoff.frm` / `snegon.frm` (191 / 192, 17 by 12), at (614, 31 + 11c).
+
+Both buttons are transparent and play `ib1p1xx1` on press, with no release sound.
+
+- A press in the skill rows area (370, 27) 223 by 195 moves the cursor to row `trunc((y - 27) * 0.092307694)`, at most 17. It also selects that skill's card and moves the slider and buttons.
+- The SKILLS caption area (376, 5) 223 by 20 selects the Skills card. It does not move the cursor.
+
+**Spending skill points.** Each step acts on the cursor skill.
+
+- **Plus.**
+  - With no unspent points, refusal A.
+  - Otherwise, with the skill value at 200 or more, refusal B.
+  - Otherwise one unspent point moves into the skill's invested points. The shown value rises as SPEC-006 §3.3 gives: 1% per point, 2% for a tagged skill.
+- **Minus.**
+  - If the skill value is not above the value it had when the screen opened, refusal C.
+  - Otherwise, if the skill has no invested points, refusal C.
+  - Otherwise one point returns to the unspent pool, with no upper limit.
+- **After every attempt**, the skill's card is selected and the skill list redrawn. The big number at (522, 228) shows the unspent points. After a successful step it animates from the previous value (section 3.8, "Big numbers").
+- **Refusals.** Each plays `iisxxxx1` and opens a large dialog box at (192, 126) with title and body in key 32328 (section 3.13):
+
+  | Refusal | Title | Body |
+  | --- | --- | --- |
+  | A | "No free skill points available." (`editor.msg` 136) | None |
+  | B | The skill name followed by ":" | "At maximum level." (132), "Unable to increment it." (133) |
+  | C | The skill name followed by ":" | "At minimum level." (134), "Unable to decrement it." (135) |
+
+- **Holding** a slider button repeats exactly as the SPECIAL buttons do in creation mode (section 3.9). It stops on release, on leaving the button, or on a refusal.
+- **Keys.** `+`, Right arrow and uppercase `N` make one plus step; `-`, Left arrow and uppercase `J` make one minus step. Keys do not repeat beyond the keyboard's own repeat.
+
+The decrement floor is the skill's value when the screen opened, not its invested points. A value raised during the same visit by Tag! or by losing Gifted through Mutate! therefore lets the player refund points invested on earlier visits. `[May-improve]`: Safe rule: never refund below the invested points the skill had when the screen opened.
+
+**Folder tabs.** One of three images is drawn opaquely at (11, 327), 318 by 33:
+
+- `perksfdr.frm` (list index 180) when Perks is selected;
+- `karmafdr.frm` (178) for Karma;
+- `killsfdr.frm` (179) for Kills.
+
+When the screen opens, the tab captions are drawn into copies of these images in font 103 on row 5. PERKS (`editor.msg` 109) is centered on x = 61, KARMA (110) on 159 and KILLS (111) on 257, each at x = center - trunc(width / 2). The selected tab's caption is key 18979, the other two key 14723. With the English widths 33, 39 and 30, the captions start at x = 45, 140 and 242 in the image, which is screen (56, 332), (151, 332) and (253, 332).
+
+**Clicking a tab.** A transparent button with mask `fldrmask.frm` (list index 186, 318 by 33) covers (11, 327). On release it plays `ib3p1xx1` and picks the folder from the screen x of the pointer:
+
+| Screen x | Folder | General card selected |
+| --- | --- | --- |
+| 208 or more | Kills | Kills |
+| 111-207 | Karma | Karma |
+| 110 or less | Perks | Perks |
+
+The folder and the card are redrawn even when the tab was already selected. Every folder draw first restores the list area (34, 360) 280 by 120 from the background.
+
+**Folder lists.** All folder text is font 101, key 992, or 32747 for the selected folder line. A press in the area (28, 363) 283 by 105 selects folder line `trunc(max(0, y - 364) / 11)` (0-9). In the Kills folder, 10 is added when the screen x is above 174. Folder line j is info line 10 + j.
+
+- **Perks.**
+  - Rows start at (34, 364) and step 11. Each perk whose rank is above 0 gets a row, in perk-index order 0-63. That includes the effect perks 53-63, which drugs and armor grant (SPEC-011 §3.22).
+  - A row reads "Name" (`perk.msg` 101 + perk), or "Name (r)" when the rank r is above 1. At most 7 rows are drawn; further perks are not shown.
+  - Row j is folder line j.
+  - The heading "TRAITS" (`editor.msg` 156), of width w, is drawn at y = 439, x = trunc((280 - w) / 2) + 31.
+  - Two one-pixel rules in key 992 sit at y = 444. One runs from x = 34 to x = trunc((246 - w) / 2). The other runs from x = trunc((280 - w) / 2) + w + 45 for trunc((246 - w) / 2) pixels more. For the English w = 42 the text starts at x = 150, and the rules span 34-102 and 206-308.
+  - The first trait slot is drawn at y = 450 and lights for folder line 8. The second slot is drawn at y = 461 when the first slot is in use, otherwise at y = 450, and lights for folder line 9. Names come from `trait.msg` 100 + trait.
+- **Karma.**
+  - Row 0 at (34, 362) is "Reputation (General) " (`editor.msg` 1000, with its trailing space) followed by campaign variable 155 in signed decimal.
+  - Rows 1 and on start at y = 373 and step 11. They are the entries below whose campaign variable is not 0, in this order. Row j is folder line j.
+
+    | Entry | Variable | Text | Picture |
+    | ---: | ---: | --- | --- |
+    | 1 | 156 | 1001 "Berserker" | 49 `repbrsrk.frm` |
+    | 2 | 157 | 1002 "Champion" | 51 `repgood.frm` |
+    | 3 | 158 | 1003 "Childkiller" | 50 `repchild.frm` |
+    | 4 | 189 | 1004 "Nuka Cola Craving" | 52 `alchohol.frm` |
+    | 5 | 190 | 1005 "Buffout Craving" | 53 `addict.frm` |
+    | 6 | 191 | 1006 "Mentats Craving" | 53 `addict.frm` |
+    | 7 | 192 | 1007 "Psycho Craving" | 53 `addict.frm` |
+    | 8 | 193 | 1008 "RadAway Craving" | 53 `addict.frm` |
+    | 9 | 194 | 1009 "Alcohol Craving" | 52 `alchohol.frm` |
+
+    Entry e's card has title `editor.msg` 1000 + e and description 1100 + e. Row 0's card is picture 48 `rep.frm`, title 1000 and description 1100. Pictures are `art/skilldex/` list indices.
+- **Kills.**
+  - The 15 kill types have names in `proto.msg` 450-464: Men, Women, Children, Super Mutants, Ghouls, Brahmin, Radscorpions, Rats, Floaters, Centaurs, Robots, Dogs, Manti, DeathClaws, Master.
+  - Types with a nonzero kill count are listed, sorted by name in byte order, so "DeathClaws" sorts before "Dogs".
+  - Rows start at y = 362 and step 11. The first 10 entries fill the left column: name at x = 34, count at x = 136. The rest fill the right column from y = 362: name at x = 191, count at x = 293.
+  - Counts are plain decimal. Left row i is folder line i; right row i is folder line 10 + i.
+
+**Condition lines.** They use the positions and colors of section 3.8. A line is lit (key 992, or 32747 when selected) when its condition holds, and dark (key 1313, or 15845 when selected) otherwise. The same test runs in creation mode, where all of them are normally dark.
+
+| Line | Text | Lit when |
+| --- | --- | --- |
+| 1 | Poisoned (`editor.msg` 312) | The player's current poison level is not 0 |
+| 2 | Radiated (313) | The current radiation level is not 0 |
+| 3 | Eye Damage (314) | Persistent effect flag `0x40`, blinded, is set (SPEC-007 §2.4) |
+| 4 | Crippled Right Arm (315) | Flag `0x20` |
+| 5 | Crippled Left Arm (316) | Flag `0x10` |
+| 6 | Crippled Right Leg (317) | Flag `0x08` |
+| 7 | Crippled Left Leg (318) | Flag `0x04` |
+
+**Info lines and hot regions in game.** A press selects an info line, then redraws the lists, the level block, the folder and the card. These regions are the same as in section 3.8: SPECIAL (19, 38), the conditions, the derived list, the SKILLS caption, the skill rows and the skill-points caption (396, 228) 171 by 25. In game the creation-only trait regions are replaced as follows:
+
+| Region | Info line |
+| --- | --- |
+| (28, 280) 124 by 32 | 7 + `trunc(max(0, y - 280) / 10)` |
+| (28, 363) 283 by 105 | Folder line, above |
+| Folder tabs | The folder's general card, above |
+
+Three regions can yield a line past their own block, because their formulas are not clamped:
+
+- the level block gives 10 for y = 310-311, the Perks folder's first line;
+- the conditions region gives 51 for y = 145-150, the Armor Class card;
+- the derived region gives 61 for y = 305-309, the Small Guns card.
+
+`[May-improve]`: Safe rule: clamp to 9, 50 and 60 respectively. The condition and derived cases also apply in creation mode.
+
+**Info card mapping.** The card geometry is that of section 3.8. The picture is the `art/skilldex/` list index; every corpus picture is 140 by 117. "Base: NN% formula" is drawn after the title in font 101, black, at (348 + title width + 8, 286).
+
+| Info line | Card | Picture | Title | Description |
+| --- | --- | --- | --- | --- |
+| 0-6 | SPECIAL k | k (`strength.frm`-`luck.frm`) | `stat.msg` 100 + k | `stat.msg` 200 + k |
+| 7, creation | Character points | 7 `level.frm` | `editor.msg` 120 | 121 |
+| 7, game | Level | 7 `level.frm` | `stat.msg` 401 | `stat.msg` 501 |
+| 8, game | Experience | 8 `exper.frm` | `stat.msg` 402 | `stat.msg` 502 |
+| 9, game | Next level | 9 `levelnxt.frm` | `editor.msg` 122 | 123 |
+| Perks folder, line j below the perk count | j-th held perk p | 72 + p | `perk.msg` 101 + p | `perk.msg` 201 + p |
+| Perks folder, line 8 or 9 with at least one trait | Trait in slot j - 8 | 55 + trait | `trait.msg` 100 + trait | `trait.msg` 200 + trait |
+| Perks folder, other lines 7-10 | Optional traits | 54 `traits.frm` | `editor.msg` 146 | 147 |
+| Perks folder, any other line | Perks | 71 `perks.frm` | 124 | 127 |
+| Karma folder, line below the row count | Karma entry | Table above | Table above | Table above |
+| Karma folder, other lines | Karma | 47 `karma.frm` | 125 | 128 |
+| Kills folder, line below the entry count | Kill type t | 36 `sneak.frm` | `proto.msg` 450 + t, a space, `editor.msg` 126 "Kills" | `proto.msg` 465 + t |
+| Kills folder, other lines | Kills | 46 `kills.frm` | 126 | 129 |
+| 43 | Hit Points | 10 `hitpoint.frm` | `editor.msg` 300 | `stat.msg` 207 |
+| 44-50 | Condition 1-7 | 11-17 (`poisoned.frm` ... `legleft.frm`) | `editor.msg` 312-318 | `editor.msg` 400-406 |
+| 51 | Armor class | 18 `armorcls.frm` | `stat.msg` 109 | 209 |
+| 52 | Action points | 19 `actionpt.frm` | 108 | 208 |
+| 53 | Carry weight | 20 `carryamt.frm` | 112 | 212 |
+| 54 | Melee damage | 21 `meleedam.frm` | 111 | 211 |
+| 55 | Damage resistance | 22 `damresis.frm` | 124 | 224 |
+| 56 | Poison resistance | 23 `poisnres.frm` | 132 | 232 |
+| 57 | Radiation resistance | 83 `radresis.frm` | 131 | 231 |
+| 58 | Sequence | 24 `sequence.frm` | 113 | 213 |
+| 59 | Healing rate | 25 `healrate.frm` | 114 | 214 |
+| 60 | Critical chance | 26 `critchnc.frm` | 115 | 215 |
+| 61-78 | Skill s | 28 + s (`gunsml.frm` ... `outdoors.frm`) | `skill.msg` 100 + s, then "Base:" (`editor.msg` 137), a space, the fixed base NN, "%", a space, `skill.msg` 300 + s | `skill.msg` 200 + s |
+| 79, creation | Tag skills | 27 `skills.frm` | `editor.msg` 144 | 145 |
+| 79, game | Skill points | 27 `skills.frm` | 130 | 131 |
+| 80 | Skills | 27 `skills.frm` | 150 | 151 |
+| 81, creation | Optional traits | 27 `skills.frm` | 146 | 147 |
+| 82-97, creation | Trait t | 55 + t (`fastmeta.frm` ... `gifted.frm`) | `trait.msg` 100 + t | `trait.msg` 200 + t |
+
+Notes on the table:
+
+- **Skill bases**, in skill order 0-17: 35, 10, 10, 65, 55, 40, 30, 15, 25, 20, 20, 20, 25, 20, 25, 20, 20, 5. An example title is "Small Guns" followed by "Base: 35% + AG".
+- **Perks folder lines.** "Below the perk count" means j is less than the number of held perks, counted up to 7. Trait slot j - 8 is used only when at least one trait is held.
+- **Folder general cards.** Selecting a folder tab sets folder line 30 (Perks), 32 (Karma) or 31 (Kills). Those lines show the folder's general card.
+- **Kill card art.** The kill-type card uses `sneak.frm` (36), not `kills.frm`. `[Must-match]`
+
+Three lookups go wrong:
+
+- Perks 53-63 have no picture. Their index, 72 + p, lies past the end of `skilldex.lst`, so the card area is cleared and left empty, with no title and no sound. `[May-improve]`: Safe rule: draw the title and description with no picture.
+- With exactly one trait held, folder line 9 reads an empty trait slot. `[May-improve]`: Safe rule: show the Optional traits card.
+- With an empty first slot and a used second slot, the trait is drawn on line 8's row but lights and hit-tests as line 9. `[May-improve]`: Safe rule: draw slot 1 at y = 461 always.
+
+**Perk chooser.**
+
+| Element | Value |
+| --- | --- |
+| Window | Screen (33, 91) 573 by 230, modal; background `perkwin.frm` (list index 86, 573 by 230), copied opaquely |
+| Heading | "PICK A PERK" (`editor.msg` 152), font 103, key 18979, at (49, 16) |
+| Done, Cancel | Red buttons at (48, 186) and (153, 186); captions DONE (100) at (69, 186) and CANCEL (102) at (171, 186), font 103, key 18979 |
+| Scroll arrows | Up `uparwoff.frm` / `uparwon.frm` (199 / 200, 11 by 14) at (25, 46); down `dnarwoff.frm` / `dnarwon.frm` (181 / 182, 11 by 14) at (25, 61). Transparent; press sound `ib1p1xx1`, no release sound |
+| List | Area (45, 43) 192 by 129, restored before each draw. Up to 11 rows, font 101, row r at (45, 43 + 12r). The highlighted row is key 32747, the others 992. A perk already held shows "(r)" at x = 207 |
+| Card | The right part of the window, from x = 280, restored before each draw. Details below |
+
+**Chooser card.**
+
+- Picture: skilldex 72 + perk at (413, 64).
+- Title: font 102, black, at (280, 27). For a held perk, "(r)" follows in font 101, black, at (288 + title width, 41).
+- Rules: black, at y = 55 and 56 from x = 280 to x = 545.
+- Description: `perk.msg` 201 + perk in font 101, black, from (280, 70), stepping 11. It wraps at `133 + max(0, min(150, c) - 8)`, with c as in section 3.8.
+- A change of picture or title plays `isdxxxx1`, except for the first card of each list.
+
+**Entries.** The list holds every eligible perk (SPEC-011 §3.21), sorted by name in byte order. Let n be the count. The selected entry is top + row, with top in 0 to max(0, n - 11) and row in 0-10. It starts at entry 0.
+
+**Moving the selection.**
+
+- **Up**, by the Up arrow key or one step of the up button: if top is above 0, top decreases by 1; otherwise row decreases by 1, but not below 0.
+- **Down**, with n above 11: if top is below n - 11, top increases by 1; otherwise row increases by 1, up to 10. With n at most 11, row increases by 1, up to n - 1.
+- **Home** sets top and row to 0.
+- **End**, with n above 11, sets top to n - 11 and row to 10. Otherwise it sets row to n - 1.
+- **Holding** a scroll button steps on press. From the 15th 41-millisecond frame it steps at 5 per second, rising by 1 per step to 24 per second, until release or leaving the button. These are the age-arrow timings of section 3.10.
+- **A click** in the list area, on release, sets row = `trunc((screen y - 134) / 12)`, clamped to 0 through n - 1.
+  - A click on the same row as the previous click chooses that entry and plays `ib1p1xx1`.
+  - Any navigation key or scroll step forgets the previous click.
+  - So does the idle timer. Whenever no input arrives and more than 700 milliseconds have passed since the timer last restarted, the timer restarts and the click is forgotten. Clicks do not restart it.
+
+**Ending the chooser.**
+
+- **Done** (button), Return (`ib1p1xx1`) or a double click chooses the selected perk.
+- **Esc**, Cancel or a pending quit request closes the chooser without a choice. The pick stays pending for the next visit.
+- **A choice** adds one rank (SPEC-011 §3.21). If adding fails, the pick stays pending. Otherwise the pending pick is cleared and the immediate extras of SPEC-011 apply. Tag! and Mutate! run their steps in the same window, below.
+- **Afterwards** the window closes, and the skills, SPECIAL rows, derived stats, Perks folder and card are redrawn.
+- **One pick per opening.** The chooser grants exactly one pick each time it opens.
+
+With no eligible perk the list is empty. The card and a Done choice then use a stale entry left from an earlier list. `[May-improve]`: Safe rule: draw the empty list, ignore Done and double clicks, and keep the pick pending.
+
+**Tag! and Mutate!** These exist only through the chooser, by picking the perk. The window stays open. Before each step the heading strip at (49, 15), 206 by 22, is restored from the art and the step's heading is drawn at (49, 16). The restore reads the art one row higher than the strip it covers. `[May-improve]`: Safe rule: restore from the same rows. Each step uses the chooser's list, keys and double click, with the card showing the entry's own picture, name and description and no rank.
+
+| Step | Heading | Entries | Choice | Esc or Cancel |
+| --- | --- | --- | --- | --- |
+| Tag! | "PICK A NEW TAG SKILL" (155) | Skills not tagged, sorted by name (15 with three tags); card picture 28 + skill | The skill fills the fourth tag slot and gains the tag bonus at once | Tags restored; Tag! rank removed |
+| Mutate!, step 1, only when at least one trait is held | "LOSE A TRAIT" (154) | Held traits, sorted by name | That trait is removed; go to step 2 | Traits restored as at screen open; Mutate! rank removed |
+| Mutate!, step 2 | "PICK A NEW TRAIT" (153) | The 16 traits minus those held when the screen opened, sorted by name | The trait is applied at once | Same as step 1 |
+
+Two defects:
+
+- When the player held any trait at the start of Mutate!, the new trait goes into the second slot. A player who held exactly one trait is left with an empty first slot. `[May-improve]`: Safe rule: put the new trait into the first empty slot.
+- Cancelling either step still consumes the pending pick, although the rank is removed. `[May-improve]`: Safe rule: leave the pick pending, as when the chooser closes without a choice.
+
+**Keys in game.**
+
+| Key | Action |
+| --- | --- |
+| Return, `d`, `D` | Done; the keys play `ib1p1xx1` |
+| Esc | Cancel |
+| `p`, `P` | Print to file (section 3.43) |
+| `+`, Right, uppercase `N` / `-`, Left, uppercase `J` | One skill plus / minus step |
+| Ctrl+Q, Ctrl+X, F10 | Quit confirmation; Yes cancels on the next frame |
+| F12 | Screenshot |
+
+The creation keys `n`, `a`, `s` and `o` do nothing in game.
+
+**Done and Cancel.** Done (button, Return, `d`, `D`) closes with no validation and keeps every change. Cancel (button, Esc, or a pending quit request) restores the whole open snapshot. That undoes:
+
+- spent skill points;
+- a chosen perk with its extras, such as the Lifegiver HP, the Educated points, a Tag! skill or a Mutate! trait;
+- the level reconciliation, together with the last reconciled level and the pending-perk flag.
+
+The reconciliation and the chooser therefore repeat on the next visit. Perks are restored by removing ranks above the saved ones, then adding ranks up to them, so their stat effects follow. Current HP returns to its value at open. No exit heals the player in game.
+
+**`editor.msg` usage.** These IDs answer which caption is used where. Each text is the English corpus string.
+
+| ID | Text | Use |
+| --- | --- | --- |
+| 100, 101, 102 | DONE, OPTIONS, CANCEL | Editor buttons (creation uses OPTIONS); DONE and CANCEL also in the perk chooser and the name/age/sex dialogs |
+| 103 | PRINT | In-game caption of the options button |
+| 104, 107, 108 | AGE, MALE, FEMALE | Age and sex captions |
+| 105, 106 | SEX, NAME | Not used |
+| 109, 110, 111 | PERKS, KARMA, KILLS | Folder tab captions, in game |
+| 112 | SKILL POINTS | Caption at (400, 233), in game |
+| 113, 114, 115 | "Level:", "Exp:", "Next Level:" | Level block, in game |
+| 116 | CHAR POINTS | Creation caption |
+| 117 | SKILLS | Skills caption, both modes |
+| 118-119, 142-143, 157-158 | Validation pairs | Creation Done (section 3.9) |
+| 120-121 | Character Points | Creation card, line 7 |
+| 122-123 | Next Level | In-game card, line 9 |
+| 124/127, 125/128, 126/129 | Perks, Karma, Kills | Folder general cards; 126 also ends the kill-type card title |
+| 130-131 | Skill Points | In-game card, line 79 |
+| 132-136 | Refusals | Skill plus and minus, in game |
+| 137 | "Base:" | Skill card attribute text, both modes |
+| 138, 139 | TAG SKILLS, OPTIONAL TRAITS | Creation captions |
+| 140-141, 148-149 | Refusal pairs | Creation tag and trait buttons |
+| 144-145, 146-147, 150-151 | Tag Skills, Optional Traits, Skills | Cards; 146-147 also for the Perks-folder trait lines |
+| 152, 153, 154, 155 | PICK A PERK, PICK A NEW TRAIT, LOSE A TRAIT, PICK A NEW TAG SKILL | Chooser headings |
+| 156 | TRAITS | Perks-folder heading |
+| 200-209, 300-318, 400-406 | As section 2.4 | Both modes |
+| 500-511 | Month names | Printed sheet date line |
+| 600-618 | Options dialog and file messages | Sections 3.11 and 3.43; 608, 613, 614 and 618 are not used |
+| 620-655 | Printed sheet | Section 3.43 |
+| 1000-1009, 1100-1109 | Karma names and descriptions | Karma folder |
+
+The corpus file also holds 1110 and 5000-5007, which are demo and test texts, and seven entries numbered 000, which are layout templates. None of them is ever looked up.
+
+### 3.43 Character Sheet Save, Load and Print
+
+`[Must-match]` unless tagged.
+
+**Entry points.**
+
+| Where | Control | Operations |
+| --- | --- | --- |
+| Creation mode, Options dialog (section 3.11) | SAVE (`s`), LOAD (`l`), PRINT TO FILE (`p`) | Save a `.GCD` sheet, load one, print the sheet |
+| In game | PRINT Red button at (343, 454), or `p` / `P` | Print only. There is no Options dialog, and SAVE, LOAD and ERASE do not exist in game |
+
+**File list.** Each operation first builds a list of names for its pattern, `*.GCD` or `*.TXT`. The list is the union of two sources:
+
+- every entry in the root directory of the master archive whose stored name is longer than 4 characters and whose last three characters equal the extension (the dot is not checked);
+- every loose file matching the pattern in the master patch root: the `fallout.cfg` key `master_patches` in section system, default "data" (SPEC-008 §3.2).
+
+The names are merged into one list, sorted case-insensitively. A name found in both sources appears once. Names are shown as stored, with their extension. The corpus archive root holds no `.GCD` or `.TXT` files (the premades are under `premade/`), so in practice the list shows files the player wrote earlier.
+
+- The reference reserves 13 bytes per name, so a loose file whose name is longer than 12 characters overflows the list. `[May-improve]`: Safe rule: leave such names out.
+- The list builder cannot fail. The "Error reading file list!" boxes (`editor.msg` 615) of sections 3.11 and below are therefore never shown.
+
+**Dialog geometry.** Both file dialogs open at screen (168, 80) as modal windows.
+
+| Element | Load dialog | Save dialog |
+| --- | --- | --- |
+| Background | `loadbox.frm` (list index 224, 288 by 229) | `savebox.frm` (list index 225, 288 by 257) |
+| Title | Font 103, key 18979, at (49, 16) | Same |
+| File list | Area (55, 49) 190 by 124, filled with raw index 100 before each draw. Up to 12 rows, font 101, row r at (55, 49 + 10r). The highlighted row is key 32747, the others 992 | Same |
+| Scroll arrows | Up `uparwoff.frm` / `uparwon.frm` at (36, 44); down `dnarwoff.frm` / `dnarwon.frm` at (36, 58); 11 by 14, transparent | Same |
+| Done | Red button at (58, 187); "DONE" (`dbox.msg` 100) at (79, 187) | Red button at (58, 214); caption at (79, 213) |
+| Cancel | Red button at (163, 187); "CANCEL" (`dbox.msg` 103) at (182, 187) | Red button at (163, 214); caption at (182, 213) |
+| Name field | None | (57, 190), font 101, key 992 text on raw index 100 |
+
+Captions are font 103, key 18979. Done and Cancel use the Red-button sounds. The reference attaches the scroll-arrow sounds to Cancel again, so the arrows are silent. `[May-improve]`: Safe rule: give the arrows `ib1p1xx1` on press.
+
+**Shared list rules.** The selected file is entry top + row, starting at entry 0. Let n be the number of files. The list scrolls when n is above 12. Let M be the maximum top: n - 13 when n is above 12, otherwise unused.
+
+- **Up**, by the key or one arrow step: top decreases by 1; at 0, row decreases by 1 instead, but not below 0.
+- **Down by an arrow step**, when scrolling: top increases by 1; past M, top stays at M and row increases by 1, up to 11. Without scrolling, row increases by 1, up to n - 1.
+- **Down by the key** follows the same rule, except as follows.
+  - The load dialog lets row reach 12, which is not drawn, before it clamps to 11. A Done in that state takes entry top + 12.
+  - The save dialog moves the row on the very press that reaches M.
+- **Home** sets top and row to 0.
+- **End**, when scrolling, sets top to M and row to 11. Otherwise it sets row to n - 1 and top to 0.
+- **Holding** an arrow repeats with the timings of the perk chooser's arrows, until release or leaving the arrow.
+- **A click** in the list area, on release, sets row = `trunc((screen y - 80 - 49) / 10)`, at least 0. When scrolling, the row is at most 11; otherwise a row past the last file becomes n - 1. With n = 0 clicks do nothing.
+  - A second click on the same row chooses that file and plays `ib1p1xx1`.
+  - Any key navigation or arrow step forgets the previous click.
+  - So does a free-running counter of idle 41-millisecond frames, every 32 frames. Clicks do not restart that counter.
+
+Because M is n - 13, the last file of a list longer than 12 is never drawn. `[May-improve]`: Safe rule: let M be n - 12, and keep the row within 0-11 and within the list.
+
+**Load dialog input.** There is no name field.
+
+- Done with a nonempty list returns the selected name, extension included.
+- Done with an empty list, Cancel, Esc or a pending quit request cancels.
+- Return does nothing.
+
+**Save dialog input.**
+
+- **Initial field.** The field starts with the default name, cut to its first 12 characters, and is drawn with one trailing space.
+- **Typing.** A typed key is appended while the field holds fewer than 8 characters, when it is a code 32-122 that is an ASCII letter or digit or one of `` # @ ! $ ` ' ~ ^ & ( ) - _ = [ ] { } ``. Space is not accepted.
+- **Erasing.** Backspace or Delete removes the last character.
+- **Cursor.** A 4-by-8 block at the end of the trailing space toggles every 3 frames between key 992 and raw index 100. While an arrow is held, the blink state changes but is not shown until the next redraw.
+- **Single click.** A click on a row puts that file's name into the field, cut at its first `.` and to at most 12 characters. Typing is then blocked until erasing brings the field below 8 characters.
+- **Double click.** It returns that file's base name at once.
+- **Accept.** Done, or Return (`ib1p1xx1`), returns the field. An empty field cancels.
+- **Cancel.** Cancel, Esc or a pending quit request cancels.
+
+**Where files go.** The returned name gets `.GCD` or `.TXT` appended. Files are always written as loose files in the master patch root, never into the archive (SPEC-008 §3.2).
+
+- **Existence test.** "Exists" means the file opens for reading, either as a loose file in that root or as an archive member.
+- **Sheet files.** A sheet is written in binary mode, 428 bytes (SPEC-006 §2.2).
+- **Printed sheets.** A printed sheet is written in text mode, so every line ends in CR LF (`0D 0A`).
+- **Upper case.** Every message shows the file name upper-cased. Upper-casing also renames the file actually written when the overwrite prompt was shown; otherwise the typed case is kept. The reference file system ignores case. `[May-improve]`: Safe rule: on a case-sensitive file system, match existing names without regard to case and write new names in upper case.
+
+**Operations.** In the table, NAME is the upper-cased name with its extension. Every message box is at (169, 126) (section 3.13). An error box plays `iisxxxx1` first.
+
+| Operation | Default name, title | Overwrite prompt | Success | Failure |
+| --- | --- | --- | --- | --- |
+| Creation SAVE | `editor.msg` 617 "PLAYER", 600 "SAVE" | When the file exists: Yes/No, key 32328, title "NAME already exists." (609), body "Do you wish to overwrite?" (610). No returns to the Options dialog | Commit the working tags and traits, write the sheet, show "NAME was successfully saved." (607), large, key 992, then close the Options dialog | "NAMEError saving !", large, key 32328, as section 3.11; the Options dialog stays open |
+| Creation LOAD | 601 "LOAD", load dialog | None | As section 3.11 (no message), then close the Options dialog | "Error loading " (612), the listed name as stored, "!"; key 32328, size by the section 3.13 rule; the Options dialog stays open |
+| Creation PRINT TO FILE | 616 "PRINT", 602 "PRINT TO FILE" | Inverted: shown when the file does **not** exist (section 3.11). No returns to the Options dialog | After writing: "NAME was successfully saved.", key 992, size by the section 3.13 rule; then close the Options dialog | "Error saving NAME!" (611 + NAME + "!"), large, key 32328; then close the Options dialog |
+| In-game PRINT | 616 "PRINT", 602 "PRINT TO FILE" | When the file exists, as for SAVE. No returns to the character screen | No message; back to the character screen | "Error saving NAME!", large, key 32328 |
+
+A cancelled file dialog returns to the Options dialog, or in game to the character screen, with nothing written. LOAD replaces the player only in creation mode (section 3.11); a game in progress can never load a sheet.
+
+**Printed sheet.** The sheet describes the player as currently shown. In game that includes current HP and effective statistics; in creation mode, level 1. S(n) below is the text of `editor.msg` n. "2d" means at least two digits with leading zeros, and "3d" at least three; a negative value takes a leading `-`, as in `-05`. Numbers are separated by single spaces exactly as listed. The reference writes these lines in order:
+
+1. Two empty lines.
+2. S(620) "FALLOUT", S(621) "VAULT-13 PERSONNEL RECORD", and the date line, each preceded by `trunc((80 - L) / 2) - 2` spaces, where L is the line's byte length. A negative count means no spaces.
+   - The date line is: the day as 2d, a space, the month name `editor.msg` 500 + month - 1, a space, the year, two spaces, HHMM as 4d, a space, S(622) "hours".
+   - The date is the game-calendar date of the save header (SPEC-008 §2.4).
+   - HHMM = `100 * (trunc(t / 36000) mod 24) + trunc(t / 600) mod 60`, for game tick t.
+3. An empty line.
+4. The name line: S(642) "  Name:", a space and the player name, padded with spaces to 27 characters (never cut). Then S(643) "Age:", a space and the age; then S(644), a space and S(645 + gender), "Male" or "Female".
+5. The level line: S(647) " Level:", a space, the level as 2d, a space, S(648), a space, the grouped experience X (section 3.42) and a space. Then 12 - length(X) spaces when positive, S(649) "Next Level:", a space and the grouped next threshold, which is empty at level 21.
+6. An empty line. The statistics heading S(623) is composed but not written.
+7. Seven statistic lines. Each label is followed by a space and the value:
+
+   | Line | Content |
+   | ---: | --- |
+   | 1 | S(624) Strength 2d, S(625) current HP 3d "/" maximum HP 3d, S(626) **Strength** 2d |
+   | 2 | S(627) Perception 2d, S(628) armor class 3d, S(629) healing rate 2d |
+   | 3 | S(630) Endurance 2d, S(631) action points 2d, S(632) critical chance 3d "%" |
+   | 4 | S(633) Charisma 2d, S(634) melee damage 2d, S(635) carry weight 3d " lbs." |
+   | 5 | S(636) Intelligence 2d, S(637) damage resistance 3d "%" |
+   | 6 | S(638) Agility 2d, S(639) radiation resistance 3d "%" |
+   | 7 | S(640) Luck 2d, S(641) poison resistance 3d "%" |
+
+8. Two empty lines.
+9. If the first trait slot is in use: S(650), then one line "  " + trait name for each used slot.
+10. If any of the 64 perks has a rank: S(651), then one line per held perk in perk-index order, "  Name" or "  Name (r)" for rank r above 1.
+11. An empty line, S(652), and an empty line.
+12. S(653). The reference composes a skill row for each skill but writes none of them.
+13. Two empty lines, then S(654).
+14. Inventory rows. The entries of the player's inventory list are taken in stored order, three per row; worn and held items are included, because they are inventory entries.
+    - Each cell is "  ", the grouped quantity, "x ", the item name, right-padded with spaces to 25 characters.
+    - A row ends after its third cell or the last entry. Trailing spaces stay.
+15. An empty line, then S(655), a space, the total inventory weight (SPEC-011 §3.14) and " lbs.". Then two empty lines.
+
+**Messages for the printed sheet.** R1 looks up IDs 650-655 as: traits heading, perks heading, karma heading, skills-and-kills heading, inventory heading, total-weight label. The English corpus file numbers them differently:
+
+| ID | Corpus text |
+| ---: | --- |
+| 650 | " ::: Traits :::           ::: Perks :::           ::: Karma :::" |
+| 651 | " ::: Skills :::                ::: Kills :::" |
+| 652 | " ::: Inventory :::" |
+| 653 | 38 spaces, then "Total Weight:" |
+| 654, 655 | Absent |
+
+A missing message reads as the text `Error` (SPEC-002). With the shipped file the reference therefore:
+
+- prints the Skills/Kills heading above the perks;
+- prints the Inventory heading where the Karma heading belongs;
+- prints the Total Weight label alone where the skill rows belong;
+- prints `Error` above the inventory;
+- prints `Error N lbs.` as the last text line.
+
+Statistic labels 624-641 and the name and level parts 642-649 match the corpus. The corpus template entries numbered 000 show the intended column layout.
+
+The sheet has four defects, and an engine may apply all four safe rules together:
+
+- **Sequence column.** The Sequence column prints Strength. `[May-improve]`: Safe rule: print the sequence value as 2d.
+- **Skill rows.** No skill rows are written, and the kill pairing never advances. `[May-improve]`: Safe rule: for each skill s in order, write a row.
+  - The row is "  ", the skill name, a space, and dots up to 16 characters in all; then a space, the skill value as 3d and "%".
+  - Pair the k-th skill with the k-th kill type, in kill-type order 0-14, whose count is nonzero. For a paired skill, append 8 spaces, the kill-type name and a space, dots up to 16 characters, a space, and the count as 3d.
+- **Headings.** The headings 650-655 do not match the shipped file. `[May-improve]`: Safe rule: assign the shipped texts by meaning.
+  - Write 650 once before the trait and perk lines, which follow with no further heading. That trait-and-perk block is written when any trait slot or perk is in use.
+  - Write the skill rows under 651, after two empty lines.
+  - Write the inventory rows under 652, after two empty lines.
+  - End with 653, a space, the weight and " lbs.".
+- **Next Level at level 21.** Next Level is empty at level 21. `[May-improve]`: Safe rule: print `------`, as on screen.
+
+Fixture P gives the literal reference output and the safe-rule variant.
+
+### 3.44 Map Object Draw Order, Lighting and Translucency
+
+**Frame layers.** A map refresh of a screen rectangle on the current elevation draws, in this order: floor tiles; the map objects in the two passes below; roofs (section 3.36); the outlines collected during the passes; floating text; and objects that have no hex, at full light 65536. `[Must-match]`
+
+**Per-hex object lists.** Every hex keeps its objects in one ordered list. `[Must-match]`
+
+- The list is sorted by elevation, lowest first. Within one elevation, flat objects (object flag `0x00000008`, SPEC-003 §2.6) come before all other objects.
+- Within one elevation and flat class, a newly inserted object goes **after** every object already in that group, so the oldest insertion comes first. R1 locks both objects' art at this point, but its comparison is incomplete and never decides anything. No art, frame size, object type or identifier breaks the tie.
+- An object is inserted when it is loaded with its map (in file order), created, copied, moved to a hex, flipped between flat and not flat, or given a new pixel offset. The last case includes every step of a walk (SPEC-007 §3.11) and every offset change made by an animation. Each of these moves the object to the end of its group on its hex, even when the hex does not change. A walking critter therefore draws after the other objects of its class on its hex. An art or frame change alone does not reinsert.
+
+**Visited hexes.** `[Must-match]` The objects drawn are found through a fixed hex lattice, which is built once at engine start for the 640-by-380 map window widened by 320 pixels on each side and 240 above and below.
+
+- The lattice has W = 41 columns and H = 72 rows: `trunc((960 + 320 + 1) / 32) + 1` and `trunc((620 + 240 + 1) / 12) + 1`.
+- Two tables are built, one for each parity of the view-center hex, with the view centered on a hex of that parity. Let O be the hex under window point (-320, -240), and (X0, Y0) its window position plus (16, 8). Let s = 16, or -16 when X0 is greater than -320. Lattice row y has its points at y-coordinate Y0 + 12y. Its first point is at x = X0 for row 0, X0 + s for odd rows, and X0 - s for even rows from 2 on, and the next points follow every 32 pixels. Each point stands for the hex under it. The table holds each point's hex minus O, and those offsets, sorted ascending, give the visiting order.
+- A refresh of rectangle R uses the table for the current center's parity. It widens R by 320 pixels left and right and 240 up and down, and takes the hex under the widened top-left corner as the base. It visits base plus offset for every lattice point whose row is below `trunc(height / 12)` and whose column is below `trunc(width / 32)`, the height and width being those of the widened rectangle. Hexes are visited in ascending offset, which is ascending hex number.
+- An object whose hex lies outside the visited set is not redrawn, even when its sprite reaches into R. Every drawn object is clipped to R.
+
+**Two passes.** `[Must-match]`
+
+1. **Flat pass.** For each visited hex in order, walk its list. Skip objects on lower elevations, and stop at the first object on a higher elevation. On the current elevation, draw each flat object that is not hidden (flag `0x00000001`). Stop at the first non-flat object and remember it.
+2. **Upright pass.** For each remembered object, in the same hex order, draw it and every later object on the current elevation in that hex's list, skipping hidden ones.
+
+So every flat object in the refreshed area is drawn before any upright object. Upright objects are drawn by ascending hex number and, within a hex, in list order. The hex number alone sets the order of objects on different hexes: no screen-y sort, sprite-bottom sort or multihex adjustment is made.
+
+**Light and outlines.** `[Must-match]` Each hex's objects are lit by the larger of the ambient light and that hex's light on the current elevation (SPEC-006 §3.6). Every drawn object with an outline type set and its outline not disabled is added to the outline list, in drawing order. The list holds at most 100 objects per refresh; later objects are not outlined in that refresh. Outlines are drawn after the roofs, in list order.
+
+**Draw modes.** One draw mode applies to the object's whole clipped rectangle, except where the player cutout of section 3.37 applies. Let s be a source pixel, D the destination index, and L the light level divided by 512 (0-128). The intensity table is the one of SPEC-001 §3.7. A source index 0 is transparent in every mode. `[Must-match]`
+
+- **Lit draw.** The result is s unchanged for s of 229 or more, otherwise intensity[s][L].
+- **Translucent draws.** These are selected by the object's six translucency bits (SPEC-003 §2.6): exactly one bit set chooses the row below. With none of the bits set, with only "explicitly no translucency", or with two or more set, the lit draw is used. Two bits can combine, for example when glass translucency is added to a critter by the Stealth Boy.
+
+  | Bit | Foreground color F | Gray table | Light used |
+  | --- | --- | --- | --- |
+  | Wall translucency `0x10000` | key 25439 [33] | common | Always 65536 (L = 128), whatever the hex light |
+  | Glass translucency `0x20000` | key 10239 [35] | glass | The hex light |
+  | Steam translucency `0x40000` | key 32767 [220] | common | The hex light |
+  | Energy translucency `0x80000` | key 30689 [58] | common | The hex light |
+  | Red translucency `0x4000` | key 31744 [133] | common | The hex light |
+
+  - The result is intensity[B][L], with B = blend_F[g][D] and g the gray level of s.
+  - blend_F is the per-color blend table of SPEC-002 §3.2. Level 0 gives D, and levels 1 to 7 give the seven-step mix of F over D.
+  - With the 5-bit components (r, g, b) of SPEC-001 §3.7:
+    - the common gray level is `trunc(trunc((b + 3r + 6g) / 10) / 4)`;
+    - the glass gray level is `trunc(trunc((r + 5g + 4b) / 10) / 4)`.
+    Both are 0-7, and both are 0 for index 0.
+  - A source pixel of gray level 0 leaves the destination color but still relights it at L.
+  - Indexes 229-255 get no exemption.
+
+  The gray tables are built once, when the object system starts, from the palette loaded then. The five blend tables are rebuilt with every palette file load (SPEC-001 §3.7). `[Must-match]`
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
@@ -1501,6 +2915,252 @@ A synthetic elevation-0 roof grid: squares with columns 10-12 and rows 20-21 for
 
 Here `xxxx` is the unchanged floor half. If square (13, 21) also had index 5, it would join both groups along edges, step 2 would hide 8 squares and step 5 would change nothing.
 
+### 4.8 Fixture H: Called-Shot Window
+
+Use the shooter, weapon and target of SPEC-007 Fixture C: a right primary single-fire rifle in the right-primary-aimed slot mode, player AP 8, in combat. The target is a man-category critter whose current art base index is 13 (`hmmaxx`, alias 11). Every hit-chance term except the location adjustment sums to 46: skill 80, range -12, cover -10, AC -12.
+
+| Row | Left part: chance, cells drawn | Right part: chance, cells drawn |
+| ---: | --- | --- |
+| 0 | Head 6: source x 0 at (33, 36), 54 at (42, 36) | Torso 46: source x 36 at (373, 36), 54 at (382, 36) |
+| 1 | Eyes -14: minus (source x 108, 6 wide) at (33, 102) and (42, 102) | Groin 16: source x 9 at (373, 102), 54 at (382, 102) |
+| 2 | Right arm 16 at (33, 166) and (42, 166) | Left arm 16 at (373, 166) and (382, 166) |
+| 3 | Right leg 26 at (33, 230) and (42, 230) | Left leg 26 at (373, 230) and (382, 230) |
+
+| Input | Expected |
+| --- | --- |
+| Labels in row 0 | `combat.msg` 1110 "the head" at (74, 36), button (33, 40) 88 by 10; 1113 "the torso", 60 wide in font 101, at (291, 36), button (291, 40) 88 by 10 |
+| Label in row 3, right | 1115 "the left leg", 71 wide, at (280, 230), button (280, 234) |
+| Left release at window (40, 236) | Row 3 left button: right leg, location 4, chance 26 as in Fixture C; `icsxxxx1`; debit `5 + 1 = 6` AP |
+| Left release at window (125, 236) | Outside the button (x 33-120), although "the right leg" (78 wide) is drawn through x = 151: nothing |
+| Ctrl+D | Code 4: torso, location 3, chance 46, still debited 6 AP |
+| Key `4` | Nothing |
+| Esc | Window closes; AP 8, no draw, no sound |
+| A melee weapon whose other terms also sum to 46 (half adjustments) | Head 26, eyes 16, arms and groin 31, legs 36, torso 46 |
+| Other terms sum to 120, ranged | Torso 95 (cap), head 80, eyes 60, arms and groin 90, legs 95 |
+| Target base index 15 (`mabrom`), row 3 right | 1155 "the left foreleg", 97 wide, at (254, 230), button (254, 234) |
+
+### 4.9 Fixture I: World Map and Town Map
+
+**World view.** The party is at the starting position (825, 75), Vault 13's cell (16, 1), with follow mode on.
+
+| Input | Expected |
+| --- | --- |
+| Centering | vx = 825 - 247 = 578; vy = 75 - 242 = -167, clamped to 0. The party is at window (269, 96) |
+| At-rest triangle | (257, 90), 25 by 13; tip at (269, 102) |
+| Visible cells | Columns 11-20 and rows 0-8. Column 11 is 22 wide at x 22-43, columns 12-19 are at x `44 + 50 (c - 12)`, and column 20 is 28 wide at x 444-471. Rows 0-7 are at y `21 + 50 r`; row 8 is 42 tall at y 421-462 |
+| Discovery after the opening reveal (no Scout) | Cell (16, 1) at (244, 71) through (293, 120) is unchanged. The other eight cells of columns 15-17, rows 0-2 are dimmed, and every other visible cell is black (key 0 [228]). Row 1's ocean threshold is 0, so nothing else is revealed |
+| Hover with pointer (279, 95) | dx = 10, dy = 0, and dy is halved to 0: the sum is 10, so the pointer hovers |
+| Hover with pointer (279, 100) | dx = 10, dy = 5, and dy is halved to 2: the sum is 12, so it does not hover |
+| Hover with pointer (273, 103) | dx = 4, dy = 8, and dx is halved to 2: the sum is 10, so it hovers |
+| Hover label "Vault 13" (font 101, width 50) | x = 257 + trunc(-25 / 2) = 245, y = 79; the label fills (245, 79) through (294, 88) |
+| Destination click at pointer (400, 300) | Destination (956, 279), cell (19, 5): no town, so no jitter. `ib1p1xx1`; follow mode stays on |
+| Travel dots | Iterations 1, 4, 7, 10 mark a pixel; iterations 2, 3, 5, 6, 8 and 9 do not |
+| Pointer at (639, 240), vx = 950 | East is blocked: `screx.frm`, and the view stays put |
+| Pointer at (639, 0), vx = 900, vy = 0 | Only north is blocked: the normal north-east art, and the view moves to (916, 0) |
+| Pointer at (639, 0), vx = 950, vy = 0 | Both axes are blocked: `scrnex.frm` |
+| Home | Centers to (578, 0), then sets vy = 0 and steps 16: (578, 16). Under the safe rule: (578, 0) |
+| End at vx = 578 | (578, 1058) |
+| Clock tick 264600 | Day digits 0 and 5 at x 487 and 496; month rows 165-178 (DEC) at (513, 12); year digits 2, 1, 6, 1 at x 548, 557, 566 and 575; time digits 0, 7, 2, 1 at x 593, 602, 611 and 620 |
+| Seen-cell pixel indices 50, 150, 100 (corpus palette, generated intensity table) | 52, 153, 228 |
+| Ordinary encounter at party window position (269, 96) | `wmapfgt0.frm` / `wmapfgt1.frm` alternate 7 times at (266, 91), 199 milliseconds each, 2786 milliseconds in all |
+
+**Town map.** All label widths are in font 101.
+
+| Input | Expected |
+| --- | --- |
+| Hub, slots 0, 1 and 3 known | Three markers. Event 514 is slot 0, `HUBENT.MAP` (36) with selector 1; event 515 is slot 1, `HUBDWNTN.MAP` (38) with selector 3; event 516 is slot 3, `HUBOLDTN.MAP` (40) with selector 2 |
+| Hub slot 3 geometry | Button (249, 131), 164 by 25; triangle at (318, 143); the hover label "Old Town" (width 52) is at x = 249 + 56 = 305, y = 131 |
+| Pointer at (260, 140) over the Hub slot 3 button | Outside the triangle's pixels: no hover, no label, no click |
+| Vault 13 at tick 863999 / 864000 | One marker, "Cavern Entrance" (`V13ENT.MAP`, 35, selector 0) / four markers |
+| Cathedral with campaign index 18 = 1 | One marker at triangle (247, 307), label "Crater" (width 40) at x = 178 + 62 = 240. Choosing it loads `CHILDEAD.MAP` (47) with selector 0 |
+| Military Base with index 17 = 1 | One marker at triangle (118, 70), label "Ruins"; it loads `MBDEAD.MAP` (48) with selector 0 |
+| Vault 15 slot 0, party in Vault 15's cell | `VAULTENT.MAP` (7) loads with index 32 = 0 |
+| Vault 15 slot 2, party at Vault 13 | The world map opens with the party travelling to Vault 15's jittered center. It stops there at rest, and `VAULTBUR.MAP` does not load until the player enters again |
+
+### 4.10 Fixture J: Pip-Boy Screen
+
+Font 101 widths from the corpus `font1.aaf`: STATUS 47, DATA 33, BACK 32, MORE 31, DONE 31, AUTOMAPS 65, VIDEO ARCHIVES 99, ALARM CLOCK 83, "of" 13, "Hit Points 25/30" 103, "Vault 13" 50, "Hub" 22, "FEV Experiment Tape" 127, "Merry Christmas!" 101, `pipboy.msg` 215 209.
+
+| Input | Expected |
+| --- | --- |
+| Game tick 264600 (07:21, 5 December 2161) | Day cells 0, 5 at (20, 17), (29, 17); `months.frm` rows 165-178 at (46, 18); year cells 2, 1, 6, 1 at x = 83, 92, 101, 110; time cells 0, 7, 2, 1 at x = 155, 164, 173, 182; all at y = 17 |
+| 25 December, normal opening | `pipx.frm` at (323, 156); "Merry Christmas!" at (381, 315) |
+| Global 10 = 150, global 101 = 0 | `pip2.frm` at (32, 83); note digits 0 at (92, 180), 5 at (80, 182), 1 at (68, 184) |
+| Global 10 = 11 | Digits 1 at (92, 180), 1 at (86, 182) |
+| Global 101 = 2, or global 10 = 0 | Note rectangle restored from `pip.frm` |
+| Status, only the water-chip quest, no holodisks | STATUS at (405, 46), underlined; "Vault 13" at (262, 66); 2 zones, (254, 66) and (254, 86), 350 by 10 |
+| Release at (300, 70) | `ib1p1xx1`; "Vault 13" yellow for 200 ms; then "Vault 13 Status" at (262, 56), underlined; "1. Find the Water Chip." at (262, 76); BACK at (413, 446) |
+| Same, global 101 = 2 | Line in key 8804 [218], strike line y = 79 from x = 262 through 396 |
+| Release at (300, 90) on that list | Sound and 200 ms pause; nothing else; the Vault 13 row still opens its detail; the Status button resets |
+| Global 162 = 1 (holodisk 0) | STATUS at (317, 46); DATA at (489, 46); "FEV Experiment Tape" at (437, 66) |
+| Release at (500, 70) | Reading view, page 0 of 3 (94 records, last-page index 2): title at (365, 46), underlined; "1 of 3" at (567, 48); records 1000-1034 at x = 255, y = 76 through 416; BACK at (332, 446); MORE at (491, 446) |
+| Release at (500, 450), twice | Page 1 shows records 1035-1069, counter "2 of 3"; page 2 shows records 1070-1093 and DONE |
+| On page 2: PageDown; release at (420, 450); release at (380, 450) | Nothing; nothing; page 1 |
+| Automap database holds map 6 elevations 0 and 1, map 35 elevation 0, map 36 elevation 0, map 3 elevation 0 | Area list: Hub (262, 66), Necropolis (262, 86), Vault 13 (262, 106) |
+| Row 1 (Hub) | Line 2 "Hub" (`map.msg` 136) at (418, 66); entries "Entrance" (`map.msg` 308, yellow) at (262, 86) and, in R1, "Sewers" (`map.msg` 209, map 3) at (262, 106); map 36 elevation 0 raster drawn. Safe rule: "Entrance" only |
+| Row 3 (Vault 13) | Line 2 "Vault 13" (`map.msg` 106); "Entrance", "Living Quarters" (218, 219). Safe rule adds "Cave Entrance" (305, map 35) |
+| Elevation view with 2 entries | Zones at y = 46, 66, 86, 106 report rows -1, 0, 1, 2 |
+| Archives with index 3 and 5 played | "Vat Destruction" (262, 66), "Overseer Briefing" (262, 86); row 2 plays `ovrintro.mve` with flags `0x0B` |
+| Alarm Clock, HP 25 of 30 | ALARM CLOCK at (387, 46); "Hit Points 25/30" at (377, 66); option j at (262, 96 + 20j); "Rest until healed" at (262, 336) |
+| 07:21, until morning / until noon | 22 h 39 min / 4 h 39 min |
+| 06:00, until morning / 12:00, until morning / 06:30, until morning | 24 h / 18 h / 23 h 30 min |
+| Status list with at least 4 zones; Alarm Clock refused; then a release on the 4th zone (y = 126) | R1: ten-minute rest begins on the Alarm Clock page; safe rule: the Status row's own meaning |
+| Screen saver draws 100, 16383, 16383 | Spawn: P = `trunc(16383 / 32767 × 724)` = 361, start (602, 409); speed 1.5249580 in single precision; the same pass clips it to 2 by 43 and moves it to (600, 410) |
+| Draws 100, 20000, 0 | P = 441: start (317, -17); speed 0.15; seven passes reach progress 1.05, moving to (315, -15) |
+| Draw 3048 | No spawn; one draw this pass |
+
+### 4.11 Fixture K: Level Block and Grouped Numbers
+
+| Input | Expected |
+| --- | --- |
+| Level 6, experience 15500 | y 280 `Level: 6`; y 291 `Exp: 15,500`; y 302 `Next Level: 21,000` |
+| Level 21, experience 215000 | `Level: 21`, `Exp: 215,000`, `Next Level: ------` |
+| Grouping of 0, 999, 1000, 100000, 1234567, 12345678 | `0`, `999`, `1,000`, `100,000`, `1,234,567`, `12,345,678` |
+| Unspent skill points 101 (Educated after the 99 cap) | Big number at (522, 228) shows `99` |
+
+### 4.12 Fixture L: Hit Tests
+
+| Press (screen x, y) | Folder | Info line | Card |
+| --- | --- | --- | --- |
+| (60, 290) | Any | 8 | Experience |
+| (60, 311) | Perks, no perks held | 10 | Perks (`editor.msg` 124 / 127); the unclamped level-block defect |
+| (100, 380) | Kills, 12 types killed | 11 | Second kill type in name order |
+| (200, 380) | Kills, 12 types killed | 21 | Twelfth kill type (right column, row 1) |
+| (100, 455) | Perks, 2 perks, 2 traits | 18 (folder line 8) | First trait slot |
+| (200, 340) | Any (tab press and release) | 42 | Karma general card; `ib3p1xx1` |
+| (250, 147) | Any | 51 | Armor Class; the unclamped conditions defect |
+
+### 4.13 Fixture M: Skill Spending
+
+Start with Small Guns at 55%, untagged, 5 invested points, 2 unspent points, and the skill cursor on Small Guns.
+
+1. Plus: 56%, 1 unspent; the big number animates 02 to 01.
+2. Plus: 57%, 0 unspent.
+3. Plus: `iisxxxx1`, box "No free skill points available."; the hold ends.
+4. Minus: 56%, 1 unspent.
+5. Minus: 55%, 2 unspent.
+6. Minus: 55% equals the value at open, so the box titled "Small Guns:" shows "At minimum level." / "Unable to decrement it."
+7. Cancel: the snapshot restores 55%, 5 invested points and 2 unspent points.
+
+### 4.14 Fixture N: Perk Chooser Selection
+
+There are 14 eligible perks, so the maximum top is 3. Start at top 0, row 0.
+
+| Input | Top, row | Selected entry |
+| --- | --- | --- |
+| Down x3 | 3, 0 | 3 |
+| Down x2 | 3, 2 | 5 |
+| Up | 2, 2 | 4 |
+| End | 3, 10 | 13 |
+| Home | 0, 0 | 0 |
+| Click at screen y = 170, then again at y = 175 before the idle timer fires | 0, 3 | 3, chosen with `ib1p1xx1` |
+
+### 4.15 Fixture O: File Dialog Paging
+
+There are 14 files, F00 through F13, so the list scrolls and M = 14 - 13 = 1. Start at top 0, row 0.
+
+| Input | Load dialog (top, row, entry) | Save dialog (top, row, entry) |
+| --- | --- | --- |
+| Down key | 1, 0, F01 | 1, 1, F02 (the press that reaches M also moves the row) |
+| Down key x11 more | 1, 11, F12 | 1, 11, F12 |
+| Down key | 1, 12, F13 (row 12 is not drawn) | 1, 11, F12 |
+| Visible rows | F01-F12; F13 never drawn | Same |
+
+With the safe rule, M = 2 and F13 is drawn as the last row of top 2.
+
+### 4.16 Fixture P: Printed Sheet
+
+The sheet is for a synthetic player:
+
+- name Alex, age 25, male; level 6, experience 15500;
+- ST 6, PE 7, EN 5, CH 4, IN 8, AG 7, LK 3; HP 47/51, AC 7, AP 8, healing rate 1, critical chance 3, melee damage 1, carry weight 175;
+- damage resistance 0, radiation resistance 10, poison resistance 25, sequence 18;
+- traits Bloody Mess and Fast Shot; perk Earlier Sequence rank 2;
+- inventory 3 Stimpak, 1 10mm Pistol, 24 10mm JHP, 1 Leather Jacket, total weight 18;
+- kills 5 Rats, 2 Radscorpions; skills Small Guns 55%, Big Guns 10%, Energy Weapons 10% (the remaining skills are omitted from the safe-rule excerpt);
+- game date 12 December 2161, 09:30.
+
+The reference output with the English corpus `editor.msg` follows. Line numbers and `|` delimiters are not part of the file. Every line ends in CR LF, and trailing spaces are shown inside the delimiters.
+
+```text
+ 1||
+ 2||
+ 3|                                  FALLOUT|
+ 4|                         VAULT-13 PERSONNEL RECORD|
+ 5|                        12 December 2161  0930 hours|
+ 6||
+ 7|  Name: Alex               Age: 25               Gender: Male|
+ 8| Level: 06                 Exp: 15,500       Next Level: 21,000|
+ 9||
+10|       Strength: 06         Hit Points: 047/051         Sequence: 06|
+11|     Perception: 07        Armor Class: 007         Healing Rate: 01|
+12|      Endurance: 05      Action Points: 08       Critical Chance: 003%|
+13|       Charisma: 04       Melee Damage: 01          Carry Weight: 175 lbs.|
+14|   Intelligence: 08        Damage Res.: 000%|
+15|        Agility: 07     Radiation Res.: 010%|
+16|           Luck: 03        Poison Res.: 025%|
+17||
+18||
+19| ::: Traits :::           ::: Perks :::           ::: Karma :::|
+20|  Bloody Mess|
+21|  Fast Shot|
+22| ::: Skills :::                ::: Kills :::|
+23|  Earlier Sequence (2)|
+24||
+25| ::: Inventory :::|
+26||
+27|                                      Total Weight:|
+28||
+29||
+30|Error|
+31|  3x Stimpak               1x 10mm Pistol           24x 10mm JHP           |
+32|  1x Leather Jacket      |
+33||
+34|Error 18 lbs.|
+35||
+36||
+```
+
+Line 10 shows Sequence 06, which is the Strength defect. Line 22 is the misnumbered perks heading. With all four safe rules, lines 1-18 are the same except that line 10 ends in `Sequence: 18`. The rest of the file becomes the following. Only the first three skill rows are shown; the real file has 18, so every later line moves down by 15.
+
+```text
+19| ::: Traits :::           ::: Perks :::           ::: Karma :::|
+20|  Bloody Mess|
+21|  Fast Shot|
+22|  Earlier Sequence (2)|
+23||
+24||
+25| ::: Skills :::                ::: Kills :::|
+26|  Small Guns ..... 055%        Radscorpions ... 002|
+27|  Big Guns ....... 010%        Rats ........... 005|
+28|  Energy Weapons . 010%|
+29||
+30||
+31| ::: Inventory :::|
+32|  3x Stimpak               1x 10mm Pistol           24x 10mm JHP           |
+33|  1x Leather Jacket      |
+34||
+35|                                      Total Weight: 18 lbs.|
+36||
+37||
+```
+
+Pairing follows kill-type order, not the name order of the Kills folder, so Radscorpions (type 6) pairs with Small Guns and Rats (type 7) with Big Guns.
+
+### 4.17 Fixture Q: Object Draw Order and Translucency
+
+On elevation 0, hex 20100 holds, in load order: flat item A, flat item B, critter C, scenery D. Hex 20101 holds flat item E and wall F. Nothing is hidden, and the whole screen is refreshed.
+
+| Step | List of hex 20100 | Draw order |
+| --- | --- | --- |
+| After load | A, B, C, D | A, B, E, then C, D, F |
+| C takes one walk step on hex 20100 (a new pixel offset) | A, B, D, C | A, B, E, then D, C, F |
+| C steps onto hex 20101 | A, B, D; hex 20101 is E, F, C | A, B, E, then D, F, C |
+
+Translucency, with source 5-bit components (7, 31, 0): the common gray level is `trunc(trunc((0 + 21 + 186) / 10) / 4)` = 5, and the glass gray level is `trunc(trunc((7 + 155 + 0) / 10) / 4)` = 4. A wall-translucent pixel of that color over destination D therefore draws blend_F[5][D], whose components are `trunc((5 F + 2 D) / 7)`, at intensity column 128. A source pixel whose gray level is 0, such as (0, 1, 0), draws intensity[D][L].
+
+With the corpus `color.pal`, the five foreground colors are indexes 33 (wall), 35 (glass), 220 (steam), 58 (energy) and 133 (red). Source 215 over destination 100 draws 6 as wall translucency, and 214 as glass translucency at full light.
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -1509,4 +3169,4 @@ Here `xxxx` is the unchanged floor half. If square (13, 21) also had index 5, it
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
-Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 33 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles", and the configuration section name "system"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc", and "column" in the section 3.36 roof-square formula). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. The sound name "toggle" is also flagged. The section 3.29 border values were recomputed with an independent model of the hex-to-screen transform and checked against the entry hexes of all 72 corpus maps. Section 3.34 art sizes were read from the corpus FRM headers. Section 3.35 file and frame facts were checked against the corpus (`rscorpbl.frm` has 9 frames; item PID 213 is Remains of Gizmo). The section 3.27 busy-click rules were checked against SPEC-007 §3.10.1 ("One sequence per owner"). The section 3.36 empty-roof test and bits match SPEC-003 §2.8, and the roof words of all 72 corpus maps were scanned: 15056 roofed squares, none with roof index 0 or the barrier bit; `LAGUNRUN.MAP` stores 257 squares with the hide bit set, which loading clears. Fixture G was stepped by hand through the section 3.36 rule. Tag count, excluding the two tag definitions: 148 `[Must-match]`, 57 `[May-improve]`.
+Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 33 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles", and the configuration section name "system"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc", and "column" in the section 3.36 roof-square formula). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. The sound name "toggle" is also flagged. The section 3.29 border values were recomputed with an independent model of the hex-to-screen transform and checked against the entry hexes of all 72 corpus maps. Section 3.34 art sizes were read from the corpus FRM headers. Section 3.35 file and frame facts were checked against the corpus (`rscorpbl.frm` has 9 frames; item PID 213 is Remains of Gizmo). The section 3.27 busy-click rules were checked against SPEC-007 §3.10.1 ("One sequence per owner"). The section 3.36 empty-roof test and bits match SPEC-003 §2.8, and the roof words of all 72 corpus maps were scanned: 15056 roofed squares, none with roof index 0 or the barrier bit; `LAGUNRUN.MAP` stores 257 squares with the hide bit set, which loading clears. Fixture G was stepped by hand through the section 3.36 rule. Sections 3.38-3.43 (R1-rev8): every art name, list index and size was read from `intrface.lst` and the corpus FRM headers; `targbox.frm`, `wrldmp00.frm`-`wrldmp19.frm` and `pipboy.frm` do not exist in the corpus, and the real files are `called.frm` (118), `worldmap.frm` (135) and `pip.frm` (127). All 21 corpus `na` pictures are 170 by 225 with one frame. Every quoted `combat.msg`, `worldmap.msg`, `map.msg`, `pipboy.msg`, `editor.msg`, `proto.msg` and `dbox.msg` text was checked against the English corpus, and the fixture label widths were computed from `font1.aaf`. The town-map entrance table was checked against the map headers of every hotspot map, and the town pictures were composited with their markers. Fixtures H-P were stepped by hand or by a research-side model. The printed sheet of section 3.43 is documented literally: R1 reads `editor.msg` 650-655 with meanings that do not match the shipped file, so every resulting defect carries a `[May-improve]` safe rule. The section 3.27 combat-lock and section 3.23 hand-swap rules were checked against the sequence registration and keyboard paths. Section 3.44 (R1-rev9) was checked against the reference object renderer, list insertion and translucent blitters, and its foreground indexes and Fixture Q values were modelled over the corpus `color.pal`. The R1 tie-break inside a hex is incomplete in the reference and never decides, so the section states the insertion-order result. Tag count, excluding the two tag definitions: 228 `[Must-match]`, 102 `[May-improve]`.

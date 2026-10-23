@@ -7,16 +7,17 @@
 
 ## 1. Overview & Scope
 
-This specification describes the compressed `.ACM` audio format used for sound effects, speech, and music, the exact decoding of that format to 16-bit PCM, the playback format assigned to decoded effect and speech audio, the construction of sound-effect file names from game state, the lookup and alias chain used to find an effect file, speech file paths, and distance-based effect volume.
+This specification describes the compressed `.ACM` audio format used for sound effects, speech, and music, the exact decoding of that format to 16-bit PCM, the playback format assigned to decoded effect and speech audio, the construction of sound-effect file names from game state, the lookup and alias chain used to find an effect file, speech file paths, distance-based effect volume, the `.LIP` phoneme file that goes with each dialogue speech file, and the lip-sync rule that turns playback position into talking-head speech frames.
 
 Evidence comes from two sources:
 
 - Static inspection of reference revision R1, targeting 32-bit Windows.
 - Measurements over the local unpacked corpus: all **2511** `.ACM` files (864 under `sound/sfx`, 1646 under `sound/speech`, 1 under `data`), decoded by a research-side oracle that follows the rules below. The oracle tables are in `oracle/SPEC-010/` (section 4.6). No original executable was run; corpus agreement shows these rules are self-consistent with the shipped assets, not that the original game produced identical bytes.
+- A parse of all **1601** `.LIP` files under `sound/speech` with the section 2.6 layout, checked against the header of each companion `.ACM` (section 5).
 
 Compatibility tags follow project policy. **[Must-match]** marks behavior an implementation must reproduce exactly: decoded PCM, file layouts, name strings, and formulas. **[May-improve]** marks reference behavior that comes from memory-safety defects or unbounded loops. An implementation must not reproduce that behavior as undefined behavior; it must instead do what the tag text says (an explicit error, or a bounded result). Where a [May-improve] case never occurs in the corpus, this is stated.
 
-Out of scope: the `.LIP` lip-sync format, background-music streaming and fade control, mapping volume values to mixer attenuation, the decoded-effect cache, and the script-opcode wrappers. The wrappers are covered by SPEC-005 by opcode number (`0x80A3`, `0x80A5`, `0x813D`-`0x8142`); this document gives the name builders those opcodes call. Animation suffix letters are defined in SPEC-007 section 2.2, prototype layouts in SPEC-003, archive lookup in SPEC-008, and message sound fields in SPEC-002.
+Out of scope: background-music streaming and fade control, mapping volume values to mixer attenuation, the decoded-effect cache, and the script-opcode wrappers. Talking-head art selection, fidgets, and the phoneme-to-frame table are in SPEC-006 section 3.11; this document gives only the lip-sync timing that drives them. The wrappers are covered by SPEC-005 by opcode number (`0x80A3`, `0x80A5`, `0x813D`-`0x8142`); this document gives the name builders those opcodes call. Animation suffix letters are defined in SPEC-007 section 2.2, prototype layouts in SPEC-003, archive lookup in SPEC-008, and message sound fields in SPEC-002.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -106,6 +107,56 @@ These one-byte fields are listed as "uninterpreted" or "sound code" in SPEC-003.
 | Scenery (any subtype) | `0x28` | Scenery sound byte; used as the door sound letter |
 
 The corpus confirms these offsets. All 17 containers with a nonzero item sound byte use `A`-`D`, and every name built from them exists. All 42 doors use scenery sound bytes `A`-`R`, and every resulting open/close name exists. The other 60 containers and all non-container items hold zero, as do non-door scenery prototypes. Weapon sound bytes are ASCII digits and uppercase letters (`oracle/SPEC-010/sfx-proto-bytes.tsv`).
+
+### 2.6 `.LIP` Phoneme File
+
+A `.LIP` file gives the mouth shapes for one dialogue speech file. It holds a header, a phoneme table, and a marker table. Every multi-byte integer is a **big-endian** 32-bit two's-complement value, as in the archive and prototype formats. This is the opposite of the little-endian ACM header in section 2.2. The tables in this section are `[Must-match]`.
+
+**Version 2 header (44 bytes).** All corpus files use this version.
+
+| Offset | Bytes | Type | Meaning |
+| --- | ---: | --- | --- |
+| `0x00` | 4 | s32 BE | Version: 2 |
+| `0x04` | 4 | s32 BE | Not used. Corpus: always 22528 (`0x5800`) |
+| `0x08` | 4 | s32 BE | Flags. Bit 0 (value 1) is the repeat flag (section 3.12); no other bit is used. Corpus: 0 in 1501 files, 4 in 100 files |
+| `0x0C` | 4 | s32 BE | Not used. Corpus: 0 |
+| `0x10` | 4 | s32 BE | Speech length in bytes. Not used at playback. Corpus: 2N in 6 files and 2N + 1 in 1595 files, where N is the companion ACM sample count (section 2.2) |
+| `0x14` | 4 | s32 BE | Phoneme count P |
+| `0x18` | 4 | s32 BE | Not used. Corpus: 0 |
+| `0x1C` | 4 | s32 BE | Marker count M |
+| `0x20` | 8 | bytes | Audio stem: the companion ACM name with no directory or extension, padded with zero bytes. All 8 bytes may be name characters, with no terminator |
+| `0x28` | 4 | bytes | Not used. Corpus: `VOC` and a zero byte |
+
+**Phoneme table**, at `0x2C`: P bytes. Each byte is a phoneme number 0-41. SPEC-006 section 3.11 maps phoneme numbers to speech frames.
+
+**Marker table**, at `0x2C + P`: M entries of 8 bytes each.
+
+| Entry offset | Bytes | Type | Meaning |
+| --- | ---: | --- | --- |
+| +0 | 4 | s32 BE | Marker type, 0 or 1. Checked when loading (section 3.12), otherwise not used |
+| +4 | 4 | s32 BE | Position: a byte offset into the decoded speech PCM |
+
+The file is `44 + P + 8M` bytes long. Nothing after the marker table is read.
+
+**Units.** Speech plays as mono 16-bit samples at 22050 Hz (section 3.6). A position therefore counts **bytes of decoded PCM**, two per sample: sample *s* starts at byte `2s`, and one second is 44100 bytes. The time of a marker is `position / 44100` seconds after the speech starts. Positions are not sample counts, ACM block numbers, or milliseconds. `[Must-match]` Corpus evidence: the length word at `0x10` is always 2N or 2N + 1, and the last marker always lies within -3019 to +24093 bytes of 2N, that is, -68 ms to +546 ms of the audio end. 36417 marker positions are odd numbers; that is valid, because the playback position is a byte count.
+
+**Pairing.** Phoneme *i* is shown from marker *i* to marker *i* + 1. The last marker is the end-of-speech marker and has no phoneme of its own, so a well-formed file has `P = M - 1`. `[Must-match]` Corpus: `P = M - 1` in all 1601 files.
+
+**Version 1 header (360 bytes)** `[May-improve]`. No corpus file uses it. The reference reads it as follows, and the phoneme table then starts at `0x168`:
+
+| Offset | Bytes | Meaning |
+| --- | ---: | --- |
+| `0x00` | 4 | Version: 1 |
+| `0x04` | 4 | Not used |
+| `0x08` | 4 | Flags, as in version 2 |
+| `0x0C`, `0x14`, `0x18`, `0x30` | 4 each | Values the reference stores where it keeps its own audio handle and table addresses |
+| `0x10`, `0x1C`, `0x20`, `0x28`, and the 7 words at `0x34`-`0x4F` | 4 each | Not used (`0x20` is a start offset that loading always resets to 0) |
+| `0x24` | 4 | Phoneme count P |
+| `0x2C` | 4 | Marker count M |
+| `0x50` | 8 | Audio stem, as in version 2 |
+| `0x58`-`0x167` | 272 | Not used |
+
+The reference later releases or deletes whatever the words at `0x0C` and `0x14` hold, as if they were its own resources. Safe rule: ignore the four words at `0x0C`, `0x14`, `0x18`, and `0x30`. An implementation may instead reject version 1 files and handle them as a missing `.LIP` (section 3.12).
 
 ## 3. Behavioral Rules & Edge Cases
 
@@ -248,7 +299,8 @@ Dialogue speech uses the talking head's base stem from the head art list, and th
 
 - Stem *t*: the sound field up to (not including) its first `.`, then **at most 8 characters** of that. **[Must-match]**
 - Head directory *h*: the head art stem. Head stems normally contain no dot. **[May-improve]**: when a head stem does contain one, the reference cuts the lip-file path at the dot but does not cut the audio path. An implementation may reject such a stem.
-- Audio: `SOUND\SPEECH\` + *h* + `\` + *t* + `.ACM`. The companion lip file uses the same stem with extension `.LIP`; its format is out of scope.
+- Lip file: `SOUND\SPEECH\` + *h* + `\` + *t* + `.LIP` (section 2.6).
+- Audio: `SOUND\SPEECH\` + *h* + `\` + *s* + `.ACM`. Here *s* is the audio stem stored in the lip file when one was read, and *t* otherwise (section 3.12). Corpus: the stored stem matches *t*, ignoring case, in all 1601 lip files.
 - Non-dialogue narration (death and ending narration, the options narrator) passes a relative name such as `narrator\options` and plays `sound\speech\` + name + `.ACM`.
 - **[May-improve]**: the reference copies the stem into fixed 8-byte and 16-byte storage. An 8-character stem overruns the first by its terminator, which is harmless there. A stem of 16 or more characters corrupts the lip extension and overruns a stack buffer. An implementation must apply the 8-character rule without memory corruption. Stems of exactly 8 characters (212 corpus files) must work.
 
@@ -268,6 +320,82 @@ Effects tied to an object get a relative volume `V` in 0..32767. This is compute
    With `P = 0` and `d >= 1`, the result is 10922; there is no division by zero. **[Must-match]**
 
 The applied effect volume is `floor(V x S / 32767)`, where *S* is the effect volume setting (0..32767). **[Must-match]** The mapping to audible attenuation is out of scope.
+
+### 3.12 Lip-Sync Playback
+
+Dialogue replies that carry a sound field play through lip-sync. SPEC-006 section 3.9 says when a reply requests speech. Narration that plays through relative names (section 3.10) has no lip file and no head, and does not use this section.
+
+**Loading.** A speech request has the speech stem *t* and the head directory *h* (section 3.10). It runs these steps in order. `[Must-match]`
+
+1. Stop and release any speech that is still loaded. No head frame is drawn for this.
+2. Open the lip file. If it opens, read the version word.
+   - Version 2: read the rest of the 44-byte header.
+   - Version 1: read the 360-byte header (section 2.6).
+   - Any other version is logged and is otherwise handled as a missing `.LIP` (see **Missing or malformed files**).
+3. Read P phoneme bytes, then M markers.
+4. Check the tables. The checks only log: a phoneme of 42 or more, a marker type other than 0 or 1, a nonzero position at marker 0, and a position lower than the one before it. **Nothing is rejected.** Corpus: no file fails any check, marker positions are strictly increasing in every file, and marker 0 always has type 1 and position 0.
+5. If P or M is 0, abandon the speech. Abandoning means that no audio plays and no new speech state begins. Any earlier speech was already stopped by step 1; if its speech state still exists, the next tick ends it as a normal ending.
+6. Load the audio from the section 3.10 path, using the stored audio stem. The ACM is decoded **completely** before playback begins. It plays as one non-repeating mono 16-bit 22050 Hz buffer (section 3.6) of 2N bytes. If the audio cannot be loaded, the speech still goes ahead without it (see **Missing or malformed files**).
+7. Set the marker index to 0 and the current phoneme to phoneme 0.
+
+**Start.** Playback begins as soon as loading finishes, inside the reply display. The audio starts before the reply text is drawn, and before the next head updater tick (SPEC-006 section 3.11). `[Must-match]`
+
+1. Lip-sync becomes **running**.
+2. The audio position is set to byte 0.
+3. Starting from marker 0, skip every marker whose position is below 0. After skipping *k* markers, the marker index is *k* and the current phoneme is phoneme *k*. With non-negative positions, as in every corpus file, nothing is skipped. `[May-improve]`: when every position is negative, the reference scan runs past the end of the table. Safe rule: treat a negative position as 0.
+4. Set the speech volume to `trunc(0.69 x V)`, where *V* is the speech volume setting (`speech_volume`, 0-32767).
+5. Start the audio. If it cannot start, for example because no audio was loaded, lip-sync stops running. The speech state remains, and the next tick ends it.
+
+The reference computes the volume factor as a floating-point product. For some multiples of 100 (300, 600, 700, ...) the result can be one lower than `floor(69 x V / 100)`. That difference cannot be heard. `[May-improve]` Safe rule: use `floor(69 x V / 100)`.
+
+**Per-tick rule.** While a speech state exists, each head updater tick runs the steps below instead of the idle fidget logic. Let *p* be the audio playback position in bytes, read **once per tick**. Let *i* be the marker index, *pos(j)* the position of marker *j*, and *ph(j)* phoneme *j*. `[Must-match]`
+
+1. If lip-sync is running, read *p*. Then, while `p > pos(i)` (**strictly greater**):
+   - set the current phoneme to *ph(i)* and add 1 to *i*;
+   - if *i* has reached M, the final marker has been passed. Set *i* to 0 and the current phoneme to *ph(0)*. Unless the repeat flag is set, stop the audio at once and stop lip-sync. Leave the loop.
+2. If lip-sync is still running and `i >= M - 1`, let *k* = 3 when M > 5 and *k* = 0 otherwise. If `p < pos(k)`, handle it as if the final marker had been passed in step 1. This test catches a playback position that has jumped back to the start. A position that never decreases never triggers it. With *k* = 0 it can never trigger at all. Corpus: one file (`harry\harry_0a.lip`) has M = 5.
+3. If the current phoneme differs from the **last drawn phoneme**, set that to the current phoneme and mark a redraw.
+4. The mixer checks whether the audio has finished.
+5. If a redraw is marked, draw frame *F*(current phoneme) of the current mood's speech art (selectors 9-11, SPEC-006 section 3.11), where *F* is the SPEC-006 phoneme table. Then clear the mark.
+6. If the audio is no longer playing, end the speech normally: release it, draw speech frame 0, enter the waiting-for-next-fidget state, set the idle-second counter to 3, and reset the fidget frame counter to 0 (SPEC-006 section 3.11).
+
+So for `pos(j) < p <= pos(j+1)` the head shows phoneme *j*. At `p = pos(j+1)` exactly, phoneme *j* still shows. A tick that passes several markers at once draws only the **last** phoneme it reaches; the phonemes in between are never drawn. Frames change only on ticks, so synchronous work that runs no ticks (a reaction transition, the window scroll-in) delays the mouth while the audio keeps playing. When the next tick comes, the head jumps to the right phoneme. `[Must-match]`
+
+The repeat flag (bit 0 of the flags word) keeps the audio running past the final marker. Each later tick passes all the markers again, so the head holds *ph(0)* until the audio ends. No corpus file sets the flag. `[Must-match]`
+
+**Last drawn phoneme.** The redraw test compares **phoneme numbers**, not frames, and the last drawn phoneme carries over from speech to speech and from session to session. At program start it is 0, with a redraw already marked. In practice, the first speech of a program run draws its first frame on its first tick. A later speech draws nothing until its current phoneme differs from the last phoneme drawn by an earlier speech. Until then the head keeps its previous image: the paused fidget frame, or, for the first reply of a session, the dialogue backdrop with no scene or head drawn yet. In the corpus, 1600 files begin and end with phoneme 0 (`lieut\lieut2.lip` begins with 31 and ends with 19). The first phoneme change comes 150 to 15834 bytes into the speech (median 259 bytes, 6 ms; at most 359 ms). This is a display glitch. `[May-improve]` Safe rule: draw the speech frame for the current phoneme on the first tick of every speech, and keep every later rule unchanged.
+
+**Final marker and audio end.** Speech ends in whichever of these comes first:
+
+- The audio finishes. In 1393 corpus files the final marker lies after the audio end, and in 6 it equals 2N, so these always end this way.
+- The playback position passes the final marker. The audio is stopped on that tick, so its tail is cut off. This happens in the 202 corpus files whose final marker lies before 2N, and it cuts at most 3019 bytes (68 ms). `[Must-match]`
+
+Either way, the tick ends with speech frame 0 drawn, and the head goes through the SPEC-006 waiting state. `[Must-match]`
+
+**Stopping without an ending.** These events stop and release speech without drawing a frame. They do not enter the waiting state and do not change the idle-second counter or the fidget frame counter: choosing an option, opening the Review screen, switching to Barter, closing Ask About with Escape, ending the session, and a new speech request. Choosing an option also does its own SPEC-006 reaction handling. Until something else draws, the head keeps the last speech frame drawn. `[Must-match]`
+
+Pressing Ask About (button or `a`) is meant to stop speech the same way. Instead the reference restarts playback on the speech that is already playing, so speech and lip-sync go on while the Ask About panel is open. `[May-improve]` Safe rule: stop speech on Ask About as described for Review and Barter.
+
+**Fidget interaction.** While a speech state exists, the idle fidget is frozen. No fidget frame is drawn, no wait is timed, and no random number is drawn. The fidget frame counter and the retained fidget timestamp keep their values. Lip-sync itself makes **no random draws**. `[Must-match]`
+
+- After a normal ending, the waiting state begins. If no fidget frame has been shown in this session, the retained timestamp is still 0, so the next tick makes the threshold draw and then the next fidget draw (SPEC-006 section 3.11).
+- After a stop without an ending, the fidget resumes from its saved frame counter on the next tick.
+
+A reaction transition that a script requests while speech plays runs to completion, with no lip updates, while the audio continues. Afterwards lip-sync uses the speech art of the destination mood. `[Must-match]`
+
+The head updater does nothing while the session's fidget art is not loaded. In that case lip-sync never runs and speech never ends through the per-tick rule. Every corpus head has fidget art. `[May-improve]` Safe rule: run the per-tick rule whenever a speech state exists.
+
+A phoneme of 42 or more indexes past the SPEC-006 table. A phoneme index of P or more, which arises when `P < M - 1`, reads past the phoneme table. In a well-formed file, the only read at index P comes when the final marker is passed, and it is replaced by *ph(0)* on the same step. `[May-improve]` Safe rule: treat both cases as phoneme 0. The corpus has no phoneme above 41, and all 63 speech FRMs (`gp`, `np`, `bp` for 21 heads) have 9 frames, which covers the largest table value, 8.
+
+**Missing or malformed files.**
+
+- **Missing `.LIP`, or a version other than 1 or 2.** The reference keeps the counts, flags, and version of the most recently loaded lip file; at program start these are all 0. With a zero count it abandons the speech (loading step 5). With counts left over from an earlier file, it builds tables of those sizes. For a missing file, no bytes are read into them. For a wrong version, they are filled from the bytes after the version word. In both cases the audio named by *t* then plays, with lip-sync driven by those table contents. `[May-improve]` Safe rule: load the audio from *t* as usual and handle the speech as one phoneme 0 whose final marker lies after the audio end. The head then shows speech frame 0 for the whole speech, and the speech ends when the audio finishes.
+- **A file shorter than its header and counts require.** The speech is abandoned (loading step 5). `[Must-match]` The reference also leaves the file open. `[May-improve]` Safe rule: close it.
+- **Missing `.ACM` with a `.LIP` present**, or the sound system not initialized (`fallout.cfg` key `initialize` = 0 in the sound section). Loading succeeds with no audio, start step 5 stops lip-sync, and the next tick ends the speech normally. The head shows speech frame 0, the waiting state begins, and the idle-second counter becomes 3. `[Must-match]`
+
+Corpus: 2043 dialogue messages have a sound field. 2039 of them name a stem that has both a `.LIP` and an `.ACM`. Four name a stem with neither: `cabbot.msg` 167, `harry.msg` 174, `laura.msg` 110, and `vree.msg` 194 (`Vree300)`). Four speech ACMs have no `.LIP`, and no message names them: `gizmo\gizmo34a`, `gizmo\gizmo36b`, `gizmo\gizmoalt`, and `harry\hary207b`. The other 41 lip-less ACMs are narration.
+
+**Settings.** Speech volume 0 plays the speech silently, and lip-sync runs normally. The sound-section `fallout.cfg` key `speech`, which switches off narration speech, is **not consulted** for talking-head speech. The subtitles preference does not apply to dialogue either: reply text is always shown. `[Must-match]`
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
@@ -421,6 +549,43 @@ These tables are generated from the local corpus. They contain hashes, header va
 
 Acceptance for the decoder: for every row of `acm-corpus.tsv`, decoding the asset with that source hash must give the listed PCM hash. A saturating, stereo-interpreting, carry-resetting, or EOF-erroring decoder fails this check.
 
+### 4.7 Lip-Sync Vectors
+
+**LIP-A** is a complete synthetic version 2 file of 97 bytes. Its stem is `SYNTH01`, with P = 5 and M = 6. The phonemes are 0, 9, 19, 23, 0, which map to speech frames 0, 8, 2, 4, 0. The marker positions are 0, 100, 300, 301, 600, 1000, and marker 2 has type 0. The length word is 1001. The companion audio is taken to have N = 500 samples, so 2N = 1000.
+
+```text
+0000: 00 00 00 02 00 00 58 00 00 00 00 00 00 00 00 00
+0010: 00 00 03 E9 00 00 00 05 00 00 00 00 00 00 00 06
+0020: 53 59 4E 54 48 30 31 00 56 4F 43 00 00 09 13 17
+0030: 00 00 00 00 01 00 00 00 00 00 00 00 01 00 00 00
+0040: 64 00 00 00 00 00 00 01 2C 00 00 00 01 00 00 01
+0050: 2D 00 00 00 01 00 00 02 58 00 00 00 01 00 00 03
+0060: E8
+```
+
+In the table below, each row is one head updater tick and *p* is the position read on that tick. The last drawn phoneme before the speech is 0, with no redraw marked. Expected results:
+
+| *p* | Marker index after the tick | Current phoneme | Frame drawn |
+| ---: | ---: | ---: | --- |
+| 0 | 0 | 0 | none; the head keeps its previous image |
+| 50 | 1 | 0 | none |
+| 100 | 1 | 0 | none (`100 > 100` is false) |
+| 101 | 2 | 9 | 8 |
+| 300 | 2 | 9 | none |
+| 301 | 3 | 19 | 2 |
+| 302 | 4 | 23 | 4 |
+| 601 | 5 | 0 | 0 |
+| 999 | 5 | 0 | none (`999 < pos(3) = 301` is false) |
+| audio finished | 5 | 0 | speech frame 0; the speech ends normally and the idle-second counter becomes 3 |
+
+The same file with last drawn phoneme 23 left by an earlier speech draws frame 0 on the first tick, at *p* = 0. Under the section 3.12 safe rule, both cases draw frame 0 on the first tick.
+
+**LIP-B** is LIP-A with the final marker position changed to 900. Bytes `0x5D`-`0x60` become `00 00 03 84`. Ticks at 601 and 900 behave as in LIP-A. At *p* = 901 the final marker is passed: the current phoneme becomes *ph(0)* = 0, the audio is stopped at byte 901 (99 bytes, about 2 ms, before its end), and the tick ends the speech with speech frame 0.
+
+**LIP-C** uses LIP-A, but the first tick reads *p* = 350. Markers 0-3 are passed on that one tick, so the marker index becomes 4 and the current phoneme 23. Only frame 4 is drawn; phonemes 9 and 19 never appear.
+
+**LIP-D** checks the units. A marker at position 44100 is reached one second after the speech starts, which is sample 22050. It is not reached at 44.1 seconds or at 2 seconds.
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -430,3 +595,16 @@ Acceptance for the decoder: for every row of `acm-corpus.tsv`, decoding the asse
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
 Verification notes: `tools/spec_lint.py` gives 0 errors. Its 5 plain-word warnings were reviewed and are benign: the math notation "column" and "remaining", the directory name "data", and the resource literal "toggle". Sound-name script opcodes are cited by number only, because CLAUDE.md bans their names. Vectors A-H were decoded by the research oracle and match the expected values above. The section 4.4 lookups were checked against the oracle resolver. The section 4.5 volumes were computed from the section 3.11 formula.
+
+Lip-sync verification: a research-side scan parsed all 1601 corpus `.LIP` files with the section 2.6 layout and compared each with its companion ACM header. The scan found no anomalies:
+
+- Every file is version 2, has `0x5800` at `0x04`, zeros at `0x0C` and `0x18`, `VOC` at `0x28`, and an exact size of `44 + P + 8M`.
+- Flags are 0 or 4.
+- `P = M - 1` in every file, and M ranges over 5-508.
+- Every phoneme is below 42.
+- Marker types are 0 (9440 markers) or 1 (72509). Marker 0 always has type 1 and position 0, and positions strictly increase.
+- The stored stem equals the file stem, ignoring case, in every file (39 differ in case only). Every lip file has an ACM.
+- The length word is 2N or 2N + 1.
+- The final marker lies before 2N in 202 files (by at most 3019 bytes), equals it in 6, and lies after it in 1393.
+
+The phoneme-to-frame table was checked against the 63 corpus speech FRMs: every one has 9 frames with zero per-frame offsets. Vectors LIP-A to LIP-C were stepped through the section 3.12 rule by a research-side model. The lip-sync text adds two plain-word linter warnings, both public `fallout.cfg` key names in the sound section: "initialize" and "speech".

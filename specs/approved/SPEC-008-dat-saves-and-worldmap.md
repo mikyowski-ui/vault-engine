@@ -83,6 +83,8 @@ If bit `0x8000` is set, copy the body literally. If clear, decode that many **co
 
 The buffered archive stream uses 16384-byte logical blocks. Every non-final block must produce 16384 bytes; a final block may be shorter, limited by the entry's remaining logical length. There is no expanded-size word inside a block. `[Must-match]` A short non-final body can expose uninitialized buffered bytes in the reference and is not a valid portable streaming layout. `[May-improve]`: reject a non-final block that expands to fewer than 16384 bytes.
 
+**Final output length.** `[Must-match]` Both compressed modes expose exactly the entry's logical length L, never the decoder's output count. In `0x40`, the final block is decoded in full and only the bytes that still fall within L are visible. A legacy `0x10` stream behaves the same way: it is decoded in one pass into an L-byte buffer, and only those L bytes are visible. So in both modes, output past L is cut off, not reported. Neither path bounds the decoder itself: output past the 16384-byte block buffer or past L is written beyond the buffer, and a `0x10` stream that ends before L leaves the rest of its buffer unset. `[May-improve]`: in both modes, stop writing output at L bytes (16384 for a non-final block) and discard the rest, which gives the same visible bytes. Reject an entry whose output ends before L. All 20456 entries of the corpus `MASTER.DAT` (14997 `0x40`, 4787 `0x20`) and `CRITTER.DAT` (5459 `0x40`) decode to exactly their logical length, with full non-final blocks and block walks that end exactly at the packed length. Neither archive has a `0x10` or `0x00` entry.
+
 ### 2.4 Save Slot Structure and `SAVE.DAT` Header
 
 Slots are numbered **01 through 10**, under the writable master patch root. `[Must-match]`
@@ -113,7 +115,7 @@ Each slot holds the central file plus the copied saved-map set and a renamed cop
 | `0x006B` | 4 | Game time in ten ticks per second, 32-bit big-endian |
 | `0x006F` | 2 | Current elevation, 16-bit big-endian |
 | `0x0071` | 2 | Current map number, 16-bit big-endian |
-| `0x0073` | 16 | Current map's `.SAV` filename |
+| `0x0073` | 16 | Current map's working `.SAV` filename: its stem and a lower-case `.sav`, NUL-padded (Section 3.10) |
 | `0x0083` | 29792 | Thumbnail: 224 x 133 one-byte palette indices, row-major, top to bottom |
 | `0x74E3` | 128 | Reserved bytes, zeroed by the writer and skipped by the reader |
 | `0x7563` | Variable | First game-state payload; total header is 30051 bytes |
@@ -285,7 +287,7 @@ The match start is an **absolute 12-bit ring index**, not a backwards distance a
 
 The dictionary resets for each compressed block. A raw outer block copies bytes directly and does not seed a dictionary for a subsequent block. `[Must-match]` Archive buffering uses logical 16384-byte boundaries even though compressed body lengths vary. Packed bytes and total expanded bytes must both be bounded by an independent reader.
 
-The reference does not comprehensively protect against truncated tokens, over-expansion, packed-offset overflow, zero-output blocks, or corrupt lengths. A zero-length/nonprogressing block can cause an endless whole-file decode loop. `[May-improve]`: reject those cases before exposing data, enforce every compressed block's output bound, require full non-final logical blocks, and verify the final unpacked length against the file entry.
+The reference does not comprehensively protect against truncated tokens, over-expansion, packed-offset overflow, zero-output blocks, or corrupt lengths. A zero-length/nonprogressing block can cause an endless whole-file decode loop. `[May-improve]`: reject those cases before exposing data, enforce every compressed block's output bound, require full non-final logical blocks, and apply the final-output rule of Section 2.3 to the entry's logical length.
 
 The recovered callback-assisted bulk-extraction path also fails to advance its destination after a compressed block, unlike its raw-block path. It can overwrite output or fail to terminate even for otherwise well-formed compressed input. `[May-improve]`: advance the destination by each compressed block's output, as the raw-block path does. The block algorithm and fixtures specify the codec/streaming contract, not a claim that this defective helper was runtime-verified or silently repaired.
 
@@ -354,7 +356,9 @@ When a time charge would reach/past the next queued event, temporarily advance t
 
 Each W iterations, reset that interval counter and apply 24 hours of party resting healing, then perform encounter tests. This happens by loop count, **not by measured elapsed game time**: city travel and Pathfinder can produce a 24-hour healing application after fewer than 24 actual game hours. `[Must-match]`
 
-Script-directed town travel uses a separate path: it chooses a target jittered by the Section 3.7 draw rule (at most 16 pixels per axis from the town center), only when the player is not already in that town, applies the same terrain stepping counters, but performs no random-encounter tests or walk-mask checks. Its city branch adds no game time at all; other branches charge Q. It still applies 24-hour party healing every W iterations. An additional supplied argument in that path is unused. `[Must-match]`
+Script-directed town travel uses a separate path. It runs after every map load made by transition processing (SPEC-013 §3.22 step 3), toward the new map's town, and town -1 does nothing. It also runs when the second of the two timed base explosions sends the party to Vault 13. No SSL opcode starts it. It moves only when the player's current cell is not already the town's cell. It then draws a target with the Section 3.7 jitter rule (at most 16 pixels per axis from the town center), recomputes W and Q, and sets the W-iteration counter and a private terrain counter to zero. It runs the terrain schedule above with that counter until the line completes, all within one call and with nothing drawn. Because the counter starts at zero, the first mountain iteration steps at once, and the first city iteration takes its extra step. It performs no random-encounter tests, no walk-mask checks and no queue processing. Game time is added directly, so events that come due during the trip are handled later by normal queue processing. Its city branch adds no game time at all; other branches charge Q. It still applies 24-hour party healing every W iterations. `[Must-match]`
+
+This path makes **no discovery reveal and no travel-path marks**: neither the every-third-iteration update of Section 3.5 nor the path dots run, so the cells it crosses keep their discovery values. The arrival cell's neighborhood is revealed only when the world map next opens, by the reveal made on opening. `[Must-match]` An additional supplied argument in that path is unused. `[Must-match]`
 
 ### 3.5 Discovery and Encounter Rules
 
@@ -568,9 +572,18 @@ Wake-up presets target the next requested whole hour. If already exactly at that
 2. Otherwise uppercase the name and replace its first `.SAV` with `.MAP`. Compare it with the texts of messages 0-65 in order; the first exact match gives the number.
 3. No match gives -1.
 
-Apart from case 1, the header's offset-`0x34` word is overwritten, so a renamed copy of a map takes the number of its name. A `.SAV` written by the engine stores its name as `<NAME>.SAV` in upper case, so it matches its original map.
+Apart from case 1, the header's offset-`0x34` word is overwritten, so a renamed copy of a map takes the number of its name. A `.SAV` written by the engine stores its name as `<NAME>.SAV` in upper case, so it matches its original map. Case 1 therefore never arises from a file that R1 writes, since every name it writes is upper case. It arises only from a hand-made stream.
 
-**The 72 corpus maps.** The corpus `maps/` directory holds 72 `.MAP` files. 66 of them are the numbered maps below, and each one's header word `0x34` already equals its number. The other six, `CARAVAN.MAP`, `JUNKDEMO.MAP`, `TEMPLAT1.MAP`, `ZDESERT1.MAP`, `ZDESERT2.MAP` and `ZDESERT3.MAP`, are not in `map.msg`, store -1 there, and load with map number -1. Normal play cannot reach them. Hotspots, encounter tables, exit grids and `load_map` all go through map numbers; `load_map` with a name string first matches it against `map.msg` (SPEC-005), so an unlisted name makes no transition. The only engine path that loads a map by file name alone is a self-run demo recording (SPEC-014 §3.6), and the corpus holds no recordings. `[Must-match]`
+**Working `.SAV` names.** `[Must-match]` A loaded map keeps the **file name** it was opened under, in upper case. That name, not the map number, names its working `.SAV`:
+
+1. Every request to open a map by name uppercases the name first. A load by map number uses the number's `map.msg` text from the table below. A town-map hotspot, a random or special encounter, or a destroyed-area substitution uses its file name from sections 3.5 and 3.7. A game load uses the `SAVE.DAT` field at `0x73` (section 2.4).
+2. If the uppercased name contains `.MAP`, its first `.MAP` is replaced by `.SAV`, and `MAPS\` plus that name is probed in the selected database (section 3.2). If the probe opens, the saved copy is loaded, and its `.SAV` name becomes the map's file name. Otherwise the `.MAP` is loaded under the requested name. A name without `.MAP` is opened as given, with no probe.
+3. The **stem** is the file name up to, not including, its first `.`, or the whole name when it has none. The working name is the stem followed by `.SAV`. Leaving a map writes `MAPS\` plus the working name, or deletes that file when the map is excluded (SPEC-014 §3.35). The header name field (offset `0x04`) of the written stream holds the same working name. A game save writes the same file. It stores the stem and a lower-case `.sav` in the `SAVE.DAT` field at `0x73`, NUL-padded to 16 bytes, for example `VAULTENT.sav`. Loading uppercases that name again.
+4. The map number chooses the automap entry, the exclusion test, the town and the music. It never chooses the file. So map 7, loaded by number as `VAULTENT.MAP`, works as `VAULTENT.SAV`. A stream opened as `HUBENT.SAV` whose header keeps word 7 under case 1 still works as `HUBENT.SAV`, with map 7's automap entry, exclusion test, town and music.
+
+**The 72 corpus maps.** The corpus `maps/` directory holds 72 `.MAP` files. 66 of them are the numbered maps below, and each one's header word `0x34` already equals its number. The other six, `CARAVAN.MAP`, `JUNKDEMO.MAP`, `TEMPLAT1.MAP`, `ZDESERT1.MAP`, `ZDESERT2.MAP` and `ZDESERT3.MAP`, are not in `map.msg`, store -1 there, and load with map number -1. Normal play cannot reach them. Hotspots, encounter tables, exit grids and `load_map` all go through map numbers. `load_map` with a name string first matches it against `map.msg` (SPEC-005) by the rule below, so an unlisted name makes no transition. The only engine path that loads a map by file name alone is a self-run demo recording (SPEC-014 §3.6), and the corpus holds no recordings. `[Must-match]`
+
+**Matching a map name.** `[Must-match]` `load_map` with a string finds a map number as follows. Uppercase the string and replace its first `.SAV` with `.MAP`. Then compare it exactly with the texts of messages 0-65, in order; the first equal text gives the number. Nothing else is normalized: no extension is added, and no directory, file or map header is consulted. `hubent.map`, `HUBENT.MAP` and `hubent.sav` give 36. `HUBENT`, `hubent`, `HUBENT.MAP ` with a trailing space, and `MAPS\HUBENT.MAP` match nothing, so no transition happens. The entrance parameter is stored in campaign element 32 before the match, so it is stored even when nothing matches (SPEC-005 §3.5). A string of 16 or more bytes overruns the reference's 16-byte work buffer. `[May-improve]`: treat such a string as no match; no text of messages 0-65 is longer than 12 bytes.
 
 **Town lookup.** `[Must-match]` Each map number has one fixed town id (section 3.7). An out-of-range number, including -1, gives town -1. The table assigns a town to every numbered map, including the interior maps that no hotspot in section 3.7 names: the Necropolis vault (9) belongs to Necropolis, the caves (16) to Shady Sands, the second Cathedral map (18) and both Master's Lair levels (33, 34) to Cathedral, the two inner Military Base maps (31, 32) to Military Base, the second Glow map (43) to Glow, and `HUBMIS1` (65) to Vault 13, although its short name and music are the Hub's. Random-encounter, special-encounter and caravan maps carry town 1 (Vault 15), except the fourth caravan pair (63, 64) and `HUBMIS1`, which carry town 0. These are plain table values, not a "no town" marker.
 
@@ -588,7 +601,7 @@ The town is used in three places:
 - When the map number is -1, nothing replaces `wind2`, which keeps looping for as long as that map is shown.
 - When music is disabled the request is recorded but nothing plays. Re-enabling music later plays the last recorded track.
 
-**Unnumbered maps.** A map with number -1 has no automap entry, no area short name, no town and no city music. It is always treated as excluded when leaving it, so no working `.SAV` is ever written for it (SPEC-014 §3.35). `[Must-match]`
+**Unnumbered maps.** A map with number -1 has no automap entry, no area short name, no town and no city music. It is always treated as excluded when leaving it. Leaving it therefore writes no working `.SAV` and deletes any that exists (SPEC-014 §3.35). A game save made on it still writes its working `.SAV`, because the exclusion is tested only when leaving (SPEC-014 §3.35, saving step 1), and the next departure deletes that file again. `[Must-match]` That game save also looks up the automap entry for map number -1, which reads a word from before the start of the automap index (section 2.8) and acts on whatever it finds. `[May-improve]`: capture no automap for an unnumbered map.
 
 The complete table follows. Track files are not in the corpus, which has no `sound/music/` directory, so only the names are given. The table is exact data. `[Must-match]`
 
@@ -747,18 +760,24 @@ With campaign index 101 zero, the water-chip quest is still visible and active. 
 
 For rest, assume the Pip-Boy has just opened with zero credited minutes, no queue interruption, a player included in the party, and healing rate 1. A single three-hour request gives A 0.6875 and K 13.75: thirteen executed hour steps credit `13 x trunc(180 / 13.75) = 169` minutes. Game time advances 108000 ticks, but no healing trigger occurs. Eighteen ten-minute requests **without closing the Pip-Boy** credit 180 minutes and trigger one healing-rate unit over the same three game hours. A one-HP deficit under until-healed can consequently require repeated three-hour phases rather than the naive three-hour estimate.
 
+Town-target jitter (section 3.7) for the Hub, town 6 at cell 17,14: the center is (875, 725). The four draws X magnitude 5, X sign 0, Y magnitude 16, Y sign 1 give the target (870, 741). The draws 0, 1, 0, 0 give the center itself. Reading the jitter as one signed draw per axis would use two draws instead of four and shift every later draw.
+
+Script-directed travel (section 3.4) from the initial position (825, 75) to Shady Sands, town 2 at cell 21,1, makes the four jitter draws. Its target then lies in X 1059-1091 and Y 59-91, so the whole trip stays in row 1 and crosses columns 17-20. No discovery byte changes on the way. Only the next opening of the world map reveals the area around cell (21,1).
+
 ### 4.5 Map Number, Town and Music Vectors
 
-These are computed from section 3.10. Each row gives the 16-byte header name field (offset `0x04`) and header word `0x34` of a synthetic map, and the result after loading.
+These are computed from section 3.10. Each row gives the file a synthetic map was opened as, its 16-byte header name field (offset `0x04`) and header word `0x34`, and the result after loading and after leaving.
 
-| Header name | Word `0x34` | Map number | Town | Music after load | Leaving writes `.SAV` |
-| --- | ---: | ---: | --- | --- | --- |
-| `hubent.map` | 7 | 36 (name uppercased and matched) | 6 Hub | `01hub` | Yes |
-| `HUBENT.SAV` | -1 | 36 (`.SAV` replaced by `.MAP`) | 6 Hub | `01hub` | Yes |
-| `hubent.sav` | 7 | 7 (lowercase `.sav` keeps the word) | 1 Vault 15 | `13carvrn` | Yes |
-| `MSTRLR34.MAP` | 34 | 34 | 11 Cathedral | `02mstrlr` | Yes |
-| `DESCRVN4.MAP` | 63 | 63 | 0 Vault 13 | `07desert` | No (excluded) |
-| `CARAVAN.MAP` | -1 | -1 (no match) | -1, world map position unchanged | `wind2` keeps looping | No (unnumbered) |
+| Opened as | Header name | Word `0x34` | Map number | Town | Music after load | Leaving |
+| --- | --- | ---: | ---: | --- | --- | --- |
+| `MAPS\HUBENT.MAP`, no saved copy | `hubent.map` | 7 | 36 (name uppercased and matched) | 6 Hub | `01hub` | Writes `HUBENT.SAV` |
+| `MAPS\HUBENT.SAV` | `HUBENT.SAV` | -1 | 36 (`.SAV` replaced by `.MAP`) | 6 Hub | `01hub` | Writes `HUBENT.SAV` |
+| `MAPS\HUBENT.SAV` | `hubent.sav` | 7 | 7 (lowercase `.sav` keeps the word) | 1 Vault 15 | `13carvrn` | Writes `HUBENT.SAV`, not `VAULTENT.SAV`, with map 7's automap entry |
+| `MAPS\MSTRLR34.MAP` | `MSTRLR34.MAP` | 34 | 34 | 11 Cathedral | `02mstrlr` | Writes `MSTRLR34.SAV` |
+| `MAPS\DESCRVN4.MAP` | `DESCRVN4.MAP` | 63 | 63 | 0 Vault 13 | `07desert` | Writes nothing (excluded); deletes any `DESCRVN4.SAV` |
+| `MAPS\CARAVAN.MAP` | `CARAVAN.MAP` | -1 | -1 (no match) | -1, world map position unchanged | `wind2` keeps looping | Writes nothing (unnumbered) |
+
+In every row the written file's header name is the working name, for example `HUBENT.SAV`, so the next load of row 3's file gives map 36, not 7. A game save made in row 3 stores `HUBENT.sav` at `SAVE.DAT` offset `0x73` and map number 7 at offset `0x71`.
 
 Rest on map 34 checks combat teams (town 11 is not in the omitted set of section 3.9); rest on map 36 does not (town 6 is).
 
@@ -771,3 +790,5 @@ Rest on map 34 checks combat teams (town 11 is not in the omitted set of section
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
 Verification notes (map numbers, section 3.10): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. The 66-row table was generated from the reference tables and checked row by row against the English corpus `map.msg` messages 0-65, which list the same names in the same order. The header word `0x34` and name field of all 72 corpus `maps/*.map` files were read: the 66 numbered maps store their own number, and the six unlisted maps store -1. The corpus has no `sound/music/` directory, so the track names are not checked against audio files.
+
+Update notes (2026-10-22): section 2.3 gains the final-output-length rule, checked by decoding all 20456 `MASTER.DAT` and 5459 `CRITTER.DAT` entries; section 3.4 states that script-directed travel makes no discovery reveal; section 3.10 gains the working `.SAV` name and map-name matching rules and corrects the unnumbered-map sentence; sections 4.4 and 4.5 gain the jitter, travel and working-name vectors. The four-draw jitter order was rechecked against the reference. `tools/spec_lint.py` gives 0 errors.

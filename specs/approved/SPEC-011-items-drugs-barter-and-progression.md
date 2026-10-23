@@ -440,8 +440,8 @@ Immediate extras when a perk rank is gained in the chooser:
 
 | Perk | Immediate extra |
 | --- | --- |
-| Tag! | Opens the fourth-tag selection. If cancelled, the rank is removed again |
-| Mutate! | Opens trait replacement. If cancelled, the rank is removed again |
+| Tag! | Opens the fourth-tag selection (SPEC-014 §3.42). If cancelled, the rank is removed again, and the pending pick is still consumed |
+| Mutate! | Opens trait replacement (SPEC-014 §3.42). If cancelled, the rank is removed again, and the pending pick is still consumed |
 | Lifegiver | Maximum-HP bonus +4 and heal 4 |
 | Educated | Unspent skill points +2, without the 99 cap of step 1 but within the stat bounds |
 
@@ -758,3 +758,5 @@ Run `python3 -I tools/spec011/survey.py <unpacked corpus>` (a research-side tool
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
 Verification notes: `tools/spec_lint.py` gives 0 errors. Its 43 plain-word warnings were reviewed and are benign. They are this spec's own formula notation: "roll" (the SPEC-006 random-integer notation), "trunc", "rank", "level", "bonus", "amount", "modifier", "weight", "size", "current", "maximum" and "capacity". The only fenced block is a big-endian hex dump of a synthetic payload. The corpus survey (section 4.12) passes every check. Tag count: 159 `[Must-match]`, 8 `[May-improve]`.
+
+Update notes (2026-10-22): section 3.21 now says that cancelling Tag! or Mutate! still consumes the pending perk pick (SPEC-014 §3.42). Tag counts are unchanged.

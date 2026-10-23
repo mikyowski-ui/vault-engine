@@ -307,6 +307,28 @@ Outside active dialogue, the background clock checker normally processes the que
 
 Active dialogue suppresses this normal critter/timed background checker; talking-head animation still uses wall-clock timing. Explicit time changes or queue-processing calls elsewhere are not forbidden by that suppression. `[Must-match]`
 
+**Background passes.** `[Must-match]` Map background work runs in background passes, not on a timer. A pass runs every time the engine polls for input. That is once per main-loop iteration, and on every poll inside a loop that waits for input: modal windows, timed pauses, and animation and combat waits. A loop that suspends map background processing still polls, but its passes skip the map tasks (SPEC-014 §3.28). The main loop has no frame limiter, so the pass rate is the polling rate of the machine. The registered background tasks run in **newest-registered-first** order. During play the idle-fidget task is registered after the script task, and so is object animation (SPEC-007 §3.11). Each pass therefore runs the idle-fidget step, then object animation, and only then the script task. Random draws made by a fidget in a pass come before any draw made by a script in that pass.
+
+**Script task.** Each pass runs these steps in order. `[Must-match]`
+
+1. If the script engine is running, the VM gets its time slice (SPEC-004). The engine stops running during a map load, from step 1 to step 6 of section 3.5.
+2. Script-created windows are updated.
+3. The engine must be running and critter scripts enabled. Critter scripts are switched on and off with map background processing, which the windows of SPEC-014 §3.28 suspend. When both hold and no dialogue is active, one **critter-script cycle step** runs, followed by the background clock checker above.
+
+**Critter-script cycle step.** `[Must-match]` Nothing happens in combat or during dialogue. Otherwise:
+
+1. Let N be the number of critter-category script records on the current map. This counts every record in the critter stream: those on all elevations, and those whose owner is dead or hidden.
+2. Add 1 to the cycle counter. If the counter is then N or more, set it to 0. The counter is 0 at program start. It is never reset, not by a map change, a game load or a new game.
+3. If N is above 0, the record at position *counter* receives a `critter_p_proc` request through the generic dispatcher (section 3.5). Position counts records in list order: block order, then slot order, 16 records per block (SPEC-003 §2.9). Removing a record moves the list's last record into the freed slot.
+
+Exactly one critter script is requested per pass, so each runs once every N passes. The first step after program start serves position 1, or position 0 when N is 1. After a map change the counter keeps its old value; a value at or above the new N wraps to 0 on the next step. The request is never `combat_p_proc`, because the step does not run in combat.
+
+The generic dispatcher decides what the request does. `[Must-match]`
+
+- A record whose script file cannot be loaded does nothing.
+- A program that a VM error has stopped, or that is suspended waiting on another program or on a blocking library call, is skipped with no effect. A program whose root run simply ended is still requested.
+- A script that defines no `critter_p_proc` runs its procedure-table index 1 instead (section 3.5). The request is **not** skipped. In 589 of the 593 corpus scripts without `critter_p_proc`, index 1 is `start`. 258 of the 1033 critter-category records in the 72 corpus maps name such a script, so their `start` runs on each of their cycle turns.
+
 ### 3.8 Object Actions and Override Boundaries
 
 The ordinary sequence is input request, optional movement/animation and proximity/AP checks, script dispatch at the interaction stage, then a default action unless the relevant override/result suppresses it. An override is not the same as an integer script return result. Each dispatch clears the override flag, but does not universally clear the separate integer result. `[Must-match]`
@@ -443,7 +465,14 @@ At zero idle counter, the two-variant probabilities are 67%/33%; the three-varia
 
 Fidget and reaction transitions advance frames with delay `floor(1000 / frame rate)` wall-clock milliseconds; a zero file frame rate uses 10 FPS. On completion, an idle fidget returns to frame zero. Idle waiting thresholds follow the idle sequence below. Waiting is measured against the retained fidget timestamp, not universally from speech completion. User choice resets the idle counter; speech completion sets it to 3. `[Must-match]`
 
-**Session start.** When a dialogue session opens with a head, the engine creates the head view showing only the background, enables the head updater, and then immediately prepares the mood fidget: it selects the speech art for the mood (selector 9, 10 or 11), reads the fidget count, and makes the fidget-choice draw above, `random(1, 100)`. A fidget is therefore chosen and drawn **at session start**, with no delay before it, and the session-start sequence makes no threshold draw. `[Must-match]` The draw happens whenever the head-list entry supplies a count, even if the fidget art then fails to load. No draw happens with head -1, when the count lookup fails, or when a session is already open. `[Must-match]` The retained fidget timestamp starts at zero, so the head updater's first tick shows frame 0 of the chosen fidget and the fidget plays through at its frame delay. There is no separate greeting or neutral-pose animation; mood transitions occur only on option reactions. `[Must-match]`
+**Session start.** When a dialogue session opens with a head, the engine creates the head view, enables the head updater, and then immediately prepares the mood fidget. It selects the speech art for the mood (selector 9, 10 or 11), reads the fidget count, and makes the fidget-choice draw above, `random(1, 100)`. This is the **only random draw** the dialogue code makes while opening a session. The mood lookup before it (SPEC-005 `start_gdialog`) draws nothing, and neither do the windows, the head view, or the scroll-in. So a fidget is chosen at session start with no delay before it, and no threshold draw is made. `[Must-match]` The draw happens whenever the head-list entry supplies a count, even if the fidget art then fails to load. No draw happens with head -1, when the count lookup fails, or when a session is already open. `[Must-match]`
+
+No head frame is drawn while the session opens. The head view first changes on the head updater's first tick. That tick comes in the choice loop, after the first reply has been displayed and its speech, if any, has started (SPEC-010 section 3.12). `[Must-match]`
+
+- If no speech is playing then, that tick shows frame 0 of the chosen fidget, because the retained fidget timestamp starts at zero. The fidget then plays through at its frame delay.
+- If the first reply started speech, that tick runs lip-sync instead. If that speech runs to a normal ending, the chosen fidget is **never shown**. The waiting state begins with the timestamp still zero, so the next tick makes the threshold draw and then a new fidget draw. If an option stops the speech first, the chosen fidget plays from frame 0 on the next tick.
+
+There is no separate greeting or neutral-pose animation; mood transitions occur only on option reactions. `[Must-match]`
 
 The idle-second counter is **not** reset when a session opens; it keeps its value from the previous session (0 at program start), so it affects the first fidget choice. `[Must-match]` The waiting-for-next-fidget state is not reset either. It is normally clear at session start because every option choice clears it; if it is set, the first tick finds the wait already elapsed and at once makes the threshold draw and a new fidget draw. `[May-improve]`: clear the waiting state when a session opens.
 
@@ -457,7 +486,7 @@ The idle-second counter is **not** reset when a session opens; it keeps its valu
 
 A neutral option leaves mood unchanged. Before a reaction transition, finish the current fidget; then play all transition frames and set up the destination mood's fidget and speech art. `[Must-match]`
 
-During speech, idle animation pauses and the speech-timing system selects frames from the corresponding selector 9, 10, or 11. Phoneme indices 0-41 map to frame numbers as follows, in index order. `[Must-match]`
+During speech, idle animation pauses, and lip-sync (SPEC-010 section 3.12) selects frames from the current mood's speech art, selector 9, 10, or 11. Phoneme numbers 0-41 come from the speech's `.LIP` file (SPEC-010 section 2.6) and map to frame numbers as follows, in index order. `[Must-match]`
 
 ```text
 0-13:  0 3 1 1 3 1 1 1 7 8 7 3 1 8
@@ -465,7 +494,7 @@ During speech, idle animation pauses and the speech-timing system selects frames
 28-41: 2 2 2 2 6 2 2 5 8 2 2 2 2 8
 ```
 
-When speech finishes, release its resources, draw speech frame zero, and allow a new fidget. Choosing an option stops any remaining speech before its reaction. With no head, the viewport supplies the scene image instead of a selected head/background animation. Lip/sound binary formats themselves are outside this specification. `[Must-match]`
+A speech frame is drawn only when the current phoneme number changes. A tick that passes several markers draws only the last phoneme reached. When speech ends normally, by its audio finishing or by passing its final marker, release it, draw speech frame zero, enter the waiting state, and set the idle counter to 3. Choosing an option stops any remaining speech before its reaction, without drawing a frame. Review, Barter, and the other stops listed in SPEC-010 section 3.12 do the same. Lip-sync makes no random draws, and the fidget makes none while speech plays. With no head, the viewport supplies the scene image instead of a selected head/background animation, and no speech is requested. `[Must-match]` The `.LIP` layout, timing units, missing-file handling, and the first-frame display safe rule are in SPEC-010 sections 2.6 and 3.12.
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
@@ -595,6 +624,14 @@ For a spatial centered at tile 2010, elevation zero, radius 1, moves to tiles 20
 
 For the queue, enqueue A, B, then C at current tick 1000 with delays 10 each. A processing pass at 1009 dispatches none. At 1010, A returning zero is followed by B; if B returns nonzero, C remains pending until another pass, even though C is already due. A periodic map update processed late at tick 2633 reschedules for 3233, not for an earlier nominal cadence boundary.
 
+The following draw-order vector starts from a fresh program run. It uses synthetic head row 7 in neutral mood with three neutral fidgets, and the idle counter is 0. Opening the session makes exactly one draw, `random(1, 100)`. If it returns 60, the session chooses neutral variant 2 (`0x08042007`) and resets the idle counter to 0. Suppose the first reply starts speech that runs to its end. No draws happen during the speech. At the end, the head shows speech frame 0 of `0x080A0007` and the idle counter becomes 3. On the next tick the wait has already elapsed, because the retained timestamp is zero:
+
+1. Add 10 to the idle counter, giving 13. This is the first wait of the program run.
+2. Draw `random(0, 3)` for the next threshold.
+3. Draw `random(1, 100)` and add `floor(13 / 2)` = 6 to choose the next fidget. Then reset the idle counter.
+
+Variant 2 from session start is never shown. If the first reply has no speech, the first tick instead shows frame 0 of `synthnf2.frm`.
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -602,3 +639,7 @@ For the queue, enqueue A, B, then C at current tick 1000 with delays 10 each. A 
 - [x] Every documented quirk tagged `[Must-match]` or `[May-improve]`
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
+
+Update notes (2026-10-22): section 3.11 now states the single session-start fidget draw, when the first head frame is drawn, and the lip-sync hand-off to SPEC-010 §3.12; section 4.4 gains a session-start draw-order vector. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-22, second pass): section 3.7 now gives the background-pass model and the critter-script cycle step, checked against the reference background-task list, script task and dispatcher. The corpus counts come from a scan of the 952 compiled scripts and of the critter-category records of all 72 corpus maps. `tools/spec_lint.py` gives 0 errors.
