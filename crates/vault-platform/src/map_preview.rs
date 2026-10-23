@@ -143,17 +143,6 @@ fn button(image: &mut IndexedImage, font: &Font, palette: &Palette, text: &[u8],
         style(palette.lookup_rgb5([0, 31, 0]).unwrap_or(1)),
     );
 }
-/// Short map labels.
-fn label(
-    image: &mut IndexedImage,
-    font: &Font,
-    palette: &Palette,
-    text: &[u8],
-    origin: [i32; 2],
-    color: u8,
-) {
-    image.draw_text(font, palette, text, origin, 160, style(color));
-}
 /// Status and panel lines.
 fn panel_text(
     image: &mut IndexedImage,
@@ -616,7 +605,7 @@ impl MapPreview {
         self.screen = Screen::Map;
         self.last_hover = None;
         self.selected = None;
-        // An unnumbered map has no working name (SPEC-008 §3.10): its
+        // A map without a working name (none loaded, SPEC-008 §3.10): its
         // header name titles it instead of the map before it.
         self.path = self.host.world.current_map_name().unwrap_or_else(|| {
             let name = &self.host.world.map.header.name;
@@ -628,14 +617,16 @@ impl MapPreview {
     /// except while a window that suspends cycling is open. SPEC-012 §3.12
     /// movies; SPEC-014 §3.17 the in-game pause window (not the world
     /// map's), §3.14 in-game save/load, §3.2 the help screen, §3.8 the
-    /// character editor, §3.41 the Pip-Boy; SPEC-013 §3.15 the Skilldex and
-    /// §3.21 elevators.
+    /// character editor, §3.39-§3.40 the world and town maps, §3.41 the
+    /// Pip-Boy; SPEC-013 §3.15 the Skilldex and §3.21 elevators.
     pub(crate) fn palette_cycling(&self) -> bool {
         self.host.library.palette_cycling
             && !matches!(
                 self.screen,
                 Screen::Movie(_)
                     | Screen::PipBoy(_)
+                    | Screen::World(_)
+                    | Screen::Town(_)
                     | Screen::Options(options::OptionsScreen::Pause)
                     | Screen::SaveLoad(_)
                     | Screen::Help(_)
@@ -726,6 +717,8 @@ impl MapPreview {
                 Screen::Automap(_) => self.automap_release(point),
                 Screen::Options(_) => self.options_release(point),
                 Screen::PipBoy(_) => self.pipboy_release(point),
+                Screen::World(_) => self.world_release(point),
+                Screen::Town(_) => self.town_release(point),
                 _ => false,
             };
         if let Some(cue) = self.pressed.take() {
@@ -733,11 +726,6 @@ impl MapPreview {
             handled = true;
         }
         handled || held.is_some()
-    }
-    pub(crate) fn location_name(&self, town: usize) -> Vec<u8> {
-        vault_core::worldmap::TOWNS
-            .get(town)
-            .map_or_else(Vec::new, |town| town.name.as_bytes().to_vec())
     }
     /// Game date and time, `MM/DD/YYYY HH:MM`.
     pub(crate) fn clock_text(&self) -> Vec<u8> {
@@ -1133,9 +1121,9 @@ impl MapPreview {
     pub fn title(&self) -> String {
         match &self.screen {
             Screen::World(_) => {
-                return "Vault — world map — click to travel; Escape returns".into();
+                return "Vault — world map — click to travel; click the party to enter".into();
             }
-            Screen::Town(_) => return "Vault — town map — choose an area; Escape returns".into(),
+            Screen::Town(_) => return "Vault — town map — choose an area".into(),
             Screen::PipBoy(_) => return "Vault — Pip-Boy — Escape returns".into(),
             Screen::Inventory(_) => {
                 return "Vault — inventory — click an item, then an action; Escape returns".into();
@@ -1412,8 +1400,8 @@ impl MapPreview {
             return false;
         }
         match self.screen {
-            Screen::World(_) => return self.world_click(point),
-            Screen::Town(_) => return self.town_click(point),
+            Screen::World(_) => return self.world_click(point, right),
+            Screen::Town(_) => return self.town_click(point, right),
             Screen::PipBoy(_) => return self.pipboy_click(point),
             Screen::Inventory(_) => return self.inventory_click(point, right),
             Screen::Character(_) => return self.character_click(point),
@@ -2303,72 +2291,6 @@ mod tests {
     }
 
     #[test]
-    fn world_map_travels_to_a_town_and_enters_an_area_from_the_town_map() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
-        // The entrance's map is a copy of the fixture map renamed in its
-        // header (bytes 4..20) to `V13ENT.MAP`, which `map.msg` lists as map
-        // 35: SPEC-008 §3.10 numbers a map by its header name.
-        let mut map = std::fs::read(dir.path().join("maps/synthetic.map")).unwrap();
-        let mut name = [0_u8; 16];
-        name[..10].copy_from_slice(b"V13ENT.MAP");
-        map[4..20].copy_from_slice(&name);
-        std::fs::write(dir.path().join("maps/v13ent.map"), map).unwrap();
-        let catalog = dir.path().join("text/english/game/map.msg");
-        let mut messages = std::fs::read(&catalog).unwrap();
-        messages.extend_from_slice(b"{35}{}{V13ENT.MAP}\n");
-        std::fs::write(&catalog, messages).unwrap();
-        let mut preview = interactive(dir.path());
-        preview.image().unwrap();
-        assert!(preview.step(KeyCode::KeyW));
-        let Screen::World(world) = &preview.screen else {
-            panic!("world map");
-        };
-        let scroll = world.scroll;
-        let image = preview.image().unwrap();
-        assert_eq!((image.width(), image.height()), (640, 480));
-        // Vault 13 (cell 16,1) is known from the start: travel to its center.
-        let [x, y] = [16 * 50 + 25, 50 + 25];
-        let point = [
-            vault_core::worldmap::VIEWPORT_ORIGIN[0] + x - scroll[0],
-            vault_core::worldmap::VIEWPORT_ORIGIN[1] + y - scroll[1],
-        ];
-        assert!(preview.click(point, false));
-        let start = preview.host.world.clock.ticks;
-        for update in 1..100 {
-            preview.tick(update * 50).unwrap();
-            if !matches!(preview.screen, Screen::World(_)) {
-                break;
-            }
-        }
-        // A visited town shows its town map with its known entrances.
-        let Screen::Town(town) = &preview.screen else {
-            panic!("town map after arriving");
-        };
-        assert_eq!(town.town, 0);
-        assert_eq!(town.buttons.len(), 1);
-        assert!(preview.host.world.clock.ticks >= start);
-        let rect = town.buttons[0].rect;
-        preview.image().unwrap();
-        assert!(preview.click([rect[0] + 4, rect[1] + 4], false));
-        assert!(
-            matches!(preview.screen, Screen::Map),
-            "{:?}",
-            String::from_utf8_lossy(&preview.status)
-        );
-        // The entrance's map is loaded (named by its working saved-map file).
-        assert_eq!(
-            preview.host.world.current_map_name().as_deref(),
-            Some("V13ENT.SAV")
-        );
-        assert_eq!(preview.image().unwrap().height(), 480);
-        // Escape returns from the world map without travelling.
-        assert!(preview.step(KeyCode::KeyW));
-        assert!(preview.step(KeyCode::Escape));
-        assert!(matches!(preview.screen, Screen::Map));
-    }
-
-    #[test]
     fn map_preview_loads_all_categories_and_handles_camera_roofs_elevations() {
         let dir = tempfile::tempdir().unwrap();
         fixture::write_corpus(dir.path());
@@ -2443,11 +2365,12 @@ mod tests {
         assert!(!preview.palette_cycling());
         assert!(preview.step(KeyCode::Escape));
         assert!(preview.palette_cycling());
-        // The world map's pause window does not.
+        // SPEC-014 §3.39: so does the world map, paused or not.
         assert!(preview.step(KeyCode::KeyW));
+        assert!(!preview.palette_cycling());
         assert!(preview.step(KeyCode::KeyP));
         assert!(matches!(&preview.screen, Screen::World(world) if world.paused));
-        assert!(preview.palette_cycling());
+        assert!(!preview.palette_cycling());
     }
     #[test]
     fn clicking_npc_renders_choices_executes_callbacks_and_returns_to_map() {

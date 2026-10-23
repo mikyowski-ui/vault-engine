@@ -231,34 +231,81 @@ fn spec008_travel_queue_events_walk_mask_and_scripted_town_travel() {
     assert!(mask.blocks([177, 25]));
     assert!(!mask.blocks([177, 0]) && !mask.blocks([1064, 25]));
     assert!(WalkMask::new(vec![0; 10]).is_err());
+}
 
-    // Script-directed travel ignores the mask and charges no city time.
+#[test]
+fn spec008_script_directed_town_travel_runs_to_completion_without_reveal() {
+    // SPEC-008 §3.4: cells (21,13) and Necropolis's (22,13) are city, and
+    // its jittered target stays inside its cell: no walk-mask checks, no
+    // city time.
     let mut host = traveller(0);
-    // Necropolis's cell (22,13) is city; its jittered target stays inside.
-    host.world.world_map.set_position([1100, 650]);
-    assert_eq!(terrain(cell_of([1100, 650]).unwrap()), Terrain::City);
-    host.travel_to_town(5).unwrap();
-    let travel = host.world.world_map.travel.unwrap();
-    assert!(travel.scripted);
-    let [x, y] = travel.destination;
-    assert!((1109..=1141).contains(&x) && (659..=691).contains(&y));
-    let start = host.world.clock.ticks;
+    host.world.world_map.set_position([1075, 675]);
+    assert_eq!(terrain([21, 13]), Terrain::City);
+    assert_eq!(terrain([22, 13]), Terrain::City);
     host.world.world_map.walk_mask = Some(Arc::new(
         WalkMask::new(vec![0xff; WalkMask::ROWS * WalkMask::ROW_BYTES]).unwrap(),
     ));
-    assert_eq!(host.travel_iteration(), Ok(TravelOutcome::Moving));
-    assert_ne!(host.world.world_map.position(), [1100, 650]);
+    let start = host.world.clock.ticks;
+    host.scripted_town_travel(5).unwrap();
+    let [x, y] = host.world.world_map.position();
+    assert!((1109..=1141).contains(&x) && (659..=691).contains(&y));
+    assert_eq!(host.world.world_map.cell(), Some([22, 13]));
     assert_eq!(host.world.clock.ticks, start);
-    // The final iteration arrives.
-    let mut last = TravelOutcome::Moving;
-    for _ in 0..200 {
-        last = host.travel_iteration().unwrap();
-        if last != TravelOutcome::Moving {
-            break;
-        }
+    assert_eq!(host.world.world_map.travel, None, "no travel state is kept");
+    // Already in the town's cell, and town -1 or out of range: nothing.
+    let position = host.world.world_map.position();
+    for town in [5, -1, 12] {
+        host.scripted_town_travel(town).unwrap();
+        assert_eq!(host.world.world_map.position(), position);
     }
-    assert_eq!(last, TravelOutcome::Arrived);
-    assert_eq!(host.world.clock.ticks, start);
+
+    // §4.4: from the initial position to Shady Sands (town 2, cell 21,1)
+    // the target lies in X 1059-1091 and Y 59-91, so the trip stays in row
+    // 1, crosses columns 17-20, and changes no discovery byte. Time is added
+    // directly: the due event is left for normal queue processing.
+    let mut host = traveller(1);
+    host.world.world_map.reset_discovery();
+    let before = host.world.world_map.saved.discovery.clone();
+    let start = host.world.clock.ticks;
+    host.world
+        .queue
+        .insert(start, 100, 0, EventKind::Other(9))
+        .unwrap();
+    host.world.world_map.interval = 50;
+    host.world.world_map.schedule.counter = 3;
+    host.scripted_town_travel(2).unwrap();
+    let [x, y] = host.world.world_map.position();
+    assert!((1059..=1091).contains(&x) && (59..=91).contains(&y));
+    assert_eq!(host.world.world_map.cell(), Some([21, 1]));
+    assert_eq!(host.world.world_map.saved.discovery, before);
+    assert!(host.world.clock.ticks > start + 100);
+    assert!(host.world.queue.next_due().is_some(), "no queue processing");
+    // W and Q are recomputed; the shared terrain counter is untouched.
+    assert_eq!(
+        host.world.world_map.speed.map(|s| (s.interval, s.ticks)),
+        Some((90, 7200))
+    );
+    assert_eq!(host.world.world_map.schedule.counter, 3);
+    assert!(host.world.world_map.interval < 90);
+}
+
+#[test]
+fn spec008_script_directed_travel_heals_every_w_iterations_without_encounters() {
+    // A long trip, Vault 13 to the Glow (town 9, cell 24,25): 24-hour
+    // healing still applies every W iterations, the W-iteration counter
+    // starts at zero, and no encounter dice are drawn (only the four
+    // jitter draws use the generator).
+    let mut host = traveller(0);
+    host.world.world_map.reset_discovery();
+    host.world.world_map.interval = 59;
+    let rng = host.world.rng.clone();
+    host.scripted_town_travel(9).unwrap();
+    assert_eq!(host.world.world_map.cell(), Some([24, 25]));
+    assert!(hp(&host) > 10, "healed on the way");
+    assert!(host.world.world_map.saved.discovery.iter().all(|b| *b == 0));
+    let mut expected = rng;
+    town_target(9, &mut expected).unwrap();
+    assert_eq!(host.world.rng, expected, "only the four jitter draws");
 }
 
 #[test]
@@ -930,4 +977,279 @@ fn spec008_map_numbers_come_from_the_header_name_matched_against_map_msg() {
     assert_eq!(map_number_of_name(b"Watrshd.map", Some(&catalog)), 5);
     assert_eq!(map_number_of_name(b"master34.map", Some(&catalog)), -1);
     assert_eq!(map_number_of_name(b"HUBENT", Some(&catalog)), -1);
+    // SPEC-008 §3.10 the `load_map` string rule: nothing else is
+    // normalized, and (safe rule) 16 or more bytes match nothing.
+    for (name, number) in [
+        (b"hubent.map".as_slice(), 36),
+        (b"HUBENT.MAP", 36),
+        (b"hubent.sav", 36),
+        (b"HUBENT", -1),
+        (b"hubent", -1),
+        (b"HUBENT.MAP ", -1),
+        (b"MAPS\\HUBENT.MAP", -1),
+        (b"HUBENT.MAP\0\0\0\0\0\0\0", 36),
+        (b"HUBENT.MAP.....", -1),
+        (b"HUBENT.MAP......", -1),
+    ] {
+        assert_eq!(
+            load_map_number(name, Some(&catalog)),
+            number,
+            "{}",
+            String::from_utf8_lossy(name)
+        );
+    }
+}
+
+#[test]
+fn spec008_fixture_working_names_and_save_dat_field() {
+    use crate::persistence::{requested_file_name, save_dat_map_file, saved_map_name, saved_probe};
+    // SPEC-008 §3.10: the file name is the uppercased final component; a
+    // `.MAP` name probes its `.SAV` copy; the stem ends at the first `.`.
+    assert_eq!(requested_file_name("maps/hubent.map"), "HUBENT.MAP");
+    assert_eq!(requested_file_name(r"MAPS\vaultent.sav"), "VAULTENT.SAV");
+    assert_eq!(saved_probe("HUBENT.MAP").as_deref(), Some("HUBENT.SAV"));
+    assert_eq!(saved_probe("A.MAP.MAP").as_deref(), Some("A.SAV.MAP"));
+    assert_eq!(saved_probe("HUBENT.SAV"), None);
+    assert_eq!(saved_map_name(b"HUBENT.MAP").as_deref(), Some("HUBENT.SAV"));
+    assert_eq!(saved_map_name(b"A.B.MAP").as_deref(), Some("A.SAV"));
+    assert_eq!(saved_map_name(b"NOEXT").as_deref(), Some("NOEXT.SAV"));
+    assert_eq!(save_dat_map_file("VAULTENT.SAV"), "VAULTENT.sav");
+    assert_eq!(save_dat_map_file("HUBENT.SAV"), "HUBENT.sav");
+}
+
+#[test]
+fn spec008_fixture_hub_jitter_takes_four_draws() {
+    // §4.4: the Hub, town 6 at cell 17,14, centers on (875, 725).
+    assert_eq!(town_center(6), Some([875, 725]));
+    let mut draws = Draws::new(&[5, 0, 16, 1]);
+    assert_eq!(town_target(6, &mut draws), Ok([870, 741]));
+    assert!(draws.0.is_empty());
+    let mut draws = Draws::new(&[0, 1, 0, 0]);
+    assert_eq!(town_target(6, &mut draws), Ok([875, 725]));
+}
+
+#[test]
+fn spec014_fixture_i_world_view_geometry() {
+    use crate::worldmap::screen::{self, Marker};
+    // The party at the start, Vault 13's cell, follow mode on.
+    let view = screen::centered(START);
+    assert_eq!(view, [578, 0]);
+    let party = screen::window(START, view);
+    assert_eq!(party, [269, 96]);
+    assert_eq!(Marker::Triangle.origin(party), [257, 90]);
+    // Visible cells: columns 11-20, rows 0-8, clipped to the view.
+    let visible: Vec<_> = (0..COLUMNS)
+        .flat_map(|c| (0..ROWS).map(move |r| [c, r]))
+        .filter(|cell| screen::cell_rect(*cell, view).is_some())
+        .collect();
+    assert!(
+        visible
+            .iter()
+            .all(|[c, r]| (11..=20).contains(c) && *r <= 8)
+    );
+    assert_eq!(visible.len(), 10 * 9);
+    assert_eq!(screen::cell_rect([11, 0], view), Some([22, 21, 22, 50]));
+    assert_eq!(screen::cell_rect([12, 1], view), Some([44, 71, 50, 50]));
+    assert_eq!(screen::cell_rect([20, 8], view), Some([444, 421, 28, 42]));
+    assert_eq!(screen::cell_rect([16, 1], view), Some([244, 71, 50, 50]));
+    // The opening reveal without Scout: (16,1) visited, its eight
+    // neighbours seen, nothing else (row 1's ocean threshold is 0).
+    let mut map = WorldMap::default();
+    map.reset_discovery();
+    map.reveal(false);
+    for cell in &visible {
+        let near = (15..=17).contains(&cell[0]) && cell[1] <= 2;
+        let expected = match (*cell == [16, 1], near) {
+            (true, _) => 2,
+            (false, true) => 1,
+            _ => 0,
+        };
+        assert_eq!(map.discovery(*cell), expected, "{cell:?}");
+    }
+    // Hover.
+    assert!(screen::hovers([279, 95], party));
+    assert!(!screen::hovers([279, 100], party));
+    assert!(screen::hovers([273, 103], party));
+    // The "Vault 13" label (width 50) fills (245, 79) to (294, 88).
+    assert_eq!(screen::label_origin(party, 50), [245, 79]);
+    assert!(screen::label_shown([245, 79], 50));
+    assert!(!screen::label_shown([245, 11], 50));
+    assert!(!screen::label_shown([-28, 79], 50));
+    // A destination click at (400, 300): world (956, 279), cell (19, 5).
+    assert!(screen::view_click([400, 300]));
+    assert!(!screen::view_click([22, 300]) && !screen::view_click([472, 300]));
+    let target = screen::world_at([400, 300], view);
+    assert_eq!(target, [956, 279]);
+    assert_eq!(cell_of(target), Some([19, 5]));
+    assert_eq!(town_at([19, 5]), None);
+    // Edge scrolling: east blocked at vx 950; only north blocked at (900,
+    // 0), moving to (916, 0); both blocked at (950, 0).
+    assert_eq!(screen::edge([639, 240]), [1, 0]);
+    assert_eq!(screen::scroll([950, 0], [1, 0]), ([950, 0], true));
+    assert_eq!(screen::edge([639, 0]), [1, -1]);
+    assert_eq!(screen::scroll([900, 0], [1, -1]), ([916, 0], false));
+    assert_eq!(screen::scroll([950, 0], [1, -1]), ([950, 0], true));
+    assert_eq!(screen::cursor_index([1, 0]), Some(3));
+    assert_eq!(screen::cursor_index([1, -1]), Some(2));
+    assert_eq!(screen::edge([2, 2]), [0, 0]);
+    assert_eq!(screen::edge([1, 478]), [-1, 1]);
+    // Home centers, then vy 0 (safe rule; the reference ends at 16); End.
+    assert_eq!(screen::home(START), [578, 0]);
+    assert_eq!(screen::end([578, 0]), [578, 1058]);
+    // Marker windows.
+    assert!(Marker::Triangle.shown([-2, 9]) && !Marker::Triangle.shown([-3, 9]));
+    assert!(Marker::Triangle.shown([483, 462]) && !Marker::Triangle.shown([484, 462]));
+    assert!(Marker::Plus.shown([18, 17]) && !Marker::Plus.shown([17, 17]));
+    assert!(Marker::Crosshair.shown([473, 11]) && !Marker::Crosshair.shown([473, 10]));
+    assert!(Marker::Bolt.shown([471, 462]) && !Marker::Bolt.shown([472, 462]));
+    // The ordinary encounter bolt at (269, 96) is drawn at (266, 91).
+    assert_eq!(Marker::Bolt.origin(party), [266, 91]);
+    assert_eq!(screen::FLASH_IMAGES * screen::FLASH_MS, 2786);
+    assert_eq!(screen::PASS_MS, 41);
+    // Side panel.
+    assert_eq!(screen::town_button(0), Some([508, 61, 15, 15]));
+    assert_eq!(screen::town_button(11), Some([508, 367, 15, 15]));
+    assert_eq!(screen::town_button(12), None);
+    assert_eq!(screen::town_world_button(), [520, 439, 15, 15]);
+}
+
+#[test]
+fn spec014_fixture_i_town_map_geometry() {
+    use crate::worldmap::screen;
+    let mut gvars = vec![0; 700];
+    let mut map = WorldMap::default();
+    // The Hub with slots 0, 1 and 3 known: events 514-516.
+    gvars[73] = 1;
+    gvars[577] = 1;
+    gvars[579] = 1;
+    map.refresh_knowledge(&gvars, 0);
+    let buttons = map.town_buttons(6, &gvars);
+    let summary: Vec<_> = buttons
+        .iter()
+        .map(|b| (b.event, b.slot, b.map, b.entry))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (514, 0, "HUBENT.MAP", 1),
+            (515, 1, "HUBDWNTN.MAP", 3),
+            (516, 3, "HUBOLDTN.MAP", 2)
+        ]
+    );
+    // Slot 3: button (249, 131), triangle (318, 143), label "Old Town"
+    // (width 52) at x 249 + 56.
+    assert_eq!(buttons[2].rect, [249, 131, 164, 25]);
+    assert_eq!(screen::marker_triangle(buttons[2].rect), [318, 143]);
+    assert_eq!(screen::marker_label_x(52), 56);
+    assert_eq!(screen::marker_label_x(200), 0);
+    // Vault 13: one marker before tick 864000, four from it on.
+    map.refresh_knowledge(&gvars, 863_999);
+    assert_eq!(map.town_buttons(0, &gvars).len(), 1);
+    assert_eq!(map.town_buttons(0, &gvars)[0].map, "V13ENT.MAP");
+    map.refresh_knowledge(&gvars, 864_000);
+    assert_eq!(map.town_buttons(0, &gvars).len(), 4);
+    // A destroyed Cathedral: one marker, triangle (247, 307), "Crater"
+    // (width 40) at x 178 + 62, loading CHILDEAD.MAP with selector 0.
+    gvars[18] = 1;
+    map.refresh_knowledge(&gvars, 0);
+    let cathedral = map.town_buttons(CATHEDRAL, &gvars);
+    assert_eq!(cathedral.len(), 1);
+    assert_eq!(screen::marker_triangle(cathedral[0].rect), [247, 307]);
+    assert_eq!(cathedral[0].rect[0] + screen::marker_label_x(40), 240);
+    assert_eq!((cathedral[0].map, cathedral[0].entry), ("CHILDEAD.MAP", 0));
+    // A destroyed Military Base: triangle (118, 70), "Ruins", MBDEAD.MAP.
+    gvars[17] = 1;
+    map.refresh_knowledge(&gvars, 0);
+    let base = map.town_buttons(MILITARY_BASE, &gvars);
+    assert_eq!(screen::marker_triangle(base[0].rect), [118, 70]);
+    assert_eq!(
+        (base[0].label, base[0].map, base[0].entry),
+        (501, "MBDEAD.MAP", 0)
+    );
+    // Vault 15: slot 0 is VAULTENT.MAP (selector 0), slots 1-3 VAULTBUR.
+    let vault15: Vec<_> = hotspots(1).map(|(_, h)| (h.map, h.entry)).collect();
+    assert_eq!(
+        vault15,
+        [
+            ("VAULTENT.MAP", 0),
+            ("VAULTBUR.MAP", 1),
+            ("VAULTBUR.MAP", 2),
+            ("VAULTBUR.MAP", 3)
+        ]
+    );
+    assert_eq!(screen::town_picture(1).as_deref(), Some("twnmap01.frm"));
+    assert_eq!(screen::town_picture(12), None);
+}
+
+#[test]
+fn spec014_world_map_build_reveals_and_marks_iterations_one_four_seven() {
+    // Building the screen reveals the party's cell and restarts the count;
+    // travel then marks (and reveals) on iterations 1, 4, 7 and 10.
+    let mut host = traveller(0);
+    host.world.world_map.reset_discovery();
+    host.world.world_map.set_position([175, 25]);
+    host.build_world_map(true).unwrap();
+    assert_eq!(host.world.world_map.discovery([3, 0]), 2);
+    assert_eq!(host.world.world_map.speed.map(|s| s.interval), Some(90));
+    host.travel_to([375, 25]);
+    let marked: Vec<_> = (1..=10)
+        .filter(|_| {
+            host.travel_iteration().unwrap();
+            host.world.world_map.mark.is_some()
+        })
+        .collect();
+    assert_eq!(marked, [1, 4, 7, 10]);
+    // A rebuild restarts the count.
+    host.build_world_map(false).unwrap();
+    host.travel_iteration().unwrap();
+    assert!(host.world.world_map.mark.is_some());
+}
+
+#[test]
+fn spec014_world_map_campaign_checks() {
+    use crate::WorldMapExit;
+    let mut host = traveller(0);
+    // No campaign: nothing.
+    assert_eq!(host.world_map_checks(), Ok(None));
+    // Water at 0 with the chip quest not done: quit (boil3 is not in this
+    // asset set, so it only fails to play).
+    let mut gvars = vec![0; 700];
+    gvars[10] = 0;
+    gvars[101] = 1;
+    host.world.gvars = Some(gvars.clone());
+    assert_eq!(host.world_map_checks(), Ok(Some(WorldMapExit::Quit)));
+    gvars[101] = 2;
+    // The vats at tick 1000 fire 2410 ticks later.
+    gvars[147] = 1000;
+    gvars[155] = 98;
+    host.world.gvars = Some(gvars.clone());
+    host.world.clock.set(3409);
+    assert_eq!(host.world_map_checks(), Ok(None));
+    assert_eq!(host.world.gvars.as_ref().unwrap()[147], 1000);
+    host.world.clock.set(3410);
+    let experience = host.world.player_sheet().unwrap().experience;
+    assert_eq!(host.world_map_checks(), Ok(None));
+    let g = host.world.gvars.clone().unwrap();
+    assert_eq!((g[147], g[17], g[308], g[155]), (0, 1, 2, 100));
+    assert_eq!(
+        host.world.player_sheet().unwrap().experience,
+        experience + 10000
+    );
+    // Under the safe rule a stored tick later than the clock waits.
+    host.world.gvars.as_mut().unwrap()[55] = 5000;
+    assert_eq!(host.world_map_checks(), Ok(None));
+    // Both in one pass: step 2 sees index 18 at 0, step 3 sees the index
+    // 17 just set, so only the lair moves the party to Vault 13.
+    let mut host = traveller(0);
+    let mut gvars = vec![0; 700];
+    gvars[10] = 5;
+    gvars[147] = 1;
+    gvars[55] = 1;
+    host.world.gvars = Some(gvars);
+    host.world.world_map.set_position([1225, 1275]);
+    host.world.clock.set(10_000);
+    assert_eq!(host.world_map_checks(), Ok(Some(WorldMapExit::Vault13)));
+    assert_eq!(host.world.world_map.cell(), Some([16, 1]));
+    let g = host.world.gvars.clone().unwrap();
+    assert_eq!((g[55], g[18], g[309], g[155]), (0, 1, 2, 15));
 }

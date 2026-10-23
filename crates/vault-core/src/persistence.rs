@@ -19,7 +19,8 @@ pub const VISITED_BYTES: usize = 5000;
 pub struct Persistence {
     /// Working `MAPS/<NAME>.SAV` images keyed by uppercase file name.
     pub maps: BTreeMap<String, Vec<u8>>,
-    /// The loaded map's working `.SAV` name, from its requested file name.
+    /// The loaded map's working `.SAV` name (SPEC-008 §3.10): the stem of
+    /// the uppercased file name it was opened under, plus `.SAV`.
     pub current_map: Option<String>,
     /// Working `MAPS/AUTOMAP.DB`.
     pub automap: AutomapDb,
@@ -33,18 +34,19 @@ pub struct Persistence {
     pub skill_uses: [[i32; 3]; 18],
     pub interface: [i32; 4],
 }
-/// A map resource name's working `.SAV` file name: the uppercase stem of
-/// the final path component plus `.SAV`.
+/// SPEC-008 §3.10 working `.SAV` names: the stem of a file name (cut at a
+/// NUL and at a final `/` or `\`), up to but not including its first `.`
+/// (the whole name when it has none), uppercased, followed by `.SAV`.
 pub fn saved_map_name(name: &[u8]) -> Option<String> {
     let name = &name[..name.iter().position(|b| *b == 0).unwrap_or(name.len())];
     let file = std::str::from_utf8(name).ok()?.rsplit(['/', '\\']).next()?;
-    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    let stem = file.split_once('.').map_or(file, |(stem, _)| stem);
     (!stem.is_empty() && stem.is_ascii()).then(|| format!("{}.SAV", stem.to_ascii_uppercase()))
 }
-/// SPEC-014 §3.35 the working `.SAV` name of a numbered map: the `map.msg`
-/// text for its number (the fixed SPEC-008 §3.10 table without a catalog)
-/// as `<NAME>.SAV` in upper case. An unnumbered map has none, so no working
-/// copy is ever written for it (SPEC-008 §3.10).
+/// SPEC-008 §3.10 the working `.SAV` name a load by map number gives: the
+/// number's `map.msg` text (the fixed table without a catalog) is the file
+/// name, so its stem names the working copy. An unnumbered map has no such
+/// load.
 pub fn working_map_name(number: i32, catalog: Option<&MsgCatalog>) -> Option<String> {
     if !(0..crate::worldmap::MAP_COUNT as i32).contains(&number) {
         return None;
@@ -54,6 +56,27 @@ pub fn working_map_name(number: i32, catalog: Option<&MsgCatalog>) -> Option<Str
         .map(|message| message.text.clone())
         .or_else(|| crate::worldmap::map_table_name(number).map(|name| name.as_bytes().to_vec()))?;
     saved_map_name(&text)
+}
+/// SPEC-008 §3.10 step 1: the file name a request opens, the final path
+/// component uppercased.
+pub fn requested_file_name(path: &str) -> String {
+    path.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_uppercase()
+}
+/// SPEC-008 §3.10 step 2: for an uppercased name containing `.MAP`, the
+/// saved copy probed first, with its first `.MAP` replaced by `.SAV`; none
+/// for a name without `.MAP`, which is opened as given.
+pub fn saved_probe(file: &str) -> Option<String> {
+    file.find(".MAP")
+        .map(|at| format!("{}.SAV{}", &file[..at], &file[at + 4..]))
+}
+/// SPEC-008 §3.10 step 3: the `SAVE.DAT` field at `0x73`: the working
+/// name's stem with a lower-case `.sav`, for example `VAULTENT.sav`.
+pub fn save_dat_map_file(working: &str) -> String {
+    let stem = working.split_once('.').map_or(working, |(stem, _)| stem);
+    format!("{stem}.sav")
 }
 
 impl WorldState {
@@ -307,7 +330,9 @@ impl WorldState {
             self.capture_automap_at(elevation);
         }
     }
-    /// Capture one elevation's automap raster, when it has tile data.
+    /// Capture one elevation's automap raster, when it has tile data. An
+    /// unnumbered map captures nothing (SPEC-008 §3.10 `[May-improve]`: the
+    /// reference reads its entry from before the automap index).
     pub fn capture_automap_at(&mut self, elevation: u8) {
         self.process_seen();
         let number = self.map.header.map_number;
@@ -329,14 +354,11 @@ impl WorldState {
             self.diagnostic(format!("automap capture failed: {error}"));
         }
     }
-    /// The current map's working `.SAV` name (SPEC-014 §3.35): the name
-    /// `map.msg` gives its number, recorded when it loaded; a map installed
-    /// without a load falls back to its header resource name. An unnumbered
-    /// map has no working name (SPEC-008 §3.10).
+    /// The current map's working `.SAV` name (SPEC-008 §3.10, SPEC-014
+    /// §3.35): the stem of the file name it was opened under, recorded when
+    /// it loaded, whatever its number (an unnumbered map has one too); a
+    /// map installed without a load falls back to its header resource name.
     pub fn current_map_name(&self) -> Option<String> {
-        if self.map.header.map_number < 0 {
-            return None;
-        }
         self.persistence
             .current_map
             .clone()
@@ -372,7 +394,9 @@ impl WorldState {
     /// is in the SPEC-008 §2.8 excluded set (the desert and encounter maps),
     /// or that has no number (SPEC-008 §3.10), has its working copy deleted
     /// and writes nothing, so it is rebuilt from its `.MAP` on every visit;
-    /// any other map is persisted. Returns false when the write failed.
+    /// any other map is persisted. The exclusion is tested only here, so a
+    /// game save on such a map still writes its working copy, which the
+    /// next departure deletes. Returns false when the write failed.
     pub fn save_left_map(&mut self) -> bool {
         let excluded = usize::try_from(self.map.header.map_number)
             .map_or(true, |number| automap::EXCLUDED.contains(&number));

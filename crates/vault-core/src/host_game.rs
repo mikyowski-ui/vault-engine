@@ -1468,11 +1468,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 None
             }
-            // SPEC-005 queued world-map and town-map requests: transitions
-            // to maps -2 and -1 (SPEC-013 §3.22).
+            // SPEC-005 queued world-map and town-map requests (SPEC-014
+            // §3.39): `world_map` opens the current town's town map first,
+            // like an exit grid holding map -1; `town_map` opens the world
+            // map directly, like map -2 (SPEC-013 §3.22).
             0x8108 | 0x8109 => {
                 self.request_transition(crate::world::Transition {
-                    map: if op == 0x8108 { -2 } else { -1 },
+                    map: if op == 0x8108 { -1 } else { -2 },
                     elevation: -1,
                     hex: -1,
                     facing: -1,

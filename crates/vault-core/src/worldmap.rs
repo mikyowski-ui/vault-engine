@@ -215,7 +215,8 @@ pub fn canonical_map_name(name: &[u8]) -> Vec<u8> {
 /// SPEC-008 §3.10 name matching, shared by the header rule and `load_map`
 /// (SPEC-005 0x80E4): the canonical name is compared with the texts of
 /// `map.msg` messages 0-65 in order; the first exact match gives the
-/// number, and no match (or no `map.msg`) gives -1.
+/// number, and no match (or no `map.msg`) gives -1. Nothing else is
+/// normalized: no extension is added and no directory is stripped.
 pub fn map_number_of_name(name: &[u8], catalog: Option<&MsgCatalog>) -> i32 {
     let Some(catalog) = catalog else {
         return -1;
@@ -228,6 +229,16 @@ pub fn map_number_of_name(name: &[u8], catalog: Option<&MsgCatalog>) -> i32 {
                 .is_some_and(|message| message.text == wanted)
         })
         .unwrap_or(-1)
+}
+/// SPEC-008 §3.10 the `load_map` string rule: [`map_number_of_name`], except
+/// that under the `[May-improve]` rule a string of 16 or more bytes (which
+/// overruns the reference's 16-byte work buffer) matches nothing.
+pub fn load_map_number(name: &[u8], catalog: Option<&MsgCatalog>) -> i32 {
+    let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+    if end >= 16 {
+        return -1;
+    }
+    map_number_of_name(name, catalog)
 }
 /// SPEC-008 §3.10 the current map number assigned after a map stream has
 /// loaded, from the header's name field rather than the requested file:
@@ -386,13 +397,12 @@ impl WalkMask {
     }
 }
 
+/// Interactive world-map travel. Script-directed town travel (SPEC-008
+/// §3.4) runs to completion inside one call and keeps no travel state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Travel {
     pub destination: [i32; 2],
     pub stepper: Stepper,
-    /// Script-directed town travel: no encounter tests or walk-mask checks,
-    /// and its city branch charges no time.
-    pub scripted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,8 +496,16 @@ pub struct WorldMap {
     pub schedule: Schedule,
     /// Iterations since the last encounter/healing check.
     pub interval: u32,
-    /// Movement-loop iterations, for the every-third discovery update.
+    /// Movement-loop iterations since the world-map screen was built, for
+    /// the every-third discovery update and travel dot (iterations 1, 4,
+    /// 7, ...).
     pub iterations: u32,
+    /// The pixel the last iteration marked with a travel dot, if it was a
+    /// marking iteration (SPEC-014 §3.39).
+    pub mark: Option<[i32; 2]>,
+    /// W and Q, computed when the world-map screen opens and again by
+    /// script-directed travel; computed per iteration until then.
+    pub speed: Option<TravelSpeed>,
     pub walk_mask: Option<Arc<WalkMask>>,
 }
 impl Default for WorldMap {
@@ -513,6 +531,8 @@ impl WorldMap {
             schedule: Schedule::default(),
             interval: 0,
             iterations: 0,
+            mark: None,
+            speed: None,
             walk_mask: None,
         }
     }
@@ -711,5 +731,233 @@ impl WorldMap {
             region,
             context: 2,
         }))
+    }
+}
+
+/// SPEC-014 §3.39-§3.40 world-map and town-map screen geometry, in window
+/// coordinates (the 640-by-480 window is at screen (0, 0)).
+pub mod screen {
+    use super::{SCROLL_LIMIT, VIEWPORT_ORIGIN, VIEWPORT_SIZE, clamp_scroll};
+
+    /// The view's last window pixel, inclusive.
+    pub const VIEW_END: [i32; 2] = [
+        VIEWPORT_ORIGIN[0] + VIEWPORT_SIZE[0] - 1,
+        VIEWPORT_ORIGIN[1] + VIEWPORT_SIZE[1] - 1,
+    ];
+    /// One scroll step on each requested axis.
+    pub const SCROLL_STEP: i32 = 16;
+    /// A pass that redraws lasts at least `trunc(1000 / 24)` milliseconds.
+    pub const PASS_MS: u64 = 1000 / 24;
+    /// The encounter flash: 14 images, each held 199 milliseconds.
+    pub const FLASH_IMAGES: u64 = 14;
+    pub const FLASH_MS: u64 = 199;
+    /// The pressed triangle's wait before entering: 500 milliseconds for a
+    /// town-button entry while travelling, else 300 after the release.
+    pub const ENTER_MS: u64 = 300;
+    pub const ENTER_TRAVELLING_MS: u64 = 500;
+    /// The side panel: a 15-by-15 red button per town at (508, Y), its
+    /// 82-by-18 name plate at (531, Y), and the Town/World button.
+    pub const TOWN_BUTTON_X: i32 = 508;
+    pub const TOWN_BUTTON_Y: [i32; 12] = [61, 88, 115, 143, 171, 200, 228, 256, 283, 310, 338, 367];
+    pub const BUTTON_SIZE: [i32; 2] = [15, 15];
+    pub const TOWN_NAME_X: i32 = 531;
+    pub const TOWN_NAME_SIZE: [i32; 2] = [82, 18];
+    pub const TOWN_WORLD_BUTTON: [i32; 2] = [520, 439];
+    /// The date and time: 9-by-17 `numbers.frm` digits (white band, digit
+    /// d at x = 9d), and 29-by-14 month rows 15 apart in `months.frm`.
+    pub const DAY: [i32; 2] = [487, 12];
+    pub const MONTH: [i32; 2] = [513, 12];
+    pub const YEAR: [i32; 2] = [548, 12];
+    pub const TIME: [i32; 2] = [593, 12];
+    pub const DIGIT: [i32; 2] = [9, 17];
+    pub const MONTH_SIZE: [i32; 2] = [29, 14];
+    /// Hover and town-map labels: font 101, key 992, with shadow.
+    pub const LABEL_FONT: i32 = 101;
+    pub const LABEL_KEY: u16 = 992;
+    /// Travel dots: key 27648 (dark red).
+    pub const DOT_KEY: u16 = 27648;
+    /// The town-map marker image within its 164-by-25 button.
+    pub const MARKER_TRIANGLE: [i32; 2] = [69, 12];
+    pub const MARKER_SIZE: [i32; 2] = [25, 13];
+    /// The town picture's window position (453 by 444).
+    pub const TOWN_PICTURE: [i32; 2] = [20, 20];
+
+    /// Centering on world position (X, Y): `(X - 247, Y - 242)`, clamped.
+    pub fn centered(position: [i32; 2]) -> [i32; 2] {
+        clamp_scroll([position[0] - 247, position[1] - 242])
+    }
+    /// The window position of world pixel `world` under view origin `view`.
+    pub fn window(world: [i32; 2], view: [i32; 2]) -> [i32; 2] {
+        [
+            world[0] - view[0] + VIEWPORT_ORIGIN[0],
+            world[1] - view[1] + VIEWPORT_ORIGIN[1],
+        ]
+    }
+    /// The world pixel under window pixel `point`, with no jitter.
+    pub fn world_at(point: [i32; 2], view: [i32; 2]) -> [i32; 2] {
+        [
+            view[0] + point[0] - VIEWPORT_ORIGIN[0],
+            view[1] + point[1] - VIEWPORT_ORIGIN[1],
+        ]
+    }
+    /// A left release at x 23-471 and y 22-462 is a view click.
+    pub fn view_click(point: [i32; 2]) -> bool {
+        (VIEWPORT_ORIGIN[0] + 1..=VIEW_END[0]).contains(&point[0])
+            && (VIEWPORT_ORIGIN[1] + 1..=VIEW_END[1]).contains(&point[1])
+    }
+    /// The hover test: `dx = |mx - px|`, `dy = |my - (py - 1)|`; the smaller
+    /// is halved (dy when they are equal), and the sum must be at most 10.
+    pub fn hovers(pointer: [i32; 2], party: [i32; 2]) -> bool {
+        let dx = (pointer[0] - party[0]).abs();
+        let dy = (pointer[1] - (party[1] - 1)).abs();
+        let (dx, dy) = if dx < dy { (dx / 2, dy) } else { (dx, dy / 2) };
+        dx + dy <= 10
+    }
+    /// The hover label's top-left corner for text width `width`:
+    /// `(px - 12 + trunc((25 - w) / 2), py - 17)`, truncated toward zero.
+    pub fn label_origin(party: [i32; 2], width: i32) -> [i32; 2] {
+        [party[0] - 12 + (25 - width) / 2, party[1] - 17]
+    }
+    /// The label is drawn only when `x > 22 - w`, `x < 472` and
+    /// `11 < y < 463`.
+    pub fn label_shown(origin: [i32; 2], width: i32) -> bool {
+        origin[0] > VIEWPORT_ORIGIN[0] - width
+            && origin[0] <= VIEW_END[0]
+            && 11 < origin[1]
+            && origin[1] <= VIEW_END[1]
+    }
+
+    /// The world-map markers and their drawing windows.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Marker {
+        /// `hotspot1.frm` / `hotspot2.frm`, 25 by 13, at (px - 12, py - 6).
+        Triangle,
+        /// `wmaploc.frm`, 5 by 5, at (px - 2, py - 2).
+        Plus,
+        /// `wmaptarg.frm` / `wmaptrg2.frm`, 11 by 11, at the point - (5, 5).
+        Crosshair,
+        /// `wmapfgt0.frm` / `wmapfgt1.frm`, 7 by 11, at (px - 3, py - 5).
+        Bolt,
+    }
+    impl Marker {
+        /// The top-left corner for a marker at window point `at`.
+        pub fn origin(self, at: [i32; 2]) -> [i32; 2] {
+            let [dx, dy] = match self {
+                Self::Triangle => [12, 6],
+                Self::Plus => [2, 2],
+                Self::Crosshair => [5, 5],
+                Self::Bolt => [3, 5],
+            };
+            [at[0] - dx, at[1] - dy]
+        }
+        /// A marker is skipped unless its top-left corner lies in these
+        /// ranges.
+        pub fn shown(self, origin: [i32; 2]) -> bool {
+            let (x, y) = match self {
+                Self::Triangle => (-2..=483, 9..=462),
+                Self::Plus => (18..=473, 17..=462),
+                Self::Crosshair => (12..=473, 11..=462),
+                Self::Bolt => (16..=471, 11..=462),
+            };
+            x.contains(&origin[0]) && y.contains(&origin[1])
+        }
+    }
+
+    /// The edge-scroll direction for a pointer at `point`: x 0-1 west, x
+    /// 638-639 east, y 0-1 north, y 478-479 south; zero off the edges.
+    pub fn edge(point: [i32; 2]) -> [i32; 2] {
+        let axis = |value: i32, far: i32| {
+            if value <= 1 {
+                -1
+            } else if value >= far - 1 {
+                1
+            } else {
+                0
+            }
+        };
+        [axis(point[0], 639), axis(point[1], 479)]
+    }
+    /// The scroll-cursor index (NW, N, NE, E, SE, S, SW, W) of a direction.
+    pub fn cursor_index(direction: [i32; 2]) -> Option<usize> {
+        Some(match direction {
+            [-1, -1] => 0,
+            [0, -1] => 1,
+            [1, -1] => 2,
+            [1, 0] => 3,
+            [1, 1] => 4,
+            [0, 1] => 5,
+            [-1, 1] => 6,
+            [-1, 0] => 7,
+            _ => return None,
+        })
+    }
+    /// One 16-pixel step on each requested axis, each clamped on its own.
+    /// Also returns whether every requested axis was already at its limit.
+    pub fn scroll(view: [i32; 2], direction: [i32; 2]) -> ([i32; 2], bool) {
+        let mut next = view;
+        let mut blocked = direction != [0, 0];
+        for axis in 0..2 {
+            let step = direction[axis];
+            if step == 0 {
+                continue;
+            }
+            let limit = if step < 0 { 0 } else { SCROLL_LIMIT[axis] };
+            if view[axis] != limit {
+                blocked = false;
+            }
+            next[axis] = (view[axis] + SCROLL_STEP * step).clamp(0, SCROLL_LIMIT[axis]);
+        }
+        (next, blocked)
+    }
+    /// Home: centers both axes on the party, then sets vy to 0. The
+    /// reference then steps 16 pixels south, ending at vy 16; under the
+    /// `[May-improve]` rule vy stays 0.
+    pub fn home(position: [i32; 2]) -> [i32; 2] {
+        [centered(position)[0], 0]
+    }
+    /// End: vy becomes 1058; vx is unchanged.
+    pub fn end(view: [i32; 2]) -> [i32; 2] {
+        [view[0], SCROLL_LIMIT[1]]
+    }
+    /// The window rectangle `[x, y, w, h]` of discovery cell `cell` under
+    /// `view`, clipped to the view; none when nothing of it shows.
+    pub fn cell_rect(cell: [usize; 2], view: [i32; 2]) -> Option<[i32; 4]> {
+        let size = super::CELL;
+        let [x, y] = window([cell[0] as i32 * size, cell[1] as i32 * size], view);
+        let left = x.max(VIEWPORT_ORIGIN[0]);
+        let top = y.max(VIEWPORT_ORIGIN[1]);
+        let right = (x + size).min(VIEW_END[0] + 1);
+        let bottom = (y + size).min(VIEW_END[1] + 1);
+        (left < right && top < bottom).then_some([left, top, right - left, bottom - top])
+    }
+    /// The 15-by-15 red button of town `town` (0-11).
+    pub fn town_button(town: usize) -> Option<[i32; 4]> {
+        let y = *TOWN_BUTTON_Y.get(town)?;
+        Some([TOWN_BUTTON_X, y, BUTTON_SIZE[0], BUTTON_SIZE[1]])
+    }
+    /// The Town/World button (event 512).
+    pub fn town_world_button() -> [i32; 4] {
+        [
+            TOWN_WORLD_BUTTON[0],
+            TOWN_WORLD_BUTTON[1],
+            BUTTON_SIZE[0],
+            BUTTON_SIZE[1],
+        ]
+    }
+    /// A town-map marker's triangle (window position) for its button.
+    pub fn marker_triangle(button: [i32; 4]) -> [i32; 2] {
+        [
+            button[0] + MARKER_TRIANGLE[0],
+            button[1] + MARKER_TRIANGLE[1],
+        ]
+    }
+    /// A town-map label's x offset in its button: `max(0, trunc((164 -
+    /// w) / 2))`.
+    pub fn marker_label_x(width: i32) -> i32 {
+        ((super::TOWN_BUTTON_SIZE[0] - width) / 2).max(0)
+    }
+    /// The town picture `twnmapNN.frm` of a town 0-11 (list index 156 + t).
+    pub fn town_picture(town: usize) -> Option<String> {
+        (town < super::TOWNS.len()).then(|| format!("twnmap{town:02}.frm"))
     }
 }

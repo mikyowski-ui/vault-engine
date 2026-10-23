@@ -78,6 +78,11 @@ fn fixed<const N: usize>(text: &[u8]) -> [u8; N] {
 fn text(bytes: &[u8]) -> &[u8] {
     &bytes[..bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len())]
 }
+/// SPEC-008 §3.10: a game load opens the `SAVE.DAT` field at `0x73`
+/// uppercased again (`VAULTENT.sav` opens `VAULTENT.SAV`).
+fn save_map_file(save: &SaveGame) -> String {
+    String::from_utf8_lossy(text(&save.header.map_file)).to_ascii_uppercase()
+}
 fn backup_name(path: &Path) -> PathBuf {
     path.with_extension("BAK")
 }
@@ -168,12 +173,10 @@ impl<A: WorldAssets> WorldHost<A> {
     /// written even when it is an excluded map (SPEC-014 §3.35).
     pub fn build_save(&mut self, info: &SaveInfo) -> Result<SaveGame, WorldError> {
         // A slot names its current map, which restore loads first
-        // (SPEC-014 §3.35): with no map loaded, or an unnumbered one that
-        // has no working name (SPEC-008 §3.10), the slot could never load.
+        // (SPEC-014 §3.35): with no map loaded the slot could never load. An
+        // unnumbered map still has its working name (SPEC-008 §3.10).
         if self.world.unloaded || self.world.current_map_name().is_none() {
-            return Err(WorldError::Invalid(
-                "saving requires a loaded, numbered map".into(),
-            ));
+            return Err(WorldError::Invalid("saving requires a loaded map".into()));
         }
         self.world.map.header.flags.0 |= 1;
         self.world.map.header.last_visit = self.world.clock.ticks as u32;
@@ -199,7 +202,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 "thumbnail must be 224 x 133 bytes".into(),
             ));
         }
-        let map_file = world.current_map_name().unwrap_or_default();
+        // SPEC-008 §3.10: the working name's stem and a lower-case `.sav`.
+        let map_file = world
+            .current_map_name()
+            .map(|name| crate::persistence::save_dat_map_file(&name))
+            .unwrap_or_default();
         let header = SaveHeader {
             name: fixed(&sheet.name),
             description: fixed(&info.description),
@@ -208,8 +215,7 @@ impl<A: WorldAssets> WorldHost<A> {
             game_date: game_date(world.clock.ticks, world.rules.calendar_year),
             game_ticks: u32::try_from(world.clock.ticks).map_err(|_| WorldError::Arithmetic)?,
             elevation: u16::from(world.elevation),
-            // The number as its 16-bit truncation (never -1 here: an
-            // unnumbered map cannot be saved).
+            // The number as its 16-bit truncation (-1 on an unnumbered map).
             map: world.map.header.map_number as u16,
             map_file: fixed(map_file.as_bytes()),
             thumbnail,
@@ -439,17 +445,14 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         let automap = AutomapDb::parse(automap)?;
         // Restore loads the slot's current map first (SPEC-014 §3.35): its
-        // name must be usable and its stream present, as the working copy
-        // the save always lists or as the original `.MAP`, before any state
-        // is reset.
-        let map_file = String::from_utf8_lossy(text(&save.header.map_file)).to_ascii_lowercase();
-        let stem = map_file
-            .rsplit_once('.')
-            .map_or(map_file.as_str(), |(stem, _)| stem);
-        let present = crate::persistence::saved_map_name(stem.as_bytes())
-            .is_some_and(|name| maps.contains_key(&name))
-            || self.assets.available(format!("maps/{stem}.map").as_bytes());
-        if stem.is_empty() || stem.contains(['/', '\\']) || !present {
+        // name must be usable and its stream present before any state is
+        // reset. SPEC-008 §3.10: the name is uppercased and opened like any
+        // map name, a `.MAP` name through its saved copy first.
+        let map_file = save_map_file(&save);
+        let probe = crate::persistence::saved_probe(&map_file).unwrap_or_else(|| map_file.clone());
+        let present = maps.contains_key(&probe)
+            || self.assets.available(format!("maps/{map_file}").as_bytes());
+        if map_file.is_empty() || map_file.contains(['/', '\\']) || !present {
             return Err(WorldError::Invalid(format!(
                 "save names no loadable map ({map_file:?})"
             )));
@@ -498,11 +501,8 @@ impl<A: WorldAssets> WorldHost<A> {
         // during map entry cannot take saved inventory identities.
         self.world
             .set_next_object_id(save.next_item_id.max(1) as u32);
-        let map_file = String::from_utf8_lossy(text(&save.header.map_file)).to_ascii_lowercase();
-        let stem = map_file
-            .rsplit_once('.')
-            .map_or(map_file.as_str(), |(stem, _)| stem);
-        self.load_map(&format!("maps/{stem}.map"))?;
+        let map_file = save_map_file(&save);
+        self.load_map(&format!("maps/{map_file}"))?;
         self.restore_player(&save)?;
         let world = &mut self.world;
         world.set_view_center(save.viewport);
