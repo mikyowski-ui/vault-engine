@@ -527,11 +527,13 @@ The interface-bar Skilldex button is defined in SPEC-014; it sends the `s` key.
 | Element | Value |
 | --- | --- |
 | Window | Screen (140, 80), 259 by 162, background `art/intrface/movemult.frm`, font 103 |
-| Title | `inventry.msg` 23, centered, y = 9 |
+| Title | `inventry.msg` 23, centered, y = 9, color key 21091 |
 | Timer overlay | `timer.frm`, 105 by 81, at (113, 34) |
 | Item picture | Inventory art scaled into 90 by 61 at (16, 46) |
 | Plus / minus | `splsoff.frm` / `splson.frm` at (194, 64), 16 by 12; `snegoff.frm` / `snegon.frm` at (194, 76), 17 by 12 |
 | Done / Cancel | Little red buttons at (98, 128) and (148, 128); they act as Enter and Esc |
+| Sounds | Every button, plus and minus included: `ib1p1xx1` on press, `ib1lu1x1` on release |
+| Button timing | Plus and minus act on the mouse press, once per press; holding a button does not repeat. Done and Cancel act on release. All four are drawn transparently |
 | Value | Starts at 60; plus adds 10 below 180, minus subtracts 10 above 10 |
 | Display | `bignum.frm` digits: minutes `trunc(S / 60)` at x = 133, tens of seconds `trunc((S mod 60) / 10)` at x = 161, ones `S mod 10` at x = 175, y = 64; the cell at x = 147 is left to the background |
 
@@ -1082,3 +1084,5 @@ All cases are out of combat with effective Intelligence 6, unless stated.
 Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 23 plain-word warnings were reviewed and are benign: this spec's own formula and UI words ("value", "level", "draw", "maximum", "position", "size", "current", "trunc", "slot", "count", "counter", "attempt"). The public opcode names `sfx_build_open_name` and `sfx_build_char_name` appear only as naming-rule references. The fenced blocks hold no code; fixtures are tables. Cross-spec note (resolved): SPEC-007 §3.7 now states the same rule as section 3.10. Every explosion, whether weapon, grenade, timed or scripted, uses the one disabled victim enumeration, so in R1 only the center target takes damage. Retaliation and onlooker wording now matches the single rule in SPEC-007 §3.6. The added warning "start" is the public SSL procedure name start, used in section 3.10. Explosion art, sound and skill-book names in sections 3.10 and 3.25 are corpus file and prototype names, checked against `art/misc/misc.lst`, the corpus FRM headers, `sound/sfx` and `pro_item.msg`. The section 3.21 coverage note was checked against `art/intrface/intrface.lst` and `map.msg`. Section 3.16 step 3 and the pointers in sections 3.2 and 3.23 were checked against SPEC-007 §3.11.3 (R1-rev7) so that both specs state one container reach timing rule and one adjacency check. Tag count, excluding the two tag definitions: 98 `[Must-match]`, 36 `[May-improve]`.
 
 Update notes (2026-10-22, R1-rev7): section 3.22's exit-grid and hotspot-travel rules; the corpus scan found no exit grid on any default entrance hex or exit-grid destination among 13055 grids. Tag count is now 100 `[Must-match]`, 37 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-23): the section 3.15 Set Timer table gains the title color and the button sounds and timing. All four buttons use `ib1p1xx1` / `ib1lu1x1`; plus and minus act once per press with no repeat. No tag change. `tools/spec_lint.py` gives 0 errors.

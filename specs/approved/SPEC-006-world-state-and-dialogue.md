@@ -386,6 +386,45 @@ Numeric callback indices are the operational interface. String callback names ar
 
 Message-list numbers are one-based references into the script/message-list catalog. Positive reply lists are resolved when the node is displayed, not merely when `gsay_reply` is called. Replies request speech playback from the message's sound field only when a talking head and active dialogue are present; option messages do not request speech. Literal replies use their stored characters directly and do not supply a message sound. `[Must-match]`
 
+**Speech requests.** All dialogue speech, whatever opcode supplied the text, starts through one speech-enabled message lookup. `[Must-match]` unless tagged.
+
+- **When a lookup requests speech.** It requests speech only when all four of these hold:
+  - the dialogue head set by the most recent `start_gdialog` is talking-head art;
+  - a talk session is active, which runs from the moment the player's talk action enters dialogue, before `talk_p_proc` runs, until that talk operation returns;
+  - the message exists;
+  - its sound field (SPEC-002) is not empty.
+- **When it does not.** A missing message returns `Error` and requests nothing. An empty sound field requests nothing either, so speech that is already playing continues.
+- **What a request does.** It is the SPEC-010 §3.12 loading and start sequence, run at once inside the lookup:
+  - the previous speech is stopped;
+  - the `.LIP` and audio are loaded from the current head's speech directory (SPEC-010 §3.10);
+  - the audio and lip-sync start.
+
+  From then on, the head updater ticks of section 3.11 drive the mouth, exactly as for any reply. The looked-up text is returned unchanged.
+
+The lookups that can request speech:
+
+1. **Reply text.** Every message-backed reply at display time: the reply of `gsay_reply` and `gsay_message` with a message number, when `gsay_end` processing starts and after each choice whose callback built a new reply with options. The request comes before the reply text is drawn.
+2. **`message_str`.** Any call with a positive message number, at the moment the opcode runs, wherever the returned text is then used.
+3. **Ask About.** Ask About answers, including the name and fallback answers ("Ask About lookup" below; window in SPEC-014 §3.45).
+
+Option texts, literal replies, literal options, the continuation and Done labels, and every lookup made outside a talk session never request speech.
+
+These rules have the following consequences. `[Must-match]`
+
+- **Same mouth as a reply.** Speech started by `message_str` uses the same head directory, `.LIP` file, speech art and per-tick rule as a reply's speech, so lip-sync runs identically.
+- **A literal reply can speak.** A reply built as `gsay_reply` with the text of `message_str` speaks. The speech starts while the callback runs, before the node is displayed. It keeps playing while the literal reply is shown, because a literal reply makes no request of its own.
+- **A later reply can replace it.** When a message-backed reply with a sound field is displayed next, it replaces that speech. A message-backed reply without a sound field leaves it playing.
+- **Only the last request remains.** Several speech-enabled `message_str` calls in one callback, for example to build option texts, each request speech in turn. Only the last one whose message has a sound field is left playing.
+- **Stopping is the same.** Speech started by `message_str` stops like any other: by a choice, Review, Barter, the end of the session, or a new request (SPEC-010 §3.12).
+
+**Stale head.** The head test reads the head left by the most recent `start_gdialog` of any session. A `message_str` that runs in `talk_p_proc` before this session's `start_gdialog` therefore tests the previous session's head:
+
+- No speech is requested when that head was none, or in the first talk of a program run.
+- With a previous talking head, the audio plays from that head's speech directory, and no mouth moves until this session's `start_gdialog` starts the head updater.
+- If the talk ends without opening dialogue, nothing stops that audio and it plays to its end. The leftover speech state is ended by the next speech request, or by the next session's first head updater tick, as a normal ending.
+
+`[May-improve]` Safe rule: make no speech request until `start_gdialog` has set up a talking head in the current session.
+
 If `gsay_end` has a pending reply but no options, it inserts a neutral continuation option with callback zero. A negative reply-list sentinel of -1 instead returns without processing. Special option pairs -2/-2 select the localized Done label; -1/-1 selects the continuation convention, whose first option receives a localized label below effective Intelligence 4 but otherwise remains blank. Literal text uses a content sentinel -4, not a localized message lookup. Displayed options normally receive leading bytes `95 20`, the single-byte bullet and space. `[Must-match]`
 
 There are 30 logical option records and 80 review replies. Message-backed reply text is bounded to 899 content bytes in its 900-byte display buffer. `[Must-match]` Raw literal-reply copying is not bounded in the reference; a safe limit is 899 bytes. `[May-improve]` Safe rule: truncate a literal reply to 899 bytes. Raw option text must leave room for the two-byte prefix and terminator, giving 897 content bytes; literal option text is not bounded in the reference either. `[May-improve]` Safe rule: truncate literal option text to 897 bytes. A thirty-first option can write its callback beyond the option array before the later capacity check; do not treat overflow as a guaranteed clean rejection. `[May-improve]` Safe rule: reject the thirty-first and later options without writing any option state.
@@ -393,6 +432,20 @@ There are 30 logical option records and 80 review replies. Message-backed reply 
 The reply rectangle is 379 by 58 at screen position (135,225); the option rectangle is 393 by 117 at (127,335). The number of logical options is not a guarantee that all fit visibly. `[Must-match]` Reply paging advances on Space or a ten-second page timeout, with up/down navigation over remembered pages. `[Must-match]` Ten page-offset slots exist without a comprehensive overflow guard. `[May-improve]` Safe rule: keep a remembered-page list large enough for every page of the reply, or stop advancing after the tenth page; never write past it. Ordinary digit selection maps digits 1 through 9 to options zero through eight. `[Must-match]` The recovered handling of digit 0 produces index -1, an out-of-range option read, and substitutes a dummy no-callback choice rather than a valid tenth entry. `[May-improve]` Safe rule: treat digit 0 as a choice with no callback and no reaction that ends the current reply/choice loop, without reading option storage at index -1.
 
 Processing windows are created/destroyed only at the outermost reply loop. Nested processing depth two or greater suppresses further option-callback execution in the choice path. Barter and Ask About are deferred presentation submodes; a pending switch to barter can refuse an immediate session-end request. Leaving the overarching talk operation restores map background processing and requests map updates, including early talk-return paths. `[Must-match]`
+
+**Review history.** Each `gsay_reply` and each `gsay_message` reply adds one review entry (message list and number, or a copy of a literal reply) with no chosen option. `gsay_start` resets the history to empty. Choosing an option records it in the latest entry: its message list and number, or for a literal option its displayed text including the `95 20` bullet. The continuation and Done sentinels are recorded as -1/-1 and -2/-2. `[Must-match]` The history holds 80 entries. An 81st reply is not recorded, and its error is only logged. The option chosen for the 80th entry is also refused, because the same full test is applied. `[May-improve]`: record the chosen option of the 80th entry. A choice made before any reply is recorded writes before the first entry. `[May-improve]`: ignore a choice when the history is empty. The window that shows the history is SPEC-014 §3.45.
+
+**Ask About lookup.** No script procedure is called: matching uses message text only. Message list L means `dialog/<name>.msg` for line L - 1 of `scripts/scripts.lst`, so list 1 is the message file of the player script, the first line of `scripts.lst`. The target's list is its script's index + 1. A missing message reads as the placeholder `Error`, which is excluded wherever the rules count "non-`Error`" messages (case-insensitive). `[Must-match]`
+
+1. Cut the submitted text into tokens at space, tab, `.` and `,`. For each token in order, try the word lookup, then the name lookup. Stop at the first token that matches.
+2. **Word lookup.** First search the target's list, messages 1000 through 1099, for a text equal to the token ignoring ASCII case. If none matches, search list 1, messages `600 M + 1000` through `600 M + 1099`, M being the current map number. A match at message k shows message k + 100 of the same list. If that message does not exist, it shows `Error`.
+3. **Name lookup.** If the target is a critter and the token equals the target's own display name, ignoring case, show one of the target's non-`Error` messages 970-979. When there are none, use list 1's 970-979. The choice is one draw in the range 1 through the count of such messages (SPEC-006 §3.4), counting them in ascending id order. With none in either list, the token does not match.
+4. **Fallback.** If no token matched, show one of the target's non-`Error` messages 980-999. When there are none, use list 1's 980-999. The choice is the same single draw. With none in either list nothing is shown.
+5. A target with no script gets no name lookup and no fallback. Its word lookup only searches list 1.
+
+Showing a message copies at most 899 bytes into the reply, shows the reply window, and draws it in the reply area. It also starts the message's speech exactly as a message-backed reply does: only with a talking head and active dialogue, from the message's sound field (SPEC-010 §3.10, §3.12). `[Must-match]`
+
+The name lookup compares the token with the target's own name, so asking an NPC about itself works but asking about other named characters goes through the word tables only. `[Must-match]` Tokenizing makes every keyword that contains a space, tab, `.` or `,` unreachable. Many corpus keywords are like that, for example list 1's "Water Chip", "The Master" and "Shady Sands". `[May-improve]`: before tokenizing, also try the whole submitted text, trimmed, in the word lookup.
 
 ### 3.10 Intelligence Filtering and NPC Reaction
 
@@ -632,6 +685,14 @@ The following draw-order vector starts from a fresh program run. It uses synthet
 
 Variant 2 from session start is never shown. If the first reply has no speech, the first tick instead shows frame 0 of `synthnf2.frm`.
 
+A talking-head session, head `harry`, runs a node callback that calls `gsay_reply` on a list with the literal text of `message_str` for list L, message 174.
+
+| Case | Result |
+| --- | --- |
+| Message 174 has sound field `X` | Speech `X` starts as `message_str` runs, before the node is drawn. It plays with lip-sync while the literal reply shows, until a choice stops it |
+| Message 174 has no sound field | No speech; any earlier speech continues |
+| Same callback, but the reply is then given as message 175 with sound field `Y` | At display, `Y` replaces `X` |
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -643,3 +704,5 @@ Variant 2 from session start is never shown. If the first reply has no speech, t
 Update notes (2026-10-22): section 3.11 now states the single session-start fidget draw, when the first head frame is drawn, and the lip-sync hand-off to SPEC-010 §3.12; section 4.4 gains a session-start draw-order vector. `tools/spec_lint.py` gives 0 errors.
 
 Update notes (2026-10-22, second pass): section 3.7 now gives the background-pass model and the critter-script cycle step, checked against the reference background-task list, script task and dispatcher. The corpus counts come from a scan of the 952 compiled scripts and of the critter-category records of all 72 corpus maps. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-23): section 3.9 gains three blocks. "Speech requests" says when a lookup starts speech, and that `message_str`, replies and Ask About answers all start it the same way, so lip-sync is identical; it covers the stale-head case with a `[May-improve]` safe rule. "Review history" covers what replies and chosen options record, the reset at `gsay_start`, and the 80-entry limit. "Ask About lookup" covers tokenizing, keywords 1000-1099, the per-map block of the player script's file, the name answers 970-979, the fallback 980-999 and its single random draw. Section 4.4 gains a `message_str` speech vector. Net tags: +6 `[Must-match]`, +4 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.

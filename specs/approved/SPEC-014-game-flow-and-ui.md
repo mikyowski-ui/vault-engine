@@ -106,6 +106,17 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
   - Section 3.27: the combat input lock is a combat-wide count of running sequences; no key acts during the lock, and held keys are flushed at each player turn; the animated watch shows on every NPC turn; talk re-tests distance and line after its approach. Section 3.23: every key and click read during a hand swap is discarded except F12.
   - Sections 3.35 and 3.36: the working `.SAV` name follows SPEC-008 §3.10, and the roof restore on leaving a map is unaffected by the elevation safe rule.
 - **R1-rev9 (2026-10-22).** New section 3.44 Map Object Draw Order, Lighting and Translucency: per-hex list order (flat first, then insertion order; every offset step reinserts), the fixed visiting lattice in ascending hex number, the flat and upright passes, the 100-outline limit, and the five translucent draws with their colors and gray tables. Section 3.37 points to it. New Fixture Q.
+- **R1-rev10 (2026-10-23).** The last open Builder questions.
+  - New section 2.5 Screenshot File, and the F12 rules in section 3.19: `scrNNNNN.bmp` in the working directory, an 8-bit BMP, and `misc.msg` 3 and 8.
+  - Section 3.19 gives the `/` and `?` date line format.
+  - Section 3.13 gives the medium Done box offsets; a medium Yes/No box cannot occur.
+  - Section 3.20: the message monitor's scroll areas are disabled with the bar.
+  - Section 3.29: every key auto-repeats, window toggles included.
+  - Section 3.17 gives the pause grey table and the converted rows.
+  - Section 3.44 gives the outline word, the outline ring geometry and colors, what reinserts an object in its hex list, and the floor light map.
+  - Section 2.3 gains the `music` key.
+  - New section 3.45 Dialogue Review and Ask About Windows.
+  - New Fixtures R, S and T.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -156,6 +167,7 @@ Total corpus length is 307978 bytes. A file that is too short is not validated. 
 | preferences | brightness | real 1.0-1.17999267578125 | 1.0 | 3.18 |
 | preferences | mouse_sensitivity | real 1.0-2.5 | 1.0 | 3.18 |
 | sound | master_volume, music_volume, sndfx_volume, speech_volume | integer 0-32767 | 22281 each | 3.18 |
+| sound | music | 0-1 | 1 | SPEC-008 §3.10 (music on/off state) |
 
 ### 2.4 Message Resources
 
@@ -163,17 +175,38 @@ All files are under `text/<language>/game/`. The listed indices are exact data; 
 
 | File | Indices used |
 | --- | --- |
-| `misc.msg` | 0 "Are you sure you want to quit?"; 4 "Quick load game successfully loaded."; 5 "Quick save game successfully saved."; 7 "Pipboy not available in combat!"; 9-13 menu labels INTRO, NEW GAME, LOAD GAME, CREDITS, EXIT; 14 copyright line; 15 "Action Points"; 16 "Hit Points" |
+| `misc.msg` | 0 "Are you sure you want to quit?"; 3 "Saved screenshot."; 4 "Quick load game successfully loaded."; 5 "Quick save game successfully saved."; 7 "Pipboy not available in combat!"; 8 "Error saving screenshot."; 9-13 menu labels INTRO, NEW GAME, LOAD GAME, CREDITS, EXIT; 14 copyright line; 15 "Action Points"; 16 "Hit Points"; 6000 "Ask about what?" (section 3.45) |
 | `lsgame.msg` | 100-103 screen titles; 104 DONE; 105 CANCEL; 106-108 slot-list error; 109 SAVE GAME; 110 LOAD GAME; 111 "- EMPTY -"; 112 "- CORRUPT SAVE  FILE -"; 113 "- OLD VERSION -"; 114 "Empty."; 115 "Error!"; 116 "Old version."; 117-128 JAN-DEC; 130 DESCRIPTION; 131 overwrite question; 132-133 save error; 134-136 load error; 140 "Game Saved."; 141 "Game Loaded." |
 | `options.msg` | 0-4 options buttons; 100 GAME PREFERENCES; 101-122 preference captions and buttons; 201-224 value labels; 300 DONE; 301 PAUSED |
-| `dbox.msg` | 100 DONE, 101 YES, 102 NO, 103 CANCEL (file dialogs, section 3.43) |
+| `dbox.msg` | 100 DONE, 101 YES, 102 NO, 103 CANCEL (file dialogs, section 3.43; Ask About, section 3.45) |
 | `editor.msg` | 100-102 DONE / OPTIONS / CANCEL labels; 103 PRINT; 104 AGE; 107 MALE; 108 FEMALE; 109-115 in-game folder tabs, SKILL POINTS and level block; 116-158 editor captions, cards, refusals and validation; 200-209 stat level words; 300-318 condition and derived labels; 400-406 condition descriptions; 500-511 month names; 600-618 editor options and file messages; 620-655 printed sheet; 1000-1009 and 1100-1109 karma names and descriptions. Per-ID use is tabled in section 3.42 |
-| `proto.msg` | 450-464 kill-type names; 465-479 kill-type descriptions (section 3.42) |
+| `proto.msg` | 450-464 kill-type names; 465-479 kill-type descriptions (section 3.42); 650 "[Done]"; 903 "This person will not barter with you."; 904 "This person has nothing to tell you about." (section 3.45) |
 | `perk.msg` | 101 + perk names; 201 + perk descriptions (SPEC-011 §3.22) |
 | `intrface.msg` | 100 SNEAK, 101 LEVEL, 102 CHEM |
 | `map.msg` | Location short names and elevation names (section 3.14) |
 | `stat.msg`, `skill.msg`, `trait.msg` | Names and descriptions for the selection screen and editor (SPEC-006); `stat.msg` 301-310 in-game level words and 401-402, 501-502 level and experience cards; `skill.msg` 300-317 skill-card formulas (section 3.42) |
 | `pipboy.msg` | 100-107 holidays; 200-203, 205, 206, 210-212, 214, 215 controls and titles; 300-314 alarm clock; 400-417 holodisk titles and their text; 503-513 archive titles; 700-810 quests (section 3.41.9) |
+
+### 2.5 Screenshot File
+
+F12 writes the composed screen to a Windows bitmap file. All multi-byte fields are little-endian. For the 640-by-480 screen the file is 308278 bytes. `[Must-match]`
+
+| Offset | Length | Value |
+| --- | ---: | --- |
+| `0x0000` | 2 | `42 4D`, ASCII `BM` |
+| `0x0002` | 4 | File size, `width × height + 1078` |
+| `0x0006` | 4 | 0 (two reserved 16-bit words) |
+| `0x000A` | 4 | 1078, the pixel data offset |
+| `0x000E` | 4 | 40, the information header size |
+| `0x0012` | 4 | Width, 640 |
+| `0x0016` | 4 | Height, 480, positive, so rows are stored bottom-up |
+| `0x001A` | 2 | 1 plane |
+| `0x001C` | 2 | 8 bits per pixel |
+| `0x001E` | 24 | Six 32-bit zeros: compression, image size, horizontal and vertical resolution, colors used, important colors |
+| `0x0036` | 1024 | 256 palette entries of 4 bytes: blue, green, red, then 0. Each level is the palette's 6-bit level multiplied by 4 (0-252) |
+| `0x0436` | `width × height` | Palette indexes, bottom screen row first. Rows have no padding |
+
+The palette is the one the game last installed (section 3.2), before the brightness table of SPEC-001 §3.1 is applied, so the file ignores the brightness setting. `[Must-match]`
 
 ## 3. Behavioral Rules & Edge Cases
 
@@ -460,7 +493,14 @@ Initial state: clock tick 264600 (set by the reset, section 3.1); level 1, exper
 
 Size: a Yes/No or two-button box is always large. Otherwise large or medium as requested, else large when the widest line exceeds 168 pixels or the box has more than five lines including the title.
 
-- **Done box.** `donebox.frm` opaque at (97, 98); caption `dbox.msg` 100 in font 103, key 18979, at (132, 101); red button at (110, 102).
+- **Done box.** `donebox.frm` (108 by 24) is copied opaquely, centered horizontally: x = `trunc((box width - 108) / 2)`. Its top is at y = 98 in the large box and y = 81 in the medium box. The caption, `dbox.msg` 100 in font 103 with key 18979, goes at (x + 35, top + 3). The red button goes at (x + 13, top + 4).
+
+  | Box | Done box | Caption | Red button |
+  | --- | --- | --- | --- |
+  | Large | (97, 98) | (132, 101) | (110, 102) |
+  | Medium | (53, 81) | (88, 84) | (66, 85) |
+
+  A medium box always has this single Done button. Yes/No and two-button boxes are forced large, so no medium Yes/No layout exists. `[Must-match]`
 - **Yes/No box.** One `donebox.frm` opaque at (37, 98) with caption 101 at (72, 101) and a red button at (50, 102). A second `donebox.frm` drawn transparently at (169, 98) with caption 102 at (204, 101) and a red button at (182, 102).
 - **Size selection detail.** When neither size is requested, the widest line is measured in the font current at the call, not in font 101. Text is then drawn in font 101, line height 10. Large boxes use 6 layout lines (`y0 = 27 + 30 - trunc((body lines + 1) * 10 / 2)`). Medium boxes use 5 (`y0 = 23 + 25 - trunc((body lines + 1) * 10 / 2)`). Both use a left margin of 29 when centering is disabled. A box is a modal window placed with its top-left at the given screen point. `[Must-match]`
 - **Instances.** These boxes resolve as follows. `[Must-match]`
@@ -605,7 +645,16 @@ Keys:
 - `+`/`=` and `-`/`_` change brightness.
 - F12 saves a screenshot.
 
-**Pause window.** Background `charwin.frm` (139 by 72) with `donebox.frm` drawn transparently at (13, 42). The window is at screen (250, 150) in game, or (185, 180) on the world map. It shows "DONE" (`options.msg` 300) at (52, 45) in font 103, key 18979, and "PAUSED" (301) in font 104, key 18979, at y = 10, x = `2 + trunc((139 - w) / 2)`. A red button sits at (26, 46). Before the window opens, the view is converted to greyscale through the grey lookup table: the whole game window after a redraw with the cursor hidden, or the world-map region (22, 21) 450 by 442. In game, background processing and palette cycling are suspended. The window closes on any key or button event except the brightness keys, which adjust brightness and keep it open; mouse movement does not close it. In game the map is redrawn on close. `[Must-match]`
+**Pause window.** Background `charwin.frm` (139 by 72) with `donebox.frm` drawn transparently at (13, 42). The window is at screen (250, 150) in game, or (185, 180) on the world map. It shows "DONE" (`options.msg` 300) at (52, 45) in font 103, key 18979, and "PAUSED" (301) in font 104, key 18979, at y = 10, x = `2 + trunc((139 - w) / 2)`. A red button sits at (26, 46). Before the window opens, the view is converted to greyscale through the grey lookup table below. In game the pointer is hidden, the whole map is redrawn, and every pixel of the 640-by-381 map window is converted, rows 0-380. Rows 379 and 380 lie under the interface bar, which is not converted and stays on top, so screen rows 0-378 turn grey. On the world map only the region (22, 21) 450 by 442 of the world-map window is converted. In game, background processing and palette cycling are suspended.
+
+**Grey lookup table.** The table maps each palette index i to a grey index. `[Must-match]`
+
+- Take P(i), the three 5-bit components of entry i of the `color.pal` palette as loaded (each 6-bit level halved and truncated). Unmapped entries count as zero (SPEC-001 §3.7). In the corpus these are entries 0 and 229-255.
+- Let s be the largest component plus the smallest, from 0 to 62.
+- Let v = `trunc(s × 240 / 510)`, from 0 to 29.
+- The grey index is the `color.pal` RGB555 lookup of the color (v, v, v), that is, of key `1057 v`.
+
+The table is built at program start and again at every game reset, from the `color.pal` palette loaded at that time. The brightness setting and palette cycling have no effect on it. Unmapped entries, including the cycling colors 229-255, therefore become key 0 [228], black. In the corpus white, index 220, becomes index 1 (v = 29), and index 1 becomes index 2 (v = 27), so the grey image is slightly darker than the original. The converted pixels are not restored when the window closes. In game the map is redrawn then. On the world map the region stays grey until the world-map screen next redraws its view (section 3.39), which happens on the next loop pass while follow mode is on. `[Must-match]` The window closes on any key or button event except the brightness keys, which adjust brightness and keep it open; mouse movement does not close it. In game the map is redrawn on close. `[Must-match]`
 
 **Quit confirmation.** A large Yes/No box at screen (169, 117) with title `misc.msg` 0, no body, title color key 32328. The in-world cursor is hidden and the arrow shown, then both are restored. Yes raises a return-to-main-menu request; it never exits the program. In game it is opened by Ctrl+Q, Ctrl+X or F10 after `ib1p1xx1`; it is also reachable from the save and load screens, options, preferences, the selection screen and the editor. `[Must-match]`
 
@@ -723,11 +772,22 @@ Buttons send their key on mouse release. Unless stated, buttons use `ib2p1xx1` o
 | Home | Center on the player |
 | `,` / `.` | Rotate the player |
 | `-`, `=` | Brightness |
-| `/` | Print date and time to the monitor, month name `editor.msg` 500 + month - 1 |
+| `/`, `?` | Print the date and time to the monitor, also while the bar is disabled. The line is the month name (`editor.msg` 500 + month - 1), a colon and a space, the day, `/`, the year, a space, then the hour without a leading zero, `:` and two-digit minutes. Example: "December: 5/2161 7:21" |
 | Ctrl+Q, Ctrl+X, F10 | Quit confirmation |
 | Ctrl+P | Pause |
 
 In the combat input loop, Space ends the turn, Enter requests the end of combat, and the loop also ends when the player's AP reaches 0. `[Must-match]`
+
+**Screenshot, F12.** `[Must-match]`
+
+- F12 is caught when the key event enters the common input queue, before any screen sees it. It therefore works in every screen and loop that reads input through that queue, and no screen's own key handling ever receives it. It does not work while the keyboard is disabled (section 3.27).
+- The whole screen is recomposed from all windows into a 640-by-480 buffer, including the mouse cursor when it is visible. The display itself is not updated by this pass.
+- The game then tries the names `scr00000.bmp`, `scr00001.bmp` and so on, five zero-padded digits, up to `scr99999.bmp`. It looks in the process's current working directory, not the save folder, and takes the first name that cannot be opened for reading. A gap in the numbering is therefore filled first.
+- The file is written as section 2.5 describes, and `misc.msg` 3 "Saved screenshot." is printed to the monitor.
+- If all 100000 names exist, or the file cannot be created, `misc.msg` 8 "Error saving screenshot." is printed instead. Write errors after the file is opened are not detected, and success is still reported.
+- No sound plays.
+
+`[May-improve]`: report a failed write as an error.
 
 ### 3.20 Message Monitor
 
@@ -738,6 +798,7 @@ In the combat input loop, Space ends the turn, Enter requests the end of combat,
 - Visible lines are drawn oldest at top, line k (k = 0-5) at x = 23 + k: each line one pixel further right.
 - A new message snaps the view to the newest line. Out of combat it plays `monitor` at most once per 500 milliseconds.
 - Two invisible buttons scroll: the upper half (23, 24) 167 by 30 scrolls one line older with cursor `suparrow.frm`; the lower half (23, 54) 167 by 30 scrolls one line newer with `sdnarrow.frm`; leaving either restores the arrow. Scrolling newer stops at the newest line. Scrolling older stops at the oldest ring slot, so early in a game the view can scroll into empty lines. `[May-improve]`: stop at the oldest nonempty line.
+- Each button scrolls once on the mouse press and makes no sound; holding it does not repeat. Both buttons belong to the interface bar's enable state. When the bar is disabled, for example during the combat input lock (section 3.27), they are disabled too. While disabled, a press does not scroll and the pointer entering or leaving them does not change the cursor. They return when the bar is enabled again. `[Must-match]`
 
 ### 3.21 HP and AC Counters
 
@@ -1034,7 +1095,13 @@ A pointer at x = 0, x = 639, y = 0 or y = 479 scrolls the map; corners scroll di
   - A center is accepted only when `42 < x' < 156` and `44 < r < 155`, that is, columns c = 44-156 and rows r = 45-154. The border does not depend on a map's contents.
   - The border applies to every view-center change. Edge and arrow scrolling, the Home key's hex-by-hex walk toward the player, and dialogue centering also apply the limiting and blocker tests. Map entry and elevation changes skip those two tests but not the border.
   - A refused center leaves the view where it was. A refused map-entry hex fails the map load (SPEC-003). The entry hexes of all 72 corpus maps lie inside the border.
-- **Arrow keys** scroll one step per key event through the same 33-millisecond gate. Key auto-repeat starts after more than 500 milliseconds, then repeats every more than 80 milliseconds. Arrow keys work regardless of the edge-scroll enable state, but not while the keyboard is disabled. `[Must-match]`
+- **Arrow keys** scroll one step per key event through the same 33-millisecond gate. They use the key auto-repeat below. Arrow keys work regardless of the edge-scroll enable state, but not while the keyboard is disabled. `[Must-match]`
+- **Key auto-repeat.** `[Must-match]`
+  - Repeat is produced by the game, not the host. It applies to every physical key alike, with no exemption for window toggles.
+  - Each time input is polled and the keyboard is enabled, every key that is still held makes one more key event of the same kind. That happens when more than 500 milliseconds have passed since its press, or more than 80 milliseconds since its previous repeat.
+  - Repeats only happen during polls, so a loop that polls less often repeats less often.
+  - F1, Tab, Esc, `o`, `i`, `c`, `p` and the other toggles therefore repeat when held. A held toggle opens its window. After about half a second its repeats are read by the open window, which closes it if it treats that key as close. Its next repeat then reopens the window from the game loop, and so on until the key is released. The help screen (F1) closes on any input, so its own repeat closes it.
+  - Clearing the keyboard cancels the repeat of every held key until that key is pressed again. This happens at the start of each player combat turn (section 3.27) and at the top of each main-menu loop pass (section 3.4).
 - **Combat and other windows.** During NPC turns and the player's attack animations the interface is disabled, but edge scrolling stays on: the scroll art temporarily replaces the animated watch, which returns afterwards. Scrolling is off during the combat panel's open and close animations, and during dialogue, inventory, the Pip-Boy, the world map and the action menu. Re-enabling the game mouse always turns scrolling back on. `[Must-match]`
 - **Click-to-scroll.** A latent mode exists in which a fresh left press on an edge pixel is flagged; any left release clears the flag before it reaches the map. While flagged, hold pulses and right clicks made with the left button down are ignored. Nothing in R1 turns this mode on (there is no configuration key), so it has no effect, and the ordinary release click is never suppressed. `[Must-match]`
 
@@ -2784,7 +2851,12 @@ Fixture P gives the literal reference output and the safe-rule variant.
 
 - The list is sorted by elevation, lowest first. Within one elevation, flat objects (object flag `0x00000008`, SPEC-003 §2.6) come before all other objects.
 - Within one elevation and flat class, a newly inserted object goes **after** every object already in that group, so the oldest insertion comes first. R1 locks both objects' art at this point, but its comparison is incomplete and never decides anything. No art, frame size, object type or identifier breaks the tie.
-- An object is inserted when it is loaded with its map (in file order), created, copied, moved to a hex, flipped between flat and not flat, or given a new pixel offset. The last case includes every step of a walk (SPEC-007 §3.11) and every offset change made by an animation. Each of these moves the object to the end of its group on its hex, even when the hex does not change. A walking critter therefore draws after the other objects of its class on its hex. An art or frame change alone does not reinsert.
+- An object is inserted when it is loaded with its map (in file order), created, copied, moved to a hex, flipped between flat and not flat, or given a new pixel offset. Each of these moves the object to the end of its group on its hex, even when the hex does not change. R1 never compares the new state with the old one:
+  - A move to a hex always removes the object and inserts it again, even when the hex and elevation are the ones it already has. The move also resets the pixel offset to (0, 0).
+  - A pixel-offset change always removes and reinserts the object, even when the change is (0, 0).
+  - Every frame step of an animation applies that frame's shift as an offset change, even a zero shift. This covers every step of a walk (SPEC-007 §3.11), every forward or reverse frame of any animation, and the first frame of a new animation. An animated object, such as a burning fire or a fidgeting critter, therefore moves to the end of its group on every frame it advances.
+  - A walking critter therefore draws after the other objects of its class on its hex.
+  - These do not reinsert: an art change, setting or stepping the frame outside an animation step, a rotation change, a light change, hiding or showing, and an outline change.
 
 **Visited hexes.** `[Must-match]` The objects drawn are found through a fixed hex lattice, which is built once at engine start for the 640-by-380 map window widened by 320 pixels on each side and 240 above and below.
 
@@ -2800,7 +2872,99 @@ Fixture P gives the literal reference output and the safe-rule variant.
 
 So every flat object in the refreshed area is drawn before any upright object. Upright objects are drawn by ascending hex number and, within a hex, in list order. The hex number alone sets the order of objects on different hexes: no screen-y sort, sprite-bottom sort or multihex adjustment is made.
 
-**Light and outlines.** `[Must-match]` Each hex's objects are lit by the larger of the ambient light and that hex's light on the current elevation (SPEC-006 §3.6). Every drawn object with an outline type set and its outline not disabled is added to the outline list, in drawing order. The list holds at most 100 objects per refresh; later objects are not outlined in that refresh. Outlines are drawn after the roofs, in list order.
+**Light and outlines.** `[Must-match]` Each hex's objects are lit by the larger of the ambient light and that hex's light on the current elevation (SPEC-006 §3.6), the hex light being capped at 65536. Every drawn object with an outline type set and its outline not disabled is added to the outline list, in drawing order. Objects without a hex are never outlined. The list holds at most 100 objects per refresh; later objects are not outlined in that refresh. Outlines are drawn after the roofs, in list order, so an outline shows through a roof that hides its object.
+
+**Outline word.** Every object has a 32-bit runtime outline word. `[Must-match]`
+
+| Bits | Meaning |
+| --- | --- |
+| 0-23 | Outline type. 0 is no outline. The value is compared whole: 1 hostile, 2 red, 4 grey, 8 friendly, 16 item. Any other nonzero value draws in key 31775 [49], opaque |
+| 30 (`0x40000000`) | Translucent: honored for types 2, 4 and 16 only |
+| 31 (`0x80000000`) | Disabled: the type is kept, but the object is not outlined |
+
+These operations change the word:
+
+- **Set a type.** This is refused when the word already has a type, or when the object has the no-highlight flag `0x00001000`. Otherwise the word becomes the new type. The disabled bit is added when the object is hidden (flag `0x00000001`).
+- **Enable.** Clears the disabled bit. Showing a hidden object also clears it.
+- **Disable.** Sets the disabled bit, but only when a type is set. Hiding an object also does this.
+- **Remove.** Sets the word to 0.
+
+An object loaded from a map or save always starts with the word 0 (SPEC-003 §2.10). Saves write the current word.
+
+**Outline colors.** `[Must-match]`
+
+| Type | Color | Translucent form (bit 30) |
+| --- | --- | --- |
+| 1 hostile | Raw indexes 243-247 (the fast-fire cycle, SPEC-001 §3.2), in row bands | Never |
+| 8 friendly | Raw indexes 229-232 (the slime cycle), in row bands | Never |
+| 2 red | Key 31744 [133] | The red blend table of the red translucency color |
+| 4 grey | Key 15855 [9] | The blend table of the wall translucency color; no R1 caller uses type 4 |
+| 16 item | Key 30632 [58] | The red blend table |
+| Other | Key 31775 [49] | Never |
+
+**Row bands** (types 1 and 8). Let n be 5 for hostile, or 4 for friendly, and b = `trunc(frame height / n)`. When b is 0, every outline pixel uses the first index, 243 or 229. Otherwise a pixel painted while scanning frame row y uses index `first + ((trunc(y / b) + 1) mod n)`. So rows 0 through b - 1 use the second index, and the first index comes last. Because these indexes cycle in the palette (SPEC-001 §3.2), the outline also shimmers over time.
+
+A translucent outline pixel is `blend[g][D]`. Here D is the destination index at that pixel, g is the common gray level (above) of the outline color's index, and blend is the table named in the table above. No light is applied. For the red type, index 133 has gray level 2.
+
+**Outline geometry.** The outline is a one-pixel ring of the object's current frame (art, frame and rotation), at the same screen position as the object. The ring is every pixel that is transparent in the frame, or lies outside the frame, and has a non-transparent frame pixel directly left of it, right of it, above it or below it. Diagonal neighbors do not count. It is painted over whatever is already in the buffer: the object, its neighbors and the roofs. In frame-local coordinates (x right, y down), R1 paints it in two passes. `[Must-match]` unless tagged.
+
+1. **Rows.** Each row y is scanned from x = 0, starting in the "outside" state.
+   - At a non-transparent pixel in the outside state, paint (x - 1, y) and switch to the inside state.
+   - At a transparent pixel in the inside state, paint (x, y) and switch to outside.
+   - If the row's last pixel (frame width - 1) is non-transparent, paint (frame width, y).
+2. **Columns.** Each column x is then scanned from y = 0 in the same way.
+   - At a non-transparent pixel in the outside state, paint (x, y - 1).
+   - At a transparent pixel in the inside state, paint (x, y).
+   - If the column's last pixel is non-transparent, paint (x, frame height).
+3. **Repaints.** A ring pixel next to the sprite both horizontally and vertically is painted twice, and the column pass's paint is the one that stays.
+   - A translucent outline blends a second time over its own first result.
+   - In a banded outline, a pixel painted above a column's run takes the band of the row below it.
+4. **Clipping.** Each paint happens only when the scanned pixel that triggers it lies inside the refreshed rectangle widened by 1 pixel on every side and limited to the map buffer. The scanned pixel is the non-transparent one for left, above and end-of-row paints, and the transparent one otherwise. So a ring pixel can land up to 2 pixels outside the refreshed rectangle. That pixel stays in the buffer until a later refresh covers it.
+5. **Buffer guards.**
+   - A left paint is skipped when the scanned pixel is the first byte of the buffer or lies in buffer column 0.
+   - An above paint is skipped when it would fall before the buffer start.
+   - The end-of-row and end-of-column paints are skipped when the scanned pixel is not inside the buffer.
+   - An end-of-row paint for a sprite whose last column is buffer column 639 lands in column 0 of the next buffer row. `[May-improve]`: skip a right paint that would wrap to the next row.
+
+**When outlines are set.** `[Must-match]` Item hover (section 3.27) sets type 16 without the translucent bit. The movement-mode hex cursor sets type 2 with the translucent bit (section 3.27). Combat uses types 1 and 8:
+
+- **Combat start.** Every combatant gets type 1, or type 8 when the player has Friendly Foe and the combatant's team is the player's team (SPEC-011). The outline is set disabled.
+- **A critter joining combat or changing teams** gets its type rebuilt (SPEC-009 §3.15, step 4).
+- **The player's turn.** When the `target_highlight` setting read at combat start is nonzero, outlines are enabled at the start of the turn. Enabling needs the setting to be nonzero now and the cursor to be in crosshair mode (section 3.27). It enables the outline of every living combatant other than the player. Outlines are disabled again when the turn ends.
+  - With setting 2, the outlines are also disabled when one of the player's attack animations starts, and enabled again after its damage is applied.
+  - Entering crosshair mode enables them and leaving it disables them, as in section 3.27.
+- **An NPC's turn.** The acting NPC's outline is enabled for its whole turn, whatever the setting, and disabled at the end.
+- **Death.** It disables the critter's outline.
+- **Combat end, or leaving the combat list.** Removes the outline.
+- **Animations.** A step of a registered animation sequence can enable or disable its owner's outline.
+
+Outside combat, the enable step applies to every living critter on the current elevation other than the player. It sets type 8 for the player's team and type 1 for everyone else, without the Friendly Foe test, and enables it. The disable step removes these outlines entirely.
+
+**Floor light.** Floor tiles are lit per pixel by interpolating the light of ten hexes around the tile. Objects still use one light per hex. `[Must-match]` unless tagged.
+
+1. **Base hex.** For a floor tile whose art's top-left is at window (x, y), the base hex is the hex under window point (x, y + 13). If no hex is there, the tile is not drawn.
+2. **Vertex lights.** Vertex k, for k = 0-9, has a hex offset from the base hex and a position in a 41-row, 80-column light map. Its light Vk is the larger of the ambient light and that hex's light (SPEC-006 §3.6), where an offset that leaves the grid gives hex light 0.
+
+   | Vertex k | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+   | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+   | Map position (row × 80 + column) | 16 | 48 | 960 | 992 | 1024 | 1936 | 1968 | 2000 | 2912 | 2944 |
+   | Hex offset, even base hex | -1 | -2 | 0 | 199 | 198 | 200 | 399 | 398 | 400 | 599 |
+   | Hex offset, odd base hex | -201 | -2 | 0 | -1 | 198 | 200 | 199 | 398 | 400 | 399 |
+
+   R1 always uses the even-hex offsets. For an odd base hex it also skips vertex 0, which keeps the light computed for the previous floor tile drawn. `[May-improve]`: compute all ten vertices, with the odd-hex offsets when the base hex number is odd.
+3. **Uniform tile.** When all ten lights are equal, the tile is drawn with the lit draw at that light, so indexes 229 and above are not lit.
+4. **Interpolated tile.** Otherwise the light map is filled by ten triangles in this order. A later triangle overwrites shared entries. All divisions truncate toward zero.
+   - **Five upright triangles** (apex A; base B on the left and C on the right), as (B, C, A): (2, 3, 0), (3, 4, 1), (5, 6, 3), (6, 7, 4), (8, 9, 6).
+     - Let dx = `trunc((VC - VB) / 32)` and dy = `trunc((VB - VA) / 13)`.
+     - A cursor q starts at A's map position, and a row value s starts at VA.
+     - For each of 13 rows: q advances by the row's step, then n entries get s, s + dx, s + 2dx and so on, with q moving past them, and then s grows by dy.
+     - The (step, n) pairs are (-1, 2), (78, 2), (76, 6), (73, 8), (71, 10), (68, 14), (65, 16), (63, 18), (61, 20), (58, 24), (55, 26), (53, 28), (50, 32).
+   - **Five inverted triangles** (top-left T, bottom apex A, top-right R), as (T, A, R): (0, 3, 1), (2, 5, 3), (3, 6, 4), (5, 8, 6), (6, 9, 7).
+     - Let dx = `trunc((VR - VT) / 32)` and dy = `trunc((VA - VT) / 13)`.
+     - q starts at T's map position, and s starts at VT. The rows are filled the same way.
+     - The pairs are (0, 32), (48, 32), (49, 30), (52, 26), (55, 24), (57, 22), (60, 18), (63, 16), (65, 14), (67, 12), (70, 8), (73, 6), (75, 4).
+   - **Drawing.** Tile pixel (px, py) then uses map entry `160 + 80 py + px`. A non-transparent source index i is drawn as intensity[i][trunc(entry / 512)] (SPEC-001 §3.7), with no exemption for indexes 229-255. Their intensity rows are unmapped, so in an interpolated tile those pixels draw as index 0. `[May-improve]`: leave indexes 229-255 unlit, as in the uniform case.
+5. **Uncovered entries.** The map persists between tiles and starts as zeros. A few tile pixels read entries no triangle ever writes, so they get light 0. These are pixels (32-34, 35), the bottom tip of 1404 of the 1600 corpus floor tiles, and edge pixels of about 51 others. The tile drawn next, 32 pixels right and 24 down, normally covers them. `[May-improve]`: give those pixels the light of the nearest written entry in the same column above.
 
 **Draw modes.** One draw mode applies to the object's whole clipped rectangle, except where the player cutout of section 3.37 applies. Let s be a source pixel, D the destination index, and L the light level divided by 512 (0-128). The intensity table is the one of SPEC-001 §3.7. A source index 0 is transparent in every mode. `[Must-match]`
 
@@ -2825,6 +2989,97 @@ So every flat object in the refreshed area is drawn before any upright object. U
   - Indexes 229-255 get no exemption.
 
   The gray tables are built once, when the object system starts, from the palette loaded then. The five blend tables are rebuilt with every palette file load (SPEC-001 §3.7). `[Must-match]`
+
+### 3.45 Dialogue Review and Ask About Windows
+
+This section gives the art, layout and input of the dialogue control panel's Review and Tell Me About controls. SPEC-006 §3.9 owns the review history and the Ask About lookup rules, and SPEC-013 §3.18 owns barter. Art is under `art/intrface/`. Sizes were read from the corpus FRM headers. `[Must-match]` unless tagged.
+
+**Control panel.** During dialogue, the panel `di_talk.frm` (list index 99, 640 by 190) is a window at screen (0, 290), 640 by 190. Its art already carries the labels REVIEW, BARTER and TELL ME ABOUT. It has three buttons, each acting on mouse release. Coordinates are window-relative.
+
+| Control | Rectangle | Up / down art | Sounds | Key |
+| --- | --- | --- | --- | --- |
+| Barter | (593, 41) 14 by 14 | `di_rdbt2.frm` (96) / `di_rdbt1.frm` (95), drawn transparently | `ib2p1xx1` / `ib2lu1x1` | `b` (SPEC-013 §3.18) |
+| Tell Me About | (593, 116) 14 by 14 | Same as Barter | Same as Barter | `a` |
+| Review | (13, 154) 51 by 29 | `di_rest1.frm` (97) / `di_rest2.frm` (98), drawn opaquely | `ib1p1xx1` / `ib1lu1x1` | None |
+
+Both 14-by-14 buttons use the art listed as "down" (`di_rdbt2.frm`) for their normal state and the "up" art when pressed. The keys `a` and `b` act only in the reply/choice loop of SPEC-006 §3.9. No key opens Review.
+
+**Review window.**
+
+- **Opening.** If talking-head speech is still playing, it is stopped (SPEC-010 §3.12). The head updater is suspended, so the head shows a frozen frame until the window closes. A modal window opens at screen (0, 0), 640 by 480, filled opaquely with `review.frm` (102, 640 by 480). Font 101 is selected.
+- **Buttons.** Each acts on release.
+
+  | Button | Rectangle | Up / down art | Sounds | Sends |
+  | --- | --- | --- | --- | --- |
+  | Scroll up | (475, 152) 35 by 35 | `di_bgup1.frm` (89) / `di_bgup2.frm` (90), transparent | `ib2p1xx1` / `ib2lu1x1` | Up arrow |
+  | Scroll down | (475, 191) 35 by 37 | `di_bgdn1.frm` (87) / `di_bgdn2.frm` (88), transparent | `ib2p1xx1` / `ib2lu1x1` | Down arrow |
+  | Done | (499, 398) 82 by 46 | `di_done1.frm` (91) / `di_done2.frm` (92), transparent | `ib1p1xx1` / `ib1lu1x1` | Esc |
+
+- **Keys.** Esc closes the window. Up and Down move the top entry by one. Every other key, including Ctrl+Q and F10, is read and ignored.
+- **Scrolling.** The first view starts with the oldest entry (entry 0) at the top. Up does nothing at entry 0. Down stops at the last entry, which can then be the only one shown. A press that cannot move does not redraw. Scrolling moves by whole entries, not by lines.
+
+**Review drawing.** Each redraw restores the transcript band from `review.frm`. It copies 357 rows of 640 bytes starting at pixel (113, 76), so rows 77-432 are restored in full, row 76 only from x = 113, and row 433 only up to x = 112. Entries are then drawn from the top entry onward. With the line step s = text height + 2 = 12 and the current line y starting at 76, each entry is drawn as follows.
+
+1. The target's name followed by `:` is drawn at (88, y) in key 992 [215], with no background fill and a drawing limit of 180 pixels. The text area's top moves down by 12.
+2. The reply text is wrapped into the area x 113-422 (width 309) from the current top, in key 768 [198]. Its first line is drawn at x = 123, and later lines at x = 113, 10 pixels apart. Afterwards y is the next free line.
+3. If an option was chosen after this reply, the player's name followed by `:` is drawn at (88, y) in key 21140 [6], the top moves down by 12, and the option text is wrapped the same way in key 15855 [9].
+4. Drawing stops after the first entry that leaves y at 407 or more.
+
+The window then refreshes (88, 76) through (434, 432). A line is drawn only while its top is at most 408, so the last entry may be cut, and a name can be left at the bottom with no text after it. `[Must-match]` The row-76 pixels at x 88-112 are not restored, so the antialiased top row of the first name keeps blending over its earlier copy. `[May-improve]`: restore the rectangle (88, 76) through (434, 433) before drawing.
+
+**Review text sources** (SPEC-006 §3.9 records them):
+
+- A message-backed reply or option is looked up again at every redraw, from its message list and number.
+- A literal reply is shown as stored. A literal option is stored with its displayed `95 20` bullet prefix, so it shows that bullet, while a message-backed option shows the bare message text.
+- The continuation option (-1/-1) shows an empty text after the player's name, and the Done option (-2/-2) shows `proto.msg` 650 "[Done]".
+- A message that does not exist shows `Error`.
+- A message list that cannot be loaded makes the reference stop the program with a system error. `[May-improve]`: draw `Error` instead.
+
+**Review wrapping** (also used by the dialogue reply area):
+
+1. If the rest of the text is at most the width W wide, it is one line.
+2. Otherwise the line runs to the first space after the line's first character. It is then extended to each later space while the text up to that space stays narrower than W. The space at the break is dropped.
+3. If the rest contains no space after its first character, the whole rest is drawn as one line, cut at W by the font's drawing limit, and the text ends there.
+4. When the chosen line is still wider than W (a first word wider than W), drawing stops for that text. `[Must-match]` In that case the reference leaves the message's stored text cut at that word for the rest of the session. `[May-improve]`: never modify the stored message text.
+
+**Closing Review.** The head updater is resumed and the previous font is restored. The window is removed, and the reply/choice loop continues. Stopped speech is not restarted.
+
+**Tell Me About.** When pressed, or on `a`, the target is tested in this order.
+
+1. **Not a critter.** Nothing happens. `[Must-match]`
+2. **Reaction level bad.** The NPC's numeric reaction (SPEC-006 §3.10, initialized on first use) is at most 25: the reference looks up `proto.msg` 904 but shows nothing. `[May-improve]`: show `proto.msg` 904 in the reply area, as for map 35.
+3. **Map number 35** (`V13ENT`): `proto.msg` 904 "This person has nothing to tell you about." is shown in the reply area, and the loop continues.
+4. **Otherwise:**
+   - the reply and option windows are hidden;
+   - on the next head-updater tick, the Ask About window opens from the reply/choice loop's next input pass.
+
+   The reference intends to stop speech first, but its test restarts or continues the speech buffer instead, so speech and lip-sync go on while the window is open. `[May-improve]`: stop playing speech, as Barter and Review do.
+
+**Ask About window.**
+
+- **Window.** A modal window at screen `(trunc((640 - 290) / 2), 356)` = (175, 356), 290 by 85. Its background is `lsgbox.frm` (238, 290 by 85), copied opaquely.
+- **Text.** Drawn in font 103, key 18979 [62]:
+  - `misc.msg` 6000 "Ask about what?" centered at y = 7 (x = 91 in the corpus font);
+  - `dbox.msg` 100 "DONE" at (56, 57);
+  - `dbox.msg` 103 "CANCEL" at (181, 57).
+- **Buttons.** Two Red buttons, `lilredup.frm` (8) / `lilreddn.frm` (9), 15 by 16, drawn transparently, with the Red-button sounds:
+  - at (34, 58), sending Enter;
+  - at (160, 58), sending Esc.
+- **Input field.** (22, 32) 244 by 14. Each redraw fills it with key 0 [228] and draws the typed text followed by the cursor character in font 101, key 992 [215], with a 244-pixel drawing limit. The view would scroll by dropping leading characters while the text is wider than 244, but the entry rule below never lets that happen.
+- **Cursor.** Starts as `_`. On every input poll where more than 333 milliseconds have passed since the last toggle, it alternates between `_` and a space, and the field is redrawn.
+- **Saved reply.** The displayed reply text is saved when the window opens.
+
+**Ask About input.** Each poll reads one input code.
+
+- **Backspace** removes the last character.
+- **Enter**, or the DONE button, submits the text (SPEC-006 §3.9 Ask About lookup). The field is then cleared, whether or not anything matched, and the window stays open. Submitting an empty field does nothing.
+- **Esc**, or the CANCEL button, stops any playing speech and closes the window.
+- **Any other code of 0 or more** is appended when fewer than 126 characters are typed, and when the width of the typed text plus `_` plus the new character's glyph width (without spacing) is below 244.
+- No quit key is handled inside the window.
+
+The code is stored as one byte. Extended keys therefore enter characters: Up arrow (328) enters `H`, and F1 (315) enters `;`. Their widths are looked up outside the 256-glyph table. `[May-improve]`: accept only codes 32 through 255.
+
+**Closing Ask About.** The window is removed and the previous font restored. The saved reply text is put back, the reply and option windows are shown again, and the reply is redrawn from the current reply page offset. Ask About replies are not added to the review history. An Ask About reply that pages, or a reply drawn while the original stood on a later page, uses the shared reply page offset: a long Ask About reply leaves that offset pointing into its own text. The restored reply then starts at a wrong position, and an Ask About reply shown while the original was on page 2 or later starts from that offset in the new text, possibly past its end. `[May-improve]`: draw each Ask About reply from its start and restore the original page offset on closing.
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
@@ -3161,6 +3416,92 @@ Translucency, with source 5-bit components (7, 31, 0): the common gray level is 
 
 With the corpus `color.pal`, the five foreground colors are indexes 33 (wall), 35 (glass), 220 (steam), 58 (energy) and 133 (red). Source 215 over destination 100 draws 6 as wall translucency, and 214 as glass translucency at full light.
 
+### 4.18 Fixture R: Dialogue Review and Ask About
+
+Font 101 widths from the corpus `font1.aaf`: "Abel:" 29, `_` 8, "Water" 35. Font 103 (`font3.aaf`): "Ask about what?" 107.
+
+| Input | Expected |
+| --- | --- |
+| Dialogue panel | Window (0, 290) 640 by 190; Review at screen (13, 444), Barter at (593, 331), Tell Me About at (593, 406) |
+| Review, entries: reply "Hng." (one line) with an option chosen, target named Abel | "Abel:" at (88, 76) key 992; "Hng." at (123, 88) key 768; player name and `:` at (88, 98) key 21140; option first line at (123, 110) key 15855; the next entry's name at (88, 120) |
+| A reply needing two lines | First line at x = 123, second at (113, top + 10) |
+| 5 entries, Down pressed 6 times | Top entry 1, 2, 3, 4 (each redrawn), then 4 twice with no redraw |
+| Up at entry 0 | No redraw |
+| Ask About window | Screen (175, 356); title at (91, 7); DONE at (56, 57); CANCEL at (181, 57); Enter button (34, 58); Esc button (160, 58); field (22, 32) 244 by 14 |
+| Target NPC's reaction 20 | Pressing Tell Me About: button sounds only, nothing shown (safe rule: `proto.msg` 904) |
+| Any critter on map 35 | `proto.msg` 904 in the reply area |
+| On map 10, target script with no 1000-1099 keywords, submit "killian" | List 1 message 7000 "Killian" matches; reply = list 1 message 7100 "Killian is the mayor. He runs a store."; no random draw |
+| Same, submit "water chip" | Tokens "water", "chip": no keyword matches (list 1 has "Water Chip" at 7005); no name match; fallback draw over the target's 980-999 |
+| Target script `abel`, submit "Abel." | Token "Abel" equals the target's name: `abel.msg` has one non-`Error` message in 970-979, so `random(1, 1)` consumes one draw and shows 970 "Me Abel." |
+| Target script `abel`, submit "xyz" | `abel.msg` has 980 and 981 in 980-999: one `random(1, 2)` draw; 1 shows "Hng.", 2 shows "Why do you say that?" |
+| Typed text 230 pixels wide including `_`, next glyph 9 wide | 230 + 9 = 239 < 244: accepted |
+| Typed text 236 pixels wide including `_`, next glyph 8 wide | 244 is not below 244: refused |
+| Up arrow pressed in the field | Character `H` appended (safe rule: ignored) |
+
+### 4.19 Fixture S: Dialog Box, Date Line, Screenshot and Key Repeat
+
+| Input | Expected |
+| --- | --- |
+| Medium Done box at screen (200, 150) | `donebox.frm` at window (53, 81), screen (253, 231); DONE at window (88, 84); red button at window (66, 85), 15 by 16 |
+| Medium size requested, title plus a second-button label | Forced large: Done box at (37, 98), second box at (169, 98) |
+| `/` at tick 264600 | Monitor line "December: 5/2161 7:21" |
+| `/` at tick 264600 + 23400 (39 minutes later) | "December: 5/2161 8:00" |
+| `?` while the bar is disabled out of combat | Same line; `ib1p1xx1` |
+| F12, folder holds `scr00000.bmp` and `scr00002.bmp` | Writes `scr00001.bmp`; monitor "Saved screenshot." |
+| First 54 bytes of a 640-by-480 screenshot | `42 4D 36 B4 04 00 00 00 00 00 36 04 00 00 28 00 00 00 80 02 00 00 E0 01 00 00 01 00 08 00` followed by 24 zero bytes |
+| Palette entry for 6-bit levels (63, 32, 0) | Bytes `00 80 FC 00` |
+| Pixel at screen (0, 479) | File offset `0x0436`; screen (0, 0) is at `0x0436 + 479 × 640` = `0x4B1B6` |
+| Tab held from t = 0 ms, polls every 41 ms | Press event at 0; first repeat at the poll at 533 ms (first with more than 500 elapsed); next at 615 (82 since the last repeat), then 697 |
+| Subtitle entry 700 pixels wide whose last space before the 640-pixel point follows its 12th word | Only those 12 words are shown, centered; the rest is never shown. Safe rule: the rest as a second line at `y0 + th`, with the band grown to `2 th + 4` |
+
+### 4.20 Fixture T: Grey Table, Outlines and Floor Light
+
+Grey table over the corpus `color.pal` (section 3.17):
+
+| Index i | 6-bit levels | s = max + min (5-bit) | v | Grey index |
+| ---: | --- | ---: | ---: | ---: |
+| 0 | unmapped | 0 | 0 | 228 |
+| 1 | (59, 59, 59) | 58 | 27 | 2 |
+| 57 | (63, 63, 31) | 46 | 21 | 5 |
+| 145 | (63, 39, 18) | 40 | 18 | 7 |
+| 215 | (15, 62, 0) | 31 | 14 | 9 |
+| 220 | (63, 63, 63) | 62 | 29 | 1 |
+| 229-255 | unmapped | 0 | 0 | 228 |
+
+Outline ring of a 3-by-2 frame. Row 0 is (0, 5, 0) and row 1 is (5, 5, 5); local coordinates, nothing clipped (section 3.44):
+
+| Pass | Paints, in order |
+| --- | --- |
+| Rows | (0, 0), (2, 0); then (-1, 1) and the end-of-row paint (3, 1) |
+| Columns | (0, 0) and the end paint (0, 2); (1, -1), (1, 2); (2, 0), (2, 2) |
+| Ring | 8 pixels: (1, -1), (0, 0), (2, 0), (-1, 1), (3, 1), (0, 2), (1, 2), (2, 2); (0, 0) and (2, 0) are painted twice |
+
+| Input | Expected |
+| --- | --- |
+| That frame, type 8 friendly | Frame height 2 gives b = 0: every pixel is index 229 |
+| That frame, type 2 with bit 30, destination index D | Each pixel is `blend_red[2][D]`; (0, 0) and (2, 0) become `blend_red[2][blend_red[2][D]]` |
+| A 10-row frame, type 1 hostile | b = 2: rows 0-1 index 244, rows 2-3 245, rows 4-5 246, rows 6-7 247, rows 8-9 243 |
+| Outline word `0x80000001` | Hostile, disabled: not collected for drawing |
+| Outline word 3 | Not a listed type: key 31775 [49], opaque |
+| Set type 16 on an object whose word is `0x80000008` | Refused: the word already has a type |
+
+Floor light for an even base hex. All vertex lights are 65536 except V3 = 0, so the tile is interpolated:
+
+| Tile pixel | Map entry | Value | Intensity column |
+| --- | ---: | ---: | ---: |
+| (32, 10), vertex 3 | 992 | 0 | 0 |
+| (40, 10) | 1000 | 16384 | 32 |
+| (48, 10) | 1008 | 32768 | 64 |
+| (16, 4) | 496 | 49152 | 96 |
+| (32, 0) | 192 | 55454 | 108 |
+| (20, 20) | 1780 | 50410 | 98 |
+| (0, 10), (64, 10), (48, 22) | | 65536 | 128 |
+| (33, 35) | 2993, never written | 0 | 0 |
+
+With all ten lights equal to 40000, the tile uses the lit draw at column `trunc(40000 / 512)` = 78, and indexes 229-255 stay unlit.
+
+Per-hex order. A hex holds upright objects A then B, on the same elevation. B steps one animation frame whose shift is (0, 0): the order becomes A, B, unchanged because B was already last. A then steps one frame, giving B, A. A script then moves B to the hex it is already on, giving A, B, with B's pixel offset reset to (0, 0).
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -3170,3 +3511,5 @@ With the corpus `color.pal`, the five foreground colors are indexes 33 (wall), 3
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
 Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 33 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles", and the configuration section name "system"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc", and "column" in the section 3.36 roof-square formula). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. The sound name "toggle" is also flagged. The section 3.29 border values were recomputed with an independent model of the hex-to-screen transform and checked against the entry hexes of all 72 corpus maps. Section 3.34 art sizes were read from the corpus FRM headers. Section 3.35 file and frame facts were checked against the corpus (`rscorpbl.frm` has 9 frames; item PID 213 is Remains of Gizmo). The section 3.27 busy-click rules were checked against SPEC-007 §3.10.1 ("One sequence per owner"). The section 3.36 empty-roof test and bits match SPEC-003 §2.8, and the roof words of all 72 corpus maps were scanned: 15056 roofed squares, none with roof index 0 or the barrier bit; `LAGUNRUN.MAP` stores 257 squares with the hide bit set, which loading clears. Fixture G was stepped by hand through the section 3.36 rule. Sections 3.38-3.43 (R1-rev8): every art name, list index and size was read from `intrface.lst` and the corpus FRM headers; `targbox.frm`, `wrldmp00.frm`-`wrldmp19.frm` and `pipboy.frm` do not exist in the corpus, and the real files are `called.frm` (118), `worldmap.frm` (135) and `pip.frm` (127). All 21 corpus `na` pictures are 170 by 225 with one frame. Every quoted `combat.msg`, `worldmap.msg`, `map.msg`, `pipboy.msg`, `editor.msg`, `proto.msg` and `dbox.msg` text was checked against the English corpus, and the fixture label widths were computed from `font1.aaf`. The town-map entrance table was checked against the map headers of every hotspot map, and the town pictures were composited with their markers. Fixtures H-P were stepped by hand or by a research-side model. The printed sheet of section 3.43 is documented literally: R1 reads `editor.msg` 650-655 with meanings that do not match the shipped file, so every resulting defect carries a `[May-improve]` safe rule. The section 3.27 combat-lock and section 3.23 hand-swap rules were checked against the sequence registration and keyboard paths. Section 3.44 (R1-rev9) was checked against the reference object renderer, list insertion and translucent blitters, and its foreground indexes and Fixture Q values were modelled over the corpus `color.pal`. The R1 tie-break inside a hex is incomplete in the reference and never decides, so the section states the insertion-order result. Tag count, excluding the two tag definitions: 228 `[Must-match]`, 102 `[May-improve]`.
+
+Update notes (2026-10-23, R1-rev10): every new art name, list index and size in sections 3.45 and 3.44 was read from `intrface.lst` and the corpus FRM headers. The guessed `di_rview.frm` does not exist; the Review background is `review.frm` (102). Quoted `misc.msg`, `dbox.msg`, `proto.msg` and `editor.msg` texts were checked against the English corpus, and fixture widths were computed from `font1.aaf` and `font3.aaf`. The Ask About fixture keywords were read from the corpus dialog files. The screenshot header bytes and the grey table were modelled over the corpus `color.pal`. Net tags for R1-rev10: +17 `[Must-match]`, +12 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.

@@ -427,7 +427,7 @@ Positive dialogue message-list number k selects the dialogue message resource be
 
 Effective IQ for `giq_option` is player intelligence plus Smooth Talker perk rank. Nonnegative threshold q admits values at least q; negative q admits values at most `-q`. A rejected option still consumes all five operands. `gsay_message` ignores its supplied reaction and inserts the host's standard continuation entry with fixed list/message selectors -2/-2, null procedure, and reaction 50. Reply/option selection can trigger speech and script procedures through the host dialogue loop; no synthetic scalar return is appended afterward. `[Must-match]`
 
-`message_str` only passes positive message numbers to its speech-aware catalog lookup. It can prepare speech when a talking head/dialogue is active, but does not return a sound handle. Nonpositive/missing text becomes D `Error`; this wrapper does not expose the catalog helper's special negative continuation selectors. `[Must-match]`
+`message_str` only passes positive message numbers to its speech-aware catalog lookup. During a talking-head dialogue it starts that message's speech and lip-sync at once, exactly as a displayed reply does (SPEC-006 §3.9, "Speech requests"), but does not return a sound handle. Nonpositive/missing text becomes D `Error`; this wrapper does not expose the catalog helper's special negative continuation selectors. `[Must-match]`
 
 ### 3.4 Object and Geometry Boundary Behavior
 
@@ -678,3 +678,5 @@ Both stacks finish empty, and no statement has pushed an implicit status. Host-b
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
 Update notes (2026-10-22): the `world_map` and `town_map` rows now say what each request opens (SPEC-014 §3.39), checked against the reference request dispatcher. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-23): the `message_str` paragraph now says that, during a talking-head dialogue, the opcode starts that message's speech and lip-sync at once, as a displayed reply does (SPEC-006 §3.9). No tag change. `tools/spec_lint.py` gives 0 errors.

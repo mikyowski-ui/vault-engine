@@ -17,7 +17,7 @@ Evidence comes from two sources:
 
 Compatibility tags follow project policy. **[Must-match]** marks behavior an implementation must reproduce exactly: decoded PCM, file layouts, name strings, and formulas. **[May-improve]** marks reference behavior that comes from memory-safety defects or unbounded loops. An implementation must not reproduce that behavior as undefined behavior; it must instead do what the tag text says (an explicit error, or a bounded result). Where a [May-improve] case never occurs in the corpus, this is stated.
 
-Out of scope: background-music streaming and fade control, mapping volume values to mixer attenuation, the decoded-effect cache, and the script-opcode wrappers. Talking-head art selection, fidgets, and the phoneme-to-frame table are in SPEC-006 section 3.11; this document gives only the lip-sync timing that drives them. The wrappers are covered by SPEC-005 by opcode number (`0x80A3`, `0x80A5`, `0x813D`-`0x8142`); this document gives the name builders those opcodes call. Animation suffix letters are defined in SPEC-007 section 2.2, prototype layouts in SPEC-003, archive lookup in SPEC-008, and message sound fields in SPEC-002.
+Out of scope: background-music streaming and fade control, the decoded-effect cache, and the script-opcode wrappers. Volume levels and their mapping to device attenuation are in section 3.13. Talking-head art selection, fidgets, and the phoneme-to-frame table are in SPEC-006 section 3.11; this document gives only the lip-sync timing that drives them. The wrappers are covered by SPEC-005 by opcode number (`0x80A3`, `0x80A5`, `0x813D`-`0x8142`); this document gives the name builders those opcodes call. Animation suffix letters are defined in SPEC-007 section 2.2, prototype layouts in SPEC-003, archive lookup in SPEC-008, and message sound fields in SPEC-002.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -311,19 +311,24 @@ Corpus: the 22 speech directories match the head-list stems exactly, plus `narra
 Effects tied to an object get a relative volume `V` in 0..32767. This is computed for item, critter, and scenery objects; any other object, or no object, gets 32767.
 
 1. Use the object's outermost container or owner if it has one, otherwise the object itself.
-2. If that object's screen bounding rectangle overlaps the game display window (inclusive pixel bounds), `V = 32767`.
-3. Otherwise let *d* = hex distance from that object to the player, and *P* = the player's Perception:
+2. If that object's screen bounding rectangle overlaps the game display window (inclusive pixel bounds), `V = 32767`. The rectangle is the object's current frame placed at its hex, as drawn (SPEC-014 §3.44), and is 1 pixel larger on every side while the object is outlined.
+   - **No elevation condition.** Neither the rectangle nor the distance below looks at elevation. An object on another elevation counts as on screen when its hex's position on the shared screen grid overlaps the window.
+   - **Unreadable art.** When the object's art cannot be loaded, the rectangle is (0, 0) to (0, 0), which overlaps the window, so V = 32767.
+   - **No hex.** An object with no hex uses its stored screen position.
+
+   `[Must-match]`
+3. Otherwise let *d* = hex distance from that object to the player, minus 1 for each of the two that is a multi-hex object, but not below 0, and let *P* = the player's Perception:
    - `d <= P` gives `V = 32767`
    - `P < d < 2P` gives `V = 32767 - floor(21844 x (d - P) / P)`
    - otherwise `V = 10922`
 
    With `P = 0` and `d >= 1`, the result is 10922; there is no division by zero. **[Must-match]**
 
-The applied effect volume is `floor(V x S / 32767)`, where *S* is the effect volume setting (0..32767). **[Must-match]** The mapping to audible attenuation is out of scope.
+The applied effect volume is `floor(V x S / 32767)`, where *S* is the effect volume setting (0..32767). **[Must-match]** Section 3.13 turns it into device attenuation.
 
 ### 3.12 Lip-Sync Playback
 
-Dialogue replies that carry a sound field play through lip-sync. SPEC-006 section 3.9 says when a reply requests speech. Narration that plays through relative names (section 3.10) has no lip file and no head, and does not use this section.
+Dialogue speech plays through lip-sync, whichever opcode supplied the text: message-backed replies, `message_str`, and Ask About answers all make the same request. SPEC-006 section 3.9 ("Speech requests") says when a lookup requests speech. Narration that plays through relative names (section 3.10) has no lip file and no head, and does not use this section.
 
 **Loading.** A speech request has the speech stem *t* and the head directory *h* (section 3.10). It runs these steps in order. `[Must-match]`
 
@@ -396,6 +401,48 @@ A phoneme of 42 or more indexes past the SPEC-006 table. A phoneme index of P or
 Corpus: 2043 dialogue messages have a sound field. 2039 of them name a stem that has both a `.LIP` and an `.ACM`. Four name a stem with neither: `cabbot.msg` 167, `harry.msg` 174, `laura.msg` 110, and `vree.msg` 194 (`Vree300)`). Four speech ACMs have no `.LIP`, and no message names them: `gizmo\gizmo34a`, `gizmo\gizmo36b`, `gizmo\gizmoalt`, and `harry\hary207b`. The other 41 lip-less ACMs are narration.
 
 **Settings.** Speech volume 0 plays the speech silently, and lip-sync runs normally. The sound-section `fallout.cfg` key `speech`, which switches off narration speech, is **not consulted** for talking-head speech. The subtitles preference does not apply to dialogue either: reply text is always shown. `[Must-match]`
+
+### 3.13 Volume Levels and Master Volume
+
+All settings are 0..32767: `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume` (SPEC-014 §2.3, SPEC-008 preference words 14-17).
+
+**Level.** Every game sound has a level L in 0..32767, set when it starts. The table is exact. `[Must-match]`
+
+| Sound | Level L |
+| --- | --- |
+| Effect with an object (section 3.11) | `floor(V x sndfx_volume / 32767)` |
+| Effect without an object: interface buttons, `play_sfx` (`0x80A3`) | `sndfx_volume` |
+| Talking-head speech (section 3.12) and narration | `trunc(0.69 x speech_volume)` |
+| Background music | `trunc(0.94 x music_volume)` |
+| Library sound started by `soundplay` (`0x8098`, SPEC-005) | 32767. No opcode changes it, and no game setting except master volume applies |
+
+**Device attenuation.** The level is scaled by master volume and converted to an attenuation A, in hundredths of a decibel. `[Must-match]`
+
+1. Compute `v = floor(master_volume x L / 32767)`, and cap v at 32767.
+2. If v = 0, then A = -10000.
+3. Otherwise A = `-1000 x log2(32767 / v)`, computed in double precision. Clamp it to -10000..0, then truncate it toward zero to an integer.
+
+The output amplitude factor is `10^(A / 2000)`. Every halving of v lowers the sound by 10 dB. Any v of 31 or less gives -10000, which is silence.
+
+**When levels apply.**
+
+- Changing master volume re-applies this rule at once to every sound that is loaded, playing or not. `[Must-match]`
+- A sound's level is applied again whenever its buffer is created, so a sound loaded after the change also follows the new master volume. `[Must-match]`
+- Changing `music_volume` updates the playing music at once. Changing `speech_volume` updates playing narration at once; talking-head speech takes its level when it starts. `[Must-match]`
+- A new `sndfx_volume` applies only to effects started afterwards. `[Must-match]`
+
+**Movie audio** is the exception. It uses the same conversion with v = `trunc(0.94 x music_volume)` directly. Master volume does **not** scale it, except that master volume 0 turns music off (SPEC-008 §3.10), which sets the movie level to 0 (SPEC-012 §3.8). `[Must-match]`
+
+At the default settings, all 22281, the attenuations are:
+
+| Sound | A |
+| --- | --- |
+| On-screen effect | -1112 |
+| Distant effect, V = 10922 | -2698 |
+| Music | -1202 |
+| Speech | -1648 |
+| Library sound | -556 |
+| Movie audio | -645 |
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
@@ -586,6 +633,22 @@ The same file with last drawn phoneme 23 left by an earlier speech draws frame 0
 
 **LIP-D** checks the units. A marker at position 44100 is reached one second after the speech starts, which is sample 22050. It is not reached at 44.1 seconds or at 2 seconds.
 
+### 4.8 Volume Vectors
+
+These vectors use the section 3.13 rule, with master volume M.
+
+| Input | v | A |
+| --- | ---: | ---: |
+| M 22281, effect L 22281 | 15150 | -1112 |
+| M 22281, effect V 10922, `sndfx_volume` 22281: L = 7426 | 5049 | -2698 |
+| M 22281, music L = `trunc(0.94 x 22281)` = 20944 | 14241 | -1202 |
+| M 22281, speech L = `trunc(0.69 x 22281)` = 15373 | 10453 | -1648 |
+| M 22281, library sound L 32767 | 22281 | -556 |
+| M 32767, L 32 | 32 | -9999 |
+| M 32767, L 31 | 31 | -10000 |
+| M 0, any L | 0 | -10000 |
+| Movie audio, music 22281, any M above 0 | 20944 | -645 |
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -608,3 +671,5 @@ Lip-sync verification: a research-side scan parsed all 1601 corpus `.LIP` files 
 - The final marker lies before 2N in 202 files (by at most 3019 bytes), equals it in 6, and lies after it in 1393.
 
 The phoneme-to-frame table was checked against the 63 corpus speech FRMs: every one has 9 frames with zero per-frame offsets. Vectors LIP-A to LIP-C were stepped through the section 3.12 rule by a research-side model. The lip-sync text adds two plain-word linter warnings, both public `fallout.cfg` key names in the sound section: "initialize" and "speech".
+
+Update notes (2026-10-23): section 3.11 states that the on-screen test has no elevation condition, and gives the outlined and unreadable-art rectangles and the multi-hex distance adjustment. Section 3.12 points to the shared speech request of SPEC-006 §3.9, which `message_str` also uses. New section 3.13 gives every sound's level, the master-volume scaling, the hundredths-of-a-decibel attenuation and the movie-audio exception, with section 4.8 vectors. Section 1 no longer puts volume mapping out of scope. Net tags: +8 `[Must-match]`. `tools/spec_lint.py` gives 0 errors.

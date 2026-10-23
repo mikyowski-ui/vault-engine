@@ -292,7 +292,7 @@ Show-frame opcodes without a preceding video data opcode redisplay the unchanged
   - Arithmetic **wraps** modulo 2^16 and is never clamped. `[Must-match]` The corpus never overflows a signed 16-bit range, so a clamping decoder matches on shipped files. Synthetic vectors A and B exercise the wrap.
 - **Uncompressed data:** the reference copies L bytes from the wrong address (the location of its own source pointer instead of the payload). `[May-improve]` Safe rule: copy the L payload bytes unchanged. Not present in the corpus.
 - **Output buffering:** decoded bytes are appended to a circular device buffer. The write position wraps at its end, and the decoder state carries across the wrap. The player tracks the last 60 write positions; when all 60 are pending, a new audio opcode is discarded. At each frame sync point it starts playback when the current frame's audio is inside the buffered span, and stops it on underrun, so audio restarts in step with video. `[May-improve]` These device-cursor details may be replaced by any scheduler that plays the decoded stream in order and in step with the frame timer. The decoded stream content and order are `[Must-match]`.
-- **Volume:** movie audio volume is `0.94 ×` the background-music volume (0 when music is disabled). It is converted to device attenuation as `-1000 × log2(32767 / v)` centibels, clamped to -10000..0, with v = 0 giving -10000. Pan is centered. `[Must-match]`
+- **Volume:** movie audio volume is `0.94 ×` the background-music volume, truncated, or 0 when music is disabled (SPEC-008 §3.10). It is converted to device attenuation as `-1000 × log2(32767 / v)` hundredths of a decibel, clamped to -10000..0 and truncated toward zero, with v = 0 giving -10000. Unlike every other game sound (SPEC-010 §3.13), it is not scaled by master volume; master volume 0 silences it only by disabling music. The level is updated whenever the music volume or the music on/off state changes, even when no movie is playing. Pan is centered. `[Must-match]`
 
 ### 3.9 Display Placement
 
@@ -309,6 +309,13 @@ The game plays movies in a 640 × 480 window at (0, 0) in **direct** mode. Each 
    - Its top is `y0 = (480 - H - Y - th) / 2 + H + Y`, where H and Y are the last displayed frame's height and top, and th is the font's text height. For the corpus, `y0 = (80 - th) / 2 + 400`.
    - Each draw fills the band with color index 0, then wraps and centers the text in it (SPEC-002).
    - The text color is the RGB555 value (31, 31, 31) looked up in the subtitle color table. The game loads `art\cuts\subtitle.pal` as the color table for the duration and uses font 101 (SPEC-002). Both are restored afterwards. `[Must-match]`
+6. **Wrapping and the lines after the first.** The entry text is broken into lines for a width of 640 pixels:
+   - Scan the characters, adding each character's width (SPEC-002 §3.1; a space counts as the space width). While the sum is at most 640, add the letter spacing and continue.
+   - At the first character that makes the sum exceed 640, step back to the last space before it. The line ends just before that space, and the following spaces are skipped. The next line starts at the first non-space character.
+
+   Each line i would be drawn at `y0 + i × th`, but a line is drawn only when its bottom, `y0 + (i + 1) × th`, does not pass the band bottom, `y0 + band height`. The band is `th + 4` high, so only line 0 is ever drawn. The rest of the text is computed and thrown away: it is not shown later, and the next entry replaces the band. Line 0 is centered at x = `trunc((640 - w) / 2)`, where w is its width including its final letter spacing (SPEC-002 §3.1). It is drawn transparently over the filled band.
+
+   No corpus entry wraps. The widest English entry is 534 pixels and the widest French one 636, so every shipped subtitle shows in full. `[May-improve]`: for an entry wider than 640 pixels, grow the band downward by one text height per extra line, to the screen bottom, and draw every line. Text with no space before the overflow point makes the reference wrapper loop forever. `[May-improve]`: break such a line before the overflowing character.
 
 ### 3.11 Movie Fades
 
@@ -516,3 +523,5 @@ Verification notes:
 - **Code.** The fenced blocks hold only hex dumps, the audio delta table, and sample `.SVE` text.
 - **Oracle.** The block decoder matched the reference decoder byte for byte on all 8613 corpus video frames and on both synthetic movies.
 - **Tag count.** 102 `[Must-match]` and 23 `[May-improve]` tags.
+
+Update notes (2026-10-23): section 3.8 states that movie audio is not scaled by master volume and gives its truncation and update rule. Section 3.10 gains step 6: subtitles wrap at 640 pixels, but only the first line is drawn, because the band is one text height plus 4. No corpus entry wraps. There are two `[May-improve]` safe rules, for growing the band and for the endless loop on a line with no space. Net tags: +2 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.

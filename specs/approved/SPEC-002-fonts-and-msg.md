@@ -219,7 +219,16 @@ The corresponding K values are 127, 146, 164, 182, 201, and 219. `[Must-match]` 
 
 The resulting components are packed and mapped through M. Generated intensity entries for unmapped palette colors are zero. Level 8 can therefore differ from level 7 and is not just a second spelling of full opacity. Exact output palette indices depend on the active color and intensity resources; the font alone cannot specify them. `[Must-match]`
 
-The recovered pixel-writing expression does not establish a sequenced destination read and pointer advance. The equations above specify its blend lookup; exact destination sampling order needs original-executable verification. The synthetic palette fixture below explicitly assumes same-coordinate destination sampling and is not evidence that this sequencing ambiguity has been resolved. `[May-improve]`: read the destination index at the pixel being written, then write the blended result to that same pixel.
+**Destination sampling.** For each glyph pixel, D is the index currently stored at the pixel being written. It is read just before the blended result is written to that same pixel. `[Must-match]`
+
+- Pixels are visited row by row, top to bottom and left to right, and each is read and written once.
+- There is no snapshot of the destination. D includes everything drawn earlier, such as earlier strings and earlier glyphs of the same string.
+- The shadow pass of SPEC-002 §3.1 is drawn first at offset (1, 1), in the black mapping, so the main pass blends over the shadow pixels.
+- Within one glyph no pixel is visited twice. In proportional mode consecutive glyphs never overlap, because each advance is at least the glyph's width.
+- In monospaced mode a negative centering offset can make glyphs overlap. A later glyph then blends over the earlier glyph's already-blended pixels.
+- The underline is written last, opaquely.
+
+The synthetic palette fixture below uses this rule.
 
 ### 3.3 Font Validation and Malformed Files
 
@@ -357,7 +366,7 @@ Byte `41` begins at destination row 1; byte `42` begins at row 2. Both end at ro
 
 String bytes `41 20 42` have proportional advances 4, 3, and 3: total width 10 and width-times-height estimate 40. The legacy maximum-cell query returns 4 and monospaced width returns 12, even though the directory contains a width-5 entry. A limit of 3 draws no initial glyph; a limit of 4 permits the first glyph. Underline, when requested, is at row 2, not row 3.
 
-For a fully specified synthetic palette subtest, assign each palette index I from 0 through 31 the six-bit RGB components `(2 x I, 2 x I, 2 x I)`. Map each RGB5 grayscale triple `(J,J,J)` back to index J, use the generated intensity table, select foreground index 28, and initialize the destination to index 0. Other palette entries are irrelevant to this subtest. Assuming same-coordinate destination sampling, rendering the first glyph yields these destination indices in its three-column maximum-height band:
+For a fully specified synthetic palette subtest, assign each palette index I from 0 through 31 the six-bit RGB components `(2 x I, 2 x I, 2 x I)`. Map each RGB5 grayscale triple `(J,J,J)` back to index J, use the generated intensity table, select foreground index 28, and initialize the destination to index 0. Other palette entries are irrelevant to this subtest. With same-coordinate destination sampling (section 3.2), rendering the first glyph yields these destination indices in its three-column maximum-height band:
 
 ```text
 Row 0:  0  0  0
@@ -446,3 +455,5 @@ For the storage-specific end-of-file case, use bytes `1A 7B 31 7D 7B 7D 7B 78 7D
 - [x] Every documented quirk tagged `[Must-match]` or `[May-improve]`
 - [x] No internal reference symbol names; only public SSL opcode names and file-format key literals
 - [x] Spec linter run against `fallout1-re` symbols with no findings
+
+Update notes (2026-10-23): section 3.2 now states the glyph blend's destination sampling as a rule: each glyph pixel reads the index already stored at the pixel being written, which includes the shadow pass and earlier glyphs, just before writing it. The earlier `[May-improve]` placeholder is replaced by a `[Must-match]` rule, and the section 4.2 fixture wording follows it. Net tags: +1 `[Must-match]`, -1 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.

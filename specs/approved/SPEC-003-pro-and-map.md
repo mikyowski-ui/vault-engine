@@ -427,7 +427,7 @@ Each object record begins with this 72-byte prefix, regardless of prototype cate
 | `0x30` | 4 | Combat identifier, distinct from the unique object identifier |
 | `0x34` | 4 | Light radius |
 | `0x38` | 4 | Light intensity |
-| `0x3C` | 4 | Stored outline word; consumed but discarded, runtime outline becomes zero |
+| `0x3C` | 4 | Stored outline word; consumed but discarded, runtime outline becomes zero. Saving writes the current runtime word, whose encoding is in SPEC-014 §3.44, so saves made in combat can store values such as `0x80000001` |
 | `0x40` | 4 | Script instance identifier, or -1 |
 | `0x44` | 4 | Cached script-file index / retained script association word. The `SAVE.DAT` player record writes -1 into `0x40`, never into this word (SPEC-008 §2.5) |
 
@@ -719,3 +719,5 @@ Picking each listed center returns its original hex. Square 5050's floor center 
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
 Update notes (2026-10-22): section 3.3 gains the duplicate script-identifier rule. A scan of the 72 corpus maps found 2146 active script records with no repeated identifier and no category mismatch. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-23): the section 2.10 object prefix row for the outline word now says that saving writes the current runtime word, while loading still discards it, and that the word's bits are defined in SPEC-014 §3.44. No tag change. `tools/spec_lint.py` gives 0 errors.
