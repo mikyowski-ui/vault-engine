@@ -20,7 +20,7 @@ use vault_formats::{
 use vault_render::{
     IndexedImage, TextStyle,
     dialogue::{self, ChoiceHit},
-    map::{Cutout, MapArt, MapHover, MapView, render_map_cut},
+    map::{Cutout, MapArt, MapHover, MapLight, MapScene, MapView, draw_map_scene, render_floor},
 };
 use winit::keyboard::KeyCode;
 
@@ -1030,6 +1030,20 @@ impl MapPreview {
         let objects = self.host.world.render_objects();
         let map = &self.host.world.map;
         self.art.bind(&self.host.assets, map, &objects)?;
+        // SPEC-014 §3.44 names no floor light: each floor pixel takes its
+        // hex's light. Objects take their hex's light and roofs the ambient.
+        let mut image = render_floor(map, self.view, &self.art)?;
+        let size = [image.width(), image.height()];
+        let tiles = &self.host.world.tile_light[self.view.elevation as usize];
+        let ambient = self.host.world.ambient;
+        self.light.shade(
+            image.pixels_mut(),
+            size,
+            self.view.grid,
+            &self.palette,
+            tiles,
+            ambient,
+        );
         let extended = |pid: u32| {
             self.host
                 .assets
@@ -1037,16 +1051,17 @@ impl MapPreview {
                 .map_or(0, |prototype| prototype.extended.0)
         };
         let cutout = self.cutout(egg.as_deref(), &extended);
-        let mut image = render_map_cut(map, &objects, self.view, &self.art, cutout.as_ref())?;
-        let size = [image.width(), image.height()];
-        self.light.shade(
-            image.pixels_mut(),
-            size,
-            self.view.grid,
-            &self.palette,
-            &self.host.world.tile_light[self.view.elevation as usize],
-            self.host.world.ambient,
-        );
+        let light = MapLight {
+            palette: &self.palette,
+            ambient,
+            tiles,
+        };
+        let scene = MapScene {
+            cutout: cutout.as_ref(),
+            light: Some(light),
+            outline: None,
+        };
+        draw_map_scene(&mut image, map, &objects, self.view, &self.art, scene)?;
         self.frozen_view = modal.then(|| image.clone());
         Ok(image)
     }

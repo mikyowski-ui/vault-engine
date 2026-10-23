@@ -124,6 +124,49 @@ pub fn render_map_with(
     render_map_cut(map, objects, view, art, None)
 }
 
+/// SPEC-014 §3.44 the light a refresh draws objects and roofs with.
+#[derive(Clone, Copy)]
+pub struct MapLight<'a> {
+    /// The palette whose intensity, blend and gray tables apply.
+    pub palette: &'a Palette,
+    /// The ambient light (SPEC-006 §3.6).
+    pub ambient: i32,
+    /// Each hex's light on the current elevation.
+    pub tiles: &'a [i64],
+}
+
+impl MapLight<'_> {
+    /// L, a light value divided by 512 (0-128).
+    fn level(light: i64) -> u8 {
+        (light.clamp(0, 65536) / 512) as u8
+    }
+    /// The level a hex's objects are lit at: the larger of the ambient
+    /// light and the hex's light. An object without a hex is at full light.
+    fn object(&self, hex: Option<i32>) -> u8 {
+        Self::level(hex.map_or(65536, |hex| {
+            let tile = usize::try_from(hex)
+                .ok()
+                .and_then(|hex| self.tiles.get(hex))
+                .copied()
+                .unwrap_or_default();
+            tile.max(i64::from(self.ambient))
+        }))
+    }
+}
+
+/// The outline color of an object whose outline type is set and not
+/// disabled, or `None`.
+pub type OutlineColor<'a> = &'a dyn Fn(&MapObject) -> Option<u8>;
+
+/// SPEC-014 §3.44 what a refresh draws besides the floor: the cutout,
+/// the light (none draws every pixel unlit) and the outlines.
+#[derive(Clone, Copy, Default)]
+pub struct MapScene<'a> {
+    pub cutout: Option<&'a Cutout<'a>>,
+    pub light: Option<MapLight<'a>>,
+    pub outline: Option<OutlineColor<'a>>,
+}
+
 /// SPEC-014 §3.37 the player see-through cutout: the `egg.frm` mask placed
 /// on the player, through which roofs and the walls and scenery that would
 /// hide the player are drawn partly transparent.
@@ -207,13 +250,13 @@ impl Cutout<'_> {
     }
 }
 
-/// A blit whose pixels inside the mask are blended by their weight.
-fn blit_cut(
+/// A blit of `frame`'s nonzero pixels, each replaced by `pixel(source,
+/// destination, position)`, clipped to the image.
+fn blit_with(
     image: &mut IndexedImage,
     frame: &FrmFrame,
     origin: [i64; 2],
-    cut: &Cutout,
-    mask: [i64; 2],
+    mut pixel: impl FnMut(u8, u8, [i64; 2]) -> u8,
 ) {
     let (width, height) = (i64::from(image.width()), i64::from(image.height()));
     let frame_width = i64::from(frame.width);
@@ -226,33 +269,258 @@ fn blit_cut(
                 continue;
             }
             let target = &mut pixels[(y * width + x) as usize];
-            *target = match cut.weight(mask, [x, y]) {
-                Some(weight) => cut.palette.mask_blend(color, *target, weight),
-                None => color,
-            };
+            *target = pixel(color, *target, [x, y]);
         }
     }
 }
 
-/// The draw order: flat objects first, then the rest; within each pass in
-/// object order, ascending hex and then the order on the hex (an object
-/// without a hex, placed by screen position, after the placed ones).
-fn draw_key(object: &MapObject) -> (bool, i64) {
-    (
-        !object.flags.contains(BasicFlags::FLAT),
-        object.hex.map_or(i64::MAX, i64::from),
-    )
+/// SPEC-014 §3.44 the five translucent draws, by their object flag: the
+/// foreground color key, the glass gray table (else the common one), and
+/// whether the draw is at full light whatever the hex light.
+const TRANSLUCENT: [(u32, u16, bool, bool); 5] = [
+    (0x10000, 25439, false, true),
+    (0x20000, 10239, true, false),
+    (0x40000, 32767, false, false),
+    (0x80000, 30689, false, false),
+    (0x4000, 31744, false, false),
+];
+
+/// The §3.44 translucent draw an object's flags select: exactly one
+/// translucency bit, other than "explicitly no translucency".
+fn translucent_row(flags: u32) -> Option<usize> {
+    let bits = flags & TRANSLUCENCY;
+    if bits.count_ones() != 1 {
+        return None;
+    }
+    TRANSLUCENT.iter().position(|(bit, ..)| *bit == bits)
 }
 
-/// [`render_map_with`] with the player's see-through cutout. Without a
-/// cutout (no mask art, or no player hex) everything draws normally (the
-/// SPEC-014 §3.37 safe rule).
-pub fn render_map_cut(
+/// SPEC-014 §3.44 how a refresh draws its pixels: unlit without a light,
+/// otherwise through the light's tables.
+struct Pens<'a> {
+    light: Option<MapLight<'a>>,
+    /// The intensity table, indexed `color * 256 + level`.
+    intensity: &'a [u8],
+    /// The common and glass gray levels of every entry.
+    gray: [[u8; 256]; 2],
+    /// Each translucent row's blend table, `blend_F[g][D]`, once built.
+    blends: [Option<Box<[[u8; 256]; 8]>>; 5],
+}
+
+impl<'a> Pens<'a> {
+    fn new(light: Option<MapLight<'a>>) -> Self {
+        let gray = light.map_or([[0; 256]; 2], |light| {
+            std::array::from_fn(|glass| {
+                std::array::from_fn(|index| light.palette.gray_level(index as u8, glass == 1))
+            })
+        });
+        Self {
+            light,
+            intensity: light.map_or(&[][..], |light| light.palette.intensity_table()),
+            gray,
+            blends: Default::default(),
+        }
+    }
+    /// The lit draw: indexes 229 and up unchanged, the rest relit at L.
+    fn lit(&self, source: u8, level: u8) -> u8 {
+        if self.light.is_none() || source >= 229 {
+            source
+        } else {
+            self.intensity[usize::from(source) * 256 + usize::from(level)]
+        }
+    }
+    /// `intensity[source][level]` with no exemption (the masked draw).
+    fn relit(&self, source: u8, level: u8) -> u8 {
+        if self.light.is_none() {
+            source
+        } else {
+            self.intensity[usize::from(source) * 256 + usize::from(level)]
+        }
+    }
+    /// Draw an object at `level` in its lit or translucent draw.
+    fn draw(
+        &mut self,
+        image: &mut IndexedImage,
+        frame: &FrmFrame,
+        origin: [i64; 2],
+        flags: u32,
+        level: u8,
+    ) {
+        let row = translucent_row(flags);
+        let (Some(light), Some(row)) = (self.light, row) else {
+            blit_with(image, frame, origin, |source, _, _| self.lit(source, level));
+            return;
+        };
+        let (_, key, glass, full) = TRANSLUCENT[row];
+        let blend = self.blends[row].get_or_insert_with(|| {
+            let palette = light.palette;
+            let key = u32::from(key);
+            let foreground = palette
+                .lookup_rgb5([
+                    (key >> 10) as u8 & 31,
+                    (key >> 5) as u8 & 31,
+                    key as u8 & 31,
+                ])
+                .unwrap_or(0);
+            Box::new(std::array::from_fn(|gray| {
+                std::array::from_fn(|destination| {
+                    palette
+                        .blend_coverage(gray as u8, foreground, destination as u8)
+                        .unwrap_or(destination as u8)
+                })
+            }))
+        });
+        let gray = &self.gray[usize::from(glass)];
+        let level = usize::from(if full { 128 } else { level });
+        let intensity = self.intensity;
+        blit_with(image, frame, origin, |source, destination, _| {
+            let mixed = blend[usize::from(gray[usize::from(source)])][usize::from(destination)];
+            intensity[usize::from(mixed) * 256 + level]
+        });
+    }
+    /// SPEC-014 §3.37 a draw through the mask at `mask`: inside it each
+    /// pixel is relit at `level` and blended by its weight, outside it the
+    /// lit draw applies. Indexes 229 and up are relit inside the mask
+    /// (the reference rule).
+    fn draw_cut(
+        &self,
+        image: &mut IndexedImage,
+        frame: &FrmFrame,
+        origin: [i64; 2],
+        level: u8,
+        cut: &Cutout,
+        mask: [i64; 2],
+    ) {
+        blit_with(image, frame, origin, |source, destination, at| {
+            match cut.weight(mask, at) {
+                Some(weight) => {
+                    cut.palette
+                        .mask_blend(self.relit(source, level), destination, weight)
+                }
+                None => self.lit(source, level),
+            }
+        });
+    }
+}
+
+/// The hex under a view point by the SPEC-003 picking rule, without the
+/// grid bounds: `column + 200 × row` even off the grid, so hex differences
+/// are the same wherever the points lie.
+fn hex_under(grid: HexGrid, [x, y]: [i64; 2]) -> i64 {
+    let y = y - grid.origin[1];
+    let k = y.div_euclid(12);
+    let v = x - grid.origin[0] - 16 * k;
+    let (b, r) = (v.div_euclid(64), v.rem_euclid(64));
+    let mut column = 2 * b + i64::from(r >= 32);
+    let mut row = b + k;
+    let (lx, ly) = (r % 32, y - 12 * k);
+    if ly < 4 {
+        if lx < 16 - 4 * ly {
+            row -= 1;
+        } else if lx > 16 + 4 * ly {
+            column += 1;
+            if column.rem_euclid(2) == 1 {
+                row -= 1;
+            }
+        }
+    }
+    199 - column + 200 * row
+}
+
+/// SPEC-014 §3.44 the visiting lattice, one table per parity of the
+/// view-center hex: 41 columns by 72 rows of points over the 640-by-380
+/// window widened by 320 pixels each side and 240 above and below, each
+/// point as (hex offset from the corner hex, row, column), sorted by offset.
+fn lattice() -> &'static [Vec<(i64, u8, u8)>; 2] {
+    static LATTICE: OnceLock<[Vec<(i64, u8, u8)>; 2]> = OnceLock::new();
+    LATTICE.get_or_init(|| {
+        std::array::from_fn(|parity| {
+            let grid = HexGrid::centered(20100 + parity as i32, 640, 380).expect("hex on the grid");
+            let corner = hex_under(grid, [-320, -240]);
+            let [x0, y0] = grid
+                .hex_center(corner as i32)
+                .expect("corner hex on the grid");
+            let step = if x0 > -320 { -16 } else { 16 };
+            let mut points = Vec::with_capacity(41 * 72);
+            for row in 0..72_i64 {
+                let first = match row {
+                    0 => x0,
+                    _ if row % 2 == 1 => x0 + step,
+                    _ => x0 - step,
+                };
+                for column in 0..41_i64 {
+                    let hex = hex_under(grid, [first + 32 * column, y0 + 12 * row]);
+                    points.push((hex - corner, row as u8, column as u8));
+                }
+            }
+            points.sort_by_key(|(offset, ..)| *offset);
+            points
+        })
+    })
+}
+
+/// SPEC-014 §3.44 the hexes a refresh of the whole view visits, in
+/// ascending hex number: the lattice for the view-center hex's parity from
+/// the hex under the widened top-left corner, limited to the widened
+/// view's rows and columns.
+fn visited_hexes(view: MapView) -> impl Iterator<Item = i32> {
+    let (width, height) = (i64::from(view.width), i64::from(view.height));
+    let center = hex_under(
+        view.grid,
+        [
+            (width - 32).div_euclid(2) + 16,
+            (height - 16).div_euclid(2) + 8,
+        ],
+    );
+    let base = hex_under(view.grid, [-320, -240]);
+    let (rows, columns) = ((height + 480) / 12, (width + 640) / 32);
+    lattice()[center.rem_euclid(2) as usize]
+        .iter()
+        .filter(move |(_, row, column)| i64::from(*row) < rows && i64::from(*column) < columns)
+        .filter_map(move |(offset, ..)| i32::try_from(base + offset).ok())
+        .filter(|hex| (0..40000).contains(hex))
+}
+
+/// SPEC-014 §3.44 the order a refresh draws `objects` (one elevation,
+/// given in insertion order) in: the flat pass, then the upright pass, by
+/// visited hex and within a hex in list order (flat objects first, each
+/// group oldest insertion first). Hidden objects and objects on unvisited
+/// hexes are not drawn. The second list holds the objects without a hex,
+/// drawn last.
+fn draw_sequence(view: MapView, objects: &[MapObject]) -> (Vec<usize>, Vec<usize>) {
+    let mut placed: Vec<(i32, bool, usize)> = Vec::new();
+    let mut hexless = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        if object.flags.contains(BasicFlags::HIDDEN) {
+            continue;
+        }
+        match object.hex {
+            Some(hex) => placed.push((hex, !object.flags.contains(BasicFlags::FLAT), index)),
+            None => hexless.push(index),
+        }
+    }
+    placed.sort_unstable();
+    let mut flat = Vec::new();
+    let mut upright = Vec::new();
+    for hex in visited_hexes(view) {
+        let start = placed.partition_point(|(at, ..)| *at < hex);
+        for (_, is_upright, index) in placed[start..].iter().take_while(|(at, ..)| *at == hex) {
+            if *is_upright {
+                upright.push(*index);
+            } else {
+                flat.push(*index);
+            }
+        }
+    }
+    flat.extend(upright);
+    (flat, hexless)
+}
+
+/// The floor squares of the view (SPEC-003 §2.8), unlit.
+pub fn render_floor(
     map: &MapFile,
-    objects: &MapObjects,
     view: MapView,
     art: &impl MapArt,
-    cutout: Option<&Cutout>,
 ) -> Result<IndexedImage, MapRenderError> {
     if view.elevation > 2 {
         return Err(MapRenderError::Elevation);
@@ -267,12 +535,9 @@ pub fn render_map_cut(
     }
     let mut image = IndexedImage::new(view.width, view.height)?;
     let origin = view.grid.origin;
-    let cutout = cutout.and_then(|cut| Some((cut, cut.origin(view)?)));
-    // A square whose corner lies past the right or bottom edge draws nothing.
-    let beyond = |[x, y]: [i64; 2]| x >= i64::from(view.width) || y >= i64::from(view.height);
     for (index, offset) in square_order() {
         let corner = corner(origin, *offset);
-        if beyond(corner) {
+        if beyond(view, corner) {
             continue;
         }
         let tile = map
@@ -286,37 +551,98 @@ pub fn render_map_cut(
             image.blit(frame, corner);
         }
     }
-    let table = objects;
-    let mut objects = Vec::new();
-    for object in &table.elevations[view.elevation as usize] {
-        if object.flags.contains(BasicFlags::HIDDEN) {
-            continue;
-        }
+    Ok(image)
+}
+
+/// A square whose corner lies past the right or bottom edge draws nothing.
+fn beyond(view: MapView, [x, y]: [i64; 2]) -> bool {
+    x >= i64::from(view.width) || y >= i64::from(view.height)
+}
+
+/// [`render_map_with`] with the player's see-through cutout, unlit.
+/// Without a cutout (no mask art, or no player hex) everything draws
+/// normally (the SPEC-014 §3.37 safe rule).
+pub fn render_map_cut(
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    cutout: Option<&Cutout>,
+) -> Result<IndexedImage, MapRenderError> {
+    let mut image = render_floor(map, view, art)?;
+    draw_map_scene(
+        &mut image,
+        map,
+        objects,
+        view,
+        art,
+        MapScene {
+            cutout,
+            ..MapScene::default()
+        },
+    )?;
+    Ok(image)
+}
+
+/// SPEC-014 §3.44 the layers of a refresh over its floor `image`: the
+/// objects of the flat and upright passes, the roofs (section 3.36) at the
+/// ambient light, the outlines collected in the passes (at most 100, in
+/// drawing order), then the objects without a hex at full light. The
+/// cutout (§3.37) applies to the roofs and the walls and scenery it cuts.
+pub fn draw_map_scene(
+    image: &mut IndexedImage,
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    scene: MapScene,
+) -> Result<(), MapRenderError> {
+    if view.elevation > 2 {
+        return Err(MapRenderError::Elevation);
+    }
+    let objects = &objects.elevations[view.elevation as usize];
+    let cutout = scene.cutout.and_then(|cut| Some((cut, cut.origin(view)?)));
+    let mut pens = Pens::new(scene.light);
+    let level = |hex: Option<i32>| scene.light.map_or(128, |light| light.object(hex));
+    let sprite = |object: &MapObject| -> Result<Option<(&FrmFrame, [i64; 2])>, GeometryError> {
         let Ok(category) = Category::from_pid(object.pid) else {
-            continue;
+            return Ok(None);
         };
         let Some((frame, shift)) =
             art.frame(category, object.art_id, object.orientation, object.frame)
         else {
+            return Ok(None);
+        };
+        Ok(Some((frame, placement(view, frame, shift, object)?.0)))
+    };
+    let (placed, hexless) = draw_sequence(view, objects);
+    let mut outlines = Vec::new();
+    for index in placed {
+        let object = &objects[index];
+        let Some((frame, origin)) = sprite(object)? else {
             continue;
         };
-        let (origin, _) = placement(view, frame, shift, object)?;
-        objects.push((draw_key(object), object, frame, origin));
-    }
-    // A stable sort keeps the order on each hex.
-    objects.sort_by_key(|(key, ..)| *key);
-    for (_, object, frame, origin) in objects {
+        let level = level(object.hex);
         match cutout {
             Some((cut, mask)) if cut.cuts(view, object) => {
-                blit_cut(&mut image, frame, origin, cut, mask);
+                pens.draw_cut(image, frame, origin, level, cut, mask);
             }
-            _ => image.blit(frame, origin),
+            _ => pens.draw(image, frame, origin, object.flags.0, level),
+        }
+        if outlines.len() < 100
+            && let Some(color) = scene.outline.and_then(|outline| outline(object))
+        {
+            outlines.push((frame, origin, color));
         }
     }
     if view.roofs {
+        let ambient = scene
+            .light
+            .map_or(128, |light| MapLight::level(i64::from(light.ambient)));
         for (index, offset) in square_order() {
-            let corner = corner(origin, *offset);
-            if beyond([corner[0], corner[1] - 96]) {
+            let corner = corner(view.grid.origin, *offset);
+            let corner = [corner[0], corner[1] - 96];
+            if beyond(view, corner) {
                 continue;
             }
             let tile = map
@@ -326,16 +652,25 @@ pub fn render_map_cut(
                 && !tile.roof_hidden()
                 && let Some((frame, _)) = art.frame(Category::Tile, u32::from(tile.roof()), 0, 0)
             {
-                let corner = [corner[0], corner[1] - 96];
                 // Every drawn roof square goes through the mask.
                 match cutout {
-                    Some((cut, mask)) => blit_cut(&mut image, frame, corner, cut, mask),
-                    None => image.blit(frame, corner),
+                    Some((cut, mask)) => pens.draw_cut(image, frame, corner, ambient, cut, mask),
+                    None => pens.draw(image, frame, corner, 0, ambient),
                 }
             }
         }
     }
-    Ok(image)
+    let bottom = i64::from(image.height());
+    for (frame, origin, color) in outlines {
+        image.outline(frame, origin, color, [0, bottom]);
+    }
+    for index in hexless {
+        let object = &objects[index];
+        if let Some((frame, origin)) = sprite(object)? {
+            pens.draw(image, frame, origin, object.flags.0, 128);
+        }
+    }
+    Ok(())
 }
 
 /// Where an object's frame is drawn: its top-left corner and its anchor
@@ -475,13 +810,11 @@ pub fn pick_candidates(
         }
     }
     let mut hits = Vec::new();
-    for (order, object) in objects.elevations[view.elevation as usize]
-        .iter()
-        .enumerate()
-    {
-        if object.flags.contains(BasicFlags::HIDDEN) {
-            continue;
-        }
+    let objects = &objects.elevations[view.elevation as usize];
+    let (placed, hexless) = draw_sequence(view, objects);
+    // Frontmost first: the reverse of the drawing order.
+    for index in placed.into_iter().chain(hexless).rev() {
+        let object = &objects[index];
         let category = Category::from_pid(object.pid).ok()?;
         let Some((frame, shift)) =
             art.frame(category, object.art_id, object.orientation, object.frame)
@@ -496,15 +829,10 @@ pub fn pick_candidates(
                 && bits == 0
                 && matches!((object.art_id >> 24) & 0x0f, 2 | 3)
                 && cutout.is_some_and(|cut| cut.oriented(view, object, false));
-            hits.push((
-                (draw_key(object), order),
-                object.id,
-                !translucent && !inside,
-            ));
+            hits.push((object.id, !translucent && !inside));
         }
     }
-    hits.sort_by_key(|(key, ..)| std::cmp::Reverse(*key));
-    Some(hits.into_iter().map(|(_, id, solid)| (id, solid)).collect())
+    Some(hits)
 }
 
 #[cfg(test)]
@@ -793,6 +1121,360 @@ mod tests {
         let image = render_map_cut(&map, &scene(vec![flat, left]), view, &art, None).unwrap();
         let pixel = image.pixels()[(y - 5) as usize * 640 + (x - 40) as usize];
         assert_eq!(pixel, 30);
+    }
+
+    #[test]
+    fn spec014_lattice_visits_every_shown_hex_in_ascending_order() {
+        // 41 columns by 72 rows, each point a distinct hex.
+        for table in lattice() {
+            assert_eq!(table.len(), 41 * 72);
+            assert!(table.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        }
+        // Off-grid numbering agrees with picking on the grid.
+        let grid = HexGrid::centered(20100, 640, 380).unwrap();
+        for point in [[0, 0], [320, 190], [17, 333], [639, 379], [-5, 100]] {
+            let picked = grid.pick_hex(point).map(i64::from);
+            assert_eq!(Some(hex_under(grid, point.map(i64::from))), picked);
+        }
+        // Every hex whose center is in the view is visited, for views
+        // centered on hexes of both parities.
+        for center in [20100, 20101, 15333, 24688] {
+            let mut view = view();
+            view.grid = HexGrid::centered(center, 640, 380).unwrap();
+            let visited: Vec<i32> = visited_hexes(view).collect();
+            assert!(visited.windows(2).all(|pair| pair[0] < pair[1]));
+            for hex in 0..40000 {
+                let [x, y] = view.grid.hex_center(hex).unwrap();
+                if (0..640).contains(&x) && (0..380).contains(&y) {
+                    assert!(visited.binary_search(&hex).is_ok(), "{center}: {hex}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spec014_fixture_q_draw_order() {
+        let map = preview();
+        let flat = |id: u32, hex: i32| {
+            let mut item = object(&map, id, 0x0000_0001, hex);
+            item.flags.0 |= BasicFlags::FLAT.0;
+            item
+        };
+        let [a, b] = [flat(1, 20100), flat(2, 20100)];
+        let c = object(&map, 3, 0x0100_0001, 20100);
+        let d = object(&map, 4, 0x0200_0001, 20100);
+        let e = flat(5, 20101);
+        let f = object(&map, 6, 0x0300_0001, 20101);
+        let order = |objects: Vec<MapObject>| {
+            let (placed, hexless) = draw_sequence(view(), &objects);
+            assert!(hexless.is_empty());
+            placed
+                .iter()
+                .map(|index| objects[*index].id)
+                .collect::<Vec<_>>()
+        };
+        // After load: A, B, E, then C, D, F.
+        let loaded = vec![
+            a.clone(),
+            b.clone(),
+            c.clone(),
+            d.clone(),
+            e.clone(),
+            f.clone(),
+        ];
+        assert_eq!(order(loaded), [1, 2, 5, 3, 4, 6]);
+        // C takes a walk step on 20100: it moves to the end of its group.
+        let mut stepped = c.clone();
+        stepped.displacement = [4, -2];
+        let walked = vec![
+            a.clone(),
+            b.clone(),
+            d.clone(),
+            e.clone(),
+            f.clone(),
+            stepped,
+        ];
+        assert_eq!(order(walked), [1, 2, 5, 4, 3, 6]);
+        // C steps onto 20101, after E and F there.
+        let mut moved = c;
+        moved.hex = Some(20101);
+        let crossed = vec![a, b, d, e, f, moved];
+        assert_eq!(order(crossed.clone()), [1, 2, 5, 4, 6, 3]);
+        // Hidden objects are skipped, and an object without a hex is last.
+        let mut hidden = crossed;
+        hidden[2].flags.0 |= BasicFlags::HIDDEN.0;
+        hidden[0].hex = None;
+        let (placed, hexless) = draw_sequence(view(), &hidden);
+        assert_eq!(placed, [1, 3, 4, 5]);
+        assert_eq!(hexless, [0]);
+    }
+
+    /// One object of `color` on hex 20100 with `flags`, drawn over a floor
+    /// of `floor` with `light`; the pixel at the hex center.
+    fn lit_pixel(color: u8, floor: u8, flags: u32, light: MapLight) -> u8 {
+        let map = preview();
+        let mut art = std::collections::BTreeMap::new();
+        art.insert(
+            (false, 0x0200_0001),
+            FrmArchive::parse(&fixture::frm(8, 8, color)).unwrap(),
+        );
+        let art = Keyed(art);
+        let view = view();
+        let mut item = object(&map, 1, 0x0200_0001, 20100);
+        item.flags.0 = flags;
+        let mut image = IndexedImage::new(640, 380).unwrap();
+        image.pixels_mut().fill(floor);
+        let lit = MapScene {
+            light: Some(light),
+            ..MapScene::default()
+        };
+        draw_map_scene(&mut image, &map, &scene(vec![item]), view, &art, lit).unwrap();
+        let [x, y] = view.grid.hex_center(20100).unwrap();
+        image.pixels()[(y - 3) as usize * 640 + x as usize]
+    }
+
+    #[test]
+    fn spec014_lit_and_translucent_draws() {
+        // In the grey palette index i has five-bit grey i / 8, and five-bit
+        // grey g looks up index 8 g.
+        let palette = grey_palette();
+        let mut tiles = vec![0; 40000];
+        tiles[20100] = 32768;
+        let dim = MapLight {
+            palette: &palette,
+            ambient: 16384,
+            tiles: &tiles,
+        };
+        // Lit draw: the hex light (above the ambient) halves grey 25 to 12;
+        // 229 and up are unchanged.
+        assert_eq!(lit_pixel(200, 80, 0, dim), 96);
+        assert_eq!(lit_pixel(230, 80, 0, dim), 230);
+        // Full ambient light leaves grey 25 at index 200.
+        let bright = MapLight {
+            ambient: 65536,
+            ..dim
+        };
+        assert_eq!(lit_pixel(200, 80, 0, bright), 200);
+        // Wall translucency: key 25439 has red 24 (index 192); grey 25 has
+        // common gray level 6, so the mix is (6 × 24 + 10) / 7 = 22 over
+        // grey 10, at full light whatever the hex light (index 176).
+        assert_eq!(lit_pixel(200, 80, 0x10000, dim), 176);
+        // Steam (key 32767, grey 31) uses the hex light: (6 × 31 + 10) / 7
+        // = 28, halved to 14.
+        assert_eq!(lit_pixel(200, 80, 0x40000, dim), 112);
+        // Gray level 0 keeps the destination but relights it.
+        assert_eq!(lit_pixel(8, 80, 0x40000, dim), 40);
+        // Indexes 229 and up get no exemption: 240 (grey 30, gray level 7)
+        // draws the foreground itself.
+        assert_eq!(lit_pixel(240, 80, 0x40000, bright), 248);
+        // Explicitly no translucency, or two bits, is the lit draw.
+        assert_eq!(lit_pixel(200, 80, 0x8000, dim), 96);
+        assert_eq!(lit_pixel(200, 80, 0x30000, dim), 96);
+        // Unlit, everything is drawn as stored.
+        let map = preview();
+        let mut art = std::collections::BTreeMap::new();
+        art.insert(
+            (false, 0x0200_0001),
+            FrmArchive::parse(&fixture::frm(8, 8, 200)).unwrap(),
+        );
+        let mut glass = object(&map, 1, 0x0200_0001, 20100);
+        glass.flags.0 = 0x20000;
+        let image = render_map_with(&map, &scene(vec![glass]), view(), &Keyed(art)).unwrap();
+        let [x, y] = view().grid.hex_center(20100).unwrap();
+        assert_eq!(image.pixels()[(y - 3) as usize * 640 + x as usize], 200);
+    }
+
+    #[test]
+    fn spec014_outlines_follow_the_roofs_at_most_100() {
+        let map = preview();
+        let mut art = std::collections::BTreeMap::new();
+        art.insert(
+            (false, 0x0200_0001),
+            FrmArchive::parse(&fixture::frm(2, 2, 20)).unwrap(),
+        );
+        let art = Keyed(art);
+        let view = view();
+        // 101 objects two hexes apart, all outlined in color 9.
+        let hexes: Vec<i32> = (95..106)
+            .flat_map(|row| (90..110).step_by(2).map(move |column| row * 200 + column))
+            .take(101)
+            .collect();
+        let objects: Vec<_> = hexes
+            .iter()
+            .enumerate()
+            .map(|(id, hex)| object(&map, id as u32, 0x0200_0001, *hex))
+            .collect();
+        let outline = |_: &MapObject| Some(9);
+        let mut image = render_floor(&map, view, &art).unwrap();
+        let mut sorted = objects.clone();
+        sorted.sort_by_key(|object| object.hex);
+        draw_map_scene(
+            &mut image,
+            &map,
+            &scene(objects),
+            view,
+            &art,
+            MapScene {
+                outline: Some(&outline),
+                ..MapScene::default()
+            },
+        )
+        .unwrap();
+        // The ring left of each sprite: the 100 first in drawing order are
+        // outlined, the last is not.
+        let ring = |object: &MapObject| {
+            let (_, origin) = object_sprite(view, &art, object).unwrap();
+            image.pixels()[origin[1] as usize * 640 + origin[0] as usize - 1]
+        };
+        assert!(sorted[..100].iter().all(|object| ring(object) == 9));
+        assert_eq!(ring(&sorted[100]), 0);
+    }
+
+    #[test]
+    fn spec014_objects_take_their_hex_light_and_roofs_the_ambient() {
+        let map = preview();
+        let palette = grey_palette();
+        let mut art = std::collections::BTreeMap::new();
+        art.insert(
+            (true, 2),
+            FrmArchive::parse(&fixture::frm(80, 36, 200)).unwrap(),
+        );
+        art.insert(
+            (false, 0x0200_0001),
+            FrmArchive::parse(&fixture::frm(2, 2, 200)).unwrap(),
+        );
+        let art = Keyed(art);
+        let mut view = view();
+        view.roofs = true;
+        let mut tiles = vec![0; 40000];
+        tiles[20300] = 65536;
+        let light = MapLight {
+            palette: &palette,
+            ambient: 32768,
+            tiles: &tiles,
+        };
+        let lit = object(&map, 1, 0x0200_0001, 20300);
+        let dark = object(&map, 2, 0x0200_0001, 19500);
+        let mut free = object(&map, 3, 0x0200_0001, 0);
+        free.hex = None;
+        free.screen = [600, 10];
+        let mut image = render_floor(&map, view, &art).unwrap();
+        let scene_light = MapScene {
+            light: Some(light),
+            ..MapScene::default()
+        };
+        draw_map_scene(
+            &mut image,
+            &map,
+            &scene(vec![lit, dark, free]),
+            view,
+            &art,
+            scene_light,
+        )
+        .unwrap();
+        let pixel = |[x, y]: [i64; 2]| image.pixels()[y as usize * 640 + x as usize];
+        let at = |hex: i32| {
+            let [x, y] = view.grid.hex_center(hex).unwrap();
+            [x, y - 1]
+        };
+        assert_eq!(pixel(at(20300)), 200);
+        assert_eq!(pixel(at(19500)), 96);
+        // Without a hex: full light.
+        assert_eq!(pixel([600, 10]), 200);
+        // The roof square of the fixture map at the ambient light.
+        assert_eq!(pixel([256, 84]), 96);
+    }
+
+    #[test]
+    fn spec014_cutout_relights_inside_the_mask() {
+        let map = preview();
+        let mask = FrmArchive::parse(&fixture::frm(129, 98, 64)).unwrap();
+        let palette = grey_palette();
+        let none = |_| 0;
+        let mut art = std::collections::BTreeMap::new();
+        art.insert(
+            (false, 0x0300_0001),
+            FrmArchive::parse(&fixture::frm(2, 2, 230)).unwrap(),
+        );
+        let art = Keyed(art);
+        let view = view();
+        let cutout = Cutout {
+            mask: mask.frame(0, 0).unwrap(),
+            hex: 20100,
+            displacement: [0; 2],
+            hidden: false,
+            extended: &none,
+            palette: &palette,
+        };
+        let tiles = vec![0; 40000];
+        let light = MapLight {
+            palette: &palette,
+            ambient: 32768,
+            tiles: &tiles,
+        };
+        let draw = |cut: Option<&Cutout>| {
+            let mut image = IndexedImage::new(640, 380).unwrap();
+            let wall = object(&map, 1, 0x0300_0001, 20300);
+            let scene_cut = MapScene {
+                cutout: cut,
+                light: Some(light),
+                outline: None,
+            };
+            draw_map_scene(&mut image, &map, &scene(vec![wall]), view, &art, scene_cut).unwrap();
+            let [x, y] = view.grid.hex_center(20300).unwrap();
+            image.pixels()[y as usize * 640 + x as usize]
+        };
+        // Outside a cutout 230 is exempt from lighting; through the mask it
+        // is relit (grey 28 to 14) and then blended at weight 64 over black
+        // (grey 7, index 56).
+        assert_eq!(draw(None), 230);
+        assert_eq!(draw(Some(&cutout)), palette.mask_blend(112, 0, 64));
+        assert_eq!(draw(Some(&cutout)), 56);
+    }
+
+    #[test]
+    #[ignore = "needs the local corpus"]
+    fn spec014_fixture_q_corpus_translucency() {
+        let dir = std::env::var_os("VAULT_CORPUS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-corpus")
+            })
+            .join("fallout1-unpacked/color.pal");
+        let Ok(bytes) = std::fs::read(&dir) else {
+            eprintln!("skipping: no local corpus at {}", dir.display());
+            return;
+        };
+        let palette = Palette::parse(&bytes).unwrap();
+        // SPEC-001 §3.7: entries 0 and 229-255 unmapped; additive mixes.
+        assert!((0..=255).all(|index| palette.is_mapped(index) == (1..229).contains(&index)));
+        assert_eq!(palette.additive(215, 215), 196);
+        assert_eq!(palette.additive(220, 220), 220);
+        // SPEC-014 Fixture I seen cells: intensity column 64.
+        assert_eq!(
+            [50, 150, 100].map(|index| palette.intensity(index, 64)),
+            [52, 153, 228]
+        );
+        // The five foreground colors.
+        let foregrounds = TRANSLUCENT.map(|(_, key, ..)| {
+            let key = u32::from(key);
+            palette.lookup_rgb5([
+                (key >> 10) as u8 & 31,
+                (key >> 5) as u8 & 31,
+                key as u8 & 31,
+            ])
+        });
+        assert_eq!(foregrounds, [33, 35, 220, 58, 133].map(Some));
+        // Source 215 over destination 100: 6 as wall translucency, 214 as
+        // glass at full light.
+        let tiles = vec![65536; 40000];
+        let light = MapLight {
+            palette: &palette,
+            ambient: 65536,
+            tiles: &tiles,
+        };
+        assert_eq!(lit_pixel(215, 100, 0x10000, light), 6);
+        assert_eq!(lit_pixel(215, 100, 0x20000, light), 214);
     }
 
     #[test]

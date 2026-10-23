@@ -1,6 +1,8 @@
-//! The map view's lighting: each pixel takes its hex's light (at least the
-//! ambient light, at most full light 65536), or the ambient light off the
-//! grid, as the intensity level `light × 128 / 65536`.
+//! The map view's floor lighting: each floor pixel takes its hex's light
+//! (at least the ambient light, at most full light 65536), or the ambient
+//! light off the grid, as the intensity level `light × 128 / 65536`. No
+//! spec gives the floor's light; objects and roofs are lit as they are
+//! drawn (SPEC-014 §3.44, `vault_render::map::draw_map_scene`).
 //!
 //! The pixel-to-hex mapping only changes with the view, and the levels only
 //! with the light, so both are kept: a frame computes one level per visible
