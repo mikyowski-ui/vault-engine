@@ -169,6 +169,12 @@ impl MapPreview {
     /// mixer, and write the configuration file when one is configured.
     pub(crate) fn apply_preferences(&mut self) {
         self.store_preferences();
+        // SPEC-009 §2.5 / SPEC-002 §3.7: reapplying preferences
+        // re-evaluates the language filter and discards the per-script
+        // catalogs.
+        if let Err(error) = self.host.reevaluate_language_filter() {
+            self.status = format!("language filter: {error}").into_bytes();
+        }
         // SPEC-014 §3.18: reapplying sets the volumes, so an F2/F3 master
         // offset (which never reaches the preference) does not survive it.
         let volumes = Volumes::from_preferences(&self.preferences);

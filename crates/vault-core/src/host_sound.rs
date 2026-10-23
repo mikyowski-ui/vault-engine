@@ -1,10 +1,15 @@
 //! SPEC-010 world integration: effect names from live objects (unaliased
 //! art stems, prototype sound bytes at item 0x38, weapon 0x79, and scenery
 //! 0x28, target materials), the effect lookup chain over the asset
-//! namespace, dialogue speech paths, and relative effect volume.
-use crate::{ObjectRef, WorldEffect, WorldState, assets::WorldAssets, host::WorldHost};
+//! namespace, dialogue speech paths, relative effect volume, and the §3.12
+//! talking-head speech and lip-sync with its head updater tick.
+use crate::{
+    ObjectRef, WorldEffect, WorldError, WorldState, assets::WorldAssets, dialogue::LipSync,
+    host::WorldHost,
+};
 use vault_formats::{
     Fid,
+    lip::{self, LipError, LipFile},
     pro::{Category, PrototypeData},
     sfx::{self, Opened, Owner, Target},
 };
@@ -148,9 +153,157 @@ impl<A: WorldAssets> WorldHost<A> {
         found.resolved.map(|stem| sfx::effect_path(&stem))
     }
     /// §3.10 dialogue speech: the active talking head's stem and a
-    /// message's sound field.
+    /// message's sound field. For the loaded speech of that field it is the
+    /// audio stem its lip file stored (§3.12).
     pub fn speech_file(&self, sound: &[u8]) -> Option<String> {
-        let head = self.world.dialogue.head.as_ref()?;
+        let dialogue = &self.world.dialogue;
+        if let Some(lip_sync) = &dialogue.lip_sync
+            && dialogue.speech.as_deref() == Some(sound)
+        {
+            return Some(lip_sync.audio.clone());
+        }
+        let head = dialogue.head.as_ref()?;
         sfx::speech_path(head.definition.stem.as_bytes(), sound)
+    }
+    /// §3.12 loading: a reply's speech request for sound field `sound`.
+    /// Any loaded speech is stopped first, with no frame drawn. A missing
+    /// `.LIP`, or one of another version, plays the audio named by the
+    /// field as one phoneme 0 (safe rule); a short file, or zero counts,
+    /// abandons the speech, and a speech state left from before then ends
+    /// normally on the next tick. The presentation layer plays
+    /// `WorldEffect::Speech` and reports its start (`speech_started`).
+    pub fn request_speech(&mut self, sound: &[u8]) {
+        let Some(head) = self.world.dialogue.head.as_ref() else {
+            return;
+        };
+        let stem = head.definition.stem.clone().into_bytes();
+        let (Some(lip_path), Some(named)) =
+            (lip::lip_path(&stem, sound), sfx::speech_path(&stem, sound))
+        else {
+            self.world.diagnostic(format!(
+                "speech: head stem {:?} contains a dot",
+                String::from_utf8_lossy(&stem)
+            ));
+            return;
+        };
+        let loaded = self.world.dialogue.speech.is_some();
+        if loaded {
+            self.world.emit(WorldEffect::StopSpeech);
+        }
+        let lip = match self.assets.resource(&lip_path) {
+            Err(_) => Ok(None),
+            Ok(bytes) => match LipFile::parse(&bytes) {
+                Ok(lip) => Ok(Some(lip)),
+                Err(LipError::Version(version)) => {
+                    self.world
+                        .diagnostic(format!("{lip_path}: LIP version {version} is unsupported"));
+                    Ok(None)
+                }
+                Err(error) => Err(error.to_string()),
+            },
+        };
+        let lip = match lip {
+            Ok(Some(lip)) if lip.phonemes.is_empty() || lip.markers.is_empty() => {
+                Err("no phonemes or markers".to_owned())
+            }
+            other => other,
+        };
+        let (lip, audio) = match lip {
+            Ok(Some(lip)) => {
+                for warning in lip.check() {
+                    self.world.diagnostic(format!("{lip_path}: {warning}"));
+                }
+                let audio = sfx::speech_path(&stem, &lip.stem).unwrap_or(named);
+                (lip, audio)
+            }
+            Ok(None) => (LipFile::silent(), named),
+            Err(error) => {
+                self.world
+                    .diagnostic(format!("{lip_path}: speech abandoned: {error}"));
+                if let Some(old) = &mut self.world.dialogue.lip_sync {
+                    old.audio_stopped();
+                }
+                return;
+            }
+        };
+        self.world.dialogue.stop_speech();
+        self.world.dialogue.speech = Some(sound.to_vec());
+        self.world.dialogue.lip_sync = Some(LipSync::new(lip, audio, None));
+        self.world.emit(WorldEffect::Speech(sound.to_vec()));
+    }
+    /// §3.12 start: the presentation layer started the speech audio, or
+    /// could not (no file, no output); then lip-sync stops running and the
+    /// next tick ends the speech normally.
+    pub fn speech_started(&mut self, started: bool) {
+        if let Some(lip_sync) = &mut self.world.dialogue.lip_sync
+            && lip_sync.clock.is_none()
+        {
+            lip_sync.start(started);
+        }
+    }
+    /// The speech audio's playback position in decoded PCM bytes, `None`
+    /// once it no longer plays; read by the next head updater tick.
+    pub fn speech_clock(&mut self, position: Option<u64>) {
+        if let Some(lip_sync) = &mut self.world.dialogue.lip_sync {
+            lip_sync.set_clock(position.unwrap_or(0), position.is_some());
+        }
+    }
+    /// §3.12 stop without an ending (Barter, Review, Ask About): release
+    /// the speech without drawing a frame.
+    pub fn stop_speech(&mut self) {
+        if self.world.dialogue.stop_speech() {
+            self.world.emit(WorldEffect::StopSpeech);
+        }
+    }
+    /// One head updater tick (SPEC-006 §3.11), from the choice loop's
+    /// start: lip-sync while a speech state exists (unless a reaction
+    /// transition plays), else the idle fidget. Missing head art keeps the
+    /// current frame and is diagnosed once (safe rule); lip-sync runs
+    /// whenever a speech state exists (§3.12 safe rule). Returns whether a
+    /// frame was drawn.
+    pub(crate) fn update_head(&mut self, now_ms: u64) -> Result<bool, WorldError> {
+        let dialogue = &mut self.world.dialogue;
+        let Some(head) = dialogue.head.as_mut().filter(|_| dialogue.updater) else {
+            return Ok(false);
+        };
+        if dialogue.speech.is_some() && !head.transitioning() {
+            let Some(lip_sync) = &mut dialogue.lip_sync else {
+                return Ok(false);
+            };
+            let step = lip_sync.tick();
+            let mut drawn = false;
+            if let Some(phoneme) = step.draw {
+                head.phoneme(usize::from(phoneme))?;
+                drawn = true;
+            }
+            if step.ended {
+                dialogue.lip_sync = None;
+                dialogue.speech = None;
+                head.speech_end();
+                drawn = true;
+            }
+            if step.stop_audio {
+                self.world.emit(WorldEffect::StopSpeech);
+            }
+            return Ok(drawn);
+        }
+        let art = head.path().and_then(|path| self.assets.frame(&path));
+        let mut diagnostic = head.diagnostic.take();
+        let mut drawn = false;
+        match art {
+            Ok(art) => {
+                drawn = head.tick(now_ms, art.frame_count(), art.fps, &mut self.world.rng)?;
+                diagnostic = diagnostic.or_else(|| head.diagnostic.take());
+            }
+            Err(error) if head.missing_art.is_none() => {
+                head.missing_art = Some(error.to_string());
+                diagnostic = Some(format!("talking-head art unavailable: {error}"));
+            }
+            Err(_) => {}
+        }
+        if let Some(message) = diagnostic {
+            self.world.diagnostic(message);
+        }
+        Ok(drawn)
     }
 }

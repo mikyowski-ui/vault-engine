@@ -264,18 +264,31 @@ fn spec006_queue_iq_reaction_and_art_vectors() {
         &mut Dice::new(&[77]),
     )
     .unwrap();
+    // A speech frame is drawn from the mood's speech art; the fidget state
+    // underneath is kept.
     animation.phoneme(41).unwrap();
     assert_eq!(
-        (animation.art_id().unwrap(), animation.frame),
-        (0x080a0007, 8)
+        animation.shown,
+        Some(HeadFrame {
+            animation: 10,
+            variant: 0,
+            frame: 8
+        })
     );
+    assert_eq!(animation.art_id().unwrap(), 0x08043007);
+    // A reaction first finishes the current (two-frame) fidget.
     animation.react(49);
-    animation.tick(100, 2, 10, &mut Dice::default()).unwrap();
+    for now in [100, 200, 300] {
+        assert!(animation.tick(now, 2, 10, &mut Dice::default()).unwrap());
+        assert_eq!(animation.art_id().unwrap(), 0x08043007);
+    }
+    assert_eq!(animation.phase, HeadPhase::Waiting);
+    animation.tick(400, 2, 10, &mut Dice::default()).unwrap();
     assert_eq!(animation.art_id().unwrap(), 0x08030007);
     // After all transition frames play, the head becomes good and then
     // chooses a good fidget (selector 1).
-    animation.tick(200, 2, 10, &mut Dice::default()).unwrap();
-    animation.tick(300, 2, 10, &mut Dice::new(&[10])).unwrap();
+    animation.tick(500, 2, 10, &mut Dice::default()).unwrap();
+    animation.tick(600, 2, 10, &mut Dice::new(&[10])).unwrap();
     assert_eq!(
         (animation.mood, animation.phase, animation.animation),
         (Mood::Good, HeadPhase::Fidget, 1)

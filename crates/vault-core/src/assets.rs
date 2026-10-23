@@ -134,6 +134,12 @@ pub trait WorldAssets {
     fn game_messages(&self, file: &str) -> Result<Arc<MsgCatalog>, WorldError> {
         Err(WorldError::Invalid(format!("{file}: messages unavailable")))
     }
+    /// The whole per-script catalog behind `message(list, _)`, freshly
+    /// loaded for the SPEC-002 §3.7 language filter; `None` when it is
+    /// missing or the assets offer only single messages.
+    fn dialogue_catalog(&self, _list: i32) -> Option<MsgCatalog> {
+        None
+    }
 }
 /// Decoded frames kept at once; past it the frame cache starts over (the
 /// frames callers hold stay valid).
@@ -300,6 +306,17 @@ impl VfsWorldAssets {
         }
         self.messages.borrow().get(path)?.as_ref()?.get(id).cloned()
     }
+    /// The per-script catalog `text/<language>/dialog/<script>.msg` of
+    /// one-based message list `list` (a `scripts.lst` row).
+    fn dialogue_path(&self, list: i32) -> Option<String> {
+        if list <= 0 {
+            return None;
+        }
+        let scripts = self.list("scripts/scripts.lst", LstKind::Script).ok()?;
+        let name = scripts.script_id((list - 1) as u32)?.name.as_deref()?;
+        let stem = std::str::from_utf8(name).ok()?.strip_suffix(".int")?;
+        Some(format!("text/{}/dialog/{stem}.msg", self.language))
+    }
     pub fn gcd(&self, path: &str) -> Result<GcdFile, WorldError> {
         Ok(GcdFile::parse(&self.read(path)?)?)
     }
@@ -396,13 +413,12 @@ impl WorldAssets for VfsWorldAssets {
             .unwrap_or(0) as usize
     }
     fn message(&self, list: i32, id: i32) -> Option<vault_formats::msg::Message> {
-        if list <= 0 {
-            return None;
-        }
-        let scripts = self.list("scripts/scripts.lst", LstKind::Script).ok()?;
-        let name = scripts.script_id((list - 1) as u32)?.name.as_deref()?;
-        let stem = std::str::from_utf8(name).ok()?.strip_suffix(".int")?;
-        self.catalog(&format!("text/{}/dialog/{stem}.msg", self.language), id)
+        self.catalog(&self.dialogue_path(list)?, id)
+    }
+    fn dialogue_catalog(&self, list: i32) -> Option<MsgCatalog> {
+        let path = self.dialogue_path(list)?;
+        self.catalog(&path, 0);
+        self.messages.borrow().get(&path)?.clone()
     }
     fn prototype_text(&self, prototype: &Prototype, description: bool) -> Option<Vec<u8>> {
         if prototype.message_base == -1 {

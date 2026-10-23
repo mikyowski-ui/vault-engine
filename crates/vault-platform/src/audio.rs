@@ -211,6 +211,14 @@ impl Mixer {
         self.voices.iter().any(|voice| voice.channel == channel)
             || self.streams.iter().any(|stream| stream.channel == channel)
     }
+    /// The source frame a voice on `channel` has reached (frames played
+    /// at the mixer rate), `None` when none plays there.
+    pub fn position(&self, channel: Channel) -> Option<u64> {
+        self.voices
+            .iter()
+            .find(|voice| voice.channel == channel)
+            .map(|voice| (voice.position >> 32).min(voice.frames()))
+    }
     /// Change the gain of what plays on `channel`.
     pub fn set_gain(&mut self, channel: Channel, gain: f32) {
         for voice in self.voices.iter_mut().filter(|v| v.channel == channel) {
@@ -524,6 +532,14 @@ impl AudioHandle {
     }
     pub fn playing(&self, channel: Channel) -> bool {
         self.lock().is_some_and(|mixer| mixer.playing(channel))
+    }
+    /// SPEC-010 §3.12 the talking-head speech's playback position in bytes
+    /// of decoded PCM (two per mono 16-bit sample, 44100 per second),
+    /// `None` when no speech plays.
+    pub fn speech_position(&self) -> Option<u64> {
+        self.lock()?
+            .position(Channel::Speech)
+            .map(|frames| 2 * frames)
     }
     pub fn open_stream(&self, channel: Channel, rate: u32, channels: usize, gain: f32) -> bool {
         self.lock()

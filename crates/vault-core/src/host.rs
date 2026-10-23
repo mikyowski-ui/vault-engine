@@ -115,6 +115,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub music_enabled: bool,
     /// The last requested music track (`sound/music/<track>.acm`).
     pub last_music: Option<String>,
+    /// SPEC-002 §3.7 language filter: the word list and the per-script
+    /// message catalogs as loaded.
+    pub script_messages: crate::dialogue::ScriptMessages,
 }
 impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn prototype(&self, pid: u32) -> Result<std::sync::Arc<vault_formats::Prototype>, WorldError> {
@@ -221,6 +224,9 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     ) -> Result<std::sync::Arc<vault_formats::MsgCatalog>, WorldError> {
         (**self).game_messages(file)
     }
+    fn dialogue_catalog(&self, list: i32) -> Option<vault_formats::MsgCatalog> {
+        (**self).dialogue_catalog(list)
+    }
 }
 impl<A: WorldAssets> WorldHost<A> {
     pub fn new(world: WorldState, assets: A) -> Self {
@@ -255,6 +261,7 @@ impl<A: WorldAssets> WorldHost<A> {
             presentation_rng: crate::ParkMiller::seeded(1).expect("a positive seed"),
             music_enabled: true,
             last_music: None,
+            script_messages: Default::default(),
         }
     }
     /// SPEC-008 §3.10 a music request: the track is recorded as the last
@@ -841,22 +848,22 @@ impl<A: WorldAssets> WorldHost<A> {
                 .diagnostic(format!("map-load script request: {error}"));
         }
     }
-    /// Talking-head speech playback completed (the presentation layer owns
-    /// audio): release it, show speech frame zero, and allow a new fidget.
+    /// End the talking-head speech normally at once (SPEC-010 §3.12): release
+    /// it, show speech frame zero, enter the waiting state with the idle
+    /// counter at 3. The head updater does this itself when the audio
+    /// finishes or the final marker passes.
     pub fn speech_finished(&mut self) {
-        if self.world.dialogue.speech.take().is_some()
+        if self.world.dialogue.stop_speech()
             && let Some(head) = &mut self.world.dialogue.head
         {
             head.speech_end();
         }
     }
-    /// SPEC-006 §3.11: during speech the presentation layer's speech-timing
-    /// system selects the head's frame by phoneme index 0-41 from the
-    /// mood's speech art; the phoneme source (the `.LIP` companion of the
-    /// speech file) and its timing are outside the specifications, so the
-    /// presentation layer calls this at each phoneme's time. Returns whether
-    /// a frame was set; outside speech nothing changes, and an index past the
-    /// table is diagnosed and ignored (safe bound).
+    /// SPEC-006 §3.11: draw the speech frame for phoneme index 0-41 from
+    /// the mood's speech art, as lip-sync (SPEC-010 §3.12) does on each
+    /// phoneme change. Returns whether a frame was drawn; outside speech
+    /// nothing changes, and an index past the table is diagnosed and
+    /// ignored (safe bound).
     pub fn speech_phoneme(&mut self, index: usize) -> bool {
         if self.world.dialogue.speech.is_none() {
             return false;
@@ -1139,26 +1146,8 @@ impl<A: WorldAssets> WorldHost<A> {
         self.callbacks.extend(self.library.callbacks());
         self.drain_requests()?;
         let mut changed = changed_by_animation;
-        // SPEC-006 §3.11 safe rule: missing head art keeps the current frame
-        // and is diagnosed once, rather than failing the update.
-        if let Some(head) = &mut self.world.dialogue.head {
-            let art = head.path().and_then(|path| self.assets.frame(&path));
-            let mut diagnostic = head.diagnostic.take();
-            match art {
-                Ok(art) => {
-                    changed = head.tick(now_ms, art.frame_count(), art.fps, &mut self.world.rng)?;
-                    diagnostic = diagnostic.or_else(|| head.diagnostic.take());
-                }
-                Err(error) if head.missing_art.is_none() => {
-                    head.missing_art = Some(error.to_string());
-                    diagnostic = Some(format!("talking-head art unavailable: {error}"));
-                }
-                Err(_) => {}
-            }
-            if let Some(message) = diagnostic {
-                self.world.diagnostic(message);
-            }
-        }
+        // SPEC-006 §3.11 / SPEC-010 §3.12 the talking-head updater.
+        changed |= self.update_head(now_ms)?;
         if self.world.dialogue.waiting
             && self.world.dialogue.page_offsets.len() > 1
             && now_ms.saturating_sub(self.world.dialogue.page_ms) >= 10000
@@ -1243,7 +1232,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 Vec::new(),
             )),
             DialogueText::Message { list, message } if *list > 0 => {
-                let value = self.assets.message(*list, *message).ok_or_else(|| {
+                let value = self.script_message(*list, *message).ok_or_else(|| {
                     WorldError::Invalid(format!("missing dialogue message {list}:{message}"))
                 })?;
                 Ok((value.text, value.sound))
@@ -1272,12 +1261,10 @@ impl<A: WorldAssets> WorldHost<A> {
                 .resolved_options
                 .push([b"\x95 ".as_slice(), text.as_slice()].concat());
         }
+        // SPEC-010 §3.12: the reply's speech loads and starts before the
+        // next head updater tick.
         if self.world.dialogue.head.is_some() && !sound.is_empty() {
-            self.world.dialogue.speech = Some(sound.clone());
-            self.world.emit(WorldEffect::Speech(sound));
-            if let Some(head) = &mut self.world.dialogue.head {
-                head.phoneme(0)?;
-            }
+            self.request_speech(&sound);
         }
         Ok(())
     }

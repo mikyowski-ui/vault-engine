@@ -135,9 +135,12 @@ pub fn compose(
         if let Some(frame) = background.frame(0, 0) {
             image.blit(frame, [126, 14]);
         }
-        // SPEC-006 §3.11 safe rule: missing head art draws no head frame.
-        let art = head.path().ok().and_then(|path| assets.frame(&path).ok());
-        if let Some(frame) = art.as_ref().and_then(|art| art.frame(0, head.frame)) {
+        // SPEC-006 §3.11: the head view shows the image the head updater
+        // last drew, none while the session opens; safe rule: missing head
+        // art draws no head frame.
+        let art = head.shown_path().and_then(|path| assets.frame(&path).ok());
+        let shown = head.shown.map_or(0, |shown| shown.frame);
+        if let Some(frame) = art.as_ref().and_then(|art| art.frame(0, shown)) {
             image.blit(frame, frame.centered_origin([126, 14], [388, 200]));
         }
     }

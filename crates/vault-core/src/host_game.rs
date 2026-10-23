@@ -1408,7 +1408,7 @@ impl<A: WorldAssets> WorldHost<A> {
             0x8104 => return self.proto_data(call.uint(1), call.int(0)),
             0x8105 => {
                 let message = if call.int(0) > 0 {
-                    self.assets.message(call.int(1), call.int(0))
+                    self.script_message(call.int(1), call.int(0))
                 } else {
                     None
                 };

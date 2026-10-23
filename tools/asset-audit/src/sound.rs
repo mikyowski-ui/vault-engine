@@ -1,6 +1,7 @@
 //! SPEC-010 corpus checks against the oracle tables: ACM decoding (source
 //! and PCM hashes, header values, counters, edge samples, and every wrapped
-//! sample), effect-name construction and lookup, and prototype sound bytes.
+//! sample), effect-name construction and lookup, and prototype sound bytes;
+//! and the §2.6 `.LIP` layout against each companion ACM header.
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -8,7 +9,7 @@ use std::{
     path::Path,
 };
 use vault_formats::{
-    LocalDirProvider, LstKind, LstTable, MAX_ASSET_BYTES, Prototype, Vfs, acm,
+    LipFile, LocalDirProvider, LstKind, LstTable, MAX_ASSET_BYTES, Prototype, Vfs, acm, lip,
     pro::{ItemData, PrototypeData},
     sfx::{self, Opened, Owner, Target, effect},
 };
@@ -153,6 +154,78 @@ pub fn audit_acm(vfs: &LocalDirProvider, oracle: &Path) -> Result<[u64; 5], Box<
         );
     }
     Ok(counts)
+}
+
+/// One `.LIP` against the SPEC-010 §2.6 layout and the §5 corpus scan;
+/// returns whether its final marker lies before the audio end (2N).
+fn check_lip(vfs: &LocalDirProvider, path: &str, bytes: &[u8]) -> Result<bool, String> {
+    let lip = LipFile::parse(bytes).map_err(|error| error.to_string())?;
+    let (p, m) = (lip.phonemes.len(), lip.markers.len());
+    if lip.version != 2 || bytes.len() != lip::HEADER_V2 + p + 8 * m || p + 1 != m {
+        return Err(format!(
+            "version {}, {} bytes, P = {p}, M = {m}",
+            lip.version,
+            bytes.len()
+        ));
+    }
+    if let Some(warning) = lip.check().first() {
+        return Err(warning.to_string());
+    }
+    if lip.markers[0].kind != 1
+        || lip
+            .markers
+            .windows(2)
+            .any(|w| w[0].position >= w[1].position)
+        || !matches!(lip.flags, 0 | 4)
+    {
+        return Err("marker 0, marker order or flags".into());
+    }
+    let (directory, file) = path.rsplit_once('/').ok_or("no directory")?;
+    let stem = String::from_utf8_lossy(&lip.stem).to_ascii_lowercase();
+    if file.strip_suffix(".lip") != Some(stem.as_str()) {
+        return Err(format!("stored stem {stem:?}"));
+    }
+    let acm = vfs
+        .read_bounded(&format!("{directory}/{stem}.acm"), MAX_ASSET_BYTES)
+        .map_err(|error| format!("companion ACM: {error}"))?;
+    let samples = 2 * i64::from(
+        acm::AcmHeader::parse(&acm)
+            .map_err(|error| error.to_string())?
+            .samples,
+    );
+    let last = i64::from(lip.markers[m - 1].position);
+    if !(samples..=samples + 1).contains(&i64::from(lip.length))
+        || !(-3019..=24093).contains(&(last - samples))
+    {
+        return Err(format!(
+            "length {} or final marker {last} against 2N = {samples}",
+            lip.length
+        ));
+    }
+    Ok(last < samples)
+}
+
+/// SPEC-010 §2.6: `[files, passed, failed, final marker before 2N]`.
+pub fn audit_lip(vfs: &LocalDirProvider) -> [u64; 4] {
+    let mut counts = [0; 4];
+    for path in vfs.files().filter(|path| path.extension() == Some("lip")) {
+        counts[0] += 1;
+        let result = vfs
+            .read_bounded(path.as_str(), MAX_ASSET_BYTES)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| check_lip(vfs, path.as_str(), &bytes));
+        match result {
+            Ok(before_end) => {
+                counts[1] += 1;
+                counts[3] += u64::from(before_end);
+            }
+            Err(error) => {
+                counts[2] += 1;
+                eprintln!("FAIL {path}: {error}");
+            }
+        }
+    }
+    counts
 }
 
 /// The six character effects the oracle samples per critter list: stand,

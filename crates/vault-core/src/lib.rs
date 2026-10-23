@@ -97,6 +97,8 @@ mod clicks_tests;
 #[cfg(test)]
 mod combat_tests;
 #[cfg(test)]
+mod dialogue_tests;
+#[cfg(test)]
 mod drugs_tests;
 #[cfg(test)]
 #[allow(dead_code)]

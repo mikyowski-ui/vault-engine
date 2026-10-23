@@ -372,20 +372,63 @@ fn spec009_initialization_resolution_and_language_filter() {
         effect,
         WorldEffect::Diagnostic(text) if text.contains("\"blind \"")
     )));
-    // A nonzero preference at load filters; the remembered state is still
-    // -1, so the first evaluation acts: 2 is not 1, so it reloads unfiltered.
-    assert!(host.world.ai.filtered);
+    // A nonzero preference at load invokes the filter, which acts only for
+    // exactly 1: value 2 is never filtered and draws nothing. The
+    // remembered state is still -1, so the first evaluation acts: 2 is not
+    // 1, so it reloads unfiltered.
+    assert!(!host.world.ai.filtered);
     host.reevaluate_language_filter().unwrap();
     assert!(!host.world.ai.filtered);
     assert_eq!(host.world.ai.filter_state, 2);
+    // With no `badwords.txt` the word list is empty: the filter does
+    // nothing and draws nothing.
     host.world.ai.language_filter = Some(1);
+    let expected = host.world.rng.clone();
     host.reevaluate_language_filter().unwrap();
-    assert!(host.world.ai.filtered);
-    host.reevaluate_language_filter().unwrap();
-    assert!(host.world.ai.filtered, "an unchanged value does nothing");
+    assert!(!host.world.ai.filtered);
+    assert_eq!(host.world.rng, expected);
+    let taunt = |host: &WorldHost<AiAssets>| {
+        let messages = host.world.ai.messages.as_ref().unwrap();
+        messages.get(1000).unwrap().text.clone()
+    };
+    assert_eq!(taunt(&host), b"taunt 1000");
+    // Exactly 1 with a word list filters (SPEC-002 §3.7), with one
+    // `random(1, 29)` draw.
+    host.script_messages.words = Arc::new(vault_formats::msg::BadWords::parse(b"taunt\n"));
     host.world.ai.language_filter = Some(0);
     host.reevaluate_language_filter().unwrap();
     assert!(!host.world.ai.filtered);
+    host.world.ai.language_filter = Some(1);
+    let mut expected = host.world.rng.clone();
+    let k2 = expected.range(1, 29).unwrap() as usize - 1;
+    host.reevaluate_language_filter().unwrap();
+    assert!(host.world.ai.filtered);
+    assert_eq!(host.world.rng, expected);
+    let mut filtered = taunts().get(1000).unwrap().text.clone();
+    let words = host.script_messages.words.clone();
+    words.filter_text(&mut filtered, k2);
+    assert_eq!(taunt(&host), filtered);
+    assert!(taunt(&host).ends_with(b" 1000") && taunt(&host) != b"taunt 1000");
+    host.reevaluate_language_filter().unwrap();
+    assert!(host.world.ai.filtered, "an unchanged value does nothing");
+    assert_eq!(host.world.rng, expected);
+    host.world.ai.language_filter = Some(0);
+    host.reevaluate_language_filter().unwrap();
+    assert!(!host.world.ai.filtered);
+    assert_eq!(taunt(&host), b"taunt 1000");
+    // A startup value of 1 filters twice (two draws); the second pass
+    // changes no text.
+    host.world.ai.language_filter = Some(1);
+    host.world.ai.filter_state = -1;
+    let mut expected = host.world.rng.clone();
+    let first = expected.range(1, 29).unwrap() as usize - 1;
+    expected.range(1, 29).unwrap();
+    host.load_combat_ai().unwrap();
+    host.reevaluate_language_filter().unwrap();
+    assert_eq!(host.world.rng, expected);
+    let mut once = b"taunt 1000".to_vec();
+    words.filter_text(&mut once, first);
+    assert_eq!(taunt(&host), once);
 
     // Resolution: an unknown number falls back to entry 0 (diagnosed), and
     // a script change takes effect at the next query (never cached).
