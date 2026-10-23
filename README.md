@@ -38,8 +38,9 @@ The current revisions (SPEC-007 R1-rev7, SPEC-008 with §3.10 and §4.5,
 SPEC-013 R1-rev5, SPEC-014 R1-rev6) add attack and non-combat animation
 choreography with projectile flight, one sequence per owner, the busy-click
 policy, map numbers with city music, and roof hiding (see "Spec completion
-notes"). The approved specs are revised as builder questions are answered; the
-open ones are listed under "Open spec questions for the research vault".
+notes"). The approved specs are revised as builder questions are answered;
+R1-rev10 answered the last open ones (see "Open spec questions for the research
+vault").
 
 `AGENTS.md` is the repository's implementation policy. `PROVENANCE.md` records
 the two-team clean-room process, and `CONTRIBUTING.md` the clean-room
@@ -433,23 +434,44 @@ Audio plays SPEC-010 sounds on the default device (`--no-audio` keeps it silent)
 - Effect requests resolve through the lookup chain, with the owner's gender
   alias. They are decoded with the exact ACM decoder, cached, and played mono at
   22050 Hz at the relative volume of their owner, scaled by the effect volume.
+  The owner counts as on screen when its drawn frame (1 pixel larger while
+  outlined) overlaps the map window, whatever its elevation, and art that
+  cannot be read counts as on screen; the hex distance drops by 1 for each
+  multi-hex object, never below 0 (SPEC-010 §3.11).
 - Background music plays as interleaved stereo at 22050 Hz (SPEC-010 §3.6). A
   track is decoded on a worker thread and cached, so a repeated request restarts
   it at once. The main menu loops `07desert`; maps request their city track
   (SPEC-008 §3.10) after `wind2`, which loops while a map loads (and on an
   unnumbered map), and the world map plays `03wrldmp`; a dead player
   hears the narrator's death line on the speech channel.
-- The preference volumes (SPEC-014 §3.18) apply to every channel: master scales
-  every voice except a movie, music the music, effects and speech each sound as
-  it starts. The setting becomes a gain through the one conversion the specs
-  give, SPEC-012 §3.8's `-1000 x log2(32767 / v)` hundredths of a decibel.
-  **F2** and **F3** lower and raise the mixer master by 2047 without changing
-  the preference, so the next preferences sync restores it.
+- Every sound has a SPEC-010 §3.13 level: `floor(V x sndfx / 32767)` for an
+  effect with an owner, `sndfx` for one without (interface buttons,
+  `play_sfx`), `trunc(0.69 x speech)` for talking-head speech and narration,
+  `trunc(0.94 x music)` for music and 32767 for `soundplay` library sounds.
+  Master volume scales the level, `v = floor(master x L / 32767)`, which
+  becomes the attenuation `-1000 x log2(32767 / v)` hundredths of a decibel
+  (clamped, truncated; v = 0 is silence) and the gain `10^(A/2000)`
+  (`vault_formats::sfx::device_volume`, `attenuation`). Changing master volume
+  re-applies to every loaded sound at once; music volume updates the playing
+  music and speech volume playing narration, while talking-head speech and
+  effects keep the level they started with. **F2** and **F3** lower and raise
+  the mixer master by 2047 without changing the preference, so the next
+  preferences sync restores it; they never switch music off.
+- Music starts off and the `fallout.cfg` `[sound]` key `music` (default 1)
+  turns it on; with `music=0` it stays off for the whole run. Setting master
+  or music volume to 0 (sliders, a loaded save's preference words, startup
+  configuration) turns it off by volume, stopping the track and silencing
+  movie audio; setting them nonzero again turns it back on and replays the
+  last recorded track (SPEC-008 §3.10, `vault_core::worldmap::MusicSwitch`).
 - At most four effects play at once. A fifth request fails rather than evicting
   one.
 - Talking-head speech plays `sound/speech/<head>/<stem stored in the .LIP>.ACM`
-  at `floor(69 x V / 100)` of the speech volume (0 plays silently and still
-  lip-syncs). Its playback position drives lip-sync (SPEC-010 §3.12): each head
+  at `trunc(0.69 x V)` of the speech volume (0 plays silently and still
+  lip-syncs). Every dialogue speech starts through one speech-enabled message
+  lookup (SPEC-006 §3.9, `vault_core::host_talk`): message-backed replies,
+  `message_str` (`0x8105`) and Ask About answers get the same lip-sync, and
+  speech is requested only once this talk session's `start_gdialog` has set
+  up a talking head (the stale-head safe rule). Its playback position drives lip-sync (SPEC-010 §3.12): each head
   tick draws the speech frame of the current `.LIP` phoneme, and the speech ends
   normally when the audio finishes or passes the final marker. Without a file or
   device the next head tick ends it. Choosing an option or switching to Barter
@@ -493,7 +515,10 @@ cargo run -p vault-platform -- --corpus-dir /path/to/unpacked/game \
   once every button is released. Holding a button does not skip.
 - Subtitles use font 101 and `art/cuts/subtitle.pal` with the RGB555 white
   text color. They are always on for the boil movies; `--subtitles` turns them
-  on for the others.
+  on for the others. An entry wider than 640 pixels wraps at the last space
+  before the overflow and every line shows, the band growing one text height
+  per line; a line with no space breaks before the overflowing character
+  (SPEC-012 §3.10 safe rules).
 
 On the local map, **I** opens the inventory and **C** the character screen
 (SPEC-011). Both are modal:
@@ -589,7 +614,20 @@ Skilldex, **C** character, **P** Pip-Boy, **B** swap hands, **M** or a right-cli
 cycle the cursor mode, **A** start combat, **1**-**8** skills (Sneak first), **,**
 and **.** rotate, **/** the date, **Ctrl+S**/**F4** save, **Ctrl+L**/**F5** load,
 **F6**/**F7** quick save/load, **Ctrl+P** pause, **Ctrl+Q**/**F10** quit. **Space**
-ends a combat turn. A skill book in the active hand is read at once from the
+ends a combat turn. **/** and **?** print the date line, for example
+"December: 5/2161 7:21", also while the bar is disabled (`ui::bar::date_line`).
+**F12** works in every screen: it writes the composed 640×480 screen, cursor
+included, as an 8-bit `scrNNNNN.bmp` (SPEC-014 §2.5,
+`vault_formats::screenshot`) in the working directory, taking the first free
+number, and prints "Saved screenshot." or "Error saving screenshot.". Every
+held key auto-repeats after more than 500 ms, then every more than 80 ms,
+window toggles included (modifier keys do not); a player turn's start and each
+main-menu pass cancel the repeats. The pause window greys the map through the
+§3.17 grey table (max plus min of each `color.pal` entry's 5-bit components)
+with the interface bar left on top; on the world map the grey stays until the
+view next redraws. The message monitor's scroll areas scroll once per press
+and are disabled with the interface bar. Medium dialog boxes put their Done
+button at (53, 81). A skill book in the active hand is read at once from the
 item slot (SPEC-013 §3.25): the skill gains `trunc((100 - S) / 10)` points,
 the screen fades to black while 1-10 game hours pass, and the book is used
 up; in combat it costs 2 AP and refuses with message 902. The Skilldex sets a skill's targeting mode; a click on an
@@ -606,8 +644,16 @@ the hover: the movement cost (or a red X), the arrow's action icon with the
 object's look-at text in the monitor, or the crosshair's hit chance. The
 movement hover plans a path only when the hovered hex, the player's hex, AP,
 legs or combat state, or a route blocker changes. With item highlight on, an
-item under the arrow gets a one-pixel outline in key 30632 until the pointer
-moves (no approved spec gives the outline's geometry). A dead critter's
+item under the arrow gets an item outline (key 30632) until the pointer
+moves. Objects carry the SPEC-014 §3.44 32-bit outline word (type,
+translucent and disabled bits; cleared on load, written as it stands on
+save). Outlines are drawn after the roofs as the one-pixel two-pass ring, at
+most 100 per refresh, hostile and friendly in cycling row bands and red, grey
+and item ones optionally translucent (`vault_render::outline`). The movement
+hex cursor has a translucent red outline. In combat every combatant is
+outlined (hostile, or friendly for the player's team with Friendly Foe); the
+outlines show on the player's turn in crosshair mode according to
+`target_highlight` and on each NPC's own turn. A dead critter's
 look-at line (491 or 492) draws from a presentation-only generator, so
 looking never moves the world's random sequence. Map clicks
 act on the release; holding the button 250 ms in arrow mode opens the action
@@ -673,7 +719,17 @@ Dialogue uses the actual script reply/options and callback procedure indices.
 Click an option or use **1–9**; **0** selects the documented dummy no-callback
 choice. **Space/up/down** navigate reply pages, the wheel scrolls options, and
 **Escape** closes dialogue (on the map it opens the options menu). Head animation continues
-while the world background clock is suspended. The synthetic Guide demonstrates
+while the world background clock is suspended. The `di_talk.frm` panel's
+buttons follow SPEC-014 §3.45 (`map_preview/talk.rs`, `vault_core::ui::talk`):
+Barter (or **b**) runs the SPEC-013 §3.18 merchant test; Review opens
+`review.frm` over the 80-entry review history (replies and the options chosen
+after them), scrolled a whole entry at a time with Up/Down and closed by Esc
+or Done, stopping speech and freezing the head; Tell Me About (or **a**) shows
+`proto.msg` 904 for a bad reaction or on map 35 and otherwise opens the Ask
+About window on the next tick. Typed words are matched against the NPC's and
+the map's keyword messages (1000-1099, the name answers 970-979, the fallback
+980-999; the whole trimmed text is tried first), and the answer is spoken in
+the reply area. The synthetic Guide demonstrates
 two nodes with a real VM callback.
 
 `--player-gcd <VFS_PATH>`, `--language <directory>`, and `--seed <integer>` select
@@ -688,8 +744,14 @@ square projection; roofs are 96 logical pixels above their floor. Objects use
 hex centers, stored displacement, directional FRM shifts, and bottom-center
 alignment. Tile images are not resized to the diamond footprint. Hidden objects,
 hidden/blank tiles, and inventory children are excluded from placed-object drawing.
-Flat objects precede upright objects; remaining object order is deterministic by
-anchor position and ID. The complete indexed scene scales with the window.
+Objects draw in the SPEC-014 §3.44 order: flat before upright, by ascending
+hex, and within a hex in insertion order. Any move to a hex (which also resets
+the pixel offset), any pixel-offset change and every animation frame step
+moves an object to the end of its group; art, frame, rotation, light, hide and
+outline changes do not. Objects take one light per hex (capped at full light),
+while floor tiles are lit per pixel by interpolating the light of ten nearby
+hexes (`vault_render::map::render_floor_lit`). The complete indexed scene
+scales with the window.
 
 Object and tile art resolves through the SPEC-007 codec (`ArtCatalog`): the FID's
 own category selects the list, critters append the two-letter animation/weapon
@@ -762,9 +824,8 @@ real-corpus compatibility corrections to the initial
 strict interpretation of the approved specifications. Automated regressions use
 synthetic fixtures; original corpus data is not included in tests.
 
-The preview assumes same-coordinate destination sampling for AAF blends, as in
-the approved synthetic fixture. The specification leaves original-executable
-sampling order unresolved; this implementation does not claim to resolve it.
+AAF blends read each destination pixel just before writing it (SPEC-002
+§3.2): the shadow pass and earlier glyphs are part of the destination.
 
 ## Prototypes, maps, and geometry
 
@@ -919,8 +980,8 @@ separate lifetimes.
 
 `GDialog` tracks session, node processing, review, paging, callbacks, and head
 animation separately. Replies clear old options, IQ filtering happens at append
-time, options are limited to 30 (a thirty-first is a diagnostic), review replies
-to 80, and literal replies and options are truncated to 899 and 897 bytes; every
+time, options are limited to 30 (a thirty-first is a diagnostic), review entries
+to 80 (`gsay_start` empties them; the 80th entry's choice is still recorded), and literal replies and options are truncated to 899 and 897 bytes; every
 reply page is remembered. Head/background IDs, filename suffixes, own-column
 fidget counts (kept only when every selectable fidget file exists),
 reaction transitions, and the 42 phoneme mappings follow SPEC-006. The platform
@@ -1068,9 +1129,9 @@ the city track that replaces the loading track `wind2` (`city_music`, once per
 map change; an unnumbered map keeps `wind2`). Script `load_map` by name
 (`0x80E4`) is uppercased with its first `.SAV` read as `.MAP` and matched
 against the same `map.msg` texts; an unmatched name (no extension or directory
-is normalized; 16 or more bytes, safe rule) makes no transition. `WorldHost::set_music_enabled` records the music on/off state,
-which the desktop keeps in step with its mixer; no spec names a setting that
-turns music off, so it stays on.
+is normalized; 16 or more bytes, safe rule) makes no transition. The music
+on/off state follows the `music` key and the master and music volumes
+(`worldmap::MusicSwitch`); it is not saved.
 
 Leaving a map writes its `.SAV` image (saved bit set, live globals/locals,
 scripts, and placed objects with inventories) into an in-memory working
@@ -1199,8 +1260,8 @@ Where SPEC-009 leaves details open, this engine makes these choices:
   "visibly holds a weapon" test reads it), and unwielding clears it; take-out
   (38) and put-away (39) are presentation requests. AI pick-ups run the item's
   pick-up script first and present `DefaultAction::Pickup`.
-- Team switching does not rebuild combat outlines, which have no approved
-  encoding.
+- A critter joining combat or changing teams gets its combat outline type
+  rebuilt (SPEC-009 §3.15).
 - Restoring an in-combat save rebuilds the snapshot from the restored combat
   list, but last-attacker references are not rebuilt from saved combat
   identifiers.
@@ -1392,14 +1453,16 @@ these choices:
   and the oracle) put it at code 120, so codes 120-127 are negative.
 - The device audio scheduler is replaced by one stream, fed in decode order,
   that starts at the first sync point after the audio configuration. The
-  movie volume is `trunc(0.94 x music)`, or 0 while music is off. The
+  movie volume is `trunc(0.94 x music)`, or 0 while music is off, and follows
+  the music volume and on/off state even with no movie playing. The
   attenuation `trunc(-1000 x log2(32767 / v))`, in hundredths of a decibel,
   becomes gain `10^(A/2000)`. The master volume does not scale the movie.
   Flag `0x04` stops the background music and `0x08` pauses it until the
   movie ends.
 - A partial decode region is copied from its offset in the frame to the
-  centered frame origin. Subtitle text wraps at the window width, with each
-  line centered and the first line 2 pixels below the band top.
+  centered frame origin. Subtitle text wraps at 640 pixels; line i is drawn
+  centered at `y0 + i x th`, and the band grows for the extra lines (safe
+  rule).
 - No approved specification names the remaining-water global or the
   world-map event triggers. The midnight countdown runs only with
   `WorldRules::water_global`. While the water-chip quest (global 101) is at
@@ -1605,55 +1668,27 @@ travel, and Pip-Boy"); there is no engine-specific save envelope.
 
 ## Open spec questions for the research vault
 
-Each needs a sanitized spec answer; until then the code takes the most literal
-reading (or the stated choice) and comments it. The questions answered by the
-SPEC-001 to SPEC-014 syncs through R1-rev9 (former items 1-20, 28-30, 32-35,
-37-39, 41, 42 and 44) are closed; the open ones keep their numbers.
+The SPEC-001 to SPEC-014 syncs through R1-rev10 answered every earlier builder
+question (former items 1-44). Each open one needs a sanitized spec answer;
+until then the code takes the most literal reading (or the stated choice) and
+comments it.
 
-- **21.** SPEC-010 §3.11 leaves the volume-to-loudness mapping open; every
-  channel uses SPEC-012 §3.8's conversion, and the master volume does not scale
-  movie audio (`vault-platform/src/audio.rs`, `volume_gain`). No spec gives a
-  volume rule for library sounds. Talking-head speech plays at
-  `floor(69 x V / 100)` of the speech setting (SPEC-010 §3.12).
-- **22.** SPEC-012 §3.10 still does not say what happens to wrapped subtitle
-  lines past the first; only the first shows (`vault-core/src/movie.rs`).
-- **23.** SPEC-010 §3.11: the on-screen test of the relative-volume rule has no
-  elevation condition (`vault-formats/src/sfx.rs`).
-- **24.** SPEC-013 §3.15 Set Timer still names no sounds for the +/- buttons;
-  the move-items counter's pair is used (`vault-platform/src/map_preview/timer.rs`).
-- **25.** SPEC-014 §3.17: the pause greyscale table (mean 5-bit grey,
-  provisional) and the converted rows 0-378 are inferred (`vault-core/src/ui/mod.rs`,
-  `grey_table`). SPEC-014 §3.44's gray tables are translucency levels and do
-  not define this table.
-- **26.** SPEC-014 §3.44 draws object outlines after the roofs, at most 100 per
-  refresh (`vault-render/src/map.rs`, `draw_map_scene`), but no spec gives their
-  geometry (a one-pixel ring, `vault-render/src/image.rs`, `outline`) or the
-  runtime outline word's encoding, so only the §3.27 item hover outline is drawn.
-  The F12 screenshot name and format (`scrNNNNN.ppm` in the save root,
-  `vault-platform/src/interface.rs`) and the `/` date line format
-  (`vault-platform/src/map_preview/hud.rs`) are still unspecified.
-- **27.** SPEC-014 §3.13: the medium dialog box's Done offsets are still not
-  given (§3.43 messages sized by the §3.13 rule can be medium); the large box's
-  are reused (`vault-platform/src/editor_screen.rs`).
-- **31.** SPEC-014 §3.29 still does not say whether window-toggle keys (F1,
-  Tab, Escape) repeat, or whether the message monitor's scroll areas work while
-  the UI is disabled; they do not repeat, and the scroll areas keep working
-  (`vault-platform/src/input.rs`, `map_preview/hud.rs`).
-- **36.** SPEC-002 §3.2 still leaves the AAF blend's destination sampling order
-  unresolved; the preview samples the same coordinate.
-- **40.** SPEC-008 §3.10 has a music on/off state, but no spec names the setting
-  that toggles it (`vault-platform/src/map_preview.rs`, `set_music_enabled`).
-- **43.** SPEC-014 §3.44 insertion order is kept by comparing each drawn
-  object's elevation, hex, pixel offset and flat flag between refreshes
-  (`vault-core/src/world.rs`, `render_objects`): setting the same hex or offset
-  again is not a reinsertion. No spec gives the floor's light; each floor pixel
-  takes its hex's light (`vault-platform/src/map_preview/light.rs`).
+- **45.** SPEC-014 §3.29 says every physical key auto-repeats. Modifier keys
+  (Shift, Ctrl, Alt, Super) are kept out of the repeat, because a repeated
+  Ctrl would, for example, close the pause window opened by Ctrl+P
+  (`vault-platform/src/input.rs`). Does the reference queue repeats for
+  modifier keys?
+- **46.** SPEC-008 §3.10 rule 4 mentions dialogue's music handling (stopped
+  for a talking head, halved for no head), but no spec says when it starts and
+  ends, so it is not wired. `MusicSwitch` already turns music off for a halved
+  volume of 0.
+- **47.** SPEC-014 §3.44 says a registered animation step can enable or
+  disable its owner's outline, but no SPEC-007 sequence entry carries that
+  step, so none does.
 
 ## Known gaps
 
-These parts are stand-ins or missing because no approved spec defines them:
+These parts are stand-ins or approximations:
 
-- The object outline geometry is the engine's choice, and only the item hover outline is drawn (item 26).
-- Talking-head speech started by `message_str` (`0x8105`) plays without
-  lip-sync, and the dialogue Review and Ask About views are not built, so
-  their speech stops are not wired (`WorldHost::stop_speech` is ready).
+- The movement-mode hex cursor's translucent red outline is drawn as an
+  overlay above the scene, not as a flat object in the §3.44 flat pass.

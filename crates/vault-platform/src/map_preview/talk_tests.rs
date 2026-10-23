@@ -114,6 +114,13 @@ fn spec014_tell_me_about_and_ask_about_window() {
     preview.image().unwrap();
     assert!(preview.choices.is_empty(), "the option window is hidden");
     assert_eq!(preview.host.world.dialogue.resolved_reply, b"Hello");
+    // The window itself opens on the next head-updater tick; keys read
+    // before then do nothing.
+    assert!(matches!(&preview.talk, Some(TalkWindow::AskAbout(ask)) if ask.opening));
+    assert_eq!(preview.talk_hides(), (true, true));
+    assert!(preview.step(KeyCode::KeyQ));
+    assert!(preview.talk_tick(preview.clock));
+    preview.image().unwrap();
     // Typing: letters and punctuation; Up arrow enters nothing (safe
     // rule); Backspace removes; an empty submit does nothing.
     let typed = |preview: &MapPreview| match &preview.talk {
@@ -160,6 +167,7 @@ fn spec014_tell_me_about_and_ask_about_window() {
     assert_eq!(preview.choices.len(), 1);
     // Esc closes it too; the conversation stays open.
     assert!(preview.step(KeyCode::KeyA));
+    assert!(preview.talk_tick(preview.clock));
     assert!(preview.step(KeyCode::Escape));
     assert!(preview.talk.is_none() && preview.host.world.dialogue.open);
     assert!(

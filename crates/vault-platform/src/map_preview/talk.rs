@@ -35,6 +35,10 @@ pub(crate) struct Review {
 }
 pub(crate) struct AskAbout {
     pub field: talk::AskField,
+    /// Tell Me About was pressed and the reply and option windows are
+    /// hidden; the window itself opens on the next head-updater tick, from
+    /// the reply/choice loop's next input pass (SPEC-014 §3.45).
+    pub opening: bool,
     /// An answer is shown, so the reply window is visible again.
     pub answered: bool,
     /// The reply text, page and remembered pages when the window opened.
@@ -72,7 +76,7 @@ impl MapPreview {
     /// the reply until an answer shows, the options while it is open.
     pub(crate) fn talk_hides(&self) -> (bool, bool) {
         match &self.talk {
-            Some(TalkWindow::AskAbout(ask)) => (!ask.answered, true),
+            Some(TalkWindow::AskAbout(ask)) => (ask.opening || !ask.answered, true),
             _ => (false, false),
         }
     }
@@ -106,6 +110,7 @@ impl MapPreview {
                 (talk::SCROLL_DOWN.0, small),
                 (talk::DONE.0, review),
             ],
+            Some(TalkWindow::AskAbout(ask)) if ask.opening => return true,
             Some(TalkWindow::AskAbout(_)) => ask_buttons()
                 .into_iter()
                 .map(|rect| (rect, review))
@@ -143,6 +148,7 @@ impl MapPreview {
                     self.close_review();
                 }
             }
+            Some(TalkWindow::AskAbout(ask)) if ask.opening => {}
             Some(TalkWindow::AskAbout(_)) => {
                 let [done, cancel] = ask_buttons();
                 if over == done {
@@ -168,6 +174,7 @@ impl MapPreview {
                 KeyCode::ArrowDown => self.scroll_review(true),
                 _ => {}
             },
+            Some(TalkWindow::AskAbout(ask)) if ask.opening => {}
             Some(TalkWindow::AskAbout(ask)) => match key {
                 KeyCode::Backspace => ask.field.backspace(),
                 KeyCode::Enter | KeyCode::NumpadEnter => self.submit_ask(),
@@ -204,6 +211,7 @@ impl MapPreview {
             let dialogue = &self.host.world.dialogue;
             self.talk = Some(TalkWindow::AskAbout(Box::new(AskAbout {
                 field: talk::AskField::new(self.clock),
+                opening: true,
                 answered: false,
                 saved: (
                     dialogue.resolved_reply.clone(),
@@ -279,6 +287,10 @@ impl MapPreview {
             return true;
         }
         match &mut self.talk {
+            Some(TalkWindow::AskAbout(ask)) if ask.opening => {
+                ask.opening = false;
+                true
+            }
             Some(TalkWindow::AskAbout(ask)) => ask.field.blink(now),
             _ => false,
         }
@@ -322,7 +334,9 @@ impl MapPreview {
             (Some(TalkWindow::Review(_)), Some(top), Some(entries)) => {
                 self.draw_review(&painter, image, &entries, top, &names);
             }
-            (Some(TalkWindow::AskAbout(ask)), _, _) => self.draw_ask(&painter, image, ask),
+            (Some(TalkWindow::AskAbout(ask)), _, _) if !ask.opening => {
+                self.draw_ask(&painter, image, ask)
+            }
             _ => {}
         }
     }
