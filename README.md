@@ -178,7 +178,7 @@ cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-saves
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-ai
 # SPEC-010: check every ACM and effect name against the oracle tables:
 cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
-    --validate-acm --validate-sfx --oracle-dir oracle/SPEC-010
+    --validate-acm --validate-sfx --validate-lip --oracle-dir oracle/SPEC-010
 # SPEC-011: check the item-prototype invariants and consume every drug:
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-items
 # SPEC-013: skill, lock, kit, explosive, poison, radiation and loot messages, window
@@ -373,7 +373,10 @@ cargo run -p vault-platform -- --master-dat /path/to/MASTER.DAT --critter-dat /p
 `--master-dat` and `--critter-dat` mount a `DatProvider`: ordinary requests use
 the master database, and `art/critters/` requests use the critter database. Each
 consults the loose `--corpus-dir` first, with no fallback to the other archive.
-Every preview and the world host read through this namespace. Archives are
+A loose `sound/music` or `data/sound/music` directory beside `--master-dat`
+(any letter case) is mounted behind the archives for the music tracks
+(`vault_formats::PrefixMount`). Every preview and the world host read through
+this namespace. Archives are
 opened lazily (`DatArchive::open`): startup reads only the directory tables,
 and each member is read and decoded from the file when requested, keeping the
 64 MiB bound per extracted file. `VfsWorldAssets` caches every decoded
@@ -385,30 +388,40 @@ binds sprites through that cache only for art it has not seen, keeps the
 pixel-to-hex light mapping until the view moves, and shades in bulk through
 the palette's intensity table.
 
-On the local map, **W** opens the world map and **P** the Pip-Boy; script
-`world_map`/`town_map` requests open them too. Both are modal, so the local map's
-scripts and clock wait. Opening the world map (and leaving the town map for it)
-plays `03wrldmp`. The world map is the 450 x 442 viewport over the
-1400 x 1500 world. The specifications name no world artwork, so the view is drawn
-from the fixed terrain grid and discovery values (unknown black, seen dim,
-visited bright). It shows known towns (with the specification's town names), the
-traveller, and the destination. A click travels to a world pixel, or to a known
-town's jittered center. Travel runs at most two loop iterations per update, about
-24 updates per second, with time charges, discovery, healing, and encounters.
-Arriving in a town enters it: a first visit loads its slot-zero map, later visits
-show the town map. **Enter** enters the current town or drops out into the
-terrain here. Arrows scroll, and **Escape** returns. The town map draws interface
-art `156 + town` at (20,20) with its known entrance buttons, labelled from
-`worldmap.msg`; a request for town -1 (an unnumbered map), an unknown town, or
-a missing picture opens the world map instead. Both views, and the Pip-Boy
-below, are stand-ins where no spec names art or layout (see "Known gaps").
+On the local map, **W** opens the world map and **P** the Pip-Boy. Script
+`world_map` opens the current town's town map first, then the world map;
+`town_map` opens the world map directly. Both screens are modal and suspend map
+processing and palette cycling. The world map (SPEC-014 §3.39) shows
+`worldmap.frm` through the 450-by-442 hole of `wmapbox.frm`, darkened by
+discovery cell, with the party marker, the destination crosshair, travel dots,
+the hover label, the town buttons and name plates, the Town/World button and
+the date; `03wrldmp` starts each time it is built. A view click travels to that
+pixel, and a known town's button to its jittered center. Clicking the party at
+rest, or its town's button, enters. Arrival never enters a town. A (follow), C,
+arrows, Home/End and 2-pixel edges scroll, and no key closes it. A pass runs two
+travel iterations every 41 ms, and an encounter flashes 7 times before its map
+loads. The town map (§3.40) shows `twnmapNN.frm` with a triangle per known
+entrance (Vault 15 is `VAULTENT.MAP`, then `VAULTBUR.MAP`). A choice in the
+party's town loads its map; a choice elsewhere travels there on the world map
+(`vault-platform/src/map_preview/world.rs`, `vault_core::worldmap::screen`).
 
-The Pip-Boy shows quests by location (active green, completed dimmed and struck
-through) and the holodisk list and pages, read from `pipboy.msg`. Its alarm clock
-offers the SPEC-008 rest choices. Rest advances one UI step per 50 ms through
-`WorldHost::begin_rest`/`advance_rest`, so the window stays responsive. Escape
-cancels it, and a queue interruption closes the Pip-Boy. SPEC-008 names neither
-catalog; these two hold the specified message ranges.
+The Pip-Boy (SPEC-014 §3.41) is drawn on `pip.frm` with its companion art: the
+date and time from `numbers.frm` and `months.frm`, the vault-water note
+(`pip2.frm`, `notenums.frm`), and the red page buttons and Alarm Clock button,
+which act on release. Status lists the quest locations and holodisks (SPEC-008
+§3.8, through `vault-guidance`), with location details (completed quests struck
+through) and holodisk pages of 35 records with BACK, MORE/DONE and
+PageUp/PageDown. Automaps lists the automap database's areas by short name,
+then an area's captured elevations and its two-row-pitch raster. Video
+Archives replays a played movie with flags `0x0B`. The Alarm Clock offers the
+`pipboy.msg` 302-314 rests, one UI step per at least 50 ms through
+`WorldHost::begin_rest`/`advance_rest` under the watch cursor; Escape stops a
+rest, and a queue interruption closes the Pip-Boy. After two idle minutes the
+screen saver runs. Closing runs `map_update_p_proc`. The `[May-improve]` safe
+rules apply (`vault-platform/src/map_preview/pipboy.rs`, `vault_core::ui::pipboy`).
+The game calendar starts at midnight on 5 December 2161 (SPEC-014 §3.1;
+`host_save::game_date`), shared by the Pip-Boy, the world map, the date
+opcodes and the save header.
 
 Audio plays SPEC-010 sounds on the default device (`--no-audio` keeps it silent):
 - Effect requests resolve through the lookup chain, with the owner's gender
@@ -428,8 +441,13 @@ Audio plays SPEC-010 sounds on the default device (`--no-audio` keeps it silent)
   the preference, so the next preferences sync restores it.
 - At most four effects play at once. A fifth request fails rather than evicting
   one.
-- Talking-head speech plays `sound/speech/<head>/<stem>.ACM`. Its completion
-  ends the head's speech phase; without a file or device it ends at once.
+- Talking-head speech plays `sound/speech/<head>/<stem stored in the .LIP>.ACM`
+  at `floor(69 x V / 100)` of the speech volume (0 plays silently and still
+  lip-syncs). Its playback position drives lip-sync (SPEC-010 §3.12): each head
+  tick draws the speech frame of the current `.LIP` phoneme, and the speech ends
+  normally when the audio finishes or passes the final marker. Without a file or
+  device the next head tick ends it. Choosing an option or switching to Barter
+  stops it without an ending.
 - Library sound slots play their files, loop with mode bit 1, and stop when the
   slot stops, pauses, or is freed.
 
@@ -500,17 +518,21 @@ On the local map, **I** opens the inventory and **C** the character screen
   The use-on window (the world action menu's Inventory entry) is `use.frm`
   with the list, scroll buttons, figure and Cancel at (313, 328), plus Home,
   End, PgUp and PgDn.
-- The character screen reconciles levels on opening. It is the character
-  editor outside creation mode, drawn with the SPEC-014 §3.8 pieces the two
-  modes share (the SPECIAL column, condition and derived lists, skill list,
-  info card, and the DONE and CANCEL buttons) and the `stat.msg`, `skill.msg`,
-  `trait.msg`, `perk.msg` and `editor.msg` texts. It shows SPECIAL, derived
-  statistics, skills (tagged ones starred), traits, and perks, and clicking a
-  skill spends an unspent point. The parts no specification defines are
-  stand-ins (see "Known gaps"). When a perk is pending, the chooser lists the
-  eligible perks by name. Tag! asks for a fourth tag skill and Mutate! for a
-  trait to drop and one to take; cancelling either removes the rank. Done
-  keeps the sheet, while Cancel or Escape restores the sheet saved on opening.
+- The character screen (SPEC-014 §3.42) reconciles levels on opening and is
+  drawn on `edtredt.frm`: the SPECIAL column, the level block with grouped
+  numbers, the skill list with the slider (refusals A, B and C), condition
+  lines lit from poison, radiation and the effect flags, and the info card for
+  every line. The Perks, Karma and Kills folders act on release (`fldrmask.frm`):
+  perks and the trait slots, the reputation row and campaign titles, and the
+  kill types sorted by name in two columns. A pending perk opens the chooser
+  (sorted by name, double click within the idle timer); Tag! and Mutate! run in
+  the same window, and cancelling either still consumes the pick (SPEC-011
+  §3.21). PRINT (and `p`) writes the §3.43 printed sheet. Done keeps the sheet;
+  Cancel or Escape restores the sheet saved on opening. The creation editor's
+  Options SAVE, LOAD and PRINT TO FILE use the §3.43 file dialogs (`.GCD` and
+  `.TXT` in the save root) with their overwrite question and messages
+  (`vault-platform/src/map_preview/character.rs`, `editor_screen.rs`;
+  `vault_core::ui::{character, sheet}`).
 - A dialogue barter request (`gdialog_barter`) opens the SPEC-013 §3.18
   barter window (`barter.frm` under the conversation) with the dialogue's
   target. Its subwindow shows three rows each of your items, your offer,
@@ -1551,161 +1573,54 @@ travel, and Pip-Boy"); there is no engine-specific save envelope.
 ## Open spec questions for the research vault
 
 Each needs a sanitized spec answer; until then the code takes the most literal
-reading (or the stated choice) and comments it. Items 1-13 keep their earlier
-numbering, which code comments cite.
+reading (or the stated choice) and comments it. The questions answered by the
+SPEC-001 to SPEC-014 syncs through R1-rev9 (former items 1-20, 28-30, 32-35,
+37-39, 41, 42 and 44) are closed; the open ones keep their numbers.
 
-1. SPEC-012 §2.8: the prose puts the first negative audio delta at code 121,
-   but the table (and Fixture E and the oracle) put `-29973` at 120. The code
-   follows the table (`vault-formats/src/mve.rs`, `AUDIO_DELTAS`).
-2. SPEC-009 Fixture H lists candidate R2's rating as 22; the §3.4 rule gives
-   20. The code follows the rule (`vault-core/src/ai_tests.rs`, Fixture H).
-3. SPEC-009 §2.5 cites a SPEC-002 "language filter". SPEC-002 now defines it
-   (§3.7, `badwords.txt`), but it is not implemented yet: its preference
-   state is tracked and text is unchanged (`vault-core/src/host_ai.rs`,
-   `AiState::filtered`).
-4. Answered by SPEC-014 R1-rev7 §3.37: the `egg.frm` cutout is drawn
-   (`vault-render/src/map.rs`, `Cutout`).
-5. Answered by SPEC-007 R1-rev8 §3.9: a throw whose projectile phase did not
-   run ends on weapon code 0 (`vault-core/src/host_choreography.rs`, `ranged`).
-6. SPEC-003 §3.3: the exit-grid +16 art shift applies on every parse, so a map
-   saved and reloaded twice moves 5 -> 21 -> 37. Is the shift draw-time only?
-   (`vault-formats/src/map.rs`, exit-grid art adjustment)
-7. Answered by SPEC-008 §2.5: word `0x40` of the player's top-level record
-   only; inventory children are written unchanged
-   (`vault-formats/src/savegame.rs`, `clear_tree`).
-8. Answered by SPEC-014 R1-rev7 §3.33/§3.34: a 2-by-1 cell on a two-row
-   pitch (`vault-core/src/ui/automap.rs`, `pipboy_cell`), and the inventory
-   row formula is `[May-improve]` in both specs.
-9. SPEC-004 §2.5: `0xC801` and `0xA801` are accepted as pushes but not
-   listed, and `0x8401` may be valid but is rejected (`vault-vm/src/program.rs`
-   and `vault-debug/src/decode.rs` agree).
-10. Answered by SPEC-007 R1-rev8 §3.7: a spray runs Stage A inside it and
-    Jinxed/Sniper once on its final result (`vault-core/src/host_combat.rs`,
-    `resolve_spray`).
-11. Answered by SPEC-008 §3.7: four draws, magnitude then sign per axis
-    (`vault-core/src/worldmap.rs`, `town_target`).
-12. Answered by SPEC-008 §3.8: a gap reads as the `Error` placeholder record
-    (`vault-guidance/src/lib.rs`).
-13. Answered by SPEC-006 §3.11: the fidget is drawn at session start, and the
-    idle counter and threshold persist across sessions
-    (`vault-core/src/dialogue.rs`).
-14. SPEC-008 §4.5: the working `.SAV` name of map 7 comes from `map.msg`
-    (`VAULTENT.SAV`); the spec does not name it. Header word 7 of `hubent.sav`
-    is covered by the vector only (`vault-core/src/persistence.rs`).
-15. SPEC-008 §3.4/§3.10: script-directed town travel keeps the
-    every-third-iteration discovery reveal; the spec does not say whether it
-    applies (`vault-core/src/host_skills.rs`, `move_to_map_town`).
-16. SPEC-008 §3.10: under the literal matching rule a `load_map` name without
-    `.map` never matches a `map.msg` text, so it makes no transition
-    (`vault-core/src/worldmap.rs`, `canonical_map_name`).
-17. SPEC-007 §3.3 names an initial scripted combat-request AP bonus, but no
-    SPEC-005 opcode sets it, so it was removed (`vault-core/src/combat_state.rs`).
-18. SPEC-014 §3.36: on leaving a map the literal rule restores roofs from the
-    player's current elevation, while the placement rule's improvement uses
-    the elevation where the group was hidden (`vault-core/src/roof.rs`,
-    `restore_roofs`).
-19. Entrance placement does not check exit grids; no spec says whether it
-    should (`vault-core/src/host.rs`, map entry).
-20. SPEC-014 §3.27 "until every running sequence has ended" is read as "no
-    show is presenting" (`WorldHost::presenting`, `vault-core/src/clicks.rs`).
-21. SPEC-010 §3.11 leaves the volume-to-loudness mapping open; every channel
-    uses SPEC-012 §3.8's conversion, and the master volume does not scale movie
-    audio (`vault-platform/src/audio.rs`, `volume_gain`). No spec gives a volume
-    rule for library sounds.
-22. SPEC-012 §3.10: the subtitle band is one text height plus 4 pixels, so only
-    the first wrapped line of a long subtitle shows (`vault-core/src/movie.rs`).
-23. SPEC-010 §3.11: the on-screen test of the relative-volume rule has no
-    elevation condition (`vault-formats/src/sfx.rs`).
-24. SPEC-013 §3.15 Set Timer: the +/- button sounds are not named; the
-    move-items counter's pair is used (`vault-platform/src/map_preview/timer.rs`).
-25. SPEC-014 §3.17: the pause greyscale table (mean 5-bit grey, provisional)
-    and the converted rows 0-378 are inferred (`vault-core/src/ui/mod.rs`,
-    `grey_table`; `vault-platform/src/map_preview/options.rs`).
-26. SPEC-014 does not specify the object outline geometry (a one-pixel ring
-    around the sprite, `vault-render/src/image.rs`, `outline`), the F12
-    screenshot name and format (`scrNNNNN.ppm` in the save root,
-    `vault-platform/src/interface.rs`), or the `/` date line format
-    (`vault-platform/src/map_preview/hud.rs`).
-27. SPEC-014 §3.13: the medium dialog box's Done offsets are not given; the
-    large box's are reused (`vault-platform/src/editor_screen.rs`).
-28. SPEC-014 §3.18: the 70 ms between a knob's press and release cues does not
-    block input (`vault-platform/src/map_preview/options.rs`).
-29. SPEC-007 §3.4 / SPEC-014 §3.23: no called-shot window is specified, so an
-    aimed slot mode makes an uncalled attack and pays the aiming AP
-    (`vault-platform/src/map_preview/hud.rs`). The hit mode of a slot in reload
-    mode is unspecified; the primary is used.
-30. SPEC-005/SPEC-014 §3.2: a library `fadeout(0)` cannot be told apart from a
-    game fade and is treated as a blocking one (`vault-platform/src/map_preview.rs`).
-31. SPEC-014 §3.29: window-toggle keys (F1, Tab, Escape) are not repeated, and
-    the message monitor's scroll areas keep working while the UI is disabled
-    (`vault-platform/src/input.rs`, `map_preview/hud.rs`).
-32. SPEC-003: with duplicate active script IDs in a map, the first record binds
-    (`vault-formats/src/map.rs`). SPEC-008 §2.3: whether a legacy `0x10` LZSS
-    stream also truncates its final output; it is left strict
-    (`vault-formats/src/dat.rs`).
-33. SPEC-014 §2.4 and §3.8, the character editor outside creation mode:
-    `editor.msg` 109-115 are not in the §2.4 ranges, the caption IDs within
-    116-158 are inferred (124, 130, 136, 152-156), when condition lines 314-318
-    light is not given, and the info card's picture and description for each
-    line are not mapped (`vault-platform/src/map_preview/character.rs`,
-    `editor_screen.rs`).
-34. SPEC-008/SPEC-014: the Pip-Boy art, layout and alarm-menu message IDs, and
-    the world-map artwork, town hotspot image and town-button anchors are not
-    named (see "Known gaps").
-35. SPEC-006 phonemes: the 42 phoneme mappings are specified, but the `.LIP`
-    phoneme source is out of scope (SPEC-010 §1), so nothing drives
-    `WorldHost::speech_phoneme` (`vault-core/src/host.rs`).
-36. SPEC-002: the AAF blend's destination sampling order is unresolved; the
-    preview samples the same coordinate (see "Format safety and
-    compatibility").
-37. SPEC-014 §3.27 "keyboard disabled" is read literally, so the always-on
-    keys (Ctrl+Q, F6/F7, F12) are also discarded while combat locks input
-    (`vault-platform/src/map_preview/hud.rs`, `clicks::input_locked`).
-38. SPEC-014 §3.23: a hand swap disables only "the bar and the mouse", so the
-    other keys keep working while it plays (`vault-platform/src/map_preview/hud.rs`).
-39. Should the `wait2.frm` watch show on every enemy turn? It shows whenever
-    combat locks input, including outside the player's turn
-    (`vault-platform/src/map_preview/hud.rs`, `pointer.rs`).
-40. SPEC-008 §3.10 has a music on/off state, but no spec names the setting
-    that toggles it; the core and the mixer keep it in step, and nothing turns
-    it off (`vault-platform/src/map_preview.rs`, `set_music_enabled`).
-41. SPEC-014 §3.27 near talk: are the distance (below 9) and the clear line
-    measured at click time? The code measures them when the click is made
-    (`WorldHost::near_talk`, `vault-platform/src/map_preview/hud.rs`).
-42. SPEC-006 §3.7 and SPEC-014 §3.27 put "critter scripts" in the background
-    checker but give no cadence or order for `critter_p_proc`. Every placed
-    critter with a script runs it on each out-of-combat real-time tick (one
-    per 100 ms, never in combat or dialogue), in world order, skipping scripts
-    without the procedure (`vault-core/src/host.rs`, `critter_scripts`).
-43. No spec gives the object draw order. Flat objects draw first, then the
-    rest, each pass in object order: ascending hex, then the order on the hex
-    (`vault-render/src/map.rs`, `draw_key`). Picking uses the same order.
-44. SPEC-001 says the additive-mix table is generated for the shipped
-    palettes but not how; the five-bit channels are summed and saturated at
-    31 through the RGB555 lookup (`vault-formats/src/palette.rs`, `additive`).
+- **21.** SPEC-010 §3.11 leaves the volume-to-loudness mapping open; every
+  channel uses SPEC-012 §3.8's conversion, and the master volume does not scale
+  movie audio (`vault-platform/src/audio.rs`, `volume_gain`). No spec gives a
+  volume rule for library sounds. Talking-head speech plays at
+  `floor(69 x V / 100)` of the speech setting (SPEC-010 §3.12).
+- **22.** SPEC-012 §3.10 still does not say what happens to wrapped subtitle
+  lines past the first; only the first shows (`vault-core/src/movie.rs`).
+- **23.** SPEC-010 §3.11: the on-screen test of the relative-volume rule has no
+  elevation condition (`vault-formats/src/sfx.rs`).
+- **24.** SPEC-013 §3.15 Set Timer still names no sounds for the +/- buttons;
+  the move-items counter's pair is used (`vault-platform/src/map_preview/timer.rs`).
+- **25.** SPEC-014 §3.17: the pause greyscale table (mean 5-bit grey,
+  provisional) and the converted rows 0-378 are inferred (`vault-core/src/ui/mod.rs`,
+  `grey_table`). SPEC-014 §3.44's gray tables are translucency levels and do
+  not define this table.
+- **26.** SPEC-014 §3.44 draws object outlines after the roofs, at most 100 per
+  refresh (`vault-render/src/map.rs`, `draw_map_scene`), but no spec gives their
+  geometry (a one-pixel ring, `vault-render/src/image.rs`, `outline`) or the
+  runtime outline word's encoding, so only the §3.27 item hover outline is drawn.
+  The F12 screenshot name and format (`scrNNNNN.ppm` in the save root,
+  `vault-platform/src/interface.rs`) and the `/` date line format
+  (`vault-platform/src/map_preview/hud.rs`) are still unspecified.
+- **27.** SPEC-014 §3.13: the medium dialog box's Done offsets are still not
+  given (§3.43 messages sized by the §3.13 rule can be medium); the large box's
+  are reused (`vault-platform/src/editor_screen.rs`).
+- **31.** SPEC-014 §3.29 still does not say whether window-toggle keys (F1,
+  Tab, Escape) repeat, or whether the message monitor's scroll areas work while
+  the UI is disabled; they do not repeat, and the scroll areas keep working
+  (`vault-platform/src/input.rs`, `map_preview/hud.rs`).
+- **36.** SPEC-002 §3.2 still leaves the AAF blend's destination sampling order
+  unresolved; the preview samples the same coordinate.
+- **40.** SPEC-008 §3.10 has a music on/off state, but no spec names the setting
+  that toggles it (`vault-platform/src/map_preview.rs`, `set_music_enabled`).
+- **43.** SPEC-014 §3.44 insertion order is kept by comparing each drawn
+  object's elevation, hex, pixel offset and flat flag between refreshes
+  (`vault-core/src/world.rs`, `render_objects`): setting the same hex or offset
+  again is not a reinsertion. No spec gives the floor's light; each floor pixel
+  takes its hex's light (`vault-platform/src/map_preview/light.rs`).
 
 ## Known gaps
 
 These parts are stand-ins or missing because no approved spec defines them:
 
-- Pip-Boy (`vault-platform/src/map_preview/pipboy.rs`): its art, layout, fonts
-  and colors, page buttons and sounds, alarm-menu labels, holodisk controls,
-  video-archive titles (file names stand in), and the rest and refusal notes.
-- World and town map (`vault-platform/src/map_preview/world.rs`): the world
-  artwork (the terrain grid is drawn dim or bright instead), the viewport
-  frame, markers, the side panel (date, town list, Enter/Close), the
-  town-button art and label placement, fonts and colors, the way back from the
-  town map, and the blocked-travel note. A town map with no town or picture
-  falls back to the world map.
-- In-game character screen (`vault-platform/src/map_preview/character.rs`):
-  the creation background `edtrcrte.frm` stands in; the level, experience,
-  unspent points, traits and perks, the perk chooser and the Tag!/Mutate!
-  windows reuse creation-mode areas; the level and experience captions are
-  English; condition lines 314-318 never light; spending by clicking a skill
-  row and the refusal texts are engine choices.
-- The character editor's SAVE, LOAD and PRINT TO FILE options do nothing: the
-  file dialog they open is unspecified (`vault-platform/src/editor_screen.rs`).
-- Lip-sync: talking heads do not move their mouths with speech, because the
-  `.LIP` format is out of scope (item 35).
-- No called-shot window (item 29).
-- The object outline geometry is the engine's choice (item 26).
+- The object outline geometry is the engine's choice, and only the item hover outline is drawn (item 26).
+- Talking-head speech started by `message_str` (`0x8105`) plays without
+  lip-sync, and the dialogue Review and Ask About views are not built, so
+  their speech stops are not wired (`WorldHost::stop_speech` is ready).
