@@ -405,7 +405,7 @@ fn effect_rect(sprite: Option<([i64; 2], [i64; 2])>, outline: u32) -> [i64; 4] {
     let Some(([x, y], [width, height])) = sprite else {
         return [0; 4];
     };
-    let grow = i64::from(outline & 0x00ff_ffff != 0 && outline & 0x8000_0000 == 0);
+    let grow = i64::from(vault_formats::map::outline::outlined(outline));
     [
         x - grow,
         y - grow,
