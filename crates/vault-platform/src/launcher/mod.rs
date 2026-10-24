@@ -10,7 +10,6 @@
 //! This is engine infrastructure, not part of any specification.
 mod browse;
 mod font;
-pub(crate) mod keys;
 mod validate;
 mod view;
 mod widgets;
@@ -341,7 +340,7 @@ impl Launcher {
     fn key(&mut self, key: KeyCode, shift: bool) -> Option<LauncherAction> {
         let focus = self.focus;
         if let Some(field) = self.text_mut(focus)
-            && let Some(changed) = field.edit(key, keys::text(key, shift))
+            && let Some(changed) = field.edit(key, field_text(key, shift))
         {
             if changed && matches!(focus, Widget::Field(_)) {
                 self.revalidate();
@@ -917,4 +916,10 @@ impl Launcher {
 enum Edit {
     Toggle,
     Remove,
+}
+
+/// The byte a key types into a launcher field: the shared US-layout text,
+/// and the keypad digits.
+fn field_text(key: winit::keyboard::KeyCode, shift: bool) -> Option<u8> {
+    crate::input::key_text(key, shift).or_else(|| crate::input::key_digit(key))
 }

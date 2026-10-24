@@ -86,7 +86,7 @@ fn type_text(launcher: &mut Launcher, text: &str) {
         let found = KEYS.iter().find_map(|code| {
             [false, true]
                 .into_iter()
-                .find(|shift| keys::text(*code, *shift) == Some(byte))
+                .find(|shift| field_text(*code, *shift) == Some(byte))
                 .map(|shift| (*code, shift))
         });
         let (key, shift) = found.unwrap_or_else(|| panic!("no key types {:?}", byte as char));
@@ -174,14 +174,14 @@ fn the_font_covers_printable_ascii_in_at_most_a_kilobyte() {
 
 #[test]
 fn text_keys_follow_the_us_layout() {
-    assert_eq!(keys::text(KeyCode::KeyA, false), Some(b'a'));
-    assert_eq!(keys::text(KeyCode::KeyZ, true), Some(b'Z'));
-    assert_eq!(keys::text(KeyCode::Digit2, true), Some(b'@'));
-    assert_eq!(keys::text(KeyCode::Semicolon, true), Some(b':'));
-    assert_eq!(keys::text(KeyCode::Backslash, false), Some(b'\\'));
-    assert_eq!(keys::text(KeyCode::Numpad7, true), Some(b'7'));
-    assert_eq!(keys::text(KeyCode::Enter, false), None);
-    assert_eq!(keys::text(KeyCode::ShiftLeft, true), None);
+    assert_eq!(field_text(KeyCode::KeyA, false), Some(b'a'));
+    assert_eq!(field_text(KeyCode::KeyZ, true), Some(b'Z'));
+    assert_eq!(field_text(KeyCode::Digit2, true), Some(b'@'));
+    assert_eq!(field_text(KeyCode::Semicolon, true), Some(b':'));
+    assert_eq!(field_text(KeyCode::Backslash, false), Some(b'\\'));
+    assert_eq!(field_text(KeyCode::Numpad7, true), Some(b'7'));
+    assert_eq!(field_text(KeyCode::Enter, false), None);
+    assert_eq!(field_text(KeyCode::ShiftLeft, true), None);
 }
 
 #[test]
