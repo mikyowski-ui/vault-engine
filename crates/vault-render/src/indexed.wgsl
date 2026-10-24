@@ -1,11 +1,8 @@
-struct Viewport {
-    scale: vec2<f32>,
-    padding: vec2<f32>,
-};
-
+// The frame fills the render pass viewport, an integer-snapped surface
+// rectangle (`Viewport` in lib.rs); each fragment samples the texel under
+// its pixel center, the rule the pointer mapping uses.
 @group(0) @binding(0) var indices: texture_2d<u32>;
 @group(0) @binding(1) var palette: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> viewport: Viewport;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -20,7 +17,7 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOutput {
     );
     let point = positions[index];
     var output: VertexOutput;
-    output.position = vec4(point * viewport.scale, 0.0, 1.0);
+    output.position = vec4(point, 0.0, 1.0);
     output.uv = vec2((point.x + 1.0) * 0.5, (1.0 - point.y) * 0.5);
     return output;
 }

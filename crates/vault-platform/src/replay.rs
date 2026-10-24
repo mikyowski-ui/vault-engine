@@ -183,18 +183,21 @@ impl Replay {
         Ok(())
     }
 
+    /// The pointer's frame pixel through the renderer's viewport for the
+    /// logged surface, clamped to the frame as the desktop maps presses,
+    /// releases and hover (H3).
     fn pixel(&self) -> Option<[i32; 2]> {
-        vault_render::image_position(self.surface, self.image, self.pointer?)
+        vault_render::image_position_clamped(self.surface, self.image, self.pointer?)
     }
 
-    /// Pointer moves reach the preview clamped to the frame, as on the
-    /// desktop.
+    /// Pointer moves reach the preview clamped to the frame, with whether
+    /// they are outside it, as on the desktop.
     fn hover(&mut self) {
-        if let Some(pixel) = self
+        if let Some(point) = self
             .pointer
-            .and_then(|point| vault_render::image_position_clamped(self.surface, self.image, point))
+            .and_then(|point| vault_render::frame_point(self.surface, self.image, point))
         {
-            self.preview.hover(pixel);
+            self.preview.pointer_moved(point);
         }
     }
 
@@ -238,7 +241,10 @@ impl Replay {
                     self.compose()?;
                 }
             }
-            InputCommand::Focus { focused: false } => self.repeat.clear(),
+            InputCommand::Focus { focused: false } => {
+                self.repeat.clear();
+                self.preview.focus_lost();
+            }
             InputCommand::PointerMoved { x, y } => {
                 self.pointer = Some([x, y]);
                 self.hover();
@@ -268,7 +274,11 @@ impl Replay {
                     self.present()?;
                 }
             }
-            InputCommand::Resize { width, height } => self.surface = [width, height],
+            // M-P1: the stored pointer is mapped again in the new viewport.
+            InputCommand::Resize { width, height } => {
+                self.surface = [width, height];
+                self.hover();
+            }
             InputCommand::Modifiers {
                 shift,
                 control,
@@ -444,6 +454,10 @@ mod tests {
             panic!("map preview expected");
         };
         assert!(map.selected.is_some());
+        // H3: presses in the letterbox map to the nearest frame pixel, as
+        // hover does.
+        replay.pointer = Some([10.0, 1270.0]);
+        assert_eq!(replay.pixel(), Some([0, 479]));
         let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
         // Identifiers must increase: a repeated one is a merged or edited log.
         let repeated = r#"{"command_id":2,"kind":"focus","focused":true}

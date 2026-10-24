@@ -10,6 +10,7 @@ pub mod combat_state;
 pub mod critical;
 pub mod dialogue;
 pub mod drugs;
+pub mod floating;
 pub mod handles;
 pub mod host;
 mod host_ai;

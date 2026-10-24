@@ -103,6 +103,19 @@ impl IndexedImage {
             self.pixels[row + start as usize..row + end as usize].fill(color);
         }
     }
+    /// A transparent copy of `source` (index 0 skipped), clipped.
+    pub fn blit_image(&mut self, source: &IndexedImage, origin: [i64; 2]) {
+        let [left, top] = origin;
+        for y in top.max(0)..(top + i64::from(source.height)).min(i64::from(self.height)) {
+            for x in left.max(0)..(left + i64::from(source.width)).min(i64::from(self.width)) {
+                let color =
+                    source.pixels[((y - top) * i64::from(source.width) + x - left) as usize];
+                if color != 0 {
+                    self.pixels[y as usize * self.width as usize + x as usize] = color;
+                }
+            }
+        }
+    }
     pub fn copy_image(&mut self, source: &IndexedImage, origin: [i32; 2]) {
         self.copy_rows(&source.pixels, [source.width, source.height], origin);
     }

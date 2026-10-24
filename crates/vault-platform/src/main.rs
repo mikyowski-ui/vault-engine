@@ -31,7 +31,7 @@ use vault_formats::{Palette, palette::PaletteCycler};
 use vault_render::Renderer;
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
+    dpi::{LogicalSize, PhysicalSize},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
@@ -89,11 +89,19 @@ impl DisplayPalette {
 }
 
 /// The JSONL input log on stdout, buffered: P-02 one flush per event-loop
-/// pass (and at exit) instead of one per input event.
-struct InputLog(std::io::BufWriter<std::io::Stdout>);
+/// pass (and at exit) instead of one per input event. The log is a
+/// diagnostic: when stdout cannot be written (a closed pipe), logging stops
+/// with a warning and the game goes on.
+struct InputLog(Option<std::io::BufWriter<std::io::Stdout>>);
 impl Default for InputLog {
     fn default() -> Self {
-        Self(std::io::BufWriter::new(std::io::stdout()))
+        Self(Some(std::io::BufWriter::new(std::io::stdout())))
+    }
+}
+impl InputLog {
+    fn stop(&mut self, error: &dyn std::fmt::Display) {
+        tracing::warn!(%error, "input log stopped: stdout cannot be written");
+        self.0 = None;
     }
 }
 
@@ -129,15 +137,18 @@ impl Shell {
         event_loop.exit();
     }
 
-    fn log(&mut self, event_loop: &ActiveEventLoop, command: InputCommand) {
-        if let Err(error) = input::write_command(&mut self.input_log.0, &mut self.ids, &command) {
-            self.fail(event_loop, error);
+    fn log(&mut self, _event_loop: &ActiveEventLoop, command: InputCommand) {
+        let Some(log) = &mut self.input_log.0 else {
+            return;
+        };
+        if let Err(error) = input::write_command(log, &mut self.ids, &command) {
+            self.input_log.stop(&*error);
         }
     }
-    fn flush_log(&mut self, event_loop: &ActiveEventLoop) {
+    fn flush_log(&mut self, _event_loop: &ActiveEventLoop) {
         use std::io::Write;
-        if let Err(error) = self.input_log.0.flush() {
-            self.fail(event_loop, error);
+        if let Some(Err(error)) = self.input_log.0.as_mut().map(|log| log.flush()) {
+            self.input_log.stop(&error);
         }
     }
 }
@@ -237,8 +248,13 @@ impl Shell {
         else {
             return;
         };
-        let size = window.inner_size();
-        let Some([x, y]) = surface_point([size.width, size.height], [640, 480], pixel) else {
+        // The renderer's own viewport: the warp lands on the surface pixel
+        // that shows the frame pixel, never in the letterbox.
+        let Some([x, y]) = self
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.surface_point(pixel))
+        else {
             return;
         };
         if let Err(error) = window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y)) {
@@ -250,15 +266,23 @@ impl Shell {
         self.pointer
             .and_then(|point| self.renderer.as_ref()?.image_position(point))
     }
+    /// H3: the pointer's frame pixel, a pointer in the letterbox clamped to
+    /// the nearest frame pixel, as hover sees it.
+    fn clamped_pixel(&self) -> Option<[i32; 2]> {
+        self.pointer
+            .and_then(|point| self.renderer.as_ref()?.frame_point(point))
+            .map(|point| point.pixel)
+    }
 
     /// The pointer's frame pixel reaches the preview, clamped to the frame
-    /// so its edge pixels stay reachable (SPEC-014 §3.29 edge scrolling).
+    /// so its edge pixels stay reachable (SPEC-014 §3.29 edge scrolling),
+    /// with whether it is outside the frame (H3: never an edge).
     fn log_hover(&mut self, event_loop: &ActiveEventLoop, point: [f64; 2]) {
         let hover = self
             .renderer
             .as_ref()
-            .and_then(|renderer| renderer.image_position_clamped(point))
-            .and_then(|pixel| self.preview.as_mut()?.hover(pixel));
+            .and_then(|renderer| renderer.frame_point(point))
+            .and_then(|point| self.preview.as_mut()?.pointer_moved(point));
         if let Some(hover) = hover {
             self.log(
                 event_loop,
@@ -284,7 +308,10 @@ impl ApplicationHandler for Shell {
                 || "Vault Engine — Indexed Color Test".to_owned(),
                 preview::AssetPreview::title,
             ))
-            .with_inner_size(LogicalSize::new(960, 640));
+            .with_inner_size(LogicalSize::new(960, 640))
+            // H2: the frame is never down-sampled in a window that keeps
+            // its minimum size.
+            .with_min_inner_size(PhysicalSize::new(640, 480));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -489,13 +516,15 @@ impl ApplicationHandler for Shell {
                         pressed: state == ElementState::Pressed,
                     },
                 );
-                let pixel = self.pixel();
+                // H3: presses and releases map with the same clamping as
+                // hover, so the letterbox acts at the nearest frame pixel.
+                let pixel = self.clamped_pixel();
                 let pressed = state == ElementState::Pressed;
                 // SPEC-012 §3.12 (G-31): a movie counts the buttons the
                 // frame paths below never see, a middle or extra button
                 // and a press in the letterbox around the frame.
                 let framed = matches!(button, MouseButton::Left | MouseButton::Right);
-                if (!framed || pressed && pixel.is_none())
+                if (!framed || pressed && self.pixel().is_none())
                     && self
                         .preview
                         .as_mut()
@@ -544,9 +573,14 @@ impl ApplicationHandler for Shell {
                 }
             }
             WindowEvent::Focused(focused) => {
-                // Keys held when the focus goes stop repeating.
+                // Keys held when the focus goes stop repeating, and (M-P6)
+                // held mouse presses are dropped: their releases go to
+                // another window.
                 if !focused {
                     self.repeat.clear();
+                    if let Some(preview) = &mut self.preview {
+                        preview.focus_lost();
+                    }
                 }
                 self.log(event_loop, InputCommand::Focus { focused });
             }
@@ -580,23 +614,19 @@ impl ApplicationHandler for Shell {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
-                window.request_redraw();
-            }
-            WindowEvent::ScaleFactorChanged { .. } => {
-                let size = window.inner_size();
-                // The surface changes here too, so the log records it.
-                self.log(
-                    event_loop,
-                    InputCommand::Resize {
-                        width: size.width,
-                        height: size.height,
-                    },
-                );
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.resize(size.width, size.height);
+                // M-P1: the stored pointer maps to another frame pixel in
+                // the new viewport: hover runs again and the drawn cursor
+                // follows, so the next click acts where the cursor shows.
+                if let Some(pointer) = self.pointer {
+                    self.log_hover(event_loop, pointer);
+                    self.refresh_pointer(&window);
                 }
                 window.request_redraw();
             }
+            // The window is resized to the new scale's suggested size after
+            // this event, which reports the new physical size in `Resized`
+            // (handled above); `inner_size` here is still the old one.
+            WindowEvent::ScaleFactorChanged { .. } => window.request_redraw(),
             WindowEvent::RedrawRequested => {
                 if std::mem::take(&mut self.pointer_moved) {
                     self.present_pointer();
@@ -624,35 +654,6 @@ impl ApplicationHandler for Shell {
             _ => {}
         }
     }
-}
-
-/// The surface point at the center of frame pixel `pixel`, found through
-/// the renderer's own pointer mapping (monotonic on each axis), so a warp
-/// lands where a pointer maps back to that pixel.
-fn surface_point(surface: [u32; 2], image: [u32; 2], pixel: [i32; 2]) -> Option<[f64; 2]> {
-    let mut point = [0.0; 2];
-    for axis in 0..2 {
-        let mapped = |value: f64| {
-            let mut probe = [0.0; 2];
-            probe[axis] = value;
-            vault_render::image_position_clamped(surface, image, probe).map(|at| at[axis])
-        };
-        // The first surface coordinate that maps to `target` or beyond.
-        let first = |target: i32| -> Option<f64> {
-            let (mut low, mut high) = (0.0, f64::from(surface[axis]));
-            for _ in 0..48 {
-                let middle = (low + high) / 2.0;
-                if mapped(middle)? >= target {
-                    high = middle;
-                } else {
-                    low = middle;
-                }
-            }
-            Some(high)
-        };
-        point[axis] = (first(pixel[axis])? + first(pixel[axis] + 1)?) / 2.0;
-    }
-    Some(point)
 }
 
 fn run(mut args: Args) -> AppResult<()> {
@@ -716,9 +717,8 @@ fn run(mut args: Args) -> AppResult<()> {
         .map(|preview| DisplayPalette::new(preview.palette(), preview.brightness()));
     shell.preview = preview;
     let run = event_loop.run_app(&mut shell);
-    {
-        use std::io::Write;
-        shell.input_log.0.flush()?;
+    if let Some(Err(error)) = shell.input_log.0.as_mut().map(std::io::Write::flush) {
+        shell.input_log.stop(&error);
     }
     run?;
     if let Some(error) = shell.failure {

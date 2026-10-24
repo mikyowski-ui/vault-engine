@@ -536,7 +536,9 @@ impl MapPreview {
             return Ok(false);
         }
         world.last_pass = Some(now);
-        if let Some(at) = self.pointer.at {
+        // H3: a pointer in the letterbox (clamped onto the frame's edge) is
+        // not on an edge.
+        if let Some(at) = self.pointer.at.filter(|_| !self.pointer.outside) {
             let direction = screen::edge(at);
             if direction != [0, 0] {
                 world.follow = false;
