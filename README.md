@@ -214,9 +214,7 @@ writer round trips; 72 maps entered, 42 working saves written, 0 failures;
 95 AI packets, 312 critters, and 1140 taunt ranges; every DAT member
 (19784 in `MASTER.DAT`, 5459 in `CRITTER.DAT`) matching its loose file; and
 `LIP files: 1601, 1601 passed, 0 failed; 202 end before the audio`. With every
-flag the run ends `Audit categories: 19 run, 1 failed`: `--validate-transitions`
-fails until exported variables are cleared on map change (SPEC-005 §2.2), and
-every other category passes.
+flag the run ends `Audit categories: 19 run, 0 failed`.
 
 `--validate-scripts` decodes every `.int` from its code start to the end of the
 image and requires every instruction word to be one the dispatcher executes:
@@ -262,9 +260,10 @@ reaching at least 20 hexes, and the landing must honour the scripted start:
 within 2 hexes of 20719 on `VAULTBUR` (header default 20100, an 8-hex pocket)
 and of 12107 on `SHADYW`, on the target of an `override_map_start` that ran,
 and on the grid's own hex after an exit grid (SPEC-013 §3.22 step 2). On the
-current tree 17 of 19 entries fault on a missing export (`Ian_ptr` and
-others), 4 landings are pockets or blocked, and 15 scripted starts never run;
-with the export registry cleared on map change every check passes.
+local corpus all 19 entries pass on every check: no script faults, and
+`VAULTBUR` lands on 20719 and `SHADYW` on 12107. A symbol fault here means the
+exported-variable registry is no longer cleared on map change (SPEC-005
+§2.2).
 
 `--validate-lip` parses every `.lip` (version 2, exact size, P = M - 1, no
 loading-check findings, markers increasing from 0) and checks its stored stem,
@@ -691,7 +690,15 @@ scroll, **PageUp**/**PageDown** cycle stacked bodies); a drag lifts an entry
 on the press and drops it on the release over the other pane, with the
 move-items counter for stacks. `metarule` 15 opens the elevator panel. The
 options menu leads to the save/load screens (slots below `--save-dir`), the
-preferences (written to `--config`) and the quit confirmation.
+preferences (written to `--config`) and the quit confirmation. The
+combat-message switch sets `WorldState::verbose_combat_messages` (1 Verbose,
+0 Brief) for combat message formatting. Mouse sensitivity (1.0-2.5, applied on
+the slider's release) has no spec formula. While the world draws its own
+cursor, the engine multiplies the OS pointer's motion by it and warps the
+hidden OS pointer after the scaled one. With the system cursor shown, or where
+the platform cannot warp the pointer, the OS absolute position is used
+unchanged. The input log records the scaled position, so a replay needs no
+sensitivity of its own. These program-run preferences survive a game reset.
 
 The world draws its own cursor (§3.26-3.29). Resting the pointer 250 ms shows
 the hover: the movement cost (or a red X), the arrow's action icon with the
@@ -1028,8 +1035,10 @@ terminates, and time arithmetic wraps at 32 bits.
 
 Exports use separate 1013-entry registries. Variable ownership is by registered
 program filename; same-owner registration resets to integer zero. Procedure
-exports are removed on program purge, while variables survive until registry
-cleanup. Named callbacks, keyboard bindings, and script timers retain their
+exports belong to a program instance and go with it (`0x800E`, `0x8009`, or
+freeing). Variables are never removed per program: the whole variable
+registry is cleared on every map load and leave, every game reset and every
+new game (SPEC-005 §2.2), so each map's first exporter owns a name afresh. Named callbacks, keyboard bindings, and script timers retain their
 separate lifetimes.
 
 `GDialog` tracks session, node processing, review, paging, callbacks, and head

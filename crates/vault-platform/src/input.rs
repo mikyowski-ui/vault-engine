@@ -224,9 +224,101 @@ pub fn write_command(
     Ok(())
 }
 
+/// SPEC-014 §3.18 `mouse_sensitivity` (1.0 through 2.5) for the drawn
+/// software cursor. The spec gives no formula; this engine scales the OS
+/// pointer's motion by it while the game draws its own cursor, and uses
+/// the OS absolute position unchanged whenever the system cursor shows, at
+/// sensitivity 1.0, or when the pointer comes back into the window.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct VirtualPointer {
+    /// The last OS absolute position.
+    os: Option<[f64; 2]>,
+    /// The pointer the game uses (surface pixels).
+    at: Option<[f64; 2]>,
+}
+impl VirtualPointer {
+    /// The OS pointer moved to `os`. With the software cursor at a
+    /// sensitivity above 1.0 the pointer moves by the OS delta times
+    /// `scale`, kept inside the `surface`; otherwise it is `os` itself.
+    pub fn moved(
+        &mut self,
+        os: [f64; 2],
+        scale: f64,
+        software: bool,
+        surface: [f64; 2],
+    ) -> [f64; 2] {
+        let at = match (self.os, self.at) {
+            (Some(last), Some(at)) if software && scale > 1.0 => {
+                let limit =
+                    |axis: usize, value: f64| value.clamp(0.0, (surface[axis] - 1.0).max(0.0));
+                [
+                    limit(0, at[0] + (os[0] - last[0]) * scale),
+                    limit(1, at[1] + (os[1] - last[1]) * scale),
+                ]
+            }
+            _ => os,
+        };
+        self.os = Some(os);
+        self.at = Some(at);
+        at
+    }
+    /// The pointer left the window: the next position re-anchors on the OS.
+    pub fn left(&mut self) {
+        *self = Self::default();
+    }
+    /// The OS pointer was moved to the game's pointer (a warp), so both
+    /// agree again.
+    pub fn anchor(&mut self, point: [f64; 2]) {
+        self.os = Some(point);
+        self.at = Some(point);
+    }
+    /// The game's pointer is away from the hidden OS pointer by more than
+    /// half a pixel, so the OS pointer should follow it (a warp) before it
+    /// can leave the window on its own.
+    pub fn drifted(&self) -> Option<[f64; 2]> {
+        let (os, at) = (self.os?, self.at?);
+        ((os[0] - at[0]).abs() > 0.5 || (os[1] - at[1]).abs() > 0.5).then_some(at)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_sensitivity_scales_software_cursor_motion_only() {
+        let surface = [960.0, 640.0];
+        let mut pointer = VirtualPointer::default();
+        // The first position, and the system cursor, are the OS position.
+        assert_eq!(
+            pointer.moved([100.0, 100.0], 2.0, true, surface),
+            [100.0, 100.0]
+        );
+        assert_eq!(
+            pointer.moved([110.0, 95.0], 2.0, true, surface),
+            [120.0, 90.0]
+        );
+        assert_eq!(pointer.drifted(), Some([120.0, 90.0]));
+        pointer.anchor([120.0, 90.0]);
+        assert_eq!(pointer.drifted(), None);
+        assert_eq!(
+            pointer.moved([130.0, 90.0], 2.0, false, surface),
+            [130.0, 90.0]
+        );
+        assert_eq!(
+            pointer.moved([140.0, 90.0], 1.0, true, surface),
+            [140.0, 90.0]
+        );
+        // Scaled motion stays inside the surface.
+        assert_eq!(
+            pointer.moved([600.0, 0.0], 2.5, true, surface),
+            [959.0, 0.0]
+        );
+        // Leaving the window re-anchors on the OS position.
+        pointer.left();
+        assert_eq!(pointer, VirtualPointer::default());
+        assert_eq!(pointer.moved([5.0, 6.0], 2.5, true, surface), [5.0, 6.0]);
+    }
 
     #[test]
     fn input_log_has_stable_ids_and_typed_json_fields() {

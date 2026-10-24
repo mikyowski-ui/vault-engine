@@ -356,6 +356,17 @@ impl AssetPreview {
         }
     }
     /// Whether the system cursor shows: an interactive world draws its own.
+    /// SPEC-014 §3.18 the applied `mouse_sensitivity`; 1.0 where no game
+    /// world takes the pointer.
+    pub fn mouse_sensitivity(&mut self) -> f64 {
+        match self {
+            Self::Map(preview) => preview.applied_preferences().mouse_sensitivity,
+            Self::Game(game) => game
+                .world()
+                .map_or(1.0, |world| world.applied_preferences().mouse_sensitivity),
+            _ => 1.0,
+        }
+    }
     pub fn system_cursor(&self) -> bool {
         match self {
             Self::Map(_) => false,

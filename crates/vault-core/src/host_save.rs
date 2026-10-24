@@ -496,6 +496,12 @@ impl<A: WorldAssets> WorldHost<A> {
         world.ai.messages = ai.messages.clone();
         world.ai.filtered = ai.filtered;
         world.ai.filter_state = ai.filter_state;
+        // The `fallout.cfg` preferences the world reads belong to the
+        // program run as well: a load restores only the save's own words.
+        world.combat_speed = self.world.combat_speed;
+        world.player_speedup = self.world.player_speedup;
+        world.target_highlight = self.world.target_highlight;
+        world.verbose_combat_messages = self.world.verbose_combat_messages;
         self.world = world;
         Ok(())
     }

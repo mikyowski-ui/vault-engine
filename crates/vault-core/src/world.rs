@@ -716,6 +716,9 @@ pub struct WorldState {
     /// which lets the player's walking use it too.
     pub combat_speed: i32,
     pub player_speedup: bool,
+    /// SPEC-014 §3.18 the `combat_messages` preference: 1 "Verbose"
+    /// (default), 0 "Brief". Combat message formatting reads it.
+    pub verbose_combat_messages: bool,
     /// SPEC-014 §3.44 the `target_highlight` preference now (0-2, default
     /// 2), which the target-outline enable step reads.
     pub target_highlight: i32,
@@ -906,6 +909,7 @@ impl WorldState {
             shows: VecDeque::new(),
             combat_speed: 0,
             player_speedup: false,
+            verbose_combat_messages: true,
             target_highlight: 2,
             crosshair: false,
             default_player_art: 0,

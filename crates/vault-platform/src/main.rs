@@ -115,6 +115,12 @@ struct Shell {
     failure: Option<AppError>,
     preview: Option<preview::AssetPreview>,
     pointer: Option<[f64; 2]>,
+    /// The OS pointer and the game's pointer, which `mouse_sensitivity`
+    /// scales while the software cursor is drawn.
+    virtual_pointer: input::VirtualPointer,
+    /// The platform cannot move the OS pointer, so the scaled pointer could
+    /// not keep it inside the window: OS positions are used unscaled.
+    warp_unsupported: bool,
     started: Option<Instant>,
     display: Option<DisplayPalette>,
     /// The output stream, kept alive for the whole session.
@@ -257,8 +263,37 @@ impl Shell {
         else {
             return;
         };
-        if let Err(error) = window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y)) {
-            tracing::debug!(%error, "pointer warp unsupported");
+        match window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y)) {
+            Ok(()) => self.virtual_pointer.anchor([x, y]),
+            Err(error) => tracing::debug!(%error, "pointer warp unsupported"),
+        }
+    }
+    /// The OS pointer moved to `os`: the game's pointer, scaled by the
+    /// applied mouse sensitivity while the software cursor is drawn. The
+    /// hidden OS pointer is warped after it, so it cannot reach the window
+    /// edge first; where warps are unsupported OS positions stay unscaled.
+    fn scaled_pointer(&mut self, window: &Window, os: [f64; 2]) -> [f64; 2] {
+        let (scale, software) = self.preview.as_mut().map_or((1.0, false), |preview| {
+            (preview.mouse_sensitivity(), !preview.system_cursor())
+        });
+        let scale = if self.warp_unsupported { 1.0 } else { scale };
+        let size = window.inner_size();
+        let surface = [f64::from(size.width), f64::from(size.height)];
+        let point = self.virtual_pointer.moved(os, scale, software, surface);
+        let Some(target) = self.virtual_pointer.drifted() else {
+            return point;
+        };
+        match window.set_cursor_position(winit::dpi::PhysicalPosition::new(target[0], target[1])) {
+            Ok(()) => {
+                self.virtual_pointer.anchor(target);
+                point
+            }
+            Err(error) => {
+                tracing::debug!(%error, "pointer warp unsupported: mouse sensitivity off");
+                self.warp_unsupported = true;
+                self.virtual_pointer.anchor(os);
+                os
+            }
         }
     }
     /// The frame pixel under the pointer, or `None` outside the frame.
@@ -489,19 +524,17 @@ impl ApplicationHandler for Shell {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.pointer = Some([position.x, position.y]);
-                self.log_hover(event_loop, [position.x, position.y]);
-                self.log(
-                    event_loop,
-                    InputCommand::PointerMoved {
-                        x: position.x,
-                        y: position.y,
-                    },
-                );
+                // The log records the game's pointer, so a replay needs no
+                // sensitivity of its own.
+                let [x, y] = self.scaled_pointer(&window, [position.x, position.y]);
+                self.pointer = Some([x, y]);
+                self.log_hover(event_loop, [x, y]);
+                self.log(event_loop, InputCommand::PointerMoved { x, y });
                 self.refresh_pointer(&window);
             }
             WindowEvent::CursorLeft { .. } => {
                 self.pointer = None;
+                self.virtual_pointer.left();
                 if let Some(preview) = &mut self.preview {
                     preview.pointer_left();
                 }

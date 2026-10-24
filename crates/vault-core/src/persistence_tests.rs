@@ -192,6 +192,27 @@ fn spec008_left_maps_join_the_working_saved_set_with_automap_capture() {
 }
 
 #[test]
+fn spec014_loading_a_save_keeps_the_program_run_preferences() {
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    host.world.verbose_combat_messages = false;
+    host.world.combat_speed = 30;
+    host.world.player_speedup = true;
+    host.world.target_highlight = 1;
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    host.load_game(root.path(), 1).unwrap();
+    // `fallout.cfg` preferences the world reads are not in the save: the
+    // reset before a restore keeps them.
+    assert!(!host.world.verbose_combat_messages);
+    assert_eq!(host.world.combat_speed, 30);
+    assert!(host.world.player_speedup);
+    assert_eq!(host.world.target_highlight, 1);
+}
+
+#[test]
 fn spec009_loading_a_save_keeps_the_combat_ai_tables() {
     let dir = corpus();
     let root = tempfile::tempdir().unwrap();
