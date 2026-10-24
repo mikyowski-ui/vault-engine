@@ -192,6 +192,56 @@ fn spec008_left_maps_join_the_working_saved_set_with_automap_capture() {
 }
 
 #[test]
+fn spec009_loading_a_save_keeps_the_combat_ai_tables() {
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let keys = [
+        "packet_num=0",
+        "max_dist=8",
+        "min_to_hit=40",
+        "min_hp=0",
+        "aggression=0",
+        "hurt_too_much=",
+        "secondary_freq=4",
+        "called_freq=3",
+        "font=101",
+        "color=145",
+        "outline_color=-1",
+        "chance=100",
+        "run_start=1000",
+        "move_start=1010",
+        "attack_start=1020",
+        "miss_start=1030",
+        "hit_head_start=1040",
+        "hit_left_arm_start=1050",
+        "hit_right_arm_start=1060",
+        "hit_torso_start=1070",
+        "hit_right_leg_start=1080",
+        "hit_left_leg_start=1090",
+        "hit_eyes_start=1100",
+        "hit_groin_start=1110",
+        "last_msg=1119",
+    ];
+    let text = format!("[Guard]\r\n{}\r\n", keys.join("\r\n"));
+    let packets = Arc::new(vault_formats::ai::Packets::parse(text.as_bytes()).unwrap());
+    host.world.ai.packets = Some(packets.clone());
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    host.load_game(root.path(), 1).unwrap();
+    // The reset before a restore keeps the packet table, so NPC turns are
+    // not skipped as "packets not loaded" after a load.
+    assert!(
+        host.world
+            .ai
+            .packets
+            .as_ref()
+            .is_some_and(|loaded| Arc::ptr_eq(loaded, &packets))
+    );
+}
+
+#[test]
 fn spec008_save_slot_round_trip_restores_the_world() {
     let dir = corpus();
     let root = tempfile::tempdir().unwrap();

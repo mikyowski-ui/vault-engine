@@ -389,6 +389,12 @@ impl Vm {
                     LaunchMode::Replace => self.parent,
                     LaunchMode::Independent => None,
                 };
+                // SPEC-005 §2.2 `0x8009` [May-improve] safe rule: the old
+                // program's procedure entries go before the replacement's
+                // first instruction (its variables stay registered).
+                if mode == LaunchMode::Replace {
+                    host.remove_procedures(self.id)?;
+                }
                 let child = host.launch(
                     &name,
                     mode,
@@ -595,8 +601,25 @@ impl Vm {
     pub fn update(&mut self, host: &mut impl VmHost) -> Result<RunOutcome, VmError> {
         self.run(host, 10)
     }
+    /// Run up to `budget` instructions. SPEC-006 §3.5 / SPEC-004 §3.3:
+    /// instructions executed while critical is set do not count against the
+    /// budget; the hard instruction limit counts every instruction.
     pub fn run(&mut self, host: &mut impl VmHost, budget: u32) -> Result<RunOutcome, VmError> {
-        let mut executed = 0;
+        self.execute_loop(host, budget, false)
+    }
+    /// Execute at most one instruction, after the same status checks as
+    /// [`Self::run`]: `Budget` when it ran and nothing else is to report.
+    /// A debugger's observer steps a program this way.
+    pub fn step(&mut self, host: &mut impl VmHost) -> Result<RunOutcome, VmError> {
+        self.execute_loop(host, 0, true)
+    }
+    fn execute_loop(
+        &mut self,
+        host: &mut impl VmHost,
+        budget: u32,
+        single: bool,
+    ) -> Result<RunOutcome, VmError> {
+        let (mut executed, mut counted) = (0, 0);
         loop {
             if self.status.contains(VmStatus::YIELD) {
                 self.status.0 &= !VmStatus::YIELD;
@@ -635,7 +658,13 @@ impl Vm {
             {
                 return Ok(RunOutcome::FragmentEnd);
             }
-            if executed >= budget && !self.status.contains(VmStatus::CRITICAL) {
+            let critical = self.status.contains(VmStatus::CRITICAL);
+            let spent = if single {
+                executed >= 1
+            } else {
+                counted >= budget && !critical
+            };
+            if spent {
                 return Ok(RunOutcome::Budget);
             }
             if executed >= self.hard_instruction_limit {
@@ -645,6 +674,9 @@ impl Vm {
                 return self.fault(error);
             }
             executed += 1;
+            if !critical {
+                counted += 1;
+            }
         }
     }
     fn save_context(&mut self) -> Result<(), VmError> {
@@ -785,7 +817,10 @@ impl Vm {
         self.jump(address)?;
         let mut completed = false;
         for _ in 0..budget.min(self.hard_instruction_limit) {
-            self.execute(host)?;
+            host.observe_before(self);
+            let result = self.execute(host);
+            host.observe_after(self, &result.clone().map(|()| RunOutcome::Budget));
+            result?;
             if self.pc == pc && self.return_stack.byte_len() == returns {
                 completed = true;
                 break;

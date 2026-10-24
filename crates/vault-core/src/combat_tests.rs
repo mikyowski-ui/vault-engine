@@ -1933,3 +1933,144 @@ fn spec014_combat_sets_and_clears_target_outlines() {
     host.world.enable_target_outlines();
     assert_eq!(host.world.outline_word(a), 0);
 }
+
+/// An AI whose NPC turns can request the script quit (as `terminate_combat`
+/// does) or fail; every NPC sees the player as its danger source.
+#[derive(Default)]
+struct Quitting {
+    quit_on: ObjectRef,
+    fail: bool,
+    turns: Vec<ObjectRef>,
+}
+impl CombatAi for Quitting {
+    fn danger_target(&mut self, world: &WorldState, critter: ObjectRef) -> Option<ObjectRef> {
+        (critter != world.player).then_some(world.player)
+    }
+    fn take_turn(
+        &mut self,
+        world: &mut WorldState,
+        critter: ObjectRef,
+    ) -> Result<(), crate::WorldError> {
+        self.turns.push(critter);
+        if critter == self.quit_on {
+            world.combat_quit = true;
+        }
+        if self.fail {
+            return Err(crate::WorldError::Invalid("scripted turn failure".into()));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn spec005_terminate_combat_ends_combat_at_the_next_turn_boundary() {
+    use crate::critical::state;
+    let mut world = world();
+    let player = world.player;
+    let a = fighter(&mut world, 20102, 12, 0);
+    let mut host = crate::WorldHost::new(world, NoAssets);
+    // Requested during the player's turn: the turn's input stops, and
+    // combat ends once it is over; a quit awards no kill experience.
+    host.start_combat(player, a).unwrap();
+    let mut ai = Quitting::default();
+    assert_eq!(
+        host.advance_combat(&mut ai).unwrap(),
+        CombatProgress::PlayerTurn
+    );
+    host.world.combat_experience = 25;
+    host.world.combat_quit = true;
+    assert!(host.player_turn_over());
+    assert_eq!(host.advance_combat(&mut ai).unwrap(), CombatProgress::Ended);
+    assert!(!host.world.combat && !host.world.combat_quit);
+    assert_eq!(host.world.combat_state.flags, state::INPUT_GATE);
+    assert_eq!(host.world.player_sheet().unwrap().experience, 0);
+    assert!(ai.turns.is_empty());
+    // Requested during an NPC's turn: combat ends before the player's
+    // next turn, and the player is back in control outside combat.
+    host.start_combat(a, player).unwrap();
+    let mut ai = Quitting {
+        quit_on: a,
+        ..Quitting::default()
+    };
+    assert_eq!(host.advance_combat(&mut ai).unwrap(), CombatProgress::Ended);
+    assert_eq!(ai.turns, [a]);
+    assert!(!host.world.combat && !host.world.combat_state.player_turn);
+}
+
+#[test]
+fn spec014_a_knocked_out_player_wakes_between_combat_rounds() {
+    use crate::queue::EventKind;
+    let mut world = world();
+    let player = world.player;
+    let a = fighter(&mut world, 20102, 12, 0);
+    let mut host = crate::WorldHost::new(world, NoAssets);
+    host.start_combat(a, player).unwrap();
+    set_results(&mut host.world, player, effect::KNOCKED_OUT, 0);
+    let now = host.world.clock.ticks;
+    host.world
+        .queue
+        .insert(now, 120, player, EventKind::Knockout)
+        .unwrap();
+    // The player's turns are skipped while out; each round adds 50 ticks
+    // and processes the queue, so the wake-up runs and the player stands
+    // at a turn start (3 AP) instead of combat spinning to its turn limit.
+    let mut ai = Quitting::default();
+    assert_eq!(
+        host.advance_combat(&mut ai).unwrap(),
+        CombatProgress::PlayerTurn
+    );
+    assert!(host.world.clock.ticks >= now + 120);
+    let results = host.world.critter_state(player).unwrap().results.0;
+    assert_eq!(results & (effect::KNOCKED_OUT | effect::KNOCKED_DOWN), 0);
+    assert_eq!(ap(&host.world, player), 7 - 3);
+    assert!(ai.turns.len() >= 3);
+}
+
+#[test]
+fn a_failing_npc_turn_is_diagnosed_and_the_turn_passes() {
+    let mut world = world();
+    let player = world.player;
+    let a = fighter(&mut world, 20102, 12, 0);
+    let mut host = crate::WorldHost::new(world, NoAssets);
+    host.start_combat(a, player).unwrap();
+    let mut ai = Quitting {
+        fail: true,
+        ..Quitting::default()
+    };
+    assert_eq!(
+        host.advance_combat(&mut ai).unwrap(),
+        CombatProgress::PlayerTurn
+    );
+    assert_eq!(ai.turns, [a]);
+    assert!(host.world.effects.iter().any(|effect| matches!(
+        effect,
+        crate::WorldEffect::Diagnostic(message) if message.contains("scripted turn failure")
+    )));
+}
+
+#[test]
+fn spec007_a_scripted_request_lasts_only_for_the_first_turn() {
+    use crate::combat_state::CombatRequest;
+    let mut world = world();
+    let player = world.player;
+    let a = fighter(&mut world, 20102, 12, 0);
+    let mut host = crate::WorldHost::new(world, NoAssets);
+    host.world.pending_combat = Some(CombatRequest {
+        attacker: a,
+        defender: player,
+        accuracy: 10,
+        damage: [0, 5],
+        flags: None,
+    });
+    assert!(host.service_combat_request().unwrap());
+    assert!(host.world.combat_state.request.is_some());
+    // The attacker's first turn passes without the requested attack: the
+    // window closes, so a later attack is not adjusted by the request.
+    let mut ai = Quitting::default();
+    assert_eq!(
+        host.advance_combat(&mut ai).unwrap(),
+        CombatProgress::PlayerTurn
+    );
+    assert_eq!(ai.turns, [a]);
+    assert!(host.world.combat_state.request.is_none());
+}

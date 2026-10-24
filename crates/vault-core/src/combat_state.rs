@@ -468,13 +468,23 @@ impl<A: WorldAssets> WorldHost<A> {
         let count = active.len();
         self.world.combat_state.list[..count].copy_from_slice(&active);
         self.world.clock.advance(50)?;
+        // SPEC-014 §3.5: combat runs inside one main-loop pass, so the
+        // events this round made due (a knocked-out player's wake-up among
+        // them) are processed here.
+        self.process_queue()?;
         Ok(())
     }
     /// Run one turn up to its action branch. A player turn stops for input.
     fn take_turn(&mut self, critter: ObjectRef, ai: &mut dyn CombatAi) -> Result<bool, WorldError> {
         self.world.combat_actor = critter;
-        // Only the very first turn after a scripted request sees its target.
-        let requested = self.world.ai.requested.take();
+        // Only the very first turn after a scripted request sees its target,
+        // and only when it is the request's attacker (SPEC-009 §3.6).
+        let requested = self.world.ai.requested.take().filter(|_| {
+            self.world
+                .combat_state
+                .request
+                .is_some_and(|request| request.attacker == critter)
+        });
         let resumed = std::mem::take(&mut self.world.combat_state.resumed);
         if !self.world.combat_active(critter) {
             if let Some(state) = self.world.critter_state_mut(critter) {
@@ -525,22 +535,34 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         // SPEC-014 §3.44: the acting NPC is outlined for its whole turn.
         self.world.enable_outline(critter);
-        if ai.builtin() {
+        let turn = if ai.builtin() {
             let (target, accuracy) = requested.map_or((None, 0), |(t, a)| (Some(t), a));
             self.world.ai.accuracy = accuracy;
-            let turn = self.ai_turn(critter, target);
+            let turn = self.ai_turn(critter, target).map(|_| ());
             self.world.ai.accuracy = 0;
-            turn?;
+            turn
         } else {
-            ai.take_turn(&mut self.world, critter)?;
+            ai.take_turn(&mut self.world, critter)
+        };
+        // A failure inside the turn is diagnosed and the turn still ends,
+        // so the same turn is not retried on every pass.
+        if let Err(error) = turn {
+            self.world
+                .diagnostic(format!("combat turn of {critter:#x}: {error}"));
         }
         self.end_turn(critter);
         Ok(false)
     }
     /// Turn end: damage received this turn resets and free movement clears.
+    /// The first turn of the first pass closes the scripted request's
+    /// window (SPEC-007 §3.3): an unused request no longer applies.
     fn end_turn(&mut self, critter: ObjectRef) {
         if let Some(state) = self.world.critter_state_mut(critter) {
             state.damage = 0;
+        }
+        let combat = &mut self.world.combat_state;
+        if combat.round == 0 && combat.cursor == 0 {
+            combat.request = None;
         }
         // SPEC-014 §3.44: the turn's outlines are disabled as it ends.
         if critter == self.world.player {
@@ -589,6 +611,13 @@ impl<A: WorldAssets> WorldHost<A> {
                     return Ok(CombatProgress::Ended);
                 }
                 self.world.combat_state.cursor += 1;
+            }
+            // SPEC-005 0x8153: a script's deferred quit-combat request ends
+            // combat at the next turn boundary (cleanup then awards no
+            // experience and leaves a knockout in place).
+            if self.world.combat_quit {
+                self.end_combat()?;
+                return Ok(CombatProgress::Ended);
             }
             let player = self.world.player;
             if self.world.is_dead(player)
@@ -678,10 +707,12 @@ impl<A: WorldAssets> WorldHost<A> {
             {
                 continue;
             }
+            // SPEC-009 §3.14: the join predicate runs a waiter's combat
+            // procedure (fixed parameter 5) here too.
             let refuse = if index < combat.active {
                 !self.wants_to_stop(critter, ai)
             } else {
-                self.wants_to_join(critter, ai, false)
+                self.wants_to_join(critter, ai, true)
             };
             if refuse {
                 return false;

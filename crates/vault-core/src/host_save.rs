@@ -474,16 +474,28 @@ impl<A: WorldAssets> WorldHost<A> {
             self.registry.purge(program)?;
             self.library.cleanup(program);
         }
+        // SPEC-005 §2.2: a full game reset clears the whole exported-variable
+        // registry, all owners.
+        self.registry.clear();
         self.programs.clear();
         self.clear_program_bindings();
         self.motions.clear();
         self.building_animation = None;
+        self.pending_dialogue = None;
         let sheet = self.world.player_sheet().cloned().unwrap_or_default();
         let mut world = WorldState::fresh(sheet, 1)?;
         world.rules = std::mem::take(&mut self.world.rules);
         world.rng = self.world.rng.clone();
         // The head updater's idle state lasts the whole program run.
         world.dialogue.idle = self.world.dialogue.idle;
+        // The SPEC-009 §3.1 packet table and taunt catalog come from game
+        // initialization, not from the game, so they outlive a reset (the
+        // catalog with its language-filter state).
+        let ai = &self.world.ai;
+        world.ai.packets = ai.packets.clone();
+        world.ai.messages = ai.messages.clone();
+        world.ai.filtered = ai.filtered;
+        world.ai.filter_state = ai.filter_state;
         self.world = world;
         Ok(())
     }

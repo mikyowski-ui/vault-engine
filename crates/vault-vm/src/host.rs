@@ -1,4 +1,4 @@
-use crate::{Value, Vm, VmError};
+use crate::{RunOutcome, Value, Vm, VmError};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +44,15 @@ pub trait VmHost {
     fn purge(&mut self, _id: u32) -> Result<(), VmError> {
         Ok(())
     }
+    /// SPEC-005 §2.2 `0x8009`: the replaced program's exported procedures
+    /// are removed (variables are never removed per program).
+    fn remove_procedures(&mut self, _owner: u32) -> Result<(), VmError> {
+        Ok(())
+    }
+    /// A debug observer's view of an instruction executed outside an
+    /// ordinary run (a conditional procedure's condition stream).
+    fn observe_before(&mut self, _vm: &Vm) {}
+    fn observe_after(&mut self, _vm: &Vm, _result: &Result<RunOutcome, VmError>) {}
     fn wait_ready(
         &mut self,
         _reference: u32,
@@ -85,6 +94,14 @@ pub struct BasicHost {
 impl BasicHost {
     pub fn register_program(&mut self, id: u32, filename: &[u8]) {
         self.filenames.insert(id, key(filename));
+    }
+    /// SPEC-005 §2.2 the full clear of every map load and leave, every full
+    /// game reset and new game: both registries are emptied, whatever their
+    /// owners.
+    pub fn clear(&mut self) {
+        self.variables.clear();
+        self.procedures.clear();
+        self.filenames.clear();
     }
     fn owner(&self, id: u32) -> Vec<u8> {
         self.filenames
@@ -160,9 +177,16 @@ impl VmHost for BasicHost {
             .cloned()
             .ok_or_else(|| symbol(name))
     }
+    // SPEC-005 §2.2: ending a program removes only its procedure entries;
+    // exported variables survive until the next full clear.
     fn purge(&mut self, id: u32) -> Result<(), VmError> {
-        self.procedures.retain(|_, procedure| procedure.owner != id);
+        self.remove_procedures(id)?;
         self.filenames.remove(&id);
+        Ok(())
+    }
+    fn remove_procedures(&mut self, owner: u32) -> Result<(), VmError> {
+        self.procedures
+            .retain(|_, procedure| procedure.owner != owner);
         Ok(())
     }
 }

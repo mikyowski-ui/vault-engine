@@ -481,6 +481,14 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.world.combat_experience =
                     self.world.combat_experience.saturating_add(experience);
             }
+            // SPEC-007 §3.6: the dead critter's script is detached (its
+            // program stays loaded, SPEC-005 §2.2), then it leaves the party.
+            if let Some(script) = self.world.script_for(victim) {
+                self.world.remove_script(script);
+                if let Some(object) = self.world.get_mut(victim) {
+                    object.raw.script_id = -1;
+                }
+            }
             self.world.party.remove(&victim);
         }
         Ok(())

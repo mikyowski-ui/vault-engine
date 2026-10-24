@@ -47,15 +47,24 @@ const STALE_REFERENCE: &str = "invalid opaque object reference";
 fn stale_reference(reference: ObjectRef) -> VmError {
     VmError::Host(format!("{STALE_REFERENCE} {reference:#x}"))
 }
+/// The error prefix of an ordinary host failure inside a row. SPEC-005
+/// §2.1: a host diagnostic followed by an ordinary return does not raise a
+/// VM error, so `game_call` diagnoses it and pushes the row's null result.
+const HOST_FAILURE: &str = "host failure:";
+fn host_failure(error: impl std::fmt::Display) -> VmError {
+    VmError::Host(format!("{HOST_FAILURE} {error}"))
+}
 /// SPEC-005 §2.1: the null result of each row that resolves an object
-/// reference, as its null-operand path pushes it.
+/// reference, as its null-operand path pushes it (or the row's safe rule).
 fn null_result(op: u16) -> Option<ExternalValue> {
     match op {
         0x80a4 => string(b"<Critter>".to_vec()),
         0x80a5 | 0x813d | 0x8141 => dynamic_null(),
-        0x80c8 | 0x80ca | 0x80d4 | 0x8100 | 0x8102 | 0x8103 => integer(-1),
-        0x80d3 => integer(9999),
-        0x80ec | 0x80f3 | 0x80f5 | 0x8106 | 0x8144 | 0x8149 => integer(0),
+        0x80c8 | 0x80ca | 0x80d4 | 0x80d5 | 0x80ff | 0x8100 | 0x8102 | 0x8103 | 0x8139 => {
+            integer(-1)
+        }
+        0x80d2 | 0x80d3 => integer(9999),
+        0x80e8 | 0x80ec | 0x80f3 | 0x80f5 | 0x8106 | 0x8117 | 0x8144 | 0x8149 => integer(0),
         _ => None,
     }
 }
@@ -412,7 +421,9 @@ impl<A: WorldAssets> WorldHost<A> {
         match self.game_call_row(vm, call) {
             // SPEC-005 §2.1 safe rule: a stale nonzero reference gives a
             // diagnostic and the row's null result, not a VM error.
-            Err(VmError::Host(message)) if message.starts_with(STALE_REFERENCE) => {
+            Err(VmError::Host(message))
+                if message.starts_with(STALE_REFERENCE) || message.starts_with(HOST_FAILURE) =>
+            {
                 let op = call.spec.word;
                 self.world.diagnostic(format!("{op:#06x}: {message}"));
                 Ok(null_result(op))
@@ -540,17 +551,17 @@ impl<A: WorldAssets> WorldHost<A> {
                     if !(0..3).contains(&elevation) {
                         return Err(VmError::Host("unrecoverable entry override".into()));
                     }
-                    self.world.move_object(
-                        self.world.player,
-                        destination,
-                        elevation as u8,
-                        false,
-                    )?;
+                    // An orientation outside 0-5 is diagnosed before anything
+                    // moves (safe rule: the reference moves, then fails).
+                    let facing = u8::try_from(orientation)
+                        .ok()
+                        .filter(|n| *n < 6)
+                        .ok_or_else(|| host_failure("override_map_start orientation"))?;
+                    self.world
+                        .move_object(self.world.player, destination, elevation as u8, false)
+                        .map_err(host_failure)?;
                     if let Some(player) = self.world.get_mut(self.world.player) {
-                        player.raw.orientation = u8::try_from(orientation)
-                            .ok()
-                            .filter(|n| *n < 6)
-                            .ok_or(VmError::Arithmetic)?;
+                        player.raw.orientation = facing;
                     }
                 }
                 None
@@ -815,7 +826,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.object(call.uint(1))?
                     .character
                     .as_ref()
-                    .ok_or_else(|| VmError::Host("stat host requires critter".into()))?
+                    .ok_or_else(|| host_failure("stat host requires critter"))?
                     .stat(call.uint(0) as usize, self.world.context(call.uint(1)))
             }),
             0x80cb => {
@@ -881,10 +892,9 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x80d1 => None,
-            0x80d2 => integer(
-                HexGrid::angular_distance(call.int(1), call.int(0))
-                    .map_err(|e| VmError::Host(e.to_string()))?,
-            ),
+            0x80d2 => {
+                integer(HexGrid::angular_distance(call.int(1), call.int(0)).map_err(host_failure)?)
+            }
             0x80d3 => {
                 let (a, b) = (call.uint(1), call.uint(0));
                 if a < 40000 || b < 40000 {
@@ -911,7 +921,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 } else {
                     integer(
                         HexGrid::step(call.int(2), call.int(1) as u8, call.int(0))
-                            .map_err(|e| VmError::Host(e.to_string()))?,
+                            .map_err(host_failure)?,
                     )
                 }
             }
@@ -1091,7 +1101,8 @@ impl<A: WorldAssets> WorldHost<A> {
             // A null object pushes I zero with no effect (safe rule).
             0x80e8 => {
                 if call.uint(1) != 0 {
-                    self.change_hp(call.uint(1), call.int(0))?;
+                    self.change_hp(call.uint(1), call.int(0))
+                        .map_err(host_failure)?;
                 }
                 integer(0)
             }
@@ -1112,7 +1123,8 @@ impl<A: WorldAssets> WorldHost<A> {
                     self.world
                         .diagnostic("single kill during restoration proceeds");
                 }
-                self.kill(vm, call.uint(1), call.int(0))?;
+                self.kill(vm, call.uint(1), call.int(0))
+                    .map_err(host_failure)?;
                 None
             }
             0x80ee => {
@@ -1160,15 +1172,18 @@ impl<A: WorldAssets> WorldHost<A> {
                 if call.uint(2) != 0
                     && let Some(script) = self.world.script_for(call.uint(2))
                 {
-                    self.world.queue.insert(
-                        self.world.clock.ticks,
-                        i64::from(call.int(1)),
-                        call.uint(2),
-                        EventKind::Script {
-                            script,
-                            parameter: call.int(0),
-                        },
-                    )?;
+                    self.world
+                        .queue
+                        .insert(
+                            self.world.clock.ticks,
+                            i64::from(call.int(1)),
+                            call.uint(2),
+                            EventKind::Script {
+                                script,
+                                parameter: call.int(0),
+                            },
+                        )
+                        .map_err(host_failure)?;
                 }
                 None
             }
@@ -1260,14 +1275,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 let difference = (i64::from(self.world.camera_hex) - i64::from(call.int(0))).abs();
                 integer(i32::from(difference % 200 < 5 || difference / 200 < 5))
             }
+            // SPEC-005 §3.3: the dialogue game state is requested with self
+            // as the target; the next tick enters it outside this program.
             0x80f9 => {
                 let owner = self.self_object(vm);
                 if owner != 0 && !self.world.combat && self.object(owner)?.alive() {
                     self.world.dialogue.target = owner;
-                    self.world.emit(WorldEffect::DefaultAction {
-                        action: ObjectAction::Talk,
-                        target: owner,
-                    });
+                    self.pending_dialogue = Some(owner);
                 }
                 None
             }
@@ -1331,7 +1345,8 @@ impl<A: WorldAssets> WorldHost<A> {
                         // An elevation change removes the critter from combat
                         // (`move_object`); the object first goes to hex 0.
                         self.world
-                            .move_object(call.uint(2), 0, call.int(0) as u8, false)?;
+                            .move_object(call.uint(2), 0, call.int(0) as u8, false)
+                            .map_err(host_failure)?;
                         let mut candidates = vec![call.int(1)];
                         for direction in 0..6 {
                             if let Ok(Some(hex)) = HexGrid::neighbor(call.int(1), direction) {
@@ -1871,7 +1886,11 @@ impl<A: WorldAssets> WorldHost<A> {
                         let pid = self.world.rules.money_pid();
                         if amount > 0 {
                             // New money stacks into a carried money entry.
-                            let reference = self.world.instantiate(self.assets.prototype(pid)?)?;
+                            let reference = self
+                                .assets
+                                .prototype(pid)
+                                .and_then(|prototype| self.world.instantiate(prototype))
+                                .map_err(host_failure)?;
                             if let Some(item) = self.world.get_mut(reference) {
                                 item.money = Some(0);
                             }
@@ -2018,7 +2037,9 @@ impl<A: WorldAssets> WorldHost<A> {
                         .map_or(0, |(_, n)| *n)
                         .min(call.int(0));
                     if count > 0 {
-                        self.world.remove_item(owner, object, count)?;
+                        self.world
+                            .remove_item(owner, object, count)
+                            .map_err(host_failure)?;
                         if self.world.get(object).is_some_and(|o| o.owner.is_none()) {
                             self.destroy(vm, object)?;
                         }
@@ -2059,7 +2080,9 @@ impl<A: WorldAssets> WorldHost<A> {
                     let inventory = self.object(source)?.inventory.clone();
                     self.object(destination)?;
                     for (item, count) in inventory {
-                        self.world.remove_item(source, item, count)?;
+                        self.world
+                            .remove_item(source, item, count)
+                            .map_err(host_failure)?;
                         if let Err(error) = self.world.add_item(destination, item, count, true) {
                             self.world.diagnostic(error.to_string());
                         }
