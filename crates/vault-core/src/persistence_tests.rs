@@ -1608,3 +1608,117 @@ fn spec006_map_loads_normalize_last_attackers() {
     let critter = find(&host, CRITTER, None);
     assert_eq!(host.world.get(critter).unwrap().opponent, 0);
 }
+
+#[test]
+fn spec008_crafted_manifest_names_never_leave_the_slot() {
+    use crate::host_save::valid_companion_name;
+    for good in ["SYNTH.SAV", "V13ENT.SAV", "DESERT_1.SAV", "A-B.SAV"] {
+        assert!(valid_companion_name(good), "{good}");
+    }
+    for bad in [
+        "../../X.SAV",
+        "..\\X.SAV",
+        "/tmp/X.SAV",
+        "C:X.SAV",
+        "x.sav",
+        "Synth.SAV",
+        "SYNTH.MAP",
+        "SYNTH",
+        ".SAV",
+        "..SAV",
+        "A.B.SAV",
+        "A B.SAV",
+        "SAVE.DAT",
+        "",
+    ] {
+        assert!(!valid_companion_name(bad), "{bad:?}");
+    }
+
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    host.save_game(root.path(), 2, &SaveInfo::default())
+        .unwrap();
+    let slot = slot_directory(root.path(), 2).unwrap();
+    let companion = fs::read(slot.join("SYNTH.SAV")).unwrap();
+    // Sentinels outside the slot that are perfectly valid map images: an
+    // unchecked lookup would read one and load it under the crafted name.
+    let sentinels = [
+        root.path().join("X.SAV"),
+        root.path().join("SAVEGAME/X.SAV"),
+    ];
+    for sentinel in &sentinels {
+        fs::write(sentinel, &companion).unwrap();
+    }
+    let listing = |dir: &Path| {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let outside = |root: &Path| {
+        (
+            sentinels
+                .iter()
+                .map(|p| fs::read(p).unwrap())
+                .collect::<Vec<_>>(),
+            listing(root),
+            listing(&root.join("SAVEGAME")),
+        )
+    };
+    let before = outside(root.path());
+    host.load_map("maps/second.map").unwrap();
+    host.world.gvars.as_mut().unwrap()[0] = 77;
+    let template = host.build_save(&SaveInfo::default()).unwrap();
+    for bad in [
+        "../../X.SAV",
+        "../X.SAV",
+        "..\\X.SAV",
+        "/tmp/X.SAV",
+        "C:X.SAV",
+        "x.sav",
+        "X.sav",
+        "A B.SAV",
+    ] {
+        let mut save = template.clone();
+        save.maps = vec![b"SYNTH.SAV".to_vec(), bad.as_bytes().to_vec()];
+        fs::write(slot.join("SAVE.DAT"), save.write().unwrap()).unwrap();
+        let error = host.load_game(root.path(), 2).unwrap_err();
+        assert!(
+            error.to_string().contains("not a plain map name"),
+            "{bad:?}: {error}"
+        );
+        // Nothing changed and the crafted name never entered the set.
+        assert_eq!(host.world.gvars.as_ref().unwrap()[0], 77);
+        assert_eq!(
+            host.world.persistence.current_map.as_deref(),
+            Some("SECOND.SAV")
+        );
+        assert!(!host.world.persistence.maps.contains_key(bad));
+        assert!(
+            host.world
+                .persistence
+                .maps
+                .keys()
+                .all(|name| valid_companion_name(name))
+        );
+    }
+    assert_eq!(outside(root.path()), before);
+
+    // A crafted name planted in the working set is refused by the writer
+    // before anything is staged, and nothing lands outside the slot.
+    host.world
+        .persistence
+        .maps
+        .insert("../../X.SAV".into(), companion.clone());
+    let slot_before = listing(&slot);
+    assert!(
+        host.save_game(root.path(), 2, &SaveInfo::default())
+            .is_err()
+    );
+    assert_eq!(listing(&slot), slot_before);
+    assert_eq!(outside(root.path()), before);
+}

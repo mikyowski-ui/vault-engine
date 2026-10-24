@@ -34,6 +34,39 @@ include!(concat!(env!("OUT_DIR"), "/extension_catalog.rs"));
 pub fn opcode(word: u16) -> Option<&'static OpcodeSpec> {
     EXTENSIONS.get(usize::from(word.checked_sub(0x804c)?))
 }
+/// The versioned "enhanced" opcode range. These words are not part of
+/// SPEC-004/005: a vanilla host rejects every one of them as an unknown
+/// word, and only an enhanced host ([`crate::VmHost::enhanced_opcodes`])
+/// dispatches them through [`ENHANCED`].
+pub const ENHANCED_RANGE: std::ops::RangeInclusive<u16> = 0x8200..=0x82ff;
+/// The version `engine_api_version` (0x8200) reports. It grows whenever an
+/// enhanced opcode is added or changes meaning, so a script can test for
+/// the features it needs.
+pub const ENGINE_API_VERSION: i32 = 1;
+/// The enhanced table, in word order from 0x8200.
+pub static ENHANCED: &[OpcodeSpec] = &[OpcodeSpec {
+    word: 0x8200,
+    name: "engine_api_version",
+    operands: &[],
+    push: PushKind::Value,
+    registered: true,
+    variable: false,
+}];
+pub fn enhanced_opcode(word: u16) -> Option<&'static OpcodeSpec> {
+    if !ENHANCED_RANGE.contains(&word) {
+        return None;
+    }
+    ENHANCED.get(usize::from(word - ENHANCED_RANGE.start()))
+}
+/// Run one enhanced word; an unassigned word in the range is still an
+/// unknown word.
+pub fn execute_enhanced(vm: &mut Vm, word: u16) -> Result<(), VmError> {
+    let spec = enhanced_opcode(word).ok_or(VmError::Opcode(word))?;
+    match spec.word {
+        0x8200 => vm.value_stack.push(Value::integer(ENGINE_API_VERSION)),
+        _ => Err(VmError::Opcode(word)),
+    }
+}
 pub fn base_tag(value: Value) -> u16 {
     value.tag & 0xf7ff
 }

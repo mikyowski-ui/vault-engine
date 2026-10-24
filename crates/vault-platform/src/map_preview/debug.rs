@@ -6,22 +6,97 @@
 //! entries; each frame with changes is also logged (target `vault_debug`).
 //! The inspector only reads world state; attached, scripts run one
 //! observed instruction at a time with unchanged results.
+//!
+//! The overlay is also a deterministic editor. F11 cycles its pages: the
+//! watch view, the object inspector (a map click selects the object under
+//! the pointer instead of acting while the overlay is open), the GVAR and
+//! MVAR editors, the map jump and the item spawner. Editing is keyboard
+//! driven: Up/Down (PageUp/PageDown by 10) choose a row, digits and Minus
+//! type a value, Backspace deletes, Enter commits, H fully heals the
+//! inspected critter. The overlay never changes the world itself: each
+//! commit becomes a [`DebugCommand`] in an outbox that the shell drains
+//! ([`MapPreview::take_debug_commands`]), logs, and applies
+//! ([`MapPreview::apply_debug`]), so a replay of the log applies each
+//! command exactly once.
 use super::MapPreview;
 use crate::interface::Painter;
 use std::collections::VecDeque;
-use vault_core::ui::ColorKey;
+use vault_core::{
+    WorldError, assets::WorldAssets, debug::DebugCommand, ui::ColorKey, worldmap::MAP_COUNT,
+};
 use vault_debug::{Inspector, InspectorConfig, VarScope, WatchList};
+use vault_formats::map::ObjectState;
 use vault_render::IndexedImage;
+use winit::keyboard::KeyCode;
 
 /// Variable change lines kept for the overlay.
 const RECENT: usize = 12;
 /// Trace entries shown.
 const TRACE_LINES: usize = 16;
 const PANEL: [i32; 4] = [352, 0, 288, 380];
+/// Rows of a variable or map list shown around the cursor.
+const LIST_ROWS: usize = 18;
+/// The longest typed entry.
+const ENTRY_LEN: usize = 11;
+
+/// The overlay's pages, in F11 order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Page {
+    /// Read-only: variable changes and the script trace.
+    Watch,
+    Inspect,
+    Globals,
+    MapVars,
+    MapJump,
+    Spawn,
+}
+impl Page {
+    fn next(self) -> Self {
+        match self {
+            Self::Watch => Self::Inspect,
+            Self::Inspect => Self::Globals,
+            Self::Globals => Self::MapVars,
+            Self::MapVars => Self::MapJump,
+            Self::MapJump => Self::Spawn,
+            Self::Spawn => Self::Watch,
+        }
+    }
+    fn title(self) -> &'static str {
+        match self {
+            Self::Watch => "watch",
+            Self::Inspect => "inspect",
+            Self::Globals => "GVAR editor",
+            Self::MapVars => "MVAR editor",
+            Self::MapJump => "map jump",
+            Self::Spawn => "item spawner",
+        }
+    }
+    /// The first row a page's cursor starts on.
+    fn first_row(self) -> usize {
+        match self {
+            Self::MapJump | Self::Spawn => 1,
+            _ => 0,
+        }
+    }
+}
 
 pub(crate) struct DebugOverlay {
     inspector: Inspector,
     recent: VecDeque<String>,
+    pub(crate) page: Page,
+    /// The inspected object's map object id (stable across runs).
+    pub(crate) selected: Option<u32>,
+    /// The page's row: a variable index, a map number, or the spawn
+    /// quantity.
+    pub(crate) cursor: usize,
+    /// The map jump's elevation.
+    elevation: u32,
+    /// Typed digits: a value, a tile, or a PID.
+    pub(crate) entry: String,
+    /// Commands committed and not yet taken by the shell.
+    outbox: Vec<DebugCommand>,
+    /// The last commit's or application's result.
+    note: String,
 }
 impl DebugOverlay {
     /// The newest variable change lines.
@@ -41,6 +116,19 @@ impl DebugOverlay {
                 format!("vm{} {:#06x} {}", entry.vm, entry.pc, instruction)
             })
             .collect()
+    }
+    fn set_page(&mut self, page: Page) {
+        self.page = page;
+        self.cursor = page.first_row();
+        self.entry.clear();
+    }
+    /// The typed entry as a signed value.
+    fn value(&self) -> Option<i32> {
+        self.entry.parse().ok()
+    }
+    fn queue(&mut self, command: DebugCommand) {
+        self.note = format!("queued: {command}");
+        self.outbox.push(command);
     }
 }
 
@@ -64,6 +152,13 @@ impl MapPreview {
                 self.debug = Some(DebugOverlay {
                     inspector,
                     recent: VecDeque::new(),
+                    page: Page::Watch,
+                    selected: None,
+                    cursor: 0,
+                    elevation: 0,
+                    entry: String::new(),
+                    outbox: Vec::new(),
+                    note: String::new(),
                 });
             }
             (false, Some(mut overlay)) => overlay.inspector.detach(&mut self.host),
@@ -72,6 +167,37 @@ impl MapPreview {
     }
     pub fn debug_enabled(&self) -> bool {
         self.debug.is_some()
+    }
+    /// The commands the overlay committed since the last call, in order.
+    /// The desktop shell logs each one (`InputCommand::Debug`) and then
+    /// applies it with [`Self::apply_debug`]; a replay discards these and
+    /// applies the logged ones instead, so nothing applies twice.
+    pub fn take_debug_commands(&mut self) -> Vec<DebugCommand> {
+        self.debug
+            .as_mut()
+            .map(|overlay| std::mem::take(&mut overlay.outbox))
+            .unwrap_or_default()
+    }
+    /// Apply one debugger command to the world through the ordinary engine
+    /// paths ([`vault_core::WorldHost::apply_debug`]) and refresh the view.
+    /// It works with the overlay closed too (a replayed log). A refused
+    /// command changes nothing and is reported on the overlay.
+    pub fn apply_debug(&mut self, command: &DebugCommand) -> Result<(), WorldError> {
+        self.thaw_view();
+        self.pointer.redraw = true;
+        let result = self.host.apply_debug(command);
+        if let Some(overlay) = &mut self.debug {
+            overlay.note = match &result {
+                Ok(()) => format!("applied: {command}"),
+                Err(error) => format!("refused: {error}"),
+            };
+        }
+        if let Err(error) = &result {
+            tracing::warn!(target: "vault_debug", %command, %error, "debug command refused");
+        } else {
+            tracing::info!(target: "vault_debug", %command, "debug command applied");
+        }
+        result
     }
     /// One inspector tick after the world update; returns whether anything
     /// changed.
@@ -92,6 +218,261 @@ impl MapPreview {
         }
         true
     }
+    /// A left click in the map area while the overlay is open selects the
+    /// object under the pointer (or nothing) for the inspector instead of
+    /// acting; a click on the panel itself does nothing. Right clicks act
+    /// as usual. Returns whether the click was taken.
+    pub(crate) fn debug_click(&mut self, point: [i32; 2], right: bool) -> bool {
+        if right || self.debug.is_none() {
+            return false;
+        }
+        let [x, y, width, height] = PANEL;
+        let on_panel = (x..x + width).contains(&point[0]) && (y..y + height).contains(&point[1]);
+        let picked = if on_panel {
+            None
+        } else {
+            self.object_at(point)
+                .and_then(|object| self.host.world.get(object))
+                .map(|object| object.raw.id)
+        };
+        let Some(overlay) = &mut self.debug else {
+            return false;
+        };
+        if !on_panel {
+            overlay.selected = picked;
+            overlay.set_page(Page::Inspect);
+            overlay.note = match picked {
+                Some(id) => format!("selected object {id:#x}"),
+                None => "nothing under the pointer".into(),
+            };
+        }
+        self.thaw_view();
+        true
+    }
+    /// The overlay's keys while it is open: F11 cycles the pages; on every
+    /// page but the watch view the editing keys are taken. Returns whether
+    /// the key was taken; every other key acts as usual.
+    pub(crate) fn debug_key(&mut self, key: KeyCode) -> bool {
+        let Some(page) = self.debug.as_ref().map(|overlay| overlay.page) else {
+            return false;
+        };
+        if key == KeyCode::F11 {
+            if let Some(overlay) = &mut self.debug {
+                overlay.set_page(page.next());
+            }
+            self.thaw_view();
+            return true;
+        }
+        if page == Page::Watch {
+            return false;
+        }
+        let rows = self.debug_rows(page);
+        let selected = self.debug.as_ref().and_then(|overlay| overlay.selected);
+        let Some(overlay) = &mut self.debug else {
+            return false;
+        };
+        let step = |cursor: usize, delta: isize| {
+            let low = page.first_row();
+            let high = rows.max(low + 1) - 1;
+            cursor.saturating_add_signed(delta).clamp(low, high)
+        };
+        let digit = match key {
+            KeyCode::Digit0 | KeyCode::Numpad0 => Some('0'),
+            KeyCode::Digit1 | KeyCode::Numpad1 => Some('1'),
+            KeyCode::Digit2 | KeyCode::Numpad2 => Some('2'),
+            KeyCode::Digit3 | KeyCode::Numpad3 => Some('3'),
+            KeyCode::Digit4 | KeyCode::Numpad4 => Some('4'),
+            KeyCode::Digit5 | KeyCode::Numpad5 => Some('5'),
+            KeyCode::Digit6 | KeyCode::Numpad6 => Some('6'),
+            KeyCode::Digit7 | KeyCode::Numpad7 => Some('7'),
+            KeyCode::Digit8 | KeyCode::Numpad8 => Some('8'),
+            KeyCode::Digit9 | KeyCode::Numpad9 => Some('9'),
+            _ => None,
+        };
+        match key {
+            _ if digit.is_some() => {
+                if overlay.entry.len() < ENTRY_LEN {
+                    overlay.entry.push(digit.expect("a digit"));
+                }
+            }
+            KeyCode::Minus | KeyCode::NumpadSubtract => {
+                // Only values are signed; tiles, PIDs and quantities are not.
+                if matches!(page, Page::Inspect | Page::Globals | Page::MapVars) {
+                    if let Some(rest) = overlay.entry.strip_prefix('-') {
+                        overlay.entry = rest.to_string();
+                    } else {
+                        overlay.entry.insert(0, '-');
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                overlay.entry.pop();
+            }
+            KeyCode::ArrowUp => overlay.cursor = step(overlay.cursor, -1),
+            KeyCode::ArrowDown => overlay.cursor = step(overlay.cursor, 1),
+            KeyCode::PageUp => overlay.cursor = step(overlay.cursor, -10),
+            KeyCode::PageDown => overlay.cursor = step(overlay.cursor, 10),
+            KeyCode::ArrowLeft if page == Page::MapJump => {
+                overlay.elevation = (overlay.elevation + 2) % 3;
+            }
+            KeyCode::ArrowRight if page == Page::MapJump => {
+                overlay.elevation = (overlay.elevation + 1) % 3;
+            }
+            KeyCode::KeyH if page == Page::Inspect => match selected {
+                Some(object) => overlay.queue(DebugCommand::HealCritter { object }),
+                None => overlay.note = "no object selected".into(),
+            },
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                let index = overlay.cursor;
+                let typed = "type a number first";
+                let command = match page {
+                    Page::Watch => Err(typed),
+                    Page::Inspect => match (selected, overlay.value()) {
+                        (None, _) => Err("no object selected"),
+                        (Some(object), value) => value
+                            .map(|value| DebugCommand::SetObjectLocalVar {
+                                object,
+                                index,
+                                value,
+                            })
+                            .ok_or(typed),
+                    },
+                    Page::Globals => overlay
+                        .value()
+                        .map(|value| DebugCommand::SetGlobalVar { index, value })
+                        .ok_or(typed),
+                    Page::MapVars => overlay
+                        .value()
+                        .map(|value| DebugCommand::SetMapVar { index, value })
+                        .ok_or(typed),
+                    Page::MapJump => {
+                        let tile = if overlay.entry.is_empty() {
+                            Ok(None)
+                        } else {
+                            overlay.entry.parse::<u32>().map(Some)
+                        };
+                        tile.map(|tile| DebugCommand::TeleportMap {
+                            map_number: index as i32,
+                            elevation: overlay.elevation,
+                            tile,
+                        })
+                        .map_err(|_| typed)
+                    }
+                    Page::Spawn => overlay
+                        .entry
+                        .parse::<u32>()
+                        .map(|pid| DebugCommand::SpawnItem {
+                            pid,
+                            quantity: index as u32,
+                        })
+                        .map_err(|_| typed),
+                };
+                match command {
+                    Ok(command) => {
+                        overlay.queue(command);
+                        overlay.entry.clear();
+                    }
+                    Err(problem) => overlay.note = problem.into(),
+                }
+            }
+            _ => return false,
+        }
+        self.thaw_view();
+        true
+    }
+    /// How many rows a page's cursor moves over.
+    fn debug_rows(&self, page: Page) -> usize {
+        let world = &self.host.world;
+        match page {
+            Page::Watch => 0,
+            Page::Inspect => self
+                .debug
+                .as_ref()
+                .and_then(|overlay| overlay.selected)
+                .and_then(|id| world.reference_for_id(id))
+                .and_then(|object| world.get(object))
+                .and_then(|object| u32::try_from(object.raw.script_id).ok())
+                .and_then(|sid| world.scripts.get(&sid))
+                .map_or(0, |script| script.local_count),
+            Page::Globals => world.gvars.as_ref().map_or(0, Vec::len),
+            Page::MapVars => world.mvars.len(),
+            Page::MapJump => MAP_COUNT,
+            Page::Spawn => vault_core::debug::MAX_SPAWN as usize + 1,
+        }
+    }
+    /// The inspected object's lines and its LVARs.
+    fn inspect_lines(&self, overlay: &DebugOverlay) -> (Vec<String>, Vec<(usize, i32)>) {
+        let world = &self.host.world;
+        let Some(id) = overlay.selected else {
+            return (vec!["click an object on the map".into()], Vec::new());
+        };
+        let Some(object) = world
+            .reference_for_id(id)
+            .and_then(|reference| world.get(reference).map(|o| (reference, o)))
+        else {
+            return (vec![format!("object {id:#x} is gone")], Vec::new());
+        };
+        let (reference, object) = object;
+        let mut lines = vec![
+            format!(
+                "id {id:#x} {}",
+                String::from_utf8_lossy(&object.name).trim()
+            ),
+            format!(
+                "PID {:#010x}  FID {:#010x}",
+                object.raw.pid, object.raw.art_id
+            ),
+            format!(
+                "hex {}  elevation {}  flags {:#010x}",
+                object
+                    .raw
+                    .hex
+                    .map_or_else(|| "-".into(), |hex| hex.to_string()),
+                object.raw.elevation,
+                object.raw.flags.0
+            ),
+        ];
+        let sid = u32::try_from(object.raw.script_id).ok();
+        let script = sid.and_then(|sid| world.scripts.get(&sid));
+        match script {
+            Some(script) => {
+                let name = self
+                    .host
+                    .assets
+                    .program(script.file)
+                    .map_or_else(|_| format!("script file {}", script.file), |(path, _)| path);
+                lines.push(format!("script {:#010x} {name}", script.id));
+            }
+            None => lines.push("no script".into()),
+        }
+        if let ObjectState::Critter(state) = &object.raw.state {
+            lines.push(format!(
+                "AI packet {}  team {}  results {:#x}",
+                state.ai, state.team, state.results.0
+            ));
+            lines.push(format!(
+                "HP {}/{}  AP {}",
+                world.hit_points(reference).unwrap_or(state.hp),
+                world.max_hit_points(reference),
+                state.ap
+            ));
+        }
+        let locals = script
+            .map(|script| {
+                (0..script.local_count)
+                    .map(|index| {
+                        let value = usize::try_from(script.local_base)
+                            .ok()
+                            .and_then(|base| world.lvars.get(base + index))
+                            .copied()
+                            .unwrap_or(0);
+                        (index, value)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        (lines, locals)
+    }
     pub(crate) fn draw_debug(&self, image: &mut IndexedImage) {
         let Some(overlay) = &self.debug else {
             return;
@@ -106,14 +487,381 @@ impl MapPreview {
             painter.text(image, 101, key, text.as_bytes(), [x + 4, y], width - 8);
             y += 10;
         };
-        line(image, "vault-debug (F9 hides)", ColorKey::WHITE);
-        line(image, "-- variable changes --", ColorKey::AMBER);
-        for change in overlay.recent_changes() {
-            line(image, change.trim(), ColorKey::GREEN);
+        line(
+            image,
+            &format!("vault-debug: {} (F9 hides, F11 page)", overlay.page.title()),
+            ColorKey::WHITE,
+        );
+        // A window of rows around the cursor.
+        let window = |count: usize| {
+            let start = overlay
+                .cursor
+                .saturating_sub(LIST_ROWS / 2)
+                .min(count.saturating_sub(LIST_ROWS));
+            start..count.min(start + LIST_ROWS)
+        };
+        let marker = |row: usize| if row == overlay.cursor { ">" } else { " " };
+        let entry = format!("{}_", overlay.entry);
+        match overlay.page {
+            Page::Watch => {
+                line(image, "-- variable changes --", ColorKey::AMBER);
+                for change in overlay.recent_changes() {
+                    line(image, change.trim(), ColorKey::GREEN);
+                }
+                line(image, "-- script trace --", ColorKey::AMBER);
+                for text in overlay.trace_lines(TRACE_LINES) {
+                    line(image, &text, ColorKey::GREEN);
+                }
+            }
+            Page::Inspect => {
+                let (lines, locals) = self.inspect_lines(overlay);
+                for text in &lines {
+                    line(image, text, ColorKey::GREEN);
+                }
+                if overlay.selected.is_some() {
+                    line(
+                        image,
+                        "-- LVARs (Enter sets, H full heal) --",
+                        ColorKey::AMBER,
+                    );
+                    for index in window(locals.len()) {
+                        let (_, value) = locals[index];
+                        line(
+                            image,
+                            &format!("{} LVAR {index} = {value}", marker(index)),
+                            ColorKey::GREEN,
+                        );
+                    }
+                    line(image, &format!("value: {entry}"), ColorKey::WHITE);
+                }
+            }
+            Page::Globals | Page::MapVars => {
+                let (label, values): (&str, &[i32]) = if overlay.page == Page::Globals {
+                    ("GVAR", self.host.world.gvars.as_deref().unwrap_or(&[]))
+                } else {
+                    ("MVAR", &self.host.world.mvars)
+                };
+                line(image, "Up/Down choose, type, Enter sets", ColorKey::AMBER);
+                if values.is_empty() {
+                    line(image, &format!("no {label}s"), ColorKey::GREEN);
+                }
+                for index in window(values.len()) {
+                    line(
+                        image,
+                        &format!("{} {label} {index} = {}", marker(index), values[index]),
+                        ColorKey::GREEN,
+                    );
+                }
+                line(image, &format!("value: {entry}"), ColorKey::WHITE);
+            }
+            Page::MapJump => {
+                line(image, "Up/Down map, Left/Right elevation", ColorKey::AMBER);
+                let tables = self.host.world.rules.tables();
+                for number in window(MAP_COUNT).filter(|number| *number >= 1) {
+                    line(
+                        image,
+                        &format!(
+                            "{} {number:2} {}",
+                            marker(number),
+                            tables.map_name(number as i32).unwrap_or("?")
+                        ),
+                        ColorKey::GREEN,
+                    );
+                }
+                line(
+                    image,
+                    &format!("elevation {}", overlay.elevation),
+                    ColorKey::WHITE,
+                );
+                line(
+                    image,
+                    &format!("tile: {entry} (empty: entrance)"),
+                    ColorKey::WHITE,
+                );
+            }
+            Page::Spawn => {
+                line(image, "type the PID (decimal), Enter", ColorKey::AMBER);
+                let pid = overlay.entry.parse::<u32>().ok();
+                line(
+                    image,
+                    &format!(
+                        "PID: {entry} {}",
+                        pid.map_or_else(String::new, |pid| format!("({pid:#010x})"))
+                    ),
+                    ColorKey::WHITE,
+                );
+                line(
+                    image,
+                    &format!("quantity: {} (Up/Down)", overlay.cursor),
+                    ColorKey::WHITE,
+                );
+            }
         }
-        line(image, "-- script trace --", ColorKey::AMBER);
-        for text in overlay.trace_lines(TRACE_LINES) {
-            line(image, &text, ColorKey::GREEN);
+        if !overlay.note.is_empty() {
+            let key = if overlay.note.starts_with("refused") {
+                ColorKey::RED
+            } else {
+                ColorKey::AMBER
+            };
+            line(image, &overlay.note, key);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::map_preview::state_fixture;
+    use std::sync::Arc;
+    use vault_formats::{LocalDirProvider, Vfs};
+
+    fn world(dir: &std::path::Path) -> MapPreview {
+        state_fixture::write_corpus(dir);
+        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir).unwrap());
+        let mut preview = MapPreview::load(
+            vfs,
+            "maps/synthetic.map",
+            "english",
+            Some("premade/synthetic.gcd"),
+            1,
+        )
+        .unwrap();
+        preview.tick(16).unwrap();
+        preview.image().unwrap();
+        preview
+    }
+    /// The fixture NPC's frame pixel (the replay tests click it there).
+    const NPC_PIXEL: [i32; 2] = [336, 170];
+    fn npc_id(preview: &MapPreview) -> u32 {
+        preview
+            .host
+            .world
+            .iter()
+            .find(|(_, object)| object.raw.pid == 0x0100_0001)
+            .map(|(_, object)| object.raw.id)
+            .unwrap()
+    }
+    fn press(preview: &mut MapPreview, keys: &[KeyCode]) {
+        for key in keys {
+            preview.step(*key);
+        }
+    }
+    fn page(preview: &MapPreview) -> Page {
+        preview.debug.as_ref().unwrap().page
+    }
+
+    #[test]
+    fn the_title_shows_internal_hints_only_in_debug_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preview = world(dir.path());
+        assert_eq!(preview.title(), "Fallout — Vault Engine");
+        preview.set_debug(true);
+        let title = preview.title();
+        assert!(
+            title.contains("maps/synthetic.map") && title.contains("elevation 0"),
+            "{title}"
+        );
+        assert!(title.contains("cursor"), "{title}");
+    }
+
+    #[test]
+    fn with_the_overlay_closed_nothing_is_taken_or_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preview = world(dir.path());
+        assert!(!preview.debug_key(KeyCode::F11));
+        assert!(!preview.debug_key(KeyCode::Enter));
+        assert!(!preview.debug_click(NPC_PIXEL, false));
+        // The right-click arrow then a left click talks, as in a game.
+        assert!(preview.click(NPC_PIXEL, true));
+        preview.click(NPC_PIXEL, false);
+        preview.release(Some(NPC_PIXEL), false);
+        assert!(preview.selected.is_some());
+        assert!(preview.take_debug_commands().is_empty());
+    }
+
+    #[test]
+    fn a_map_click_inspects_and_edits_queue_commands_without_applying_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preview = world(dir.path());
+        press(&mut preview, &[KeyCode::F9]);
+        assert_eq!(page(&preview), Page::Watch);
+        // The watch view takes no editing key.
+        assert!(!preview.debug_key(KeyCode::Digit1));
+        // A left click selects the NPC instead of acting.
+        assert!(preview.click(NPC_PIXEL, false));
+        preview.release(Some(NPC_PIXEL), false);
+        let id = npc_id(&preview);
+        let overlay = preview.debug.as_ref().unwrap();
+        assert_eq!((overlay.page, overlay.selected), (Page::Inspect, Some(id)));
+        assert!(preview.selected.is_none(), "the click did not act");
+        assert!(!preview.host.world.dialogue.open);
+        let lines = preview.inspect_lines(preview.debug.as_ref().unwrap()).0;
+        assert!(
+            lines.iter().any(|line| line.contains("PID 0x01000001")),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|line| line.contains("AI packet")));
+        assert!(lines.iter().any(|line| line.starts_with("HP ")));
+        assert!(lines.iter().any(|line| line.contains("script 0x04000001")));
+        // LVAR 1 = -25, then a full heal.
+        press(
+            &mut preview,
+            &[
+                KeyCode::ArrowDown,
+                KeyCode::Digit2,
+                KeyCode::Digit5,
+                KeyCode::Minus,
+                KeyCode::Enter,
+                KeyCode::KeyH,
+            ],
+        );
+        let sid = preview
+            .host
+            .world
+            .get(preview.host.world.reference_for_id(id).unwrap())
+            .unwrap()
+            .raw
+            .script_id as u32;
+        let before = preview.host.world.local(Some(sid), 1);
+        let commands = preview.take_debug_commands();
+        assert_eq!(
+            commands,
+            [
+                DebugCommand::SetObjectLocalVar {
+                    object: id,
+                    index: 1,
+                    value: -25
+                },
+                DebugCommand::HealCritter { object: id },
+            ]
+        );
+        assert!(preview.take_debug_commands().is_empty(), "taken once");
+        assert_eq!(
+            preview.host.world.local(Some(sid), 1),
+            before,
+            "not applied"
+        );
+        for command in &commands {
+            preview.apply_debug(command).unwrap();
+        }
+        assert_eq!(preview.host.world.local(Some(sid), 1), -25);
+        assert!(preview.debug.as_ref().unwrap().note.starts_with("applied"));
+        // A click on empty map clears the selection; the panel takes clicks.
+        assert!(preview.click([10, 10], false));
+        assert_eq!(preview.debug.as_ref().unwrap().selected, None);
+        assert!(preview.click([500, 100], false));
+        // Right clicks act as usual (they cycle the cursor).
+        assert!(preview.click(NPC_PIXEL, true));
+        assert!(preview.take_debug_commands().is_empty());
+    }
+
+    #[test]
+    fn the_variable_map_and_spawn_pages_emit_their_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preview = world(dir.path());
+        preview.set_debug(true);
+        // GVAR 2 = -12.
+        press(&mut preview, &[KeyCode::F11, KeyCode::F11]);
+        assert_eq!(page(&preview), Page::Globals);
+        press(
+            &mut preview,
+            &[
+                KeyCode::ArrowDown,
+                KeyCode::ArrowDown,
+                KeyCode::Digit1,
+                KeyCode::Digit2,
+                KeyCode::NumpadSubtract,
+                KeyCode::Enter,
+            ],
+        );
+        // Enter with nothing typed queues nothing.
+        press(&mut preview, &[KeyCode::Enter]);
+        assert_eq!(
+            preview.take_debug_commands(),
+            [DebugCommand::SetGlobalVar {
+                index: 2,
+                value: -12
+            }]
+        );
+        // MVAR rows stop at the last variable.
+        press(&mut preview, &[KeyCode::F11]);
+        assert_eq!(page(&preview), Page::MapVars);
+        let mvars = preview.host.world.mvars.len();
+        for _ in 0..mvars + 3 {
+            press(&mut preview, &[KeyCode::ArrowDown]);
+        }
+        assert_eq!(
+            preview.debug.as_ref().unwrap().cursor,
+            mvars.saturating_sub(1)
+        );
+        // Map 2, elevation 1, hex 123; then map 65 at its entrance.
+        press(&mut preview, &[KeyCode::F11]);
+        assert_eq!(page(&preview), Page::MapJump);
+        let mut keys = vec![
+            KeyCode::ArrowUp,
+            KeyCode::ArrowDown,
+            KeyCode::ArrowRight,
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Enter,
+        ];
+        keys.extend([KeyCode::PageDown; 7]);
+        keys.extend([KeyCode::ArrowLeft, KeyCode::Enter]);
+        press(&mut preview, &keys);
+        assert_eq!(
+            preview.take_debug_commands(),
+            [
+                DebugCommand::TeleportMap {
+                    map_number: 2,
+                    elevation: 1,
+                    tile: Some(123)
+                },
+                DebugCommand::TeleportMap {
+                    map_number: 65,
+                    elevation: 0,
+                    tile: None
+                },
+            ]
+        );
+        // Two of PID 1.
+        press(&mut preview, &[KeyCode::F11]);
+        assert_eq!(page(&preview), Page::Spawn);
+        press(
+            &mut preview,
+            &[
+                KeyCode::ArrowDown,
+                KeyCode::Digit1,
+                KeyCode::Backspace,
+                KeyCode::Digit1,
+                KeyCode::Enter,
+            ],
+        );
+        let spawn = preview.take_debug_commands();
+        assert_eq!(
+            spawn,
+            [DebugCommand::SpawnItem {
+                pid: 1,
+                quantity: 2
+            }]
+        );
+        let player = preview.host.world.player;
+        let before = preview.host.world.inventory_count(player, 1);
+        preview.apply_debug(&spawn[0]).unwrap();
+        assert_eq!(preview.host.world.inventory_count(player, 1), before + 2);
+        // A refused command is reported and changes nothing.
+        assert!(
+            preview
+                .apply_debug(&DebugCommand::SetGlobalVar {
+                    index: 1 << 30,
+                    value: 1
+                })
+                .is_err()
+        );
+        assert!(preview.debug.as_ref().unwrap().note.starts_with("refused"));
+        // F11 wraps to the watch view, which passes keys through again.
+        press(&mut preview, &[KeyCode::F11]);
+        assert_eq!(page(&preview), Page::Watch);
+        assert!(!preview.debug_key(KeyCode::Enter));
     }
 }

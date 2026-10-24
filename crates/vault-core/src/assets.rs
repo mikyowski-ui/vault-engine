@@ -135,6 +135,14 @@ pub trait WorldAssets {
     fn resource(&self, path: &str) -> Result<Vec<u8>, WorldError> {
         Err(WorldError::Invalid(format!("{path}: resource unavailable")))
     }
+    /// How many mod layers sit above the base data (see
+    /// `vault_formats::vfs::LayeredVfs`); 0 for plain game data.
+    fn mod_layers(&self) -> usize {
+        0
+    }
+    /// Parse scripts with the versioned enhanced opcode range accepted
+    /// (`IntProgram::parse_enhanced`); the Enhanced preset turns it on.
+    fn set_enhanced_scripts(&self, _enabled: bool) {}
     /// A localized game message catalog (`text/<language>/game/<file>`).
     fn game_messages(&self, file: &str) -> Result<Arc<MsgCatalog>, WorldError> {
         Err(WorldError::Invalid(format!("{file}: messages unavailable")))
@@ -191,6 +199,9 @@ pub struct VfsWorldAssets {
     /// Load problems not yet taken (`take_diagnostics`), at most
     /// `FAILURE_CACHE_LIMIT`.
     diagnostics: RefCell<Vec<String>>,
+    /// Scripts parse with the enhanced opcode range accepted (the
+    /// Enhanced preset); off, scripts parse under plain SPEC-004.
+    enhanced_scripts: std::cell::Cell<bool>,
 }
 impl VfsWorldAssets {
     pub fn new(vfs: Arc<dyn Vfs>, language: &str) -> Result<Self, WorldError> {
@@ -218,6 +229,7 @@ impl VfsWorldAssets {
             art: RefCell::new(None),
             fonts: RefCell::new(None),
             diagnostics: RefCell::new(Vec::new()),
+            enhanced_scripts: std::cell::Cell::new(false),
         })
     }
     /// SPEC-002 §3.5: a message file that stops early keeps the records
@@ -387,7 +399,7 @@ impl WorldAssets for VfsWorldAssets {
             std::str::from_utf8(name)
                 .map_err(|_| WorldError::Invalid("invalid script name".into()))?
         );
-        let program = IntProgram::parse(&self.read(&path)?)?;
+        let program = IntProgram::parse_with(&self.read(&path)?, self.enhanced_scripts.get())?;
         self.programs
             .borrow_mut()
             .insert(index, (path.clone(), program.clone()));
@@ -405,7 +417,7 @@ impl WorldAssets for VfsWorldAssets {
         } else {
             format!("scripts/{path}")
         };
-        let program = IntProgram::parse(&self.read(&path)?)?;
+        let program = IntProgram::parse_with(&self.read(&path)?, self.enhanced_scripts.get())?;
         Ok((path, program))
     }
     fn local_count(&self, index: i32) -> usize {
@@ -650,6 +662,15 @@ impl WorldAssets for VfsWorldAssets {
     }
     fn language(&self) -> &str {
         &self.language
+    }
+    fn mod_layers(&self) -> usize {
+        self.vfs.mod_layers()
+    }
+    fn set_enhanced_scripts(&self, enabled: bool) {
+        if self.enhanced_scripts.replace(enabled) != enabled {
+            // Cached programs were parsed under the other profile.
+            self.programs.borrow_mut().clear();
+        }
     }
     fn files(&self, pattern: &[u8]) -> Vec<Vec<u8>> {
         let Ok(pattern) = std::str::from_utf8(pattern) else {

@@ -321,8 +321,26 @@ impl WorldRules {
             .or_else(|| WeaponPerk::from_perk(perk))
     }
 }
+/// Which engine behaviour a world runs with. [`Vanilla`](Self::Vanilla), the
+/// default everywhere, is the spec-conformant reference behaviour: every
+/// Must-match rule holds and no extension is reachable. `Enhanced` opts in
+/// to the engine's own additions (the versioned enhanced opcode range and
+/// VFS overrides of the compiled campaign tables); it never changes a
+/// vanilla rule by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum EnginePreset {
+    #[default]
+    Vanilla,
+    Enhanced,
+}
 #[derive(Debug, Clone, Default)]
 pub struct WorldRules {
+    /// The engine behaviour preset (Vanilla unless a shell opts in).
+    pub preset: EnginePreset,
+    /// Campaign tables loaded from VFS overrides
+    /// ([`WorldHost::load_table_overrides`](crate::WorldHost::load_table_overrides));
+    /// `None`, always so in Vanilla, runs on the compiled tables.
+    pub tables: Option<std::sync::Arc<crate::tables::CampaignTables>>,
     /// Weapon-perk overrides; SPEC-011 §3.22 numbers 58-61 apply otherwise.
     pub weapon_perks: BTreeMap<i32, WeaponPerk>,
     pub reputation_globals: Option<ReputationGlobals>,
@@ -330,6 +348,14 @@ pub struct WorldRules {
     pub currency_pid: Option<u32>,
     pub doctor_bag_pid: Option<u32>,
     pub first_aid_kit_pid: Option<u32>,
+}
+impl WorldRules {
+    /// The campaign tables in force: an override set, or the compiled ones.
+    pub fn tables(&self) -> &crate::tables::CampaignTables {
+        self.tables
+            .as_deref()
+            .unwrap_or_else(|| crate::tables::CampaignTables::compiled())
+    }
 }
 /// SPEC-013 §3.22 a map transition request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

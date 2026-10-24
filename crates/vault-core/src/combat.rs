@@ -162,6 +162,9 @@ pub struct Attack {
     pub combat_difficulty: i32,
     /// Initial scripted combat-request accuracy adjustment.
     pub accuracy_bonus: i32,
+    /// Overridden critical tables ([`crate::tables`]); `None` uses the
+    /// compiled SPEC-007 tables.
+    pub tables: Option<std::sync::Arc<crate::tables::CampaignTables>>,
 }
 
 /// Player darkness penalty by the defender's visible light (full 65536).
@@ -197,6 +200,11 @@ pub struct Resolution {
 }
 
 impl Attack {
+    fn tables(&self) -> &crate::tables::CampaignTables {
+        self.tables
+            .as_deref()
+            .unwrap_or_else(|| crate::tables::CampaignTables::compiled())
+    }
     /// The selected attack mode: the weapon's nibble, or bare punch/kick.
     pub fn mode(&self) -> u8 {
         match &self.weapon {
@@ -542,7 +550,9 @@ impl Attack {
         } else {
             self.location
         };
-        let entry = critical::success_effect(matrix, place, tier)
+        let entry = self
+            .tables()
+            .success_effect(matrix, place, tier)
             .ok_or_else(|| WorldError::Invalid("critical entry out of range".into()))?;
         resolution.defender_flags |= entry.flags;
         resolution.message = Some(entry.message);
@@ -576,7 +586,9 @@ impl Attack {
             .as_ref()
             .map_or(0, |weapon| weapon.failure_table);
         let column = critical::failure_column(rng.range(1, 100)? - 5 * (self.luck - 5));
-        let mask = critical::failure_mask(table, column)
+        let mask = self
+            .tables()
+            .failure_mask(table, column)
             .ok_or_else(|| WorldError::Invalid("critical-failure column must be 0-4".into()))?;
         if mask == 0 {
             return Ok(());

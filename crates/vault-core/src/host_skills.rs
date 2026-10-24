@@ -33,7 +33,7 @@ pub const SNEAK_FLAG: u32 = 0x01;
 pub const EXPOSED_FLAG: u32 = 0x02;
 /// Doctor's limb order and the crippled bits.
 const LIMBS: [u32; 5] = [0x40, 0x10, 0x20, 0x08, 0x04];
-const CRIPPLED: u32 = 0x7c;
+pub(crate) const CRIPPLED: u32 = 0x7c;
 /// Explosion damage type's DT and DR stats.
 const EXPLOSION_DT: usize = 17 + 6;
 const EXPLOSION_DR: usize = 24 + 6;
@@ -210,7 +210,7 @@ impl<A: WorldAssets> WorldHost<A> {
         (hp, max)
     }
     /// Add HP, capped at the maximum; the player's HP counter rolls.
-    fn heal_critter(&mut self, critter: ObjectRef, amount: i32) {
+    pub(crate) fn heal_critter(&mut self, critter: ObjectRef, amount: i32) {
         let (hp, max) = self.hit_point_range(critter);
         let healed = hp.saturating_add(amount).min(max);
         if let Some(object) = self.world.get_mut(critter) {
@@ -1427,7 +1427,11 @@ impl<A: WorldAssets> WorldHost<A> {
     /// -1 (an unnumbered map) or when the party's cell is already the
     /// town's cell. The current town does not change (SPEC-014 §3.39).
     pub fn move_to_map_town(&mut self) -> Result<(), WorldError> {
-        let town = crate::worldmap::map_town(self.world.map.header.map_number);
+        let town = self
+            .world
+            .rules
+            .tables()
+            .map_town(self.world.map.header.map_number);
         self.scripted_town_travel(town)
     }
     /// §3.22 a transition request: one made in combat ends combat; the last

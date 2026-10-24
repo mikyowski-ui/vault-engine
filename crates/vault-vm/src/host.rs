@@ -29,6 +29,19 @@ pub trait VmHost {
     fn extension(&mut self, opcode: u16, _vm: &mut Vm) -> Result<(), VmError> {
         Err(VmError::Opcode(opcode))
     }
+    /// Whether the versioned enhanced range
+    /// ([`ENHANCED_RANGE`](crate::extensions::ENHANCED_RANGE)) dispatches.
+    /// Off by default: a vanilla host rejects those words exactly as any
+    /// other unknown word.
+    fn enhanced_opcodes(&self) -> bool {
+        false
+    }
+    /// Execute an enhanced-range word; only called while
+    /// [`Self::enhanced_opcodes`] is on. The default runs the engine's own
+    /// enhanced table.
+    fn enhanced_extension(&mut self, opcode: u16, vm: &mut Vm) -> Result<(), VmError> {
+        crate::extensions::execute_enhanced(vm, opcode)
+    }
     fn program_mut(&mut self, _id: u32) -> Result<&mut Vm, VmError> {
         Err(VmError::Host("program reference".into()))
     }

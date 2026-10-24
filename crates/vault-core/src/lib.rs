@@ -9,6 +9,7 @@ pub mod combat;
 pub mod combat_messages;
 pub mod combat_state;
 pub mod critical;
+pub mod debug;
 pub mod dialogue;
 pub mod drugs;
 pub mod floating;
@@ -47,6 +48,7 @@ pub mod routing;
 pub mod sequence;
 pub mod skills;
 pub mod stats;
+pub mod tables;
 pub mod ui;
 pub mod world;
 pub mod worldmap;
@@ -56,8 +58,8 @@ pub use host_movement::{Movement, StepOutcome};
 pub use host_skills::BookRoute;
 pub use host_travel::{TravelOutcome, WorldMapExit};
 pub use world::{
-    ActiveExplosion, ExplosionRequest, LootRequest, ObjectAction, ObjectRef, ScriptEvent,
-    Transition, WorldEffect, WorldRules, WorldState,
+    ActiveExplosion, EnginePreset, ExplosionRequest, LootRequest, ObjectAction, ObjectRef,
+    ScriptEvent, Transition, WorldEffect, WorldRules, WorldState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -102,6 +104,8 @@ mod clicks_tests;
 mod combat_messages_tests;
 #[cfg(test)]
 mod combat_tests;
+#[cfg(test)]
+mod debug_tests;
 #[cfg(test)]
 mod dialogue_tests;
 #[cfg(test)]
@@ -156,6 +160,8 @@ mod self_stop_tests;
 mod skills_tests;
 #[cfg(test)]
 mod state_tests;
+#[cfg(test)]
+mod tables_tests;
 #[cfg(test)]
 mod talk_tests;
 #[cfg(test)]

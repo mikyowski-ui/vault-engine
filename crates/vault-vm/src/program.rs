@@ -42,6 +42,9 @@ pub struct IntProgram {
     pub identifier_origin: usize,
     pub literal_origin: usize,
     pub code_start: usize,
+    /// Parsed with [`IntProgram::parse_enhanced`]: the versioned enhanced
+    /// range is accepted as instruction words.
+    enhanced: bool,
 }
 
 fn word(bytes: &[u8], at: usize) -> Result<u32, IntError> {
@@ -114,8 +117,23 @@ pub(crate) fn valid_word(word: u16) -> bool {
         (0x8000..=0x8155).contains(&word)
     }
 }
+/// [`valid_word`], plus the versioned enhanced range
+/// ([`crate::extensions::ENHANCED_RANGE`]) when `enhanced` is set.
+pub(crate) fn valid_word_in(word: u16, enhanced: bool) -> bool {
+    valid_word(word) || (enhanced && crate::extensions::ENHANCED_RANGE.contains(&word))
+}
 impl IntProgram {
+    /// Parse under SPEC-004: any word outside the defined set, including
+    /// the enhanced range, is an invalid instruction.
     pub fn parse(bytes: &[u8]) -> Result<Self, IntError> {
+        Self::parse_with(bytes, false)
+    }
+    /// Parse for an enhanced host: the versioned enhanced range is accepted
+    /// as instruction words as well. Every other rule is unchanged.
+    pub fn parse_enhanced(bytes: &[u8]) -> Result<Self, IntError> {
+        Self::parse_with(bytes, true)
+    }
+    pub fn parse_with(bytes: &[u8], enhanced: bool) -> Result<Self, IntError> {
         if bytes.len() > MAX_PROGRAM_BYTES {
             return Err(IntError::new(0, "program exceeds 64 MiB limit"));
         }
@@ -159,7 +177,7 @@ impl IntProgram {
                     return Err(IntError::new(at, "truncated instruction"));
                 }
                 let op = u16::from_be_bytes([bytes[at], bytes[at + 1]]);
-                if !valid_word(op) {
+                if !valid_word_in(op, enhanced) {
                     return Err(IntError::new(at, format!("invalid instruction {op:#06x}")));
                 }
                 let size = instruction_length(op);
@@ -207,7 +225,12 @@ impl IntProgram {
             identifier_origin,
             literal_origin,
             code_start,
+            enhanced,
         })
+    }
+    /// Whether the program was parsed with the enhanced range accepted.
+    pub fn enhanced(&self) -> bool {
+        self.enhanced
     }
     pub fn image(&self) -> &[u8] {
         &self.image

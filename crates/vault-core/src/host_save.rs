@@ -93,8 +93,34 @@ fn save_map_file(save: &SaveGame) -> String {
 fn backup_name(path: &Path) -> PathBuf {
     path.with_extension("BAK")
 }
-/// Case-insensitive lookup of a slot file.
+/// A companion name the slot accepts: exactly what
+/// [`saved_map_name`](crate::persistence::saved_map_name) gives back for it,
+/// so a plain uppercase stem of letters, digits, `_` or `-` plus `.SAV`,
+/// with no `/` or `\` separator, no `..` component, and no `C:` drive
+/// prefix. Manifest names are untrusted SAVE.DAT bytes; anything else would
+/// let a crafted slot read or write files outside its directory.
+pub fn valid_companion_name(name: &str) -> bool {
+    let plain = name.strip_suffix(".SAV").is_some_and(|stem| {
+        stem.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    });
+    plain && crate::persistence::saved_map_name(name.as_bytes()).as_deref() == Some(name)
+}
+fn checked_companion(name: &str) -> Result<&str, WorldError> {
+    if valid_companion_name(name) {
+        Ok(name)
+    } else {
+        Err(WorldError::Invalid(format!(
+            "save manifest name {name:?} is not a plain map name"
+        )))
+    }
+}
+/// Case-insensitive lookup of a slot file: the fixed central and automap
+/// names, or a [`valid_companion_name`].
 fn slot_file(dir: &Path, name: &str) -> Result<PathBuf, WorldError> {
+    if name != CENTRAL_FILE && name != AUTOMAP_FILE {
+        checked_companion(name)?;
+    }
     let exact = dir.join(name);
     if exact.is_file() {
         return Ok(exact);
@@ -359,7 +385,7 @@ impl<A: WorldAssets> WorldHost<A> {
         let save = self.build_save(info)?;
         let mut files = vec![(CENTRAL_FILE.to_string(), save.write()?)];
         for (name, bytes) in &self.world.persistence.maps {
-            files.push((name.clone(), bytes.clone()));
+            files.push((checked_companion(name)?.to_string(), bytes.clone()));
         }
         files.push((
             AUTOMAP_FILE.to_string(),
@@ -439,8 +465,11 @@ impl<A: WorldAssets> WorldHost<A> {
         let mut maps = BTreeMap::new();
         for name in &save.maps {
             let name = std::str::from_utf8(name)
-                .map_err(|_| WorldError::Invalid("save manifest name is not ASCII".into()))?
-                .to_ascii_uppercase();
+                .map_err(|_| WorldError::Invalid("save manifest name is not ASCII".into()))?;
+            // Validated before any path is formed, so a crafted manifest
+            // (`../../X.SAV`, `C:X.SAV`, ...) never reads outside the slot
+            // and never enters the working saved-map set.
+            let name = checked_companion(name)?.to_string();
             let path = slot_file(&dir, &name)?;
             let bytes = fs::read(&path).map_err(|error| io(&path, error))?;
             // SPEC-008 §3.3 safe rule: every companion map is validated

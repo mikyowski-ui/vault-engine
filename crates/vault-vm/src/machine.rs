@@ -1,4 +1,4 @@
-use crate::program::{self, instruction_length, valid_word};
+use crate::program::{self, instruction_length, valid_word_in};
 use crate::{
     ExportedProcedure, ExternalValue, IntProgram, LaunchMode, Lifecycle, Stack, Value, VmError,
     VmHost,
@@ -240,7 +240,7 @@ impl Vm {
         let code = self.code();
         let bytes = code.get(at..at + 2).ok_or(VmError::Truncated(self.pc))?;
         let word = u16::from_be_bytes(bytes.try_into().expect("instruction word"));
-        if !valid_word(word) {
+        if !valid_word_in(word, self.program.enhanced()) {
             return Err(VmError::Opcode(word));
         }
         let size = instruction_length(word);
@@ -604,6 +604,10 @@ impl Vm {
                 }
             }
             0x804c..=0x8155 => host.extension(word, self)?,
+            // The versioned enhanced range exists only when the host turns it
+            // on; otherwise it falls through to the unknown-word error below,
+            // exactly as SPEC-004 requires for any undefined word.
+            0x8200..=0x82ff if host.enhanced_opcodes() => host.enhanced_extension(word, self)?,
             _ => return Err(VmError::Opcode(word)),
         }
         Ok(())

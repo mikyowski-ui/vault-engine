@@ -61,6 +61,12 @@ pub enum InputCommand {
         width: u32,
         height: u32,
     },
+    /// A vault-debug mutation the F9 overlay committed. The shell logs it
+    /// right after the input that committed it, then applies it; a replay
+    /// applies the logged record, never the overlay's own outbox.
+    Debug {
+        command: vault_core::debug::DebugCommand,
+    },
 }
 
 /// SPEC-014 §3.29: key auto-repeat starts after more than 500 ms...
@@ -461,6 +467,26 @@ mod tests {
         }
         assert!(!is_modifier(KeyCode::KeyP));
         assert!(!is_modifier(KeyCode::Escape));
+    }
+
+    #[test]
+    fn debug_records_round_trip() {
+        let mut output = Vec::new();
+        let mut ids = SequenceIds::default();
+        let command = InputCommand::Debug {
+            command: vault_core::debug::DebugCommand::SetGlobalVar {
+                index: 3,
+                value: -7,
+            },
+        };
+        write_command(&mut output, &mut ids, &command).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(
+            text,
+            "{\"command_id\":1,\"kind\":\"debug\",\"command\":{\"op\":\"set_global_var\",\"index\":3,\"value\":-7}}\n"
+        );
+        let logged: LoggedCommand = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(logged.command, command);
     }
 
     #[test]

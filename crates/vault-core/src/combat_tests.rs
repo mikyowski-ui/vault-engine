@@ -591,6 +591,7 @@ fn fixture_c() -> Attack {
         ticks: 864000,
         combat_difficulty: 1,
         accuracy_bonus: 0,
+        tables: None,
     }
 }
 

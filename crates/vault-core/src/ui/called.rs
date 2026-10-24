@@ -251,6 +251,7 @@ mod tests {
             ticks: 864_000,
             combat_difficulty: 1,
             accuracy_bonus: 0,
+            tables: None,
         }
     }
 
