@@ -23,6 +23,7 @@ Important distinctions: a directional-file selector is not a critter's zero-base
 - **R1-rev2 (2026-10-18).** Section 3.6 now gives the exact draw range and position of the punch-to-kick draw. Section 3.7 now gives the complete missed-shot bystander algorithm: the line-of-fire stage, the impact fallback, victim selection, hit location, damage, and draw order. Fixtures D and E are added. The raw revision hash was replaced by the label R1.
 - **R1-rev3 (2026-10-19).** Section 3.6 now holds the single authoritative intended-target, onlooker and retaliation rule, which SPEC-009 cites. A surviving conscious unintended victim, whether a missed-shot bystander or a critical-failure random target, makes the retaliation check only when its team differs from the attacker's. Section 3.7 now states that the disabled splash enumeration serves every explosion, so no explosion damages beyond its center target, which matches SPEC-013 §3.10.
 - **R1-rev9 (2026-10-22).** Section 3.3: the combat-request AP bonus is always 0 in R1, because no request source sets it. Section 3.4: the UI aiming flag in reload mode, and the called-shot window of SPEC-014 §3.38. New Fixture I gives the spray draw order with Sniper, Jinxed, an extra-only hit and a critical failure.
+- **R1-rev10 (2026-10-23).** New section 3.12 Combat Message Lines: the full line order, names and message bases, the status list, and the Brief/Verbose difference (only the struck-target tail of a critical hit). The status list's last flag is looked up at the bare bit number and prints nothing (`[May-improve]` safe rule). New Fixture J.
 - **R1-rev8 (2026-10-21).** Resolves two engine-audit errata:
   - Section 3.9: a throw whose projectile phase does not run still registers step 11, which always changes the attacker to weapon code 0 because there is no refill item; the dodge is registered only for an invalid projectile, never for a critical failure that keeps its critical bit. A `[May-improve]` keeps the held item's weapon code. Section 3.10.4 step 11 points to the new rule.
   - Section 3.7: the Stage A pass inside a spray, Jinxed/Sniper post-processing once per spray on the final result (no Slayer, no per-target processing), the extra-hits-only outcome with a `[May-improve]`, and the full spray draw order. Section 3.6 states that Sniper is ranged-subtype only, never throw.
@@ -1212,6 +1213,44 @@ No flag word changes. An open container is one whose frame is not 0 (SPEC-005 `o
 - **Knockout wake-up.** When a knockout's wake event fires outside combat, it replaces knocked out with knocked down and immediately plays the stand-up: 37 when the current animation is 20, otherwise 36. That clears knocked down. In combat it only marks the critter, which stands up on its turn (section 3.4).
 - **End of combat.** A prone player who is not dead has the wake event removed and stands up at once, unless a script ended combat while the player was knocked out. A player still knocked out at the end of a main-loop pass ends the game (SPEC-014 §3.5).
 
+### 3.12 Combat Message Lines
+
+The same routine prints the message-monitor lines (SPEC-014 §3.20) for three things: every combat attack, once its attack animation has finished and just before its damage is applied; every explosion; and scripted damage (`critter_damage`, SPEC-005). Text comes from `combat.msg`. "Dead" below means the critter's stored damage flags already had the dead bit `0x80` before this attack's damage was applied, so a critter that this attack kills still gets its lines. Every line ends with a `.` appended by the engine. `[Must-match]`
+
+**Names and bases.** For the player the name is `combat.msg` 506 "You" and the base is 500, whatever the player's gender. For any other critter the name is its object name, and the base is 600 for a male and 700 for a female. The **main critter** is the struck target when the attack hit, and the attacker otherwise. B is the main critter's base. `[Must-match]`
+
+Lines are printed in this order, each only when its condition holds. `[Must-match]`
+
+1. **Strength.** When the player attacks with a weapon whose minimum strength is above the player's strength: 107 "You are not strong enough to use this weapon properly." (no extra `.`).
+2. **Wrong target.** When the attack hit, and the struck target differs from the critter aimed at:
+   - If the struck object is a critter and the aimed-at critter is the player: B + 8 "Oops! %s was hit instead of you!" with the struck critter's name.
+   - If the struck object is a critter and the aimed-at critter is someone else: B + 9 with the struck critter's name, then the aimed-at critter's name.
+   - If the struck object is not a critter: 515 "%s missed" with "You" when the player attacked, otherwise 615 or 715 by the attacker's gender with the attacker's name.
+
+   The appended `.` follows the message's own `!`, giving for example "Oops! Ian was hit instead of you!.".
+3. **Struck target.** When the attack hit, the struck object is a critter, and it is not dead:
+   - **Torso** (location 3; uncalled attacks are normalized to torso, section 2.4): a critical hit uses B + 28 (no damage), B + 24 (1) or B + 20 (otherwise); a normal hit uses B + 27, B + 23 or B + 13.
+   - **Other locations:** the location name is `combat.msg` 1000 + 10 × the critter's art alias + location, as in the called-shot window (SPEC-014 §3.38). A critical hit uses B + 25, B + 21 or B + 11; a normal hit uses B + 26, B + 22 or B + 12. If that name is missing, the line starts empty.
+   - Damage 0 and 1 use the wording without a number. Any other value, including a negative one, is formatted with `%d`.
+   - Then the **tail** is added, which is where Brief and Verbose differ (below).
+4. **Attacker.** When the attacker exists and is not dead:
+   - On a miss: a critical miss uses B + 14 (attacker damage 0), B + 33 (1) or B + 34 (otherwise), and a normal miss uses B + 15. The attacker's status list (below) for its own damage flags is appended.
+   - On a hit, or on a miss that is not critical, a second attacker line follows when the attacker took damage above 0: the normal-hit torso wording for the attacker (its own base, 13, 23 or 27 by damage) followed by its status list.
+5. **Extra victims.** For each additional critter hit by a spray, an explosion or a knock-on, in order and unless dead: the normal-hit torso wording for its damage, followed by its status list. Damage 0 prints "… was hit for no damage".
+
+**Status list** for a critter C and damage flags F. The base S is 200 for the player, whatever the player's gender, 300 for a male and 400 for a female. `[Must-match]`
+
+- F = 0: nothing.
+- F includes dead (`0x80`): 108 " and " followed by S + 7 ("were killed" or "was killed"). Nothing else is listed.
+- Otherwise, take every set bit of F except hit (`0x100`) and critical (`0x200`), from bit 0 upward. Each bit but the last adds ", " and then S + the bit number (for example 301 "knocked down" for bit 1). The last bit adds 108 " and " and then the message numbered by the **bare bit number**, 0 to 31. `combat.msg` has no such entries, so nothing follows " and ". A single knocked-down flag therefore reads "Raider was hit for 5 hit points and ." `[May-improve]` Safe rule: use S + the bit number for the last flag as for the others ("… and knocked down.").
+
+**Brief and Verbose.** `[Must-match]` The `fallout.cfg` key `combat_messages` is read at every struck-target line; a missing key counts as 1. Value 1 is Verbose and 0 is Brief (SPEC-014 §3.18). The setting changes only the tail of line 3, and only for a critical hit whose critical-effect message was chosen by section 3.6 from the matrices of section 2.5:
+
+- **Verbose, critical hit:** append the critical-effect message text, which is the ordinary message or, after a failed save, the failed-save message, for example 5004 ". The blow knocks him to the ground". The target's status list is **not** appended. If the target's damage flags include dead, the line is printed, and then a second line follows: the main critter's name, a space, and "were killed" (207 for a male player, 257 for a female player) or "was killed" (307 for a male, 407 for a female).
+- **Brief, or any non-critical hit:** append the target's status list.
+
+Every other line is identical in both settings. The strength, wrong-target, attacker and extra-victim lines always use the status list, and a non-critical hit prints the same line in both.
+
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
 These vectors are invented and require no shipped artwork or live host execution. Resource-existence sets, blocker objects, effective stats and random outcomes are explicit test inputs. Hex dumps contain data only; none is a complete map/prototype file.
@@ -1430,6 +1469,18 @@ Shared inputs: the player fires a burst (animation 46) with 3 rounds in the maga
 
 A clean-room engine that skips the spray post-processing would make 5 draws in I1, losing the Sniper D10 and the critical tier, and 7 in I2. Placing the Sniper D10 before the rays would also shift every later draw.
 
+### 4.10 Fixture J: Combat Message Lines
+
+A male NPC named "Raider" (alias 0, so the head is `combat.msg` 1110 "the head") is struck in the head by the player. Texts are the English corpus `combat.msg`.
+
+| Attack result | Verbose (`combat_messages` = 1) | Brief (0) |
+| --- | --- | --- |
+| Critical, 18 damage, effect 5/802/2/-3/1/5004/5003 with the save passed (flags `0x802`) | "Raider was critically hit in the head for 18 hit points. The blow knocks him to the ground." | "Raider was critically hit in the head for 18 hit points, knocked down and ." (safe rule: "…, knocked down and had his armor bypassed.") |
+| Critical, 40 damage, effect 6/80/-1/0/0/5007/5000 (flags `0x80`) | Two lines: "Raider was critically hit in the head for 40 hit points, death is instantaneous." then "Raider was killed." | One line: "Raider was critically hit in the head for 40 hit points and was killed." |
+| Normal hit, 5 damage, no flags | "Raider was hit in the head for 5 hit points." | Same |
+| Normal hit, 1 damage, torso | "Raider was hit for 1 hit point." | Same |
+| Player's critical miss, 3 self-damage, flags lose turn (`0x8000`) | "You critically missed and took 3 hit points and ." (safe rule: "… and lost your next turn.") | Same |
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -1441,3 +1492,5 @@ A clean-room engine that skips the spray post-processing would make 5 draws in I
 Verification notes (R1-rev8): `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Its 18 plain-word warnings were reviewed and are benign: the public art directory/list stems ("items", "critters", "scenery", "tiles", "misc"), the public `fallout.cfg` key "running", and this spec's own formula notation ("index", "stat", "column", "rank", "range", "count"). The only fenced blocks are a synthetic list file and big-endian hex dumps. Fixture G timelines were cross-checked with an independent model of the section 3.10.1 start rule, written from this spec's text rather than reference code. The section 3.11 container reach bits were read from the corpus item prototypes. Fixture H was recomputed by hand from the section 3.11.1 step rule. The R1-rev7 container reach timing and adjacency rules were cross-checked with SPEC-013 §3.16, §3.2 and §3.23, and the busy-click rules with SPEC-014 §3.27. Tag count, excluding the two tag definitions: 213 `[Must-match]`, 39 `[May-improve]`.
 
 Update notes (2026-10-22, R1-rev9): sections 3.3 and 3.4 and new Fixture I. Fixture I was stepped by hand through the section 3.7 draw order; the combat-request AP bonus was checked at all six request sources. Tag count is now 215 `[Must-match]`, 39 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-23, R1-rev10): section 3.12 and Fixture J. All message numbers and texts were checked against the English corpus `combat.msg`, which has no entries 0-31. The Fixture J critical effects were taken from the section 2.5 man/head row. Net tags: +5 `[Must-match]`, +1 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.

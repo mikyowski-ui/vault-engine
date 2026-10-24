@@ -122,6 +122,11 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
   - Section 3.27: the movement-click order (cancel, walk or run and sneak, registration, route) and the no-route stop. The player stops silently and the old path is not resumed.
   - New section 3.46 Floating Text and Fixture U.
   - Section 3.41.1 points to the SPEC-012 §3.12 water countdown.
+- **R1-rev12 (2026-10-23).** The last README questions.
+  - Section 3.29: modifier keys repeat but translate to no key code (item 45).
+  - Section 3.27: the in-world cursor is a flat map object drawn in the section 3.44 flat pass.
+  - Section 3.44: no R1 sequence uses the outline animation step (item 47).
+  - Section 3.18: the Combat messages row points to SPEC-007 §3.12.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -688,7 +693,7 @@ When campaign global 603 is 0, its initial value, `prefcvr.frm` is drawn opaque 
 | Violence level | 4-position knob at (76, 226) | 0 214, 1 215, 2 204, 3 216 |
 | Target highlight | 3-position knob at (76, 309) | 0 202, 1 201, 2 213 |
 | Running burning guy | 2-position knob at (76, 387) | 0 202, 1 201 |
-| Combat messages | Switch at (299, 74) | Left 211 "Verbose" = value 1; right 212 "Brief" = value 0 |
+| Combat messages | Switch at (299, 74) | Left 211 "Verbose" = value 1; right 212 "Brief" = value 0. The setting changes only the struck-target line of a critical hit (SPEC-007 §3.12) |
 | Combat taunts | Switch at (299, 141) | 202 / 201 |
 | Language filter | Switch at (299, 207) | 202 / 201 |
 | Running | Switch at (299, 271) | 209 / 219 |
@@ -990,6 +995,14 @@ Over the map window the system cursor is blank and an in-world flat object is dr
 
 In movement mode the hex snaps to the hovered hex; a second object for the AP text sits at that hex's screen position plus (16, 15). Other modes follow the pointer by pixel. `[Must-match]`
 
+**Cursor objects in the draw order.** `[Must-match]` The in-world cursor is an ordinary map object on the current elevation, marked flat (object flag `0x08`), no-block, shoot-through, light-through and temporary. Every mode's art is shown on this one object. It is therefore drawn in the **flat pass** of section 3.44, not as an overlay:
+
+- It is drawn after the flat objects of lower-numbered hexes and before those of higher-numbered ones. Within its own hex it follows the order of insertion, and every move reinserts it at the end of that hex's flat group.
+- Every upright object, roof and floating text is drawn over it.
+- In movement mode its translucent outline is added to the outline list when it is drawn, so the outline is drawn after the roofs, like every outline.
+
+The AP-text object of movement mode is a separate object that is not flat, so it is drawn in the upright pass at its hex.
+
 **Mode cycling.** A right-click in the map area (y at most 379, ignoring held repeats) or `m` selects mode `(current + 1) mod 3` over movement, arrow and crosshair. Out of combat a resulting crosshair becomes movement. In combat crosshair is skipped only when the active hand holds a non-weapon; an empty hand counts as a weapon. Entering crosshair turns hostile outlines on, and leaving it turns them off. `[Must-match]` The same formula applies to use and skill modes by their numeric values: use crosshair goes to arrow; First Aid, Steal and Repair go to crosshair (or movement); Doctor and Traps go to movement; Lockpick and Science go to arrow. `[May-improve]`: a right-click from use or skill mode goes to movement.
 
 **Hover.** Feedback is computed once the pointer has rested on one pixel for at least 250 milliseconds, and again only after it moves; moving resets the art and removes any item outline. `[Must-match]`
@@ -1137,6 +1150,7 @@ A pointer at x = 0, x = 639, y = 0 or y = 479 scrolls the map; corners scroll di
   - Each time input is polled and the keyboard is enabled, every key that is still held makes one more key event of the same kind. That happens when more than 500 milliseconds have passed since its press, or more than 80 milliseconds since its previous repeat.
   - Repeats only happen during polls, so a loop that polls less often repeats less often.
   - F1, Tab, Esc, `o`, `i`, `c`, `p` and the other toggles therefore repeat when held. A held toggle opens its window. After about half a second its repeats are read by the open window, which closes it if it treats that key as close. Its next repeat then reopens the window from the game loop, and so on until the key is released. The help screen (F1) closes on any input, so its own repeat closes it.
+  - **Modifier keys repeat too, but produce no key.** Shift, Ctrl, Alt, Caps Lock, Num Lock and Scroll Lock are physical keys like any other. They are timed and repeated by the same rule, and each press or repeat is placed in the 32-event keyboard buffer (section 3.27). A buffered event is translated to a key code only when it is read, using the modifiers held at the time of the event. A modifier key on its own translates to no key code, so its press or repeat is removed from the buffer and nothing acts: no window opens or closes, and no "any key" test is met. Such an event still uses one buffer slot and one poll. Holding Ctrl therefore never closes the pause window that Ctrl+P opened. Holding P while Ctrl is held repeats Ctrl+P like any other key. `[Must-match]`
   - Clearing the keyboard cancels the repeat of every held key until that key is pressed again. This happens at the start of each player combat turn (section 3.27) and at the top of each main-menu loop pass (section 3.4).
 - **Combat and other windows.** During NPC turns and the player's attack animations the interface is disabled, but edge scrolling stays on: the scroll art temporarily replaces the animated watch, which returns afterwards. Scrolling is off during the combat panel's open and close animations, and during dialogue, inventory, the Pip-Boy, the world map and the action menu. Re-enabling the game mouse always turns scrolling back on. `[Must-match]`
 - **Click-to-scroll.** A latent mode exists in which a fresh left press on an edge pixel is flagged; any left release clears the flag before it reaches the map. While flagged, hold pulses and right clicks made with the left button down are ignored. Nothing in R1 turns this mode on (there is no configuration key), so it has no effect, and the ordinary release click is never suppressed. `[Must-match]`
@@ -2972,7 +2986,7 @@ A translucent outline pixel is `blend[g][D]`. Here D is the destination index at
 - **An NPC's turn.** The acting NPC's outline is enabled for its whole turn, whatever the setting, and disabled at the end.
 - **Death.** It disables the critter's outline.
 - **Combat end, or leaving the combat list.** Removes the outline.
-- **Animations.** A step of a registered animation sequence can enable or disable its owner's outline.
+- **Animations.** The animation system has a sequence step that enables or disables its owner's outline. No R1 code registers that step: no engine sequence (SPEC-007 §3.10, §3.11) and no script opcode adds it, so it never runs. An engine needs no such step for parity.
 
 Outside combat, the enable step applies to every living critter on the current elevation other than the player. It sets type 8 for the player's team and type 1 for everyone else, without the Friendly Foe test, and enables it. The disable step removes these outlines entirely.
 
@@ -3660,3 +3674,5 @@ Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or r
 Update notes (2026-10-23, R1-rev10): every new art name, list index and size in sections 3.45 and 3.44 was read from `intrface.lst` and the corpus FRM headers. The guessed `di_rview.frm` does not exist; the Review background is `review.frm` (102). Quoted `misc.msg`, `dbox.msg`, `proto.msg` and `editor.msg` texts were checked against the English corpus, and fixture widths were computed from `font1.aaf` and `font3.aaf`. The Ask About fixture keywords were read from the corpus dialog files. The screenshot header bytes and the grey table were modelled over the corpus `color.pal`. Net tags for R1-rev10: +17 `[Must-match]`, +12 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.
 
 Update notes (2026-10-23, R1-rev11): the input rules of sections 3.21, 3.25 and 3.27 were traced through the reference roll, panel, mouse and keyboard paths. The floating-text colors in section 3.46 were checked against the corpus `color.pal`, the taunt fonts and colors against all 95 `data/ai.txt` packets, and the fixture widths against `font1.aaf`. The placement window is the 640-by-380 map window. Net tags: +10 `[Must-match]`, +2 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-23, R1-rev12): the keyboard translation tables were checked for every modifier, lock and Windows key, and the cursor object flags were read from the game-mouse set-up. Net tags: +2 `[Must-match]`. `tools/spec_lint.py` gives 0 errors.
