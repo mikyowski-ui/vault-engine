@@ -208,7 +208,7 @@ fn the_databases_validate_with_counts_and_reasons() {
     let check = validate::critter(&dir.join("CRITTER.DAT"));
     assert_eq!(
         (check.state, check.text.as_str()),
-        (State::Ok, "1 members, 1 critter art")
+        (State::Ok, "1 member, 1 critter art")
     );
     // A member missing from the archive may sit in the loose data folder.
     let partial = archive(&[

@@ -90,8 +90,12 @@ pub fn master(path: &Path, data_root: Option<&Path>) -> Check {
     };
     let count = archive.paths().count();
     match missing(Some(&archive), data_root).as_slice() {
-        [] => Check::ok(format!("{count} members")),
-        missing => Check::bad(format!("{count} members; missing {}", missing.join(", "))),
+        [] => Check::ok(plural(count, "member")),
+        missing => Check::bad(format!(
+            "{}; missing {}",
+            plural(count, "member"),
+            missing.join(", ")
+        )),
     }
 }
 
@@ -110,9 +114,12 @@ pub fn critter(path: &Path) -> Check {
         })
         .count();
     if art == 0 {
-        Check::bad(format!("{count} members; none under art/critters/"))
+        Check::bad(format!(
+            "{}; none under art/critters/",
+            plural(count, "member")
+        ))
     } else {
-        Check::ok(format!("{count} members, {art} critter art"))
+        Check::ok(format!("{}, {art} critter art", plural(count, "member")))
     }
 }
 
@@ -188,7 +195,7 @@ pub fn mods(directory: &Path, entries: &[LayerEntry], policy: LoadOrderPolicy) -
                 return Check::unset("disabled");
             }
             match mount(std::slice::from_ref(entry)) {
-                Ok(vfs) => Check::ok(format!("{} files", vfs.files().count())),
+                Ok(vfs) => Check::ok(plural(vfs.files().count(), "file")),
                 Err(error) => Check::bad(error),
             }
         })
@@ -198,13 +205,22 @@ pub fn mods(directory: &Path, entries: &[LayerEntry], policy: LoadOrderPolicy) -
     } else {
         match mount(entries) {
             Ok(vfs) => Check::ok(format!(
-                "{} of {} layers mounted, {} files",
+                "{} of {} mounted, {}",
                 vfs.mod_layers(),
-                entries.len(),
-                vfs.files().count()
+                plural(entries.len(), "layer"),
+                plural(vfs.files().count(), "file")
             )),
             Err(error) => Check::bad(error),
         }
     };
     Mods { layers, stack }
+}
+
+/// `count` and `noun`, with an `s` unless the count is one.
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
