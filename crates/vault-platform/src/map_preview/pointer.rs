@@ -84,8 +84,14 @@ pub(crate) struct Edge {
 
 #[derive(Debug, Default)]
 pub(crate) struct PointerState {
-    /// The pointer's frame pixel while it is over the window.
+    /// The pointer's frame pixel while it is over the window (clamped to
+    /// the frame when it is in the letterbox).
     pub at: Option<[i32; 2]>,
+    /// H3: the pointer is outside the frame, in the window's letterbox. Its
+    /// clamped pixel still hovers and clicks, but it is never an edge for
+    /// edge scrolling (the in-game map here, the world map's edges in
+    /// `world.rs`).
+    pub outside: bool,
     /// When the pointer came to rest at `at`.
     rest_since: u64,
     /// The hover ran for this rest.
@@ -261,9 +267,8 @@ impl MapPreview {
         let entered_map =
             point[1] <= map_bottom() && previous.is_none_or(|[_, y]| y > map_bottom());
         self.restart_rest(entered_map);
-        if let Some(menu) = &mut self.pointer.menu {
-            menu.tracker.moved(point[1]);
-        }
+        // M-P4: an open menu follows the pointer once per poll
+        // (`pointer_tick`), not once per OS pointer event.
         self.window_pointer(point);
         // Leaving the map window out of combat drops the crosshair, use and
         // skill modes back to movement.
@@ -287,10 +292,21 @@ impl MapPreview {
             return;
         }
         self.pointer.at = None;
+        self.pointer.outside = false;
         self.pointer.rested = false;
         self.pointer.feedback = None;
         self.clear_item_outline();
         self.pointer.edge = None;
+    }
+    /// H3: whether the pointer is outside the frame (in the letterbox),
+    /// where no screen edge-scrolls.
+    pub(crate) fn pointer_outside(&self) -> bool {
+        self.pointer.outside
+    }
+    /// The shell reports whether the pointer's clamped pixel lies outside
+    /// the frame, before the move reaches `hover`.
+    pub(crate) fn set_pointer_outside(&mut self, outside: bool) {
+        self.pointer.outside = outside;
     }
     /// A left press in the map area: the click waits for the release, and
     /// holding it in arrow mode opens the action menu.
@@ -385,14 +401,30 @@ impl MapPreview {
             }
         }
         // §3.26-§3.27: while the watch shows the game mouse is disabled: a
-        // held press is dropped, and no menu, edge scroll or hover runs.
+        // held press is dropped, and no menu or hover runs. M-P2: the combat
+        // lock leaves edge scrolling on (§3.27, §3.29), its scroll art
+        // replacing the watch for a moment; a hand swap's wait out of
+        // combat turns it off (§3.23).
         if watch {
             self.pointer.held = None;
-            let scrolling = self.pointer.edge.take().is_some();
+            let scrolling = if self.combat_locked() {
+                self.edge_scroll()
+            } else {
+                self.pointer.edge.take().is_some()
+            };
             return scrolling | self.pointer.feedback.take().is_some();
         }
-        let mut changed = self.menu_repeat();
-        if self.pointer.menu.is_some() {
+        // §3.21: a counter roll or the panel animation reads no button, so
+        // no hold pulse opens the menu meanwhile.
+        let mut changed = !self.bar_blocks() && self.menu_repeat();
+        if let Some(menu) = &mut self.pointer.menu {
+            // §3.28 Must-match: each poll moves the highlight at most one
+            // entry, however far the pointer moved.
+            if let Some([_, y]) = self.pointer.at {
+                let highlight = menu.tracker.highlight;
+                menu.tracker.moved(y);
+                changed |= menu.tracker.highlight != highlight;
+            }
             return changed;
         }
         changed |= self.edge_scroll();
@@ -465,9 +497,17 @@ impl MapPreview {
     /// Leaving the edge restores the previous cursor and turns the
     /// in-world cursor back on.
     fn edge_scroll(&mut self) -> bool {
+        // H3: a pointer in the letterbox is not on an edge pixel. §3.29:
+        // scrolling is off while the combat panel animates and while the
+        // world turned it off (dialogue).
         let direction = self
             .pointer
             .at
+            .filter(|_| {
+                !self.pointer_outside()
+                    && self.hud.panel.animation.is_none()
+                    && self.host.world.scrolling_enabled
+            })
             .and_then(|[x, y]| cursor::edge_direction(x, y));
         let Some(direction) = direction else {
             let left = self.pointer.edge.take().is_some();
@@ -804,15 +844,8 @@ impl MapPreview {
             painter.cursor_frame(image, cursor::ANIMATED_WATCH.art, frame, at);
             return;
         }
-        // §3.26: the animated watch replaces the in-world cursor while the
-        // combat lock or a hand swap holds.
-        if self.world_pointer()
-            && let Some((_, frame)) = self.hud.watch
-        {
-            let art = cursor::ANIMATED_WATCH.art;
-            painter.cursor_frame(image, art, frame as usize, at);
-            return;
-        }
+        // §3.29: the scroll art, which under the combat lock temporarily
+        // replaces the animated watch.
         if let Some(edge) = self.pointer.edge {
             let art = if edge.blocked {
                 cursor::SCROLL_BLOCKED
@@ -820,6 +853,15 @@ impl MapPreview {
                 cursor::SCROLL
             }[edge.direction];
             painter.cursor(image, art.art, at);
+            return;
+        }
+        // §3.26: the animated watch replaces the in-world cursor while the
+        // combat lock or a hand swap holds.
+        if self.world_pointer()
+            && let Some((_, frame)) = self.hud.watch
+        {
+            let art = cursor::ANIMATED_WATCH.art;
+            painter.cursor_frame(image, art, frame as usize, at);
             return;
         }
         if self.world_pointer() && at[1] <= map_bottom() && !self.host.world.ui_disabled {

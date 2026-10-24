@@ -718,24 +718,34 @@ fn spec014_action_menu_opens_on_a_held_press_and_runs_the_entry() {
             Entry::Cancel
         ]
     );
-    // The world pauses; each move of more than 10 pixels moves the
-    // highlight one entry.
+    // The world pauses. M-P4 (§3.28): the highlight follows the pointer
+    // once per poll and at most one entry, however far it moved; a move of
+    // more than 10 pixels from the last anchor moves it and resets the
+    // anchor.
     let ticks = preview.host.world.clock.ticks;
     preview.tick(2000).unwrap();
     assert_eq!(preview.host.world.clock.ticks, ticks);
+    let highlight = |preview: &MapPreview| preview.pointer.menu.as_ref().unwrap().tracker.highlight;
     preview.hover([point[0], point[1] + 11]);
     preview.hover([point[0] + 3, point[1] + 22]);
-    assert_eq!(preview.pointer.menu.as_ref().unwrap().tracker.highlight, 2);
+    assert_eq!(highlight(&preview), 0, "pointer events alone move nothing");
+    preview.tick(2016).unwrap();
+    assert_eq!(highlight(&preview), 1, "one entry per poll");
+    preview.hover([point[0], point[1] + 33]);
+    preview.tick(2032).unwrap();
+    assert_eq!(highlight(&preview), 2);
     preview.hover([point[0], point[1] + 12]);
-    assert_eq!(preview.pointer.menu.as_ref().unwrap().tracker.highlight, 2);
+    preview.tick(2048).unwrap();
+    assert_eq!(highlight(&preview), 1);
     preview.hover([point[0] + 5, point[1] + 11]);
-    assert_eq!(preview.pointer.menu.as_ref().unwrap().tracker.highlight, 1);
+    preview.tick(2064).unwrap();
+    assert_eq!(highlight(&preview), 1);
     preview.image().unwrap();
     // The release runs Look (examine) and warps the pointer to the menu's
     // column at the last anchor.
     assert!(preview.release(Some([point[0] + 5, point[1] + 11]), false));
     assert!(preview.pointer.menu.is_none());
-    assert_eq!(preview.pointer.at, Some([point[0], point[1] + 11]));
+    assert_eq!(preview.pointer.at, Some([point[0], point[1] + 12]));
     assert!(!preview.host.world.dialogue.open);
     // A second hold without moving runs Talk.
     preview.hover(point);
@@ -1459,10 +1469,13 @@ fn spec014_hp_counter_rolls_only_when_asked_and_blocks_the_world() {
     preview.tick(48).unwrap();
     assert!(preview.counters_rolling());
     let ticks = preview.host.world.clock.ticks;
-    assert!(preview.step(KeyCode::KeyI), "keys are swallowed");
+    // §3.21: keys typed during the roll are deferred, not read.
+    assert!(preview.step(KeyCode::KeyI), "keys are held");
     assert!(matches!(preview.screen, Screen::Map));
+    assert_eq!(preview.hud.held_keys.len(), 1);
     let mut now = 48;
     while preview.counters_rolling() {
+        assert!(matches!(preview.screen, Screen::Map), "not read meanwhile");
         now += 16;
         preview.tick(now).unwrap();
         preview.image().unwrap();
@@ -1471,6 +1484,8 @@ fn spec014_hp_counter_rolls_only_when_asked_and_blocks_the_world() {
     assert_eq!(preview.host.world.clock.ticks, ticks, "the world waited");
     // 3 units of 3 frames plus the first, at 62 ms each.
     assert!(now >= 48 + 10 * 62, "{now}");
+    // The deferred key is read when the roll ends.
+    assert!(matches!(preview.screen, Screen::Inventory(_)));
 }
 
 #[test]
@@ -3552,4 +3567,173 @@ fn spec014_an_attack_click_out_of_combat_starts_combat_and_is_replayed() {
     assert!(preview.host.world.combat);
     assert!(preview.hud.replay.is_none());
     assert!(preview.hud.called.is_some(), "the replay opened the window");
+}
+
+#[test]
+fn spec014_fixture_u_floating_text_draws_over_its_hex_until_it_expires() {
+    use vault_core::floating::Ink;
+    let dir = corpus();
+    // Font 101: glyphs 5 wide (advance 6), line height 8 (pitch 9).
+    std::fs::write(dir.path().join("font1.aaf"), state_fixture::preview_aaf()).unwrap();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    let bare = preview.image().unwrap();
+    let target = npc(&preview);
+    let hex = preview.host.world.get(target).unwrap().raw.hex.unwrap();
+    let (color, outline) = (Ink::Key(32747), Some(Ink::Key(0)));
+    assert!(
+        preview
+            .host
+            .register_floating(target, 101, color, outline, b"Hello")
+    );
+    let text = preview.host.world.floating.texts[0].clone();
+    assert_eq!(text.size, [5 * 6 + 2, 9 + 2]);
+    assert_eq!((text.hex, text.lifetime, text.created), (hex, 4500, 16));
+    // C2: the box is drawn at the hex's window position plus its offset,
+    // and nothing else in the map window changes.
+    let drawn = preview.image().unwrap();
+    let [hx, hy] = preview.view.grid.hex_reference(hex).unwrap();
+    let [x, y] = [hx as i32 + text.offset[0], hy as i32 + text.offset[1]];
+    let changed: Vec<_> = (0..640 * 380)
+        .filter(|index| bare.pixels()[*index] != drawn.pixels()[*index])
+        .map(|index| [(index % 640) as i32, (index / 640) as i32])
+        .collect();
+    assert!(!changed.is_empty(), "the text is drawn");
+    assert!(
+        changed
+            .iter()
+            .all(|[px, py]| (x..x + 32).contains(px) && (y..y + 11).contains(py))
+    );
+    // The owner walking away leaves the text over its creation hex.
+    let elevation = preview.host.world.get(target).unwrap().raw.elevation;
+    let away = vault_formats::HexGrid::step(hex, 1, 3).unwrap();
+    preview
+        .host
+        .world
+        .move_object(target, away, elevation, false)
+        .unwrap();
+    assert_eq!(preview.host.world.floating.texts[0].hex, hex);
+    // A new text of the owner replaces it at the next background update.
+    assert!(
+        preview
+            .host
+            .register_floating(target, 101, color, outline, b"Bye")
+    );
+    assert_eq!(preview.host.world.floating.len(), 2);
+    preview.tick(32).unwrap();
+    assert_eq!(preview.host.world.floating.len(), 1);
+    let created = preview.host.world.floating.texts[0].created;
+    // Removed at the first background update strictly after 4500 ms of
+    // real time; not during a modal screen, but at the first update after.
+    preview.tick(created + 4500).unwrap();
+    assert_eq!(preview.host.world.floating.len(), 1);
+    assert!(preview.step(KeyCode::KeyI));
+    assert!(matches!(preview.screen, Screen::Inventory(_)));
+    preview.tick(created + 6000).unwrap();
+    assert_eq!(preview.host.world.floating.len(), 1, "no update meanwhile");
+    preview.return_to_map();
+    assert!(preview.tick(created + 6016).unwrap());
+    assert!(preview.host.world.floating.is_empty());
+    // Safe rule: an elevation change removes every text; empty strings are
+    // refused.
+    assert!(
+        preview
+            .host
+            .register_floating(target, 101, color, outline, b"Hi")
+    );
+    assert!(
+        !preview
+            .host
+            .register_floating(target, 101, color, outline, b"")
+    );
+    let other = (preview.host.world.elevation + 1) % 3;
+    preview.host.world.set_current_elevation(other);
+    assert!(preview.host.world.floating.is_empty());
+}
+
+#[test]
+fn m_p5_clicks_released_during_a_roll_are_lost_and_held_ones_act_after_it() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let player = preview.host.world.player;
+    let mut now = 16;
+    preview.tick(now).unwrap();
+    preview.image().unwrap();
+    let start = preview.host.world.get(player).unwrap().raw.hex.unwrap();
+    let point = on_hex(&preview, vault_formats::HexGrid::step(start, 1, 3).unwrap());
+    let hp = preview.host.world.hit_points(player).unwrap();
+    let roll = |preview: &mut MapPreview, now: &mut u64, loss: i32| {
+        preview.host.world.set_hit_points(player, hp - loss);
+        preview.host.world.emit(WorldEffect::RollHitPoints);
+        *now += 16;
+        preview.tick(*now).unwrap();
+        assert!(preview.bar_blocks());
+    };
+    let finish = |preview: &mut MapPreview, now: &mut u64| {
+        while preview.bar_blocks() {
+            *now += 16;
+            preview.tick(*now).unwrap();
+        }
+    };
+    preview.hover(point);
+    // §3.21: a click whose release is read during the roll is lost.
+    roll(&mut preview, &mut now, 2);
+    assert!(preview.tap(point));
+    assert!(preview.pointer.held.is_none());
+    finish(&mut preview, &mut now);
+    assert!(!preview.host.owns_motion(player), "no walk");
+    // A button still held when the roll ends counts as held; its release
+    // afterwards acts as an ordinary release.
+    roll(&mut preview, &mut now, 4);
+    assert!(preview.click(point, false));
+    finish(&mut preview, &mut now);
+    assert!(preview.pointer.held.is_some());
+    assert!(preview.release(Some(point), false));
+    assert!(preview.host.owns_motion(player), "the walk registered");
+    // M-P6: a press held when the window loses the focus is dropped.
+    preview.hud.mode = Mode::Arrow;
+    assert!(preview.click(point, false));
+    assert!(preview.pointer.held.is_some());
+    preview.focus_lost();
+    assert!(preview.pointer.held.is_none() && preview.pointer.menu.is_none());
+}
+
+#[test]
+fn m_p2_h3_edge_scrolling_under_the_lock_but_not_in_the_letterbox_or_panel_animation() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    // The lock between player turns shows the watch; edge scrolling stays
+    // on (§3.27, §3.29) and its art replaces the watch.
+    preview.host.world.combat = true;
+    preview.host.world.combat_state.player_turn = false;
+    preview.hud.panel = super::hud::Panel::settled(true, false);
+    assert!(preview.combat_locked() && preview.watch_shown());
+    let start = preview.host.world.camera_hex;
+    preview.hover([639, 200]);
+    preview.clock = 100;
+    assert!(preview.pointer_tick());
+    assert_ne!(preview.host.world.camera_hex, start);
+    assert!(preview.pointer.edge.is_some());
+    // H3: the pointer in the letterbox, clamped onto the edge pixel, is no
+    // edge.
+    let scrolled = preview.host.world.camera_hex;
+    preview.hover([320, 200]);
+    preview.clock = 200;
+    preview.pointer_tick();
+    assert!(preview.pointer.edge.is_none());
+    preview.set_pointer_outside(true);
+    preview.hover([639, 200]);
+    preview.clock = 300;
+    preview.pointer_tick();
+    assert!(preview.pointer.edge.is_none());
+    assert_eq!(preview.host.world.camera_hex, scrolled);
+    // §3.29: no edge scrolling during the panel's animation.
+    preview.set_pointer_outside(false);
+    preview.hud.panel.animation = Some((false, 300));
+    preview.clock = 400;
+    preview.pointer_tick();
+    assert!(preview.pointer.edge.is_none());
+    assert_eq!(preview.host.world.camera_hex, scrolled);
 }

@@ -1025,12 +1025,22 @@ fn spec009_fixture_g_taunt_requests_buffers_and_display() {
             ..
         })
     ));
-    let expiry = host.world.floating[0].1;
-    assert_eq!(expiry, crate::ai::floating_lifetime(1), "no font: one line");
+    // SPEC-014 §3.46: 3500 ms plus 1000 per line with the default delay.
+    let text = &host.world.floating.texts[0];
+    assert_eq!(
+        (text.lines.len(), text.lifetime),
+        (1, 4500),
+        "no font: one line"
+    );
+    let expiry = text.created + text.lifetime;
     host.request_taunt(guard, Taunt::Miss).unwrap();
     host.run_taunts();
     assert_eq!(taunt_effects(&host).len(), 1, "a floating text exists");
-    host.world.elapsed_ms = expiry;
+    // Expired texts go only at a background update, strictly after the
+    // lifetime.
+    assert!(!host.world.floating.update(expiry));
+    assert!(host.world.floating.update(expiry + 1));
+    host.world.elapsed_ms = expiry + 1;
     host.request_taunt(guard, Taunt::Hit(LOCATION_TORSO))
         .unwrap();
     host.run_taunts();

@@ -195,17 +195,6 @@ pub fn compose(
         });
         y += height + 2;
     }
-    image.draw_text(
-        font,
-        palette,
-        b"1-9 choose   0 end node   SPACE page   ESC close",
-        [127, 462],
-        500,
-        TextStyle {
-            foreground: green,
-            ..Default::default()
-        },
-    );
     Ok(DialogueLayout {
         image,
         choices,

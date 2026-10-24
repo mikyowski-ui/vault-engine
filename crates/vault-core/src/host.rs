@@ -1519,6 +1519,8 @@ impl<A: WorldAssets> WorldHost<A> {
             });
         }
         self.world.dialogue.start(owner, vm.id, background, head)?;
+        // SPEC-014 §3.46: starting a dialogue removes every floating text.
+        self.world.floating.clear();
         self.world.background_enabled = false;
         self.world.scrolling_enabled = false;
         self.library.mouse_hidden = false;

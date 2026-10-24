@@ -675,8 +675,8 @@ pub struct WorldState {
     pub world_map: crate::worldmap::WorldMap,
     /// SPEC-009 packets, snapshot, and taunt state.
     pub ai: crate::ai::AiState,
-    /// Live floating-text objects: owner and expiry on the host clock.
-    pub floating: Vec<(ObjectRef, u64)>,
+    /// SPEC-014 §3.46 the floating texts, in creation order.
+    pub floating: crate::floating::FloatingTexts,
     /// Pip-Boy credited rest minutes (reset when the Pip-Boy opens).
     pub rest_credit: i32,
     /// SPEC-008 working saved-map set, automap database, and carried
@@ -882,7 +882,7 @@ impl WorldState {
             combat_state: Default::default(),
             world_map: Default::default(),
             ai: Default::default(),
-            floating: Vec::new(),
+            floating: Default::default(),
             rest_credit: 0,
             persistence: Default::default(),
             pending_combat: None,
@@ -1821,6 +1821,11 @@ impl WorldState {
     pub fn set_current_elevation(&mut self, elevation: u8) {
         let changed = self.elevation != elevation;
         self.elevation = elevation;
+        // SPEC-014 §3.46 safe rule: an elevation change removes every
+        // floating text.
+        if changed {
+            self.floating.clear();
+        }
         if changed && self.map_script.is_some() {
             self.broadcast(ScriptEvent::MapUpdate, 0);
         }

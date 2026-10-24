@@ -7,7 +7,7 @@
 use crate::{ObjectRef, RandomSource, WorldError, rng::stat_check};
 use std::sync::Arc;
 use vault_formats::{
-    Font, MsgCatalog,
+    MsgCatalog,
     ai::{Packet, Packets},
 };
 
@@ -102,8 +102,6 @@ pub const READY_SOUND: u8 = 0;
 pub const OUT_OF_AMMO_SOUND: u8 = 2;
 /// Taunt text buffers hold 80 bytes: copies keep at most 79.
 pub const TAUNT_BYTES: usize = 79;
-/// Taunts wrap at 200 pixels.
-pub const TAUNT_WIDTH: u64 = 200;
 /// Message-monitor lines are formatted into 200 bytes: at most 199 kept.
 pub const MESSAGE_BYTES: usize = 199;
 
@@ -139,33 +137,6 @@ pub fn attack_animation(nibble: u8) -> u8 {
 /// miss from the attacker; ranged and thrown attacks from the defender.
 pub fn melee_form(animation: u8) -> bool {
     animation < 45 && animation != 18
-}
-/// Default floating-text lifetime: 3500 ms plus 1399 ms per line.
-pub fn floating_lifetime(lines: usize) -> u64 {
-    3500 + 1399 * lines as u64
-}
-/// Lines of a greedy word wrap at `width` pixels; a word wider than a line
-/// keeps a line of its own.
-pub fn wrapped_lines(font: &Font, text: &[u8], width: u64) -> usize {
-    let mut lines = 1;
-    let mut line: Vec<u8> = Vec::new();
-    for word in text
-        .split(|byte| *byte == b' ')
-        .filter(|word| !word.is_empty())
-    {
-        let joined = if line.is_empty() {
-            word.to_vec()
-        } else {
-            [line.as_slice(), b" ", word].concat()
-        };
-        if !line.is_empty() && font.text_width(&joined, false) > width {
-            lines += 1;
-            line = word.to_vec();
-        } else {
-            line = joined;
-        }
-    }
-    lines
 }
 
 /// §3.3 perception limit: `5P` in the forward sector (halved for a glass

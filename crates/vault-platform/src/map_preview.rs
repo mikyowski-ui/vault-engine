@@ -40,6 +40,7 @@ mod dialog;
 mod elevator;
 mod fade;
 pub(crate) use fade::FADE_MS;
+mod floating;
 mod help;
 mod hud;
 mod inventory;
@@ -583,6 +584,12 @@ impl MapPreview {
     pub fn set_modifiers(&mut self, modifiers: [bool; 3]) {
         self.hud.modifiers = modifiers;
     }
+    /// M-P6: the window lost the focus, so the releases of the buttons held
+    /// now will not arrive: every held press is dropped, and no action
+    /// menu opens later with the button up.
+    pub fn focus_lost(&mut self) {
+        self.drop_presses();
+    }
     /// Every press still held is forgotten (its release was swallowed).
     fn drop_presses(&mut self) {
         self.held = None;
@@ -709,6 +716,15 @@ impl MapPreview {
         let over = held.filter(|rect| point.is_some_and(|point| rect.contains(point)));
         if self.movie_release() {
             self.pressed = None;
+            return true;
+        }
+        // SPEC-014 §3.21: a click whose release is read during a counter
+        // roll or the panel animation is lost: no map action, bar button or
+        // menu entry results.
+        if self.bar_blocks() {
+            if !right {
+                self.drop_presses();
+            }
             return true;
         }
         // SPEC-013 §3.15: the Set Timer window is modal over any window.
@@ -961,6 +977,12 @@ impl MapPreview {
                         .map_or(b"object".as_slice(), |object| object.name.as_slice());
                     self.status = [format!("{action:?}: ").as_bytes(), name].concat();
                 }
+                // SPEC-014 §3.46: a created floating text (a `float_msg` or a
+                // taunt) is drawn from the world's floating texts; its
+                // effect only asks for the redraw (the view thawed above).
+                WorldEffect::Floating { object, .. } | WorldEffect::Taunt { object, .. } => {
+                    tracing::trace!(object, "floating text created");
+                }
                 other => tracing::debug!(?other, "host presentation request"),
             }
         }
@@ -1055,10 +1077,13 @@ impl MapPreview {
                 .map_or(0, |prototype| prototype.extended.0)
         };
         let cutout = self.cutout(egg.as_deref(), &extended);
+        // SPEC-014 §3.46: the floating texts, the layer after the outlines.
+        let floating = self.floating_sprites();
         let scene = MapScene {
             cutout: cutout.as_ref(),
             light: Some(light),
             outlines: Some(&inks),
+            floating: &floating,
         };
         draw_map_scene(&mut image, map, &objects, self.view, &self.art, scene)?;
         self.frozen_view = modal.then(|| image.clone());
@@ -1220,7 +1245,7 @@ impl MapPreview {
         // everywhere (a hand swap's wait included, §3.23) and no screen
         // receives it. While combat disables the keyboard (§3.27) it is not
         // read: it is held below with the other keys and acts when read.
-        if key == KeyCode::F12 && !self.keyboard_locked() {
+        if key == KeyCode::F12 && !self.keyboard_locked() && !self.bar_blocks() {
             self.screenshot();
             return true;
         }
@@ -1236,7 +1261,9 @@ impl MapPreview {
         // SPEC-014 §3.27: while combat locks the keyboard no key is read,
         // F12 included; presses and releases are held (up to 32) and read
         // in order once it is enabled (`read_held_keys`).
-        if self.keyboard_locked() {
+        // §3.21: during a counter roll or the panel animation keys are
+        // deferred the same way, and read in order when it ends.
+        if self.keyboard_locked() || self.bar_blocks() {
             let modifiers = self.hud.modifiers;
             self.hold_key(hud::HeldKey::Press(key, modifiers));
             return true;
@@ -1247,9 +1274,8 @@ impl MapPreview {
             return true;
         }
         // SPEC-014 §3.28-3.29: keyboard input is discarded while the action
-        // menu is open or edge scrolling is under way, and §3.21 while a
-        // counter rolls.
-        if self.pointer_swallows_keys() || self.bar_blocks() {
+        // menu is open or edge scrolling is under way.
+        if self.pointer_swallows_keys() {
             return true;
         }
         if matches!(self.screen, Screen::Barter(_)) {
@@ -1423,16 +1449,31 @@ impl MapPreview {
         if self.fade_blocks() {
             return true;
         }
-        if self.movie_press()
-            || self.dialog_click(point)
-            || self.timer_click(point)
-            || self.called_click(point, right)
-        {
+        if self.movie_press() {
             return true;
         }
-        // SPEC-014 §3.21, §3.25: game input waits while a counter rolls or
-        // the combat panel animates.
+        // The dialog box and the Set Timer window take the left button
+        // only: a right click presses none of their buttons (which would
+        // leave a held button with no release), and is swallowed.
+        if right && (self.dialog.is_some() || self.hud.timer.is_some()) {
+            return true;
+        }
+        if self.dialog_click(point) || self.timer_click(point) || self.called_click(point, right) {
+            return true;
+        }
+        // SPEC-014 §3.21, §3.25: while a counter rolls or the combat panel
+        // animates no click acts. Buttons are sampled, not queued: a left
+        // press in the map still down when the animation ends counts as
+        // held from the reading that saw it, and its release then acts as
+        // an ordinary release; a release during the animation loses it.
         if self.bar_blocks() {
+            if !right
+                && matches!(self.screen, Screen::Map)
+                && !self.host.world.dialogue.open
+                && point[1] <= vault_core::ui::bar::BAR_ORIGIN[1]
+            {
+                self.map_press(point);
+            }
             return true;
         }
         if matches!(self.screen, Screen::Barter(_)) {
@@ -1546,7 +1587,12 @@ impl MapPreview {
             // A counter roll or an open action menu pauses the world.
             _ if self.bar_blocks() => Ok(false),
             Screen::Map if self.pointer.menu.is_some() || self.timer_open() => Ok(false),
-            Screen::Map => self.host.tick(now),
+            // SPEC-014 §3.46: floating texts go at the background update,
+            // before the scripts may create new ones.
+            Screen::Map => {
+                let removed = self.floating_tick(now);
+                self.host.tick(now).map(|changed| changed | removed)
+            }
             Screen::World(_) | Screen::Town(_) => self
                 .world_tick(now)
                 .map_err(|error| vault_core::WorldError::Invalid(error.to_string())),

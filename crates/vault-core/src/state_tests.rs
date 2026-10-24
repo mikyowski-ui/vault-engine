@@ -1924,7 +1924,7 @@ fn spec009_ai_opcodes_alert_gate_hearing_team_and_party() {
     assert_eq!(team(&host, target), 0);
 
     // float_msg creates a live floating text (which suppresses taunts) for
-    // the default 3500 ms plus 1399 ms per line.
+    // the default 3500 ms plus 1000 ms per line (SPEC-014 §3.46).
     host.world.elevation = 1;
     let float = [
         push(target as i32),
@@ -1934,7 +1934,9 @@ fn spec009_ai_opcodes_alert_gate_hearing_team_and_party() {
     ]
     .concat();
     run_fragment(&mut host, &base, &float).unwrap();
-    assert_eq!(host.world.floating, [(target, 3500 + 1399)]);
+    let texts = &host.world.floating.texts;
+    assert_eq!(texts.len(), 1);
+    assert_eq!((texts[0].owner, texts[0].lifetime), (target, 3500 + 1000));
 }
 
 #[test]

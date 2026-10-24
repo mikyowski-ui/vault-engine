@@ -578,10 +578,11 @@ impl MapPreview {
             self.hud.held_keys.push_back(event);
         }
     }
-    /// A key went up: held while the keyboard is disabled, so it counts
-    /// toward the 32 events (§3.27). Game input acts on presses only.
+    /// A key went up: held while the keyboard is disabled or a roll or the
+    /// panel animation defers keys, so it counts toward the 32 events
+    /// (§3.21, §3.27). Game input acts on presses only.
     pub fn key_up(&mut self, _key: KeyCode) {
-        if !self.fade_blocks() && self.keyboard_locked() {
+        if !self.fade_blocks() && (self.keyboard_locked() || self.bar_blocks()) {
             self.hold_key(HeldKey::Release);
         }
     }

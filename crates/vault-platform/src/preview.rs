@@ -242,6 +242,36 @@ impl AssetPreview {
             Self::Game(game) => game.step(key),
         }
     }
+    /// The pointer moved: its frame pixel, clamped to the frame, and
+    /// whether it lies outside the frame (H3: a letterbox pointer hovers
+    /// and clicks at the clamped pixel but is never an edge).
+    pub fn pointer_moved(
+        &mut self,
+        point: vault_render::FramePoint,
+    ) -> Option<vault_render::map::MapHover> {
+        match self {
+            Self::Map(preview) => preview.set_pointer_outside(point.outside),
+            Self::Game(game) => {
+                if let Some(world) = game.world() {
+                    world.set_pointer_outside(point.outside);
+                }
+            }
+            _ => {}
+        }
+        self.hover(point.pixel)
+    }
+    /// M-P6: the window lost the focus; held presses are dropped.
+    pub fn focus_lost(&mut self) {
+        match self {
+            Self::Map(preview) => preview.focus_lost(),
+            Self::Game(game) => {
+                if let Some(world) = game.world() {
+                    world.focus_lost();
+                }
+            }
+            _ => {}
+        }
+    }
     pub fn hover(&mut self, point: [i32; 2]) -> Option<vault_render::map::MapHover> {
         match self {
             Self::Sprite(_) | Self::Movie(_) => None,

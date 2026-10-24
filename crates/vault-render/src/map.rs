@@ -1,5 +1,6 @@
 use crate::{
     ImageError, IndexedImage,
+    floating::FloatingSprite,
     outline::{BlendTable, OutlineInks, blend_table, draw_outline},
 };
 use std::sync::OnceLock;
@@ -166,6 +167,8 @@ pub struct MapScene<'a> {
     pub cutout: Option<&'a Cutout<'a>>,
     pub light: Option<MapLight<'a>>,
     pub outlines: Option<&'a OutlineInks>,
+    /// SPEC-014 §3.46 the floating texts, in creation order.
+    pub floating: &'a [FloatingSprite],
 }
 
 /// SPEC-014 §3.37 the player see-through cutout: the `egg.frm` mask placed
@@ -906,6 +909,18 @@ pub fn draw_map_scene(
             [width, height],
         );
     }
+    // SPEC-014 §3.46: floating text, in creation order, transparently, at
+    // its creation hex's current window position plus its offset; not
+    // hidden by roofs and whether or not its owner shows.
+    for text in scene.floating {
+        let Ok([x, y]) = view.grid.hex_reference(text.hex) else {
+            continue;
+        };
+        image.blit_image(
+            &text.image,
+            [x + i64::from(text.offset[0]), y + i64::from(text.offset[1])],
+        );
+    }
     for index in hexless {
         let object = &objects[index];
         if let Some((frame, origin)) = sprite(object)? {
@@ -1057,13 +1072,19 @@ pub fn pick_candidates(
     // Frontmost first: the reverse of the drawing order.
     for index in placed.into_iter().chain(hexless).rev() {
         let object = &objects[index];
-        let category = Category::from_pid(object.pid).ok()?;
+        // M-R2: an object with an unknown PID category or no placement is
+        // skipped, as the draw path skips it; it does not hide the others.
+        let Ok(category) = Category::from_pid(object.pid) else {
+            continue;
+        };
         let Some((frame, shift)) =
             art.frame(category, object.art_id, object.orientation, object.frame)
         else {
             continue;
         };
-        let (origin, _) = placement(view, frame, shift, object).ok()?;
+        let Ok((origin, _)) = placement(view, frame, shift, object) else {
+            continue;
+        };
         if sample(frame, origin) {
             let bits = object.flags.0 & TRANSLUCENCY;
             let translucent = bits != 0 && bits != NO_TRANSLUCENCY;
@@ -1527,6 +1548,70 @@ mod tests {
     }
 
     #[test]
+    fn spec014_floating_text_draws_over_roofs_at_its_hex_and_m_r2_picks_past_bad_objects() {
+        let map = preview();
+        let mut art = std::collections::BTreeMap::new();
+        art.insert(
+            (true, 2),
+            FrmArchive::parse(&fixture::frm(80, 36, 200)).unwrap(),
+        );
+        art.insert(
+            (false, 0x0200_0001),
+            FrmArchive::parse(&fixture::frm(2, 2, 20)).unwrap(),
+        );
+        let art = Keyed(art);
+        let mut view = view();
+        view.roofs = true;
+        let roof = [256_i64, 84];
+        let [hx, hy] = view.grid.hex_reference(20100).unwrap();
+        // A 3-by-3 box with one glyph pixel at (1, 1), placed over the roof.
+        let mut image = IndexedImage::new(3, 3).unwrap();
+        image.pixels_mut()[4] = 77;
+        let text = FloatingSprite {
+            hex: 20100,
+            offset: [(roof[0] - hx - 1) as i32, (roof[1] - hy - 1) as i32],
+            image,
+        };
+        let draw = |texts: &[FloatingSprite]| {
+            let mut image = render_floor(&map, view, &art).unwrap();
+            let layers = MapScene {
+                floating: texts,
+                ..MapScene::default()
+            };
+            draw_map_scene(&mut image, &map, &scene(Vec::new()), view, &art, layers).unwrap();
+            image
+        };
+        let pixel =
+            |image: &IndexedImage, [x, y]: [i64; 2]| image.pixels()[y as usize * 640 + x as usize];
+        let bare = draw(&[]);
+        assert_eq!(pixel(&bare, roof), 200);
+        let image = draw(std::slice::from_ref(&text));
+        assert_eq!(pixel(&image, roof), 77, "not hidden by the roof");
+        for x in [roof[0] - 1, roof[0] + 1] {
+            let beside = [x, roof[1]];
+            assert_eq!(
+                pixel(&image, beside),
+                pixel(&bare, beside),
+                "index 0 skipped"
+            );
+        }
+        // M-R2: an object whose PID has no category is skipped by picking
+        // as by drawing; it does not hide the objects under the pointer.
+        view.roofs = false;
+        let good = object(&map, 1, 0x0200_0001, 20300);
+        let mut bad = object(&map, 2, 0x0200_0001, 20500);
+        bad.pid = 0x0f00_0001;
+        let objects = scene(vec![bad, good]);
+        let point = view
+            .grid
+            .hex_center(20300)
+            .unwrap()
+            .map(|value| value as i32);
+        let hits = pick_candidates(&map, &objects, view, &art, point, None).unwrap();
+        assert_eq!(hits, [(1, true)]);
+    }
+
+    #[test]
     fn spec014_outlines_follow_the_roofs_at_most_100() {
         let map = preview();
         let mut art = std::collections::BTreeMap::new();
@@ -1675,6 +1760,7 @@ mod tests {
                 cutout: cut,
                 light: Some(light),
                 outlines: None,
+                floating: &[],
             };
             draw_map_scene(&mut image, &map, &scene(vec![wall]), view, &art, scene_cut).unwrap();
             let [x, y] = view.grid.hex_center(20300).unwrap();

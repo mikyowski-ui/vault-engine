@@ -1484,38 +1484,40 @@ impl<A: WorldAssets> WorldHost<A> {
                 {
                     let text = vm.host_string(call.args[1].value)?.unwrap_or(b"").to_vec();
                     if !text.is_empty() {
+                        // SPEC-005 §3.5 and SPEC-014 §3.46: style -1 takes
+                        // the next style of the cycle kept for the program
+                        // run; -2 is font 103 in red and recenters the view
+                        // on the player before the text is placed.
                         let mut style = call.int(0);
                         if style == -1 {
-                            self.floating_style = self.floating_style % 12 + 1;
+                            self.floating_style = crate::floating::next_style(self.floating_style);
                             style = self.floating_style;
                         }
-                        let color = match style {
-                            -2 | 2 => 31744,
-                            1 | 5 | 10 => 10570,
-                            3 => 992,
-                            4 => 31,
-                            6 => 21140,
-                            7 => 32074,
-                            9 => 32767,
-                            11 => 8456,
-                            12 => 15855,
-                            _ => 32747,
-                        };
+                        let color = crate::floating::style_color(style);
                         if style == -2
                             && let Some(hex) =
                                 self.world.get(self.world.player).and_then(|p| p.raw.hex)
                         {
                             self.world.set_view_center(hex);
                         }
-                        let font = if style == -2 { 103 } else { 101 };
-                        // A live floating text suppresses SPEC-009 taunts.
-                        self.register_floating(call.uint(2), font, &text);
-                        self.world.emit(WorldEffect::Floating {
-                            object: call.uint(2),
-                            text,
+                        let font = crate::floating::style_font(style);
+                        // Always with the one-pixel outline in key 0; a
+                        // refused creation is silent.
+                        let ink = crate::floating::Ink::Key;
+                        if self.register_floating(
+                            call.uint(2),
                             font,
-                            color,
-                        });
+                            ink(color),
+                            Some(ink(0)),
+                            &text,
+                        ) {
+                            self.world.emit(WorldEffect::Floating {
+                                object: call.uint(2),
+                                text,
+                                font,
+                                color,
+                            });
+                        }
                     }
                 }
                 None

@@ -787,10 +787,10 @@ impl<A: WorldAssets> WorldHost<A> {
         }
     }
     /// One taunt callback: its buffer's text, now, unless any floating text
-    /// exists.
+    /// exists anywhere (texts waiting for removal included; SPEC-014 §3.46
+    /// removes texts only at background updates).
     pub(crate) fn show_taunt(&mut self, callback: &TauntCallback) {
-        let now = self.world.elapsed_ms;
-        self.world.floating.retain(|(_, expiry)| *expiry > now);
+        use crate::floating::Ink;
         let text = self.world.ai.taunts[callback.buffer].clone();
         if !self.world.floating.is_empty()
             || text.is_empty()
@@ -798,28 +798,72 @@ impl<A: WorldAssets> WorldHost<A> {
         {
             return;
         }
-        self.register_floating(callback.speaker, callback.font, &text);
-        self.world.emit(WorldEffect::Taunt {
-            object: callback.speaker,
-            text,
-            font: callback.font,
-            color: callback.color,
-            outline: callback.outline,
-        });
+        // The packet's color is a raw index with the SPEC-002 drawing flags,
+        // its outline a raw index or -1 for none.
+        let outline = (callback.outline >= 0).then_some(Ink::Raw(callback.outline as u32 & 0xff));
+        let color = Ink::Raw(callback.color as u32);
+        if self.register_floating(callback.speaker, callback.font, color, outline, &text) {
+            self.world.emit(WorldEffect::Taunt {
+                object: callback.speaker,
+                text,
+                font: callback.font,
+                color: callback.color,
+                outline: callback.outline,
+            });
+        }
     }
-    /// Track a new floating text over `object` for the floating-text
-    /// subsystem's default lifetime (3500 ms plus 1399 ms per line, words
-    /// wrapped at 200 pixels in `font`).
-    pub(crate) fn register_floating(&mut self, object: ObjectRef, font: i32, text: &[u8]) {
-        let lines = self
-            .assets
-            .font_number(font)
-            .map_or(1, |font| ai::wrapped_lines(&font, text, ai::TAUNT_WIDTH));
-        let now = self.world.elapsed_ms;
-        self.world.floating.retain(|(_, expiry)| *expiry > now);
-        self.world
-            .floating
-            .push((object, now + ai::floating_lifetime(lines)));
+    /// SPEC-014 §3.46 create a floating text over `owner`'s hex: refused
+    /// (`false`, nothing appears and the owner's earlier text stays) for an
+    /// empty string, once 19 texts exist, or when the wrap needs more than
+    /// 63 lines. Safe rule: an owner without a hex (held in an inventory)
+    /// is refused too. The text is wrapped at 200 pixels in `font`, placed
+    /// at the first candidate that fits the 640-by-380 window, timed from
+    /// the latest background update, and marks the owner's earlier texts
+    /// for removal at the next update. Owners are generational references
+    /// that are never reused, so a destroyed owner's text matches no new
+    /// owner (the safe rule).
+    pub fn register_floating(
+        &mut self,
+        owner: ObjectRef,
+        font: i32,
+        color: crate::floating::Ink,
+        outline: Option<crate::floating::Ink>,
+        text: &[u8],
+    ) -> bool {
+        use crate::floating::{FloatingText, TEXT_LIMIT, WINDOW, layout, lifetime, place};
+        if text.is_empty() || self.world.floating.len() >= TEXT_LIMIT {
+            return false;
+        }
+        let loaded = self.assets.font_number(font);
+        let Some(layout) = layout(text, loaded.as_deref(), outline.is_some()) else {
+            return false;
+        };
+        let Some(hex) = self.world.get(owner).and_then(|object| object.raw.hex) else {
+            return false;
+        };
+        let Some(position) =
+            HexGrid::centered(self.world.camera_hex, WINDOW[0] as u32, WINDOW[1] as u32)
+                .and_then(|grid| grid.hex_reference(hex))
+                .ok()
+                .map(|at| at.map(|value| value.clamp(-(1 << 24), 1 << 24) as i32))
+        else {
+            return false;
+        };
+        let origin = place(position, layout.size);
+        let floating = &mut self.world.floating;
+        floating.push(FloatingText {
+            owner,
+            font,
+            lifetime: lifetime(floating.base_delay, layout.lines.len()),
+            lines: layout.lines,
+            size: layout.size,
+            color,
+            outline,
+            hex,
+            offset: [origin[0] - position[0], origin[1] - position[1]],
+            created: self.world.elapsed_ms,
+            marked: false,
+        })
     }
     /// `<critter name> <text> <item name>.` from `misc.msg` into the
     /// message monitor, truncated to 199 bytes; nothing without the line.
