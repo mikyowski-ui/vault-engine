@@ -69,7 +69,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # cpal uses WASAPI on Windows; no extra system packages are needed.
       - run: cargo build --workspace --release --locked
-      - run: cargo test --workspace --locked
+      - name: cargo test
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set -o pipefail
+          cargo test --workspace --locked --no-fail-fast 2>&1 | tee test-output.txt
+      # Every failing test (or compile error) becomes an error annotation:
+      # annotations are readable where the job log needs admin rights.
+      - name: Report test failures
+        if: failure()
+        shell: bash
+        run: |
+          awk '/^---- .* stdout ----$/ || /^error(\[E[0-9]+\])?: / {
+                 if (msg != "") print msg; msg = $0; n = 0; next }
+               msg != "" && n < 8 { msg = msg "%0A" $0; n++ }
+               END { if (msg != "") print msg }' test-output.txt \
+            | head -n 40 | sed 's/^/::error title=cargo test::/'
       - uses: actions/upload-artifact@v4
         with:
           name: vault-engine-windows-x86_64
@@ -86,7 +103,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # cpal uses CoreAudio on macOS; no extra system packages are needed.
       - run: cargo build --workspace --locked
-      - run: cargo test --workspace --locked
+      - name: cargo test
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set -o pipefail
+          cargo test --workspace --locked --no-fail-fast 2>&1 | tee test-output.txt
+      # Every failing test (or compile error) becomes an error annotation:
+      # annotations are readable where the job log needs admin rights.
+      - name: Report test failures
+        if: failure()
+        shell: bash
+        run: |
+          awk '/^---- .* stdout ----$/ || /^error(\[E[0-9]+\])?: / {
+                 if (msg != "") print msg; msg = $0; n = 0; next }
+               msg != "" && n < 8 { msg = msg "%0A" $0; n++ }
+               END { if (msg != "") print msg }' test-output.txt \
+            | head -n 40 | sed 's/^/::error title=cargo test::/'
 
   supply-chain:
     runs-on: ubuntu-latest
@@ -102,4 +136,5 @@ jobs:
       - run: cargo audit --file fuzz/Cargo.lock
       # Advisories, licenses, bans, and sources from deny.toml, for both.
       - run: cargo deny --locked check
-      - run: cargo deny --manifest-path fuzz/Cargo.toml --locked check --config deny.toml
+      # `--config` is a global option: it goes before the subcommand.
+      - run: cargo deny --manifest-path fuzz/Cargo.toml --locked --config deny.toml check

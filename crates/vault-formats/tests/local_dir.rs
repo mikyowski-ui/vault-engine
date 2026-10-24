@@ -145,13 +145,17 @@ fn namespace_is_a_snapshot_reads_are_live_and_missing_or_non_directory_roots_fai
         fs::read(temp.path().join("COLOR.PAL")).unwrap()
     );
     assert!(matches!(vfs.read("absent.pal"), Err(VfsError::NotFound(_))));
-    // Live lookups still refuse case-folded ambiguity.
-    fs::copy(temp.path().join("COLOR.PAL"), temp.path().join("NEW.pal")).unwrap();
-    assert!(matches!(
-        vfs.read("new.pal"),
-        Err(VfsError::CaseCollision { .. })
-    ));
-    fs::remove_file(temp.path().join("NEW.pal")).unwrap();
+    // Live lookups still refuse case-folded ambiguity, where the host
+    // filesystem can hold two names that differ only in case (macOS and
+    // Windows fold case by default, so `NEW.pal` would be `new.pal`).
+    if !temp.path().join("NEW.pal").exists() {
+        fs::copy(temp.path().join("COLOR.PAL"), temp.path().join("NEW.pal")).unwrap();
+        assert!(matches!(
+            vfs.read("new.pal"),
+            Err(VfsError::CaseCollision { .. })
+        ));
+        fs::remove_file(temp.path().join("NEW.pal")).unwrap();
+    }
     assert_eq!(
         LocalDirProvider::mount(temp.path())
             .unwrap()
@@ -233,15 +237,19 @@ mod unix {
             Err(VfsError::InvalidPath { .. })
         ));
         fs::remove_file(temp.path().join(r"art\test.frm")).unwrap();
-        fs::write(
+        // A filesystem that refuses non-UTF-8 names (APFS on macOS) cannot
+        // hold one to smuggle in.
+        if fs::write(
             temp.path().join(OsString::from_vec(vec![0xff])),
             b"synthetic",
         )
-        .unwrap();
-        assert!(matches!(
-            LocalDirProvider::mount(temp.path()),
-            Err(VfsError::NonUtf8Name(_))
-        ));
+        .is_ok()
+        {
+            assert!(matches!(
+                LocalDirProvider::mount(temp.path()),
+                Err(VfsError::NonUtf8Name(_))
+            ));
+        }
     }
 }
 

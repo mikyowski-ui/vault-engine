@@ -25,6 +25,12 @@ allow = [
     "Zlib",
 ]
 
+# The fuzz workspace's libfuzzer-sys bundles LLVM's libFuzzer under the
+# permissive NCSA license; it is allowed for that crate only.
+[[licenses.exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
+
 [licenses.private]
 ignore = true
 
