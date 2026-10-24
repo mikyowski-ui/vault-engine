@@ -2,13 +2,13 @@
 //! through live world state, with draw accounting against a cloned
 //! generator.
 use crate::{
-    CharacterSheet, ObjectRef, RandomSource, WorldEffect, WorldError, WorldHost, WorldState,
+    CharacterSheet, ObjectRef, RandomSource, WorldEffect, WorldHost, WorldState,
     ai::{Taunt, intent},
-    assets::WorldAssets,
     combat::Resolution,
     combat_state::{CombatRequest, PacketAi},
     critical::{effect, hit_mode, location},
     fixture_world as fixture,
+    test_support::{Draws, TestAssets, patched, right_primary, set_hp, special},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -109,68 +109,15 @@ fn misc() -> Arc<MsgCatalog> {
     )
 }
 
-#[derive(Clone)]
-struct AiAssets {
-    prototypes: BTreeMap<u32, Arc<Prototype>>,
-    ai: Option<Vec<u8>>,
-    taunts: Option<Arc<MsgCatalog>>,
-    misc: Option<Arc<MsgCatalog>>,
-    combat: Option<Arc<MsgCatalog>>,
-    /// Critter animation codes without art.
-    missing: BTreeSet<u8>,
-    /// Loadable art by identifier.
-    art: BTreeMap<u32, Arc<vault_formats::FrmArchive>>,
-}
-impl Default for AiAssets {
-    fn default() -> Self {
-        Self {
-            prototypes: BTreeMap::new(),
-            ai: Some(packets()),
-            taunts: Some(taunts()),
-            misc: Some(misc()),
-            combat: None,
-            missing: BTreeSet::new(),
-            art: BTreeMap::new(),
-        }
-    }
-}
-impl WorldAssets for AiAssets {
-    fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
-        self.prototypes
-            .get(&pid)
-            .cloned()
-            .ok_or_else(|| WorldError::Invalid("no prototype".into()))
-    }
-    fn program(&self, _index: i32) -> Result<(String, vault_vm::IntProgram), WorldError> {
-        Err(WorldError::Invalid("no programs".into()))
-    }
-    fn message(&self, _list: i32, _id: i32) -> Option<vault_formats::msg::Message> {
-        None
-    }
-    fn art_exists(&self, fid: u32) -> bool {
-        !self.missing.contains(&Fid(fid).animation())
-    }
-    fn object_art(&self, fid: u32) -> Result<Arc<vault_formats::FrmArchive>, WorldError> {
-        self.art
-            .get(&fid)
-            .cloned()
-            .ok_or_else(|| WorldError::Invalid("object art unavailable".into()))
-    }
-    fn resource(&self, path: &str) -> Result<Vec<u8>, WorldError> {
-        self.ai
-            .clone()
-            .filter(|_| path == "data/ai.txt")
-            .ok_or_else(|| WorldError::Invalid(format!("{path} is missing")))
-    }
-    fn game_messages(&self, file: &str) -> Result<Arc<MsgCatalog>, WorldError> {
-        match file {
-            "combatai.msg" => self.taunts.clone(),
-            "misc.msg" => self.misc.clone(),
-            "combat.msg" => self.combat.clone(),
-            _ => None,
-        }
-        .ok_or_else(|| WorldError::Invalid(format!("{file} is missing")))
-    }
+/// The combat AI resources: `ai.txt` [`packets`], `combatai.msg`
+/// [`taunts`] and `misc.msg` [`misc`]; every art exists but the `missing`
+/// animations.
+fn assets() -> TestAssets {
+    let mut assets = TestAssets::all_art();
+    assets.resources.insert("data/ai.txt".into(), packets());
+    assets.game.insert("combatai.msg".into(), taunts());
+    assets.game.insert("misc.msg".into(), misc());
+    assets
 }
 
 /// Player at 20100 facing 5, outside combat.
@@ -179,7 +126,7 @@ fn world() -> WorldState {
     world.get_mut(world.player).unwrap().raw.orientation = 5;
     world
 }
-fn ai_host(world: WorldState, assets: AiAssets) -> WorldHost<AiAssets> {
+fn ai_host(world: WorldState, assets: TestAssets) -> WorldHost<TestAssets> {
     let mut host = WorldHost::new(world, assets);
     host.load_combat_ai().unwrap();
     host.world.effects.clear();
@@ -194,20 +141,9 @@ fn npc(
     packet: i32,
     stats: &[(usize, i32)],
 ) -> ObjectRef {
-    let mut bytes = fixture::prototype(1, 0);
-    for stat in 0..7 {
-        fixture::word(&mut bytes, 48 + 4 * stat, 5);
-    }
-    fixture::word(&mut bytes, 48 + 4 * 7, 30);
-    fixture::word(&mut bytes, 48 + 4 * 8, 8);
-    for (stat, value) in stats {
-        fixture::word(&mut bytes, 48 + 4 * stat, *value);
-    }
-    fixture::word(&mut bytes, 0x24, packet);
-    fixture::word(&mut bytes, 0x28, team);
-    let critter = world
-        .spawn(Arc::new(Prototype::parse(&bytes).unwrap()), hex, 0)
-        .unwrap();
+    let mut words = special(&[&[(7, 30), (8, 8)], stats].concat());
+    words.extend([(0x24, packet), (0x28, team)]);
+    let critter = world.spawn(patched(1, 0, &words, &[]), hex, 0).unwrap();
     world.get_mut(critter).unwrap().raw.flags = BasicFlags(0);
     critter
 }
@@ -217,16 +153,6 @@ fn set_skill(world: &mut WorldState, critter: ObjectRef, skill: usize, points: i
 }
 fn state(world: &mut WorldState, critter: ObjectRef) -> &mut vault_formats::map::CritterState {
     world.critter_state_mut(critter).unwrap()
-}
-fn set_hp(world: &mut WorldState, critter: ObjectRef, hp: i32) {
-    state(world, critter).hp = hp;
-    world
-        .get_mut(critter)
-        .unwrap()
-        .character
-        .as_mut()
-        .unwrap()
-        .current_hp = hp;
 }
 
 // Item prototype offsets (SPEC-003): extended flags, cost, and the weapon,
@@ -324,7 +250,7 @@ fn rounds(world: &WorldState, weapon: ObjectRef) -> i32 {
 fn hex(world: &WorldState, object: ObjectRef) -> i32 {
     world.get(object).unwrap().raw.hex.unwrap()
 }
-fn taunt_effects(host: &WorldHost<AiAssets>) -> Vec<(ObjectRef, Vec<u8>)> {
+fn taunt_effects(host: &WorldHost<TestAssets>) -> Vec<(ObjectRef, Vec<u8>)> {
     host.world
         .effects
         .iter()
@@ -334,7 +260,7 @@ fn taunt_effects(host: &WorldHost<AiAssets>) -> Vec<(ObjectRef, Vec<u8>)> {
         })
         .collect()
 }
-fn messages(host: &WorldHost<AiAssets>) -> Vec<Vec<u8>> {
+fn messages(host: &WorldHost<TestAssets>) -> Vec<Vec<u8>> {
     host.world
         .effects
         .iter()
@@ -352,7 +278,7 @@ fn line(id: i32) -> Vec<u8> {
 fn spec009_initialization_resolution_and_language_filter() {
     let mut world = world();
     let critter = npc(&mut world, 20300, 1, 99, &[]);
-    let mut host = WorldHost::new(world, AiAssets::default());
+    let mut host = WorldHost::new(world, assets());
     host.world.ai.language_filter = Some(2);
     host.load_combat_ai().unwrap();
     let packets = host.world.ai.packets.clone().unwrap();
@@ -387,7 +313,7 @@ fn spec009_initialization_resolution_and_language_filter() {
     host.reevaluate_language_filter().unwrap();
     assert!(!host.world.ai.filtered);
     assert_eq!(host.world.rng, expected);
-    let taunt = |host: &WorldHost<AiAssets>| {
+    let taunt = |host: &WorldHost<TestAssets>| {
         let messages = host.world.ai.messages.as_ref().unwrap();
         messages.get(1000).unwrap().text.clone()
     };
@@ -445,17 +371,17 @@ fn spec009_initialization_resolution_and_language_filter() {
 
     // Missing resources fail initialization; combatai.msg is read first.
     for assets in [
-        AiAssets {
-            ai: None,
-            ..AiAssets::default()
+        TestAssets {
+            resources: BTreeMap::new(),
+            ..assets()
         },
-        AiAssets {
-            taunts: None,
-            ..AiAssets::default()
+        TestAssets {
+            game: BTreeMap::from([("misc.msg".into(), misc())]),
+            ..assets()
         },
-        AiAssets {
-            ai: Some(b"[Empty]\r\n".to_vec()),
-            ..AiAssets::default()
+        TestAssets {
+            resources: BTreeMap::from([("data/ai.txt".into(), b"[Empty]\r\n".to_vec())]),
+            ..assets()
         },
     ] {
         let mut host = WorldHost::new(self::world(), assets);
@@ -487,7 +413,7 @@ fn spec009_fixture_c_danger_through_live_state() {
     set_hp(&mut world, x, 0);
     world.combat = true;
     world.ai.snapshot = vec![a, b, c, d, e, f, x];
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     assert_eq!(host.danger(a), Some(e));
     // The distance sort persists in the snapshot (stable for ties).
     assert_eq!(host.world.ai.snapshot, [a, c, e, x, b, f, d]);
@@ -551,7 +477,7 @@ fn spec009_fixture_h_setter_retaliation_and_onlookers() {
     let r3 = npc(&mut world, 21100, 2, 0, &[(11, 9), (9, 40)]);
     state(&mut world, r3).results.0 = effect::KNOCKED_OUT;
     let rock = world.spawn(item(5, 22, &[]), 21300, 0).unwrap();
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     let ratings: Vec<_> = [q, r1, r2, r3, 0, rock]
         .iter()
         .map(|critter| host.world.retaliation_rating(*critter))
@@ -599,7 +525,7 @@ fn spec009_fixture_h_setter_retaliation_and_onlookers() {
     host.world.combat = true;
     host.world.ai.snapshot = vec![v, r2, far];
     host.after_damage(q, v, true);
-    let alert = |host: &WorldHost<AiAssets>, critter| {
+    let alert = |host: &WorldHost<TestAssets>, critter| {
         host.world.critter_state(critter).unwrap().maneuvers & intent::ALERT != 0
     };
     assert!(alert(&host, v) && alert(&host, r2) && !alert(&host, far));
@@ -618,7 +544,7 @@ fn spec007_intended_target_rule_covers_unintended_victims() {
     let attack = world
         .attack_profile(attacker, victim, hit_mode::PUNCH, location::UNCALLED, false)
         .unwrap();
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     host.world.combat = true;
     host.world.ai.snapshot = vec![attacker, intended, victim];
     let resolution = Resolution {
@@ -627,7 +553,7 @@ fn spec007_intended_target_rule_covers_unintended_victims() {
         defender_flags: effect::HIT,
         ..Default::default()
     };
-    let hp = |host: &WorldHost<AiAssets>, critter| host.world.hit_points(critter).unwrap();
+    let hp = |host: &WorldHost<TestAssets>, critter| host.world.hit_points(critter).unwrap();
     let before = hp(&host, intended);
     host.apply_attack_to(attacker, intended, victim, &attack, &resolution)
         .unwrap();
@@ -637,7 +563,7 @@ fn spec007_intended_target_rule_covers_unintended_victims() {
         "the intended target takes nothing"
     );
     assert_eq!(host.world.get(victim).unwrap().opponent, 0);
-    let alert = |host: &WorldHost<AiAssets>, critter| {
+    let alert = |host: &WorldHost<TestAssets>, critter| {
         host.world.critter_state(critter).unwrap().maneuvers & intent::ALERT != 0
     };
     assert!(alert(&host, intended) && alert(&host, victim));
@@ -659,10 +585,10 @@ fn spec014_combat_cleanup_wakes_a_knocked_out_player() {
     // player and removes the pending wake-up event (SPEC-014 §3.5).
     let world = world();
     let player = world.player;
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     host.damage_critter(player, None, 0, effect::KNOCKED_OUT)
         .unwrap();
-    let wake = |host: &WorldHost<AiAssets>| {
+    let wake = |host: &WorldHost<TestAssets>| {
         host.world
             .queue
             .events()
@@ -683,7 +609,7 @@ fn spec009_fixture_d_weapon_usability_preference_and_cost() {
     let mut world = world();
     let critter = npc(&mut world, 20300, 1, 0, &[]);
     state(&mut world, critter).ap = 5;
-    let mut assets = AiAssets::default();
+    let mut assets = assets();
     assets.prototypes.insert(30, ammo(30, 0, 10));
     assets.prototypes.insert(31, ammo(31, 50, 20));
     assets.prototypes.insert(32, ammo(32, 50, 0));
@@ -801,7 +727,7 @@ fn spec009_fixture_e_hit_mode_and_called_shot_draws_through_the_world() {
         .unwrap();
     state(&mut world, critter).ap = 8;
     world.get_mut(player).unwrap().raw.hex = Some(20500);
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     let mut outcomes = BTreeSet::new();
     for seed in 1..400 {
         host.world.rng = crate::ParkMiller::seeded(seed).unwrap();
@@ -821,10 +747,7 @@ fn spec009_fixture_e_hit_mode_and_called_shot_draws_through_the_world() {
             location::TORSO
         } else {
             let place = expected.range(0, 8).unwrap() as u8;
-            let chance = host
-                .world
-                .attack_profile(critter, player, hit_mode::RIGHT_PRIMARY, place, false)
-                .unwrap()
+            let chance = right_primary(&host.world, critter, player, place, false)
                 .hit_chance(true)
                 .unwrap();
             if chance < 40 { location::TORSO } else { place }
@@ -897,7 +820,7 @@ fn spec009_fixture_f_flee_movement_and_run_taunt() {
     let critter = npc(&mut world, 20100 + 7 * 200, 1, 1, &[]);
     state(&mut world, critter).ap = 4;
     world.combat = true;
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     let mut expected = host.world.rng.clone();
     let _chance = expected.range(1, 100).unwrap();
     let id = expected.range(1000, 1010).unwrap();
@@ -917,7 +840,7 @@ fn spec009_fixture_f_flee_movement_and_run_taunt() {
     let critter = npc(&mut world, 21500, 1, 1, &[]);
     state(&mut world, critter).ap = 4;
     let blocker = npc(&mut world, HexGrid::step(21500, 2, 4).unwrap(), 1, 0, &[]);
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     host.ai_flee(critter).unwrap();
     assert_eq!(
         hex(&host.world, critter),
@@ -930,7 +853,7 @@ fn spec009_fixture_f_flee_movement_and_run_taunt() {
     let far = npc(&mut world, 20100 + 8 * 200, 1, 1, &[]);
     let tired = npc(&mut world, 20100 + 6 * 200, 1, 1, &[]);
     state(&mut world, far).ap = 4;
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     let expected = host.world.rng.clone();
     host.ai_flee(far).unwrap();
     host.ai_flee(tired).unwrap();
@@ -951,7 +874,7 @@ fn spec009_fixture_f_flee_movement_and_run_taunt() {
     let mut world = self::world();
     let brute = npc(&mut world, 21300, 1, 3, &[]);
     state(&mut world, brute).results.0 = effect::CRIPPLED_RIGHT_LEG;
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     host.ai_turn(brute, None).unwrap();
     assert_eq!(
         host.world.critter_state(brute).unwrap().maneuvers,
@@ -966,7 +889,7 @@ fn spec009_fixture_g_taunt_requests_buffers_and_display() {
     let zeta = npc(&mut world, 20300, 1, 2, &[]);
     let guard = npc(&mut world, 20500, 1, 0, &[]);
     let brute = npc(&mut world, 20700, 1, 3, &[]);
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     // The chance draw must be at most 35, then the line draw is inclusive.
     let mut seen = BTreeSet::new();
     for seed in 1..200 {
@@ -1085,16 +1008,7 @@ fn spec009_fixture_g_taunt_requests_buffers_and_display() {
     host.world
         .equip(guard, gun, BasicFlags::RIGHT_HAND.0)
         .unwrap();
-    let ranged = host
-        .world
-        .attack_profile(
-            guard,
-            zeta,
-            hit_mode::RIGHT_PRIMARY,
-            location::RIGHT_LEG,
-            true,
-        )
-        .unwrap();
+    let ranged = right_primary(&host.world, guard, zeta, location::RIGHT_LEG, true);
     let hit = Resolution {
         defender_flags: effect::HIT,
         ..Resolution::default()
@@ -1187,7 +1101,7 @@ fn spec009_fixture_i_healing_loop_through_inventory() {
         2,
         ObjectDetail::Plain,
     );
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     let mut expected = host.world.rng.clone();
     expected.range(1, 100).unwrap();
     host.ai_heal(critter).unwrap();
@@ -1214,7 +1128,7 @@ fn spec009_fixture_i_healing_loop_through_inventory() {
 
 /// An NPC with a loaded pistol (primary 4 AP, damage 1, range 20) facing
 /// the player, who is its living last attacker.
-fn duel(distance: i32, skill: i32) -> (WorldHost<AiAssets>, ObjectRef, ObjectRef) {
+fn duel(distance: i32, skill: i32) -> (WorldHost<TestAssets>, ObjectRef, ObjectRef) {
     let mut world = world();
     let player = world.player;
     set_hp(&mut world, player, 1000);
@@ -1234,23 +1148,14 @@ fn duel(distance: i32, skill: i32) -> (WorldHost<AiAssets>, ObjectRef, ObjectRef
     state(&mut world, critter).ap = 8;
     world.combat = true;
     world.ai.snapshot = vec![player, critter];
-    (ai_host(world, AiAssets::default()), critter, pistol)
+    (ai_host(world, assets()), critter, pistol)
 }
 
 #[test]
 fn spec009_fixture_j_attack_loop_through_the_world() {
     let (mut host, critter, pistol) = duel(3, 100);
     let player = host.world.player;
-    let chance = host
-        .world
-        .attack_profile(
-            critter,
-            player,
-            hit_mode::RIGHT_PRIMARY,
-            location::UNCALLED,
-            false,
-        )
-        .unwrap()
+    let chance = right_primary(&host.world, critter, player, location::UNCALLED, false)
         .hit_chance(true)
         .unwrap();
     assert!(chance >= 40);
@@ -1274,16 +1179,7 @@ fn spec009_fixture_j_attack_loop_through_the_world() {
     // Range-aware chance below 40 but no-range chance at least 40: approach
     // (with a move taunt), spending the AP on movement.
     let (mut host, critter, pistol) = duel(19, 40);
-    let profile = host
-        .world
-        .attack_profile(
-            critter,
-            player,
-            hit_mode::RIGHT_PRIMARY,
-            location::UNCALLED,
-            false,
-        )
-        .unwrap();
+    let profile = right_primary(&host.world, critter, player, location::UNCALLED, false);
     let (aware, plain) = (
         profile.hit_chance(true).unwrap(),
         profile.hit_chance(false).unwrap(),
@@ -1408,7 +1304,7 @@ fn spec009_weapon_switching_pickup_and_unarmed_upgrade() {
     state(&mut world, critter).ap = 8;
     world.combat = true;
     world.ai.snapshot = vec![player, critter];
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     host.ai_attack(critter, player).unwrap();
     assert_eq!(
         host.world.wielded(critter, hit_mode::RIGHT_PRIMARY),
@@ -1435,7 +1331,7 @@ fn spec009_weapon_switching_pickup_and_unarmed_upgrade() {
         .spawn(weapon(72, 0x06, 4, 4, 20, 10, 300), 20500 + 11 * 200, 0)
         .unwrap();
     world.combat = true;
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     // Perception 5 + 5 = 10: the farther (better) weapon is out of range.
     assert_eq!(
         host.environment_search(critter, vault_formats::pro::ItemSubtype::Weapon),
@@ -1520,7 +1416,7 @@ fn spec009_turn_tree_requested_target_join_stop_and_party_follow() {
     world.get_mut(member).unwrap().raw.id = 18000;
     world.party.insert(member);
     state(&mut world, member).ap = 3;
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     assert!(host.world.party_member(member));
     host.ai_turn(member, None).unwrap();
     assert_eq!(host.world.object_distance(member, player), 6);
@@ -1536,7 +1432,7 @@ fn spec009_turn_tree_requested_target_join_stop_and_party_follow() {
     world.get_mut(critter).unwrap().opponent = critter;
     state(&mut world, critter).damage = 4;
     state(&mut world, critter).ap = 2;
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     assert_eq!(host.ai_turn(critter, None).unwrap(), None);
     assert_ne!(
         host.world.critter_state(critter).unwrap().maneuvers & intent::FLEE,
@@ -1550,7 +1446,7 @@ fn spec009_team_switching_and_random_retarget() {
     let a = npc(&mut world, 20300, 1, 0, &[]);
     let b = npc(&mut world, 20500, 2, 0, &[]);
     world.get_mut(a).unwrap().opponent = b;
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     host.set_team(a, 3);
     assert_eq!(host.world.get(a).unwrap().opponent, b);
     host.set_team(a, 2);
@@ -1570,7 +1466,7 @@ fn spec009_team_switching_and_random_retarget() {
     let ahead = npc(&mut world, 20100 + 3 * 200, 2, 0, &[]);
     let behind = npc(&mut world, 20100 + 200, 2, 0, &[]);
     state(&mut world, attacker).ap = 8;
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     let mut rng = crate::ParkMiller::seeded(3).unwrap();
     let before = rng.clone();
     assert_eq!(
@@ -1601,29 +1497,11 @@ fn spec009_team_switching_and_random_retarget() {
     );
 }
 
-/// Scripted outcomes in draw order; each must lie in its requested range.
-struct Draws(std::collections::VecDeque<i32>);
-impl Draws {
-    fn new(values: &[i32]) -> Self {
-        Self(values.iter().copied().collect())
-    }
-}
-impl RandomSource for Draws {
-    fn range(&mut self, first: i32, last: i32) -> Result<i32, WorldError> {
-        let value = self.0.pop_front().expect("an outcome for every draw");
-        assert!(
-            (first..=last).contains(&value),
-            "{value} outside {first}..={last}"
-        );
-        Ok(value)
-    }
-}
-
 /// SPEC-007 Fixture E geometry, on one hex column: the attacker, a living
 /// critter X1, the defender, then X2 (DT 2, DR 20) or a wall, with a
 /// single-fire weapon of range 20 and damage 1-20. The clock is before the
 /// first day, so no critical-upgrade draws are made.
-fn fixture_e(blocker: &str, x1_team: i32) -> (WorldHost<AiAssets>, [ObjectRef; 4]) {
+fn fixture_e(blocker: &str, x1_team: i32) -> (WorldHost<TestAssets>, [ObjectRef; 4]) {
     let mut world = world();
     let player = world.player;
     world.get_mut(player).unwrap().raw.hex = Some(0);
@@ -1634,11 +1512,7 @@ fn fixture_e(blocker: &str, x1_team: i32) -> (WorldHost<AiAssets>, [ObjectRef; 4
     let far = match blocker {
         "wall" => {
             let wall = world
-                .spawn(
-                    Arc::new(Prototype::parse(&fixture::prototype(3, 0)).unwrap()),
-                    20100 + 6 * 200,
-                    0,
-                )
+                .spawn(patched(3, 0, &[], &[]), 20100 + 6 * 200, 0)
                 .unwrap();
             world.get_mut(wall).unwrap().raw.flags = BasicFlags(0);
             wall
@@ -1656,26 +1530,17 @@ fn fixture_e(blocker: &str, x1_team: i32) -> (WorldHost<AiAssets>, [ObjectRef; 4
         .equip(attacker, gun, BasicFlags::RIGHT_HAND.0)
         .unwrap();
     state(&mut world, attacker).ap = 8;
-    let mut assets = AiAssets::default();
+    let mut assets = assets();
     assets.prototypes.insert(30, ammo(30, 0, 10));
     (ai_host(world, assets), [attacker, x1, defender, far])
 }
 fn miss(
-    host: &WorldHost<AiAssets>,
+    host: &WorldHost<TestAssets>,
     attacker: ObjectRef,
     defender: ObjectRef,
     outcomes: &[i32],
 ) -> (crate::Spray, Option<crate::host_ai::Victim>) {
-    let attack = host
-        .world
-        .attack_profile(
-            attacker,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::UNCALLED,
-            false,
-        )
-        .unwrap();
+    let attack = right_primary(&host.world, attacker, defender, location::UNCALLED, false);
     let mut draws = Draws::new(outcomes);
     let (spray, victim, _) = host
         .resolve_attack(attacker, defender, &attack, &mut draws)
@@ -1683,16 +1548,25 @@ fn miss(
     assert!(draws.0.is_empty(), "unused outcomes {:?}", draws.0);
     (spray, victim)
 }
-fn line_of_fire_chance(host: &WorldHost<AiAssets>, attacker: ObjectRef, critter: ObjectRef) -> i32 {
-    host.world
-        .attack_profile(
-            attacker,
-            critter,
-            hit_mode::RIGHT_PRIMARY,
-            location::TORSO,
-            false,
-        )
-        .unwrap()
+/// `attacker`'s unaimed, uncalled right-hand primary attack on
+/// `defender`, which must not be refused.
+fn shoot(host: &mut WorldHost<TestAssets>, attacker: ObjectRef, defender: ObjectRef) -> Resolution {
+    host.perform_attack(
+        attacker,
+        defender,
+        hit_mode::RIGHT_PRIMARY,
+        location::UNCALLED,
+        false,
+    )
+    .unwrap()
+    .unwrap()
+}
+fn line_of_fire_chance(
+    host: &WorldHost<TestAssets>,
+    attacker: ObjectRef,
+    critter: ObjectRef,
+) -> i32 {
+    right_primary(&host.world, attacker, critter, location::TORSO, false)
         .hit_chance(true)
         .unwrap()
         / 3
@@ -1757,7 +1631,7 @@ fn spec007_missed_shot_at_the_extension_hex_hits_the_defender_at_numerator_2() {
     world
         .equip(attacker, gun, BasicFlags::RIGHT_HAND.0)
         .unwrap();
-    let mut assets = AiAssets::default();
+    let mut assets = assets();
     assets.prototypes.insert(30, ammo(30, 0, 10));
     let host = ai_host(world, assets);
     let (spray, victim) = miss(&host, attacker, defender, &[100, 9]);
@@ -1774,37 +1648,19 @@ fn spec007_bystander_messages_and_same_team_retaliation() {
         for (object, name) in [(attacker, "Gunner"), (x1, "Bob"), (defender, "Target")] {
             host.world.get_mut(object).unwrap().name = name.as_bytes().to_vec();
         }
-        host.assets.combat = Some(Arc::new(
-            MsgCatalog::parse(b"{506}{}{You}\n{608}{}{Oops! %s was hit instead of you!}\n{609}{}{Oops! %s was hit instead of %s!}\n{615}{}{%s missed}\n")
-                .unwrap(),
-        ));
+        host.assets.insert_messages(
+            "combat.msg",
+            b"{506}{}{You}\n{608}{}{Oops! %s was hit instead of you!}\n{609}{}{Oops! %s was hit instead of %s!}\n{615}{}{%s missed}\n",
+        );
         host.world.ai.combat_taunts = Some(0);
-        let main = host
-            .world
-            .attack_profile(
-                attacker,
-                defender,
-                hit_mode::RIGHT_PRIMARY,
-                location::UNCALLED,
-                false,
-            )
-            .unwrap()
+        let main = right_primary(&host.world, attacker, defender, location::UNCALLED, false)
             .hit_chance(true)
             .unwrap();
         let chance = line_of_fire_chance(&host, attacker, x1);
         host.world.rng = crate::fixture_items::seed_where(&[(1, 100), (1, 100)], |v| {
             v[0] > main && v[1] <= chance
         });
-        let result = host
-            .perform_attack(
-                attacker,
-                defender,
-                hit_mode::RIGHT_PRIMARY,
-                location::UNCALLED,
-                false,
-            )
-            .unwrap()
-            .unwrap();
+        let result = shoot(&mut host, attacker, defender);
         assert_ne!(result.defender_flags & effect::HIT, 0);
         assert!(messages(&host).contains(&b"Oops! Bob was hit instead of Target!.".to_vec()));
         let opponent = host.world.get(x1).unwrap().opponent;
@@ -1814,20 +1670,10 @@ fn spec007_bystander_messages_and_same_team_retaliation() {
     // its only line (SPEC-007 §3.12).
     let (mut host, [attacker, x1, defender, _]) = fixture_e("wall", 2);
     host.world.get_mut(attacker).unwrap().name = b"Gunner".to_vec();
-    host.assets.combat = Some(Arc::new(
-        MsgCatalog::parse(b"{615}{}{%s missed}\n").unwrap(),
-    ));
+    host.assets
+        .insert_messages("combat.msg", b"{615}{}{%s missed}\n");
     host.world.ai.combat_taunts = Some(0);
-    let main = host
-        .world
-        .attack_profile(
-            attacker,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::UNCALLED,
-            false,
-        )
-        .unwrap()
+    let main = right_primary(&host.world, attacker, defender, location::UNCALLED, false)
         .hit_chance(true)
         .unwrap();
     let chance = line_of_fire_chance(&host, attacker, x1);
@@ -1835,16 +1681,7 @@ fn spec007_bystander_messages_and_same_team_retaliation() {
         crate::fixture_items::seed_where(&[(1, 100), (1, 100)], |v| v[0] > main && v[1] > chance);
     // Played over time, the lines print once the attack's show has played.
     host.playback = crate::host_choreography::Playback::RealTime;
-    let result = host
-        .perform_attack(
-            attacker,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::UNCALLED,
-            false,
-        )
-        .unwrap()
-        .unwrap();
+    let result = shoot(&mut host, attacker, defender);
     assert_ne!(result.defender_flags & effect::HIT, 0, "recorded hit bit");
     assert!(messages(&host).is_empty());
     for step in 0..1000 {
@@ -1867,7 +1704,7 @@ fn spec007_fixture_d_punch_to_kick_draw() {
         let attacker = npc(&mut world, 20100 + 2 * 200, 1, 0, &[]);
         let far = npc(&mut world, 20100 + 9 * 200, 2, 0, &[]);
         state(&mut world, attacker).ap = 8;
-        let mut assets = AiAssets::default();
+        let mut assets = assets();
         assets.missing.extend(missing);
         let mut host = ai_host(world, assets);
         host.world.rng = crate::fixture_items::seed_where(&[(1, 4)], |v| v[0] == first);
@@ -1934,7 +1771,7 @@ fn spec009_explosion_attribution_and_noticed_drops() {
     state(&mut world, dead).results.0 = effect::DEAD;
     set_hp(&mut world, dead, 0);
     let ally = npc(&mut world, 20900, 0, 0, &[]);
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     host.attribute_explosion(source, &[source, hurt, dead]);
     assert_eq!(host.world.get(hurt).unwrap().opponent, source);
     assert_eq!(host.world.get(dead).unwrap().opponent, 0);
@@ -1962,7 +1799,7 @@ fn spec009_join_and_stop_predicates_use_live_danger() {
     let player = world.player;
     let fighter = npc(&mut world, 20100 + 3 * 200, 1, 0, &[]);
     let waiter = npc(&mut world, 20100 + 5 * 200, 1, 0, &[]);
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     host.start_combat(player, fighter).unwrap();
     let mut ai = PacketAi;
     // The fighter's living last attacker (the player) is perceived and its
@@ -2046,7 +1883,7 @@ fn labels(
         .collect()
 }
 /// The last node of a show's projectile flight.
-fn flight_end(host: &WorldHost<AiAssets>) -> i32 {
+fn flight_end(host: &WorldHost<TestAssets>) -> i32 {
     host.world
         .shows
         .front()
@@ -2061,7 +1898,7 @@ fn flight_end(host: &WorldHost<AiAssets>) -> i32 {
         .expect("a flight")
 }
 /// Play every queued show, a pass per 100 ms; returns the sounds started.
-fn play(host: &mut WorldHost<AiAssets>) -> Vec<Vec<u8>> {
+fn play(host: &mut WorldHost<TestAssets>) -> Vec<Vec<u8>> {
     host.world.effects.clear();
     let mut now = 100;
     while host.presenting() {
@@ -2101,27 +1938,14 @@ fn spec013_weapon_explosions_play_where_the_projectile_ends() {
         let object = host.world.get_mut(gun).unwrap();
         object.raw.pid = pid;
         object.prototype = Some(Arc::new(prototype));
-        let mut rocket = fixture::prototype(5, 0);
-        fixture::word(&mut rocket, 0, 0x0500_0009);
-        fixture::word(&mut rocket, 8, 0x0500_0009);
-        host.assets
-            .prototypes
-            .insert(0x0500_0009, Arc::new(Prototype::parse(&rocket).unwrap()));
+        let rocket = patched(5, 0, &[(0, 0x0500_0009), (8, 0x0500_0009)], &[]);
+        host.assets.prototypes.insert(0x0500_0009, rocket);
         host.world.ai.combat_taunts = Some(0);
         host.playback = Playback::RealTime;
         (host, attacker, defender)
     };
-    let attack = |host: &mut WorldHost<AiAssets>, attacker, defender, hits: bool| {
-        let chance = host
-            .world
-            .attack_profile(
-                attacker,
-                defender,
-                hit_mode::RIGHT_PRIMARY,
-                location::UNCALLED,
-                false,
-            )
-            .unwrap()
+    let attack = |host: &mut WorldHost<TestAssets>, attacker, defender, hits: bool| {
+        let chance = right_primary(&host.world, attacker, defender, location::UNCALLED, false)
             .hit_chance(true)
             .unwrap();
         host.world.rng = crate::fixture_items::seed_where(&[(1, 100)], |v| {
@@ -2131,19 +1955,11 @@ fn spec013_weapon_explosions_play_where_the_projectile_ends() {
                 v[0] > chance && v[0] < 96
             }
         });
-        host.perform_attack(
-            attacker,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::UNCALLED,
-            false,
-        )
-        .unwrap()
-        .unwrap()
+        shoot(host, attacker, defender)
     };
     // The explosion entries: the projectile turns into the center art, and
     // the six adjacent arts follow with direction 0's start delay.
-    let blasts = |host: &WorldHost<AiAssets>, art: u32| {
+    let blasts = |host: &WorldHost<TestAssets>, art: u32| {
         let show = host.world.shows.front().unwrap();
         labels(&show.main)
             .into_iter()
@@ -2247,7 +2063,12 @@ fn fixture_f(
     damage_type: i32,
     held: i32,
     spare: i32,
-) -> (WorldHost<AiAssets>, ObjectRef, ObjectRef, Option<ObjectRef>) {
+) -> (
+    WorldHost<TestAssets>,
+    ObjectRef,
+    ObjectRef,
+    Option<ObjectRef>,
+) {
     let mut world = world();
     let player = world.player;
     let defender = npc(&mut world, 20100 + 4 * 200, 1, 0, &[]);
@@ -2256,32 +2077,19 @@ fn fixture_f(
     world.equip(player, hand, BasicFlags::RIGHT_HAND.0).unwrap();
     let spare = (spare > 0).then(|| carry(&mut world, player, prototype, spare, loaded(0, -1)));
     state(&mut world, player).ap = 8;
-    let mut assets = AiAssets::default();
-    let mut projectile = fixture::prototype(5, 0);
-    fixture::word(&mut projectile, 0, PROJECTILE_PID as i32);
-    fixture::word(&mut projectile, 8, PROJECTILE_ART as i32);
-    assets.prototypes.insert(
-        PROJECTILE_PID,
-        Arc::new(Prototype::parse(&projectile).unwrap()),
-    );
+    let mut assets = assets();
+    let projectile = [(0, PROJECTILE_PID as i32), (8, PROJECTILE_ART as i32)];
+    let projectile = patched(5, 0, &projectile, &[]);
+    assets.prototypes.insert(PROJECTILE_PID, projectile);
     let mut host = ai_host(world, assets);
     host.world.ai.combat_taunts = Some(0);
     host.playback = crate::host_choreography::Playback::RealTime;
     (host, hand, defender, spare)
 }
 /// The player's throw, hitting or (not critically) missing.
-fn throw(host: &mut WorldHost<AiAssets>, defender: ObjectRef, hits: bool) -> Resolution {
+fn throw(host: &mut WorldHost<TestAssets>, defender: ObjectRef, hits: bool) -> Resolution {
     let player = host.world.player;
-    let chance = host
-        .world
-        .attack_profile(
-            player,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::UNCALLED,
-            false,
-        )
-        .unwrap()
+    let chance = right_primary(&host.world, player, defender, location::UNCALLED, false)
         .hit_chance(true)
         .unwrap();
     host.world.rng = crate::fixture_items::seed_where(&[(1, 100)], |v| {
@@ -2291,23 +2099,14 @@ fn throw(host: &mut WorldHost<AiAssets>, defender: ObjectRef, hits: bool) -> Res
             v[0] > chance && v[0] < 96
         }
     });
-    let result = host
-        .perform_attack(
-            player,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::UNCALLED,
-            false,
-        )
-        .unwrap()
-        .unwrap();
+    let result = shoot(host, player, defender);
     assert_eq!(result.defender_flags & effect::HIT != 0, hits);
     result
 }
 /// Inventory entries: item and quantity.
 type Entries = Vec<(ObjectRef, i32)>;
 /// The player's inventory: hand-flagged entries, then the others.
-fn hands(host: &WorldHost<AiAssets>) -> (Entries, Entries) {
+fn hands(host: &WorldHost<TestAssets>) -> (Entries, Entries) {
     let world = &host.world;
     world
         .get(world.player)
@@ -2321,7 +2120,7 @@ fn hands(host: &WorldHost<AiAssets>) -> (Entries, Entries) {
         })
 }
 /// The player's art weapon code and animation.
-fn hand_art(host: &WorldHost<AiAssets>) -> (u8, u8) {
+fn hand_art(host: &WorldHost<TestAssets>) -> (u8, u8) {
     let art = Fid(host.world.get(host.world.player).unwrap().raw.art_id);
     (art.weapon(), art.animation())
 }
@@ -2385,16 +2184,7 @@ fn spec007_fixture_f_thrown_weapon_consumption() {
     // F4: a critical failure that keeps its effect launches nothing.
     let (host, _, defender, _) = fixture_f(19, 0, 0, 1, 0);
     let player = host.world.player;
-    let attack = host
-        .world
-        .attack_profile(
-            player,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::UNCALLED,
-            false,
-        )
-        .unwrap();
+    let attack = right_primary(&host.world, player, defender, location::UNCALLED, false);
     let failure = Resolution {
         attacker_flags: effect::CRITICAL | effect::DROP,
         ..Default::default()
@@ -2507,7 +2297,7 @@ fn spec007_projectile_flight_from_the_adjacent_hex_to_the_target() {
     assert!(rows[3].1.starts_with("sound WH") && rows[3].0 == n);
     assert_eq!(rows.last().unwrap().0, -1);
     // In flight the thrown item is drawn as its projectile only.
-    let drawn = |host: &WorldHost<AiAssets>, art: u32| {
+    let drawn = |host: &WorldHost<TestAssets>, art: u32| {
         host.world.render_snapshot().objects.elevations[0]
             .iter()
             .filter(|record| record.art_id == art)
@@ -2564,12 +2354,12 @@ fn spec007_projectile_flight_from_the_adjacent_hex_to_the_target() {
 /// SPEC-007 §3.10 scenes: the player at 20100 and an NPC adjacent to the
 /// south (20300), both with critter base 0, combat taunts off, and the
 /// player's punch art (11 frames, action frame 3) loadable.
-fn scene_pair() -> (WorldHost<AiAssets>, ObjectRef, ObjectRef) {
+fn scene_pair() -> (WorldHost<TestAssets>, ObjectRef, ObjectRef) {
     let mut world = world();
     let player = world.player;
     let defender = npc(&mut world, 20300, 1, 0, &[]);
     state(&mut world, player).ap = 8;
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     host.world.ai.combat_taunts = Some(0);
     host.assets
         .art
@@ -2578,7 +2368,7 @@ fn scene_pair() -> (WorldHost<AiAssets>, ObjectRef, ObjectRef) {
 }
 /// A resolved punch against `defender` with defender flags `flags`.
 fn punch_scene(
-    host: &WorldHost<AiAssets>,
+    host: &WorldHost<TestAssets>,
     player: ObjectRef,
     defender: ObjectRef,
     flags: u32,
@@ -2602,7 +2392,7 @@ fn punch_scene(
     (attack, spray)
 }
 fn build(
-    host: &mut WorldHost<AiAssets>,
+    host: &mut WorldHost<TestAssets>,
     player: ObjectRef,
     defender: ObjectRef,
     attack: &crate::combat::Attack,
@@ -2645,16 +2435,7 @@ fn spec007_a_throw_without_a_projectile_phase_ends_standing_with_code_0() {
     // while the knife stays in the hand.
     let (mut host, knife, defender, _) = fixture_f(45, 1, 0, 1, 0);
     let player = host.world.player;
-    let attack = host
-        .world
-        .attack_profile(
-            player,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::UNCALLED,
-            false,
-        )
-        .unwrap();
+    let attack = right_primary(&host.world, player, defender, location::UNCALLED, false);
     let spray = crate::Spray {
         main: Resolution {
             code: 1,
@@ -2746,16 +2527,7 @@ fn spec007_bullets_show_no_projectile_and_no_hit_sound() {
         .wielded(attacker, hit_mode::RIGHT_PRIMARY)
         .unwrap();
     host.world.get_mut(attacker).unwrap().raw.art_id = Fid::new(1, 0, 0, 5, 0).0;
-    let attack = host
-        .world
-        .attack_profile(
-            attacker,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::TORSO,
-            false,
-        )
-        .unwrap();
+    let attack = right_primary(&host.world, attacker, defender, location::TORSO, false);
     let spray = crate::Spray {
         main: Resolution {
             code: 2,
@@ -2887,16 +2659,7 @@ fn spec007_fire_dance_runs_then_burns_and_on_fire_returns_to_standing() {
     host.world
         .equip(player, gun, BasicFlags::RIGHT_HAND.0)
         .unwrap();
-    let attack = host
-        .world
-        .attack_profile(
-            player,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::TORSO,
-            false,
-        )
-        .unwrap();
+    let attack = right_primary(&host.world, player, defender, location::TORSO, false);
     let spray = crate::Spray {
         main: Resolution {
             code: 2,
@@ -2959,16 +2722,7 @@ fn spec007_extras_react_when_the_main_sequence_reaches_their_placeholders() {
     let (mut host, [attacker, x1, defender, far]) = fixture_e("critter", 2);
     host.world.ai.combat_taunts = Some(0);
     host.playback = crate::host_choreography::Playback::RealTime;
-    let attack = host
-        .world
-        .attack_profile(
-            attacker,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::TORSO,
-            false,
-        )
-        .unwrap();
+    let attack = right_primary(&host.world, attacker, defender, location::TORSO, false);
     let extra = |object| {
         (
             object,
@@ -3040,16 +2794,7 @@ fn spec007_critical_failure_effects_drop_or_destroy_the_weapon() {
         .world
         .wielded(attacker, hit_mode::RIGHT_PRIMARY)
         .unwrap();
-    let attack = host
-        .world
-        .attack_profile(
-            attacker,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::TORSO,
-            false,
-        )
-        .unwrap();
+    let attack = right_primary(&host.world, attacker, defender, location::TORSO, false);
     let failure = |flags| crate::Spray {
         main: Resolution {
             code: 0,
@@ -3077,16 +2822,7 @@ fn spec007_critical_failure_effects_drop_or_destroy_the_weapon() {
         .world
         .wielded(attacker, hit_mode::RIGHT_PRIMARY)
         .unwrap();
-    let attack = host
-        .world
-        .attack_profile(
-            attacker,
-            defender,
-            hit_mode::RIGHT_PRIMARY,
-            location::TORSO,
-            false,
-        )
-        .unwrap();
+    let attack = right_primary(&host.world, attacker, defender, location::TORSO, false);
     let built = build(
         &mut host,
         attacker,
@@ -3134,14 +2870,14 @@ fn spec007_ai_moves_play_as_walks_frame_by_frame() {
     let mut world = self::world();
     let critter = npc(&mut world, 21500, 1, 1, &[]);
     state(&mut world, critter).ap = 4;
-    let mut host = ai_host(world, AiAssets::default());
+    let mut host = ai_host(world, assets());
     host.playback = crate::host_choreography::Playback::RealTime;
     host.world.combat = true;
     host.ai_flee(critter).unwrap();
     let goal = HexGrid::step(21500, 2, 4).unwrap();
     assert_eq!(hex(&host.world, critter), goal, "the world moved at once");
     assert!(host.presenting(), "combat waits for the walk");
-    let shown = |host: &WorldHost<AiAssets>| {
+    let shown = |host: &WorldHost<TestAssets>| {
         let show = host.world.shows.front()?;
         let display = show.display(Owner::World(critter))?;
         Some((display.hex?, Fid(display.art).animation()))

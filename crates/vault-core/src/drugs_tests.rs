@@ -9,6 +9,7 @@ use crate::{
     fixture_items::{self as support, DRUG_A, DRUG_B, ItemAssets, messages},
     progression::ADDICTED_FLAG,
     queue::EventKind,
+    test_support::hp,
 };
 use std::collections::VecDeque;
 
@@ -25,9 +26,6 @@ impl RandomSource for Draws {
 fn bonus(host: &WorldHost<ItemAssets>, critter: ObjectRef, stats: [usize; 2]) -> [i32; 2] {
     let sheet = host.world.get(critter).unwrap().character.as_ref().unwrap();
     stats.map(|stat| sheet.bonus[stat])
-}
-fn hp(host: &WorldHost<ItemAssets>, critter: ObjectRef) -> i32 {
-    host.world.hit_points(critter).unwrap()
 }
 fn set_hp(host: &mut WorldHost<ItemAssets>, critter: ObjectRef, value: i32) {
     host.world.set_hit_points(critter, value);

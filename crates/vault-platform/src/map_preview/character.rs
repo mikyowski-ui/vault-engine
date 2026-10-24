@@ -1367,10 +1367,11 @@ fn line_key(selected: bool) -> ColorKey {
 
 #[cfg(test)]
 mod tests {
-    use super::super::state_fixture;
+    use super::super::{
+        state_fixture,
+        test_support::{interactive, local_corpus},
+    };
     use super::*;
-    use std::sync::Arc;
-    use vault_formats::{LocalDirProvider, Vfs};
 
     const EDITOR: &[u8] = b"{132}{}{At maximum level.}\n{133}{}{Unable to increment it.}\n\
         {134}{}{At minimum level.}\n{135}{}{Unable to decrement it.}\n\
@@ -1386,15 +1387,7 @@ mod tests {
             b"{100}{}{Small Guns}\n",
         )
         .unwrap();
-        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir).unwrap());
-        let mut preview = MapPreview::load(
-            vfs,
-            "maps/synthetic.map",
-            "english",
-            Some("premade/synthetic.gcd"),
-            1,
-        )
-        .unwrap();
+        let mut preview = interactive(dir);
         let save = dir.join("save");
         std::fs::create_dir_all(&save).unwrap();
         preview.save_root = save;
@@ -1620,23 +1613,10 @@ mod tests {
         assert_eq!(slider_buttons(2)[1], Rect::new(614, 53, 17, 12));
     }
 
-    /// The unpacked corpus (`$VAULT_CORPUS`, else `local-corpus` beside
-    /// the repository).
-    fn corpus() -> Option<Arc<dyn Vfs>> {
-        let dir = std::env::var_os("VAULT_CORPUS")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-corpus")
-            })
-            .join("fallout1-unpacked");
-        dir.is_dir()
-            .then(|| Arc::new(LocalDirProvider::mount(dir).unwrap()) as Arc<dyn Vfs>)
-    }
-
     #[test]
     #[ignore = "needs the local corpus"]
     fn corpus_character_screen_art_folders_and_printed_sheet() {
-        let Some(vfs) = corpus() else {
+        let Some(vfs) = local_corpus() else {
             return;
         };
         let mut preview = MapPreview::load(vfs, "maps/v13ent.map", "english", None, 1).unwrap();

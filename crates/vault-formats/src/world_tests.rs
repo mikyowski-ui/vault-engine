@@ -1,7 +1,5 @@
 use crate::{geometry::GeometryError, map::*, pro::*, *};
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/world/support.rs"]
-mod fixture;
+use vault_fixtures::world as fixture;
 
 fn lookup(pid: u32) -> Result<PrototypeInfo, ParseError> {
     assert_eq!(pid, 1);

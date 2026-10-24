@@ -9,5 +9,8 @@ license.workspace = true
 [dependencies]
 thiserror.workspace = true
 
+[dev-dependencies]
+vault-fixtures.workspace = true
+
 [lints]
 workspace = true

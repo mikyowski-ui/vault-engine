@@ -3,7 +3,7 @@
 //! the speed-up checkbox, Default, Done and Cancel), with preferences applied
 //! to the world and written to `fallout.cfg` when a path is configured.
 use super::{MapPreview, Screen};
-use crate::{AppResult, audio::Volumes, interface::Painter};
+use crate::{AppResult, audio::Volumes, input::key_text, interface::Painter};
 use vault_core::ui::{
     BUTTON_PRESS, ColorKey, Rect,
     flow::{self, DialogKey},
@@ -110,15 +110,7 @@ fn menu_key(key: KeyCode, control: bool) -> Option<MenuKey> {
         KeyCode::KeyQ if control => MenuKey::CtrlQ,
         KeyCode::KeyX if control => MenuKey::CtrlX,
         KeyCode::F10 => MenuKey::F10,
-        _ => {
-            let name = format!("{key:?}");
-            MenuKey::Char(
-                name.strip_prefix("Key")?
-                    .chars()
-                    .next()?
-                    .to_ascii_lowercase(),
-            )
-        }
+        _ => MenuKey::Char(key_text(key, false).filter(u8::is_ascii_lowercase)?.into()),
     })
 }
 fn knob_values(values: &mut Preferences) -> [&mut i32; 5] {

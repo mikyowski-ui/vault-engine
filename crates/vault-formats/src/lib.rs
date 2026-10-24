@@ -113,6 +113,4 @@ mod state_tests;
 mod world_tests;
 
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/formats/support.rs"]
-pub(crate) mod fixture_assets;
+pub(crate) use vault_fixtures::formats as fixture_assets;

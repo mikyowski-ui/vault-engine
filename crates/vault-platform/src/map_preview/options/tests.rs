@@ -1,25 +1,20 @@
 //! M-I6 preferences (SPEC-014 §3.17-§3.18, §3.46), and the H12 worn-armor
 //! guard and elevator keypad over the synthetic corpus.
 use super::{AppliedPreferences, OptionsScreen, set_slider};
-use crate::map_preview::{MapPreview, Screen, fixture, state_fixture};
+use crate::map_preview::{
+    MapPreview, Screen, fixture,
+    test_support::{interactive, synthetic_corpus},
+};
 use std::sync::Arc;
 use vault_core::{
     WorldEffect,
     ui::options::{self, DEFAULT_VOLUME, OptionsAction, Preferences},
 };
-use vault_formats::{LocalDirProvider, Vfs, pro::BasicFlags};
+use vault_formats::pro::BasicFlags;
 use winit::keyboard::KeyCode;
 
 fn preview(root: &std::path::Path) -> MapPreview {
-    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(root).unwrap());
-    let mut preview = MapPreview::load(
-        vfs,
-        "maps/synthetic.map",
-        "english",
-        Some("premade/synthetic.gcd"),
-        1,
-    )
-    .unwrap();
+    let mut preview = interactive(root);
     preview.save_root = root.join("saves");
     preview
 }
@@ -57,8 +52,7 @@ fn m_i6_the_line_delay_follows_the_base_delay_and_the_hooks_apply_it() {
     });
     assert_eq!((slow.floating_base_ms, slow.floating_line_ms), (6000, 2000));
     // Storing derives the line delay (the stale 1.399994 is never kept).
-    let dir = tempfile::tempdir().unwrap();
-    state_fixture::write_corpus(dir.path());
+    let dir = synthetic_corpus();
     let mut preview = preview(dir.path());
     preview.preferences.text_base_delay = 3.5;
     preview.preferences.text_line_delay = 1.399_994;
@@ -72,8 +66,7 @@ fn m_i6_the_line_delay_follows_the_base_delay_and_the_hooks_apply_it() {
 
 #[test]
 fn m_i6_default_applies_at_once_and_cancel_restores_the_backup() {
-    let dir = tempfile::tempdir().unwrap();
-    state_fixture::write_corpus(dir.path());
+    let dir = synthetic_corpus();
     let mut preview = preview(dir.path());
     preview.preferences.master_volume = 100;
     preview.preferences.mouse_sensitivity = 2.0;
@@ -114,8 +107,7 @@ fn m_i6_default_applies_at_once_and_cancel_restores_the_backup() {
 
 #[test]
 fn spec014_3_17_save_and_load_from_options_return_there_on_cancel() {
-    let dir = tempfile::tempdir().unwrap();
-    state_fixture::write_corpus(dir.path());
+    let dir = synthetic_corpus();
     let mut preview = preview(dir.path());
     preview.open_options();
     preview.options_action(OptionsAction::SaveGame);
@@ -144,8 +136,7 @@ fn spec014_3_17_save_and_load_from_options_return_there_on_cancel() {
 
 #[test]
 fn h12_a_quick_click_on_worn_armor_changes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    state_fixture::write_corpus(dir.path());
+    let dir = synthetic_corpus();
     let mut preview = preview(dir.path());
     let player = preview.host.world.player;
     // Armor class 5, damage resistance 10 and threshold 2 for normal damage.
@@ -194,8 +185,7 @@ fn h12_a_quick_click_on_worn_armor_changes_nothing() {
 
 #[test]
 fn spec013_elevator_keys_accept_the_numeric_keypad() {
-    let dir = tempfile::tempdir().unwrap();
-    state_fixture::write_corpus(dir.path());
+    let dir = synthetic_corpus();
     let mut preview = preview(dir.path());
     preview.host.world.map.header.map_number = 6;
     let player = preview.host.world.player;

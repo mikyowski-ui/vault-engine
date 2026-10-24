@@ -2,51 +2,22 @@
 //! stale-head safe rule), review history and the Ask About lookup, and the
 //! SPEC-014 §3.45 Tell Me About tests and Review texts (Fixture R).
 use crate::{
-    CharacterSheet, ObjectRef, RandomSource, WorldEffect, WorldError, WorldHost, WorldState,
-    assets::WorldAssets,
+    CharacterSheet, ObjectRef, RandomSource, WorldEffect, WorldHost, WorldState,
     dialogue::{
         DialogueOption, DialogueText, HeadDefinition, HeadIdle, Mood, REVIEW_CAPACITY, ReviewEntry,
         TalkingHead,
     },
     fixture_world as fixture,
     host_talk::{ReviewText, TellMeAbout, ask_tokens},
+    test_support::TestAssets,
 };
-use std::{collections::BTreeMap, sync::Arc};
-use vault_formats::{MsgCatalog, Prototype, msg::Message};
-
-#[derive(Default)]
-struct TalkAssets {
-    catalogs: BTreeMap<i32, MsgCatalog>,
-    game: BTreeMap<String, Arc<MsgCatalog>>,
-}
-impl WorldAssets for TalkAssets {
-    fn prototype(&self, _pid: u32) -> Result<Arc<Prototype>, WorldError> {
-        Err(WorldError::Invalid("no prototypes".into()))
-    }
-    fn program(&self, _index: i32) -> Result<(String, vault_vm::IntProgram), WorldError> {
-        Err(WorldError::Invalid("no programs".into()))
-    }
-    fn message(&self, list: i32, id: i32) -> Option<Message> {
-        self.catalogs.get(&list)?.get(id).cloned()
-    }
-    fn resource(&self, path: &str) -> Result<Vec<u8>, WorldError> {
-        Err(WorldError::Invalid(format!("{path} is missing")))
-    }
-    fn dialogue_catalog(&self, list: i32) -> Option<MsgCatalog> {
-        self.catalogs.get(&list).cloned()
-    }
-    fn game_messages(&self, file: &str) -> Result<Arc<MsgCatalog>, WorldError> {
-        self.game
-            .get(file)
-            .cloned()
-            .ok_or_else(|| WorldError::Invalid(format!("{file} is missing")))
-    }
-}
+use std::sync::Arc;
+use vault_formats::{MsgCatalog, Prototype};
 
 /// The player script's list 1, the target `abel`'s list 5 (script index
 /// 4), and `proto.msg`.
-fn host() -> (WorldHost<TalkAssets>, ObjectRef) {
-    let mut assets = TalkAssets::default();
+fn host() -> (WorldHost<TestAssets>, ObjectRef) {
+    let mut assets = TestAssets::default();
     assets.catalogs.insert(
         1,
         MsgCatalog::parse(
@@ -65,14 +36,9 @@ fn host() -> (WorldHost<TalkAssets>, ObjectRef) {
         )
         .unwrap(),
     );
-    assets.game.insert(
-        "proto.msg".into(),
-        Arc::new(
-            MsgCatalog::parse(
-                b"{650}{}{[Done]}\n{904}{}{This person has nothing to tell you about.}",
-            )
-            .unwrap(),
-        ),
+    assets.insert_messages(
+        "proto.msg",
+        b"{650}{}{[Done]}\n{904}{}{This person has nothing to tell you about.}",
     );
     let mut host = WorldHost::new(
         WorldState::new(CharacterSheet::default(), 1).unwrap(),
@@ -94,7 +60,7 @@ fn host() -> (WorldHost<TalkAssets>, ObjectRef) {
 }
 
 /// A talk session whose `start_gdialog` set up talking head `harry`.
-fn talking(host: &mut WorldHost<TalkAssets>) {
+fn talking(host: &mut WorldHost<TestAssets>) {
     let head = TalkingHead::without_fidget(
         HeadDefinition {
             index: 3,
@@ -109,7 +75,7 @@ fn talking(host: &mut WorldHost<TalkAssets>) {
     host.world.dialogue.start(target, 1, 0, Some(head)).unwrap();
 }
 
-fn speech(host: &mut WorldHost<TalkAssets>) -> Vec<WorldEffect> {
+fn speech(host: &mut WorldHost<TestAssets>) -> Vec<WorldEffect> {
     host.world
         .effects
         .drain(..)

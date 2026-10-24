@@ -2,134 +2,56 @@
 //! SPEC-003 §3.3 duplicate script identifiers and SPEC-013 §3.22 exit
 //! grids at a map's entrance.
 use crate::fixture_state as fixture;
+use crate::test_support::{
+    TestAssets as Scripts, count, gvar, npc_prototype, program, record, request, requested, stream,
+};
 use crate::{
-    assets::WorldAssets,
-    world::{ScriptRequest, Transition, WorldTrace, empty_map, object_record},
+    world::{Transition, empty_map, object_record},
     *,
 };
-use std::sync::Arc;
 use vault_formats::{
-    MapFile, Prototype,
-    map::{MapScript, ObjectDetail, ObjectState, ScriptBlock, ScriptCategory, ScriptPrefix},
-    pro::{BasicFlags, PackedLocation, ScriptFlags},
+    MapFile,
+    map::{ObjectDetail, ObjectState, ScriptPrefix},
+    pro::{BasicFlags, PackedLocation},
 };
-use vault_vm::IntProgram;
-
-/// `gvar[index] += 1`.
-fn count(index: i32) -> Vec<u8> {
-    [
-        fixture::push(index),
-        fixture::push(index),
-        fixture::instruction(0x80c5),
-        fixture::push(1),
-        fixture::instruction(0x8039),
-        fixture::instruction(0x80c6),
-    ]
-    .concat()
-}
-fn program(procedures: &[(&[u8], Vec<u8>)]) -> IntProgram {
-    let procedures: Vec<(&[u8], Vec<u8>)> = procedures
-        .iter()
-        .map(|(name, body)| (*name, fixture::returning(body.clone())))
-        .collect();
-    IntProgram::parse(&fixture::program(&[], &procedures)).unwrap()
-}
 
 /// Script files: 0 has `start` (gvar 0) and `critter_p_proc` (gvar 1); 1
 /// has only `start` (gvar 0); 2's `critter_p_proc` divides by zero; any
-/// other file cannot be loaded.
-struct Scripts {
-    critter: Arc<Prototype>,
-    programs: Vec<IntProgram>,
-    map: MapFile,
-}
-impl Scripts {
-    fn new(map: MapFile) -> Self {
-        Self {
-            critter: Arc::new(Prototype::parse(&fixture::npc_prototype()).unwrap()),
-            programs: vec![
-                program(&[(b"start", count(0)), (b"critter_p_proc", count(1))]),
-                program(&[(b"start", count(0))]),
-                program(&[
-                    (b"start", Vec::new()),
-                    (
-                        b"critter_p_proc",
-                        [
-                            fixture::push(1),
-                            fixture::push(0),
-                            fixture::instruction(0x803c),
-                        ]
-                        .concat(),
-                    ),
-                ]),
-            ],
-            map,
-        }
-    }
-}
-impl WorldAssets for Scripts {
-    fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
-        if pid >> 24 == 1 {
-            Ok(self.critter.clone())
-        } else {
-            Err(WorldError::Invalid("no prototype".into()))
-        }
-    }
-    fn program(&self, index: i32) -> Result<(String, IntProgram), WorldError> {
-        usize::try_from(index)
-            .ok()
-            .and_then(|index| self.programs.get(index))
-            .map(|program| ("synthetic.int".into(), program.clone()))
-            .ok_or_else(|| WorldError::Invalid(format!("script {index} does not load")))
-    }
-    fn message(&self, _list: i32, _id: i32) -> Option<vault_formats::msg::Message> {
-        None
-    }
-    fn map(&self, _path: &str) -> Result<MapFile, WorldError> {
-        Ok(self.map.clone())
-    }
-    fn map_path(&self, number: i32) -> Option<String> {
-        (number == 7).then(|| "maps/synth.map".into())
-    }
-}
-
+/// other file cannot be loaded. Every path loads `map`, and map 7 is
+/// `maps/synth.map`.
 fn host(map: MapFile) -> WorldHost<Scripts> {
     let mut world = WorldState::new(CharacterSheet::default(), 1).unwrap();
     world.gvars = Some(vec![0; 4]);
     // Only the records these tests make are in the critter stream.
     world.drop_player_script();
-    WorldHost::new(world, Scripts::new(map))
+    let divide = [
+        fixture::push(1),
+        fixture::push(0),
+        fixture::instruction(0x803c),
+    ]
+    .concat();
+    let mut scripts = Scripts {
+        any_map: Some(map),
+        ..Scripts::default()
+    }
+    .with_program(
+        "synthetic.int",
+        program(&[(b"start", count(0)), (b"critter_p_proc", count(1))]),
+    )
+    .with_program("synthetic.int", program(&[(b"start", count(0))]))
+    .with_program(
+        "synthetic.int",
+        program(&[(b"start", Vec::new()), (b"critter_p_proc", divide)]),
+    );
+    scripts.by_type.insert(1, npc_prototype());
+    scripts.map_paths.insert(7, "maps/synth.map".into());
+    WorldHost::new(world, scripts)
 }
 /// A scripted critter at `hex` on `elevation`.
 fn critter(host: &mut WorldHost<Scripts>, hex: i32, elevation: u8, file: i32) -> u32 {
-    let prototype = host.assets.critter.clone();
+    let prototype = host.assets.by_type[&1].clone();
     let object = host.world.spawn(prototype, hex, elevation).unwrap();
     host.world.add_script(object, file, 4, 0).unwrap()
-}
-fn request(script: u32, event: ScriptEvent) -> ScriptRequest {
-    ScriptRequest {
-        script,
-        event,
-        source: 0,
-        target: 0,
-        fixed: 0,
-        action: -1,
-        only_present: false,
-    }
-}
-/// The scripts that received a request of `event`, in order.
-fn requested(host: &WorldHost<Scripts>, event: ScriptEvent) -> Vec<u32> {
-    host.world
-        .trace
-        .iter()
-        .filter_map(|entry| match entry {
-            WorldTrace::Script { id, event: e, .. } if *e == event => Some(*id),
-            _ => None,
-        })
-        .collect()
-}
-fn gvar(host: &WorldHost<Scripts>, index: usize) -> i32 {
-    host.world.gvars.as_ref().unwrap()[index]
 }
 
 #[test]
@@ -231,38 +153,6 @@ fn spec006_each_background_pass_runs_one_cycle_step() {
     assert_eq!(host.world.clock.ticks, ticks + 1);
 }
 
-fn record(id: u32, file: i32, prefix: ScriptPrefix) -> MapScript {
-    MapScript {
-        id,
-        link: 0,
-        prefix,
-        stored_flags: ScriptFlags(0),
-        flags: ScriptFlags(0),
-        file_index: file,
-        object_id: -1,
-        local_base: -1,
-        stored_local_count: 0,
-        local_count: 0,
-        result: 0,
-        event: 0,
-        parameter: 0,
-        action: 0,
-        override_default: 0,
-        execution_state: 0,
-        quantity: 0,
-        annotations: 0,
-        file_offset: 0,
-    }
-}
-fn stream(records: Vec<MapScript>) -> ScriptCategory {
-    ScriptCategory {
-        declared_count: records.len(),
-        blocks: vec![ScriptBlock {
-            active: records.len(),
-            slots: records,
-        }],
-    }
-}
 fn spatial(hex: u32) -> ScriptPrefix {
     ScriptPrefix::Spatial {
         location: PackedLocation(hex),

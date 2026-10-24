@@ -2,76 +2,21 @@
 //! walk and run rules, the interaction sequences of §3.11.3, and doors and
 //! containers (§3.11.4).
 use crate::{
-    CharacterSheet, ObjectAction, ObjectRef, Perk, WorldEffect, WorldError, WorldHost, WorldState,
-    assets::WorldAssets,
+    CharacterSheet, ObjectAction, ObjectRef, Perk, WorldEffect, WorldHost, WorldState,
     choreography::{Begin, Frames, Stepped},
     clicks::{Click, Policy, busy_policy},
     critical::effect,
-    fixture_world as fixture,
     host_choreography::Playback,
     motion::{Call, Goal, HEX_STEPS, Motion, MotionSequence, Play, Walk, crosses},
     routing::step,
+    test_support::{ArtPolicy, TestAssets as Assets, patched},
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::sync::Arc;
 use vault_formats::{
-    Fid, FrmArchive, MsgCatalog, Prototype,
+    Fid, FrmArchive, Prototype,
     map::{ObjectDetail, ObjectState},
     pro::{BasicFlags, LockFlags},
 };
-
-#[derive(Default)]
-struct Assets {
-    prototypes: BTreeMap<u32, Arc<Prototype>>,
-    art: BTreeMap<u32, Arc<FrmArchive>>,
-    /// Critter animation codes without art.
-    missing: BTreeSet<u8>,
-    tokens: BTreeMap<(u8, u16), Vec<u8>>,
-}
-impl WorldAssets for Assets {
-    fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
-        self.prototypes
-            .get(&pid)
-            .cloned()
-            .ok_or_else(|| WorldError::Invalid("no prototype".into()))
-    }
-    fn program(&self, _index: i32) -> Result<(String, vault_vm::IntProgram), WorldError> {
-        Err(WorldError::Invalid("no programs".into()))
-    }
-    fn message(&self, _list: i32, _id: i32) -> Option<vault_formats::msg::Message> {
-        None
-    }
-    fn art_token(&self, category: u8, index: u16) -> Option<Vec<u8>> {
-        self.tokens.get(&(category, index)).cloned()
-    }
-    /// Critter art exists but for the listed animations; other art exists
-    /// when it loads.
-    fn art_exists(&self, fid: u32) -> bool {
-        match Fid(fid).category() {
-            1 => !self.missing.contains(&Fid(fid).animation()),
-            _ => self.art.contains_key(&fid),
-        }
-    }
-    fn object_art(&self, fid: u32) -> Result<Arc<FrmArchive>, WorldError> {
-        self.art
-            .get(&fid)
-            .cloned()
-            .ok_or_else(|| WorldError::Invalid("object art unavailable".into()))
-    }
-    fn game_messages(&self, file: &str) -> Result<Arc<MsgCatalog>, WorldError> {
-        let text: &[u8] = match file {
-            "misc.msg" => b"{2000}{}{You cannot get there.}\n",
-            "proto.msg" => {
-                b"{480}{}{You see: %s.}\n{485}{}{You search the %s.}\n{486}{}{You close the %s.}\n\
-                  {487}{}{It is locked.}\n{700}{}{You don't have enough action points.}\n"
-            }
-            _ => return Err(WorldError::Invalid(format!("{file} is missing"))),
-        };
-        Ok(Arc::new(MsgCatalog::parse(text).unwrap()))
-    }
-}
 
 /// An FRM of `frames` frames per direction at `fps` with action frame
 /// `action`, every frame in a direction moving by `shifts[direction]`.
@@ -105,10 +50,21 @@ fn critter(animation: u8, weapon: u8) -> u32 {
     Fid::new(1, 0, animation, weapon, 0).0
 }
 
-/// The player at 20100, outside combat, with instant playback.
+/// The player at 20100, outside combat, with instant playback. Critter art
+/// exists but for the `missing` animations; other art exists when it loads.
 fn host() -> WorldHost<Assets> {
     let world = WorldState::new(CharacterSheet::default(), 1).unwrap();
-    let mut host = WorldHost::new(world, Assets::default());
+    let assets = Assets {
+        art_policy: ArtPolicy::Critters,
+        ..Assets::default()
+    }
+    .with_messages("misc.msg", b"{2000}{}{You cannot get there.}\n")
+    .with_messages(
+        "proto.msg",
+        b"{480}{}{You see: %s.}\n{485}{}{You search the %s.}\n{486}{}{You close the %s.}\n\
+          {487}{}{It is locked.}\n{700}{}{You don't have enough action points.}\n",
+    );
+    let mut host = WorldHost::new(world, assets);
     host.assets.tokens.insert((1, 0), b"hmjmps".to_vec());
     host.world.effects.clear();
     host
@@ -119,22 +75,6 @@ fn hex(host: &WorldHost<Assets>, object: ObjectRef) -> i32 {
 /// `count` hexes from `from` in `direction`.
 fn hexes(from: i32, direction: u8, count: usize) -> i32 {
     (0..count).fold(from, |hex, _| step(hex, direction))
-}
-/// A prototype from the fixture template with words and bytes patched.
-fn prototype(
-    category: u8,
-    subtype: usize,
-    words: &[(usize, i32)],
-    bytes: &[(usize, u8)],
-) -> Arc<Prototype> {
-    let mut data = fixture::prototype(category, subtype);
-    for (offset, value) in words {
-        fixture::word(&mut data, *offset, *value);
-    }
-    for (offset, value) in bytes {
-        data[*offset] = *value;
-    }
-    Arc::new(Prototype::parse(&data).unwrap())
 }
 fn place(host: &mut WorldHost<Assets>, prototype: Arc<Prototype>, hex: i32) -> ObjectRef {
     let object = host.world.spawn(prototype, hex, 0).unwrap();
@@ -147,11 +87,7 @@ fn door(host: &mut WorldHost<Assets>, hex: i32) -> ObjectRef {
     host.assets
         .art
         .insert(0x0200_0000, frm(4, 10, 0, [[1, 0]; 6]));
-    let door = place(
-        host,
-        prototype(2, 0, &[(0x18, 0x800)], &[(0x28, b'A')]),
-        hex,
-    );
+    let door = place(host, patched(2, 0, &[(0x18, 0x800)], &[(0x28, b'A')]), hex);
     host.world.get_mut(door).unwrap().raw.state = ObjectState::Other {
         word: 0,
         detail: ObjectDetail::Door(LockFlags(0)),
@@ -161,12 +97,12 @@ fn door(host: &mut WorldHost<Assets>, hex: i32) -> ObjectRef {
 /// A closed container with sound byte `B` and three frames of art.
 fn chest(host: &mut WorldHost<Assets>, hex: i32, words: &[(usize, i32)]) -> ObjectRef {
     host.assets.art.insert(0, frm(3, 10, 0, STILL));
-    let chest = place(host, prototype(0, 1, words, &[(0x38, b'B')]), hex);
+    let chest = place(host, patched(0, 1, words, &[(0x38, b'B')]), hex);
     host.world.get_mut(chest).unwrap().name = b"chest".to_vec();
     chest
 }
 fn npc(host: &mut WorldHost<Assets>, hex: i32) -> ObjectRef {
-    place(host, prototype(1, 0, &[], &[]), hex)
+    place(host, patched(1, 0, &[], &[]), hex)
 }
 fn lock(host: &WorldHost<Assets>, object: ObjectRef) -> LockFlags {
     host.world.get(object).unwrap().lock().unwrap()
@@ -387,11 +323,7 @@ fn spec013_a_walk_stops_on_the_exit_grid_hex_and_transitions() {
     host.assets.art.insert(critter(1, 0), frm(8, 10, 0, shifts));
     let player = host.world.player;
     let on_route = hexes(20100, 1, 2);
-    let grid = place(
-        &mut host,
-        prototype(5, 0, &[(0, 0x0500_0010)], &[]),
-        on_route,
-    );
+    let grid = place(&mut host, patched(5, 0, &[(0, 0x0500_0010)], &[]), on_route);
     let object = host.world.get_mut(grid).unwrap();
     object.raw.flags = BasicFlags(BasicFlags::NONBLOCKING.0 | BasicFlags::FLAT.0);
     object.raw.state = ObjectState::Other {
@@ -495,7 +427,7 @@ fn spec007_pickups_reach_down_and_take_the_item_on_the_action_frame() {
     host.assets.art.insert(critter(10, 0), frm(6, 10, 2, STILL));
     host.assets.tokens.insert((0, 0), b"knife.frm".to_vec());
     let player = host.world.player;
-    let item = place(&mut host, prototype(0, 5, &[], &[]), step(20100, 1));
+    let item = place(&mut host, patched(0, 5, &[], &[]), step(20100, 1));
     host.action(player, item, ObjectAction::Pickup).unwrap();
     // Registered: the first delay forced to 0, the move entry (a one-step
     // route next to the item, moving nothing; SPEC-007 §3.1), the turn
@@ -546,7 +478,7 @@ fn spec007_interaction_sequences_follow_the_section_3_11_3_table() {
             .insert(critter(11, weapon), frm(6, 10, 2, STILL));
     }
     // A pickup at object distance 5 runs to the item.
-    let far = place(&mut host, prototype(0, 5, &[], &[]), hexes(20100, 1, 5));
+    let far = place(&mut host, patched(0, 5, &[], &[]), hexes(20100, 1, 5));
     let item = far;
     assert_eq!(
         labels(&host.pickup_motion(player, far).unwrap()),
@@ -563,7 +495,7 @@ fn spec007_interaction_sequences_follow_the_section_3_11_3_table() {
     let sequence = host.pickup_motion(player, far).unwrap();
     assert!(sequence.schedule.entries()[2].forced, "the adjacency check");
     // At distance 4 it walks; in combat it walks.
-    let near = place(&mut host, prototype(0, 5, &[], &[]), hexes(20100, 1, 4));
+    let near = place(&mut host, patched(0, 5, &[], &[]), hexes(20100, 1, 4));
     let walk = |host: &WorldHost<Assets>, item| {
         host.pickup_motion(player, item).unwrap().schedule.entries()[0]
             .action
@@ -625,7 +557,7 @@ fn spec007_interaction_sequences_follow_the_section_3_11_3_table() {
     // put-away animation has delay 0 and the reach -1.
     let lever = place(
         &mut host,
-        prototype(2, 5, &[(0x18, 0x01)], &[]),
+        patched(2, 5, &[(0x18, 0x01)], &[]),
         step(20100, 2),
     );
     assert_eq!(
@@ -646,7 +578,7 @@ fn spec007_interaction_sequences_follow_the_section_3_11_3_table() {
     // adjacency check, the turn, the AP, the climb, the use; the climber
     // keeps its pose.
     host.world.get_mut(player).unwrap().raw.art_id = critter(0, 0);
-    let ladder = place(&mut host, prototype(2, 3, &[], &[]), hexes(20100, 0, 2));
+    let ladder = place(&mut host, patched(2, 3, &[], &[]), hexes(20100, 0, 2));
     let sequence = host.ladder_motion(player, ladder).unwrap();
     assert!(!sequence.reset);
     let spot = step(hexes(20100, 0, 2), 2);
@@ -731,7 +663,7 @@ fn spec007_using_a_door_walks_reaches_and_opens_it() {
     assert_eq!(sounds(&mut host), ["SODOORSA"]);
     // Plain scenery without a script shows `proto.msg` 480.
     let beside = step(hex(&host, player), 5);
-    let rock = place(&mut host, prototype(2, 5, &[(0x18, 0x800)], &[]), beside);
+    let rock = place(&mut host, patched(2, 5, &[(0x18, 0x800)], &[]), beside);
     host.world.get_mut(rock).unwrap().name = b"rock".to_vec();
     host.action(player, rock, ObjectAction::Use).unwrap();
     assert!(messages(&mut host).contains(&"You see: rock.".to_string()));
@@ -852,7 +784,7 @@ fn spec014_clicks_while_the_player_is_busy_cancel_or_do_nothing() {
     // Mid-reach, a movement click with `interrupt_walk` off does nothing;
     // on, it cancels the pickup whole: the reach is abandoned, its pickup
     // entry dropped, and the forced adjacency check reports nothing.
-    let item = place(&mut host, prototype(0, 5, &[], &[]), step(20100, 1));
+    let item = place(&mut host, patched(0, 5, &[], &[]), step(20100, 1));
     host.action(player, item, ObjectAction::Pickup).unwrap();
     now += 100;
     host.step_motions(now);
@@ -883,7 +815,7 @@ fn spec014_clicks_while_the_player_is_busy_cancel_or_do_nothing() {
     // that whole action (the player's art is walk); in any other pose it
     // does nothing and shows no message.
     host.world.move_object(player, 20100, 0, false).unwrap();
-    let far = place(&mut host, prototype(0, 5, &[], &[]), hexes(20100, 1, 4));
+    let far = place(&mut host, patched(0, 5, &[], &[]), hexes(20100, 1, 4));
     host.action(player, far, ObjectAction::Pickup).unwrap();
     now += 100;
     host.step_motions(now);
@@ -1063,7 +995,7 @@ fn spec007_a_failed_approach_tells_the_player_but_an_external_stop_does_not() {
     // Combat starting (or a map exit) mid-approach stops every sequence:
     // the forced adjacency check runs under the halt and prints nothing,
     // as the reference prints nothing (§3.11.3).
-    let far = place(&mut host, prototype(0, 5, &[], &[]), hexes(20100, 1, 4));
+    let far = place(&mut host, patched(0, 5, &[], &[]), hexes(20100, 1, 4));
     host.action(player, far, ObjectAction::Pickup).unwrap();
     host.step_motions(0);
     host.stop_motions();
@@ -1077,7 +1009,7 @@ fn spec007_a_failed_approach_tells_the_player_but_an_external_stop_does_not() {
     // it starts (§3.1) and the check then tells a player actor (safe
     // rule).
     let ringed = hexes(20100, 0, 3);
-    let item = place(&mut host, prototype(0, 5, &[], &[]), ringed);
+    let item = place(&mut host, patched(0, 5, &[], &[]), ringed);
     for direction in 0..6 {
         npc(&mut host, step(ringed, direction));
     }

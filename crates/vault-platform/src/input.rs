@@ -210,6 +210,58 @@ pub fn is_modifier(key: winit::keyboard::KeyCode) -> bool {
     )
 }
 
+/// The character a key types on the US layout (SPEC-014 §3.10): a letter,
+/// upper case with Shift; a number-row digit, or with Shift its symbol;
+/// the punctuation keys, plain or shifted; and Space. The keypad and every
+/// other key type none.
+pub fn key_text(key: winit::keyboard::KeyCode, shift: bool) -> Option<u8> {
+    use winit::keyboard::KeyCode::{self, *};
+    const LETTERS: [KeyCode; 26] = [
+        KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM, KeyN, KeyO,
+        KeyP, KeyQ, KeyR, KeyS, KeyT, KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ,
+    ];
+    const DIGITS: [KeyCode; 10] = [
+        Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9,
+    ];
+    let pick = |plain: u8, shifted: u8| Some(if shift { shifted } else { plain });
+    if let Some(at) = LETTERS.iter().position(|&each| each == key) {
+        return pick(
+            b"abcdefghijklmnopqrstuvwxyz"[at],
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"[at],
+        );
+    }
+    if let Some(at) = DIGITS.iter().position(|&each| each == key) {
+        return pick(b"0123456789"[at], b")!@#$%^&*("[at]);
+    }
+    let (plain, shifted) = match key {
+        Minus => (b'-', b'_'),
+        Equal => (b'=', b'+'),
+        BracketLeft => (b'[', b'{'),
+        BracketRight => (b']', b'}'),
+        Backquote => (b'`', b'~'),
+        Quote => (b'\'', b'"'),
+        Period => (b'.', b'>'),
+        Comma => (b',', b'<'),
+        Slash => (b'/', b'?'),
+        Semicolon => (b';', b':'),
+        Backslash => (b'\\', b'|'),
+        Space => (b' ', b' '),
+        _ => return None,
+    };
+    pick(plain, shifted)
+}
+
+/// The digit a number-row or keypad key types, as its character.
+pub fn key_digit(key: winit::keyboard::KeyCode) -> Option<u8> {
+    use winit::keyboard::KeyCode::*;
+    let keypad = [
+        Numpad0, Numpad1, Numpad2, Numpad3, Numpad4, Numpad5, Numpad6, Numpad7, Numpad8, Numpad9,
+    ];
+    (keypad.iter().position(|&each| each == key))
+        .map(|at| b"0123456789"[at])
+        .or_else(|| key_text(key, false).filter(u8::is_ascii_digit))
+}
+
 /// How a wheel delta is measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -473,6 +525,75 @@ mod tests {
         }
         assert!(!is_modifier(KeyCode::KeyP));
         assert!(!is_modifier(KeyCode::Escape));
+    }
+
+    #[test]
+    fn spec014_keys_type_their_us_layout_characters() {
+        use winit::keyboard::KeyCode;
+        let text = |key, shift| key_text(key, shift).map(char::from);
+        // Letters, with Shift upper case.
+        assert_eq!(text(KeyCode::KeyA, false), Some('a'));
+        assert_eq!(text(KeyCode::KeyA, true), Some('A'));
+        assert_eq!(text(KeyCode::KeyZ, false), Some('z'));
+        assert_eq!(text(KeyCode::KeyQ, true), Some('Q'));
+        // The number row and its shifted symbols.
+        let digits = [
+            KeyCode::Digit0,
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+        ];
+        let plain: String = digits.iter().filter_map(|&key| text(key, false)).collect();
+        let shifted: String = digits.iter().filter_map(|&key| text(key, true)).collect();
+        assert_eq!(plain, "0123456789");
+        assert_eq!(shifted, ")!@#$%^&*(");
+        // The punctuation keys, plain and shifted, and Space either way.
+        for (key, plain, shifted) in [
+            (KeyCode::Minus, '-', '_'),
+            (KeyCode::Equal, '=', '+'),
+            (KeyCode::BracketLeft, '[', '{'),
+            (KeyCode::BracketRight, ']', '}'),
+            (KeyCode::Backquote, '`', '~'),
+            (KeyCode::Quote, '\'', '"'),
+            (KeyCode::Period, '.', '>'),
+            (KeyCode::Comma, ',', '<'),
+            (KeyCode::Slash, '/', '?'),
+            (KeyCode::Semicolon, ';', ':'),
+            (KeyCode::Backslash, '\\', '|'),
+            (KeyCode::Space, ' ', ' '),
+        ] {
+            assert_eq!(text(key, false), Some(plain), "{key:?}");
+            assert_eq!(text(key, true), Some(shifted), "{key:?}");
+        }
+        // The keypad types no text; its digits are digits all the same.
+        assert_eq!(text(KeyCode::Numpad7, false), None);
+        assert_eq!(text(KeyCode::NumpadAdd, false), None);
+        assert_eq!(key_digit(KeyCode::Numpad7), Some(b'7'));
+        assert_eq!(key_digit(KeyCode::Numpad0), Some(b'0'));
+        assert_eq!(key_digit(KeyCode::Digit3), Some(b'3'));
+        assert_eq!(key_digit(KeyCode::NumpadAdd), None);
+        assert_eq!(key_digit(KeyCode::KeyA), None);
+        // Keys that are not characters.
+        for key in [
+            KeyCode::F1,
+            KeyCode::Enter,
+            KeyCode::NumpadEnter,
+            KeyCode::Escape,
+            KeyCode::Tab,
+            KeyCode::Backspace,
+            KeyCode::ArrowLeft,
+            KeyCode::ShiftLeft,
+            KeyCode::IntlBackslash,
+        ] {
+            assert_eq!(text(key, false), None, "{key:?}");
+            assert_eq!(text(key, true), None, "{key:?}");
+        }
     }
 
     #[test]

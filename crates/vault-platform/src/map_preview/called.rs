@@ -5,7 +5,7 @@
 //! running while it is open (unlike the action menu); the in-world cursor
 //! is hidden and the system cursor is the arrow.
 use super::MapPreview;
-use crate::interface::Painter;
+use crate::{input::key_text, interface::Painter};
 use vault_core::{
     ObjectRef,
     assets::WorldAssets,
@@ -258,10 +258,9 @@ impl MapPreview {
             KeyCode::Escape => self.close_called(),
             KeyCode::F12 => self.screenshot(),
             _ => {
-                let name = format!("{key:?}");
-                let letter = name
-                    .strip_prefix("Key")
-                    .and_then(|letter| letter.chars().next());
+                let letter = key_text(key, true)
+                    .filter(u8::is_ascii_uppercase)
+                    .map(char::from);
                 let code =
                     called::key_code(letter, self.hud.modifiers[1], key == KeyCode::Backspace);
                 if let Some(part) = code.and_then(called::choice) {

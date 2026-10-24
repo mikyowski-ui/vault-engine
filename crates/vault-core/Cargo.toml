@@ -16,6 +16,7 @@ vault-vm.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
+vault-fixtures.workspace = true
 
 [lints]
 workspace = true

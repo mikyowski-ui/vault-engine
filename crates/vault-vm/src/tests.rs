@@ -1,9 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/vm/support.rs"]
-mod fixture;
-use fixture::{op, push};
+use vault_fixtures::vm::{self as fixture, op, push};
 
 fn program() -> IntProgram {
     IntProgram::parse(&fixture::program()).unwrap()

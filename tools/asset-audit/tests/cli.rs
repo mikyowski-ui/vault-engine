@@ -1,20 +1,7 @@
 use std::process::Command;
 
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/formats/support.rs"]
-mod fixture_assets;
-use fixture_assets as fixtures;
-
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/vm/support.rs"]
-mod vm;
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/world/support.rs"]
-mod world;
-pub(crate) use world as fixture_world;
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/state/support.rs"]
-mod state;
+use vault_fixtures::formats as fixtures;
+use vault_fixtures::{state, vm, world};
 
 #[test]
 fn validates_gam_and_gcd_and_rejects_undefined_initializers() {
@@ -532,9 +519,7 @@ fn validates_spec009_packets_critter_resolution_and_taunt_ranges() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("last_msg"));
 }
 
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/sound/support.rs"]
-mod sound;
+use vault_fixtures::sound;
 
 fn sha256(bytes: &[u8]) -> String {
     use sha2::Digest;
@@ -1184,9 +1169,7 @@ fn movie_oracle(dir: &std::path::Path, summary: &[String], subtitles: &str) {
     .unwrap();
 }
 
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/movie/support.rs"]
-mod movie;
+use vault_fixtures::movie;
 
 #[test]
 fn validates_spec012_movies_fades_and_subtitles_against_oracle_tables() {

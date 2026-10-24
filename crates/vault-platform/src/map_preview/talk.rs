@@ -13,7 +13,7 @@
 //! its speech; Esc or CANCEL stops speech and closes it, restoring the
 //! saved reply and its page (safe rule).
 use super::MapPreview;
-use crate::{editor_screen::typed_char, interface::Painter};
+use crate::{input::key_text, interface::Painter};
 use vault_core::{
     assets::WorldAssets,
     host_talk::{ReviewText, TellMeAbout},
@@ -53,22 +53,6 @@ fn ask_buttons() -> [Rect; 2] {
     let [ox, oy] = talk::ASK_ORIGIN;
     let [w, h] = RED_BUTTON.2;
     [talk::ASK_DONE, talk::ASK_CANCEL].map(|[x, y]| Rect::new(ox + x, oy + y, w, h))
-}
-
-/// A key's character in the field, US layout: the editor's mapping plus
-/// the punctuation Ask About tokenizes on.
-fn ask_char(key: KeyCode, shift: bool) -> Option<u8> {
-    typed_char(key, shift).or_else(|| {
-        let (plain, shifted) = match key {
-            KeyCode::Period => (b'.', b'>'),
-            KeyCode::Comma => (b',', b'<'),
-            KeyCode::Slash => (b'/', b'?'),
-            KeyCode::Semicolon => (b';', b':'),
-            KeyCode::Backslash => (b'\\', b'|'),
-            _ => return None,
-        };
-        Some(if shift { shifted } else { plain })
-    })
 }
 
 impl MapPreview {
@@ -190,7 +174,7 @@ impl MapPreview {
                             .and_then(|font| font.character_width(code))
                             .map_or(0, |width| width as i32)
                     };
-                    if let Some(code) = ask_char(key, self.hud.modifiers[0]) {
+                    if let Some(code) = key_text(key, self.hud.modifiers[0]) {
                         ask.field.type_code(i32::from(code), measure, glyph);
                     }
                 }

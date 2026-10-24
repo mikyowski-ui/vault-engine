@@ -1,18 +1,18 @@
 //! SPEC-014 §3.45 the dialogue panel, Review and Ask About windows over a
 //! synthetic conversation.
 use super::{TalkWindow, ask_buttons};
-use crate::map_preview::{MapPreview, Screen, state_fixture};
-use std::sync::Arc;
+use crate::map_preview::{
+    MapPreview, Screen,
+    test_support::{interactive, synthetic_corpus},
+};
 use vault_core::{WorldEffect, ui::cursor::Mode, ui::talk};
-use vault_formats::{LocalDirProvider, Vfs};
 use winit::keyboard::KeyCode;
 
 /// The synthetic conversation ("Hello" with option "Continue"), its
 /// script's message file (list 1) with one fallback answer, and
 /// `proto.msg`.
 fn talking() -> (tempfile::TempDir, MapPreview) {
-    let dir = tempfile::tempdir().unwrap();
-    state_fixture::write_corpus(dir.path());
+    let dir = synthetic_corpus();
     std::fs::create_dir_all(dir.path().join("text/english/dialog")).unwrap();
     std::fs::write(
         dir.path().join("text/english/dialog/synthetic.msg"),
@@ -25,15 +25,7 @@ fn talking() -> (tempfile::TempDir, MapPreview) {
           {904}{}{This person has nothing to tell you about.}\n",
     )
     .unwrap();
-    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
-    let mut preview = MapPreview::load(
-        vfs,
-        "maps/synthetic.map",
-        "english",
-        Some("premade/synthetic.gcd"),
-        1,
-    )
-    .unwrap();
+    let mut preview = interactive(dir.path());
     preview.image().unwrap();
     preview.hud.mode = Mode::Arrow;
     assert!(preview.tap([336, 170]));

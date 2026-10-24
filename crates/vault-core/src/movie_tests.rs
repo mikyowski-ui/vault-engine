@@ -8,14 +8,12 @@ use crate::{
     assets::VfsWorldAssets,
     fixture_state as state,
     movie::{self, MoviePlayback, MovieRequest, Step, flags},
+    test_support::dir_assets,
 };
-use std::sync::Arc;
-use vault_formats::{LocalDirProvider, moviefx, sve};
+use vault_formats::{moviefx, sve};
 use vault_vm::{IntProgram, RunOutcome, Vm};
 
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/movie/support.rs"]
-mod fixture;
+use vault_fixtures::movie as fixture;
 
 /// A movie of chunks of `(type, version, payload)` opcodes, each chunk
 /// ended by an end-of-chunk opcode, then an end-of-stream chunk.
@@ -333,12 +331,8 @@ fn movie_host(dir: &std::path::Path) -> WorldHost<VfsWorldAssets> {
     std::fs::write(dir.join("art/cuts/intro.cfg"), fixture::fades()).unwrap();
     std::fs::write(dir.join("text/english/cuts/intro.sve"), b"1:intro\n").unwrap();
     std::fs::write(dir.join("text/english/cuts/BOIL1.SVE"), b"1:boil\n").unwrap();
-    let vfs = Arc::new(LocalDirProvider::mount(dir).unwrap());
-    let assets = VfsWorldAssets::new(vfs, "english").unwrap();
-    WorldHost::new(
-        WorldState::new(CharacterSheet::default(), 1).unwrap(),
-        assets,
-    )
+    let world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+    WorldHost::new(world, dir_assets(dir))
 }
 fn requests(host: &mut WorldHost<VfsWorldAssets>) -> Vec<MovieRequest> {
     host.world

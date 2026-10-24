@@ -5,20 +5,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/formats/support.rs"]
-pub(crate) mod fixture_assets;
-
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/world/support.rs"]
-pub(crate) mod fixture_world;
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/state/support.rs"]
-mod state;
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/vm/support.rs"]
-mod vm;
+use vault_fixtures::{state, vm};
 
 #[derive(Parser)]
 #[command(about = "Vault Engine workspace verification")]

@@ -195,12 +195,11 @@ fn play_title(enhanced: bool) -> &'static str {
 fn black() -> Palette {
     palette_from(&[[0; 3]; 256])
 }
+/// A letter key's lower-case letter or a number-row key's digit.
 fn letter(key: KeyCode) -> Option<char> {
-    let name = format!("{key:?}");
-    name.strip_prefix("Key")
-        .or_else(|| name.strip_prefix("Digit"))
-        .and_then(|rest| rest.chars().next())
-        .map(|c| c.to_ascii_lowercase())
+    crate::input::key_text(key, false)
+        .filter(u8::is_ascii_alphanumeric)
+        .map(char::from)
 }
 
 impl Game {
@@ -1677,14 +1676,13 @@ fn selection_button(point: [i32; 2]) -> Option<(Rect, SelectionAction)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{audio::sound_fixture, map_preview::state_fixture};
+    use crate::{audio::sound_fixture, map_preview::test_support::synthetic_corpus};
     use vault_formats::LocalDirProvider;
 
     #[test]
     fn menu_music_volumes_and_the_death_narration() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = synthetic_corpus();
         let root = dir.path();
-        state_fixture::write_corpus(root);
         let map = std::fs::read(root.join("maps/synthetic.map")).unwrap();
         std::fs::write(root.join("maps/v13ent.map"), &map).unwrap();
         std::fs::create_dir_all(root.join("sound/music")).unwrap();
@@ -1769,9 +1767,8 @@ mod tests {
 
     #[test]
     fn the_configured_music_key_and_volumes_set_the_music_state() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = synthetic_corpus();
         let root = dir.path();
-        state_fixture::write_corpus(root);
         std::fs::create_dir_all(root.join("sound/music")).unwrap();
         std::fs::write(
             root.join("sound/music/07desert.acm"),
@@ -1825,9 +1822,8 @@ mod tests {
 
     #[test]
     fn spec014_3_30_global_299_is_cleared_after_the_slideshow() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = synthetic_corpus();
         let root = dir.path();
-        state_fixture::write_corpus(root);
         let map = std::fs::read(root.join("maps/synthetic.map")).unwrap();
         std::fs::write(root.join("maps/v13ent.map"), &map).unwrap();
         let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(root).unwrap());
@@ -1859,8 +1855,7 @@ mod tests {
 
     #[test]
     fn a_still_splash_and_slides_do_not_recompose_every_poll() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
         let mut game =
             Game::new(vfs.clone(), "english", 1, dir.path().join("saves"), None).unwrap();

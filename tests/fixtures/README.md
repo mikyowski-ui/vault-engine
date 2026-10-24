@@ -31,3 +31,9 @@ All files here were authored for Vault Engine. None contain original game assets
 Tests copy loose fixtures into temporary directories when exercising namespace
 changes, collisions, or symlink attacks. The committed fixture directory is never
 modified by tests.
+
+The `support.rs` builders under `formats/`, `movie/`, `sound/`, `state/`, `vm/`
+and `world/` need only `std`, so they are compiled once as the `vault-fixtures`
+crate (`crates/vault-fixtures`), a dev-dependency of the crates that use them
+and a dependency of `cargo xtask fixtures`. `items/support.rs` implements
+`vault-core` types, so `vault-core` includes it as its own test module.

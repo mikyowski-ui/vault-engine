@@ -7,11 +7,10 @@ use crate::{
     fixture_state as fixture,
     host_save::{SaveInfo, slot_directory},
     queue::EventKind,
+    test_support::dir_assets,
 };
 use std::{fs, path::Path, sync::Arc};
-use vault_formats::{
-    LocalDirProvider, MapFile, ParseError, map::ObjectState, pro::BasicFlags, savegame::SaveHeader,
-};
+use vault_formats::{MapFile, ParseError, map::ObjectState, pro::BasicFlags, savegame::SaveHeader};
 
 /// The interactive fixture map as a fresh stream whose header names it
 /// `<NAME>.MAP` (SPEC-008 §3.10 assigns the number from that name), with
@@ -68,12 +67,8 @@ fn corpus() -> tempfile::TempDir {
     dir
 }
 fn host(dir: &Path) -> WorldHost<VfsWorldAssets> {
-    let assets =
-        VfsWorldAssets::new(Arc::new(LocalDirProvider::mount(dir).unwrap()), "english").unwrap();
-    let mut host = WorldHost::new(
-        WorldState::new(CharacterSheet::default(), 1).unwrap(),
-        assets,
-    );
+    let world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+    let mut host = WorldHost::new(world, dir_assets(dir));
     host.load_campaign().unwrap();
     host
 }

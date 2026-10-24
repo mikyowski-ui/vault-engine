@@ -8,6 +8,7 @@ members = [
     "crates/vault-render",
     "crates/vault-debug",
     "crates/vault-platform",
+    "crates/vault-fixtures",
     "tools/xtask",
     "tools/asset-audit",
 ]
@@ -23,6 +24,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 vault-core = { path = "crates/vault-core" }
 vault-debug = { path = "crates/vault-debug" }
+vault-fixtures = { path = "crates/vault-fixtures" }
 vault-formats = { path = "crates/vault-formats" }
 vault-guidance = { path = "crates/vault-guidance" }
 vault-render = { path = "crates/vault-render" }

@@ -10,15 +10,12 @@ use vault_core::{
     CharacterSheet, ObjectRef,
     world::{ScriptInstance, WorldObject, object_record},
 };
+use vault_fixtures::vm::{self as fixture, op, push};
 use vault_formats::{
     map::{CritterState, ObjectState},
     pro::{Category, CombatFlags},
 };
 use vault_vm::{BasicHost, IntProgram, RunOutcome, Value, VmError, VmStatus};
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/vm/support.rs"]
-mod fixture;
-use fixture::{op, push};
 
 fn fragment(parts: &[Vec<u8>]) -> Vm {
     let program = IntProgram::parse(&fixture::program()).unwrap();

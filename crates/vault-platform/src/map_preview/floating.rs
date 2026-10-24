@@ -64,13 +64,13 @@ impl MapPreview {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use crate::map_preview::test_support::local_corpus;
     use vault_core::{
         assets::{VfsWorldAssets, WorldAssets},
         floating::{layout, lifetime, place},
         ui::ColorKey,
     };
-    use vault_formats::{LocalDirProvider, Palette, Vfs};
+    use vault_formats::Palette;
 
     /// SPEC-014 §4.21 Fixture U over the corpus `font1.aaf` and
     /// `color.pal`: the widths, boxes, line positions, colors and
@@ -78,17 +78,9 @@ mod tests {
     #[test]
     #[ignore = "needs the local corpus"]
     fn spec014_fixture_u_over_the_corpus_font_and_palette() {
-        let dir = std::env::var_os("VAULT_CORPUS")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-corpus")
-            })
-            .join("fallout1-unpacked");
-        if !dir.is_dir() {
-            eprintln!("skipping: no local corpus at {}", dir.display());
+        let Some(vfs) = local_corpus() else {
             return;
-        }
-        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir).unwrap());
+        };
         let palette = Palette::parse(&vfs.read("color.pal").unwrap()).unwrap();
         let assets = VfsWorldAssets::new(vfs, "english").unwrap();
         let font = assets.font_number(101).expect("font1.aaf");

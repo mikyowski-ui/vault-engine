@@ -2,30 +2,12 @@
 //! `kill_critter`, `destroy_object` and `critter_damage` set on the running
 //! program when their object is its own owner.
 use crate::fixture_state as fixture;
-use crate::{assets::WorldAssets, world::ScriptRequest, *};
+use crate::test_support::{TestAssets as Assets, count, gvar, npc_prototype, program, request};
+use crate::*;
 use std::sync::Arc;
 use vault_formats::{Prototype, pro::BasicFlags};
 use vault_vm::{IntProgram, VmStatus};
 
-/// `gvar[index] += 1`.
-fn count(index: i32) -> Vec<u8> {
-    [
-        fixture::push(index),
-        fixture::push(index),
-        fixture::instruction(0x80c5),
-        fixture::push(1),
-        fixture::instruction(0x8039),
-        fixture::instruction(0x80c6),
-    ]
-    .concat()
-}
-fn program(procedures: &[(&[u8], Vec<u8>)]) -> IntProgram {
-    let procedures: Vec<(&[u8], Vec<u8>)> = procedures
-        .iter()
-        .map(|(name, body)| (*name, fixture::returning(body.clone())))
-        .collect();
-    IntProgram::parse(&fixture::program(&[], &procedures)).unwrap()
-}
 const SCRIPT_OVERRIDES: u16 = 0x80b9;
 const SELF_OBJ: u16 = 0x80bc;
 const KILL_CRITTER: u16 = 0x80ed;
@@ -74,82 +56,40 @@ fn on_object(op: u16, object: u32, after: &[i32]) -> Vec<u8> {
     code
 }
 
-struct Assets {
-    critter: Arc<Prototype>,
-    item: Arc<Prototype>,
-    programs: Vec<IntProgram>,
-}
-impl WorldAssets for Assets {
-    fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
-        Ok(if pid >> 24 == 1 {
-            self.critter.clone()
-        } else {
-            self.item.clone()
-        })
-    }
-    fn program(&self, index: i32) -> Result<(String, IntProgram), WorldError> {
-        usize::try_from(index)
-            .ok()
-            .and_then(|index| self.programs.get(index))
-            .map(|program| ("synthetic.int".into(), program.clone()))
-            .ok_or_else(|| WorldError::Invalid(format!("script {index} does not load")))
-    }
-    fn message(&self, _list: i32, _id: i32) -> Option<vault_formats::msg::Message> {
-        None
-    }
-    fn game_messages(&self, file: &str) -> Result<Arc<vault_formats::MsgCatalog>, WorldError> {
-        if file != "combat.msg" {
-            return Err(WorldError::Invalid(format!("{file} is missing")));
-        }
-        let text = b"{108}{}{ and }\n{307}{}{was killed}\n{613}{}{%s was hit for %d hit points}\n";
-        Ok(Arc::new(vault_formats::MsgCatalog::parse(text).unwrap()))
-    }
-}
-
 /// Script file 0 is the player's (it only has `start`); the test adds
 /// its own programs from file 1.
 fn host() -> WorldHost<Assets> {
     let mut world = WorldState::new(CharacterSheet::default(), 1).unwrap();
     world.gvars = Some(vec![0; 8]);
-    WorldHost::new(
-        world,
-        Assets {
-            critter: Arc::new(Prototype::parse(&fixture::npc_prototype()).unwrap()),
-            item: Arc::new(Prototype::parse(&fixture::world::prototype(0, 5)).unwrap()),
-            programs: vec![program(&[(b"start", Vec::new())])],
-        },
-    )
-}
-fn request(script: u32, event: ScriptEvent) -> ScriptRequest {
-    ScriptRequest {
-        script,
-        event,
-        source: 0,
-        target: 0,
-        fixed: 0,
-        action: -1,
-        only_present: false,
+    let item = Prototype::parse(&fixture::world::prototype(0, 5)).unwrap();
+    let mut assets = Assets {
+        any_prototype: Some(Arc::new(item)),
+        ..Assets::default()
     }
+    .with_program("synthetic.int", program(&[(b"start", Vec::new())]))
+    .with_messages(
+        "combat.msg",
+        b"{108}{}{ and }\n{307}{}{was killed}\n{613}{}{%s was hit for %d hit points}\n",
+    );
+    assets.by_type.insert(1, npc_prototype());
+    WorldHost::new(world, assets)
 }
 /// A critter at `hex` with a script running `program`; its first request
 /// (the program load) is made.
 fn scripted_critter(host: &mut WorldHost<Assets>, hex: i32, program: IntProgram) -> (u32, u32) {
     let critter = host
         .world
-        .spawn(host.assets.critter.clone(), hex, 0)
+        .spawn(host.assets.by_type[&1].clone(), hex, 0)
         .unwrap();
     let sid = scripted(host, critter, program);
     (critter, sid)
 }
 fn scripted(host: &mut WorldHost<Assets>, object: u32, program: IntProgram) -> u32 {
-    host.assets.programs.push(program);
+    host.assets.programs.push(("synthetic.int".into(), program));
     let file = host.assets.programs.len() as i32 - 1;
     let sid = host.world.add_script(object, file, 4, 0).unwrap();
     host.dispatch(request(sid, ScriptEvent::Start)).unwrap();
     sid
-}
-fn gvar(host: &WorldHost<Assets>, index: usize) -> i32 {
-    host.world.gvars.as_ref().unwrap()[index]
 }
 fn program_of(host: &WorldHost<Assets>, sid: u32) -> u32 {
     host.world.scripts[&sid].program
@@ -254,7 +194,7 @@ fn spec005_a_held_item_that_destroys_itself_keeps_its_instance() {
     let player = host.world.player;
     let item = host
         .world
-        .spawn(host.assets.item.clone(), 20110, 0)
+        .spawn(host.assets.any_prototype.clone().unwrap(), 20110, 0)
         .unwrap();
     host.world.add_item(player, item, 1, true).unwrap();
     let sid = scripted(&mut host, item, acting(on_self(DESTROY_OBJECT, &[])));
@@ -277,7 +217,7 @@ fn spec005_nothing_else_sets_the_self_stop_bit() {
     let mut host = host();
     // `kill_critter_type` on the script's own PID kills its own object but
     // does not stop it.
-    let pid = host.assets.critter.pid;
+    let pid = host.assets.by_type[&1].pid;
     let code = [fixture::push(pid as i32), fixture::push(2)].concat();
     let (critter, sid) = scripted_critter(
         &mut host,
@@ -291,7 +231,7 @@ fn spec005_nothing_else_sets_the_self_stop_bit() {
     // `kill_critter` aimed at another critter leaves the killer running.
     let other = host
         .world
-        .spawn(host.assets.critter.clone(), 20108, 0)
+        .spawn(host.assets.by_type[&1].clone(), 20108, 0)
         .unwrap();
     let (_, sid) = scripted_critter(
         &mut host,

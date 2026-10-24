@@ -9,7 +9,7 @@
 //! §3.42 mapping), the §3.13 message boxes, and the §3.43 sheet files: the
 //! load and save file dialogs, the file operations in the master patch
 //! root, and the printed sheet's inputs.
-use crate::interface::Painter;
+use crate::{input::key_text, interface::Painter};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use vault_core::{
@@ -199,13 +199,6 @@ fn box_buttons(origin: [i32; 2], yes_no: bool, size: DialogSize) -> Vec<Rect> {
         .map(|button| red_button([origin[0] + button.button[0], origin[1] + button.button[1]]))
         .collect()
 }
-fn letter(key: KeyCode) -> Option<char> {
-    let name = format!("{key:?}");
-    name.strip_prefix("Key")
-        .and_then(|rest| rest.chars().next())
-        .map(|c| c.to_ascii_lowercase())
-}
-
 impl EditorStage {
     pub fn new(editor: Editor) -> Self {
         Self {
@@ -606,14 +599,14 @@ impl EditorStage {
             }
             KeyCode::Escape => EditorExit::Cancel,
             _ => {
-                match letter(key) {
-                    Some('n') => {
+                match key_text(key, false) {
+                    Some(b'n') => {
                         self.dialog =
                             Some(EditorDialog::Name(NameField::open(&self.editor.sheet.name)))
                     }
-                    Some('a') => self.open_age(),
-                    Some('s') => self.dialog = Some(EditorDialog::Sex),
-                    Some('o') => self.dialog = Some(EditorDialog::Options { erase: false }),
+                    Some(b'a') => self.open_age(),
+                    Some(b's') => self.dialog = Some(EditorDialog::Sex),
+                    Some(b'o') => self.dialog = Some(EditorDialog::Options { erase: false }),
                     _ => return EditorExit::Stay(false),
                 }
                 EditorExit::Stay(true)
@@ -1791,47 +1784,14 @@ impl FileDialog {
 /// §3.10 a name-field character: what the key types on the US layout,
 /// the punctuation keys included, when its code is 32 through 122.
 fn name_char(key: KeyCode, shift: bool) -> Option<u8> {
-    typed_char(key, shift)
-        .or_else(|| {
-            let (plain, shifted) = match key {
-                KeyCode::Period => (b'.', b'>'),
-                KeyCode::Comma => (b',', b'<'),
-                KeyCode::Slash => (b'/', b'?'),
-                KeyCode::Semicolon => (b';', b':'),
-                KeyCode::Backslash => (b'\\', b'|'),
-                _ => return None,
-            };
-            Some(if shift { shifted } else { plain })
-        })
-        .filter(|code| (32..=122).contains(code))
+    key_text(key, shift).filter(|code| (32..=122).contains(code))
 }
 
-/// The byte a key types, US layout, with shift.
+/// The byte a key types in a file name, US layout, with shift: as
+/// `key_text`, but `.`, `,`, `/`, `;` and `\` type nothing.
 pub(crate) fn typed_char(key: KeyCode, shift: bool) -> Option<u8> {
-    let name = format!("{key:?}");
-    if let Some(letter) = name.strip_prefix("Key") {
-        let c = letter.bytes().next()?;
-        return Some(if shift { c } else { c.to_ascii_lowercase() });
-    }
-    if let Some(digit) = name.strip_prefix("Digit") {
-        let d = digit.bytes().next()?;
-        return Some(if shift {
-            b")!@#$%^&*("[usize::from(d - b'0')]
-        } else {
-            d
-        });
-    }
-    let (plain, shifted) = match key {
-        KeyCode::Minus => (b'-', b'_'),
-        KeyCode::Equal => (b'=', b'+'),
-        KeyCode::BracketLeft => (b'[', b'{'),
-        KeyCode::BracketRight => (b']', b'}'),
-        KeyCode::Backquote => (b'`', b'~'),
-        KeyCode::Quote => (b'\'', b'"'),
-        KeyCode::Space => (b' ', b' '),
-        _ => return None,
-    };
-    Some(if shift { shifted } else { plain })
+    use KeyCode::{Backslash, Comma, Period, Semicolon, Slash};
+    key_text(key, shift).filter(|_| !matches!(key, Period | Comma | Slash | Semicolon | Backslash))
 }
 
 /// §3.43 the sheet files: the master patch root (`fallout.cfg`

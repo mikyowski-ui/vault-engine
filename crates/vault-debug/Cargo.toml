@@ -11,5 +11,8 @@ vault-core.workspace = true
 vault-formats.workspace = true
 vault-vm.workspace = true
 
+[dev-dependencies]
+vault-fixtures.workspace = true
+
 [lints]
 workspace = true

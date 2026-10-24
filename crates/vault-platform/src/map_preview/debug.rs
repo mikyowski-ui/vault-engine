@@ -19,7 +19,7 @@
 //! ([`MapPreview::apply_debug`]), so a replay of the log applies each
 //! command exactly once.
 use super::MapPreview;
-use crate::interface::Painter;
+use crate::{input::key_digit, interface::Painter};
 use std::collections::VecDeque;
 use vault_core::{
     WorldError, assets::WorldAssets, debug::DebugCommand, ui::ColorKey, worldmap::MAP_COUNT,
@@ -276,19 +276,7 @@ impl MapPreview {
             let high = rows.max(low + 1) - 1;
             cursor.saturating_add_signed(delta).clamp(low, high)
         };
-        let digit = match key {
-            KeyCode::Digit0 | KeyCode::Numpad0 => Some('0'),
-            KeyCode::Digit1 | KeyCode::Numpad1 => Some('1'),
-            KeyCode::Digit2 | KeyCode::Numpad2 => Some('2'),
-            KeyCode::Digit3 | KeyCode::Numpad3 => Some('3'),
-            KeyCode::Digit4 | KeyCode::Numpad4 => Some('4'),
-            KeyCode::Digit5 | KeyCode::Numpad5 => Some('5'),
-            KeyCode::Digit6 | KeyCode::Numpad6 => Some('6'),
-            KeyCode::Digit7 | KeyCode::Numpad7 => Some('7'),
-            KeyCode::Digit8 | KeyCode::Numpad8 => Some('8'),
-            KeyCode::Digit9 | KeyCode::Numpad9 => Some('9'),
-            _ => None,
-        };
+        let digit = key_digit(key).map(char::from);
         match key {
             _ if digit.is_some() => {
                 if overlay.entry.len() < ENTRY_LEN {
@@ -611,21 +599,11 @@ impl MapPreview {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map_preview::state_fixture;
-    use std::sync::Arc;
-    use vault_formats::{LocalDirProvider, Vfs};
+    use crate::map_preview::{state_fixture, test_support::interactive};
 
     fn world(dir: &std::path::Path) -> MapPreview {
         state_fixture::write_corpus(dir);
-        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir).unwrap());
-        let mut preview = MapPreview::load(
-            vfs,
-            "maps/synthetic.map",
-            "english",
-            Some("premade/synthetic.gcd"),
-            1,
-        )
-        .unwrap();
+        let mut preview = interactive(dir);
         preview.tick(16).unwrap();
         preview.image().unwrap();
         preview

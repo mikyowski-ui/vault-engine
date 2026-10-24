@@ -2,65 +2,32 @@
 //! weapon 0x79, scenery 0x28 sound bytes, target materials, art stems), the
 //! lookup chain over the asset namespace, speech paths, and volume.
 use crate::{
-    CharacterSheet, ObjectRef, WorldError, WorldHost, WorldState,
-    assets::WorldAssets,
+    CharacterSheet, ObjectRef, WorldHost, WorldState,
     dialogue::{HeadDefinition, Mood, TalkingHead},
-    fixture_world as fixture,
+    test_support::{TestAssets, patched},
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 use vault_formats::{Fid, Prototype};
 
-#[derive(Default)]
-struct SoundAssets {
-    /// `(category, art index)` to list token.
-    tokens: BTreeMap<(u8, u16), Vec<u8>>,
-    /// Effect files present, as upper-case stems.
-    effects: BTreeSet<Vec<u8>>,
-}
-impl WorldAssets for SoundAssets {
-    fn prototype(&self, _pid: u32) -> Result<Arc<Prototype>, WorldError> {
-        Err(WorldError::Invalid("no prototypes".into()))
-    }
-    fn program(&self, _index: i32) -> Result<(String, vault_vm::IntProgram), WorldError> {
-        Err(WorldError::Invalid("no programs".into()))
-    }
-    fn message(&self, _list: i32, _id: i32) -> Option<vault_formats::msg::Message> {
-        None
-    }
-    fn art_token(&self, category: u8, index: u16) -> Option<Vec<u8>> {
-        self.tokens.get(&(category, index)).cloned()
-    }
-    /// Every art exists but the kick (17), so a punch stays a punch.
-    fn art_exists(&self, fid: u32) -> bool {
-        vault_formats::Fid(fid).animation() != 17
-    }
-    fn available(&self, path: &[u8]) -> bool {
-        let stem = path
-            .strip_prefix(b"sound/sfx/")
-            .and_then(|name| name.strip_suffix(b".ACM"));
-        stem.is_some_and(|stem| self.effects.contains(&stem.to_ascii_uppercase()))
-    }
+/// No resources but list tokens; every art exists but the kick (17), so a
+/// punch stays a punch; no effect files.
+fn sound_assets() -> TestAssets {
+    let mut assets = TestAssets::all_art();
+    assets.missing.insert(17);
+    assets.effects = Some(BTreeSet::new());
+    assets
 }
 
-/// A prototype from the fixture template with words and bytes patched.
+/// A prototype from the fixture template, with PID 7 of its category and
+/// words and bytes patched.
 fn prototype(
     category: u8,
     subtype: usize,
     words: &[(usize, i32)],
     bytes: &[(usize, u8)],
 ) -> Arc<Prototype> {
-    let mut data = fixture::prototype(category, subtype);
-    fixture::word(&mut data, 0, ((category as i32) << 24) | 7);
-    for (offset, value) in words {
-        fixture::word(&mut data, *offset, *value);
-    }
-    for (offset, value) in bytes {
-        data[*offset] = *value;
-    }
-    Arc::new(Prototype::parse(&data).unwrap())
+    let pid = [(0, (i32::from(category) << 24) | 7)];
+    patched(category, subtype, &[&pid, words].concat(), bytes)
 }
 fn place(world: &mut WorldState, prototype: Arc<Prototype>, hex: i32) -> ObjectRef {
     world.spawn(prototype, hex, 0).unwrap()
@@ -88,7 +55,7 @@ fn spec010_prototype_sound_bytes_feed_the_name_builders() {
     let crate_ = place(&mut world, prototype(0, 5, &[(0x24, 1)], &[]), 20310);
     let wood = place(&mut world, prototype(3, 0, &[(0x20, 3)], &[]), 20312);
     let critter = place(&mut world, prototype(1, 0, &[], &[]), 20314);
-    let mut host = WorldHost::new(world, SoundAssets::default());
+    let mut host = WorldHost::new(world, sound_assets());
     let name = |name: Option<Vec<u8>>| String::from_utf8(name.unwrap()).unwrap();
 
     assert_eq!(name(host.open_sound_name(container, 0)), "IOCNTNRB");
@@ -140,11 +107,10 @@ fn spec010_character_names_lookup_speech_and_volume() {
         20100 + 6 * 200,
     );
     world.get_mut(critter).unwrap().raw.art_id = Fid::new(1, 1, 0, 0, 0).0;
-    let mut assets = SoundAssets::default();
+    let mut assets = sound_assets();
     assets.tokens.insert((1, 1), b"hmjmps".to_vec());
-    for stem in ["HFXXXXAA", "HMXXXXAN", "MAMTNTAN", "HMJMPSZQ"] {
-        assets.effects.insert(stem.as_bytes().to_vec());
-    }
+    let stems = ["HFXXXXAA", "HMXXXXAN", "MAMTNTAN", "HMJMPSZQ"];
+    assets.effects = Some(stems.map(|stem| stem.as_bytes().to_vec()).into());
     let mut host = WorldHost::new(world, assets);
     let name = |name: Option<Vec<u8>>| String::from_utf8(name.unwrap()).unwrap();
     assert_eq!(name(host.character_sound_name(critter, 16, 4)), "HMJMPSZQ");
@@ -158,7 +124,7 @@ fn spec010_character_names_lookup_speech_and_volume() {
     );
 
     // The gender alias needs a critter owner; direct playback has none.
-    let file = |host: &WorldHost<SoundAssets>, name: &[u8], owner| host.effect_file(name, owner);
+    let file = |host: &WorldHost<TestAssets>, name: &[u8], owner| host.effect_file(name, owner);
     assert_eq!(
         file(&host, b"HAPOWRAA", Some(critter)).as_deref(),
         Some("sound/sfx/HFXXXXAA.ACM")
@@ -231,7 +197,7 @@ fn spec010_character_names_lookup_speech_and_volume() {
     assert_eq!(host.world.effect_volume(Some(held), false), 10922);
 }
 
-fn effects(host: &mut WorldHost<SoundAssets>) -> Vec<(String, Option<ObjectRef>)> {
+fn effects(host: &mut WorldHost<TestAssets>) -> Vec<(String, Option<ObjectRef>)> {
     host.world
         .effects
         .drain(..)
@@ -281,7 +247,7 @@ fn spec010_cues_for_doors_containers_attacks_and_movement() {
     if let Some(ObjectState::Critter(state)) = world.get_mut(player).map(|o| &mut o.raw.state) {
         state.ap = 20;
     }
-    let mut assets = SoundAssets::default();
+    let mut assets = sound_assets();
     assets.tokens.insert((1, 0), b"hmjmps".to_vec());
     let mut host = WorldHost::new(world, assets);
 

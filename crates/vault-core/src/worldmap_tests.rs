@@ -1,41 +1,10 @@
 //! SPEC-008 §3.4-§3.7 world travel and the §4.4 world vectors.
+use crate::test_support::{self as support, Draws, TestAssets as NoAssets};
 use crate::{
-    CharacterSheet, Perk, RandomSource, TravelOutcome, WorldError, WorldHost, WorldState,
-    queue::EventKind, worldmap::*,
+    CharacterSheet, Perk, TravelOutcome, WorldHost, WorldState, queue::EventKind, worldmap::*,
 };
-use std::{collections::VecDeque, sync::Arc};
+use std::sync::Arc;
 use vault_formats::map::ObjectState;
-
-/// Replays scripted draws, checking each requested range.
-struct Draws(VecDeque<i32>);
-impl Draws {
-    fn new(values: &[i32]) -> Self {
-        Self(values.iter().copied().collect())
-    }
-}
-impl RandomSource for Draws {
-    fn range(&mut self, first: i32, last: i32) -> Result<i32, WorldError> {
-        let value = self.0.pop_front().expect("scripted draw available");
-        assert!(
-            (first..=last).contains(&value),
-            "{value} outside {first}..={last}"
-        );
-        Ok(value)
-    }
-}
-
-struct NoAssets;
-impl crate::assets::WorldAssets for NoAssets {
-    fn prototype(&self, _pid: u32) -> Result<Arc<vault_formats::Prototype>, WorldError> {
-        Err(WorldError::Invalid("no prototypes".into()))
-    }
-    fn program(&self, _index: i32) -> Result<(String, vault_vm::IntProgram), WorldError> {
-        Err(WorldError::Invalid("no programs".into()))
-    }
-    fn message(&self, _list: i32, _id: i32) -> Option<vault_formats::msg::Message> {
-        None
-    }
-}
 
 /// A player with displayed Outdoorsman 50 (base 10 plus 40 invested) and
 /// the given Pathfinder ranks, damaged to 10 HP.
@@ -48,10 +17,8 @@ fn traveller(pathfinder: u32) -> WorldHost<NoAssets> {
     sheet.current_hp = 10;
     let mut world = WorldState::new(sheet, 1).unwrap();
     let player = world.player;
-    if let Some(ObjectState::Critter(state)) = world.get_mut(player).map(|o| &mut o.raw.state) {
-        state.hp = 10;
-    }
-    WorldHost::new(world, NoAssets)
+    support::set_hp(&mut world, player, 10);
+    WorldHost::new(world, NoAssets::default())
 }
 
 fn hp(host: &WorldHost<NoAssets>) -> i32 {
@@ -572,11 +539,7 @@ fn rest(host: &mut WorldHost<NoAssets>, request: RestRequest) -> RestOutcome {
 }
 fn set_hp(host: &mut WorldHost<NoAssets>, value: i32) {
     let player = host.world.player;
-    let object = host.world.get_mut(player).unwrap();
-    object.character.as_mut().unwrap().current_hp = value;
-    if let ObjectState::Critter(state) = &mut object.raw.state {
-        state.hp = value;
-    }
+    support::set_hp(&mut host.world, player, value);
 }
 fn max_hp(host: &WorldHost<NoAssets>) -> i32 {
     host.world
@@ -797,11 +760,7 @@ fn spec008_rest_eligibility_attackers_and_team_locations() {
         Arc::new(vault_formats::Prototype::parse(&crate::fixture_world::prototype(1, 0)).unwrap());
     let living = |host: &mut WorldHost<NoAssets>, hex| {
         let reference = host.world.spawn(critter.clone(), hex, 0).unwrap();
-        let object = host.world.get_mut(reference).unwrap();
-        object.character.as_mut().unwrap().current_hp = 10;
-        if let ObjectState::Critter(state) = &mut object.raw.state {
-            state.hp = 10;
-        }
+        support::set_hp(&mut host.world, reference, 10);
         reference
     };
     let other = living(&mut host, 20500);

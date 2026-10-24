@@ -2,17 +2,15 @@
 //! and the stored action code, SPEC-006 §3.5 first requests and map entry,
 //! and SPEC-005 0x80F9 dialogue entry.
 use crate::fixture_state as fixture;
+use crate::test_support::{
+    TestAssets as Requests, count, gvar, npc_prototype, record, request, requested, stream,
+};
 use crate::{
-    assets::WorldAssets,
     world::{ScriptRequest, WorldTrace, empty_map, object_record},
     *,
 };
 use std::sync::Arc;
-use vault_formats::{
-    MapFile, Prototype,
-    map::{MapScript, ScriptBlock, ScriptCategory, ScriptPrefix},
-    pro::ScriptFlags,
-};
+use vault_formats::{MapFile, map::ScriptPrefix};
 use vault_vm::{IntProgram, VmHost, VmStatus};
 
 fn table(strings: &[&[u8]]) -> (Vec<u8>, Vec<u32>) {
@@ -75,18 +73,6 @@ fn program(exports: &[&[u8]], procedures: &[(&[u8], Vec<u8>)]) -> IntProgram {
     fixture::world::word(&mut bytes, jump, addresses[1] as i32);
     IntProgram::parse(&bytes).unwrap()
 }
-/// `gvar[index] += 1`.
-fn count(index: i32) -> Vec<u8> {
-    [
-        fixture::push(index),
-        fixture::push(index),
-        fixture::instruction(0x80c5),
-        fixture::push(1),
-        fixture::instruction(0x8039),
-        fixture::instruction(0x80c6),
-    ]
-    .concat()
-}
 /// `gvar[script_action] += 1`: which requests reached the body, by number.
 fn count_action() -> Vec<u8> {
     [
@@ -118,68 +104,6 @@ fn rows() -> Vec<u8> {
     ]
     .concat()
 }
-/// Script files by index; index 9 and above never load.
-/// - 0 `mapa.int` and 1 `mapb.int`: map scripts exporting `Ian_ptr`; `start`
-///   counts its action, `map_enter_p_proc` counts gvar 31.
-/// - 2 `npc.int`: `start` counts its action, `map_enter_p_proc` gvar 30,
-///   `talk_p_proc` gvar 40; no `critter_p_proc`.
-/// - 3 `talker.int`: `critter_p_proc` enters dialogue (0x80F9); `talk_p_proc`
-///   counts gvar 40.
-/// - 4 `rows.int`: `use_p_proc` runs [`rows`].
-struct Requests {
-    critter: Arc<Prototype>,
-    programs: Vec<(String, IntProgram)>,
-    maps: Vec<(String, MapFile)>,
-}
-impl WorldAssets for Requests {
-    fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
-        if pid >> 24 == 1 {
-            Ok(self.critter.clone())
-        } else {
-            Err(WorldError::Invalid("no prototype".into()))
-        }
-    }
-    fn program(&self, index: i32) -> Result<(String, IntProgram), WorldError> {
-        usize::try_from(index)
-            .ok()
-            .and_then(|index| self.programs.get(index))
-            .cloned()
-            .ok_or_else(|| WorldError::Invalid(format!("script {index} does not load")))
-    }
-    fn message(&self, _list: i32, _id: i32) -> Option<vault_formats::msg::Message> {
-        None
-    }
-    fn map(&self, path: &str) -> Result<MapFile, WorldError> {
-        self.maps
-            .iter()
-            .find(|(name, _)| name == path)
-            .map(|(_, map)| map.clone())
-            .ok_or_else(|| WorldError::Invalid(format!("{path} is missing")))
-    }
-}
-fn record(id: u32, file: i32) -> MapScript {
-    MapScript {
-        id,
-        link: 0,
-        prefix: ScriptPrefix::None,
-        stored_flags: ScriptFlags(0),
-        flags: ScriptFlags(0),
-        file_index: file,
-        object_id: -1,
-        local_base: -1,
-        stored_local_count: 0,
-        local_count: 0,
-        result: 0,
-        event: 0,
-        parameter: 0,
-        action: 0,
-        override_default: 0,
-        execution_state: 0,
-        quantity: 0,
-        annotations: 0,
-        file_offset: 0,
-    }
-}
 /// A map whose map script is file `map_script`, with one critter per
 /// `(hex, file)` (critter script identifiers `0x04000001` on).
 fn map(map_script: i32, critters: &[(i32, i32)]) -> MapFile {
@@ -192,17 +116,21 @@ fn map(map_script: i32, critters: &[(i32, i32)]) -> MapFile {
         object.hex = Some(*hex);
         object.script_id = id as i32;
         map.objects.elevations[0].push(object);
-        records.push(record(id, *file));
+        records.push(record(id, *file, ScriptPrefix::None));
     }
-    map.scripts[4] = ScriptCategory {
-        declared_count: records.len(),
-        blocks: vec![ScriptBlock {
-            active: records.len(),
-            slots: records,
-        }],
-    };
+    map.scripts[4] = stream(records);
     map
 }
+/// Script files by index; index 9 and above never load.
+/// - 0 `mapa.int` and 1 `mapb.int`: map scripts exporting `Ian_ptr`; `start`
+///   counts its action, `map_enter_p_proc` counts gvar 31.
+/// - 2 `npc.int`: `start` counts its action, `map_enter_p_proc` gvar 30,
+///   `talk_p_proc` gvar 40; no `critter_p_proc`.
+/// - 3 `talker.int`: `critter_p_proc` enters dialogue (0x80F9); `talk_p_proc`
+///   counts gvar 40.
+/// - 4 `rows.int`: `use_p_proc` runs [`rows`].
+///
+/// Critter PIDs load the `npc_prototype` fixture; maps load by path.
 fn host(maps: Vec<(&str, MapFile)>) -> WorldHost<Requests> {
     let exporting = |name: &str| {
         (
@@ -247,20 +175,16 @@ fn host(maps: Vec<(&str, MapFile)>) -> WorldHost<Requests> {
     world.gvars = Some(vec![0; 64]);
     // Only the records these tests make are in the critter stream.
     world.drop_player_script();
-    WorldHost::new(
-        world,
-        Requests {
-            critter: Arc::new(Prototype::parse(&fixture::npc_prototype()).unwrap()),
-            programs,
-            maps: maps
-                .into_iter()
-                .map(|(name, map)| (name.to_string(), map))
-                .collect(),
-        },
-    )
-}
-fn gvar(host: &WorldHost<Requests>, index: usize) -> i32 {
-    host.world.gvars.as_ref().unwrap()[index]
+    let mut requests = Requests {
+        programs,
+        maps: maps
+            .into_iter()
+            .map(|(name, map)| (name.to_string(), map))
+            .collect(),
+        ..Requests::default()
+    };
+    requests.by_type.insert(1, npc_prototype());
+    WorldHost::new(world, requests)
 }
 fn status(host: &WorldHost<Requests>, script: u32) -> VmStatus {
     host.programs[&host.world.scripts[&script].program].status
@@ -303,16 +227,8 @@ fn spec005_a_same_map_export_by_another_file_is_a_vm_error() {
     assert_eq!(symbol_faults(&host), 1);
     // The faulted script runs no further requests on this map.
     let before = gvar(&host, 12);
-    host.dispatch(ScriptRequest {
-        script: conflict,
-        event: ScriptEvent::Critter,
-        source: 0,
-        target: 0,
-        fixed: 0,
-        action: -1,
-        only_present: false,
-    })
-    .unwrap();
+    host.dispatch(request(conflict, ScriptEvent::Critter))
+        .unwrap();
     assert_eq!(gvar(&host, 12), before);
 }
 
@@ -370,17 +286,11 @@ fn spec006_a_failed_first_request_runs_nothing_and_is_retried() {
     let script = host.world.add_script(owner, 9, 4, 0).unwrap();
     // A new instance starts with action code 0.
     assert_eq!(host.world.scripts[&script].event, 0);
-    let request = ScriptRequest {
-        script,
-        event: ScriptEvent::Critter,
-        source: 0,
-        target: 0,
-        fixed: 0,
-        action: -1,
-        only_present: false,
-    };
     for _ in 0..2 {
-        assert!(host.dispatch(request.clone()).is_err());
+        assert!(
+            host.dispatch(request(script, ScriptEvent::Critter))
+                .is_err()
+        );
         let instance = &host.world.scripts[&script];
         assert!(!instance.initialized);
         // The number was stored before the load was attempted.
@@ -452,13 +362,8 @@ fn spec005_ordinary_host_failures_are_diagnosed_with_the_null_result() {
     let hex = host.world.get(player).unwrap().raw.hex;
     host.world.effects.clear();
     host.dispatch(ScriptRequest {
-        script,
-        event: ScriptEvent::Use,
         source: player,
-        target: 0,
-        fixed: 0,
-        action: -1,
-        only_present: false,
+        ..request(script, ScriptEvent::Use)
     })
     .unwrap();
     // The off-map distance pushes 9999, the bad orientation moves nothing,
@@ -613,18 +518,8 @@ fn spec006_the_player_record_is_rebuilt_on_every_map_change() {
     for _ in 0..3 {
         host.critter_cycle_step().unwrap();
     }
-    let served: Vec<u32> = host
-        .world
-        .trace
-        .iter()
-        .filter_map(|entry| match entry {
-            WorldTrace::Script {
-                id,
-                event: ScriptEvent::Critter,
-                ..
-            } => Some(*id),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(served, [0x0400_0002, 0x0400_0000 | 18000, 0x0400_0001]);
+    assert_eq!(
+        requested(&host, ScriptEvent::Critter),
+        [0x0400_0002, 0x0400_0000 | 18000, 0x0400_0001]
+    );
 }

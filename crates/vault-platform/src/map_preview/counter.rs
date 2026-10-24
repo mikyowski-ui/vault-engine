@@ -1,7 +1,7 @@
 //! SPEC-013 §3.17 the move-items counter (`movemult.frm` at screen (140,
 //! 80)), shared by the loot, barter and inventory windows: the title, the
 //! item picture, three digits, plus, minus, ALL, Done and Cancel.
-use crate::interface::Painter;
+use crate::{input::key_digit, interface::Painter};
 use vault_core::{
     skills::{self, Counter},
     ui::{ColorKey, Rect},
@@ -132,15 +132,10 @@ pub(crate) fn counter_key(counter: &mut Counter, key: KeyCode) -> CounterInput {
             CounterInput::Changed
         }
         _ => {
-            let name = format!("{key:?}");
-            let Some(digit) = name
-                .strip_prefix("Digit")
-                .or_else(|| name.strip_prefix("Numpad"))
-                .and_then(|d| d.parse::<u8>().ok())
-            else {
+            let Some(digit) = key_digit(key) else {
                 return CounterInput::Ignored;
             };
-            counter.digit(digit);
+            counter.digit(digit - b'0');
             CounterInput::Changed
         }
     }

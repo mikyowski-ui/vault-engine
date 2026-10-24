@@ -30,6 +30,7 @@ winit = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+vault-fixtures.workspace = true
 
 [lints]
 workspace = true

@@ -133,15 +133,13 @@ use vault_formats::{
     pro::{BasicFlags, LockFlags},
 };
 
-use crate::fixture_world as world_fixture;
+use crate::test_support::{Draws, TestAssets, patched, right_primary, special};
 
 fn prototype(category: u8, subtype: usize) -> Arc<Prototype> {
-    Arc::new(Prototype::parse(&world_fixture::prototype(category, subtype)).unwrap())
+    patched(category, subtype, &[], &[])
 }
 fn critter(body: i32) -> Arc<Prototype> {
-    let mut bytes = world_fixture::prototype(1, 0);
-    world_fixture::word(&mut bytes, 0x190, body);
-    Arc::new(Prototype::parse(&bytes).unwrap())
+    patched(1, 0, &[(0x190, body)], &[])
 }
 /// Player at 20100, facing 5, elevation 0, outside combat.
 fn world() -> WorldState {
@@ -357,24 +355,6 @@ fn spec007_fixture_b_controlled_rays_los_and_cover() {
     assert!(!world.can_see(player, defender));
 }
 
-/// No resources, though every art identifier counts as existing, so that
-/// attack sequences register (SPEC-007 §3.10.1).
-struct NoAssets;
-impl crate::assets::WorldAssets for NoAssets {
-    fn prototype(&self, _pid: u32) -> Result<Arc<Prototype>, crate::WorldError> {
-        Err(crate::WorldError::Invalid("no prototypes".into()))
-    }
-    fn art_exists(&self, _fid: u32) -> bool {
-        true
-    }
-    fn program(&self, _index: i32) -> Result<(String, vault_vm::IntProgram), crate::WorldError> {
-        Err(crate::WorldError::Invalid("no programs".into()))
-    }
-    fn message(&self, _list: i32, _id: i32) -> Option<vault_formats::msg::Message> {
-        None
-    }
-}
-
 fn set_results(world: &mut WorldState, object: ObjectRef, results: u32, ap: i32) {
     if let Some(vault_formats::map::ObjectState::Critter(state)) =
         world.get_mut(object).map(|o| &mut o.raw.state)
@@ -398,7 +378,7 @@ fn spec007_move_to_object_shortening_doors_replans_and_ap() {
     let mut state = world();
     let target = place(&mut state, critter(0), 20298);
     let player = state.player;
-    let mut host = WorldHost::new(state, NoAssets);
+    let mut host = WorldHost::new(state, TestAssets::all_art());
     let movement = host.plan_to_object(player, target).unwrap();
     assert_eq!(
         (movement.directions.clone(), movement.destination),
@@ -422,7 +402,7 @@ fn spec007_move_to_object_shortening_doors_replans_and_ap() {
     let mut state = world();
     let gate = door(&mut state, 20299, false);
     let mover = npc(&mut state, 0);
-    let mut host = WorldHost::new(state, NoAssets);
+    let mut host = WorldHost::new(state, TestAssets::all_art());
     let mut movement = host.plan_to_tile(mover, 20298, 10).unwrap();
     assert_eq!(movement.directions, [1, 1]);
     assert_eq!(
@@ -447,7 +427,7 @@ fn spec007_move_to_object_shortening_doors_replans_and_ap() {
     let mut state = world();
     let player = state.player;
     state.combat = true;
-    let mut host = WorldHost::new(state, NoAssets);
+    let mut host = WorldHost::new(state, TestAssets::all_art());
     let mut movement = host.plan_to_tile(player, 20298, 10).unwrap();
     assert_eq!(movement.directions, [1, 1]);
     wall(&mut host.world, 20299);
@@ -484,7 +464,7 @@ fn spec007_move_to_object_shortening_doors_replans_and_ap() {
     let mut state = world();
     let player = state.player;
     state.combat = true;
-    let mut host = WorldHost::new(state, NoAssets);
+    let mut host = WorldHost::new(state, TestAssets::all_art());
     for (results, free, start, expected_ap, expected_free) in [
         (0, 0, 8, 7, 0),
         (effect::CRIPPLED_LEFT_LEG, 0, 8, 4, 0),
@@ -512,25 +492,6 @@ fn step_back(hex: i32, direction: u8) -> i32 {
 }
 
 use crate::combat::{Attack, PlayerModifiers, WeaponProfile, attack_mode, knockback_displacement};
-use std::collections::VecDeque;
-
-/// Supplies exact random outcomes in order, checking each is in range.
-struct Outcomes(VecDeque<i32>);
-impl Outcomes {
-    fn new(values: &[i32]) -> Self {
-        Self(values.iter().copied().collect())
-    }
-}
-impl crate::RandomSource for Outcomes {
-    fn range(&mut self, first: i32, last: i32) -> Result<i32, crate::WorldError> {
-        let value = self.0.pop_front().expect("scripted random outcome");
-        assert!(
-            (first..=last).contains(&value),
-            "{value} outside {first}..={last}"
-        );
-        Ok(value)
-    }
-}
 
 /// SPEC-007 §4.3: aimed right-leg rifle shot by the player at a man-category
 /// NPC fifteen hexes east, one intervening critter, normal difficulty.
@@ -605,7 +566,7 @@ fn spec007_fixture_c_hit_chance_cost_and_normal_damage() {
     assert_eq!(attack.range(), 20);
     // D100 20 (margin 6), upgrade D100 50 > 25, base damage 18:
     // 18 - DT 4 = 14; 14 - trunc(14 * 25 / 100) = 11.
-    let resolution = attack.resolve(&mut Outcomes::new(&[20, 50, 18])).unwrap();
+    let resolution = attack.resolve(&mut Draws::new(&[20, 50, 18])).unwrap();
     assert_eq!(
         (
             resolution.code,
@@ -625,7 +586,7 @@ fn spec007_fixture_c_critical_variant_and_boundaries() {
     // Upgrade D100 1 <= 25; severity 80 + 20 = 100 -> tier 4, entry
     // 4/80A/2/0/1/5025/5026; saving D10 8 > Endurance 5 fails; base 18.
     let resolution = attack
-        .resolve(&mut Outcomes::new(&[20, 1, 80, 8, 18]))
+        .resolve(&mut Draws::new(&[20, 1, 80, 8, 18]))
         .unwrap();
     assert_eq!(resolution.code, 3);
     assert_eq!(
@@ -647,7 +608,7 @@ fn spec007_fixture_c_critical_variant_and_boundaries() {
     assert_eq!(crate::combat::knockout_delay(5), 200);
     // A passed save keeps the ordinary mask and message.
     let saved = attack
-        .resolve(&mut Outcomes::new(&[20, 1, 80, 5, 18]))
+        .resolve(&mut Draws::new(&[20, 1, 80, 5, 18]))
         .unwrap();
     assert_eq!(saved.defender_flags & effect::PERSISTENT, 0x0a);
     assert_eq!(saved.message, Some(5025));
@@ -657,7 +618,7 @@ fn spec007_fixture_c_critical_variant_and_boundaries() {
     let mut failing = fixture_c();
     failing.luck = 7;
     failing.weapon.as_mut().unwrap().failure_table = 2;
-    let resolution = failing.resolve(&mut Outcomes::new(&[100, 1, 60])).unwrap();
+    let resolution = failing.resolve(&mut Draws::new(&[100, 1, 60])).unwrap();
     assert_eq!(resolution.code, 0);
     assert_eq!(
         resolution.attacker_flags,
@@ -680,12 +641,10 @@ fn spec007_fixture_c_critical_variant_and_boundaries() {
     // a ranged success on D10 <= Luck.
     let mut early = fixture_c();
     early.ticks = 863999;
-    let resolution = early.resolve(&mut Outcomes::new(&[20, 18])).unwrap();
+    let resolution = early.resolve(&mut Draws::new(&[20, 18])).unwrap();
     assert_eq!((resolution.code, resolution.damage), (2, 11));
     early.player.sniper = true;
-    let resolution = early
-        .resolve(&mut Outcomes::new(&[20, 5, 80, 8, 18]))
-        .unwrap();
+    let resolution = early.resolve(&mut Draws::new(&[20, 5, 80, 8, 18])).unwrap();
     assert_eq!(resolution.code, 3);
 }
 
@@ -863,7 +822,7 @@ fn spec007_death_animation_choice_tree_and_fallbacks() {
 }
 
 /// Fixture C's world: rifle-armed player, intervening critter, defender.
-fn fixture_c_world() -> (crate::WorldHost<NoAssets>, ObjectRef) {
+fn fixture_c_world() -> (crate::WorldHost<TestAssets>, ObjectRef) {
     let mut sheet = CharacterSheet::default();
     sheet.base[1] = 6;
     sheet.bonus[16] = 20;
@@ -873,9 +832,8 @@ fn fixture_c_world() -> (crate::WorldHost<NoAssets>, ObjectRef) {
     let player = state.player;
     state.get_mut(player).unwrap().raw.orientation = 1;
     set_results(&mut state, player, 0, 8);
-    let mut rifle = world_fixture::prototype(0, 3);
-    world_fixture::word(&mut rifle, 0x18, 0x06);
-    for (offset, value) in [
+    let rifle = [
+        (0x18, 0x06),
         (61, 8),
         (65, 20),
         (73, 20),
@@ -883,31 +841,13 @@ fn fixture_c_world() -> (crate::WorldHost<NoAssets>, ObjectRef) {
         (89, 5),
         (101, -1),
         (117, 6),
-    ] {
-        world_fixture::word(&mut rifle, offset, value);
-    }
-    let rifle = place(&mut state, Arc::new(Prototype::parse(&rifle).unwrap()), 1);
+    ];
+    let rifle = place(&mut state, patched(0, 3, &rifle, &[]), 1);
     state.add_item(player, rifle, 1, true).unwrap();
     state
         .equip(player, rifle, BasicFlags::RIGHT_HAND.0)
         .unwrap();
-    let mut man = world_fixture::prototype(1, 0);
-    for (stat, value) in [
-        (0, 5),
-        (1, 5),
-        (2, 5),
-        (3, 5),
-        (4, 5),
-        (5, 5),
-        (6, 5),
-        (7, 60),
-        (9, 10),
-        (17, 4),
-        (24, 25),
-    ] {
-        world_fixture::word(&mut man, 48 + 4 * stat, value);
-    }
-    let man = Arc::new(Prototype::parse(&man).unwrap());
+    let man = patched(1, 0, &special(&[(7, 60), (9, 10), (17, 4), (24, 25)]), &[]);
     let defender = place(&mut state, man.clone(), 21685);
     let between = place(&mut state, man, 20892);
     for object in [defender, between] {
@@ -921,10 +861,13 @@ fn fixture_c_world() -> (crate::WorldHost<NoAssets>, ObjectRef) {
     state.combat = true;
     state.combat_actor = player;
     state.clock.set(864000);
-    (crate::WorldHost::new(state, NoAssets), defender)
+    (
+        crate::WorldHost::new(state, TestAssets::all_art()),
+        defender,
+    )
 }
 
-fn field_bytes(host: &crate::WorldHost<NoAssets>, defender: ObjectRef) -> Vec<u8> {
+fn field_bytes(host: &crate::WorldHost<TestAssets>, defender: ObjectRef) -> Vec<u8> {
     let world = &host.world;
     let player = world.player;
     let rifle = world
@@ -954,16 +897,7 @@ fn spec007_fixture_c_world_profile_preflight_and_application() {
     let (mut host, defender) = fixture_c_world();
     let player = host.world.player;
     assert_eq!(host.world.object_distance(player, defender), 15);
-    let attack = host
-        .world
-        .attack_profile(
-            player,
-            defender,
-            critical::hit_mode::RIGHT_PRIMARY,
-            location::RIGHT_LEG,
-            true,
-        )
-        .unwrap();
+    let attack = right_primary(&host.world, player, defender, location::RIGHT_LEG, true);
     assert_eq!(
         (
             attack.skill,
@@ -980,7 +914,7 @@ fn spec007_fixture_c_world_profile_preflight_and_application() {
     );
     assert_eq!(attack.hit_chance(true).unwrap(), 26);
     assert_eq!(host.world.preflight(player, defender, &attack), Ok(()));
-    let resolution = attack.resolve(&mut Outcomes::new(&[20, 50, 18])).unwrap();
+    let resolution = attack.resolve(&mut Draws::new(&[20, 50, 18])).unwrap();
     host.apply_attack(player, defender, &attack, &resolution)
         .unwrap();
     assert_eq!(
@@ -989,18 +923,9 @@ fn spec007_fixture_c_world_profile_preflight_and_application() {
     );
 
     let (mut host, defender) = fixture_c_world();
-    let attack = host
-        .world
-        .attack_profile(
-            player,
-            defender,
-            critical::hit_mode::RIGHT_PRIMARY,
-            location::RIGHT_LEG,
-            true,
-        )
-        .unwrap();
+    let attack = right_primary(&host.world, player, defender, location::RIGHT_LEG, true);
     let resolution = attack
-        .resolve(&mut Outcomes::new(&[20, 1, 80, 8, 18]))
+        .resolve(&mut Draws::new(&[20, 1, 80, 8, 18]))
         .unwrap();
     host.apply_attack(player, defender, &attack, &resolution)
         .unwrap();
@@ -1030,16 +955,8 @@ fn spec007_fixture_c_world_profile_preflight_and_application() {
 
     // Preflight order: AP, range, empty magazine, hard obstruction, dead.
     let (mut host, defender) = fixture_c_world();
-    let attack = |host: &crate::WorldHost<NoAssets>| {
-        host.world
-            .attack_profile(
-                player,
-                defender,
-                critical::hit_mode::RIGHT_PRIMARY,
-                location::RIGHT_LEG,
-                true,
-            )
-            .unwrap()
+    let attack = |host: &crate::WorldHost<TestAssets>| {
+        right_primary(&host.world, player, defender, location::RIGHT_LEG, true)
     };
     set_results(&mut host.world, player, 0, 5);
     assert_eq!(
@@ -1091,7 +1008,7 @@ impl crate::RandomSource for Lowest {
 }
 
 /// Player with a 10-round spray weapon; defender 5 east; extra critter 2 east.
-fn spray_world(mode: u8) -> (crate::WorldHost<NoAssets>, ObjectRef, ObjectRef) {
+fn spray_world(mode: u8) -> (crate::WorldHost<TestAssets>, ObjectRef, ObjectRef) {
     let mut sheet = CharacterSheet::default();
     sheet.invested[0] = 200;
     sheet.recompute(Default::default());
@@ -1099,9 +1016,8 @@ fn spray_world(mode: u8) -> (crate::WorldHost<NoAssets>, ObjectRef, ObjectRef) {
     let player = state.player;
     state.get_mut(player).unwrap().raw.orientation = 1;
     set_results(&mut state, player, 0, 10);
-    let mut gun = world_fixture::prototype(0, 3);
-    world_fixture::word(&mut gun, 0x18, i32::from(mode));
-    for (offset, value) in [
+    let gun = [
+        (0x18, i32::from(mode)),
         (61, 5),
         (65, 5),
         (73, 20),
@@ -1109,26 +1025,11 @@ fn spray_world(mode: u8) -> (crate::WorldHost<NoAssets>, ObjectRef, ObjectRef) {
         (101, -1),
         (105, 10),
         (117, 10),
-    ] {
-        world_fixture::word(&mut gun, offset, value);
-    }
-    let gun = place(&mut state, Arc::new(Prototype::parse(&gun).unwrap()), 1);
+    ];
+    let gun = place(&mut state, patched(0, 3, &gun, &[]), 1);
     state.add_item(player, gun, 1, true).unwrap();
     state.equip(player, gun, BasicFlags::RIGHT_HAND.0).unwrap();
-    let mut body = world_fixture::prototype(1, 0);
-    for (stat, value) in [
-        (0, 5),
-        (1, 5),
-        (2, 5),
-        (3, 5),
-        (4, 5),
-        (5, 5),
-        (6, 5),
-        (7, 100),
-    ] {
-        world_fixture::word(&mut body, 48 + 4 * stat, value);
-    }
-    let body = Arc::new(Prototype::parse(&body).unwrap());
+    let body = patched(1, 0, &special(&[(7, 100)]), &[]);
     let defender = place(&mut state, body.clone(), 20695);
     let extra = place(&mut state, body, 20298);
     for object in [defender, extra] {
@@ -1136,7 +1037,11 @@ fn spray_world(mode: u8) -> (crate::WorldHost<NoAssets>, ObjectRef, ObjectRef) {
     }
     state.combat = true;
     state.combat_actor = player;
-    (crate::WorldHost::new(state, NoAssets), defender, extra)
+    (
+        crate::WorldHost::new(state, TestAssets::all_art()),
+        defender,
+        extra,
+    )
 }
 
 #[test]
@@ -1149,16 +1054,14 @@ fn spec007_spray_budgets_rays_extras_and_continuous_fire() {
     assert_eq!(spray_budgets(1, false), [0, 0, 0, 1]);
     assert_eq!(spray_budgets(9, true), [0, 1, 1, 1]);
 
-    let profile = |host: &crate::WorldHost<NoAssets>, defender| {
-        host.world
-            .attack_profile(
-                host.world.player,
-                defender,
-                critical::hit_mode::RIGHT_PRIMARY,
-                location::TORSO,
-                false,
-            )
-            .unwrap()
+    let profile = |host: &crate::WorldHost<TestAssets>, defender| {
+        right_primary(
+            &host.world,
+            host.world.player,
+            defender,
+            location::TORSO,
+            false,
+        )
     };
     // Burst: center ray budget 3 - 1 direct hit = 2, left 3, right 4; the
     // extra critter on all three lines absorbs 9 rounds, the target 1.
@@ -1249,16 +1152,13 @@ impl crate::RandomSource for Traced {
 fn spec007_spray_stage_a_extra_damage_order_and_post_processing() {
     use crate::combat::attack_mode;
     let (host, defender, extra) = spray_world(attack_mode::BURST);
-    let mut attack = host
-        .world
-        .attack_profile(
-            host.world.player,
-            defender,
-            critical::hit_mode::RIGHT_PRIMARY,
-            location::TORSO,
-            false,
-        )
-        .unwrap();
+    let mut attack = right_primary(
+        &host.world,
+        host.world.player,
+        defender,
+        location::TORSO,
+        false,
+    );
     attack.attacker_player = true;
     attack.player.sniper = true;
     attack.luck = 5;
@@ -1312,16 +1212,13 @@ fn spec007_fixture_i_spray_draw_order() {
     let fixture = |sniper: bool, jinxed: bool| {
         let (mut host, defender, extra) = spray_world(attack_mode::BURST);
         host.world.clock.set(864000);
-        let mut attack = host
-            .world
-            .attack_profile(
-                host.world.player,
-                defender,
-                critical::hit_mode::RIGHT_PRIMARY,
-                location::TORSO,
-                false,
-            )
-            .unwrap();
+        let mut attack = right_primary(
+            &host.world,
+            host.world.player,
+            defender,
+            location::TORSO,
+            false,
+        );
         let weapon = attack.weapon.as_mut().unwrap();
         (weapon.rounds, weapon.burst, weapon.damage) = (3, 10, [10, 20]);
         attack.attacker_player = true;
@@ -1337,7 +1234,7 @@ fn spec007_fixture_i_spray_draw_order() {
         assert_eq!(attack.hit_chance(true).unwrap(), 70);
         (host, defender, extra, attack)
     };
-    type Host = crate::WorldHost<NoAssets>;
+    type Host = crate::WorldHost<TestAssets>;
     fn run(
         host: &Host,
         defender: ObjectRef,
@@ -1434,7 +1331,7 @@ fn spec007_aimed_shot_availability_and_grenade_scatter() {
     // Scatter (§3.7.1 Stage B): D(distance / 2) displacement, then the
     // direction draw.
     assert_eq!(
-        crate::combat::grenade_scatter(20100, 8, &mut Outcomes::new(&[3, 2])).unwrap(),
+        crate::combat::grenade_scatter(20100, 8, &mut Draws::new(&[3, 2])).unwrap(),
         vault_formats::HexGrid::step(20100, 2, 3).unwrap()
     );
     // Half distance 0 is a reversed range: the generator returns its first
@@ -1451,24 +1348,10 @@ use crate::combat_state::{CombatAi, CombatProgress};
 
 /// A hostile NPC (team 1) with SPECIAL 5, the given Sequence and max AP.
 fn fighter(state: &mut WorldState, hex: i32, sequence: i32, elevation: u8) -> ObjectRef {
-    let mut body = world_fixture::prototype(1, 0);
-    for (stat, value) in [
-        (0, 5),
-        (1, 5),
-        (2, 5),
-        (3, 5),
-        (4, 5),
-        (5, 5),
-        (6, 5),
-        (7, 30),
-        (8, 7),
-        (13, sequence),
-    ] {
-        world_fixture::word(&mut body, 48 + 4 * stat, value);
-    }
-    world_fixture::word(&mut body, 40, 1);
+    let mut words = special(&[(7, 30), (8, 7), (13, sequence)]);
+    words.push((40, 1));
     let critter = state
-        .spawn(Arc::new(Prototype::parse(&body).unwrap()), hex, elevation)
+        .spawn(patched(1, 0, &words, &[]), hex, elevation)
         .unwrap();
     state.get_mut(critter).unwrap().raw.flags = BasicFlags(0);
     critter
@@ -1509,7 +1392,7 @@ fn spec007_combat_initialization_rounds_turns_and_cleanup() {
     world.get_mut(hidden).unwrap().raw.flags = BasicFlags(BasicFlags::HIDDEN.0);
     let upstairs = fighter(&mut world, 20110, 8, 1);
     world.critter_state_mut(c).unwrap().maneuvers = maneuver::ALERTED | maneuver::FLEEING;
-    let mut host = crate::WorldHost::new(world, NoAssets);
+    let mut host = crate::WorldHost::new(world, TestAssets::all_art());
     assert_eq!(host.world.combat_state.flags, state::INPUT_GATE);
 
     // NPC attacker vs NPC defender: active order a, b, then the player.
@@ -1606,7 +1489,7 @@ fn spec007_combat_turn_skips_standups_and_automatic_ending() {
     let mut world = world();
     let player = world.player;
     let a = fighter(&mut world, 20102, 12, 0);
-    let mut host = crate::WorldHost::new(world, NoAssets);
+    let mut host = crate::WorldHost::new(world, TestAssets::all_art());
     host.start_combat(player, a).unwrap();
     // Lose-turn skips the action branch and is cleared.
     set_results(&mut host.world, a, effect::LOSE_TURN, 0);
@@ -1657,7 +1540,7 @@ fn spec007_combat_turn_skips_standups_and_automatic_ending() {
     let player = allied.player;
     let ally = fighter(&mut allied, 20102, 12, 0);
     allied.critter_state_mut(ally).unwrap().team = 0;
-    let mut host = crate::WorldHost::new(allied, NoAssets);
+    let mut host = crate::WorldHost::new(allied, TestAssets::all_art());
     host.start_combat(player, ally).unwrap();
     for critter in [player, ally] {
         host.world.get_mut(critter).unwrap().opponent = 0;
@@ -1685,16 +1568,7 @@ fn spec007_scripted_request_starts_combat_and_adjusts_the_first_attack() {
     assert!(host.world.combat_state.request.is_some());
     // Starting combat cleared the defender's unused AP (AC 12 -> 10), and the
     // request's accuracy adjustment adds 10: 26 + 2 + 10.
-    let mut attack = host
-        .world
-        .attack_profile(
-            player,
-            defender,
-            critical::hit_mode::RIGHT_PRIMARY,
-            location::RIGHT_LEG,
-            true,
-        )
-        .unwrap();
+    let mut attack = right_primary(&host.world, player, defender, location::RIGHT_LEG, true);
     let request = host.apply_request(player, defender, &mut attack).unwrap();
     assert_eq!(attack.hit_chance(true).unwrap(), 38);
     host.world.combat_state.request = Some(request);
@@ -1735,7 +1609,7 @@ fn spec005_an_elevation_change_removes_combat_membership() {
     let player = world.player;
     let a = fighter(&mut world, 20102, 12, 0);
     let b = fighter(&mut world, 20104, 6, 0);
-    let mut host = crate::WorldHost::new(world, NoAssets);
+    let mut host = crate::WorldHost::new(world, TestAssets::all_art());
     host.start_combat(a, b).unwrap();
     host.world.get_mut(a).unwrap().opponent = b;
     assert!(host.world.ai.snapshot.contains(&b));
@@ -1760,7 +1634,7 @@ fn spec007_the_ap_debit_is_the_requests_cost_not_the_victims() {
     let intended = fighter(&mut world, 20104, 6, 0);
     let bystander = fighter(&mut world, 20106, 8, 0);
     world.critter_state_mut(attacker).unwrap().ap = 9;
-    let mut host = crate::WorldHost::new(world, NoAssets);
+    let mut host = crate::WorldHost::new(world, TestAssets::all_art());
     // SPEC-007 §3.4: fixture C's aimed leg shot costs 5 + 1. The missed
     // shot's bystander profile (§3.7.1, torso, unaimed) would cost 5, but it
     // serves damage, armor and knockback only.
@@ -1879,7 +1753,7 @@ fn spec014_combat_sets_and_clears_target_outlines() {
         .set_perk(Perk::FriendlyFoe, 1, context);
     world.target_highlight = 1;
     world.crosshair = true;
-    let mut host = crate::WorldHost::new(world, NoAssets);
+    let mut host = crate::WorldHost::new(world, TestAssets::all_art());
     host.start_combat(player, a).unwrap();
     assert_eq!(host.world.combat_state.highlight, 1);
     assert_eq!(host.world.outline_word(a), 0x8000_0001);
@@ -1969,7 +1843,7 @@ fn spec005_terminate_combat_ends_combat_at_the_next_turn_boundary() {
     let mut world = world();
     let player = world.player;
     let a = fighter(&mut world, 20102, 12, 0);
-    let mut host = crate::WorldHost::new(world, NoAssets);
+    let mut host = crate::WorldHost::new(world, TestAssets::all_art());
     // Requested during the player's turn: the turn's input stops, and
     // combat ends once it is over; a quit awards no kill experience.
     host.start_combat(player, a).unwrap();
@@ -2004,7 +1878,7 @@ fn spec014_a_knocked_out_player_wakes_between_combat_rounds() {
     let mut world = world();
     let player = world.player;
     let a = fighter(&mut world, 20102, 12, 0);
-    let mut host = crate::WorldHost::new(world, NoAssets);
+    let mut host = crate::WorldHost::new(world, TestAssets::all_art());
     host.start_combat(a, player).unwrap();
     set_results(&mut host.world, player, effect::KNOCKED_OUT, 0);
     let now = host.world.clock.ticks;
@@ -2032,7 +1906,7 @@ fn a_failing_npc_turn_is_diagnosed_and_the_turn_passes() {
     let mut world = world();
     let player = world.player;
     let a = fighter(&mut world, 20102, 12, 0);
-    let mut host = crate::WorldHost::new(world, NoAssets);
+    let mut host = crate::WorldHost::new(world, TestAssets::all_art());
     host.start_combat(a, player).unwrap();
     let mut ai = Quitting {
         fail: true,
@@ -2055,7 +1929,7 @@ fn spec007_a_scripted_request_lasts_only_for_the_first_turn() {
     let mut world = world();
     let player = world.player;
     let a = fighter(&mut world, 20102, 12, 0);
-    let mut host = crate::WorldHost::new(world, NoAssets);
+    let mut host = crate::WorldHost::new(world, TestAssets::all_art());
     host.world.pending_combat = Some(CombatRequest {
         attacker: a,
         defender: player,

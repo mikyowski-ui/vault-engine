@@ -2,28 +2,20 @@
 //! J where the synthetic font allows (its widths are the corpus font's in
 //! the vault-core layout tests).
 use super::{AutomapView, Page, PipBoy, StatusView, Tab};
-use crate::map_preview::{MapPreview, Screen, state_fixture};
-use std::sync::Arc;
+use crate::map_preview::{
+    MapPreview, Screen, state_fixture,
+    test_support::{interactive, local_corpus, npc, synthetic_corpus},
+};
 use vault_core::ui::{automap, saveload::MAP_SHORT_NAMES};
-use vault_formats::{LocalDirProvider, Vfs, pro::Category};
 use winit::keyboard::KeyCode;
 
 fn corpus() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    state_fixture::write_corpus(dir.path());
+    let dir = synthetic_corpus();
     std::fs::write(dir.path().join("font1.aaf"), state_fixture::preview_aaf()).unwrap();
     dir
 }
 fn load(dir: &std::path::Path) -> MapPreview {
-    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir).unwrap());
-    let mut preview = MapPreview::load(
-        vfs,
-        "maps/synthetic.map",
-        "english",
-        Some("premade/synthetic.gcd"),
-        1,
-    )
-    .unwrap();
+    let mut preview = interactive(dir);
     preview.image().unwrap();
     preview.host.world.gvars = Some(vec![0; 620]);
     preview
@@ -243,13 +235,7 @@ fn spec014_fixture_j_alarm_clock_rest_and_refusal() {
     // previous page stays current under the safe rule.
     assert!(preview.tap([60, 345]));
     let player = preview.host.world.player;
-    let npc = preview
-        .host
-        .world
-        .iter()
-        .find(|(reference, object)| object.category() == Category::Critter && *reference != player)
-        .unwrap()
-        .0;
+    let npc = npc(&preview);
     preview.host.world.get_mut(npc).unwrap().opponent = player;
     assert!(!preview.host.rest_allowed());
     assert!(preview.tap([130, 20]));
@@ -358,22 +344,6 @@ fn spec014_fixture_j_automaps_and_archives() {
     preview.image().unwrap();
     now += 50;
     preview.tick(now).unwrap();
-}
-
-/// The unpacked corpus: `$VAULT_CORPUS`, else `local-corpus` beside the
-/// repository.
-fn local_corpus() -> Option<Arc<dyn Vfs>> {
-    let dir = std::env::var_os("VAULT_CORPUS")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-corpus")
-        })
-        .join("fallout1-unpacked");
-    if !dir.is_dir() {
-        eprintln!("skipping: no local corpus at {}", dir.display());
-        return None;
-    }
-    Some(Arc::new(LocalDirProvider::mount(dir).unwrap()))
 }
 
 #[test]

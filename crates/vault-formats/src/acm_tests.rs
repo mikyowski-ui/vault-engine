@@ -2,9 +2,7 @@
 //! output rule, and the header and bound errors.
 use crate::acm::{AcmHeader, decode, wrap16};
 
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/sound/support.rs"]
-mod sound;
+use vault_fixtures::sound;
 
 fn samples(vector: char) -> Vec<i16> {
     decode(&sound::acm(vector)).unwrap().samples

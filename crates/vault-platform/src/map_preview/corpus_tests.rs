@@ -1,32 +1,14 @@
 //! Live-corpus regressions for `--game` behavior, run with
 //! `cargo test -p vault-platform -- --ignored` beside a `local-corpus`.
-use super::MapPreview;
-use std::sync::Arc;
+use super::{MapPreview, test_support::local_corpus};
 use vault_core::{ObjectRef, WorldEffect};
 use vault_formats::{
-    LocalDirProvider, Vfs,
     map::{ObjectDetail, ObjectState},
     pro::Category,
 };
 
-/// The unpacked corpus: `$VAULT_CORPUS`, else `local-corpus` beside the
-/// repository; `None` skips the test.
-fn corpus() -> Option<Arc<dyn Vfs>> {
-    let dir = std::env::var_os("VAULT_CORPUS")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-corpus")
-        })
-        .join("fallout1-unpacked");
-    if !dir.is_dir() {
-        eprintln!("skipping: no local corpus at {}", dir.display());
-        return None;
-    }
-    Some(Arc::new(LocalDirProvider::mount(dir).unwrap()))
-}
-
 fn map(name: &str) -> Option<MapPreview> {
-    let vfs = corpus()?;
+    let vfs = local_corpus()?;
     let mut preview = MapPreview::load(vfs, &format!("maps/{name}"), "english", None, 1).unwrap();
     preview.host.world.effects.clear();
     Some(preview)

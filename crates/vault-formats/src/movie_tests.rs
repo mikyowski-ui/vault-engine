@@ -35,9 +35,7 @@ fn palette_push_and_fade_level_are_total() {
     assert_eq!(effect.level(1, 20, 0), 20);
 }
 
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/movie/support.rs"]
-mod movie;
+use vault_fixtures::movie;
 
 fn sha(bytes: &[u8]) -> String {
     Sha256::digest(bytes)

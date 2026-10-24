@@ -259,9 +259,7 @@ impl MoviePlayer {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/movie/support.rs"]
-pub(crate) mod fixture;
+pub(crate) use vault_fixtures::movie as fixture;
 
 #[cfg(test)]
 pub(crate) mod tests {

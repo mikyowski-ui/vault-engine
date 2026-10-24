@@ -4,7 +4,11 @@
 //! travel sound and moves the player (or requests the map change); Esc
 //! cancels and, under the safe rule, changes nothing.
 use super::{MapPreview, Screen};
-use crate::{AppResult, interface::Painter};
+use crate::{
+    AppResult,
+    input::{key_digit, key_text},
+    interface::Painter,
+};
 use vault_core::{
     skills,
     ui::{BUTTON_PRESS, Rect},
@@ -230,17 +234,10 @@ impl MapPreview {
             self.choose_level(None);
             return true;
         }
-        let name = format!("{key:?}");
-        // The number row, the numeric keypad's digits and the letters all
-        // type their character (the keypad's operators type none).
-        let character = name
-            .strip_prefix("Digit")
-            .or_else(|| name.strip_prefix("Key"))
-            .or_else(|| {
-                name.strip_prefix("Numpad")
-                    .filter(|rest| rest.len() == 1 && rest.as_bytes()[0].is_ascii_digit())
-            })
-            .and_then(|rest| rest.bytes().next());
+        // The number row, the numeric keypad's digits and the letters (upper
+        // case) all type their character (the keypad's operators type none).
+        let character =
+            key_digit(key).or_else(|| key_text(key, true).filter(u8::is_ascii_uppercase));
         let level = character.and_then(|c| skills::elevator(screen.kind)?.button_for_key(c));
         match level {
             Some(level) => {

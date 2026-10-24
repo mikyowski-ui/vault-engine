@@ -3,16 +3,12 @@
 //! the SPEC-002 §3.7 language filter on script messages.
 use crate::{
     CharacterSheet, RandomSource, WorldEffect, WorldError, WorldHost, WorldState,
-    assets::WorldAssets,
     dialogue::{
         HeadDefinition, HeadFrame, HeadIdle, HeadPhase, LipStep, LipSync, Mood, TalkingHead,
     },
+    test_support::TestAssets,
 };
-use std::{collections::BTreeMap, sync::Arc};
-use vault_formats::{
-    LipFile, MsgCatalog, Prototype,
-    msg::{BadWords, Message},
-};
+use vault_formats::{LipFile, MsgCatalog, msg::BadWords};
 
 /// SPEC-010 §4.7 LIP-A.
 const LIP_A: [u8; 97] = [
@@ -286,39 +282,13 @@ fn spec006_session_start_draw_order() {
     );
 }
 
-#[derive(Default)]
-struct SpeechAssets {
-    resources: BTreeMap<String, Vec<u8>>,
-    catalogs: BTreeMap<i32, MsgCatalog>,
-}
-impl WorldAssets for SpeechAssets {
-    fn prototype(&self, _pid: u32) -> Result<Arc<Prototype>, WorldError> {
-        Err(WorldError::Invalid("no prototypes".into()))
-    }
-    fn program(&self, _index: i32) -> Result<(String, vault_vm::IntProgram), WorldError> {
-        Err(WorldError::Invalid("no programs".into()))
-    }
-    fn message(&self, list: i32, id: i32) -> Option<Message> {
-        self.catalogs.get(&list)?.get(id).cloned()
-    }
-    fn resource(&self, path: &str) -> Result<Vec<u8>, WorldError> {
-        self.resources
-            .get(path)
-            .cloned()
-            .ok_or_else(|| WorldError::Invalid(format!("{path} is missing")))
-    }
-    fn dialogue_catalog(&self, list: i32) -> Option<MsgCatalog> {
-        self.catalogs.get(&list).cloned()
-    }
-}
-
-fn host(resources: &[(&str, Vec<u8>)]) -> WorldHost<SpeechAssets> {
-    let assets = SpeechAssets {
+fn host(resources: &[(&str, Vec<u8>)]) -> WorldHost<TestAssets> {
+    let assets = TestAssets {
         resources: resources
             .iter()
             .map(|(path, bytes)| (path.to_string(), bytes.clone()))
             .collect(),
-        ..SpeechAssets::default()
+        ..TestAssets::default()
     };
     let mut host = WorldHost::new(
         WorldState::new(CharacterSheet::default(), 1).unwrap(),
@@ -338,7 +308,7 @@ fn host(resources: &[(&str, Vec<u8>)]) -> WorldHost<SpeechAssets> {
     host
 }
 
-fn speech_effects(host: &mut WorldHost<SpeechAssets>) -> Vec<WorldEffect> {
+fn speech_effects(host: &mut WorldHost<TestAssets>) -> Vec<WorldEffect> {
     host.world
         .effects
         .drain(..)
@@ -346,7 +316,7 @@ fn speech_effects(host: &mut WorldHost<SpeechAssets>) -> Vec<WorldEffect> {
         .collect()
 }
 
-fn shown(host: &WorldHost<SpeechAssets>) -> Option<(u8, usize)> {
+fn shown(host: &WorldHost<TestAssets>) -> Option<(u8, usize)> {
     let head = host.world.dialogue.head.as_ref()?;
     head.shown.map(|shown| (shown.animation, shown.frame))
 }

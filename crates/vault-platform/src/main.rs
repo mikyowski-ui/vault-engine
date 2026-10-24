@@ -10,11 +10,7 @@ mod preview;
 mod replay;
 
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/formats/support.rs"]
-pub(crate) mod fixture_assets;
-#[cfg(test)]
-pub(crate) use map_preview::fixture as fixture_world;
+pub(crate) use vault_fixtures::formats as fixture_assets;
 
 use std::{
     error::Error,

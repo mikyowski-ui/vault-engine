@@ -1,10 +1,10 @@
 //! Debugger commands through `WorldHost::apply_debug`.
 use crate::{
     CharacterSheet, WorldHost, WorldState, assets::VfsWorldAssets, debug::DebugCommand,
-    fixture_state as fixture,
+    fixture_state as fixture, test_support::dir_assets,
 };
-use std::{fs, sync::Arc};
-use vault_formats::{LocalDirProvider, map::ObjectState};
+use std::fs;
+use vault_formats::map::ObjectState;
 
 const ITEM_PID: u32 = 0x0000_0001;
 
@@ -17,15 +17,8 @@ fn host() -> (tempfile::TempDir, WorldHost<VfsWorldAssets>) {
         dir.path().join("maps/synth.map"),
     )
     .unwrap();
-    let assets = VfsWorldAssets::new(
-        Arc::new(LocalDirProvider::mount(dir.path()).unwrap()),
-        "english",
-    )
-    .unwrap();
-    let mut host = WorldHost::new(
-        WorldState::new(CharacterSheet::default(), 1).unwrap(),
-        assets,
-    );
+    let world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+    let mut host = WorldHost::new(world, dir_assets(dir.path()));
     host.load_campaign().unwrap();
     host.load_map("maps/synthetic.map").unwrap();
     (dir, host)

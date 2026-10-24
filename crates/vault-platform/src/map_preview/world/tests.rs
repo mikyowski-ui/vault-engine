@@ -1,13 +1,15 @@
 //! SPEC-014 Fixture I (§4.9) and the §3.39-§3.40 screen flows over the
 //! synthetic corpus, with synthetic world-map art.
 use super::{Pending, TownOrigin, WorldScreen};
-use crate::map_preview::{MapPreview, Screen, fixture, state_fixture};
-use std::{path::Path, sync::Arc};
+use crate::map_preview::{
+    MapPreview, Screen, fixture,
+    test_support::{interactive, local_corpus, synthetic_corpus},
+};
+use std::path::Path;
 use vault_core::{
     ui::ColorKey,
     worldmap::{Encounter, START},
 };
-use vault_formats::{LocalDirProvider, Vfs};
 use winit::keyboard::KeyCode;
 
 /// Pixel data starts after the 62-byte header and the 12-byte frame header.
@@ -30,9 +32,8 @@ fn art(width: u16, height: u16, color: impl Fn(usize, usize) -> u8) -> Vec<u8> {
 /// Vault 15. `V13ENT.MAP` is the fixture map renamed in its header (map
 /// 35), and `VAULTBUR.MAP` likewise (map 8).
 fn corpus() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = synthetic_corpus();
     let root = dir.path();
-    state_fixture::write_corpus(root);
     let interface = root.join("art/intrface");
     let write = |name: &str, bytes: Vec<u8>| std::fs::write(interface.join(name), bytes).unwrap();
     write("worldmap.frm", fixture::frm(1400, 1500, 50));
@@ -76,15 +77,7 @@ fn corpus() -> tempfile::TempDir {
     dir
 }
 fn preview(root: &Path) -> MapPreview {
-    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(root).unwrap());
-    let mut preview = MapPreview::load(
-        vfs,
-        "maps/synthetic.map",
-        "english",
-        Some("premade/synthetic.gcd"),
-        1,
-    )
-    .unwrap();
+    let mut preview = interactive(root);
     preview.image().unwrap();
     preview
 }
@@ -520,15 +513,9 @@ fn spec014_an_arrow_key_at_the_scroll_limit_keeps_follow_mode() {
 #[test]
 #[ignore = "needs the local corpus"]
 fn corpus_world_and_town_map_art_and_seen_cell_dimming() {
-    let dir = std::env::var_os("VAULT_CORPUS")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-corpus"))
-        .join("fallout1-unpacked");
-    if !dir.is_dir() {
-        eprintln!("skipping: no local corpus at {}", dir.display());
+    let Some(vfs) = local_corpus() else {
         return;
-    }
-    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(&dir).unwrap());
+    };
     let preview = MapPreview::load(vfs, "maps/v13ent.map", "english", None, 1).unwrap();
     let painter = preview.painter();
     // SPEC-014 §3.39-§3.40 art sizes.

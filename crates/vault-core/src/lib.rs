@@ -111,25 +111,16 @@ mod dialogue_tests;
 #[cfg(test)]
 mod drugs_tests;
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/formats/support.rs"]
-pub(crate) mod fixture_assets;
+pub(crate) use vault_fixtures::formats as fixture_assets;
 #[cfg(test)]
-#[allow(dead_code)]
 #[path = "../../../tests/fixtures/items/support.rs"]
 pub(crate) mod fixture_items;
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/state/support.rs"]
-pub(crate) mod fixture_state;
+pub(crate) use vault_fixtures::state as fixture_state;
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/vm/support.rs"]
-pub(crate) mod fixture_vm;
+pub(crate) use vault_fixtures::vm as fixture_vm;
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/world/support.rs"]
-pub(crate) mod fixture_world;
+pub(crate) use vault_fixtures::world as fixture_world;
 #[cfg(test)]
 mod host_ai_tests;
 #[cfg(test)]
@@ -164,6 +155,8 @@ mod state_tests;
 mod tables_tests;
 #[cfg(test)]
 mod talk_tests;
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod worldmap_tests;
 

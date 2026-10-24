@@ -6,6 +6,7 @@ use crate::{
     library::SoundState,
     queue::{EventKind, TimedQueue},
     rng::{skill_check, stat_check},
+    test_support::{dir_assets, npc_prototype},
     world::WorldTrace,
     *,
 };
@@ -449,7 +450,7 @@ struct Assets {
 }
 impl Assets {
     fn new(strings: &[&[u8]]) -> Self {
-        let prototype = Arc::new(Prototype::parse(&fixture::npc_prototype()).unwrap());
+        let prototype = npc_prototype();
         let map = MapFile::parse(&fixture::world::preview_map(), &|pid: u32| {
             Ok(Prototype::parse(&fixture::world::prototype(
                 (pid >> 24) as u8,
@@ -906,11 +907,7 @@ fn world_lifecycle_lighting_spatials_and_queue_order() {
     fixture::world::word(&mut fresh, 0x24, 1);
     fixture::world::word(&mut fresh, 0x28, 0);
     std::fs::write(dir.path().join("maps/synthetic.map"), fresh).unwrap();
-    let assets = VfsWorldAssets::new(
-        Arc::new(vault_formats::LocalDirProvider::mount(dir.path()).unwrap()),
-        "english",
-    )
-    .unwrap();
+    let assets = dir_assets(dir.path());
     let mut host = WorldHost::new(
         WorldState::new(CharacterSheet::default(), 1).unwrap(),
         assets,
@@ -979,11 +976,7 @@ fn world_lifecycle_lighting_spatials_and_queue_order() {
 fn interactive_dialogue_runs_real_callbacks_and_restores_map() {
     let dir = tempfile::tempdir().unwrap();
     fixture::write_corpus(dir.path());
-    let assets = VfsWorldAssets::new(
-        Arc::new(vault_formats::LocalDirProvider::mount(dir.path()).unwrap()),
-        "english",
-    )
-    .unwrap();
+    let assets = dir_assets(dir.path());
     let mut host = WorldHost::new(
         WorldState::new(CharacterSheet::default(), 1).unwrap(),
         assets,
@@ -1062,11 +1055,7 @@ fn spec003_saved_maps_retain_embedded_mvars_and_report_out_of_range_access() {
         fixture::world::word(&mut map, 0x24, 1);
         fixture::world::word(&mut map, 0x28, flags);
         std::fs::write(dir.path().join("maps/synthetic.map"), map).unwrap();
-        let assets = VfsWorldAssets::new(
-            Arc::new(vault_formats::LocalDirProvider::mount(dir.path()).unwrap()),
-            "english",
-        )
-        .unwrap();
+        let assets = dir_assets(dir.path());
         let mut host = WorldHost::new(
             WorldState::new(CharacterSheet::default(), 1).unwrap(),
             assets,
@@ -1489,11 +1478,7 @@ fn spec006_live_queue_stop_elevation_updates_speech_reputation_and_campaign_fail
     let dir = tempfile::tempdir().unwrap();
     fixture::write_corpus(dir.path());
     std::fs::remove_file(dir.path().join("data/vault13.gam")).unwrap();
-    let assets = VfsWorldAssets::new(
-        Arc::new(vault_formats::LocalDirProvider::mount(dir.path()).unwrap()),
-        "english",
-    )
-    .unwrap();
+    let assets = dir_assets(dir.path());
     let mut campaign = WorldHost::new(WorldState::empty(1).unwrap(), assets);
     campaign.world.gvars = Some(vec![5, 6]);
     assert!(campaign.load_campaign().is_err());
@@ -2111,14 +2096,7 @@ fn spec011_progression_and_barter_opcodes() {
     assert_eq!(host.world.dialogue.barter_modifier, -20);
     assert!(host.world.dialogue.pending_barter);
     host.world.dialogue.pending_barter = false;
-    let plain = host
-        .world
-        .spawn(
-            Arc::new(Prototype::parse(&fixture::npc_prototype()).unwrap()),
-            20500,
-            0,
-        )
-        .unwrap();
+    let plain = host.world.spawn(npc_prototype(), 20500, 0).unwrap();
     host.world.dialogue.target = plain;
     run_fragment(&mut host, &base, &[push(-5), instruction(0x8129)].concat()).unwrap();
     assert_eq!(host.world.dialogue.barter_modifier, -5);
@@ -2142,11 +2120,7 @@ fn spec006_head_counts_use_own_columns_only_when_fidget_art_exists() {
     ] {
         std::fs::write(heads.join(format!("{name}.frm")), b"").unwrap();
     }
-    let assets = VfsWorldAssets::new(
-        Arc::new(vault_formats::LocalDirProvider::mount(dir.path()).unwrap()),
-        "english",
-    )
-    .unwrap();
+    let assets = dir_assets(dir.path());
     assert_eq!(assets.head(0).unwrap().counts, [1, 2, 3]);
     // `partbf3.frm` is missing, so the bad count keeps the first column.
     assert_eq!(assets.head(1).unwrap().counts, [1, 2, 1]);
@@ -2214,11 +2188,7 @@ fn spec014_an_entry_hex_outside_the_map_border_fails_the_load() {
     let mut map = fixture::interactive_map();
     fixture::world::word(&mut map, 0x14, 30 * 200 + 100);
     std::fs::write(dir.path().join("maps/outside.map"), map).unwrap();
-    let assets = VfsWorldAssets::new(
-        Arc::new(vault_formats::LocalDirProvider::mount(dir.path()).unwrap()),
-        "english",
-    )
-    .unwrap();
+    let assets = dir_assets(dir.path());
     let mut host = WorldHost::new(
         WorldState::new(CharacterSheet::default(), 1).unwrap(),
         assets,

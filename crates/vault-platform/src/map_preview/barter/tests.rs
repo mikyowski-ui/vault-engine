@@ -1,21 +1,12 @@
 //! H13 and M-I5: the barter window's open containers and offer total
 //! (SPEC-011 §3.19, SPEC-013 §3.18) over the synthetic corpus.
-use crate::map_preview::{MapPreview, Screen, fixture, state_fixture};
+use crate::map_preview::{
+    MapPreview, Screen, fixture,
+    test_support::{interactive, npc, synthetic_corpus},
+};
 use std::sync::Arc;
 use vault_core::{ObjectRef, skills::ItemEntry};
-use vault_formats::{LocalDirProvider, Vfs, pro::Category};
 
-fn preview(root: &std::path::Path) -> MapPreview {
-    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(root).unwrap());
-    MapPreview::load(
-        vfs,
-        "maps/synthetic.map",
-        "english",
-        Some("premade/synthetic.gcd"),
-        1,
-    )
-    .unwrap()
-}
 /// An item of `subtype` (1 container, 5 miscellaneous) worth `cost`,
 /// carried by `owner`.
 fn item(
@@ -48,17 +39,10 @@ fn screen_mut(preview: &mut MapPreview) -> &mut super::BarterScreen {
 
 #[test]
 fn h13_an_accepted_trade_closes_table_containers_and_m_i5_totals_the_whole_table() {
-    let dir = tempfile::tempdir().unwrap();
-    state_fixture::write_corpus(dir.path());
-    let mut preview = preview(dir.path());
+    let dir = synthetic_corpus();
+    let mut preview = interactive(dir.path());
     let player = preview.host.world.player;
-    let merchant = preview
-        .host
-        .world
-        .iter()
-        .find(|(reference, object)| object.category() == Category::Critter && *reference != player)
-        .unwrap()
-        .0;
+    let merchant = npc(&preview);
     // A bag worth 10 holding a widget worth 25.
     let bag = item(&mut preview, 0x41, 1, 10, player);
     let widget = item(&mut preview, 0x40, 5, 25, bag);
@@ -93,17 +77,10 @@ fn h13_an_accepted_trade_closes_table_containers_and_m_i5_totals_the_whole_table
 
 #[test]
 fn h13_each_frame_cuts_a_broken_container_chain_and_clamps_the_offsets() {
-    let dir = tempfile::tempdir().unwrap();
-    state_fixture::write_corpus(dir.path());
-    let mut preview = preview(dir.path());
+    let dir = synthetic_corpus();
+    let mut preview = interactive(dir.path());
     let player = preview.host.world.player;
-    let merchant = preview
-        .host
-        .world
-        .iter()
-        .find(|(reference, object)| object.category() == Category::Critter && *reference != player)
-        .unwrap()
-        .0;
+    let merchant = npc(&preview);
     let bag = item(&mut preview, 0x41, 1, 10, player);
     let inner = item(&mut preview, 0x42, 1, 5, bag);
     let dialogue = &mut preview.host.world.dialogue;

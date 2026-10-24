@@ -1,4 +1,4 @@
-pub(crate) use crate::fixture_assets as assets;
+pub use crate::formats as assets;
 pub fn program() -> Vec<u8> {
     assets::sparse(include_str!("program.int.hex"))
 }

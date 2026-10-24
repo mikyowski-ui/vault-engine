@@ -3,7 +3,7 @@
 //! box), committing through the SPEC-008 slot writer and reader, and quick
 //! save/load. Slots live below the configured save root.
 use super::{MapPreview, Screen, dialog::Dialog};
-use crate::{AppResult, interface::Painter};
+use crate::{AppResult, input::key_text, interface::Painter};
 use vault_core::{
     host_save::{SaveInfo, slot_directory},
     ui::{
@@ -72,25 +72,15 @@ fn scan(root: &std::path::Path) -> (Vec<SlotState>, Vec<Option<Vec<u8>>>) {
         .unzip()
 }
 
+/// A description character: a letter (upper case with Shift), a number-row
+/// digit, Space, `.` or `-`; Shift changes no other key.
 fn text_key(key: KeyCode, shift: bool) -> Option<u8> {
-    let name = format!("{key:?}");
-    if let Some(letter) = name.strip_prefix("Key") {
-        let letter = letter.bytes().next()?;
-        return Some(if shift {
-            letter
-        } else {
-            letter.to_ascii_lowercase()
-        });
-    }
-    if let Some(digit) = name.strip_prefix("Digit") {
-        return digit.bytes().next();
-    }
-    match key {
-        KeyCode::Space => Some(b' '),
-        KeyCode::Period => Some(b'.'),
-        KeyCode::Minus => Some(b'-'),
-        _ => None,
-    }
+    let plain = key_text(key, false).filter(|c| c.is_ascii_alphanumeric() || b" .-".contains(c))?;
+    Some(if shift {
+        plain.to_ascii_uppercase()
+    } else {
+        plain
+    })
 }
 
 impl MapPreview {

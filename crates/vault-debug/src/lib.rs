@@ -207,8 +207,3 @@ impl Inspector {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/formats/support.rs"]
-pub(crate) mod fixture_assets;

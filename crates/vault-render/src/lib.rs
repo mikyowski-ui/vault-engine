@@ -7,11 +7,9 @@ pub mod map;
 pub mod movie;
 pub mod outline;
 
-#[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/formats/support.rs"]
-pub(crate) mod fixture_assets;
 pub use image::{ImageError, IndexedImage, TextStyle, compose_preview};
+#[cfg(test)]
+pub(crate) use vault_fixtures::formats as fixture_assets;
 
 const SPRITE_SIDE: u32 = 16;
 

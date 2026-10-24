@@ -440,7 +440,7 @@ pub fn replay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{map_preview::state_fixture, preview::PreviewArgs};
+    use crate::{map_preview::test_support::synthetic_corpus, preview::PreviewArgs};
 
     /// The 960 x 640 window shows the 640 x 480 frame (map and interface
     /// bar) at scale 1, inset 160 x 80. A right-click turns the movement
@@ -477,8 +477,7 @@ mod tests {
     /// the digest covers fails here. The digests are written in halves.
     #[test]
     fn vanilla_replays_keep_their_recorded_digests() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         let dialogue = replay_log(dir.path(), DIALOGUE_LOG);
         assert_eq!(
             dialogue.state_sha256,
@@ -504,8 +503,7 @@ mod tests {
     /// one the replay keeps integer scaling (1280 x 960 at 320, 60).
     #[test]
     fn a_logged_scaling_mode_maps_the_replayed_pointer() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         let log = |scaling: &str| {
             format!(
                 "{{\"command_id\":1,\"kind\":\"surface\",\"width\":1920,\"height\":1080}}\n\
@@ -525,8 +523,7 @@ mod tests {
 
     #[test]
     fn replays_a_dialogue_log_deterministically_and_stops_at_quit() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
         replay.run(DIALOGUE_LOG.as_bytes()).unwrap();
         let AssetPreview::Map(map) = &replay.preview else {
@@ -583,8 +580,7 @@ mod tests {
     /// central save can be built and the digest covers the player's
     /// inventory and the campaign variables.
     fn debug_corpus() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         std::fs::copy(
             dir.path().join("maps/synthetic.map"),
             dir.path().join("maps/synth.map"),
@@ -718,8 +714,7 @@ mod tests {
 
     #[test]
     fn resizes_move_the_picking_geometry_and_bad_logs_fail() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         // At 1920 x 1280 the frame is drawn at scale 2, inset 320 x 160: the
         // NPC's window position moves accordingly.
         let log = r#"{"command_id":1,"kind":"resize","width":1920,"height":1280}
@@ -756,8 +751,7 @@ mod tests {
 
     #[test]
     fn timed_logs_replay_their_surface_frames_and_key_repeats() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         // D-11: the log opens with the physical surface (a HiDPI window of
         // 1920 x 1280 draws the frame at scale 2, inset 320 x 160), and its
         // ticks are the only clock. A right-click turns the cursor into the
@@ -830,8 +824,7 @@ mod tests {
 
     #[test]
     fn headless_worlds_complete_movies_instead_of_waiting_for_them() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         crate::movie::tests::movie_corpus(dir.path());
         let mut desktop = args(dir.path());
         desktop.startup_movies = true;

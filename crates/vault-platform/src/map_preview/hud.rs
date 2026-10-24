@@ -3,7 +3,7 @@
 //! active item slot, buttons and the combat panel), the indicator boxes,
 //! the in-world cursor modes and their clicks, and the game-loop hotkeys.
 use super::MapPreview;
-use crate::interface::Painter;
+use crate::{input::key_text, interface::Painter};
 use std::collections::VecDeque;
 use vault_core::{
     ObjectAction, ObjectRef, WorldEffect,
@@ -261,18 +261,11 @@ pub(crate) fn game_key(key: KeyCode, [shift, control, _]: [bool; 3]) -> Option<K
         Slash => Key::Char('/'),
         Minus | NumpadSubtract => Key::Char('-'),
         Equal | NumpadAdd => Key::Char('='),
-        _ => {
-            let name = format!("{key:?}");
-            if let Some(letter) = name.strip_prefix("Key") {
-                return Some(Key::Char(letter.chars().next()?.to_ascii_lowercase()));
-            }
-            let digit = name.strip_prefix("Digit")?.chars().next()?;
-            if shift {
-                Key::Char(b")!@#$%^&*("[digit.to_digit(10)? as usize] as char)
-            } else {
-                Key::Char(digit)
-            }
-        }
+        // A letter whatever Shift; a number-row digit or its shifted symbol.
+        _ => match key_text(key, false).filter(u8::is_ascii_alphanumeric)? {
+            digit if digit.is_ascii_digit() => Key::Char(key_text(key, shift)?.into()),
+            letter => Key::Char(letter.into()),
+        },
     })
 }
 

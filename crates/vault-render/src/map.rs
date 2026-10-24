@@ -1228,9 +1228,7 @@ pub fn pick_candidates(
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/world/support.rs"]
-mod fixture;
+use vault_fixtures::world as fixture;
 #[cfg(test)]
 mod tests {
     use super::*;

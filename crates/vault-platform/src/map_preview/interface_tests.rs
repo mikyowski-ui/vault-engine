@@ -1,6 +1,9 @@
 //! SPEC-013 and SPEC-014 windows in the interactive world, and the game
 //! flow, over the synthetic corpus.
-use super::{MapPreview, Screen, state_fixture};
+use super::{
+    MapPreview, Screen, state_fixture,
+    test_support::{load, npc, synthetic_corpus},
+};
 use crate::game::Game;
 use std::sync::Arc;
 use vault_core::{
@@ -14,36 +17,17 @@ use winit::keyboard::KeyCode;
 /// The synthetic corpus, with its map also under a save-manifest-sized
 /// name and as the new-game map.
 fn corpus() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    state_fixture::write_corpus(dir.path());
+    let dir = synthetic_corpus();
     let map = std::fs::read(dir.path().join("maps/synthetic.map")).unwrap();
     std::fs::write(dir.path().join("maps/synth.map"), &map).unwrap();
     std::fs::write(dir.path().join("maps/v13ent.map"), &map).unwrap();
     dir
 }
 fn world(dir: &std::path::Path) -> MapPreview {
-    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir).unwrap());
-    let mut preview = MapPreview::load(
-        vfs,
-        "maps/synth.map",
-        "english",
-        Some("premade/synthetic.gcd"),
-        1,
-    )
-    .unwrap();
+    let mut preview = load(dir, "maps/synth.map");
     preview.save_root = dir.join("saves");
     preview.screenshot_dir = dir.to_path_buf();
     preview
-}
-fn npc(preview: &MapPreview) -> vault_core::ObjectRef {
-    let player = preview.host.world.player;
-    preview
-        .host
-        .world
-        .iter()
-        .find(|(reference, object)| object.category() == Category::Critter && *reference != player)
-        .unwrap()
-        .0
 }
 
 #[test]

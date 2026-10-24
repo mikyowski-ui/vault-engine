@@ -1,6 +1,7 @@
 use crate::{
     AppResult,
     audio::{AudioHandle, Channel, MusicRequest, Volumes},
+    input::key_text,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -1448,19 +1449,9 @@ impl MapPreview {
             if self.panel_key(key) {
                 return true;
             }
-            let choice = match key {
-                KeyCode::Digit1 => Some(Some(0)),
-                KeyCode::Digit2 => Some(Some(1)),
-                KeyCode::Digit3 => Some(Some(2)),
-                KeyCode::Digit4 => Some(Some(3)),
-                KeyCode::Digit5 => Some(Some(4)),
-                KeyCode::Digit6 => Some(Some(5)),
-                KeyCode::Digit7 => Some(Some(6)),
-                KeyCode::Digit8 => Some(Some(7)),
-                KeyCode::Digit9 => Some(Some(8)),
-                KeyCode::Digit0 => Some(None),
-                _ => None,
-            };
+            // The number row: 1-9 pick an option, 0 none.
+            let choice = (key_text(key, false).filter(u8::is_ascii_digit))
+                .map(|digit| usize::from(digit - b'0').checked_sub(1));
             if let Some(index) = choice {
                 if let Err(error) = self.host.choose_dialogue(index) {
                     self.status = error.to_string().into_bytes();
@@ -1527,14 +1518,7 @@ impl MapPreview {
             self.open_world_map_with_music();
             return true;
         }
-        let key_number = match key {
-            KeyCode::KeyL => Some(b'L'),
-            KeyCode::KeyD => Some(b'D'),
-            KeyCode::KeyU => Some(b'U'),
-            KeyCode::KeyG => Some(b'G'),
-            KeyCode::KeyT => Some(b'T'),
-            _ => None,
-        };
+        let key_number = key_text(key, true).filter(|code| b"LDUGT".contains(code));
         if let Some(key) = key_number
             && self.host.key_callback(i32::from(key))
         {
@@ -1853,19 +1837,18 @@ impl MapPreview {
 #[cfg(test)]
 mod corpus_tests;
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/world/support.rs"]
-pub(crate) mod fixture;
+pub(crate) use vault_fixtures::world as fixture;
 #[cfg(test)]
 mod interface_tests;
 #[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
 use crate::audio::sound_fixture;
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/state/support.rs"]
-pub(crate) mod state_fixture;
+pub(crate) use vault_fixtures::state as state_fixture;
 #[cfg(test)]
 mod tests {
+    use super::test_support::{interactive, synthetic_corpus};
     use super::*;
     use vault_formats::LocalDirProvider;
 
@@ -1995,17 +1978,6 @@ mod tests {
             .move_object(item, 20100, 0, false)
             .unwrap();
     }
-    fn interactive(dir: &std::path::Path) -> MapPreview {
-        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir).unwrap());
-        MapPreview::load(
-            vfs,
-            "maps/synthetic.map",
-            "english",
-            Some("premade/synthetic.gcd"),
-            1,
-        )
-        .unwrap()
-    }
 
     #[test]
     fn dat_archives_supply_the_world_like_the_loose_corpus() {
@@ -2055,8 +2027,7 @@ mod tests {
     fn effects_speech_ui_and_library_sounds_reach_the_mixer() {
         use crate::audio::EFFECT_VOICES;
         use vault_core::dialogue::{HeadDefinition, Mood, TalkingHead};
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         std::fs::create_dir_all(dir.path().join("sound/sfx")).unwrap();
         std::fs::create_dir_all(dir.path().join("sound/speech/synth")).unwrap();
         for (path, vector) in [
@@ -2156,8 +2127,7 @@ mod tests {
     #[test]
     fn talking_heads_lip_sync_with_their_speech() {
         use vault_core::dialogue::{HeadDefinition, HeadIdle, Mood, TalkingHead};
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         let speech = dir.path().join("sound/speech/synth");
         std::fs::create_dir_all(&speech).unwrap();
         std::fs::write(speech.join("hello.acm"), sound_fixture::acm('H')).unwrap();
@@ -2230,9 +2200,8 @@ mod tests {
 
     #[test]
     fn game_movies_play_modally_with_subtitles_and_return_to_their_screen() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = synthetic_corpus();
         let root = dir.path();
-        state_fixture::write_corpus(root);
         crate::movie::tests::movie_corpus(root);
         let (synthetic, _, _) = crate::movie::fixture::synthetic('A');
         std::fs::write(root.join("art/cuts/boil1.mve"), synthetic).unwrap();
@@ -2330,9 +2299,8 @@ mod tests {
 
     #[test]
     fn world_map_music_and_the_music_switch_reach_the_mixer() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = synthetic_corpus();
         let root = dir.path();
-        state_fixture::write_corpus(root);
         std::fs::create_dir_all(root.join("sound/music")).unwrap();
         for track in ["03wrldmp", "wind2", "13carvrn"] {
             std::fs::write(
@@ -2399,9 +2367,8 @@ mod tests {
     #[test]
     fn spec008_dialogue_stops_or_halves_the_music_and_undoes_it_on_close() {
         use vault_core::dialogue::{HeadDefinition, HeadIdle, Mood, TalkingHead};
-        let dir = tempfile::tempdir().unwrap();
+        let dir = synthetic_corpus();
         let root = dir.path();
-        state_fixture::write_corpus(root);
         std::fs::create_dir_all(root.join("sound/music")).unwrap();
         std::fs::write(root.join("sound/music/01hub.acm"), sound_fixture::acm('B')).unwrap();
         let mut preview = interactive(root);
@@ -2490,9 +2457,8 @@ mod tests {
 
     #[test]
     fn world_audio_takes_volumes_music_requests_and_movie_music_flags() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = synthetic_corpus();
         let root = dir.path();
-        state_fixture::write_corpus(root);
         crate::movie::tests::movie_corpus(root);
         std::fs::create_dir_all(root.join("sound/sfx")).unwrap();
         std::fs::create_dir_all(root.join("sound/music")).unwrap();
@@ -2591,8 +2557,7 @@ mod tests {
 
     #[test]
     fn a_modal_window_reuses_the_frozen_world_view() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         let mut preview = interactive(dir.path());
         preview.image().unwrap();
         assert!(preview.frozen_view.is_none(), "the map screen renders live");
@@ -2608,8 +2573,7 @@ mod tests {
 
     #[test]
     fn inventory_character_and_barter_screens_drive_the_spec011_rules() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         std::fs::write(
             dir.path().join("text/english/game/editor.msg"),
             b"{136}{}{No free skill points available.}\n",
@@ -2826,8 +2790,7 @@ mod tests {
     }
     #[test]
     fn the_pause_window_and_modal_windows_suspend_palette_cycling() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
+        let dir = synthetic_corpus();
         let mut preview = interactive(dir.path());
         preview.image().unwrap();
         assert!(preview.palette_cycling());
@@ -2852,17 +2815,8 @@ mod tests {
     }
     #[test]
     fn clicking_npc_renders_choices_executes_callbacks_and_returns_to_map() {
-        let dir = tempfile::tempdir().unwrap();
-        state_fixture::write_corpus(dir.path());
-        let vfs = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
-        let mut preview = MapPreview::load(
-            vfs,
-            "maps/synthetic.map",
-            "english",
-            Some("premade/synthetic.gcd"),
-            1,
-        )
-        .unwrap();
+        let dir = synthetic_corpus();
+        let mut preview = interactive(dir.path());
         preview.image().unwrap();
         // SPEC-014 §3.27: a right-click cycles movement to arrow; an arrow
         // click on a talkable critter talks to it.

@@ -1,5 +1,5 @@
-pub(crate) use crate::fixture_assets as assets;
-pub(crate) use crate::fixture_world as world;
+pub use crate::formats as assets;
+pub use crate::world;
 
 pub fn gcd() -> Vec<u8> {
     assets::sparse(include_str!("player.gcd.hex"))

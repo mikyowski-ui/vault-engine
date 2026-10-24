@@ -15,6 +15,7 @@ This Cargo workspace consists of 7 core crates plus CLI tools:
 6. `crates/vault-debug`: Headless VM stepper and instruction trace, GVAR/MVAR/LVAR watches, and map object/critter inspectors with plain-text rendering for overlays.
 7. `crates/vault-platform`: Desktop windowing (`winit`), input mapping, audio output, and main loop.
 8. `tools/xtask` & `tools/asset-audit`: CLI verification and local corpus auditing tools.
+9. `crates/vault-fixtures` (dev-only): the dependency-free synthetic test fixture builders from `tests/fixtures/`, compiled once and shared as a dev-dependency (a normal dependency of `xtask`).
 
 ## Engineering Gates
 Every PR must pass (`cargo xtask check` runs all three):

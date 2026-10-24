@@ -3,34 +3,19 @@
 //! elevators and transitions, the move-items counter, sneak, skill gating
 //! and defaults, and the loot window.
 use crate::{
-    LootRequest, ObjectRef, RandomSource, Transition, WorldEffect, WorldError, WorldHost,
+    LootRequest, ObjectRef, Transition, WorldEffect, WorldHost,
     fixture_items::{self as items, ItemAssets},
     loot::LootMove,
     queue::EventKind,
     skills::{self, Counter, SetTimer, StealExperience, StealInputs},
+    test_support::{Draws, hp, set_hp},
 };
-use std::{collections::VecDeque, sync::Arc};
+use std::sync::Arc;
 use vault_formats::{
     HexGrid, MsgCatalog,
     map::{ObjectDetail, ObjectState},
     pro::BasicFlags,
 };
-
-/// Scripted outcomes for pure checks; each must lie in its range.
-struct Draws(VecDeque<i32>);
-impl RandomSource for Draws {
-    fn range(&mut self, first: i32, last: i32) -> Result<i32, WorldError> {
-        let value = self.0.pop_front().expect("an outcome for every draw");
-        assert!(
-            (first..=last).contains(&value),
-            "{value} outside {first}..={last}"
-        );
-        Ok(value)
-    }
-}
-fn draws(values: &[i32]) -> Draws {
-    Draws(values.iter().copied().collect())
-}
 
 const CRITTER_PID: u32 = 0x0100_0100;
 const ITEM_PID: u32 = 0x600;
@@ -109,18 +94,8 @@ fn critter(host: &mut WorldHost<ItemAssets>, hex: i32, stats: &[(usize, i32)]) -
         .world
         .spawn(items::critter(CRITTER_PID, stats, 0, &[]), hex, 0)
         .unwrap();
-    set_hp(host, critter, 30);
+    set_hp(&mut host.world, critter, 30);
     critter
-}
-fn set_hp(host: &mut WorldHost<ItemAssets>, critter: ObjectRef, hp: i32) {
-    let object = host.world.get_mut(critter).unwrap();
-    object.character.as_mut().unwrap().current_hp = hp;
-    if let ObjectState::Critter(state) = &mut object.raw.state {
-        state.hp = hp;
-    }
-}
-fn hp(host: &WorldHost<ItemAssets>, critter: ObjectRef) -> i32 {
-    host.world.hit_points(critter).unwrap()
 }
 fn skill(host: &WorldHost<ItemAssets>, index: usize) -> i32 {
     let player = host.world.player;
@@ -155,7 +130,7 @@ fn spec013_fixture_a_steal_checks() {
         victim_steal: Some(40),
     };
     let check = |inputs: StealInputs, outcomes: &[i32]| {
-        let mut rng = draws(outcomes);
+        let mut rng = Draws::new(outcomes);
         let result = skills::steal_check(&inputs, 864_000, &mut rng).unwrap();
         assert!(rng.0.is_empty(), "unused outcomes");
         result
@@ -202,7 +177,7 @@ fn spec013_fixture_b_first_aid_through_a_kit() {
     let mut host = host();
     let player = host.world.player;
     let target = critter(&mut host, adjacent(1), &[]);
-    set_hp(&mut host, target, 10);
+    set_hp(&mut host.world, target, 10);
     let kit = items::carry(&mut host, player, KIT_PID, 1);
     let chance = skill(&host, 6) + critical(&host) + 20;
     assert!(chance >= 1 && chance - 1 < 990, "{chance}");
@@ -223,7 +198,7 @@ fn spec013_fixture_b_first_aid_through_a_kit() {
     assert_eq!(host.world.player_sheet().unwrap().experience, before.1 + 25);
     assert!(host.world.get(kit).is_some(), "draw 7 keeps the kit");
     // A kit draw of 1 uses it up.
-    set_hp(&mut host, target, 10);
+    set_hp(&mut host.world, target, 10);
     host.world.rng.script(&[1, 100, 2, 1]);
     host.use_kit(player, kit, target).unwrap();
     assert!(messages(&mut host).contains(&"kit out".to_string()));
@@ -231,7 +206,7 @@ fn spec013_fixture_b_first_aid_through_a_kit() {
     // A healthy target: no roll, 502 with its name, no experience; time
     // still passes, and the kit draw follows.
     let kit = items::carry(&mut host, player, KIT_PID, 1);
-    set_hp(&mut host, target, 30);
+    set_hp(&mut host.world, target, 30);
     host.world.get_mut(target).unwrap().name = b"Ian".to_vec();
     let ticks = host.world.clock.ticks;
     host.world.rng.script(&[5]);
@@ -315,7 +290,7 @@ fn spec013_fixture_b_usage_slots_and_the_limit() {
     let mut host = host();
     let player = host.world.player;
     let target = critter(&mut host, adjacent(1), &[]);
-    set_hp(&mut host, target, 10);
+    set_hp(&mut host.world, target, 10);
     let kit = items::carry(&mut host, player, KIT_PID, 1);
     host.world.persistence.skill_uses[6] = [100_000, 200_000, 300_000];
     host.world.clock.ticks = 999_999;
@@ -470,7 +445,7 @@ fn spec013_explosion_retry_scripted_requests_and_scenery_notice() {
     // an explosion in progress waits for the next pass (safe rule).
     // (The first blast's knockback moved the victim off the center.)
     host.world.move_object(victim, center, 0, false).unwrap();
-    set_hp(&mut host, victim, 30);
+    set_hp(&mut host.world, victim, 30);
     host.world.get_mut(victim).unwrap().opponent = 0;
     host.world.pending_combat = None;
     let request = ExplosionRequest {
@@ -1116,7 +1091,7 @@ fn spec014_corpse_look_at_leaves_the_world_generator_alone() {
     let mut host = host();
     let player = host.world.player;
     let corpse = critter(&mut host, adjacent(1), &[]);
-    set_hp(&mut host, corpse, 0);
+    set_hp(&mut host.world, corpse, 0);
     host.world.get_mut(corpse).unwrap().name = b"rat".to_vec();
     let world = host.world.rng.state().clone();
     let presentation = host.presentation_rng.state().clone();

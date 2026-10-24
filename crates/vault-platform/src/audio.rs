@@ -915,9 +915,7 @@ fn render(mixer: &Mutex<Mixer>, out: &mut [f32], channels: usize, rate: u32) {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../tests/fixtures/sound/support.rs"]
-pub(crate) mod sound_fixture;
+pub(crate) use vault_fixtures::sound as sound_fixture;
 
 #[cfg(test)]
 mod tests {
