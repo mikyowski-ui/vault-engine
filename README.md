@@ -39,8 +39,8 @@ SPEC-013 R1-rev5, SPEC-014 R1-rev6) add attack and non-combat animation
 choreography with projectile flight, one sequence per owner, the busy-click
 policy, map numbers with city music, and roof hiding (see "Spec completion
 notes"). The approved specs are revised as builder questions are answered;
-R1-rev10 answered the last open ones (see "Open spec questions for the research
-vault").
+SPEC-014 R1-rev12 answered all but one (see "Open spec questions for the
+research vault").
 
 `AGENTS.md` is the repository's implementation policy. `PROVENANCE.md` records
 the two-team clean-room process, and `CONTRIBUTING.md` the clean-room
@@ -516,6 +516,13 @@ Audio plays SPEC-010 sounds on the default device (`--no-audio` keeps it silent)
   configuration) turns it off by volume, stopping the track and silencing
   movie audio; setting them nonzero again turns it back on and replays the
   last recorded track (SPEC-008 §3.10, `vault_core::worldmap::MusicSwitch`).
+- A dialogue session changes the music when it opens and undoes the change
+  when it closes (SPEC-008 §3.10 rule 4). A talking head stops the track, and
+  closing replays it from the beginning. Without a head the music volume is
+  halved (truncated), and closing restores the volume the session opened with
+  (the `[May-improve]` safe rule, not the reference's halving of a stale stored
+  volume). A volume of 1 halves to 0 and turns music off by volume. Barter and
+  the Review and Ask About windows inside a session change nothing.
 - At most four effects play at once. A fifth request fails rather than evicting
   one.
 - Talking-head speech plays `sound/speech/<head>/<stem stored in the .LIP>.ACM`
@@ -674,8 +681,12 @@ included, as an 8-bit `scrNNNNN.bmp` (SPEC-014 §2.5,
 `vault_formats::screenshot`) in the working directory, taking the first free
 number, and prints "Saved screenshot." or "Error saving screenshot.". Every
 held key auto-repeats after more than 500 ms, then every more than 80 ms,
-window toggles included (modifier keys do not); a player turn's start and each
-main-menu pass cancel the repeats. The pause window greys the map through the
+window toggles and modifier keys included; a player turn's start and each
+main-menu pass cancel the repeats. A modifier or lock key (Shift, Ctrl, Alt,
+Super, Caps, Num and Scroll Lock) translates to no key when it is read, so its
+press or repeat takes a slot of the 32-event buffer and acts on nothing: no
+"any key" test is met, and holding Ctrl never closes the pause window that
+Ctrl+P opened (§3.29). The pause window greys the map through the
 §3.17 grey table (max plus min of each `color.pal` entry's 5-bit components)
 with the interface bar left on top; on the world map the grey stays until the
 view next redraws. The message monitor's scroll areas scroll once per press
@@ -692,7 +703,9 @@ move-items counter for stacks. `metarule` 15 opens the elevator panel. The
 options menu leads to the save/load screens (slots below `--save-dir`), the
 preferences (written to `--config`) and the quit confirmation. The
 combat-message switch sets `WorldState::verbose_combat_messages` (1 Verbose,
-0 Brief) for combat message formatting. Mouse sensitivity (1.0-2.5, applied on
+0 Brief). It changes only the struck-target line of a critical hit: Verbose
+appends the critical-effect text (and a separate "was killed" line), Brief the
+status list (SPEC-007 §3.12, `vault_core::combat_messages`). Mouse sensitivity (1.0-2.5, applied on
 the slider's release) has no spec formula. While the world draws its own
 cursor, the engine multiplies the OS pointer's motion by it and warps the
 hidden OS pointer after the scaled one. With the system cursor shown, or where
@@ -700,7 +713,13 @@ the platform cannot warp the pointer, the OS absolute position is used
 unchanged. The input log records the scaled position, so a replay needs no
 sensitivity of its own. These program-run preferences survive a game reset.
 
-The world draws its own cursor (§3.26-3.29). Resting the pointer 250 ms shows
+The world draws its own cursor (§3.26-3.29). It is a flat map object at the
+hex under the pointer, drawn in the §3.44 flat pass in hex and insertion order
+(each move reinserts it), lit by its hex like any object, clipped to the map
+window, and under every upright object, roof and floating text. It exists
+only in the render scene, so scripts, saves, picking and blocking never see
+it. The movement-mode AP text is a separate upright object at the same hex.
+Resting the pointer 250 ms shows
 the hover: the movement cost (or a red X), the arrow's action icon with the
 object's look-at text in the monitor, or the crosshair's hit chance. The
 movement hover plans a path only when the hovered hex, the player's hex, AP,
@@ -711,7 +730,8 @@ translucent and disabled bits; cleared on load, written as it stands on
 save). Outlines are drawn after the roofs as the one-pixel two-pass ring, at
 most 100 per refresh, hostile and friendly in cycling row bands and red, grey
 and item ones optionally translucent (`vault_render::outline`). The movement
-hex cursor has a translucent red outline. In combat every combatant is
+hex cursor's translucent red outline joins the outline list when the cursor is
+drawn, so it is painted after the roofs. In combat every combatant is
 outlined (hostile, or friendly for the player's team with Friendly Foe); the
 outlines show on the player's turn in crosshair mode according to
 `target_highlight` and on each NPC's own turn. A dead critter's
@@ -1038,7 +1058,22 @@ program filename; same-owner registration resets to integer zero. Procedure
 exports belong to a program instance and go with it (`0x800E`, `0x8009`, or
 freeing). Variables are never removed per program: the whole variable
 registry is cleared on every map load and leave, every game reset and every
-new game (SPEC-005 §2.2), so each map's first exporter owns a name afresh. Named callbacks, keyboard bindings, and script timers retain their
+new game (SPEC-005 §2.2), so each map's first exporter owns a name afresh.
+
+The player has its own critter-category script record (`scripts.lst` entry 0),
+which is party member 0 (SPEC-006 §3.5). It is created afresh at every new game
+and reset. Leaving a map copies it, with each party member's record, and
+removes it, so its timers end. After the next map loads it is recreated with
+identifier 18000 and no loaded program, after the map's own critter records.
+A game load gives the player a new record instead of the saved one.
+
+A script that kills, damages or destroys its own object (`0x80ED`, `0x80EF`,
+`0x80F4`) stops itself (SPEC-005 §3.2). The rest of that run does not execute,
+its own `destroy_p_proc`/`damage_p_proc` requests are skipped while the opcode
+runs, and every later request runs nothing with the override clear. Default
+actions such as look and pickup therefore proceed, until the program is freed
+at the next map load. A held item that destroys itself leaves the inventory
+hidden, temporary and detached from its script. Named callbacks, keyboard bindings, and script timers retain their
 separate lifetimes.
 
 `GDialog` tracks session, node processing, review, paging, callbacks, and head
@@ -1734,27 +1769,18 @@ travel, and Pip-Boy"); there is no engine-specific save envelope.
 
 ## Open spec questions for the research vault
 
-The SPEC-001 to SPEC-014 syncs through R1-rev10 answered every earlier builder
-question (former items 1-44). Each open one needs a sanitized spec answer;
-until then the code takes the most literal reading (or the stated choice) and
-comments it.
+The SPEC-001 to SPEC-014 syncs through SPEC-014 R1-rev12 answered every
+earlier builder question (former items 1-47). One is open; until it is
+answered the code takes the stated choice and comments it.
 
-- **45.** SPEC-014 §3.29 says every physical key auto-repeats. Modifier keys
-  (Shift, Ctrl, Alt, Super) are kept out of the repeat, because a repeated
-  Ctrl would, for example, close the pause window opened by Ctrl+P
-  (`vault-platform/src/input.rs`). Does the reference queue repeats for
-  modifier keys?
-- **46.** SPEC-008 §3.10 rule 4 mentions dialogue's music handling (stopped
-  for a talking head, halved for no head), but no spec says when it starts and
-  ends, so it is not wired. `MusicSwitch` already turns music off for a halved
-  volume of 0.
-- **47.** SPEC-014 §3.44 says a registered animation step can enable or
-  disable its owner's outline, but no SPEC-007 sequence entry carries that
-  step, so none does.
+- **48.** SPEC-007 §4.10 Fixture J says the Raider has art alias 0, "so the
+  head is `combat.msg` 1110". But §3.12 (and SPEC-014 §3.38) name a location
+  `1000 + 10 × alias + location`, which is message 1000 for alias 0 and the
+  head, and SPEC-014 §3.38 says messages 1000-1007 do not exist. The Fixture J
+  tests (`vault-core/src/combat_messages_tests.rs`) use alias 11, which gives
+  1110 "the head" as the fixture's expected text needs. Which value is
+  intended?
 
 ## Known gaps
 
-These parts are stand-ins or approximations:
-
-- The movement-mode hex cursor's translucent red outline is drawn as an
-  overlay above the scene, not as a flat object in the §3.44 flat pass.
+None.
