@@ -23,7 +23,7 @@ use crate::{
 };
 use vault_formats::{
     Fid, FrmArchive,
-    pro::{ContainerFlags, ItemData, LockFlags, PrototypeData, SceneryData},
+    pro::{BasicFlags, ContainerFlags, ItemData, LockFlags, PrototypeData, SceneryData},
 };
 
 /// Animation codes (SPEC-007 §2.2).
@@ -89,6 +89,15 @@ impl Running {
     }
 }
 
+/// SPEC-014 §3.28 when the world's sequences stopped: a paused map
+/// background (the presentation layer stopped ticking the world), or an
+/// open dialogue.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Paused {
+    pub background: Option<u64>,
+    pub dialogue: Option<u64>,
+}
+
 impl<A: WorldAssets> WorldHost<A> {
     /// Register a world sequence (§3.10.1): it is examined once now, and
     /// instant playback plays it to its end at once. Returns whether it
@@ -137,6 +146,14 @@ impl<A: WorldAssets> WorldHost<A> {
         sequence.id = self.next_motion;
         sequence.combat = self.world.combat;
         let now = self.motion_time.max(self.world.elapsed_ms);
+        if sequence.combat {
+            // SPEC-014 §3.27: the registration adds 1 to the combat count
+            // before its first examination, so a sequence that ends within
+            // it takes the lock and releases it at once.
+            let count = self.combat_count() + 1;
+            let turn = self.lock_turn();
+            self.combat_lock.counted(count, turn);
+        }
         self.running_motions.push(Running::of(&sequence, false));
         match self.playback {
             Playback::Instant => {
@@ -162,10 +179,14 @@ impl<A: WorldAssets> WorldHost<A> {
     /// SPEC-014 §3.27 recount the running sequences registered in combat:
     /// the world's sequences and the attack shows queued to play.
     pub(crate) fn sync_combat_lock(&mut self) {
-        let count = self.motions.iter().filter(|m| m.combat).count()
-            + self.world.shows.iter().filter(|show| show.combat).count();
+        let count = self.combat_count();
         let turn = self.lock_turn();
         self.combat_lock.counted(count, turn);
+    }
+    /// The running sequences registered in combat.
+    fn combat_count(&self) -> usize {
+        self.motions.iter().filter(|m| m.combat).count()
+            + self.world.shows.iter().filter(|show| show.combat).count()
     }
     /// After a sequence's registration or pass: a sequence cancelled
     /// meanwhile is halted while its record is still the running one, so
@@ -198,6 +219,43 @@ impl<A: WorldAssets> WorldHost<A> {
         self.motion_time = now_ms;
         self.sync_combat_lock();
         changed
+    }
+    /// SPEC-014 §3.28 / §3.2: map background processing is paused at
+    /// `now_ms` (an open action menu, a modal window or screen, a game
+    /// fade). A presentation layer that does not tick the world calls this
+    /// on each frame it skips; the next [`WorldHost::tick`] resumes every
+    /// world sequence and attack show where it stood, its next steps moved
+    /// by the paused span, instead of replaying that time at once.
+    pub fn pause_background(&mut self, now_ms: u64) {
+        self.paused.background.get_or_insert(now_ms);
+    }
+    /// The end of a [`Self::pause_background`] span.
+    pub(crate) fn resume_background(&mut self, now_ms: u64) {
+        if let Some(since) = self.paused.background.take() {
+            let span = now_ms.saturating_sub(since);
+            self.delay_motions(span);
+            for show in &mut self.world.shows {
+                show.delay(span);
+            }
+        }
+    }
+    /// The world's sequences up to `now_ms`, except while a dialogue is
+    /// open: they then wait, and resume where they stood once it closes.
+    /// Returns whether anything stepped.
+    pub(crate) fn step_world_motions(&mut self, now_ms: u64) -> bool {
+        if self.world.dialogue.open {
+            self.paused.dialogue.get_or_insert(now_ms);
+            return false;
+        }
+        if let Some(since) = self.paused.dialogue.take() {
+            self.delay_motions(now_ms.saturating_sub(since));
+        }
+        self.step_motions(now_ms)
+    }
+    fn delay_motions(&mut self, span_ms: u64) {
+        for sequence in &mut self.motions {
+            sequence.schedule.delay(span_ms);
+        }
     }
     /// One scheduler pass over the sequences registered before it, in
     /// registration order. A sequence registered during the pass was
@@ -452,8 +510,9 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// A walk entry starts: it plans its route (§3.1). Without a route it
     /// fails, unless the mover is already where it was going: on the hex,
-    /// or for an object, a one-step route shortened to nothing (the mover
-    /// on the target's hex or a neighbor of it) moves nothing.
+    /// or for an object, a route shortened to nothing (the mover on the
+    /// target's hex or a neighbor of it, or within two hexes for a
+    /// multihex mover, whose route loses two steps) moves nothing.
     pub(crate) fn start_walk(&mut self, mover: ObjectRef, walk: &mut Walk) -> Begin {
         let planned = match walk.goal {
             Goal::Hex(hex) => self.plan_to_tile(mover, hex, walk.limit),
@@ -468,7 +527,13 @@ impl<A: WorldAssets> WorldHost<A> {
         if movement.directions.is_empty() {
             let there = match walk.goal {
                 Goal::Hex(hex) => self.place(mover).is_some_and(|(at, _)| at == hex),
-                Goal::Object(target) => self.world.distance(mover, target) <= 1,
+                Goal::Object(target) => {
+                    let multihex = self
+                        .world
+                        .get(mover)
+                        .is_some_and(|object| object.raw.flags.contains(BasicFlags::MULTIHEX));
+                    self.world.distance(mover, target) <= if multihex { 2 } else { 1 }
+                }
             };
             return if there { Begin::Done } else { Begin::Failed };
         }
@@ -551,7 +616,11 @@ impl<A: WorldAssets> WorldHost<A> {
                     self.world.diagnostic(error.to_string());
                 }
             } else {
-                let rebuilt = self.world.route(mover, hex, walk.destination, true);
+                // §3.1 the request's limit still bounds the scheduled
+                // route: the rebuilt one takes only the hexes left.
+                walk.limit = walk.limit.saturating_sub(walk.cursor);
+                let mut rebuilt = self.world.route(mover, hex, walk.destination, true);
+                rebuilt.truncate(walk.limit);
                 let Some(&first) = rebuilt.first() else {
                     self.stand_on_hex(mover);
                     return Stepped::Done;
@@ -1392,16 +1461,32 @@ impl<A: WorldAssets> WorldHost<A> {
     ) -> Result<bool, WorldError> {
         self.walk_toward_with(actor, tile, run, reserve, true)
     }
-    /// SPEC-014 §3.27 a movement click: a walk, or a run, toward `tile`,
-    /// limited in combat to the action points and free movement less
-    /// `reserve`. For a busy player (a sequence holding it is still
-    /// playing) `interrupt_walk` decides: on, the click first cancels the
-    /// player's current sequence, whatever it is doing, dropping its
-    /// unstarted use, take-out and loot; off, the walk cannot register and
-    /// the click does nothing. A player's run clears sneaking without
-    /// Silent Running. Returns whether the walk registered: false when the
-    /// click does nothing, without a route, or when the sequence cannot
-    /// register (SPEC-007 §3.10.1).
+    /// SPEC-014 §3.27 a movement click on `tile` (the caller found the hex
+    /// under the pointer, step 1), in the Must-match order:
+    ///
+    /// 2. In combat the step budget is the action points plus free
+    ///    movement less `reserve`; at 0 or less nothing happens. Out of
+    ///    combat a busy player's sequence (one holding it is still playing)
+    ///    is cancelled now when `interrupt_walk` is on, whatever it is
+    ///    doing, dropping its unstarted use, take-out and loot. The cancel
+    ///    comes before the walk registers and before any route is searched.
+    /// 3. A player's run request clears sneaking without Silent Running,
+    ///    even when the walk then fails or finds no route.
+    /// 4. A sequence holding one walk or run entry to the hex registers. It
+    ///    fails while the player is still busy (`interrupt_walk` off, or a
+    ///    sequence the cancel could not end, SPEC-007 §3.10.1). For the
+    ///    actor's own hex it holds no entry and ends at once.
+    /// 5. The entry starts at once and only then searches its route
+    ///    ([`Self::start_walk`]); neither the click nor the registration
+    ///    tests it. Without a route the entry fails as it starts: the
+    ///    sequence ends and the walker stands, with no message and no AP
+    ///    spent (the "no route" stop, reference behavior).
+    ///
+    /// In combat the registration takes the combat lock while the walk
+    /// plays; a no-route or own-hex click takes it and releases it within
+    /// the click (`clicks::CombatLock::releases`). The route is cut to the
+    /// budget as the entry starts, and AP are charged per hex. Returns
+    /// whether the sequence registered.
     pub fn walk_toward_with(
         &mut self,
         actor: ObjectRef,
@@ -1411,13 +1496,6 @@ impl<A: WorldAssets> WorldHost<A> {
         interrupt_walk: bool,
     ) -> Result<bool, WorldError> {
         let player = actor == self.world.player;
-        if player {
-            match busy_policy(Click::Movement, &self.click_state(), interrupt_walk) {
-                Policy::Ignore => return Ok(false),
-                Policy::Cancel => self.cancel_motions(actor),
-                Policy::Proceed => {}
-            }
-        }
         let limit = if self.world.combat {
             let free = if player { self.world.free_movement } else { 0 };
             let budget = self.world.action_points(actor) + free - reserve;
@@ -1428,20 +1506,27 @@ impl<A: WorldAssets> WorldHost<A> {
         } else {
             usize::MAX
         };
-        let Some(movement) = self.plan_to_tile(actor, tile, limit) else {
-            return Ok(false);
+        let policy = if player {
+            busy_policy(Click::Movement, &self.click_state(), interrupt_walk)
+        } else {
+            Policy::Proceed
         };
-        if movement.directions.is_empty() {
-            return Ok(false);
+        if policy == Policy::Cancel {
+            self.cancel_motions(actor);
         }
         if player && run && self.sneaking() && self.world.perk(Perk::SilentRunning) == 0 {
             self.set_sneak(false)?;
         }
+        if policy == Policy::Ignore {
+            return Ok(false);
+        }
         let mut sequence = MotionSequence::new();
-        let walk = Walk::new(Goal::Hex(tile), run, limit);
-        sequence
-            .push(actor, 0, Motion::Walk(Box::new(walk)))
-            .map_err(refused)?;
+        if self.place(actor).is_none_or(|(hex, _)| hex != tile) {
+            let walk = Walk::new(Goal::Hex(tile), run, limit);
+            sequence
+                .push(actor, 0, Motion::Walk(Box::new(walk)))
+                .map_err(refused)?;
+        }
         Ok(self.register_motion(sequence))
     }
 

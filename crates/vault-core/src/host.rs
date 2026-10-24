@@ -102,6 +102,11 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub combat_lock: crate::clicks::CombatLock,
     /// The scheduler time of the world's sequences.
     pub(crate) motion_time: u64,
+    /// SPEC-014 §3.28 when the world's sequences stopped for a pause.
+    pub(crate) paused: crate::host_motion::Paused,
+    /// SPEC-012 §3.12 a water-countdown movie was requested and has not
+    /// finished playing.
+    pub(crate) countdown_movie: bool,
     /// SPEC-007 §3.11.2 the idle-fidget background task, while it runs.
     pub(crate) fidget: Option<crate::host_fidget::Fidget>,
     /// SPEC-006 §3.7 the critter-script cycle counter: 0 at program start
@@ -266,6 +271,8 @@ impl<A: WorldAssets> WorldHost<A> {
             next_motion: 0,
             combat_lock: Default::default(),
             motion_time: 0,
+            paused: Default::default(),
+            countdown_movie: false,
             fidget: None,
             critter_cycle: 0,
             transition_world_map: false,
@@ -457,10 +464,11 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.trace.push(WorldTrace::LoadStep(3));
         self.world.import_map(map, &self.assets)?;
         self.world.unloaded = false;
-        // SPEC-014 §3.35: a map loaded fresh clears the player's last
-        // attacker.
-        if !saved && let Some(player) = self.world.get_mut(self.world.player) {
-            player.opponent = 0;
+        // SPEC-006 §3.5 step 3: a fresh map's critters, whose stored -1
+        // last attacker is nothing, start with no last attacker; under the
+        // saved-map safe rule a stored combat identifier resolves.
+        if saved {
+            self.world.resolve_last_attackers();
         }
         self.world.trace.push(WorldTrace::LoadStep(4));
         self.world.elevation = self.world.map.header.entry_elevation;
@@ -574,6 +582,9 @@ impl<A: WorldAssets> WorldHost<A> {
             self.report_load_dispatch(result);
         }
         self.world.trace.push(WorldTrace::LoadStep(7));
+        // SPEC-006 §3.5 step 7 / SPEC-013 §3.22: the party is recovered
+        // around the player's final entry placement.
+        self.world.place_party()?;
         if let Some(player) = self.world.get_mut(self.world.player) {
             player.raw.light = Light {
                 radius: 4,
@@ -619,6 +630,11 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.enqueue_map_timers()?;
         self.world.loading = false;
         self.world.restoring = false;
+        // SPEC-006 §3.5: after step 10 every load, fresh or saved, leaves
+        // the player with no last attacker.
+        if let Some(player) = self.world.get_mut(self.world.player) {
+            player.opponent = 0;
+        }
         // SPEC-014 §3.35: once a saved copy has loaded, with its map
         // scripts, the revisit rules age it; then the city music starts.
         if saved && load_error.is_none() {
@@ -1028,9 +1044,10 @@ impl<A: WorldAssets> WorldHost<A> {
                     .insert(self.world.clock.ticks, 600, 0, EventKind::MapUpdate)?;
             }
             EventKind::Midnight => {
-                // SPEC-013 §3.20: a movie already playing skips the whole
-                // handler, including the next midnight.
-                if self.library.movie_playing {
+                // SPEC-013 §3.20 / SPEC-012 §3.12 step 1: a movie already
+                // playing skips the whole handler, including the next
+                // midnight.
+                if self.library.movie_playing || self.countdown_movie {
                     return Ok(0);
                 }
                 let refs: Vec<_> = self.world.iter().map(|(r, _)| r).collect();
@@ -1146,6 +1163,8 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     pub fn tick(&mut self, now_ms: u64) -> Result<bool, WorldError> {
         self.world.elapsed_ms = now_ms;
+        // SPEC-014 §3.28: animation resumes where a pause left it.
+        self.resume_background(now_ms);
         // Asset load problems that did not stop a load (SPEC-002 §3.5).
         for message in self.assets.take_diagnostics() {
             self.world.diagnostic(message);
@@ -1169,7 +1188,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         // SPEC-007 §3.11 the world's own sequences (walking, interactions,
         // doors) pause while a dialogue is open.
-        if !self.world.dialogue.open && self.step_motions(now_ms) {
+        if self.step_world_motions(now_ms) {
             changed_by_animation = true;
             self.drain_requests()?;
         }
@@ -1847,8 +1866,10 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             retained = result.result;
             if retained != 0 {
+                // SPEC-006 §3.8 step 5: result 1 destroys the item, one
+                // unit of a stack.
                 if retained == 1 {
-                    self.world.erase(item);
+                    self.world.destroy_unit(item)?;
                 }
                 self.map_update()?;
                 return Ok(());
@@ -1888,7 +1909,7 @@ impl<A: WorldAssets> WorldHost<A> {
             retained = result.result;
         }
         if retained == 1 {
-            self.world.erase(item);
+            self.world.destroy_unit(item)?;
         }
         self.map_update()
     }
@@ -1923,8 +1944,9 @@ impl<A: WorldAssets> WorldHost<A> {
         self.approach_sequence(actor, target, action, run)
     }
     /// SPEC-014 §3.27 a movement-mode click: walk toward `tile`, limited in
-    /// combat to the actor's AP plus free movement. Returns whether a route
-    /// exists.
+    /// combat to the actor's AP plus free movement. Returns whether the walk
+    /// registered; its route is searched only as it starts, and without one
+    /// the walker stops standing.
     pub fn walk_to(&mut self, actor: ObjectRef, tile: i32) -> Result<bool, WorldError> {
         self.walk_toward(actor, tile, false, 0)
     }

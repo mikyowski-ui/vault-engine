@@ -233,6 +233,9 @@ impl<A: WorldAssets> WorldHost<A> {
         for (item, flag) in session.hidden {
             self.world.add_item(session.merchant, item, 1, true)?;
             if flag != 0 {
+                // The returned item may have joined a stack: only its own
+                // unit goes back into the slot (SPEC-011 §3.13).
+                let item = self.world.split_unit(item)?;
                 self.world.equip(session.merchant, item, flag)?;
             }
         }

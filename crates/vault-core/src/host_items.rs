@@ -3,14 +3,16 @@
 //! the perk chooser's display-name order (§3.21), opening the inventory in
 //! combat (§3.11), and the drag reload's ready sound (§3.15); and the
 //! SPEC-005 §3.8 player base art: the jumpsuit by gender, armor art, and
-//! the inventory figure.
+//! the inventory figure; and new item instances that know their loaded
+//! ammunition (§3.14-3.16).
 use crate::{
     ObjectRef, Perk, WorldEffect, WorldError, ai, assets::WorldAssets, host::WorldHost,
     progression::PerkChoice,
 };
+use std::sync::Arc;
 use vault_formats::{
     Fid,
-    pro::{BasicFlags, ItemData},
+    pro::{BasicFlags, Item, ItemData, Prototype, PrototypeData},
 };
 
 /// SPEC-005 §3.8 the `critters.lst` base names of the male and female
@@ -18,6 +20,32 @@ use vault_formats::{
 const JUMPSUITS: [&[u8]; 2] = [b"hmjmps", b"hfjmps"];
 
 impl<A: WorldAssets> WorldHost<A> {
+    /// A new instance of `prototype` placed on the map
+    /// (`WorldState::spawn`). A weapon is created loaded with its
+    /// prototype's ammunition, whose prototype is recorded too, so the
+    /// weapon has that ammunition's weight and value and can be unloaded
+    /// (§3.14-3.16), as an imported weapon does.
+    pub(crate) fn spawn(
+        &mut self,
+        prototype: Arc<Prototype>,
+        hex: i32,
+        elevation: u8,
+    ) -> Result<ObjectRef, WorldError> {
+        self.remember_ammo(&prototype);
+        self.world.spawn(prototype, hex, elevation)
+    }
+    fn remember_ammo(&mut self, prototype: &Prototype) {
+        if let PrototypeData::Item(Item {
+            data: ItemData::Weapon(weapon),
+            ..
+        }) = &prototype.data
+            && let Ok(pid) = u32::try_from(weapon.ammo_pid)
+            && self.world.known_prototype(pid).is_none()
+            && let Ok(ammo) = self.assets.prototype(pid)
+        {
+            self.world.remember_prototype(ammo);
+        }
+    }
     /// Each gained level prints `stat.msg` 600 and plays `levelup`.
     fn announce_levels(&mut self, levels: u32) {
         for _ in 0..levels {
@@ -253,6 +281,8 @@ impl<A: WorldAssets> WorldHost<A> {
         } else {
             BasicFlags::RIGHT_HAND
         };
+        // From a stack the slot takes one unit (SPEC-011 §3.13).
+        let item = self.world.split_unit(item)?;
         self.world.equip(critter, item, flag.0)?;
         if armour && critter == self.world.player {
             let base = self

@@ -117,12 +117,18 @@ impl WorldState {
             .and_then(|object| object.character.as_ref())
             .map_or(0, |sheet| i64::from(sheet.stat(12, self.context(critter))))
     }
-    /// The §3.14 limit test for adding `quantity` of `item` to `owner`.
+    /// The §3.14 limit test for adding `quantity` of `item` to `owner`. An
+    /// item the critter already carries (a move between its own bags) is
+    /// already in its total, so it adds nothing to the carry check.
     pub fn add_refusal(&self, owner: ObjectRef, item: ObjectRef, quantity: i32) -> Option<Refusal> {
         let target = self.get(owner)?;
         let added = self.item_weight(item) * i64::from(quantity);
-        let heavy =
-            |critter: ObjectRef| self.inventory_weight(critter) + added > self.carry_limit(critter);
+        let heavy = |critter: ObjectRef| {
+            let carried = self.get(item).is_some_and(|o| o.owner.is_some())
+                && self.outermost_owner(item) == critter;
+            let added = if carried { 0 } else { added };
+            self.inventory_weight(critter) + added > self.carry_limit(critter)
+        };
         match target.category() {
             Category::Critter => {
                 let sheet = target.character.as_ref()?;
@@ -360,6 +366,16 @@ impl WorldState {
         if let (Some(replacement), Some(pack)) = (replacement, self.pack_size(item)) {
             self.set_ammo_rounds(replacement, pack);
         }
+        // The copy that represents the rest takes a new instance of the
+        // item's script (SPEC-007 §3.9), rather than none.
+        if let Some(replacement) = replacement
+            && let Some((file, category, locals)) = self
+                .script_for(item)
+                .and_then(|sid| self.scripts.get(&sid))
+                .map(|script| (script.file, (script.id >> 24) as u8, script.local_count))
+        {
+            self.add_script(replacement, file, category, locals)?;
+        }
         if self
             .get(item)
             .is_some_and(|o| o.raw.flags.contains(BasicFlags::WORN))
@@ -439,17 +455,11 @@ impl WorldState {
                 Some((slot, owner.inventory[slot].1))
             })
             .ok_or_else(not_carried)?;
-        let script = self
-            .script_for(item)
-            .and_then(|sid| self.scripts.get(&sid))
-            .map(|script| (script.file, (script.id >> 24) as u8, script.local_count));
+        // The copy left for the rest has its own script instance.
         self.remove_item(attacker, item, 1)?;
         if count > 1 {
             let copy = self.get(parent).expect("parent").inventory[slot].0;
             self.get_mut(copy).expect("copy").raw.flags.0 |= hands;
-            if let Some((file, category, locals)) = script {
-                self.add_script(copy, file, category, locals)?;
-            }
             return Ok((item, Some(copy)));
         }
         let Some(refill) = self.first_identical(attacker, item) else {
@@ -512,10 +522,36 @@ impl WorldState {
             .find(|(entry, _)| *entry == item)
             .map(|(_, quantity)| *quantity)
     }
+    /// One unit of a carried stack becomes its own entry of the same
+    /// owner, keeping any hand flags; a copy represents the rest (SPEC-011
+    /// §3.13 removal). A single unit is left as it is. Returns the unit,
+    /// which is `item` itself.
+    pub(crate) fn split_unit(&mut self, item: ObjectRef) -> Result<ObjectRef, WorldError> {
+        let Some(owner) = self.get(item).and_then(|object| object.owner) else {
+            return Ok(item);
+        };
+        if self.entry_quantity(item).unwrap_or(1) <= 1 {
+            return Ok(item);
+        }
+        let hands = self.get(item).map_or(0, |object| {
+            object.raw.flags.0 & (BasicFlags::LEFT_HAND.0 | BasicFlags::RIGHT_HAND.0)
+        });
+        self.remove_item(owner, item, 1)?;
+        self.get_mut(owner)
+            .expect("owner")
+            .inventory
+            .push((item, 1));
+        let object = self.get_mut(item).expect("item");
+        object.owner = Some(owner);
+        object.raw.hex = None;
+        object.raw.flags.0 |= hands;
+        Ok(item)
+    }
     /// SPEC-014 §3.34 a hand or armor slot (`flag`) takes `item`, which
     /// first leaves any slot it holds (worn armor's stats come off); from a
     /// stack the slot takes one unit, split off as its own entry (equipped
-    /// items never stack). Returns the object now in the slot.
+    /// items never stack). An item already in that slot changes nothing,
+    /// so no effect is applied twice. Returns the object now in the slot.
     pub fn equip_slot(
         &mut self,
         owner: ObjectRef,
@@ -533,24 +569,17 @@ impl WorldState {
         let held = self
             .get(item)
             .map_or(0, |object| object.raw.flags.0 & EQUIPPED);
-        if held & BasicFlags::WORN.0 != 0 && flag != BasicFlags::WORN.0 {
+        if held & flag != 0 {
+            return Ok(item);
+        }
+        if held & BasicFlags::WORN.0 != 0 {
             self.armour_effect(owner, item, false);
         }
         if let Some(object) = self.get_mut(item) {
             object.raw.flags.0 &= !EQUIPPED;
         }
-        let quantity = self.entry_quantity(item).unwrap_or(1);
-        if quantity > 1 {
-            // The detached unit becomes its own entry; the rest stays.
-            self.remove_item(owner, item, 1)?;
-            self.get_mut(owner)
-                .expect("owner")
-                .inventory
-                .push((item, 1));
-            let object = self.get_mut(item).expect("item");
-            object.owner = Some(owner);
-            object.raw.hex = None;
-        }
+        // The detached unit becomes its own entry; the rest stays.
+        self.split_unit(item)?;
         self.equip(owner, item, flag)?;
         Ok(item)
     }
@@ -588,7 +617,13 @@ impl WorldState {
         }
         Ok(true)
     }
-    /// Drop `quantity` units of a carried item on the owner's hex.
+    /// Drop `quantity` units of a carried item on the owner's hex. A map
+    /// object is one unit (SPEC-006 §3.8 picks up one item; money its
+    /// amount), so every unit leaves as its own ground object and none is
+    /// lost (SPEC-011 §3.13 conservation): unit by unit, each removal
+    /// detaching the representative while a copy keeps the rest, so an
+    /// ammunition entry drops its front pack and then full packs. Money
+    /// drops as one object holding the amount.
     pub fn drop_item(
         &mut self,
         owner: ObjectRef,
@@ -599,8 +634,31 @@ impl WorldState {
             .get(self.outermost_owner(owner))
             .and_then(|holder| Some((holder.raw.hex?, holder.raw.elevation)))
             .ok_or_else(|| WorldError::Invalid("the holder is not on the map".into()))?;
-        self.remove_item(owner, item, quantity)?;
-        self.move_object(item, place.0, place.1, false)
+        let money = self.get(item).is_some_and(|object| object.money.is_some());
+        if money || quantity <= 1 {
+            self.remove_item(owner, item, quantity)?;
+            return self.move_object(item, place.0, place.1, false);
+        }
+        if self.entry_quantity(item).unwrap_or(0) < quantity {
+            return Err(WorldError::Invalid("not enough inventory quantity".into()));
+        }
+        let parent = self
+            .get(item)
+            .and_then(|object| object.owner)
+            .ok_or_else(|| WorldError::Invalid("item is not carried".into()))?;
+        let mut unit = item;
+        for left in (0..quantity).rev() {
+            let slot = self
+                .get(parent)
+                .and_then(|object| object.inventory.iter().position(|(r, _)| *r == unit))
+                .ok_or_else(|| WorldError::Invalid("item is not carried".into()))?;
+            self.remove_item(owner, unit, 1)?;
+            self.move_object(unit, place.0, place.1, false)?;
+            if left > 0 {
+                unit = self.get(parent).expect("parent").inventory[slot].0;
+            }
+        }
+        Ok(())
     }
     /// A misc item's remaining charges.
     pub fn charges(&self, item: ObjectRef) -> Option<i32> {

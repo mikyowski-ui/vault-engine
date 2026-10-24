@@ -1494,3 +1494,142 @@ fn spec014_talk_tests_distance_and_line_from_the_player_at_each_moment() {
     host.action(player, target, ObjectAction::Talk).unwrap_err();
     assert!(!host.moving(player));
 }
+
+/// A hex west of the player's start whose six neighbors hold critters, so
+/// no route reaches it.
+fn enclosed(host: &mut WorldHost<Assets>) -> i32 {
+    let target = hexes(20100, 4, 4);
+    for direction in 0..6 {
+        npc(host, step(target, direction));
+    }
+    target
+}
+
+#[test]
+fn spec014_movement_clicks_cancel_before_the_route_and_stop_without_one() {
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let shifts = HEX_STEPS.map(|[x, y]| [(x / 4) as i16, (y / 4) as i16]);
+    host.assets.art.insert(critter(1, 0), frm(8, 10, 0, shifts));
+    let player = host.world.player;
+    let target = enclosed(&mut host);
+    let art =
+        |host: &WorldHost<Assets>| Fid(host.world.get(player).unwrap().raw.art_id).animation();
+    let walking = |host: &mut WorldHost<Assets>, now: &mut u64| {
+        assert!(
+            host.walk_toward(player, hexes(hex(host, player), 1, 6), false, 0)
+                .unwrap()
+        );
+        for _ in 0..2 {
+            *now += 100;
+            host.step_motions(*now);
+        }
+        assert!(host.click_state().walking && host.click_state().busy);
+        assert_ne!(host.world.get(player).unwrap().raw.displacement, [0, 0]);
+    };
+    let mut now = 0;
+    // SPEC-014 §3.27 "No route": the cancel comes first, then the walk
+    // registers and only its start searches the route. Without one the
+    // entry fails: the sequence ends, the player stands on the hex it
+    // occupies, nothing is printed and the old path is not resumed.
+    walking(&mut host, &mut now);
+    let stored = hex(&host, player);
+    host.world.effects.clear();
+    assert!(host.walk_toward(player, target, false, 0).unwrap());
+    assert!(host.motions.is_empty() && !host.click_state().busy);
+    assert_eq!(art(&host), 0, "standing");
+    assert_eq!(hex(&host, player), stored);
+    assert_eq!(host.world.get(player).unwrap().raw.displacement, [0, 0]);
+    assert!(messages(&mut host).is_empty() && sounds(&mut host).is_empty());
+    now += 1000;
+    host.step_motions(now);
+    assert_eq!(hex(&host, player), stored, "the old walk is not resumed");
+    // The player's own hex stops a walking player the same way: the
+    // sequence holds no entry and ends at once.
+    walking(&mut host, &mut now);
+    let stored = hex(&host, player);
+    assert!(host.walk_toward(player, stored, false, 0).unwrap());
+    assert!(host.motions.is_empty());
+    assert_eq!((art(&host), hex(&host, player)), (0, stored));
+    // Step 3: a run request clears sneaking before the registration, so
+    // also without a route, and when a busy player's walk cannot register
+    // (`interrupt_walk` off).
+    host.set_sneak(true).unwrap();
+    assert!(host.walk_toward(player, target, true, 0).unwrap());
+    assert!(!host.sneaking());
+    walking(&mut host, &mut now);
+    host.set_sneak(true).unwrap();
+    let first = host.motions[0].id;
+    assert!(
+        !host
+            .walk_toward_with(player, target, true, 0, false)
+            .unwrap()
+    );
+    assert!(!host.sneaking());
+    assert_eq!(host.motions[0].id, first, "the walk keeps playing");
+}
+
+#[test]
+fn spec014_combat_no_route_clicks_take_and_release_the_lock_at_once() {
+    use crate::clicks::input_locked;
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let player = host.world.player;
+    let target = enclosed(&mut host);
+    host.world.combat = true;
+    host.world.critter_state_mut(player).unwrap().ap = 5;
+    host.combat_lock.begin_turn();
+    host.sync_combat_lock();
+    let releases = host.combat_lock.releases;
+    // No route: registered, failed as it started, no AP spent; the lock
+    // was taken and released within the click.
+    assert!(host.walk_toward(player, target, false, 0).unwrap());
+    assert_eq!(host.world.critter_state(player).unwrap().ap, 5);
+    assert_eq!(host.combat_lock.count, 0);
+    assert!(!input_locked(&host.click_state()));
+    assert_eq!(host.combat_lock.releases, releases + 1);
+    // The player's own hex: the same.
+    assert!(host.walk_toward(player, 20100, false, 0).unwrap());
+    assert_eq!(host.combat_lock.releases, releases + 2);
+    assert!(!input_locked(&host.click_state()));
+    // No budget: nothing happens, not even the lock.
+    host.world.critter_state_mut(player).unwrap().ap = 0;
+    assert!(!host.walk_toward(player, target, false, 0).unwrap());
+    assert_eq!(host.combat_lock.releases, releases + 2);
+}
+
+#[test]
+fn spec014_paused_background_resumes_walks_where_they_stood() {
+    let mut host = host();
+    host.playback = Playback::RealTime;
+    let shifts = HEX_STEPS.map(|[x, y]| [(x / 4) as i16, (y / 4) as i16]);
+    host.assets.art.insert(critter(1, 0), frm(8, 10, 0, shifts));
+    let player = host.world.player;
+    let goal = hexes(20100, 1, 6);
+    assert!(host.walk_toward(player, goal, false, 0).unwrap());
+    host.tick(0).unwrap();
+    host.tick(100).unwrap();
+    let place = |host: &WorldHost<Assets>| {
+        let object = host.world.get(player).unwrap();
+        (object.raw.hex, object.raw.displacement)
+    };
+    let before = place(&host);
+    // SPEC-014 §3.28: ten seconds under a modal window, then the next
+    // tick: the walk goes on from where it stood, one step at a time.
+    host.pause_background(150);
+    host.tick(10_150).unwrap();
+    assert_eq!(place(&host), before, "nothing replays the paused span");
+    host.tick(10_200).unwrap();
+    assert_ne!(place(&host), before);
+    assert_ne!(hex(&host, player), goal);
+    // A dialogue pauses the world's sequences the same way.
+    let before = place(&host);
+    host.world.dialogue.open = true;
+    host.tick(10_250).unwrap();
+    host.tick(20_000).unwrap();
+    host.world.dialogue.open = false;
+    host.tick(20_000).unwrap();
+    assert_eq!(place(&host), before);
+    host.tick(20_100).unwrap();
+    assert_ne!(hex(&host, player), goal, "no teleport to the goal");
+}

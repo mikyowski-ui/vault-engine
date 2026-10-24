@@ -2,7 +2,7 @@
 //! automap database, the live-world area-map `.SAV` export (§2.9), and the
 //! save components this engine carries without interpreting them.
 use crate::{ObjectRef, WorldState, world::ScriptInstance};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use vault_formats::{
     AutomapDb, MsgCatalog, automap,
     map::{
@@ -56,6 +56,46 @@ pub fn working_map_name(number: i32, catalog: Option<&MsgCatalog>) -> Option<Str
         .map(|message| message.text.clone())
         .or_else(|| crate::worldmap::map_table_name(number).map(|name| name.as_bytes().to_vec()))?;
     saved_map_name(&text)
+}
+/// Remove the local-variable slices (`base`, `count`) of scripts left out
+/// of an image from `pool`, where no written record also uses them, and
+/// move every written record's base down past the removed values.
+fn compact_locals(
+    pool: &mut Vec<i32>,
+    records: &mut [Vec<MapScript>; 5],
+    dropped: &[(i32, usize)],
+) {
+    let slice = |base: i32, count: usize| {
+        usize::try_from(base)
+            .ok()
+            .map(|base| base..base.saturating_add(count).min(pool.len()))
+    };
+    let mut removed = vec![false; pool.len()];
+    for (base, count) in dropped {
+        for index in slice(*base, *count).into_iter().flatten() {
+            removed[index] = true;
+        }
+    }
+    for record in records.iter().flatten() {
+        let count = usize::try_from(record.local_count).unwrap_or(0);
+        for index in slice(record.local_base, count).into_iter().flatten() {
+            removed[index] = false;
+        }
+    }
+    for record in records.iter_mut().flatten() {
+        if let Ok(base) = usize::try_from(record.local_base) {
+            let below = removed[..base.min(removed.len())]
+                .iter()
+                .filter(|removed| **removed)
+                .count();
+            record.local_base -= below as i32;
+        }
+    }
+    let mut index = 0;
+    pool.retain(|_| {
+        index += 1;
+        !removed[index - 1]
+    });
 }
 /// SPEC-008 §3.10 step 1: the file name a request opens, the final path
 /// component uppercased.
@@ -187,7 +227,11 @@ impl WorldState {
     /// per-load map script, and placed top-level objects with nested
     /// inventories. The player (saved centrally) is excluded, as are party
     /// members unless `include_party` (they travel with the player between
-    /// maps but are saved on the current map in a save slot).
+    /// maps but are saved on the current map in a save slot). Without the
+    /// party, the scripts of objects left out (the party's, the player's,
+    /// temporary objects') are left out too, with their local variables,
+    /// and the pool is compacted (SPEC-006 §3.5 step 1: those scripts
+    /// travel with their objects, so a revisit gains no orphan instances).
     pub fn export_map(&self, include_party: bool) -> MapFile {
         let mut map = self.map.clone();
         map.header.flags = MapFlags(map.header.flags.0 | MapFlags::SAVED.0);
@@ -210,7 +254,9 @@ impl WorldState {
                 templates.entry(script.id).or_insert(script);
             }
         }
+        let written = self.written_objects(include_party);
         let mut records: [Vec<MapScript>; 5] = Default::default();
+        let mut dropped = Vec::new();
         for slot in &self.script_order {
             let stream = usize::from(slot.stream);
             // An inert record is written back unchanged.
@@ -224,7 +270,16 @@ impl WorldState {
             if Some(slot.id) == self.map_script {
                 continue;
             }
+            let unwritten =
+                self.get(instance.owner).is_some() && !written.contains(&instance.owner);
+            if !include_party && unwritten {
+                dropped.push((instance.local_base, instance.local_count));
+                continue;
+            }
             records[stream].push(self.script_record(instance, templates.get(&slot.id).copied()));
+        }
+        if !dropped.is_empty() {
+            compact_locals(&mut map.lvars, &mut records, &dropped);
         }
         map.scripts = records.map(|slots| ScriptCategory {
             declared_count: slots.len(),
@@ -259,6 +314,32 @@ impl WorldState {
         });
         map.objects.total = map.objects.elevations.iter().map(Vec::len).sum();
         map
+    }
+    /// The objects an area-map image writes: placed top-level objects other
+    /// than the player, temporary objects, objects past elevation 2 and,
+    /// unless `include_party`, party members; with their inventories.
+    fn written_objects(&self, include_party: bool) -> BTreeSet<ObjectRef> {
+        let mut written = BTreeSet::new();
+        let mut pending: Vec<ObjectRef> = self
+            .iter()
+            .filter(|(reference, object)| {
+                object.raw.hex.is_some()
+                    && *reference != self.player
+                    && object.owner.is_none()
+                    && object.raw.elevation <= 2
+                    && !object.raw.flags.contains(BasicFlags::TEMPORARY)
+                    && (include_party || !self.party.contains(reference))
+            })
+            .map(|(reference, _)| reference)
+            .collect();
+        while let Some(reference) = pending.pop() {
+            if written.insert(reference)
+                && let Some(object) = self.get(reference)
+            {
+                pending.extend(object.inventory.iter().map(|(child, _)| *child));
+            }
+        }
+        written
     }
     /// SPEC-014 §3.33: the player entered `hex`.
     pub fn mark_visited(&mut self, hex: i32) {

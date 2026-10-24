@@ -41,7 +41,7 @@ pub enum WorldMapExit {
 }
 
 /// SPEC-014 §3.39 campaign indices of the per-pass checks.
-const WATER_GLOBAL: usize = 10;
+const WATER_GLOBAL: usize = movie::WATER_GLOBAL;
 const VATS_TIMER_GLOBAL: usize = 147;
 const LAIR_TIMER_GLOBAL: usize = 55;
 const VATS_STATUS_GLOBAL: usize = 308;

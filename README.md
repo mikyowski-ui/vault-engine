@@ -554,8 +554,8 @@ cargo run -p vault-platform -- --corpus-dir /path/to/unpacked/game \
   --preview-map maps/v13ent.map --startup-movies
 ```
 
-- In the world, `play_gmovie`, the endgame movie, the water countdown (with a
-  host water global), and the Pip-Boy's **Video archive** tab request game
+- In the world, `play_gmovie`, the endgame movie, the water countdown, and
+  the Pip-Boy's **Video archive** tab request game
   movies. They queue and play one at a time, modally: the world and its
   scripts wait. Afterwards the previous screen returns.
 - One movie step runs per shell update. Sync points wait on the frame timer,
@@ -1517,13 +1517,16 @@ these choices:
   centered frame origin. Subtitle text wraps at 640 pixels; line i is drawn
   centered at `y0 + i x th`, and the band grows for the extra lines (safe
   rule).
-- No approved specification names the remaining-water global or the
-  world-map event triggers. The midnight countdown runs only with
-  `WorldRules::water_global`. While the water-chip quest (global 101) is at
-  most 1, it decrements the water. Then, outside dialogue, the most severe
-  threshold reached plays its movie if not yet played: boil3 at 0 or less
-  (`0x05`, then `WorldEffect::EndGame` as the quit request), boil2 at 50 or
-  less, and boil1 at 100 or less (`0x07`). The world-map events can call
+- The midnight water countdown (SPEC-012 §3.12) counts down campaign
+  global 10, the remaining water, unless the water-chip quest (global 101)
+  is 2. A midnight while a countdown movie still plays does nothing. A
+  positive value decrements; then, outside dialogue, the new value chooses
+  at most one movie through the saved water-movie byte (bits `0x01` and
+  `0x02`, the engine's values): boil1 at 100 or less, else boil2 at 50 or
+  less (`0x07`), else boil3 at 0 (`0x05`, then `WorldEffect::EndGame` as the
+  quit request). A movie already played does nothing. Safe rule: a value
+  already 0 outside dialogue chooses boil3, so a countdown that reached 0
+  during a dialogue still ends the game. The world-map events can call
   `play_game_movie` directly. The `--game` flow plays the main menu's attract
   intro (flag `0x08`) and `ovrintro` (flag `0x04`) before a new game.
 - Movies play modally, so `play_gmovie`'s suspension of dialogue background

@@ -497,32 +497,44 @@ fn spec005_playmovie_completes_headless_and_waits_for_a_presentation_layer() {
 
 #[test]
 fn spec012_midnight_water_countdown() {
+    use crate::queue::EventKind;
     let dir = tempfile::tempdir().unwrap();
     let mut host = movie_host(dir.path());
-    let mut gvars = vec![0; 200];
-    gvars[150] = 102;
-    host.world.gvars = Some(gvars);
-    // Without a host-supplied water global nothing happens.
+    let water = |host: &WorldHost<VfsWorldAssets>| host.world.gvars.as_ref().unwrap()[10];
+    let set = |host: &mut WorldHost<VfsWorldAssets>, index: usize, value: i32| {
+        host.world.gvars.as_mut().unwrap()[index] = value;
+    };
+    // The remaining water is campaign global 10, with no host setup.
+    host.world.gvars = Some(vec![0; 200]);
+    set(&mut host, movie::WATER_GLOBAL, 102);
     host.water_countdown();
-    assert_eq!(host.world.gvars.as_ref().unwrap()[150], 102);
-    host.world.rules.water_global = Some(150);
-    host.water_countdown();
+    assert_eq!(water(&host), 101);
     assert!(requests(&mut host).is_empty(), "101 left");
     host.water_countdown();
     let boil1 = requests(&mut host).remove(0);
     assert_eq!((boil1.index, boil1.flags), (Some(movie::BOIL1), 0x07));
-    host.water_countdown();
-    assert!(requests(&mut host).is_empty(), "boil1 already played");
-    // Inside dialogue the water still drains, but nothing plays.
-    host.world.gvars.as_mut().unwrap()[150] = 51;
-    host.world.dialogue.open = true;
+    assert_eq!(host.world.persistence.campaign_status, movie::BOIL1_CHOSEN);
+    // Its water-movie bit is set: boil1 is not chosen again.
     host.water_countdown();
     assert!(requests(&mut host).is_empty());
+    // Inside dialogue the water still drains, but nothing is chosen.
+    set(&mut host, movie::WATER_GLOBAL, 51);
+    host.world.dialogue.open = true;
+    host.water_countdown();
+    assert_eq!(water(&host), 50);
+    assert_eq!(host.world.persistence.campaign_status, movie::BOIL1_CHOSEN);
     host.world.dialogue.open = false;
+    // boil2 is chosen (its bit set) but its file is absent, so it does not
+    // play and is not chosen again.
     host.water_countdown();
     assert!(requests(&mut host).is_empty(), "boil2.mve is absent");
-    host.world.gvars.as_mut().unwrap()[150] = 1;
+    assert_eq!(host.world.persistence.campaign_status, 0x03);
     host.water_countdown();
+    assert!(requests(&mut host).is_empty());
+    // At 0, boil3 plays, then a quit request.
+    set(&mut host, movie::WATER_GLOBAL, 1);
+    host.water_countdown();
+    assert_eq!(water(&host), 0);
     let effects: Vec<_> = host.world.effects.drain(..).collect();
     assert!(
         matches!(&effects[0], WorldEffect::Movie(request) if request.index == Some(movie::BOIL3) && request.flags == 0x05)
@@ -531,8 +543,53 @@ fn spec012_midnight_water_countdown() {
         matches!(effects[1], WorldEffect::EndGame),
         "then a quit request"
     );
-    // A finished water-chip quest stops the countdown.
-    host.world.gvars.as_mut().unwrap()[movie::WATER_CHIP_GLOBAL] = 2;
+    // A played boil3 does nothing more, and 0 never decrements.
     host.water_countdown();
-    assert_eq!(host.world.gvars.as_ref().unwrap()[150], 0);
+    assert!(host.world.effects.is_empty());
+    assert_eq!(water(&host), 0);
+    // [May-improve] safe rule: 0 reached during a dialogue still chooses
+    // boil3 at a later midnight outside dialogue.
+    host.world.persistence.movies[movie::BOIL3] = 0;
+    set(&mut host, movie::WATER_GLOBAL, 1);
+    host.world.dialogue.open = true;
+    host.water_countdown();
+    assert!(host.world.effects.is_empty());
+    host.world.dialogue.open = false;
+    host.water_countdown();
+    assert_eq!(requests(&mut host)[0].index, Some(movie::BOIL3));
+    // A quest value other than 2 still counts down; 2 stops it.
+    set(&mut host, movie::WATER_GLOBAL, 150);
+    set(&mut host, movie::WATER_CHIP_GLOBAL, 3);
+    host.water_countdown();
+    assert_eq!(water(&host), 149);
+    set(&mut host, movie::WATER_CHIP_GLOBAL, 2);
+    host.water_countdown();
+    assert_eq!(water(&host), 149);
+    // Step 1: while a countdown movie plays, the midnight handler returns
+    // at once: no unjam, no countdown and no next midnight.
+    set(&mut host, movie::WATER_CHIP_GLOBAL, 0);
+    set(&mut host, movie::WATER_GLOBAL, 100);
+    host.world.persistence.campaign_status = 0;
+    host.world.persistence.movies[movie::BOIL1] = 0;
+    host.movie_policy = movie::MoviePolicy::WaitUntilFinished;
+    host.water_countdown();
+    assert_eq!(requests(&mut host)[0].index, Some(movie::BOIL1));
+    host.world.queue = Default::default();
+    host.world
+        .queue
+        .insert(0, 0, 0, EventKind::Midnight)
+        .unwrap();
+    host.process_queue().unwrap();
+    assert_eq!(water(&host), 99, "the handler returned at once");
+    assert!(
+        host.world.queue.events().next().is_none(),
+        "no next midnight"
+    );
+    host.movie_finished();
+    host.world
+        .queue
+        .insert(0, 0, 0, EventKind::Midnight)
+        .unwrap();
+    host.process_queue().unwrap();
+    assert_eq!(water(&host), 98);
 }

@@ -117,6 +117,14 @@ pub const BOIL1: usize = 11;
 pub const BOIL2: usize = 12;
 /// The SPEC-008 water-chip quest global (unfinished at most 1).
 pub const WATER_CHIP_GLOBAL: usize = 101;
+/// §3.12 the remaining water: campaign global 10 (150 days in
+/// `data/vault13.gam`).
+pub const WATER_GLOBAL: usize = 10;
+/// §3.12 the water-movie byte's bits for a chosen boil1 and boil2. The
+/// specification names the bits but not their values; these are the
+/// engine's.
+pub const BOIL1_CHOSEN: u8 = 0x01;
+pub const BOIL2_CHOSEN: u8 = 0x02;
 /// The Pip-Boy flags (§3.12 engine callers).
 pub const ARCHIVE_FLAGS: u32 = 0x0b;
 

@@ -844,7 +844,11 @@ impl<A: WorldAssets> WorldHost<A> {
     /// §3.10 steps 3-5 after the Set Timer dialog accepted `seconds`:
     /// `proto.msg` 589, the permanent armed PID, the player's Traps check, and
     /// the explosion event owned by the explosive (which marks it in use).
+    /// Only one unit is armed: from a stack it is split off first as its
+    /// own entry (keeping the hand), so the rest keeps its PID, carries no
+    /// in-use flag and stays armable.
     pub fn arm_explosive(&mut self, item: ObjectRef, seconds: i32) -> Result<(), WorldError> {
+        let item = self.world.split_unit(item)?;
         self.print_game("proto.msg", 589, &[]);
         let pid = self.world.get(item).map_or(0, |o| o.raw.pid);
         if let Some(armed) = skills::armed_pid(pid) {
@@ -1404,50 +1408,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 .unwrap_or(hex)
         };
         let previous = self.world.get(player).map_or(0, |o| o.raw.elevation);
+        // The move re-syncs the party on an elevation change.
         self.world
             .move_object(player, destination, elevation, false)?;
-        if previous != elevation {
-            if self.world.combat {
-                self.end_combat()?;
-            }
-            self.place_party()?;
-        }
-        Ok(())
-    }
-    /// §3.22 party following: each visible member fills the next free
-    /// neighbor of the player's hex, in NE through NW order.
-    fn place_party(&mut self) -> Result<(), WorldError> {
-        let player = self.world.player;
-        let Some((hex, elevation)) = self
-            .world
-            .get(player)
-            .and_then(|o| Some((o.raw.hex?, o.raw.elevation)))
-        else {
-            return Ok(());
-        };
-        let members: Vec<_> = self
-            .world
-            .party
-            .iter()
-            .copied()
-            .filter(|member| *member != player)
-            .filter(|member| {
-                self.world
-                    .get(*member)
-                    .is_some_and(|o| !o.raw.flags.contains(BasicFlags::HIDDEN))
-            })
-            .collect();
-        let mut neighbors =
-            (0..6).filter_map(|direction| vault_formats::HexGrid::step(hex, direction, 1).ok());
-        for member in members {
-            let Some(spot) = neighbors.by_ref().find(|spot| {
-                self.world
-                    .movement_blocker(*spot, elevation, member)
-                    .is_none()
-            }) else {
-                break;
-            };
-            self.world.move_object(member, spot, elevation, false)?;
+        if previous != elevation && self.world.combat {
+            self.end_combat()?;
         }
         Ok(())
     }
@@ -1474,8 +1439,12 @@ impl<A: WorldAssets> WorldHost<A> {
     /// also requested as -2) opens the world map and -1 the town map, once
     /// the outgoing map is saved and cleared (SPEC-014 §3.35); a failed
     /// save ends the session instead. Otherwise the map loads by number
-    /// and, for a hex other than -1 and 0 on elevation 0-2, the player is
-    /// placed there with the facing. Returns whether a transition ran.
+    /// and, for a hex on the grid other than 0 and an elevation 0-2, the
+    /// player is placed there with the facing; the party then follows the
+    /// final placement. A transition that fails (an unknown map, a load or
+    /// placement error) is a diagnostic, not a failed frame, and the
+    /// requests made during the load are cleared either way. Returns
+    /// whether a transition ran.
     pub fn process_transition(&mut self) -> Result<bool, WorldError> {
         if self.world.combat {
             return Ok(false);
@@ -1484,44 +1453,63 @@ impl<A: WorldAssets> WorldHost<A> {
             return Ok(false);
         };
         match transition.map {
-            -2..=0 => {
-                if !self.unload_map()? {
-                    self.world.emit(WorldEffect::MapSaveFailed);
-                } else if transition.map == -1 {
+            -2..=0 => match self.unload_map() {
+                Ok(false) => self.world.emit(WorldEffect::MapSaveFailed),
+                Ok(true) if transition.map == -1 => {
                     self.transition_world_map = true;
                     self.world.emit(WorldEffect::TownMap);
-                } else {
+                }
+                Ok(true) => {
                     self.transition_world_map = true;
                     // SPEC-008 §3.10: the world map plays `03wrldmp`.
                     self.play_world_map_music();
                     self.world.emit(WorldEffect::WorldMap);
                 }
-            }
+                Err(error) => {
+                    self.world
+                        .diagnostic(format!("leaving the map failed: {error}"));
+                    self.world.emit(WorldEffect::MapSaveFailed);
+                }
+            },
             map => {
-                let path = self
-                    .assets
-                    .map_path(map)
-                    .ok_or_else(|| WorldError::Invalid(format!("map {map} is not available")))?;
-                self.load_map(&path)?;
-                // Step 3: the party moves on the world map to the map's town.
-                self.move_to_map_town()?;
-                if !matches!(transition.hex, -1 | 0) && (0..=2).contains(&transition.elevation) {
-                    let facing = transition.facing.clamp(0, 5) as u8;
-                    self.place_player(transition.hex, transition.elevation as u8, facing)?;
-                }
-                if transition.facing >= 0
-                    && let Some(object) = self.world.get_mut(self.world.player)
-                {
-                    object.raw.orientation = transition.facing.clamp(0, 5) as u8;
-                }
+                let result = self.transition_to(map, transition);
                 // SPEC-013 §3.22 [May-improve]: steps 2 and 4 use the hex,
                 // elevation and facing saved when processing started, and
                 // a request made during the load (an exit grid at the
                 // entrance or the step-2 hex, a script's `load_map`) is
-                // cleared rather than replacing them.
+                // cleared rather than replacing them, even when the
+                // transition fails.
                 self.world.pending_transition = None;
+                if let Err(error) = result {
+                    self.world
+                        .diagnostic(format!("map transition to {map} failed: {error}"));
+                }
             }
         }
         Ok(true)
+    }
+    /// §3.22 steps 1-4 for a positive map number.
+    fn transition_to(&mut self, map: i32, transition: Transition) -> Result<(), WorldError> {
+        let path = self
+            .assets
+            .map_path(map)
+            .ok_or_else(|| WorldError::Invalid(format!("map {map} is not available")))?;
+        self.load_map(&path)?;
+        // Step 3: the party moves on the world map to the map's town.
+        self.move_to_map_town()?;
+        // Safe rule: a hex off the grid keeps the entrance, as -1 and 0 do.
+        if (1..40000).contains(&transition.hex) && (0..=2).contains(&transition.elevation) {
+            let facing = transition.facing.clamp(0, 5) as u8;
+            self.place_player(transition.hex, transition.elevation as u8, facing)?;
+            // The party follows the final placement on the same elevation
+            // too (an elevation change has re-synced it already).
+            self.world.place_party()?;
+        }
+        if transition.facing >= 0
+            && let Some(object) = self.world.get_mut(self.world.player)
+        {
+            object.raw.orientation = transition.facing.clamp(0, 5) as u8;
+        }
+        Ok(())
     }
 }

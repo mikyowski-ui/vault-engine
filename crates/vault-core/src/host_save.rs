@@ -512,6 +512,16 @@ impl<A: WorldAssets> WorldHost<A> {
         self.load_map(&format!("maps/{map_file}"))?;
         self.restore_player(&save)?;
         let world = &mut self.world;
+        // SPEC-014 §3.44 / §3.36: the restored player record is a placement
+        // on its hex: it is reinserted there, and the roof tracking moves
+        // from the entrance square to the player's square.
+        let player = world.player;
+        world.reinsert(player);
+        // SPEC-006 §3.5: the player record sets the last attacker again.
+        world.resolve_last_attacker(player);
+        if let Some(hex) = save.player.hex {
+            world.place_player_roof(hex, save.player.elevation);
+        }
         world.set_view_center(save.viewport);
         world.elevation = save.player.elevation;
         world.sneak_working = save.sneak_working != 0;

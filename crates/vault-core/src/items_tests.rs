@@ -4,6 +4,7 @@
 //! combat.
 use crate::{
     ObjectRef, Perk, WorldEffect, WorldHost,
+    assets::WorldAssets,
     fixture_items::{
         self as support, AMMO_X, ARMOR_A, ARMOR_B, CONTAINER, ItemAssets, MONEY, WEAPON_W, messages,
     },
@@ -488,4 +489,176 @@ fn spec014_inventory_slot_moves_split_swap_and_drop() {
     host.world.drop_item(player, armor, 1).unwrap();
     let dropped = host.world.get(armor).unwrap();
     assert_eq!((dropped.owner, dropped.raw.hex), (None, Some(20100)));
+}
+
+#[test]
+fn spec011_drops_keep_every_unit_on_the_ground() {
+    let mut host = support::host();
+    let player = host.world.player;
+    host.world.move_object(player, 20100, 0, false).unwrap();
+    let ground = |host: &WorldHost<ItemAssets>, pid: u32| -> Vec<ObjectRef> {
+        host.world
+            .iter()
+            .filter(|(_, o)| o.raw.pid == pid && o.owner.is_none() && o.raw.hex == Some(20100))
+            .map(|(reference, _)| reference)
+            .collect()
+    };
+    // SPEC-011 §3.13 conservation: a drop of 5 leaves 5 ground objects of
+    // one unit each (SPEC-006 §3.8 picks up one), and picking all 5 up
+    // restacks the 5.
+    host.assets
+        .prototypes
+        .insert(0x606, support::misc(0x606, 1, 1, 1));
+    let stack = support::carry(&mut host, player, 0x606, 5);
+    host.world.drop_item(player, stack, 5).unwrap();
+    assert!(entries(&host, player).is_empty());
+    let units = ground(&host, 0x606);
+    assert_eq!(units.len(), 5);
+    for unit in units {
+        host.world.add_item(player, unit, 1, false).unwrap();
+    }
+    assert_eq!(entries(&host, player).len(), 1);
+    assert_eq!(entries(&host, player)[0].1, 5);
+    // A partial drop keeps the rest carried.
+    let stack = entries(&host, player)[0].0;
+    host.world.drop_item(player, stack, 2).unwrap();
+    assert_eq!(entries(&host, player)[0].1, 3);
+    assert_eq!(ground(&host, 0x606).len(), 2);
+    // Ammunition: the front pack leaves first, then full packs, and every
+    // round is kept.
+    let ammo = support::carry(&mut host, player, AMMO_X, 3);
+    set_detail(&mut host, ammo, ObjectDetail::Ammunition(5));
+    host.world.drop_item(player, ammo, 3).unwrap();
+    let mut packs: Vec<_> = ground(&host, AMMO_X)
+        .into_iter()
+        .map(|pack| rounds(&host, pack))
+        .collect();
+    packs.sort();
+    assert_eq!(packs, [5, 20, 20]);
+    // Too many units is refused and drops nothing.
+    let stack = entries(&host, player)[0].0;
+    assert!(host.world.drop_item(player, stack, 4).is_err());
+    assert_eq!(entries(&host, player)[0].1, 3);
+}
+
+#[test]
+fn spec014_a_slot_given_its_own_item_changes_nothing() {
+    let mut host = support::host();
+    let player = host.world.player;
+    let armor = support::carry(&mut host, player, ARMOR_A, 1);
+    for _ in 0..3 {
+        host.world
+            .equip_slot(player, armor, BasicFlags::WORN.0)
+            .unwrap();
+        assert_eq!(host.world.player_sheet().unwrap().bonus[9], 20);
+    }
+    host.world.unequip(player, armor).unwrap();
+    assert_eq!(host.world.player_sheet().unwrap().bonus[9], 0);
+    // A hand item given to its own hand stays there.
+    let gun = support::carry(&mut host, player, WEAPON_W, 1);
+    for _ in 0..2 {
+        host.world
+            .equip_slot(player, gun, BasicFlags::RIGHT_HAND.0)
+            .unwrap();
+    }
+    assert!(
+        host.world
+            .get(gun)
+            .unwrap()
+            .raw
+            .flags
+            .contains(BasicFlags::RIGHT_HAND)
+    );
+    // `wield_obj_critter` on a stack wields one unit (SPEC-011 §3.13).
+    let stack = support::carry(&mut host, player, AMMO_X, 3);
+    host.wield_object(player, stack).unwrap();
+    let wielded = host.world.get(stack).unwrap();
+    assert!(wielded.raw.flags.contains(BasicFlags::RIGHT_HAND));
+    assert!(entries(&host, player).contains(&(stack, 1)));
+    assert!(
+        entries(&host, player)
+            .iter()
+            .any(|(entry, quantity)| *entry != stack && *quantity == 2)
+    );
+}
+
+#[test]
+fn spec011_moves_between_a_carriers_own_bags_count_the_weight_once() {
+    let mut host = support::host();
+    // A biped with effective carry weight 150 holding 148 and a bag of 2.
+    let carrier = npc(&mut host, 0x0100_0202, 0);
+    host.assets
+        .prototypes
+        .insert(0x600, support::misc(0x600, 1, 148, 0));
+    let load = support::carry(&mut host, carrier, 0x600, 1);
+    let bag = support::carry(&mut host, carrier, CONTAINER, 1);
+    assert_eq!(host.world.inventory_weight(carrier), 150);
+    assert_eq!(host.world.add_refusal(bag, load, 1), None);
+    assert!(host.world.move_into(carrier, load, bag, 1).unwrap());
+    assert_eq!(host.world.inventory_weight(carrier), 150);
+    // Something not yet carried still counts.
+    host.assets
+        .prototypes
+        .insert(0x601, support::misc(0x601, 1, 1, 0));
+    let more = support::spawn(&mut host, 0x601);
+    assert_eq!(
+        host.world.add_refusal(bag, more, 1),
+        Some(Refusal::TooHeavy)
+    );
+}
+
+#[test]
+fn spec013_arming_one_explosive_of_a_stack_arms_only_that_unit() {
+    use crate::queue::EventKind;
+    let mut host = support::host();
+    let player = host.world.player;
+    host.assets
+        .prototypes
+        .insert(51, support::misc(51, 1, 1, 1));
+    host.assets
+        .prototypes
+        .insert(206, support::misc(206, 1, 1, 1));
+    let dynamite = support::carry(&mut host, player, 51, 2);
+    assert!(host.explosive_armable(dynamite));
+    host.arm_explosive(dynamite, 30).unwrap();
+    // The armed unit is its own entry with the armed PID and the in-use
+    // flag; the other unit keeps PID 51, no flag, and stays armable.
+    let armed = host.world.get(dynamite).unwrap();
+    assert_eq!(armed.raw.pid, 206);
+    assert!(armed.raw.flags.contains(BasicFlags::USED));
+    assert!(entries(&host, player).contains(&(dynamite, 1)));
+    let (rest, quantity) = *entries(&host, player)
+        .iter()
+        .find(|(entry, _)| *entry != dynamite)
+        .unwrap();
+    assert_eq!(quantity, 1);
+    assert_eq!(host.world.get(rest).unwrap().raw.pid, 51);
+    assert!(
+        !host
+            .world
+            .get(rest)
+            .unwrap()
+            .raw
+            .flags
+            .contains(BasicFlags::USED)
+    );
+    let owners: Vec<_> = host
+        .world
+        .queue
+        .events()
+        .filter(|event| matches!(event.kind, EventKind::Other(8 | 11)))
+        .map(|event| event.object)
+        .collect();
+    assert_eq!(owners, [dynamite]);
+    assert!(host.explosive_armable(rest));
+}
+
+#[test]
+fn spec011_spawned_weapons_know_their_ammunition() {
+    let mut host = support::host();
+    assert!(host.world.known_prototype(AMMO_X).is_none());
+    let prototype = host.assets.prototype(WEAPON_W).unwrap();
+    let weapon = host.spawn(prototype, 20100, 0).unwrap();
+    assert!(host.world.known_prototype(AMMO_X).is_some());
+    assert!(host.world.unload_weapon(weapon).unwrap().is_some());
 }
