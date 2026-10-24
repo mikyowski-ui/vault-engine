@@ -33,11 +33,35 @@ jobs:
       # Fails if fuzz/Cargo.lock is out of date, so the fuzz build below
       # resolves exactly the locked versions (the `--locked` guarantee).
       - run: cargo fetch --manifest-path fuzz/Cargo.toml --locked
-      - run: cargo +nightly fuzz build
-      - run: |
+      - name: cargo fuzz build
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set -o pipefail
+          cargo +nightly fuzz build 2>&1 | tee fuzz-output.txt
+      - name: cargo fuzz run
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set -o pipefail
           for target in $(cargo +nightly fuzz list); do
-            cargo +nightly fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=2048 || exit 1
+            echo "==== fuzz target $target" | tee -a fuzz-output.txt
+            cargo +nightly fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=2048 \
+              2>&1 | tee -a fuzz-output.txt || exit 1
           done
+      # Build errors and the crashing target become error annotations:
+      # annotations are readable where the job log needs admin rights.
+      - name: Report fuzz failures
+        if: failure()
+        run: |
+          test -f fuzz-output.txt || exit 0
+          awk '/^==== fuzz target / { target = $4 }
+               /^error(\[E[0-9]+\])?: |^==[0-9]+==ERROR|^thread .* panicked|^SUMMARY: / {
+                 if (open) print msg
+                 msg = (target != "" ? "[" target "] " : "") $0; n = 0; open = 1; next }
+               open && n < 8 { msg = msg "%0A" $0; n++; if (n == 8) { print msg; open = 0 } }
+               END { if (open) print msg }' fuzz-output.txt \
+            | head -n 40 | sed 's/^/::error title=fuzz smoke::/'
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
