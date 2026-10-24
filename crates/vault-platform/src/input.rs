@@ -67,6 +67,12 @@ pub enum InputCommand {
     Debug {
         command: vault_core::debug::DebugCommand,
     },
+    /// The shell's display scaling: logged after the surface and on every
+    /// Alt+S, so a replay maps the pointer through the same viewport. A
+    /// log without one is replayed with integer scaling.
+    Scaling {
+        aspect_fit: bool,
+    },
 }
 
 /// SPEC-014 §3.29: key auto-repeat starts after more than 500 ms...

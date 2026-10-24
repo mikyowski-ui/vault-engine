@@ -48,8 +48,6 @@ pub fn interactive_world(preview: &mut AssetPreview) -> Option<&mut MapPreview> 
 /// log applies those records and discards the overlay's outbox, so each
 /// command applies exactly once. A refused command is reported, not fatal.
 /// Returns whether anything was applied (the frame should be redrawn).
-// The desktop shell (main.rs) calls this once it logs debug records.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn drain_debug_commands(
     preview: &mut AssetPreview,
     mut log: impl FnMut(&InputCommand) -> AppResult<()>,
@@ -93,6 +91,8 @@ pub struct Replay {
     timed: Option<bool>,
     /// SPEC-014 §3.29 the engine key repeat, as on the desktop.
     repeat: KeyRepeat,
+    /// The logged display scaling (integer until a `scaling` record).
+    scaling: vault_render::ScalingMode,
 }
 
 impl Replay {
@@ -105,6 +105,7 @@ impl Replay {
         let mut replay = Self {
             preview,
             surface: INITIAL_SURFACE,
+            scaling: vault_render::ScalingMode::Integer,
             image: [0; 2],
             pointer: None,
             now: 0,
@@ -230,16 +231,20 @@ impl Replay {
     /// logged surface, clamped to the frame as the desktop maps presses,
     /// releases and hover (H3).
     fn pixel(&self) -> Option<[i32; 2]> {
-        vault_render::image_position_clamped(self.surface, self.image, self.pointer?)
+        vault_render::image_position_clamped_with(
+            self.surface,
+            self.image,
+            self.scaling,
+            self.pointer?,
+        )
     }
 
     /// Pointer moves reach the preview clamped to the frame, with whether
     /// they are outside it, as on the desktop.
     fn hover(&mut self) {
-        if let Some(point) = self
-            .pointer
-            .and_then(|point| vault_render::frame_point(self.surface, self.image, point))
-        {
+        if let Some(point) = self.pointer.and_then(|point| {
+            vault_render::frame_point_with(self.surface, self.image, self.scaling, point)
+        }) {
             self.preview.pointer_moved(point);
         }
     }
@@ -320,6 +325,14 @@ impl Replay {
             // M-P1: the stored pointer is mapped again in the new viewport.
             InputCommand::Resize { width, height } => {
                 self.surface = [width, height];
+                self.hover();
+            }
+            InputCommand::Scaling { aspect_fit } => {
+                self.scaling = if aspect_fit {
+                    vault_render::ScalingMode::AspectFit
+                } else {
+                    vault_render::ScalingMode::Integer
+                };
                 self.hover();
             }
             InputCommand::Modifiers {
@@ -458,6 +471,58 @@ mod tests {
         }
     }
 
+    /// With the Vanilla preset (the default) the dialogue replay and its
+    /// idle variant end in the state digests recorded before the Phase 0
+    /// shell, debugger and mod work; any change to Vanilla behaviour that
+    /// the digest covers fails here. The digests are written in halves.
+    #[test]
+    fn vanilla_replays_keep_their_recorded_digests() {
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        let dialogue = replay_log(dir.path(), DIALOGUE_LOG);
+        assert_eq!(
+            dialogue.state_sha256,
+            concat!(
+                "1a641c22334423ebdf4a4304581b843d",
+                "db3faf99123d32d6cc33e2be7d11ed2c"
+            )
+        );
+        assert_eq!((dialogue.commands, dialogue.elapsed_ms), (11, 176));
+        let idle = DIALOGUE_LOG.replace(r#""button":"Right""#, r#""button":"Middle""#);
+        let idle = replay_log(dir.path(), &idle);
+        assert_eq!(
+            idle.state_sha256,
+            concat!(
+                "9d63926e7cf5003f5b9b59ec4914d98e",
+                "48bb9436aa49c5676adea8ad28b0b8af"
+            )
+        );
+    }
+
+    /// A logged `scaling` record maps the pointer through the aspect-fit
+    /// viewport (1440 x 1080 at x 240, scale 2.25, on a 1920 x 1080 surface); without
+    /// one the replay keeps integer scaling (1280 x 960 at 320, 60).
+    #[test]
+    fn a_logged_scaling_mode_maps_the_replayed_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        let log = |scaling: &str| {
+            format!(
+                "{{\"command_id\":1,\"kind\":\"surface\",\"width\":1920,\"height\":1080}}\n\
+                 {scaling}\
+                 {{\"command_id\":3,\"kind\":\"pointer_moved\",\"x\":250.5,\"y\":10.5}}\n"
+            )
+        };
+        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        replay
+            .run(log("{\"command_id\":2,\"kind\":\"scaling\",\"aspect_fit\":true}\n").as_bytes())
+            .unwrap();
+        assert_eq!(replay.pixel(), Some([4, 4]));
+        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        replay.run(log("").as_bytes()).unwrap();
+        assert_eq!(replay.pixel(), Some([0, 0]));
+    }
+
     #[test]
     fn replays_a_dialogue_log_deterministically_and_stops_at_quit() {
         let dir = tempfile::tempdir().unwrap();
@@ -497,13 +562,13 @@ mod tests {
         )
     }
     /// What the desktop logs when the overlay's spawner commits one item:
-    /// F9 opens the overlay, F11 five times reaches the spawner, the PID
+    /// F9 opens the overlay, F8 five times reaches the spawner, the PID
     /// is typed and Enter commits; the shell then logs the committed
     /// command as its own record.
     fn spawn_log(with_record: bool) -> String {
         let mut lines = vec![key(1, "F9")];
         for id in 2..=6 {
-            lines.push(key(id, "F11"));
+            lines.push(key(id, "F8"));
         }
         lines.push(key(7, "Digit1"));
         lines.push(key(8, "Enter"));
@@ -610,8 +675,8 @@ mod tests {
         };
         let keys = [
             KeyCode::F9,
-            KeyCode::F11,
-            KeyCode::F11,
+            KeyCode::F8,
+            KeyCode::F8,
             KeyCode::Digit7,
             KeyCode::Enter,
         ];

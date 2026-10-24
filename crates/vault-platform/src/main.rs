@@ -158,7 +158,7 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
         scaling: args
             .scaling
             .or(config.scaling)
-            .unwrap_or(ScalingMode::Integer),
+            .unwrap_or(ScalingMode::AspectFit),
         fullscreen: args.fullscreen || config.fullscreen.unwrap_or(false),
         preset: args.preset.or(config.preset).unwrap_or_default(),
         mod_list: config.mod_list.clone(),
@@ -331,6 +331,37 @@ impl Shell {
         };
         if let Err(error) = input::write_command(log, &mut self.ids, &command) {
             self.input_log.stop(&*error);
+        }
+    }
+    /// The display scaling reaches the log, so a replay maps the pointer
+    /// through the same viewport.
+    fn log_scaling(&mut self, event_loop: &ActiveEventLoop) {
+        let aspect_fit = self.scaling == ScalingMode::AspectFit;
+        self.log(event_loop, InputCommand::Scaling { aspect_fit });
+    }
+    /// The F9 overlay's committed commands: each is logged, then applied,
+    /// so a replay of the log applies it at the same point, exactly once.
+    fn drain_debug(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(preview) = self.preview.as_mut() else {
+            return;
+        };
+        let (log, ids) = (&mut self.input_log, &mut self.ids);
+        let result = replay::drain_debug_commands(preview, |command| {
+            if let Some(writer) = &mut log.0
+                && let Err(error) = input::write_command(writer, ids, command)
+            {
+                log.stop(&*error);
+            }
+            Ok(())
+        });
+        match result {
+            Ok(true) => {
+                if let Some(window) = self.window.clone() {
+                    self.refresh_preview(event_loop, &window);
+                }
+            }
+            Ok(false) => {}
+            Err(error) => self.fail(event_loop, error),
         }
     }
     fn flush_log(&mut self, _event_loop: &ActiveEventLoop) {
@@ -521,6 +552,7 @@ impl Shell {
                     scaling = config::scaling_name(self.scaling),
                     "scaling mode changed"
                 );
+                self.log_scaling(event_loop);
             }
         }
         self.viewport_changed(event_loop, window);
@@ -637,6 +669,7 @@ impl ApplicationHandler for Shell {
             Ok(mut renderer) => {
                 renderer.set_scaling(self.scaling);
                 self.renderer = Some(renderer);
+                self.log_scaling(event_loop);
             }
             Err(error) => {
                 self.fail(event_loop, error);
@@ -658,6 +691,8 @@ impl ApplicationHandler for Shell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // The F9 overlay's commands follow the inputs that committed them.
+        self.drain_debug(event_loop);
         // The commands logged since the last pass.
         self.flush_log(event_loop);
         let Some(started) = self.started.filter(|_| self.preview.is_some()) else {
@@ -975,14 +1010,13 @@ fn run(mut args: Args) -> AppResult<()> {
             config::FILE_NAME
         );
     }
-    if let Some(mods) = &launch.mod_list {
-        tracing::warn!(?mods, "mod_list is not applied yet");
-    }
+    args.preview.preset = match launch.preset {
+        config::Preset::Vanilla => vault_core::EnginePreset::Vanilla,
+        config::Preset::Enhanced => vault_core::EnginePreset::Enhanced,
+    };
+    args.preview.mods = launch.mod_list.clone();
     let input_log = InputLog::open(args.record_inputs.as_deref())?;
     let mut preview = args.preview.load()?;
-    if let Some(preview::AssetPreview::Game(game)) = &mut preview {
-        game.enhanced = launch.preset == config::Preset::Enhanced;
-    }
     // Audio serves an interactive world or a movie; sprites need none.
     let output = || {
         if args.no_audio {
@@ -1109,7 +1143,7 @@ mod tests {
         assert!(!launch.zero_arg_game && !args.names_asset());
         assert_eq!(
             (launch.scaling, launch.fullscreen, launch.preset),
-            (ScalingMode::Integer, false, config::Preset::Vanilla)
+            (ScalingMode::AspectFit, false, config::Preset::Vanilla)
         );
         let display_only = config::Config {
             fullscreen: Some(true),
@@ -1182,9 +1216,10 @@ mod tests {
         let mut args = parse(&["--replay-inputs", "log.jsonl", "--preview-map", "m.map"]);
         let launch = resolve_launch(&mut args, Some(&installed()));
         assert!(!args.preview.debug && args.preview.master_dat.is_none());
+        // (Its own pointer mapping follows the log's `scaling` records.)
         assert_eq!(
             (launch.scaling, launch.fullscreen),
-            (ScalingMode::Integer, false)
+            (ScalingMode::AspectFit, false)
         );
         // The value flags check their values.
         for bad in [["--scaling", "stretch"], ["--preset", "modern"]] {

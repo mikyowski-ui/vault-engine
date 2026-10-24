@@ -7,7 +7,7 @@
 //! The inspector only reads world state; attached, scripts run one
 //! observed instruction at a time with unchanged results.
 //!
-//! The overlay is also a deterministic editor. F11 cycles its pages: the
+//! The overlay is also a deterministic editor. F8 cycles its pages: the
 //! watch view, the object inspector (a map click selects the object under
 //! the pointer instead of acting while the overlay is open), the GVAR and
 //! MVAR editors, the map jump and the item spawner. Editing is keyboard
@@ -39,7 +39,7 @@ const LIST_ROWS: usize = 18;
 /// The longest typed entry.
 const ENTRY_LEN: usize = 11;
 
-/// The overlay's pages, in F11 order.
+/// The overlay's pages, in F8 order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
     /// Read-only: variable changes and the script trace.
@@ -249,14 +249,14 @@ impl MapPreview {
         self.thaw_view();
         true
     }
-    /// The overlay's keys while it is open: F11 cycles the pages; on every
+    /// The overlay's keys while it is open: F8 cycles the pages; on every
     /// page but the watch view the editing keys are taken. Returns whether
     /// the key was taken; every other key acts as usual.
     pub(crate) fn debug_key(&mut self, key: KeyCode) -> bool {
         let Some(page) = self.debug.as_ref().map(|overlay| overlay.page) else {
             return false;
         };
-        if key == KeyCode::F11 {
+        if key == KeyCode::F8 {
             if let Some(overlay) = &mut self.debug {
                 overlay.set_page(page.next());
             }
@@ -489,7 +489,7 @@ impl MapPreview {
         };
         line(
             image,
-            &format!("vault-debug: {} (F9 hides, F11 page)", overlay.page.title()),
+            &format!("vault-debug: {} (F9 hides, F8 page)", overlay.page.title()),
             ColorKey::WHITE,
         );
         // A window of rows around the cursor.
@@ -668,7 +668,7 @@ mod tests {
     fn with_the_overlay_closed_nothing_is_taken_or_queued() {
         let dir = tempfile::tempdir().unwrap();
         let mut preview = world(dir.path());
-        assert!(!preview.debug_key(KeyCode::F11));
+        assert!(!preview.debug_key(KeyCode::F8));
         assert!(!preview.debug_key(KeyCode::Enter));
         assert!(!preview.debug_click(NPC_PIXEL, false));
         // The right-click arrow then a left click talks, as in a game.
@@ -761,7 +761,7 @@ mod tests {
         let mut preview = world(dir.path());
         preview.set_debug(true);
         // GVAR 2 = -12.
-        press(&mut preview, &[KeyCode::F11, KeyCode::F11]);
+        press(&mut preview, &[KeyCode::F8, KeyCode::F8]);
         assert_eq!(page(&preview), Page::Globals);
         press(
             &mut preview,
@@ -784,7 +784,7 @@ mod tests {
             }]
         );
         // MVAR rows stop at the last variable.
-        press(&mut preview, &[KeyCode::F11]);
+        press(&mut preview, &[KeyCode::F8]);
         assert_eq!(page(&preview), Page::MapVars);
         let mvars = preview.host.world.mvars.len();
         for _ in 0..mvars + 3 {
@@ -795,7 +795,7 @@ mod tests {
             mvars.saturating_sub(1)
         );
         // Map 2, elevation 1, hex 123; then map 65 at its entrance.
-        press(&mut preview, &[KeyCode::F11]);
+        press(&mut preview, &[KeyCode::F8]);
         assert_eq!(page(&preview), Page::MapJump);
         let mut keys = vec![
             KeyCode::ArrowUp,
@@ -825,7 +825,7 @@ mod tests {
             ]
         );
         // Two of PID 1.
-        press(&mut preview, &[KeyCode::F11]);
+        press(&mut preview, &[KeyCode::F8]);
         assert_eq!(page(&preview), Page::Spawn);
         press(
             &mut preview,
@@ -859,8 +859,8 @@ mod tests {
                 .is_err()
         );
         assert!(preview.debug.as_ref().unwrap().note.starts_with("refused"));
-        // F11 wraps to the watch view, which passes keys through again.
-        press(&mut preview, &[KeyCode::F11]);
+        // F8 wraps to the watch view, which passes keys through again.
+        press(&mut preview, &[KeyCode::F8]);
         assert_eq!(page(&preview), Page::Watch);
         assert!(!preview.debug_key(KeyCode::Enter));
     }

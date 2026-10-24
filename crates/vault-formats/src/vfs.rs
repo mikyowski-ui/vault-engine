@@ -790,6 +790,17 @@ impl LayeredVfs {
             Some(parent) if !parent.as_os_str().is_empty() => parent,
             _ => Path::new("."),
         };
+        Self::from_entries(base, directory, &entries, policy)
+    }
+
+    /// Layers from already-parsed entries (lowest first), their paths
+    /// resolved against `directory` as a load order there would resolve them.
+    pub fn from_entries(
+        base: Arc<dyn Vfs>,
+        directory: &Path,
+        entries: &[LayerEntry],
+        policy: LoadOrderPolicy,
+    ) -> Result<Self, VfsError> {
         let dir = Dir::open_ambient_dir(directory, ambient_authority())
             .map_err(|error| io_error(directory, error))?;
         let layers = entries

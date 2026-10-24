@@ -139,9 +139,9 @@ pub struct Game {
     /// `--debug` was given: the worlds accept the map preview's keys
     /// (G-09); without it they keep only the game's own keys.
     pub debug_keys: bool,
-    /// The configured preset is the enhanced one (shown in the title; the
-    /// rule set itself is the engine's).
-    pub enhanced: bool,
+    /// The configured engine preset: every world starts with it, and the
+    /// enhanced one is named in the title.
+    pub preset: vault_core::EnginePreset,
     sounds: crate::map_preview::SoundBank,
     finished: bool,
     /// SPEC-014 §3.2 a fade outside the world, and the six-bit levels shown
@@ -247,7 +247,7 @@ impl Game {
             headless: false,
             debug: false,
             debug_keys: false,
-            enhanced: false,
+            preset: vault_core::EnginePreset::Vanilla,
             sounds: Default::default(),
             finished: false,
             fade: None,
@@ -503,7 +503,8 @@ impl Game {
     }
     fn world_with(&self, sheet: CharacterSheet) -> AppResult<MapPreview> {
         let assets = VfsWorldAssets::new(self.vfs.clone(), &self.language)?;
-        let mut world = MapPreview::with_sheet(assets, flow::NEW_GAME_MAP, sheet, self.seed)?;
+        let mut world =
+            MapPreview::with_sheet(assets, flow::NEW_GAME_MAP, sheet, self.seed, self.preset)?;
         world.host.world.clock.ticks = flow::START_TICKS;
         world.audio = self.audio.clone();
         world.save_root = self.save_root.clone();
@@ -704,7 +705,7 @@ impl Game {
         if self.debug_keys {
             self.title()
         } else {
-            play_title(self.enhanced).into()
+            play_title(self.preset == vault_core::EnginePreset::Enhanced).into()
         }
     }
     /// The stage's diagnostic title.
@@ -1759,7 +1760,7 @@ mod tests {
         // The window shows the product name in play, the stage with
         // `--debug`.
         assert_eq!(game.window_title(), "Fallout — Vault Engine");
-        game.enhanced = true;
+        game.preset = vault_core::EnginePreset::Enhanced;
         assert_eq!(game.window_title(), "Fallout — Vault Engine [Enhanced]");
         game.debug_keys = true;
         assert_eq!(game.window_title(), "Vault — main menu");

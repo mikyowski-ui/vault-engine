@@ -2,14 +2,22 @@ use crate::AppResult;
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
 use vault_formats::{
-    DatArchive, DatProvider, Database, Font, FrmArchive, LocalDirProvider, MAX_ASSET_BYTES,
-    MsgCatalog, Palette, ParseError, PrefixMount, Vfs, VfsPath,
+    DatArchive, DatProvider, Database, Font, FrmArchive, LayerEntry, LayeredVfs, LoadOrderPolicy,
+    LocalDirProvider, MAX_ASSET_BYTES, MsgCatalog, Palette, ParseError, PrefixMount, Vfs, VfsPath,
 };
 use vault_render::{ImageError, IndexedImage, compose_preview};
 use winit::keyboard::KeyCode;
 
 #[derive(clap::Args, Debug, Default)]
 pub struct PreviewArgs {
+    /// The engine preset (from the settings or `--preset`; Vanilla when
+    /// neither names one).
+    #[arg(skip)]
+    pub preset: vault_core::EnginePreset,
+    /// Mod layers stacked over the game data, lowest first (the settings'
+    /// `mod_list`): paths, or a `load_order.toml`.
+    #[arg(skip)]
+    pub mods: Option<crate::config::ModList>,
     /// Mount a loose directory: the whole asset source, or with DAT
     /// archives the loose patch root both databases consult first.
     #[arg(long, requires = "preview_asset", value_name = "PATH")]
@@ -422,6 +430,39 @@ impl PreviewArgs {
     /// read, and members stream from the file on demand), or a loose
     /// directory alone.
     pub fn source(&self) -> AppResult<Arc<dyn Vfs>> {
+        let base = self.base_source()?;
+        let Some(mods) = &self.mods else {
+            return Ok(base);
+        };
+        // The mod layers stay outermost, so the world sees them counted.
+        let layered = match mods {
+            crate::config::ModList::File(path) => LayeredVfs::from_load_order(base, path),
+            // Paths from the settings are the user's own (already resolved
+            // against the settings file), so they may lie anywhere.
+            crate::config::ModList::Paths(paths) => {
+                let entries = paths
+                    .iter()
+                    .map(|path| LayerEntry {
+                        path: Some(path.to_string_lossy().into_owned()),
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>();
+                LayeredVfs::from_entries(
+                    base,
+                    Path::new("."),
+                    &entries,
+                    LoadOrderPolicy {
+                        allow_outside: true,
+                    },
+                )
+            }
+        }
+        .map_err(|error| format!("mod_list: {error}"))?;
+        tracing::info!(layers = layered.layers().len(), "mod layers mounted");
+        Ok(Arc::new(layered))
+    }
+    /// The game data without mod layers.
+    fn base_source(&self) -> AppResult<Arc<dyn Vfs>> {
         let loose = self
             .corpus_dir
             .as_ref()
@@ -481,6 +522,7 @@ impl PreviewArgs {
             )?;
             game.headless = self.headless;
             game.debug = self.debug;
+            game.preset = self.preset;
             // G-09: the preview and debug keys work in the game only with
             // the explicit flag.
             game.debug_keys = self.debug;
@@ -488,12 +530,13 @@ impl PreviewArgs {
         }
         if let Some(path) = &self.preview_map {
             let vfs = self.source()?;
-            let mut map = crate::map_preview::MapPreview::load(
+            let mut map = crate::map_preview::MapPreview::load_with(
                 vfs,
                 path,
                 language,
                 self.player_gcd.as_deref(),
                 self.resolved_seed(),
+                self.preset,
             )?;
             map.host.set_subtitles(self.subtitles);
             map.save_root = save_root;

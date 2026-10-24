@@ -121,8 +121,47 @@ WGSL resolves them through a separate 256-entry RGB332 palette texture. The
 sprite retains its aspect ratio on resize. Minimized windows suspend rendering;
 lost/outdated surfaces are reconfigured.
 
-Keyboard, pointer, wheel, focus, modifier, resize, and quit observations are
-written as JSON Lines to stdout. Command IDs begin at 1 in each session:
+The 640×480 frame is scaled one of two ways (`scaling` in the settings,
+`--scaling`, or **Alt+S** at run time). `aspect_fit`, the default, fills the
+window on one axis and centers it on the other. At a fractional scale the
+shader samples sharp-bilinearly: it pre-scales by the whole part and blends
+the palette-resolved colours only in a thin band at each texel edge, so pixels
+stay crisp while scrolling. `integer` keeps whole-pixel scaling with a border.
+Pointer mapping, the cursor warp and replay all use the same integer-snapped
+viewport. **F11** or **Alt+Enter** toggles borderless fullscreen. The shell
+keeps these keys, and F10 stays the game's quit confirmation (SPEC-014
+§3.17). The window opens at 1280×960, or at the largest multiple of 640×480
+that fits a smaller monitor.
+
+With no arguments the game starts from the data named in `vault-engine.toml`,
+looked for beside the executable and then in the working directory. Keys:
+`master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
+`preset` (`vanilla` or `enhanced`), `scaling`, `fullscreen` and `debug`. When
+there is no file, `MASTER.DAT` and `CRITTER.DAT` are looked for in the working
+directory, beside the executable, in `../local-corpus` and in the usual Steam
+and GOG install directories, and what is found is written to a new
+`vault-engine.toml`. Command-line flags always win over the file.
+
+`preset = "enhanced"` (or `--preset enhanced`) selects
+`vault_core::EnginePreset::Enhanced`. That enables the versioned opcode range
+`0x8200`-`0x82FF` (`0x8200` pushes the engine API version, 1) and reads table
+overrides from `data/vault-engine/<table>.txt`. The tables are the critical
+hits, critical failures, terrain, encounter frequency, regions, towns,
+hotspots and map numbers, in the canonical text `build.rs` emits. Vanilla, the
+default, keeps strict SPEC-004/005 behaviour: the enhanced words are unknown
+opcodes, the compiled spec tables are used, and replay digests are unchanged
+(a regression test pins them). `mod_list` stacks mod layers over the game data,
+lowest first: each is a loose folder and/or a master `.DAT` with an optional
+critter `.DAT`, routed as the base data is, and the highest layer wins. It is
+either a list of paths or the path of a `load_order.toml` (`layers = [...]`, or
+`[[layer]]` tables with `path`, `master_dat` and `critter_dat`). A load order's
+layers must lie inside its own directory. A mounted mod layer also enables the
+table overrides.
+
+With `--record-inputs FILE` (`-` for stdout), keyboard, pointer, wheel,
+focus, modifier, resize, display-scaling, vault-debug and quit observations are
+written as JSON Lines; without it nothing is logged. Command IDs begin at 1 in
+each session:
 
 ```json
 {"command_id":1,"kind":"key","physical_key":"KeyA","pressed":true,"repeat":false}
@@ -145,8 +184,9 @@ cargo run -p vault-platform -- --master-dat /path/to/MASTER.DAT --critter-dat /p
 # {"commands":8,"elapsed_ms":128,"state_sha256":"…"}
 ```
 
-The desktop logs its initial window size (`surface`, the first record) and
-every frame's clock (`tick`), so a replay ticks at exactly the logged times,
+The desktop logs its initial window size (`surface`, the first record), its
+display scaling (`scaling`, then on every Alt+S; a log without one replays
+with integer scaling) and every frame's clock (`tick`), so a replay ticks at exactly the logged times,
 with the same engine key repeats (SPEC-014 §3.29). A log without a leading
 `surface` record comes from an older desktop: each command then advances a
 simulated 16 ms frame on a 960 x 640 surface. Command identifiers must increase; replay stops at `quit` or an unconsumed
@@ -765,7 +805,18 @@ raster.
 interactive world: every GVAR, MVAR and LVAR is watched after each update, the
 live trace records every script instruction, and an overlay on the right of
 the map view shows the newest changes (also logged at debug level, target
-`vault_debug`).
+`vault_debug`). **F8** cycles the overlay's pages: Watch, Inspect (a left
+click on the map selects an object instead of acting, showing its id, PID,
+FID, script, AI packet, team, HP/AP, flags and LVARs, with LVAR edits and
+**H** for a full heal), GVAR and MVAR editors, Map jump (any numbered map, an
+elevation and an optional tile) and Spawn (PID and quantity). Up/Down choose a
+row, digits and Minus type, Backspace deletes and Enter commits. The overlay
+never changes the world itself: each commit becomes a
+`vault_core::debug::DebugCommand` (`SetGlobalVar`, `SetMapVar`,
+`SetObjectLocalVar`, `TeleportMap`, `SpawnItem`, `HealCritter`, objects named
+by map object id) that the shell logs as a `debug` record and then applies, so
+a replay applies the same commands at the same points, exactly once. Without
+debug mode the window title is the product name, "Fallout — Vault Engine".
 
 ## Map preview
 
@@ -1250,7 +1301,11 @@ under the SPEC-008 §3.3 safe rule: every file is staged as `<name>.TMP`, and on
 after all succeed are the old files renamed to `.BAK`, the staged files renamed
 into place (restoring the backups if that fails), and the backups removed.
 `load_game` reads and validates the header, every payload, every companion map
-(parsed in full), and the automap before it changes any state. A timed event
+(parsed in full), and the automap before it changes any state. A companion
+name from the manifest is used only when it is exactly the name
+`saved_map_name` would give: a plain `[A-Za-z0-9_-]` stem plus `.SAV`, with no
+separator, `..` or drive prefix. Saving checks the same rule. A crafted
+`SAVE.DAT` can therefore never read or write a file outside its slot. A timed event
 whose owner identifier matches no restored object is restored without an owner. It then restores in the reference order: reset, game
 tick, campaign snapshot A, working set, current map, then the player and later
 components (snapshot B is ignored). An active saved combat resumes the player's

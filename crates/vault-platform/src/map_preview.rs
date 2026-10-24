@@ -7,7 +7,8 @@ use std::{
     sync::Arc,
 };
 use vault_core::{
-    CharacterSheet, ObjectAction, ObjectRef, Perk, WorldEffect, WorldHost, WorldState,
+    CharacterSheet, EnginePreset, ObjectAction, ObjectRef, Perk, WorldEffect, WorldHost,
+    WorldState,
     assets::{VfsWorldAssets, WorldAssets},
     movie::{MoviePolicy, MovieRequest},
 };
@@ -441,6 +442,7 @@ fn overlaps_window([left, top, right, bottom]: [i64; 4], [width, height]: [i64; 
 }
 
 impl MapPreview {
+    #[cfg(test)]
     pub fn load(
         vfs: Arc<dyn Vfs>,
         path: &str,
@@ -448,26 +450,42 @@ impl MapPreview {
         character: Option<&str>,
         seed: i32,
     ) -> AppResult<Self> {
+        Self::load_with(vfs, path, language, character, seed, EnginePreset::Vanilla)
+    }
+    /// The world for `path`, its player sheet read from `character` (a
+    /// `.gcd`) when given, under `preset`.
+    pub fn load_with(
+        vfs: Arc<dyn Vfs>,
+        path: &str,
+        language: &str,
+        character: Option<&str>,
+        seed: i32,
+        preset: EnginePreset,
+    ) -> AppResult<Self> {
         let assets = VfsWorldAssets::new(vfs, language)?;
         let character = if let Some(path) = character {
             CharacterSheet::from_gcd(&assets.gcd(path)?, Default::default())
         } else {
             CharacterSheet::default()
         };
-        Self::with_sheet(assets, path, character, seed)
+        Self::with_sheet(assets, path, character, seed, preset)
     }
     /// The world for `path` with a ready player sheet (SPEC-014 §3.12's
     /// new-game hand-off passes the selected or edited character).
+    /// `preset` is set before the campaign loads, so its table overrides
+    /// and script parse profile apply from the first map on.
     pub fn with_sheet(
         assets: VfsWorldAssets,
         path: &str,
         character: CharacterSheet,
         seed: i32,
+        preset: EnginePreset,
     ) -> AppResult<Self> {
         let path = VfsPath::new(path)?;
         let palette = Palette::parse(&assets.vfs.read_bounded("color.pal", MAX_ASSET_BYTES)?)?;
         let font = assets.font().ok();
         let mut host = WorldHost::new(WorldState::new(character, seed)?, assets);
+        host.set_preset(preset);
         // SPEC-005 §3.8: loading the player sheet runs the gender update.
         host.update_player_gender();
         host.interactive_dialogue = true;
@@ -1389,7 +1407,7 @@ impl MapPreview {
         if self.movie_key() || self.dialog_key(key) || self.timer_key(key) || self.called_key(key) {
             return true;
         }
-        // F9 toggles the vault-debug inspector; while it is open, F11 and
+        // F9 toggles the vault-debug inspector; while it is open, F8 and
         // its editing keys belong to it.
         if key == KeyCode::F9 {
             let on = !self.debug_enabled();
