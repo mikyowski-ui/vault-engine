@@ -220,7 +220,7 @@ impl AssetPreview {
                 "Vault — movie {} — any key or a click skips",
                 movie.player.request.path
             ),
-            Self::Game(game) => game.title(),
+            Self::Game(game) => game.window_title(),
         }
     }
     /// A key went up (SPEC-014 §3.27 holds releases during the combat lock).

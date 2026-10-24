@@ -139,6 +139,9 @@ pub struct Game {
     /// `--debug` was given: the worlds accept the map preview's keys
     /// (G-09); without it they keep only the game's own keys.
     pub debug_keys: bool,
+    /// The configured preset is the enhanced one (shown in the title; the
+    /// rule set itself is the engine's).
+    pub enhanced: bool,
     sounds: crate::map_preview::SoundBank,
     finished: bool,
     /// SPEC-014 §3.2 a fade outside the world, and the six-bit levels shown
@@ -180,6 +183,14 @@ fn palette_from(levels: &[[u8; 3]; 256]) -> Palette {
         bytes[3 * index..3 * index + 3].copy_from_slice(triple);
     }
     Palette::parse(&bytes).expect("a complete base palette")
+}
+/// The window title in normal play (without `--debug`).
+fn play_title(enhanced: bool) -> &'static str {
+    if enhanced {
+        "Fallout — Vault Engine [Enhanced]"
+    } else {
+        "Fallout — Vault Engine"
+    }
 }
 fn black() -> Palette {
     palette_from(&[[0; 3]; 256])
@@ -236,6 +247,7 @@ impl Game {
             headless: false,
             debug: false,
             debug_keys: false,
+            enhanced: false,
             sounds: Default::default(),
             finished: false,
             fade: None,
@@ -686,6 +698,16 @@ impl Game {
             _ => None,
         }
     }
+    /// The window title: the product name in play, and the stage's
+    /// diagnostic [`Game::title`] with `--debug`.
+    pub fn window_title(&self) -> String {
+        if self.debug_keys {
+            self.title()
+        } else {
+            play_title(self.enhanced).into()
+        }
+    }
+    /// The stage's diagnostic title.
     pub fn title(&self) -> String {
         match &self.stage {
             Stage::World(world) => world.title(),
@@ -1734,6 +1756,13 @@ mod tests {
         assert!(matches!(game.stage, Stage::Death { leaving: true, .. }));
         game.tick(48 + 2300).unwrap();
         assert_eq!(game.title(), "Vault — main menu");
+        // The window shows the product name in play, the stage with
+        // `--debug`.
+        assert_eq!(game.window_title(), "Fallout — Vault Engine");
+        game.enhanced = true;
+        assert_eq!(game.window_title(), "Fallout — Vault Engine [Enhanced]");
+        game.debug_keys = true;
+        assert_eq!(game.window_title(), "Vault — main menu");
         assert_eq!(audio.last_music(), Some(menu));
     }
 

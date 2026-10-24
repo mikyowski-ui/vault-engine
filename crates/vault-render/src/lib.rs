@@ -27,6 +27,34 @@ pub enum RendererError {
     SurfaceConfiguration,
 }
 
+/// How the frame is scaled into the window.
+///
+/// Both modes keep the frame's aspect ratio, center it, and snap its
+/// rectangle to whole surface pixels; a surface smaller than the frame
+/// gets the same fractional downscale in either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScalingMode {
+    /// The largest scale `min(W / w, H / h)`, fractional when it must be:
+    /// the frame touches both edges of one axis. A fractional scale is
+    /// drawn sharp-bilinear (nearest texels, blended only across a narrow
+    /// band at texel edges); an integer one is drawn exactly as `Integer`.
+    AspectFit,
+    /// The largest whole scale `floor(min(W / w, H / h))`, drawn with
+    /// nearest texels; the default.
+    #[default]
+    Integer,
+}
+
+impl ScalingMode {
+    /// The other mode.
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::AspectFit => Self::Integer,
+            Self::Integer => Self::AspectFit,
+        }
+    }
+}
+
 /// An R8Uint sprite and a separate 256-entry sRGB palette, resolved in WGSL.
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -40,7 +68,10 @@ pub struct Renderer {
     /// group) is recreated only when the image size changes.
     sprite: wgpu::Texture,
     palette: wgpu::Texture,
+    /// The shader's [`DisplayParams`], rewritten when the viewport changes.
+    display: wgpu::Buffer,
     image_size: [u32; 2],
+    scaling: ScalingMode,
     /// H2/M-R1: the integer-snapped rectangle the frame is drawn into;
     /// pointer mapping and warps use the same one.
     viewport: Option<Viewport>,
@@ -149,7 +180,13 @@ impl Renderer {
             [256, 1],
             wgpu::TextureFormat::Rgba8UnormSrgb,
         );
-        let bind_group = image_bind_group(&device, &pipeline, &sprite, &palette_texture);
+        let display = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("display parameters"),
+            size: std::mem::size_of::<DisplayParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = image_bind_group(&device, &pipeline, &sprite, &palette_texture, &display);
         let mut renderer = Self {
             surface,
             device,
@@ -159,13 +196,16 @@ impl Renderer {
             bind_group,
             sprite,
             palette: palette_texture,
+            display,
             image_size: [image.width(), image.height()],
+            scaling: ScalingMode::Integer,
             viewport: None,
             drawable: false,
             configured: None,
         };
         renderer.write_indices(image);
         renderer.set_palette(palette);
+        renderer.write_display();
         renderer.resize(width, height);
         Ok(renderer)
     }
@@ -210,9 +250,40 @@ impl Renderer {
         self.update_viewport();
     }
 
-    /// The frame's [`Viewport`] for the current image and surface sizes.
+    /// The frame's [`Viewport`] for the current image and surface sizes
+    /// and scaling mode, and the shader's parameters for it.
     fn update_viewport(&mut self) {
-        self.viewport = Viewport::fit([self.config.width, self.config.height], self.image_size);
+        self.viewport = Viewport::fit_with(
+            [self.config.width, self.config.height],
+            self.image_size,
+            self.scaling,
+        );
+        self.write_display();
+    }
+
+    fn write_display(&self) {
+        let params = self.viewport.map_or(DisplayParams::NEAREST, |view| {
+            view.display_params(self.scaling)
+        });
+        self.queue
+            .write_buffer(&self.display, 0, bytemuck::cast_slice(&params.0));
+    }
+
+    /// Select how the frame is scaled; the viewport, and with it every
+    /// pointer mapping and warp, follows at once.
+    pub fn set_scaling(&mut self, mode: ScalingMode) {
+        if mode == self.scaling {
+            return;
+        }
+        self.scaling = mode;
+        if self.drawable {
+            self.update_viewport();
+        }
+    }
+
+    /// The active scaling mode.
+    pub fn scaling(&self) -> ScalingMode {
+        self.scaling
     }
 
     /// The rectangle the frame is drawn into, while the surface is drawable.
@@ -228,8 +299,13 @@ impl Renderer {
         let size = [image.width(), image.height()];
         if size != self.image_size {
             self.sprite = sprite_texture(&self.device, size);
-            self.bind_group =
-                image_bind_group(&self.device, &self.pipeline, &self.sprite, &self.palette);
+            self.bind_group = image_bind_group(
+                &self.device,
+                &self.pipeline,
+                &self.sprite,
+                &self.palette,
+                &self.display,
+            );
             self.image_size = size;
             if self.drawable {
                 self.update_viewport();
@@ -347,6 +423,7 @@ fn image_bind_group(
     pipeline: &wgpu::RenderPipeline,
     sprite: &wgpu::Texture,
     palette: &wgpu::Texture,
+    display: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("indexed sprite resources"),
@@ -363,6 +440,10 @@ fn image_bind_group(
                 resource: wgpu::BindingResource::TextureView(
                     &palette.create_view(&Default::default()),
                 ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: display.as_entire_binding(),
             },
         ],
     })
@@ -395,15 +476,33 @@ fn texture(
     })
 }
 
+/// The shader's uniform block (`Display` in `indexed.wgsl`): the scale per
+/// axis (viewport size over frame size), then 1.0 when the frame is drawn
+/// sharp-bilinear and 0.0 when it is drawn with nearest texels, then
+/// padding.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DisplayParams(pub [f32; 4]);
+
+impl DisplayParams {
+    const NEAREST: Self = Self([1.0, 1.0, 0.0, 0.0]);
+    /// Whether the frame is drawn sharp-bilinear.
+    pub fn sharp(self) -> bool {
+        self.0[2] != 0.0
+    }
+}
+
 /// The surface rectangle the frame is drawn into, in whole surface pixels.
 /// One rectangle serves drawing (the render pass viewport), pointer
 /// mapping, the clamped mapping, pointer warps and headless replays, so a
 /// pointer always maps to the texel drawn under it.
 ///
-/// The scale is the largest integer `floor(min(W / w, H / h))` when that is
-/// at least 1; only a surface smaller than the frame on some axis gets an
-/// aspect-preserving fractional downscale. The rectangle is centered, its
-/// left and top margins rounded down.
+/// With [`ScalingMode::Integer`] the scale is the largest integer
+/// `floor(min(W / w, H / h))` when that is at least 1; only a surface
+/// smaller than the frame on some axis gets an aspect-preserving
+/// fractional downscale. With [`ScalingMode::AspectFit`] that fractional
+/// scale applies at every size: the frame spans the limiting axis, its
+/// other side rounded down. The rectangle is centered, its left and top
+/// margins rounded down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
     pub left: u32,
@@ -424,16 +523,22 @@ pub struct FramePoint {
 }
 
 impl Viewport {
-    /// The rectangle for an `image`-sized frame on a `surface`-sized window;
-    /// `None` when either is empty.
+    /// The [`ScalingMode::Integer`] rectangle for an `image`-sized frame on
+    /// a `surface`-sized window; `None` when either is empty.
     pub fn fit(surface: [u32; 2], image: [u32; 2]) -> Option<Self> {
+        Self::fit_with(surface, image, ScalingMode::Integer)
+    }
+
+    /// The rectangle for an `image`-sized frame on a `surface`-sized window
+    /// scaled in `mode`; `None` when either is empty.
+    pub fn fit_with(surface: [u32; 2], image: [u32; 2], mode: ScalingMode) -> Option<Self> {
         if surface.contains(&0) || image.contains(&0) {
             return None;
         }
         let [sw, sh] = surface.map(u64::from);
         let [iw, ih] = image.map(u64::from);
         let scale = (sw / iw).min(sh / ih);
-        let (width, height) = if scale >= 1 {
+        let (width, height) = if scale >= 1 && mode == ScalingMode::Integer {
             (iw * scale, ih * scale)
         } else if sw * ih <= sh * iw {
             // The width limits: the frame spans the surface's width.
@@ -449,6 +554,27 @@ impl Viewport {
             image,
         })
     }
+    /// The whole scale `k` when the frame is drawn exactly `k` times its
+    /// size on both axes.
+    pub fn integer_scale(self) -> Option<u32> {
+        let [iw, ih] = self.image;
+        let k = self.width / iw;
+        (k >= 1 && self.width == iw * k && self.height == ih * k).then_some(k)
+    }
+
+    /// The shader parameters for this rectangle in `mode`: sharp-bilinear
+    /// only for an aspect fit at a fractional scale, so an integer scale
+    /// draws exactly the nearest texels in either mode.
+    pub fn display_params(self, mode: ScalingMode) -> DisplayParams {
+        let sharp = mode == ScalingMode::AspectFit && self.integer_scale().is_none();
+        DisplayParams([
+            self.width as f32 / self.image[0] as f32,
+            self.height as f32 / self.image[1] as f32,
+            if sharp { 1.0 } else { 0.0 },
+            0.0,
+        ])
+    }
+
     fn origin(self) -> [i64; 2] {
         [i64::from(self.left), i64::from(self.top)]
     }
@@ -543,9 +669,51 @@ pub fn frame_point(surface: [u32; 2], image: [u32; 2], point: [f64; 2]) -> Optio
     Viewport::fit(surface, image)?.clamped(point)
 }
 
+/// [`image_position`] for a frame scaled in `mode` (the free functions
+/// above are the [`ScalingMode::Integer`] mapping).
+pub fn image_position_with(
+    surface: [u32; 2],
+    image: [u32; 2],
+    mode: ScalingMode,
+    point: [f64; 2],
+) -> Option<[i32; 2]> {
+    Viewport::fit_with(surface, image, mode)?.position(point)
+}
+
+/// [`image_position_clamped`] for a frame scaled in `mode`.
+pub fn image_position_clamped_with(
+    surface: [u32; 2],
+    image: [u32; 2],
+    mode: ScalingMode,
+    point: [f64; 2],
+) -> Option<[i32; 2]> {
+    frame_point_with(surface, image, mode, point).map(|point| point.pixel)
+}
+
+/// [`frame_point`] for a frame scaled in `mode`.
+pub fn frame_point_with(
+    surface: [u32; 2],
+    image: [u32; 2],
+    mode: ScalingMode,
+    point: [f64; 2],
+) -> Option<FramePoint> {
+    Viewport::fit_with(surface, image, mode)?.clamped(point)
+}
+
+/// The surface point a pointer warp to frame pixel `pixel` goes to, for a
+/// frame scaled in `mode` ([`Viewport::surface_point`]).
+pub fn surface_point_with(
+    surface: [u32; 2],
+    image: [u32; 2],
+    mode: ScalingMode,
+    pixel: [i32; 2],
+) -> Option<[f64; 2]> {
+    Some(Viewport::fit_with(surface, image, mode)?.surface_point(pixel))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Viewport;
+    use super::{ScalingMode, Viewport};
 
     #[test]
     fn image_position_inverts_the_centered_scaled_quad() {
@@ -637,6 +805,196 @@ mod tests {
                         assert!((mapped - asked).abs() <= 1);
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_indexed_shader_validates() {
+        use wgpu::naga;
+        let module = naga::front::wgsl::parse_str(include_str!("indexed.wgsl")).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap();
+        // The uniform block matches `DisplayParams`.
+        assert_eq!(std::mem::size_of::<super::DisplayParams>(), 16);
+    }
+
+    const SURFACES: [[u32; 2]; 5] = [
+        [640, 480],
+        [960, 640],
+        [1280, 960],
+        [1920, 1080],
+        [1001, 777],
+    ];
+
+    #[test]
+    fn both_scaling_modes_fit_the_frame_into_whole_surface_pixels() {
+        let rect = |surface, mode| {
+            let v = Viewport::fit_with(surface, [640, 480], mode).unwrap();
+            [v.left, v.top, v.width, v.height]
+        };
+        let integer = [
+            [0, 0, 640, 480],
+            [160, 80, 640, 480],
+            [0, 0, 1280, 960],
+            [320, 60, 1280, 960],
+            [180, 148, 640, 480],
+        ];
+        // The aspect fit touches both edges of the limiting axis.
+        let aspect = [
+            [0, 0, 640, 480],
+            [53, 0, 853, 640],
+            [0, 0, 1280, 960],
+            [240, 0, 1440, 1080],
+            [0, 13, 1001, 750],
+        ];
+        for ((surface, integer), aspect) in SURFACES.into_iter().zip(integer).zip(aspect) {
+            assert_eq!(rect(surface, ScalingMode::Integer), integer, "{surface:?}");
+            assert_eq!(rect(surface, ScalingMode::AspectFit), aspect, "{surface:?}");
+            // `fit` is the integer mode.
+            assert_eq!(
+                Viewport::fit(surface, [640, 480]),
+                Viewport::fit_with(surface, [640, 480], ScalingMode::Integer)
+            );
+        }
+        // Below the frame both modes take the same fractional downscale.
+        for surface in [[320, 480], [600, 400]] {
+            assert_eq!(
+                rect(surface, ScalingMode::AspectFit),
+                rect(surface, ScalingMode::Integer)
+            );
+        }
+        assert_eq!(
+            Viewport::fit_with([0, 480], [640, 480], ScalingMode::AspectFit),
+            None
+        );
+        assert_eq!(ScalingMode::AspectFit.toggled(), ScalingMode::Integer);
+        assert_eq!(ScalingMode::Integer.toggled(), ScalingMode::AspectFit);
+    }
+
+    #[test]
+    fn sharp_bilinear_runs_only_for_a_fractional_aspect_fit() {
+        let params = |surface, mode| {
+            Viewport::fit_with(surface, [640, 480], mode)
+                .unwrap()
+                .display_params(mode)
+        };
+        for surface in SURFACES {
+            // Integer mode always draws nearest texels.
+            assert!(
+                !params(surface, ScalingMode::Integer).sharp(),
+                "{surface:?}"
+            );
+        }
+        // An aspect fit at a whole scale reduces to the nearest path.
+        assert!(!params([640, 480], ScalingMode::AspectFit).sharp());
+        assert!(!params([1280, 960], ScalingMode::AspectFit).sharp());
+        assert_eq!(
+            params([1280, 960], ScalingMode::AspectFit),
+            params([1280, 960], ScalingMode::Integer)
+        );
+        assert_eq!(
+            params([1280, 960], ScalingMode::AspectFit).0,
+            [2.0, 2.0, 0.0, 0.0]
+        );
+        for surface in [[960, 640], [1920, 1080], [1001, 777]] {
+            assert!(
+                params(surface, ScalingMode::AspectFit).sharp(),
+                "{surface:?}"
+            );
+        }
+        assert_eq!(
+            params([1920, 1080], ScalingMode::AspectFit).0,
+            [2.25, 2.25, 1.0, 0.0]
+        );
+        let view = Viewport::fit_with([1920, 1080], [640, 480], ScalingMode::AspectFit).unwrap();
+        assert_eq!(view.integer_scale(), None);
+        assert_eq!(
+            Viewport::fit([1920, 1080], [640, 480])
+                .unwrap()
+                .integer_scale(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn pointers_round_trip_in_both_modes() {
+        for mode in [ScalingMode::AspectFit, ScalingMode::Integer] {
+            for surface in SURFACES {
+                let view = Viewport::fit_with(surface, [640, 480], mode).unwrap();
+                // Every texel is reached by some surface column and row, in
+                // order, and a warp lands back on the texel asked for.
+                let mut last = -1;
+                for x in view.left..view.left + view.width {
+                    let [texel, _] = view
+                        .position([f64::from(x) + 0.5, f64::from(view.top)])
+                        .unwrap();
+                    assert!(
+                        texel == last || texel == last + 1,
+                        "{mode:?} {surface:?} {x}"
+                    );
+                    last = texel;
+                }
+                assert_eq!(last, 639);
+                for pixel in [
+                    [0, 0],
+                    [639, 479],
+                    [320, 190],
+                    [1, 478],
+                    [638, 1],
+                    [333, 241],
+                ] {
+                    let point = view.surface_point(pixel);
+                    let mapped = view.clamped(point).unwrap();
+                    assert!(!mapped.outside, "{mode:?} {surface:?} {pixel:?}");
+                    assert_eq!(mapped.pixel, pixel, "{mode:?} {surface:?} {point:?}");
+                    assert_eq!(
+                        super::surface_point_with(surface, [640, 480], mode, pixel),
+                        Some(point)
+                    );
+                    assert_eq!(
+                        super::image_position_with(surface, [640, 480], mode, point),
+                        Some(pixel)
+                    );
+                }
+                // The letterbox clamps to the nearest edge texel.
+                let corner = super::frame_point_with(surface, [640, 480], mode, [-5.0, -5.0]);
+                assert_eq!(corner.map(|p| (p.pixel, p.outside)), Some(([0, 0], true)));
+                assert_eq!(
+                    super::image_position_clamped_with(
+                        surface,
+                        [640, 480],
+                        mode,
+                        [f64::from(surface[0]) + 9.0, f64::from(surface[1]) + 9.0]
+                    ),
+                    Some([639, 479])
+                );
+            }
+        }
+        // 1920 x 1080 aspect fit: 1440 x 1080 at x 240, scale 2.25.
+        let aspect = |point| {
+            super::image_position_with([1920, 1080], [640, 480], ScalingMode::AspectFit, point)
+        };
+        assert_eq!(aspect([239.9, 0.0]), None);
+        assert_eq!(aspect([240.0, 0.0]), Some([0, 0]));
+        assert_eq!(aspect([241.9, 1.9]), Some([0, 0]));
+        assert_eq!(aspect([242.0, 2.0]), Some([1, 1]));
+        assert_eq!(aspect([243.9, 3.9]), Some([1, 1]));
+        assert_eq!(aspect([244.0, 4.0]), Some([2, 2]));
+        assert_eq!(aspect([1679.9, 1079.9]), Some([639, 479]));
+        assert_eq!(aspect([1680.0, 0.0]), None);
+        // The integer free functions are unchanged by the mode-taking ones.
+        for x in (0..1920).step_by(7) {
+            for y in (0..1080).step_by(11) {
+                let point = [f64::from(x) + 0.25, f64::from(y) + 0.75];
+                assert_eq!(
+                    super::frame_point([1920, 1080], [640, 480], point),
+                    super::frame_point_with([1920, 1080], [640, 480], ScalingMode::Integer, point)
+                );
             }
         }
     }

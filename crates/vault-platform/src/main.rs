@@ -1,4 +1,5 @@
 mod audio;
+mod config;
 mod editor_screen;
 mod game;
 mod input;
@@ -17,7 +18,7 @@ pub(crate) use map_preview::fixture as fixture_world;
 
 use std::{
     error::Error,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
     time::{Duration, Instant},
@@ -28,14 +29,14 @@ use input::InputCommand;
 use tracing_subscriber::EnvFilter;
 use vault_core::SequenceIds;
 use vault_formats::{Palette, palette::PaletteCycler};
-use vault_render::Renderer;
+use vault_render::{Renderer, ScalingMode};
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalSize},
+    dpi::PhysicalSize,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowId},
+    window::{Fullscreen, Window, WindowId},
 };
 
 type AppError = Box<dyn Error + Send + Sync>;
@@ -43,7 +44,8 @@ type AppResult<T> = Result<T, AppError>;
 
 #[derive(Parser)]
 #[command(
-    about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives"
+    about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives",
+    long_about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives.\n\nWithout arguments the game starts from the data named in vault-engine.toml (beside the executable, else in the working directory). Without that file, MASTER.DAT and CRITTER.DAT are looked for in the working directory, beside the executable, in ../local-corpus and in the usual Steam and GOG install directories, and what is found is saved to vault-engine.toml. Command-line flags always win over the file.\n\nF11 or Alt+Enter toggles borderless fullscreen; Alt+S toggles aspect-fit and integer scaling."
 )]
 struct Args {
     /// Present one frame and exit successfully (requires a desktop and GPU backend).
@@ -65,8 +67,168 @@ struct Args {
     /// With --replay-inputs: also write the final frame as a binary PPM.
     #[arg(long, value_name = "PATH", requires = "replay_inputs")]
     replay_frame: Option<PathBuf>,
+    /// Record every input command and frame clock as a JSONL input log to
+    /// FILE (`-`: standard output), for --replay-inputs. Without it no
+    /// input log is written.
+    #[arg(long, value_name = "FILE", conflicts_with = "replay_inputs")]
+    record_inputs: Option<PathBuf>,
+    /// How the frame is scaled into the window: `aspect_fit` (the largest
+    /// fit, sharp-bilinear at fractional scales) or `integer` (whole scales
+    /// only). Default: the settings file's, else integer. Alt+S toggles it.
+    #[arg(long, value_name = "MODE", value_parser = scaling_arg)]
+    scaling: Option<ScalingMode>,
+    /// Start in borderless fullscreen (F11 or Alt+Enter toggles it).
+    #[arg(long)]
+    fullscreen: bool,
+    /// The engine preset: `vanilla` or `enhanced`. Default: the settings
+    /// file's, else vanilla.
+    #[arg(long, value_name = "PRESET", value_parser = preset_arg)]
+    preset: Option<config::Preset>,
     #[command(flatten)]
     preview: preview::PreviewArgs,
+}
+
+fn scaling_arg(text: &str) -> Result<ScalingMode, String> {
+    config::parse_scaling(text).ok_or_else(|| "expected aspect_fit or integer".into())
+}
+fn preset_arg(text: &str) -> Result<config::Preset, String> {
+    config::Preset::parse(text).ok_or_else(|| "expected vanilla or enhanced".into())
+}
+
+impl Args {
+    /// An asset to preview, or the game, is named.
+    fn names_asset(&self) -> bool {
+        let preview = &self.preview;
+        preview.game
+            || preview.preview_frm.is_some()
+            || preview.preview_map.is_some()
+            || preview.play_movie.is_some()
+    }
+    /// The command line names the asset source.
+    fn names_source(&self) -> bool {
+        self.preview.corpus_dir.is_some() || self.preview.master_dat.is_some()
+    }
+    /// The launch would use game data the command line does not name: the
+    /// settings file's or, without one, discovered data. A replay never
+    /// does, and neither does a bare smoke test (the color test).
+    fn wants_data(&self) -> bool {
+        self.replay_inputs.is_none()
+            && !self.names_source()
+            && (self.names_asset() || !self.smoke_test)
+    }
+}
+
+/// What the command line and the settings file make of a launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Launch {
+    scaling: ScalingMode,
+    fullscreen: bool,
+    preset: config::Preset,
+    /// The settings' mod list, for the engine to load.
+    mod_list: Option<config::ModList>,
+    /// No asset was named and the settings' game data starts the game.
+    zero_arg_game: bool,
+}
+
+/// Merge `config` into the command line, which always wins: with no asset
+/// named (and no smoke test) settings that name game data start the game;
+/// an asset or the game named without a source takes the settings' data;
+/// and the display, preset and debug settings fill what the flags leave
+/// unset. A replay takes nothing from the settings: it runs as logged.
+fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
+    let none = config::Config::default();
+    let config = match config {
+        Some(config) if args.replay_inputs.is_none() => config,
+        _ => &none,
+    };
+    let named = args.names_asset();
+    let zero_arg_game = args.wants_data() && !named && config.has_game_data();
+    if zero_arg_game {
+        args.preview.game = true;
+    }
+    if (named || zero_arg_game) && args.wants_data() {
+        if let (Some(master), Some(critter)) = (&config.master_dat, &config.critter_dat) {
+            args.preview.master_dat = Some(master.clone());
+            args.preview.critter_dat = Some(critter.clone());
+        }
+        args.preview.corpus_dir = config.data_root.clone();
+    }
+    args.preview.debug |= config.debug.unwrap_or(false);
+    Launch {
+        scaling: args
+            .scaling
+            .or(config.scaling)
+            .unwrap_or(ScalingMode::Integer),
+        fullscreen: args.fullscreen || config.fullscreen.unwrap_or(false),
+        preset: args.preset.or(config.preset).unwrap_or_default(),
+        mod_list: config.mod_list.clone(),
+        zero_arg_game,
+    }
+}
+
+/// The settings file beside the executable or in the working directory.
+/// Without one, when the launch wants game data the command line does not
+/// name, the data discovered on disk, saved for the next launch.
+fn settings(args: &Args) -> AppResult<Option<config::Config>> {
+    if args.replay_inputs.is_some() {
+        return Ok(None);
+    }
+    let dirs = config::search_dirs();
+    if let Some(path) = config::find(&dirs) {
+        tracing::info!(file = %path.display(), "settings loaded");
+        return config::Config::load(&path).map(Some);
+    }
+    if !args.wants_data() {
+        return Ok(None);
+    }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let home = config::home_dir();
+    let Some(found) = config::discover(&config::data_dirs(exe_dir.as_deref(), home.as_deref()))
+    else {
+        return Ok(None);
+    };
+    tracing::info!(
+        master = ?found.master_dat,
+        critter = ?found.critter_dat,
+        data = ?found.data_root,
+        "game data discovered"
+    );
+    config::persist(&found, &dirs);
+    Ok(Some(found))
+}
+
+/// The interactive window's first inner size: 1280 x 960 (the frame at
+/// scale 2), or on a smaller monitor the largest whole multiple of
+/// 640 x 480 that fits it, at least 640 x 480.
+fn initial_window_size(monitor: Option<[u32; 2]>) -> [u32; 2] {
+    let k = monitor
+        .filter(|size| !size.contains(&0))
+        .map_or(2, |[width, height]| {
+            (width / 640).min(height / 480).clamp(1, 2)
+        });
+    [640 * k, 480 * k]
+}
+
+/// A key the shell keeps for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellHotkey {
+    /// F11 or Alt+Enter: borderless fullscreen on or off.
+    Fullscreen,
+    /// Alt+S: aspect-fit or integer scaling.
+    Scaling,
+}
+
+/// The shell hotkey `key` is with Alt held or not. F10 is never one: it
+/// is the game's quit-confirmation key (SPEC-014).
+fn shell_hotkey(key: KeyCode, alt: bool) -> Option<ShellHotkey> {
+    match key {
+        KeyCode::F11 => Some(ShellHotkey::Fullscreen),
+        KeyCode::Enter | KeyCode::NumpadEnter if alt => Some(ShellHotkey::Fullscreen),
+        KeyCode::KeyS if alt => Some(ShellHotkey::Scaling),
+        _ => None,
+    }
 }
 
 /// SPEC-001 display palette: cycling replaces display entries, never the PAL.
@@ -88,19 +250,30 @@ impl DisplayPalette {
     }
 }
 
-/// The JSONL input log on stdout, buffered: P-02 one flush per event-loop
-/// pass (and at exit) instead of one per input event. The log is a
-/// diagnostic: when stdout cannot be written (a closed pipe), logging stops
-/// with a warning and the game goes on.
-struct InputLog(Option<std::io::BufWriter<std::io::Stdout>>);
-impl Default for InputLog {
-    fn default() -> Self {
-        Self(Some(std::io::BufWriter::new(std::io::stdout())))
-    }
-}
+/// The JSONL input log `--record-inputs` asks for, buffered: P-02 one
+/// flush per event-loop pass (and at exit) instead of one per input event.
+/// Without the flag nothing is written. The log is a diagnostic: when it
+/// cannot be written (a closed pipe, a full disk), logging stops with a
+/// warning and the game goes on.
+#[derive(Default)]
+struct InputLog(Option<Box<dyn std::io::Write>>);
 impl InputLog {
+    /// The log at `path`, `-` being standard output; none without a path.
+    fn open(path: Option<&Path>) -> AppResult<Self> {
+        let Some(path) = path else {
+            return Ok(Self(None));
+        };
+        if path == Path::new("-") {
+            return Ok(Self(Some(Box::new(std::io::BufWriter::new(
+                std::io::stdout(),
+            )))));
+        }
+        let file =
+            std::fs::File::create(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        Ok(Self(Some(Box::new(std::io::BufWriter::new(file)))))
+    }
     fn stop(&mut self, error: &dyn std::fmt::Display) {
-        tracing::warn!(%error, "input log stopped: stdout cannot be written");
+        tracing::warn!(%error, "input log stopped: it cannot be written");
         self.0 = None;
     }
 }
@@ -133,6 +306,15 @@ struct Shell {
     /// The drawn cursor moved since the last presented frame; the next
     /// redraw presents it once, however many moves came in between (P-01).
     pointer_moved: bool,
+    /// How the frame is scaled (Alt+S toggles it).
+    scaling: ScalingMode,
+    /// Open the window in borderless fullscreen.
+    fullscreen: bool,
+    /// Alt is held, for the shell hotkeys.
+    alt: bool,
+    /// Shell hotkeys held down: their repeats and releases stay with the
+    /// shell too.
+    shell_keys: Vec<KeyCode>,
 }
 
 impl Shell {
@@ -296,6 +478,65 @@ impl Shell {
             }
         }
     }
+    /// F11 and Alt+Enter toggle borderless fullscreen, Alt+S the scaling
+    /// mode. The shell keeps these keys: neither their presses (with the
+    /// repeats) nor their releases reach the game or the input log.
+    /// Returns whether the shell took the key.
+    fn shell_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        key: KeyCode,
+        pressed: bool,
+        repeat: bool,
+    ) -> bool {
+        if !pressed {
+            let Some(at) = self.shell_keys.iter().position(|held| *held == key) else {
+                return false;
+            };
+            self.shell_keys.swap_remove(at);
+            return true;
+        }
+        if repeat {
+            return self.shell_keys.contains(&key);
+        }
+        let Some(hotkey) = shell_hotkey(key, self.alt) else {
+            return false;
+        };
+        if !self.shell_keys.contains(&key) {
+            self.shell_keys.push(key);
+        }
+        match hotkey {
+            ShellHotkey::Fullscreen => {
+                let fullscreen = window.fullscreen().is_none();
+                window.set_fullscreen(fullscreen.then_some(Fullscreen::Borderless(None)));
+                tracing::info!(fullscreen, "fullscreen toggled");
+            }
+            ShellHotkey::Scaling => {
+                self.scaling = self.scaling.toggled();
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_scaling(self.scaling);
+                }
+                tracing::info!(
+                    scaling = config::scaling_name(self.scaling),
+                    "scaling mode changed"
+                );
+            }
+        }
+        self.viewport_changed(event_loop, window);
+        true
+    }
+    /// M-P1: the frame's viewport changed (a resize, or a scaling mode or
+    /// fullscreen change): the stored pointer maps to another frame pixel,
+    /// so hover runs again and the drawn cursor follows, and the next click
+    /// acts where the cursor shows.
+    fn viewport_changed(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        if let Some(pointer) = self.pointer {
+            self.log_hover(event_loop, pointer);
+            self.refresh_pointer(window);
+        }
+        window.request_redraw();
+    }
     /// The frame pixel under the pointer, or `None` outside the frame.
     fn pixel(&self) -> Option<[i32; 2]> {
         self.pointer
@@ -338,15 +579,20 @@ impl ApplicationHandler for Shell {
             return;
         }
         self.started.get_or_insert_with(Instant::now);
+        let monitor = event_loop
+            .primary_monitor()
+            .map(|monitor| [monitor.size().width, monitor.size().height]);
+        let [width, height] = initial_window_size(monitor);
         let attributes = Window::default_attributes()
             .with_title(self.preview.as_ref().map_or_else(
                 || "Vault Engine — Indexed Color Test".to_owned(),
                 preview::AssetPreview::title,
             ))
-            .with_inner_size(LogicalSize::new(960, 640))
+            .with_inner_size(PhysicalSize::new(width, height))
             // H2: the frame is never down-sampled in a window that keeps
             // its minimum size.
-            .with_min_inner_size(PhysicalSize::new(640, 480));
+            .with_min_inner_size(PhysicalSize::new(640, 480))
+            .with_fullscreen(self.fullscreen.then_some(Fullscreen::Borderless(None)));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -388,7 +634,10 @@ impl ApplicationHandler for Shell {
             }
         })();
         match renderer {
-            Ok(renderer) => self.renderer = Some(renderer),
+            Ok(mut renderer) => {
+                renderer.set_scaling(self.scaling);
+                self.renderer = Some(renderer);
+            }
             Err(error) => {
                 self.fail(event_loop, error);
                 return;
@@ -495,6 +744,11 @@ impl ApplicationHandler for Shell {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                if let PhysicalKey::Code(key) = event.physical_key
+                    && self.shell_key(event_loop, &window, key, pressed, event.repeat)
+                {
+                    return;
+                }
                 self.log(
                     event_loop,
                     InputCommand::Key {
@@ -611,6 +865,8 @@ impl ApplicationHandler for Shell {
                 // another window.
                 if !focused {
                     self.repeat.clear();
+                    // Their releases go elsewhere too.
+                    self.shell_keys.clear();
                     if let Some(preview) = &mut self.preview {
                         preview.focus_lost();
                     }
@@ -619,6 +875,7 @@ impl ApplicationHandler for Shell {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 let modifiers = modifiers.state();
+                self.alt = modifiers.alt_key();
                 if let Some(preview) = &mut self.preview {
                     preview.set_modifiers([
                         modifiers.shift_key(),
@@ -647,14 +904,7 @@ impl ApplicationHandler for Shell {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
-                // M-P1: the stored pointer maps to another frame pixel in
-                // the new viewport: hover runs again and the drawn cursor
-                // follows, so the next click acts where the cursor shows.
-                if let Some(pointer) = self.pointer {
-                    self.log_hover(event_loop, pointer);
-                    self.refresh_pointer(&window);
-                }
-                window.request_redraw();
+                self.viewport_changed(event_loop, &window);
             }
             // The window is resized to the new scale's suggested size after
             // this event, which reports the new physical size in `Resized`
@@ -711,7 +961,28 @@ fn run(mut args: Args) -> AppResult<()> {
         println!("{}", serde_json::to_string(&report)?);
         return Ok(());
     }
+    let config = settings(&args)?;
+    let launch = resolve_launch(&mut args, config.as_ref());
+    if launch.zero_arg_game {
+        tracing::info!("starting the game from the settings' data");
+    } else if !args.names_asset() && !args.smoke_test {
+        tracing::warn!(
+            "no game data found: name it in {} beside the executable or in the working \
+             directory (master_dat = \"/path/to/MASTER.DAT\", critter_dat = \
+             \"/path/to/CRITTER.DAT\"), put MASTER.DAT and CRITTER.DAT in the working \
+             directory, or pass --game --master-dat PATH --critter-dat PATH; showing the \
+             color test",
+            config::FILE_NAME
+        );
+    }
+    if let Some(mods) = &launch.mod_list {
+        tracing::warn!(?mods, "mod_list is not applied yet");
+    }
+    let input_log = InputLog::open(args.record_inputs.as_deref())?;
     let mut preview = args.preview.load()?;
+    if let Some(preview::AssetPreview::Game(game)) = &mut preview {
+        game.enhanced = launch.preset == config::Preset::Enhanced;
+    }
     // Audio serves an interactive world or a movie; sprites need none.
     let output = || {
         if args.no_audio {
@@ -743,6 +1014,9 @@ fn run(mut args: Args) -> AppResult<()> {
     let mut shell = Shell {
         smoke_test: args.smoke_test,
         _audio: audio,
+        input_log,
+        scaling: launch.scaling,
+        fullscreen: launch.fullscreen,
         ..Default::default()
     };
     shell.display = preview
@@ -778,5 +1052,216 @@ fn main() -> ExitCode {
             tracing::error!(%error, "exiting");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once("vault-platform").chain(args.iter().copied())).unwrap()
+    }
+
+    fn installed() -> config::Config {
+        config::Config {
+            master_dat: Some("/games/fallout/MASTER.DAT".into()),
+            critter_dat: Some("/games/fallout/CRITTER.DAT".into()),
+            data_root: Some("/games/fallout/DATA".into()),
+            scaling: Some(ScalingMode::AspectFit),
+            fullscreen: Some(true),
+            debug: Some(true),
+            preset: Some(config::Preset::Enhanced),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_arguments_start_the_game_from_the_settings() {
+        let mut args = parse(&[]);
+        assert!(args.wants_data());
+        let launch = resolve_launch(&mut args, Some(&installed()));
+        assert!(launch.zero_arg_game);
+        assert!(args.preview.game && args.preview.debug);
+        assert_eq!(
+            args.preview.master_dat,
+            Some("/games/fallout/MASTER.DAT".into())
+        );
+        assert_eq!(
+            args.preview.critter_dat,
+            Some("/games/fallout/CRITTER.DAT".into())
+        );
+        assert_eq!(args.preview.corpus_dir, Some("/games/fallout/DATA".into()));
+        assert_eq!(
+            launch,
+            Launch {
+                scaling: ScalingMode::AspectFit,
+                fullscreen: true,
+                preset: config::Preset::Enhanced,
+                mod_list: None,
+                zero_arg_game: true,
+            }
+        );
+        // Without settings, or with settings naming no data, the color test
+        // shows as before.
+        let mut args = parse(&[]);
+        let launch = resolve_launch(&mut args, None);
+        assert!(!launch.zero_arg_game && !args.names_asset());
+        assert_eq!(
+            (launch.scaling, launch.fullscreen, launch.preset),
+            (ScalingMode::Integer, false, config::Preset::Vanilla)
+        );
+        let display_only = config::Config {
+            fullscreen: Some(true),
+            master_dat: Some("/only/MASTER.DAT".into()),
+            ..Default::default()
+        };
+        let mut args = parse(&[]);
+        let launch = resolve_launch(&mut args, Some(&display_only));
+        assert!(!launch.zero_arg_game && !args.names_asset() && launch.fullscreen);
+        // A loose data directory alone is game data.
+        let loose = config::Config {
+            data_root: Some("/unpacked".into()),
+            ..Default::default()
+        };
+        let mut args = parse(&[]);
+        assert!(resolve_launch(&mut args, Some(&loose)).zero_arg_game);
+        assert_eq!(
+            (args.preview.corpus_dir, args.preview.master_dat),
+            (Some("/unpacked".into()), None)
+        );
+    }
+
+    #[test]
+    fn command_line_flags_win_over_the_settings() {
+        let mut args = parse(&[
+            "--game",
+            "--master-dat",
+            "/cli/master.dat",
+            "--critter-dat",
+            "/cli/critter.dat",
+            "--scaling",
+            "integer",
+            "--preset",
+            "vanilla",
+        ]);
+        assert!(!args.wants_data());
+        let launch = resolve_launch(&mut args, Some(&installed()));
+        assert!(!launch.zero_arg_game);
+        // The command line's source is used whole: no settings data mixes in.
+        assert_eq!(args.preview.master_dat, Some("/cli/master.dat".into()));
+        assert_eq!(args.preview.critter_dat, Some("/cli/critter.dat".into()));
+        assert_eq!(args.preview.corpus_dir, None);
+        assert_eq!(launch.scaling, ScalingMode::Integer);
+        assert_eq!(launch.preset, config::Preset::Vanilla);
+        // Unset flags take the settings.
+        assert!(launch.fullscreen && args.preview.debug);
+        // `--game` without a source takes the settings' data.
+        let mut args = parse(&["--game", "--scaling", "aspect_fit"]);
+        let launch = resolve_launch(&mut args, Some(&installed()));
+        assert!(!launch.zero_arg_game);
+        assert_eq!(
+            args.preview.master_dat,
+            Some("/games/fallout/MASTER.DAT".into())
+        );
+        assert_eq!(launch.scaling, ScalingMode::AspectFit);
+        // A map preview with its own corpus keeps it.
+        let mut args = parse(&["--corpus-dir", "/cli", "--preview-map", "m.map"]);
+        resolve_launch(&mut args, Some(&installed()));
+        assert!(!args.preview.game);
+        assert_eq!(
+            (args.preview.corpus_dir, args.preview.master_dat),
+            (Some("/cli".into()), None)
+        );
+        // A bare smoke test stays the color test.
+        let mut args = parse(&["--smoke-test"]);
+        assert!(!args.wants_data());
+        assert!(!resolve_launch(&mut args, Some(&installed())).zero_arg_game);
+        assert!(!args.preview.game);
+        // A replay takes nothing from the settings.
+        let mut args = parse(&["--replay-inputs", "log.jsonl", "--preview-map", "m.map"]);
+        let launch = resolve_launch(&mut args, Some(&installed()));
+        assert!(!args.preview.debug && args.preview.master_dat.is_none());
+        assert_eq!(
+            (launch.scaling, launch.fullscreen),
+            (ScalingMode::Integer, false)
+        );
+        // The value flags check their values.
+        for bad in [["--scaling", "stretch"], ["--preset", "modern"]] {
+            assert!(Args::try_parse_from(["vault-platform", bad[0], bad[1]]).is_err());
+        }
+        assert!(
+            Args::try_parse_from([
+                "vault-platform",
+                "--record-inputs",
+                "-",
+                "--replay-inputs",
+                "log.jsonl",
+                "--preview-map",
+                "m.map"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn the_input_log_is_written_only_when_asked_for() {
+        use std::io::Write;
+        assert!(InputLog::open(None).unwrap().0.is_none());
+        assert!(parse(&[]).record_inputs.is_none());
+        assert_eq!(
+            parse(&["--record-inputs", "-"]).record_inputs,
+            Some(PathBuf::from("-"))
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("inputs.jsonl");
+        let mut log = InputLog::open(Some(&path)).unwrap();
+        let mut ids = SequenceIds::default();
+        input::write_command(log.0.as_mut().unwrap(), &mut ids, &InputCommand::Quit).unwrap();
+        log.0.as_mut().unwrap().flush().unwrap();
+        drop(log);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"command_id\":1,\"kind\":\"quit\"}\n"
+        );
+        assert!(InputLog::open(Some(&temp.path().join("missing/inputs.jsonl"))).is_err());
+    }
+
+    #[test]
+    fn the_window_opens_at_scale_two_or_the_largest_fitting_multiple() {
+        assert_eq!(initial_window_size(None), [1280, 960]);
+        assert_eq!(initial_window_size(Some([0, 0])), [1280, 960]);
+        assert_eq!(initial_window_size(Some([3840, 2160])), [1280, 960]);
+        assert_eq!(initial_window_size(Some([1280, 960])), [1280, 960]);
+        assert_eq!(initial_window_size(Some([1366, 768])), [640, 480]);
+        assert_eq!(initial_window_size(Some([1279, 1024])), [640, 480]);
+        assert_eq!(initial_window_size(Some([800, 400])), [640, 480]);
+    }
+
+    #[test]
+    fn the_shell_hotkeys_leave_f10_to_the_game() {
+        assert_eq!(
+            shell_hotkey(KeyCode::F11, false),
+            Some(ShellHotkey::Fullscreen)
+        );
+        assert_eq!(
+            shell_hotkey(KeyCode::Enter, true),
+            Some(ShellHotkey::Fullscreen)
+        );
+        assert_eq!(
+            shell_hotkey(KeyCode::NumpadEnter, true),
+            Some(ShellHotkey::Fullscreen)
+        );
+        assert_eq!(
+            shell_hotkey(KeyCode::KeyS, true),
+            Some(ShellHotkey::Scaling)
+        );
+        // SPEC-014: F10 is the game's quit confirmation; plain Enter and S
+        // are the game's keys.
+        for alt in [false, true] {
+            assert_eq!(shell_hotkey(KeyCode::F10, alt), None);
+        }
+        assert_eq!(shell_hotkey(KeyCode::Enter, false), None);
+        assert_eq!(shell_hotkey(KeyCode::KeyS, false), None);
     }
 }
