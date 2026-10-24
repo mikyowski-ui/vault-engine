@@ -33,12 +33,14 @@ jobs:
       # Fails if fuzz/Cargo.lock is out of date, so the fuzz build below
       # resolves exactly the locked versions (the `--locked` guarantee).
       - run: cargo fetch --manifest-path fuzz/Cargo.toml --locked
+      # The prebuilt cargo-fuzz is a musl binary and defaults `--target` to
+      # its own triple; AddressSanitizer needs the glibc target.
       - name: cargo fuzz build
         env:
           CARGO_TERM_COLOR: never
         run: |
           set -o pipefail
-          cargo +nightly fuzz build 2>&1 | tee fuzz-output.txt
+          cargo +nightly fuzz build --target x86_64-unknown-linux-gnu 2>&1 | tee fuzz-output.txt
       - name: cargo fuzz run
         env:
           CARGO_TERM_COLOR: never
@@ -46,7 +48,8 @@ jobs:
           set -o pipefail
           for target in $(cargo +nightly fuzz list); do
             echo "==== fuzz target $target" | tee -a fuzz-output.txt
-            cargo +nightly fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=2048 \
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$target" \
+              -- -max_total_time=60 -rss_limit_mb=2048 \
               2>&1 | tee -a fuzz-output.txt || exit 1
           done
       # Build errors and the crashing target become error annotations:

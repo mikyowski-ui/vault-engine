@@ -77,6 +77,9 @@ cargo +nightly fuzz run map -- -max_len=65536 -rss_limit_mb=2048
 ```
 
 `cargo fuzz` runs from the repository root and finds this crate by itself.
+It defaults `--target` to the triple it was built for. A prebuilt cargo-fuzz
+(for example the musl binary CI installs) therefore needs
+`--target x86_64-unknown-linux-gnu`: AddressSanitizer cannot link a static libc.
 
 ## Crashes
 
