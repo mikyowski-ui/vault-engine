@@ -190,11 +190,17 @@ impl MapPreview {
         true
     }
     /// A press on a red button answers the box; presses elsewhere are
-    /// swallowed (the box is modal).
+    /// swallowed (the box is modal). H14: the press's release is swallowed
+    /// too, so a box answered over the world map (the quit confirmation's
+    /// No button at (351, 219) lies inside the view) never reaches the
+    /// screen below as a view click.
     pub(crate) fn dialog_click(&mut self, point: [i32; 2]) -> bool {
         let Some(dialog) = &self.dialog else {
             return false;
         };
+        if let Screen::World(world) = &mut self.screen {
+            world.swallow_release();
+        }
         let [ox, oy] = dialog.origin;
         let pressed = flow::dialog_buttons(dialog.yes_no)
             .into_iter()

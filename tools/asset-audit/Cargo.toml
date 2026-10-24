@@ -11,6 +11,7 @@ clap.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 vault-core.workspace = true
+vault-debug.workspace = true
 vault-formats.workspace = true
 vault-guidance.workspace = true
 vault-vm.workspace = true

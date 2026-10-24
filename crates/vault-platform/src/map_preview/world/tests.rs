@@ -415,6 +415,109 @@ fn spec014_the_water_check_quits_from_the_world_map() {
 }
 
 #[test]
+fn m_w2_a_vault13_campaign_exit_leaves_no_stale_travel_and_follow_on() {
+    let dir = corpus();
+    let mut preview = preview(dir.path());
+    // The vats countdown (index 147) is due and the cathedral is gone
+    // (index 18): the pass moves the party to Vault 13 and loads V13ENT.
+    let mut gvars = vec![0; 700];
+    gvars[10] = 30;
+    gvars[147] = 1;
+    gvars[18] = 1;
+    preview.host.world.gvars = Some(gvars);
+    preview.host.world.clock.set(10_000);
+    assert!(preview.step(KeyCode::KeyW));
+    click(&mut preview, [400, 300]);
+    assert!(preview.host.world.world_map.travel.is_some());
+    preview.tick(1000).unwrap();
+    assert!(
+        matches!(preview.screen, Screen::Map),
+        "{}",
+        String::from_utf8_lossy(&preview.status)
+    );
+    let map = &preview.host.world.world_map;
+    assert!(
+        map.travel.is_none() && map.mark.is_none(),
+        "no stale journey"
+    );
+    // Reopened, the party is at rest with follow mode on, and a destination
+    // click keeps it on (the party was at rest).
+    assert!(preview.step(KeyCode::KeyW));
+    assert!(world(&preview).follow);
+    click(&mut preview, [400, 300]);
+    assert!(world(&preview).follow);
+}
+
+#[test]
+fn h14_a_dialog_answered_on_the_world_map_does_not_click_the_view() {
+    let dir = corpus();
+    let mut preview = preview(dir.path());
+    let mut gvars = vec![0; 700];
+    gvars[10] = 30;
+    preview.host.world.gvars = Some(gvars);
+    assert!(preview.step(KeyCode::KeyW));
+    preview.tick(1000).unwrap();
+    assert!(preview.step(KeyCode::F10));
+    assert!(preview.dialog.is_some());
+    // No is the red button at (169 + 182, 117 + 102), inside the view.
+    let no = [351, 219];
+    assert!(vault_core::worldmap::screen::view_click(no));
+    click(&mut preview, no);
+    assert!(preview.dialog.is_none() && !preview.quit_requested);
+    assert!(
+        preview.host.world.world_map.travel.is_none(),
+        "the release did not start travel"
+    );
+    assert!(matches!(preview.screen, Screen::World(_)));
+    // The next view click is a destination click again.
+    click(&mut preview, [400, 300]);
+    assert!(preview.host.world.world_map.travel.is_some());
+}
+
+#[test]
+fn m_w3_no_travel_progresses_under_the_quit_confirmation() {
+    let dir = corpus();
+    let mut preview = preview(dir.path());
+    let mut gvars = vec![0; 700];
+    gvars[10] = 30;
+    preview.host.world.gvars = Some(gvars);
+    assert!(preview.step(KeyCode::KeyW));
+    click(&mut preview, [400, 300]);
+    let mut now = run(&mut preview, 1000, 3, |_| false);
+    assert!(preview.host.world.world_map.travel.is_some());
+    assert!(preview.step(KeyCode::F10));
+    let (position, ticks) = (
+        preview.host.world.world_map.position(),
+        preview.host.world.clock.ticks,
+    );
+    now = run(&mut preview, now, 20, |_| false);
+    assert_eq!(preview.host.world.world_map.position(), position);
+    assert_eq!(preview.host.world.clock.ticks, ticks);
+    assert!(preview.dialog.is_some());
+    // Esc answers No; the journey resumes.
+    assert!(preview.step(KeyCode::Escape));
+    run(&mut preview, now, 3, |_| false);
+    assert_ne!(preview.host.world.world_map.position(), position);
+}
+
+#[test]
+fn spec014_an_arrow_key_at_the_scroll_limit_keeps_follow_mode() {
+    let dir = corpus();
+    let mut preview = preview(dir.path());
+    assert!(preview.step(KeyCode::KeyW));
+    if let Screen::World(world) = &mut preview.screen {
+        world.view = [0, 300];
+        world.follow = true;
+    }
+    assert!(preview.step(KeyCode::ArrowLeft));
+    assert!(world(&preview).follow);
+    assert_eq!(world(&preview).view, [0, 300]);
+    assert!(preview.step(KeyCode::ArrowRight));
+    assert!(!world(&preview).follow);
+    assert_eq!(world(&preview).view, [16, 300]);
+}
+
+#[test]
 #[ignore = "needs the local corpus"]
 fn corpus_world_and_town_map_art_and_seen_cell_dimming() {
     let dir = std::env::var_os("VAULT_CORPUS")

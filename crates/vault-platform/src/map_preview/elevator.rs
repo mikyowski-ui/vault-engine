@@ -231,9 +231,15 @@ impl MapPreview {
             return true;
         }
         let name = format!("{key:?}");
+        // The number row, the numeric keypad's digits and the letters all
+        // type their character (the keypad's operators type none).
         let character = name
             .strip_prefix("Digit")
             .or_else(|| name.strip_prefix("Key"))
+            .or_else(|| {
+                name.strip_prefix("Numpad")
+                    .filter(|rest| rest.len() == 1 && rest.as_bytes()[0].is_ascii_digit())
+            })
             .and_then(|rest| rest.bytes().next());
         let level = character.and_then(|c| skills::elevator(screen.kind)?.button_for_key(c));
         match level {

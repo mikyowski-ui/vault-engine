@@ -142,6 +142,11 @@ impl WorldScreen {
     fn clear_dots(&mut self) {
         self.dots.fill(0);
     }
+    /// The next left release does nothing: its press went to a window in
+    /// front (a dialog box) or closed the pause window.
+    pub fn swallow_release(&mut self) {
+        self.swallow = true;
+    }
 }
 
 fn inside(rect: [i32; 4], point: [i32; 2]) -> bool {
@@ -181,8 +186,25 @@ impl MapPreview {
     /// mode on and the view centered on the party. The music was requested
     /// by the transition that opened it.
     pub(crate) fn open_world_map(&mut self) {
+        // §3.39: opening the screen shows the party at rest (a town-map
+        // choice that starts a journey sets its travel after this).
+        self.end_world_travel();
         let world = WorldScreen::new(self.host.world.world_map.position());
         self.show_world(world, true);
+    }
+    /// M-W2: the screen is left (a map loads, a campaign check exits, a
+    /// quit): a journey in progress ends there, with its travel-dot mark,
+    /// so the next opening finds the party at rest with follow mode on
+    /// instead of resuming a stale line from wherever the party is now.
+    fn end_world_travel(&mut self) {
+        let map = &mut self.host.world.world_map;
+        map.travel = None;
+        map.mark = None;
+    }
+    /// The world or town map closes to the loaded map.
+    fn close_world_to_map(&mut self) {
+        self.end_world_travel();
+        self.return_to_map();
     }
     /// The world map opened by the interface rather than by a world
     /// transition (a town map's World button or failure, the preview's W
@@ -281,7 +303,7 @@ impl MapPreview {
     /// Leaving to a loaded map.
     fn leave_world(&mut self, loaded: Result<(), vault_core::WorldError>) {
         match loaded {
-            Ok(()) => self.return_to_map(),
+            Ok(()) => self.close_world_to_map(),
             Err(error) => self.status = error.to_string().into_bytes(),
         }
     }
@@ -293,7 +315,7 @@ impl MapPreview {
             return;
         };
         match self.host.enter_town(town) {
-            Ok(Some(TownEntry::Direct(_))) => self.return_to_map(),
+            Ok(Some(TownEntry::Direct(_))) => self.close_world_to_map(),
             Ok(Some(TownEntry::TownMap { .. })) => {
                 let Screen::World(world) = std::mem::replace(&mut self.screen, Screen::Map) else {
                     return;
@@ -421,8 +443,13 @@ impl MapPreview {
                     KeyCode::ArrowUp => [0, -1],
                     _ => [0, 1],
                 };
-                world.follow = false;
-                world.view = screen::scroll(world.view, direction).0;
+                // §3.39: a key is ignored when the view is already at that
+                // limit, so it leaves follow mode as it is.
+                let (view, blocked) = screen::scroll(world.view, direction);
+                if !blocked {
+                    world.follow = false;
+                    world.view = view;
+                }
             }
             KeyCode::Home => {
                 world.follow = false;
@@ -453,6 +480,10 @@ impl MapPreview {
             world.paused = false;
             world.swallow = !right;
             return true;
+        }
+        // A new press owns the next release.
+        if !right {
+            world.swallow = false;
         }
         if right || world.pending.is_some() {
             return true;
@@ -586,7 +617,7 @@ impl MapPreview {
         match self.host.world_map_checks()? {
             Some(WorldMapExit::Quit) => {
                 self.quit_requested = true;
-                self.return_to_map();
+                self.close_world_to_map();
                 return Ok(true);
             }
             Some(WorldMapExit::Vault13) => {

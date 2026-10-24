@@ -19,6 +19,41 @@ pub(crate) enum OptionsScreen {
     Quit,
     Preferences(Box<PreferenceState>),
 }
+/// SPEC-014 §3.18 the preferences as the rest of the game applies them:
+/// the pointer's motion scale, whether combat messages are verbose, and the
+/// SPEC-014 §3.46 floating-text lifetime, `base + lines x line`
+/// milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct AppliedPreferences {
+    /// Relative pointer motion is multiplied by this (1.0 through 2.5).
+    pub mouse_sensitivity: f64,
+    /// `combat_messages` 1, "Verbose"; 0 is "Brief".
+    pub verbose_combat_messages: bool,
+    /// `trunc(text_base_delay x 1000)`.
+    pub floating_base_ms: u64,
+    /// `trunc(min(max((text_base_delay - 1) x 0.4, 0), 2) x 1000)`.
+    pub floating_line_ms: u64,
+}
+#[cfg_attr(not(test), allow(dead_code))]
+impl AppliedPreferences {
+    pub fn of(values: &Preferences) -> Self {
+        let base = values.text_base_delay.clamp(1.0, 6.0);
+        Self {
+            mouse_sensitivity: values.mouse_sensitivity.clamp(1.0, 2.5),
+            verbose_combat_messages: values.combat_messages != 0,
+            floating_base_ms: (base * 1000.0) as u64,
+            floating_line_ms: (((base - 1.0) * 0.4).clamp(0.0, 2.0) * 1000.0) as u64,
+        }
+    }
+    /// A floating text of `lines` lines is removed once strictly more than
+    /// this many milliseconds have passed since its creation.
+    pub fn floating_lifetime_ms(&self, lines: u64) -> u64 {
+        self.floating_base_ms
+            .saturating_add(lines.saturating_mul(self.floating_line_ms))
+    }
+}
+
 pub(crate) struct PreferenceState {
     values: Preferences,
     backup: Preferences,
@@ -124,7 +159,11 @@ fn slider_value(values: &Preferences, index: usize) -> (f64, f64, f64) {
 fn set_slider(values: &mut Preferences, index: usize, value: f64) {
     match index {
         0 => values.combat_speed = value as i32,
-        1 => values.text_base_delay = value.clamp(1.0, 6.0),
+        // §3.18 the line delay follows the base delay.
+        1 => {
+            values.text_base_delay = value.clamp(1.0, 6.0);
+            values.text_line_delay = options::line_delay(values.text_base_delay);
+        }
         2 => values.master_volume = value as i32,
         3 => values.music_volume = value as i32,
         4 => values.sndfx_volume = value as i32,
@@ -170,6 +209,13 @@ impl MapPreview {
             blocked_until: 0,
         })));
     }
+    /// M-I6: the applied preferences, for the consumers outside this
+    /// window: the shell's pointer-motion scale, the combat message
+    /// verbosity and the floating-text layer's lifetimes.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn applied_preferences(&self) -> AppliedPreferences {
+        AppliedPreferences::of(&self.preferences)
+    }
     /// Apply preferences to the world (the save words included) and the
     /// mixer, and write the configuration file when one is configured.
     pub(crate) fn apply_preferences(&mut self) {
@@ -190,6 +236,9 @@ impl MapPreview {
     /// the configuration file when one is configured. A brightness hotkey
     /// does only this (and applies its gamma): it reapplies no volume.
     pub(crate) fn store_preferences(&mut self) {
+        // §3.18 / §3.46: reapplying derives the line delay from the base
+        // delay, and the derived value is what is saved.
+        self.preferences.text_line_delay = options::line_delay(self.preferences.text_base_delay);
         let values = self.preferences.clone();
         let world = &mut self.host.world;
         world.difficulty = values.game_difficulty;
@@ -479,7 +528,12 @@ impl MapPreview {
             return false;
         }
         if drag.released {
+            let index = drag.index;
             state.drag = None;
+            // §3.18 mouse sensitivity takes effect on release.
+            if index == 7 {
+                self.preferences.mouse_sensitivity = state.values.mouse_sensitivity;
+            }
             self.play_effect(vault_core::ui::BUTTON_RELEASE.as_bytes(), None);
             return true;
         }
@@ -504,6 +558,11 @@ impl MapPreview {
         // The live preview: brightness and the volumes take effect now
         // (Cancel restores the backup).
         match index {
+            // §3.18: the text delay is stored as it changes.
+            1 => {
+                self.preferences.text_base_delay = values.text_base_delay;
+                self.preferences.text_line_delay = values.text_line_delay;
+            }
             2 => self.preferences.master_volume = values.master_volume,
             3 => self.preferences.music_volume = values.music_volume,
             4 => self.preferences.sndfx_volume = values.sndfx_volume,
@@ -537,17 +596,20 @@ impl MapPreview {
     }
     fn options_action(&mut self, action: OptionsAction) {
         match action {
-            OptionsAction::SaveGame => {
-                self.screen = Screen::Map;
-                self.open_save_screen(vault_core::ui::saveload::Mode::Save);
-            }
-            OptionsAction::LoadGame => {
-                self.screen = Screen::Map;
-                self.open_save_screen(vault_core::ui::saveload::Mode::LoadInGame);
-            }
+            // §3.17: a save or load closes options; a cancel returns here.
+            OptionsAction::SaveGame => self.save_screen_from_options(true),
+            OptionsAction::LoadGame => self.save_screen_from_options(false),
             OptionsAction::Preferences => self.open_preferences(),
             OptionsAction::ExitGame => self.screen = Screen::Options(OptionsScreen::Quit),
             OptionsAction::Done => self.screen = Screen::Map,
+        }
+    }
+    fn save_screen_from_options(&mut self, save: bool) {
+        use vault_core::ui::saveload::Mode;
+        self.screen = Screen::Map;
+        self.open_save_screen(if save { Mode::Save } else { Mode::LoadInGame });
+        if let Screen::SaveLoad(screen) = &mut self.screen {
+            screen.from_options = true;
         }
     }
     pub(crate) fn options_key(&mut self, key: KeyCode) -> bool {
@@ -676,6 +738,31 @@ impl MapPreview {
         }
         true
     }
+    /// §3.18 DEFAULT: every preference returns to its default, game
+    /// difficulty included, and the volumes, gamma, mouse sensitivity and
+    /// text delays apply at once (the live preview a slider drag gives;
+    /// Cancel still restores the backup).
+    fn default_preferences(&mut self) {
+        let Screen::Options(OptionsScreen::Preferences(state)) = &mut self.screen else {
+            return;
+        };
+        let defaults = Preferences::default();
+        state.values = Preferences {
+            text_line_delay: options::line_delay(defaults.text_base_delay),
+            ..defaults
+        };
+        state.changed = true;
+        let values = state.values.clone();
+        let live = &mut self.preferences;
+        live.master_volume = values.master_volume;
+        live.music_volume = values.music_volume;
+        live.sndfx_volume = values.sndfx_volume;
+        live.speech_volume = values.speech_volume;
+        live.brightness = values.brightness;
+        live.mouse_sensitivity = values.mouse_sensitivity;
+        live.text_base_delay = values.text_base_delay;
+        live.text_line_delay = values.text_line_delay;
+    }
     fn preferences_click(&mut self, point: [i32; 2]) {
         let covered = self.preferences_covered();
         let painter = Painter {
@@ -704,13 +791,7 @@ impl MapPreview {
             if rect.contains(point) {
                 self.press_button(rect);
                 match index {
-                    0 => {
-                        if let Screen::Options(OptionsScreen::Preferences(state)) = &mut self.screen
-                        {
-                            state.values = Preferences::default();
-                            state.changed = true;
-                        }
-                    }
+                    0 => self.default_preferences(),
                     1 => self.close_preferences(true),
                     _ => self.close_preferences(false),
                 }
@@ -783,3 +864,6 @@ pub(super) fn draw_pause(painter: &Painter, image: &mut IndexedImage, origin: [i
     painter.text(image, 104, ColorKey::LABEL, &paused, [ox + x, oy + 10], 139);
     painter.blit(image, "lilredup.frm", 0, [ox + 26, oy + 46]);
 }
+
+#[cfg(test)]
+mod tests;

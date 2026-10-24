@@ -1,6 +1,7 @@
 mod archives;
 mod items;
 mod movies;
+mod readiness;
 mod sound;
 mod ui;
 
@@ -131,6 +132,28 @@ struct Args {
     /// corpus directory).
     #[arg(long, value_name = "PATH", requires = "validate_dat")]
     critter_dat: Option<PathBuf>,
+    /// SPEC-004/SPEC-005: decode every `.INT` to the end of its code and
+    /// require every instruction word to be one the dispatcher executes
+    /// (unknown words are listed); resolve every map's script index, script
+    /// record file index and object script id through `scripts.lst` to a
+    /// loadable `.INT`; and require the procedure index 1 the request path
+    /// falls back to in every referenced script.
+    #[arg(long)]
+    validate_scripts: bool,
+    /// SPEC-013 §3.21-§3.23: every exit grid and elevator destination names
+    /// a map in `map.msg`, a hex 0-39999 on elevation 0-2 with a tile block,
+    /// and no wall or scenery on the hex. Ladder and stairs words and
+    /// `load_map` names `map.msg` lacks are reported as warnings.
+    #[arg(long)]
+    validate_exits: bool,
+    /// SPEC-006 §3.5 / SPEC-013 §3.22 / SPEC-014 §3.39: from a fresh start
+    /// on `V13ENT.MAP`, leave map after map through exit grids, the world
+    /// map's town entry, ladders and scripted `load_map`, ticking the
+    /// world; every entered map must have no script faulted on a missing
+    /// symbol, a passable landing with room to move, and its scripted start
+    /// (Vault 15's ladder lands near 20719, Shady Sands near 12107).
+    #[arg(long)]
+    validate_transitions: bool,
 }
 
 fn saved_objects(map: &MapFile) -> usize {
@@ -890,6 +913,29 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
             audit.report("Roofs");
             Ok(audit.failed())
         });
+    }
+    for (enabled, title, check) in [
+        (
+            args.validate_scripts,
+            "Scripts",
+            readiness::audit_scripts as fn(&Arc<LocalDirProvider>, &mut readiness::Warnings) -> _,
+        ),
+        (args.validate_exits, "Exits", readiness::audit_exits),
+        (
+            args.validate_transitions,
+            "Transitions",
+            readiness::audit_transitions,
+        ),
+    ] {
+        if enabled {
+            failures.run(title, &format!("{title} check(s)"), || {
+                let mut warnings = readiness::Warnings::default();
+                let audit = check(&vfs, &mut warnings)?;
+                audit.report(title);
+                println!("{title} warnings: {}", warnings.count());
+                Ok(audit.failed())
+            });
+        }
     }
     if args.validate_saves {
         failures.run("Saves", "save check(s)", || {

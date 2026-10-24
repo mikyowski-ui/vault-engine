@@ -893,6 +893,10 @@ impl MapPreview {
                         .map(|_| ()),
                 }
             }
+            // H12 / SPEC-014 §3.34: a quick press and release on the worn
+            // armor changes nothing (as for a hand's own item), so its AC,
+            // DR, DT and perk are never applied twice.
+            DropTarget::Armor if self.slot_item(Slot::Armor) == Some(item) => Ok(()),
             DropTarget::Armor if is(self, item, armor) => {
                 let old = self.slot_item(Slot::Armor).filter(|old| *old != item);
                 let worn = self

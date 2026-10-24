@@ -295,8 +295,68 @@ impl MapPreview {
             self.barter_text(item, ObjectAction::LookAt);
         }
     }
-    /// The hold pulse of an arrow press opens the item menu at the pointer.
+    /// H13: every column's open containers must still form an ownership
+    /// chain from the column's holder (a move, trade or script can take a
+    /// bag away). The chain is cut at the first container that is no
+    /// longer inside the one before it, and each column's scroll offset is
+    /// clamped to its entries. Returns whether anything changed.
+    fn check_barter_views(&mut self) -> bool {
+        let Screen::Barter(screen) = &self.screen else {
+            return false;
+        };
+        let session = &screen.session;
+        let roots = [
+            self.host.world.player,
+            session.offer,
+            session.table,
+            session.merchant,
+        ];
+        let world = &self.host.world;
+        let valid: [usize; 4] = std::array::from_fn(|column| {
+            let mut holder = roots[column];
+            screen.views[column]
+                .iter()
+                .take_while(|container| {
+                    let inside = world
+                        .get(**container)
+                        .is_some_and(|object| object.owner == Some(holder));
+                    holder = **container;
+                    inside
+                })
+                .count()
+        });
+        let mut changed = false;
+        for (column, keep) in valid.into_iter().enumerate() {
+            if let Screen::Barter(screen) = &mut self.screen
+                && screen.views[column].len() > keep
+            {
+                screen.views[column].truncate(keep);
+                screen.offsets[column] = 0;
+                changed = true;
+            }
+        }
+        let Some(owners) = self.barter_owners() else {
+            return changed;
+        };
+        let counts = owners.map(|owner| self.barter_entries(owner).len());
+        if let Screen::Barter(screen) = &mut self.screen {
+            for (offset, count) in screen.offsets.iter_mut().zip(counts) {
+                let limit = count.saturating_sub(ROWS);
+                if *offset > limit {
+                    *offset = limit;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+    /// The hold pulse of an arrow press opens the item menu at the pointer;
+    /// every frame also checks the columns' open containers.
     pub(crate) fn barter_tick(&mut self) -> bool {
+        let checked = self.check_barter_views();
+        checked | self.barter_pulse()
+    }
+    fn barter_pulse(&mut self) -> bool {
         let (clock, at) = (self.clock, self.pointer.at);
         let Screen::Barter(screen) = &mut self.screen else {
             return false;
@@ -411,13 +471,36 @@ impl MapPreview {
         let trade = self.host.attempt_trade(&session);
         self.drain_effects();
         match trade {
+            // H13 / SPEC-011 §3.19 step 4: the tables' items have changed
+            // sides, so containers opened on a table close and the table
+            // columns scroll back to the top (the inventories keep their
+            // views, clamped by the next frame's check).
+            Ok(Trade::Accepted) => {
+                if let Screen::Barter(screen) = &mut self.screen {
+                    for column in [1, 2] {
+                        screen.views[column].clear();
+                        screen.offsets[column] = 0;
+                    }
+                }
+                self.check_barter_views();
+                let text = self.status.clone();
+                self.barter_reply(text);
+            }
             // `inventry.msg` 27 or 28 reaches the reply area.
-            Ok(Trade::Accepted | Trade::Refused) => {
+            Ok(Trade::Refused) => {
                 let text = self.status.clone();
                 self.barter_reply(text);
             }
             Ok(Trade::Nothing) => {}
             Err(error) => self.status = error.to_string().into_bytes(),
+        }
+    }
+    /// M-I5 / SPEC-013 §3.18: the player table's plain value, the whole
+    /// table even while a container opened on it is shown.
+    fn barter_offer_value(&self) -> i64 {
+        match &self.screen {
+            Screen::Barter(screen) => self.host.world.inventory_value(screen.session.offer),
+            _ => 0,
         }
     }
     fn barter_reply(&mut self, text: Vec<u8>) {
@@ -766,9 +849,8 @@ impl MapPreview {
         for (merchant, rect) in PORTRAITS {
             self.draw_barter_portrait(&mut image, screen, merchant, at(WINDOW, rect));
         }
-        let world = &self.host.world;
         for (text, x) in [
-            (format!("${}", world.inventory_value(owners[1])), 169),
+            (format!("${}", self.barter_offer_value()), 169),
             (format!("${price}"), 254),
         ] {
             painter.text(
@@ -803,3 +885,6 @@ impl MapPreview {
         Ok(image)
     }
 }
+
+#[cfg(test)]
+mod tests;

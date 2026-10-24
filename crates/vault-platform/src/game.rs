@@ -867,6 +867,14 @@ impl Game {
                 Ok(changed)
             }
             Stage::Editor(stage) => {
+                // §3.9: an accepted quit confirmation cancels on the next
+                // frame and returns through the selection screen to the
+                // menu.
+                if stage.quitting {
+                    self.editor_exit(EditorExit::Cancel);
+                    self.enter_menu();
+                    return Ok(true);
+                }
                 let stepped = stage.tick(now, self.pointer);
                 self.editor_sounds();
                 Ok(stepped || self.held_moved())
@@ -979,15 +987,6 @@ impl Game {
         match world.endgame.take() {
             Some(WorldEffect::Slideshow) => {
                 let globals = world.host.world.gvars.clone().unwrap_or_default();
-                if let Some(value) = world
-                    .host
-                    .world
-                    .gvars
-                    .as_mut()
-                    .and_then(|g| g.get_mut(endgame::DONE_GLOBAL))
-                {
-                    *value = 0;
-                }
                 let slides = endgame::slides(&globals);
                 let Stage::World(world) =
                     std::mem::replace(&mut self.stage, Stage::Menu { since: self.now })
@@ -1056,9 +1055,19 @@ impl Game {
         }
     }
     /// Show slide `index`, or return to the world after the last (§3.30
-    /// exit: map processing resumes).
-    fn stage_slide(&mut self, slides: Vec<Slide>, index: usize, world: Box<MapPreview>) {
+    /// exit: map processing resumes). Global 299 is cleared after the
+    /// sequence (§3.30), not before it.
+    fn stage_slide(&mut self, slides: Vec<Slide>, index: usize, mut world: Box<MapPreview>) {
         if index >= slides.len() {
+            if let Some(value) = world
+                .host
+                .world
+                .gvars
+                .as_mut()
+                .and_then(|g| g.get_mut(endgame::DONE_GLOBAL))
+            {
+                *value = 0;
+            }
             self.stage = Stage::World(world);
             return;
         }
@@ -1397,6 +1406,13 @@ impl Game {
                 }
             }
             Stage::Editor(stage) => {
+                let painter = Painter {
+                    assets: &self.assets,
+                    palette: &self.palette,
+                };
+                if stage.quit_key(key, self.modifiers[1], || painter.message("misc.msg", 0)) {
+                    return true;
+                }
                 let exit = stage.key(key, self.modifiers[0]);
                 self.editor_exit(exit)
             }
@@ -1768,6 +1784,40 @@ mod tests {
         let (_, audio, mixer) = start("[sound]\nmusic=1\n");
         assert!(audio.music_enabled());
         assert!(mixer.lock().unwrap().playing(Channel::Music));
+    }
+
+    #[test]
+    fn spec014_3_30_global_299_is_cleared_after_the_slideshow() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        state_fixture::write_corpus(root);
+        let map = std::fs::read(root.join("maps/synthetic.map")).unwrap();
+        std::fs::write(root.join("maps/v13ent.map"), &map).unwrap();
+        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(root).unwrap());
+        let mut game = Game::new(vfs, "english", 1, root.join("saves"), None).unwrap();
+        assert!(game.step(KeyCode::KeyN));
+        assert!(game.step(KeyCode::KeyT));
+        let world = game.world().unwrap();
+        let mut gvars = vec![0; 700];
+        gvars[endgame::DONE_GLOBAL] = 1;
+        world.host.world.gvars = Some(gvars);
+        world.endgame = Some(WorldEffect::Slideshow);
+        game.tick(16).unwrap();
+        let done = |world: &MapPreview| world.host.world.gvars.as_ref().unwrap()[299];
+        let Stage::Slides { world, .. } = &game.stage else {
+            panic!("the slideshow");
+        };
+        assert_eq!(done(world), 1, "still set while the slides show");
+        for _ in 0..20 {
+            if !matches!(game.stage, Stage::Slides { .. }) {
+                break;
+            }
+            game.step(KeyCode::Space);
+        }
+        let Stage::World(world) = &game.stage else {
+            panic!("back in the world");
+        };
+        assert_eq!(done(world), 0);
     }
 
     #[test]

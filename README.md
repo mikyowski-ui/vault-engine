@@ -195,6 +195,10 @@ cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
 # the loose file (archives default to the corpus directory's parent):
 cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game --validate-dat \
     [--master-dat /path/to/MASTER.DAT --critter-dat /path/to/CRITTER.DAT]
+# Campaign readiness: script words and scripts.lst references, every exit
+# destination, and multi-map transition sequences from the new-game map:
+cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
+    --validate-scripts --validate-exits --validate-transitions
 ```
 
 The `--validate-*` flags combine freely. All requested categories share one
@@ -210,7 +214,57 @@ writer round trips; 72 maps entered, 42 working saves written, 0 failures;
 95 AI packets, 312 critters, and 1140 taunt ranges; every DAT member
 (19784 in `MASTER.DAT`, 5459 in `CRITTER.DAT`) matching its loose file; and
 `LIP files: 1601, 1601 passed, 0 failed; 202 end before the audio`. With every
-flag the run ends `Audit categories: 16 run, 0 failed`.
+flag the run ends `Audit categories: 19 run, 1 failed`: `--validate-transitions`
+fails until exported variables are cleared on map change (SPEC-005 §2.2), and
+every other category passes.
+
+`--validate-scripts` decodes every `.int` from its code start to the end of the
+image and requires every instruction word to be one the dispatcher executes:
+pushes, the core words `0x8000`-`0x804B`, and the library and game words the
+SPEC-005 catalog registers (`0x807D`, `0x807E` and `0x8091` raise a VM error).
+Unknown words are listed with the files that use them. It then resolves every
+map's script index, every script record's file index (through `scripts.lst` to
+a loadable `.int`) and every object's script id (to a script record), and
+requires the procedure index 1 the request path falls back to (SPEC-004 §3.7)
+in every referenced script. Problems on the six unlisted maps are warnings. On
+the local corpus 952 files (740977 instructions, no unknown word), 65 map
+script indexes, 2121 script records, 1956 object scripts and 608 fallbacks
+pass, with 26 warnings for `JUNKDEMO.MAP`'s missing scripts.
+
+`--validate-exits` checks every distinct exit grid destination of each map
+(map 0 and -1 open the world and town maps and need no tile) and every
+elevator destination (SPEC-013
+§3.21-§3.22): the map is in `map.msg` and present, the hex is 0-39999 on
+elevation 0-2 (a grid hex of -1 or 0 checks the map's default entrance), that
+elevation has a tile block, and no wall or scenery blocks the hex. Ladder and
+stairs instance words, which the engine never reads (SPEC-013 §3.23), are
+checked the same way as warnings, and so are scripted `load_map` calls with
+constant operands whose map name `map.msg` does not list: `mvdwn2up.int` and
+`mvup2dwn.int` name `master12.map` and `master34.map`, so no transition happens
+(SPEC-008 §3.10). On the local corpus 13055 grids (108 distinct destinations),
+34 elevator destinations, 99 ladders and stairs and 68 `load_map` destinations
+pass, with those 2 warnings.
+
+`--validate-transitions` starts a headless world as the desktop does (the
+campaign, the language filter and the combat AI, then `V13ENT.MAP`) and leaves
+map after map through the engine's own paths, running each map for 3 seconds
+of game time in 50 ms frames: an exit grid (the player placed on it), the
+world map's town entry (`enter_town`), a ladder's Use, and a scripted
+`load_map` as `0x80E4` does it (campaign index 32 = the parameter found in the
+scripts, then a transition with hex, elevation and facing -1). The sequences
+are V13ENT → Vault 15 (`VAULTENT`) → its ladder → `VAULTBUR`, V13ENT → Shady
+Sands (`SHADYW`), and a campaign tour: V13ENT → `VAULT13` → V13ENT → Vault 15 →
+`VAULTBUR` → Shady Sands → Junktown → `JUNKCSNO` → the Hub → Necropolis → the
+Brotherhood → the Boneyard → the Raiders → the Glow → the Military Base → the
+Cathedral. Each entered map must be the expected one, no script may end with
+the error bit on a missing symbol, the player must stand on a passable hex
+reaching at least 20 hexes, and the landing must honour the scripted start:
+within 2 hexes of 20719 on `VAULTBUR` (header default 20100, an 8-hex pocket)
+and of 12107 on `SHADYW`, on the target of an `override_map_start` that ran,
+and on the grid's own hex after an exit grid (SPEC-013 §3.22 step 2). On the
+current tree 17 of 19 entries fault on a missing export (`Ian_ptr` and
+others), 4 landings are pockets or blocked, and 15 scripted starts never run;
+with the export registry cleared on map change every check passes.
 
 `--validate-lip` parses every `.lip` (version 2, exact size, P = M - 1, no
 loading-check findings, markers increasing from 0) and checks its stored stem,

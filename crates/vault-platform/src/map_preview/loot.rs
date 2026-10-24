@@ -309,8 +309,33 @@ impl MapPreview {
             self.look_line(item);
         }
     }
-    /// The hold pulse of an arrow press opens the item menu at the pointer.
+    /// Each pane's scroll offset stays within its entries (a move, Take
+    /// All or a body change can shorten a pane under a scrolled view).
+    fn clamp_loot_offsets(&mut self) -> bool {
+        let Screen::Loot(screen) = &self.screen else {
+            return false;
+        };
+        let counts =
+            [false, true].map(|target| self.host.loot_items(&screen.session, target).len());
+        let Screen::Loot(screen) = &mut self.screen else {
+            return false;
+        };
+        let mut changed = false;
+        for (offset, count) in screen.offsets.iter_mut().zip(counts) {
+            let limit = count.saturating_sub(skills::LOOT_ROWS);
+            if *offset > limit {
+                *offset = limit;
+                changed = true;
+            }
+        }
+        changed
+    }
     pub(crate) fn loot_tick(&mut self) -> bool {
+        let clamped = self.clamp_loot_offsets();
+        clamped | self.loot_pulse()
+    }
+    /// The hold pulse of an arrow press opens the item menu at the pointer.
+    fn loot_pulse(&mut self) -> bool {
         let (clock, at) = (self.clock, self.pointer.at);
         let Screen::Loot(screen) = &mut self.screen else {
             return false;
@@ -554,8 +579,9 @@ impl MapPreview {
             }
             return self.loot_counter(input);
         }
-        // SPEC-014 §3.34: all other input is ignored during a drag.
-        if screen.held.is_some() {
+        // SPEC-014 §3.34: all other input is ignored during a drag, and the
+        // open item menu takes the keys too.
+        if screen.held.is_some() || screen.menu.is_some() {
             return true;
         }
         let [shift, control, _] = self.hud.modifiers;

@@ -64,10 +64,14 @@ pub(crate) struct EditorStage {
     files: Option<SheetFiles>,
     /// The file dialog open over the options dialog, and its operation.
     pub file: Option<(SheetOp, FileDialog)>,
-    /// A §3.43 message or overwrite question over the options dialog.
+    /// A §3.43 message or overwrite question over the options dialog, or
+    /// the quit confirmation.
     pub notice: Option<(Notice, AfterNotice)>,
     /// The last time a press or frame reported, in milliseconds.
     now: u64,
+    /// §3.9: the quit confirmation was accepted; the editor cancels on the
+    /// next frame and the game returns to the main menu.
+    pub quitting: bool,
 }
 
 /// The three file operations of the options dialog.
@@ -88,6 +92,8 @@ pub(crate) enum AfterNotice {
     /// Yes writes the file of the operation; No returns to the options
     /// dialog.
     Overwrite(SheetOp, Vec<u8>),
+    /// The quit confirmation: Yes leaves the editor for the main menu.
+    Quit,
 }
 
 /// A button that acts on its release over it.
@@ -161,6 +167,8 @@ fn options_button(i: usize) -> Rect {
 }
 /// The Erase question's Yes/No box.
 const ERASE_ORIGIN: [i32; 2] = [169, 126];
+/// SPEC-014 §3.17 the quit confirmation's screen position.
+const QUIT_ORIGIN: [i32; 2] = [169, 117];
 /// §3.9 the SPECIAL plus repeats from the 20th frame, §3.10 the age
 /// arrows from the 15th.
 const SPECIAL_IDLE_FRAMES: u32 = 20;
@@ -211,6 +219,7 @@ impl EditorStage {
             file: None,
             notice: None,
             now: 0,
+            quitting: false,
         }
     }
     /// The sheet files in the master patch root `root`, with `vfs` for the
@@ -407,7 +416,37 @@ impl EditorStage {
             AfterNotice::CloseOptions => self.dialog = None,
             AfterNotice::Overwrite(op, file) if yes => self.write_sheet(op, &file),
             AfterNotice::Overwrite(..) => {}
+            AfterNotice::Quit => self.quitting = yes,
         }
+    }
+    /// §3.9 Ctrl+Q, Ctrl+X and F10 open the quit confirmation (SPEC-014
+    /// §3.17: a large Yes/No box at (169, 117), `misc.msg` 0 in key 32328)
+    /// unless another box or the name field takes the keys. Returns whether
+    /// the key opened it.
+    pub fn quit_key(
+        &mut self,
+        key: KeyCode,
+        control: bool,
+        title: impl FnOnce() -> Vec<u8>,
+    ) -> bool {
+        let quit = key == KeyCode::F10 || control && matches!(key, KeyCode::KeyQ | KeyCode::KeyX);
+        if !quit
+            || self.notice.is_some()
+            || self.file.is_some()
+            || self.refusal.is_some()
+            || matches!(self.dialog, Some(EditorDialog::Name(_)))
+        {
+            return false;
+        }
+        let notice = Notice::new(
+            QUIT_ORIGIN,
+            vec![title()],
+            ColorKey::ERROR,
+            Some(DialogSize::Large),
+            true,
+        );
+        self.notice = Some((notice, AfterNotice::Quit));
+        true
     }
     /// A refusal: `iisxxxx1` and the `editor.msg` box (G-30).
     fn refuse(&mut self, refusal: editor::Refusal) {
@@ -482,18 +521,11 @@ impl EditorStage {
                     }
                     KeyCode::Escape => self.dialog = None,
                     KeyCode::Backspace | KeyCode::Delete => field.backspace(),
-                    KeyCode::Space => field.key(b' '),
-                    _ => {
-                        let name = format!("{key:?}");
-                        let Some(c) = name
-                            .strip_prefix("Key")
-                            .or_else(|| name.strip_prefix("Digit"))
-                            .and_then(|rest| rest.bytes().next())
-                        else {
-                            return EditorExit::Stay(false);
-                        };
-                        field.key(if shift { c } else { c.to_ascii_lowercase() });
-                    }
+                    // §3.10: key codes 32 through 122 are accepted.
+                    _ => match name_char(key, shift) {
+                        Some(code) => field.key(code),
+                        None => return EditorExit::Stay(false),
+                    },
                 }
                 return EditorExit::Stay(true);
             }
@@ -1756,6 +1788,24 @@ impl FileDialog {
     }
 }
 
+/// §3.10 a name-field character: what the key types on the US layout,
+/// the punctuation keys included, when its code is 32 through 122.
+fn name_char(key: KeyCode, shift: bool) -> Option<u8> {
+    typed_char(key, shift)
+        .or_else(|| {
+            let (plain, shifted) = match key {
+                KeyCode::Period => (b'.', b'>'),
+                KeyCode::Comma => (b',', b'<'),
+                KeyCode::Slash => (b'/', b'?'),
+                KeyCode::Semicolon => (b';', b':'),
+                KeyCode::Backslash => (b'\\', b'|'),
+                _ => return None,
+            };
+            Some(if shift { shifted } else { plain })
+        })
+        .filter(|code| (32..=122).contains(code))
+}
+
 /// The byte a key types, US layout, with shift.
 pub(crate) fn typed_char(key: KeyCode, shift: bool) -> Option<u8> {
     let name = format!("{key:?}");
@@ -2155,5 +2205,59 @@ mod tests {
         // Leaving the button ends the repeat.
         assert!(!stage.tick(5000, Some([0, 0])));
         assert!(stage.repeat.is_none());
+    }
+
+    #[test]
+    fn spec014_3_9_ctrl_q_ctrl_x_and_f10_ask_and_yes_quits() {
+        let mut stage = stage();
+        let title = || b"Are you sure you want to quit?".to_vec();
+        // Plain Q is no quit key; Ctrl+Q opens the confirmation.
+        assert!(!stage.quit_key(KeyCode::KeyQ, false, title));
+        assert!(stage.quit_key(KeyCode::KeyQ, true, title));
+        let (notice, after) = stage.notice.as_ref().unwrap();
+        assert_eq!(*after, AfterNotice::Quit);
+        assert!(notice.yes_no);
+        assert_eq!(notice.origin, [169, 117]);
+        // No (Esc) closes it and stays.
+        stage.key(KeyCode::Escape, false);
+        assert!(stage.notice.is_none() && !stage.quitting);
+        // F10 and Ctrl+X ask too; Yes requests the quit.
+        assert!(stage.quit_key(KeyCode::F10, false, title));
+        assert!(!stage.quit_key(KeyCode::KeyX, true, title), "already open");
+        stage.key(KeyCode::KeyY, false);
+        assert!(stage.quitting);
+        // The name field takes its keys: Ctrl+Q there is no quit key.
+        let mut stage = self::stage();
+        stage.key(KeyCode::KeyN, false);
+        assert!(!stage.quit_key(KeyCode::KeyQ, true, title));
+    }
+
+    #[test]
+    fn spec014_3_10_the_name_field_accepts_codes_32_through_122() {
+        let mut stage = stage();
+        stage.key(KeyCode::KeyN, false);
+        for (key, shift) in [
+            (KeyCode::KeyJ, true),
+            (KeyCode::Period, false),
+            (KeyCode::Digit1, true),
+            (KeyCode::Space, false),
+            (KeyCode::Minus, false),
+            (KeyCode::Quote, false),
+            (KeyCode::Slash, true),
+        ] {
+            assert!(matches!(stage.key(key, shift), EditorExit::Stay(true)));
+        }
+        // `{` (123), `|` (124) and `~` (126) are above 122.
+        for (key, shift) in [
+            (KeyCode::BracketLeft, true),
+            (KeyCode::Backslash, true),
+            (KeyCode::Backquote, true),
+        ] {
+            assert!(matches!(stage.key(key, shift), EditorExit::Stay(false)));
+        }
+        let Some(EditorDialog::Name(field)) = &stage.dialog else {
+            panic!("the name dialog is open");
+        };
+        assert_eq!(field.text, b"J.! -'?");
     }
 }

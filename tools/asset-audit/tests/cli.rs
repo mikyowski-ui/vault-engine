@@ -1332,3 +1332,143 @@ fn validates_spec012_movies_fades_and_subtitles_against_oracle_tables() {
         "{errors}"
     );
 }
+
+/// The first non-push instruction word at or after the code start of
+/// `bytes`, by byte offset.
+fn first_statement(bytes: &[u8]) -> usize {
+    let program = vault_vm::IntProgram::parse(bytes).unwrap();
+    let mut at = program.code_start as u32;
+    loop {
+        let instruction = vault_debug::decode::decode(program.image(), at).unwrap();
+        if instruction.immediate.is_none() {
+            return at as usize;
+        }
+        at = instruction.next_address();
+    }
+}
+
+#[test]
+fn validates_script_words_references_and_the_lifecycle_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    state::write_corpus(temp.path());
+    let (success, _, text, errors) = audit(temp.path(), &["--validate-scripts"]);
+    assert!(success, "{errors}");
+    for line in [
+        "Scripts: 2 files,",
+        "0 unknown word(s)",
+        "Scripts instruction words: 2 passed, 0 failed",
+        "Audit categories: 1 run, 0 failed",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    // 0x807D is an unregistered library slot (SPEC-005): the dispatcher
+    // raises a VM error on it, so the audit lists it.
+    let mut bad = vm::program();
+    let at = first_statement(&bad);
+    bad[at..at + 2].copy_from_slice(&0x807d_u16.to_be_bytes());
+    std::fs::write(temp.path().join("scripts/bad.int"), bad).unwrap();
+    // A map whose script index names no `scripts.lst` row.
+    let mut map = std::fs::read(temp.path().join("maps/synthetic.map")).unwrap();
+    map[0x24..0x28].copy_from_slice(&40_i32.to_be_bytes());
+    std::fs::write(temp.path().join("maps/broken.map"), map).unwrap();
+    let (success, _, text, errors) = audit(temp.path(), &["--validate-scripts"]);
+    assert!(!success);
+    assert!(text.contains("Unknown word 0x807d"), "{text}");
+    assert!(
+        text.contains("Scripts instruction words: 2 passed, 1 failed"),
+        "{text}"
+    );
+    assert!(
+        errors.contains("FAIL instruction words: scripts/bad.int: unknown word 0x807d x1"),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("FAIL map script index: BROKEN.MAP: script index 39 missing"),
+        "{errors}"
+    );
+}
+
+/// The world fixture's map (number 7) with an exit grid leading back to map
+/// 7 at `hex`, elevation 0.
+fn map_with_exit_grid(hex: i32) -> Vec<u8> {
+    let mut bytes = world::preview_map();
+    let counts = 248 + 3 * 40_000 + 20;
+    for offset in [counts, counts + 4] {
+        world::word(&mut bytes, offset, 6);
+    }
+    let mut grid = world::object(5, 20500, 6, &[7, hex, 0, 2]);
+    // Exit grids are miscellaneous PIDs 0x05000010-0x05000017 (SPEC-003).
+    world::word(&mut grid, 0x2c, 0x0500_0010);
+    let end = bytes.len() - 8;
+    bytes.splice(end..end, grid);
+    bytes
+}
+
+#[test]
+fn validates_exit_grid_destinations_against_tiles_and_blockers() {
+    let temp = tempfile::tempdir().unwrap();
+    world::write_corpus(temp.path());
+    // The wall stands on 20101.
+    let write = |hex| {
+        let map = map_with_exit_grid(hex);
+        std::fs::write(temp.path().join("maps/synthetic.map"), &map).unwrap();
+        std::fs::write(temp.path().join("maps/synth.map"), &map).unwrap();
+    };
+    write(20101);
+    let (success, _, text, errors) = audit(temp.path(), &["--validate-exits"]);
+    assert!(!success);
+    assert!(
+        text.contains("Exits exit grids: 0 passed, 2 failed"),
+        "{text}\n{errors}"
+    );
+    assert!(
+        errors.contains(
+            "grid 20500/0 -> map 7 hex 20101/0: hex 20101/0 is blocked by a wall or scenery"
+        ),
+        "{errors}"
+    );
+    // The fixture lists no elevator map, so those destinations fail too.
+    assert!(
+        errors.contains("FAIL elevator destinations: elevator 0"),
+        "{errors}"
+    );
+    write(20500);
+    let (_, _, text, errors) = audit(temp.path(), &["--validate-exits"]);
+    assert!(
+        text.contains("Exits exit grids: 2 passed, 0 failed"),
+        "{text}\n{errors}"
+    );
+    assert!(text.contains("Exits: 2 exit grids"), "{text}");
+    // Off the map.
+    write(40_000);
+    let (_, _, _, errors) = audit(temp.path(), &["--validate-exits"]);
+    assert!(
+        errors.contains("hex 40000/0 is outside 0-39999"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn transition_sequences_report_each_missing_campaign_map() {
+    let temp = tempfile::tempdir().unwrap();
+    state::write_corpus(temp.path());
+    let map = std::fs::read(temp.path().join("maps/synthetic.map")).unwrap();
+    std::fs::write(temp.path().join("maps/v13ent.map"), &map).unwrap();
+    let (success, _, text, errors) = audit(temp.path(), &["--validate-transitions"]);
+    assert!(!success);
+    // The fresh start runs and is checked; every sequence then stops at its
+    // first campaign map, which the fixture lacks.
+    for line in [
+        "Transition new game V13ENT.MAP:",
+        "Transitions symbol faults: 1 passed, 0 failed",
+        "Transitions reached: 0 passed, 3 failed",
+        "Audit categories: 1 run, 1 failed",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}\n{errors}");
+    }
+    assert!(
+        errors.contains("FAIL reached: Vault 15 ladder 1"),
+        "{errors}"
+    );
+    assert!(errors.contains("FAIL reached: Campaign 1"), "{errors}");
+}

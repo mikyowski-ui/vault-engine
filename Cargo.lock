@@ -187,6 +187,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "vault-core",
+ "vault-debug",
  "vault-formats",
  "vault-guidance",
  "vault-vm",

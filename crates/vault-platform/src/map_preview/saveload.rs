@@ -27,6 +27,9 @@ pub(crate) struct SaveLoadScreen {
     arrow: Option<(ListKey, Rect, HoldRepeat)>,
     /// The description cursor's blink phase (on for 3 frames, off for 3).
     blink: bool,
+    /// SPEC-014 §3.17: opened from the options menu, so a cancel returns
+    /// there (a save or load that happened closes options too).
+    pub from_options: bool,
 }
 
 impl SaveLoadScreen {
@@ -115,6 +118,7 @@ impl MapPreview {
             description: None,
             arrow: None,
             blink: true,
+            from_options: false,
         }));
     }
     pub(crate) fn saveload_image(&mut self) -> AppResult<IndexedImage> {
@@ -285,6 +289,16 @@ impl MapPreview {
     fn close_save_screen(&mut self) {
         self.screen = Screen::Map;
     }
+    /// Esc or Cancel: back to the options menu when it opened the screen,
+    /// else to the map.
+    fn cancel_save_screen(&mut self) {
+        let from_options = matches!(&self.screen, Screen::SaveLoad(screen) if screen.from_options);
+        self.screen = if from_options {
+            Screen::Options(super::options::OptionsScreen::Menu)
+        } else {
+            Screen::Map
+        };
+    }
     /// Done, Enter or a double click on the selected slot.
     fn commit_slot(&mut self) {
         let slot = self.slot_list.selected;
@@ -426,7 +440,7 @@ impl MapPreview {
             KeyCode::Home => self.slot_list.key(ListKey::Home),
             KeyCode::End => self.slot_list.key(ListKey::End),
             KeyCode::Enter | KeyCode::NumpadEnter => self.commit_slot(),
-            KeyCode::Escape => self.close_save_screen(),
+            KeyCode::Escape => self.cancel_save_screen(),
             _ => return false,
         }
         true
@@ -457,7 +471,7 @@ impl MapPreview {
             self.commit_slot();
         } else if red(saveload::CANCEL.0).contains(point) {
             self.press_button(red(saveload::CANCEL.0));
-            self.close_save_screen();
+            self.cancel_save_screen();
         } else if let Some((rect, key)) = [
             (saveload::ARROW_UP, ListKey::Up),
             (saveload::ARROW_DOWN, ListKey::Down),

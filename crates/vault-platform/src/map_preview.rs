@@ -1539,6 +1539,10 @@ impl MapPreview {
         // and clock wait while travel or rest advances time. An open action
         // menu pauses background map processing.
         let screen = match &self.screen {
+            // M-W3 / SPEC-014 §3.13: a dialog box is modal over every
+            // screen: world travel, encounters, the map and the windows
+            // below it wait; audio, fades and the cursor below keep running.
+            _ if self.dialog.is_some() => Ok(false),
             // A counter roll or an open action menu pauses the world.
             _ if self.bar_blocks() => Ok(false),
             Screen::Map if self.pointer.menu.is_some() || self.timer_open() => Ok(false),
