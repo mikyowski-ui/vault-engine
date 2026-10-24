@@ -1561,7 +1561,13 @@ impl MapPreview {
         // SPEC-014 §3.2: a game fade blocks completely: no world update,
         // animation, game clock, hover or background task runs until it
         // ends; only the fade advances, and sound keeps playing.
+        // SPEC-014 §3.28 / §3.2: a frame that skips the world's tick on the
+        // local map pauses its sequences, which resume where they stood.
+        let local_map = !matches!(self.screen, Screen::World(_) | Screen::Town(_));
         if self.fade_blocks() {
+            if local_map {
+                self.host.pause_background(now);
+            }
             let game = self.host.library.palette.clone();
             let changed = self
                 .fades
@@ -1579,6 +1585,7 @@ impl MapPreview {
         // The world and Pip-Boy screens are modal: the local map's scripts
         // and clock wait while travel or rest advances time. An open action
         // menu pauses background map processing.
+        let mut world_ticked = false;
         let screen = match &self.screen {
             // M-W3 / SPEC-014 §3.13: a dialog box is modal over every
             // screen: world travel, encounters, the map and the windows
@@ -1590,6 +1597,7 @@ impl MapPreview {
             // SPEC-014 §3.46: floating texts go at the background update,
             // before the scripts may create new ones.
             Screen::Map => {
+                world_ticked = true;
                 let removed = self.floating_tick(now);
                 self.host.tick(now).map(|changed| changed | removed)
             }
@@ -1613,6 +1621,9 @@ impl MapPreview {
             Screen::Automap(_) | Screen::Help(_) => Ok(false),
             Screen::SaveLoad(_) => Ok(self.saveload_frame(now)),
         };
+        if local_map && !world_ticked {
+            self.host.pause_background(now);
+        }
         let mut changed = match screen {
             Ok(changed) => changed | crosshair,
             Err(error) => {

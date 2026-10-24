@@ -42,8 +42,9 @@ impl AppliedPreferences {
         Self {
             mouse_sensitivity: values.mouse_sensitivity.clamp(1.0, 2.5),
             verbose_combat_messages: values.combat_messages != 0,
-            floating_base_ms: (base * 1000.0) as u64,
-            floating_line_ms: (((base - 1.0) * 0.4).clamp(0.0, 2.0) * 1000.0) as u64,
+            floating_base_ms: vault_core::floating::lifetime(base, 0),
+            floating_line_ms: vault_core::floating::lifetime(base, 1)
+                - vault_core::floating::lifetime(base, 0),
         }
     }
     /// A floating text of `lines` lines is removed once strictly more than

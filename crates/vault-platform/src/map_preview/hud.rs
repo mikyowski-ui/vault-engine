@@ -1468,10 +1468,11 @@ impl MapPreview {
                 // SPEC-007 §3.11.1: a run when the `running` preference is
                 // on, which Shift inverts.
                 let run = (self.preferences.running != 0) != self.hud.modifiers[0];
-                // §3.27 a busy player: with `interrupt_walk` on the walk
-                // cancels its sequence out of combat; otherwise the click
-                // does nothing.
-                if self.click_policy(Click::Movement) == Policy::Ignore {
+                // §3.27: the combat lock discards the click. Past it, the
+                // hex comes first (off the grid nothing is cancelled); the
+                // busy rules, the run's sneak clear and the no-route stop
+                // are core's, so a busy player's click still reaches it.
+                if clicks::input_locked(&self.host.click_state()) {
                     return;
                 }
                 if let Some(hex) = self.view.grid.pick_hex(point) {
@@ -1481,7 +1482,7 @@ impl MapPreview {
                         .walk_toward_with(player, hex, run, reserve, interrupt)
                     {
                         Ok(true) => {}
-                        Ok(false) => tracing::debug!(hex, "no route for the player's walk"),
+                        Ok(false) => tracing::debug!(hex, "the player's walk did not register"),
                         Err(error) => self.status = error.to_string().into_bytes(),
                     }
                 }
