@@ -253,6 +253,12 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn resource(&self, path: &str) -> Result<Vec<u8>, WorldError> {
         (**self).resource(path)
     }
+    fn mod_layers(&self) -> usize {
+        (**self).mod_layers()
+    }
+    fn set_enhanced_scripts(&self, enabled: bool) {
+        (**self).set_enhanced_scripts(enabled)
+    }
     fn game_messages(
         &self,
         file: &str,
@@ -337,6 +343,52 @@ impl<A: WorldAssets> WorldHost<A> {
     pub fn rules(&mut self, rules: WorldRules) {
         self.world.rules = rules;
     }
+    /// The engine behaviour preset (Vanilla by default).
+    pub fn preset(&self) -> crate::EnginePreset {
+        self.world.rules.preset
+    }
+    /// Select the engine behaviour preset. Going back to Vanilla drops any
+    /// loaded table overrides unless a mod layer is mounted.
+    pub fn set_preset(&mut self, preset: crate::EnginePreset) {
+        self.world.rules.preset = preset;
+        self.assets
+            .set_enhanced_scripts(preset == crate::EnginePreset::Enhanced);
+        if !self.overrides_allowed() {
+            self.world.rules.tables = None;
+        }
+    }
+    /// Whether campaign-table overrides may be read: only with the
+    /// Enhanced preset or a mounted mod layer, never in plain Vanilla.
+    pub fn overrides_allowed(&self) -> bool {
+        self.preset() == crate::EnginePreset::Enhanced || self.assets.mod_layers() > 0
+    }
+    /// Read the campaign-table overrides (`data/vault-engine/<table>.txt`,
+    /// see [`crate::tables`]) from the VFS, when [`Self::overrides_allowed`].
+    /// Each present file replaces its whole table after full validation; a
+    /// bad file is an error and leaves the tables in force unchanged.
+    /// Returns the tables overridden. In plain Vanilla nothing is read and
+    /// the compiled tables stay in force.
+    pub fn load_table_overrides(&mut self) -> Result<Vec<crate::tables::Table>, WorldError> {
+        if !self.overrides_allowed() {
+            self.world.rules.tables = None;
+            return Ok(Vec::new());
+        }
+        let mut tables = crate::tables::CampaignTables::compiled().clone();
+        let mut loaded = Vec::new();
+        for table in crate::tables::Table::ALL {
+            let path = table.override_path();
+            if !self.assets.available(path.as_bytes()) {
+                continue;
+            }
+            let bytes = self.assets.resource(&path)?;
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| WorldError::Invalid(format!("{path}: not UTF-8 text")))?;
+            tables = tables.with_override(table, text)?;
+            loaded.push(table);
+        }
+        self.world.rules.tables = (!loaded.is_empty()).then(|| std::sync::Arc::new(tables));
+        Ok(loaded)
+    }
     pub fn bind_program(&mut self, vm: &Vm, script: u32) {
         self.program_scripts.insert(vm.id, script);
         if let Some(instance) = self.world.scripts.get_mut(&script) {
@@ -373,6 +425,12 @@ impl<A: WorldAssets> WorldHost<A> {
                     WorldError::Invalid("campaign initializer data/vault13.gam did not open".into())
                 })
             });
+        // Table overrides belong to the campaign data; plain Vanilla reads
+        // nothing here.
+        if let Err(error) = self.load_table_overrides() {
+            self.world
+                .diagnostic(format!("campaign table override rejected: {error}"));
+        }
         match gam {
             Ok(gam) => {
                 self.world.gvars = Some(gam.values);
@@ -701,8 +759,14 @@ impl<A: WorldAssets> WorldHost<A> {
         // times; under the [May-improve] rule it is requested once per map
         // change here (the presentation layer still restarts a track that
         // already plays, the `[Must-match]` rule).
-        if let Some(track) = crate::worldmap::city_music(self.world.map.header.map_number) {
-            self.request_music(track);
+        if let Some(track) = self
+            .world
+            .rules
+            .tables()
+            .city_music(self.world.map.header.map_number)
+            .map(str::to_string)
+        {
+            self.request_music(&track);
         }
         self.drain_requests()?;
         if let Some(error) = load_error {
@@ -2195,6 +2259,11 @@ impl<A: WorldAssets> WorldHost<A> {
 impl<A: WorldAssets> VmHost for WorldHost<A> {
     fn now_ms(&self) -> u32 {
         self.world.elapsed_ms as u32
+    }
+    /// The enhanced opcode range follows the preset: Vanilla rejects those
+    /// words exactly as unknown words.
+    fn enhanced_opcodes(&self) -> bool {
+        self.preset() == crate::EnginePreset::Enhanced
     }
     fn extension(&mut self, opcode: u16, vm: &mut Vm) -> Result<(), VmError> {
         let call = extensions::decode(vm, opcode)?;

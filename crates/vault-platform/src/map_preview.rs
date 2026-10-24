@@ -1281,7 +1281,13 @@ impl MapPreview {
         self.choices.clear();
         Ok(self.compose_world(image))
     }
+    /// The window title: the plain game name, or with the vault-debug
+    /// inspector on (`--debug`, F9) the internal hints (screen, map file,
+    /// elevation, cursor mode and the preview keys).
     pub fn title(&self) -> String {
+        if !self.debug_enabled() {
+            return "Fallout — Vault Engine".into();
+        }
         match &self.screen {
             Screen::World(_) => {
                 return "Vault — world map — click to travel; click the party to enter".into();
@@ -1383,10 +1389,14 @@ impl MapPreview {
         if self.movie_key() || self.dialog_key(key) || self.timer_key(key) || self.called_key(key) {
             return true;
         }
-        // F9 toggles the vault-debug inspector.
+        // F9 toggles the vault-debug inspector; while it is open, F11 and
+        // its editing keys belong to it.
         if key == KeyCode::F9 {
             let on = !self.debug_enabled();
             self.set_debug(on);
+            return true;
+        }
+        if self.debug_key(key) {
             return true;
         }
         // SPEC-014 §3.27: while combat locks the keyboard no key is read,
@@ -1658,6 +1668,11 @@ impl MapPreview {
         }
         if point[1] > vault_core::ui::bar::BAR_ORIGIN[1] {
             return self.bar_click(point, right);
+        }
+        // While the vault-debug overlay is open a map click selects the
+        // object under the pointer instead of acting.
+        if self.debug_click(point, right) {
+            return true;
         }
         if self.host.world.ui_disabled {
             return false;
@@ -2219,7 +2234,11 @@ mod tests {
         assert!(preview.host.play_game_movie(vault_core::movie::BOIL1, 0x07));
         preview.image().unwrap();
         assert!(preview.movie_active() && preview.display_override().is_some());
+        // The movie's path is a debug-mode title hint.
+        assert_eq!(preview.title(), "Fallout — Vault Engine");
+        preview.set_debug(true);
         assert!(preview.title().contains(r"art\cuts\boil1.mve"));
+        preview.set_debug(false);
         let ticks = preview.host.world.clock.ticks;
         let mut now = 0;
         while !preview.tick(now).unwrap() {
@@ -2261,7 +2280,9 @@ mod tests {
         // The startup sequence: iplogo is absent, so only intro plays.
         preview.queue_startup_movies();
         assert!(preview.movie_active());
+        preview.set_debug(true);
         assert!(preview.title().contains("intro.mve"));
+        preview.set_debug(false);
         while preview.movie_active() {
             now += 16;
             preview.tick(now).unwrap();

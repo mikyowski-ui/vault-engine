@@ -132,9 +132,15 @@ impl<A: WorldAssets> WorldHost<A> {
         let mut stepper = Stepper::new(map.position(), destination);
         // A line ends within max(A, B) + 1 steps; mountains step every
         // other iteration, so this bound is never reached by a legal line.
+        let tables = self.world.rules.tables.clone();
+        let tables = tables
+            .as_deref()
+            .unwrap_or_else(|| crate::tables::CampaignTables::compiled());
         for _ in 0..4 * (worldmap::WORLD_SIZE[0] + worldmap::WORLD_SIZE[1]) {
             let map = &mut self.world.world_map;
-            let terrain = map.cell().map_or(Terrain::Desert, worldmap::terrain);
+            let terrain = map
+                .cell()
+                .map_or(Terrain::Desert, |cell| tables.terrain(cell));
             let mut position = map.position();
             let mut done = false;
             let charge = schedule.iterate(terrain, || {
@@ -183,9 +189,15 @@ impl<A: WorldAssets> WorldHost<A> {
             Some(speed) => speed,
             None => self.travel_speed()?,
         };
+        let tables = self.world.rules.tables.clone();
+        let tables = tables
+            .as_deref()
+            .unwrap_or_else(|| crate::tables::CampaignTables::compiled());
         let map = &mut self.world.world_map;
         map.mark = None;
-        let terrain = map.cell().map_or(Terrain::Desert, worldmap::terrain);
+        let terrain = map
+            .cell()
+            .map_or(Terrain::Desert, |cell| tables.terrain(cell));
         let mask = map.walk_mask.clone();
         let mut position = map.position();
         let mut outcome = TravelOutcome::Moving;
@@ -228,7 +240,7 @@ impl<A: WorldAssets> WorldHost<A> {
             if let Some(encounter) =
                 world
                     .world_map
-                    .check_encounter(&mut world.rng, luck, explorer)?
+                    .check_encounter_with(tables, &mut world.rng, luck, explorer)?
             {
                 world.world_map.travel = None;
                 return Ok(TravelOutcome::Encounter(encounter));
@@ -294,9 +306,13 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.world_map.cell().ok_or_else(|| {
                 WorldError::Invalid("world position outside the cell grid".into())
             })?;
+        let tables = self.world.rules.tables.clone();
+        let tables = tables
+            .as_deref()
+            .unwrap_or_else(|| crate::tables::CampaignTables::compiled());
         Ok(Encounter::Terrain {
-            map: worldmap::terrain_map(worldmap::terrain(cell), &mut self.world.rng)?,
-            region: worldmap::region(cell),
+            map: worldmap::terrain_map(tables.terrain(cell), &mut self.world.rng)?,
+            region: tables.region(cell),
             context: 1,
         })
     }

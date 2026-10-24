@@ -17,6 +17,7 @@
 use crate::{
     AppResult,
     input::{InputCommand, KeyRepeat, LoggedCommand},
+    map_preview::MapPreview,
     preview::AssetPreview,
 };
 use sha2::{Digest, Sha256};
@@ -30,6 +31,42 @@ pub const FRAME_MS: u64 = 16;
 /// The desktop's initial logical window size, for an untimed log until it
 /// reports a resize.
 const INITIAL_SURFACE: [u32; 2] = [960, 640];
+
+/// The interactive world a preview shows, if any: a map preview, or the
+/// game's current world.
+pub fn interactive_world(preview: &mut AssetPreview) -> Option<&mut MapPreview> {
+    match preview {
+        AssetPreview::Map(map) => Some(&mut **map),
+        AssetPreview::Game(game) => game.world(),
+        _ => None,
+    }
+}
+
+/// The desktop shell's vault-debug hook, run after each input event it
+/// handles: every command the F9 overlay committed is logged (`log`, which
+/// writes the `debug` record) and then applied, in order. A replay of the
+/// log applies those records and discards the overlay's outbox, so each
+/// command applies exactly once. A refused command is reported, not fatal.
+/// Returns whether anything was applied (the frame should be redrawn).
+// The desktop shell (main.rs) calls this once it logs debug records.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn drain_debug_commands(
+    preview: &mut AssetPreview,
+    mut log: impl FnMut(&InputCommand) -> AppResult<()>,
+) -> AppResult<bool> {
+    let Some(world) = interactive_world(preview) else {
+        return Ok(false);
+    };
+    let commands = world.take_debug_commands();
+    for command in &commands {
+        log(&InputCommand::Debug {
+            command: command.clone(),
+        })?;
+        // Refusals are reported on the overlay and in the log.
+        let _ = world.apply_debug(command);
+    }
+    Ok(!commands.is_empty())
+}
 
 /// The replay's result: what was applied and the final state digest.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -125,6 +162,12 @@ impl Replay {
             if !self.stopped {
                 self.apply(logged.command)?;
                 self.commands += 1;
+            }
+            // The replayed input may have committed overlay commands; the
+            // desktop logged and applied those as their own `debug`
+            // records, which this replay applies when it reaches them.
+            if let Some(world) = interactive_world(&mut self.preview) {
+                world.take_debug_commands();
             }
         }
         Ok(())
@@ -286,6 +329,16 @@ impl Replay {
                 ..
             } => self.preview.set_modifiers([shift, control, alt]),
             InputCommand::Quit => self.stopped = true,
+            // The desktop applied the command right after logging it, then
+            // drew the frame.
+            InputCommand::Debug { command } => {
+                if let Some(world) = interactive_world(&mut self.preview) {
+                    world.take_debug_commands();
+                    if world.apply_debug(&command).is_ok() || world.debug_enabled() {
+                        self.compose()?;
+                    }
+                }
+            }
             // Focus does not reach the preview; a logged hover is the
             // desktop's output, recomputed here.
             InputCommand::Focus { .. } | InputCommand::MapHover { .. } => {}
@@ -433,6 +486,169 @@ mod tests {
 
     fn replay_log(root: &std::path::Path, log: &str) -> ReplayReport {
         replay(args(root).load().unwrap().unwrap(), log.as_bytes(), None).unwrap()
+    }
+
+    /// The fixture's item prototype (a container).
+    const ITEM_PID: u32 = 1;
+
+    fn key(id: u64, key: &str) -> String {
+        format!(
+            r#"{{"command_id":{id},"kind":"key","physical_key":"{key}","pressed":true,"repeat":false}}"#
+        )
+    }
+    /// What the desktop logs when the overlay's spawner commits one item:
+    /// F9 opens the overlay, F11 five times reaches the spawner, the PID
+    /// is typed and Enter commits; the shell then logs the committed
+    /// command as its own record.
+    fn spawn_log(with_record: bool) -> String {
+        let mut lines = vec![key(1, "F9")];
+        for id in 2..=6 {
+            lines.push(key(id, "F11"));
+        }
+        lines.push(key(7, "Digit1"));
+        lines.push(key(8, "Enter"));
+        if with_record {
+            lines.push(format!(
+                r#"{{"command_id":9,"kind":"debug","command":{{"op":"spawn_item","pid":{ITEM_PID},"quantity":1}}}}"#
+            ));
+        }
+        lines.join("\n") + "\n"
+    }
+    /// The state fixture with its map also saved under an 8.3 name, so a
+    /// central save can be built and the digest covers the player's
+    /// inventory and the campaign variables.
+    fn debug_corpus() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        state_fixture::write_corpus(dir.path());
+        std::fs::copy(
+            dir.path().join("maps/synthetic.map"),
+            dir.path().join("maps/synth.map"),
+        )
+        .unwrap();
+        dir
+    }
+    fn debug_args(root: &std::path::Path) -> PreviewArgs {
+        PreviewArgs {
+            preview_map: Some("maps/synth.map".into()),
+            ..args(root)
+        }
+    }
+    fn debug_replay(root: &std::path::Path, log: &str) -> ReplayReport {
+        replay(
+            debug_args(root).load().unwrap().unwrap(),
+            log.as_bytes(),
+            None,
+        )
+        .unwrap()
+    }
+    fn carried(replay: &mut Replay) -> i32 {
+        let world = interactive_world(&mut replay.preview).unwrap();
+        let player = world.host.world.player;
+        world.host.world.inventory_count(player, ITEM_PID)
+    }
+
+    #[test]
+    fn logged_debug_commands_apply_once_and_replay_identically() {
+        let dir = debug_corpus();
+        let start = {
+            let mut replay = Replay::new(debug_args(dir.path()).load().unwrap().unwrap()).unwrap();
+            carried(&mut replay)
+        };
+        // The overlay's own commit in a replay is discarded; only the
+        // logged record applies, so the item is created exactly once.
+        let mut replay = Replay::new(debug_args(dir.path()).load().unwrap().unwrap()).unwrap();
+        replay.run(spawn_log(true).as_bytes()).unwrap();
+        assert_eq!(carried(&mut replay), start + 1);
+        assert!(
+            interactive_world(&mut replay.preview)
+                .unwrap()
+                .take_debug_commands()
+                .is_empty()
+        );
+        let first = replay.finish(None).unwrap();
+        assert_eq!(first, debug_replay(dir.path(), &spawn_log(true)));
+        // Without the record nothing is created, and the digest differs.
+        let mut replay = Replay::new(debug_args(dir.path()).load().unwrap().unwrap()).unwrap();
+        replay.run(spawn_log(false).as_bytes()).unwrap();
+        assert_eq!(carried(&mut replay), start);
+        assert_ne!(
+            replay.finish(None).unwrap().state_sha256,
+            first.state_sha256
+        );
+
+        // A record applies with the overlay closed too, and a refused one
+        // changes nothing.
+        let log = [
+            r#"{"command_id":1,"kind":"debug","command":{"op":"set_global_var","index":0,"value":4242}}"#,
+            r#"{"command_id":2,"kind":"debug","command":{"op":"set_global_var","index":999999,"value":1}}"#,
+            r#"{"command_id":3,"kind":"debug","command":{"op":"spawn_item","pid":1,"quantity":2}}"#,
+        ]
+        .join("\n");
+        let mut replay = Replay::new(debug_args(dir.path()).load().unwrap().unwrap()).unwrap();
+        replay.run(log.as_bytes()).unwrap();
+        assert_eq!(carried(&mut replay), start + 2);
+        let world = interactive_world(&mut replay.preview).unwrap();
+        assert_eq!(world.host.world.gvars.as_ref().unwrap()[0], 4242);
+        assert!(!world.debug_enabled());
+        let once = replay.finish(None).unwrap();
+        assert_eq!(once.commands, 3);
+        assert_eq!(
+            once,
+            debug_replay(dir.path(), &log),
+            "same log, same digest"
+        );
+    }
+
+    #[test]
+    fn the_desktop_hook_logs_then_applies_and_its_log_replays_the_same_state() {
+        let dir = debug_corpus();
+        let mut desktop = debug_args(dir.path()).load().unwrap().unwrap();
+        let mut ids = vault_core::SequenceIds::default();
+        let mut log = Vec::new();
+        let mut write = |log: &mut Vec<u8>, command: &InputCommand| {
+            crate::input::write_command(log, &mut ids, command)
+        };
+        let keys = [
+            KeyCode::F9,
+            KeyCode::F11,
+            KeyCode::F11,
+            KeyCode::Digit7,
+            KeyCode::Enter,
+        ];
+        for key in keys {
+            let physical_key = serde_json::to_value(key)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string();
+            write(
+                &mut log,
+                &InputCommand::Key {
+                    physical_key,
+                    pressed: true,
+                    repeat: false,
+                },
+            )
+            .unwrap();
+            desktop.tick(0).unwrap();
+            desktop.step(key);
+            drain_debug_commands(&mut desktop, |command| write(&mut log, command)).unwrap();
+        }
+        let text = String::from_utf8(log).unwrap();
+        assert!(
+            text.contains(
+                r#""kind":"debug","command":{"op":"set_global_var","index":0,"value":7}"#
+            ),
+            "{text}"
+        );
+        let world = interactive_world(&mut desktop).unwrap();
+        assert_eq!(world.host.world.gvars.as_ref().unwrap()[0], 7);
+        assert!(world.take_debug_commands().is_empty(), "drained");
+        let mut replay = Replay::new(debug_args(dir.path()).load().unwrap().unwrap()).unwrap();
+        replay.run(text.as_bytes()).unwrap();
+        let world = interactive_world(&mut replay.preview).unwrap();
+        assert_eq!(world.host.world.gvars.as_ref().unwrap()[0], 7);
+        assert!(world.debug_enabled());
     }
 
     #[test]

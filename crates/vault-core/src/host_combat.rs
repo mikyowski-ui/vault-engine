@@ -216,6 +216,7 @@ impl WorldState {
             // SPEC-014 §2.3: combat_difficulty defaults to 1 (normal).
             combat_difficulty: self.combat_difficulty.unwrap_or(1),
             accuracy_bonus: 0,
+            tables: self.rules.tables.clone(),
         })
     }
     /// SPEC-007 §3.2 weapon-attack preflight. A high accuracy score alone

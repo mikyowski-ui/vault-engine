@@ -244,3 +244,275 @@ mod unix {
         ));
     }
 }
+
+mod layered {
+    use std::{fs, path::Path, sync::Arc};
+    use vault_formats::{
+        LayerEntry, LayeredVfs, LoadOrderPolicy, LocalDirProvider, ModLayer, Vfs, VfsError,
+        VfsPath, parse_load_order,
+    };
+
+    /// An archive member: its name and bytes.
+    type Member<'a> = (&'a str, &'a [u8]);
+    /// A raw (uncompressed) synthetic archive: directories with members.
+    fn archive(directories: &[(&str, &[Member])]) -> Vec<u8> {
+        let mut tables = Vec::new();
+        let count = directories.len() as u32;
+        for word in [count, count, 0, 0] {
+            tables.extend(word.to_be_bytes());
+        }
+        for (name, _) in directories {
+            tables.push(name.len() as u8);
+            tables.extend(name.as_bytes());
+        }
+        let table_len: usize = tables.len()
+            + directories
+                .iter()
+                .map(|(_, files)| {
+                    16 + files
+                        .iter()
+                        .map(|(name, _)| 1 + name.len() + 16)
+                        .sum::<usize>()
+                })
+                .sum::<usize>();
+        let mut offset = table_len as u32;
+        let mut payload: Vec<u8> = Vec::new();
+        for (_, files) in directories {
+            let count = files.len() as u32;
+            for word in [count, count, 16, 0] {
+                tables.extend(word.to_be_bytes());
+            }
+            for (name, body) in *files {
+                tables.push(name.len() as u8);
+                tables.extend(name.as_bytes());
+                for word in [0x20, offset, body.len() as u32, body.len() as u32] {
+                    tables.extend(word.to_be_bytes());
+                }
+                offset += body.len() as u32;
+                payload.extend(*body);
+            }
+        }
+        assert_eq!(tables.len(), table_len);
+        tables.extend(payload);
+        tables
+    }
+    fn write(root: &Path, path: &str, bytes: &[u8]) {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    fn base(root: &Path) -> Arc<dyn Vfs> {
+        write(root, "base/data/a.txt", b"base a");
+        write(root, "base/data/b.txt", b"base b");
+        write(root, "base/data/c.txt", b"base c");
+        write(root, "base/art/critters/hero.frm", b"base hero");
+        Arc::new(LocalDirProvider::mount(root.join("base")).unwrap())
+    }
+
+    #[test]
+    fn three_layers_override_in_order_and_list_the_union() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let base = base(root);
+        // Layer 1: a loose folder overriding a and b, adding one.
+        write(root, "mods/one/data/A.TXT", b"one a");
+        write(root, "mods/one/data/b.txt", b"one b");
+        write(root, "mods/one/data/only1.txt", b"one only");
+        // Layer 2: a DAT overriding b, with critter art in its own archive.
+        let master = archive(&[("DATA", &[("B.TXT", b"two b"), ("ONLY2.TXT", b"two only")])]);
+        let critter = archive(&[("ART\\CRITTERS", &[("HERO.FRM", b"two hero")])]);
+        write(root, "mods/two.dat", &master);
+        write(root, "mods/two-critter.dat", &critter);
+        // A master-archive copy of critter art is never used for that path.
+        let decoy = archive(&[("ART\\CRITTERS", &[("HERO.FRM", b"wrong archive")])]);
+        write(root, "mods/three/master.dat", &decoy);
+        // Layer 3: folder plus master archive; overrides a only.
+        write(root, "mods/three/data/a.txt", b"three a");
+        write(
+            root,
+            "load_order.toml",
+            br#"
+# lowest first
+[[layer]]
+path = "mods/one"
+
+[[layer]]
+path = "mods/two.dat"   # a .dat path is the layer's master archive
+critter_dat = "mods/two-critter.dat"
+
+[[layer]]
+path = 'mods/three'
+master_dat = "mods/three/master.dat"
+"#,
+        );
+        let vfs = LayeredVfs::from_load_order(base, root.join("load_order.toml")).unwrap();
+        assert_eq!(vfs.mod_layers(), 3);
+        let names: Vec<_> = vfs.layers().iter().map(ModLayer::name).collect();
+        assert_eq!(names, ["mods/one", "mods/two.dat", "mods/three"]);
+        for (path, expected) in [
+            ("data/a.txt", &b"three a"[..]),
+            ("DATA\\B.TXT", b"two b"),
+            ("data/c.txt", b"base c"),
+            ("data/only1.txt", b"one only"),
+            ("data/only2.txt", b"two only"),
+            // Critter art: layer three's loose folder lacks it and its
+            // master archive is not consulted, so layer two's critter
+            // archive serves it.
+            ("art/critters/hero.frm", b"two hero"),
+        ] {
+            assert_eq!(vfs.read(path).unwrap(), expected, "{path}");
+        }
+        assert!(matches!(
+            vfs.read("data/missing.txt"),
+            Err(VfsError::NotFound(_))
+        ));
+        assert!(matches!(
+            vfs.read("../escape.txt"),
+            Err(VfsError::InvalidPath { .. })
+        ));
+        let files: Vec<_> = vfs.files().map(VfsPath::as_str).collect();
+        let mut sorted = files.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(files, sorted, "canonical order without duplicates");
+        for path in [
+            "art/critters/hero.frm",
+            "data/a.txt",
+            "data/b.txt",
+            "data/c.txt",
+            "data/only1.txt",
+            "data/only2.txt",
+        ] {
+            assert!(files.contains(&path), "{path}");
+        }
+        // Bounded reads honor the winning layer's size.
+        assert!(matches!(
+            vfs.read_bounded("data/a.txt", 3),
+            Err(VfsError::FileTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn the_array_form_and_its_parser() {
+        assert_eq!(
+            parse_load_order("layers = [\"a\", 'b.dat',\n  \"c\" ] # done\n").unwrap(),
+            ["a", "b.dat", "c"].map(|path| LayerEntry {
+                path: Some(path.into()),
+                ..LayerEntry::default()
+            })
+        );
+        assert_eq!(parse_load_order("# nothing\n").unwrap(), []);
+        assert_eq!(
+            parse_load_order("layers = [\"x#y\"]").unwrap()[0]
+                .path
+                .as_deref(),
+            Some("x#y")
+        );
+        for bad in [
+            "layers = [\"a\"",
+            "layers = \"a\"",
+            "layers = [\"a\" \"b\"]",
+            "[[layer]]\nname = \"a\"",
+            "[[layer]]\npath = \"a\"\npath = \"b\"",
+            "[[layer]]\n",
+            "[other]\n",
+            "path = \"a\"",
+            "layers = [\"a\"]\n[[layer]]\npath = \"b\"",
+            "[[layer]]\npath = \"a\\q\"",
+        ] {
+            assert!(
+                matches!(parse_load_order(bad), Err(VfsError::LoadOrder(_))),
+                "{bad:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let base = base(dir.path());
+        write(dir.path(), "mods/a/data/a.txt", b"array a");
+        write(dir.path(), "load_order.toml", b"layers = [\"mods/a\"]\n");
+        let vfs = LayeredVfs::from_load_order(base, dir.path().join("load_order.toml")).unwrap();
+        assert_eq!(vfs.read("data/a.txt").unwrap(), b"array a");
+        assert_eq!(vfs.read("data/b.txt").unwrap(), b"base b");
+    }
+
+    #[test]
+    fn traversal_links_and_missing_layers_are_clean_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        let base = base(&root);
+        write(dir.path(), "outside/data/a.txt", b"outside a");
+        let load = |text: &str, policy| {
+            write(&root, "load_order.toml", text.as_bytes());
+            LayeredVfs::from_load_order_with(base.clone(), root.join("load_order.toml"), policy)
+        };
+        let strict = LoadOrderPolicy::default();
+        let absolute = dir.path().join("outside").display().to_string();
+        for entry in [
+            "../outside",
+            "mods/../../outside",
+            "..\\\\outside",
+            absolute.as_str(),
+            "/etc",
+            "C:/outside",
+            "",
+        ] {
+            let text = format!("layers = [\"{}\"]", entry.replace('\\', "\\\\"));
+            assert!(
+                matches!(load(&text, strict), Err(VfsError::LoadOrder(_))),
+                "{entry:?}"
+            );
+        }
+        // The caller may allow leaving the directory explicitly.
+        let allow = LoadOrderPolicy {
+            allow_outside: true,
+        };
+        let vfs = load("layers = [\"../outside\"]", allow).unwrap();
+        assert_eq!(vfs.read("data/a.txt").unwrap(), b"outside a");
+        let text = format!("layers = [\"{}\"]", absolute.replace('\\', "\\\\"));
+        assert_eq!(
+            load(&text, allow).unwrap().read("data/a.txt").unwrap(),
+            b"outside a"
+        );
+        // A missing layer folder or archive is an error, not an empty layer.
+        assert!(matches!(
+            load("layers = [\"mods/none\"]", strict),
+            Err(VfsError::Io { .. })
+        ));
+        assert!(matches!(
+            load("[[layer]]\npath = \"mods/none.dat\"", strict),
+            Err(VfsError::Io { .. })
+        ));
+        // A corrupt archive is an archive error.
+        write(&root, "mods/bad.dat", b"not an archive");
+        assert!(matches!(
+            load("layers = [\"mods/bad.dat\"]", strict),
+            Err(VfsError::Archive(_))
+        ));
+        // Requests through a layer keep the canonical path rules.
+        write(&root, "mods/ok/data/a.txt", b"ok a");
+        let vfs = load("layers = [\"mods/ok\"]", strict).unwrap();
+        for path in ["../data/a.txt", "/data/a.txt", "data//a.txt", "C:data"] {
+            assert!(
+                matches!(vfs.read(path), Err(VfsError::InvalidPath { .. })),
+                "{path}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            // A symlinked layer, or a link inside one, is refused.
+            std::os::unix::fs::symlink(dir.path().join("outside"), root.join("mods/link")).unwrap();
+            assert!(matches!(
+                load("layers = [\"mods/link\"]", strict),
+                Err(VfsError::Symlink(_))
+            ));
+            std::os::unix::fs::symlink(
+                dir.path().join("outside/data/a.txt"),
+                root.join("mods/ok/data/linked.txt"),
+            )
+            .unwrap();
+            assert!(matches!(
+                load("layers = [\"mods/ok\"]", strict),
+                Err(VfsError::Symlink(_))
+            ));
+        }
+    }
+}

@@ -979,3 +979,71 @@ fn critical_instructions_do_not_count_against_the_budget_and_step_runs_one() {
     assert_eq!(vm.step(&mut host).unwrap(), RunOutcome::Budget);
     assert_eq!(vm.pc, 4);
 }
+
+/// A host with the enhanced opcode range switched on.
+struct EnhancedHost;
+impl VmHost for EnhancedHost {
+    fn enhanced_opcodes(&self) -> bool {
+        true
+    }
+}
+#[test]
+fn enhanced_range_is_rejected_like_any_unknown_word_unless_the_host_enables_it() {
+    use crate::extensions::{ENGINE_API_VERSION, ENHANCED_RANGE, enhanced_opcode};
+    // Vanilla: 0x8200 fails exactly as an undefined word outside every
+    // range does, with the same error and the same faulted state.
+    let outcome = |word: u16| {
+        let mut vm = fragment(&op(word));
+        let mut host = BasicHost::default();
+        let result = vm.run(&mut host, 10);
+        (result, vm.status, vm.pc, vm.value_stack.byte_len())
+    };
+    for word in [0x8200, 0x8201, 0x82ff] {
+        let (result, status, pc, depth) = outcome(word);
+        let (other, other_status, other_pc, other_depth) = outcome(0x8156);
+        assert_eq!(result, Err(VmError::Opcode(word)));
+        assert_eq!(other, Err(VmError::Opcode(0x8156)));
+        assert_eq!((status, pc, depth), (other_status, other_pc, other_depth));
+    }
+    // The default `VmHost` gate is off.
+    assert!(!BasicHost::default().enhanced_opcodes());
+    // A vanilla parse refuses the word at load time, like any other
+    // undefined word.
+    let mut image = fixture::program();
+    let code = IntProgram::parse(&image).unwrap().code_start;
+    for (word, name) in [(0x8200_u16, "0x8200"), (0x8156, "0x8156")] {
+        image[code..code + 2].copy_from_slice(&word.to_be_bytes());
+        let error = IntProgram::parse(&image).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("invalid instruction {name}")),
+            "{error}"
+        );
+    }
+    image[code..code + 2].copy_from_slice(&0x8200_u16.to_be_bytes());
+    assert!(IntProgram::parse_enhanced(&image).unwrap().enhanced());
+    assert!(IntProgram::parse_enhanced(&image[..]).is_ok());
+    // An enhanced program on a vanilla host still fails as unknown.
+    let enhanced = || IntProgram::parse_enhanced(&fixture::program()).unwrap();
+    let mut vm = Vm::fragment(enhanced(), &op(0x8200)).unwrap();
+    assert_eq!(
+        vm.run(&mut BasicHost::default(), 10),
+        Err(VmError::Opcode(0x8200))
+    );
+    // Enhanced: engine_api_version pushes the integer version.
+    let mut vm = Vm::fragment(enhanced(), &op(0x8200)).unwrap();
+    let mut host = EnhancedHost;
+    assert_eq!(vm.run(&mut host, 10).unwrap(), RunOutcome::FragmentEnd);
+    assert_eq!(
+        vm.value_stack.top().unwrap(),
+        Value::integer(ENGINE_API_VERSION)
+    );
+    // An unassigned word in the range is still unknown when enabled, and
+    // words outside the range never reach the enhanced table.
+    let mut vm = Vm::fragment(enhanced(), &op(0x8201)).unwrap();
+    assert_eq!(vm.run(&mut host, 10), Err(VmError::Opcode(0x8201)));
+    let mut vm = Vm::fragment(enhanced(), &op(0x8156)).unwrap();
+    assert_eq!(vm.run(&mut host, 10), Err(VmError::Opcode(0x8156)));
+    assert_eq!(*ENHANCED_RANGE.start(), 0x8200);
+    assert_eq!(enhanced_opcode(0x8200).unwrap().name, "engine_api_version");
+    assert!(enhanced_opcode(0x8155).is_none());
+}

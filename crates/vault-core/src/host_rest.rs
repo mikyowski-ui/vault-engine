@@ -125,7 +125,7 @@ impl<A: WorldAssets> WorldHost<A> {
         let elevation = self.world.elevation;
         // SPEC-008 §3.10: the town is the current map's fixed table town;
         // -1 (an unnumbered map) falls into the team-checking default.
-        let town = crate::worldmap::map_town(map);
+        let town = self.world.rules.tables().map_town(map);
         let teams = TEAM_CHECK_MAPS.contains(&map)
             || !(map == 17
                 || (map == 3 && elevation > 0)

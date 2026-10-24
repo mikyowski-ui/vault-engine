@@ -756,14 +756,32 @@ impl WorldMap {
         luck: i32,
         explorer: u32,
     ) -> Result<Option<Encounter>, WorldError> {
+        self.check_encounter_with(
+            crate::tables::CampaignTables::compiled(),
+            rng,
+            luck,
+            explorer,
+        )
+    }
+    /// [`Self::check_encounter`] over a given campaign table set (a mod's
+    /// overridden grids and towns).
+    pub fn check_encounter_with(
+        &mut self,
+        tables: &crate::tables::CampaignTables,
+        rng: &mut impl RandomSource,
+        luck: i32,
+        explorer: u32,
+    ) -> Result<Option<Encounter>, WorldError> {
         let sum = roll_3d6(rng)?;
         let Some(cell) = self.cell() else {
             return Ok(None);
         };
-        if town_at(cell).is_some() || sum >= ENCOUNTER_BELOW[usize::from(frequency(cell)) & 3] {
+        if tables.town_at(cell).is_some()
+            || sum >= ENCOUNTER_BELOW[usize::from(tables.frequency(cell)) & 3]
+        {
             return Ok(None);
         }
-        let region = region(cell);
+        let region = tables.region(cell);
         for _ in 0..DRAW_LIMIT {
             let gate = roll_3d6(rng)? - 5 + luck + 2 * explorer.min(1 << 20) as i32;
             if gate < 18 || self.saved.specials & ALL_SPECIALS == ALL_SPECIALS {
@@ -784,7 +802,7 @@ impl WorldMap {
             }
         }
         Ok(Some(Encounter::Terrain {
-            map: terrain_map(terrain(cell), rng)?,
+            map: terrain_map(tables.terrain(cell), rng)?,
             region,
             context: 2,
         }))
