@@ -115,7 +115,9 @@ cargo run -p vault-platform
 cargo run -p vault-platform -- --smoke-test
 ```
 
-The window displays a centered 16×16 synthetic sprite containing all 256 indices,
+Without game data set up, `cargo run -p vault-platform` opens the launcher
+(see [Launcher](#launcher)). The bare smoke test displays the color test: a
+centered 16×16 synthetic sprite containing all 256 indices,
 scaled to whole pixels where space permits. An `R8Uint` texture holds indices;
 WGSL resolves them through a separate 256-entry RGB332 palette texture. The
 sprite retains its aspect ratio on resize. Minimized windows suspend rendering;
@@ -136,11 +138,95 @@ that fits a smaller monitor.
 With no arguments the game starts from the data named in `vault-engine.toml`,
 looked for beside the executable and then in the working directory. Keys:
 `master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
-`preset` (`vanilla` or `enhanced`), `scaling`, `fullscreen` and `debug`. When
+`preset` (`vanilla` or `enhanced`), `scaling`, `fullscreen`, `debug` and
+`audio` (`false` keeps the audio device closed, as `--no-audio` does). When
 there is no file, `MASTER.DAT` and `CRITTER.DAT` are looked for in the working
 directory, beside the executable, in `../local-corpus` and in the usual Steam
 and GOG install directories, and what is found is written to a new
-`vault-engine.toml`. Command-line flags always win over the file.
+`vault-engine.toml`. Command-line flags always win over the file. When that
+still names no game data that validates, the launcher opens instead (below).
+
+### Launcher
+
+The launcher is a native pre-game window. It is drawn into the same 640×480
+indexed frame as the game, with its own 5×8 bitmap font (ASCII 32-126 plus
+✓ and ✗, 776 bytes of glyph data drawn for this project) and its own palette.
+It uses no game art or fonts, so it works before any game data is found. It
+opens when:
+
+- the binary starts with no asset named (no `--game`, `--preview-*`,
+  `--play-movie` or `--smoke-test`) and `vault-engine.toml` is missing, fails
+  to parse (the error shows in the status line, and Save replaces the file),
+  or names game data that does not validate; or
+- `--launcher` is given. Display flags given with it (`--scaling`,
+  `--fullscreen`, `--preset`, `--no-audio`) pre-set its choices.
+
+Replays (`--replay-inputs`), `--smoke-test`, `--game` and the `--preview-*`
+and `--play-movie` flags never show it, and `--launcher` conflicts with them.
+A Shift-held-at-startup trigger is not offered: winit reports modifiers only
+through later events, not when the window opens.
+
+It has three tabs and a bottom bar:
+
+- **Game data**: `MASTER.DAT`, `CRITTER.DAT` and the data folder. Each takes
+  typed text, **Browse** (a built-in folder browser over `std::fs`), or a file
+  dropped on the window. A dropped `.DAT` goes to the field its name matches
+  (`critter` in the name: CRITTER.DAT, otherwise MASTER.DAT). A dropped folder
+  becomes the data folder, unless it holds both archives: then it fills all
+  three fields the way discovery does. Each field is validated as it changes,
+  and a ✓ or ✗ with a reason and the member count shows under it:
+  - MASTER.DAT must open as a DAT archive (only its directory tables are
+    read). It must hold `color.pal`, `data/vault13.gam` and the new-game map
+    `maps/v13ent.map`, or the data folder must hold the missing ones.
+  - CRITTER.DAT must open and hold members under `art/critters/`.
+  - The data folder must be an existing directory. Without the archives it is
+    the whole game data, so it must then hold those three files itself.
+  - The two archives are named together or not at all.
+- **Display & audio**: scaling (`aspect_fit` or `integer`), fullscreen,
+  preset (`vanilla` or `enhanced`), audio on or off, and the debug overlay.
+- **Mods**: the `load_order.toml` layers, lowest first, with their per-layer
+  check (each layer is mounted on its own over an empty base) and the whole
+  stack's check. Layers can be added (typed, browsed or dropped while the tab
+  shows), moved up or down, enabled or disabled, and removed. Paths inside the
+  load order's directory are written relative to it. A layer outside it is
+  reported, because a load order's layers must lie inside its own directory.
+  With no load order yet, Save writes `load_order.toml` beside the settings
+  and sets `mod_list = "load_order.toml"`. A `mod_list` given as an inline
+  path list in `vault-engine.toml` is shown read-only, with that explanation:
+  edit it in the file, or remove it to manage a `load_order.toml` here. A load
+  order that does not parse is also shown read-only, Save leaves it alone, and
+  Play is refused.
+- **Save**, **Play**, **Launch with Debug** and **Quit**, with a status line.
+  Save writes `vault-engine.toml`, rewriting the file it was read from in
+  place or else creating one beside the executable (then in the working
+  directory). Unknown keys are kept, and paths below the file's directory are
+  written relative to it. Play refuses, with the reason, until the game data
+  and the mod stack validate. Then it saves and starts the game in the same
+  window and renderer, with the same launch a zero-argument start builds from
+  those settings. Launch with Debug does the same with the debug overlay on
+  for this run only (the Debug toggle is what is saved). If the game fails to
+  load, the launcher stays open and shows why.
+
+Keys: **Tab** and **Shift+Tab** move the focus, **Enter** or **Space**
+activates, the arrows choose (Left and Right switch tabs and cycle choices,
+Up and Down move between widgets or through a list), and **Esc** backs out of
+the browser. In the browser, Enter opens a folder or picks a file, Backspace
+goes up, and **Use this folder** picks the folder shown. In the layer list,
+Shift+Up and Shift+Down move the selected layer, Space toggles it, and Delete
+removes it. Text fields take US-layout text with Left, Right, Home, End,
+Backspace and Delete. The mouse clicks, hovers and scrolls lists. F11,
+Alt+Enter and Alt+S work as in the game.
+
+Launcher input is never game input. Nothing is written to a `--record-inputs`
+log while the launcher shows. The log starts when the game does: first its
+`surface` and `scaling` records, as a direct start writes them, then the
+game's frames. The game's clock also starts at zero then, so a log recorded
+through the launcher replays like one from a direct start.
+
+`load_order.toml` `[[layer]]` tables take an optional `enabled = false`. The
+layer stays listed but is not mounted. `vault_formats::vfs::write_load_order`
+writes entries back in the `[[layer]]` form, which `parse_load_order` reads
+to the same entries.
 
 `preset = "enhanced"` (or `--preset enhanced`) selects
 `vault_core::EnginePreset::Enhanced`. That enables the versioned opcode range
@@ -154,7 +240,7 @@ opcodes, the compiled spec tables are used, and replay digests are unchanged
 lowest first: each is a loose folder and/or a master `.DAT` with an optional
 critter `.DAT`, routed as the base data is, and the highest layer wins. It is
 either a list of paths or the path of a `load_order.toml` (`layers = [...]`, or
-`[[layer]]` tables with `path`, `master_dat` and `critter_dat`). A load order's
+`[[layer]]` tables with `path`, `master_dat`, `critter_dat` and an optional `enabled = false`). A load order's
 layers must lie inside its own directory. A mounted mod layer also enables the
 table overrides.
 

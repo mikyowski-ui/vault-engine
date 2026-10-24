@@ -88,6 +88,8 @@ pub struct Config {
     pub scaling: Option<ScalingMode>,
     pub fullscreen: Option<bool>,
     pub debug: Option<bool>,
+    /// `false` keeps the audio device closed, as `--no-audio` does.
+    pub audio: Option<bool>,
     /// Keys this engine does not know, in file order: ignored, but kept
     /// so that a rewrite does not lose them.
     pub unknown: Vec<(String, Value)>,
@@ -203,6 +205,7 @@ impl Config {
             }
             "fullscreen" => self.fullscreen = Some(boolean(value)?),
             "debug" => self.debug = Some(boolean(value)?),
+            "audio" => self.audio = Some(boolean(value)?),
             _ => self.unknown.push((key.to_owned(), value)),
         }
         Ok(())
@@ -252,7 +255,11 @@ impl Config {
         if let Some(scaling) = self.scaling {
             line("scaling", quote(scaling_name(scaling)));
         }
-        for (key, value) in [("fullscreen", self.fullscreen), ("debug", self.debug)] {
+        for (key, value) in [
+            ("fullscreen", self.fullscreen),
+            ("debug", self.debug),
+            ("audio", self.audio),
+        ] {
             if let Some(value) = value {
                 line(key, value.to_string());
             }
@@ -279,11 +286,29 @@ impl Config {
 
     /// Relative paths taken relative to `base` (the file's directory).
     pub fn relative_to(mut self, base: &Path) -> Self {
-        let join = |path: &mut PathBuf| {
+        self.each_path(|path| {
             if path.is_relative() {
                 *path = base.join(&*path);
             }
-        };
+        });
+        self
+    }
+
+    /// Paths below `base` made relative to it again (the inverse of
+    /// [`Config::relative_to`]), so a file kept beside the game data stays
+    /// valid when the folder moves; other paths are kept as they are.
+    pub fn relative_from(mut self, base: &Path) -> Self {
+        self.each_path(|path| {
+            if let Ok(rest) = path.strip_prefix(base)
+                && !rest.as_os_str().is_empty()
+            {
+                *path = rest.to_path_buf();
+            }
+        });
+        self
+    }
+
+    fn each_path(&mut self, mut visit: impl FnMut(&mut PathBuf)) {
         for path in [
             &mut self.master_dat,
             &mut self.critter_dat,
@@ -292,14 +317,25 @@ impl Config {
         .into_iter()
         .flatten()
         {
-            join(path);
+            visit(path);
         }
         match &mut self.mod_list {
-            Some(ModList::Paths(paths)) => paths.iter_mut().for_each(join),
-            Some(ModList::File(file)) => join(file),
+            Some(ModList::Paths(paths)) => paths.iter_mut().for_each(visit),
+            Some(ModList::File(file)) => visit(file),
             None => {}
         }
-        self
+    }
+
+    /// Write the settings to `path`, replacing any file there; paths below
+    /// its directory are written relative to it, and unknown keys are kept.
+    pub fn save(&self, path: &Path) -> crate::AppResult<()> {
+        let base = path.parent().unwrap_or(Path::new(""));
+        let text = self
+            .clone()
+            .relative_from(base)
+            .to_toml()
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        write_replacing(path, text.as_bytes())
     }
 
     /// Read a settings file, its relative paths resolved against its
@@ -322,7 +358,7 @@ impl Config {
     }
 }
 
-const KNOWN: [&str; 9] = [
+const KNOWN: [&str; 10] = [
     "master_dat",
     "critter_dat",
     "data_root",
@@ -331,6 +367,7 @@ const KNOWN: [&str; 9] = [
     "scaling",
     "fullscreen",
     "debug",
+    "audio",
     "load_order",
 ];
 
@@ -557,6 +594,24 @@ pub fn discover(dirs: &[PathBuf]) -> Option<Config> {
     })
 }
 
+/// Replace the file at `path` with `bytes`: a temporary sibling is written
+/// and renamed over it, so a failed write leaves the old file whole.
+pub fn write_replacing(path: &Path, bytes: &[u8]) -> crate::AppResult<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("{} names no file", path.display()))?;
+    let mut temporary = std::ffi::OsString::from(".");
+    temporary.push(name);
+    temporary.push(".tmp");
+    let temporary = path.with_file_name(temporary);
+    std::fs::write(&temporary, bytes)
+        .and_then(|()| std::fs::rename(&temporary, path))
+        .map_err(|error| {
+            let _ = std::fs::remove_file(&temporary);
+            format!("{}: {error}", path.display()).into()
+        })
+}
+
 /// Write a discovered configuration into the first of `dirs` that takes
 /// it (an existing file is never replaced); `None`, with a warning, when
 /// none does.
@@ -650,6 +705,41 @@ future_list = []
                 .1,
             Value::String("tab\there \u{e9} \"q\"".into())
         );
+    }
+
+    #[test]
+    fn save_replaces_the_file_with_relative_paths_and_unknown_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(FILE_NAME);
+        std::fs::write(
+            &path,
+            "audio = false\nmaster_dat = \"MASTER.DAT\"\nnew = [\"x\"]\n",
+        )
+        .unwrap();
+        let mut config = Config::load(&path).unwrap();
+        assert_eq!(config.audio, Some(false));
+        assert_eq!(config.master_dat, Some(temp.path().join("MASTER.DAT")));
+        config.audio = Some(true);
+        config.data_root = Some("/elsewhere/data".into());
+        config.mod_list = Some(ModList::File(temp.path().join("load_order.toml")));
+        config.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("master_dat = \"MASTER.DAT\"\n"), "{text}");
+        assert!(text.contains("data_root = \"/elsewhere/data\"\n"), "{text}");
+        assert!(text.contains("mod_list = \"load_order.toml\"\n"), "{text}");
+        assert!(text.contains("audio = true\nnew = [\"x\"]\n"), "{text}");
+        assert_eq!(Config::load(&path).unwrap(), config);
+        // No temporary file is left behind, and a missing directory fails.
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        assert!(
+            config
+                .save(&temp.path().join("missing").join(FILE_NAME))
+                .is_err()
+        );
+        assert!(matches!(
+            Config::parse("audio = \"off\""),
+            Err(ConfigError { line: 1, .. })
+        ));
     }
 
     #[test]

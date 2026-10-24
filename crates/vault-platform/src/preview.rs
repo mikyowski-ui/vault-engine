@@ -8,7 +8,7 @@ use vault_formats::{
 use vault_render::{ImageError, IndexedImage, compose_preview};
 use winit::keyboard::KeyCode;
 
-#[derive(clap::Args, Debug, Default)]
+#[derive(clap::Args, Debug, Default, Clone)]
 pub struct PreviewArgs {
     /// The engine preset (from the settings or `--preset`; Vanilla when
     /// neither names one).

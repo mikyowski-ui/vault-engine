@@ -4,6 +4,7 @@ mod editor_screen;
 mod game;
 mod input;
 mod interface;
+mod launcher;
 mod map_preview;
 mod movie;
 mod preview;
@@ -38,7 +39,7 @@ use winit::{
 type AppError = Box<dyn Error + Send + Sync>;
 type AppResult<T> = Result<T, AppError>;
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(
     about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives",
     long_about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives.\n\nWithout arguments the game starts from the data named in vault-engine.toml (beside the executable, else in the working directory). Without that file, MASTER.DAT and CRITTER.DAT are looked for in the working directory, beside the executable, in ../local-corpus and in the usual Steam and GOG install directories, and what is found is saved to vault-engine.toml. Command-line flags always win over the file.\n\nF11 or Alt+Enter toggles borderless fullscreen; Alt+S toggles aspect-fit and integer scaling."
@@ -80,6 +81,11 @@ struct Args {
     /// file's, else vanilla.
     #[arg(long, value_name = "PRESET", value_parser = preset_arg)]
     preset: Option<config::Preset>,
+    /// Open the launcher (game data, display, audio and mod settings, then
+    /// Play) even when the settings are complete. A start naming nothing
+    /// opens it anyway while the settings name no valid game data.
+    #[arg(long, conflicts_with_all = ["replay_inputs", "smoke_test", "preview_asset"])]
+    launcher: bool,
     #[command(flatten)]
     preview: preview::PreviewArgs,
 }
@@ -124,6 +130,9 @@ struct Launch {
     mod_list: Option<config::ModList>,
     /// No asset was named and the settings' game data starts the game.
     zero_arg_game: bool,
+    /// The settings' `audio = false` keeps the device closed (as
+    /// `--no-audio` does).
+    audio: bool,
 }
 
 /// Merge `config` into the command line, which always wins: with no asset
@@ -159,6 +168,107 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
         preset: args.preset.or(config.preset).unwrap_or_default(),
         mod_list: config.mod_list.clone(),
         zero_arg_game,
+        audio: !args.no_audio && config.audio.unwrap_or(true),
+    }
+}
+
+/// Merge the settings into the command line, load what it names, and open
+/// the audio output a world or a movie plays through.
+fn start(
+    args: &mut Args,
+    config: Option<&config::Config>,
+) -> AppResult<(Launch, Option<preview::AssetPreview>, Option<audio::Audio>)> {
+    let launch = resolve_launch(args, config);
+    if launch.zero_arg_game {
+        tracing::info!("starting the game from the settings' data");
+    }
+    args.preview.preset = match launch.preset {
+        config::Preset::Vanilla => vault_core::EnginePreset::Vanilla,
+        config::Preset::Enhanced => vault_core::EnginePreset::Enhanced,
+    };
+    args.preview.mods = launch.mod_list.clone();
+    let mut preview = args.preview.load()?;
+    // Audio serves an interactive world or a movie; sprites need none.
+    let output = || {
+        if launch.audio {
+            audio::Audio::open()
+        } else {
+            audio::Audio::silent()
+        }
+    };
+    let audio = match &mut preview {
+        Some(preview::AssetPreview::Map(map)) => {
+            let audio = output();
+            map.audio = audio.handle();
+            Some(audio)
+        }
+        Some(preview::AssetPreview::Movie(movie)) => {
+            let audio = output();
+            movie.player.audio = audio.handle();
+            Some(audio)
+        }
+        Some(preview::AssetPreview::Game(game)) => {
+            let audio = output();
+            game.set_audio(audio.handle());
+            Some(audio)
+        }
+        _ => None,
+    };
+    Ok((launch, preview, audio))
+}
+
+/// The command line the launcher's Play starts from: the one it was shown
+/// for, its display flags dropped (the launcher showed them as its own
+/// choices and saved what it launches with), debug on for Launch with
+/// Debug. With the launcher's settings, [`start`] then builds the
+/// zero-argument launch.
+fn play_args(shown: &Args, debug: bool) -> Args {
+    let mut args = shown.clone();
+    args.scaling = None;
+    args.fullscreen = false;
+    args.preset = None;
+    args.no_audio = false;
+    args.preview.debug |= debug;
+    args
+}
+
+/// The launcher a start shows, if it shows one: with `--launcher`, or for
+/// a start naming nothing whose settings are missing, malformed
+/// (`problem`) or name game data that does not validate. The command
+/// line's display flags pre-set its choices.
+fn launcher_for(
+    args: &Args,
+    config: Option<&config::Config>,
+    problem: Option<String>,
+) -> Option<launcher::Launcher> {
+    let mut config = config.cloned().unwrap_or_default();
+    if let Some(scaling) = args.scaling {
+        config.scaling = Some(scaling);
+    }
+    if let Some(preset) = args.preset {
+        config.preset = Some(preset);
+    }
+    if args.fullscreen {
+        config.fullscreen = Some(true);
+    }
+    if args.no_audio {
+        config.audio = Some(false);
+    }
+    let forced = args.launcher || problem.is_some();
+    let launcher = launcher::Launcher::new(launcher::Setup {
+        config,
+        settings_path: config::find(&config::search_dirs()),
+        save_dirs: config::search_dirs(),
+        start_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        problem,
+    });
+    match launcher.ready() {
+        Ok(()) if !forced => None,
+        Ok(()) => Some(launcher),
+        Err(reason) => {
+            tracing::info!(%reason, "no valid game data set up: showing the launcher");
+            Some(launcher)
+        }
     }
 }
 
@@ -311,6 +421,12 @@ struct Shell {
     /// Shell hotkeys held down: their repeats and releases stay with the
     /// shell too.
     shell_keys: Vec<KeyCode>,
+    /// The pre-game launcher, while it shows (then `preview` is `None`).
+    launcher: Option<Box<launcher::Launcher>>,
+    /// The command line the launcher's Play starts the game from.
+    pending: Option<Box<Args>>,
+    /// Shift is held, for the launcher's text entry.
+    shift: bool,
 }
 
 impl Shell {
@@ -321,7 +437,12 @@ impl Shell {
         event_loop.exit();
     }
 
+    /// Launcher input is never game input: the log starts with the game
+    /// (its surface and scaling first, as a direct start writes them).
     fn log(&mut self, _event_loop: &ActiveEventLoop, command: InputCommand) {
+        if self.launcher.is_some() {
+            return;
+        }
         let Some(log) = &mut self.input_log.0 else {
             return;
         };
@@ -601,6 +722,136 @@ impl Shell {
     }
 }
 
+impl Shell {
+    fn refresh_launcher(&mut self, window: &Window) {
+        let Some(launcher) = &self.launcher else {
+            return;
+        };
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_image(&launcher.image(), &launcher::palette());
+        }
+        window.request_redraw();
+    }
+
+    /// A window event while the launcher shows: its input goes to the
+    /// launcher (never to the input log); the window's own events come
+    /// back for the shared handling.
+    fn launcher_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        event: WindowEvent,
+    ) -> Option<WindowEvent> {
+        let input = match event {
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+                return None;
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let PhysicalKey::Code(key) = event.physical_key else {
+                    return None;
+                };
+                let pressed = event.state == ElementState::Pressed;
+                if self.shell_key(event_loop, window, key, pressed, event.repeat) || !pressed {
+                    return None;
+                }
+                launcher::LauncherInput::Key {
+                    key,
+                    shift: self.shift,
+                }
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.alt = modifiers.state().alt_key();
+                self.shift = modifiers.state().shift_key();
+                return None;
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.pointer = Some(self.scaled_pointer(window, [position.x, position.y]));
+                launcher::LauncherInput::Pointer(self.pixel()?)
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.pointer = None;
+                self.virtual_pointer.left();
+                return None;
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => launcher::LauncherInput::Press(self.pixel()?),
+            WindowEvent::MouseInput { .. } => return None,
+            WindowEvent::MouseWheel { delta, .. } => launcher::LauncherInput::Wheel(match delta {
+                MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                MouseScrollDelta::PixelDelta(position) => position.y / 40.0,
+            }),
+            WindowEvent::DroppedFile(path) => launcher::LauncherInput::Dropped(path),
+            WindowEvent::Focused(false) => {
+                self.shell_keys.clear();
+                return None;
+            }
+            other => return Some(other),
+        };
+        let action = self.launcher.as_mut()?.handle(input);
+        match action {
+            None => self.refresh_launcher(window),
+            Some(launcher::LauncherAction::Quit) => event_loop.exit(),
+            Some(launcher::LauncherAction::Play) => self.start_game(event_loop, window, false),
+            Some(launcher::LauncherAction::PlayDebug) => self.start_game(event_loop, window, true),
+        }
+        None
+    }
+
+    /// Play: the launcher's settings start the game exactly as a
+    /// zero-argument start with those settings would, in this window and
+    /// renderer. When it does not load, the launcher stays and says why.
+    fn start_game(&mut self, event_loop: &ActiveEventLoop, window: &Window, debug: bool) {
+        let (Some(launcher), Some(pending)) = (self.launcher.as_mut(), self.pending.as_ref())
+        else {
+            return;
+        };
+        let config = launcher.launch_config();
+        let mut args = play_args(pending, debug);
+        let (launch, preview, audio) = match start(&mut args, Some(&config)) {
+            Ok((launch, Some(preview), audio)) => (launch, preview, audio),
+            Ok((_, None, _)) => {
+                launcher.launch_failed("the settings name no game data");
+                return self.refresh_launcher(window);
+            }
+            Err(error) => {
+                tracing::error!(%error, "the launcher's game did not start");
+                launcher.launch_failed(error);
+                return self.refresh_launcher(window);
+            }
+        };
+        tracing::info!(debug = args.preview.debug, "launcher: starting the game");
+        self.launcher = None;
+        self.pending = None;
+        self._audio = audio;
+        self.display = Some(DisplayPalette::new(preview.palette(), preview.brightness()));
+        self.preview = Some(preview);
+        // The game's clock starts at its first frame, as in a direct start.
+        self.started = Some(Instant::now());
+        self.scaling = launch.scaling;
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_scaling(self.scaling);
+        }
+        if launch.fullscreen && window.fullscreen().is_none() {
+            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+        }
+        // `--record-inputs` starts here, with what a direct start logs first.
+        let size = window.inner_size();
+        self.log(
+            event_loop,
+            InputCommand::Surface {
+                width: size.width,
+                height: size.height,
+            },
+        );
+        self.log_scaling(event_loop);
+        self.refresh_preview(event_loop, window);
+    }
+}
+
 impl ApplicationHandler for Shell {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_some() {
@@ -612,10 +863,11 @@ impl ApplicationHandler for Shell {
             .map(|monitor| [monitor.size().width, monitor.size().height]);
         let [width, height] = initial_window_size(monitor);
         let attributes = Window::default_attributes()
-            .with_title(self.preview.as_ref().map_or_else(
-                || "Vault Engine — Indexed Color Test".to_owned(),
-                preview::AssetPreview::title,
-            ))
+            .with_title(match (&self.preview, &self.launcher) {
+                (Some(preview), _) => preview.title(),
+                (None, Some(launcher)) => launcher.title(),
+                (None, None) => "Vault Engine — Indexed Color Test".to_owned(),
+            })
             .with_inner_size(PhysicalSize::new(width, height))
             // H2: the frame is never down-sampled in a window that keeps
             // its minimum size.
@@ -652,6 +904,14 @@ impl ApplicationHandler for Shell {
                     size.height,
                     &image,
                     &palette,
+                ))?)
+            } else if let Some(launcher) = &self.launcher {
+                Ok(pollster::block_on(Renderer::new_with_image(
+                    window.clone(),
+                    size.width,
+                    size.height,
+                    &launcher.image(),
+                    &launcher::palette(),
                 ))?)
             } else {
                 Ok(pollster::block_on(Renderer::new(
@@ -767,6 +1027,14 @@ impl ApplicationHandler for Shell {
             .filter(|window| window.id() == window_id)
         else {
             return;
+        };
+        let event = if self.launcher.is_some() {
+            match self.launcher_event(event_loop, &window, event) {
+                Some(event) => event,
+                None => return,
+            }
+        } else {
+            event
         };
         match event {
             WindowEvent::CloseRequested => {
@@ -992,67 +1260,39 @@ fn run(mut args: Args) -> AppResult<()> {
         println!("{}", serde_json::to_string(&report)?);
         return Ok(());
     }
-    let config = settings(&args)?;
-    let launch = resolve_launch(&mut args, config.as_ref());
-    if launch.zero_arg_game {
-        tracing::info!("starting the game from the settings' data");
-    } else if !args.names_asset() && !args.smoke_test {
-        tracing::warn!(
-            "no game data found: name it in {} beside the executable or in the working \
-             directory (master_dat = \"/path/to/MASTER.DAT\", critter_dat = \
-             \"/path/to/CRITTER.DAT\"), put MASTER.DAT and CRITTER.DAT in the working \
-             directory, or pass --game --master-dat PATH --critter-dat PATH; showing the \
-             color test",
-            config::FILE_NAME
-        );
-    }
-    args.preview.preset = match launch.preset {
-        config::Preset::Vanilla => vault_core::EnginePreset::Vanilla,
-        config::Preset::Enhanced => vault_core::EnginePreset::Enhanced,
+    // A start naming nothing may show the launcher instead, which also
+    // reports a malformed settings file rather than failing on it.
+    let bare = args.launcher || (!args.names_asset() && !args.smoke_test);
+    let (config, problem) = match settings(&args) {
+        Ok(config) => (config, None),
+        Err(error) if bare => (None, Some(error.to_string())),
+        Err(error) => return Err(error),
     };
-    args.preview.mods = launch.mod_list.clone();
+    let launcher = bare
+        .then(|| launcher_for(&args, config.as_ref(), problem))
+        .flatten();
     let input_log = InputLog::open(args.record_inputs.as_deref())?;
-    let mut preview = args.preview.load()?;
-    // Audio serves an interactive world or a movie; sprites need none.
-    let output = || {
-        if args.no_audio {
-            audio::Audio::silent()
-        } else {
-            audio::Audio::open()
-        }
-    };
-    let audio = match &mut preview {
-        Some(preview::AssetPreview::Map(map)) => {
-            let audio = output();
-            map.audio = audio.handle();
-            Some(audio)
-        }
-        Some(preview::AssetPreview::Movie(movie)) => {
-            let audio = output();
-            movie.player.audio = audio.handle();
-            Some(audio)
-        }
-        Some(preview::AssetPreview::Game(game)) => {
-            let audio = output();
-            game.set_audio(audio.handle());
-            Some(audio)
-        }
-        _ => None,
-    };
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Wait);
     let mut shell = Shell {
         smoke_test: args.smoke_test,
-        _audio: audio,
         input_log,
-        scaling: launch.scaling,
-        fullscreen: launch.fullscreen,
         ..Default::default()
     };
-    shell.display = preview
-        .as_ref()
-        .map(|preview| DisplayPalette::new(preview.palette(), preview.brightness()));
-    shell.preview = preview;
+    if let Some(launcher) = launcher {
+        shell.scaling = resolve_launch(&mut args.clone(), config.as_ref()).scaling;
+        shell.launcher = Some(Box::new(launcher));
+        shell.pending = Some(Box::new(args));
+    } else {
+        let (launch, preview, audio) = start(&mut args, config.as_ref())?;
+        shell.scaling = launch.scaling;
+        shell.fullscreen = launch.fullscreen;
+        shell._audio = audio;
+        shell.display = preview
+            .as_ref()
+            .map(|preview| DisplayPalette::new(preview.palette(), preview.brightness()));
+        shell.preview = preview;
+    }
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Wait);
     let run = event_loop.run_app(&mut shell);
     if let Some(Err(error)) = shell.input_log.0.as_mut().map(std::io::Write::flush) {
         shell.input_log.stop(&error);
@@ -1130,6 +1370,7 @@ mod tests {
                 preset: config::Preset::Enhanced,
                 mod_list: None,
                 zero_arg_game: true,
+                audio: true,
             }
         );
         // Without settings, or with settings naming no data, the color test
@@ -1233,6 +1474,72 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn the_launchers_play_builds_the_zero_argument_launch() {
+        let shown = parse(&["--launcher", "--scaling", "integer", "--no-audio"]);
+        assert!(shown.launcher && shown.wants_data() && !shown.names_asset());
+        // What the launcher saved and hands over (its fields made absolute).
+        let chosen = config::Config {
+            scaling: Some(ScalingMode::AspectFit),
+            audio: Some(false),
+            debug: None,
+            mod_list: Some(config::ModList::File(
+                "/games/fallout/load_order.toml".into(),
+            )),
+            ..installed()
+        };
+        let mut args = play_args(&shown, false);
+        let launch = resolve_launch(&mut args, Some(&chosen));
+        assert!(args.preview.game && launch.zero_arg_game && !args.preview.debug);
+        assert_eq!(
+            (
+                args.preview.master_dat,
+                args.preview.critter_dat,
+                args.preview.corpus_dir
+            ),
+            (
+                Some("/games/fallout/MASTER.DAT".into()),
+                Some("/games/fallout/CRITTER.DAT".into()),
+                Some("/games/fallout/DATA".into())
+            )
+        );
+        // The launcher's choices, not the flags it was shown with.
+        assert_eq!(
+            launch,
+            Launch {
+                scaling: ScalingMode::AspectFit,
+                fullscreen: true,
+                preset: config::Preset::Enhanced,
+                mod_list: chosen.mod_list.clone(),
+                zero_arg_game: true,
+                audio: false,
+            }
+        );
+        // Launch with Debug, and audio back on.
+        let mut args = play_args(&shown, true);
+        let on = config::Config {
+            audio: Some(true),
+            ..chosen
+        };
+        let launch = resolve_launch(&mut args, Some(&on));
+        assert!(args.preview.debug && launch.audio);
+        // `--no-audio` still wins over the settings without the launcher.
+        let mut args = parse(&["--no-audio"]);
+        assert!(!resolve_launch(&mut args, Some(&on)).audio);
+        // The launcher is never shown for a replay, a smoke test or an asset.
+        for other in [
+            &["--smoke-test"][..],
+            &["--game"],
+            &["--preview-map", "m.map"],
+            &["--replay-inputs", "log.jsonl", "--preview-map", "m.map"],
+        ] {
+            let line = std::iter::once("vault-platform")
+                .chain(["--launcher"])
+                .chain(other.iter().copied());
+            assert!(Args::try_parse_from(line).is_err(), "{other:?}");
+        }
     }
 
     #[test]

@@ -477,7 +477,7 @@ impl fmt::Debug for ModLayer {
 
 /// One `load_order.toml` layer entry, with paths as written (relative to
 /// the load order's own directory).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerEntry {
     /// A loose folder, or a `.dat` file used as the layer's master archive.
     pub path: Option<String>,
@@ -485,6 +485,19 @@ pub struct LayerEntry {
     pub master_dat: Option<String>,
     /// The layer's critter archive (`art/critters/` requests).
     pub critter_dat: Option<String>,
+    /// `enabled = false` keeps the layer listed but unmounted. On by default.
+    pub enabled: bool,
+}
+
+impl Default for LayerEntry {
+    fn default() -> Self {
+        Self {
+            path: None,
+            master_dat: None,
+            critter_dat: None,
+            enabled: true,
+        }
+    }
 }
 
 /// How [`LayeredVfs::from_load_order_with`] resolves layer paths.
@@ -548,13 +561,17 @@ fn toml_string(text: &str) -> Result<(String, &str), VfsError> {
 
 /// Parse the `load_order.toml` subset: either `layers = ["path", ...]`
 /// (one array, which may span lines) or one `[[layer]]` table per layer
-/// with `path = "..."` and the optional `master_dat` / `critter_dat` keys.
-/// `#` starts a comment. Entries are listed lowest first: the last layer
-/// wins. Unknown keys, sections, or a mix of both forms are errors.
+/// with `path = "..."`, the optional `master_dat` / `critter_dat` keys and
+/// an optional `enabled = true | false` (a disabled layer stays listed but
+/// is not mounted). `#` starts a comment. Entries are listed lowest first:
+/// the last layer wins. Unknown keys, sections, or a mix of both forms are
+/// errors.
 pub fn parse_load_order(text: &str) -> Result<Vec<LayerEntry>, VfsError> {
     let mut entries: Vec<LayerEntry> = Vec::new();
     let mut array_form = false;
     let mut in_table = false;
+    // The layer number whose `enabled` key was last seen.
+    let mut enabled_seen = None;
     let mut lines = text.lines().enumerate();
     while let Some((number, line)) = lines.next() {
         let at = |message: String| load_order_error(format!("line {}: {message}", number + 1));
@@ -617,9 +634,21 @@ pub fn parse_load_order(text: &str) -> Result<Vec<LayerEntry>, VfsError> {
             }
             continue;
         }
+        let layer = entries.len();
         let Some(entry) = entries.last_mut().filter(|_| in_table) else {
             return Err(at(format!("unknown key {key:?}")));
         };
+        if key == "enabled" {
+            if enabled_seen.replace(layer) == Some(layer) {
+                return Err(at(format!("duplicate key {key:?}")));
+            }
+            entry.enabled = match value {
+                "true" => true,
+                "false" => false,
+                _ => return Err(at(format!("`enabled` is true or false, not {value:?}"))),
+            };
+            continue;
+        }
         let (text, rest) = toml_string(value)?;
         if !rest.trim().is_empty() {
             return Err(at(format!("text after the value: {rest:?}")));
@@ -643,6 +672,44 @@ pub fn parse_load_order(text: &str) -> Result<Vec<LayerEntry>, VfsError> {
         }
     }
     Ok(entries)
+}
+
+/// One basic TOML string with only the escapes [`parse_load_order`] reads.
+fn toml_quote(text: &str) -> Result<String, VfsError> {
+    if text.chars().any(char::is_control) {
+        return Err(load_order_error(format!(
+            "layer path {text:?} holds a control character"
+        )));
+    }
+    Ok(format!(
+        "\"{}\"",
+        text.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
+}
+
+/// Write layer entries (lowest first) as a `load_order.toml` in the
+/// `[[layer]]` form, with the paths exactly as given (relative paths stay
+/// relative) and `enabled = false` for a disabled layer;
+/// [`parse_load_order`] reads the text back to the same entries. A path
+/// holding a control character cannot be written.
+pub fn write_load_order(entries: &[LayerEntry]) -> Result<String, VfsError> {
+    let mut out = String::from("# Mod layers, lowest first: the last layer wins.\n");
+    for entry in entries {
+        out.push_str("\n[[layer]]\n");
+        for (key, value) in [
+            ("path", &entry.path),
+            ("master_dat", &entry.master_dat),
+            ("critter_dat", &entry.critter_dat),
+        ] {
+            if let Some(value) = value {
+                out.push_str(&format!("{key} = {}\n", toml_quote(value)?));
+            }
+        }
+        if !entry.enabled {
+            out.push_str("enabled = false\n");
+        }
+    }
+    Ok(out)
 }
 
 /// Whether `path` is absolute or has a drive or root prefix, in either
@@ -795,6 +862,7 @@ impl LayeredVfs {
 
     /// Layers from already-parsed entries (lowest first), their paths
     /// resolved against `directory` as a load order there would resolve them.
+    /// Disabled entries are skipped.
     pub fn from_entries(
         base: Arc<dyn Vfs>,
         directory: &Path,
@@ -805,6 +873,7 @@ impl LayeredVfs {
             .map_err(|error| io_error(directory, error))?;
         let layers = entries
             .iter()
+            .filter(|entry| entry.enabled)
             .map(|entry| Self::open_layer(&dir, directory, entry, policy))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self::new(base, layers))
@@ -876,5 +945,94 @@ impl Vfs for LayeredVfs {
 
     fn mod_layers(&self) -> usize {
         self.layers.len() + self.base.mod_layers()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layer(path: &str, enabled: bool) -> LayerEntry {
+        LayerEntry {
+            path: Some(path.into()),
+            enabled,
+            ..LayerEntry::default()
+        }
+    }
+
+    #[test]
+    fn a_disabled_layer_is_parsed_and_listed_but_not_mounted() {
+        let text = "[[layer]]\npath = \"mods/one\"\nenabled = false # parked\n\
+                    [[layer]]\npath = \"mods/two\"\nenabled = true\n";
+        let entries = parse_load_order(text).unwrap();
+        assert_eq!(entries, [layer("mods/one", false), layer("mods/two", true)]);
+        for bad in [
+            "[[layer]]\npath = \"a\"\nenabled = \"no\"",
+            "[[layer]]\npath = \"a\"\nenabled = false\nenabled = true",
+            "[[layer]]\nenabled = false",
+            "enabled = false",
+            "layers = [\"a\"]\nenabled = false",
+        ] {
+            assert!(
+                matches!(parse_load_order(bad), Err(VfsError::LoadOrder(_))),
+                "{bad:?}"
+            );
+        }
+        // Each table has its own `enabled`.
+        let two =
+            "[[layer]]\npath = \"a\"\nenabled = false\n[[layer]]\npath = \"b\"\nenabled = false";
+        assert_eq!(
+            parse_load_order(two).unwrap(),
+            [layer("a", false), layer("b", false)]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["one", "two"] {
+            let folder = dir.path().join("mods").join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("a.txt"), name).unwrap();
+        }
+        let strict = LoadOrderPolicy::default();
+        let base: Arc<dyn Vfs> =
+            Arc::new(LocalDirProvider::mount(dir.path().join("mods/one")).unwrap());
+        let vfs = LayeredVfs::from_entries(base, dir.path(), &entries, strict).unwrap();
+        assert_eq!(vfs.mod_layers(), 1);
+        assert_eq!(vfs.layers()[0].name(), "mods/two");
+        assert_eq!(vfs.read("a.txt").unwrap(), b"two");
+        // A disabled layer is never opened, so a missing one is no error.
+        let base: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+        let missing = [layer("mods/missing", false)];
+        assert!(LayeredVfs::from_entries(base.clone(), dir.path(), &missing, strict).is_ok());
+        let missing = [layer("mods/missing", true)];
+        assert!(LayeredVfs::from_entries(base, dir.path(), &missing, strict).is_err());
+    }
+
+    #[test]
+    fn the_writer_round_trips_through_the_parser() {
+        let entries = vec![
+            layer("mods/one", true),
+            LayerEntry {
+                path: Some(r"mods\two".into()),
+                master_dat: Some("mods/two/\"quoted\".dat".into()),
+                critter_dat: Some("mods/two/critter.dat".into()),
+                enabled: false,
+            },
+            LayerEntry {
+                critter_dat: Some("critters.dat".into()),
+                ..LayerEntry::default()
+            },
+        ];
+        let text = write_load_order(&entries).unwrap();
+        assert!(text.contains("[[layer]]\npath = \"mods/one\"\n"), "{text}");
+        assert!(text.contains("path = \"mods\\\\two\"\n"), "{text}");
+        assert_eq!(text.matches("enabled = false").count(), 1);
+        assert_eq!(parse_load_order(&text).unwrap(), entries);
+        assert_eq!(
+            parse_load_order(&write_load_order(&[]).unwrap()).unwrap(),
+            []
+        );
+        assert!(matches!(
+            write_load_order(&[layer("bad\nname", true)]),
+            Err(VfsError::LoadOrder(_))
+        ));
     }
 }
