@@ -246,18 +246,55 @@ For a skill contest, first check the attacker. Only a successful attacker causes
 
 Requesting a `.MAP` first probes its saved `.SAV` counterpart and prefers a successful saved-map load. Otherwise the original map is loaded. The saved-state bit `0x01` distinguishes restoration from fresh initialization. The following is the host-side order for a successful load; scripts can perform additional actions during their requests. `[Must-match]`
 
-1. Save/leave the old map, stop animations, suspend normal map background processing, prepare party members, disable scrolling, rendering refresh, and script execution, and clear the current map-script association. `[Must-match]`
-2. Read and validate the map header version 19. Remove old objects. Clamp negative global/local variable counts to zero, allocate the arrays, and read the map's binary global and local values. `[Must-match]`
-3. Read tile data, script instances, and objects. Object loading rebuilds local lighting contributions. For a fresh map, normalize critter combat data. `[Must-match]`
+1. Save/leave the old map, stop animations, suspend normal map background processing, prepare party members, disable scrolling, rendering refresh, and script execution, and clear the current map-script association. When a map is current, leaving it runs the old map's `map_exit_p_proc` requests and writes its `.SAV` first, then performs the same object removal as step 2. Exports are therefore still readable during `map_exit_p_proc`. `[Must-match]`
+2. Read and validate the map header version 19. Remove old objects. Object removal also:
+   - removes every script instance other than the player's own and cancels every script queue event;
+   - ends and frees **every** loaded script program, which empties the exported-procedure registry;
+   - clears the **whole** exported-variable registry (SPEC-005 §2.2).
+
+   No `destroy_p_proc` is requested for the removed objects. Clamp negative global/local variable counts to zero, allocate the arrays, and read the map's binary global and local values. `[Must-match]`
+3. Read tile data, script instances, and objects. Every script instance read here starts with no loaded program. Object loading rebuilds local lighting contributions. `[Must-match]` For a fresh map only (saved-state bit `0x01` clear), normalize the last-attacker word, and nothing else:
+   - **Scope.** Visit every object placed on the hex grid, on all three elevations, that has a critter PID. This includes the player and any party members carried over. Skip objects with PID -1. Do not visit inventory contents (no corpus map holds a critter in an inventory).
+   - **Rule.** If the critter's last-attacker word (SPEC-003 §2.11 record offset `0x70`) holds the -1 sentinel, set it to nothing. Any other value is left as it is.
+   - **Unchanged fields.** Damage last turn (`0x58`), intent bits (`0x5C`), current AP (`0x60`), damage flags (`0x64`), AI packet (`0x68`), team (`0x6C`), hit points, radiation and poison all keep their stored values. Intent bit `0x01` (alert) in particular is neither set nor cleared here.
+
+   All 1095 critters in the 72 corpus maps store -1 there, so a freshly loaded corpus map has no last attacker anywhere. No corpus critter has any intent bit set. `[Must-match]` A saved map (`.SAV`, bit `0x01` set) skips this step. Its critters keep a stored -1 as the restoration sentinel of SPEC-009 §3.4 until combat start clears every participant's last attacker (SPEC-007 §3.6). A stored nonnegative value is kept as a raw combat identifier and is not resolved to a critter, yet later code treats it as a critter reference. `[May-improve]` Safe rule: when loading a saved map outside savegame combat restoration, resolve a nonnegative stored value to the critter on that map with that combat identifier, or to nothing if no critter matches. Separately, every successful map load sets the **player's** last attacker to nothing after step 10, fresh or saved. When a savegame is restored, the player record read after the map sets it again (SPEC-008 §2.5). `[Must-match]`
 4. Set the entrance elevation and viewport center. Initially there is no current map script, so this elevation assignment does not take the ordinary elevation-change update path. `[Must-match]`
 5. Set ambient light to **65536**, then place the player at the centered tile, set the entrance facing, and identify the current map. This full ambient precedes the map's final desired scripted lighting. For a fresh map only, attempt the companion `.GAM` based on the header's map name and replace the map-global array with its initialization values. Successful saved-state restoration does not reinitialize those values from `.GAM`. `[Must-match]`
-6. Enable scripts. If the map declares a map script, create its hidden temporary owner and request `map_enter_p_proc`, with fixed parameter 1 for fresh entry or 0 for saved entry, while spatial checking is disabled. `[Must-match]`
+6. Enable scripts. If the map declares a map script, create its hidden temporary owner and request `map_enter_p_proc`, with fixed parameter 1 for fresh entry or 0 for saved entry, while spatial checking is disabled. Step 2 freed every program, so this is always the map script's **first request** and follows the first-request rule below. `[Must-match]`
 7. Recover party members, show the interface, finalize player placement/standing art, install player light radius 4 and intensity 65536, and resume map background processing. Player light is established **after** the initial map-script entry request. `[Must-match]`
 8. Request startup for all script instances in stored script-type/list order. Then broadcast `map_enter_p_proc` to present named entries on other scripts, excluding the map script already requested in step 6, again supplying the fresh/saved fixed parameter and suppressing spatial checks. `[Must-match]`
 9. Broadcast `map_update_p_proc`: request the map script first, then present named entries on other scripts in stored order, with spatial checks disabled around the broadcast. `[Must-match]`
 10. Enable tile refresh, apply any pending entry-facing override or redraw, enqueue midnight/periodic map timers, remove the loading callback, re-enable scrolling, and restore the normal cursor. `[Must-match]`
 
-The generic dispatcher resets the action's override flag on each request, sets its action category, and uses the owner as target only if no target was supplied. It clears the source reference after completion. `[Must-match]` On a script's first request, it loads and runs the compiled program's initial stream rather than atomically jumping into the requested named procedure. `[Must-match]` Later requests use cached procedure indices. A missing cached entry can fall back to procedure index 1; map broadcasts explicitly skip missing entries on non-map scripts. `[Must-match]` Host request order must not be confused with a guarantee that every requested name immediately executes a distinct procedure body.
+The generic dispatcher resets the action's override flag on each request, sets its action category, and uses the owner as target only if no target was supplied. It clears the source reference after completion. `[Must-match]`
+
+**First request.** A script instance's first request is any request made while the instance has no loaded program. That covers every instance read in step 3 or created later, and every party-member instance recovered in step 7. The dispatcher handles it as follows. `[Must-match]`
+
+1. It stores the requested action number, as for every request. `script_action` therefore returns the **requested** number throughout the first run: 15 for the step 6 map-entry request, 1 for a step 8 startup request, and 14 for a `damage_p_proc` request.
+2. It loads the `.INT` named by the instance's `scripts.lst` entry. If loading fails, the request fails and nothing runs, and the next request tries again.
+3. It caches the procedure index of every request name (SPEC-004 §3.7).
+4. It adds the program to the VM's run list, newest first, then runs **one VM time slice** (section 3.7, script task step 1) with the per-program budget raised from 10 to 5000 instructions. It restores 10 afterwards. The slice runs every program in the run list, not only the new one, then the VM's timed and conditional procedure checks for every program (SPEC-004 §3.3), then the library updates. Instructions executed while critical is set do not count against the budget.
+5. The new program starts at offset 0. It runs its initial stream (SPEC-004 §2.2): globals, then exports with their initial values, then a jump into the body of `start`. That body runs with `script_action` as in item 1, together with everything it calls. When `start` returns, the program is marked ended. Later host calls are not affected by that mark.
+6. The dispatcher does **not** separately call the requested procedure. The requested body runs on the first request only if `start` itself calls it, or if the request is the startup request itself. The request reports success.
+
+If the budget runs out first, or the program waits, yields, stops or blocks, the rest of the first run continues in later time slices at the normal budget of 10. `[Must-match]`
+
+Later requests use cached procedure indices. A missing cached entry can fall back to procedure index 1; map broadcasts explicitly skip missing entries on non-map scripts. `[Must-match]` Host request order must not be confused with a guarantee that every requested name immediately executes a distinct procedure body.
+
+**Consequence for map entry.** 905 of the 952 corpus `start` bodies read `script_action`. Map headers name 56 map scripts; `junkdemo.int` is absent from the corpus, and all 55 others test `script_action` for equality with 15 in `start`:
+
+- **17** have a `map_enter_p_proc`, and `start` calls it under that test.
+- **38** have no `map_enter_p_proc` and do their entry work inside `start`, or in a procedure it calls, under that test. Examples are `vault13.int`, whose `override_map_start` is in `start`, and the Shady Sands scripts.
+
+On every map load, fresh or saved, the map script's entry work therefore runs inside step 6. That includes the `map_enter_p_proc` body when there is one, within the first slice's budget, and before the player light of step 7. Step 8's broadcast excludes the map script, so the entry work runs exactly once. `[Must-match]`
+
+The map script's next two requests are ordinary later requests:
+
+- Step 8's startup request runs `start` again, with `script_action` 1.
+- Step 9's update request runs `map_update_p_proc` if present. Otherwise it falls back to procedure index 1 with `script_action` 23; index 1 is `start` in 54 of the 55 present map scripts and `lighting` in `usedcar.int`.
+
+Every other script's first request is normally its step 8 startup request, which runs its `start` body with `script_action` 1. Its `map_enter_p_proc` then runs through the step 8 broadcast as a later request. `surf.int` runs nothing on its first request (SPEC-004 §2.2). `[Must-match]`
 
 Later elevation changes request map updates when a current map script exists. Dialogue exit and several completed object-use paths also request updates. Map update is therefore not solely a once-per-minute timer. `[Must-match]`
 
@@ -706,3 +743,5 @@ Update notes (2026-10-22): section 3.11 now states the single session-start fidg
 Update notes (2026-10-22, second pass): section 3.7 now gives the background-pass model and the critter-script cycle step, checked against the reference background-task list, script task and dispatcher. The corpus counts come from a scan of the 952 compiled scripts and of the critter-category records of all 72 corpus maps. `tools/spec_lint.py` gives 0 errors.
 
 Update notes (2026-10-23): section 3.9 gains three blocks. "Speech requests" says when a lookup starts speech, and that `message_str`, replies and Ask About answers all start it the same way, so lip-sync is identical; it covers the stale-head case with a `[May-improve]` safe rule. "Review history" covers what replies and chosen options record, the reset at `gsay_start`, and the 80-entry limit. "Ask About lookup" covers tokenizing, keywords 1000-1099, the per-map block of the player script's file, the name answers 970-979, the fallback 980-999 and its single random draw. Section 4.4 gains a `message_str` speech vector. Net tags: +6 `[Must-match]`, +4 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-23, second pass): section 3.5 steps 1-2 say where the export registries are emptied. Step 3 gives the exact fresh-map normalization: only the -1 last-attacker sentinel becomes nothing, and no intent bit changes (no corpus critter has one set). Step 6 and the new "First request" block reconcile the first-request rule with SPEC-013 §3.10: the initial stream runs `start` with `script_action` returning the requested number, and the requested body is not called separately. A "Consequence for map entry" block lists how the 55 corpus map scripts run their entry work inside step 6. Net tags: +5 `[Must-match]`, +1 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.

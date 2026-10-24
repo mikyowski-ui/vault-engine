@@ -60,10 +60,33 @@ VM-error type checks and host-error checks can occur after some or all operands 
 | --- | --- | --- | --- | --- |
 | `0x8014` | `fetch_external` | identifier offset U | Stored tagged value | Resolve the identifier-table name; missing variable is a VM error. Exported text is copied into this program's dynamic-string storage, not shared as an offset. `[Must-match]` |
 | `0x8015` | `store_external` | identifier offset U, value U | none | Missing name is a VM error. Replace exported value/tag; string characters are copied to registry-owned storage. `[Must-match]` |
-| `0x8016` | `export_variable` | identifier offset U | none | Register/reset a case-insensitive exported variable to I zero; duplicate owned by another program filename, or full registry, is a VM error. Same owner filename can reset it. `[Must-match]` |
-| `0x8017` | `export_procedure` | procedure-table index U, argument count U | none | Obtain name and entry address from that procedure record; register its address and supplied argument count. Another program owning the name, or full registry, is a VM error. Neither operand tag is checked. `[Must-match]` |
+| `0x8016` | `export_variable` | identifier offset U | none | Register/reset a case-insensitive exported variable to I zero; duplicate owned by another program filename, or full registry, is a VM error. The owner filename is the path the program was loaded from (script directory plus its `scripts.lst` file name), compared case-insensitively, so every instance of the same `.INT` is the same owner. The same owner filename can reset it: the value becomes I zero and a held string is released. `[Must-match]` |
+| `0x8017` | `export_procedure` | procedure-table index U, argument count U | none | Obtain name and entry address from that procedure record; register its address and supplied argument count. Ownership is by **program instance**, not filename: the owning program may re-register its own name, but any other program owning the name, including another loaded instance of the same `.INT`, is a VM error, as is a full registry. Neither operand tag is checked. `[Must-match]` |
 
-Procedure and variable registries are separate, each with 1013 entries and stored names of at most 31 characters. Names are matched case-insensitively. `[Must-match]` Overly long names have truncation/collision hazards, not a defined long-name namespace. `[May-improve]`: truncate every name to 31 characters before storing or comparing it. Procedure exports are removed when the exporting program is removed. Variable ownership is by program filename and variables can survive program removal until registry cleanup. Import-call execution and its recovered argument-transfer defects remain covered by SPEC-004; export registration does not imply a repaired cross-program calling convention. `[Must-match]`
+Procedure and variable registries are separate, each with 1013 entries and stored names of at most 31 characters. Names are matched case-insensitively. `[Must-match]` Overly long names have truncation/collision hazards, not a defined long-name namespace. `[May-improve]`: truncate every name to 31 characters before storing or comparing it. Import-call execution and its recovered argument-transfer defects remain covered by SPEC-004; export registration does not imply a repaired cross-program calling convention. `[Must-match]`
+
+**Registry lifetime.** The two registries are emptied at different points. An entry is never removed one at a time except as listed. The table is `[Must-match]`.
+
+| Event | Procedure registry | Variable registry |
+| --- | --- | --- |
+| A program executes `0x800E` | That program's entries are removed at once; the program is freed on the next VM time slice | Unchanged |
+| A program executes `0x8009` | The old program's entries are removed after the replacement has started (see below) | Unchanged |
+| A program ends through `0x8010`, stops through `0x8011`, or ends with a VM error | Unchanged: the program stays loaded until the next full clear | Unchanged |
+| The program's object is destroyed or its script instance is removed during play | Unchanged: removing a script instance does not free its program | Unchanged |
+| Leaving or loading a map (SPEC-006 §3.5 steps 1 and 2) | Empty: every loaded script program is ended and freed, which removes every entry | **Whole table cleared**, all owners |
+| Full game reset: return to the main menu after a session, the start of every savegame restore, a failed savegame load (SPEC-014 §3.5, SPEC-008 §3.3) | Empty, as above | **Whole table cleared**, all owners |
+| New game: map initialization resets to an empty map before the start map loads | Empty, as above | **Whole table cleared**, all owners |
+
+The variable registry has no per-program cleanup. An exported variable's entry and value survive the removal of the program that exported it, but only until the next full clear. Values are never written to `SAVE.DAT` or to a `.SAV` map. Every map load therefore starts with an empty variable registry, and each exported name is re-created, with value I zero, by the first program that exports it on the new map. `[Must-match]`
+
+Re-export works as follows:
+
+- **After a map change** there is no conflict. 54 map scripts export the same names `Ian_ptr`, `Dog_ptr` and `Tycho_ptr` (`Katja_ptr` 53, `Tandi_ptr` 52). The next map's script finds the name absent, because the first map's entry was cleared in step 2 at the latest, and it becomes the new owner. Returning to the first map again creates a fresh entry. `[Must-match]`
+- **On the same map**, a second export of a name by a different owner filename is a VM error. It ends the exporting program with the error state (SPEC-004 §3.8), so that script runs no further requests on this map. A second export by the same filename resets the value to I zero. `[Must-match]`
+- **Corpus.** 57 corpus scripts export 196 distinct variable names, 528 exports in all, every one inside the program's initial stream (SPEC-004 §2.2). Fifty names are exported by more than one file. On every shipped map, with the map script and all object and spatial scripts counted, no name is exported by two different files, and no exporting file has two instances. No corpus initial stream or procedure body contains `0x8017`, `0x8008` through `0x800B`, `0x800E`, `0x8010` or `0x8011`; the only `0x8010` is the bootstrap's own at offset 18.
+- **Imports.** An import is resolved when `0x8014` or `0x8015` executes, not when the program loads. On a new map, a script that reads a name before its exporter's first request has run gets the missing-variable VM error. The map script's first request (SPEC-006 §3.5 step 6) runs before the startup requests of every other script (step 8). `[Must-match]`
+
+For `0x8009`, the replacement program is loaded and immediately runs one slice of its own initial stream. That slice has a 24-instruction budget, and instructions executed while critical is set do not count. Only then is the old program ended and its procedure entries removed. A replacement that exports a procedure name the old program still owns therefore raises a VM error. `[May-improve]` Safe rule: remove the old program's procedure entries before the replacement's first instruction. A replacement from a different file that exports a variable name owned by the old file is a VM error under either order, because variable entries outlive their program. `[Must-match]`
 
 ### 2.3 Complete General-Library Reference: `0x804C`-`0x80A0`
 
@@ -176,7 +199,7 @@ The current script instance supplies owner/self, source, target, action, fixed p
 | `0x80C4` | `set_map_var` | value, element index | none | Set MVAR; out-of-bounds host failure is ignored, not returned. `[Must-match]` |
 | `0x80C5` | `global_var` | element index | I value | Read campaign GVAR. Entire array absent gives -1; existing array with out-of-range index gives zero. `[Must-match]` |
 | `0x80C6` | `set_global_var` | value, element index | none | Set campaign GVAR; absent array or out-of-range index only diagnoses/fails without a pushed status. `[Must-match]` |
-| `0x80C7` | `script_action` | none | I action | Current script event/action code; missing context gives zero. `[Must-match]` |
+| `0x80C7` | `script_action` | none | I action | Current script event/action code: the event number of the last request made to this instance, from the complete table in SPEC-004 §3.7 (12 critter cycle, 13 combat, 18 destroy, and so on); 0 before any request. Missing context gives zero. `[Must-match]` |
 | `0x80EC` | `elevation` | object | I elevation | Object's elevation; null gives zero with diagnostic. `[Must-match]` |
 | `0x80F7` | `fixed_param` | none | I value | Current invocation's fixed parameter; missing context gives zero. `[Must-match]` |
 | `0x80FA` | `action_being_used` | none | I action | Current use-action selector; missing context gives -1. `[Must-match]` |
@@ -370,7 +393,7 @@ Map/world/combat requests are often deferred state requests, not synchronous cha
 | `0x80A5` | `sfx_build_open_name` | action, object | D name | Build scenery-door or item-container sound name from prototype sound byte. Null diagnoses and pushes D offset zero, not I null. `[Must-match]` |
 | `0x80B8` | `display_msg` | text S | none | Append game message-log text; optionally also log script messages to debug output. `[Must-match]` Text is passed as a debug format when debug display is enabled. `[May-improve]`: emit the debug text literally. |
 | `0x8105` | `message_str` | message number, message-list number | D text | Positive message number fetches catalog text via speech-aware lookup; missing/nonpositive message returns D `Error`. Can have speech-host effects. `[Must-match]` |
-| `0x810A` | `float_msg` | style, text U, object | none | Only S text is resolved; other text tags are not rejected but become null and produce no message. Require object on current elevation and nonempty text; create floating text with style/font/color rules in 3.5. `[Must-match]` |
+| `0x810A` | `float_msg` | style, text U, object | none | Only S text is resolved; other text tags are not rejected but become null and produce no message. Require object on current elevation and nonempty text; create floating text with style/font/color rules in 3.5, always with a one-pixel outline in key 0 [228]. Layout, placement, lifetime, the 19-text limit, replacement of the owner's earlier text and removal are in SPEC-014 §3.46. A refused creation is silent. `[Must-match]` |
 | `0x8115` | `play_gmovie` | movie number | none | Suspend dialogue background updates, play indexed game movie with per-movie fade/music options, restore updates. `[Must-match]` Index is not checked before indexing its options table. `[May-improve]`: ignore numbers outside 0-13 with a diagnostic. |
 | `0x8133` | `game_ui_disable` | none | none | Disable game UI/input/cursor controls. `[Must-match]` |
 | `0x8134` | `game_ui_enable` | none | none | Reenable game UI/input/cursor controls. `[Must-match]` |
@@ -680,3 +703,5 @@ Both stacks finish empty, and no statement has pushed an implicit status. Host-b
 Update notes (2026-10-22): the `world_map` and `town_map` rows now say what each request opens (SPEC-014 §3.39), checked against the reference request dispatcher. `tools/spec_lint.py` gives 0 errors.
 
 Update notes (2026-10-23): the `message_str` paragraph now says that, during a talking-head dialogue, the opcode starts that message's speech and lip-sync at once, as a displayed reply does (SPEC-006 §3.9). No tag change. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-23): section 2.2 gains the registry-lifetime table. The whole exported-variable registry is cleared on every map load and game reset, never per program; procedure entries belong to a program instance and go with it. It also gives re-export across maps and on one map, the corpus export survey, import resolution timing, and the `0x8009` ordering (`[May-improve]`). The `0x80C7` row points to the SPEC-004 §3.7 table, and the `0x810A` row to SPEC-014 §3.46. Net tags: +6 `[Must-match]`, +1 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.

@@ -117,6 +117,11 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
   - Section 2.3 gains the `music` key.
   - New section 3.45 Dialogue Review and Ask About Windows.
   - New Fixtures R, S and T.
+- **R1-rev11 (2026-10-23).** Engine code-review V2 questions.
+  - Section 3.21: clicks released during a counter roll or a combat-panel animation are lost; keys wait in the keyboard buffer and follow the section 3.27 flush rules. Section 3.25 states the same for the panel.
+  - Section 3.27: the movement-click order (cancel, walk or run and sneak, registration, route) and the no-route stop. The player stops silently and the old path is not resumed.
+  - New section 3.46 Floating Text and Fixture U.
+  - Section 3.41.1 points to the SPEC-012 §3.12 water countdown.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -810,7 +815,7 @@ HP band: red when HP is below `trunc(max HP * 0.25)`, yellow when below `trunc(m
 
 **Animated roll.** The counter moves one unit at a time, like a mechanical drum, from the previously shown value P to the new value V (V clamped first). `[Must-match]`
 
-- **Step delay.** `t = trunc(250 / (|P - V| + 1))` milliseconds, computed once from the whole change. Each "wait" below is t milliseconds. During a wait the pointer and in-world cursor keep updating, but the caller is blocked: game input is not processed until the roll ends.
+- **Step delay.** `t = trunc(250 / (|P - V| + 1))` milliseconds, computed once from the whole change. Each "wait" below is t milliseconds. The game is blocked until the roll ends. Clicks made during the roll are lost and keys are deferred ("Input during rolls and panel animations", below).
 - **Direction.** Each unit changes P by +1 or -1 toward V. The digit cells hold the magnitude. Each unit adds +1 to the ones digit when the magnitude grows, or -1 when it shrinks, with decimal carry and borrow. While all three magnitude digits are 0 the step is always +1, so a roll through zero continues outward on the other side of 0. The hundreds digit wraps from 10 to 0 and from -1 to 9.
 - **One unit**, with each glyph drawn over the cell before its wait:
   1. Show the "roll up" glyph in the ones cell, then wait.
@@ -833,6 +838,22 @@ HP band: red when HP is below `trunc(max HP * 0.25)`, yellow when below `trunc(m
 | AC | Start of the player's combat turn; end of the player's turn; end of combat; changing worn armor in the inventory | Interface initialization and refresh |
 
 The remembered previous value starts at 0 for both counters and is updated after every draw, animated or not. The first draw after start is unanimated. `[Must-match]` An animated first frame draws the previous value's digits without taking the absolute value, so a negative previous value reads outside the band. `[May-improve]`: always draw digits of the absolute value with a separate sign.
+
+**Input during rolls and panel animations.** `[Must-match]` An animated HP or AC roll and the animated open or close of the combat panel (section 3.25) block the game until they end. Neither the input queue nor the bar buttons are read during them, so no click, key or button acts. Mouse buttons and keys are then treated differently.
+
+- **Mouse buttons are sampled, not queued.** The game reads the mouse as a current position and a current button state. It keeps no record of earlier presses and releases.
+  - During a roll the state is read once before each wait. The exception is the wait after the tens-cell "roll down" glyph, where nothing is read and the pointer does not move.
+  - During a panel animation the state is read continuously while the animated watch is the cursor. In R1 the watch is showing in every path that animates the panel.
+  - Each reading replaces the previous pressed, held and released flags, and nothing acts on them.
+- **Lost clicks.** A click whose release is read during a roll or panel animation is lost. No map action, bar button or action-menu hold results. A press and release that both fall between two readings are never seen at all. Nothing is queued for later.
+- **Held buttons.** A button still held when the animation ends counts as held from the reading that first saw it down. Its release is read after the animation as an ordinary release (section 3.27). It acts at the release position if the game mouse is enabled at that moment. After the turn-start AC roll the lock lifts as soon as the player's turn begins, so such a release acts. During the lock between player turns it is discarded (section 3.27).
+- **Pointer and cursor.** The pointer keeps moving, and the animated watch keeps animating. Out of combat the in-world cursor and its hover keep updating. Edge scrolling works during a roll whenever it is enabled, because the combat lock leaves it on (section 3.27). It is off during both panel animations.
+- **Keys are deferred.** Key presses and releases stay in the 32-event keyboard buffer of section 3.27. They are read, in order, the next time the game reads input. Whether they then act follows the flush rules of section 3.27:
+  - The AC roll at the start of the player's turn comes after that turn's flush. Keys typed during it are read once the turn begins.
+  - The AC roll at the end of the player's turn and the combat-start panel animation fall inside the lock between player turns. Keys typed then are flushed at the start of the next player turn, unless combat ends first.
+  - Keys typed during the combat-end panel animation, or during the AC roll that follows it, are read after combat ends.
+  - Keys typed during an HP roll out of combat, such as healing in the inventory, are read when the roll ends.
+- A roll whose value does not change has no waits and blocks nothing.
 
 ### 3.22 AP Pips
 
@@ -929,6 +950,8 @@ The indicator boxes occupy a separate window at screen (0, 358), height 21, whic
 - **Close** (normal combat end, with map scrolling briefly disabled): delete the buttons; play `icibcxx1`; show frames 4 through 0 at 200 milliseconds. The non-animated close draws frame 0, and loading closes without animation.
 - **Lights.** The start of the player's turn enables the buttons, draws `endltgrn.frm` (57 by 58) transparently over the panel and plays `icombat2`. The end of the player's turn, or a just-opened panel, disables them, draws `endltred.frm` and plays `icombat1`.
 
+- **Input.** The animated open and close take 800 milliseconds: the first frame is shown at once and the other four follow 200 milliseconds apart. Clicks released during them are lost and keys are deferred, as section 3.21 states ("Input during rolls and panel animations"). `[Must-match]`
+
 ### 3.26 Cursor Shapes
 
 Hotspots follow SPEC-001 §3.5: `(trunc(w / 2) - direction X shift, h - 1 - direction Y shift)`. The values below are computed from the corpus art. `[Must-match]`
@@ -997,7 +1020,20 @@ In movement mode the hex snaps to the hovered hex; a second object for the AP te
 
 **Clicks** (left release in the map area, y at most 379). Every left-button map action fires on **release**, at the release position; the press itself does nothing. A release before the 250-millisecond hold pulse is an ordinary click. A right click acts on press. `[Must-match]`
 
-- **Movement.** Walk, or run when the `running` preference is on; Shift inverts the preference. In combat the route is limited to AP plus free movement. With Ctrl held in combat, the current attack's AP cost is subtracted from that budget first, and nothing moves if the result is 0 or less. Out of combat, when `fallout.cfg` [system] `interrupt_walk` is on (default 1), a new walk first cancels the player's current sequence, whatever it is doing ("Clicks while the player is busy", below).
+- **Movement.** `[Must-match]` A movement click is handled in this order:
+  1. **Target hex.** The hex under the pointer is found. When the pointer is outside the hex grid, nothing happens and nothing is cancelled.
+  2. **Budget or cancel.**
+     - In combat the step budget is current AP plus remaining free movement. With Ctrl held, the current attack's AP cost (section 3.23) is subtracted first. When the result is 0 or less, nothing happens.
+     - Out of combat there is no budget. When `fallout.cfg` [system] `interrupt_walk` is on (default 1, read at every click), the player's current sequence is cancelled at this point, whatever it is doing ("Clicks while the player is busy", below). The cancel comes before the new walk is registered and before any route is searched. It does not depend on whether the new walk can be made.
+  3. **Walk or run.** The click walks, or runs when the `running` preference is on. Shift inverts the preference. A run request clears sneaking unless the player has Silent Running. This happens before the walk is registered, so it happens even when the walk then fails or finds no route. A run request walks instead in the cases of SPEC-007 §3.11.1.
+  4. **Registration.** A sequence holding one walk or run entry to the target hex is registered. It fails and nothing more happens in two cases: the player still has a running sequence (the cancel was not made, or a prioritized sequence refused it, SPEC-007 §3.10.1), or the in-combat budget is 0. When the target is the player's own hex, the sequence holds no entry and ends at once.
+  5. **Route.** The entry starts at once and only then searches its route from the player's hex (SPEC-007 §3.1, goal not strict). Neither the click nor the registration tests the route beforehand.
+- **No route.** `[Must-match]` When the route search returns no route, the entry fails as it starts. The sequence ends (SPEC-007 §3.10.1) and the player is set to the standing pose. Nothing is printed, no sound plays and no AP are spent. The hover's red `X` (above) predicts this case, but it does not prevent the click.
+  - **Out of combat**, the cancel in step 2 has already ended the old walk. A no-route click therefore stops the player where the cancel left it: standing on the hex the player occupies, which can lag the drawn sprite by up to one hex (SPEC-007 §3.11.1). The old path is not resumed.
+  - Clicking the player's own hex stops a walking player the same way.
+  - Other ways to get no route: a target beyond a closed door, since the player never opens doors on a route (SPEC-007 §3.1); a target the search cannot reach within its capacity; an enclosed target; and an occupied target one step away, whose route loses its last step and is left empty.
+  - This stop is reference behavior, not a defect. It is the only way to stop a walk without starting another.
+- **In combat** the player is never busy when a click is accepted, so nothing is cancelled. The registration takes the combat input lock (section 3.27) for as long as the sequence runs. A no-route or own-hex click takes the lock and releases it within the same click, so no watch cursor is seen and the hover is recomputed on the next idle poll. The route is not cut to the budget in advance: the walk ends when AP plus free movement reach 0 as AP are charged per hex (SPEC-007 §3.11.1). A click on a hex whose hover shows the red `X` for lack of AP therefore still walks as far as the AP allow.
 - **Arrow.** Perform the primary action:
   - item: pick up;
   - player: rotate, only when standing;
@@ -1022,7 +1058,7 @@ In movement mode the hex snaps to the hovered hex; a second object for the AP te
     - The end of combat re-enables the keyboard without a flush. Keys typed during the last turns of a combat are read after it ends.
     - `[May-improve]`: which key events survive when more than 32 are typed during one lock depends on the reference's input library. Safe rule: keep the first 32.
 - **Movement click, out of combat.**
-  - With `interrupt_walk` on, the click cancels the player's current sequence and the new walk starts. A reach or container use in progress is abandoned. Its unstarted entries are dropped: the use itself, the weapon take-out and the loot request.
+  - With `interrupt_walk` on, the click cancels the player's current sequence before the new walk is registered or its route searched ("Movement", above). The new walk then starts. When it has no route, the player is left standing instead. A reach or container use in progress is abandoned. Its unstarted entries are dropped: the use itself, the weapon take-out and the loot request.
   - A sequence the player is not part of keeps playing. An example is a door's opening animation that the use already started.
   - With `interrupt_walk` off, the new walk cannot register while the player is busy, so the click does nothing.
 - **Arrow click or action-menu entry** (pick up, use, loot, talk, skill use).
@@ -2112,7 +2148,7 @@ Every other key does nothing. That includes the arrow keys, Home, End, the digit
 | Year | (83, 17), 4 digits | `2161` |
 | Time | (155, 17), 4 digits, 24-hour clock, no separator | `0721` |
 
-**Vault-water note.** The note shows unless campaign global 101 (the water chip) equals 2 or campaign global 10 (the vault-water days) equals 0. Otherwise the 148-by-227 rectangle at (32, 83) is restored from `pip.frm`. A shown note is `pip2.frm` copied opaquely at (32, 83), with the days left in `notenums.frm` digits drawn transparently over it. The digits are drawn from the ones digit up: the ones digit at (92, 180), and each next digit 12 pixels further left and 2 pixels lower. After a digit 1, the next digit moves only 6 pixels left. The note is redrawn at opening and after every rest step. `[Must-match]` A negative day count shows the note and draws cells from outside the digit art. `[May-improve]`: hide the note when the day count is not positive.
+**Vault-water note.** The note shows unless campaign global 101 (the water chip) equals 2 or campaign global 10 (the vault-water days, counted down at each midnight as in SPEC-012 §3.12) equals 0. Otherwise the 148-by-227 rectangle at (32, 83) is restored from `pip.frm`. A shown note is `pip2.frm` copied opaquely at (32, 83), with the days left in `notenums.frm` digits drawn transparently over it. The digits are drawn from the ones digit up: the ones digit at (92, 180), and each next digit 12 pixels further left and 2 pixels lower. After a digit 1, the next digit moves only 6 pixels left. The note is redrawn at opening and after every rest step. `[Must-match]` A negative day count shows the note and draws cells from outside the digit art. `[May-improve]`: hide the note when the day count is not positive.
 
 #### 3.41.2 The Screen Area and Row Zones
 
@@ -3081,6 +3117,92 @@ The code is stored as one byte. Extended keys therefore enter characters: Up arr
 
 **Closing Ask About.** The window is removed and the previous font restored. The saved reply text is put back, the reply and option windows are shown again, and the reply is redrawn from the current reply page offset. Ask About replies are not added to the review history. An Ask About reply that pages, or a reply drawn while the original stood on a later page, uses the shared reply page offset: a long Ask About reply leaves that offset pointing into its own text. The restored reply then starts at a wrong position, and an Ask About reply shown while the original was on page 2 or later starts from that offset in the new text, possibly past its end. `[May-improve]`: draw each Ask About reply from its start and restore the original page offset on closing.
 
+### 3.46 Floating Text
+
+Floating text is short text drawn in the world over a map object. In R1 it has two users: the `float_msg` opcode (`0x810A`, SPEC-005 §3.5) and combat taunts (SPEC-009 §3.17). Look-at descriptions, combat messages and other notices go to the message monitor (section 3.20), not to floating text. `[Must-match]` unless tagged.
+
+**Creation.** Each text has an owner object, a string, a font, a text color and an outline color (or no outline). Every R1 text has an owner.
+
+| User | Font | Text color | Outline |
+| --- | --- | --- | --- |
+| `float_msg` style -2 | 103 | key 31744 [133] | key 0 [228] |
+| `float_msg`, every other style | 101 | Per style, below | key 0 [228] |
+| Combat taunt | The packet's `font`; 101 in every corpus packet | The packet's `color`, a raw index with the drawing flags of SPEC-002 §3.1; raw index 58 in every corpus packet | The packet's `outline_color` as a raw index, or none for -1; raw index 55 in every corpus packet |
+
+`float_msg` style colors (SPEC-005 §3.5), with the palette index the corpus palette returns:
+
+| Style | Color |
+| --- | --- |
+| 0, 8, and any unrecognized style | key 32747 [57] |
+| 1, 5, 10 | key 10570 [11] |
+| 2 | key 31744 [133] |
+| 3 | key 992 [215] |
+| 4 | key 31 [106] |
+| 6 | key 21140 [6] |
+| 7 | key 32074 [131] |
+| 9 | key 32767 [220] |
+| 11 | key 8456 [208] |
+| 12 | key 15855 [9] |
+
+- Style -1 takes the next style of the shared cycle 2, 3, ... 12, 1, 2, ..., starting at 2 (SPEC-005 §3.5). The cycle position is kept for the whole program run. A new game, a load or a map change does not reset it.
+- Style -2 recenters the view on the player before the text is placed.
+- `float_msg` requires its object to be on the current elevation (SPEC-005). A taunt has no elevation test.
+
+A creation is refused, and nothing appears, in three cases. An earlier text of the same owner then stays.
+
+- The string is empty.
+- 19 texts already exist. The table has 20 slots, but a creation is refused once 19 are in use. Texts waiting for removal still count.
+- The wrap below fails, because the text needs more than 63 lines.
+
+**Layout.**
+
+1. **Wrap.** The string is wrapped with the shared word wrapper of section 3.41.3 at width 200, in the text's font. A string narrower than 200 pixels is one line. A line feed or other control byte is not a forced break: it is a break point like a space, and it is drawn as a glyph.
+2. **Trailing characters.** A line that ends at a break after a space loses that space. A line that ends after a hyphen keeps the hyphen. The last line of a text of two or more lines keeps a trailing space, but a one-line text loses it.
+3. **Box.** The box width W is the widest line's width (SPEC-002 §3.1, final letter spacing included). The box height H is the line count times (font line height + 1): 11 per line for font 101 and 21 for font 103. With an outline, 2 is added to both W and H.
+4. **Lines.** The box starts as index 0, which is transparent. Line k, counted from 0, is drawn with its left edge at x = `trunc((W - w) / 2)`, where w is the line's width, and its top at y = `k × (line height + 1)`, plus 1 with an outline. Glyphs are drawn as in SPEC-002 §3.2 over index 0. Partial coverage levels therefore blend toward palette index 0, and a pixel whose result is index 0 stays transparent.
+5. **Outline.** With outline index c, two passes paint the outline into the box:
+   - **Row pass.** Rows 1 to H - 2 are scanned left to right, each starting "outside". At a nonzero pixel while outside, the pixel to its left is painted c and the scan goes inside. At a zero pixel while inside, that pixel is painted c and the scan goes outside.
+   - **Column pass.** Every column is scanned, rows 0 to H - 1, top to bottom, each starting outside. At a nonzero pixel while outside, the pixel above it is painted c. At a zero pixel while inside, that pixel is painted c. The scan switches as in the row pass.
+   - Pixels painted by the row pass count as nonzero in the column pass, so the outline also covers the diagonal corners. Column 0 and row 0 are always blank before the passes, so no paint falls outside the box.
+   - Outline index 0 paints transparent pixels. There is then no visible outline, but the box keeps its extra 2 pixels.
+
+**Placement.** The position is chosen once, at creation. Let (hx, hy) be the window position of the owner's hex: the top-left of its 32-by-16 cell, as in section 3.27, in the 640-by-380 map window. The candidate top-left corners below are tried in order. The first one whose whole box lies inside the window is used, that is x ≥ 0, x + W ≤ 640, y ≥ 0 and y + H ≤ 380.
+
+1. (hx + 16 - `trunc(W / 2)`, hy - H - 60)
+2. Candidate 1 moved left by `trunc(W / 2)`
+3. Candidate 2 moved right by W
+4. (hx - 16 - W, hy - 16 - H)
+5. (hx + 48, hy - 16 - H)
+6. (hx + 16 - `trunc(W / 2)`, hy)
+7. Candidate 6 moved left by `trunc(W / 2)`
+8. Candidate 7 moved right by W
+
+If no candidate fits, candidate 1 is used anyway and the box is clipped. The 60-pixel rise is fixed: the owner's art height plays no part.
+
+The chosen offset from the hex is kept. Each draw places the box at the hex's current window position plus that offset, so the text scrolls with the map, and later scrolling can move it partly or wholly out of the window. The text is anchored to the hex the owner stood on at creation, not to the owner. When the owner walks away, the text stays behind. `[Must-match]`
+
+**Drawing.** Floating text is the frame layer after the outlines and before the objects that have no hex (section 3.44). Every text is drawn in creation order, transparently (index 0 is skipped), and clipped to the refreshed rectangle. It is not hidden by roofs, and it does not depend on whether its owner is visible. A creation refreshes the new box's rectangle. A removal refreshes the union of the removed boxes, at their current positions. `[Must-match]`
+
+**Lifetime.** `[Must-match]`
+
+- **Removal time.** A text is removed at the first background update in which strictly more than `base + lines × line` milliseconds have passed since its creation. Background updates run on every input poll while background processing is on.
+- **Base and line delays.** base = `trunc(text_base_delay × 1000)`. line = `trunc(min(max((text_base_delay - 1) × 0.4, 0), 2) × 1000)`. With the default 3.5, a text lasts 3500 milliseconds plus 1000 per line. The range is 1000 milliseconds flat at a delay of 1.0, up to 6000 plus 2000 per line at 6.0.
+- **The line-delay key.** `fallout.cfg` [preferences] `text_line_delay` is read at start-up. Before any text can appear, the preference application of section 3.18 replaces it with the value derived from `text_base_delay`, and the derived value is what is written back. The 1.399994 default therefore never times a text.
+- **Creation time.** The creation time is the time of the latest background update, not the exact moment of creation.
+- **Real time.** The clock is real time. Removal is not checked while map background processing is off, such as during the action menu (section 3.28), the Pip-Boy, inventory, Skilldex, options, automap, character screen, elevator panel, world map, dialogue and map loading, or while the game is paused. The clock keeps running meanwhile. A text whose time passed is removed at the first update afterwards: its lifetime is not extended.
+- **Not during rolls.** No background update runs during a counter roll (section 3.21).
+
+**Replacement and removal.** `[Must-match]` unless tagged.
+
+- A new text marks every existing text of the same owner for removal. Marked texts go at the next background update, so the new text replaces the old. Until then a marked text still counts toward the limit and is still drawn.
+- Starting a dialogue removes every text at once.
+- Every game reset removes every text: a new game, loading a save, and returning to the main menu.
+- Nothing else removes a text. A text survives its owner's death, destruction or hiding, the start and end of combat, map changes and elevation changes.
+- A text still alive when a new map loads or the elevation changes is drawn on the new map or elevation, at the same hex number and offset, until it expires. `[May-improve]`. Safe rule: remove every floating text when a map is loaded and when the elevation changes.
+- After its owner is destroyed, R1 still matches the text against new owners for replacement, so a later object may be taken for the destroyed one. `[May-improve]`. Safe rule: a destroyed owner's text keeps its lifetime but matches no new owner.
+
+**Gating.** No preference hides floating text. `float_msg` is not gated by `combat_messages` or `combat_taunts`, and it works in and out of combat. Taunts are gated by `combat_taunts`. A taunt is also skipped while any floating text exists anywhere, including texts waiting for removal and stale texts from another map or elevation (SPEC-009 §3.17). `[Must-match]`
+
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
 These vectors are invented and computed from the rules above; none is a shipped asset.
@@ -3502,6 +3624,29 @@ With all ten lights equal to 40000, the tile uses the lit draw at column `trunc(
 
 Per-hex order. A hex holds upright objects A then B, on the same elevation. B steps one animation frame whose shift is (0, 0): the order becomes A, B, unchanged because B was already last. A then steps one frame, giving B, A. A script then moves B to the hex it is already on, giving A, B, with B's pixel offset reset to (0, 0).
 
+### 4.21 Fixture U: Floating Text
+
+Font 101 widths are from the corpus `font1.aaf`: "Hello stranger. Welcome to" 160, "Shady Sands." 80, "Die, scum!" 58. Default preferences apply. Window positions are those of section 3.46.
+
+| Input | Expected |
+| --- | --- |
+| `float_msg` style 0 "Hello stranger. Welcome to Shady Sands." (width 245); owner's hex at window (304, 200) | Two lines, "Hello stranger. Welcome to" and "Shady Sands."; box 162 by 24; line 0 at box (1, 1), line 1 at (41, 12); text key 32747 [57], outline key 0 [228]; candidate 1 fits: box at (239, 116), offset (-65, -84) |
+| Same text; owner's hex at window (600, 50) | Candidates 1-3 fail (y = -34, then x + W = 778); candidate 4 fits: box at (422, 10), offset (-178, -40) |
+| Same text, 5 seconds later | Still shown (lifetime 3500 + 2 × 1000 = 5500 ms); removed at the first background update after 5500 ms |
+| The owner walks 3 hexes east after the text is created | The text stays over the creation hex |
+| Combat taunt "Die, scum!" with packet font 101, color 58, outline 55 | Box 60 by 13; line at (1, 1); text raw index 58, outline raw index 55; lifetime 4500 ms |
+| Taunt packet with `outline_color=-1` | Box 58 by 11; no outline |
+| Box 5 by 3 whose only glyph pixel is (2, 1), outline c | Row pass paints (1, 1) and (3, 1); column pass paints (1, 0), (1, 2), (2, 0), (2, 2), (3, 0), (3, 2): a 3-by-3 ring around the glyph pixel |
+| `float_msg` style -1 three times, first use in the session | Styles 2, 3, 4: key 31744 [133], key 992 [215], key 31 [106] |
+| `float_msg` style 13 | Font 101, key 32747 [57] |
+| `float_msg` style -2 "Warning" | Font 103, key 31744 [133]; the view recenters on the player first; box height 21 + 2 = 23 |
+| `text_base_delay` 1.0, a 3-line text | 1000 ms (line delay 0) |
+| `text_base_delay` 6.0, a 1-line text | 6000 + 2000 = 8000 ms |
+| Owner A has a text; A floats a new one | The old text is removed at the next background update; the new one shows |
+| 19 texts exist; any new `float_msg` | Nothing appears; an earlier text of the same owner stays |
+| Any text exists; an NPC taunt fires | No taunt |
+| A text is alive when the player takes an exit grid to another map | Drawn on the new map at the same hex number until it expires. Safe rule: removed on map load |
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -3513,3 +3658,5 @@ Per-hex order. A hex holds upright objects A then B, on the same elevation. B st
 Verification notes: `tools/spec_lint.py` gives 0 errors, and no source path or raw revision hash appears. Twelve public `fallout.cfg` key literals that coincide with reference identifiers were added to the linter allowlist (CLAUDE.md rule 2): `game_difficulty`, `violence_level`, `target_highlight`, `combat_messages`, `item_highlight`, `combat_speed`, `player_speedup`, `mouse_sensitivity`, `master_volume`, `music_volume`, `sndfx_volume` and `speech_volume`. The 33 plain-word warnings were reviewed and are benign: the configuration keys "splash", "brightness", "running" and "subtitles", and the configuration section name "system"; the sound name "monitor"; and formula words ("line", "time", "length", "width", "text", "current", "count", "trunc", and "column" in the section 3.36 roof-square formula). Campaign variables are cited by index only. The only fenced blocks are a synthetic hex dump and a credits text sample. The sound name "toggle" is also flagged. The section 3.29 border values were recomputed with an independent model of the hex-to-screen transform and checked against the entry hexes of all 72 corpus maps. Section 3.34 art sizes were read from the corpus FRM headers. Section 3.35 file and frame facts were checked against the corpus (`rscorpbl.frm` has 9 frames; item PID 213 is Remains of Gizmo). The section 3.27 busy-click rules were checked against SPEC-007 §3.10.1 ("One sequence per owner"). The section 3.36 empty-roof test and bits match SPEC-003 §2.8, and the roof words of all 72 corpus maps were scanned: 15056 roofed squares, none with roof index 0 or the barrier bit; `LAGUNRUN.MAP` stores 257 squares with the hide bit set, which loading clears. Fixture G was stepped by hand through the section 3.36 rule. Sections 3.38-3.43 (R1-rev8): every art name, list index and size was read from `intrface.lst` and the corpus FRM headers; `targbox.frm`, `wrldmp00.frm`-`wrldmp19.frm` and `pipboy.frm` do not exist in the corpus, and the real files are `called.frm` (118), `worldmap.frm` (135) and `pip.frm` (127). All 21 corpus `na` pictures are 170 by 225 with one frame. Every quoted `combat.msg`, `worldmap.msg`, `map.msg`, `pipboy.msg`, `editor.msg`, `proto.msg` and `dbox.msg` text was checked against the English corpus, and the fixture label widths were computed from `font1.aaf`. The town-map entrance table was checked against the map headers of every hotspot map, and the town pictures were composited with their markers. Fixtures H-P were stepped by hand or by a research-side model. The printed sheet of section 3.43 is documented literally: R1 reads `editor.msg` 650-655 with meanings that do not match the shipped file, so every resulting defect carries a `[May-improve]` safe rule. The section 3.27 combat-lock and section 3.23 hand-swap rules were checked against the sequence registration and keyboard paths. Section 3.44 (R1-rev9) was checked against the reference object renderer, list insertion and translucent blitters, and its foreground indexes and Fixture Q values were modelled over the corpus `color.pal`. The R1 tie-break inside a hex is incomplete in the reference and never decides, so the section states the insertion-order result. Tag count, excluding the two tag definitions: 228 `[Must-match]`, 102 `[May-improve]`.
 
 Update notes (2026-10-23, R1-rev10): every new art name, list index and size in sections 3.45 and 3.44 was read from `intrface.lst` and the corpus FRM headers. The guessed `di_rview.frm` does not exist; the Review background is `review.frm` (102). Quoted `misc.msg`, `dbox.msg`, `proto.msg` and `editor.msg` texts were checked against the English corpus, and fixture widths were computed from `font1.aaf` and `font3.aaf`. The Ask About fixture keywords were read from the corpus dialog files. The screenshot header bytes and the grey table were modelled over the corpus `color.pal`. Net tags for R1-rev10: +17 `[Must-match]`, +12 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-23, R1-rev11): the input rules of sections 3.21, 3.25 and 3.27 were traced through the reference roll, panel, mouse and keyboard paths. The floating-text colors in section 3.46 were checked against the corpus `color.pal`, the taunt fonts and colors against all 95 `data/ai.txt` packets, and the fixture widths against `font1.aaf`. The placement window is the 640-by-380 map window. Net tags: +10 `[Must-match]`, +2 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.

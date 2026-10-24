@@ -77,7 +77,17 @@ The normal compiler layout below is present in all 952 observed scripts; the ini
 | `0x26` | `80 25` | Preserve a return value across context restoration and yield |
 | `0x28` | `80 26` | Preserve a value in the current program across external-context restoration and yield |
 
-The procedure count immediately follows the final two-byte instruction, at `0x2A`. The bootstrap first jumps **over the metadata tables**. Later global-initialization instructions establish globals, push initial values and a root argument count, leave critical execution, and jump into the root body. This later initialization is executable bytecode of variable size, not another fixed-layout header. `[Must-match]`
+The procedure count immediately follows the final two-byte instruction, at `0x2A`. The bootstrap first jumps **over the metadata tables** to the **initial stream**. Later global-initialization instructions establish globals, push initial values and a root argument count, leave critical execution, and jump into the root body. This later initialization is executable bytecode of variable size, not another fixed-layout header. An engine executes it; it does not pattern-match it. `[Must-match]`
+
+All 952 corpus files use one shape for the initial stream:
+
+1. `0x802C`, then one constant push for each global, giving its initial value.
+2. Only in files with exported variables (57 files): one `0x8016` for each exported name, then one `0x8015` for each name, storing its initial value. Of the 528 stored values, 524 are 0, three are 1 and one is 4.
+3. An integer 0 push, which is the root argument count.
+4. `0x8003`.
+5. An integer push of the destination address, then `0x8004`.
+
+The destination is the body of the procedure named `start` in 951 files. Index 0 normally shares that body; in `usedcar.int` it does not, and the jump still goes to `start`. `start` begins with `0x802B`, which consumes the root argument count. When `start` returns, it pops return address 18 pushed by the bootstrap, so `0x8010` marks the program ended. In `surf.int` the destination is offset 18 itself, so that program's initial stream ends without running its `start` body. `[Must-match]`
 
 ### 2.3 Procedure Records and Flags
 
@@ -224,6 +234,8 @@ For `0x802E`, let C initially be the consumed count and let K begin at zero. Whi
 
 Exported procedure and variable names share case-insensitive registries across programs, but occupy separate namespaces. Registration supports names of at most 31 retained bytes; longer identifiers are truncated in registry storage. Export registration is an executed operation, not a loader action triggered by a record flag. Missing imported procedures and external variables are errors. Strings in external variables are stored as character content and are copied into the fetching program's dynamic storage. `[Must-match]`
 
+Registry lifetime is specified in SPEC-005 §2.2. Procedure entries disappear when their program is ended through `0x800E` or `0x8009`, or freed. Variable entries are removed only by the full clear performed on every map load and game reset, and are never removed per program. `[Must-match]`
+
 ### 3.3 Addressing, Branching, Scheduling, and Program Control
 
 Unless otherwise stated, these operations obtain every operand from the value stack; there is **no inline branch displacement** after the instruction word. Each table row is `[Must-match]`.
@@ -354,16 +366,35 @@ All words `0x8000` through `0x804B` are registered by the core VM. The general l
 
 The following are **public procedure names**, located through case-insensitive identifier lookup. Event numbers are host dispatch categories; neither the event number nor the procedure's eventual table index is an opcode. The table below is `[Must-match]`.
 
-| Public entry name | Host event number, decimal | Observable entry purpose |
+| Public entry name | Host event number, decimal | Observable entry purpose and requesting host path |
 | --- | ---: | --- |
-| `start` | 1 | Script startup/initialization |
-| `map_enter_p_proc` | 15 | Map-entry notification |
-| `map_update_p_proc` | 23 | Map-update notification |
-| `talk_p_proc` | 11 | Dialogue/talk request |
-| `look_at_p_proc` | 21 | Short object look-at request |
+| `start` | 1 | Script startup/initialization: every script instance at map load (SPEC-006 §3.5 step 8), and a not-yet-loaded script before explosion notification (SPEC-013 §3.10) |
+| `spatial_p_proc` | 2 | Spatial trigger entered (SPEC-006 §3.6) |
 | `description_p_proc` | 3 | Detailed object-description request |
+| `pickup_p_proc` | 4 | Item pickup (SPEC-006 §3.8) |
+| `drop_p_proc` | 5 | Item dropped from inventory to the map |
+| `use_p_proc` | 6 | Use of an object or item |
+| `use_obj_on_p_proc` | 7 | Item used on an object |
+| `use_skill_on_p_proc` | 8 | Skill used on an object |
+| `talk_p_proc` | 11 | Dialogue/talk request |
+| `critter_p_proc` | 12 | Critter-script cycle step outside combat (SPEC-006 §3.7) |
+| `combat_p_proc` | 13 | Combat notifications: turn start with fixed parameter 4 (SPEC-007), the attacker's hit with fixed parameter 2, and the join test with fixed parameter 5 (SPEC-009) |
+| `damage_p_proc` | 14 | A critter other than protected PID `0x01000008` (SPEC-007) loses hit points to a combat attack, as attacker, struck target or extra victim. Not requested for any victim of an attack whose struck target is not the critter aimed at. Also the explosion notification of item, scenery and spatial scripts (SPEC-013 §3.10) |
+| `map_enter_p_proc` | 15 | Map-entry notification |
+| `map_exit_p_proc` | 16 | Map-exit notification, map script only (SPEC-006 §3.5) |
+| `create_p_proc` | 17 | Never requested by the host |
+| `destroy_p_proc` | 18 | A critter killed by combat-attack damage, after its `damage_p_proc` request if one was made, with the critter that last hit it as source; or an object destroyed together with its script instance |
+| `look_at_p_proc` | 21 | Short object look-at request |
+| `timed_event_p_proc` | 22 | Script timer fired (SPEC-006 §3.7) |
+| `map_update_p_proc` | 23 | Map-update notification |
 
-The names do not have fixed procedure-table indices. A newly loaded program first executes its bootstrap and global initialization; later host invocations use cached procedure indices and synchronous call preparation. Missing names are cached as zero. The generic host invocation path substitutes **procedure index 1** for that zero, whereas map-entry and map-update broadcasts first test for a present procedure. A missing callback is therefore not uniformly a silent no-op. Do not confuse the fallback index with the event number or assume that it proves the existence of a procedure named `start`. `[Must-match]`
+Event numbers 0, 9, 10, 19 and 20 name no requestable procedure; the host never requests them. `[Must-match]`
+
+**Action code.** Every request stores its event number in the script instance's current event/action code (SPEC-003 script-record offset `0x1C`) before the program is loaded or entered, and `script_action` (`0x80C7`, SPEC-005) returns that stored number. A new instance starts with 0. The code is not reset when the request finishes and is not restored when a nested request to the same instance returns, so a later procedure of that script entered without a request reads the number of the last request. It is saved and restored with the instance. When a script without the requested procedure falls back to procedure index 1 (below), `start` runs with `script_action` returning the requested event number, for example 12 on a critter-cycle turn. Corpus `start` procedures compare it with 12, 13 and 18 for that reason. `[Must-match]`
+
+**No map-script combat request.** R1 contains a map-script `combat_p_proc` request after each attack, with the team of the critter that knocked the player out as its fixed parameter. It is made only when that critter has already been recorded, and the critter is recorded only when the request returns an override. Nothing else records it, so the request is never made and the map script never receives event 13. `[Must-match]`
+
+The names do not have fixed procedure-table indices. A newly loaded program first executes its bootstrap and initial stream, which in corpus files runs the `start` body (Section 2.2). On that first request the host does not separately call the requested procedure (SPEC-006 §3.5). Later host invocations use cached procedure indices and synchronous call preparation. Missing names are cached as zero. The generic host invocation path substitutes **procedure index 1** for that zero, whereas map-entry and map-update broadcasts first test for a present procedure. A missing callback is therefore not uniformly a silent no-op. Do not confuse the fallback index with the event number or assume that it proves the existence of a procedure named `start`. `[Must-match]`
 
 ### 3.8 Error and Validation Boundaries
 
@@ -479,3 +510,5 @@ For the value-stack capacity boundary, execute 341 copies of `C0 01 00 00 00 00`
 - [x] Spec linter run against `fallout1-re` symbols with no findings
 
 Update notes (2026-10-22): fixture rows for the non-standard push tags `0x8401` and `0xC801` were added to sections 4.2 and 4.3 and stepped by hand through the section 2.5 decode rule. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-23): section 3.7 gains the complete table of host event numbers 1-23 with their requesting paths, the stored action code that `script_action` returns, and the unreachable map-script combat request. Section 2.2 gives the corpus shape of the initial stream (globals, exports, jump into `start`; `surf.int` runs nothing). Section 3.2 points to the SPEC-005 §2.2 registry lifetime. Net tags: +5 `[Must-match]`. `tools/spec_lint.py` gives 0 errors.

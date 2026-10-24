@@ -44,6 +44,7 @@ Terminology used in this document (descriptive, not reference identifiers):
 
 - **R1-rev2 (2026-10-19).** Section 3.3 onlooker alerting and the section 3.4 retaliation rows now follow the authoritative rule in SPEC-007 §3.6. The exception that allows a same-team retaliation check applies to the attack's **intended** target, not to an unintended victim. The earlier wording had this reversed.
 - **R1-rev3 (2026-10-21).** Fixture H candidate R2 now has AC 2, so its rating is 22 and the tie row matches the section 3.4 rule. Section 2.5 corrects the language-filter consequences (value 2 is never filtered; a startup value of 1 filters twice; the save-load ordering defect is `[May-improve]`) and cites the new SPEC-002 §3.7 filter definition. Section 3.19 gains the filter's draw.
+- **R1-rev4 (2026-10-23).** Section 3.17: taunt layout, placement, lifetime and removal now point to SPEC-014 §3.46. With default preferences the per-line delay is 1000 ms, not the 1399 ms read at start-up.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -540,7 +541,7 @@ Request sites:
 
 In ranged combat it is the **defender** who speaks the hit/miss taunt, using the defender's own packet and the location it was hit. In melee it is the attacker. `[Must-match]`
 
-**Display callback:** if any floating text object currently exists anywhere, display nothing. `[Must-match]` Otherwise create a floating text object over C, with font `K.font`, color `K.color`, and outline `K.outline_color` (-1 means none). Lines are word-wrapped at 200 pixels and centered. The outline adds a 1-pixel border on each side and is drawn with the outline palette index. An empty taunt text, or a full floating-text table, creates nothing. Display lifetime belongs to the floating-text subsystem, whose default delays are 3500 ms base and 1399 ms per line. `[Must-match]`
+**Display callback:** if any floating text object currently exists anywhere, display nothing. `[Must-match]` Otherwise create a floating text object over C, with font `K.font`, color `K.color`, and outline `K.outline_color` (-1 means none). Lines are word-wrapped at 200 pixels and centered. The outline adds a 1-pixel border on each side and is drawn with the outline palette index. An empty taunt text, or a full floating-text table, creates nothing. Display layout, placement, lifetime and removal belong to the floating-text subsystem (SPEC-014 §3.46). With default preferences a taunt lasts 3500 ms plus 1000 ms per line: the 1399 ms per-line default read at start-up is replaced by the preference value before any text can appear. `[Must-match]`
 
 ### 3.18 Script Opcode Surface
 
@@ -831,3 +832,5 @@ Verification notes: `tools/spec_lint.py` gives 0 errors. The 25 `ai.txt` packet 
 - the prose phrases "damage flags AND mask", "length", "capacity", "rounds" and "current";
 - this spec's own notation "danger", "self", "target", "cost" and "start";
 - the synthetic fixture packet names "alpha" and "guard".
+
+Update notes (2026-10-23, R1-rev4): the section 3.17 lifetime sentence points to SPEC-014 §3.46. No tag change. `tools/spec_lint.py` gives 0 errors.

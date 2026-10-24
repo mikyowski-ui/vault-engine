@@ -369,7 +369,16 @@ Engine callers and their flags:
 | Pip-Boy video archive | selected movie | 0x0B |
 | Midnight water countdown, outside dialogue, each movie only if not yet played | boil1 (water ≤ 100), boil2 (≤ 50), boil3 (0) | boil3: 0x05; others: 0x07 |
 
-All these flags are `[Must-match]`. The water countdown only runs while the water-chip quest is unfinished and decrements the remaining water first. After boil3 from the countdown, the game ends with a quit request. `[Must-match]`
+All these flags are `[Must-match]`.
+
+**Water countdown.** The remaining water is **campaign global 10**, the eleventh `GAME_GLOBAL_VARS` initializer of `data/vault13.gam` (SPEC-006 §2.1), whose shipped value is 150 days. The water chip quest is campaign global 101. Both are ordinary campaign globals, read and written by scripts with `global_var`/`set_global_var`; neither is an exported variable (SPEC-005 §2.2), and the engine does not need any script to supply them. The SPEC-014 §3.41.1 vault-water note reads the same two globals. Each midnight event (SPEC-006 §3.7) runs these steps first: `[Must-match]`
+
+1. If a countdown movie from step 4 is still playing, the midnight handler returns at once: none of its daily work runs and no next midnight event is queued.
+2. Unjam all locks.
+3. If global 101 is not 2 and global 10 is above 0, subtract 1 from global 10. Then, only when no dialogue is active, choose a movie from the new value: boil1 if the value is at most 100 and the boil1 bit of the water-movie byte is clear (then set that bit); otherwise boil2 if the value is at most 50 and the boil2 bit is clear (then set that bit); otherwise boil3 if the value is 0. One midnight chooses at most one movie, so when scripts have set the value to 50 or less with neither bit set, boil1 plays that midnight and boil2 the next.
+4. A chosen movie plays only outside dialogue and only if its played bit is clear (section 3.12, step 7). After boil3 plays, the game ends with a quit request. A chosen movie that was already played does nothing.
+
+The water-movie byte is 0 at a new game and is saved and loaded with the script state. A countdown that reaches 0 while dialogue is active chooses no movie, and later midnights never decrement a value of 0, so boil3 and the water game over never come from the countdown in that game. `[May-improve]` Safe rule: when global 10 is already 0 and global 101 is not 2 at a midnight outside dialogue, choose boil3.
 
 **Pip-Boy selection.** For selection a ≥ 0, scan indexes 3..13 for played movies. At each played movie decrement a, and stop when a ≤ 0. Selections 0 and 1 therefore both pick the first played movie. If no movie qualifies, the scan ends at index 14, and the reference plays index 14, which is out of range. `[May-improve]` Safe rule: play nothing.
 
@@ -525,3 +534,5 @@ Verification notes:
 - **Tag count.** 102 `[Must-match]` and 23 `[May-improve]` tags.
 
 Update notes (2026-10-23): section 3.8 states that movie audio is not scaled by master volume and gives its truncation and update rule. Section 3.10 gains step 6: subtitles wrap at 640 pixels, but only the first line is drawn, because the band is one text height plus 4. No corpus entry wraps. There are two `[May-improve]` safe rules, for growing the band and for the endless loop on a line with no space. Net tags: +2 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-10-23, second pass): section 3.12 now defines the water countdown. The remaining water is campaign global 10 (`data/vault13.gam`, 150 days) and the quest state is campaign global 101; neither is an exported variable. It gives the midnight steps, the saved water-movie byte, and a `[May-improve]` safe rule for a countdown that reaches 0 during dialogue. Net tags: +1 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.
