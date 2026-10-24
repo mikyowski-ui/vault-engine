@@ -1023,6 +1023,11 @@ impl WorldState {
             self.insertions.insert(reference, next_insertion());
         }
     }
+    /// SPEC-014 §3.44 the object's latest insertion stamp, if it has one: a
+    /// render-side object stamped later draws after it in its group.
+    pub fn insertion(&self, reference: ObjectRef) -> Option<u64> {
+        self.insertions.get(&reference).copied()
+    }
     /// SPEC-014 §3.44 a pixel-offset change: it always reinserts the
     /// object, even when the offset is unchanged.
     pub fn set_offset(&mut self, reference: ObjectRef, offset: [i32; 2]) {

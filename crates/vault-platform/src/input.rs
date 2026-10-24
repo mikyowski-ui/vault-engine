@@ -101,9 +101,9 @@ impl Default for Keyboard {
 ///
 /// Times are frame times: a press counts from the first poll after it, so
 /// no repeat comes early, and a replay of the logged frames repeats as the
-/// desktop did. Modifier keys are not repeated: the game reads them as the
-/// Shift, Ctrl and Alt state of other keys, not as key presses of their
-/// own.
+/// desktop did. Modifier and lock keys repeat by the same rule; each press
+/// or repeat is a key event of its own, but it translates to no key code
+/// ([`is_modifier`]).
 #[derive(Debug, Default)]
 pub struct KeyRepeat {
     /// The held keys, in press order.
@@ -129,21 +129,7 @@ impl KeyRepeat {
     }
     /// A key went down (before the press was handled).
     pub fn press(&mut self, key: winit::keyboard::KeyCode, keyboard: Keyboard) {
-        use winit::keyboard::KeyCode::*;
         self.sync(keyboard);
-        if matches!(
-            key,
-            ShiftLeft
-                | ShiftRight
-                | ControlLeft
-                | ControlRight
-                | AltLeft
-                | AltRight
-                | SuperLeft
-                | SuperRight
-        ) {
-            return;
-        }
         self.held.retain(|held| held.key != key);
         self.held.push(HeldKey {
             key,
@@ -183,6 +169,33 @@ impl KeyRepeat {
         }
         due
     }
+}
+
+/// SPEC-014 §3.29: Shift, Ctrl, Alt, Caps Lock, Num Lock and Scroll Lock
+/// (and the Windows keys) are physical keys like any other: they are timed
+/// and repeated, and each press or repeat takes one slot of the 32-event
+/// keyboard buffer (§3.27). A buffered event is translated to a key code
+/// only when it is read, with the modifiers held when it was typed, and a
+/// modifier key on its own translates to none: its event is removed and
+/// nothing acts, so no window opens or closes and no "any key" test is
+/// met. Holding Ctrl never closes the pause window Ctrl+P opened, while P
+/// held with Ctrl repeats Ctrl+P like any other key.
+pub fn is_modifier(key: winit::keyboard::KeyCode) -> bool {
+    use winit::keyboard::KeyCode::*;
+    matches!(
+        key,
+        ShiftLeft
+            | ShiftRight
+            | ControlLeft
+            | ControlRight
+            | AltLeft
+            | AltRight
+            | SuperLeft
+            | SuperRight
+            | CapsLock
+            | NumLock
+            | ScrollLock
+    )
 }
 
 /// How a wheel delta is measured.
@@ -362,10 +375,9 @@ mod tests {
         assert_eq!(fired[0], 1512, "500 ms is not yet more than 500");
         assert_eq!(fired[1] - fired[0], 96, "the first frame past 80 ms");
         repeat.release(KeyCode::ArrowUp);
-        // Exactly 500 ms does not repeat; a modifier does not repeat.
+        // Exactly 500 ms does not repeat.
         repeat.press(KeyCode::ArrowLeft, on);
         assert!(repeat.poll(0, on).is_empty());
-        repeat.press(KeyCode::ShiftLeft, on);
         assert!(repeat.poll(500, on).is_empty());
         assert_eq!(repeat.poll(501, on), [KeyCode::ArrowLeft]);
         assert!(repeat.poll(581, on).is_empty());
@@ -412,6 +424,43 @@ mod tests {
         repeat.press(KeyCode::ArrowDown, on);
         repeat.clear();
         assert!(repeat.poll(9000, on).is_empty());
+    }
+
+    #[test]
+    fn spec014_modifier_and_lock_keys_repeat_like_any_key() {
+        use winit::keyboard::KeyCode;
+        let on = Keyboard::default();
+        let mut repeat = KeyRepeat::default();
+        // Ctrl held from 0 ms with polls every 41 ms repeats as Tab does in
+        // Fixture S, and so does a lock key held beside it.
+        repeat.press(KeyCode::ControlLeft, on);
+        repeat.press(KeyCode::CapsLock, on);
+        let fired: Vec<(u64, Vec<KeyCode>)> = (0..18)
+            .map(|poll| poll * 41)
+            .map(|now| (now, repeat.poll(now, on)))
+            .filter(|(_, due)| !due.is_empty())
+            .collect();
+        let both = vec![KeyCode::ControlLeft, KeyCode::CapsLock];
+        assert_eq!(
+            fired,
+            [(533, both.clone()), (615, both.clone()), (697, both)]
+        );
+        // They translate to no key code; the keys they modify do.
+        for key in [
+            KeyCode::ShiftLeft,
+            KeyCode::ShiftRight,
+            KeyCode::ControlLeft,
+            KeyCode::ControlRight,
+            KeyCode::AltLeft,
+            KeyCode::AltRight,
+            KeyCode::CapsLock,
+            KeyCode::NumLock,
+            KeyCode::ScrollLock,
+        ] {
+            assert!(is_modifier(key), "{key:?}");
+        }
+        assert!(!is_modifier(KeyCode::KeyP));
+        assert!(!is_modifier(KeyCode::Escape));
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! sees the same rests, holds and scroll steps (D-11).
 use super::{MapPreview, Screen};
 use crate::interface::Painter;
+use std::sync::Arc;
 use vault_core::{
     ObjectAction, ObjectRef,
     assets::WorldAssets,
@@ -18,12 +19,8 @@ use vault_core::{
         cursor::{self, Entry, MenuTracker, Mode, MoveHover, Primary, Target},
     },
 };
-use vault_formats::{Fid, HexGrid, map::outline, pro::Category};
-use vault_render::{
-    IndexedImage,
-    map::pick_candidates,
-    outline::{OutlineInks, draw_outline},
-};
+use vault_formats::{Fid, FrmArchive, HexGrid, map::outline, pro::Category};
+use vault_render::{IndexedImage, map::pick_candidates};
 
 /// The scroll blocker (misc PID `0x0500000C`).
 const SCROLL_BLOCKER: u32 = 0x0500_000c;
@@ -113,9 +110,25 @@ pub(crate) struct PointerState {
     pub outlined: Option<ObjectRef>,
     /// The hover outline was removed: the scene is drawn again.
     pub redraw: bool,
+    /// §3.27 / §3.44 the in-world cursor object's latest insertion stamp
+    /// (`vault_core::world::next_insertion`): every move reinserts it at
+    /// the end of its hex's flat group.
+    pub cursor_stamp: u64,
     /// Paths planned for movement hovers.
     #[cfg(test)]
     pub routes_planned: u32,
+}
+
+/// SPEC-014 §3.27 the in-world cursor's objects for one refresh: the
+/// cursor's art layer (every mode's art, a flat object), movement mode's
+/// hex outline frame and its corner, and the AP-text layer (an upright
+/// object), all at the hex under the pointer. The layers are view-sized,
+/// with index 0 transparent.
+pub(crate) struct CursorObjects {
+    pub hex: i32,
+    pub art: IndexedImage,
+    pub ring: Option<(Arc<FrmArchive>, [i64; 2])>,
+    pub text: Option<IndexedImage>,
 }
 
 /// The loot and barter windows' cursor art.
@@ -263,6 +276,8 @@ impl MapPreview {
             return;
         }
         self.pointer.at = Some(point);
+        // §3.27: the move reinserts the cursor object in its hex list.
+        self.pointer.cursor_stamp = vault_core::world::next_insertion();
         // Entering the map window turns the in-world cursor back on.
         let entered_map =
             point[1] <= map_bottom() && previous.is_none_or(|[_, y]| y > map_bottom());
@@ -325,6 +340,7 @@ impl MapPreview {
             // restarts.
             let at = [menu.origin[0], menu.tracker.anchor];
             self.pointer.at = Some(at);
+            self.pointer.cursor_stamp = vault_core::world::next_insertion();
             self.hud.warp = Some(at);
             self.restart_rest(false);
             let entry = if self.quit_requested {
@@ -864,8 +880,9 @@ impl MapPreview {
             painter.cursor_frame(image, art, frame as usize, at);
             return;
         }
-        if self.world_pointer() && at[1] <= map_bottom() && !self.host.world.ui_disabled {
-            self.draw_world_cursor(&painter, image, at);
+        // §3.27: the in-world cursor is a flat map object, drawn by the
+        // map refresh (`cursor_objects`), not over the frame.
+        if self.world_cursor_at().is_some() {
             return;
         }
         // SPEC-014 §3.20: over the message monitor's scroll areas, while
@@ -884,82 +901,108 @@ impl MapPreview {
         }
         painter.cursor(image, cursor::ARROW.art, at);
     }
-    fn draw_world_cursor(&self, painter: &Painter, image: &mut IndexedImage, at: [i32; 2]) {
+    /// SPEC-014 §3.27 where the in-world cursor shows: over the map window
+    /// (the bar starts below row 379) while the map takes the pointer and
+    /// the interface is enabled, unless the action menu, the scroll art or
+    /// the animated watch replaces it. Elsewhere the system cursor or a
+    /// window's cursor shows instead (`draw_cursor`).
+    pub(crate) fn world_cursor_at(&self) -> Option<[i32; 2]> {
+        let at = self.pointer.at?;
+        (self.world_pointer()
+            && self.pointer.menu.is_none()
+            && self.pointer.edge.is_none()
+            && self.hud.watch.is_none()
+            && at[1] <= map_bottom()
+            && !self.host.world.ui_disabled)
+            .then_some(at)
+    }
+    /// SPEC-014 §3.27 the in-world cursor's objects over a `size` view, at
+    /// the hex under the pointer: none while it does not show, or off the
+    /// hex grid. Movement mode snaps the `msef003.frm` hex outline to that
+    /// hex, with its AP text at the hex's cell; the other modes follow the
+    /// pointer by pixel.
+    pub(crate) fn cursor_objects(&self, [width, height]: [u32; 2]) -> Option<CursorObjects> {
+        let at = self.world_cursor_at()?;
+        let hex = self.view.grid.pick_hex(at)?;
+        let painter = Painter {
+            assets: &self.host.assets,
+            palette: &self.palette,
+        };
+        let mut art = IndexedImage::new(width, height).ok()?;
+        let mut ring = None;
+        let mut text = None;
         let feedback = self.pointer.feedback.as_ref();
         match self.hud.mode {
             Mode::Movement => {
-                let Some(hex) = self.view.grid.pick_hex(at) else {
-                    return;
-                };
-                let Ok(center) = self.view.grid.hex_center(hex) else {
-                    return;
-                };
-                // The 32-by-16 hex outline drawn as a flat object at the hex,
-                // with outline type 2 and the translucent bit (movement mode
-                // only): the SPEC-014 §3.44 ring, blended through the red
-                // translucency table, over the 640-by-380 map buffer.
-                if let Some(art) = painter.art(Mode::Movement.art())
-                    && let Some(frame) = art.frame(0, 0)
+                let center = self.view.grid.hex_center(hex).ok()?;
+                // The 32-by-16 hex outline at the hex, with outline type 2
+                // and the translucent bit (movement mode only).
+                if let Some(frames) = painter.art(Mode::Movement.art())
+                    && let Some(frame) = frames.frame(0, 0)
                 {
-                    let [sx, sy] = art.shifts[0].map(i64::from);
+                    let [sx, sy] = frames.shifts[0].map(i64::from);
                     let origin = [
                         center[0] + sx - i64::from(frame.width / 2),
                         center[1] + sy - i64::from(frame.height) + 1,
                     ];
-                    image.blit(frame, origin);
-                    let inks = OutlineInks::new(painter.palette);
-                    if let Some(ink) = inks.ink(outline::RED | outline::TRANSLUCENT) {
-                        let map = [640, i64::from(map_bottom())];
-                        draw_outline(image, frame, origin, ink, [0, 0, map[0], map[1]], map);
-                    }
+                    art.blit(frame, origin);
+                    ring = Some((frames.clone(), origin));
                 }
-                if let Some(Feedback::Cost(text, key)) = feedback {
+                if let Some(Feedback::Cost(cost, key)) = feedback {
+                    let mut layer = IndexedImage::new(width, height).ok()?;
                     let cell = [center[0] as i32 - 16, center[1] as i32 - 8];
-                    let width = painter.width(101, text);
+                    let width = painter.width(101, cost);
                     outlined(
-                        painter,
-                        image,
+                        &painter,
+                        &mut layer,
                         *key,
-                        text,
+                        cost,
                         [cell[0] + (32 - width) / 2, cell[1] + 3],
                     );
+                    text = Some(layer);
                 }
             }
             Mode::Arrow => match feedback {
                 Some(Feedback::Pick(icon)) => {
-                    let (art, shift) = cursor::pick_art(at[0], at[1]);
+                    let (name, shift) = cursor::pick_art(at[0], at[1]);
                     let top = at[1] - shift;
-                    if art == "actarrom.frm" {
-                        painter.blit(image, art, 0, [at[0] - 28, top]);
-                        painter.blit(image, icon, 0, [at[0] - 68, top]);
+                    if name == "actarrom.frm" {
+                        painter.blit(&mut art, name, 0, [at[0] - 28, top]);
+                        painter.blit(&mut art, icon, 0, [at[0] - 68, top]);
                     } else {
-                        painter.blit(image, "actarrow.frm", 0, [at[0], top]);
-                        painter.blit(image, icon, 0, [at[0] + 29, top]);
+                        painter.blit(&mut art, "actarrow.frm", 0, [at[0], top]);
+                        painter.blit(&mut art, icon, 0, [at[0] + 29, top]);
                     }
                 }
                 _ => {
-                    painter.cursor(image, Mode::Arrow.art(), at);
+                    painter.cursor(&mut art, Mode::Arrow.art(), at);
                 }
             },
             Mode::Crosshair => match feedback {
-                Some(Feedback::Hit(text, key)) => {
-                    painter.cursor(image, "acttohit.frm", at);
+                Some(Feedback::Hit(hit, key)) => {
+                    painter.cursor(&mut art, "acttohit.frm", at);
                     outlined(
-                        painter,
-                        image,
+                        &painter,
+                        &mut art,
                         *key,
-                        text,
+                        hit,
                         [at[0] - 10 + 22, at[1] - 10 + 1],
                     );
                 }
                 _ => {
-                    painter.cursor(image, Mode::Crosshair.art(), at);
+                    painter.cursor(&mut art, Mode::Crosshair.art(), at);
                 }
             },
             mode @ (Mode::UseCrosshair | Mode::Skill(_)) => {
-                painter.cursor(image, mode.art(), at);
+                painter.cursor(&mut art, mode.art(), at);
             }
         }
+        Some(CursorObjects {
+            hex,
+            art,
+            ring,
+            text,
+        })
     }
     /// The arrow and the stacked 40-by-40 icons, the highlighted one in its
     /// `h` art; mirrored at the right edge and shifted up at the bottom.

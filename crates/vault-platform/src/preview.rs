@@ -235,6 +235,8 @@ impl AssetPreview {
         match self {
             Self::Sprite(preview) => preview.step(key),
             Self::Map(preview) => preview.step(key),
+            // SPEC-014 §3.29: a modifier key alone is no key: it skips nothing.
+            Self::Movie(_) if crate::input::is_modifier(key) => false,
             Self::Movie(movie) => {
                 movie.player.key();
                 true

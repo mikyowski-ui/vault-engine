@@ -604,11 +604,14 @@ impl MapPreview {
             let Some(event) = self.hud.held_keys.pop_front() else {
                 break;
             };
+            // §3.29: the event is translated as it is read, with the
+            // modifiers it was typed with; a modifier key alone is no key
+            // code, so its event is removed and nothing acts.
             if let HeldKey::Press(key, modifiers) = event {
                 let current = std::mem::replace(&mut self.hud.modifiers, modifiers);
                 self.step(key);
                 self.hud.modifiers = current;
-                read = true;
+                read |= !crate::input::is_modifier(key);
             }
         }
         read

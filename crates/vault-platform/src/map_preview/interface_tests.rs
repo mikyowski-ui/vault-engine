@@ -3737,3 +3737,176 @@ fn m_p2_h3_edge_scrolling_under_the_lock_but_not_in_the_letterbox_or_panel_anima
     assert!(preview.pointer.edge.is_none());
     assert_eq!(preview.host.world.camera_hex, scrolled);
 }
+
+#[test]
+fn spec014_holding_ctrl_never_closes_the_pause_window() {
+    use super::options::OptionsScreen;
+    use crate::input::{KeyRepeat, Keyboard};
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    let paused =
+        |preview: &MapPreview| matches!(preview.screen, Screen::Options(OptionsScreen::Pause));
+    let on = Keyboard::default();
+    let mut repeat = KeyRepeat::default();
+    // SPEC-014 §3.29: Ctrl goes down (an event with no key code), then P:
+    // Ctrl+P opens the pause window.
+    repeat.press(KeyCode::ControlLeft, on);
+    assert!(!preview.step(KeyCode::ControlLeft));
+    assert!(matches!(preview.screen, Screen::Map));
+    preview.set_modifiers([false, true, false]);
+    repeat.press(KeyCode::KeyP, on);
+    assert!(preview.step(KeyCode::KeyP));
+    assert!(paused(&preview));
+    repeat.release(KeyCode::KeyP);
+    // Ctrl held for two seconds repeats like any key, and its repeats
+    // reach the pause window, which they never close.
+    let mut repeats = 0;
+    for now in (16..2000).step_by(16) {
+        for key in repeat.poll(now, on) {
+            assert_eq!(key, KeyCode::ControlLeft);
+            repeats += 1;
+            assert!(!preview.step(key));
+        }
+        assert!(paused(&preview), "at {now} ms");
+    }
+    assert!(repeats > 10, "{repeats} repeats");
+    // P held while Ctrl is held repeats Ctrl+P: its press closes the
+    // window (any key does), and each repeat toggles it again.
+    repeat.press(KeyCode::KeyP, on);
+    preview.step(KeyCode::KeyP);
+    assert!(!paused(&preview));
+    let mut states = Vec::new();
+    for now in (2000..3000).step_by(16) {
+        for key in repeat.poll(now, on) {
+            preview.step(key);
+            if key == KeyCode::KeyP {
+                states.push(paused(&preview));
+            }
+        }
+    }
+    assert!(states.len() > 3, "{states:?}");
+    for (index, state) in states.iter().enumerate() {
+        assert_eq!(*state, index % 2 == 0, "{states:?}");
+    }
+}
+
+#[test]
+fn spec014_a_modifier_repeat_takes_a_buffer_slot_and_meets_no_any_key_test() {
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    // SPEC-014 §3.29: the help screen closes on any key, but a modifier or
+    // lock key on its own is no key.
+    preview.open_help();
+    for key in [
+        KeyCode::ShiftLeft,
+        KeyCode::ShiftRight,
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+        KeyCode::AltLeft,
+        KeyCode::AltRight,
+        KeyCode::CapsLock,
+        KeyCode::NumLock,
+        KeyCode::ScrollLock,
+    ] {
+        assert!(!preview.step(key), "{key:?}");
+        assert!(matches!(preview.screen, Screen::Help(_)), "{key:?}");
+    }
+    assert!(preview.step(KeyCode::KeyA));
+    assert!(matches!(preview.screen, Screen::Map));
+    // While combat disables the keyboard, each modifier press or repeat
+    // takes one of the 32 buffer slots: 31 Shift events and one `m` fill
+    // it, and the next `m` is lost.
+    preview.host.world.combat = true;
+    preview.hud.panel = super::hud::Panel::settled(true, false);
+    assert!(preview.keyboard_locked());
+    for _ in 0..31 {
+        preview.step(KeyCode::ShiftLeft);
+    }
+    preview.step(KeyCode::KeyM);
+    preview.step(KeyCode::KeyM);
+    assert_eq!(preview.hud.held_keys.len(), 32);
+    // Read once the keyboard is enabled, the Shift events are removed and
+    // do nothing; the one held `m` cycles the mode once.
+    preview.host.world.combat = false;
+    preview.host.combat_lock.end_turn();
+    preview.hud.panel = super::hud::Panel::settled(false, false);
+    let before = preview.hud.mode;
+    preview.tick(32).unwrap();
+    assert!(preview.hud.held_keys.is_empty());
+    assert!(matches!(preview.screen, Screen::Map));
+    assert_eq!(
+        preview.hud.mode,
+        vault_core::ui::cursor::cycle_mode(before, false, true)
+    );
+}
+
+#[test]
+fn spec014_the_in_world_cursor_is_a_flat_scene_object_over_the_map_only() {
+    let dir = corpus();
+    std::fs::write(
+        dir.path().join("art/intrface/msef003.frm"),
+        super::fixture::frm(32, 16, 9),
+    )
+    .unwrap();
+    let mut preview = world(dir.path());
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    let player = preview.host.world.player;
+    let (player_hex, elevation) = preview
+        .host
+        .world
+        .get(player)
+        .map(|object| (object.raw.hex.unwrap(), object.raw.elevation))
+        .unwrap();
+    let hex = vault_formats::HexGrid::step(player_hex, 2, 3).unwrap();
+    let [x, y] = preview.view.grid.hex_center(hex).unwrap();
+    let point = [x as i32, y as i32];
+    let total = preview.host.world.render_objects().total;
+    preview.hover(point);
+    // SPEC-014 §3.27: movement mode's cursor snaps to the hovered hex and
+    // carries the hex outline frame for the outline list.
+    let cursor = preview.cursor_objects([640, 380]).unwrap();
+    assert_eq!(cursor.hex, hex);
+    assert!(cursor.ring.is_some());
+    assert!(cursor.art.pixels().contains(&9));
+    // It is not a world object: scripts, saves, picking and routes see the
+    // same objects as before.
+    assert_eq!(preview.host.world.render_objects().total, total);
+    let base = preview.image().unwrap();
+    assert!(preview.cursor_in_frame);
+    // Within its hex it precedes a flat object inserted after its last
+    // move, and a move reinserts it after that object.
+    let prototype =
+        Arc::new(vault_formats::Prototype::parse(&super::fixture::prototype(0, 5)).unwrap());
+    let item = preview.host.world.spawn(prototype, hex, elevation).unwrap();
+    preview.host.world.set_flat(item, true);
+    let id = preview.host.world.get(item).unwrap().raw.id;
+    let objects = preview.host.world.render_objects();
+    let list = &objects.elevations[usize::from(elevation)];
+    let order = preview.cursor_order(&objects, hex);
+    assert_eq!(list[order].id, id, "the item draws over the cursor");
+    preview.hover([point[0] + 1, point[1]]);
+    assert_eq!(preview.cursor_objects([640, 380]).unwrap().hex, hex);
+    let objects = preview.host.world.render_objects();
+    let order = preview.cursor_order(&objects, hex);
+    assert_eq!(order, objects.elevations[usize::from(elevation)].len());
+    // Over the bar the arrow is drawn instead, and the scene is composed
+    // again without the cursor object.
+    preview.hover([320, 440]);
+    assert!(preview.cursor_objects([640, 380]).is_none());
+    let bar = preview.pointer_frame().unwrap();
+    assert!(!preview.cursor_in_frame);
+    assert_ne!(bar.pixels(), base.pixels());
+    // A modal window shows no in-world cursor.
+    preview.hover(point);
+    assert!(preview.cursor_objects([640, 380]).is_some());
+    assert!(preview.step(KeyCode::KeyI));
+    assert!(matches!(preview.screen, Screen::Inventory(_)));
+    assert!(preview.cursor_objects([640, 380]).is_none());
+    preview.image().unwrap();
+    assert!(!preview.cursor_in_frame);
+}

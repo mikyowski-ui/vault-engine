@@ -21,11 +21,22 @@ use vault_render::{
     IndexedImage,
     dialogue::{self, ChoiceHit},
     map::{
-        Cutout, MapArt, MapHover, MapLight, MapScene, MapView, draw_map_scene, render_floor_lit,
+        Cutout, MapArt, MapHover, MapLight, MapScene, MapView, SceneCursor, draw_map_scene,
+        render_floor_lit,
     },
     outline::OutlineInks,
 };
 use winit::keyboard::KeyCode;
+
+/// SPEC-008 §3.10 rule 4 what an open dialogue session did to the music.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialogueMusic {
+    /// A talking head stopped the track; the close replays the last one.
+    Stopped,
+    /// Without a head the music volume was halved; the close restores
+    /// `volume`, the one current at the opening (the safe rule).
+    Halved { volume: i32 },
+}
 
 /// SPEC-014 §3.37 `egg.frm`, interface art (`intrface.lst`) index 2.
 const EGG_ART: u32 = 0x0600_0002;
@@ -202,6 +213,12 @@ pub struct MapPreview {
     held: Option<vault_core::ui::Rect>,
     /// The last frame drew the held button down.
     held_shown: bool,
+    /// SPEC-014 §3.27 the last composed frame's map view holds the
+    /// in-world cursor object, so a pointer move composes it again.
+    cursor_in_frame: bool,
+    /// SPEC-008 §3.10 rule 4 what the open dialogue session did to the
+    /// music, undone when it closes.
+    dialogue_music: Option<DialogueMusic>,
     /// G-09 the map preview tool's own keys: W opens the world map,
     /// PageUp/PageDown change the elevation, L/D/U/G/T act on the
     /// selection. The game's worlds have them only with `--debug`.
@@ -518,6 +535,8 @@ impl MapPreview {
             figure: (0, 0),
             held: None,
             held_shown: false,
+            cursor_in_frame: false,
+            dialogue_music: None,
             preview_keys: true,
             roof_key: true,
             fade_pointer: None,
@@ -827,6 +846,49 @@ impl MapPreview {
         self.volumes.master = (self.volumes.master + delta).clamp(0, 32767);
         self.audio.set_master(self.volumes.master);
     }
+    /// SPEC-008 §3.10 rule 4: a dialogue session's music. Its opening
+    /// (`start_gdialog`, after the head window is created) stops the
+    /// current track for a talking head, or halves the music volume
+    /// without one; its closing (after the windows are destroyed) replays
+    /// the last recorded track from its beginning, subject to the music
+    /// on/off state, or restores the volume. A session already open
+    /// changes nothing, and barter, Review and Ask About keep the session
+    /// open. The reference halves the volume a previous no-head session
+    /// stored instead of the current one (`[May-improve]`); the safe rule
+    /// halves the volume current at the opening and restores it. A volume
+    /// of 1 halves to 0, which turns music off by volume (rule 2) until the
+    /// restore turns it back on.
+    pub(crate) fn dialogue_music_tick(&mut self) {
+        let open = self.host.world.dialogue.open;
+        match (open, self.dialogue_music) {
+            (true, None) => {
+                self.dialogue_music = Some(if self.host.world.dialogue.head.is_some() {
+                    self.audio.stop_music();
+                    DialogueMusic::Stopped
+                } else {
+                    self.sync_volumes();
+                    let volume = self.volumes.music;
+                    self.apply_volumes(Volumes {
+                        music: volume / 2,
+                        ..self.volumes
+                    });
+                    DialogueMusic::Halved { volume }
+                });
+            }
+            (false, Some(DialogueMusic::Stopped)) => {
+                self.dialogue_music = None;
+                self.audio.replay_music(self.host.assets.vfs.clone());
+            }
+            (false, Some(DialogueMusic::Halved { volume })) => {
+                self.dialogue_music = None;
+                self.apply_volumes(Volumes {
+                    music: volume,
+                    ..self.volumes
+                });
+            }
+            _ => {}
+        }
+    }
     /// A SPEC-010 effect: resolve the name through the lookup chain (with
     /// the owner's gender alias), decode, and play at the relative volume.
     fn play_effect(&mut self, name: &[u8], owner: Option<ObjectRef>) {
@@ -909,6 +971,7 @@ impl MapPreview {
         }
     }
     fn drain_effects(&mut self) {
+        self.dialogue_music_tick();
         if !self.host.world.effects.is_empty() {
             self.thaw_view();
         }
@@ -1002,6 +1065,8 @@ impl MapPreview {
         }
         self.check_barter();
         self.check_loot();
+        // The map view sets it when it draws the in-world cursor.
+        self.cursor_in_frame = false;
         let mut image = match &self.screen {
             Screen::Map => self.map_image(),
             Screen::Skilldex(_) => self.skilldex_image(),
@@ -1029,8 +1094,14 @@ impl MapPreview {
         Ok(image)
     }
     /// The last composed frame with the cursor at the pointer's current
-    /// place, without composing the scene again.
-    pub fn pointer_frame(&self) -> Option<IndexedImage> {
+    /// place, without composing the scene again. SPEC-014 §3.27: the
+    /// in-world cursor is a map object drawn under the upright objects and
+    /// roofs, so while it shows, or the last frame showed it, the scene is
+    /// composed again.
+    pub fn pointer_frame(&mut self) -> Option<IndexedImage> {
+        if self.cursor_in_frame || self.world_cursor_at().is_some() {
+            return self.image().ok();
+        }
         let mut image = self.frame.clone()?;
         self.draw_cursor(&mut image);
         Some(image)
@@ -1079,15 +1150,59 @@ impl MapPreview {
         let cutout = self.cutout(egg.as_deref(), &extended);
         // SPEC-014 §3.46: the floating texts, the layer after the outlines.
         let floating = self.floating_sprites();
+        // SPEC-014 §3.27: the in-world cursor, a flat object at the hex
+        // under the pointer (movement mode adds its red translucent
+        // outline and the upright AP-text object). It exists only in the
+        // refresh, so no script, save, pick or route ever sees it.
+        let cursor = self.cursor_objects([self.view.width, self.view.height]);
+        let ring = cursor
+            .as_ref()
+            .and_then(|cursor| cursor.ring.as_ref())
+            .and_then(|(art, origin)| Some((art.frame(0, 0)?, *origin)));
+        let scene_cursor = cursor.as_ref().map(|cursor| SceneCursor {
+            hex: cursor.hex,
+            order: self.cursor_order(&objects, cursor.hex),
+            art: (&cursor.art, [0, 0]),
+            outline: ring.map(|(frame, origin)| {
+                (
+                    frame,
+                    origin,
+                    vault_formats::map::outline::RED | vault_formats::map::outline::TRANSLUCENT,
+                )
+            }),
+            text: cursor.text.as_ref().map(|text| (text, [0, 0])),
+        });
         let scene = MapScene {
             cutout: cutout.as_ref(),
             light: Some(light),
             outlines: Some(&inks),
             floating: &floating,
+            cursor: scene_cursor,
         };
         draw_map_scene(&mut image, map, &objects, self.view, &self.art, scene)?;
+        self.cursor_in_frame |= cursor.is_some();
         self.frozen_view = modal.then(|| image.clone());
         Ok(image)
+    }
+    /// SPEC-014 §3.27 / §3.44 the in-world cursor's place in the view
+    /// elevation's object list (insertion order): before the first object
+    /// on its hex inserted after its last move, else at the end. Only the
+    /// order within its hex's groups matters.
+    fn cursor_order(&self, objects: &MapObjects, hex: i32) -> usize {
+        let world = &self.host.world;
+        let Some(list) = objects.elevations.get(usize::from(self.view.elevation)) else {
+            return 0;
+        };
+        let stamp = self.pointer.cursor_stamp;
+        list.iter()
+            .position(|object| {
+                object.hex == Some(hex)
+                    && world
+                        .reference_for_id(object.id)
+                        .and_then(|reference| world.insertion(reference))
+                        .is_none_or(|inserted| inserted > stamp)
+            })
+            .unwrap_or(list.len())
     }
     /// SPEC-014 §3.37 the cutout mask, loaded once. Without it everything
     /// draws normally (the safe rule), and the failure is reported once.
@@ -1248,6 +1363,22 @@ impl MapPreview {
         if key == KeyCode::F12 && !self.keyboard_locked() && !self.bar_blocks() {
             self.screenshot();
             return true;
+        }
+        // SPEC-014 §3.29: a modifier or lock key on its own translates to no
+        // key code. While the keyboard is disabled its press or repeat still
+        // takes a buffer slot (read later, it does nothing); otherwise it is
+        // read at once and nothing acts: no window opens or closes, no
+        // "any key" test is met (a movie, the help screen, the pause window).
+        if crate::input::is_modifier(key) {
+            let modal = matches!(self.screen, Screen::Movie(_))
+                || self.dialog.is_some()
+                || self.hud.timer.is_some()
+                || self.hud.called.is_some();
+            if !modal && (self.keyboard_locked() || self.bar_blocks()) {
+                let modifiers = self.hud.modifiers;
+                self.hold_key(hud::HeldKey::Press(key, modifiers));
+            }
+            return false;
         }
         if self.movie_key() || self.dialog_key(key) || self.timer_key(key) || self.called_key(key) {
             return true;
@@ -1642,6 +1773,7 @@ impl MapPreview {
             self.view.elevation = self.host.world.elevation;
             changed = true;
         }
+        self.dialogue_music_tick();
         if !self.host.world.effects.is_empty() {
             self.drain_effects();
             changed = true;
@@ -2223,6 +2355,98 @@ mod tests {
             audio.last_music(),
             Some(MusicRequest::track("03wrldmp", true))
         );
+    }
+
+    #[test]
+    fn spec008_dialogue_stops_or_halves_the_music_and_undoes_it_on_close() {
+        use vault_core::dialogue::{HeadDefinition, HeadIdle, Mood, TalkingHead};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        state_fixture::write_corpus(root);
+        std::fs::create_dir_all(root.join("sound/music")).unwrap();
+        std::fs::write(root.join("sound/music/01hub.acm"), sound_fixture::acm('B')).unwrap();
+        let mut preview = interactive(root);
+        let (audio, mixer) = AudioHandle::detached();
+        preview.audio = audio.clone();
+        preview.preferences.music_volume = 9001;
+        preview.tick(0).unwrap();
+        preview.request_music(MusicRequest::track("01hub", true));
+        audio.wait_music();
+        let playing = || mixer.lock().unwrap().playing(Channel::Music);
+        assert!(playing());
+        let head = || {
+            TalkingHead::without_fidget(
+                HeadDefinition {
+                    index: 3,
+                    stem: String::new(),
+                    counts: [0; 3],
+                },
+                Mood::Neutral,
+                HeadIdle::default(),
+            )
+        };
+        // SPEC-008 §3.10 rule 4: a talking-head session stops the track
+        // when it opens; a session already open changes nothing.
+        preview.host.world.dialogue.open = true;
+        preview.host.world.dialogue.head = Some(head());
+        preview.dialogue_music_tick();
+        assert!(!playing());
+        assert!(audio.music_enabled(), "the on/off state is unchanged");
+        preview.dialogue_music_tick();
+        assert!(!playing());
+        // Closing replays the last recorded track from its beginning.
+        preview.host.world.dialogue.open = false;
+        preview.host.world.dialogue.head = None;
+        preview.dialogue_music_tick();
+        audio.wait_music();
+        assert!(playing());
+        assert_eq!(audio.last_music(), Some(MusicRequest::track("01hub", true)));
+        // No head: the music volume current at the opening is halved
+        // (truncated) and restored at the close (the safe rule), however
+        // long the session stays open.
+        let level = vault_formats::sfx::music_level;
+        preview.host.world.dialogue.open = true;
+        preview.dialogue_music_tick();
+        assert_eq!(preview.volumes.music, 4500);
+        assert_eq!(
+            mixer.lock().unwrap().level(Channel::Music),
+            Some(level(4500))
+        );
+        preview.tick(16).unwrap();
+        preview.dialogue_music_tick();
+        assert_eq!(preview.volumes.music, 4500, "halved once");
+        assert!(playing());
+        preview.host.world.dialogue.open = false;
+        preview.dialogue_music_tick();
+        assert_eq!(preview.volumes.music, 9001);
+        assert_eq!(
+            mixer.lock().unwrap().level(Channel::Music),
+            Some(level(9001))
+        );
+        // A second no-head session halves the current volume again, not
+        // one stored by the session before (the reference's defect).
+        preview.preferences.music_volume = 7001;
+        preview.tick(32).unwrap();
+        preview.host.world.dialogue.open = true;
+        preview.dialogue_music_tick();
+        assert_eq!(preview.volumes.music, 3500);
+        preview.host.world.dialogue.open = false;
+        preview.dialogue_music_tick();
+        assert_eq!(preview.volumes.music, 7001);
+        // A volume of 1 halves to 0, which turns music off by volume; the
+        // close turns it back on and the world replays its track.
+        preview.preferences.music_volume = 1;
+        preview.tick(48).unwrap();
+        assert!(audio.music_enabled());
+        preview.host.world.dialogue.open = true;
+        preview.dialogue_music_tick();
+        assert_eq!(preview.volumes.music, 0);
+        assert!(!audio.music_enabled() && !preview.host.music_enabled);
+        assert!(!playing());
+        preview.host.world.dialogue.open = false;
+        preview.dialogue_music_tick();
+        assert_eq!(preview.volumes.music, 1);
+        assert!(audio.music_enabled() && preview.host.music_enabled);
     }
 
     #[test]

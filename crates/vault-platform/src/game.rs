@@ -1348,6 +1348,13 @@ impl Game {
             self.screenshot();
             return true;
         }
+        // SPEC-014 §3.29: a modifier or lock key alone translates to no key
+        // code, so no screen reads it and no "any key" test is met; a world
+        // holds it like any key while combat disables the keyboard.
+        if crate::input::is_modifier(key) && !matches!(self.stage, Stage::World(_) | Stage::Load(_))
+        {
+            return false;
+        }
         match &mut self.stage {
             Stage::Splash { .. } => {
                 self.start_movies();

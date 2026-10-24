@@ -169,6 +169,46 @@ pub struct MapScene<'a> {
     pub outlines: Option<&'a OutlineInks>,
     /// SPEC-014 §3.46 the floating texts, in creation order.
     pub floating: &'a [FloatingSprite],
+    /// SPEC-014 §3.27 the in-world cursor's objects, when it shows.
+    pub cursor: Option<SceneCursor<'a>>,
+}
+
+/// SPEC-014 §3.27 the in-world cursor: a flat object on the current
+/// elevation (flat, no-block, shoot-through, light-through, temporary)
+/// that shows every mode's art, drawn in the §3.44 flat pass at its hex
+/// and lit as any object there, and in movement mode a second, upright
+/// object for the AP text, drawn in the upright pass at the same hex. Both
+/// exist only in the refresh: they are not world objects, so scripts,
+/// saves, picking and blocking never see them.
+#[derive(Clone, Copy)]
+pub struct SceneCursor<'a> {
+    /// The hex both objects are at.
+    pub hex: i32,
+    /// Their place in the elevation's object list (insertion order): they
+    /// follow the objects listed before index `order` and precede the rest,
+    /// so within their hex groups they come after the objects inserted
+    /// before their last move (every move reinserts them at the end).
+    pub order: usize,
+    /// The cursor art and its top-left corner in the view (index 0 is
+    /// transparent).
+    pub art: (&'a IndexedImage, [i64; 2]),
+    /// Movement mode's outline: the hex frame at its top-left corner and
+    /// its outline word, added to the outline list when the cursor is
+    /// drawn, so it is painted after the roofs like every outline.
+    pub outline: Option<(&'a FrmFrame, [i64; 2], u32)>,
+    /// The AP-text object's art and top-left corner.
+    pub text: Option<(&'a IndexedImage, [i64; 2])>,
+}
+
+/// One entry of a refresh's drawing order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drawn {
+    /// An object, by its index in the elevation's list.
+    Object(usize),
+    /// The in-world cursor (flat pass).
+    Cursor,
+    /// Movement mode's AP text (upright pass).
+    CursorText,
 }
 
 /// SPEC-014 §3.37 the player see-through cutout: the `egg.frm` mask placed
@@ -260,13 +300,23 @@ fn blit_with(
     image: &mut IndexedImage,
     frame: &FrmFrame,
     origin: [i64; 2],
+    pixel: impl FnMut(u8, u8, [i64; 2]) -> u8,
+) {
+    let size = [i64::from(frame.width), i64::from(frame.height)];
+    blit_pixels(image, size, frame.pixels(), origin, pixel);
+}
+
+/// [`blit_with`] for a `size` block of `source` pixels (an image layer).
+fn blit_pixels(
+    image: &mut IndexedImage,
+    [frame_width, frame_height]: [i64; 2],
+    source: &[u8],
+    origin: [i64; 2],
     mut pixel: impl FnMut(u8, u8, [i64; 2]) -> u8,
 ) {
     let (width, height) = (i64::from(image.width()), i64::from(image.height()));
-    let frame_width = i64::from(frame.width);
-    let source = frame.pixels();
     let pixels = image.pixels_mut();
-    for y in origin[1].max(0)..(origin[1] + i64::from(frame.height)).min(height) {
+    for y in origin[1].max(0)..(origin[1] + frame_height).min(height) {
         for x in origin[0].max(0)..(origin[0] + frame_width).min(width) {
             let color = source[((y - origin[1]) * frame_width + x - origin[0]) as usize];
             if color == 0 {
@@ -363,6 +413,20 @@ impl<'a> Pens<'a> {
         blit_with(image, frame, origin, |source, destination, _| {
             let mixed = blend[usize::from(gray[usize::from(source)])][usize::from(destination)];
             intensity[usize::from(mixed) * 256 + level]
+        });
+    }
+    /// An image layer drawn like an object without translucency: the lit
+    /// draw at `level` of its nonzero pixels.
+    fn draw_layer(
+        &self,
+        image: &mut IndexedImage,
+        layer: &IndexedImage,
+        origin: [i64; 2],
+        level: u8,
+    ) {
+        let size = [i64::from(layer.width()), i64::from(layer.height())];
+        blit_pixels(image, size, layer.pixels(), origin, |source, _, _| {
+            self.lit(source, level)
         });
     }
     /// SPEC-014 §3.37 a draw through the mask at `mask`: inside it each
@@ -475,6 +539,26 @@ fn visited_hexes(view: MapView) -> impl Iterator<Item = i32> {
 /// hexes are not drawn. The second list holds the objects without a hex,
 /// drawn last.
 fn draw_sequence(view: MapView, objects: &[MapObject]) -> (Vec<usize>, Vec<usize>) {
+    let (placed, hexless) = draw_sequence_with(view, objects, None);
+    let placed = placed
+        .into_iter()
+        .filter_map(|drawn| match drawn {
+            Drawn::Object(index) => Some(index),
+            Drawn::Cursor | Drawn::CursorText => None,
+        })
+        .collect();
+    (placed, hexless)
+}
+
+/// [`draw_sequence`] with the §3.27 cursor objects at `cursor` (their hex
+/// and list place, [`SceneCursor`]): the cursor in its hex's flat group and
+/// the AP text in its upright group, each before the objects listed from
+/// `order` on. On an unvisited hex neither is drawn.
+fn draw_sequence_with(
+    view: MapView,
+    objects: &[MapObject],
+    cursor: Option<(i32, usize)>,
+) -> (Vec<Drawn>, Vec<usize>) {
     let mut placed: Vec<(i32, bool, usize)> = Vec::new();
     let mut hexless = Vec::new();
     for (index, object) in objects.iter().enumerate() {
@@ -490,13 +574,30 @@ fn draw_sequence(view: MapView, objects: &[MapObject]) -> (Vec<usize>, Vec<usize
     let mut flat = Vec::new();
     let mut upright = Vec::new();
     for hex in visited_hexes(view) {
+        let here = cursor.filter(|(at, _)| *at == hex).map(|(_, order)| order);
+        let (mut cursor_due, mut text_due) = (here.is_some(), here.is_some());
         let start = placed.partition_point(|(at, ..)| *at < hex);
         for (_, is_upright, index) in placed[start..].iter().take_while(|(at, ..)| *at == hex) {
+            let later = here.is_some_and(|order| *index >= order);
             if *is_upright {
-                upright.push(*index);
+                if text_due && later {
+                    upright.push(Drawn::CursorText);
+                    text_due = false;
+                }
+                upright.push(Drawn::Object(*index));
             } else {
-                flat.push(*index);
+                if cursor_due && later {
+                    flat.push(Drawn::Cursor);
+                    cursor_due = false;
+                }
+                flat.push(Drawn::Object(*index));
             }
+        }
+        if cursor_due {
+            flat.push(Drawn::Cursor);
+        }
+        if text_due {
+            upright.push(Drawn::CursorText);
         }
     }
     flat.extend(upright);
@@ -850,9 +951,37 @@ pub fn draw_map_scene(
         };
         Ok(Some((frame, placement(view, frame, shift, object)?.0)))
     };
-    let (placed, hexless) = draw_sequence(view, objects);
+    let cursor = scene.cursor;
+    let (placed, hexless) = draw_sequence_with(
+        view,
+        objects,
+        cursor.map(|cursor| (cursor.hex, cursor.order)),
+    );
     let mut outlines = Vec::new();
-    for index in placed {
+    for drawn in placed {
+        let index = match (drawn, cursor) {
+            (Drawn::Object(index), _) => index,
+            // SPEC-014 §3.27: the cursor objects are lit as any object on
+            // their hex; the cursor's outline joins the list as it draws.
+            (Drawn::Cursor, Some(cursor)) => {
+                let (art, origin) = cursor.art;
+                pens.draw_layer(image, art, origin, level(Some(cursor.hex)));
+                if outlines.len() < 100
+                    && let Some((frame, origin, word)) = cursor.outline
+                    && let Some(ink) = scene.outlines.and_then(|inks| inks.ink(word))
+                {
+                    outlines.push((frame, origin, ink));
+                }
+                continue;
+            }
+            (Drawn::CursorText, Some(cursor)) => {
+                if let Some((text, origin)) = cursor.text {
+                    pens.draw_layer(image, text, origin, level(Some(cursor.hex)));
+                }
+                continue;
+            }
+            (Drawn::Cursor | Drawn::CursorText, None) => continue,
+        };
         let object = &objects[index];
         let Some((frame, origin)) = sprite(object)? else {
             continue;
@@ -1672,6 +1801,122 @@ mod tests {
     }
 
     #[test]
+    fn spec014_cursor_object_draws_in_the_flat_pass_and_its_outline_after_the_roofs() {
+        let map = preview();
+        let mut art = std::collections::BTreeMap::new();
+        art.insert(
+            (true, 2),
+            FrmArchive::parse(&fixture::frm(80, 36, 200)).unwrap(),
+        );
+        // Flat items in 20, upright scenery in 30.
+        art.insert(
+            (false, 0x0000_0001),
+            FrmArchive::parse(&fixture::frm(2, 2, 20)).unwrap(),
+        );
+        art.insert(
+            (false, 0x0200_0001),
+            FrmArchive::parse(&fixture::frm(2, 2, 30)).unwrap(),
+        );
+        let art = Keyed(art);
+        let mut view = view();
+        let flat = |id: u32, hex: i32| {
+            let mut item = object(&map, id, 0x0000_0001, hex);
+            item.flags.0 |= BasicFlags::FLAT.0;
+            item
+        };
+        let upright = |id: u32, hex: i32| object(&map, id, 0x0200_0001, hex);
+        // The cursor sits on 20100; its art covers the whole view in 77 and
+        // the AP text, when present, in 88.
+        let layer =
+            |color: u8| IndexedImage::from_pixels(640, 380, vec![color; 640 * 380]).unwrap();
+        let (cursor_art, text_art) = (layer(77), layer(88));
+        let ring = FrmArchive::parse(&fixture::frm(4, 4, 99)).unwrap();
+        let ring = ring.frame(0, 0).unwrap();
+        let palette = grey_palette();
+        let inks = OutlineInks::new(&palette);
+        let other = crate::outline::key_index(&palette, crate::outline::OTHER_KEY);
+        let draw = |view: MapView, objects: Vec<MapObject>, cursor: SceneCursor| {
+            let mut image = render_floor(&map, view, &art).unwrap();
+            let layers = MapScene {
+                outlines: Some(&inks),
+                cursor: Some(cursor),
+                ..MapScene::default()
+            };
+            draw_map_scene(&mut image, &map, &scene(objects), view, &art, layers).unwrap();
+            image
+        };
+        let at = |image: &IndexedImage, hex: i32| {
+            let [x, y] = view.grid.hex_center(hex).unwrap();
+            image.pixels()[y as usize * 640 + x as usize]
+        };
+        let objects = vec![
+            flat(1, 20098),
+            flat(2, 20102),
+            upright(3, 20096),
+            upright(4, 20104),
+        ];
+        let cursor = SceneCursor {
+            hex: 20100,
+            order: objects.len(),
+            art: (&cursor_art, [0, 0]),
+            outline: None,
+            text: None,
+        };
+        let image = draw(view, objects.clone(), cursor);
+        // Over a flat object of a lower hex, under one of a higher hex, and
+        // under every upright object, whatever its hex.
+        assert_eq!(at(&image, 20098), 77, "over the lower flat object");
+        assert_eq!(at(&image, 20102), 20, "under the higher flat object");
+        assert_eq!(at(&image, 20096), 30, "under a lower upright object");
+        assert_eq!(at(&image, 20104), 30, "under a higher upright object");
+        // The AP text is upright: over the flat objects and the uprights of
+        // lower hexes, under those of higher hexes.
+        let with_text = SceneCursor {
+            text: Some((&text_art, [0, 0])),
+            ..cursor
+        };
+        let image = draw(view, objects.clone(), with_text);
+        assert_eq!(at(&image, 20098), 88);
+        assert_eq!(at(&image, 20102), 88);
+        assert_eq!(at(&image, 20096), 88, "over the lower upright object");
+        assert_eq!(at(&image, 20104), 30, "under the higher upright object");
+        // Within its hex the cursor follows the flat objects inserted
+        // before its last move and precedes those inserted after.
+        let own = vec![flat(5, 20100)];
+        let before = SceneCursor { order: 1, ..cursor };
+        assert_eq!(at(&draw(view, own.clone(), before), 20100), 77);
+        let after = SceneCursor { order: 0, ..cursor };
+        assert_eq!(at(&draw(view, own, after), 20100), 20);
+        // The cursor's outline joins the outline list when it is drawn, so
+        // it is painted after the roofs: the roof hides the cursor's art,
+        // not its ring.
+        view.roofs = true;
+        let roof = [256_i64, 84];
+        let small = IndexedImage::from_pixels(4, 4, vec![77; 16]).unwrap();
+        let origin = [roof[0] + 1, roof[1]];
+        let outlined = SceneCursor {
+            order: 0,
+            art: (&small, origin),
+            outline: Some((ring, origin, 3)),
+            ..cursor
+        };
+        let image = draw(view, Vec::new(), outlined);
+        let pixel = |[x, y]: [i64; 2]| image.pixels()[y as usize * 640 + x as usize];
+        assert_eq!(pixel(origin), 200, "the roof covers the cursor");
+        assert_eq!(pixel(roof), other, "the ring is drawn over the roof");
+        // Without the outline the roof shows there.
+        let plain = SceneCursor {
+            outline: None,
+            ..outlined
+        };
+        let image = draw(view, Vec::new(), plain);
+        assert_eq!(
+            image.pixels()[roof[1] as usize * 640 + roof[0] as usize],
+            200
+        );
+    }
+
+    #[test]
     fn spec014_objects_take_their_hex_light_and_roofs_the_ambient() {
         let map = preview();
         let palette = grey_palette();
@@ -1761,6 +2006,7 @@ mod tests {
                 light: Some(light),
                 outlines: None,
                 floating: &[],
+                cursor: None,
             };
             draw_map_scene(&mut image, &map, &scene(vec![wall]), view, &art, scene_cut).unwrap();
             let [x, y] = view.grid.hex_center(20300).unwrap();
