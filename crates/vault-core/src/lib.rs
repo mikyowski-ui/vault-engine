@@ -146,6 +146,8 @@ mod roof_tests;
 #[cfg(test)]
 mod script_cycle_tests;
 #[cfg(test)]
+mod script_request_tests;
+#[cfg(test)]
 mod skills_tests;
 #[cfg(test)]
 mod state_tests;

@@ -873,3 +873,109 @@ fn scheduling_faults_wrapping_remainder_and_detach_without_a_parent() {
     assert_eq!(vm.parent, None);
     assert!(!vm.status.contains(VmStatus::ERROR));
 }
+#[test]
+fn spec005_registry_lifetime_full_clear_and_per_program_procedures() {
+    let mut host = BasicHost::default();
+    host.register_program(1, b"scripts/v13cave.int");
+    host.register_program(2, b"scripts/vaultent.int");
+    host.export_variable(1, b"Ian_ptr").unwrap();
+    host.store_variable(b"ian_ptr", ExternalValue::Value(Value::integer(5)))
+        .unwrap();
+    host.export_procedure(
+        b"helper",
+        ExportedProcedure {
+            owner: 1,
+            address: 0,
+            arguments: 0,
+        },
+    )
+    .unwrap();
+    // Ending the program removes its procedure entries only: the variable
+    // and its value survive, and another file still conflicts on this map.
+    host.purge(1).unwrap();
+    assert!(host.import_procedure(b"helper").is_err());
+    assert_eq!(
+        host.fetch_variable(b"IAN_PTR").unwrap(),
+        ExternalValue::Value(Value::integer(5))
+    );
+    assert!(matches!(
+        host.export_variable(2, b"Ian_ptr"),
+        Err(VmError::Symbol(_))
+    ));
+    // The map change's full clear empties both tables, so the next map's
+    // script becomes the new owner with value I zero.
+    host.clear();
+    assert!(host.fetch_variable(b"Ian_ptr").is_err());
+    host.register_program(2, b"scripts/vaultent.int");
+    host.export_variable(2, b"Ian_ptr").unwrap();
+    assert_eq!(
+        host.fetch_variable(b"Ian_ptr").unwrap(),
+        ExternalValue::Value(Value::integer(0))
+    );
+}
+#[test]
+fn spec005_replace_removes_old_procedures_before_the_replacement_starts() {
+    #[derive(Default)]
+    struct Replacing {
+        basic: BasicHost,
+        removed_before_launch: Option<bool>,
+    }
+    impl VmHost for Replacing {
+        fn launch(
+            &mut self,
+            _name: &[u8],
+            _mode: LaunchMode,
+            _parent: Option<u32>,
+            _critical: bool,
+        ) -> Result<u32, VmError> {
+            self.removed_before_launch = Some(self.basic.import_procedure(b"shared").is_err());
+            Ok(2)
+        }
+        fn remove_procedures(&mut self, owner: u32) -> Result<(), VmError> {
+            self.basic.remove_procedures(owner)
+        }
+    }
+    let mut host = Replacing::default();
+    host.basic.register_program(1, b"scripts/old.int");
+    host.basic.export_variable(1, b"kept").unwrap();
+    host.basic
+        .export_procedure(
+            b"shared",
+            ExportedProcedure {
+                owner: 1,
+                address: 0,
+                arguments: 0,
+            },
+        )
+        .unwrap();
+    let mut vm = fragment(&[fixture::assets::hex("90 01 00 00 00 06"), op(0x8009)].concat());
+    assert_eq!(vm.run(&mut host, 100).unwrap(), RunOutcome::Ended);
+    assert_eq!(host.removed_before_launch, Some(true));
+    assert!(host.basic.fetch_variable(b"kept").is_ok());
+}
+#[test]
+fn critical_instructions_do_not_count_against_the_budget_and_step_runs_one() {
+    // Enter critical, three no-ops, leave critical (uncounted), then two
+    // counted no-ops: a budget of 3 stops before the last one.
+    let code = [
+        op(0x8002),
+        op(0x8000),
+        op(0x8000),
+        op(0x8000),
+        op(0x8003),
+        op(0x8000),
+        op(0x8000),
+        op(0x8000),
+    ]
+    .concat();
+    let mut vm = fragment(&code);
+    let mut host = BasicHost::default();
+    assert_eq!(vm.run(&mut host, 3).unwrap(), RunOutcome::Budget);
+    assert_eq!(vm.pc, 14);
+    let mut vm = fragment(&code);
+    assert_eq!(vm.step(&mut host).unwrap(), RunOutcome::Budget);
+    assert_eq!(vm.pc, 2);
+    assert!(vm.status.contains(VmStatus::CRITICAL));
+    assert_eq!(vm.step(&mut host).unwrap(), RunOutcome::Budget);
+    assert_eq!(vm.pc, 4);
+}

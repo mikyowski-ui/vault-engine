@@ -689,8 +689,17 @@ impl<A: WorldAssets> WorldHost<A> {
         };
         profile.weapon = attack.weapon.clone();
         main.multiplier = 2;
-        main.rounds = 1;
-        main.damage = profile.round_damage(2, false, false, rng)? as i32;
+        // SPEC-007 §3.7 step 7: a spray's random-target damage takes the
+        // spray's scheduled ammunition as its round count.
+        main.rounds = match &attack.weapon {
+            Some(weapon) if random && spraying => weapon.rounds.min(weapon.burst).max(1),
+            _ => 1,
+        };
+        let mut damage = 0;
+        for _ in 0..main.rounds {
+            damage += profile.round_damage(2, false, false, rng)?;
+        }
+        main.damage = damage.min(i64::from(i32::MAX)) as i32;
         profile.finish(main);
         Ok((
             spray,

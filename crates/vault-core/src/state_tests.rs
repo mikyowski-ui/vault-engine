@@ -1126,9 +1126,13 @@ fn spec004_host_tick_fires_scheduled_procedures_and_launches_programs() {
     );
     host.tick(2100).unwrap();
     assert_ne!(host.programs[&77].program.procedures()[1].flags, 0);
+    // SPEC-006 §3.5: the slice runs the programs before the timed checks,
+    // so the procedure fired by one slice's check runs in the next slice.
+    host.tick(2101).unwrap();
+    assert_eq!(host.programs[&77].program.procedures()[1].flags, 0);
+    assert!(!host.programs[&77].status.contains(VmStatus::ENDED));
     host.tick(2101).unwrap();
     let vm = &host.programs[&77];
-    assert_eq!(vm.program.procedures()[1].flags, 0);
     assert!(vm.status.contains(VmStatus::ENDED));
     assert_eq!(
         (vm.return_stack.byte_len(), vm.value_stack.byte_len()),

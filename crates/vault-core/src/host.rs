@@ -19,12 +19,15 @@ use vault_vm::{
 };
 
 pub(crate) type HostResult = Result<Option<ExternalValue>, VmError>;
+/// SPEC-006 §3.5 the per-program budget of a script's first time slice.
+const FIRST_REQUEST_BUDGET: u32 = 5000;
 
 /// An observer of script execution: a debugger's live instruction trace.
 /// While one is attached to a host, its scripts run one instruction per
-/// `Vm::run` call (the same scheduling as larger budgets) and every step is
-/// reported before and after it executes. Nested script runs are reported
-/// too; the observer is never held across a step.
+/// `Vm::step` call (the same scheduling as larger budgets) and every step is
+/// reported before and after it executes: requested procedures, the time
+/// slice and the condition streams of conditional procedures. Nested script
+/// runs are reported too; the observer is never held across a step.
 pub trait VmObserver: Send {
     fn before_step(&mut self, vm: &Vm);
     fn after_step(&mut self, vm: &Vm, result: &Result<RunOutcome, VmError>);
@@ -121,6 +124,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// An interaction's approach has just ended: its action runs as the
     /// sequence's proximity step (SPEC-013 §3.2), not a new approach.
     pub(crate) arriving: bool,
+    /// SPEC-005 0x80F9: a dialogue-entry request for this object, serviced
+    /// by the next tick outside the running script.
+    pub(crate) pending_dialogue: Option<ObjectRef>,
     /// A debugger's live trace of script execution, when attached.
     pub vm_observer: Option<std::sync::Arc<std::sync::Mutex<dyn VmObserver>>>,
     /// Presentation-only draws (a dead critter's look-at line), apart from
@@ -278,6 +284,7 @@ impl<A: WorldAssets> WorldHost<A> {
             transition_world_map: false,
             presentation: None,
             arriving: false,
+            pending_dialogue: None,
             vm_observer: None,
             presentation_rng: crate::ParkMiller::seeded(1).expect("a positive seed"),
             music_enabled: true,
@@ -338,16 +345,31 @@ impl<A: WorldAssets> WorldHost<A> {
     /// A campaign initializer that opens replaces the array (a missing marker
     /// yields an empty array); an open failure reports failure and leaves any
     /// prior array intact.
+    /// The failure is also a world diagnostic: without the array every
+    /// `global_var` read gives -1 (SPEC-005 0x80C5), so play would go on
+    /// with campaign flags reading as set.
     pub fn load_campaign(&mut self) -> Result<(), WorldError> {
         self.world.trace.push(WorldTrace::InventoryRefresh);
         let gam = self
             .assets
-            .gam("data/vault13.gam", GamSection::Campaign)?
-            .ok_or_else(|| {
-                WorldError::Invalid("campaign initializer data/vault13.gam did not open".into())
-            })?;
-        self.world.gvars = Some(gam.values);
-        Ok(())
+            .gam("data/vault13.gam", GamSection::Campaign)
+            .and_then(|gam| {
+                gam.ok_or_else(|| {
+                    WorldError::Invalid("campaign initializer data/vault13.gam did not open".into())
+                })
+            });
+        match gam {
+            Ok(gam) => {
+                self.world.gvars = Some(gam.values);
+                Ok(())
+            }
+            Err(error) => {
+                self.world.diagnostic(format!(
+                    "campaign globals unavailable, every global_var reads -1: {error}"
+                ));
+                Err(error)
+            }
+        }
     }
     /// SPEC-014 §3.35 leaving a map, before another loads or the town or
     /// world map opens: every animation stops; the map-exit handlers and
@@ -397,10 +419,25 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.rendering_enabled = false;
         self.world.scripts_enabled = false;
         self.world.map_script = None;
+        // SPEC-006 §3.5 step 1: a dialogue still open ends with the map, so
+        // nothing calls back into the left map's programs.
+        if self.world.dialogue.open {
+            self.world.dialogue.pending_barter = false;
+            self.world.dialogue.options.clear();
+            self.world.dialogue.waiting = false;
+            self.world.dialogue.depth = 0;
+            self.end_session();
+        }
+        self.world.dialogue.talking = false;
+        self.world.dialogue.target = 0;
+        self.pending_dialogue = None;
         for program in self.programs.keys().copied().collect::<Vec<_>>() {
             self.registry.purge(program)?;
             self.library.cleanup(program);
         }
+        // SPEC-005 §2.2 / SPEC-006 §3.5 step 2: every program is freed and
+        // the whole exported-variable registry is cleared, all owners.
+        self.registry.clear();
         self.programs.clear();
         self.program_scripts.clear();
         // Nothing queued for the left map's programs may run against the
@@ -694,6 +731,16 @@ impl<A: WorldAssets> WorldHost<A> {
             .and_then(|instance| self.programs.get(&instance.program))
             .is_some_and(|vm| vm.program.find_procedure(event.name(), true).is_some())
     }
+    /// SPEC-006 §3.5 the generic dispatcher. Every request stores its
+    /// SPEC-004 §3.7 event number as the instance's action code before the
+    /// program is loaded or entered; the code is not reset afterwards. A
+    /// script instance without a loaded program takes the first-request
+    /// path: its `.INT` is loaded (a failure fails the request with nothing
+    /// run, and the next request tries again), added to the run list and
+    /// given one VM time slice at the raised budget, which runs its initial
+    /// stream (in corpus files the `start` body); the requested procedure is
+    /// not called separately. Later requests call the cached procedure
+    /// synchronously, a missing one falling back to procedure index 1.
     pub fn dispatch(&mut self, request: ScriptRequest) -> Result<DispatchResult, WorldError> {
         if !self.world.scripts_enabled {
             return Ok(DispatchResult::default());
@@ -723,8 +770,57 @@ impl<A: WorldAssets> WorldHost<A> {
         {
             return Ok(DispatchResult::default());
         }
-        let mut vm = if !instance.initialized {
-            let (filename, program) = self.assets.program(instance.file)?;
+        // Map broadcasts test for a present procedure before requesting it.
+        let procedure = if instance.initialized {
+            let vm = self
+                .programs
+                .get(&instance.program)
+                .ok_or_else(|| WorldError::Invalid("script program unavailable".into()))?;
+            let procedure = vm.program.find_procedure(request.event.name(), true);
+            if request.only_present && procedure.is_none() {
+                return Ok(DispatchResult::default());
+            }
+            procedure
+        } else {
+            None
+        };
+        let target = if request.target == 0 {
+            instance.owner
+        } else {
+            request.target
+        };
+        let script = self.world.scripts.get_mut(&instance.id).expect("script");
+        script.overridden = false;
+        script.event = request.event.code();
+        script.source = request.source;
+        script.target = target;
+        script.fixed = request.fixed;
+        script.action = request.action;
+        let first = if instance.initialized {
+            None
+        } else {
+            match self.assets.program(instance.file) {
+                Ok(loaded) => Some(loaded),
+                Err(error) => {
+                    if let Some(script) = self.world.scripts.get_mut(&instance.id) {
+                        script.source = 0;
+                    }
+                    return Err(error);
+                }
+            }
+        };
+        self.world.trace.push(WorldTrace::Script {
+            id: instance.id,
+            event: request.event,
+            source: request.source,
+            target,
+            fixed: request.fixed,
+            player_light: self
+                .world
+                .get(self.world.player)
+                .map_or(0, |p| p.raw.light.intensity),
+        });
+        let pending = if let Some((filename, program)) = first {
             let mut vm = Vm::new(program);
             reserve_null_string(&mut vm)?;
             vm.id = self.next_program;
@@ -737,57 +833,32 @@ impl<A: WorldAssets> WorldHost<A> {
             let script = self.world.scripts.get_mut(&instance.id).expect("script");
             script.program = vm.id;
             script.initialized = true;
-            vm
+            let id = vm.id;
+            self.programs.insert(id, vm);
+            // SPEC-006 §3.5 first request, item 4: one time slice for the
+            // whole run list at the raised budget; the rest of an unfinished
+            // first run continues in later slices at the normal budget.
+            self.time_slice(FIRST_REQUEST_BUDGET);
+            self.programs.get(&id).is_some_and(|vm| {
+                vm.status.0 & (VmStatus::WAITING | VmStatus::ATTACHED | VmStatus::SPAWN_BLOCKED)
+                    != 0
+            })
         } else {
-            self.programs
+            let mut vm = self
+                .programs
                 .remove(&instance.program)
-                .ok_or_else(|| WorldError::Invalid("script program unavailable".into()))?
-        };
-        let procedure = vm.program.find_procedure(request.event.name(), true);
-        if instance.initialized && request.only_present && procedure.is_none() {
+                .ok_or_else(|| WorldError::Invalid("script program unavailable".into()))?;
+            let run = vm
+                .prepare_host_call(procedure.filter(|index| *index != 0).unwrap_or(1), true)
+                .and_then(|_| self.run_vm(&mut vm));
+            let pending = matches!(run, Ok(RunOutcome::Blocked | RunOutcome::Waiting));
+            if let Err(error) = run {
+                self.world
+                    .diagnostic(format!("script {}: {error}", instance.file));
+            }
             self.programs.insert(vm.id, vm);
-            return Ok(DispatchResult::default());
-        }
-        let target = if request.target == 0 {
-            instance.owner
-        } else {
-            request.target
+            pending
         };
-        let event = request
-            .event
-            .documented_code()
-            .or_else(|| self.world.rules.event_codes.get(&request.event).copied())
-            .unwrap_or(0);
-        let script = self.world.scripts.get_mut(&instance.id).expect("script");
-        script.overridden = false;
-        script.event = event;
-        script.source = request.source;
-        script.target = target;
-        script.fixed = request.fixed;
-        script.action = request.action;
-        self.world.trace.push(WorldTrace::Script {
-            id: instance.id,
-            event: request.event,
-            source: request.source,
-            target,
-            fixed: request.fixed,
-            player_light: self
-                .world
-                .get(self.world.player)
-                .map_or(0, |p| p.raw.light.intensity),
-        });
-        let preparation = if instance.initialized {
-            vm.prepare_host_call(procedure.filter(|index| *index != 0).unwrap_or(1), true)
-        } else {
-            Ok(())
-        };
-        let run = preparation.and_then(|_| self.run_vm(&mut vm));
-        let pending = matches!(run, Ok(RunOutcome::Blocked | RunOutcome::Waiting));
-        if let Err(error) = run {
-            self.world
-                .diagnostic(format!("script {}: {error}", instance.file));
-        }
-        self.programs.insert(vm.id, vm);
         let result =
             self.world
                 .scripts
@@ -805,35 +876,16 @@ impl<A: WorldAssets> WorldHost<A> {
     fn run_vm(&mut self, vm: &mut Vm) -> Result<RunOutcome, VmError> {
         self.active.insert(vm.id);
         let mut outcome = Err(VmError::InstructionLimit);
-        match self.vm_observer.clone() {
+        if self.vm_observer.is_some() {
             // The same total budget, one observed instruction at a time.
-            Some(observer) => {
-                let lock = || {
-                    observer
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                };
-                for _ in 0..1_000_000 {
-                    lock().before_step(vm);
-                    let result = vm.run(self, 1);
-                    lock().after_step(vm, &result);
-                    match result {
-                        Ok(RunOutcome::Budget) => {}
-                        result => {
-                            outcome = result;
-                            break;
-                        }
-                    }
-                }
-            }
-            None => {
-                for _ in 0..1000 {
-                    match vm.run(self, 1000) {
-                        Ok(RunOutcome::Budget) => {}
-                        result => {
-                            outcome = result;
-                            break;
-                        }
+            outcome = self.observed_run(vm, u32::MAX, 1_000_000);
+        } else {
+            for _ in 0..1000 {
+                match vm.run(self, 1000) {
+                    Ok(RunOutcome::Budget) => {}
+                    result => {
+                        outcome = result;
+                        break;
                     }
                 }
             }
@@ -844,13 +896,51 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         outcome
     }
+    /// Run `vm` for `budget` counted instructions (critical ones do not
+    /// count), one instruction at a time while an observer is attached,
+    /// reporting each step to it; at most `limit` observed steps.
+    fn observed_run(
+        &mut self,
+        vm: &mut Vm,
+        budget: u32,
+        limit: u32,
+    ) -> Result<RunOutcome, VmError> {
+        let Some(observer) = self.vm_observer.clone() else {
+            return vm.run(self, budget);
+        };
+        let lock = || {
+            observer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let mut counted = 0;
+        for _ in 0..limit {
+            let critical = vm.status.contains(VmStatus::CRITICAL);
+            if counted >= budget && !critical {
+                return Ok(RunOutcome::Budget);
+            }
+            lock().before_step(vm);
+            let result = vm.step(self);
+            lock().after_step(vm, &result);
+            match result {
+                Ok(RunOutcome::Budget) => {
+                    if !critical {
+                        counted += 1;
+                    }
+                }
+                result => return result,
+            }
+        }
+        Err(VmError::InstructionLimit)
+    }
     /// A program's run ended in an error. The program is faulted (ended with
-    /// the error bit), so a run that exhausted the host's instruction budget
-    /// is never resumed mid-procedure by `update_programs` or stacked on by
-    /// `poll_scheduled`: the budget is the `[May-improve]` safe bound on a
-    /// runaway script (SPEC-004 §3.3 makes a budget boundary alone no
-    /// termination, so the choice is the fault, not a pending request). A
-    /// registration the program left open is dropped (SPEC-005 0x810E).
+    /// the error bit), and the time slice skips a faulted program, so a run
+    /// that exhausted the host's instruction budget is never resumed
+    /// mid-procedure or revived by a timed or conditional procedure: the
+    /// budget is the `[May-improve]` safe bound on a runaway script (SPEC-004
+    /// §3.3 makes a budget boundary alone no termination, so the choice is
+    /// the fault, not a pending request). A registration the program left
+    /// open is dropped (SPEC-005 0x810E).
     fn program_faulted(&mut self, vm: &mut Vm, error: &VmError) {
         vm.status.0 |= VmStatus::ENDED | VmStatus::ERROR;
         if self.building_program == Some(vm.id) {
@@ -1125,41 +1215,65 @@ impl<A: WorldAssets> WorldHost<A> {
         // Each pass's nonzero stop only ends that pass; time still advances.
         self.process_queue().map(|_| ())
     }
-    /// SPEC-004 interpreter pass: each loaded program, in identifier order,
-    /// polls its timed/conditional procedures (firing at most one, as a
-    /// deferred host call) and then runs its ordinary ten-instruction budget.
-    /// Programs blocked on a child or a wait predicate do not advance here;
-    /// ended/stopped flows stay ended unless a deferred call was prepared.
+    /// SPEC-006 §3.7 script-task step 1: the VM's time slice at the normal
+    /// budget, then the requests it deferred.
     pub fn update_programs(&mut self) -> Result<(), WorldError> {
-        for id in self.programs.keys().copied().collect::<Vec<_>>() {
-            if self.active.contains(&id) {
-                continue;
-            }
-            let Some(mut vm) = self.programs.remove(&id) else {
-                continue;
-            };
-            if vm
-                .status
-                .contains(VmStatus::ATTACHED | VmStatus::SPAWN_BLOCKED)
-            {
-                self.programs.insert(id, vm);
-                continue;
-            }
-            self.active.insert(id);
-            let result = if vm.status.contains(VmStatus::WAITING) {
-                vm.update(self).map(|_| ())
-            } else {
-                vm.poll_scheduled(self, u32::MAX)
-                    .and_then(|_| vm.update(self))
-                    .map(|_| ())
-            };
-            self.active.remove(&id);
-            self.programs.insert(id, vm);
-            if let Err(error) = result {
-                self.world.diagnostic(format!("program {id}: {error}"));
-            }
-        }
+        self.time_slice(10);
         self.drain_requests()
+    }
+    /// One SPEC-004 VM time slice (SPEC-006 §3.5 first request, item 4):
+    /// every program in the run list, newest first, runs `budget`
+    /// instructions (instructions executed while critical do not count);
+    /// then every program's timed and conditional procedures are checked
+    /// (firing at most one each, as a deferred call that runs in a later
+    /// slice); then the library's named-event callbacks are collected.
+    /// Programs a VM error ended (SPEC-004 §3.8), programs blocked on a
+    /// child, and programs already running are skipped; a waiting program
+    /// only has its wait checked.
+    fn time_slice(&mut self, budget: u32) {
+        let ids: Vec<_> = self.programs.keys().rev().copied().collect();
+        let skipped = |vm: &Vm| {
+            vm.status
+                .contains(VmStatus::ERROR | VmStatus::ATTACHED | VmStatus::SPAWN_BLOCKED)
+        };
+        for id in &ids {
+            if self.active.contains(id) {
+                continue;
+            }
+            let Some(mut vm) = self.programs.remove(id) else {
+                continue;
+            };
+            if !skipped(&vm) {
+                self.active.insert(*id);
+                let limit = vm.hard_instruction_limit;
+                let result = self.observed_run(&mut vm, budget, limit);
+                self.active.remove(id);
+                if let Err(error) = result {
+                    self.program_faulted(&mut vm, &error);
+                    self.world.diagnostic(format!("program {id}: {error}"));
+                }
+            }
+            self.programs.insert(*id, vm);
+        }
+        for id in &ids {
+            if self.active.contains(id) {
+                continue;
+            }
+            let Some(mut vm) = self.programs.remove(id) else {
+                continue;
+            };
+            if !skipped(&vm) && !vm.status.contains(VmStatus::WAITING) {
+                self.active.insert(*id);
+                let result = vm.poll_scheduled(self, u32::MAX);
+                self.active.remove(id);
+                if let Err(error) = result {
+                    self.program_faulted(&mut vm, &error);
+                    self.world.diagnostic(format!("program {id}: {error}"));
+                }
+            }
+            self.programs.insert(*id, vm);
+        }
+        self.callbacks.extend(self.library.callbacks());
     }
     pub fn tick(&mut self, now_ms: u64) -> Result<bool, WorldError> {
         self.world.elapsed_ms = now_ms;
@@ -1197,7 +1311,6 @@ impl<A: WorldAssets> WorldHost<A> {
         // processing on) and no dialogue, one critter-script cycle step and
         // then the background clock checker.
         self.update_programs()?;
-        self.callbacks.extend(self.library.callbacks());
         if self.world.scripts_enabled && self.world.background_enabled && !self.world.dialogue.open
         {
             self.critter_cycle_step()?;
@@ -1255,8 +1368,13 @@ impl<A: WorldAssets> WorldHost<A> {
             self.library.release_named(program, procedure);
             changed = true;
         }
-        // SPEC-013 §3.22: a pending transition runs in the main loop.
-        if self.process_transition()? {
+        // SPEC-005 0x80F9: a script's dialogue-entry request.
+        if self.service_dialogue_request()? {
+            changed = true;
+        }
+        // SPEC-013 §3.22: a pending transition runs in the main loop; one
+        // requested during a dialogue waits for the dialogue to close.
+        if !self.world.dialogue.open && self.process_transition()? {
             changed = true;
         }
         // SPEC-013 §3.10: the request pass services a scripted explosion.
@@ -1319,9 +1437,10 @@ impl<A: WorldAssets> WorldHost<A> {
                     |value| (value.text, value.sound),
                 ))
             }
-            _ => Err(WorldError::Invalid(
-                "invalid dialogue message selectors".into(),
-            )),
+            // SPEC-005 §3.3 [May-improve]: any other nonpositive list
+            // number is missing text, which reads `Error` like a missing
+            // message.
+            DialogueText::Message { .. } => Ok((b"Error".to_vec(), Vec::new())),
         }
     }
     pub(crate) fn realize_dialogue(&mut self) -> Result<(), WorldError> {
@@ -1624,47 +1743,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.print_game("misc.msg", 2000, &[]);
                 return Ok(());
             }
-            // Dialogue entry: tile-distance limit 12 and a reachability path.
-            let reachable = match (
-                self.world.get(actor).and_then(|o| o.raw.hex),
-                self.world.get(target).and_then(|o| o.raw.hex),
-            ) {
-                (Some(from), Some(to)) => !self.world.route(actor, from, to, false).is_empty(),
-                _ => false,
-            };
-            if self.world.distance(actor, target) > 12 || !reachable {
-                return Err(WorldError::Invalid(
-                    "talk target is beyond 12 tiles or unreachable".into(),
-                ));
-            }
-            let sid = self
-                .world
-                .script_for(target)
-                .ok_or_else(|| WorldError::Invalid("target has no dialogue script".into()))?;
-            self.world.background_enabled = false;
-            self.world.dialogue.target = target;
-            // SPEC-006 §3.9: the talk session runs from here, before
-            // `talk_p_proc`, until the talk returns: at once when no
-            // dialogue opened, else when the dialogue closes.
-            self.world.dialogue.talking = true;
-            let dispatched = self.dispatch(ScriptRequest {
-                script: sid,
-                event: ScriptEvent::Talk,
-                source: 0,
-                target: 0,
-                fixed: 0,
-                action: -1,
-                only_present: false,
-            });
-            if !self.world.dialogue.open {
-                self.world.dialogue.talking = false;
-            }
-            dispatched?;
-            if !self.world.dialogue.open {
-                self.world.background_enabled = true;
-                self.map_update()?;
-            }
-            return Ok(());
+            return self.enter_dialogue(actor, target);
         }
         if let ObjectAction::UseObject(item) = action {
             if self
@@ -1819,6 +1898,83 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.emit(WorldEffect::Message(text.into_bytes()));
         }
         self.drain_requests()
+    }
+    /// SPEC-006 §3.8 dialogue entry with `target`: refused in combat or
+    /// for a target without a script; an ordinary target must also be
+    /// within tile distance 12 of `actor` with a reachability path. Map
+    /// background activity is suspended, the session target is set and
+    /// the talk event is requested from the target's script; when no
+    /// dialogue opened, background activity resumes and the map updates.
+    fn enter_dialogue(&mut self, actor: ObjectRef, target: ObjectRef) -> Result<(), WorldError> {
+        if self.world.combat {
+            return Err(WorldError::Invalid(
+                "dialogue entry refused in combat".into(),
+            ));
+        }
+        // Dialogue entry: tile-distance limit 12 and a reachability path.
+        let reachable = match (
+            self.world.get(actor).and_then(|o| o.raw.hex),
+            self.world.get(target).and_then(|o| o.raw.hex),
+        ) {
+            (Some(from), Some(to)) => !self.world.route(actor, from, to, false).is_empty(),
+            _ => false,
+        };
+        if self.world.distance(actor, target) > 12 || !reachable {
+            return Err(WorldError::Invalid(
+                "talk target is beyond 12 tiles or unreachable".into(),
+            ));
+        }
+        let sid = self
+            .world
+            .script_for(target)
+            .ok_or_else(|| WorldError::Invalid("target has no dialogue script".into()))?;
+        self.world.background_enabled = false;
+        self.world.dialogue.target = target;
+        // SPEC-006 §3.9: the talk session runs from here, before
+        // `talk_p_proc`, until the talk returns: at once when no
+        // dialogue opened, else when the dialogue closes.
+        self.world.dialogue.talking = true;
+        let dispatched = self.dispatch(ScriptRequest {
+            script: sid,
+            event: ScriptEvent::Talk,
+            source: 0,
+            target: 0,
+            fixed: 0,
+            action: -1,
+            only_present: false,
+        });
+        if !self.world.dialogue.open {
+            self.world.dialogue.talking = false;
+        }
+        dispatched?;
+        if !self.world.dialogue.open {
+            self.world.background_enabled = true;
+            self.map_update()?;
+        }
+        Ok(())
+    }
+    /// SPEC-005 0x80F9 and §3.3: the dialogue game state a script requested
+    /// with `dialogue_system_enter` is entered here, outside the requesting
+    /// program, through the talk entry of the player's talk action. A
+    /// request made stale by combat, an open dialogue or the target's death
+    /// is dropped; a refused entry is diagnosed. Returns whether a dialogue
+    /// entry ran.
+    pub(crate) fn service_dialogue_request(&mut self) -> Result<bool, WorldError> {
+        let Some(target) = self.pending_dialogue.take() else {
+            return Ok(false);
+        };
+        if self.world.combat
+            || self.world.dialogue.open
+            || self.world.get(target).is_none_or(|object| !object.alive())
+        {
+            return Ok(false);
+        }
+        let player = self.world.player;
+        if let Err(error) = self.enter_dialogue(player, target) {
+            self.world
+                .diagnostic(format!("dialogue_system_enter: {error}"));
+        }
+        Ok(true)
     }
     /// SPEC-007 §3.11.3 using an item on a target runs as the scenery use
     /// sequence, whose use callback is [`Self::use_item_stage`].
@@ -2015,6 +2171,25 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
         self.registry.purge(id)?;
         self.library.cleanup(id);
         Ok(())
+    }
+    fn remove_procedures(&mut self, owner: u32) -> Result<(), VmError> {
+        self.registry.remove_procedures(owner)
+    }
+    fn observe_before(&mut self, vm: &Vm) {
+        if let Some(observer) = &self.vm_observer {
+            observer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .before_step(vm);
+        }
+    }
+    fn observe_after(&mut self, vm: &Vm, result: &Result<RunOutcome, VmError>) {
+        if let Some(observer) = &self.vm_observer {
+            observer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .after_step(vm, result);
+        }
     }
     /// SPEC-004 0x8008-0x800B: start a fresh program image (no stack cloning).
     /// The interpreter pass runs its bootstrap; the VM blocks an attached or

@@ -43,6 +43,10 @@ pub enum ScriptEvent {
     Combat,
     Damage,
     Destroy,
+    /// An item dropped from inventory to the map.
+    Drop,
+    /// Never requested by the host (SPEC-004 §3.7).
+    Create,
 }
 impl ScriptEvent {
     pub fn name(self) -> &'static [u8] {
@@ -64,21 +68,33 @@ impl ScriptEvent {
             Self::Combat => b"combat_p_proc",
             Self::Damage => b"damage_p_proc",
             Self::Destroy => b"destroy_p_proc",
+            Self::Drop => b"drop_p_proc",
+            Self::Create => b"create_p_proc",
         }
     }
-    pub fn documented_code(self) -> Option<i32> {
+    /// SPEC-004 §3.7 the host event number a request stores as the
+    /// instance's action code (`script_action`, SPEC-005 0x80C7).
+    pub fn code(self) -> i32 {
         match self {
-            Self::Start => Some(1),
-            Self::MapEnter => Some(15),
-            Self::MapUpdate => Some(23),
-            Self::LookAt => Some(21),
-            Self::Description => Some(3),
-            Self::Use => Some(6),
-            Self::UseSkill => Some(8),
-            Self::UseObject => Some(7),
-            Self::Pickup => Some(4),
-            Self::Talk => Some(11),
-            _ => None,
+            Self::Start => 1,
+            Self::Spatial => 2,
+            Self::Description => 3,
+            Self::Pickup => 4,
+            Self::Drop => 5,
+            Self::Use => 6,
+            Self::UseObject => 7,
+            Self::UseSkill => 8,
+            Self::Talk => 11,
+            Self::Critter => 12,
+            Self::Combat => 13,
+            Self::Damage => 14,
+            Self::MapEnter => 15,
+            Self::MapExit => 16,
+            Self::Create => 17,
+            Self::Destroy => 18,
+            Self::LookAt => 21,
+            Self::Timed => 22,
+            Self::MapUpdate => 23,
         }
     }
 }
@@ -287,7 +303,6 @@ pub struct WorldRules {
     /// Weapon-perk overrides; SPEC-011 §3.22 numbers 58-61 apply otherwise.
     pub weapon_perks: BTreeMap<i32, WeaponPerk>,
     pub reputation_globals: Option<ReputationGlobals>,
-    pub event_codes: BTreeMap<ScriptEvent, i32>,
     /// Money PID override; SPEC-011 §3.16 PID 41 applies otherwise.
     pub currency_pid: Option<u32>,
     pub doctor_bag_pid: Option<u32>,
