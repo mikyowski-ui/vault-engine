@@ -423,7 +423,9 @@ fn spec013_fixture_c_explosive_timers_and_detonation() {
         .unwrap();
     host.skill_map_exit().unwrap();
     assert!(host.world.get(carried).is_none());
-    assert!(messages(&mut host).is_empty());
+    // Only the blast's own combat line (SPEC-007 §3.12; this fixture's
+    // `combat.msg` lacks its wording) prints.
+    assert!(messages(&mut host).iter().all(|line| line != "premature"));
 }
 
 #[test]

@@ -16,6 +16,10 @@ impl VmStatus {
     pub const YIELD: u16 = 0x40;
     pub const CRITICAL: u16 = 0x80;
     pub const SPAWN_BLOCKED: u16 = 0x100;
+    /// SPEC-005 §3.2 self-stop: the same bit as [`Self::SPAWN_BLOCKED`],
+    /// set by a game opcode that kills, destroys or damages the running
+    /// script's own object. It is never cleared for a top-level program.
+    pub const SELF_STOPPED: u16 = 0x100;
     pub fn contains(self, flag: u16) -> bool {
         self.0 & flag != 0
     }
@@ -83,6 +87,17 @@ impl Vm {
             interned: BTreeMap::new(),
             string_bytes: 0,
         }
+    }
+    /// SPEC-005 §3.2: a host game opcode stopped this program for good. The
+    /// bit is the spawn wait bit; a program waiting on a spawned child has
+    /// that child, a self-stopped one has none.
+    pub fn self_stopped(&self) -> bool {
+        self.status.contains(VmStatus::SELF_STOPPED) && self.child.is_none()
+    }
+    /// SPEC-005 §3.2: stop this program at the next instruction boundary,
+    /// with nothing unwound; it runs nothing until it is freed.
+    pub fn stop_self(&mut self) {
+        self.status.0 |= VmStatus::SELF_STOPPED;
     }
     /// Isolated instruction harness, retaining the supplied program's metadata and
     /// literal tables. Reaching the fragment end is an explicit successful boundary.

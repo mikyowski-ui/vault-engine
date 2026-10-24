@@ -96,6 +96,8 @@ impl WorldAssets for Scripts {
 fn host(map: MapFile) -> WorldHost<Scripts> {
     let mut world = WorldState::new(CharacterSheet::default(), 1).unwrap();
     world.gvars = Some(vec![0; 4]);
+    // Only the records these tests make are in the critter stream.
+    world.drop_player_script();
     WorldHost::new(world, Scripts::new(map))
 }
 /// A scripted critter at `hex` on `elevation`.

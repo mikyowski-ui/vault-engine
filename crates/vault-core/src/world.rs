@@ -21,6 +21,29 @@ use vault_formats::{
 };
 
 pub type ObjectRef = u32;
+
+/// SPEC-006 §3.5 the party marks of a script record: "not saved with the
+/// map" (script-instance flag `0x08`, SPEC-003 §2.9) and "kept by script
+/// removal" (`0x10`).
+pub mod party_marks {
+    pub const NOT_SAVED: u32 = 0x08;
+    pub const KEPT: u32 = 0x10;
+    pub const BOTH: u32 = NOT_SAVED | KEPT;
+}
+/// SPEC-006 §3.5 step 7: a recovered party record's identifier is
+/// `(PID & 0xFFFFFF) + 18000` in the critter category.
+pub const PARTY_SCRIPT_BASE: u32 = 18000;
+/// SPEC-006 §3.5 the player script: `scripts.lst` entry 0, no locals.
+pub const PLAYER_SCRIPT_FILE: i32 = 0;
+
+/// A party member's script record copied when a map is left (SPEC-006
+/// §3.5 step 1), with its local-variable values, until step 7 recovers it.
+#[derive(Debug, Clone)]
+pub(crate) struct CarriedScript {
+    pub member: ObjectRef,
+    pub record: ScriptInstance,
+    pub locals: Option<Vec<i32>>,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ScriptEvent {
     Start,
@@ -657,6 +680,13 @@ pub struct WorldState {
     /// stream's last record into the freed slot (SPEC-006 §3.7).
     pub script_order: Vec<ScriptSlot>,
     pub map_script: Option<u32>,
+    /// SPEC-006 §3.5 the party records copied on leaving a map, waiting
+    /// for step 7 of the next map load.
+    pub(crate) party_scripts: Vec<CarriedScript>,
+    /// The records the last map import read with an object identifier,
+    /// by record: a saved map's copy of the player record names the player
+    /// this way, as no object of the map binds it (SPEC-006 §3.5).
+    pub(crate) record_objects: Vec<(u32, i32)>,
     pub requests: VecDeque<ScriptRequest>,
     pub clock: WorldClock,
     pub queue: TimedQueue,
@@ -873,6 +903,8 @@ impl WorldState {
             scripts: BTreeMap::new(),
             script_order: Vec::new(),
             map_script: None,
+            party_scripts: Vec::new(),
+            record_objects: Vec::new(),
             requests: VecDeque::new(),
             clock: WorldClock::default(),
             queue: TimedQueue::default(),
@@ -981,7 +1013,182 @@ impl WorldState {
             active: true,
             opponent: 0,
         })?;
+        world.create_player_script()?;
         Ok(())
+    }
+    /// SPEC-006 §3.5 the player's script record, created from nothing (at
+    /// program start, for a new game, at a game reset, and for a loaded
+    /// player): a new critter-category instance of `scripts.lst` entry 0
+    /// with no loaded program, action code 0, no local slice and no timers,
+    /// carrying both party marks.
+    pub fn create_player_script(&mut self) -> Result<u32, WorldError> {
+        let sid = self.add_script(self.player, PLAYER_SCRIPT_FILE, 4, 0)?;
+        let script = self.scripts.get_mut(&sid).expect("added script");
+        script.flags |= party_marks::BOTH;
+        Ok(sid)
+    }
+    /// Tests about other critter records leave the player's out of the
+    /// critter stream and the cycle.
+    #[cfg(test)]
+    pub(crate) fn drop_player_script(&mut self) {
+        if let Some(sid) = self.script_for(self.player) {
+            self.remove_script(sid);
+        }
+        if let Some(player) = self.get_mut(self.player) {
+            player.raw.script_id = -1;
+        }
+    }
+    /// The party: the player (party member 0) and the other members.
+    pub fn party_members(&self) -> Vec<ObjectRef> {
+        std::iter::once(self.player)
+            .chain(self.party.iter().copied().filter(|m| *m != self.player))
+            .collect()
+    }
+    /// The script records of the party members, in member order.
+    pub fn party_records(&self) -> Vec<u32> {
+        self.party_members()
+            .into_iter()
+            .filter_map(|member| self.script_for(member))
+            .collect()
+    }
+    /// SPEC-006 §3.5 saving a game: the party records lose their marks, so
+    /// they are written with the map's other scripts, and get them back
+    /// afterwards (`marked` false, then true).
+    pub fn set_party_marks(&mut self, marked: bool) {
+        for sid in self.party_records() {
+            if let Some(script) = self.scripts.get_mut(&sid) {
+                if marked {
+                    script.flags |= party_marks::BOTH;
+                } else {
+                    script.flags &= !party_marks::BOTH;
+                }
+            }
+        }
+    }
+    /// SPEC-006 §3.5 leaving a map (step 1): each party member's record and
+    /// local values are copied, its marks cleared, and the instance removed
+    /// in the ordinary way, cancelling its owner's script timers. The
+    /// member keeps no script reference until step 7.
+    fn carry_party_scripts(&mut self) {
+        for member in self.party_members() {
+            let Some(sid) = self.script_for(member) else {
+                continue;
+            };
+            let record = self.scripts.get(&sid).cloned().expect("member script");
+            let locals = usize::try_from(record.local_base)
+                .ok()
+                .and_then(|base| self.lvars.get(base..base.checked_add(record.local_count)?))
+                .map(<[i32]>::to_vec);
+            if let Some(script) = self.scripts.get_mut(&sid) {
+                script.flags &= !party_marks::BOTH;
+            }
+            self.remove_script(sid);
+            self.queue.retain(|event| {
+                !matches!(event.kind, EventKind::Script { script, .. }
+                    if script == sid || event.object == member)
+            });
+            if let Some(object) = self.get_mut(member) {
+                object.raw.script_id = -1;
+            }
+            self.party_scripts.push(CarriedScript {
+                member,
+                record,
+                locals,
+            });
+        }
+    }
+    /// SPEC-006 §3.5 step 7: each copied party record becomes a new
+    /// critter-category instance with identifier `(PID & 0xFFFFFF) + 18000`
+    /// (18000 for the player), keeping its action code, fixed parameter,
+    /// flags and other words. It has no loaded program and has not run,
+    /// carries both marks again and gets a fresh local slice for the saved
+    /// values; it joins the end of the critter stream, after the map's own
+    /// records. A taken identifier (two members of one PID, or a game
+    /// load's saved copy of the player record, which the load then removes)
+    /// moves on to the next free one, so records never alias.
+    pub(crate) fn recover_party_scripts(&mut self) -> Result<(), WorldError> {
+        for carried in std::mem::take(&mut self.party_scripts) {
+            let CarriedScript {
+                member,
+                mut record,
+                locals,
+            } = carried;
+            let Some(pid) = self.get(member).map(|object| object.raw.pid) else {
+                continue;
+            };
+            let number = ((pid & 0x00ff_ffff) + PARTY_SCRIPT_BASE) & 0x00ff_ffff;
+            let wanted = (4 << 24) | number;
+            let id = if self.scripts.contains_key(&wanted) {
+                (number..0x0100_0000)
+                    .chain(1..number)
+                    .map(|n| (4 << 24) | n)
+                    .find(|id| !self.scripts.contains_key(id))
+                    .ok_or(WorldError::Arithmetic)?
+            } else {
+                wanted
+            };
+            record.id = id;
+            record.owner = member;
+            record.initialized = false;
+            record.program = 0;
+            record.source = 0;
+            record.target = member;
+            record.flags |= party_marks::BOTH;
+            match locals {
+                Some(values) => {
+                    record.local_base = self.lvars.len() as i32;
+                    record.local_count = values.len();
+                    self.lvars.extend(values);
+                }
+                None => record.local_base = -1,
+            }
+            self.scripts.insert(id, record);
+            self.append_script(id);
+            if let Some(object) = self.get_mut(member) {
+                object.raw.script_id = id as i32;
+            }
+        }
+        Ok(())
+    }
+    /// SPEC-006 §3.5 loading a game: the record the loaded player names
+    /// (`saved`; `SAVE.DAT` stores -1 there, SPEC-008 §2.5), the copy the
+    /// saved map restored (its record names the player's object and no map
+    /// object bound it) and every record owned by the player (the one the
+    /// reset created and the map load recovered) are removed, with their
+    /// script timers, and the player gets a newly created record.
+    pub(crate) fn replace_player_script(&mut self, saved: i32) -> Result<u32, WorldError> {
+        let player = self.player;
+        let player_id = self.get(player).map_or(-1, |object| object.raw.id as i32);
+        let copies = self
+            .record_objects
+            .iter()
+            .filter(|(sid, object)| {
+                *object == player_id && self.scripts.get(sid).is_some_and(|s| s.owner == 0)
+            })
+            .map(|(sid, _)| *sid);
+        let mut old: Vec<u32> = self
+            .scripts
+            .values()
+            .filter(|script| script.owner == player)
+            .map(|script| script.id)
+            .chain(copies)
+            .collect();
+        if let Ok(saved) = u32::try_from(saved)
+            && self.scripts.contains_key(&saved)
+        {
+            old.push(saved);
+        }
+        old.sort_unstable();
+        old.dedup();
+        // Created first, so the new identifier differs from the old ones.
+        let sid = self.create_player_script()?;
+        for id in &old {
+            self.remove_script(*id);
+        }
+        self.queue.retain(
+            |event| !matches!(event.kind, EventKind::Script { script, .. } if old.contains(&script)),
+        );
+        Ok(sid)
     }
     pub fn insert(&mut self, mut object: WorldObject) -> Result<ObjectRef, WorldError> {
         if self.references.len() >= 200_000 {
@@ -1149,6 +1356,8 @@ impl WorldState {
         map: MapFile,
         assets: &impl WorldAssets,
     ) -> Result<(), WorldError> {
+        // SPEC-006 §3.5 step 1: the party records leave with their members.
+        self.carry_party_scripts();
         let keep: BTreeSet<_> = self
             .iter()
             .filter(|(reference, _)| {
@@ -1173,10 +1382,11 @@ impl WorldState {
         // (a map saved on leaving has already folded them into its seen
         // flags; an excluded or unnumbered map drops them).
         self.visited.fill(0);
-        // SPEC-006 §3.5 steps 1 and 7: the kept objects' script instances
-        // and local variables travel with them, under ids that cannot
-        // alias the new map's scripts; a kept object whose script instance
-        // is gone loses its reference instead of dangling.
+        // The kept items' script instances and local variables travel with
+        // them, under ids that cannot alias the new map's scripts; a kept
+        // object whose script instance is gone loses its reference instead
+        // of dangling. (The party members' records were copied above, for
+        // step 7.)
         let mut carried = Vec::new();
         for reference in &keep {
             let Some(sid) = self
@@ -1200,6 +1410,7 @@ impl WorldState {
         }
         self.scripts.clear();
         self.script_order.clear();
+        self.record_objects.clear();
         self.map_script = None;
         self.mvars = map.mvars.clone();
         self.lvars = map.lvars.clone();
@@ -1216,6 +1427,9 @@ impl WorldState {
                     inert: (!found).then(|| Box::new(script.clone())),
                 });
                 if found {
+                    if script.object_id != -1 {
+                        self.record_objects.push((script.id, script.object_id));
+                    }
                     let locals = if script.local_count > 0 {
                         script.local_count as usize
                     } else {

@@ -126,13 +126,36 @@ impl<A: WorldAssets> WorldHost<A> {
     pub(crate) fn clear_animation(&mut self, object: ObjectRef) {
         self.cancel_motions(object);
     }
-    fn kill(&mut self, vm: &mut Vm, object: ObjectRef, animation: i32) -> Result<(), VmError> {
-        if object == 0 {
-            return Ok(());
+    /// SPEC-005 §3.2 a self-stopping game opcode (`kill_critter`,
+    /// `destroy_object`, `critter_damage`) on `object`. While `body` runs
+    /// the program is host-busy: the dispatcher skips requests to it. When
+    /// `body` completed the opcode (it returns false on its early returns)
+    /// on the running script's own object, the program stops itself at the
+    /// next instruction boundary. An instance the opcode removed leaves the
+    /// override flag and result it had before the opcode for the request.
+    fn self_stopping(
+        &mut self,
+        vm: &mut Vm,
+        object: ObjectRef,
+        body: impl FnOnce(&mut Self, bool) -> Result<bool, VmError>,
+    ) -> Result<(), VmError> {
+        let own = object != 0 && object == self.self_object(vm);
+        let sid = self.sid(vm);
+        let before = sid
+            .and_then(|sid| self.world.scripts.get(&sid))
+            .map(|script| (script.overridden, script.result));
+        self.host_busy.push(vm.id);
+        let result = body(self, own);
+        if let Some(at) = self.host_busy.iter().rposition(|id| *id == vm.id) {
+            self.host_busy.remove(at);
         }
-        self.kill_critter(object, animation)?;
-        if object == self.self_object(vm) {
-            vm.status.0 |= 0x100;
+        if result? && own {
+            vm.stop_self();
+            if let (Some(sid), Some(before)) = (sid, before)
+                && self.world.scripts.get(&sid).map(|s| s.owner) != Some(object)
+            {
+                self.departed.insert(sid, before);
+            }
         }
         Ok(())
     }
@@ -189,20 +212,30 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.queue.remove_object(object);
         self.present_corpse(object, animation)
     }
-    fn destroy(&mut self, vm: &mut Vm, object: ObjectRef) -> Result<(), VmError> {
-        let owned = self.object(object)?.owner.is_some();
+    /// An object's removal. SPEC-005 §3.2: `destroy_object` on the
+    /// script's `own` object held in an inventory takes it out of the
+    /// inventory without freeing it: it is detached from its script
+    /// (reference -1) and marked hidden and temporary, and its script
+    /// instance stays in the list until the map is left.
+    fn destroy(&mut self, object: ObjectRef, own: bool) -> Result<(), VmError> {
+        let holder = self.object(object)?.owner;
         self.clear_animation(object);
-        if object == self.self_object(vm) {
-            vm.status.0 |= 0x100;
-            if owned {
-                let target = self.world.get_mut(object).expect("object");
-                target.raw.flags.0 |= BasicFlags::HIDDEN.0 | BasicFlags::TEMPORARY.0;
-                target.raw.script_id = -1;
-                if let Some(sid) = self.sid(vm) {
-                    self.world.remove_script(sid);
-                }
-                return Ok(());
-            }
+        if own && let Some(holder) = holder {
+            let count = self
+                .object(holder)?
+                .inventory
+                .iter()
+                .find(|(item, _)| *item == object)
+                .map_or(1, |(_, count)| *count)
+                .max(1);
+            self.world
+                .remove_item(holder, object, count)
+                .map_err(host_failure)?;
+            let target = self.world.get_mut(object).expect("object");
+            target.raw.flags.0 |= BasicFlags::HIDDEN.0 | BasicFlags::TEMPORARY.0;
+            target.raw.script_id = -1;
+            target.raw.hex = None;
+            return Ok(());
         }
         self.world.erase(object);
         self.world.rebuild_lighting();
@@ -286,9 +319,15 @@ impl<A: WorldAssets> WorldHost<A> {
         Ok(())
     }
     /// The `critter_damage` body: the fixed amount as both damage bounds.
-    fn critter_damage(&mut self, op: u16, call: &HostCall, values: &[i32]) -> Result<(), VmError> {
+    /// Returns false on the null/non-critter early return.
+    fn critter_damage(
+        &mut self,
+        op: u16,
+        call: &HostCall,
+        values: &[i32],
+    ) -> Result<bool, VmError> {
         if call.uint(2) == 0 || self.object(call.uint(2))?.category() != Category::Critter {
-            return Ok(());
+            return Ok(false);
         }
         // Fixed amount as both damage bounds: through the victim's DT
         // then DR for the low-byte damage type unless 0x100 bypasses
@@ -314,6 +353,10 @@ impl<A: WorldAssets> WorldHost<A> {
             value.clamp(0, i64::from(i32::MAX)) as i32
         };
         let was_dead = self.world.is_dead(victim);
+        // SPEC-007 §3.12: scripted damage prints the combat message lines
+        // before it applies.
+        let lines = self.damage_lines(victim, damage);
+        self.print_lines(lines);
         self.damage_critter(victim, None, damage, 0)?;
         let died = !was_dead && self.world.is_dead(victim);
         // SPEC-007 §3.11.5: shown as a temporary attacker's hit, or without
@@ -334,7 +377,7 @@ impl<A: WorldAssets> WorldHost<A> {
         } else if died {
             self.kill_critter(victim, 48)?;
         }
-        Ok(())
+        Ok(true)
     }
     /// `turn_off_objs_in_area` / `turn_on_objs_in_area` under the SPEC-005
     /// §3.4 safe rules: reversed hex bounds are swapped and each pass
@@ -1123,8 +1166,16 @@ impl<A: WorldAssets> WorldHost<A> {
                     self.world
                         .diagnostic("single kill during restoration proceeds");
                 }
-                self.kill(vm, call.uint(1), call.int(0))
-                    .map_err(host_failure)?;
+                // SPEC-005 §3.2: the kill of the script's own object stops
+                // it; a null object returns early.
+                let (object, animation) = (call.uint(1), call.int(0));
+                self.self_stopping(vm, object, |host, _| {
+                    if object == 0 {
+                        return Ok(false);
+                    }
+                    host.kill_critter(object, animation).map_err(host_failure)?;
+                    Ok(true)
+                })?;
                 None
             }
             0x80ee => {
@@ -1144,15 +1195,16 @@ impl<A: WorldAssets> WorldHost<A> {
                         if call.int(0) == 0 {
                             self.world.erase(object);
                         } else {
-                            self.kill(
-                                vm,
+                            // SPEC-005 §3.2: never a self-stop.
+                            self.kill_critter(
                                 object,
                                 if call.int(0) == 1 {
                                     [62, 51, 52, 53, 63, 62, 54, 56, 59, 62, 63][index % 11]
                                 } else {
                                     48
                                 },
-                            )?;
+                            )
+                            .map_err(host_failure)?;
                         }
                     }
                     self.world.map.header.last_visit = self.world.clock.ticks as u32;
@@ -1161,9 +1213,13 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             // SPEC-005 §3.5 safe rule: the host-busy bit is cleared on every
             // return path, including the null/non-critter early return.
+            // SPEC-005 §3.2: damage to the script's own object stops it,
+            // whether or not it killed.
             0x80ef => {
                 vm.status.0 |= 0x20;
-                let result = self.critter_damage(op, call, &values);
+                let result = self.self_stopping(vm, call.uint(2), |host, _| {
+                    host.critter_damage(op, call, &values)
+                });
                 vm.status.0 &= !0x20;
                 result?;
                 None
@@ -1238,13 +1294,20 @@ impl<A: WorldAssets> WorldHost<A> {
                     integer(result)
                 }
             }
+            // SPEC-005 §3.2: removing the script's own object stops it;
+            // the null and loading-restriction early returns do not.
             0x80f4 => {
-                if call.uint(0) != 0
-                    && !(self.world.restoring
-                        && self.object(call.uint(0))?.category() == Category::Critter)
-                {
-                    self.destroy(vm, call.uint(0))?;
-                }
+                let object = call.uint(0);
+                self.self_stopping(vm, object, |host, own| {
+                    if object == 0
+                        || (host.world.restoring
+                            && host.object(object)?.category() == Category::Critter)
+                    {
+                        return Ok(false);
+                    }
+                    host.destroy(object, own)?;
+                    Ok(true)
+                })?;
                 None
             }
             // SPEC-005 §2.6 safe rule: 1 only for two non-null objects on
@@ -2043,12 +2106,12 @@ impl<A: WorldAssets> WorldHost<A> {
                             .remove_item(owner, object, count)
                             .map_err(host_failure)?;
                         if self.world.get(object).is_some_and(|o| o.owner.is_none()) {
-                            self.destroy(vm, object)?;
+                            self.destroy(object, false)?;
                         }
                     }
                     count
                 } else {
-                    self.destroy(vm, object)?;
+                    self.destroy(object, false)?;
                     0
                 };
                 integer(count)

@@ -224,7 +224,8 @@ impl WorldState {
     }
     /// SPEC-008 §2.9 area-map `.SAV` image of the current map: the saved
     /// bit set, live globals/locals, every script instance except the
-    /// per-load map script, and placed top-level objects with nested
+    /// per-load map script and records flagged "not saved" (`0x08`, the
+    /// marked party records), and placed top-level objects with nested
     /// inventories. The player (saved centrally) is excluded, as are party
     /// members unless `include_party` (they travel with the player between
     /// maps but are saved on the current map in a save slot). Without the
@@ -270,9 +271,13 @@ impl WorldState {
             if Some(slot.id) == self.map_script {
                 continue;
             }
+            // SPEC-003 §2.9: flag `0x08` excludes a record from ordinary
+            // saving (the party records while they carry their marks).
             let unwritten =
                 self.get(instance.owner).is_some() && !written.contains(&instance.owner);
-            if !include_party && unwritten {
+            if instance.flags & crate::world::party_marks::NOT_SAVED != 0
+                || (!include_party && unwritten)
+            {
                 dropped.push((instance.local_base, instance.local_count));
                 continue;
             }

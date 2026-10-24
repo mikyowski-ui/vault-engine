@@ -1487,6 +1487,68 @@ fn spec013_a_failed_transition_is_a_diagnostic_and_clears_its_requests() {
 }
 
 #[test]
+fn spec006_a_save_writes_the_party_records_and_a_load_gives_a_fresh_player_record() {
+    use crate::world::party_marks;
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let player = host.world.player;
+    let companion = find(&host, CRITTER, None);
+    let companion_id = host.world.get(companion).unwrap().raw.id as i32;
+    let member = host.world.add_script(companion, 0, 4, 0).unwrap();
+    host.world.party.insert(companion);
+    host.world.scripts.get_mut(&member).unwrap().flags |= party_marks::BOTH;
+    let sid = host.world.script_for(player).unwrap();
+    assert_eq!(sid, 0x0400_0000 | 18000);
+    host.world.scripts.get_mut(&sid).unwrap().event = 21;
+    // An ordinary departure leaves the marked records out of the `.SAV`.
+    assert!(host.world.persist_current_map(false));
+    let saved = parse_saved(&host, "SYNTH.SAV");
+    let has = |map: &MapFile, id: u32| map.scripts[4].active().any(|script| script.id == id);
+    assert!(!has(&saved, sid) && !has(&saved, member));
+    // A save clears the marks for the write, so the party records go into
+    // the current map's `.SAV`, and sets them again.
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    let saved = parse_saved(&host, "SYNTH.SAV");
+    let record = saved.scripts[4]
+        .active()
+        .find(|script| script.id == sid)
+        .unwrap();
+    assert_eq!((record.flags.0 & party_marks::BOTH, record.event), (0, 21));
+    assert!(has(&saved, member));
+    for script in [sid, member] {
+        let flags = host.world.scripts[&script].flags;
+        assert_eq!(flags & party_marks::BOTH, party_marks::BOTH);
+    }
+    // A load: the saved player record (and its action code) is not
+    // restored; the player gets a newly created record. The saved party's
+    // records are marked again.
+    host.load_map("maps/second.map").unwrap();
+    host.load_game(root.path(), 1).unwrap();
+    let player = host.world.player;
+    let fresh = host.world.script_for(player).unwrap();
+    assert_ne!(fresh, sid);
+    assert!(!host.world.scripts.contains_key(&sid));
+    let record = &host.world.scripts[&fresh];
+    assert_eq!((record.event, record.initialized), (0, false));
+    assert_eq!(record.flags & party_marks::BOTH, party_marks::BOTH);
+    let owned = host
+        .world
+        .scripts
+        .values()
+        .filter(|script| script.owner == player)
+        .count();
+    assert_eq!(owned, 1);
+    let companion = host.world.reference_for_id(companion_id as u32).unwrap();
+    assert!(host.world.party.contains(&companion));
+    let member = host.world.script_for(companion).unwrap();
+    let flags = host.world.scripts[&member].flags;
+    assert_eq!(flags & party_marks::BOTH, party_marks::BOTH);
+}
+
+#[test]
 fn spec014_a_loaded_save_places_the_player_and_keeps_the_water_byte() {
     let dir = corpus();
     let root = tempfile::tempdir().unwrap();

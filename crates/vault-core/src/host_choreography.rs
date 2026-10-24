@@ -188,13 +188,13 @@ impl<A: WorldAssets> WorldHost<A> {
             if !self.world.shows.front().is_some_and(Show::finished) {
                 break;
             }
-            if self
-                .world
-                .shows
-                .pop_front()
-                .is_some_and(|show| show.outlines)
-            {
-                self.world.enable_target_outlines();
+            if let Some(show) = self.world.shows.pop_front() {
+                for line in show.messages {
+                    self.world.emit(WorldEffect::Message(line));
+                }
+                if show.outlines {
+                    self.world.enable_target_outlines();
+                }
             }
             changed = true;
         }
@@ -238,6 +238,9 @@ impl<A: WorldAssets> WorldHost<A> {
             Playback::Instant => {
                 let taunts = std::mem::take(&mut show.taunts);
                 self.start_all(&started, &taunts);
+                for line in std::mem::take(&mut show.messages) {
+                    self.world.emit(WorldEffect::Message(line));
+                }
                 if show.outlines {
                     self.world.enable_target_outlines();
                 }
