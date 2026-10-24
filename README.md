@@ -1,46 +1,39 @@
 # Vault Engine
 
-A Rust clean-room engine workspace. Phase 0 establishes the crate boundaries,
-loose-directory asset access, deterministic core primitives, and graphics shell.
-Phase 1 (`P1-02` / `P1-03`) adds approved PAL, FRM/FR0–FR5, LST, FON, AAF, and MSG
-parsers, format auditing, and an interactive sprite/font/message preview.
-Phases 2 and 3 Core (`P2-02`, `P2-03`, `P3-02`) add PRO/MAP parsing, isometric
-geometry, the INT loader/core VM, and map preview.
-Phase 3 Host and Phase 4 (`P3-03`, `P4-02`, `P4-03`) add the host opcode catalog,
-GAM/GCD resources, world state, character statistics, shuffled RNG, and interactive
-script-driven dialogue. The SPEC-007 phase adds the complete art-identifier codec,
-hex routing, rays/perception, and combat resolution and turns, and closes the
-remaining SPEC-001–006 behaviors (see "Spec completion notes" below). The SPEC-008
-phase adds DAT archives and LZSS, selected-database lookup, legacy save slots with
-the working saved-map set and automap database, world travel, and Pip-Boy status
-and rest. The SPEC-009 phase adds `ai.txt` packets, the combat snapshot, threat
-selection, the NPC turn (flee, healing, weapon choice, called shots, the bounded
-attack loop, reloading), team switching, random retargeting, and taunts. The
-SPEC-010 phase adds the exact ACM decoder, effect-name builders with the
-prototype sound bytes, the effect lookup and alias chain, speech paths, and
-relative effect volume. The SPEC-011 phase adds drugs, inventory rules, barter,
-and progression. The SPEC-012 phase adds the exact `.MVE` decoder (container,
-block video codec, palettes, DPCM audio), paced playback with movie fades and
-`.SVE` subtitles, the game movie table and `play_gmovie`, and desktop movie,
-inventory, character, and barter screens. The SPEC-013 phase adds the active
-skills, kits, sneak, explosives, poison and radiation events, elevators, exit
-grids and the loot/steal window; SPEC-014 adds the game flow (splash, main menu,
-character selection and creation), the save/load and options screens, the
-interface bar, cursor modes and the endgame. The SPEC-007 revision adds the
-punch-to-kick draw and missed-shot bystanders, and the SPEC-001 revision the
-shipped 33536-byte palette form. Later SPEC-005/007/009/013/014 revisions
-add the single intended-target retaliation rule, center-only explosions with
-the scenery `damage_p_proc` notice and the 50-tick retry, scripted explosions,
-the automap and inventory windows, rolling HP/AC counters, the white death
-fade, the large dialog boxes and the help screen; the desktop now streams DAT
-members lazily and can run the vault-debug inspector live (`--debug`, F9).
-The current revisions (SPEC-007 R1-rev7, SPEC-008 with §3.10 and §4.5,
-SPEC-013 R1-rev5, SPEC-014 R1-rev6) add attack and non-combat animation
-choreography with projectile flight, one sequence per owner, the busy-click
-policy, map numbers with city music, and roof hiding (see "Spec completion
-notes"). The approved specs are revised as builder questions are answered;
-SPEC-014 R1-rev12 answered all but one (see "Open spec questions for the
-research vault").
+[![CI](https://github.com/mikyowski-ui/vault-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/mikyowski-ui/vault-engine/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Rust: 1.88+](https://img.shields.io/badge/Rust-1.88%2B-orange.svg)](Cargo.toml)
+
+**Vault Engine** is a cross-platform, clean-room game engine written in safe
+Rust that runs the original 1997 *Fallout* campaign from its retail
+`MASTER.DAT` and `CRITTER.DAT` archives. It builds and is tested on Linux,
+macOS and Windows, and the workspace forbids `unsafe` code.
+
+Every behaviour is implemented from written specifications produced by a
+two-team clean-room process: one team studies the original and writes
+sanitized specs, and the other builds only from those specs (see
+[`PROVENANCE.md`](PROVENANCE.md)). The engine covers:
+
+- **Binary decoders** for the game's archives and formats: DAT and LZSS,
+  palettes, FRM art, maps, prototypes, messages, fonts and saves.
+- **A two-stack `.INT` script VM** with the full host opcode set.
+- **An isometric hex world** with pathfinding, lighting, roofs and animation.
+- **Turn-based combat and combat AI.**
+- **`.MVE` cutscenes** with subtitles, and **`.ACM` audio** for music, speech
+  and effects.
+
+> **No game assets are included.** This repository contains no proprietary
+> *Fallout* data. To play, point the engine at your own copy of the game.
+> Synthetic fixtures written for this project let you build, test and preview
+> the engine without any retail data.
+
+<p align="center">
+  <img src="docs/assets/launcher-preview.png" width="640"
+       alt="The Vault Engine launcher: green-on-black Game data tab with validated MASTER.DAT and CRITTER.DAT fields, tabs for Display & audio and Mods, and Play, Launch with Debug and Quit buttons">
+</p>
+<p align="center"><sub>The native pre-game launcher, rendered headlessly with
+its built-in font and palette from synthetic test archives; no retail data
+was used.</sub></p>
 
 `AGENTS.md` is the repository's implementation policy. `PROVENANCE.md` records
 the two-team clean-room process, and `CONTRIBUTING.md` the clean-room
@@ -61,6 +54,7 @@ data is needed to build, test, or run the synthetic shell and preview fixtures.
 | `vault-render` | Indexed sprite/text/map/dialogue composition and palette rendering |
 | `vault-debug` | Headless VM stepper and instruction trace, GVAR/MVAR/LVAR watches, and map object/critter inspectors with tick diffs and text rendering |
 | `vault-platform` | Desktop shell, asset preview, input command logging |
+| `vault-fixtures` | Dev-only synthetic test fixture builders, compiled once and shared by the crates' tests and `xtask` |
 | `xtask` | Engineering gate runner |
 | `asset-audit` | Loose-corpus counts and format validation |
 
@@ -1794,6 +1788,50 @@ Deliberate exceptions and gaps:
 - SPEC-007's selection and damage of the accidental target are not specified;
   the rule above is this engine's choice.
 - The SPEC-003 mapper inventory-repair mode is omitted, as the safe rule allows.
+
+## Development history
+
+A Rust clean-room engine workspace. Phase 0 establishes the crate boundaries,
+loose-directory asset access, deterministic core primitives, and graphics shell.
+Phase 1 (`P1-02` / `P1-03`) adds approved PAL, FRM/FR0–FR5, LST, FON, AAF, and MSG
+parsers, format auditing, and an interactive sprite/font/message preview.
+Phases 2 and 3 Core (`P2-02`, `P2-03`, `P3-02`) add PRO/MAP parsing, isometric
+geometry, the INT loader/core VM, and map preview.
+Phase 3 Host and Phase 4 (`P3-03`, `P4-02`, `P4-03`) add the host opcode catalog,
+GAM/GCD resources, world state, character statistics, shuffled RNG, and interactive
+script-driven dialogue. The SPEC-007 phase adds the complete art-identifier codec,
+hex routing, rays/perception, and combat resolution and turns, and closes the
+remaining SPEC-001–006 behaviors (see "Spec completion notes" below). The SPEC-008
+phase adds DAT archives and LZSS, selected-database lookup, legacy save slots with
+the working saved-map set and automap database, world travel, and Pip-Boy status
+and rest. The SPEC-009 phase adds `ai.txt` packets, the combat snapshot, threat
+selection, the NPC turn (flee, healing, weapon choice, called shots, the bounded
+attack loop, reloading), team switching, random retargeting, and taunts. The
+SPEC-010 phase adds the exact ACM decoder, effect-name builders with the
+prototype sound bytes, the effect lookup and alias chain, speech paths, and
+relative effect volume. The SPEC-011 phase adds drugs, inventory rules, barter,
+and progression. The SPEC-012 phase adds the exact `.MVE` decoder (container,
+block video codec, palettes, DPCM audio), paced playback with movie fades and
+`.SVE` subtitles, the game movie table and `play_gmovie`, and desktop movie,
+inventory, character, and barter screens. The SPEC-013 phase adds the active
+skills, kits, sneak, explosives, poison and radiation events, elevators, exit
+grids and the loot/steal window; SPEC-014 adds the game flow (splash, main menu,
+character selection and creation), the save/load and options screens, the
+interface bar, cursor modes and the endgame. The SPEC-007 revision adds the
+punch-to-kick draw and missed-shot bystanders, and the SPEC-001 revision the
+shipped 33536-byte palette form. Later SPEC-005/007/009/013/014 revisions
+add the single intended-target retaliation rule, center-only explosions with
+the scenery `damage_p_proc` notice and the 50-tick retry, scripted explosions,
+the automap and inventory windows, rolling HP/AC counters, the white death
+fade, the large dialog boxes and the help screen; the desktop now streams DAT
+members lazily and can run the vault-debug inspector live (`--debug`, F9).
+The current revisions (SPEC-007 R1-rev7, SPEC-008 with §3.10 and §4.5,
+SPEC-013 R1-rev5, SPEC-014 R1-rev6) add attack and non-combat animation
+choreography with projectile flight, one sequence per owner, the busy-click
+policy, map numbers with city music, and roof hiding (see "Spec completion
+notes"). The approved specs are revised as builder questions are answered;
+SPEC-014 R1-rev12 answered all but one (see "Open spec questions for the
+research vault").
 
 ## Spec completion notes
 
