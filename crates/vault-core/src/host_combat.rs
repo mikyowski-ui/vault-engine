@@ -7,10 +7,10 @@ use crate::{
         Attack, DeathChoice, PROTECTED_PID, PlayerModifiers, Resolution, Subtype, WeaponProfile,
         corpse_flattens, knockback_displacement, knockout_delay, weapon_skill,
     },
-    critical::{effect, hit_mode},
+    combat_messages::{self, AttackLines, Named, Struck},
+    critical::{effect, hit_mode, location},
     host::WorldHost,
     host_ai::Victim,
-    host_drugs::Arg,
     queue::EventKind,
     routing::{extend_line, rotation, step},
     stats::Perk,
@@ -1017,15 +1017,13 @@ impl<A: WorldAssets> WorldHost<A> {
             ));
         }
         // SPEC-011 §3.11: the player is warned when the weapon's minimum
-        // strength exceeds effective ST (the hit chance pays 20 per point).
-        if attack.attacker_player
+        // strength exceeds effective ST (the hit chance pays 20 per point);
+        // the warning is the first of the attack's message lines.
+        let strength = attack.attacker_player
             && attack
                 .weapon
                 .as_ref()
-                .is_some_and(|weapon| weapon.min_strength > attack.strength)
-        {
-            self.print_game("combat.msg", 107, &[]);
-        }
+                .is_some_and(|weapon| weapon.min_strength > attack.strength);
         let mut rng = std::mem::take(&mut self.world.rng);
         let outcome = self.resolve_attack(attacker, defender, &attack, &mut rng);
         self.world.rng = rng;
@@ -1055,7 +1053,6 @@ impl<A: WorldAssets> WorldHost<A> {
         if struck {
             spray.main.defender_flags &= !effect::HIT;
         }
-        self.bystander_message(attacker, defender, victim.as_ref());
         self.world.ai.callbacks.clear();
         // SPEC-013 §3.10: an exploding weapon's explosion is where the
         // projectile ends.
@@ -1085,6 +1082,23 @@ impl<A: WorldAssets> WorldHost<A> {
                 return Ok(Err(Refusal::Sequence));
             }
         };
+        // SPEC-007 §3.12: the message lines read the state before the
+        // damage applies. Played at once they print now; a show prints them
+        // once it has played.
+        let unintended = matches!(victim, Some(Victim::Random(..) | Victim::Bystander(..)));
+        let lines = AttackLines {
+            strength,
+            location: if unintended {
+                location::TORSO
+            } else {
+                attack.location
+            },
+            ..self.attack_lines(attacker, defender, hit.then_some(recorded_defender), &spray)
+        };
+        let mut messages = self.combat_lines(&lines);
+        if self.playback == crate::host_choreography::Playback::Instant {
+            self.print_lines(std::mem::take(&mut messages));
+        }
         // The sequence's commitments, then the §3.6 cleanup: onlookers hear
         // of the intended target when the final victim differs, then of a
         // critter victim.
@@ -1108,6 +1122,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         application?;
         let mut show = built.show;
+        show.messages = messages;
         // SPEC-014 §3.44: with setting 2 a player's attack animation turns
         // the target outlines off until its damage has been applied.
         if attacker == player && self.world.combat && self.world.combat_state.highlight == 2 {
@@ -1170,56 +1185,107 @@ impl<A: WorldAssets> WorldHost<A> {
         });
         Ok(if kick { hit_mode::KICK } else { mode })
     }
-    /// §3.7.1 messages: a critter victim other than the intended target is
-    /// "hit instead" (`combat.msg` base 500 player, 600 male, 700 female, plus
-    /// 8 when the intended target is the player, else 9); a non-critter
-    /// impact shows the attacker's "missed" text (515, 615 or 715).
-    fn bystander_message(
-        &mut self,
-        attacker: ObjectRef,
-        intended: ObjectRef,
-        victim: Option<&Victim>,
-    ) {
-        let base = |host: &Self, object: ObjectRef| {
-            if object == host.world.player {
-                500
-            } else if host.world.effective(object, 34) == 1 {
-                700
-            } else {
-                600
-            }
-        };
-        let name = |host: &Self, object: ObjectRef| {
-            if object == host.world.player {
-                host.game_text("combat.msg", 506).unwrap_or_default()
-            } else {
-                host.world
-                    .get(object)
-                    .map(|o| o.name.clone())
+    /// SPEC-007 §3.12 a critter as the combat message lines name it: the
+    /// player as `combat.msg` 506 "You", anyone else by object name; its
+    /// gender, whether it was already dead, and its art alias. `None` for a
+    /// non-critter.
+    pub(crate) fn combat_named(&self, object: ObjectRef) -> Option<Named> {
+        let found = self.world.get(object)?;
+        if found.category() != vault_formats::pro::Category::Critter {
+            return None;
+        }
+        let player = object == self.world.player;
+        Some(Named {
+            name: if player {
+                self.game_text(combat_messages::FILE, combat_messages::PLAYER_NAME)
                     .unwrap_or_default()
-            }
+            } else {
+                found.name.clone()
+            },
+            player,
+            female: self.world.effective(object, 34) == 1,
+            dead: self.world.is_dead(object),
+            alias: self.assets.critter_alias(Fid(found.raw.art_id).base()),
+        })
+    }
+    /// SPEC-007 §3.12 the line inputs of an attack by `attacker` aimed at
+    /// `aimed` that struck `struck` (none on a miss), from its resolution:
+    /// a struck non-critter is the attacker's "missed"; the location is the
+    /// caller's.
+    pub(crate) fn attack_lines(
+        &self,
+        attacker: ObjectRef,
+        aimed: ObjectRef,
+        struck: Option<ObjectRef>,
+        spray: &Spray,
+    ) -> AttackLines {
+        let main = &spray.main;
+        let hit = struck.is_some();
+        AttackLines {
+            strength: false,
+            attacker: self.combat_named(attacker),
+            aimed: self.combat_named(aimed),
+            struck: struck.map(|object| {
+                self.combat_named(object)
+                    .map_or(Struck::Object, Struck::Critter)
+            }),
+            wrong_target: struck.is_some_and(|object| object != aimed),
+            location: location::TORSO,
+            damage: main.damage,
+            flags: main.defender_flags,
+            critical: hit && main.defender_flags & effect::CRITICAL != 0,
+            critical_message: main.message,
+            critical_miss: !hit && main.attacker_flags & effect::CRITICAL != 0,
+            attacker_damage: if main.attacker_flags != 0 {
+                main.self_damage
+            } else {
+                0
+            },
+            attacker_flags: main.attacker_flags,
+            extras: spray
+                .extras
+                .iter()
+                .filter_map(|(object, _, outcome)| {
+                    Some((
+                        self.combat_named(*object)?,
+                        outcome.damage,
+                        outcome.defender_flags,
+                    ))
+                })
+                .collect(),
+        }
+    }
+    /// SPEC-007 §3.12 the lines of a hit for `damage` on `victim` that no
+    /// critter attacks (an explosion or scripted damage): the struck-target
+    /// torso line with its status list, dead included when lethal.
+    pub(crate) fn damage_lines(&self, victim: ObjectRef, damage: i32) -> Vec<Vec<u8>> {
+        let Some(named) = self.combat_named(victim) else {
+            return Vec::new();
         };
-        match victim {
-            Some(Victim::Bystander(victim, _)) if *victim != intended => {
-                let (victim_name, intended_name) = (name(self, *victim), name(self, intended));
-                if intended == self.world.player {
-                    let id = base(self, *victim) + 8;
-                    self.print_game("combat.msg", id, &[Arg::Text(&victim_name)]);
-                } else {
-                    let id = base(self, *victim) + 9;
-                    self.print_game(
-                        "combat.msg",
-                        id,
-                        &[Arg::Text(&victim_name), Arg::Text(&intended_name)],
-                    );
-                }
-            }
-            Some(Victim::Object(_)) => {
-                let attacker_name = name(self, attacker);
-                let id = base(self, attacker) + 15;
-                self.print_game("combat.msg", id, &[Arg::Text(&attacker_name)]);
-            }
-            _ => {}
+        let lethal = damage > 0 && self.world.hit_points(victim).is_some_and(|hp| damage >= hp);
+        let lines = AttackLines {
+            struck: Some(Struck::Critter(named)),
+            location: location::TORSO,
+            damage,
+            flags: effect::HIT | if lethal { effect::DEAD } else { 0 },
+            ..AttackLines::default()
+        };
+        self.combat_lines(&lines)
+    }
+    /// The lines under the current `combat_messages` preference; none
+    /// when `combat.msg` cannot be loaded.
+    pub(crate) fn combat_lines(&self, lines: &AttackLines) -> Vec<Vec<u8>> {
+        let Ok(catalog) = self.assets.game_messages(combat_messages::FILE) else {
+            return Vec::new();
+        };
+        combat_messages::lines(lines, self.world.verbose_combat_messages, &|id| {
+            catalog.get(id).map(|message| message.text.clone())
+        })
+    }
+    /// Print lines on the message monitor.
+    pub(crate) fn print_lines(&mut self, lines: Vec<Vec<u8>>) {
+        for line in lines {
+            self.world.emit(crate::WorldEffect::Message(line));
         }
     }
 }

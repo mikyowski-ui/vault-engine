@@ -140,6 +140,16 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// SPEC-002 §3.7 language filter: the word list and the per-script
     /// message catalogs as loaded.
     pub script_messages: crate::dialogue::ScriptMessages,
+    /// SPEC-005 §3.2 the programs inside one of their own self-stopping
+    /// game opcodes (host-busy `0x0020`): the dispatcher skips requests to
+    /// them, so the opcode's own `destroy_p_proc` or `damage_p_proc` does
+    /// not run.
+    pub(crate) host_busy: Vec<u32>,
+    /// SPEC-005 §3.2 the override flag and result a self-stopping opcode
+    /// found on its script instance before the opcode removed it (a
+    /// destroyed or killed owner), by instance: the request that ran the
+    /// procedure still returns them.
+    pub(crate) departed: BTreeMap<u32, (bool, i32)>,
 }
 impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn prototype(&self, pid: u32) -> Result<std::sync::Arc<vault_formats::Prototype>, WorldError> {
@@ -211,6 +221,9 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     }
     fn art_row(&self, category: u8, name: &[u8]) -> Option<u16> {
         (**self).art_row(category, name)
+    }
+    fn critter_alias(&self, index: u16) -> Option<i32> {
+        (**self).critter_alias(index)
     }
     fn object_art(
         &self,
@@ -290,6 +303,8 @@ impl<A: WorldAssets> WorldHost<A> {
             music_enabled: true,
             last_music: None,
             script_messages: Default::default(),
+            host_busy: Vec::new(),
+            departed: BTreeMap::new(),
         }
     }
     /// SPEC-008 §3.10 a music request: the track is recorded as the last
@@ -440,6 +455,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.registry.clear();
         self.programs.clear();
         self.program_scripts.clear();
+        self.departed.clear();
         // Nothing queued for the left map's programs may run against the
         // next map's script table, where ids can alias: callbacks (named
         // handlers, `key_callback`), dialogue waiters and script requests
@@ -620,7 +636,9 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.world.trace.push(WorldTrace::LoadStep(7));
         // SPEC-006 §3.5 step 7 / SPEC-013 §3.22: the party is recovered
-        // around the player's final entry placement.
+        // around the player's final entry placement, its script records
+        // after the map's own critter records.
+        self.world.recover_party_scripts()?;
         self.world.place_party()?;
         if let Some(player) = self.world.get_mut(self.world.player) {
             player.raw.light = Light {
@@ -694,6 +712,8 @@ impl<A: WorldAssets> WorldHost<A> {
         Ok(())
     }
     pub(crate) fn clear_program_bindings(&mut self) {
+        self.departed.clear();
+        self.host_busy.clear();
         self.program_scripts.clear();
         self.active.clear();
         self.motions.clear();
@@ -748,11 +768,36 @@ impl<A: WorldAssets> WorldHost<A> {
         let Some(instance) = self.world.scripts.get(&request.script).cloned() else {
             return Ok(DispatchResult::default());
         };
+        // SPEC-005 §3.2: a program inside one of its own self-stopping game
+        // opcodes is host-busy, and a request to it is skipped.
+        if instance.initialized && self.host_busy.contains(&instance.program) {
+            return Ok(DispatchResult::default());
+        }
         if self.active.contains(&instance.program) && instance.program != 0 {
             self.world.request(request);
             return Ok(DispatchResult {
                 pending: true,
                 ..Default::default()
+            });
+        }
+        // SPEC-005 §3.2: a program that stopped itself runs nothing, but
+        // the request still stores its action number and clears the
+        // override flag, leaving the result: default actions proceed.
+        if instance.initialized
+            && self
+                .programs
+                .get(&instance.program)
+                .is_some_and(Vm::self_stopped)
+        {
+            let script = self.world.scripts.get_mut(&instance.id).expect("script");
+            script.overridden = false;
+            script.event = request.event.code();
+            script.fixed = request.fixed;
+            script.action = request.action;
+            return Ok(DispatchResult {
+                overridden: false,
+                result: script.result,
+                pending: false,
             });
         }
         // SPEC-006 §3.7: a program a VM error stopped, or one suspended on
@@ -842,6 +887,7 @@ impl<A: WorldAssets> WorldHost<A> {
             self.programs.get(&id).is_some_and(|vm| {
                 vm.status.0 & (VmStatus::WAITING | VmStatus::ATTACHED | VmStatus::SPAWN_BLOCKED)
                     != 0
+                    && !vm.self_stopped()
             })
         } else {
             let mut vm = self
@@ -851,7 +897,10 @@ impl<A: WorldAssets> WorldHost<A> {
             let run = vm
                 .prepare_host_call(procedure.filter(|index| *index != 0).unwrap_or(1), true)
                 .and_then(|_| self.run_vm(&mut vm));
-            let pending = matches!(run, Ok(RunOutcome::Blocked | RunOutcome::Waiting));
+            // SPEC-005 §3.2: a run that stopped itself returns as if the
+            // procedure had ended.
+            let pending =
+                matches!(run, Ok(RunOutcome::Blocked | RunOutcome::Waiting)) && !vm.self_stopped();
             if let Err(error) = run {
                 self.world
                     .diagnostic(format!("script {}: {error}", instance.file));
@@ -859,18 +908,26 @@ impl<A: WorldAssets> WorldHost<A> {
             self.programs.insert(vm.id, vm);
             pending
         };
-        let result =
-            self.world
-                .scripts
-                .get_mut(&instance.id)
-                .map_or(DispatchResult::default(), |script| {
-                    script.source = 0;
-                    DispatchResult {
-                        overridden: script.overridden,
-                        result: script.result,
-                        pending,
-                    }
-                });
+        // SPEC-005 §3.2: an instance its own opcode removed returns what it
+        // held before that opcode.
+        let departed = self.departed.remove(&instance.id);
+        let result = match self.world.scripts.get_mut(&instance.id) {
+            Some(script) => {
+                script.source = 0;
+                DispatchResult {
+                    overridden: script.overridden,
+                    result: script.result,
+                    pending,
+                }
+            }
+            None => departed.map_or(DispatchResult::default(), |(overridden, result)| {
+                DispatchResult {
+                    overridden,
+                    result,
+                    pending,
+                }
+            }),
+        };
         Ok(result)
     }
     fn run_vm(&mut self, vm: &mut Vm) -> Result<RunOutcome, VmError> {
@@ -1397,6 +1454,10 @@ impl<A: WorldAssets> WorldHost<A> {
         }
     }
     fn callback(&mut self, program: u32, procedure: u32) -> Result<RunOutcome, WorldError> {
+        // SPEC-005 §3.2: a program that stopped itself runs nothing more.
+        if self.programs.get(&program).is_some_and(Vm::self_stopped) {
+            return Ok(RunOutcome::Stopped);
+        }
         let mut vm = self
             .programs
             .remove(&program)

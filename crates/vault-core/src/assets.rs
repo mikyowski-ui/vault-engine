@@ -106,6 +106,11 @@ pub trait WorldAssets {
     fn art_row(&self, _category: u8, _name: &[u8]) -> Option<u16> {
         None
     }
+    /// The `critters.lst` alias of a critter art index (SPEC-007 §2.1),
+    /// which picks the location names (SPEC-014 §3.38, SPEC-007 §3.12).
+    fn critter_alias(&self, _index: u16) -> Option<i32> {
+        None
+    }
     /// Load the art selected by a complete SPEC-007 identifier.
     fn object_art(&self, _fid: u32) -> Result<Arc<FrmArchive>, WorldError> {
         Err(WorldError::Invalid("object art unavailable".into()))
@@ -539,6 +544,9 @@ impl WorldAssets for VfsWorldAssets {
     }
     fn art_row(&self, category: u8, name: &[u8]) -> Option<u16> {
         self.art_catalog().ok()?.last_row(category, name)
+    }
+    fn critter_alias(&self, index: u16) -> Option<i32> {
+        self.art_catalog().ok()?.critter_alias(index)
     }
     fn art_exists(&self, fid: u32) -> bool {
         self.art_catalog()

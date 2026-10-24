@@ -6,6 +6,7 @@ pub mod barter;
 pub mod choreography;
 pub mod clicks;
 pub mod combat;
+pub mod combat_messages;
 pub mod combat_state;
 pub mod critical;
 pub mod dialogue;
@@ -98,6 +99,8 @@ mod choreography_tests;
 #[cfg(test)]
 mod clicks_tests;
 #[cfg(test)]
+mod combat_messages_tests;
+#[cfg(test)]
 mod combat_tests;
 #[cfg(test)]
 mod dialogue_tests;
@@ -147,6 +150,8 @@ mod roof_tests;
 mod script_cycle_tests;
 #[cfg(test)]
 mod script_request_tests;
+#[cfg(test)]
+mod self_stop_tests;
 #[cfg(test)]
 mod skills_tests;
 #[cfg(test)]

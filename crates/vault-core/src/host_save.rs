@@ -187,7 +187,12 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.world.map.header.flags.0 |= 1;
         self.world.map.header.last_visit = self.world.clock.ticks as u32;
-        if !self.world.persist_current_map(true) {
+        // SPEC-006 §3.5: the party records are written with the map's
+        // other scripts, their marks cleared for the save and set again.
+        self.world.set_party_marks(false);
+        let persisted = self.world.persist_current_map(true);
+        self.world.set_party_marks(true);
+        if !persisted {
             return Err(WorldError::Invalid(
                 "the current map could not be written to the working map set".into(),
             ));
@@ -584,6 +589,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 None => world.diagnostic(format!("party member {id} is not on the restored map")),
             }
         }
+        // SPEC-006 §3.5: the saved player record (with its action code) is
+        // not restored; the player gets a newly created one, and the saved
+        // party list's records get both marks again.
+        let saved_script = save.player.script_id;
+        world.replace_player_script(saved_script)?;
+        world.set_party_marks(true);
         // No AI state refers to objects from before the load.
         self.world.ai.snapshot.clear();
         self.world.ai.callbacks.clear();

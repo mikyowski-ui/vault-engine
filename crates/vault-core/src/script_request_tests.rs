@@ -245,6 +245,8 @@ fn host(maps: Vec<(&str, MapFile)>) -> WorldHost<Requests> {
     ];
     let mut world = WorldState::new(CharacterSheet::default(), 1).unwrap();
     world.gvars = Some(vec![0; 64]);
+    // Only the records these tests make are in the critter stream.
+    world.drop_player_script();
     WorldHost::new(
         world,
         Requests {
@@ -518,4 +520,111 @@ fn the_live_trace_observes_the_time_slice() {
     host.programs.insert(77, vm);
     host.update_programs().unwrap();
     assert!(steps.lock().unwrap().0 > 10);
+}
+
+/// A host whose script file 0 is the player script: `start` counts gvar
+/// 60 and `timed_event_p_proc` gvar 61. The player has its record.
+fn player_host(maps: Vec<(&str, MapFile)>) -> WorldHost<Requests> {
+    let mut host = host(maps);
+    host.assets.programs[0] = (
+        "scripts/obj_dude.int".into(),
+        program(
+            &[],
+            &[(b"start", count(60)), (b"timed_event_p_proc", count(61))],
+        ),
+    );
+    host.world.create_player_script().unwrap();
+    host
+}
+/// The critter-stream records in list order.
+fn critter_stream(host: &WorldHost<Requests>) -> Vec<u32> {
+    host.world
+        .script_order
+        .iter()
+        .filter(|slot| slot.stream == 4)
+        .map(|slot| slot.id)
+        .collect()
+}
+
+#[test]
+fn spec006_the_player_record_is_rebuilt_on_every_map_change() {
+    use crate::world::party_marks;
+    let mut host = player_host(vec![
+        ("maps/a.map", map(-1, &[(20104, 2)])),
+        ("maps/b.map", map(-1, &[(20104, 2), (20106, 2)])),
+    ]);
+    let player = host.world.player;
+    // Creation: a critter-category record of entry 0, no program, action
+    // code 0, no local slice, both marks.
+    let created = host.world.script_for(player).unwrap();
+    let record = &host.world.scripts[&created];
+    assert_eq!((created >> 24, record.file, record.owner), (4, 0, player));
+    assert!(!record.initialized);
+    assert_eq!(
+        (record.event, record.local_base, record.local_count),
+        (0, -1, 0)
+    );
+    assert_eq!(record.flags & party_marks::BOTH, party_marks::BOTH);
+    // A player timer does not survive the map change.
+    let now = host.world.clock.ticks;
+    host.world
+        .queue
+        .insert(
+            now,
+            100,
+            player,
+            crate::queue::EventKind::Script {
+                script: created,
+                parameter: 0,
+            },
+        )
+        .unwrap();
+    let mut programs = Vec::new();
+    for (path, critters) in [("maps/a.map", 1), ("maps/b.map", 2)] {
+        host.load_map(path).unwrap();
+        // Recovered as (PID & 0xFFFFFF) + 18000 in the critter category,
+        // after the map's own critter records, with both marks again.
+        let sid = host.world.script_for(player).unwrap();
+        assert_eq!(sid, 0x0400_0000 | 18000);
+        let stream = critter_stream(&host);
+        assert_eq!(stream.len(), critters + 1);
+        assert_eq!(stream.last(), Some(&sid));
+        let record = &host.world.scripts[&sid];
+        assert_eq!(record.flags & party_marks::BOTH, party_marks::BOTH);
+        // The step 8 startup request was its first request: the program
+        // loaded again and its initial stream ran `start`.
+        assert!(record.initialized);
+        programs.push(record.program);
+        assert!(
+            host.world
+                .queue
+                .events()
+                .all(|event| !matches!(event.kind, crate::queue::EventKind::Script { .. }))
+        );
+    }
+    assert_ne!(programs[0], programs[1], "no program carries over");
+    assert_eq!(gvar(&host, 60), 2);
+    host.advance_time(1000).unwrap();
+    assert_eq!(gvar(&host, 61), 0);
+    // The cycle reaches the player's record last: from counter 0 it
+    // serves position 1, 2 (the player), then wraps to 0.
+    host.world.trace.clear();
+    host.critter_cycle = 0;
+    for _ in 0..3 {
+        host.critter_cycle_step().unwrap();
+    }
+    let served: Vec<u32> = host
+        .world
+        .trace
+        .iter()
+        .filter_map(|entry| match entry {
+            WorldTrace::Script {
+                id,
+                event: ScriptEvent::Critter,
+                ..
+            } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(served, [0x0400_0002, 0x0400_0000 | 18000, 0x0400_0001]);
 }

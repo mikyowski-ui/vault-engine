@@ -1050,6 +1050,9 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.world.get(victim).is_none() || self.world.is_dead(victim) {
             return Ok(());
         }
+        // SPEC-007 §3.12: the explosion's message lines precede its damage.
+        let lines = self.damage_lines(victim, damage);
+        self.print_lines(lines);
         self.damage_critter(victim, explosion.source, damage, 0)?;
         let player = self.world.player;
         if knockback > 0 && !self.world.is_dead(victim) {

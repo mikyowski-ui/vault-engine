@@ -1806,11 +1806,12 @@ fn spec007_bystander_messages_and_same_team_retaliation() {
             .unwrap()
             .unwrap();
         assert_ne!(result.defender_flags & effect::HIT, 0);
-        assert!(messages(&host).contains(&b"Oops! Bob was hit instead of Target!".to_vec()));
+        assert!(messages(&host).contains(&b"Oops! Bob was hit instead of Target!.".to_vec()));
         let opponent = host.world.get(x1).unwrap().opponent;
         assert_eq!(opponent == attacker, retaliates, "team {team}");
     }
-    // A wall impact shows the attacker's "missed" text (615, male NPC).
+    // A wall impact shows the attacker's "missed" text (615, male NPC),
+    // its only line (SPEC-007 §3.12).
     let (mut host, [attacker, x1, defender, _]) = fixture_e("wall", 2);
     host.world.get_mut(attacker).unwrap().name = b"Gunner".to_vec();
     host.assets.combat = Some(Arc::new(
@@ -1832,6 +1833,8 @@ fn spec007_bystander_messages_and_same_team_retaliation() {
     let chance = line_of_fire_chance(&host, attacker, x1);
     host.world.rng =
         crate::fixture_items::seed_where(&[(1, 100), (1, 100)], |v| v[0] > main && v[1] > chance);
+    // Played over time, the lines print once the attack's show has played.
+    host.playback = crate::host_choreography::Playback::RealTime;
     let result = host
         .perform_attack(
             attacker,
@@ -1843,7 +1846,15 @@ fn spec007_bystander_messages_and_same_team_retaliation() {
         .unwrap()
         .unwrap();
     assert_ne!(result.defender_flags & effect::HIT, 0, "recorded hit bit");
-    assert_eq!(messages(&host), [b"Gunner missed".to_vec()]);
+    assert!(messages(&host).is_empty());
+    for step in 0..1000 {
+        if host.world.shows.is_empty() {
+            break;
+        }
+        host.step_shows(step * 10);
+    }
+    assert!(host.world.shows.is_empty());
+    assert_eq!(messages(&host), [b"Gunner missed.".to_vec()]);
 }
 
 #[test]

@@ -790,6 +790,9 @@ pub struct Show {
     /// target outlines, disabled as it started, are enabled again once it
     /// has played (its damage applied).
     pub outlines: bool,
+    /// SPEC-007 §3.12 the attack's combat message lines, printed when the
+    /// show has played, before its damage counts as applied.
+    pub messages: Vec<Vec<u8>>,
 }
 impl Show {
     pub fn finished(&self) -> bool {
