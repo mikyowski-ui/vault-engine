@@ -55,6 +55,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// (SPEC-005 §3.2 safe rule).
     pub fn movie_finished(&mut self) {
         self.library.movie_playing = false;
+        self.countdown_movie = false;
     }
     /// §3.13 `play_gmovie`: the table flags (plus `0x02` for indexes 3 and 4
     /// without a loaded map). An index outside 0..13 is a failed play
@@ -88,47 +89,60 @@ impl<A: WorldAssets> WorldHost<A> {
             None => false,
         }
     }
-    /// The midnight water countdown, with the remaining water in the
-    /// host-supplied global (`WorldRules::water_global`; no approved
-    /// specification names it, so without one nothing happens). While the
-    /// water-chip quest is unfinished the water decrements first; then,
-    /// outside dialogue, the most severe threshold reached plays its movie
-    /// if not yet played: boil3 at 0 (flags `0x05`, then a quit request),
-    /// boil2 at 50 or less and boil1 at 100 or less (`0x07`).
+    /// §3.12 the midnight water countdown, steps 3-4 (the handler has
+    /// already returned while a countdown movie plays, step 1, and unjammed
+    /// the locks, step 2). The remaining water is campaign global 10 and the
+    /// water-chip quest global 101. Unless the quest is 2, a positive value
+    /// decrements; then, outside dialogue, the new value chooses at most one
+    /// movie: boil1 at 100 or less with its water-movie bit clear (setting
+    /// it), else boil2 at 50 or less with its bit clear (setting it), else
+    /// boil3 at 0. A chosen movie plays only if not yet played (boil1 and
+    /// boil2 with flags `0x07`, boil3 with `0x05` and then a quit request).
+    /// `[May-improve]` safe rule: a value already 0 at a midnight outside
+    /// dialogue, with the quest not 2, chooses boil3, so a countdown that
+    /// reached 0 during a dialogue still ends the game.
     pub(crate) fn water_countdown(&mut self) {
-        let Some(global) = self.world.rules.water_global else {
-            return;
-        };
         let Some(gvars) = self.world.gvars.as_mut() else {
             return;
         };
-        if gvars
-            .get(movie::WATER_CHIP_GLOBAL)
-            .is_none_or(|quest| *quest > 1)
-        {
+        if gvars.get(movie::WATER_CHIP_GLOBAL) == Some(&2) {
             return;
         }
-        let Some(water) = gvars.get_mut(global) else {
-            self.world
-                .diagnostic(format!("water global {global} is outside the campaign"));
+        let Some(water) = gvars.get_mut(movie::WATER_GLOBAL) else {
+            self.world.diagnostic(format!(
+                "water global {} is outside the campaign",
+                movie::WATER_GLOBAL
+            ));
             return;
         };
-        *water = water.saturating_sub(1);
+        let counted = *water > 0;
+        if counted {
+            *water -= 1;
+        }
         let water = *water;
-        if self.world.dialogue.open {
+        if self.world.dialogue.open || !(counted || water == 0) {
             return;
         }
-        let (index, flags) = match water {
-            ..=0 => (movie::BOIL3, 0x05),
-            1..=50 => (movie::BOIL2, 0x07),
-            51..=100 => (movie::BOIL1, 0x07),
-            _ => return,
+        let chosen = &mut self.world.persistence.campaign_status;
+        let (index, flags) = if !counted {
+            (movie::BOIL3, 0x05)
+        } else if water <= 100 && *chosen & movie::BOIL1_CHOSEN == 0 {
+            *chosen |= movie::BOIL1_CHOSEN;
+            (movie::BOIL1, 0x07)
+        } else if water <= 50 && *chosen & movie::BOIL2_CHOSEN == 0 {
+            *chosen |= movie::BOIL2_CHOSEN;
+            (movie::BOIL2, 0x07)
+        } else if water == 0 {
+            (movie::BOIL3, 0x05)
+        } else {
+            return;
         };
-        if self.world.persistence.movies[index] == 0
-            && self.play_game_movie(index, flags)
-            && index == movie::BOIL3
-        {
-            self.world.emit(WorldEffect::EndGame);
+        if self.world.persistence.movies[index] == 0 && self.play_game_movie(index, flags) {
+            // Headless, playback ends as it starts (`MoviePolicy`).
+            self.countdown_movie = self.movie_policy == movie::MoviePolicy::WaitUntilFinished;
+            if index == movie::BOIL3 {
+                self.world.emit(WorldEffect::EndGame);
+            }
         }
     }
 }

@@ -82,6 +82,9 @@ pub fn input_locked(state: &ClickState) -> bool {
 /// - The player's turn start releases the lock and flushes held keys
 ///   (`turns` counts the starts); between player turns the input stays
 ///   locked, and the end of combat releases everything without a flush.
+/// - A sequence that ends within its own registration (a no-route or
+///   own-hex movement click) takes the lock and releases it at once, so
+///   no watch cursor is seen; `releases` still counts that release.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CombatLock {
     /// Running sequences registered while combat was active.
@@ -93,6 +96,9 @@ pub struct CombatLock {
     pub engaged: bool,
     /// Player turns started: each one flushes the held keys.
     pub turns: u64,
+    /// Lock releases during the player's turn: each turns the in-world
+    /// cursor back on, so the hover is recomputed on the next idle poll.
+    pub releases: u64,
 }
 impl CombatLock {
     /// The player's turn starts: the input comes back and held keys are
@@ -115,6 +121,9 @@ impl CombatLock {
             if self.count == 0 && count > 0 {
                 self.engaged = true;
             } else if count == 0 {
+                if self.engaged {
+                    self.releases += 1;
+                }
                 self.engaged = false;
             }
         }

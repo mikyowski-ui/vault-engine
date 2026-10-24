@@ -292,9 +292,6 @@ pub struct WorldRules {
     pub currency_pid: Option<u32>,
     pub doctor_bag_pid: Option<u32>,
     pub first_aid_kit_pid: Option<u32>,
-    /// The campaign global holding the remaining water for the SPEC-012
-    /// midnight countdown; no approved specification names it.
-    pub water_global: Option<usize>,
 }
 /// SPEC-013 §3.22 a map transition request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1245,6 +1242,50 @@ impl WorldState {
         self.rebuild_lighting();
         Ok(())
     }
+    /// SPEC-006 §3.5 step 3 `[May-improve]` safe rule for a saved map:
+    /// every placed critter but the player (PID -1 skipped) takes its last
+    /// attacker from its stored word ([`Self::resolve_last_attacker`]).
+    /// Intent bits and every other combat field are untouched.
+    pub(crate) fn resolve_last_attackers(&mut self) {
+        let critters: Vec<_> = self
+            .iter()
+            .filter(|(reference, object)| {
+                *reference != self.player
+                    && object.owner.is_none()
+                    && object.raw.hex.is_some()
+                    && object.raw.pid != u32::MAX
+            })
+            .map(|(reference, _)| reference)
+            .collect();
+        for critter in critters {
+            self.resolve_last_attacker(critter);
+        }
+    }
+    /// A critter's stored last-attacker word as its reference: a
+    /// nonnegative combat identifier resolves to the placed critter with
+    /// that identifier, or to nothing when none matches; -1 is nothing.
+    pub(crate) fn resolve_last_attacker(&mut self, critter: ObjectRef) {
+        let Some(ObjectState::Critter(state)) = self.get(critter).map(|o| &o.raw.state) else {
+            return;
+        };
+        let attacker = state.attacker;
+        let found = (attacker >= 0)
+            .then(|| {
+                self.iter()
+                    .find(|(_, object)| {
+                        object.owner.is_none()
+                            && object.raw.hex.is_some()
+                            && object.category() == Category::Critter
+                            && object.raw.combat_id == attacker
+                    })
+                    .map(|(found, _)| found)
+            })
+            .flatten()
+            .unwrap_or(0);
+        if let Some(object) = self.get_mut(critter) {
+            object.opponent = found;
+        }
+    }
     fn owned_by_kept(&self, mut reference: ObjectRef) -> bool {
         for _ in 0..64 {
             let Some(parent) = self.get(reference).and_then(|o| o.owner) else {
@@ -1775,6 +1816,47 @@ impl WorldState {
         }
         if animated && previous != Some(hex) {
             self.check_spatials(reference);
+        }
+        // SPEC-013 §3.22: the player's elevation change, by placement or
+        // by script (`move_to`, `override_map_start`), re-syncs the party.
+        if reference == self.player && changed_elevation {
+            self.place_party()?;
+        }
+        Ok(())
+    }
+    /// SPEC-013 §3.22 party following, by the placement rule with starting
+    /// radius 2: each visible party member other than the player, placed
+    /// on the map, fills the next free neighbor of the player's hex in NE
+    /// through NW order. Run on an elevation change and after the final
+    /// player placement of a map change (SPEC-006 §3.5 step 7).
+    pub(crate) fn place_party(&mut self) -> Result<(), WorldError> {
+        let player = self.player;
+        let Some((hex, elevation)) = self
+            .get(player)
+            .and_then(|o| Some((o.raw.hex?, o.raw.elevation)))
+        else {
+            return Ok(());
+        };
+        let members: Vec<_> = self
+            .party
+            .iter()
+            .copied()
+            .filter(|member| *member != player)
+            .filter(|member| {
+                self.get(*member)
+                    .is_some_and(|o| o.owner.is_none() && !o.raw.flags.contains(BasicFlags::HIDDEN))
+            })
+            .collect();
+        let mut neighbors =
+            (0..6).filter_map(|direction| vault_formats::HexGrid::step(hex, direction, 1).ok());
+        for member in members {
+            let Some(spot) = neighbors
+                .by_ref()
+                .find(|spot| self.movement_blocker(*spot, elevation, member).is_none())
+            else {
+                break;
+            };
+            self.move_object(member, spot, elevation, false)?;
         }
         Ok(())
     }

@@ -399,6 +399,16 @@ impl<O, A> Schedule<O, A> {
             index += 1;
         }
     }
+    /// SPEC-014 §3.28 background processing paused for `span_ms`: every
+    /// running entry's next step moves by the span, so the sequence goes on
+    /// where it stood instead of replaying the paused time at once.
+    pub fn delay(&mut self, span_ms: u64) {
+        for entry in &mut self.entries {
+            if let State::Running { due_ms, .. } = &mut entry.state {
+                *due_ms = due_ms.saturating_add(span_ms);
+            }
+        }
+    }
     /// The earliest time a running entry's step is due.
     pub fn due_ms(&self) -> Option<u64> {
         self.entries
@@ -655,6 +665,10 @@ impl Sequence {
     pub fn due_ms(&self) -> Option<u64> {
         self.schedule.due_ms()
     }
+    /// Move every running entry's next step by a paused span.
+    pub fn delay(&mut self, span_ms: u64) {
+        self.schedule.delay(span_ms);
+    }
     /// Run every remaining step at once (headless playback, and the final
     /// state an attack leaves). Returns what started, in order.
     pub fn run_to_end(&mut self, now_ms: u64) -> Vec<Started> {
@@ -824,6 +838,13 @@ impl Show {
             }
         }
         started
+    }
+    /// Move every running entry's next step by a paused span.
+    pub fn delay(&mut self, span_ms: u64) {
+        self.main.delay(span_ms);
+        for extra in &mut self.extras {
+            extra.delay(span_ms);
+        }
     }
     /// The earliest due step of any running entry.
     pub fn due_ms(&self) -> Option<u64> {

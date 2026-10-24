@@ -1324,3 +1324,154 @@ fn spec014_the_game_calendar_starts_on_5_december_2161() {
     assert_eq!(game_date(27 * 864_000), [1, 1, 2162]);
     assert_eq!(game_date(27 * 864_000 + 59 * 864_000), [3, 1, 2162]);
 }
+
+#[test]
+fn spec013_the_party_follows_map_changes_and_leaves_no_orphan_scripts() {
+    let dir = corpus();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let companion = find(&host, CRITTER, None);
+    let id = host.world.get(companion).unwrap().raw.id as i32;
+    let sid = host.world.add_script(companion, 0, 4, 2).unwrap();
+    assert!(host.world.set_local(Some(sid), 0, 42));
+    host.world.party.insert(companion);
+    let player = host.world.player;
+    let beside = |host: &WorldHost<VfsWorldAssets>| {
+        let (a, b) = (
+            host.world.get(player).unwrap(),
+            host.world.get(companion).unwrap(),
+        );
+        a.raw.elevation == b.raw.elevation && host.world.distance(player, companion) == 1
+    };
+    let records = |map: &MapFile| -> Vec<i32> {
+        map.scripts
+            .iter()
+            .flat_map(|category| category.active().map(|script| script.object_id))
+            .collect()
+    };
+    // SPEC-006 §3.5 step 7 / SPEC-013 §3.22: on a map change the member is
+    // placed next to the player's final placement.
+    host.load_map("maps/second.map").unwrap();
+    assert!(beside(&host));
+    // SPEC-006 §3.5 step 1: the member's script left with it, so the left
+    // map's `.SAV` holds neither its record nor its local variables.
+    let saved = parse_saved(&host, "SYNTH.SAV");
+    assert!(!records(&saved).contains(&id));
+    let left = (records(&saved).len(), saved.lvars.len());
+    // Revisits gain no orphan records or local variables.
+    for _ in 0..2 {
+        host.load_map("maps/synth.map").unwrap();
+        assert!(beside(&host));
+        host.load_map("maps/second.map").unwrap();
+        let saved = parse_saved(&host, "SYNTH.SAV");
+        assert_eq!((records(&saved).len(), saved.lvars.len()), left);
+        assert!(!records(&parse_saved(&host, "SECOND.SAV")).contains(&id));
+    }
+    let carried = host.world.script_for(companion).unwrap();
+    assert_eq!(host.world.local(Some(carried), 0), 42);
+    // The kept map script records still resolve to objects on the map.
+    let synth = parse_saved(&host, "SYNTH.SAV");
+    assert!(records(&synth).iter().all(|owner| {
+        *owner == -1
+            || synth
+                .objects
+                .elevations
+                .iter()
+                .flatten()
+                .any(|object| object.id as i32 == *owner)
+    }));
+    // A scripted elevation change (`move_to`) re-syncs the party too.
+    host.world.move_object(player, 20300, 1, false).unwrap();
+    assert!(beside(&host));
+}
+
+#[test]
+fn spec013_a_failed_transition_is_a_diagnostic_and_clears_its_requests() {
+    let dir = corpus();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    host.world.effects.clear();
+    host.request_transition(crate::Transition {
+        map: 63,
+        elevation: 0,
+        hex: 20100,
+        facing: 0,
+    });
+    assert!(host.process_transition().unwrap());
+    assert!(host.world.pending_transition.is_none());
+    assert!(host.world.effects.iter().any(|effect| matches!(
+        effect,
+        crate::WorldEffect::Diagnostic(text) if text.contains("map transition to 63")
+    )));
+    // A destination hex off the grid keeps the entrance.
+    host.request_transition(crate::Transition {
+        map: 8,
+        elevation: 0,
+        hex: 40_000,
+        facing: 2,
+    });
+    assert!(host.process_transition().unwrap());
+    let player = host.world.get(host.world.player).unwrap();
+    assert_eq!((player.raw.hex, player.raw.orientation), (Some(20100), 2));
+}
+
+#[test]
+fn spec014_a_loaded_save_places_the_player_and_keeps_the_water_byte() {
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let player = host.world.player;
+    host.world.move_object(player, 20400, 0, false).unwrap();
+    let roof = host.world.roof;
+    let hidden = host.world.hidden_roof_squares(0);
+    // SPEC-012 §3.12: the water-movie byte is saved with the script state.
+    host.world.persistence.campaign_status = 0x03;
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    host.load_map("maps/second.map").unwrap();
+    host.world.persistence.campaign_status = 0;
+    host.load_game(root.path(), 1).unwrap();
+    // The restored player record is a placement: the roof tracking moved
+    // from the entrance square to the player's.
+    assert_eq!(host.world.get(player).unwrap().raw.hex, Some(20400));
+    assert_eq!(host.world.roof, roof);
+    assert_eq!(host.world.hidden_roof_squares(0), hidden);
+    assert_eq!(host.world.persistence.campaign_status, 0x03);
+}
+
+#[test]
+fn spec006_map_loads_normalize_last_attackers() {
+    let dir = corpus();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let player = host.world.player;
+    let critter = find(&host, CRITTER, None);
+    // A fresh map's critters store -1: no last attacker; intent bits stay.
+    assert_eq!(host.world.get(critter).unwrap().opponent, 0);
+    // The saved-map safe rule: a stored combat identifier resolves to the
+    // critter with it, or to nothing.
+    let object = host.world.get_mut(critter).unwrap();
+    object.raw.combat_id = 3;
+    if let ObjectState::Critter(state) = &mut object.raw.state {
+        state.attacker = 3;
+        state.maneuvers = 0x01;
+    }
+    host.world.get_mut(player).unwrap().opponent = critter;
+    host.load_map("maps/second.map").unwrap();
+    // Every load leaves the player with no last attacker.
+    assert_eq!(host.world.get(player).unwrap().opponent, 0);
+    host.load_map("maps/synth.map").unwrap();
+    let critter = find(&host, CRITTER, None);
+    let object = host.world.get(critter).unwrap();
+    assert_eq!(object.opponent, critter);
+    assert!(matches!(&object.raw.state, ObjectState::Critter(state) if state.maneuvers == 0x01));
+    let object = host.world.get_mut(critter).unwrap();
+    if let ObjectState::Critter(state) = &mut object.raw.state {
+        state.attacker = 7;
+    }
+    host.load_map("maps/second.map").unwrap();
+    host.load_map("maps/synth.map").unwrap();
+    let critter = find(&host, CRITTER, None);
+    assert_eq!(host.world.get(critter).unwrap().opponent, 0);
+}

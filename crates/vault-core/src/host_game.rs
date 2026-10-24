@@ -665,7 +665,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     let created = self.assets.prototype(call.uint(3)).and_then(|prototype| {
                         let elevation = u8::try_from(call.int(1))
                             .map_err(|_| WorldError::Invalid("elevation outside 0-255".into()))?;
-                        let object = self.world.spawn(prototype.clone(), hex, elevation)?;
+                        let object = self.spawn(prototype.clone(), hex, elevation)?;
                         Ok((prototype, object))
                     });
                     let (prototype, object) = match created {
