@@ -561,6 +561,35 @@ fn load_order_edits_round_trip_through_the_writer() {
 }
 
 #[test]
+fn the_game_row_refuses_fallout2_until_its_specs_exist() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    install(dir);
+    let config = Config {
+        master_dat: Some(dir.join("MASTER.DAT")),
+        critter_dat: Some(dir.join("CRITTER.DAT")),
+        ..Config::default()
+    };
+    let mut launcher = Launcher::new(setup(dir, config));
+    assert_eq!(launcher.ready(), Ok(()));
+    // On the Game data tab, after the fields.
+    let order = launcher.order();
+    let browse = order
+        .iter()
+        .position(|widget| *widget == Widget::Browse(Field::DataRoot))
+        .unwrap();
+    assert_eq!(order[browse + 1], Widget::Game);
+    launcher.focus = Widget::Game;
+    key(&mut launcher, KeyCode::ArrowRight);
+    assert_eq!(launcher.config.game, Some(GameProfile::Fallout2));
+    let refused = launcher.ready().unwrap_err();
+    assert!(refused.contains("SPEC-015"), "{refused}");
+    key(&mut launcher, KeyCode::Space);
+    assert_eq!(launcher.config.game, Some(GameProfile::Fallout1));
+    assert_eq!(launcher.ready(), Ok(()));
+}
+
+#[test]
 fn mod_layers_show_their_manifest_name_and_enhanced_badge() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
@@ -624,7 +653,7 @@ fn the_keyboard_moves_the_focus_in_layout_order() {
     use {Field as F, Tab as T, Widget as W};
     launcher.focus = W::Tab(T::Data);
     let mut seen = vec![launcher.focus];
-    for _ in 0..12 {
+    for _ in 0..13 {
         key(&mut launcher, KeyCode::Tab);
         seen.push(launcher.focus);
     }
@@ -640,6 +669,7 @@ fn the_keyboard_moves_the_focus_in_layout_order() {
             W::Browse(F::Critter),
             W::Field(F::DataRoot),
             W::Browse(F::DataRoot),
+            W::Game,
             W::Save,
             W::Play,
             W::PlayDebug,
@@ -868,8 +898,8 @@ fn the_initial_screen_draws_the_same_frame() {
     assert_eq!(
         digest,
         concat!(
-            "35d285d1e3ec2825720f7e021615ab94",
-            "cd5db1d90a95af00eab8f74ca7a149ad"
+            "e4eaed7d9bf7f9427f237d4722895d98",
+            "bf5f118abd0d7f046b279560a38e6798"
         )
     );
     // Every tab and the browser draw within the palette's own entries.

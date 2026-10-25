@@ -105,6 +105,11 @@ struct Args {
     /// file's, else vanilla.
     #[arg(long, value_name = "PRESET", value_parser = preset_arg)]
     preset: Option<config::Preset>,
+    /// The game whose data this is: `fallout1` or `fallout2`. Default: the
+    /// settings file's `game`, else fallout1. Fallout 2 is refused until
+    /// its specifications are approved (docs/fallout2-and-qol-roadmap.md).
+    #[arg(long, value_name = "GAME", value_parser = game_arg)]
+    game_profile: Option<vault_core::GameProfile>,
     /// With the enhanced preset, the viewport: `fixed_640x480` or
     /// `unlocked_widescreen` (the world across the window behind the
     /// interface). Default: the settings file's `viewport_mode`, else
@@ -126,6 +131,9 @@ struct Args {
 
 fn scaling_arg(text: &str) -> Result<ScalingMode, String> {
     config::parse_scaling(text).ok_or_else(|| "expected aspect_fit or integer".into())
+}
+fn game_arg(text: &str) -> Result<vault_core::GameProfile, String> {
+    config::parse_game(text).ok_or_else(|| "expected fallout1 or fallout2".into())
 }
 fn preset_arg(text: &str) -> Result<config::Preset, String> {
     config::Preset::parse(text).ok_or_else(|| "expected vanilla or enhanced".into())
@@ -166,6 +174,7 @@ impl Args {
 struct Launch {
     scaling: ScalingMode,
     fullscreen: bool,
+    game: vault_core::GameProfile,
     preset: config::Preset,
     /// With the enhanced preset only, its presentation settings.
     enhanced: Option<enhanced::EnhancedSettings>,
@@ -217,6 +226,7 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
             .or(config.scaling)
             .unwrap_or(ScalingMode::AspectFit),
         fullscreen: args.fullscreen || config.fullscreen.unwrap_or(false),
+        game: args.game_profile.or(config.game).unwrap_or_default(),
         preset,
         enhanced,
         mod_list: config.mod_list.clone(),
@@ -260,6 +270,7 @@ fn start(
         config::Preset::Vanilla => vault_core::EnginePreset::Vanilla,
         config::Preset::Enhanced => vault_core::EnginePreset::Enhanced,
     };
+    args.preview.game_profile = launch.game;
     args.preview.mods = launch.mod_list.clone();
     args.preview.enhanced = launch.enhanced;
     args.preview.mod_export = Some(mods::export_root(launch.mod_list.as_ref()));
@@ -303,6 +314,7 @@ fn play_args(shown: &Args, debug: bool) -> Args {
     args.scaling = None;
     args.fullscreen = false;
     args.preset = None;
+    args.game_profile = None;
     args.viewport = None;
     args.zoom = None;
     args.no_audio = false;
@@ -325,6 +337,9 @@ fn launcher_for(
     }
     if let Some(preset) = args.preset {
         config.preset = Some(preset);
+    }
+    if let Some(game) = args.game_profile {
+        config.game = Some(game);
     }
     if args.fullscreen {
         config.fullscreen = Some(true);
@@ -1798,6 +1813,7 @@ mod tests {
             Launch {
                 scaling: ScalingMode::AspectFit,
                 fullscreen: true,
+                game: vault_core::GameProfile::Fallout1,
                 preset: config::Preset::Enhanced,
                 enhanced: Some(enhanced::EnhancedSettings::default()),
                 mod_list: None,
@@ -1943,6 +1959,7 @@ mod tests {
             Launch {
                 scaling: ScalingMode::AspectFit,
                 fullscreen: true,
+                game: vault_core::GameProfile::Fallout1,
                 preset: config::Preset::Enhanced,
                 enhanced: Some(enhanced::EnhancedSettings::default()),
                 mod_list: chosen.mod_list.clone(),
@@ -2045,6 +2062,37 @@ mod tests {
         assert_eq!(
             shell_hotkey(KeyCode::KeyS, true, true),
             Some(ShellHotkey::Scaling)
+        );
+    }
+
+    #[test]
+    fn a_fallout2_launch_is_refused_until_its_specs_exist() {
+        let settings = config::Config {
+            game: Some(vault_core::GameProfile::Fallout2),
+            ..installed()
+        };
+        assert_eq!(
+            resolve_launch(&mut parse(&[]), Some(&settings)).game,
+            vault_core::GameProfile::Fallout2
+        );
+        // The flag wins over the file, as the other flags do.
+        let mut args = parse(&["--game-profile", "fallout1"]);
+        assert_eq!(
+            resolve_launch(&mut args, Some(&settings)).game,
+            vault_core::GameProfile::Fallout1
+        );
+        assert!(Args::try_parse_from(["vault-platform", "--game-profile", "fallout3"]).is_err());
+        // Nothing is read: the refusal comes before the sources.
+        let preview = preview::PreviewArgs {
+            game: true,
+            game_profile: vault_core::GameProfile::Fallout2,
+            ..Default::default()
+        };
+        let error = preview.load().err().unwrap();
+        assert_eq!(error.to_string(), vault_core::FALLOUT2_PENDING);
+        assert_eq!(
+            play_args(&parse(&["--game-profile", "fallout2"]), false).game_profile,
+            None
         );
     }
 

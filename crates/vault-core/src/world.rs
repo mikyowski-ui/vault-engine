@@ -321,6 +321,18 @@ impl WorldRules {
             .or_else(|| WeaponPerk::from_perk(perk))
     }
 }
+/// The game whose data an engine runs. Only Fallout 1 is specified
+/// (SPEC-001 to SPEC-014); Fallout 2 is known by name and refused until
+/// its specifications are approved ([`FALLOUT2_PENDING`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GameProfile {
+    #[default]
+    Fallout1,
+    Fallout2,
+}
+/// Why a Fallout 2 start is refused.
+pub const FALLOUT2_PENDING: &str =
+    "Fallout 2 data needs SPEC-015 to SPEC-019 (docs/fallout2-and-qol-roadmap.md)";
 /// Which engine behaviour a world runs with. [`Vanilla`](Self::Vanilla), the
 /// default everywhere, is the spec-conformant reference behaviour: every
 /// Must-match rule holds and no extension is reachable. `Enhanced` opts in

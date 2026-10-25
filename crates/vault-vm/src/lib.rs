@@ -13,7 +13,7 @@ pub mod procedure_flags {
 pub use arithmetic::float_text;
 pub use host::{BasicHost, ExportedProcedure, ExternalValue, LaunchMode, VmHost};
 pub use machine::{RunOutcome, Vm, VmStatus};
-pub use program::{IntError, IntProgram, Lifecycle, Procedure};
+pub use program::{IntError, IntProgram, Lifecycle, Procedure, WordSet};
 pub use stack::{Stack, Value, VmError};
 
 #[cfg(test)]

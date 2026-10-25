@@ -132,7 +132,11 @@ that fits a smaller monitor.
 With no arguments the game starts from the data named in `vault-engine.toml`,
 looked for beside the executable and then in the working directory. Keys:
 `master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
-`preset` (`vanilla` or `enhanced`), `scaling`, `fullscreen`, `debug` and
+`game` (`fallout1`, the default, or `fallout2`, which is refused until its
+specifications exist; see the
+[Fallout 2 and QoL roadmap](docs/fallout2-and-qol-roadmap.md), and the
+`--game-profile` flag), `preset` (`vanilla` or `enhanced`), `scaling`,
+`fullscreen`, `debug` and
 `audio` (`false` keeps the audio device closed, as `--no-audio` does), plus
 the enhanced preset's `viewport_mode`, `default_zoom`, `smooth_camera`,
 `roof_peek` and `ui_scale` (see

@@ -16,6 +16,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
 };
+use vault_core::GameProfile;
 use vault_render::ScalingMode;
 
 /// The settings file's name, looked up beside the executable first and
@@ -44,6 +45,21 @@ impl Preset {
             Self::Vanilla => "vanilla",
             Self::Enhanced => "enhanced",
         }
+    }
+}
+
+/// `fallout1` or `fallout2` (the `game` key and `--game-profile`).
+pub fn parse_game(text: &str) -> Option<GameProfile> {
+    match text {
+        "fallout1" => Some(GameProfile::Fallout1),
+        "fallout2" => Some(GameProfile::Fallout2),
+        _ => None,
+    }
+}
+pub fn game_name(game: GameProfile) -> &'static str {
+    match game {
+        GameProfile::Fallout1 => "fallout1",
+        GameProfile::Fallout2 => "fallout2",
     }
 }
 
@@ -165,6 +181,8 @@ pub struct Config {
     /// The loose data directory both databases consult first.
     pub data_root: Option<PathBuf>,
     pub mod_list: Option<ModList>,
+    /// The game whose data this is; only Fallout 1 runs today.
+    pub game: Option<GameProfile>,
     pub preset: Option<Preset>,
     pub scaling: Option<ScalingMode>,
     pub fullscreen: Option<bool>,
@@ -280,6 +298,12 @@ impl Config {
                     }
                 })
             }
+            "game" => {
+                let text = string(value)?;
+                self.game = Some(parse_game(&text).ok_or_else(|| {
+                    format!("`game` is \"fallout1\" or \"fallout2\", not \"{text}\"")
+                })?);
+            }
             "preset" => {
                 let text = string(value)?;
                 self.preset = Some(Preset::parse(&text).ok_or_else(|| {
@@ -378,6 +402,9 @@ impl Config {
             }
             Some(ModList::File(file)) => line("mod_list", path(file)?),
             None => {}
+        }
+        if let Some(game) = self.game {
+            line("game", quote(game_name(game)));
         }
         if let Some(preset) = self.preset {
             line("preset", quote(preset.name()));
@@ -520,11 +547,12 @@ impl Config {
     }
 }
 
-const KNOWN: [&str; 15] = [
+const KNOWN: [&str; 16] = [
     "master_dat",
     "critter_dat",
     "data_root",
     "mod_list",
+    "game",
     "preset",
     "scaling",
     "fullscreen",
@@ -899,6 +927,7 @@ master_dat = "C:\\Games\\Fallout\\MASTER.DAT"   # the master database
 critter_dat = 'C:\Games\Fallout\CRITTER.DAT'
 data_root = "/games/fallout/data"
 load_order = ["mods/one", 'mods/two',]
+game = "fallout1"
 preset = "enhanced"
 scaling = "aspect_fit"
 fullscreen = true
@@ -919,9 +948,19 @@ future_list = []
             config.mod_list,
             Some(ModList::Paths(vec!["mods/one".into(), "mods/two".into()]))
         );
+        assert_eq!(config.game, Some(GameProfile::Fallout1));
         assert_eq!(config.preset, Some(Preset::Enhanced));
         assert_eq!(config.scaling, Some(ScalingMode::AspectFit));
         assert_eq!((config.fullscreen, config.debug), (Some(true), Some(false)));
+        assert_eq!(
+            Config::parse("game = \"fallout2\"").unwrap().game,
+            Some(GameProfile::Fallout2)
+        );
+        let error = Config::parse("game = \"fallout3\"").unwrap_err();
+        assert!(
+            error.message.contains("\"fallout1\" or \"fallout2\""),
+            "{error}"
+        );
         assert_eq!(
             config.unknown,
             vec![

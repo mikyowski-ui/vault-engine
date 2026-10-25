@@ -19,6 +19,24 @@ fn finish(vm: &mut Vm) -> Result<RunOutcome, VmError> {
     panic!("fixture did not terminate")
 }
 #[test]
+fn the_fallout1_word_set_is_spec_004_and_005_exactly() {
+    let set = WordSet::FALLOUT1;
+    for word in 0x8000..=0x8155_u16 {
+        assert!(set.accepts(word), "{word:#06x}");
+    }
+    // Past SPEC-005's last host word (where another game's words would
+    // start) and below bit 15: refused.
+    for word in [0x8156, 0x8183, 0x81ff, 0x7fff, 0x0000] {
+        assert!(!set.accepts(word), "{word:#06x}");
+    }
+    // Every slot-1 push, whatever bits 10-14 hold.
+    for slot in 0..32_u16 {
+        assert!(set.accepts(0x8001 + slot * 0x0400));
+    }
+    assert!(!set.accepts(0x0001));
+}
+
+#[test]
 fn spec004_complete_program_metadata_execution_and_mutations() {
     let bytes = fixture::program();
     assert_eq!(bytes.len(), 282);

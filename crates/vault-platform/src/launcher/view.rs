@@ -6,8 +6,9 @@ use super::font::{self, CHECK, CROSS};
 use super::validate::{Check, State};
 use super::widgets::{self, Look, Rect, Row};
 use super::{Field, Launcher, Tab, Widget};
-use crate::config::{Preset, roof_peek_name, scaling_name, viewport_name};
+use crate::config::{Preset, game_name, roof_peek_name, scaling_name, viewport_name};
 use crate::enhanced::{RoofPeek, ViewportMode};
+use vault_core::GameProfile;
 use vault_formats::{LayerEntry, ModManifest};
 use vault_render::{IndexedImage, ScalingMode};
 
@@ -66,6 +67,9 @@ const FIELD_HINTS: [&str; 3] = [
 ];
 const FIELD_PLACEHOLDERS: [&str; 3] = ["path to MASTER.DAT", "path to CRITTER.DAT", "(none)"];
 
+/// The Game row, below the fields' checks.
+const GAME_TOP: i32 = 302;
+
 fn field_top(field: Field) -> i32 {
     72 + field.index() as i32 * 84
 }
@@ -118,6 +122,7 @@ pub fn layout(launcher: &Launcher) -> Vec<(Widget, Rect)> {
                 out.push((Widget::Field(field), Rect::new(28, y, 500, 18)));
                 out.push((Widget::Browse(field), Rect::new(536, y, 76, 18)));
             }
+            out.push((Widget::Game, Rect::new(160, GAME_TOP, 150, 18)));
         }
         Tab::Display => {
             for (row, widget) in (0..).zip(DISPLAY) {
@@ -300,6 +305,25 @@ fn draw_data(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, rect:
         }
         draw_check(image, [28, y + 40], &launcher.checks[i], 96);
     }
+    let game = launcher.config.game.unwrap_or_default();
+    font::draw(image, [28, GAME_TOP + 5], "Game", color::TEXT);
+    if let Some(r) = rect(Widget::Game) {
+        widgets::toggle(
+            image,
+            r,
+            &format!("< {} >", game_name(game)),
+            look(Widget::Game),
+        );
+    }
+    font::draw(
+        image,
+        [322, GAME_TOP + 5],
+        match game {
+            GameProfile::Fallout1 => "Fallout 1 data",
+            GameProfile::Fallout2 => "not yet supported: awaits its specifications",
+        },
+        color::DIM,
+    );
     font::draw(
         image,
         [28, 330],

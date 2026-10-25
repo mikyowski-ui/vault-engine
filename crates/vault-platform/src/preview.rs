@@ -15,6 +15,10 @@ pub struct PreviewArgs {
     /// neither names one).
     #[arg(skip)]
     pub preset: vault_core::EnginePreset,
+    /// The game whose data this is (from the settings or
+    /// `--game-profile`); Fallout 2 is refused before anything is read.
+    #[arg(skip)]
+    pub game_profile: vault_core::GameProfile,
     /// Mod layers stacked over the game data, lowest first (the settings'
     /// `mod_list`): paths, or a `load_order.toml`.
     #[arg(skip)]
@@ -605,6 +609,9 @@ impl PreviewArgs {
         }
     }
     pub fn load(&self) -> AppResult<Option<AssetPreview>> {
+        if self.game_profile == vault_core::GameProfile::Fallout2 {
+            return Err(vault_core::FALLOUT2_PENDING.into());
+        }
         let language = self.language.as_deref().unwrap_or("english");
         let save_root = self.save_dir.clone().unwrap_or_else(|| PathBuf::from("."));
         if self.game {

@@ -106,16 +106,35 @@ fn strings(
 pub(crate) fn instruction_length(word: u16) -> usize {
     if word & 0x3ff == 1 { 6 } else { 2 }
 }
-/// SPEC-004 §2.5: bit 15 must be set. All 32 slot-1 words `0x8001 + n *
-/// 0x0400` are valid pushes that keep their full word as the tag (a
-/// non-standard tag such as `0x8401` fails later, at a type check). Other
-/// words with bits 10-14 set are rejected (the `[May-improve]` rule).
-pub(crate) fn valid_word(word: u16) -> bool {
-    if word & 0x3ff == 1 {
-        word & 0x8000 != 0
-    } else {
-        (0x8000..=0x8155).contains(&word)
+/// The instruction words a game's programs may use besides the slot-1
+/// pushes: the SPEC-004 core words and the SPEC-005 host words. Only
+/// Fallout 1's set is specified; another game's words join only with its
+/// approved specification (docs/fallout2-and-qol-roadmap.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WordSet {
+    /// The core and host words, `0x8000` up to the last host word.
+    pub words: std::ops::RangeInclusive<u16>,
+}
+impl WordSet {
+    /// SPEC-004/005: `0x8000` to `0x8155`.
+    pub const FALLOUT1: Self = Self {
+        words: 0x8000..=0x8155,
+    };
+    /// SPEC-004 §2.5: bit 15 must be set. All 32 slot-1 words `0x8001 + n *
+    /// 0x0400` are valid pushes that keep their full word as the tag (a
+    /// non-standard tag such as `0x8401` fails later, at a type check).
+    /// Other words with bits 10-14 set are rejected (the `[May-improve]`
+    /// rule).
+    pub fn accepts(&self, word: u16) -> bool {
+        if word & 0x3ff == 1 {
+            word & 0x8000 != 0
+        } else {
+            self.words.contains(&word)
+        }
     }
+}
+pub(crate) fn valid_word(word: u16) -> bool {
+    WordSet::FALLOUT1.accepts(word)
 }
 /// [`valid_word`], plus the versioned enhanced range
 /// ([`crate::extensions::ENHANCED_RANGE`]) when `enhanced` is set.

@@ -23,6 +23,7 @@ use browse::{Browser, Target};
 use std::path::{Path, PathBuf};
 pub(crate) use validate::Empty;
 use validate::{Check, State};
+use vault_core::GameProfile;
 use vault_formats::{LayerEntry, LoadOrderPolicy};
 use vault_render::{IndexedImage, ScalingMode};
 pub use view::palette;
@@ -94,6 +95,8 @@ pub enum Widget {
     Tab(Tab),
     Field(Field),
     Browse(Field),
+    /// The game whose data this is (`game`).
+    Game,
     Scaling,
     Fullscreen,
     Preset,
@@ -301,6 +304,10 @@ impl Launcher {
     /// Whether the game data and the mod stack can start the game, or the
     /// first reason they cannot.
     pub fn ready(&self) -> Result<(), String> {
+        // Fallout 2 is known by name only until its specifications exist.
+        if self.config.game == Some(GameProfile::Fallout2) {
+            return Err(format!("{}.", vault_core::FALLOUT2_PENDING));
+        }
         const NAMES: [&str; 3] = ["MASTER.DAT", "CRITTER.DAT", "Data folder"];
         if let Some((name, check)) = NAMES
             .iter()
@@ -388,7 +395,9 @@ impl Launcher {
             }
             KeyCode::ArrowLeft | KeyCode::ArrowRight => match focus {
                 Widget::Tab(_) => self.switch_tab(delta),
-                Widget::Scaling | Widget::Preset | Widget::Viewport => return self.activate(focus),
+                Widget::Game | Widget::Scaling | Widget::Preset | Widget::Viewport => {
+                    return self.activate(focus);
+                }
                 Widget::Zoom | Widget::RoofPeek | Widget::UiScale => self.choose(focus, delta),
                 _ => self.move_focus(delta),
             },
@@ -547,6 +556,12 @@ impl Launcher {
             Widget::Browse(field) => self.open_browser(Target::Field(field)),
             Widget::Scaling => {
                 config.scaling = Some(config.scaling.unwrap_or(ScalingMode::AspectFit).toggled());
+            }
+            Widget::Game => {
+                config.game = Some(match config.game.unwrap_or_default() {
+                    GameProfile::Fallout1 => GameProfile::Fallout2,
+                    GameProfile::Fallout2 => GameProfile::Fallout1,
+                });
             }
             Widget::Preset => {
                 config.preset = Some(match config.preset.unwrap_or_default() {

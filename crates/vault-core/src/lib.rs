@@ -60,8 +60,8 @@ pub use host_movement::{Movement, StepOutcome};
 pub use host_skills::BookRoute;
 pub use host_travel::{TravelOutcome, WorldMapExit};
 pub use world::{
-    ActiveExplosion, EnginePreset, ExplosionRequest, LootRequest, ObjectAction, ObjectRef,
-    ScriptEvent, Transition, WorldEffect, WorldRules, WorldState,
+    ActiveExplosion, EnginePreset, ExplosionRequest, FALLOUT2_PENDING, GameProfile, LootRequest,
+    ObjectAction, ObjectRef, ScriptEvent, Transition, WorldEffect, WorldRules, WorldState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
