@@ -5,10 +5,10 @@
 use crate::config::{self, Config, ModList, Preset};
 use crate::enhanced::{EnhancedSettings, ViewportMode};
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
+use vault_core::mod_export::Setup;
 use vault_formats::{
     EnhancedOverrides, LayerEntry, LoadOrderPolicy, ModManifest, Vfs,
     mod_manifest::{self, MANIFEST},
@@ -175,6 +175,7 @@ pub fn setup_manifest(
             smooth_camera: Some(settings.smooth_camera),
             roof_peek: Some(config::roof_peek_name(settings.roof_peek).into()),
         }),
+        ..ModManifest::default()
     }
 }
 
@@ -250,18 +251,32 @@ pub fn export_setup(
             .map_err(|error| format!("{}: {error}", folder.display()))?;
         sources.push(Arc::new(vfs));
     }
-    let mut files = BTreeMap::new();
+    let mut setup = Setup::default();
     for source in &sources {
-        files.extend(vault_core::mod_export::setup_files(source.as_ref())?);
+        setup.merge(vault_core::mod_export::setup(source.as_ref())?);
     }
-    let files: Vec<(String, Vec<u8>)> = files.into_iter().collect();
     let output = request
         .output
         .clone()
         .unwrap_or_else(|| export_root(config.mod_list.as_ref()).join(&request.name));
-    mod_manifest::write_mod_folder(&output, &manifest, &files)
+    let files = write_setup(&output, manifest, setup)?;
+    Ok((output, files))
+}
+
+/// Write `setup` as a mod folder at `output` with `manifest`, which gains
+/// the setup's registrations; returns how many game files it holds.
+pub fn write_setup(
+    output: &Path,
+    mut manifest: ModManifest,
+    setup: Setup,
+) -> crate::AppResult<usize> {
+    manifest.scripts = setup.scripts.into_values().collect();
+    manifest.maps = setup.maps.into_values().collect();
+    manifest.patches = setup.patches;
+    let files: Vec<(String, Vec<u8>)> = setup.files.into_iter().collect();
+    mod_manifest::write_mod_folder(output, &manifest, &files)
         .map_err(|error| format!("{}: {error}", output.display()))?;
-    Ok((output, files.len()))
+    Ok(files.len())
 }
 
 /// The first free folder `root/<slug>`, `root/<slug>-2`, ... (an export

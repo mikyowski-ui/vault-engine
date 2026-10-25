@@ -637,3 +637,53 @@ pub fn write_cam_demo(root: &std::path::Path) -> i32 {
     std::fs::write(root.join("maps/cam_demo.gam"), b"MAP_GLOBAL_VARS:\n").unwrap();
     index
 }
+
+/// The camera demo's registered script row in [`write_cam_demo_mod`].
+pub const CAM_DEMO_MOD_SCRIPT: u32 = 4096;
+/// The camera demo's registered map number in [`write_cam_demo_mod`].
+pub const CAM_DEMO_MOD_MAP: u32 = 100;
+
+/// Where [`write_cam_demo_mod`] put the demo layer.
+pub struct CamDemoMod {
+    /// `root/load_order.toml`, naming the layer.
+    pub load_order: std::path::PathBuf,
+    /// `root/mods/cam-demo`.
+    pub layer: std::path::PathBuf,
+    pub script: u32,
+    pub map: u32,
+}
+
+/// The camera demo as an additive mod layer over a corpus [`write_corpus`]
+/// wrote in `root`: `root/mods/cam-demo` holds `scripts/camdemo.int`,
+/// `maps/cam_demo.map` (map number [`CAM_DEMO_MOD_MAP`], its map script
+/// row [`CAM_DEMO_MOD_SCRIPT`]) and its empty `.gam`, and a
+/// `vault-mod.toml` that registers both and selects the enhanced preset.
+/// `scripts.lst` is left as it is. `root/load_order.toml` names the layer.
+pub fn write_cam_demo_mod(root: &std::path::Path) -> CamDemoMod {
+    let layer = root.join("mods/cam-demo");
+    for folder in ["maps", "scripts"] {
+        std::fs::create_dir_all(layer.join(folder)).unwrap();
+    }
+    std::fs::write(layer.join("scripts/camdemo.int"), cam_demo_program()).unwrap();
+    let mut map = cam_demo_map(CAM_DEMO_MOD_SCRIPT as i32);
+    world::word(&mut map, 0x34, CAM_DEMO_MOD_MAP as i32);
+    std::fs::write(layer.join("maps/cam_demo.map"), map).unwrap();
+    std::fs::write(layer.join("maps/cam_demo.gam"), b"MAP_GLOBAL_VARS:\n").unwrap();
+    std::fs::write(
+        layer.join("vault-mod.toml"),
+        format!(
+            "name = \"Camera demo\"\nversion = \"1.0.0\"\n\n[enhanced]\npreset = \"enhanced\"\n\n\
+             [[scripts]]\nfile = \"camdemo.int\"\nindex = {CAM_DEMO_MOD_SCRIPT}\nlocal_vars = 0\n\n\
+             [[maps]]\nfile = \"cam_demo.map\"\nnumber = {CAM_DEMO_MOD_MAP}\n"
+        ),
+    )
+    .unwrap();
+    let load_order = root.join("load_order.toml");
+    std::fs::write(&load_order, "layers = [\"mods/cam-demo\"]\n").unwrap();
+    CamDemoMod {
+        load_order,
+        layer,
+        script: CAM_DEMO_MOD_SCRIPT,
+        map: CAM_DEMO_MOD_MAP,
+    }
+}

@@ -194,3 +194,80 @@ fn vanilla_ignores_overrides_and_enhanced_or_a_mod_layer_loads_them() {
     assert!(broken.load_table_overrides().is_err());
     assert!(broken.world.rules.tables.is_none());
 }
+
+#[test]
+fn mod_patches_replace_records_over_the_override_in_load_order() {
+    let dir = corpus();
+    // Two layers patch the maps table: record 0 by both (the higher wins)
+    // and record 1 by the lower only.
+    for (layer, patch) in [
+        (
+            "low",
+            "0|0|DESERT1.MAP|6|07desert\n1|1|DESERT2.MAP|3|07desert\n",
+        ),
+        ("high", "# mine\n0|0|DESERT1.MAP|7|07desert\n"),
+    ] {
+        let folder = dir.path().join("mods").join(layer);
+        fs::create_dir_all(folder.join("data").join(layer)).unwrap();
+        fs::write(
+            folder.join("data").join(layer).join("maps.patch.txt"),
+            patch,
+        )
+        .unwrap();
+        fs::write(
+            folder.join("vault-mod.toml"),
+            format!(
+                "name = \"{layer}\"\n[[patches]]\ntable = \"maps\"\nfile = \"data/{layer}/maps.patch.txt\"\n"
+            ),
+        )
+        .unwrap();
+    }
+    let mount = || -> Arc<dyn Vfs> {
+        let base: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+        let entry = |path: &str| vault_formats::LayerEntry {
+            path: Some(path.into()),
+            ..Default::default()
+        };
+        Arc::new(
+            vault_formats::LayeredVfs::from_entries(
+                base,
+                dir.path(),
+                &[entry("mods/low"), entry("mods/high")],
+                vault_formats::LoadOrderPolicy::default(),
+            )
+            .unwrap(),
+        )
+    };
+    let mut modded = host(mount());
+    assert_eq!(modded.load_table_overrides().unwrap(), [Table::Maps]);
+    let tables = modded.world.rules.tables();
+    assert_eq!(tables.map_town(0), 7);
+    assert_eq!(tables.map_town(1), 3);
+    assert_eq!(tables.map_town(2), worldmap::map_town(2));
+
+    // Without the whole-file override, the patches apply to the compiled
+    // table.
+    fs::remove_file(dir.path().join("data/vault-engine/maps.txt")).unwrap();
+    let mut patched = host(mount());
+    assert_eq!(patched.load_table_overrides().unwrap(), [Table::Maps]);
+    assert_eq!(patched.world.rules.tables().map_town(0), 7);
+
+    // A record past the table, or an unknown table, is an error and leaves
+    // the compiled tables.
+    fs::write(
+        dir.path().join("mods/high/data/high/maps.patch.txt"),
+        "99|x",
+    )
+    .unwrap();
+    let mut broken = host(mount());
+    assert!(broken.load_table_overrides().is_err());
+    assert!(broken.world.rules.tables.is_none());
+    fs::write(
+        dir.path().join("mods/high/vault-mod.toml"),
+        "name = \"high\"\n[[patches]]\ntable = \"cities\"\nfile = \"data/high/maps.patch.txt\"\n",
+    )
+    .unwrap();
+    let mut unknown = host(mount());
+    let error = unknown.load_table_overrides().unwrap_err().to_string();
+    assert!(error.contains("no campaign table `cities`"), "{error}");
+}

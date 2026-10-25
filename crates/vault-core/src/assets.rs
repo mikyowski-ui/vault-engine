@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+use vault_formats::mod_manifest::ModRegistry;
 use vault_formats::{
     ArtCatalog, Fid, Font, FontKind, FontSet, FrmArchive, GamFile, GamSection, GcdFile,
     LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype, Vfs,
@@ -140,6 +141,11 @@ pub trait WorldAssets {
     fn mod_layers(&self) -> usize {
         0
     }
+    /// The mod layers' registered campaign-table patches, lowest layer
+    /// first, as (table name, VFS path); none for plain game data.
+    fn table_patches(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// Parse scripts with the versioned enhanced opcode range accepted
     /// (`IntProgram::parse_enhanced`); the Enhanced preset turns it on.
     fn set_enhanced_scripts(&self, _enabled: bool) {}
@@ -202,6 +208,9 @@ pub struct VfsWorldAssets {
     /// Scripts parse with the enhanced opcode range accepted (the
     /// Enhanced preset); off, scripts parse under plain SPEC-004.
     enhanced_scripts: std::cell::Cell<bool>,
+    /// What the mod layers' `vault-mod.toml` manifests register (empty
+    /// without mod layers).
+    registry: ModRegistry,
 }
 impl VfsWorldAssets {
     pub fn new(vfs: Arc<dyn Vfs>, language: &str) -> Result<Self, WorldError> {
@@ -214,7 +223,7 @@ impl VfsWorldAssets {
                 "language must be a resource directory name".into(),
             ));
         }
-        Ok(Self {
+        Self {
             vfs,
             language: language.to_ascii_lowercase(),
             prototypes: RefCell::new(BTreeMap::new()),
@@ -230,7 +239,34 @@ impl VfsWorldAssets {
             fonts: RefCell::new(None),
             diagnostics: RefCell::new(Vec::new()),
             enhanced_scripts: std::cell::Cell::new(false),
-        })
+            registry: ModRegistry::default(),
+        }
+        .with_registry()
+    }
+    /// The mod layers' registrations
+    /// ([`ModRegistry::from_vfs`](vault_formats::mod_manifest::ModRegistry::from_vfs)).
+    /// A malformed manifest, a conflict, or a script row the base
+    /// `scripts.lst` already has is an error.
+    fn with_registry(mut self) -> Result<Self, WorldError> {
+        let registry = ModRegistry::from_vfs(self.vfs.as_ref())
+            .map_err(|error| WorldError::Invalid(format!("mod registration: {error}")))?;
+        if !registry.scripts.is_empty()
+            && let Ok(list) = self.list("scripts/scripts.lst", LstKind::Script)
+            && let Some(index) = registry
+                .scripts
+                .keys()
+                .find(|index| list.script_id(**index).is_some())
+        {
+            return Err(WorldError::Invalid(format!(
+                "mod registration: script index {index} is a scripts.lst row"
+            )));
+        }
+        self.registry = registry;
+        Ok(self)
+    }
+    /// What the mod layers register.
+    pub fn registry(&self) -> &ModRegistry {
+        &self.registry
     }
     /// SPEC-002 §3.5: a message file that stops early keeps the records
     /// before the failure, which still load; the failure is reported as a
@@ -390,9 +426,16 @@ impl WorldAssets for VfsWorldAssets {
             return Err(WorldError::Invalid("negative script-file index".into()));
         }
         let list = self.list("scripts/scripts.lst", LstKind::Script)?;
+        // A row past the list may be a mod's registered script.
+        let registered = self
+            .registry
+            .scripts
+            .get(&(index as u32))
+            .map(|script| script.file.as_bytes());
         let name = list
             .script_id(index as u32)
             .and_then(|entry| entry.name.as_deref())
+            .or(registered)
             .ok_or_else(|| WorldError::Invalid(format!("script index {index} missing")))?;
         let path = format!(
             "scripts/{}",
@@ -431,7 +474,14 @@ impl WorldAssets for VfsWorldAssets {
                     .and_then(|entry| entry.local_vars)
             })
             .filter(|count| *count >= 0 && *count <= 1_000_000)
-            .unwrap_or(0) as usize
+            .map(|count| count as usize)
+            .or_else(|| {
+                self.registry
+                    .scripts
+                    .get(&(index as u32))
+                    .map(|script| script.local_vars as usize)
+            })
+            .unwrap_or(0)
     }
     fn message(&self, list: i32, id: i32) -> Option<vault_formats::msg::Message> {
         self.catalog(&self.dialogue_path(list)?, id)
@@ -643,12 +693,17 @@ impl WorldAssets for VfsWorldAssets {
     fn map_index(&self, name: &[u8]) -> Option<i32> {
         let catalog = self.game_messages("map.msg").ok();
         let number = crate::worldmap::load_map_number(name, catalog.as_deref());
-        (number >= 0).then_some(number)
+        // SPEC-008 §3.10 first; an unmatched name may be a mod's map.
+        (number >= 0)
+            .then_some(number)
+            .or_else(|| self.registry.map_number(name).map(|number| number as i32))
     }
     /// SPEC-014 §3.35: the file name comes from `map.msg` by map number.
     fn map_path(&self, number: i32) -> Option<String> {
         if !(0..crate::worldmap::MAP_COUNT as i32).contains(&number) {
-            return None;
+            // A mod's registered map (numbers 66 and up).
+            let map = self.registry.maps.get(&u32::try_from(number).ok()?)?;
+            return Some(format!("maps/{}", map.file));
         }
         let catalog = self.game_messages("map.msg").ok()?;
         let name = std::str::from_utf8(&catalog.get(number)?.text).ok()?;
@@ -665,6 +720,13 @@ impl WorldAssets for VfsWorldAssets {
     }
     fn mod_layers(&self) -> usize {
         self.vfs.mod_layers()
+    }
+    fn table_patches(&self) -> Vec<(String, String)> {
+        self.registry
+            .patches
+            .iter()
+            .map(|patch| (patch.table.clone(), patch.file.clone()))
+            .collect()
     }
     fn set_enhanced_scripts(&self, enabled: bool) {
         if self.enhanced_scripts.replace(enabled) != enabled {

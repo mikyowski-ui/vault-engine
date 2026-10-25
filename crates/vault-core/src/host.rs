@@ -256,6 +256,9 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn mod_layers(&self) -> usize {
         (**self).mod_layers()
     }
+    fn table_patches(&self) -> Vec<(String, String)> {
+        (**self).table_patches()
+    }
     fn set_enhanced_scripts(&self, enabled: bool) {
         (**self).set_enhanced_scripts(enabled)
     }
@@ -375,15 +378,45 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         let mut tables = crate::tables::CampaignTables::compiled().clone();
         let mut loaded = Vec::new();
+        let read = |path: &str| -> Result<String, WorldError> {
+            let bytes = self.assets.resource(path)?;
+            String::from_utf8(bytes)
+                .map_err(|_| WorldError::Invalid(format!("{path}: not UTF-8 text")))
+        };
+        // The mods' record patches (`vault-mod.toml` `[[patches]]`).
+        let patches = self.assets.table_patches();
+        if let Some((name, _)) = patches.iter().find(|(name, _)| {
+            !crate::tables::Table::ALL
+                .iter()
+                .any(|table| table.name() == name)
+        }) {
+            return Err(WorldError::Invalid(format!(
+                "mod registration: no campaign table `{name}`"
+            )));
+        }
         for table in crate::tables::Table::ALL {
             let path = table.override_path();
-            if !self.assets.available(path.as_bytes()) {
+            let mine: Vec<&String> = patches
+                .iter()
+                .filter(|(name, _)| name == table.name())
+                .map(|(_, file)| file)
+                .collect();
+            let overridden = self.assets.available(path.as_bytes());
+            if !overridden && mine.is_empty() {
                 continue;
             }
-            let bytes = self.assets.resource(&path)?;
-            let text = std::str::from_utf8(&bytes)
-                .map_err(|_| WorldError::Invalid(format!("{path}: not UTF-8 text")))?;
-            tables = tables.with_override(table, text)?;
+            // The whole-file override (else the compiled table), then each
+            // patch in load order; the result is validated as an override.
+            let mut text = if overridden {
+                read(&path)?
+            } else {
+                table.canonical().to_owned()
+            };
+            for file in mine {
+                text = vault_formats::mod_manifest::apply_patch(&text, &read(file)?)
+                    .map_err(|error| WorldError::Invalid(format!("{file}: {error}")))?;
+            }
+            tables = tables.with_override(table, &text)?;
             loaded.push(table);
         }
         self.world.rules.tables = (!loaded.is_empty()).then(|| std::sync::Arc::new(tables));
@@ -632,6 +665,21 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.map.header.map_number,
             catalog.as_deref(),
         );
+        // A name §3.10 does not match may be a mod's registered map
+        // (`vault-mod.toml` `[[maps]]`, numbers 66 and up).
+        let number = if number < 0 {
+            let name = &self.world.map.header.name;
+            let name = &name[..name
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(name.len())];
+            self.assets
+                .map_index(name)
+                .filter(|number| *number >= crate::worldmap::MAP_COUNT as i32)
+                .unwrap_or(number)
+        } else {
+            number
+        };
         self.world.map.header.map_number = number;
         self.world.persistence.current_map = load_error
             .is_none()

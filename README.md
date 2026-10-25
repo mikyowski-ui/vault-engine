@@ -406,6 +406,44 @@ roof_peek = "cursor_xray"
 - A malformed manifest stops the launch with `mod_list:` and the folder's
   name. The launcher shows the same error on the layer.
 
+A manifest can also **register** additions without replacing whole files:
+
+```toml
+[[scripts]]            # a script row past the base scripts.lst
+file = "camdemo.int"   # under scripts/
+index = 4096           # not a scripts.lst row; unique across mods
+local_vars = 0
+
+[[maps]]               # reachable by load_map name, transitions and saves
+file = "cam_demo.map"  # under maps/
+number = 100           # 66-65535 (SPEC-008's table is 0-65); unique
+
+[[patches]]            # single records of a campaign table
+table = "towns"        # critical, critical_failure, terrain, frequency,
+                       # region, towns, hotspots or maps
+file = "data/mymod/towns.patch.txt"
+```
+
+- **Scripts.** A row the base `scripts.lst` lacks resolves to the
+  registered file and local count. Registering a row the list already has
+  is refused at load.
+- **Maps.** `load_map` first matches `map.msg` 0-65 exactly as SPEC-008
+  §3.10 says. A name that matches nothing is then compared with the
+  registered file names, uppercased. A loaded map whose header name §3.10
+  does not match takes its registered number, so saves and transitions
+  find it again.
+- **Patches.** A patch file holds `<record index>|<fields>` lines, `#`
+  comments allowed. Each table starts from its whole-file override (or the
+  compiled table), takes the patches in load order (a later layer wins a
+  record), and is then validated like an override.
+- **Conflicts.** Two mods registering one script row, map number or map
+  file stop the load, naming both. So does an unknown table, or a record
+  past a table's end.
+- **Where they are read.** Each enabled layer's own `vault-mod.toml` is read
+  from that layer, so layers never hide each other's manifests.
+  `vault_fixtures::state::write_cam_demo_mod` ships the camera demo this way,
+  leaving `scripts.lst` untouched.
+
 A setup can be exported as a ready-to-share mod folder in two ways:
 
 - **In game.** On the **F9** Camera page, the **Export Current Setup as
@@ -432,10 +470,13 @@ the launcher's Mods tab, and the setup's files:
 - every `data/vault-engine/<table>.txt` override in the game data, mod layers
   or `--from` folders;
 - every `scripts/*.int` that only an enhanced parse accepts, such as the
-  camera demo's `camdemo.int`.
+  camera demo's `camdemo.int`;
+- every script, map (with its `.gam`) and table patch the mod layers
+  register, with their `[[scripts]]`, `[[maps]]` and `[[patches]]` entries.
 
 `scripts.lst` is not copied: a whole-file override would replace the game's.
-A copied script therefore runs only where a map or list row already names it.
+An unregistered copied script therefore runs only where a map or list row
+already names it.
 
 With `--record-inputs FILE` (`-` for stdout), keyboard, pointer, wheel,
 focus, modifier, resize, display-scaling, enhanced-presentation, vault-debug and quit observations are

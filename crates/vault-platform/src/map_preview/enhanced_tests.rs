@@ -683,3 +683,62 @@ fn the_camera_page_exports_the_setup_as_a_mod() {
             .is_file()
     );
 }
+
+#[test]
+fn a_registered_mod_layer_runs_the_camera_demo() {
+    use std::sync::Arc;
+    use vault_core::assets::WorldAssets;
+    use vault_formats::{LayeredVfs, LocalDirProvider, Vfs};
+    let dir = synthetic_corpus();
+    let list = std::fs::read(dir.path().join("scripts/scripts.lst")).unwrap();
+    let layer = vault_fixtures::state::write_cam_demo_mod(dir.path());
+    assert_eq!(
+        std::fs::read(dir.path().join("scripts/scripts.lst")).unwrap(),
+        list,
+        "scripts.lst is untouched"
+    );
+    let mount = || -> Arc<dyn Vfs> {
+        let base: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+        Arc::new(LayeredVfs::from_load_order(base, &layer.load_order).unwrap())
+    };
+    let load = |vfs: Arc<dyn Vfs>| {
+        MapPreview::load_with(
+            vfs,
+            "maps/cam_demo.map",
+            "english",
+            Some("premade/synthetic.gcd"),
+            1,
+            vault_core::EnginePreset::Enhanced,
+        )
+    };
+    let mut preview = load(mount()).unwrap();
+    // The registered map answers its name and number.
+    let assets = &preview.host.assets;
+    assert_eq!(assets.map_index(b"CAM_DEMO.MAP"), Some(layer.map as i32));
+    assert_eq!(
+        assets.map_path(layer.map as i32).as_deref(),
+        Some("maps/cam_demo.map")
+    );
+    assert_eq!(preview.host.world.map.header.map_number, layer.map as i32);
+    // The map script, a registered row, runs: the camera pans to the
+    // interior (the first of its four requests).
+    preview.set_enhanced(Some(EnhancedSettings {
+        smooth_camera: false,
+        ..Default::default()
+    }));
+    let mut now = 16;
+    for _ in 0..120 {
+        now += 16;
+        preview.tick(now).unwrap();
+    }
+    assert_eq!(
+        preview.host.world.camera_hex,
+        vault_fixtures::state::CAM_DEMO_INTERIOR
+    );
+    // A registration on a scripts.lst row is refused at load.
+    let manifest = layer.layer.join("vault-mod.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, text.replace("index = 4096", "index = 0")).unwrap();
+    let error = load(mount()).err().unwrap().to_string();
+    assert!(error.contains("scripts.lst row"), "{error}");
+}

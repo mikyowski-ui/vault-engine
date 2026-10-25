@@ -1,11 +1,11 @@
 //! The F9 overlay's "Export Current Setup as Mod": a ready-to-share mod
 //! folder with a `vault-mod.toml` of the running `enhanced` presentation,
 //! the setup's table overrides and enhanced scripts
-//! ([`vault_core::mod_export::setup_files`]) and a `README.txt`. Engine
+//! ([`vault_core::mod_export::setup`]) and a `README.txt`. Engine
 //! extension, not part of any specification.
 use super::MapPreview;
 use std::path::PathBuf;
-use vault_formats::{ModManifest, mod_manifest};
+use vault_formats::ModManifest;
 
 /// The exported folder's name under the export root (`-2`, `-3`, ... when
 /// taken).
@@ -42,12 +42,12 @@ impl MapPreview {
         let manifest = self
             .setup_manifest()
             .ok_or("the enhanced preset is off: nothing to export")?;
-        let files = vault_core::mod_export::setup_files(self.host.assets.vfs.as_ref())
+        let setup = vault_core::mod_export::setup(self.host.assets.vfs.as_ref())
             .map_err(|error| error.to_string())?;
         let output = crate::mods::free_folder(&root, EXPORT_SLUG);
-        mod_manifest::write_mod_folder(&output, &manifest, &files)
-            .map_err(|error| format!("{}: {error}", output.display()))?;
-        tracing::info!(folder = %output.display(), files = files.len(), "setup exported as a mod");
+        let files = crate::mods::write_setup(&output, manifest, setup)
+            .map_err(|error| error.to_string())?;
+        tracing::info!(folder = %output.display(), files, "setup exported as a mod");
         Ok(output)
     }
 }

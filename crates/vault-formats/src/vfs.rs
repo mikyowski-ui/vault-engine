@@ -137,6 +137,15 @@ pub trait Vfs: Send + Sync {
     fn mod_layers(&self) -> usize {
         0
     }
+
+    /// Each mod layer's own `vault-mod.toml`
+    /// ([`crate::mod_manifest::MANIFEST`]), lowest layer first, as (layer
+    /// name, bytes). A layer above another hides its file from
+    /// [`Vfs::read`], so the manifests are read layer by layer here. None
+    /// for a plain provider.
+    fn layer_manifests(&self) -> Result<Vec<(String, Vec<u8>)>, VfsError> {
+        Ok(Vec::new())
+    }
 }
 
 /// A snapshot of the namespace of an unpacked game directory.
@@ -421,6 +430,10 @@ impl Vfs for PrefixMount {
 
     fn mod_layers(&self) -> usize {
         self.primary.mod_layers()
+    }
+
+    fn layer_manifests(&self) -> Result<Vec<(String, Vec<u8>)>, VfsError> {
+        self.primary.layer_manifests()
     }
 }
 
@@ -945,6 +958,18 @@ impl Vfs for LayeredVfs {
 
     fn mod_layers(&self) -> usize {
         self.layers.len() + self.base.mod_layers()
+    }
+
+    fn layer_manifests(&self) -> Result<Vec<(String, Vec<u8>)>, VfsError> {
+        let mut manifests = self.base.layer_manifests()?;
+        for layer in &self.layers {
+            if let Some(bytes) =
+                crate::mod_manifest::ModRegistry::read_layer_manifest(&layer.provider)?
+            {
+                manifests.push((layer.name.clone(), bytes));
+            }
+        }
+        Ok(manifests)
     }
 }
 
