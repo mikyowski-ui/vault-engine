@@ -108,6 +108,74 @@ fn open_v2(path: &Path) -> Check {
     }
 }
 
+/// SPEC-018 §2: a Fallout 2 install, from the configured `MASTER.DAT`
+/// path: its folder's archives are found (case folded, regular files,
+/// ambiguity refused), opened as SPEC-015 specifies (a refused
+/// `patch000.dat` refuses the install), and the master database as mounted
+/// (`data_root`, then `patch000.dat`, then `MASTER.DAT`) must hold the
+/// required members. Returns the MASTER.DAT and CRITTER.DAT checks.
+pub fn fallout2(master: &Path, critter: Option<&Path>, data_root: Option<&Path>) -> [Check; 2] {
+    use vault_formats::fallout2::{Fallout2Install, missing_members};
+    let bad = |text: String| [Check::bad(text), Check::unset("")];
+    let folder = Fallout2Install::folder_of(master);
+    let install = match Fallout2Install::discover(&folder) {
+        Ok(install) => install,
+        Err(error) => return bad(error),
+    };
+    let named = |path: &Path, found: &Path| {
+        std::fs::canonicalize(path).ok() == std::fs::canonicalize(found).ok()
+    };
+    if !named(master, &install.master) {
+        return bad(format!(
+            "Fallout 2 reads {} in its folder",
+            install.master.display()
+        ));
+    }
+    let critter_check = match critter {
+        Some(critter) if !named(critter, &install.critter) => Check::bad(format!(
+            "Fallout 2 reads {} beside MASTER.DAT",
+            install.critter.display()
+        )),
+        _ => Check::ok(format!("{} (Fallout 2 archive)", install.critter.display())),
+    };
+    let opened = match install.open() {
+        Ok(opened) => opened,
+        Err(error) => return bad(error),
+    };
+    let loose = match data_root
+        .map(vault_formats::LocalDirProvider::mount)
+        .transpose()
+    {
+        Ok(loose) => loose.map(Arc::new),
+        Err(error) => return bad(format!("data folder: {error}")),
+    };
+    let provider = opened.provider(loose);
+    let count = opened.master.entries().len();
+    let missing = missing_members(&provider);
+    if !missing.is_empty() {
+        return [
+            Check::bad(format!(
+                "{} (Fallout 2 archive); missing {}",
+                plural(count, "member"),
+                missing.join(", ")
+            )),
+            critter_check,
+        ];
+    }
+    let patch = if opened.patch.is_some() {
+        ", patch000.dat mounted"
+    } else {
+        ""
+    };
+    [
+        Check::ok(format!(
+            "{} (Fallout 2 archive){patch}",
+            plural(count, "member")
+        )),
+        critter_check,
+    ]
+}
+
 /// `members` the archive (or the loose `data_root`) is missing.
 fn missing(archive: Option<&DatArchive>, data_root: Option<&Path>) -> Vec<&'static str> {
     MASTER_MEMBERS

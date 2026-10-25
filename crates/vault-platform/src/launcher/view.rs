@@ -272,12 +272,13 @@ pub fn draw(launcher: &Launcher) -> IndexedImage {
         &font::clip_end(&launcher.status, 104),
         tone,
     );
-    font::draw(
-        image_ref,
-        [16, 462],
-        "Tab/Shift+Tab move   Enter/Space activate   Arrows choose   Esc backs out",
-        color::DIM,
-    );
+    // SPEC-017 §8.7 rule 6: under Play, the script gate's notice.
+    let help = if launcher.config.game == Some(GameProfile::Fallout2) {
+        vault_core::fallout2::GATE_NOTICE
+    } else {
+        "Tab/Shift+Tab move   Enter/Space activate   Arrows choose   Esc backs out"
+    };
+    font::draw(image_ref, [16, 462], help, color::DIM);
     image
 }
 
@@ -320,7 +321,7 @@ fn draw_data(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, rect:
         [322, GAME_TOP + 5],
         match game {
             GameProfile::Fallout1 => "Fallout 1 data",
-            GameProfile::Fallout2 => "not yet supported: awaits its specifications",
+            GameProfile::Fallout2 => "Fallout 2 data (SPEC-018 install)",
         },
         color::DIM,
     );

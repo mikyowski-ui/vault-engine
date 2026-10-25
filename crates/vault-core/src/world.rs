@@ -321,13 +321,10 @@ impl WorldRules {
             .or_else(|| WeaponPerk::from_perk(perk))
     }
 }
-/// The game whose data an engine runs. Fallout 1 is specified (SPEC-001
-/// to SPEC-014); of Fallout 2 only the archives are (SPEC-015), so a
-/// Fallout 2 start is refused ([`FALLOUT2_PENDING`]).
+/// The game whose data an engine runs: Fallout 1 (SPEC-001 to SPEC-014)
+/// or Fallout 2 (SPEC-015 to SPEC-019; its scripts stay gated by SPEC-017
+/// §8.5, [`crate::fallout2::SCRIPT_GATE_OPEN`]).
 pub use vault_formats::GameProfile;
-/// Why a Fallout 2 start is refused.
-pub const FALLOUT2_PENDING: &str = "Fallout 2's archives read, but its maps, prototypes and \
-     scripts need SPEC-016 to SPEC-019 (docs/fallout2-and-qol-roadmap.md)";
 /// Which engine behaviour a world runs with. [`Vanilla`](Self::Vanilla), the
 /// default everywhere, is the spec-conformant reference behaviour: every
 /// Must-match rule holds and no extension is reachable. `Enhanced` opts in

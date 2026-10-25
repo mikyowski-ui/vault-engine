@@ -12,6 +12,10 @@ All files here were authored for Vault Engine. None contain original game assets
 - `state/`: SPEC-006 GAM/GCD vectors, world/RNG/stat/dialogue tests, and interactive
   synthetic corpus generation.
 - `sound/`: SPEC-010 ACM vectors A-H as offset-addressed hex streams.
+- `fallout2/`: SPEC-018 §8's synthetic data tables (`maps.txt`, `city.txt`,
+  `worldmap.txt`, `party.txt`, the line tables and `elevators.txt`), the
+  grammar sample of §8.2, and a builder that adds them and a synthetic
+  `maps/artemple.map` to the synthetic corpus for a Fallout 2 install.
 - `movie/`: SPEC-012 header, chunk-walk, subtitle, and fade vectors; the
   synthetic movies of Fixture H are read from `oracle/SPEC-012/synthetic/`.
 - `loose/`: plain-text markers with mixed-case game-style paths and extensions.
@@ -32,8 +36,8 @@ Tests copy loose fixtures into temporary directories when exercising namespace
 changes, collisions, or symlink attacks. The committed fixture directory is never
 modified by tests.
 
-The `support.rs` builders under `formats/`, `movie/`, `sound/`, `state/`, `vm/`
-and `world/` need only `std`, so they are compiled once as the `vault-fixtures`
+The `support.rs` builders under `fallout2/`, `formats/`, `movie/`, `sound/`,
+`state/`, `vm/` and `world/` need only `std`, so they are compiled once as the `vault-fixtures`
 crate (`crates/vault-fixtures`), a dev-dependency of the crates that use them
 and a dependency of `cargo xtask fixtures`. `items/support.rs` implements
 `vault-core` types, so `vault-core` includes it as its own test module.

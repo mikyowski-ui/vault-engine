@@ -44,8 +44,12 @@ impl SaveLoadScreen {
 const DESCRIPTION_DONE: Rect = Rect::new(169 + 34, 116 + 58, 15, 16);
 const DESCRIPTION_CANCEL: Rect = Rect::new(169 + 160, 116 + 58, 15, 16);
 
-/// Read every slot header below `root`.
-fn scan(root: &std::path::Path) -> (Vec<SlotState>, Vec<Option<Vec<u8>>>) {
+/// Read every slot header below `root`, in `game`'s layout (SPEC-018
+/// §2.3: slots belong to one game, so the other game's slots do not read).
+fn scan(
+    root: &std::path::Path,
+    game: vault_core::GameProfile,
+) -> (Vec<SlotState>, Vec<Option<Vec<u8>>>) {
     (1..=saveload::SLOTS as u8)
         .map(|slot| {
             let path = slot_directory(root, slot).map(|dir| dir.join("SAVE.DAT"));
@@ -54,7 +58,7 @@ fn scan(root: &std::path::Path) -> (Vec<SlotState>, Vec<Option<Vec<u8>>>) {
             }) else {
                 return (SlotState::Empty, None);
             };
-            match SaveHeader::parse(&bytes[..bytes.len().min(HEADER_LEN)]) {
+            match SaveHeader::parse_for(&bytes[..bytes.len().min(HEADER_LEN)], game) {
                 Ok(header) => (
                     SlotState::Occupied(SlotInfo {
                         name: header.name_text().to_vec(),
@@ -84,6 +88,15 @@ fn text_key(key: KeyCode, shift: bool) -> Option<u8> {
 }
 
 impl MapPreview {
+    /// The save layout this world's slots use: Fallout 2's while a Fallout
+    /// 2 game runs (SPEC-018 §7).
+    fn save_profile(&self) -> vault_core::GameProfile {
+        if self.host.world.fallout2.is_some() {
+            vault_core::GameProfile::Fallout2
+        } else {
+            vault_core::GameProfile::Fallout1
+        }
+    }
     /// The current view scaled to a 224-by-133 thumbnail.
     fn capture_thumbnail(&mut self) -> Vec<u8> {
         match self.map_view_image() {
@@ -99,7 +112,7 @@ impl MapPreview {
             self.quick.forget();
         }
         let capture = self.capture_thumbnail();
-        let (slots, thumbnails) = scan(&self.save_root);
+        let (slots, thumbnails) = scan(&self.save_root, self.save_profile());
         self.screen = Screen::SaveLoad(Box::new(SaveLoadScreen {
             mode,
             slots,
@@ -391,9 +404,12 @@ impl MapPreview {
                 let text = self.message("misc.msg", 5);
                 self.notify(text);
             }
-        } else if let Screen::SaveLoad(screen) = &mut self.screen {
-            // A failed save rescans the slots and stays open.
-            (screen.slots, screen.thumbnails) = scan(&self.save_root);
+        } else {
+            let profile = self.save_profile();
+            if let Screen::SaveLoad(screen) = &mut self.screen {
+                // A failed save rescans the slots and stays open.
+                (screen.slots, screen.thumbnails) = scan(&self.save_root, profile);
+            }
         }
     }
     pub(crate) fn saveload_key(&mut self, key: KeyCode) -> bool {
@@ -491,7 +507,7 @@ impl MapPreview {
             Quick::Pick(mode) => self.open_save_screen(mode),
             _ => {
                 let slot = self.slot_list.selected;
-                let (slots, _) = scan(&self.save_root);
+                let (slots, _) = scan(&self.save_root, self.save_profile());
                 let description = match &slots[slot] {
                     SlotState::Occupied(info) => info.description.clone(),
                     _ => Vec::new(),

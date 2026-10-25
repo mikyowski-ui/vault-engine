@@ -517,11 +517,25 @@ impl MapPreview {
         seed: i32,
         preset: EnginePreset,
     ) -> AppResult<Self> {
+        Self::with_setup(assets, path, character, seed, preset, |_| {})
+    }
+    /// [`Self::with_sheet`] with `setup` run on the new host after the
+    /// preset is set and before the campaign and the map load: a Fallout 2
+    /// game installs its world state there (SPEC-018 §6.6 step 3).
+    pub fn with_setup(
+        assets: VfsWorldAssets,
+        path: &str,
+        character: CharacterSheet,
+        seed: i32,
+        preset: EnginePreset,
+        setup: impl FnOnce(&mut WorldHost<VfsWorldAssets>),
+    ) -> AppResult<Self> {
         let path = VfsPath::new(path)?;
         let palette = Palette::parse(&assets.vfs.read_bounded("color.pal", MAX_ASSET_BYTES)?)?;
         let font = assets.font().ok();
         let mut host = WorldHost::new(WorldState::new(character, seed)?, assets);
         host.set_preset(preset);
+        setup(&mut host);
         // SPEC-005 §3.8: loading the player sheet runs the gender update.
         host.update_player_gender();
         host.interactive_dialogue = true;

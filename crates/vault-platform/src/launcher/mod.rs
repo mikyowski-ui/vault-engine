@@ -321,11 +321,6 @@ impl Launcher {
         if self.mods.check.stack.state == State::Bad {
             return Err(format!("Mods: {}.", self.mods.check.stack.text));
         }
-        // Fallout 2's archives validate (SPEC-015), but nothing past them
-        // runs until its other specifications exist.
-        if self.config.game == Some(GameProfile::Fallout2) {
-            return Err(format!("{}.", vault_core::FALLOUT2_PENDING));
-        }
         // A layer that mounts can still fail on its `vault-mod.toml`.
         if let Some(check) = self
             .mods
@@ -705,6 +700,22 @@ impl Launcher {
             state: State::Bad,
             text: format!("required with {other}"),
         };
+        if game == GameProfile::Fallout2 {
+            // SPEC-018 §2: the install folder holding MASTER.DAT is listed
+            // for its archives, which are opened, and the master database
+            // as mounted must hold the required members.
+            [self.checks[0], self.checks[1]] = match &master {
+                Some(master) => validate::fallout2(master, critter.as_deref(), root.as_deref()),
+                None => [
+                    Check {
+                        state: State::Bad,
+                        text: "required: Fallout 2 reads MASTER.DAT and CRITTER.DAT".into(),
+                    },
+                    Check::unset("found beside MASTER.DAT"),
+                ],
+            };
+            return;
+        }
         self.checks[0] = match (&master, &critter) {
             (Some(master), _) => validate::master(master, root.as_deref(), game),
             (None, Some(_)) => required("CRITTER.DAT"),

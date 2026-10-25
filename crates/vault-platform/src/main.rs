@@ -2069,7 +2069,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fallout2_launch_is_refused_until_its_specs_exist() {
+    fn a_fallout2_launch_resolves_its_profile() {
         let settings = config::Config {
             game: Some(vault_core::GameProfile::Fallout2),
             ..installed()
@@ -2085,14 +2085,15 @@ mod tests {
             vault_core::GameProfile::Fallout1
         );
         assert!(Args::try_parse_from(["vault-platform", "--game-profile", "fallout3"]).is_err());
-        // Nothing is read: the refusal comes before the sources.
+        // SPEC-018 §6.7: Play is not refused for being Fallout 2; without
+        // game data it fails on its sources, as Fallout 1 does.
         let preview = preview::PreviewArgs {
             game: true,
             game_profile: vault_core::GameProfile::Fallout2,
             ..Default::default()
         };
         let error = preview.load().err().unwrap();
-        assert_eq!(error.to_string(), vault_core::FALLOUT2_PENDING);
+        assert!(error.to_string().contains("--master-dat"), "{error}");
         assert_eq!(
             play_args(&parse(&["--game-profile", "fallout2"]), false).game_profile,
             None

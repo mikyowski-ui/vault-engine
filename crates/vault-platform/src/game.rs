@@ -165,6 +165,14 @@ pub struct Game {
     volume_source: Option<Volumes>,
     /// The selected premade's bio text, read once per selection (P-02).
     bio: Option<(usize, Vec<u8>)>,
+    /// The game whose data this is: Fallout 2 follows SPEC-018 §6.
+    pub game_profile: vault_core::GameProfile,
+    /// SPEC-018 §6.6 step 1: the Fallout 2 tables, parsed before the
+    /// selection screen (and again for a load from the menu).
+    fallout2: Option<Arc<vault_core::fallout2::Fallout2Tables>>,
+    /// The last refusal shown on returning to the menu (a table that
+    /// SPEC-018 §4 refuses names its file and line).
+    pub last_error: Option<String>,
 }
 
 /// One fade over the fixed 700 ms of the §3.2 safe rule: step k of n sets
@@ -263,6 +271,9 @@ impl Game {
             held_shown: false,
             volume_source: None,
             bio: None,
+            game_profile: vault_core::GameProfile::Fallout1,
+            fallout2: None,
+            last_error: None,
         };
         // §3.1 splash: the configured start, without wrapping the stored value.
         let start = config.get_int("system", "splash").unwrap_or(0);
@@ -450,7 +461,12 @@ impl Game {
     /// §3.12 the new-game hand-off: the selected player on the start map.
     fn enter_world(&mut self, sheet: CharacterSheet) {
         match self.world_with(sheet) {
-            Ok(world) => self.stage = Stage::World(Box::new(world)),
+            Ok(mut world) => {
+                // SPEC-018 §6.6 step 4: the completed hand-off prints the
+                // script gate's notice.
+                world.host.fallout2_notice();
+                self.stage = Stage::World(Box::new(world));
+            }
             Err(error) => {
                 tracing::error!(%error, "new game failed");
                 self.enter_menu();
@@ -511,10 +527,64 @@ impl Game {
             self.enhanced = world.enhanced().or(self.enhanced);
         }
     }
+    /// SPEC-018 §6.6 step 1: under Fallout 2, parse the §4 tables and the
+    /// campaign initializer before the selection screen (or a load). A
+    /// refusal returns to the menu with a message naming the file and line;
+    /// nothing has changed then.
+    fn prepare_fallout2(&mut self) -> bool {
+        if self.game_profile != vault_core::GameProfile::Fallout2 {
+            return true;
+        }
+        let assets = match VfsWorldAssets::new(self.vfs.clone(), &self.language) {
+            Ok(assets) => assets,
+            Err(error) => return self.refuse(error.to_string()),
+        };
+        assets.set_game_profile(vault_core::GameProfile::Fallout2);
+        let host = vault_core::WorldHost::new(
+            match vault_core::WorldState::new(CharacterSheet::default(), self.seed) {
+                Ok(world) => world,
+                Err(error) => return self.refuse(error.to_string()),
+            },
+            assets,
+        );
+        let tables = match host.load_fallout2_tables() {
+            Ok(tables) => tables,
+            Err(error) => return self.refuse(error.to_string()),
+        };
+        match host
+            .assets
+            .gam("data/vault13.gam", vault_formats::GamSection::Campaign)
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => return self.refuse("data/vault13.gam did not open".into()),
+            Err(error) => return self.refuse(format!("data/vault13.gam: {error}")),
+        }
+        self.fallout2 = Some(tables);
+        self.last_error = None;
+        true
+    }
+    fn refuse(&mut self, error: String) -> bool {
+        tracing::error!(%error, "the Fallout 2 game data was refused");
+        self.last_error = Some(error);
+        self.enter_menu();
+        false
+    }
     fn world_with(&self, sheet: CharacterSheet) -> AppResult<MapPreview> {
         let assets = VfsWorldAssets::new(self.vfs.clone(), &self.language)?;
+        let fallout2 = self.fallout2.clone();
+        let path = if fallout2.is_some() {
+            vault_core::fallout2::START_MAP
+        } else {
+            flow::NEW_GAME_MAP
+        };
+        // SPEC-018 §6.6 step 3: the Fallout 2 world state is installed after
+        // the reset and before the start map's load.
         let mut world =
-            MapPreview::with_sheet(assets, flow::NEW_GAME_MAP, sheet, self.seed, self.preset)?;
+            MapPreview::with_setup(assets, path, sheet, self.seed, self.preset, |host| {
+                if let Some(tables) = fallout2 {
+                    host.begin_fallout2_game(tables);
+                }
+            })?;
         world.host.world.clock.ticks = flow::START_TICKS;
         world.audio = self.audio.clone();
         world.save_root = self.save_root.clone();
@@ -555,10 +625,14 @@ impl Game {
                 self.play_movie("art/cuts/intro.mve", flow::ATTRACT_INTRO_FLAGS, Next::Menu)
             }
             MenuChoice::NewGame => {
+                if !self.prepare_fallout2() {
+                    return;
+                }
                 self.selection = 0;
                 self.sheet = self.premade(0);
                 self.stage = Stage::Selection;
             }
+            MenuChoice::LoadGame if !self.prepare_fallout2() => {}
             MenuChoice::LoadGame => match self.world_with(CharacterSheet::default()) {
                 Ok(mut world) => {
                     world.open_save_screen(Mode::LoadFromMenu);
@@ -616,7 +690,12 @@ impl Game {
     /// Take the selected (or edited) character into the game: the
     /// `ovrintro` movie, then the world.
     fn start_game(&mut self, sheet: CharacterSheet) {
-        let (path, flags) = flow::NEW_GAME_MOVIE;
+        // SPEC-018 §6.4: Fallout 2's hand-off plays `elder.mve`.
+        let (path, flags) = if self.fallout2.is_some() {
+            vault_core::fallout2::NEW_GAME_MOVIE
+        } else {
+            flow::NEW_GAME_MOVIE
+        };
         self.play_movie(path, flags, Next::NewGame(Box::new(sheet)));
     }
     fn selection_action(&mut self, action: SelectionAction) {

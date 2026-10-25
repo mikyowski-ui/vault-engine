@@ -56,6 +56,11 @@ const VAULT13_ENTRANCE: &str = "V13ENT.MAP";
 
 impl<A: WorldAssets> WorldHost<A> {
     fn set_global(&mut self, index: usize, value: i32) {
+        // SPEC-018 §6.2: the engine writes no campaign global under
+        // Fallout 2.
+        if self.world.fallout2.is_some() {
+            return;
+        }
         if let Some(slot) = self.world.gvars.as_mut().and_then(|g| g.get_mut(index)) {
             *slot = value;
         }
@@ -113,6 +118,10 @@ impl<A: WorldAssets> WorldHost<A> {
     /// reveal or path marks; time is added directly (none on the city
     /// branch), and 24-hour party healing still applies every W iterations.
     pub fn scripted_town_travel(&mut self, town: i32) -> Result<(), WorldError> {
+        // SPEC-018 §5.4: Fallout 2 moves directly at the map load instead.
+        if self.world.fallout2.is_some() {
+            return Ok(());
+        }
         let Some(cell) = usize::try_from(town)
             .ok()
             .and_then(|town| worldmap::TOWNS.get(town))
@@ -327,6 +336,10 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// Derive town and entrance knowledge from the campaign globals.
     pub fn refresh_world_knowledge(&mut self) {
+        // SPEC-018 §5.8: campaign globals do not drive Fallout 2's areas.
+        if self.world.fallout2.is_some() {
+            return;
+        }
         let ticks = self.world.clock.ticks;
         let gvars = self.world.gvars.clone().unwrap_or_default();
         self.world.world_map.refresh_knowledge(&gvars, ticks);
@@ -393,6 +406,11 @@ impl<A: WorldAssets> WorldHost<A> {
     /// least 2410 ticks past it. Under the safe bound, check 1 runs only
     /// when the campaign holds both of its indices.
     pub fn world_map_checks(&mut self) -> Result<Option<WorldMapExit>, WorldError> {
+        // SPEC-019 §2.7 / SPEC-018 §6.2: Fallout 1's campaign checks do not
+        // run under Fallout 2.
+        if self.world.fallout2.is_some() {
+            return Ok(None);
+        }
         let indices = self.world.gvars.as_ref().map_or(0, Vec::len);
         if indices > movie::WATER_CHIP_GLOBAL
             && self.global(WATER_GLOBAL) == 0

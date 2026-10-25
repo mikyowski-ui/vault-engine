@@ -113,10 +113,16 @@ under `AGENTS.md`'s rule, then implemented by a separate agent.
 
 - `game = "fallout1" | "fallout2"` in `vault-engine.toml`, a `--game-profile`
   flag, and a launcher row. `vault_core::GameProfile` names the two games.
-- A Fallout 2 launch is refused before any data is read. The message says
-  the archives read but the maps, prototypes and scripts need SPEC-016 to
-  SPEC-019. The launcher reads Fallout 2 archives (SPEC-015) and shows the
-  same message on Play.
+- Until SPEC-018, a Fallout 2 launch was refused before any data was read.
+
+**SPEC-018** is implemented: the launcher validates a Fallout 2 install
+(`MASTER.DAT`, `CRITTER.DAT` and an optional `patch000.dat` found in its
+folder, and the required members), and Play starts a new game on
+`maps/artemple.map` from the `data/*.txt` tables (`vault_formats::fallout2`,
+`vault_core::fallout2`). Saves use the version 1.2 layout. Fallout 2 scripts
+stay gated (SPEC-017 §8.5, `vault_core::fallout2::SCRIPT_GATE_OPEN`): no
+`.INT` loads, and the monitor and launcher say so. SPEC-019's screens (the
+Fallout 2 world map, town map, Pip-Boy and interface) are still to come.
 - `vault_vm::WordSet` replaces the fixed `0x8000..=0x8155` test. Fallout 1's
   set is unchanged word for word.
 

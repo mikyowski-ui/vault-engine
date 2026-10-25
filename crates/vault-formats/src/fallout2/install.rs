@@ -100,7 +100,7 @@ impl Fallout2Install {
         let master = open(&self.master).map_err(|error| {
             if DatArchive::open(&self.master).is_ok() {
                 format!(
-                    "{}: this folder holds Fallout 1 data (a SPEC-008 archive), not Fallout 2",
+                    "{}: this folder holds Fallout 1 data (a SPEC-008 archive; set Game to fallout1)",
                     file_name(&self.master)
                 )
             } else {

@@ -352,7 +352,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 ));
                 continue;
             };
-            self.fallout2_create_critter(critter, hex, elevation, origin)?;
+            if let Err(error) = self.fallout2_create_critter(critter, hex, elevation, origin) {
+                self.world.diagnostic(format!(
+                    "encounter critter {:#010x} not created: {error}",
+                    critter.pid
+                ));
+            }
         }
         Ok(())
     }

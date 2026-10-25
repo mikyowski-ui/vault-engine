@@ -138,8 +138,10 @@ data is read in Fallout 2's formats:
   `patch000.dat` over `MASTER.DAT`, and `CRITTER.DAT` for critter art;
 - SPEC-016 version 20 maps and 416-byte critter prototypes.
 
-`--game-profile fallout2 --preview-map MAP` previews a Fallout 2 map. Playing
-waits for SPEC-017 to SPEC-019; see the
+`--game-profile fallout2 --preview-map MAP` previews a Fallout 2 map. Under
+`fallout2`, Play validates the install and starts a new game from its SPEC-018
+tables on `maps/artemple.map`, with Fallout 2 scripts gated (SPEC-017 §8.5);
+SPEC-019's screens are still to come. See the
 [Fallout 2 and QoL roadmap](docs/fallout2-and-qol-roadmap.md), and the
 `--game-profile` flag), `preset` (`vanilla` or `enhanced`), `scaling`,
 `fullscreen`, `debug` and

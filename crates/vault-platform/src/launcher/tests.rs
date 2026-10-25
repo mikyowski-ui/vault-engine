@@ -622,23 +622,45 @@ fn the_game_row_reads_each_games_archives() {
         launcher.checks[0]
     );
     assert!(launcher.ready().unwrap_err().starts_with("MASTER.DAT:"));
-    // Version 2 archives check out, with their member counts.
+    // Version 2 archives open, but SPEC-018 §2.2's members are missing.
     launcher.set_field(Field::Master, &fallout2.join("master.dat"));
     launcher.set_field(Field::Critter, &fallout2.join("critter.dat"));
-    let checks: Vec<(State, String)> = launcher.checks[..2]
-        .iter()
-        .map(|check| (check.state, check.text.clone()))
-        .collect();
-    assert_eq!(
-        checks,
-        [
-            (State::Ok, "3 members (Fallout 2 archive)".to_owned()),
-            (State::Ok, "1 member (Fallout 2 archive)".to_owned()),
-        ]
+    assert_eq!(launcher.checks[0].state, State::Bad);
+    assert!(
+        launcher.checks[0].text.starts_with(
+            "3 members (Fallout 2 archive); missing data/vault13.gam, maps/artemple.map"
+        ),
+        "{:?}",
+        launcher.checks[0]
     );
-    // Play is still refused: nothing past the archives is specified.
+    assert_eq!(launcher.checks[1].state, State::Ok);
     let refused = launcher.ready().unwrap_err();
-    assert!(refused.contains("SPEC-016"), "{refused}");
+    assert!(refused.contains("data/party.txt"), "{refused}");
+    // With every required member, Play unlocks under Fallout 2.
+    let mut members = vec![Member::zlib("DATA\\WORDS.TXT", &zlib_vector("words"))];
+    for path in vault_formats::fallout2::REQUIRED_MEMBERS {
+        members.push(Member::stored(
+            &path.to_ascii_uppercase().replace('/', "\\"),
+            b"x",
+        ));
+    }
+    fs::write(fallout2.join("master.dat"), archive(&members)).unwrap();
+    launcher.revalidate();
+    assert_eq!(
+        (launcher.checks[0].state, launcher.checks[0].text.as_str()),
+        (State::Ok, "8 members (Fallout 2 archive)")
+    );
+    assert_eq!(launcher.ready(), Ok(()));
+    // A patch000.dat that does not open refuses the install.
+    fs::write(fallout2.join("PATCH000.DAT"), b"not an archive").unwrap();
+    launcher.revalidate();
+    assert!(
+        launcher.checks[0].text.contains("PATCH000.DAT"),
+        "{:?}",
+        launcher.checks[0]
+    );
+    fs::remove_file(fallout2.join("PATCH000.DAT")).unwrap();
+    launcher.revalidate();
     // Back to Fallout 1: these archives are refused, with the other hint.
     key(&mut launcher, KeyCode::Space);
     assert_eq!(launcher.config.game, Some(GameProfile::Fallout1));

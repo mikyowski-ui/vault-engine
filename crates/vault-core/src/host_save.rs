@@ -643,18 +643,12 @@ impl<A: WorldAssets> WorldHost<A> {
             &mut notes,
         );
         let position = state.position;
+        // The member records follow the saved identifiers, in order.
+        let party: Vec<u32> = save.party.iter().map(|id| *id as u32).collect();
         self.install_fallout2 = Some(Box::new(state));
         let result = self.apply_save(save, maps, automap);
         self.install_fallout2 = None;
         result?;
-        let party: Vec<u32> = self
-            .world
-            .party
-            .iter()
-            .filter(|member| **member != self.world.player)
-            .filter_map(|member| self.world.get(*member))
-            .map(|object| object.raw.id)
-            .collect();
         let state = self
             .world
             .fallout2

@@ -573,21 +573,23 @@ impl PreviewArgs {
                 loose.ok_or("a preview requires --corpus-dir or --master-dat/--critter-dat")?;
             return Ok(loose);
         };
-        // SPEC-018 §1: Fallout 2's databases over SPEC-015 archives, with an
-        // optional patch000.dat above MASTER.DAT.
+        // SPEC-018 §1-§2: Fallout 2's databases over SPEC-015 archives, found
+        // in the install folder that holds MASTER.DAT, with an optional
+        // patch000.dat above MASTER.DAT.
         if self.game_profile == vault_core::GameProfile::Fallout2 {
-            let archive = |path: &Path| -> AppResult<Arc<vault_formats::Dat2Archive>> {
-                Ok(Arc::new(
-                    vault_formats::Dat2Archive::open(path)
-                        .map_err(|error| format!("{}: {error}", path.display()))?,
-                ))
-            };
-            let mut layers = vec![archive(master)?];
-            if let Some(patch) = vault_formats::Dat2Provider::find_patch(master) {
+            let _ = critter;
+            let folder = vault_formats::fallout2::Fallout2Install::folder_of(master);
+            let install = vault_formats::fallout2::Fallout2Install::discover(&folder)?;
+            if let Some(patch) = &install.patch {
                 tracing::info!(file = %patch.display(), "patch000.dat mounted");
-                layers.push(archive(&patch)?);
             }
-            let provider = vault_formats::Dat2Provider::new(loose, layers, Some(archive(critter)?));
+            let provider = install.open()?.provider(loose);
+            // §2.2: Play needs the required members (map preview does not).
+            if self.game
+                && let Some(member) = vault_formats::fallout2::missing_members(&provider).first()
+            {
+                return Err(format!("the Fallout 2 install is missing {member}").into());
+            }
             tracing::info!(
                 files = provider.files().count(),
                 "Fallout 2 databases mounted"
@@ -630,11 +632,6 @@ impl PreviewArgs {
         }
     }
     pub fn load(&self) -> AppResult<Option<AssetPreview>> {
-        // Of Fallout 2, map preview is specified (SPEC-015/016/018 §1);
-        // anything else waits for its specifications.
-        if self.game_profile == vault_core::GameProfile::Fallout2 && self.preview_map.is_none() {
-            return Err(vault_core::FALLOUT2_PENDING.into());
-        }
         let language = self.language.as_deref().unwrap_or("english");
         let save_root = self.save_dir.clone().unwrap_or_else(|| PathBuf::from("."));
         if self.game {
@@ -645,6 +642,8 @@ impl PreviewArgs {
                 save_root,
                 self.config.clone(),
             )?;
+            // SPEC-018 §6: a Fallout 2 game's new-game data and hand-off.
+            game.game_profile = self.game_profile;
             game.headless = self.headless;
             game.debug = self.debug;
             game.preset = self.preset;
@@ -929,7 +928,8 @@ mod tests {
             fallout2.image().unwrap().pixels(),
             fallout1.image().unwrap().pixels()
         );
-        // The other game's archives are refused; so is playing Fallout 2.
+        // The other game's archives are refused; and playing Fallout 2
+        // needs SPEC-018 §2.2's members, which a plain map corpus lacks.
         let wrong = PreviewArgs {
             master_dat: Some(master.clone()),
             critter_dat: Some(critter.clone()),
@@ -944,7 +944,302 @@ mod tests {
             game: true,
             ..Default::default()
         };
-        assert!(play.load().err().unwrap().to_string().contains("SPEC-016"));
+        let error = play.load().err().unwrap().to_string();
+        assert!(error.contains("missing maps/artemple.map"), "{error}");
+    }
+
+    /// A VFS that records every path read through it.
+    struct Logged {
+        inner: Arc<dyn Vfs>,
+        reads: std::sync::Mutex<Vec<String>>,
+    }
+    impl Vfs for Logged {
+        fn read(&self, path: &str) -> Result<Vec<u8>, vault_formats::VfsError> {
+            self.reads.lock().unwrap().push(path.to_ascii_lowercase());
+            self.inner.read(path)
+        }
+        fn read_bounded(
+            &self,
+            path: &str,
+            max_bytes: usize,
+        ) -> Result<Vec<u8>, vault_formats::VfsError> {
+            self.reads.lock().unwrap().push(path.to_ascii_lowercase());
+            self.inner.read_bounded(path, max_bytes)
+        }
+        fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {
+            self.inner.files()
+        }
+    }
+
+    /// SPEC-018 §8.13 and the end-to-end Fallout 2 path: a synthetic
+    /// install of SPEC-015 archives (SPEC-016 layouts, the SPEC-018 tables,
+    /// a synthetic `artemple.map`) validates in the launcher, Play's start
+    /// makes a new game on the start map with scripts gated, the world map
+    /// is reachable, and save and load round-trip.
+    #[test]
+    fn spec018_a_fallout2_install_plays_end_to_end() {
+        use vault_core::{GameProfile::Fallout2, fallout2, host_save::SaveInfo};
+        let corpus = crate::map_preview::test_support::synthetic_corpus();
+        vault_fixtures::fallout2::write_tables(corpus.path());
+        let install = tempfile::tempdir().unwrap();
+        let (master, critter) =
+            vault_fixtures::dat2::fallout2_install(corpus.path(), install.path(), 2);
+        // §2: the launcher accepts the install and Play unlocks.
+        let saves = tempfile::tempdir().unwrap();
+        let launcher = crate::launcher::Launcher::new(crate::launcher::Setup {
+            config: crate::config::Config {
+                game: Some(Fallout2),
+                master_dat: Some(master.clone()),
+                critter_dat: Some(critter.clone()),
+                ..Default::default()
+            },
+            settings_path: None,
+            save_dirs: vec![saves.path().to_path_buf()],
+            start_dir: saves.path().to_path_buf(),
+            problem: None,
+        });
+        assert_eq!(launcher.ready(), Ok(()));
+        // §6.7: `--game` loads under Fallout 2.
+        let args = PreviewArgs {
+            game_profile: Fallout2,
+            master_dat: Some(master.clone()),
+            critter_dat: Some(critter.clone()),
+            game: true,
+            headless: true,
+            save_dir: Some(saves.path().to_path_buf()),
+            ..Default::default()
+        };
+        let source = args.source().unwrap();
+        assert!(matches!(args.load().unwrap(), Some(AssetPreview::Game(_))));
+        // The same Play start over a read-logging VFS.
+        let logged = Arc::new(Logged {
+            inner: source,
+            reads: Default::default(),
+        });
+        let mut game = crate::game::Game::new(
+            logged.clone(),
+            "english",
+            1,
+            saves.path().to_path_buf(),
+            None,
+        )
+        .unwrap();
+        game.headless = true;
+        game.game_profile = Fallout2;
+        // n: the tables parse, then the selection; t takes the premade:
+        // elder.mve is missing, so the world starts.
+        assert!(game.step(KeyCode::KeyN));
+        assert_eq!(game.last_error, None);
+        assert!(game.step(KeyCode::KeyT));
+        let world = game.world().expect("the Fallout 2 world");
+        let host = &world.host;
+        let player = host.world.get(host.world.player).unwrap();
+        assert_eq!(
+            (player.raw.hex, player.raw.elevation, player.raw.orientation),
+            (Some(20100), 0, 2)
+        );
+        assert_eq!(host.world.map.header.map_number, 2);
+        assert_eq!(host.world.map.header.version, 20);
+        let state = host.world.fallout2.as_deref().unwrap();
+        assert_eq!(state.position, [175, 125]);
+        assert_eq!(state.map_flags, [0, 0, 3]);
+        assert_eq!(host.world.clock.ticks, fallout2::START_TICKS);
+        assert_eq!(host.world.game_date(), [7, 25, 2241]);
+        // No `.int` was read and no program runs; the scripts' records are
+        // kept, the critter's among them.
+        assert!(host.scripts_gated());
+        assert!(host.programs.is_empty());
+        let reads = logged.reads.lock().unwrap().clone();
+        assert!(
+            !reads.iter().any(|path| path.ends_with(".int")),
+            "{reads:?}"
+        );
+        let critter = host
+            .world
+            .iter()
+            .find(|(reference, object)| {
+                object.category() == vault_formats::pro::Category::Critter
+                    && *reference != host.world.player
+            })
+            .map(|(reference, _)| reference)
+            .unwrap();
+        let script = host
+            .world
+            .script_for(critter)
+            .expect("the critter's script record");
+        // The monitor's last message is the notice, once (it wraps over
+        // rows; a message's first row starts with the bullet).
+        world.image().unwrap();
+        let squeeze = |text: &[u8]| {
+            text.iter()
+                .copied()
+                .filter(|b| *b != b' ')
+                .collect::<Vec<u8>>()
+        };
+        let notice = squeeze(fallout2::GATE_NOTICE.as_bytes());
+        let messages = |world: &crate::map_preview::MapPreview| {
+            let mut out: Vec<Vec<u8>> = Vec::new();
+            for line in world.hud.monitor.visible() {
+                match line.split_first() {
+                    Some((&vault_core::ui::bar::BULLET, rest)) => out.push(squeeze(rest)),
+                    Some(_) => {
+                        if let Some(last) = out.last_mut() {
+                            last.extend(squeeze(line));
+                        }
+                    }
+                    None => {}
+                }
+            }
+            out
+        };
+        let shown = messages(world);
+        assert_eq!(shown.last(), Some(&notice), "{shown:?}");
+        assert_eq!(
+            shown.iter().filter(|message| **message == notice).count(),
+            1
+        );
+        // A save made now carries the gated mark and the critter's record.
+        let root = saves.path();
+        world.host.save_game(root, 1, &SaveInfo::default()).unwrap();
+        let slot = root.join("SAVEGAME/SLOT01");
+        let central = std::fs::read(slot.join("SAVE.DAT")).unwrap();
+        assert_eq!(central[0x74F7], 1);
+        assert_eq!(&central[0x18..0x1C], &[0, 1, 0, 2]);
+        assert_eq!(&central[0x74E3..0x74F3], b"VAULTENG F2SAVE1");
+        assert_eq!(&central[0x71..0x73], &[0, 2]);
+        assert_eq!(&central[0x73..0x80], b"ARTEMPLE.sav\0");
+        let saved_map = std::fs::read(slot.join("ARTEMPLE.SAV")).unwrap();
+        let lookup = |pid| {
+            vault_core::assets::WorldAssets::prototype(&world.host.assets, pid)
+                .map(|prototype| prototype.info())
+                .map_err(|error| vault_formats::ParseError {
+                    format: "PRO",
+                    offset: 0,
+                    message: error.to_string(),
+                })
+        };
+        let parsed = vault_formats::MapFile::parse_for(&saved_map, &lookup, Fallout2).unwrap();
+        let ids: Vec<u32> = parsed
+            .scripts
+            .iter()
+            .flat_map(|category| category.active())
+            .map(|record| record.id)
+            .collect();
+        assert!(ids.contains(&script), "{ids:?} lacks {script:#x}");
+        let automap = std::fs::read(slot.join("AUTOMAP.SAV")).unwrap();
+        assert!(automap.len() >= 12005);
+        // An exit-grid transition (to map 1) loads Test Village, with no
+        // second notice; its area moves the party there.
+        world.host.request_transition(vault_core::Transition {
+            map: 1,
+            elevation: -1,
+            hex: -1,
+            facing: -1,
+        });
+        assert!(world.host.process_transition().unwrap());
+        assert_eq!(world.host.world.map.header.map_number, 1);
+        world.image().unwrap();
+        let shown = messages(world);
+        assert_eq!(
+            shown.iter().filter(|message| **message == notice).count(),
+            1
+        );
+        // The world map is reachable: a transition to it, travel with no
+        // encounter table on the way, and an area entrance back.
+        world.host.request_transition(vault_core::Transition {
+            map: -2,
+            elevation: -1,
+            hex: -1,
+            facing: -1,
+        });
+        assert!(world.host.process_transition().unwrap());
+        assert!(world.host.world.unloaded);
+        world.host.fallout2_build_world_map(true).unwrap();
+        world.host.fallout2_travel_to([300, 250]).unwrap();
+        let mut outcome = vault_core::Fallout2Travel::Moving;
+        for _ in 0..2000 {
+            outcome = world.host.fallout2_travel_iteration().unwrap();
+            if outcome != vault_core::Fallout2Travel::Moving {
+                break;
+            }
+        }
+        assert_eq!(outcome, vault_core::Fallout2Travel::Arrived);
+        let state = world.host.world.fallout2.as_deref().unwrap();
+        assert_eq!(state.position, [300, 250]);
+        assert_ne!(state.discovery([6, 5]), 0);
+        assert!(world.host.world.clock.ticks > fallout2::START_TICKS);
+        // Dropping to terrain loads the desert map at its start point.
+        world.host.fallout2_travel_to([10, 10]).unwrap();
+        world.host.world.fallout2.as_deref_mut().unwrap().position = [10, 10];
+        assert!(world.host.fallout2_drop_to_terrain().unwrap());
+        assert_eq!(world.host.world.map.header.map_number, 0);
+        let player = world.host.world.get(world.host.world.player).unwrap();
+        assert_eq!(player.raw.hex, Some(19086));
+        // Into Test Village through area 0's entrance 0 (the header's
+        // default entrance).
+        world.host.fallout2_enter_entrance(0, 0).unwrap();
+        assert_eq!(world.host.world.map.header.map_number, 1);
+        // Map 0 is excluded (saved=No): leaving it wrote no DESERT1.SAV.
+        let working = &world.host.world.persistence.maps;
+        assert!(!working.contains_key("DESERT1.SAV"), "{:?}", working.keys());
+        assert!(working.contains_key("ARTEMPLE.SAV"));
+        let before = world.host.world.fallout2.as_deref().unwrap().clone();
+        let ticks = world.host.world.clock.ticks;
+        // Save and load round-trip.
+        world.host.save_game(root, 2, &SaveInfo::default()).unwrap();
+        world.host.world.clock.set(ticks + 1000);
+        world.host.world.fallout2.as_deref_mut().unwrap().map_flags[2] = 0;
+        world.host.load_game(root, 2).unwrap();
+        assert_eq!(world.host.world.clock.ticks, ticks);
+        assert_eq!(world.host.world.map.header.map_number, 1);
+        let after = world.host.world.fallout2.as_deref().unwrap();
+        assert_eq!(after.save(), before.save());
+        assert_eq!(after.position, before.position);
+        // The load printed the notice again.
+        let effects: Vec<_> = world.host.world.effects.iter().cloned().collect();
+        assert!(effects.iter().any(|effect| matches!(effect,
+            vault_core::WorldEffect::Message(text) if squeeze(text) == notice)));
+        // A Fallout 1 slot never loads under Fallout 2, nor a Fallout 2 slot
+        // under Fallout 1.
+        let mut fallout1 =
+            crate::map_preview::test_support::load(corpus.path(), "maps/testvil.map");
+        fallout1
+            .host
+            .save_game(root, 3, &SaveInfo::default())
+            .unwrap();
+        assert!(world.host.load_game(root, 3).is_err());
+        assert!(fallout1.host.load_game(root, 2).is_err());
+        // A slot saved with another campaign-global count is refused, and
+        // nothing changes.
+        let mut other = std::fs::read(root.join("SAVEGAME/SLOT02/SAVE.DAT")).unwrap();
+        other[0x74F6] ^= 1;
+        std::fs::write(root.join("SAVEGAME/SLOT02/SAVE.DAT"), other).unwrap();
+        assert!(world.host.load_game(root, 2).is_err());
+        assert_eq!(world.host.world.map.header.map_number, 1);
+    }
+
+    /// SPEC-018 §6.6 step 1: a table that §4 refuses returns to the main
+    /// menu with a message naming the file and line; no game starts.
+    #[test]
+    fn spec018_a_refused_table_returns_to_the_menu() {
+        let corpus = crate::map_preview::test_support::synthetic_corpus();
+        vault_fixtures::fallout2::write_tables(corpus.path());
+        std::fs::write(
+            corpus.path().join("data/maps.txt"),
+            "[Map 000]\nlookup_name=No File\n",
+        )
+        .unwrap();
+        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(corpus.path()).unwrap());
+        let saves = tempfile::tempdir().unwrap();
+        let mut game =
+            crate::game::Game::new(vfs, "english", 1, saves.path().to_path_buf(), None).unwrap();
+        game.headless = true;
+        game.game_profile = vault_core::GameProfile::Fallout2;
+        game.step(KeyCode::KeyN);
+        let error = game.last_error.clone().expect("a refusal");
+        assert_eq!(error, "data/maps.txt line 0: no valid map record");
+        assert_eq!(game.title(), "Vault — main menu");
+        assert!(game.world().is_none());
     }
 
     #[test]

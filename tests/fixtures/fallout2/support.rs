@@ -50,16 +50,16 @@ fn word(bytes: &mut [u8], at: usize, value: i32) {
     bytes[at..at + 4].copy_from_slice(&value.to_be_bytes());
 }
 
-/// §8.13's start map from a SPEC-003 map stream `map` (the synthetic
-/// interactive map): the header names map script `script` (`0` for none),
-/// its entrance is hex `hex`, elevation 0, orientation `orientation`, and
-/// its name field is `artemple.map`.
-pub fn start_map(mut map: Vec<u8>, script: i32, hex: i32, orientation: i32) -> Vec<u8> {
-    // Header: version, name[16], entry hex, elevation, orientation,
-    // local count, script index (SPEC-003 §2.7).
-    let mut name = [0u8; 16];
-    name[..12].copy_from_slice(b"artemple.map");
-    map[4..20].copy_from_slice(&name);
+/// A copy of SPEC-003 map stream `map` (the synthetic interactive map)
+/// whose header names `name`, map script `script` (a one-based
+/// `scripts.lst` reference, 0 for none), and the entrance hex `hex`,
+/// elevation 0 and orientation `orientation`.
+pub fn named_map(mut map: Vec<u8>, name: &str, script: i32, hex: i32, orientation: i32) -> Vec<u8> {
+    // Header: version, name[16], entry hex, elevation, orientation, local
+    // count, script reference (SPEC-003 §2.7).
+    let mut field = [0u8; 16];
+    field[..name.len()].copy_from_slice(name.as_bytes());
+    map[4..20].copy_from_slice(&field);
     word(&mut map, 20, hex);
     word(&mut map, 24, 0);
     word(&mut map, 28, orientation);
@@ -67,18 +67,26 @@ pub fn start_map(mut map: Vec<u8>, script: i32, hex: i32, orientation: i32) -> V
     map
 }
 
-/// Write SPEC-018's tables (`tables()`) and `maps/artemple.map` (from
-/// `maps/synthetic.map`, by [`start_map`]) into a synthetic corpus at
-/// `root`.
-pub fn write_tables(root: &std::path::Path, script: i32, hex: i32, orientation: i32) {
+/// Write SPEC-018's tables (`tables()`) into a synthetic corpus at `root`
+/// with three maps made from its `maps/synthetic.map` by [`named_map`]:
+/// §8.13's `maps/artemple.map` (map script reference 1, entrance hex
+/// 20100, orientation 2), and `maps/testvil.map` and `maps/desert1.map`
+/// at the synthetic map's entrance.
+pub fn write_tables(root: &std::path::Path) {
     std::fs::create_dir_all(root.join("data")).unwrap();
     for (path, text) in tables() {
         std::fs::write(root.join(path), text).unwrap();
     }
     let map = std::fs::read(root.join("maps/synthetic.map")).unwrap();
-    std::fs::write(
-        root.join("maps/artemple.map"),
-        start_map(map, script, hex, orientation),
-    )
-    .unwrap();
+    for (file, name, script, orientation) in [
+        ("maps/artemple.map", "artemple.map", 1, 2),
+        ("maps/testvil.map", "testvil.map", 0, 0),
+        ("maps/desert1.map", "desert1.map", 0, 0),
+    ] {
+        std::fs::write(
+            root.join(file),
+            named_map(map.clone(), name, script, 20100, orientation),
+        )
+        .unwrap();
+    }
 }
