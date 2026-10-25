@@ -3,6 +3,7 @@
 pub mod ai;
 pub mod assets;
 pub mod barter;
+pub mod camera;
 pub mod choreography;
 pub mod clicks;
 pub mod combat;

@@ -549,6 +549,9 @@ impl ExplosionArt {
 pub enum WorldEffect {
     Diagnostic(String),
     Message(Vec<u8>),
+    /// An `enhanced` preset camera request from a script (opcodes
+    /// `0x8210`-`0x8213`); presentation only. Vanilla never emits it.
+    Camera(crate::camera::CameraCommand),
     /// A SPEC-010 effect request, resolved through the effect lookup chain.
     /// Animation-registered and object effects supply their owner (for the
     /// gender alias and relative volume); direct playback supplies none.

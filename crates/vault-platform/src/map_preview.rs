@@ -51,6 +51,7 @@ mod counter;
 mod debug;
 mod dialog;
 mod elevator;
+mod enhanced;
 mod fade;
 pub(crate) use fade::FADE_MS;
 mod floating;
@@ -1197,6 +1198,8 @@ impl MapPreview {
             outlines: Some(&inks),
             floating: &floating,
             cursor: scene_cursor,
+            roof_cutaway: None,
+            shroud: None,
         };
         draw_map_scene(&mut image, map, &objects, self.view, &self.art, scene)?;
         self.cursor_in_frame |= cursor.is_some();

@@ -3,11 +3,13 @@
 pub mod dialogue;
 pub mod floating;
 pub mod image;
+pub mod layers;
 pub mod map;
 pub mod movie;
 pub mod outline;
 
 pub use image::{ImageError, IndexedImage, TextStyle, compose_preview};
+pub use layers::{EnhancedLayout, Layer};
 #[cfg(test)]
 pub(crate) use vault_fixtures::formats as fixture_assets;
 
@@ -311,6 +313,16 @@ impl Renderer {
         }
         self.write_indices(image);
         self.set_palette(palette);
+    }
+
+    /// The `enhanced` presentation: `layers` drawn back to front into their
+    /// surface rectangles through one palette (see [`layers`]). Until the
+    /// multi-layer pass exists this shows the first layer alone through the
+    /// single-image path.
+    pub fn set_layers(&mut self, layers: &[Layer<'_>], palette: &[[u8; 4]; 256]) {
+        if let Some(layer) = layers.first() {
+            self.set_image(layer.image, palette);
+        }
     }
 
     fn write_indices(&self, image: &IndexedImage) {

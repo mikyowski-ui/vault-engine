@@ -171,6 +171,34 @@ pub struct MapScene<'a> {
     pub floating: &'a [FloatingSprite],
     /// SPEC-014 §3.27 the in-world cursor's objects, when it shows.
     pub cursor: Option<SceneCursor<'a>>,
+    /// The `enhanced` preset's roof cutaway around the cursor (`None` in
+    /// Vanilla).
+    pub roof_cutaway: Option<RoofCutaway>,
+    /// The `enhanced` preset's shroud over hexes the camera may not reach
+    /// (`None` in Vanilla).
+    pub shroud: Option<Shroud<'a>>,
+}
+
+/// The `enhanced` preset's roof peek: roof pixels within `inner` view
+/// pixels of `center` are cut away, and within the `ring` beyond it they
+/// dissolve through a 4x4 ordered (Bayer) dither. Engine extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoofCutaway {
+    /// The center in view pixels.
+    pub center: [i64; 2],
+    pub inner: u32,
+    pub ring: u32,
+}
+
+/// The `enhanced` preset's shroud: view pixels over hexes outside the
+/// camera's region (or off the grid) are darkened toward `dark` through an
+/// ordered dither. Engine extension.
+#[derive(Debug, Clone, Copy)]
+pub struct Shroud<'a> {
+    /// One flag per hex 0-39999: whether the hex is inside.
+    pub allowed: &'a [bool],
+    /// The palette index the shroud darkens to.
+    pub dark: u8,
 }
 
 /// SPEC-014 §3.27 the in-world cursor: a flat object on the current
@@ -1154,6 +1182,21 @@ pub fn pick_objects_with(
 /// the orientation table without the transparency-end exceptions (whether
 /// or not the player is hidden), with a nonzero mask pixel under the
 /// pointer.
+/// [`pick_candidates`] with the `enhanced` roof cutaway: roofs cut away
+/// around the cursor do not stop the pick. Until the cutaway is honoured
+/// this picks as [`pick_candidates`] does.
+pub fn pick_candidates_cut(
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    point: [i32; 2],
+    cutout: Option<&Cutout>,
+    cutaway: Option<RoofCutaway>,
+) -> Option<Vec<(u32, bool)>> {
+    let _ = cutaway;
+    pick_candidates(map, objects, view, art, point, cutout)
+}
 pub fn pick_candidates(
     map: &MapFile,
     objects: &MapObjects,
@@ -2005,6 +2048,8 @@ mod tests {
                 outlines: None,
                 floating: &[],
                 cursor: None,
+                roof_cutaway: None,
+                shroud: None,
             };
             draw_map_scene(&mut image, &map, &scene(vec![wall]), view, &art, scene_cut).unwrap();
             let [x, y] = view.grid.hex_center(20300).unwrap();

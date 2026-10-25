@@ -1,6 +1,7 @@
 mod audio;
 mod config;
 mod editor_screen;
+mod enhanced;
 mod game;
 mod input;
 mod interface;
