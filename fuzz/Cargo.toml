@@ -164,3 +164,17 @@ path = "fuzz_targets/validate.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "zlib"
+path = "fuzz_targets/zlib.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dat2"
+path = "fuzz_targets/dat2.rs"
+test = false
+doc = false
+bench = false

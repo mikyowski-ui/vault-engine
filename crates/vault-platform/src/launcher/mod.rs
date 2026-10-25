@@ -304,10 +304,6 @@ impl Launcher {
     /// Whether the game data and the mod stack can start the game, or the
     /// first reason they cannot.
     pub fn ready(&self) -> Result<(), String> {
-        // Fallout 2 is known by name only until its specifications exist.
-        if self.config.game == Some(GameProfile::Fallout2) {
-            return Err(format!("{}.", vault_core::FALLOUT2_PENDING));
-        }
         const NAMES: [&str; 3] = ["MASTER.DAT", "CRITTER.DAT", "Data folder"];
         if let Some((name, check)) = NAMES
             .iter()
@@ -324,6 +320,11 @@ impl Launcher {
         }
         if self.mods.check.stack.state == State::Bad {
             return Err(format!("Mods: {}.", self.mods.check.stack.text));
+        }
+        // Fallout 2's archives validate (SPEC-015), but nothing past them
+        // runs until its other specifications exist.
+        if self.config.game == Some(GameProfile::Fallout2) {
+            return Err(format!("{}.", vault_core::FALLOUT2_PENDING));
         }
         // A layer that mounts can still fail on its `vault-mod.toml`.
         if let Some(check) = self
@@ -562,6 +563,8 @@ impl Launcher {
                     GameProfile::Fallout1 => GameProfile::Fallout2,
                     GameProfile::Fallout2 => GameProfile::Fallout1,
                 });
+                // The archives are read as the other game's format now.
+                self.revalidate();
             }
             Widget::Preset => {
                 config.preset = Some(match config.preset.unwrap_or_default() {
@@ -691,10 +694,11 @@ impl Launcher {
     /// Validate the three fields again.
     fn revalidate(&mut self) {
         let [master, critter, root] = Field::ALL.map(|field| self.path(field));
+        let game = self.config.game.unwrap_or_default();
         let databases = master.is_some() || critter.is_some();
         self.checks[2] = match &root {
             None => Check::unset("optional: loose files read before the archives"),
-            Some(root) => validate::data_root(root, !databases),
+            Some(root) => validate::data_root(root, !databases, game),
         };
         let root = root.filter(|_| self.checks[2].is_ok());
         let required = |other: &str| Check {
@@ -702,12 +706,12 @@ impl Launcher {
             text: format!("required with {other}"),
         };
         self.checks[0] = match (&master, &critter) {
-            (Some(master), _) => validate::master(master, root.as_deref()),
+            (Some(master), _) => validate::master(master, root.as_deref(), game),
             (None, Some(_)) => required("CRITTER.DAT"),
             (None, None) => Check::unset("not set: the data folder alone is the game data"),
         };
         self.checks[1] = match (&critter, &master) {
-            (Some(critter), _) => validate::critter(critter),
+            (Some(critter), _) => validate::critter(critter, game),
             (None, Some(_)) => required("MASTER.DAT"),
             (None, None) => Check::unset("not set"),
         };

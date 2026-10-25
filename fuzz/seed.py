@@ -67,6 +67,24 @@ def write(target, name, data):
     (directory / name).write_bytes(data)
 
 
+def read_text(path):
+    return path.read_text()
+
+
+def dat2(members):
+    """A SPEC-015 archive: member data, the tree, then the footer."""
+    data = bytearray()
+    tree = bytearray(struct.pack("<I", len(members)))
+    for path, stored, compressed, real in members:
+        offset = len(data)
+        data += stored
+        tree += struct.pack("<I", len(path)) + path
+        tree += struct.pack("<BIII", int(compressed), real, len(stored), offset)
+    data += tree
+    data += struct.pack("<II", len(tree), len(data) + 8)
+    return bytes(data)
+
+
 def main():
     dat = read(FIXTURES / "archive" / "synthetic.dat.hex")
     write("dat", "synthetic.dat", dat)
@@ -102,6 +120,24 @@ def main():
     write("moviefx", "fixture-g.cfg", (FIXTURES / "movie" / "fixture-g.cfg").read_bytes())
     for path in sorted((FIXTURES / "loose" / "data").glob("ai*.txt")):
         write("ai", path.name, path.read_bytes())
+    # SPEC-015: each zlib vector with its plain length, and small version 2
+    # archives holding a stored and a compressed member.
+    sizes = {"empty": 0, "text": 47, "words": 28011, "noise": 4096, "stored": 70000, "repeat": 40000}
+    vectors = {}
+    for line in read_text(FIXTURES / "zlib" / "vectors.hex").splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        if line.startswith("@"):
+            name = line[1:].split()[0]
+            vectors[name] = bytearray()
+            continue
+        vectors[name] += plain(line)
+    for name, stream in vectors.items():
+        write("zlib", name, struct.pack("<I", sizes[name]) + bytes(stream))
+    for name in ("text", "repeat"):
+        write("dat2", f"{name}.dat", dat2([(b"COLOR.PAL", b"pal", False, 3),
+                                           (b"DATA\\" + name.upper().encode() + b".TXT",
+                                            bytes(vectors[name]), True, sizes[name])]))
     for directory in sorted(CORPUS.iterdir()):
         print(f"{directory.relative_to(ROOT)}: {len(list(directory.iterdir()))} seeds")
 

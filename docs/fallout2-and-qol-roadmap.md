@@ -79,21 +79,51 @@ The phrase "the spec must define" marks what this document does not assume.
 
 ### Spec requests
 
-| Spec | Scope |
-|---|---|
-| SPEC-015 | Archive version 2: directory, entries, compression, the probe |
-| SPEC-016 | MAP version 20 and prototype deltas, with round-trip vectors |
-| SPEC-017 | Host words `0x8156`-`0x8183` and VM deltas from SPEC-004 |
-| SPEC-018 | Saves, world map, party and the other data tables |
-| SPEC-019 | Interface, game-flow and movie deltas |
+| Spec | Scope | Status |
+|---|---|---|
+| SPEC-015 | Archive version 2: footer, tree, entries, zlib members | **Approved and implemented** (2026-10-25) |
+| SPEC-016 | MAP version 20 and prototype deltas, with round-trip vectors | Waiting for its source |
+| SPEC-017 | Host words `0x8156`-`0x8183` and VM deltas from SPEC-004 | Requested |
+| SPEC-018 | Saves, world map, party and the other data tables | Requested |
+| SPEC-019 | Interface, game-flow and movie deltas | Requested |
+
+**SPEC-015** (`specs/approved/SPEC-015-dat2-archive-and-zlib.md`) was written
+from the project owner's brief and RFC 1950/1951, with nothing from game
+code or other engines. It is implemented as:
+- `vault_formats::Dat2Archive`, a read-only VFS provider;
+- `vault_formats::inflate`, a bounded RFC 1951/1950 decoder with no new
+  dependency.
+
+The launcher reads both games' archives under the Game row.
+
+**SPEC-016 needs a source before it can be written.** The brief names MAP
+version 20 and the prototype extensions but gives no layout, and this
+engine's rules forbid filling one in from memory. Its source (the project
+owner or the research vault) must state:
+1. **MAP v20 header:** every field that differs from SPEC-003 §2.7's version
+   19 header (offsets, widths, meanings), and whether the variable sections
+   change.
+2. **Map objects:** every per-category difference in the object records
+   (SPEC-003 §2.8): new or resized fields for critters, items and scenery.
+3. **Map scripts:** whether the script section differs.
+4. **Prototypes:** each category's record size and its added fields (SPEC-003
+   §2.4-§2.6).
+5. **Choosing the format:** whether the map version alone selects the
+   layout, or the game profile also does (for example, a version 19 map under
+   Fallout 2).
+6. **Test vectors:** at least one small version 20 map and one prototype per
+   changed category, with their decoded field values.
+
+Until then, `--preview-map` refuses Fallout 2 data before reading it.
 
 ### Groundwork (done without a spec)
 
 - `game = "fallout1" | "fallout2"` in `vault-engine.toml`, a `--game-profile`
   flag, and a launcher row. `vault_core::GameProfile` names the two games.
-- A Fallout 2 launch is refused before any data is read, with the message
-  "Fallout 2 data needs SPEC-015 to SPEC-019 (docs/fallout2-and-qol-roadmap.md)".
-  The launcher shows the same message on Play.
+- A Fallout 2 launch is refused before any data is read. The message says
+  the archives read but the maps, prototypes and scripts need SPEC-016 to
+  SPEC-019. The launcher reads Fallout 2 archives (SPEC-015) and shows the
+  same message on Play.
 - `vault_vm::WordSet` replaces the fixed `0x8000..=0x8155` test. Fallout 1's
   set is unchanged word for word.
 

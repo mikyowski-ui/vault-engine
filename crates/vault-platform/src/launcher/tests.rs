@@ -190,22 +190,22 @@ fn the_databases_validate_with_counts_and_reasons() {
     let dir = temp.path();
     // The SPEC-008 fixture opens, but holds none of what a game reads.
     fs::write(dir.join("fixture.dat"), fixture_archive()).unwrap();
-    let check = validate::master(&dir.join("fixture.dat"), None);
+    let check = validate::master(&dir.join("fixture.dat"), None, GameProfile::Fallout1);
     assert_eq!(check.state, State::Bad);
     assert_eq!(
         check.text,
         "2 members; missing color.pal, data/vault13.gam, maps/v13ent.map"
     );
-    let check = validate::critter(&dir.join("fixture.dat"));
+    let check = validate::critter(&dir.join("fixture.dat"), GameProfile::Fallout1);
     assert_eq!(
         (check.state, check.text.as_str()),
         (State::Bad, "2 members; none under art/critters/")
     );
     // Archives shaped like the real ones.
     install(dir);
-    let check = validate::master(&dir.join("MASTER.DAT"), None);
+    let check = validate::master(&dir.join("MASTER.DAT"), None, GameProfile::Fallout1);
     assert_eq!((check.state, check.text.as_str()), (State::Ok, "3 members"));
-    let check = validate::critter(&dir.join("CRITTER.DAT"));
+    let check = validate::critter(&dir.join("CRITTER.DAT"), GameProfile::Fallout1);
     assert_eq!(
         (check.state, check.text.as_str()),
         (State::Ok, "1 member, 1 critter art")
@@ -216,35 +216,45 @@ fn the_databases_validate_with_counts_and_reasons() {
         ("MAPS", &[("V13ENT.MAP", b"map")]),
     ]);
     fs::write(dir.join("partial.dat"), partial).unwrap();
-    assert!(!validate::master(&dir.join("partial.dat"), None).is_ok());
+    assert!(!validate::master(&dir.join("partial.dat"), None, GameProfile::Fallout1).is_ok());
     fs::create_dir_all(dir.join("DATA")).unwrap();
     fs::write(dir.join("DATA/Color.Pal"), b"pal").unwrap();
-    assert!(validate::master(&dir.join("partial.dat"), Some(&dir.join("DATA"))).is_ok());
+    assert!(
+        validate::master(
+            &dir.join("partial.dat"),
+            Some(&dir.join("DATA")),
+            GameProfile::Fallout1,
+        )
+        .is_ok()
+    );
     // Missing, wrong-kind and invalid paths.
     for (path, reason) in [
         (dir.join("none.dat"), "file not found"),
         (dir.join("DATA"), "not a file"),
     ] {
-        assert_eq!(validate::master(&path, None).text, reason);
-        assert_eq!(validate::critter(&path).text, reason);
+        assert_eq!(
+            validate::master(&path, None, GameProfile::Fallout1).text,
+            reason
+        );
+        assert_eq!(validate::critter(&path, GameProfile::Fallout1).text, reason);
     }
     fs::write(dir.join("junk.dat"), b"not an archive").unwrap();
-    let check = validate::master(&dir.join("junk.dat"), None);
+    let check = validate::master(&dir.join("junk.dat"), None, GameProfile::Fallout1);
     assert!(
         check.state == State::Bad && check.text.starts_with("not a readable DAT archive"),
         "{check:?}"
     );
     assert_eq!(
-        validate::data_root(&dir.join("missing"), false).text,
+        validate::data_root(&dir.join("missing"), false, GameProfile::Fallout1).text,
         "directory not found"
     );
     assert_eq!(
-        validate::data_root(&dir.join("MASTER.DAT"), false).text,
+        validate::data_root(&dir.join("MASTER.DAT"), false, GameProfile::Fallout1).text,
         "not a directory"
     );
-    assert!(validate::data_root(&dir.join("DATA"), false).is_ok());
+    assert!(validate::data_root(&dir.join("DATA"), false, GameProfile::Fallout1).is_ok());
     // Alone, the loose folder must hold everything a new game reads.
-    let alone = validate::data_root(&dir.join("DATA"), true);
+    let alone = validate::data_root(&dir.join("DATA"), true, GameProfile::Fallout1);
     assert_eq!(
         alone.text,
         "no databases, and missing data/vault13.gam, maps/v13ent.map"
@@ -561,10 +571,31 @@ fn load_order_edits_round_trip_through_the_writer() {
 }
 
 #[test]
-fn the_game_row_refuses_fallout2_until_its_specs_exist() {
+fn the_game_row_reads_each_games_archives() {
+    use vault_fixtures::dat2::{Member, archive, zlib_vector};
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
     install(dir);
+    // Fallout 2 archives (SPEC-015) in their own folder.
+    let fallout2 = dir.join("fallout2");
+    fs::create_dir_all(&fallout2).unwrap();
+    fs::write(
+        fallout2.join("master.dat"),
+        archive(&[
+            Member::stored("COLOR.PAL", b"pal"),
+            Member::zlib("TEXT\\ENGLISH\\GAME\\NOTE.MSG", &zlib_vector("text")),
+            Member::zlib("DATA\\WORDS.TXT", &zlib_vector("words")),
+        ]),
+    )
+    .unwrap();
+    fs::write(
+        fallout2.join("critter.dat"),
+        archive(&[Member::zlib(
+            "ART\\CRITTERS\\HERO.FRM",
+            &zlib_vector("repeat"),
+        )]),
+    )
+    .unwrap();
     let config = Config {
         master_dat: Some(dir.join("MASTER.DAT")),
         critter_dat: Some(dir.join("CRITTER.DAT")),
@@ -579,14 +610,43 @@ fn the_game_row_refuses_fallout2_until_its_specs_exist() {
         .position(|widget| *widget == Widget::Browse(Field::DataRoot))
         .unwrap();
     assert_eq!(order[browse + 1], Widget::Game);
+    // Fallout 2 reads the archives as version 2: Fallout 1's are refused,
+    // with a hint.
     launcher.focus = Widget::Game;
     key(&mut launcher, KeyCode::ArrowRight);
     assert_eq!(launcher.config.game, Some(GameProfile::Fallout2));
+    assert_eq!(launcher.checks[0].state, State::Bad);
+    assert!(
+        launcher.checks[0].text.contains("set Game to fallout1"),
+        "{:?}",
+        launcher.checks[0]
+    );
+    assert!(launcher.ready().unwrap_err().starts_with("MASTER.DAT:"));
+    // Version 2 archives check out, with their member counts.
+    launcher.set_field(Field::Master, &fallout2.join("master.dat"));
+    launcher.set_field(Field::Critter, &fallout2.join("critter.dat"));
+    let checks: Vec<(State, String)> = launcher.checks[..2]
+        .iter()
+        .map(|check| (check.state, check.text.clone()))
+        .collect();
+    assert_eq!(
+        checks,
+        [
+            (State::Ok, "3 members (Fallout 2 archive)".to_owned()),
+            (State::Ok, "1 member (Fallout 2 archive)".to_owned()),
+        ]
+    );
+    // Play is still refused: nothing past the archives is specified.
     let refused = launcher.ready().unwrap_err();
-    assert!(refused.contains("SPEC-015"), "{refused}");
+    assert!(refused.contains("SPEC-016"), "{refused}");
+    // Back to Fallout 1: these archives are refused, with the other hint.
     key(&mut launcher, KeyCode::Space);
     assert_eq!(launcher.config.game, Some(GameProfile::Fallout1));
-    assert_eq!(launcher.ready(), Ok(()));
+    assert!(
+        launcher.checks[0].text.contains("set Game to fallout2"),
+        "{:?}",
+        launcher.checks[0]
+    );
 }
 
 #[test]

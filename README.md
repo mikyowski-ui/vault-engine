@@ -132,8 +132,9 @@ that fits a smaller monitor.
 With no arguments the game starts from the data named in `vault-engine.toml`,
 looked for beside the executable and then in the working directory. Keys:
 `master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
-`game` (`fallout1`, the default, or `fallout2`, which is refused until its
-specifications exist; see the
+`game` (`fallout1`, the default, or `fallout2`). Under `fallout2` the
+launcher reads the SPEC-015 archive format, but a start is refused until the
+maps, prototypes and scripts are specified (SPEC-016 onward); see the
 [Fallout 2 and QoL roadmap](docs/fallout2-and-qol-roadmap.md), and the
 `--game-profile` flag), `preset` (`vanilla` or `enhanced`), `scaling`,
 `fullscreen`, `debug` and

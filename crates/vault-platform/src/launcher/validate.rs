@@ -5,8 +5,10 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use vault_core::GameProfile;
 use vault_formats::{
-    DatArchive, LayerEntry, LayeredVfs, LoadOrderPolicy, ModManifest, Vfs, VfsError, VfsPath,
+    Dat2Archive, DatArchive, LayerEntry, LayeredVfs, LoadOrderPolicy, ModManifest, Vfs, VfsError,
+    VfsPath,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,15 +62,50 @@ pub const MASTER_MEMBERS: [&str; 3] = [
 /// The critter database serves the `art/critters/` requests.
 const CRITTER_DIR: &[u8] = b"ART\\CRITTERS\\";
 
-fn open(path: &Path) -> Result<DatArchive, String> {
-    if !path.is_file() {
-        return Err(if path.exists() {
-            "not a file".into()
-        } else {
-            "file not found".into()
-        });
+fn is_file(path: &Path) -> Result<(), String> {
+    if path.is_file() {
+        Ok(())
+    } else if path.exists() {
+        Err("not a file".into())
+    } else {
+        Err("file not found".into())
     }
-    DatArchive::open(path).map_err(|error| format!("not a readable DAT archive: {error}"))
+}
+
+fn open(path: &Path) -> Result<DatArchive, String> {
+    is_file(path)?;
+    DatArchive::open(path).map_err(|error| {
+        // A Fallout 2 archive under the Fallout 1 profile says so.
+        let hint = if Dat2Archive::open(path).is_ok() {
+            " (a Fallout 2 archive: set Game to fallout2)"
+        } else {
+            ""
+        };
+        format!("not a readable DAT archive: {error}{hint}")
+    })
+}
+
+/// A Fallout 2 archive (SPEC-015) and its member count. Which members a
+/// Fallout 2 install needs is not yet specified (SPEC-018), so none is
+/// required.
+fn open_v2(path: &Path) -> Check {
+    if let Err(error) = is_file(path) {
+        return Check::bad(error);
+    }
+    match Dat2Archive::open(path) {
+        Ok(archive) => Check::ok(format!(
+            "{} (Fallout 2 archive)",
+            plural(archive.entries().len(), "member")
+        )),
+        Err(error) => {
+            let hint = if DatArchive::open(path).is_ok() {
+                " (a Fallout 1 archive: set Game to fallout1)"
+            } else {
+                ""
+            };
+            Check::bad(format!("not a readable Fallout 2 archive: {error}{hint}"))
+        }
+    }
 }
 
 /// `members` the archive (or the loose `data_root`) is missing.
@@ -84,8 +121,12 @@ fn missing(archive: Option<&DatArchive>, data_root: Option<&Path>) -> Vec<&'stat
 }
 
 /// MASTER.DAT: an archive holding every [`MASTER_MEMBERS`] entry (or with
-/// the missing ones in the loose data folder).
-pub fn master(path: &Path, data_root: Option<&Path>) -> Check {
+/// the missing ones in the loose data folder); for Fallout 2, a readable
+/// SPEC-015 archive.
+pub fn master(path: &Path, data_root: Option<&Path>, game: GameProfile) -> Check {
+    if game == GameProfile::Fallout2 {
+        return open_v2(path);
+    }
     let archive = match open(path) {
         Ok(archive) => archive,
         Err(error) => return Check::bad(error),
@@ -101,8 +142,12 @@ pub fn master(path: &Path, data_root: Option<&Path>) -> Check {
     }
 }
 
-/// CRITTER.DAT: an archive with critter art.
-pub fn critter(path: &Path) -> Check {
+/// CRITTER.DAT: an archive with critter art; for Fallout 2, a readable
+/// SPEC-015 archive.
+pub fn critter(path: &Path, game: GameProfile) -> Check {
+    if game == GameProfile::Fallout2 {
+        return open_v2(path);
+    }
     let archive = match open(path) {
         Ok(archive) => archive,
         Err(error) => return Check::bad(error),
@@ -126,8 +171,9 @@ pub fn critter(path: &Path) -> Check {
 }
 
 /// The loose data folder: an existing directory. Without the databases it
-/// is the whole game data, so it must then hold [`MASTER_MEMBERS`] itself.
-pub fn data_root(path: &Path, standalone: bool) -> Check {
+/// is the whole game data, so it must then hold [`MASTER_MEMBERS`] itself
+/// (Fallout 1 only: Fallout 2's are not yet specified).
+pub fn data_root(path: &Path, standalone: bool, game: GameProfile) -> Check {
     if !path.is_dir() {
         return Check::bad(if path.exists() {
             "not a directory"
@@ -136,7 +182,7 @@ pub fn data_root(path: &Path, standalone: bool) -> Check {
         });
     }
     let entries = std::fs::read_dir(path).map_or(0, |entries| entries.count());
-    if standalone {
+    if standalone && game == GameProfile::Fallout1 {
         let missing = missing(None, Some(path));
         if !missing.is_empty() {
             return Check::bad(format!("no databases, and missing {}", missing.join(", ")));
