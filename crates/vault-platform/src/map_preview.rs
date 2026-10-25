@@ -181,6 +181,9 @@ pub struct MapPreview {
     /// Where the F9 overlay exports the current setup as a mod (`None`:
     /// the export is refused, as in a replay).
     pub mod_export: Option<std::path::PathBuf>,
+    /// Started with `--debug`: the enhanced Push reaches any standing
+    /// critter, not only party members.
+    pub debug_session: bool,
     /// The directory holding `SAVEGAME/SLOTnn`.
     pub save_root: std::path::PathBuf,
     /// SPEC-014 §3.19 where F12 writes `scrNNNNN.bmp`: the process's
@@ -546,6 +549,7 @@ impl MapPreview {
             preferences: Default::default(),
             config_path: None,
             mod_export: None,
+            debug_session: false,
             save_root: std::path::PathBuf::from("."),
             screenshot_dir: std::path::PathBuf::new(),
             quick: Default::default(),

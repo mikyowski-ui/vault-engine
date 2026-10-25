@@ -392,8 +392,12 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.persistence.automap.bytes().to_vec(),
         ));
         // The `enhanced` state sits beside the slot's files, never in them
-        // (`SAVE.DAT` keeps SPEC-008's layout); Vanilla writes none.
-        if self.preset() == crate::EnginePreset::Enhanced {
+        // (`SAVE.DAT` keeps SPEC-008's layout). Only an enhanced save with
+        // settings to keep writes it; any other save removes an old one, so
+        // an overwritten slot never carries stale settings.
+        let sidecar = self.preset() == crate::EnginePreset::Enhanced
+            && !self.world.companion_distance.is_empty();
+        if sidecar {
             files.push((
                 crate::companion::SIDECAR.to_string(),
                 crate::companion::write_sidecar(&self.world.companion_distance).into_bytes(),
@@ -438,6 +442,15 @@ impl<A: WorldAssets> WorldHost<A> {
             Ok(()) => {
                 for path in backups {
                     let _ = fs::remove_file(backup_name(&path));
+                }
+                if !sidecar {
+                    let path = dir.join(crate::companion::SIDECAR);
+                    match fs::remove_file(&path) {
+                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(io(&path, error));
+                        }
+                        _ => {}
+                    }
                 }
                 Ok(())
             }

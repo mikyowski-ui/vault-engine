@@ -387,8 +387,10 @@ unchanged.
 - **Ground items.** Holding **Shift** on the map outlines every item lying
   on the ground in the item color. The highlight is drawn after the
   outlines and outside their list of 100.
-- **Push.** Out of combat, a standing critter's action menu has **PUSH**.
-  The critter walks one hex directly away from you, or to one of the two
+- **Push.** Out of combat, a standing party member's action menu has
+  **PUSH**, so shopkeepers and guards stay where their scripts put them (a
+  `--debug` session offers it on any standing critter). The critter walks
+  one hex directly away from you, or to one of the two
   neighbouring directions when that hex is taken. With no free hex the
   status line says so.
 - **Gear.** A party member's action menu has **GEAR**. It opens the loot
@@ -407,8 +409,10 @@ unchanged.
   | charge | none | the packet's value |
 
   The settings are saved beside the slot's `SAVE.DAT` in `VAULTENG.TOML`,
-  only under Enhanced. `SAVE.DAT` itself is byte-identical to a Vanilla
-  save.
+  only by an Enhanced save that has some to keep. Any other save into the
+  slot, a Vanilla one included, removes an old `VAULTENG.TOML`, so an
+  overwritten slot never carries stale settings. `SAVE.DAT` itself is
+  byte-identical to a Vanilla save.
 
 Fallout 1 has no art for the new buttons and menu entries, so they are
 drawn by the engine in the palette's amber and black.

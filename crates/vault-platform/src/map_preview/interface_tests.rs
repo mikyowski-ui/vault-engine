@@ -4000,3 +4000,41 @@ fn enhanced_party_menus_offer_push_and_gear() {
             > vault_formats::HexGrid::lattice_distance(player, before).unwrap()
     );
 }
+
+#[test]
+fn enhanced_push_reaches_strangers_only_in_a_debug_session() {
+    use crate::enhanced::{EnhancedSettings, ViewportMode};
+    use vault_core::ui::cursor::Entry;
+    let dir = corpus();
+    let menu = |debug_session: bool| {
+        let mut preview = world(dir.path());
+        preview.host.set_preset(vault_core::EnginePreset::Enhanced);
+        preview.set_enhanced(Some(EnhancedSettings {
+            viewport: ViewportMode::Fixed,
+            ..Default::default()
+        }));
+        preview.debug_session = debug_session;
+        let stranger = npc(&preview);
+        preview.tick(16).unwrap();
+        preview.image().unwrap();
+        let hex = preview.host.world.get(stranger).unwrap().raw.hex.unwrap();
+        let point = on_hex(&preview, hex);
+        preview.hud.mode = Mode::Arrow;
+        preview.hover(point);
+        assert!(preview.click(point, false));
+        preview.tick(316).unwrap();
+        preview
+            .pointer
+            .menu
+            .as_ref()
+            .expect("the action menu")
+            .entries
+            .clone()
+    };
+    // A stranger (not in the party): no Push, no Gear.
+    let entries = menu(false);
+    assert!(!entries.contains(&Entry::Push) && !entries.contains(&Entry::Gear));
+    // `--debug`: Push reaches it; Gear stays for the party only.
+    let entries = menu(true);
+    assert!(entries.contains(&Entry::Push) && !entries.contains(&Entry::Gear));
+}

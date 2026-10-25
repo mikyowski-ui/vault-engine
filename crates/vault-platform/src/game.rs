@@ -540,6 +540,7 @@ impl Game {
         world.roof_key = false;
         world.set_enhanced(self.enhanced);
         world.mod_export = self.mod_export.clone();
+        world.debug_session = self.debug_keys;
         Ok(world)
     }
     fn premade(&self, index: usize) -> CharacterSheet {

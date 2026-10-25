@@ -2972,20 +2972,34 @@ fn enhanced_companion_distance_overrides_the_flee_and_pursuit_stops() {
 }
 
 #[test]
-fn enhanced_push_steps_a_critter_away_from_the_player() {
+fn enhanced_push_steps_a_party_member_away_from_the_player() {
     use crate::{EnginePreset, companion::Push};
-    let world = || {
+    // A party member two hexes south of the player (and, unless `party`, a
+    // stranger standing there instead).
+    let world = |party: bool| {
         let mut world = self::world();
         let critter = npc(&mut world, 20100 + 2 * 200, 1, 1, &[]);
+        if party {
+            world.get_mut(critter).unwrap().raw.id = 18000;
+            world.party.insert(critter);
+        }
         (world, critter)
     };
-    // Vanilla: no push.
-    let (vanilla, critter) = world();
+    // Vanilla: no push, even for the party or a debug session.
+    let (vanilla, critter) = world(true);
     let mut host = ai_host(vanilla, assets());
-    assert!(!host.can_push(critter));
-    assert_eq!(host.push_critter(critter).unwrap(), None);
-    // Enhanced: one hex directly away from the player.
-    let (enhanced, critter) = world();
+    assert!(!host.can_push(critter, true));
+    assert_eq!(host.push_critter(critter, true).unwrap(), None);
+    // Enhanced: a stranger (a shopkeeper, a guard) is not pushed, except in
+    // a `--debug` session.
+    let (stranger, critter) = world(false);
+    let mut host = ai_host(stranger, assets());
+    host.set_preset(EnginePreset::Enhanced);
+    assert!(!host.can_push(critter, false));
+    assert_eq!(host.push_critter(critter, false).unwrap(), None);
+    assert!(host.can_push(critter, true));
+    // A party member steps one hex directly away from the player.
+    let (enhanced, critter) = world(true);
     let mut host = ai_host(enhanced, assets());
     host.set_preset(EnginePreset::Enhanced);
     let from = hex(&host.world, critter);
@@ -2993,7 +3007,7 @@ fn enhanced_push_steps_a_critter_away_from_the_player() {
     let away = crate::routing::rotation(player, from).unwrap();
     let expected = HexGrid::neighbor(from, away).unwrap().unwrap();
     assert_eq!(
-        host.push_critter(critter).unwrap(),
+        host.push_critter(critter, false).unwrap(),
         Some(Push::Moved(expected))
     );
     let mut now = 0;
@@ -3008,14 +3022,14 @@ fn enhanced_push_steps_a_critter_away_from_the_player() {
             > HexGrid::lattice_distance(player, from).unwrap()
     );
     // Not the player, not in combat, not when fallen.
-    assert!(!host.can_push(host.world.player));
+    assert!(!host.can_push(host.world.player, true));
     host.world.combat = true;
-    assert!(!host.can_push(critter));
+    assert!(!host.can_push(critter, false));
     host.world.combat = false;
     state(&mut host.world, critter).results.0 |= effect::KNOCKED_OUT;
-    assert!(!host.can_push(critter));
+    assert!(!host.can_push(critter, false));
     // Every candidate blocked: refused with Blocked.
-    let (mut boxed, critter) = world();
+    let (mut boxed, critter) = world(true);
     let from = hex(&boxed, critter);
     let player = hex(&boxed, boxed.player);
     let away = crate::routing::rotation(player, from).unwrap();
@@ -3025,6 +3039,9 @@ fn enhanced_push_steps_a_critter_away_from_the_player() {
     }
     let mut host = ai_host(boxed, assets());
     host.set_preset(EnginePreset::Enhanced);
-    assert_eq!(host.push_critter(critter).unwrap(), Some(Push::Blocked));
+    assert_eq!(
+        host.push_critter(critter, false).unwrap(),
+        Some(Push::Blocked)
+    );
     assert_eq!(hex(&host.world, critter), from);
 }

@@ -1761,3 +1761,40 @@ fn enhanced_companion_distances_live_in_a_sidecar_beside_save_dat() {
     fs::write(slot(&enhanced_root).join(SIDECAR), "[party]").unwrap();
     assert!(host.load_game(enhanced_root.path(), 1).is_err());
 }
+
+#[test]
+fn a_save_without_enhanced_settings_removes_a_stale_sidecar() {
+    use crate::{
+        EnginePreset,
+        companion::{Distance, SIDECAR},
+    };
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let sidecar = root.path().join("SAVEGAME/SLOT01").join(SIDECAR);
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    // An enhanced save with a companion setting writes the sidecar.
+    host.set_preset(EnginePreset::Enhanced);
+    host.world.companion_distance.insert(18000, Distance::Hold);
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    assert!(sidecar.is_file());
+    // A Vanilla save over that slot removes it...
+    host.set_preset(EnginePreset::Vanilla);
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    assert!(!sidecar.exists());
+    // ...so an enhanced load of the overwritten slot has no settings.
+    host.set_preset(EnginePreset::Enhanced);
+    host.load_game(root.path(), 1).unwrap();
+    assert!(host.world.companion_distance.is_empty());
+    // An enhanced save with no settings left removes it too.
+    host.world.companion_distance.insert(18000, Distance::Close);
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    assert!(sidecar.is_file());
+    host.world.companion_distance.clear();
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    assert!(!sidecar.exists());
+}

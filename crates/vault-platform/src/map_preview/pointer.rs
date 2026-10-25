@@ -510,7 +510,7 @@ impl MapPreview {
         if matches!(target, Target::Critter { .. }) {
             entries = cursor::enhanced_entries(
                 entries,
-                self.host.can_push(object),
+                self.host.can_push(object, self.debug_session),
                 self.host.is_companion(object),
             );
         }
@@ -550,7 +550,7 @@ impl MapPreview {
             }
             Entry::Inventory => self.open_inventory_on(Some(object)),
             Entry::Skill => self.open_skilldex_on(Some(object)),
-            Entry::Push => match self.host.push_critter(object) {
+            Entry::Push => match self.host.push_critter(object, self.debug_session) {
                 Ok(Some(vault_core::companion::Push::Blocked)) => {
                     self.status = b"There is no room to push.".to_vec();
                 }

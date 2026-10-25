@@ -133,12 +133,15 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// Whether `critter` may be pushed: the enhanced preset, out of
     /// combat, a placed critter other than the player on the player's
-    /// elevation that is neither dead nor knocked out.
-    pub fn can_push(&self, critter: ObjectRef) -> bool {
+    /// elevation that is neither dead nor knocked out, and a party member
+    /// unless `any` (a `--debug` session) lifts that, so shopkeepers and
+    /// guards stay where their scripts put them.
+    pub fn can_push(&self, critter: ObjectRef, any: bool) -> bool {
         let world = &self.world;
         self.party_tools()
             && !world.combat
             && critter != world.player
+            && (any || world.party_member(critter))
             && world.get(critter).is_some_and(|object| {
                 object.category() == vault_formats::pro::Category::Critter
                     && object.raw.hex.is_some()
@@ -163,9 +166,14 @@ impl<A: WorldAssets> WorldHost<A> {
     /// direction from the player's hex to its own (the SPEC-003 §3.5
     /// direction), else the two neighboring directions, as SPEC-009 §3.8
     /// tries a flight's candidates. The first free hex is walked to through
-    /// the ordinary walk sequence. `None` when it may not be pushed.
-    pub fn push_critter(&mut self, critter: ObjectRef) -> Result<Option<Push>, WorldError> {
-        if !self.can_push(critter) {
+    /// the ordinary walk sequence. `None` when it may not be pushed
+    /// ([`Self::can_push`], with `any` as there).
+    pub fn push_critter(
+        &mut self,
+        critter: ObjectRef,
+        any: bool,
+    ) -> Result<Option<Push>, WorldError> {
+        if !self.can_push(critter, any) {
             return Ok(None);
         }
         let world = &self.world;

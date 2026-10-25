@@ -654,6 +654,7 @@ impl PreviewArgs {
             map.set_debug(self.debug);
             map.set_enhanced(self.enhanced);
             map.mod_export = self.mod_export.clone();
+            map.debug_session = self.debug;
             return Ok(Some(AssetPreview::Map(Box::new(map))));
         }
         if let Some(path) = &self.play_movie {

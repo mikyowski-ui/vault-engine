@@ -105,8 +105,9 @@ Vanilla the menus, windows, saves and replay digests are byte-identical.
 
 ### a) Push
 
-- **What.** A **Push** entry in the action menu of a party member or a
-  non-hostile critter, out of combat. The critter steps one hex directly away
+- **What.** A **Push** entry in a party member's action menu, out of
+  combat. Strangers (shopkeepers, guards) are never pushed, except in a
+  `--debug` session. The critter steps one hex directly away
   from the player; when that hex is blocked, the two neighboring directions
   are tried. With no free hex, a status line says so and nothing moves.
 - **How.** The step goes through the ordinary walk sequence (SPEC-007), so it
@@ -143,8 +144,9 @@ Vanilla the menus, windows, saves and replay digests are byte-identical.
   | Hold | 1 hex | 1 hex |
   | Charge | none | the packet's value |
 - **Saves.** The settings live in the world's enhanced state and are saved in
-  a sidecar `VAULTENG.TOML` beside the slot's `SAVE.DAT`, only under
-  Enhanced. `SAVE.DAT` itself is unchanged.
+  a sidecar `VAULTENG.TOML` beside the slot's `SAVE.DAT`, only by an
+  Enhanced save that has some to keep. Any other save into the slot removes
+  an old sidecar. `SAVE.DAT` itself is unchanged.
 
 ### d) Additive mod registration
 
