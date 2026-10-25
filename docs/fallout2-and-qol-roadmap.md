@@ -83,9 +83,9 @@ The phrase "the spec must define" marks what this document does not assume.
 |---|---|---|
 | SPEC-015 | Archive version 2: footer, tree, entries, zlib members | **Approved and implemented** (2026-10-25) |
 | SPEC-016 | MAP version 20 and prototype deltas, with round-trip vectors | **Approved and implemented** (2026-10-25) |
-| SPEC-017 | Host words `0x8156`-`0x8183` and VM deltas from SPEC-004 | Requested |
-| SPEC-018 | Saves, world map, party and the other data tables | Requested |
-| SPEC-019 | Interface, game-flow and movie deltas | Requested |
+| SPEC-017 | Host words `0x8156`-`0x8183` and VM deltas from SPEC-004 | Approved (Team A); word numbers provisional, scripts gated by its §8 audit |
+| SPEC-018 | Saves, world map, party and the other data tables | Approved (Team A; §1 owner decision) |
+| SPEC-019 | Interface, party control, car and game-flow deltas | Approved (Team A) |
 
 **SPEC-015** (`specs/approved/SPEC-015-dat2-archive-and-zlib.md`) was written
 from the project owner's brief and RFC 1950/1951, with nothing from game
