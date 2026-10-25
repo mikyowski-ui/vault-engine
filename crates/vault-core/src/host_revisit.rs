@@ -39,7 +39,16 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         // The reference's later test for more than 14 days, which would
         // remove miscellaneous PID 0x0500000B, is never reached.
-        if hours > 144 {
+        // SPEC-018 §5.2: a Fallout 2 map with `dead_bodies_age=No` skips
+        // the corpse replacement.
+        let ages = self.world.fallout2.as_deref().is_none_or(|state| {
+            state
+                .tables
+                .maps
+                .get(self.world.map.header.map_number)
+                .is_none_or(|record| record.dead_bodies_age)
+        });
+        if hours > 144 && ages {
             self.leave_remains()?;
         }
         Ok(())
@@ -143,7 +152,9 @@ impl<A: WorldAssets> WorldHost<A> {
                 matches!(&prototype.data, PrototypeData::Critter(critter)
                     if critter.flags.contains(CritterFlags::FLAT))
             });
-            let gizmo = pid == GIZMO;
+            // SPEC-018 §5.2: Fallout 1's special case is not used under
+            // Fallout 2; every corpse takes the general branch.
+            let gizmo = pid == GIZMO && self.world.fallout2.is_none();
             let prototype = match self
                 .assets
                 .prototype(if gizmo { GIZMO_REMAINS } else { REMAINS })

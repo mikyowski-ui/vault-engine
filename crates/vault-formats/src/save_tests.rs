@@ -6,7 +6,7 @@ use crate::{
     savegame::*,
 };
 
-fn fixture_header() -> Vec<u8> {
+pub(crate) fn fixture_header() -> Vec<u8> {
     let mut bytes = vec![0; HEADER_LEN];
     for (offset, hex) in [
         (
@@ -65,7 +65,7 @@ fn spec008_fixture_complete_save_header() {
     assert!(SaveHeader::parse(&bytes[..0x74e3]).is_err());
 }
 
-fn lookup(pid: u32) -> Result<PrototypeInfo, ParseError> {
+pub(crate) fn lookup(pid: u32) -> Result<PrototypeInfo, ParseError> {
     assert_eq!(pid, 1);
     Ok(
         Prototype::parse(&crate::fixture_assets::sparse(include_str!(
@@ -135,7 +135,7 @@ fn player_tree() -> MapObject {
     }
 }
 
-fn synthetic_save(campaign: usize) -> SaveGame {
+pub(crate) fn synthetic_save(campaign: usize) -> SaveGame {
     SaveGame {
         header: SaveHeader {
             elevation: 1,
@@ -246,6 +246,7 @@ fn synthetic_save(campaign: usize) -> SaveGame {
         next_item_id: 4000,
         party: vec![11, 12],
         interface: [1, 0, 1, 0],
+        fallout2: None,
     }
 }
 

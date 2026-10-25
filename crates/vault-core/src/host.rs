@@ -116,6 +116,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// and never reset by a map change, a game load or a new game (a shell
     /// that builds a new host for a new game carries it over).
     pub critter_cycle: usize,
+    /// SPEC-018 §7: a Fallout 2 load's restored state, installed by the
+    /// reset that precedes its map load.
+    pub(crate) install_fallout2: Option<Box<crate::fallout2::Fallout2World>>,
     /// SPEC-013 §3.22: the open town or world map was started by a
     /// transition to map -1 or -2, so the request pending when it closes
     /// is discarded.
@@ -309,6 +312,7 @@ impl<A: WorldAssets> WorldHost<A> {
             countdown_movie: false,
             fidget: None,
             critter_cycle: 0,
+            install_fallout2: None,
             transition_world_map: false,
             presentation: None,
             arriving: false,
@@ -401,6 +405,16 @@ impl<A: WorldAssets> WorldHost<A> {
             )));
         }
         for table in crate::tables::Table::ALL {
+            // SPEC-018 §4.8: under Fallout 2 the six world tables come from
+            // its own data files; only the critical tables are overridable.
+            if self.world.fallout2.is_some()
+                && !matches!(
+                    table,
+                    crate::tables::Table::Critical | crate::tables::Table::CriticalFailure
+                )
+            {
+                continue;
+            }
             let path = table.override_path();
             let mine: Vec<&String> = patches
                 .iter()
@@ -675,15 +689,28 @@ impl<A: WorldAssets> WorldHost<A> {
         // (SPEC-014 §3.35) comes from the file name the map was opened
         // under, never from the number; the current town is not changed by
         // a map load (SPEC-014 §3.39).
-        let catalog = self.assets.game_messages("map.msg").ok();
-        let number = crate::worldmap::header_map_number(
-            &self.world.map.header.name,
-            self.world.map.header.map_number,
-            catalog.as_deref(),
-        );
+        let fallout2 = self
+            .world
+            .fallout2
+            .as_ref()
+            .map(|state| state.tables.clone());
+        let number = if let Some(tables) = &fallout2 {
+            // SPEC-018 §5.1: the records' match texts replace `map.msg`.
+            tables.maps.header_number(
+                &self.world.map.header.name,
+                self.world.map.header.map_number,
+            )
+        } else {
+            let catalog = self.assets.game_messages("map.msg").ok();
+            crate::worldmap::header_map_number(
+                &self.world.map.header.name,
+                self.world.map.header.map_number,
+                catalog.as_deref(),
+            )
+        };
         // A name §3.10 does not match may be a mod's registered map
         // (`vault-mod.toml` `[[maps]]`, numbers 66 and up).
-        let number = if number < 0 {
+        let number = if number < 0 && fallout2.is_none() {
             let name = &self.world.map.header.name;
             let name = &name[..name
                 .iter()
@@ -823,13 +850,29 @@ impl<A: WorldAssets> WorldHost<A> {
         // times; under the [May-improve] rule it is requested once per map
         // change here (the presentation layer still restarts a track that
         // already plays, the `[Must-match]` rule).
-        if let Some(track) = self
-            .world
-            .rules
-            .tables()
-            .city_music(self.world.map.header.map_number)
-            .map(str::to_string)
-        {
+        let number = self.world.map.header.map_number;
+        let track = match self.world.fallout2.as_deref_mut() {
+            // SPEC-018 §5.2: a successful load sets the map's known and
+            // visited flags, and §5.4 moves the party to the map's area;
+            // the record's `music` is the city track.
+            Some(state) => {
+                if load_error.is_none() {
+                    state.map_loaded(number);
+                }
+                state
+                    .tables
+                    .maps
+                    .get(number)
+                    .and_then(|record| record.music.clone())
+            }
+            None => self
+                .world
+                .rules
+                .tables()
+                .city_music(number)
+                .map(str::to_string),
+        };
+        if let Some(track) = track {
             self.request_music(&track);
         }
         self.drain_requests()?;
@@ -974,6 +1017,17 @@ impl<A: WorldAssets> WorldHost<A> {
         script.target = target;
         script.fixed = request.fixed;
         script.action = request.action;
+        // SPEC-017 §8.7 rule 2: while Fallout 2 scripts are gated no `.INT`
+        // is opened, and the request takes SPEC-006 §3.7's path for a
+        // script that cannot be loaded: nothing runs and the host's
+        // default action follows.
+        if !instance.initialized && self.scripts_gated() {
+            if let Some(script) = self.world.scripts.get_mut(&instance.id) {
+                script.source = 0;
+            }
+            self.note_gated_request();
+            return Ok(DispatchResult::default());
+        }
         let first = if instance.initialized {
             None
         } else {
@@ -1339,7 +1393,10 @@ impl<A: WorldAssets> WorldHost<A> {
                         object.set_lock(lock);
                     }
                 }
-                self.water_countdown();
+                // SPEC-018 §6.2: Fallout 2 has no water countdown.
+                if self.world.fallout2.is_none() {
+                    self.water_countdown();
+                }
                 // The radiation check follows the other work and precedes
                 // the next midnight.
                 self.radiation_check()?;

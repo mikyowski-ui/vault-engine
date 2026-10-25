@@ -1,0 +1,11 @@
+[Area 00]
+area_name=Test Village
+world_pos=175,125
+start_state=On
+size=Large
+townmap_art_idx=156
+entrance_0=On,100,200,Test Village,-1,-1,0
+entrance_2=Off,150,220,Temple,1,12345,-1
+entrance_3=On,10,10,No Such Map,-1,-1,0
+[Area 01]
+world_pos=99999,5

@@ -478,6 +478,18 @@ impl<A: WorldAssets> WorldHost<A> {
                     .and_then(|index| self.world.kills.get_mut(index))
                 {
                     *count = count.saturating_add(1);
+                } else if let Some(count) = usize::try_from(category)
+                    .ok()
+                    .and_then(|index| index.checked_sub(15))
+                    .and_then(|index| {
+                        // SPEC-018 §7.3: Fallout 2's kill types 15-18.
+                        self.world
+                            .fallout2
+                            .as_mut()
+                            .and_then(|fallout2| fallout2.kills.get_mut(index))
+                    })
+                {
+                    *count = count.saturating_add(1);
                 }
                 self.world.combat_experience =
                     self.world.combat_experience.saturating_add(experience);

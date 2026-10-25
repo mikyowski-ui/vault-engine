@@ -1427,6 +1427,11 @@ impl<A: WorldAssets> WorldHost<A> {
     /// -1 (an unnumbered map) or when the party's cell is already the
     /// town's cell. The current town does not change (SPEC-014 §3.39).
     pub fn move_to_map_town(&mut self) -> Result<(), WorldError> {
+        // SPEC-018 §5.4: under Fallout 2 the map load has already moved the
+        // party to its area, with no travel.
+        if self.world.fallout2.is_some() {
+            return Ok(());
+        }
         let town = self
             .world
             .rules
@@ -1497,10 +1502,13 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// §3.22 steps 1-4 for a positive map number.
     fn transition_to(&mut self, map: i32, transition: Transition) -> Result<(), WorldError> {
-        let path = self
-            .assets
-            .map_path(map)
-            .ok_or_else(|| WorldError::Invalid(format!("map {map} is not available")))?;
+        // SPEC-018 §5.1: under Fallout 2 a number is a `maps.txt` record.
+        let path = if self.world.fallout2.is_some() {
+            self.fallout2_map_path(map)
+        } else {
+            self.assets.map_path(map)
+        }
+        .ok_or_else(|| WorldError::Invalid(format!("map {map} is not available")))?;
         self.load_map(&path)?;
         // Step 3: the party moves on the world map to the map's town.
         self.move_to_map_town()?;

@@ -28,11 +28,14 @@ pub const DISPLAY_SCANNER: u32 = 0x04;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomapDb {
     bytes: Vec<u8>,
+    /// Map numbers in the index: 66 (SPEC-008), or 1000 (SPEC-018 §7.6).
+    maps: usize,
 }
 
-fn slot(map: usize, elevation: usize) -> Option<usize> {
-    (map < MAPS && elevation < 3).then(|| 5 + 4 * (3 * map + elevation))
-}
+/// SPEC-018 §7.6 the Fallout 2 index's map numbers.
+pub const FALLOUT2_MAPS: usize = 1000;
+/// SPEC-018 §7.6 the empty Fallout 2 database: 12005 bytes.
+pub const FALLOUT2_EMPTY_LEN: usize = 5 + 4 * FALLOUT2_MAPS * 3;
 
 fn error(at: usize, message: &str) -> ParseError {
     ParseError::new("AUTOMAP", at, message)
@@ -41,26 +44,73 @@ fn error(at: usize, message: &str) -> ParseError {
 impl Default for AutomapDb {
     /// A fresh 797-byte database: excluded maps -1, others recordable (0).
     fn default() -> Self {
-        let mut bytes = vec![1];
-        put_u32(&mut bytes, EMPTY_LEN as u32);
-        for map in 0..MAPS {
-            for _ in 0..3 {
-                put_i32(&mut bytes, if EXCLUDED.contains(&map) { -1 } else { 0 });
-            }
-        }
-        Self { bytes }
+        Self::fresh(MAPS, |map| EXCLUDED.contains(&map))
     }
 }
 
 impl AutomapDb {
+    fn fresh(maps: usize, excluded: impl Fn(usize) -> bool) -> Self {
+        let mut bytes = vec![1];
+        put_u32(&mut bytes, (5 + 12 * maps) as u32);
+        for map in 0..maps {
+            for _ in 0..3 {
+                put_i32(&mut bytes, if excluded(map) { -1 } else { 0 });
+            }
+        }
+        Self { bytes, maps }
+    }
+    /// SPEC-018 §7.6 a fresh Fallout 2 database: 1000 map numbers by 3
+    /// elevations, -1 for every elevation of an excluded number (absent
+    /// numbers included) and 0 otherwise.
+    pub fn fallout2(excluded: impl Fn(usize) -> bool) -> Self {
+        Self::fresh(FALLOUT2_MAPS, excluded)
+    }
     /// Exactly version 1 is accepted, and the offset table must be complete.
     pub fn parse(bytes: Vec<u8>) -> Result<Self, ParseError> {
         match bytes.first() {
-            Some(1) if bytes.len() >= EMPTY_LEN => Ok(Self { bytes }),
+            Some(1) if bytes.len() >= EMPTY_LEN => Ok(Self { bytes, maps: MAPS }),
             Some(1) => Err(error(bytes.len(), "truncated automap offset table")),
             Some(_) => Err(error(0, "automap database version must be 1")),
             None => Err(error(0, "empty automap database")),
         }
+    }
+    /// SPEC-018 §7.6 a Fallout 2 database: version 1, at least 12005
+    /// bytes, and no index word pointing inside the index or past the end.
+    pub fn parse_fallout2(bytes: Vec<u8>) -> Result<Self, ParseError> {
+        match bytes.first() {
+            Some(1) if bytes.len() >= FALLOUT2_EMPTY_LEN => {}
+            Some(1) => return Err(error(bytes.len(), "truncated automap offset table")),
+            Some(_) => return Err(error(0, "automap database version must be 1")),
+            None => return Err(error(0, "empty automap database")),
+        }
+        let db = Self {
+            bytes,
+            maps: FALLOUT2_MAPS,
+        };
+        for map in 0..FALLOUT2_MAPS {
+            for elevation in 0..3 {
+                let offset = db.offset(map, elevation).expect("slot");
+                if offset > 0
+                    && ((offset as usize) < FALLOUT2_EMPTY_LEN || offset as usize >= db.bytes.len())
+                {
+                    return Err(error(
+                        db.slot(map, elevation).expect("slot"),
+                        "an index offset inside the index or past the end",
+                    ));
+                }
+            }
+        }
+        Ok(db)
+    }
+    /// The map numbers the index holds.
+    pub fn map_count(&self) -> usize {
+        self.maps
+    }
+    fn slot(&self, map: usize, elevation: usize) -> Option<usize> {
+        (map < self.maps && elevation < 3).then(|| 5 + 4 * (3 * map + elevation))
+    }
+    fn index_len(&self) -> usize {
+        5 + 12 * self.maps
     }
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
@@ -74,13 +124,13 @@ impl AutomapDb {
     }
     /// The offset word: 0 recordable/not captured, -1 excluded, else an entry.
     pub fn offset(&self, map: usize, elevation: usize) -> Option<i32> {
-        let at = slot(map, elevation)?;
+        let at = self.slot(map, elevation)?;
         Some(i32::from_be_bytes(
             self.bytes[at..at + 4].try_into().expect("word"),
         ))
     }
     fn set_offset(&mut self, map: usize, elevation: usize, value: i32) {
-        let at = slot(map, elevation).expect("valid slot");
+        let at = self.slot(map, elevation).expect("valid slot");
         self.bytes[at..at + 4].copy_from_slice(&value.to_be_bytes());
     }
     /// The stored entry `(compression byte, payload)` at a positive offset.
@@ -92,7 +142,7 @@ impl AutomapDb {
             return Ok(None);
         }
         let start = offset as usize;
-        if start < EMPTY_LEN {
+        if start < self.index_len() {
             return Err(error(start, "entry offset points into the offset table"));
         }
         let header = self
@@ -162,7 +212,7 @@ impl AutomapDb {
                 self.bytes
                     .splice(begin..begin + 5 + old, entry.iter().copied());
                 let delta = RASTER_LEN as i64 - old as i64;
-                for other in 0..MAPS {
+                for other in 0..self.maps {
                     for layer in 0..3 {
                         let value = self.offset(other, layer).expect("slot");
                         if value > start {

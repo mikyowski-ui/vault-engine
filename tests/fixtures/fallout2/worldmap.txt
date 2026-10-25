@@ -1,0 +1,28 @@
+[Data]
+terrain_types=Desert:1, Mountain:2
+Common=22%
+Rare=4%
+[Tile Data]
+num_horizontal_tiles=1
+[Tile 0]
+art_idx=339
+0_0=Desert,No_Fill,Common,Rare,None,Test_Desert
+1_0=Mountain,Fill_W,Rare,Rare,Rare,Test_Desert
+6_5=Swamp,Fill_Q,Bogus,Common,Common,Missing_Table
+[Random Maps: Desert]
+map_00=Desert Encounter 1
+[Encounter Table 0]
+lookup_name=Test_Desert
+maps=Desert Encounter 1
+enc_00=Chance:25%, Enc:(2-4) TEST_Geckos
+enc_01=Chance:15%, Counter:1, Enc:(1) TEST_Geckos FIGHTING (1-2) TEST_Hunters
+enc_02=Chance:10%, If(Global(3) > 1), Enc:(1) TEST_Hunters AMBUSH Player
+enc_03=Chance:5%, Special, Counter:1, Map:Temple
+enc_04=Chance:5%, Enc:(3-1) TEST_Geckos
+[Encounter: TEST_Geckos]
+position=surrounding, spacing:2, distance:6
+type_00=Ratio:75%, pid:16777217
+type_01=Ratio:25%, pid:16777218, Item:(1-3)41, Item:4(wielded)
+[Encounter: TEST_Hunters]
+type_00=pid:16777219, Script:12, If(Player(Level) >= 5)
+type_01=pid:16777220, Dead

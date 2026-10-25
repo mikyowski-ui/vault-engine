@@ -1,0 +1,10 @@
+[Elevator 0]
+background=el_test
+stop_0=2, 0, 14104, 1
+stop_1=2, 1, 22504, 2
+stop_3=1, 0, 100, G
+doors=33554585
+[Elevator 1]
+background=el_test
+stop_0=2, 0, 100, 1
+stop_1=7, 0, 100, 2

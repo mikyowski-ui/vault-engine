@@ -850,7 +850,7 @@ impl MapPreview {
     /// the month name is `editor.msg` 500 + month - 1.
     pub(crate) fn clock_text(&self) -> Vec<u8> {
         let world = &self.host.world;
-        let [month, day, year] = vault_core::host_save::game_date(world.clock.ticks);
+        let [month, day, year] = world.game_date();
         let name = self.message("editor.msg", 500 + i32::from(month) - 1);
         vault_core::ui::bar::date_line(&name, [day, year], world.clock.hhmm())
     }

@@ -59,9 +59,14 @@ pub const CALENDAR_YEAR: u16 = 2161;
 pub const CALENDAR_DAY: u64 = 338;
 /// Month, day, year of a game tick on the fixed non-leap calendar.
 pub fn game_date(ticks: u64) -> [u16; 3] {
-    let days = ticks / 864000 + CALENDAR_DAY;
+    calendar_date(ticks, CALENDAR_YEAR, CALENDAR_DAY)
+}
+/// Month, day, year of a game tick on the fixed non-leap calendar whose
+/// tick 0 is day `start_day` (from 0) of `start_year`.
+pub fn calendar_date(ticks: u64, start_year: u16, start_day: u64) -> [u16; 3] {
+    let days = ticks / 864000 + start_day;
     let mut day = days % 365;
-    let year = (u64::from(CALENDAR_YEAR) + days / 365).min(u64::from(u16::MAX)) as u16;
+    let year = (u64::from(start_year) + days / 365).min(u64::from(u16::MAX)) as u16;
     let mut month = 1;
     for days in [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] {
         if day < days {
@@ -250,7 +255,7 @@ impl<A: WorldAssets> WorldHost<A> {
             description: fixed(&info.description),
             host_date: info.host_date,
             host_time: info.host_time,
-            game_date: game_date(world.clock.ticks),
+            game_date: world.game_date(),
             game_ticks: u32::try_from(world.clock.ticks).map_err(|_| WorldError::Arithmetic)?,
             elevation: u16::from(world.elevation),
             // The number as its 16-bit truncation (-1 on an unnumbered map).
@@ -316,11 +321,53 @@ impl<A: WorldAssets> WorldHost<A> {
             .map(|object| object.raw.id as i32)
             .collect();
         let campaign = world.gvars.clone().unwrap_or_default();
+        let fallout2 = world.fallout2.as_deref().map(|state| {
+            // SPEC-018 §7.5: each member's control record (one created as
+            // joining creates it when none is stored), and the retained
+            // records.
+            let records = world
+                .party
+                .iter()
+                .filter(|member| **member != world.player)
+                .filter_map(|member| world.get(*member))
+                .map(|object| {
+                    state
+                        .control
+                        .get(&object.raw.id)
+                        .copied()
+                        .unwrap_or_else(|| state.joining_record(object.raw.pid))
+                })
+                .collect();
+            Box::new(vault_formats::savegame::Fallout2Payload {
+                kills: state.kills,
+                world_map: state.save(),
+                movies: state.movies,
+                records,
+                retained: state
+                    .retained
+                    .iter()
+                    .map(|(id, record)| (*id as i32, *record))
+                    .collect(),
+            })
+        });
+        let mut header = header;
+        if fallout2.is_some() {
+            // SPEC-018 §7.2: version 1.2, the layout tag, G and the gated
+            // mark.
+            header.set_fallout2(campaign.len() as u32, self.scripts_gated());
+        }
+        let world = &self.world;
+        let carried = &world.persistence;
+        let campaign_status = if fallout2.is_some() {
+            0
+        } else {
+            carried.campaign_status
+        };
         Ok(SaveGame {
             header,
             player_combat_id: player.raw.combat_id,
             campaign: campaign.clone(),
-            campaign_status: carried.campaign_status,
+            campaign_status,
             maps: carried
                 .maps
                 .keys()
@@ -328,7 +375,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 .collect(),
             automap_length: carried.automap.bytes().len() as i32,
             campaign_b: campaign,
-            campaign_b_status: carried.campaign_status,
+            campaign_b_status: campaign_status,
             player: world
                 .object_tree(world.player)
                 .ok_or_else(|| WorldError::Invalid("player tree exceeds depth limit".into()))?,
@@ -372,6 +419,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 world.active_hand,
                 carried.interface[3],
             ],
+            fallout2,
         })
     }
     /// Write a slot under the SPEC-008 §3.3 safe rule: every file is first
@@ -475,14 +523,44 @@ impl<A: WorldAssets> WorldHost<A> {
         let dir = slot_directory(root, slot)?;
         let central_path = slot_file(&dir, CENTRAL_FILE)?;
         let central = fs::read(&central_path).map_err(|error| io(&central_path, error))?;
-        SaveHeader::parse(&central)?;
+        // SPEC-018 §2.3, §7.2: slots belong to one game; a Fallout 2 game
+        // reads only the Fallout 2 layout.
+        let fallout2 = self.world.fallout2.is_some();
+        let header = SaveHeader::parse_for(
+            &central,
+            if fallout2 {
+                crate::GameProfile::Fallout2
+            } else {
+                crate::GameProfile::Fallout1
+            },
+        )?;
         // G comes from the installed campaign initializer.
         let initial = self
             .assets
             .gam("data/vault13.gam", vault_formats::GamSection::Campaign)?
             .ok_or_else(|| WorldError::Invalid("campaign initializer did not open".into()))?;
         let lookup = |pid| self.prototype_info(pid);
-        let save = SaveGame::parse(&central, initial.values.len(), &lookup)?;
+        // SPEC-018 §3.5, §7.8: the tables are parsed again for the load, and
+        // the whole central stream is validated against them before any
+        // working file changes.
+        let tables = if fallout2 {
+            header.check_fallout2(initial.values.len(), self.scripts_gated())?;
+            Some(
+                self.load_fallout2_tables()
+                    .map_err(|error| WorldError::Invalid(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let save = match &tables {
+            Some(tables) => SaveGame::parse_fallout2(
+                &central,
+                initial.values.len(),
+                &lookup,
+                &crate::fallout2::Fallout2World::shape(tables),
+            )?,
+            None => SaveGame::parse(&central, initial.values.len(), &lookup)?,
+        };
         let mut maps = BTreeMap::new();
         for name in &save.maps {
             let name = std::str::from_utf8(name)
@@ -505,7 +583,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 "AUTOMAP.SAV length differs from the recorded length".into(),
             ));
         }
-        let automap = AutomapDb::parse(automap)?;
+        let automap = if tables.is_some() {
+            AutomapDb::parse_fallout2(automap)?
+        } else {
+            AutomapDb::parse(automap)?
+        };
         // Restore loads the slot's current map first (SPEC-014 §3.35): its
         // name must be usable and its stream present before any state is
         // reset. SPEC-008 §3.10: the name is uppercased and opened like any
@@ -531,8 +613,76 @@ impl<A: WorldAssets> WorldHost<A> {
         } else {
             BTreeMap::new()
         };
-        self.apply_save(save, maps, automap)?;
+        match tables {
+            Some(tables) => self.apply_fallout2_save(save, maps, automap, tables)?,
+            None => self.apply_save(save, maps, automap)?,
+        }
         self.world.companion_distance = distances;
+        Ok(())
+    }
+    /// SPEC-018 §7: restore a validated Fallout 2 slot: its world state is
+    /// installed before the current map loads (whose number and flags it
+    /// drives), then the saved position, the kill types 15-18 and the party
+    /// records; the gate notice follows a successful load.
+    pub fn apply_fallout2_save(
+        &mut self,
+        mut save: SaveGame,
+        maps: BTreeMap<String, Vec<u8>>,
+        automap: AutomapDb,
+        tables: std::sync::Arc<crate::fallout2::Fallout2Tables>,
+    ) -> Result<(), WorldError> {
+        let payload = save
+            .fallout2
+            .take()
+            .ok_or_else(|| WorldError::Invalid("not a Fallout 2 save".into()))?;
+        let mut notes = Vec::new();
+        let state = crate::fallout2::Fallout2World::restore(
+            tables,
+            &payload.world_map,
+            payload.movies,
+            &mut notes,
+        );
+        let position = state.position;
+        self.install_fallout2 = Some(Box::new(state));
+        let result = self.apply_save(save, maps, automap);
+        self.install_fallout2 = None;
+        result?;
+        let party: Vec<u32> = self
+            .world
+            .party
+            .iter()
+            .filter(|member| **member != self.world.player)
+            .filter_map(|member| self.world.get(*member))
+            .map(|object| object.raw.id)
+            .collect();
+        let state = self
+            .world
+            .fallout2
+            .as_deref_mut()
+            .ok_or_else(|| WorldError::Invalid("Fallout 2 state was not installed".into()))?;
+        state.position = position;
+        state.kills = payload.kills;
+        state.control.clear();
+        for (id, record) in party.iter().zip(&payload.records) {
+            let record = crate::fallout2::Fallout2World::sanitize(*record, &mut notes);
+            if record.record != -1 {
+                state.control.insert(*id, record);
+            }
+        }
+        state.retained = payload
+            .retained
+            .iter()
+            .map(|(id, record)| {
+                (
+                    *id as u32,
+                    crate::fallout2::Fallout2World::sanitize(*record, &mut notes),
+                )
+            })
+            .collect();
+        for note in notes {
+            self.world.diagnostic(note);
+        }
+        self.fallout2_notice();
         Ok(())
     }
     /// Reset like a new game, keeping rules and generator state (the random
@@ -571,6 +721,9 @@ impl<A: WorldAssets> WorldHost<A> {
         world.player_speedup = self.world.player_speedup;
         world.target_highlight = self.world.target_highlight;
         world.verbose_combat_messages = self.world.verbose_combat_messages;
+        // SPEC-018 §7: a Fallout 2 load installs its restored state here,
+        // before the current map loads.
+        world.fallout2 = self.install_fallout2.take();
         self.world = world;
         Ok(())
     }

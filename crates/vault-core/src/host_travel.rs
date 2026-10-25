@@ -254,7 +254,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// Charge Q ticks. A charge reaching/passing the next queued event first
     /// moves to that event tick plus one (never backwards) and processes the
     /// queue; a nonzero handler result stops at that time.
-    fn charge_travel_time(&mut self, ticks: u32) -> Result<i32, WorldError> {
+    pub(crate) fn charge_travel_time(&mut self, ticks: u32) -> Result<i32, WorldError> {
         let target = self
             .world
             .clock

@@ -8,6 +8,7 @@ pub mod cfg;
 pub mod credits;
 pub mod dat;
 pub mod dat2;
+pub mod fallout2;
 pub mod fid;
 pub mod font;
 pub mod frm;

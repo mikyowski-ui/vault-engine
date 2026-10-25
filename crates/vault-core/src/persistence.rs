@@ -428,7 +428,7 @@ impl WorldState {
     pub fn capture_automap_at(&mut self, elevation: u8) {
         self.process_seen();
         let number = self.map.header.map_number;
-        if !(0..automap::MAPS as i32).contains(&number)
+        if !(0..self.persistence.automap.map_count() as i32).contains(&number)
             || self
                 .map
                 .tiles
@@ -490,8 +490,12 @@ impl WorldState {
     /// game save on such a map still writes its working copy, which the
     /// next departure deletes. Returns false when the write failed.
     pub fn save_left_map(&mut self) -> bool {
-        let excluded = usize::try_from(self.map.header.map_number)
-            .map_or(true, |number| automap::EXCLUDED.contains(&number));
+        let excluded = match &self.fallout2 {
+            // SPEC-018 §5.2: `saved=No`, an absent number, or -1.
+            Some(state) => state.tables.maps.excluded(self.map.header.map_number),
+            None => usize::try_from(self.map.header.map_number)
+                .map_or(true, |number| automap::EXCLUDED.contains(&number)),
+        };
         if excluded {
             if let Some(name) = self.current_map_name() {
                 self.persistence.maps.remove(&name);

@@ -125,11 +125,23 @@ impl<A: WorldAssets> WorldHost<A> {
         let elevation = self.world.elevation;
         // SPEC-008 §3.10: the town is the current map's fixed table town;
         // -1 (an unnumbered map) falls into the team-checking default.
-        let town = self.world.rules.tables().map_town(map);
-        let teams = TEAM_CHECK_MAPS.contains(&map)
-            || !(map == 17
-                || (map == 3 && elevation > 0)
-                || TEAM_CHECK_EXEMPT_TOWNS.contains(&town));
+        let teams = match self.world.fallout2.as_deref() {
+            // SPEC-018 §5.2: `can_rest_here` first; the last-attacker test
+            // always; the team test only outside every area.
+            Some(state) => {
+                if !state.can_rest(map, elevation) {
+                    return false;
+                }
+                state.tables.city.area_of_map(map) == -1
+            }
+            None => {
+                let town = self.world.rules.tables().map_town(map);
+                TEAM_CHECK_MAPS.contains(&map)
+                    || !(map == 17
+                        || (map == 3 && elevation > 0)
+                        || TEAM_CHECK_EXEMPT_TOWNS.contains(&town))
+            }
+        };
         let player = self.world.player;
         let player_team = self.world.critter_state(player).map_or(0, |s| s.team);
         let player_combat_id = self.world.get(player).map_or(-1, |o| o.raw.combat_id);

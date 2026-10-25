@@ -7,6 +7,8 @@
 
 #[path = "../../../tests/fixtures/archive/dat2.rs"]
 pub mod dat2;
+#[path = "../../../tests/fixtures/fallout2/support.rs"]
+pub mod fallout2;
 #[path = "../../../tests/fixtures/formats/support.rs"]
 pub mod formats;
 #[path = "../../../tests/fixtures/movie/support.rs"]

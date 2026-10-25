@@ -807,7 +807,7 @@ impl MapPreview {
             None => {
                 pen.painter
                     .blit(&mut image, pipboy::LOGO, 0, pipboy::LOGO_AT);
-                let [month, day, _] = pipboy::date(self.host.world.clock.ticks);
+                let [month, day, _] = self.host.world.game_date();
                 if let Some(id) = pipboy::holiday(month, day) {
                     let text = self.pip_text(id);
                     let x = pipboy::holiday_x(pen.width(&text));

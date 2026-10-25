@@ -1,0 +1,20 @@
+[Map 000]
+lookup_name=Desert Encounter 1
+map_name=desert1
+music=07desert
+saved=No
+random_start_point_0=elev:0, tile_num:19086
+random_start_point_1=elev:3, tile_num:100
+[Map 001]
+lookup_name=Test Village
+map_name=testvil
+music=05raider
+[Map 002]
+lookup_name=Temple
+map_name=artemple
+can_rest_here=No,No,Yes
+pipboy_active=No
+dead_bodies_age=No
+[Map 003]
+lookup_name=Broken
+map_name=toolongname

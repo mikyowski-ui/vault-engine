@@ -1,0 +1,10 @@
+; header comment
+stray line
+[Map 001]
+lookup_name = Test Village   ; trailing comment
+map_name=TESTVIL.MAP
+saved=No
+SAVED=yes
+bogus_key=1
+[map 1]
+music=05raider

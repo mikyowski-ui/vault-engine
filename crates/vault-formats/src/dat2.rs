@@ -345,6 +345,21 @@ impl Dat2Provider {
             files: files.into_iter().collect(),
         }
     }
+    /// SPEC-018 §2.2: whether the master database as mounted (the loose
+    /// folder, then the master layers) holds `path`; the critter archive
+    /// does not count.
+    pub fn in_master(&self, path: &str) -> bool {
+        let Ok(path) = VfsPath::new(path) else {
+            return false;
+        };
+        self.loose
+            .as_ref()
+            .is_some_and(|loose| loose.files().any(|file| *file == path))
+            || self
+                .master
+                .iter()
+                .any(|archive| archive.index.contains_key(&path))
+    }
     /// SPEC-018 §1: `patch000.dat` beside `master`, its name compared
     /// case-insensitively.
     pub fn find_patch(master: &Path) -> Option<PathBuf> {

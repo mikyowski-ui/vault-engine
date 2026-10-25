@@ -1,0 +1,9 @@
+[Party Member 0]
+party_member_pid=16777300
+area_attack_mode=always, be_sure, nonsense
+attack_who=closest
+level_minimum=2
+level_up_every=3
+level_pids=16777301,16777302
+[Party Member 1]
+attack_who=strongest

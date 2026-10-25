@@ -76,10 +76,87 @@ impl Default for SaveHeader {
     }
 }
 
+/// SPEC-018 §7.3 order 10: the Fallout 2 layout's perk-rank words.
+pub const FALLOUT2_PERKS: usize = 119;
+/// SPEC-018 §7.2 the Fallout 2 layout tag at `0x74E3`.
+pub const FALLOUT2_TAG: &[u8; 16] = b"VAULTENG F2SAVE1";
+/// SPEC-018 §7.2 the Fallout 2 save version, 1.2.
+pub const FALLOUT2_VERSION: [u16; 2] = [1, 2];
+
 impl SaveHeader {
     /// Strict complete-header validation: all 30051 bytes must be present,
     /// unlike the reference's seek-based loose reader.
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
+        Self::parse_version(bytes, [1, 1])
+    }
+    /// The header of `game`'s layout: SPEC-008 §2.4's for Fallout 1;
+    /// SPEC-018 §7.2's for Fallout 2, version exactly 1.2 with the layout
+    /// tag (checks 1-3; the campaign count and gated mark depend on the
+    /// install and are [`Self::check_fallout2`]'s).
+    pub fn parse_for(bytes: &[u8], game: crate::GameProfile) -> Result<Self, ParseError> {
+        match game {
+            crate::GameProfile::Fallout1 => Self::parse(bytes),
+            crate::GameProfile::Fallout2 => {
+                let header = Self::parse_version(bytes, FALLOUT2_VERSION)?;
+                if &header.reserved[..16] != FALLOUT2_TAG {
+                    return Err(ParseError::new(
+                        "SAVE",
+                        0x74E3,
+                        "not a Vault Engine Fallout 2 save (layout tag)",
+                    ));
+                }
+                Ok(header)
+            }
+        }
+    }
+    /// SPEC-018 §7.2 checks 4 and 5: the stored G equals the installed
+    /// campaign initializer's, and the gated mark is 0 or 1, with a mark of
+    /// 1 loading only while Fallout 2 scripts are gated.
+    pub fn check_fallout2(&self, installed: usize, gated: bool) -> Result<(), ParseError> {
+        let stored = self.campaign_count();
+        if usize::try_from(stored).ok() != Some(installed) {
+            return Err(ParseError::new(
+                "SAVE",
+                0x74F3,
+                format!(
+                    "saved with {stored} campaign globals; the installed data/vault13.gam has \
+                     {installed}"
+                ),
+            ));
+        }
+        match self.gated_mark() {
+            0 => Ok(()),
+            1 if gated => Ok(()),
+            1 => Err(ParseError::new(
+                "SAVE",
+                0x74F7,
+                "saved while Fallout 2 scripts were off; it cannot load once they run",
+            )),
+            mark => Err(ParseError::new(
+                "SAVE",
+                0x74F7,
+                format!("gated mark {mark} is not 0 or 1"),
+            )),
+        }
+    }
+    /// SPEC-018 §7.2 the stored campaign-global count G (`0x74F3`).
+    pub fn campaign_count(&self) -> u32 {
+        u32::from_be_bytes(self.reserved[16..20].try_into().expect("word"))
+    }
+    /// SPEC-018 §7.2 the gated mark (`0x74F7`).
+    pub fn gated_mark(&self) -> u8 {
+        self.reserved[20]
+    }
+    /// SPEC-018 §7.2: version 1.2, and in the reserved bytes the tag, G and
+    /// the gated mark, the other 107 bytes zero.
+    pub fn set_fallout2(&mut self, campaign_count: u32, gated: bool) {
+        self.version = FALLOUT2_VERSION;
+        self.reserved = [0; 128];
+        self.reserved[..16].copy_from_slice(FALLOUT2_TAG);
+        self.reserved[16..20].copy_from_slice(&campaign_count.to_be_bytes());
+        self.reserved[20] = u8::from(gated);
+    }
+    fn parse_version(bytes: &[u8], expected: [u16; 2]) -> Result<Self, ParseError> {
         let mut r = Reader::unbounded(bytes, "SAVE");
         if bytes.len() < HEADER_LEN {
             return Err(r.error("save header requires 30051 bytes"));
@@ -89,8 +166,12 @@ impl SaveHeader {
             return Err(ParseError::new("SAVE", 0, "save signature mismatch"));
         }
         let version = [r.be_u16()?, r.be_u16()?];
-        if version != [1, 1] {
-            return Err(ParseError::new("SAVE", 0x18, "save version is not 1.1"));
+        if version != expected {
+            return Err(ParseError::new(
+                "SAVE",
+                0x18,
+                format!("save version is not {}.{}", expected[0], expected[1]),
+            ));
         }
         let release = r.take(1)?[0];
         let name = r.take(32)?.try_into().expect("name");
@@ -296,6 +377,28 @@ pub struct SaveGame {
     pub party: Vec<i32>,
     /// 25: enabled, hidden, selected hand/item, end-turn panel open.
     pub interface: [i32; 4],
+    /// SPEC-018 §7.3: the Fallout 2 layout's changed components; `None`
+    /// for a Fallout 1 save.
+    pub fallout2: Option<Box<Fallout2Payload>>,
+}
+
+/// SPEC-018 §7.3 what the Fallout 2 layout stores in place of, or after,
+/// SPEC-008's components. With it, [`SaveGame::world_map`] and
+/// [`SaveGame::movies`] are not written, and perk words 64-118 are written
+/// 0 and ignored on load.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Fallout2Payload {
+    /// Order 7: kill types 15-18, after [`SaveGame::kills`]' 0-14.
+    pub kills: [i32; 4],
+    /// Order 20 (§7.4).
+    pub world_map: crate::fallout2::save::WorldMapSave2,
+    /// Order 22: one byte per SPEC-018 §6.4 movie index.
+    pub movies: [u8; 17],
+    /// Order 24's member records (§7.5), one per [`SaveGame::party`]
+    /// identifier.
+    pub records: Vec<crate::fallout2::save::MemberRecord>,
+    /// Order 24's retained records, in ascending identifier order.
+    pub retained: Vec<(i32, crate::fallout2::save::MemberRecord)>,
 }
 
 impl SaveGame {
@@ -311,7 +414,29 @@ impl SaveGame {
         campaign_count: usize,
         prototypes: &impl PrototypeLookup,
     ) -> Result<Self, ParseError> {
-        let header = SaveHeader::parse(bytes)?;
+        Self::parse_with(bytes, campaign_count, prototypes, None)
+    }
+    /// Parse a complete SPEC-018 §7 Fallout 2 `SAVE.DAT` whose counts must
+    /// equal the installed tables' `shape` (§7.4, §7.5). The header's G and
+    /// gated mark are checked by [`SaveHeader::check_fallout2`].
+    pub fn parse_fallout2(
+        bytes: &[u8],
+        campaign_count: usize,
+        prototypes: &impl PrototypeLookup,
+        shape: &crate::fallout2::save::Fallout2Shape,
+    ) -> Result<Self, ParseError> {
+        Self::parse_with(bytes, campaign_count, prototypes, Some(shape))
+    }
+    fn parse_with(
+        bytes: &[u8],
+        campaign_count: usize,
+        prototypes: &impl PrototypeLookup,
+        shape: Option<&crate::fallout2::save::Fallout2Shape>,
+    ) -> Result<Self, ParseError> {
+        let header = match shape {
+            None => SaveHeader::parse(bytes)?,
+            Some(_) => SaveHeader::parse_for(bytes, crate::GameProfile::Fallout2)?,
+        };
         let mut r = Reader::unbounded(bytes, "SAVE");
         r.take(HEADER_LEN)?;
         let player_combat_id = r.be_i32()?;
@@ -364,8 +489,17 @@ impl SaveGame {
             kill_category: r.be_i32()?,
         };
         let kills = r.words()?;
+        // SPEC-018 §7.3 order 7: kill types 15-18 follow under Fallout 2.
+        let more_kills: [i32; 4] = match shape {
+            Some(_) => r.words()?,
+            None => [0; 4],
+        };
         let tags = r.words()?;
         let perks = r.words()?;
+        // Order 10: perk words 64-118 are ignored on load.
+        if shape.is_some() {
+            r.take(4 * (FALLOUT2_PERKS - 64))?;
+        }
         let state = r.word()?;
         let combat = if state & 1 == 0 {
             CombatSave {
@@ -438,28 +572,54 @@ impl SaveGame {
         let preferences = r.words::<20>()?.map(|word| word as u32);
         let reconciled_level = r.be_i32()?;
         let pending_perk = r.take(1)?[0];
-        let world_map = WorldMapSave {
-            discovery: r.take(899)?.to_vec(),
-            entrances: r.take(105)?.to_vec(),
-            towns: r.word()?,
-            specials: r.word()?,
-            town: r.be_i32()?,
-            section: r.be_i32()?,
-            position: [r.word()?, r.word()?],
+        let (world_map, fallout2_map) = match shape {
+            None => (
+                WorldMapSave {
+                    discovery: r.take(899)?.to_vec(),
+                    entrances: r.take(105)?.to_vec(),
+                    towns: r.word()?,
+                    specials: r.word()?,
+                    town: r.be_i32()?,
+                    section: r.be_i32()?,
+                    position: [r.word()?, r.word()?],
+                },
+                None,
+            ),
+            Some(shape) => (
+                WorldMapSave::default(),
+                Some(crate::fallout2::save::WorldMapSave2::read(&mut r, shape)?),
+            ),
         };
-        let movies = r.take(14)?.try_into().expect("movies");
+        let (movies, fallout2_movies) = match shape {
+            None => (r.take(14)?.try_into().expect("movies"), None),
+            Some(_) => ([0; 14], Some(r.take(17)?.try_into().expect("movies"))),
+        };
         let mut skill_uses = [[0; 3]; 18];
         for skill in &mut skill_uses {
             *skill = r.words()?;
         }
-        let party_count = r.be_i32()?;
-        let next_item_id = r.be_i32()?;
-        if !(0..=100_000).contains(&party_count) {
-            return Err(r.error("party count out of range"));
-        }
-        let party = (0..(party_count - 1).max(0))
-            .map(|_| r.be_i32())
-            .collect::<Result<_, _>>()?;
+        let (party_count, next_item_id, party, fallout2_party) = match shape {
+            None => {
+                let party_count = r.be_i32()?;
+                let next_item_id = r.be_i32()?;
+                if !(0..=100_000).contains(&party_count) {
+                    return Err(r.error("party count out of range"));
+                }
+                let party = (0..(party_count - 1).max(0))
+                    .map(|_| r.be_i32())
+                    .collect::<Result<_, _>>()?;
+                (party_count, next_item_id, party, None)
+            }
+            Some(shape) => {
+                let party = crate::fallout2::save::PartySave2::read(&mut r, shape)?;
+                (
+                    party.count,
+                    party.next_item_id,
+                    party.members,
+                    Some((party.records, party.retained)),
+                )
+            }
+        };
         let interface = r.words()?;
         if r.pos != bytes.len() {
             return Err(r.error("trailing bytes after the finalization position"));
@@ -495,6 +655,18 @@ impl SaveGame {
             next_item_id,
             party,
             interface,
+            fallout2: match (fallout2_map, fallout2_movies, fallout2_party) {
+                (Some(world_map), Some(movies), Some((records, retained))) => {
+                    Some(Box::new(Fallout2Payload {
+                        kills: more_kills,
+                        world_map,
+                        movies,
+                        records,
+                        retained,
+                    }))
+                }
+                _ => None,
+            },
         })
     }
     /// Serialize every component in order. The player tree is written with
@@ -544,10 +716,20 @@ impl SaveGame {
                 self.stats.kill_category,
             ])
             .chain(&self.kills)
-            .chain(&self.tags)
-            .chain(&self.perks)
         {
             put_i32(out, *value);
+        }
+        let fallout2 = self.fallout2.as_deref();
+        if let Some(fallout2) = fallout2 {
+            for value in fallout2.kills {
+                put_i32(out, value);
+            }
+        }
+        for value in self.tags.iter().chain(&self.perks) {
+            put_i32(out, *value);
+        }
+        if fallout2.is_some() {
+            out.extend(std::iter::repeat_n(0, 4 * (FALLOUT2_PERKS - 64)));
         }
         put_u32(out, self.combat.state);
         if self.combat.state & 1 != 0 {
@@ -606,28 +788,47 @@ impl SaveGame {
         }
         put_i32(out, self.reconciled_level);
         out.push(self.pending_perk);
-        let map = &self.world_map;
-        if map.discovery.len() != 899 || map.entrances.len() != 105 {
-            return Err(error("world-map arrays must be 899 and 105 bytes"));
+        if let Some(fallout2) = fallout2 {
+            fallout2.world_map.write(out);
+            out.extend_from_slice(&fallout2.movies);
+        } else {
+            let map = &self.world_map;
+            if map.discovery.len() != 899 || map.entrances.len() != 105 {
+                return Err(error("world-map arrays must be 899 and 105 bytes"));
+            }
+            out.extend_from_slice(&map.discovery);
+            out.extend_from_slice(&map.entrances);
+            put_u32(out, map.towns);
+            put_u32(out, map.specials);
+            put_i32(out, map.town);
+            put_i32(out, map.section);
+            put_u32(out, map.position[0]);
+            put_u32(out, map.position[1]);
+            out.extend_from_slice(&self.movies);
         }
-        out.extend_from_slice(&map.discovery);
-        out.extend_from_slice(&map.entrances);
-        put_u32(out, map.towns);
-        put_u32(out, map.specials);
-        put_i32(out, map.town);
-        put_i32(out, map.section);
-        put_u32(out, map.position[0]);
-        put_u32(out, map.position[1]);
-        out.extend_from_slice(&self.movies);
         for value in self.skill_uses.iter().flatten() {
             put_i32(out, *value);
         }
-        if self.party.len() != (self.party_count - 1).max(0) as usize {
-            return Err(error("party identifiers must number max(P - 1, 0)"));
+        if let Some(fallout2) = fallout2 {
+            crate::fallout2::save::PartySave2 {
+                count: self.party_count,
+                next_item_id: self.next_item_id,
+                members: self.party.clone(),
+                records: fallout2.records.clone(),
+                retained: fallout2.retained.clone(),
+            }
+            .write(out)?;
+        } else {
+            if self.party.len() != (self.party_count - 1).max(0) as usize {
+                return Err(error("party identifiers must number max(P - 1, 0)"));
+            }
+            put_i32(out, self.party_count);
+            put_i32(out, self.next_item_id);
+            for value in &self.party {
+                put_i32(out, *value);
+            }
         }
-        put_i32(out, self.party_count);
-        put_i32(out, self.next_item_id);
-        for value in self.party.iter().chain(&self.interface) {
+        for value in &self.interface {
             put_i32(out, *value);
         }
         Ok(std::mem::take(out))

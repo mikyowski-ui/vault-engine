@@ -1106,7 +1106,19 @@ impl<A: WorldAssets> WorldHost<A> {
                 // even when the name fails to match); a negative numeric
                 // index stores nothing. An unmatched name or a negative
                 // index makes no transition.
-                let index = if let Some(name) = call.text(1) {
+                let fallout2 = self
+                    .world
+                    .fallout2
+                    .as_ref()
+                    .map(|state| state.tables.clone());
+                let index = if let Some(tables) = &fallout2 {
+                    // SPEC-018 §5.1: the entrance parameter is written
+                    // nowhere, and names match the records' match texts.
+                    match call.text(1) {
+                        Some(name) => Some(tables.maps.match_name(name)),
+                        None => Some(call.int(1)).filter(|index| tables.maps.get(*index).is_some()),
+                    }
+                } else if let Some(name) = call.text(1) {
                     if let Some(slot) = self.world.gvars.as_mut().and_then(|a| a.get_mut(32)) {
                         *slot = call.int(0);
                     }
@@ -1745,7 +1757,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
             }
             0x8118 | 0x8119 => {
-                let [month, day, _] = crate::host_save::game_date(self.world.clock.ticks);
+                let [month, day, _] = self.world.game_date();
                 integer(i32::from(if op == 0x8118 { month } else { day }))
             }
             // SPEC-013 §3.10: one pending request, serviced by the request

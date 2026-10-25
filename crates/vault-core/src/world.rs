@@ -751,6 +751,9 @@ pub struct WorldState {
     pub combat_state: crate::combat_state::CombatState,
     /// SPEC-008 world-map component and runtime travel state.
     pub world_map: crate::worldmap::WorldMap,
+    /// SPEC-018: the Fallout 2 game state, when a Fallout 2 game runs (its
+    /// world map, areas, map flags, counters, car and party records).
+    pub fallout2: Option<Box<crate::fallout2::Fallout2World>>,
     /// SPEC-009 packets, snapshot, and taunt state.
     pub ai: crate::ai::AiState,
     /// SPEC-014 §3.46 the floating texts, in creation order.
@@ -968,6 +971,7 @@ impl WorldState {
             combat_experience: 0,
             combat_state: Default::default(),
             world_map: Default::default(),
+            fallout2: None,
             ai: Default::default(),
             floating: Default::default(),
             rest_credit: 0,
