@@ -12,6 +12,9 @@ use vault_formats::{
     pro::{BasicFlags, Category},
 };
 
+mod enhanced;
+pub use enhanced::{BAYER, ShroudCell, ShroudField, bayer, draw_shroud, roof_hides};
+
 pub trait MapArt {
     fn frame(
         &self,
@@ -181,7 +184,10 @@ pub struct MapScene<'a> {
 
 /// The `enhanced` preset's roof peek: roof pixels within `inner` view
 /// pixels of `center` are cut away, and within the `ring` beyond it they
-/// dissolve through a 4x4 ordered (Bayer) dither. Engine extension.
+/// dissolve through a 4x4 ordered (Bayer) dither anchored to world pixels
+/// ([`RoofCutaway::keeps`]). Only roofs are cut: what the scene drew
+/// beneath shows through, and the cutout, translucency and outlines are
+/// unchanged. Engine extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoofCutaway {
     /// The center in view pixels.
@@ -192,7 +198,13 @@ pub struct RoofCutaway {
 
 /// The `enhanced` preset's shroud: view pixels over hexes outside the
 /// camera's region (or off the grid) are darkened toward `dark` through an
-/// ordered dither. Engine extension.
+/// ordered dither, fully dark from two hexes (64 pixels) beyond the
+/// region's edge ([`ShroudField::darkens`]). It is painted after the roofs
+/// and before the outlines, floating text and hexless objects; the
+/// in-world cursor's art, drawn in the flat pass (§3.27), is shrouded with
+/// the scene, its outline is not. The per-hex distance field is built from
+/// `allowed` once and reused while the flags are unchanged. Engine
+/// extension.
 #[derive(Debug, Clone, Copy)]
 pub struct Shroud<'a> {
     /// One flag per hex 0-39999: whether the hex is inside.
@@ -455,6 +467,31 @@ impl<'a> Pens<'a> {
         let size = [i64::from(layer.width()), i64::from(layer.height())];
         blit_pixels(image, size, layer.pixels(), origin, |source, _, _| {
             self.lit(source, level)
+        });
+    }
+    /// A roof square through the `enhanced` cutaway: the pixels `keeps`
+    /// accepts are drawn as [`Self::draw_cut`] (with a cutout) or the lit
+    /// draw (without) would draw them; the rest leave what lies beneath.
+    fn draw_roof_peek(
+        &self,
+        image: &mut IndexedImage,
+        frame: &FrmFrame,
+        origin: [i64; 2],
+        level: u8,
+        cutout: Option<(&Cutout, [i64; 2])>,
+        keeps: impl Fn([i64; 2]) -> bool,
+    ) {
+        blit_with(image, frame, origin, |source, destination, at| {
+            if !keeps(at) {
+                return destination;
+            }
+            match cutout.and_then(|(cut, mask)| Some((cut, cut.weight(mask, at)?))) {
+                Some((cut, weight)) => {
+                    cut.palette
+                        .mask_blend(self.relit(source, level), destination, weight)
+                }
+                None => self.lit(source, level),
+            }
         });
     }
     /// SPEC-014 §3.37 a draw through the mask at `mask`: inside it each
@@ -1046,13 +1083,27 @@ pub fn draw_map_scene(
                 && !tile.roof_hidden()
                 && let Some((frame, _)) = art.frame(Category::Tile, u32::from(tile.roof()), 0, 0)
             {
-                // Every drawn roof square goes through the mask.
-                match cutout {
-                    Some((cut, mask)) => pens.draw_cut(image, frame, corner, ambient, cut, mask),
-                    None => pens.draw(image, frame, corner, 0, ambient),
+                let size = [i64::from(frame.width), i64::from(frame.height)];
+                // Every drawn roof square goes through the mask; the
+                // `enhanced` cutaway removes the pixels around its center.
+                match (cutout, scene.roof_cutaway) {
+                    (_, Some(cutaway)) if cutaway.touches(corner, size) => {
+                        let keeps = |at| cutaway.keeps(view.grid, at);
+                        pens.draw_roof_peek(image, frame, corner, ambient, cutout, keeps);
+                    }
+                    (Some((cut, mask)), _) => {
+                        pens.draw_cut(image, frame, corner, ambient, cut, mask)
+                    }
+                    (None, _) => pens.draw(image, frame, corner, 0, ambient),
                 }
             }
         }
+    }
+    // The `enhanced` shroud covers the scene, roofs included, but not the
+    // outlines, floating text and hexless objects drawn after it.
+    if let Some(shroud) = scene.shroud {
+        let field = enhanced::cached_field(shroud.allowed);
+        draw_shroud(image, view.grid, &field, shroud.dark);
     }
     // The refresh covers the whole view, which is the map buffer.
     let (width, height) = (i64::from(image.width()), i64::from(image.height()));
@@ -1182,9 +1233,22 @@ pub fn pick_objects_with(
 /// the orientation table without the transparency-end exceptions (whether
 /// or not the player is hidden), with a nonzero mask pixel under the
 /// pointer.
-/// [`pick_candidates`] with the `enhanced` roof cutaway: roofs cut away
-/// around the cursor do not stop the pick. Until the cutaway is honoured
-/// this picks as [`pick_candidates`] does.
+pub fn pick_candidates(
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    point: [i32; 2],
+    cutout: Option<&Cutout>,
+) -> Option<Vec<(u32, bool)>> {
+    pick_candidates_cut(map, objects, view, art, point, cutout, None)
+}
+
+/// [`pick_candidates`] with the `enhanced` roof cutaway: a roof pixel the
+/// cutaway removes at `point` (inside its inner radius, or dithered out in
+/// its ring at that exact pixel; [`RoofCutaway::keeps`]) does not stop the
+/// pick, so the pick matches what the scene shows. With `cutaway` `None`
+/// this is [`pick_candidates`].
 pub fn pick_candidates_cut(
     map: &MapFile,
     objects: &MapObjects,
@@ -1194,49 +1258,18 @@ pub fn pick_candidates_cut(
     cutout: Option<&Cutout>,
     cutaway: Option<RoofCutaway>,
 ) -> Option<Vec<(u32, bool)>> {
-    let _ = cutaway;
-    pick_candidates(map, objects, view, art, point, cutout)
-}
-pub fn pick_candidates(
-    map: &MapFile,
-    objects: &MapObjects,
-    view: MapView,
-    art: &impl MapArt,
-    point: [i32; 2],
-    cutout: Option<&Cutout>,
-) -> Option<Vec<(u32, bool)>> {
     if view.elevation > 2 {
         return None;
     }
-    let sample = |frame: &FrmFrame, origin: [i64; 2]| {
-        let x = i64::from(point[0]) - origin[0];
-        let y = i64::from(point[1]) - origin[1];
-        x >= 0
-            && y >= 0
-            && x < i64::from(frame.width)
-            && y < i64::from(frame.height)
-            && frame.pixels()[(y * i64::from(frame.width) + x) as usize] != 0
-    };
+    let sample = |frame: &FrmFrame, origin: [i64; 2]| enhanced::sample(frame, origin, point);
     let in_mask = cutout.is_some_and(|cut| {
         cut.origin(view)
             .and_then(|mask| cut.weight(mask, point.map(i64::from)))
             .is_some_and(|weight| weight != 0)
     });
-    if view.roofs && !in_mask {
-        let [ox, oy] = view.grid.origin;
-        for (square, offset) in square_offsets().iter().enumerate() {
-            let tile = map.tile(view.elevation as usize, square)?;
-            if tile.roof() != 1
-                && !tile.roof_hidden()
-                && let Some((frame, _)) = art.frame(Category::Tile, u32::from(tile.roof()), 0, 0)
-                && sample(
-                    frame,
-                    [ox.checked_add(offset[0])?, oy.checked_add(offset[1] - 96)?],
-                )
-            {
-                return None;
-            }
-        }
+    let cut_away = cutaway.is_some_and(|cutaway| !cutaway.keeps(view.grid, point.map(i64::from)));
+    if view.roofs && !in_mask && !cut_away && enhanced::roof_pixel_at(map, view, art, point)? {
+        return None;
     }
     let mut hits = Vec::new();
     let objects = &objects.elevations[view.elevation as usize];
@@ -1273,6 +1306,8 @@ pub fn pick_candidates(
 #[cfg(test)]
 use vault_fixtures::world as fixture;
 #[cfg(test)]
+mod enhanced_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     use vault_formats::{FrmArchive, Prototype};
@@ -1300,7 +1335,7 @@ mod tests {
     }
     /// A grey palette: index i is grey `i / 4` (six-bit), and five-bit grey
     /// g looks up index `8 g`.
-    fn grey_palette() -> Palette {
+    pub(super) fn grey_palette() -> Palette {
         let mut bytes = Vec::with_capacity(0x8300);
         for index in 0..256_u32 {
             let grey = (index / 4) as u8;
@@ -1311,7 +1346,7 @@ mod tests {
         }
         Palette::parse(&bytes).unwrap()
     }
-    fn preview() -> MapFile {
+    pub(super) fn preview() -> MapFile {
         MapFile::parse(&fixture::preview_map(), &|pid| {
             let category = (pid >> 24) as u8;
             Ok(Prototype::parse(&fixture::prototype(
@@ -1323,7 +1358,7 @@ mod tests {
         .unwrap()
     }
     /// Art by identifier: tiles and objects keyed by their art id.
-    struct Keyed(std::collections::BTreeMap<(bool, u32), FrmArchive>);
+    pub(super) struct Keyed(pub(super) std::collections::BTreeMap<(bool, u32), FrmArchive>);
     impl MapArt for Keyed {
         fn frame(
             &self,
@@ -1337,7 +1372,7 @@ mod tests {
         }
     }
     /// An object of `art` on `hex`, from the fixture map's first object.
-    fn object(map: &MapFile, id: u32, art: u32, hex: i32) -> MapObject {
+    pub(super) fn object(map: &MapFile, id: u32, art: u32, hex: i32) -> MapObject {
         let mut object = map.objects.elevations[0][0].clone();
         object.id = id;
         object.pid = art & 0x0f00_0000 | 1;
@@ -1349,14 +1384,14 @@ mod tests {
         object.orientation = 0;
         object
     }
-    fn scene(objects: Vec<MapObject>) -> MapObjects {
+    pub(super) fn scene(objects: Vec<MapObject>) -> MapObjects {
         MapObjects {
             total: objects.len(),
             elevations: [objects, Vec::new(), Vec::new()],
             consumed_len: 0,
         }
     }
-    fn view() -> MapView {
+    pub(super) fn view() -> MapView {
         MapView {
             grid: HexGrid::centered(20100, 640, 380).unwrap(),
             elevation: 0,
