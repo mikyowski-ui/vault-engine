@@ -440,3 +440,200 @@ pub fn write_pipboy(root: &std::path::Path) {
     )
     .unwrap();
 }
+
+/// A corpus-shaped program (SPEC-004 §2.2): [`program`], with the initial
+/// stream's jump going into the body of procedure 1 (normally `start`)
+/// instead of the trampoline, so a first request runs `start` with
+/// `script_action` returning the requested number (SPEC-006 §3.5).
+pub fn corpus_program(strings: &[&[u8]], procedures: &[(&[u8], Vec<u8>)]) -> Vec<u8> {
+    let mut bytes = program(strings, procedures);
+    let read = |bytes: &[u8], offset: usize| {
+        i32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    };
+    let init = read(&bytes, 12) as usize;
+    let start = read(&bytes, 46 + 24 + 16);
+    // The initial stream is `0x802c`, push 0, `0x8003`, push target, `0x8004`.
+    world::word(&mut bytes, init + 12, start);
+    bytes
+}
+
+/// The `enhanced` camera demo, all synthetic. `maps/cam_demo.map` has one
+/// elevation: scroll blockers ([`CAM_DEMO_BLOCKER_PID`], hidden) on the
+/// ring of hex columns and rows [`CAM_DEMO_RING`] enclose the camera's
+/// region, inside the map border and smaller than the 200-by-200 grid; the
+/// enclosure has floor tiles; a walled, roofed building
+/// ([`CAM_DEMO_BUILDING`], roof art index 2 over floor art index 0) has a
+/// doorway at [`CAM_DEMO_DOOR`] and holds a critter and an item; and the
+/// player enters outside it at [`CAM_DEMO_ENTRY`].
+pub const CAM_DEMO_RING: [i32; 2] = [60, 140];
+/// The building's walls in hex `[first column, last column, first row,
+/// last row]`; the roof covers the squares under them.
+pub const CAM_DEMO_BUILDING: [i32; 4] = [90, 109, 90, 107];
+/// The doorway: the gap in the building's last wall row.
+pub const CAM_DEMO_DOOR: i32 = 100 + 200 * 107;
+/// The map's entry hex, in the enclosure and outside the building.
+pub const CAM_DEMO_ENTRY: i32 = 100 + 200 * 125;
+/// The interior hex the script pans to.
+pub const CAM_DEMO_INTERIOR: i32 = 100 + 200 * 98;
+/// The critter's and the item's hexes, inside the building.
+pub const CAM_DEMO_CRITTER: i32 = 98 + 200 * 96;
+pub const CAM_DEMO_ITEM: i32 = 103 + 200 * 100;
+/// The scroll blocker PID (SPEC-014 §3.29).
+pub const CAM_DEMO_BLOCKER_PID: u32 = 0x0500_000c;
+/// The `scripts.lst` row of the demo's map script.
+pub const CAM_DEMO_SCRIPT: &str = "camdemo.int # local_vars=0";
+/// What the map script requests at map entry, in order, as the enhanced
+/// word and its operands in the order written: pan to the interior over
+/// 1500 ms, zoom to 200% over 1000 ms, shake with intensity 6 for 800 ms,
+/// then reset over 1500 ms.
+pub const CAM_DEMO_REQUESTS: [(u16, &[i32]); 4] = [
+    (0x8210, &[CAM_DEMO_INTERIOR, 1500]),
+    (0x8211, &[200, 1000]),
+    (0x8212, &[6, 800]),
+    (0x8213, &[1500]),
+];
+
+/// `scripts/camdemo.int`: `start` tests `script_action` for 15, the map
+/// entry request, and then makes the four [`CAM_DEMO_REQUESTS`] at once
+/// (their durations are presentation timing, which the view sequences),
+/// as corpus map scripts do their entry work inside `start`. The startup
+/// (1) and update (23) requests that reach `start` later skip them. The
+/// words lie in the enhanced range, so only an enhanced parse accepts it.
+pub fn cam_demo_program() -> Vec<u8> {
+    let requests: Vec<u8> = CAM_DEMO_REQUESTS
+        .iter()
+        .flat_map(|(word, operands)| {
+            let mut code: Vec<u8> = operands.iter().flat_map(|value| push(*value)).collect();
+            code.extend(instruction(*word));
+            code
+        })
+        .collect();
+    let body = |skip: i32| {
+        [
+            push(skip),
+            instruction(0x80c7),
+            push(15),
+            instruction(0x8033),
+            instruction(0x802f),
+            requests.clone(),
+        ]
+        .concat()
+    };
+    let build = |skip: i32| corpus_program(&[], &[(b"start", returning(body(skip)))]);
+    // The skip target is the end of the requests: `start`'s address, its
+    // `0x802b`, then the body. Its value does not change the layout.
+    let first = build(0);
+    let start = i32::from_be_bytes(first[46 + 24 + 16..46 + 24 + 20].try_into().unwrap());
+    build(start + 2 + body(0).len() as i32)
+}
+
+/// `maps/cam_demo.map` with map script `scripts.lst` index `script`.
+pub fn cam_demo_map(script: i32) -> Vec<u8> {
+    let mut bytes = world::empty_map();
+    bytes.truncate(236);
+    bytes[4..20].fill(0);
+    bytes[4..16].copy_from_slice(b"CAM_DEMO.MAP");
+    for (offset, value) in [
+        (0x14, CAM_DEMO_ENTRY),
+        (0x18, 0),
+        (0x1c, 0),
+        // No local or map variables.
+        (0x20, 0),
+        (0x24, script + 1),
+        // A fresh map with elevations 1 and 2 omitted.
+        (0x28, 0x0c),
+        (0x30, 0),
+        (0x34, -1),
+    ] {
+        world::word(&mut bytes, offset, value);
+    }
+    let [ring_first, ring_last] = CAM_DEMO_RING.map(|hex| hex / 2);
+    let [first_column, last_column, first_row, last_row] = CAM_DEMO_BUILDING;
+    for position in 0..10000 {
+        let (column, row) = (position % 100, position / 100);
+        let inside = |first: i32, last: i32| {
+            (first..=last).contains(&column) && (first..=last).contains(&row)
+        };
+        let roofed = (first_column / 2..=last_column / 2).contains(&column)
+            && (first_row / 2..=last_row / 2).contains(&row);
+        let word = if roofed {
+            0x0002_0000_u32
+        } else if inside(ring_first, ring_last) {
+            0x0001_0000
+        } else {
+            0x0001_0001
+        };
+        bytes.extend(word.to_be_bytes());
+    }
+    bytes.extend(world::words(&[0; 5]));
+    // (hex, PID category): the blockers (category 5), the walls but the
+    // doorway (3), the critter (1) and the item (0).
+    let [first, last] = CAM_DEMO_RING;
+    let mut placed: Vec<(i32, u8)> = (first..=last)
+        .flat_map(|index| [(index, first), (index, last), (first, index), (last, index)])
+        .map(|(column, row)| (column + 200 * row, 5))
+        .collect();
+    placed.extend(
+        (first_column..=last_column)
+            .flat_map(|column| [(column, first_row), (column, last_row)])
+            .chain(
+                (first_row + 1..last_row).flat_map(|row| [(first_column, row), (last_column, row)]),
+            )
+            .map(|(column, row)| (column + 200 * row, 3))
+            .filter(|(hex, _)| *hex != CAM_DEMO_DOOR),
+    );
+    placed.extend([(CAM_DEMO_CRITTER, 1), (CAM_DEMO_ITEM, 0)]);
+    // In hex order, as the map writer stores objects, so the file reads
+    // and writes back unchanged; the ring's corners appear once.
+    placed.sort_unstable();
+    placed.dedup();
+    let mut objects = Vec::new();
+    for (index, (hex, category)) in placed.into_iter().enumerate() {
+        let mut object = world::object(category, hex, index as u32 + 1, &[]);
+        match category {
+            5 => {
+                // Hidden, as scroll blockers are not drawn.
+                world::word(&mut object, 0x24, 0x1);
+                world::word(&mut object, 0x2c, CAM_DEMO_BLOCKER_PID as i32);
+            }
+            1 => world::word(&mut object, 0x74, 30),
+            _ => {}
+        }
+        objects.push(object);
+    }
+    let count = objects.len() as i32;
+    bytes.extend(world::words(&[count, count]));
+    bytes.extend(objects.concat());
+    bytes.extend(world::words(&[0, 0]));
+    bytes
+}
+
+/// Writes the camera demo into `root`, a corpus [`write_corpus`] wrote:
+/// `maps/cam_demo.map`, its empty `maps/cam_demo.gam`, and
+/// `scripts/camdemo.int`, whose [`CAM_DEMO_SCRIPT`] row is appended to
+/// `scripts/scripts.lst` (once). It adds files only; the map uses the
+/// corpus's prototypes and art. Returns the script's list index.
+pub fn write_cam_demo(root: &std::path::Path) -> i32 {
+    for folder in ["maps", "scripts"] {
+        std::fs::create_dir_all(root.join(folder)).unwrap();
+    }
+    let list = root.join("scripts/scripts.lst");
+    let mut text = std::fs::read_to_string(&list).unwrap_or_default();
+    let index = match text.lines().position(|line| line == CAM_DEMO_SCRIPT) {
+        Some(index) => index,
+        None => {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            let index = text.lines().count();
+            text.push_str(CAM_DEMO_SCRIPT);
+            text.push('\n');
+            std::fs::write(&list, &text).unwrap();
+            index
+        }
+    } as i32;
+    std::fs::write(root.join("scripts/camdemo.int"), cam_demo_program()).unwrap();
+    std::fs::write(root.join("maps/cam_demo.map"), cam_demo_map(index)).unwrap();
+    std::fs::write(root.join("maps/cam_demo.gam"), b"MAP_GLOBAL_VARS:\n").unwrap();
+    index
+}

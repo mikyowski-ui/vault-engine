@@ -18,7 +18,9 @@ struct Args {
 enum Task {
     /// Run all engineering gates from AGENTS.md (clippy and tests with `--locked`).
     Check,
-    /// Materialize a complete synthetic map/prototype/art/INT corpus in an empty directory.
+    /// Materialize a complete synthetic map/prototype/art/INT corpus in an empty
+    /// directory, and the same corpus with the enhanced camera demo map
+    /// `maps/cam_demo.map` in `<PATH>-cam-demo`, also empty.
     Fixtures {
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
@@ -66,13 +68,34 @@ fn main() -> ExitCode {
     }
 }
 
+/// The synthetic corpus in `output`, and beside it in `<output>-cam-demo`
+/// the same corpus with the enhanced camera demo added. The demo's script
+/// parses only under the Enhanced preset, so it is kept out of `output`,
+/// whose files a Vanilla audit validates.
 fn materialize(output: &Path) -> Result<(), Box<dyn Error>> {
-    if output.exists() && output.read_dir()?.next().is_some() {
-        return Err("fixture output directory must be empty".into());
+    let mut name = output
+        .file_name()
+        .ok_or("fixture output directory needs a name")?
+        .to_os_string();
+    name.push("-cam-demo");
+    let demo = output.with_file_name(name);
+    for directory in [output, &demo] {
+        if directory.exists() && directory.read_dir()?.next().is_some() {
+            return Err(format!(
+                "fixture output directory {} must be empty",
+                directory.display()
+            )
+            .into());
+        }
     }
-    std::fs::create_dir_all(output)?;
-    state::write_corpus(output);
-    std::fs::write(output.join("scripts/core-fixture.int"), vm::program())?;
+    for directory in [output, &demo] {
+        std::fs::create_dir_all(directory)?;
+        state::write_corpus(directory);
+        std::fs::write(directory.join("scripts/core-fixture.int"), vm::program())?;
+    }
+    // `maps/cam_demo.map` and its map script, appended to `scripts.lst`.
+    state::write_cam_demo(&demo);
     println!("Synthetic corpus written to {}", output.display());
+    println!("Enhanced camera demo corpus written to {}", demo.display());
     Ok(())
 }
