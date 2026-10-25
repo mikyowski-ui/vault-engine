@@ -692,6 +692,10 @@ impl MapPreview {
         self.open_preferences();
         self.menu_preferences = true;
     }
+    /// This session was opened for the main menu's preferences.
+    pub(crate) fn opened_for_preferences(&self) -> bool {
+        self.menu_preferences
+    }
     /// The preferences opened from the main menu are still up (or their
     /// quit confirmation is).
     pub(crate) fn menu_preferences_open(&self) -> bool {

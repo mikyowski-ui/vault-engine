@@ -492,6 +492,7 @@ impl<A: WorldAssets> WorldHost<A> {
             return Ok(None);
         }
         let player = self.world.player;
+        self.last_push = None;
         self.action(player, critter, crate::ObjectAction::Push)?;
         Ok(self.last_push.take().or(Some(Push2::Approaching)))
     }

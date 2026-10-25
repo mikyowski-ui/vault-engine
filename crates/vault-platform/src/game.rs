@@ -1016,7 +1016,9 @@ impl Game {
                 let changed = world.tick(now)?;
                 if !world.load_screen_open() && !world.menu_preferences_open() {
                     // SPEC-019 §3.2: preferences set from the menu stay.
-                    self.preferences = world.preferences.clone();
+                    if world.opened_for_preferences() {
+                        self.preferences = world.preferences.clone();
+                    }
                     let Stage::Load(world) =
                         std::mem::replace(&mut self.stage, Stage::Menu { since: now })
                     else {
