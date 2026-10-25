@@ -18,7 +18,7 @@ use vault_core::{
     assets::WorldAssets,
     loot::{LootMove, LootSession},
     skills::{self, Counter, ItemEntry},
-    ui::{BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect, cursor, inventory as layout},
+    ui::{BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect, cursor, fallout2 as ui2, inventory as layout},
 };
 use vault_formats::pro::{ItemData, PrototypeData};
 use vault_render::IndexedImage;
@@ -212,7 +212,21 @@ impl MapPreview {
         let done = self.button_art(on_screen(DONE), "lilredup.frm", "lilreddn.frm");
         painter.blit(&mut image, done, 0, [ox + DONE.x, oy + DONE.y]);
         if self.take_all_shown(screen) {
-            self.engine_button(&painter, &mut image, TAKE_ALL, b"TAKE ALL");
+            // SPEC-019 §3.7: Fallout 2's Take All pair at the enhanced
+            // button's place, with the art's own size.
+            let pressed = self.held == Some(on_screen(self.take_all_rect()));
+            let art = self
+                .host
+                .world
+                .fallout2
+                .as_ref()
+                .and_then(|_| painter.role(&ui2::TAKE_ALL[usize::from(pressed)]));
+            match art {
+                Some((name, _)) => {
+                    painter.blit(&mut image, name, 0, [ox + TAKE_ALL.x, oy + TAKE_ALL.y]);
+                }
+                None => self.engine_button(&painter, &mut image, TAKE_ALL, b"TAKE ALL"),
+            }
         }
         if screen.session.companion {
             let mode = self.host.companion_distance(screen.session.root);
@@ -460,6 +474,11 @@ impl MapPreview {
     pub(crate) fn loot_click(&mut self, point: [i32; 2], right: bool) -> bool {
         let clock = self.clock;
         let entry = self.loot_entry_at(point);
+        let take_all = self.take_all_rect();
+        let take_all_shown = match &self.screen {
+            Screen::Loot(screen) => self.take_all_shown(screen),
+            _ => false,
+        };
         let Screen::Loot(screen) = &mut self.screen else {
             return false;
         };
@@ -501,8 +520,8 @@ impl MapPreview {
             self.host.cycle_companion_distance(companion);
             return true;
         }
-        if TAKE_ALL.contains(local) && self.enhanced.is_some() && !screen.session.steal {
-            self.press_button(on_screen(TAKE_ALL));
+        if take_all.contains(local) && take_all_shown {
+            self.press_button(on_screen(take_all));
             self.loot_take_all();
             return true;
         }
@@ -672,7 +691,24 @@ impl MapPreview {
     /// The `enhanced` window shows its Take All button outside steal
     /// sessions (Vanilla has Shift+A only).
     fn take_all_shown(&self, screen: &LootScreen) -> bool {
-        self.enhanced().is_some() && !screen.session.steal
+        (self.enhanced().is_some() || self.host.world.fallout2.is_some()) && !screen.session.steal
+    }
+    /// The Take All button's window rectangle: the enhanced one, or under
+    /// Fallout 2 its art's size at the same place.
+    fn take_all_rect(&self) -> Rect {
+        let painter = Painter {
+            assets: &self.host.assets,
+            palette: &self.palette,
+        };
+        self.host
+            .world
+            .fallout2
+            .as_ref()
+            .and_then(|_| painter.role(&ui2::TAKE_ALL[0]))
+            .and_then(|(_, art)| art.frame(0, 0).map(|frame| (frame.width, frame.height)))
+            .map_or(TAKE_ALL, |(w, h)| {
+                Rect::new(TAKE_ALL.x, TAKE_ALL.y, i32::from(w), i32::from(h))
+            })
     }
     /// G-20 Take All (Shift+A, or the enhanced button): refused silently
     /// in steal sessions by the host.

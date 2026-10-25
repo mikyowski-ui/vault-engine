@@ -112,7 +112,8 @@ impl WorldState {
                 .sum()
         })
     }
-    fn carry_limit(&self, critter: ObjectRef) -> i64 {
+    /// SPEC-011 §3.14 the carry limit: effective Carry Weight.
+    pub fn carry_limit(&self, critter: ObjectRef) -> i64 {
         self.get(critter)
             .and_then(|object| object.character.as_ref())
             .map_or(0, |sheet| i64::from(sheet.stat(12, self.context(critter))))

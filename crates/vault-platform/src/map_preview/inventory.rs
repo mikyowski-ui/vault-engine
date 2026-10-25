@@ -1247,9 +1247,26 @@ impl MapPreview {
                 text(image, line, [377, y + 10 * index as i32], *clip);
             }
         }
+        let total = world.inventory_weight(player);
+        // SPEC-019 §3.7: under Fallout 2 the line shows the carry limit,
+        // and turns key 31744 over it.
+        if world.fallout2.is_some() {
+            let limit = world.carry_limit(player);
+            let weight = [
+                painter.message("inventry.msg", 20),
+                format!(" {total}/{limit}").into_bytes(),
+            ]
+            .concat();
+            let key = vault_core::ui::fallout2::weight_color(
+                total.min(i64::from(i32::MAX)) as i32,
+                limit.min(i64::from(i32::MAX)) as i32,
+            );
+            painter.text(image, 101, key, &weight, [407, 224], 80);
+            return;
+        }
         let weight = [
             painter.message("inventry.msg", 20),
-            format!(" {}", world.inventory_weight(player)).into_bytes(),
+            format!(" {total}").into_bytes(),
         ]
         .concat();
         text(image, &weight, [407, 224], 80);

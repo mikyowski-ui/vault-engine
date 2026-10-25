@@ -273,3 +273,166 @@ fn spec019_pipboy_status_holodisks_automaps_archives_and_availability() {
     assert_eq!(preview.automap_entry(1, 2), b"Test Village 3");
     assert_eq!(preview.fallout2_automap_entries(1000), [(0, 1)]);
 }
+
+/// A conversation with the synthetic map's scripted critter, made a
+/// Fallout 2 party member with a control record whose allowed
+/// dispositions are custom, defensive and aggressive and distances
+/// stay_close, on_your_own and charge (§4.10's member).
+fn party_talk() -> (tempfile::TempDir, MapPreview, vault_core::ObjectRef) {
+    let dir = corpus();
+    std::fs::create_dir_all(dir.path().join("text/english/dialog")).unwrap();
+    std::fs::write(
+        dir.path().join("text/english/dialog/synthetic.msg"),
+        b"{980}{}{Hng.}\n",
+    )
+    .unwrap();
+    let mut preview = world(dir.path());
+    preview.image().unwrap();
+    preview.hud.mode = Mode::Arrow;
+    assert!(preview.tap([336, 170]));
+    assert!(preview.host.world.dialogue.open && preview.host.world.dialogue.waiting);
+    let member = preview.host.world.dialogue.target;
+    let pid = preview.host.world.get(member).unwrap().raw.pid;
+    let party = format!(
+        "[Party Member 0]\nparty_member_pid={pid}\ndisposition=custom, defensive, aggressive\n\
+         distance=stay_close, on_your_own, charge\n"
+    );
+    let mut files: Vec<(&str, &str)> = vault_fixtures::fallout2::tables()
+        .into_iter()
+        .filter(|(path, _)| *path != "data/party.txt")
+        .collect();
+    let party: &'static str = Box::leak(party.into_boxed_str());
+    files.push(("data/party.txt", party));
+    let tables =
+        Arc::new(Fallout2Tables::load(&mut vault_fixtures::fallout2::reader(files)).unwrap());
+    preview.host.world.fallout2 = Some(Box::new(Fallout2World::new_game(tables, -1)));
+    preview.host.world.get_mut(member).unwrap().raw.id = 18000;
+    preview.host.world.party.insert(member);
+    let record = preview
+        .host
+        .world
+        .fallout2
+        .as_deref()
+        .unwrap()
+        .joining_record(pid);
+    assert_eq!(record.record, 0);
+    preview
+        .host
+        .world
+        .fallout2
+        .as_deref_mut()
+        .unwrap()
+        .control
+        .insert(18000, record);
+    (dir, preview, member)
+}
+
+#[test]
+fn spec019_vector_j_dialogue_panel_and_combat_control() {
+    use super::super::talk::TalkWindow;
+    use vault_core::{
+        fallout2_party::{disposition, distance},
+        ui::{fallout2 as ui2, talk},
+    };
+    use vault_formats::fallout2::party::ControlField;
+    let (_dir, mut preview, member) = party_talk();
+    preview.image().unwrap();
+    // §3.8: `a` does nothing; the Combat Control button (Tell Me About's
+    // place) opens the control panel.
+    assert!(!preview.step(KeyCode::KeyA) || preview.talk.is_none());
+    assert!(preview.talk.is_none());
+    let rect = talk::panel_button(ui2::COMBAT_CONTROL_BUTTON);
+    assert!(preview.tap([rect.x + 7, rect.y + 7]));
+    assert!(matches!(preview.talk, Some(TalkWindow::Control(_))));
+    preview.image().unwrap();
+    let field = |preview: &MapPreview, field: ControlField| {
+        preview.host.control_of(member).unwrap().fields[field as usize]
+    };
+    // Row "Defensive" (key 3): the preset.
+    assert!(preview.step(KeyCode::Digit3));
+    assert_eq!(
+        field(&preview, ControlField::Disposition),
+        disposition::DEFENSIVE
+    );
+    assert_eq!(
+        field(&preview, ControlField::Distance),
+        distance::STAY_CLOSE
+    );
+    // Key 2 (Coward) is disabled: nothing changes.
+    assert!(preview.step(KeyCode::Digit2));
+    assert_eq!(
+        field(&preview, ControlField::Disposition),
+        disposition::DEFENSIVE
+    );
+    // Custom: the Distance row cycles stay_close, charge, on_your_own.
+    let [ox, oy] = ui2::control::ORIGIN;
+    let [cx, cy] = ui2::control::CUSTOM_BUTTON;
+    assert!(preview.tap([ox + cx + 5, oy + cy + 5]));
+    assert!(matches!(
+        preview.talk,
+        Some(TalkWindow::Control(ref panel)) if panel.custom
+    ));
+    preview.image().unwrap();
+    let [px, py] = ui2::custom::ORIGIN;
+    let [rx, ry] = ui2::custom::button(3);
+    let distance_row = [px + rx + 5, py + ry + 5];
+    assert!(preview.tap(distance_row));
+    assert_eq!(field(&preview, ControlField::Distance), distance::CHARGE);
+    assert_eq!(
+        field(&preview, ControlField::Disposition),
+        disposition::CUSTOM
+    );
+    assert!(preview.tap(distance_row));
+    assert_eq!(
+        field(&preview, ControlField::Distance),
+        distance::ON_YOUR_OWN
+    );
+    assert!(preview.tap(distance_row));
+    assert_eq!(
+        field(&preview, ControlField::Distance),
+        distance::STAY_CLOSE
+    );
+    // Enter closes the custom panel; Use Best Weapon with nothing to wield
+    // plays the error sound; `t` returns to dialogue.
+    assert!(preview.step(KeyCode::Enter));
+    assert!(matches!(
+        preview.talk,
+        Some(TalkWindow::Control(ref panel)) if !panel.custom
+    ));
+    assert!(preview.step(KeyCode::KeyU));
+    assert!(preview.step(KeyCode::KeyT));
+    assert!(preview.talk.is_none() && preview.host.world.dialogue.open);
+    // `c` opens it too.
+    assert!(preview.step(KeyCode::KeyC));
+    assert!(matches!(preview.talk, Some(TalkWindow::Control(_))));
+    assert!(preview.step(KeyCode::Escape));
+    assert!(preview.talk.is_none());
+    // §3.7: Barter opens without the prototype's barter flag (a trade),
+    // and Offer moves both tables at once.
+    assert!(preview.step(KeyCode::KeyB));
+    preview.image().unwrap();
+    let Screen::Barter(screen) = &preview.screen else {
+        panic!("the trade window");
+    };
+    let session = screen.session.clone();
+    let item = widget(&mut preview, member);
+    preview
+        .host
+        .barter_move(member, session.table, item, 1)
+        .unwrap();
+    assert_eq!(
+        preview.host.attempt_trade(&session).unwrap(),
+        vault_core::barter::Trade::Accepted
+    );
+    let player = preview.host.world.player;
+    assert!(
+        preview
+            .host
+            .world
+            .get(player)
+            .unwrap()
+            .inventory
+            .iter()
+            .any(|(entry, _)| *entry == item)
+    );
+}

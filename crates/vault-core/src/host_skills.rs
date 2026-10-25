@@ -1277,16 +1277,20 @@ impl<A: WorldAssets> WorldHost<A> {
     /// keeping the script barter modifier.
     pub fn barter_entry(&mut self) -> bool {
         let merchant = self.world.dialogue.target;
-        let barters = self
-            .world
-            .get(merchant)
-            .and_then(|object| object.prototype.as_ref())
-            .is_some_and(|prototype| match &prototype.data {
-                vault_formats::pro::PrototypeData::Critter(critter) => {
-                    critter.flags.0 & skills::BARTER_FLAG != 0
-                }
-                _ => false,
-            });
+        // SPEC-019 §3.7: a Fallout 2 party member with a control record
+        // trades without the prototype's barter flag.
+        let trades = self.control_of(merchant).is_some();
+        let barters = trades
+            || self
+                .world
+                .get(merchant)
+                .and_then(|object| object.prototype.as_ref())
+                .is_some_and(|prototype| match &prototype.data {
+                    vault_formats::pro::PrototypeData::Critter(critter) => {
+                        critter.flags.0 & skills::BARTER_FLAG != 0
+                    }
+                    _ => false,
+                });
         if barters {
             self.world.dialogue.pending_barter = true;
         } else if let Some(text) = self.game_text("proto.msg", 903) {

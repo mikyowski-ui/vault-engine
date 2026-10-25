@@ -26,6 +26,8 @@ use winit::keyboard::KeyCode;
 pub(crate) enum TalkWindow {
     Review(Review),
     AskAbout(Box<AskAbout>),
+    /// SPEC-019 §3.15 the combat control panel (and its custom panel).
+    Control(super::control::ControlPanel),
 }
 pub(crate) struct Review {
     /// The entry at the top of the transcript.
@@ -70,16 +72,36 @@ impl MapPreview {
         dialogue.open && dialogue.waiting && self.talk.is_none()
     }
     /// `a` asks about, `b` barters (SPEC-013 §3.18); no key opens Review.
+    /// SPEC-019 §3.8: under Fallout 2 `a` does nothing and `c` opens the
+    /// control panel for a party member with a control record.
     pub(crate) fn panel_key(&mut self, key: KeyCode) -> bool {
         if !self.panel_ready() {
             return false;
         }
+        let fallout2 = self.host.world.fallout2.is_some();
         match key {
-            KeyCode::KeyA => self.tell_me_about(),
+            KeyCode::KeyA if !fallout2 => self.tell_me_about(),
+            KeyCode::KeyC if self.control_member().is_some() => self.open_control(),
             KeyCode::KeyB => self.barter_button(),
             _ => return false,
         }
         true
+    }
+    /// The panel's buttons and their cues: Barter, then Tell Me About
+    /// (Fallout 1) or Combat Control (a Fallout 2 party member's), then
+    /// Review.
+    fn panel_buttons(&self) -> Vec<(Rect, Cues)> {
+        let small = (talk::SMALL_PRESS.as_bytes(), talk::SMALL_RELEASE.as_bytes());
+        let review = (BUTTON_PRESS.as_bytes(), BUTTON_RELEASE.as_bytes());
+        let mut buttons = vec![(talk::panel_button(talk::BARTER), small)];
+        if self.host.world.fallout2.is_none() {
+            buttons.push((talk::panel_button(talk::TELL_ME_ABOUT), small));
+        } else if self.control_member().is_some() {
+            let rect = vault_core::ui::fallout2::COMBAT_CONTROL_BUTTON;
+            buttons.push((talk::panel_button(rect), small));
+        }
+        buttons.push((talk::panel_button(talk::REVIEW), review));
+        buttons
     }
     /// A left press on a panel button, or in a window (modal: every press
     /// there is taken).
@@ -99,11 +121,8 @@ impl MapPreview {
                 .into_iter()
                 .map(|rect| (rect, review))
                 .collect(),
-            None if self.panel_ready() => vec![
-                (talk::panel_button(talk::BARTER), small),
-                (talk::panel_button(talk::TELL_ME_ABOUT), small),
-                (talk::panel_button(talk::REVIEW), review),
-            ],
+            Some(TalkWindow::Control(_)) => return self.control_click(point),
+            None if self.panel_ready() => self.panel_buttons(),
             None => return false,
         };
         if let Some((rect, (press, release))) =
@@ -141,7 +160,15 @@ impl MapPreview {
                     self.cancel_ask();
                 }
             }
+            Some(TalkWindow::Control(_)) => return self.control_release(Some(over)),
+            None if !self.panel_buttons().iter().any(|(rect, _)| *rect == over) => return false,
             None if over == talk::panel_button(talk::BARTER) => self.barter_button(),
+            // Fallout 2's Combat Control sits where Tell Me About was.
+            None if over == talk::panel_button(talk::TELL_ME_ABOUT)
+                && self.host.world.fallout2.is_some() =>
+            {
+                self.open_control();
+            }
             None if over == talk::panel_button(talk::TELL_ME_ABOUT) => self.tell_me_about(),
             None if over == talk::panel_button(talk::REVIEW) => self.open_review(),
             None => return false,
@@ -179,6 +206,7 @@ impl MapPreview {
                     }
                 }
             },
+            Some(TalkWindow::Control(_)) => return self.control_key(key),
             None => return false,
         }
         true
@@ -301,12 +329,18 @@ impl MapPreview {
             assets: &self.host.assets,
             palette: &self.palette,
         };
+        let shown = self.panel_buttons();
         for (rect, (normal, pressed), opaque) in [
             (talk::BARTER, talk::SMALL_ART, false),
             (talk::TELL_ME_ABOUT, talk::SMALL_ART, false),
             (talk::REVIEW, talk::REVIEW_ART, true),
         ] {
             let rect = talk::panel_button(rect);
+            // SPEC-019 §3.8: no Tell Me About under Fallout 2; the Combat
+            // Control button takes its place for a party member.
+            if !shown.iter().any(|(button, _)| *button == rect) {
+                continue;
+            }
             let art = self.button_art(rect, normal, pressed);
             if opaque {
                 painter.blit_opaque(image, art, 0, [rect.x, rect.y]);
@@ -321,6 +355,7 @@ impl MapPreview {
             (Some(TalkWindow::AskAbout(ask)), _, _) if !ask.opening => {
                 self.draw_ask(&painter, image, ask)
             }
+            (Some(TalkWindow::Control(panel)), _, _) => self.draw_control(&painter, image, panel),
             _ => {}
         }
     }

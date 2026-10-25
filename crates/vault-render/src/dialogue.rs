@@ -120,6 +120,30 @@ pub fn compose(
     empathy: bool,
     option_scroll: usize,
 ) -> Result<DialogueLayout, DialogueRenderError> {
+    compose_with_panel(
+        scene,
+        dialogue,
+        font,
+        palette,
+        assets,
+        empathy,
+        option_scroll,
+        None,
+    )
+}
+/// [`compose`] with the control panel's art at `panel` instead of
+/// `intrface.lst` row 99 (SPEC-019 §3.8 names the Fallout 2 panels).
+#[allow(clippy::too_many_arguments)]
+pub fn compose_with_panel(
+    scene: &IndexedImage,
+    dialogue: &GDialog,
+    font: &Font,
+    palette: &Palette,
+    assets: &impl WorldAssets,
+    empathy: bool,
+    option_scroll: usize,
+    panel: Option<&str>,
+) -> Result<DialogueLayout, DialogueRenderError> {
     let mut image = IndexedImage::new(640, 480)?;
     image.copy_image(scene, [0, 0]);
     let shell = assets.frame(&assets.interface_path(103)?)?;
@@ -128,7 +152,10 @@ pub fn compose(
     }
     // SPEC-014 §3.45: the control panel `di_talk.frm` (640 by 190) is the
     // window at screen (0, 290); the option area (127, 335) lies inside it.
-    let panel = assets.frame(&assets.interface_path(99)?)?;
+    let panel = match panel {
+        Some(path) => assets.frame(path)?,
+        None => assets.frame(&assets.interface_path(99)?)?,
+    };
     if let Some(frame) = panel.frame(0, 0) {
         image.blit(frame, [0, 290]);
     }

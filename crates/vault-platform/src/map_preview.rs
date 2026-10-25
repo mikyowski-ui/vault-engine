@@ -48,6 +48,7 @@ mod barter;
 mod called;
 mod camera;
 mod character;
+mod control;
 mod counter;
 mod debug;
 mod dialog;
@@ -1409,7 +1410,10 @@ impl MapPreview {
             let dialogue = &mut self.host.world.dialogue;
             let reply = reply_hidden.then(|| std::mem::take(&mut dialogue.resolved_reply));
             let options = options_hidden.then(|| std::mem::take(&mut dialogue.resolved_options));
-            let layout = dialogue::compose(
+            // SPEC-019 §3.8: Fallout 2 names its panel art (`di_talkp.frm`
+            // for a party member with a control record).
+            let panel = self.fallout2_talk_panel();
+            let layout = dialogue::compose_with_panel(
                 &image,
                 &self.host.world.dialogue,
                 font,
@@ -1417,6 +1421,7 @@ impl MapPreview {
                 &self.host.assets,
                 self.host.world.perk(Perk::Empathy) > 0,
                 self.option_scroll,
+                panel.as_deref(),
             );
             let dialogue = &mut self.host.world.dialogue;
             if let Some(reply) = reply {

@@ -212,9 +212,14 @@ impl<A: WorldAssets> WorldHost<A> {
         if offer_empty && empty(self, session.table) {
             return Ok(Trade::Nothing);
         }
-        let accepted = !offer_empty
-            && !self.world.holds_armed(session.offer)
-            && i64::from(self.barter_price(session)) <= self.world.inventory_value(session.offer);
+        // SPEC-019 §3.7: trading with a Fallout 2 party member that has a
+        // control record always succeeds, without the price comparison.
+        let trade = self.control_of(session.merchant).is_some();
+        let accepted = trade
+            || !offer_empty
+                && !self.world.holds_armed(session.offer)
+                && i64::from(self.barter_price(session))
+                    <= self.world.inventory_value(session.offer);
         if !accepted {
             self.print_game("inventry.msg", 28, &[]);
             return Ok(Trade::Refused);
