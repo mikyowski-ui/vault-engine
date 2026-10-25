@@ -41,29 +41,73 @@ pub fn opcode(word: u16) -> Option<&'static OpcodeSpec> {
 pub const ENHANCED_RANGE: std::ops::RangeInclusive<u16> = 0x8200..=0x82ff;
 /// The version `engine_api_version` (0x8200) reports. It grows whenever an
 /// enhanced opcode is added or changes meaning, so a script can test for
-/// the features it needs.
-pub const ENGINE_API_VERSION: i32 = 1;
-/// The enhanced table, in word order from 0x8200.
-pub static ENHANCED: &[OpcodeSpec] = &[OpcodeSpec {
-    word: 0x8200,
-    name: "engine_api_version",
-    operands: &[],
-    push: PushKind::Value,
-    registered: true,
-    variable: false,
-}];
+/// the features it needs:
+/// - 1: `engine_api_version` itself;
+/// - 2: the camera requests `0x8210`-`0x8213`.
+pub const ENGINE_API_VERSION: i32 = 2;
+/// A camera request word with integer `operands`, pushing nothing.
+const fn camera(word: u16, name: &'static str, operands: &'static [Rule]) -> OpcodeSpec {
+    OpcodeSpec {
+        word,
+        name,
+        operands,
+        push: PushKind::None,
+        registered: true,
+        variable: false,
+    }
+}
+/// The enhanced table, in ascending word order. A word of the range it does
+/// not list is unassigned and stays an unknown word.
+///
+/// The camera requests (`0x8210`-`0x8213`) take integer operands, which a
+/// script pushes in the order written: `op_cam_pan_to(tile, duration_ms)`
+/// pushes `tile` first. They are popped last first, so in the decoded
+/// [`HostCall`] `args[0]` is the last operand (`duration_ms`) and `args[1]`
+/// the first. They push nothing. What they do is the host's; a host without
+/// a view drops them (see [`execute_enhanced`]).
+pub static ENHANCED: &[OpcodeSpec] = &[
+    OpcodeSpec {
+        word: 0x8200,
+        name: "engine_api_version",
+        operands: &[],
+        push: PushKind::Value,
+        registered: true,
+        variable: false,
+    },
+    // op_cam_pan_to(tile_num, duration_ms)
+    camera(0x8210, "op_cam_pan_to", &[Rule::Integer, Rule::Integer]),
+    // op_cam_set_zoom(zoom_pct, duration_ms)
+    camera(0x8211, "op_cam_set_zoom", &[Rule::Integer, Rule::Integer]),
+    // op_cam_shake(intensity, duration_ms)
+    camera(0x8212, "op_cam_shake", &[Rule::Integer, Rule::Integer]),
+    // op_cam_reset(duration_ms)
+    camera(0x8213, "op_cam_reset", &[Rule::Integer]),
+];
 pub fn enhanced_opcode(word: u16) -> Option<&'static OpcodeSpec> {
     if !ENHANCED_RANGE.contains(&word) {
         return None;
     }
-    ENHANCED.get(usize::from(word - ENHANCED_RANGE.start()))
+    let index = ENHANCED
+        .binary_search_by_key(&word, |spec| spec.word)
+        .ok()?;
+    ENHANCED.get(index)
 }
-/// Run one enhanced word; an unassigned word in the range is still an
-/// unknown word.
-pub fn execute_enhanced(vm: &mut Vm, word: u16) -> Result<(), VmError> {
+/// Pop and check an enhanced word's operands, as [`decode`] does for the
+/// SPEC-005 words. An unassigned word in the range is an unknown word.
+pub fn decode_enhanced(vm: &mut Vm, word: u16) -> Result<HostCall, VmError> {
     let spec = enhanced_opcode(word).ok_or(VmError::Opcode(word))?;
-    match spec.word {
+    gather(vm, spec)
+}
+/// Run one enhanced word on a host with no enhanced services of its own
+/// (the [`crate::VmHost::enhanced_extension`] default): `engine_api_version`
+/// pushes [`ENGINE_API_VERSION`], and a camera request pops and checks its
+/// operands and is dropped, as such a host has no view. An unassigned word
+/// in the range is still an unknown word.
+pub fn execute_enhanced(vm: &mut Vm, word: u16) -> Result<(), VmError> {
+    let call = decode_enhanced(vm, word)?;
+    match call.spec.word {
         0x8200 => vm.value_stack.push(Value::integer(ENGINE_API_VERSION)),
+        0x8210..=0x8213 => Ok(()),
         _ => Err(VmError::Opcode(word)),
     }
 }
@@ -202,8 +246,12 @@ pub fn decode(vm: &mut Vm, word: u16) -> Result<HostCall, VmError> {
         });
         return Ok(HostCall { spec, args });
     }
-    // These wrappers gather their declared operands before checking their types;
-    // the variable-arity region operation has the documented earlier boundaries.
+    gather(vm, spec)
+}
+/// Pop `spec`'s declared operands, then check their types. These wrappers
+/// gather every operand before checking any; the variable-arity region
+/// operation has the documented earlier boundaries.
+fn gather(vm: &mut Vm, spec: &'static OpcodeSpec) -> Result<HostCall, VmError> {
     let mut values = Vec::new();
     for _ in spec.operands {
         values.push(vm.value_stack.pop()?);

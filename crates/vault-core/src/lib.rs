@@ -98,6 +98,8 @@ mod ai_tests;
 #[cfg(test)]
 mod barter_tests;
 #[cfg(test)]
+mod camera_tests;
+#[cfg(test)]
 mod choreography_tests;
 #[cfg(test)]
 mod clicks_tests;

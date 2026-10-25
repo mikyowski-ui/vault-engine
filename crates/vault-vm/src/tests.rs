@@ -995,7 +995,7 @@ fn enhanced_range_is_rejected_like_any_unknown_word_unless_the_host_enables_it()
         let result = vm.run(&mut host, 10);
         (result, vm.status, vm.pc, vm.value_stack.byte_len())
     };
-    for word in [0x8200, 0x8201, 0x82ff] {
+    for word in [0x8200, 0x8201, 0x8210, 0x8211, 0x8212, 0x8213, 0x82ff] {
         let (result, status, pc, depth) = outcome(word);
         let (other, other_status, other_pc, other_depth) = outcome(0x8156);
         assert_eq!(result, Err(VmError::Opcode(word)));
@@ -1043,4 +1043,69 @@ fn enhanced_range_is_rejected_like_any_unknown_word_unless_the_host_enables_it()
     assert_eq!(*ENHANCED_RANGE.start(), 0x8200);
     assert_eq!(enhanced_opcode(0x8200).unwrap().name, "engine_api_version");
     assert!(enhanced_opcode(0x8155).is_none());
+}
+#[test]
+fn enhanced_camera_words_pop_their_operands_and_push_nothing() {
+    use crate::extensions::{
+        ENGINE_API_VERSION, ENHANCED, PushKind, decode_enhanced, enhanced_opcode,
+    };
+    assert_eq!(ENGINE_API_VERSION, 2);
+    // The table is in ascending word order, as the lookup requires.
+    assert!(ENHANCED.windows(2).all(|pair| pair[0].word < pair[1].word));
+    for (word, name, operands) in [
+        (0x8210, "op_cam_pan_to", 2),
+        (0x8211, "op_cam_set_zoom", 2),
+        (0x8212, "op_cam_shake", 2),
+        (0x8213, "op_cam_reset", 1),
+    ] {
+        let spec = enhanced_opcode(word).unwrap();
+        assert_eq!((spec.name, spec.operands.len()), (name, operands));
+        assert_eq!(spec.push, PushKind::None);
+    }
+    for word in [0x820f, 0x8214] {
+        assert!(enhanced_opcode(word).is_none());
+    }
+    let enhanced = || IntProgram::parse_enhanced(&fixture::program()).unwrap();
+    // A host without a view drops each request: the operands are consumed
+    // and the sentinel below them stays on top.
+    let code = [
+        push(77),
+        push(20100),
+        push(1500),
+        op(0x8210),
+        push(200),
+        push(1000),
+        op(0x8211),
+        push(6),
+        push(800),
+        op(0x8212),
+        push(1500),
+        op(0x8213),
+    ]
+    .concat();
+    let mut vm = Vm::fragment(enhanced(), &code).unwrap();
+    assert_eq!(
+        vm.run(&mut EnhancedHost, 100).unwrap(),
+        RunOutcome::FragmentEnd
+    );
+    assert_eq!(vm.value_stack.pop().unwrap(), Value::integer(77));
+    assert!(vm.value_stack.pop().is_err());
+    // Pop order: the last operand is `args[0]`.
+    let mut vm = Vm::fragment(enhanced(), &[push(20100), push(1500)].concat()).unwrap();
+    vm.run(&mut EnhancedHost, 100).unwrap();
+    let call = decode_enhanced(&mut vm, 0x8210).unwrap();
+    assert_eq!((call.int(0), call.int(1)), (1500, 20100));
+    // The operands are integers; anything else is the usual type error, and
+    // a missing operand the usual underflow.
+    let mut vm = Vm::fragment(enhanced(), &op(0x8213)).unwrap();
+    vm.value_stack.push(Value::float(1.5)).unwrap();
+    assert_eq!(
+        vm.run(&mut EnhancedHost, 100),
+        Err(VmError::Type(Value::FLOAT))
+    );
+    let mut vm = Vm::fragment(enhanced(), &[push(1), op(0x8213), op(0x8213)].concat()).unwrap();
+    assert_eq!(vm.run(&mut EnhancedHost, 100), Err(VmError::Underflow));
+    // Unassigned neighbours stay unknown when enabled.
+    let mut vm = Vm::fragment(enhanced(), &op(0x8214)).unwrap();
+    assert_eq!(vm.run(&mut EnhancedHost, 10), Err(VmError::Opcode(0x8214)));
 }

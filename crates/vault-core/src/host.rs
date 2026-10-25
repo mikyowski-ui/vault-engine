@@ -2265,6 +2265,27 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
     fn enhanced_opcodes(&self) -> bool {
         self.preset() == crate::EnginePreset::Enhanced
     }
+    /// The enhanced camera requests (`0x8210`-`0x8213`) leave the world as
+    /// [`WorldEffect::Camera`] effects; a refused one gives a diagnostic
+    /// instead and the script goes on. Other enhanced words run the
+    /// engine's own table.
+    fn enhanced_extension(&mut self, opcode: u16, vm: &mut Vm) -> Result<(), VmError> {
+        if !crate::camera::CAMERA_WORDS.contains(&opcode) {
+            return extensions::execute_enhanced(vm, opcode);
+        }
+        let call = extensions::decode_enhanced(vm, opcode)?;
+        if self.calls.len() < 100_000 {
+            self.calls.push(CallTrace {
+                opcode,
+                operands: call.args.iter().map(|arg| arg.value).collect(),
+            });
+        }
+        match crate::camera::CameraCommand::from_call(&call) {
+            Ok(command) => self.world.emit(WorldEffect::Camera(command)),
+            Err(message) => self.world.diagnostic(message),
+        }
+        Ok(())
+    }
     fn extension(&mut self, opcode: u16, vm: &mut Vm) -> Result<(), VmError> {
         let call = extensions::decode(vm, opcode)?;
         if self.calls.len() < 100_000 {
