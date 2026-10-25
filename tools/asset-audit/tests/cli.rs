@@ -1455,3 +1455,72 @@ fn transition_sequences_report_each_missing_campaign_map() {
     );
     assert!(errors.contains("FAIL reached: Campaign 1"), "{errors}");
 }
+
+#[test]
+fn reports_the_spec017_script_stack_model_for_both_tables() {
+    use vault_fixtures::dat2::{Member, archive};
+    // Listed scripts: a clean one, one using the Fallout 2 word 0x8156,
+    // one using the reserved 0x815A, and one the mount lacks.
+    let script = |words: &[u16]| {
+        let mut body = vec![state::instruction(0x80bc), state::push(13), state::push(0)];
+        body.extend(words.iter().map(|word| state::instruction(*word)));
+        body.push(state::instruction(0x801a));
+        state::program(
+            &[],
+            &[(b"start".as_slice(), state::returning(body.concat()))],
+        )
+    };
+    let scripts = [
+        ("clean.int", script(&[0x8033, 0x8033])),
+        ("words2.int", script(&[0x8156])),
+        ("reserved.int", script(&[0x815a])),
+    ];
+    let list = b"clean.int # local_vars=0\nwords2.int # local_vars=0\n\
+                 reserved.int # local_vars=0\nabsent.int # local_vars=0\n";
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("scripts")).unwrap();
+    std::fs::write(temp.path().join("scripts/scripts.lst"), list).unwrap();
+    let mut members = vec![Member::stored("scripts\\scripts.lst", list)];
+    for (name, bytes) in &scripts {
+        std::fs::write(temp.path().join("scripts").join(name), bytes).unwrap();
+        members.push(Member::stored(&format!("scripts\\{name}"), bytes));
+    }
+    let install = tempfile::tempdir().unwrap();
+    std::fs::write(install.path().join("MASTER.DAT"), archive(&members)).unwrap();
+    std::fs::write(install.path().join("CRITTER.DAT"), archive(&[])).unwrap();
+    let (success, _, text, errors) = audit(
+        temp.path(),
+        &[
+            "--report-script-stack",
+            "--fallout2-dir",
+            install.path().to_str().unwrap(),
+        ],
+    );
+    // A report, not a category: it never fails the run.
+    assert!(success, "{errors}");
+    assert!(!text.contains("Audit categories"), "{text}");
+    for line in [
+        "Script stack (fallout1 table): 3 scripts, 1 listed but absent, 0 undecodable",
+        "Script stack findings: 2 (underflow 0, overflow 0, merge conflict 0, unresolved 0, \
+         refused word 2, reserved word 0, unexpected frame 0, data-dependent 0)",
+        "Script stack finding: refused word at word 0x8156 x1",
+        "Script stack finding: refused word at word 0x815a x1",
+        "Script stack (fallout2 table): 3 scripts, 1 listed but absent, 0 undecodable",
+        "Script stack findings: 1 (underflow 0, overflow 0, merge conflict 0, unresolved 0, \
+         refused word 0, reserved word 1, unexpected frame 0, data-dependent 0)",
+        "Script stack finding: reserved word at word 0x815a x1",
+        "Script stack word 0x8156 (inven_cmds): 1 occurrences, table pops 3 push 1, consistent: ",
+        "Script stack word 0x80e6 (set_exit_grids): 0 occurrences, table pops 5 push 0, \
+         consistent: not inferred",
+        "Script stack stub 0x80ad: 0 occurrences",
+        "Script stack reserved-range occurrences: 1",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    // The inferred candidates include the table's signature.
+    let inferred = text
+        .lines()
+        .find(|line| line.starts_with("Script stack word 0x8156"))
+        .unwrap();
+    assert!(inferred.contains("pops 3 push 1"), "{inferred}");
+}

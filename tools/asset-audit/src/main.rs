@@ -3,6 +3,7 @@ mod items;
 mod movies;
 mod readiness;
 mod sound;
+mod stack;
 mod ui;
 
 use std::{collections::BTreeSet, error::Error, path::PathBuf, process::ExitCode, sync::Arc};
@@ -154,6 +155,51 @@ struct Args {
     /// (Vault 15's ladder lands near 20719, Shady Sands near 12107).
     #[arg(long)]
     validate_transitions: bool,
+    /// SPEC-017 §8: run every `.INT` that `scripts/scripts.lst` names
+    /// through the abstract value-stack model with the Fallout 1 host-word
+    /// table (§8.4's model check), and report the findings by kind,
+    /// signature inference and operand-type evidence. Counts and
+    /// signatures only; no script byte is printed. A report, not an audit
+    /// category: §8.4 finds the Fallout 1 corpus is not clean under the
+    /// §8.2 model (statement calls of value-returning words leave their
+    /// result on the stack), which is a spec-revision request, so it never
+    /// fails the run.
+    #[arg(long)]
+    report_script_stack: bool,
+    /// SPEC-017 §8.1: a Fallout 2 install folder (its `MASTER.DAT`,
+    /// `CRITTER.DAT` and `patch000.dat`, mounted as SPEC-018 §1 says) whose
+    /// scripts the stack model checks with the Fallout 2 table, adding the
+    /// per-word summary of SPEC-017's words and stubs that §8.5 records.
+    #[arg(long, value_name = "PATH", requires = "report_script_stack")]
+    fallout2_dir: Option<PathBuf>,
+}
+
+/// SPEC-017 §8 the script stack report (`--report-script-stack`): the
+/// Fallout 1 corpus with the Fallout 1 table, then a Fallout 2 install with
+/// the Fallout 2 table when one is given.
+fn report_script_stack(vfs: &dyn Vfs, fallout2: Option<&PathBuf>) -> Result<(), Box<dyn Error>> {
+    let (audit, table) = stack::audit(vfs, vault_vm::WordSet::FALLOUT1)?;
+    audit.report("fallout1", &table, &[]);
+    let Some(folder) = fallout2 else {
+        return Ok(());
+    };
+    let install = vault_formats::fallout2::Fallout2Install::discover(folder)?;
+    let provider = install.open()?.provider(None);
+    let (audit, table) = stack::audit(&provider, vault_vm::WordSet::FALLOUT2)?;
+    audit.report("fallout2", &table, &stack::SPEC017_WORDS);
+    for word in stack::STUB_WORDS {
+        println!(
+            "Script stack stub {word:#06x}: {} occurrences",
+            audit.occurrences.get(&word).copied().unwrap_or(0)
+        );
+    }
+    let reserved: u64 = audit
+        .occurrences
+        .range(vault_vm::extensions::FALLOUT2_RESERVED)
+        .map(|(_, count)| count)
+        .sum();
+    println!("Script stack reserved-range occurrences: {reserved}");
+    Ok(())
 }
 
 fn saved_objects(map: &MapFile) -> usize {
@@ -936,6 +982,10 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
                 Ok(audit.failed())
             });
         }
+    }
+    // A report, outside the categories: it prints and never fails the run.
+    if args.report_script_stack {
+        report_script_stack(&*vfs, args.fallout2_dir.as_ref())?;
     }
     if args.validate_saves {
         failures.run("Saves", "save check(s)", || {

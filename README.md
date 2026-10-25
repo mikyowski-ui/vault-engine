@@ -611,6 +611,10 @@ cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game --vali
 # destination, and multi-map transition sequences from the new-game map:
 cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
     --validate-scripts --validate-exits --validate-transitions
+# SPEC-017 §8: the script stack model with the Fallout 1 table, and with the
+# Fallout 2 table over a Fallout 2 install (counts and signatures only):
+cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
+    --report-script-stack [--fallout2-dir /path/to/fallout2]
 ```
 
 The `--validate-*` flags combine freely. All requested categories share one
@@ -640,6 +644,21 @@ in every referenced script. Problems on the six unlisted maps are warnings. On
 the local corpus 952 files (740977 instructions, no unknown word), 65 map
 script indexes, 2121 script records, 1956 object scripts and 608 fallbacks
 pass, with 26 warnings for `JUNKDEMO.MAP`'s missing scripts.
+
+`--report-script-stack` runs SPEC-017 §8's abstract value-stack model over
+every `.int` that `scripts.lst` names, with SPEC-005's host-word table, and
+with `--fallout2-dir` also over a Fallout 2 install's scripts with SPEC-017's
+table. It prints findings by kind, the consistent pop/push signatures of the
+host words involved (and of SPEC-017's ten words under Fallout 2) and
+operand-type evidence; no script byte. It is a report, not a category, and
+never fails the run: §8.4's model check is not clean on the local corpus
+(884 scripts, 62 listed ones absent; 1082 findings: 1080 merge conflicts, 1
+underflow at `start_gdialog`, 1 unresolved call through a name lookup).
+Statement calls of value-returning words leave their result on the stack
+where branches rejoin; inference finds `set_critter_stat`,
+`critter_add_trait` and `critter_mod_skill` consistent only with push 0.
+That is a revision request for SPEC-017 §8.2, and Fallout 2 scripts stay
+gated.
 
 `--validate-exits` checks every distinct exit grid destination of each map
 (map 0 and -1 open the world and town maps and need no tile) and every
