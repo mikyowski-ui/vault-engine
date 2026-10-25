@@ -22,6 +22,7 @@ use vault_core::{
         Rect,
         editor::{self, Editor},
         endgame::{self, CreditInput, CreditStyle, Credits, Slide},
+        fallout2 as ui2,
         flow::{self, MenuChoice, MenuInput, SelectionAction, SelectionKey},
         options::Preferences,
         saveload::Mode,
@@ -85,7 +86,7 @@ enum Stage {
     },
     /// The endgame slideshow, returning to its world afterward.
     Slides {
-        slides: Vec<Slide>,
+        slides: Vec<Shown>,
         index: usize,
         since: u64,
         palette: Palette,
@@ -645,8 +646,21 @@ impl Game {
                 self.enter_credits("quotes.txt", CreditStyle::Reversed)
             }
             MenuChoice::Quotes => {}
-            // SPEC-019 §3.2: Fallout 2's Options opens the preferences.
-            MenuChoice::Options => {}
+            // SPEC-019 §3.2: Fallout 2's Options opens the preferences
+            // directly, without the options menu; closing them (or a
+            // confirmed quit) returns here.
+            MenuChoice::Options => {
+                if !self.prepare_fallout2() {
+                    return;
+                }
+                match self.world_with(CharacterSheet::default()) {
+                    Ok(mut world) => {
+                        world.open_preferences_from_menu();
+                        self.stage = Stage::Load(Box::new(world));
+                    }
+                    Err(error) => tracing::error!(%error, "preferences failed"),
+                }
+            }
             // §3.5: Exit stops the music.
             MenuChoice::Exit => {
                 self.audio.stop_music();
@@ -659,11 +673,42 @@ impl Game {
             },
         }
     }
+    fn fallout2_menu(&self) -> bool {
+        self.game_profile == vault_core::GameProfile::Fallout2
+    }
     fn menu_poll(&mut self, input: MenuInput) {
+        // SPEC-019 §3.2: Fallout 2's six buttons (keys only reach here).
+        if self.fallout2_menu() {
+            let input = match input {
+                MenuInput::None => ui2::MenuInput::None,
+                MenuInput::Key(key) => ui2::MenuInput::Key(key),
+                MenuInput::Escape => ui2::MenuInput::Escape,
+                MenuInput::CtrlR => ui2::MenuInput::CtrlR,
+                MenuInput::Press(_) | MenuInput::Release(_) => return,
+            };
+            self.menu_poll2(input);
+            return;
+        }
         let Stage::Menu { since } = self.stage else {
             return;
         };
         let poll = flow::menu_poll(input, self.modifiers[0], self.now.saturating_sub(since));
+        for sound in poll.sounds {
+            self.audio_cue(sound);
+        }
+        if poll.brightness != 0 {
+            self.brightness_step(poll.brightness > 0);
+        }
+        if let Some(choice) = poll.choice {
+            self.menu_choice(choice);
+        }
+    }
+    /// SPEC-019 §3.2 one poll of Fallout 2's menu.
+    fn menu_poll2(&mut self, input: ui2::MenuInput) {
+        let Stage::Menu { since } = self.stage else {
+            return;
+        };
+        let poll = ui2::menu_poll(input, self.modifiers[0], self.now.saturating_sub(since));
         for sound in poll.sounds {
             self.audio_cue(sound);
         }
@@ -969,7 +1014,9 @@ impl Game {
             }
             Stage::Load(world) => {
                 let changed = world.tick(now)?;
-                if !world.load_screen_open() {
+                if !world.load_screen_open() && !world.menu_preferences_open() {
+                    // SPEC-019 §3.2: preferences set from the menu stay.
+                    self.preferences = world.preferences.clone();
                     let Stage::Load(world) =
                         std::mem::replace(&mut self.stage, Stage::Menu { since: now })
                     else {
@@ -1104,13 +1151,42 @@ impl Game {
         match world.endgame.take() {
             Some(WorldEffect::Slideshow) => {
                 let globals = world.host.world.gvars.clone().unwrap_or_default();
-                let slides = endgame::slides(&globals);
+                // SPEC-019 §3.20: Fallout 2's slides are `endgame.txt`'s
+                // records whose global equals their value, in table order.
+                let slides: Vec<Shown> = match world.host.world.fallout2.as_deref() {
+                    Some(state) => {
+                        let painter = Painter {
+                            assets: &world.host.assets,
+                            palette: &world.palette,
+                        };
+                        let mut notes = Vec::new();
+                        let slides = ui2::endgame_slides(
+                            &state.tables.endgame,
+                            &globals,
+                            |row| painter.interface_row(row),
+                            &mut notes,
+                        );
+                        for note in notes {
+                            tracing::warn!(%note, "endgame slide");
+                        }
+                        slides.into_iter().map(Shown::from).collect()
+                    }
+                    None => endgame::slides(&globals)
+                        .into_iter()
+                        .map(Shown::from)
+                        .collect(),
+                };
                 let Stage::World(world) =
                     std::mem::replace(&mut self.stage, Stage::Menu { since: self.now })
                 else {
                     return;
                 };
                 self.stage_slide(slides, 0, world);
+            }
+            // SPEC-019 §3.20: Fallout 2 has no walk movies; the ending goes
+            // to the credits.
+            Some(_) if world.host.world.fallout2.is_some() => {
+                self.continue_with(Next::Credits);
             }
             Some(_) => {
                 // §3.31 the ending: walkm or walkw by gender, then credits.
@@ -1174,14 +1250,16 @@ impl Game {
     /// Show slide `index`, or return to the world after the last (§3.30
     /// exit: map processing resumes). Global 299 is cleared after the
     /// sequence (§3.30), not before it.
-    fn stage_slide(&mut self, slides: Vec<Slide>, index: usize, mut world: Box<MapPreview>) {
+    fn stage_slide(&mut self, slides: Vec<Shown>, index: usize, mut world: Box<MapPreview>) {
         if index >= slides.len() {
-            if let Some(value) = world
-                .host
-                .world
-                .gvars
-                .as_mut()
-                .and_then(|g| g.get_mut(endgame::DONE_GLOBAL))
+            // SPEC-019 §3.20: no global is written under Fallout 2.
+            if world.host.world.fallout2.is_none()
+                && let Some(value) = world
+                    .host
+                    .world
+                    .gvars
+                    .as_mut()
+                    .and_then(|g| g.get_mut(endgame::DONE_GLOBAL))
             {
                 *value = 0;
             }
@@ -1190,7 +1268,7 @@ impl Game {
         }
         let palette = self
             .assets
-            .palette(slides[index].palette_path().as_bytes())
+            .palette(slides[index].palette.as_bytes())
             .unwrap_or_else(|_| self.palette.clone());
         self.stage = Stage::Slides {
             slides,
@@ -1241,6 +1319,9 @@ impl Game {
             Stage::Movie { player, .. } => return Ok(player.image()),
             Stage::World(world) | Stage::Load(world) | Stage::Ending { world, .. } => {
                 return world.image();
+            }
+            Stage::Menu { .. } if self.game_profile == vault_core::GameProfile::Fallout2 => {
+                draw_menu2(&painter, &mut image, held);
             }
             Stage::Menu { .. } => {
                 painter.blit_opaque(&mut image, flow::MENU_BACKGROUND, 0, [0, 0]);
@@ -1294,7 +1375,7 @@ impl Game {
                 since,
                 ..
             } => {
-                let slide = slides[*index];
+                let slide = &slides[*index];
                 let offset = match slide.pan {
                     Some(right) => {
                         let step = (self.now.saturating_sub(*since) / endgame::PAN_STEP_MS) as i32;
@@ -1307,7 +1388,7 @@ impl Game {
                     }
                     None => 0,
                 };
-                if let Some(art) = painter.art(&slide.art_path())
+                if let Some(art) = painter.art(&slide.art)
                     && let Some(frame) = art.frame(0, 0)
                 {
                     image.blit(frame, [-i64::from(offset), 0]);
@@ -1336,14 +1417,17 @@ impl Game {
             }
         }
         let green = flow::SELECTION_TEXT;
-        painter.centered(
-            image,
-            101,
-            green,
-            premade.id.as_bytes(),
-            [150 - 100, 252],
-            200,
-        );
+        // SPEC-019 §3.3: no ID text under Fallout 2.
+        if self.game_profile != vault_core::GameProfile::Fallout2 {
+            painter.centered(
+                image,
+                101,
+                green,
+                premade.id.as_bytes(),
+                [150 - 100, 252],
+                200,
+            );
+        }
         painter.centered(image, 101, green, &self.sheet.name, [318 - 80, 40], 160);
         let context = StatContext::default();
         for k in 0..7 {
@@ -1571,6 +1655,30 @@ impl Game {
             // §3.4: a press plays `nmselec0`; the release over the button
             // selects it.
             // §3.3 only the nonzero pixels of the up image are clickable.
+            Stage::Menu { .. } if self.game_profile == vault_core::GameProfile::Fallout2 => {
+                let painter = Painter {
+                    assets: &self.assets,
+                    palette: &self.palette,
+                };
+                let mask = painter.art(flow::MENU_BUTTON_ART.0);
+                let pressed = ui2::menu_button_at(point).filter(|i| {
+                    let rect = ui2::menu_button(*i);
+                    mask.as_ref()
+                        .and_then(|art| art.frame(0, 0))
+                        .is_none_or(|frame| {
+                            let (w, h) = (i32::from(frame.width), i32::from(frame.height));
+                            let (x, y) = (point[0] - rect.x, point[1] - rect.y);
+                            (0..w).contains(&x)
+                                && (0..h).contains(&y)
+                                && frame.pixels()[(y * w + x) as usize] != 0
+                        })
+                });
+                if let Some(i) = pressed {
+                    self.held = Some(ui2::menu_button(i));
+                    self.menu_poll2(ui2::MenuInput::Press(i));
+                }
+                true
+            }
             Stage::Menu { .. } => {
                 let painter = Painter {
                     assets: &self.assets,
@@ -1659,6 +1767,12 @@ impl Game {
                 }
                 true
             }
+            Stage::Menu { .. } if self.game_profile == vault_core::GameProfile::Fallout2 => {
+                if let Some(i) = (0..6).find(|i| over == Some(ui2::menu_button(*i))) {
+                    self.menu_poll2(ui2::MenuInput::Release(i));
+                }
+                held.is_some()
+            }
             Stage::Menu { .. } => {
                 if let Some(button) = flow::MENU_BUTTONS
                     .into_iter()
@@ -1745,6 +1859,74 @@ impl Game {
 }
 
 /// A red button at `origin`.
+/// SPEC-019 §3.2 Fallout 2's main menu: `mainmenu.frm`, six buttons at
+/// (30, 19 + 41i) with their `misc.msg` 9 + i labels (or the engine
+/// strings) centered on x = 126 in font 104, the copyright `misc.msg` 20
+/// (none when missing) and the version text.
+fn draw_menu2(painter: &Painter, image: &mut IndexedImage, held: Option<Rect>) {
+    painter.blit_opaque(image, flow::MENU_BACKGROUND, 0, [0, 0]);
+    for (i, fallback) in ui2::text::MENU.iter().enumerate() {
+        let rect = ui2::menu_button(i);
+        let (up, down) = flow::MENU_BUTTON_ART;
+        let art = if held == Some(rect) { down } else { up };
+        painter.blit(image, art, 0, [rect.x, rect.y]);
+        let label = painter.message_or("misc.msg", 9 + i as i32, fallback);
+        let origin = ui2::menu_label(i, painter.width(104, &label));
+        painter.text(image, 104, flow::MENU_LABEL_COLOR, &label, origin, 200);
+    }
+    let copyright = painter.message("misc.msg", ui2::MENU_COPYRIGHT_ID);
+    if copyright.is_empty() {
+        crate::interface::note_once("misc.msg 20", "no copyright line");
+    } else {
+        painter.text(
+            image,
+            100,
+            flow::MENU_TEXT_COLOR,
+            &copyright,
+            flow::MENU_COPYRIGHT,
+            625,
+        );
+    }
+    let version = ui2::MENU_VERSION.as_bytes();
+    let [right, y] = flow::MENU_VERSION_RIGHT;
+    painter.text(
+        image,
+        100,
+        flow::MENU_TEXT_COLOR,
+        version,
+        [right - painter.width(100, version), y],
+        200,
+    );
+}
+
+/// One slideshow step as shown: SPEC-014 §3.30's fixed table or SPEC-019
+/// §3.20's `endgame.txt` records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Shown {
+    art: String,
+    palette: String,
+    /// A desert pan, and whether it runs left to right.
+    pan: Option<bool>,
+}
+impl From<Slide> for Shown {
+    fn from(slide: Slide) -> Self {
+        Self {
+            art: slide.art_path(),
+            palette: slide.palette_path(),
+            pan: slide.pan,
+        }
+    }
+}
+impl From<ui2::Slide2> for Shown {
+    fn from(slide: ui2::Slide2) -> Self {
+        Self {
+            art: slide.art,
+            palette: slide.palette,
+            pan: slide.pan,
+        }
+    }
+}
+
 fn red_button(origin: [i32; 2]) -> Rect {
     Rect::new(origin[0], origin[1], 15, 16)
 }
@@ -1913,6 +2095,163 @@ mod tests {
         let (_, audio, mixer) = start("[sound]\nmusic=1\n");
         assert!(audio.music_enabled());
         assert!(mixer.lock().unwrap().playing(Channel::Music));
+    }
+
+    /// A synthetic Fallout 2 install (SPEC-018 §8.13's), with `extra`
+    /// files added to the corpus first; the game over it, under the
+    /// Fallout 2 profile, headless.
+    fn fallout2_game(extra: &[(&str, Vec<u8>)]) -> (tempfile::TempDir, tempfile::TempDir, Game) {
+        let corpus = synthetic_corpus();
+        vault_fixtures::fallout2::write_tables(corpus.path());
+        for (path, bytes) in extra {
+            let path = corpus.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let install = tempfile::tempdir().unwrap();
+        let (master, critter) =
+            vault_fixtures::dat2::fallout2_install(corpus.path(), install.path(), 2);
+        let vfs = crate::preview::PreviewArgs {
+            game_profile: vault_core::GameProfile::Fallout2,
+            master_dat: Some(master),
+            critter_dat: Some(critter),
+            game: true,
+            headless: true,
+            ..Default::default()
+        }
+        .source()
+        .unwrap();
+        let mut game = Game::new(vfs, "english", 1, install.path().join("saves"), None).unwrap();
+        game.headless = true;
+        game.game_profile = vault_core::GameProfile::Fallout2;
+        (corpus, install, game)
+    }
+
+    #[test]
+    fn spec019_fallout2_menu_options_slides_elevator_and_slots() {
+        let elevators =
+            b"[Elevator 0]\nbackground=elevbg\nstop_0=1,0,20100,1\nstop_1=2,0,20100,2\n";
+        let endgame = b"5, 1, enda, nar_a\n5, 2, endb, nar_b\n9, 0, dp, nar_c, -1\n";
+        let (_corpus, install, mut game) = fallout2_game(&[
+            ("data/vault-engine/elevators.txt", elevators.to_vec()),
+            ("data/endgame.txt", endgame.to_vec()),
+            (
+                "art/intrface/elevbg.frm",
+                vault_fixtures::world::frm(230, 284, 70),
+            ),
+            (
+                "art/intrface/mainmenu.frm",
+                vault_fixtures::world::frm(640, 480, 3),
+            ),
+            (
+                "art/intrface/menuup.frm",
+                vault_fixtures::world::frm(26, 26, 90),
+            ),
+            (
+                "art/intrface/menudown.frm",
+                vault_fixtures::world::frm(26, 26, 91),
+            ),
+        ]);
+        // §3.2: six buttons on the left; Options (button 3) at (30, 142).
+        assert!(matches!(game.stage, Stage::Menu { .. }));
+        let image = game.image().unwrap();
+        let painter = Painter {
+            assets: &game.assets,
+            palette: &game.palette,
+        };
+        let up = painter.art(flow::MENU_BUTTON_ART.0).unwrap();
+        let frame = up.frame(0, 0).unwrap();
+        let (w, h) = (i32::from(frame.width), i32::from(frame.height));
+        let opaque = (0..h)
+            .flat_map(|y| (0..w).map(move |x| [x, y]))
+            .find(|[x, y]| frame.pixels()[(y * w + x) as usize] != 0)
+            .unwrap();
+        let color = frame.pixels()[(opaque[1] * w + opaque[0]) as usize];
+        let rect = ui2::menu_button(3);
+        let at = [rect.x + opaque[0], rect.y + opaque[1]];
+        assert_eq!(image.pixels()[(at[1] * 640 + at[0]) as usize], color);
+        // Nothing at Fallout 1's button column.
+        assert_eq!(image.pixels()[(45 * 640 + 430) as usize], 3);
+        // The Options button's press and release: the preferences, directly.
+        assert!(game.click(at, false));
+        assert!(game.release(Some(at), false));
+        assert!(matches!(game.stage, Stage::Load(_)));
+        let world = game.world().unwrap();
+        assert!(world.menu_preferences_open());
+        // §2.7: no cover over the fifth knob row.
+        assert!(world.host.world.fallout2.is_some());
+        // Cancel (Esc) closes them; the next pass is back at the menu.
+        assert!(game.step(KeyCode::Escape));
+        game.tick(100).unwrap();
+        assert!(matches!(game.stage, Stage::Menu { .. }));
+        // `o` opens them too.
+        assert!(game.step(KeyCode::KeyO));
+        assert!(matches!(game.stage, Stage::Load(_)));
+        assert!(game.step(KeyCode::Escape));
+        game.tick(200).unwrap();
+        // A new game; §3.20 slides from endgame.txt: endb still, dp panned
+        // right to left; no global written.
+        assert!(game.step(KeyCode::KeyN));
+        assert!(game.step(KeyCode::KeyT));
+        let world = game.world().unwrap();
+        let mut gvars = world.host.world.gvars.clone().unwrap();
+        gvars[5] = 2;
+        gvars[9] = 0;
+        world.host.world.gvars = Some(gvars.clone());
+        // §3.11: a Fallout 1 header is an old version, a short one corrupt.
+        let root = install.path().join("saves");
+        world.host.save_game(&root, 1, &Default::default()).unwrap();
+        let slot = |n: u8| root.join(format!("SAVEGAME/SLOT{n:02}"));
+        std::fs::create_dir_all(slot(2)).unwrap();
+        let mut old = std::fs::read(slot(1).join("SAVE.DAT")).unwrap();
+        old[0x1B] = 1;
+        std::fs::write(slot(2).join("SAVE.DAT"), &old).unwrap();
+        std::fs::create_dir_all(slot(3)).unwrap();
+        std::fs::write(slot(3).join("SAVE.DAT"), &old[..100]).unwrap();
+        let slots = world.slot_states();
+        assert!(matches!(
+            slots[0],
+            vault_core::ui::saveload::SlotState::Occupied(_)
+        ));
+        assert_eq!(slots[1], vault_core::ui::saveload::SlotState::OldVersion);
+        assert_eq!(slots[2], vault_core::ui::saveload::SlotState::Corrupt);
+        // The elevator of metarule 15 type 0: two stops from elevators.txt.
+        let view = world.host.elevator_view(0).unwrap();
+        assert_eq!(view.background, "elevbg.frm");
+        assert_eq!(view.destinations, [(1, 0, 20100), (2, 0, 20100)]);
+        world.open_elevator(0);
+        world.image().unwrap();
+        assert!(world.elevator_open());
+        world.host.perform_elevator(0, Some(0)).unwrap();
+        assert_eq!(
+            world
+                .host
+                .world
+                .pending_transition
+                .map(|transition| transition.map),
+            Some(1)
+        );
+        world.endgame = Some(WorldEffect::Slideshow);
+        game.tick(300).unwrap();
+        let Stage::Slides { slides, .. } = &game.stage else {
+            panic!("the slideshow");
+        };
+        assert_eq!(
+            slides
+                .iter()
+                .map(|slide| slide.art.as_str())
+                .collect::<Vec<_>>(),
+            ["art/intrface/endb.frm", "art/intrface/dp.frm"]
+        );
+        assert_eq!(slides[1].pan, Some(false));
+        for _ in 0..20 {
+            if !matches!(game.stage, Stage::Slides { .. }) {
+                break;
+            }
+            game.step(KeyCode::Space);
+        }
+        let world = game.world().unwrap();
+        assert_eq!(world.host.world.gvars.as_ref().unwrap(), &gvars);
     }
 
     #[test]

@@ -46,9 +46,10 @@ impl Mode {
 
 /// A slot's state, from its `SAVE.DAT` header.
 ///
-/// §3.14 `[May-improve]`: the reference's "old version" state (`lsgame.msg`
-/// 113, 116 and 136) is unreachable in R1, because the header reader reports
-/// only short reads and bad signatures; it is omitted here.
+/// §3.14 `[May-improve]`: under Fallout 1 the reference's "old version"
+/// state (`lsgame.msg` 113, 116 and 136) is unreachable in R1, because the
+/// header reader reports only short reads and bad signatures. SPEC-019
+/// §3.11 reaches it under Fallout 2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotState {
     Occupied(SlotInfo),
@@ -56,6 +57,10 @@ pub enum SlotState {
     Empty,
     /// A short header or a bad signature.
     Corrupt,
+    /// SPEC-019 §3.11, Fallout 2 only: a full header with a good signature
+    /// that fails SPEC-018 §7.2's other checks (a Fallout 1 slot, another
+    /// layout tag or campaign count, or a gated save once the gate opens).
+    OldVersion,
 }
 /// The header fields the screen shows.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -90,6 +95,7 @@ pub fn second_line(state: &SlotState, text: impl Fn(i32) -> Vec<u8>) -> (Vec<u8>
         SlotState::Occupied(info) => (info.description.clone(), false),
         SlotState::Empty => ([b"       ".to_vec(), text(111)].concat(), false),
         SlotState::Corrupt => (text(112), true),
+        SlotState::OldVersion => (text(113), true),
     }
 }
 pub fn caption_color(selected: bool) -> ColorKey {

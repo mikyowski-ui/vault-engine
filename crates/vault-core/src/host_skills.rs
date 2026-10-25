@@ -1306,27 +1306,38 @@ impl<A: WorldAssets> WorldHost<A> {
             .world
             .get(self.world.player)
             .map_or(0, |o| o.raw.elevation);
-        skills::elevator(kind).map_or(0, |elevator| {
+        self.elevator_view(kind).map_or(0, |elevator| {
             elevator.start_level(self.world.map.header.map_number, elevation)
         })
+    }
+    /// The elevator of type `kind`: SPEC-013 §2.7's compiled table, or
+    /// under Fallout 2 SPEC-018 §4.9's `elevators.txt` record.
+    pub fn elevator_view(&self, kind: i32) -> Option<skills::ElevatorView> {
+        match self.world.fallout2.as_deref() {
+            Some(state) => state.tables.elevators.get(kind).map(Into::into),
+            None => skills::elevator(kind).map(Into::into),
+        }
     }
     /// §3.21 performing an elevator choice. Safe rule: Cancel (`None`)
     /// changes nothing. The same map places the player (closing a nearby
     /// elevator door when the elevation changes); another map closes the
     /// door and requests a transition facing southeast.
     pub fn perform_elevator(&mut self, kind: i32, choice: Option<usize>) -> Result<(), WorldError> {
-        let Some(&(map, elevation, hex)) = skills::elevator(kind)
-            .zip(choice)
-            .and_then(|(elevator, choice)| elevator.destinations.get(choice))
+        let Some(elevator) = self.elevator_view(kind) else {
+            return Ok(());
+        };
+        let Some(&(map, elevation, hex)) =
+            choice.and_then(|choice| elevator.destinations.get(choice))
         else {
             return Ok(());
         };
+        let doors = elevator.doors;
         self.world.capture_automap();
         let player = self.world.player;
         let current = self.world.get(player).map_or(0, |o| o.raw.elevation);
         if map == self.world.map.header.map_number {
             let door = (elevation != current)
-                .then(|| self.elevator_door())
+                .then(|| self.elevator_door(&doors))
                 .flatten();
             self.place_player(hex, elevation, 2)?;
             if elevation != current {
@@ -1338,7 +1349,7 @@ impl<A: WorldAssets> WorldHost<A> {
         } else {
             // The combat pass does not close the door on a map change.
             if !self.world.combat
-                && let Some(door) = self.elevator_door()
+                && let Some(door) = self.elevator_door(&doors)
             {
                 self.close_door_instantly(door);
             }
@@ -1353,14 +1364,14 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// The first elevator door within 4 hexes of the player on its
     /// elevation, in object order.
-    fn elevator_door(&self) -> Option<ObjectRef> {
+    fn elevator_door(&self, doors: &[u32]) -> Option<ObjectRef> {
         let player = self.world.player;
         let (hex, elevation) = self
             .world
             .get(player)
             .and_then(|o| Some((o.raw.hex?, o.raw.elevation)))?;
         self.world.iter().find_map(|(reference, object)| {
-            (skills::ELEVATOR_DOORS.contains(&object.raw.pid)
+            (doors.contains(&object.raw.pid)
                 && object.raw.elevation == elevation
                 && object.raw.hex.is_some_and(|door| {
                     vault_formats::HexGrid::lattice_distance(hex, door).is_ok_and(|d| d <= 4)

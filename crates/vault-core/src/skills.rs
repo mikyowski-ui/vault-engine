@@ -742,43 +742,124 @@ impl Elevator {
     }
     /// Gauge cell `trunc(level × 12 / (n - 1))`.
     pub fn gauge_cell(&self, level: usize) -> i32 {
-        (level as i32 * 12) / (self.buttons() as i32 - 1).max(1)
+        gauge_cell_for(self.buttons(), level)
     }
     /// The travel sound for `levels` levels travelled.
     pub fn travel_sound(&self, levels: usize) -> Option<&'static str> {
-        let table: &[&str] = match self.buttons() {
-            2 => &["elv1_1"],
-            3 => &["elv1_2", "elv1_1"],
-            4 => &["elv1_3", "elv2_3", "elv1_1"],
-            _ => &[],
-        };
-        table.get(levels.checked_sub(1)?).copied()
+        travel_sound_for(self.buttons(), levels)
     }
     /// Busy-wait per gauge step: 23, 46 or 69 ms for 2, 3 or 4 buttons.
     pub fn step_ms(&self) -> u64 {
-        ((self.buttons() as f32 - 1.0) / 12.0 * 276.923_07) as u64
+        step_ms_for(self.buttons())
     }
     /// The gauge cells drawn moving from `from` to `to`: steps of
     /// `(n - 1) / 12` cell units; safe rule: the exact target cell ends it.
     pub fn gauge_path(&self, from: usize, to: usize) -> Vec<i32> {
-        let step = (self.buttons() as f32 - 1.0) / 12.0;
-        let target = self.gauge_cell(to) as f32;
-        let mut position = self.gauge_cell(from) as f32;
-        let mut cells = Vec::new();
-        if from == to {
-            return cells;
-        }
-        let down = target < position;
-        loop {
-            position += if down { -step } else { step };
-            if (down && position <= target) || (!down && position >= target) {
-                break;
-            }
-            cells.push(position as i32);
-        }
-        cells.push(target as i32);
-        cells
+        gauge_path_for(self.buttons(), from, to)
     }
+}
+/// An elevator as the window shows and performs it: SPEC-013 §2.7's
+/// compiled table under Fallout 1, SPEC-018 §4.9's engine-owned table
+/// under Fallout 2 (with its own doors).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElevatorView {
+    /// File names under `art/intrface/`.
+    pub background: String,
+    pub panel: Option<String>,
+    pub keys: Vec<u8>,
+    pub destinations: Vec<(i32, u8, i32)>,
+    pub doors: Vec<u32>,
+}
+impl From<&Elevator> for ElevatorView {
+    fn from(elevator: &Elevator) -> Self {
+        Self {
+            background: elevator.background.to_owned(),
+            panel: elevator.panel.map(str::to_owned),
+            keys: elevator.keys.to_vec(),
+            destinations: elevator.destinations.to_vec(),
+            doors: ELEVATOR_DOORS.to_vec(),
+        }
+    }
+}
+impl From<&vault_formats::fallout2::elevators::Elevator> for ElevatorView {
+    fn from(elevator: &vault_formats::fallout2::elevators::Elevator) -> Self {
+        let file = |stem: &str| format!("{}.frm", stem.to_ascii_lowercase());
+        Self {
+            background: file(&elevator.background),
+            panel: elevator.panel.as_deref().map(file),
+            keys: elevator.stops.iter().map(|stop| stop.key).collect(),
+            destinations: elevator
+                .stops
+                .iter()
+                .map(|stop| (stop.map as i32, stop.elevation, stop.tile))
+                .collect(),
+            doors: elevator.doors.clone(),
+        }
+    }
+}
+impl ElevatorView {
+    pub fn buttons(&self) -> usize {
+        self.destinations.len()
+    }
+    pub fn button_for_key(&self, key: u8) -> Option<usize> {
+        self.keys.iter().position(|k| k.eq_ignore_ascii_case(&key))
+    }
+    pub fn start_level(&self, map: i32, elevation: u8) -> usize {
+        self.destinations
+            .iter()
+            .position(|(m, e, _)| *m == map && *e == elevation)
+            .unwrap_or(0)
+    }
+    pub fn gauge_cell(&self, level: usize) -> i32 {
+        gauge_cell_for(self.buttons(), level)
+    }
+    pub fn travel_sound(&self, levels: usize) -> Option<&'static str> {
+        travel_sound_for(self.buttons(), levels)
+    }
+    pub fn step_ms(&self) -> u64 {
+        step_ms_for(self.buttons())
+    }
+    pub fn gauge_path(&self, from: usize, to: usize) -> Vec<i32> {
+        gauge_path_for(self.buttons(), from, to)
+    }
+}
+/// Gauge cell `trunc(level × 12 / (n - 1))` with `buttons` buttons.
+fn gauge_cell_for(buttons: usize, level: usize) -> i32 {
+    (level as i32 * 12) / (buttons as i32 - 1).max(1)
+}
+/// The travel sound for `levels` levels travelled with `buttons` buttons.
+fn travel_sound_for(buttons: usize, levels: usize) -> Option<&'static str> {
+    let table: &[&str] = match buttons {
+        2 => &["elv1_1"],
+        3 => &["elv1_2", "elv1_1"],
+        4 => &["elv1_3", "elv2_3", "elv1_1"],
+        _ => &[],
+    };
+    table.get(levels.checked_sub(1)?).copied()
+}
+/// Busy-wait per gauge step with `buttons` buttons.
+fn step_ms_for(buttons: usize) -> u64 {
+    ((buttons as f32 - 1.0) / 12.0 * 276.923_07) as u64
+}
+/// The gauge path with `buttons` buttons.
+fn gauge_path_for(buttons: usize, from: usize, to: usize) -> Vec<i32> {
+    let step = (buttons as f32 - 1.0) / 12.0;
+    let target = gauge_cell_for(buttons, to) as f32;
+    let mut position = gauge_cell_for(buttons, from) as f32;
+    let mut cells = Vec::new();
+    if from == to {
+        return cells;
+    }
+    let down = target < position;
+    loop {
+        position += if down { -step } else { step };
+        if (down && position <= target) || (!down && position >= target) {
+            break;
+        }
+        cells.push(position as i32);
+    }
+    cells.push(target as i32);
+    cells
 }
 /// The final pause after travel.
 pub const ELEVATOR_PAUSE_MS: u64 = 200;

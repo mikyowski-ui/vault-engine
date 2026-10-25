@@ -49,6 +49,7 @@ const DESCRIPTION_CANCEL: Rect = Rect::new(169 + 160, 116 + 58, 15, 16);
 fn scan(
     root: &std::path::Path,
     game: vault_core::GameProfile,
+    fallout2: Option<(usize, bool)>,
 ) -> (Vec<SlotState>, Vec<Option<Vec<u8>>>) {
     (1..=saveload::SLOTS as u8)
         .map(|slot| {
@@ -58,7 +59,22 @@ fn scan(
             }) else {
                 return (SlotState::Empty, None);
             };
-            match SaveHeader::parse_for(&bytes[..bytes.len().min(HEADER_LEN)], game) {
+            let header = &bytes[..bytes.len().min(HEADER_LEN)];
+            // SPEC-019 §3.11: under Fallout 2 a full header with a good
+            // signature that fails SPEC-018 §7.2's other checks is an old
+            // version; a short one or a bad signature stays corrupt.
+            let parsed = SaveHeader::parse_for(header, game).and_then(|parsed| {
+                if let Some((globals, gated)) = fallout2 {
+                    parsed.check_fallout2(globals, gated)?;
+                }
+                Ok(parsed)
+            });
+            let signed = header.len() == HEADER_LEN
+                && header.starts_with(vault_formats::savegame::SIGNATURE);
+            if parsed.is_err() && fallout2.is_some() && signed {
+                return (SlotState::OldVersion, None);
+            }
+            match parsed {
                 Ok(header) => (
                     SlotState::Occupied(SlotInfo {
                         name: header.name_text().to_vec(),
@@ -97,6 +113,21 @@ impl MapPreview {
             vault_core::GameProfile::Fallout1
         }
     }
+    /// Fallout 2's installed campaign count and gate state for SPEC-018
+    /// §7.2 checks 4-5, `None` under Fallout 1.
+    fn fallout2_slot_check(&self) -> Option<(usize, bool)> {
+        self.host.world.fallout2.as_ref()?;
+        let globals = self.host.world.gvars.as_ref().map_or(0, Vec::len);
+        Some((globals, self.host.scripts_gated()))
+    }
+    /// Every slot's state and thumbnail.
+    fn scan_slots(&self) -> (Vec<SlotState>, Vec<Option<Vec<u8>>>) {
+        scan(
+            &self.save_root,
+            self.save_profile(),
+            self.fallout2_slot_check(),
+        )
+    }
     /// The current view scaled to a 224-by-133 thumbnail.
     fn capture_thumbnail(&mut self) -> Vec<u8> {
         match self.map_view_image() {
@@ -112,7 +143,7 @@ impl MapPreview {
             self.quick.forget();
         }
         let capture = self.capture_thumbnail();
-        let (slots, thumbnails) = scan(&self.save_root, self.save_profile());
+        let (slots, thumbnails) = self.scan_slots();
         self.screen = Screen::SaveLoad(Box::new(SaveLoadScreen {
             mode,
             slots,
@@ -198,12 +229,23 @@ impl MapPreview {
                     l2,
                     164,
                 );
-                if let Some((short, elevation)) =
-                    saveload::location_messages(info.map, info.elevation)
-                {
-                    let mut location = painter.message("map.msg", short);
-                    location.push(b' ');
-                    location.extend(painter.message("map.msg", elevation));
+                // SPEC-019 §3.11: under Fallout 2 the saved map's location
+                // name (SPEC-018 §5.2), no elevation name; an unknown map
+                // shows an empty location.
+                let location = match self.host.world.fallout2.as_deref() {
+                    Some(state) => {
+                        Some(state.location_name(i32::from(info.map as i16)).into_bytes())
+                    }
+                    None => saveload::location_messages(info.map, info.elevation).map(
+                        |(short, elevation)| {
+                            let mut location = painter.message("map.msg", short);
+                            location.push(b' ');
+                            location.extend(painter.message("map.msg", elevation));
+                            location
+                        },
+                    ),
+                };
+                if let Some(location) = location {
                     // G-31 / §3.14: wrapped to 164 pixels, up to three lines
                     // 12 apart (the `[May-improve]` rule for the reference,
                     // which shows only the first).
@@ -228,6 +270,11 @@ impl MapPreview {
             }
             SlotState::Corrupt => {
                 let text = painter.message("lsgame.msg", 115);
+                painter.text(&mut image, 101, ColorKey::ERROR, &text, [404, 262], 160);
+            }
+            // SPEC-019 §3.11: `lsgame.msg` 116 in the info box.
+            SlotState::OldVersion => {
+                let text = painter.message("lsgame.msg", 116);
                 painter.text(&mut image, 101, ColorKey::ERROR, &text, [404, 262], 160);
             }
         }
@@ -326,6 +373,8 @@ impl MapPreview {
             // The reference's body is 136 ("older version"); under the safe
             // rule a corrupt slot uses 135.
             SlotState::Corrupt => self.show_notice(134, 135, false),
+            // SPEC-019 §3.11: `iisxxxx1`, title 134 and body 136.
+            SlotState::OldVersion => self.show_notice(134, 136, false),
             SlotState::Occupied(_) => {
                 let mode = screen.mode;
                 match self.host.load_game(&self.save_root, slot as u8 + 1) {
@@ -405,10 +454,10 @@ impl MapPreview {
                 self.notify(text);
             }
         } else {
-            let profile = self.save_profile();
+            let scanned = self.scan_slots();
             if let Screen::SaveLoad(screen) = &mut self.screen {
                 // A failed save rescans the slots and stays open.
-                (screen.slots, screen.thumbnails) = scan(&self.save_root, profile);
+                (screen.slots, screen.thumbnails) = scanned;
             }
         }
     }
@@ -507,7 +556,7 @@ impl MapPreview {
             Quick::Pick(mode) => self.open_save_screen(mode),
             _ => {
                 let slot = self.slot_list.selected;
-                let (slots, _) = scan(&self.save_root, self.save_profile());
+                let (slots, _) = self.scan_slots();
                 let description = match &slots[slot] {
                     SlotState::Occupied(info) => info.description.clone(),
                     _ => Vec::new(),
@@ -575,5 +624,13 @@ impl MapPreview {
         let body = self.message("lsgame.msg", body);
         let dialog = Dialog::done([169, 116], title, body, ColorKey::ERROR);
         self.show_dialog(if quit { dialog.quitting() } else { dialog });
+    }
+}
+
+#[cfg(test)]
+impl MapPreview {
+    /// Every slot's state, as the screen would list it.
+    pub(crate) fn slot_states(&self) -> Vec<SlotState> {
+        self.scan_slots().0
     }
 }

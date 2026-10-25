@@ -264,6 +264,9 @@ pub struct MapPreview {
     /// SPEC-014 §3.42 the character screen's info line, folder and skill
     /// cursor, kept from one opening to the next.
     character_memory: character::Remembered,
+    /// SPEC-019 §3.2 the preferences were opened from Fallout 2's main
+    /// menu, so closing them leaves the session.
+    menu_preferences: bool,
     /// The `enhanced` preset's presentation (camera, dual-layer frame and
     /// roof peeking); `None` is Vanilla, the default.
     enhanced: Option<Box<enhanced::Enhanced>>,
@@ -621,6 +624,7 @@ impl MapPreview {
             egg: None,
             interrupt_walk: true,
             character_memory: character::Remembered::default(),
+            menu_preferences: false,
             enhanced: None,
         })
     }

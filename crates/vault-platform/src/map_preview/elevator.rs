@@ -57,7 +57,7 @@ fn elevator_button(origin: [i32; 2], i: usize) -> Rect {
 impl MapPreview {
     /// A deferred elevator request opens the window over the world.
     pub(crate) fn open_elevator(&mut self, kind: i32) {
-        if skills::elevator(kind).is_some() {
+        if self.host.elevator_view(kind).is_some() {
             let start = self.host.elevator_start_level(kind);
             self.screen = Screen::Elevator(ElevatorScreen {
                 kind,
@@ -67,8 +67,11 @@ impl MapPreview {
         }
     }
     fn elevator_origin(&self, painter: &Painter, kind: i32) -> [i32; 2] {
-        let background = skills::elevator(kind).map_or("el_mil1.frm", |e| e.background);
-        skills::elevator_origin(painter.size(background).unwrap_or([230, 284]))
+        let background = self
+            .host
+            .elevator_view(kind)
+            .map_or_else(|| "el_mil1.frm".to_owned(), |e| e.background);
+        skills::elevator_origin(painter.size(&background).unwrap_or([230, 284]))
     }
     pub(crate) fn elevator_image(&mut self) -> AppResult<IndexedImage> {
         let Screen::Elevator(screen) = &self.screen else {
@@ -79,7 +82,7 @@ impl MapPreview {
             .travel
             .as_ref()
             .and_then(|travel| travel.cell(self.clock));
-        let elevator = skills::elevator(kind).ok_or("invalid elevator")?;
+        let elevator = self.host.elevator_view(kind).ok_or("invalid elevator")?;
         let view = self.map_view_image()?;
         let mut image = self.compose_world(view);
         let painter = Painter {
@@ -87,9 +90,9 @@ impl MapPreview {
             palette: &self.palette,
         };
         let origin = self.elevator_origin(&painter, kind);
-        painter.blit_opaque(&mut image, elevator.background, 0, origin);
-        if let Some(panel) = elevator.panel {
-            let height = painter.size(elevator.background).map_or(284, |[_, h]| h);
+        painter.blit_opaque(&mut image, &elevator.background, 0, origin);
+        if let Some(panel) = &elevator.panel {
+            let height = painter.size(&elevator.background).map_or(284, |[_, h]| h);
             let panel_height = painter.size(panel).map_or(248, |[_, h]| h);
             painter.blit_opaque(
                 &mut image,
@@ -123,7 +126,7 @@ impl MapPreview {
         let Screen::Elevator(screen) = &mut self.screen else {
             return;
         };
-        let Some(elevator) = skills::elevator(screen.kind) else {
+        let Some(elevator) = self.host.elevator_view(screen.kind) else {
             self.screen = Screen::Map;
             return;
         };
@@ -192,7 +195,7 @@ impl MapPreview {
             palette: &self.palette,
         };
         let origin = self.elevator_origin(&painter, kind);
-        let buttons = skills::elevator(kind).map_or(0, |e| e.buttons());
+        let buttons = self.host.elevator_view(kind).map_or(0, |e| e.buttons());
         if let Some(rect) = (0..buttons)
             .map(|i| elevator_button(origin, i))
             .find(|rect| rect.contains(point))
@@ -216,7 +219,7 @@ impl MapPreview {
             palette: &self.palette,
         };
         let origin = self.elevator_origin(&painter, kind);
-        let buttons = skills::elevator(kind).map_or(0, |e| e.buttons());
+        let buttons = self.host.elevator_view(kind).map_or(0, |e| e.buttons());
         let Some(level) = (0..buttons).find(|i| over == Some(elevator_button(origin, *i))) else {
             return false;
         };
@@ -238,7 +241,7 @@ impl MapPreview {
         // case) all type their character (the keypad's operators type none).
         let character =
             key_digit(key).or_else(|| key_text(key, true).filter(u8::is_ascii_uppercase));
-        let level = character.and_then(|c| skills::elevator(screen.kind)?.button_for_key(c));
+        let level = character.and_then(|c| self.host.elevator_view(screen.kind)?.button_for_key(c));
         match level {
             Some(level) => {
                 self.choose_level(Some(level));
@@ -246,5 +249,13 @@ impl MapPreview {
             }
             None => false,
         }
+    }
+}
+
+#[cfg(test)]
+impl MapPreview {
+    /// Whether the elevator window is open.
+    pub(crate) fn elevator_open(&self) -> bool {
+        matches!(self.screen, Screen::Elevator(_))
     }
 }

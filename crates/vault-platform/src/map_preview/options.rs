@@ -579,14 +579,17 @@ impl MapPreview {
         }
         true
     }
-    /// Global 603 at its initial 0 covers the fifth knob.
+    /// Global 603 at its initial 0 covers the fifth knob; SPEC-019 §2.7:
+    /// never under Fallout 2.
     fn preferences_covered(&self) -> bool {
-        self.host
-            .world
-            .gvars
-            .as_ref()
-            .and_then(|globals| globals.get(options::COVER_GLOBAL))
-            .is_none_or(|value| *value == 0)
+        self.host.world.fallout2.is_none()
+            && self
+                .host
+                .world
+                .gvars
+                .as_ref()
+                .and_then(|globals| globals.get(options::COVER_GLOBAL))
+                .is_none_or(|value| *value == 0)
     }
     fn options_action(&mut self, action: OptionsAction) {
         match action {
@@ -683,9 +686,30 @@ impl MapPreview {
             self.quit_requested = true;
         }
     }
+    /// SPEC-019 §3.2: the main menu's Options opens the preferences
+    /// directly; closing them leaves the session.
+    pub(crate) fn open_preferences_from_menu(&mut self) {
+        self.open_preferences();
+        self.menu_preferences = true;
+    }
+    /// The preferences opened from the main menu are still up (or their
+    /// quit confirmation is).
+    pub(crate) fn menu_preferences_open(&self) -> bool {
+        self.menu_preferences
+            && !self.quit_requested
+            && matches!(
+                self.screen,
+                Screen::Options(OptionsScreen::Preferences(_) | OptionsScreen::Quit)
+            )
+    }
     pub(super) fn close_preferences(&mut self, keep: bool) {
+        let after = if self.menu_preferences {
+            Screen::Map
+        } else {
+            Screen::Options(OptionsScreen::Menu)
+        };
         let Screen::Options(OptionsScreen::Preferences(state)) =
-            std::mem::replace(&mut self.screen, Screen::Options(OptionsScreen::Menu))
+            std::mem::replace(&mut self.screen, after)
         else {
             return;
         };
