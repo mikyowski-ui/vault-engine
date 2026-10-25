@@ -391,6 +391,14 @@ impl<A: WorldAssets> WorldHost<A> {
             AUTOMAP_FILE.to_string(),
             self.world.persistence.automap.bytes().to_vec(),
         ));
+        // The `enhanced` state sits beside the slot's files, never in them
+        // (`SAVE.DAT` keeps SPEC-008's layout); Vanilla writes none.
+        if self.preset() == crate::EnginePreset::Enhanced {
+            files.push((
+                crate::companion::SIDECAR.to_string(),
+                crate::companion::write_sidecar(&self.world.companion_distance).into_bytes(),
+            ));
+        }
         fs::create_dir_all(&dir).map_err(|error| io(&dir, error))?;
         let staged = |name: &str| dir.join(format!("{name}.TMP"));
         let staging = files.iter().try_for_each(|(name, bytes)| {
@@ -498,7 +506,21 @@ impl<A: WorldAssets> WorldHost<A> {
                 "save names no loadable map ({map_file:?})"
             )));
         }
-        self.apply_save(save, maps, automap)
+        // The `enhanced` sidecar, read (and validated) under Enhanced only;
+        // a slot without one has no companion settings.
+        let distances = if self.preset() == crate::EnginePreset::Enhanced {
+            let path = dir.join(crate::companion::SIDECAR);
+            match fs::read_to_string(&path) {
+                Ok(text) => crate::companion::parse_sidecar(&text).map_err(WorldError::Invalid)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+                Err(error) => return Err(io(&path, error)),
+            }
+        } else {
+            BTreeMap::new()
+        };
+        self.apply_save(save, maps, automap)?;
+        self.world.companion_distance = distances;
+        Ok(())
     }
     /// Reset like a new game, keeping rules and generator state (the random
     /// component has no bytes and is not restored, so the fresh world's

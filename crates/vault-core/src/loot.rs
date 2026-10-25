@@ -28,6 +28,9 @@ pub struct LootSession {
     /// The root target (the victim in steal mode).
     pub root: ObjectRef,
     pub steal: bool,
+    /// The `enhanced` companion gear window
+    /// ([`WorldHost::open_companion_loot`]).
+    pub companion: bool,
     /// N: presses on item slots in this session.
     pub attempts: i32,
     pub experience: StealExperience,
@@ -171,23 +174,9 @@ impl<A: WorldAssets> WorldHost<A> {
                 return Ok(None);
             }
         }
-        let equipped = |host: &Self, owner: ObjectRef| -> Vec<ObjectRef> {
-            host.world.get(owner).map_or(Vec::new(), |object| {
-                object
-                    .inventory
-                    .iter()
-                    .map(|(item, _)| *item)
-                    .filter(|item| {
-                        host.world
-                            .get(*item)
-                            .is_some_and(|o| o.raw.flags.0 & EQUIPPED != 0)
-                    })
-                    .collect()
-            })
-        };
-        let mut hidden = equipped(self, looter);
+        let mut hidden = self.equipped(looter);
         if steal {
-            hidden.extend(equipped(self, target));
+            hidden.extend(self.equipped(target));
         }
         let mut bodies = Vec::new();
         let mut body = 0;
@@ -231,6 +220,7 @@ impl<A: WorldAssets> WorldHost<A> {
             looter,
             root: target,
             steal,
+            companion: false,
             attempts: 0,
             experience: StealExperience::default(),
             caught: false,
@@ -239,6 +229,50 @@ impl<A: WorldAssets> WorldHost<A> {
             target_view: Vec::new(),
             bodies,
             body,
+        }))
+    }
+    /// `owner`'s equipped inventory entries.
+    fn equipped(&self, owner: ObjectRef) -> Vec<ObjectRef> {
+        self.world.get(owner).map_or(Vec::new(), |object| {
+            object
+                .inventory
+                .iter()
+                .map(|(item, _)| *item)
+                .filter(|item| {
+                    self.world
+                        .get(*item)
+                        .is_some_and(|o| o.raw.flags.0 & EQUIPPED != 0)
+                })
+                .collect()
+        })
+    }
+    /// The `enhanced` companion gear window: the ordinary loot window on a
+    /// companion ([`WorldHost::is_companion`]), with no steal roll, no
+    /// `pickup_p_proc` override and no catch; both sides' equipped items
+    /// stay hidden. `None` for anyone else.
+    pub fn open_companion_loot(
+        &mut self,
+        companion: ObjectRef,
+    ) -> Result<Option<LootSession>, WorldError> {
+        if !self.is_companion(companion) {
+            return Ok(None);
+        }
+        let looter = self.world.player;
+        let mut hidden = self.equipped(looter);
+        hidden.extend(self.equipped(companion));
+        Ok(Some(LootSession {
+            looter,
+            root: companion,
+            steal: false,
+            companion: true,
+            attempts: 0,
+            experience: StealExperience::default(),
+            caught: false,
+            hidden,
+            player_view: Vec::new(),
+            target_view: Vec::new(),
+            bodies: Vec::new(),
+            body: 0,
         }))
     }
     /// The entries a pane lists: the shown container's inventory without

@@ -1717,3 +1717,47 @@ fn spec008_crafted_manifest_names_never_leave_the_slot() {
     assert_eq!(listing(&slot), slot_before);
     assert_eq!(outside(root.path()), before);
 }
+
+#[test]
+fn enhanced_companion_distances_live_in_a_sidecar_beside_save_dat() {
+    use crate::{
+        EnginePreset,
+        companion::{Distance, SIDECAR},
+    };
+    let dir = corpus();
+    let save = |preset: EnginePreset| {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = host(dir.path());
+        host.set_preset(preset);
+        host.load_map("maps/synth.map").unwrap();
+        host.world.companion_distance.insert(18000, Distance::Hold);
+        host.save_game(root.path(), 1, &SaveInfo::default())
+            .unwrap();
+        (root, host)
+    };
+    let (vanilla_root, _) = save(EnginePreset::Vanilla);
+    let (enhanced_root, mut host) = save(EnginePreset::Enhanced);
+    let slot = |root: &tempfile::TempDir| root.path().join("SAVEGAME/SLOT01");
+    // Vanilla writes no sidecar; SAVE.DAT is the same either way.
+    assert!(!slot(&vanilla_root).join(SIDECAR).exists());
+    assert!(slot(&enhanced_root).join(SIDECAR).is_file());
+    assert_eq!(
+        fs::read(slot(&vanilla_root).join("SAVE.DAT")).unwrap(),
+        fs::read(slot(&enhanced_root).join("SAVE.DAT")).unwrap()
+    );
+    // An enhanced load restores the distances.
+    host.world.companion_distance.clear();
+    host.load_game(enhanced_root.path(), 1).unwrap();
+    assert_eq!(
+        host.world.companion_distance.get(&18000),
+        Some(&Distance::Hold)
+    );
+    // A Vanilla load never reads it.
+    host.set_preset(EnginePreset::Vanilla);
+    host.load_game(enhanced_root.path(), 1).unwrap();
+    assert!(host.world.companion_distance.is_empty());
+    // A malformed sidecar fails an enhanced load before any state changes.
+    host.set_preset(EnginePreset::Enhanced);
+    fs::write(slot(&enhanced_root).join(SIDECAR), "[party]").unwrap();
+    assert!(host.load_game(enhanced_root.path(), 1).is_err());
+}

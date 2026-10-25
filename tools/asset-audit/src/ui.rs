@@ -853,7 +853,10 @@ pub fn audit_ui(vfs: &LocalDirProvider) -> Result<UiAudit, Box<dyn Error>> {
         cursor::Entry::Talk,
         cursor::Entry::Cancel,
     ] {
-        let (normal, highlighted) = entry.icons();
+        // Every Vanilla entry has art (only the enhanced ones do not).
+        let Some((normal, highlighted)) = entry.icons() else {
+            continue;
+        };
         check_size(&mut audit, vfs, normal, [40, 40], None);
         check_size(&mut audit, vfs, highlighted, [40, 40], None);
     }

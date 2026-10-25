@@ -132,10 +132,16 @@ Vanilla the menus, windows, saves and replay digests are byte-identical.
   `pickup_p_proc` override and no chance of being caught. Equipped items stay
   hidden, as in the loot window.
 - **Distance.** The window has a **Distance** toggle cycling *Default*,
-  *Close*, *Hold* and *Charge*. It overrides that companion's AI packet
-  `max_dist` (SPEC-009 §3.6 and §3.8): Default keeps the packet's value,
-  Close is 3 hexes, Hold is 1, and Charge keeps the packet's value but ignores
-  the flee limit.
+  *Close*, *Hold* and *Charge*. It changes how that companion's AI packet
+  `max_dist` is read at the two places SPEC-009 uses it: the §3.6 step 4
+  pursuit stop and the §3.8 step 1 flee stop.
+
+  | Mode | Pursuit stop | Flee stop |
+  |---|---|---|
+  | Default | the packet's value | the packet's value |
+  | Close | 3 hexes | 3 hexes |
+  | Hold | 1 hex | 1 hex |
+  | Charge | none | the packet's value |
 - **Saves.** The settings live in the world's enhanced state and are saved in
   a sidecar `VAULTENG.TOML` beside the slot's `SAVE.DAT`, only under
   Enhanced. `SAVE.DAT` itself is unchanged.

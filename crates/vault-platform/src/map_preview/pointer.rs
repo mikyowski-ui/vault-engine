@@ -505,7 +505,15 @@ impl MapPreview {
             return false;
         };
         let at = self.menu_point().unwrap_or(point);
-        let entries = cursor::menu_entries(target, self.host.world.combat);
+        let mut entries = cursor::menu_entries(target, self.host.world.combat);
+        // The `enhanced` critter entries (the host refuses them in Vanilla).
+        if matches!(target, Target::Critter { .. }) {
+            entries = cursor::enhanced_entries(
+                entries,
+                self.host.can_push(object),
+                self.host.is_companion(object),
+            );
+        }
         self.pointer.menu = Some(ActionMenu {
             object,
             target,
@@ -542,6 +550,14 @@ impl MapPreview {
             }
             Entry::Inventory => self.open_inventory_on(Some(object)),
             Entry::Skill => self.open_skilldex_on(Some(object)),
+            Entry::Push => match self.host.push_critter(object) {
+                Ok(Some(vault_core::companion::Push::Blocked)) => {
+                    self.status = b"There is no room to push.".to_vec();
+                }
+                Ok(_) => {}
+                Err(error) => self.status = error.to_string().into_bytes(),
+            },
+            Entry::Gear => self.open_companion_gear(object),
             Entry::Cancel => {}
         }
     }
@@ -1092,15 +1108,41 @@ impl MapPreview {
         };
         painter.blit(image, arrow.0, 0, [arrow.1, top]);
         for (index, entry) in menu.entries.iter().enumerate() {
-            let (normal, highlighted) = entry.icons();
-            let art = if index == menu.tracker.highlight {
-                highlighted
-            } else {
-                normal
-            };
-            painter.blit(image, art, 0, [icons_x, top + 40 * index as i32]);
+            let lit = index == menu.tracker.highlight;
+            let at = [icons_x, top + 40 * index as i32];
+            match entry.icons() {
+                Some((normal, highlighted)) => {
+                    painter.blit(image, if lit { highlighted } else { normal }, 0, at);
+                }
+                None => draw_engine_icon(painter, image, *entry, lit, at),
+            }
         }
     }
+}
+
+/// An `enhanced` menu entry's engine-drawn icon (Fallout 1 has no art for
+/// it): a 40-pixel plate in the menu's place with its label, its colors
+/// swapped while highlighted.
+fn draw_engine_icon(
+    painter: &Painter,
+    image: &mut IndexedImage,
+    entry: Entry,
+    lit: bool,
+    [x, y]: [i32; 2],
+) {
+    let label: &[u8] = match entry {
+        Entry::Push => b"PUSH",
+        Entry::Gear => b"GEAR",
+        _ => return,
+    };
+    let (fill, text) = if lit {
+        (ColorKey::AMBER, ColorKey::BLACK)
+    } else {
+        (ColorKey::BLACK, ColorKey::AMBER)
+    };
+    image.fill_rect([x + 2, y + 2, 36, 36], painter.color(ColorKey::AMBER));
+    image.fill_rect([x + 3, y + 3, 34, 34], painter.color(fill));
+    painter.centered(image, 101, text, label, [x + 3, y + 16], 34);
 }
 
 #[cfg(test)]

@@ -943,7 +943,8 @@ impl<A: WorldAssets> WorldHost<A> {
             Some(target) => {
                 if !self.world.is_dead(target)
                     && self.world.action_points(critter) != 0
-                    && self.world.object_distance(critter, target) > packet.max_dist
+                    && self.world.object_distance(critter, target)
+                        > self.ai_distance(critter).pursuit_limit(packet.max_dist)
                 {
                     self.world.add_intent(critter, intent::STOP);
                 }
@@ -1018,7 +1019,9 @@ impl<A: WorldAssets> WorldHost<A> {
             return Ok(());
         };
         let player = self.world.player;
-        if self.world.object_distance(critter, player) >= packet.max_dist {
+        if self.world.object_distance(critter, player)
+            >= self.ai_distance(critter).flee_limit(packet.max_dist)
+        {
             self.world.add_intent(critter, intent::STOP);
             return Ok(());
         }

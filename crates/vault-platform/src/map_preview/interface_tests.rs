@@ -3894,3 +3894,109 @@ fn spec014_the_in_world_cursor_is_a_flat_scene_object_over_the_map_only() {
     preview.image().unwrap();
     assert!(!preview.cursor_in_frame);
 }
+
+#[test]
+fn enhanced_party_menus_offer_push_and_gear() {
+    use crate::enhanced::{EnhancedSettings, ViewportMode};
+    use vault_core::{companion::Distance, ui::cursor::Entry};
+    let dir = corpus();
+    // Hold a press on `target` until the action menu opens; returns it.
+    let open = |preview: &mut MapPreview, target, now: u64| {
+        let hex = preview.host.world.get(target).unwrap().raw.hex.unwrap();
+        let point = on_hex(preview, hex);
+        preview.hud.mode = Mode::Arrow;
+        preview.hover(point);
+        assert!(preview.click(point, false));
+        preview.tick(now + 300).unwrap();
+        (
+            point,
+            preview
+                .pointer
+                .menu
+                .as_ref()
+                .expect("the action menu")
+                .entries
+                .clone(),
+        )
+    };
+    // Vanilla: the critter menu is unchanged, party member or not.
+    let mut vanilla = world(dir.path());
+    let member = npc(&vanilla);
+    vanilla.host.world.get_mut(member).unwrap().raw.id = 18000;
+    vanilla.host.world.party.insert(member);
+    vanilla.tick(16).unwrap();
+    vanilla.image().unwrap();
+    let (_, entries) = open(&mut vanilla, member, 16);
+    assert!(!entries.contains(&Entry::Push) && !entries.contains(&Entry::Gear));
+
+    // Enhanced (the fixed viewport keeps the frame's coordinates).
+    let mut preview = world(dir.path());
+    preview.host.set_preset(vault_core::EnginePreset::Enhanced);
+    preview.set_enhanced(Some(EnhancedSettings {
+        viewport: ViewportMode::Fixed,
+        ..Default::default()
+    }));
+    let member = npc(&preview);
+    preview.host.world.get_mut(member).unwrap().raw.id = 18000;
+    preview.host.world.party.insert(member);
+    preview.tick(16).unwrap();
+    preview.image().unwrap();
+    let (point, entries) = open(&mut preview, member, 16);
+    assert_eq!(
+        entries,
+        [
+            Entry::Talk,
+            Entry::Look,
+            Entry::Inventory,
+            Entry::Skill,
+            Entry::Push,
+            Entry::Gear,
+            Entry::Cancel
+        ]
+    );
+    // The engine-drawn icons draw (no art is looked up for them).
+    preview.image().unwrap();
+    // Gear opens the companion window: no steal session.
+    preview.pointer.menu.as_mut().unwrap().tracker.highlight = 5;
+    assert!(preview.release(Some(point), false));
+    let session = match &preview.screen {
+        Screen::Loot(screen) => screen.session.clone(),
+        _ => panic!("the gear window"),
+    };
+    assert!(session.companion && !session.steal);
+    assert_eq!(session.root, member);
+    // Its Distance toggle cycles the companion's mode.
+    use super::loot::DISTANCE;
+    let [ox, oy] = vault_core::skills::LOOT_ORIGIN;
+    let toggle = [ox + DISTANCE.x + 10, oy + DISTANCE.y + 10];
+    preview.image().unwrap();
+    assert!(preview.click(toggle, false));
+    preview.release(Some(toggle), false);
+    assert_eq!(preview.host.companion_distance(member), Distance::Close);
+    assert!(preview.step(KeyCode::Escape));
+    assert!(matches!(preview.screen, Screen::Map));
+    // Push steps the companion away from the player.
+    let before = preview.host.world.get(member).unwrap().raw.hex.unwrap();
+    let (point, _) = open(&mut preview, member, 3000);
+    preview.pointer.menu.as_mut().unwrap().tracker.highlight = 4;
+    assert!(preview.release(Some(point), false));
+    let mut now = 3400;
+    while preview.host.moving(member) && now < 20_000 {
+        now += 16;
+        preview.tick(now).unwrap();
+    }
+    let player = preview
+        .host
+        .world
+        .get(preview.host.world.player)
+        .unwrap()
+        .raw
+        .hex
+        .unwrap();
+    let after = preview.host.world.get(member).unwrap().raw.hex.unwrap();
+    assert_ne!(after, before);
+    assert!(
+        vault_formats::HexGrid::lattice_distance(player, after).unwrap()
+            > vault_formats::HexGrid::lattice_distance(player, before).unwrap()
+    );
+}

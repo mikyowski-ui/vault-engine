@@ -56,6 +56,9 @@ const DONE: Rect = Rect::new(288, 328, 15, 16);
 /// The `enhanced` window's engine-drawn Take All button, centered over the
 /// middle panel above its emblem (the window's art has no such button).
 pub(crate) const TAKE_ALL: Rect = Rect::new(214, 236, 108, 20);
+/// The companion gear window's engine-drawn Distance toggle, above Take
+/// All.
+pub(crate) const DISTANCE: Rect = Rect::new(214, 210, 108, 20);
 /// Body cycling (sending PgUp and PgDn) with its up and down art.
 const CYCLE: [(Rect, bool, &str, &str); 2] = [
     (Rect::new(436, 162, 20, 18), false, "slu.frm", "sld.frm"),
@@ -95,18 +98,32 @@ impl MapPreview {
             return;
         };
         match self.host.open_loot(request) {
-            Ok(Some(session)) => {
-                self.screen = Screen::Loot(Box::new(LootScreen {
-                    session,
-                    offsets: [0, 0],
-                    held: None,
-                    counter: None,
-                    arrow: false,
-                    press: None,
-                    menu: None,
-                    hovered: None,
-                }))
-            }
+            Ok(Some(session)) => self.show_loot(session),
+            Ok(None) => {}
+            Err(error) => self.status = error.to_string().into_bytes(),
+        }
+    }
+    /// The loot window over the world for `session`.
+    fn show_loot(&mut self, session: vault_core::loot::LootSession) {
+        self.screen = Screen::Loot(Box::new(LootScreen {
+            session,
+            offsets: [0, 0],
+            held: None,
+            counter: None,
+            arrow: false,
+            press: None,
+            menu: None,
+            hovered: None,
+        }));
+    }
+    /// The `enhanced` Gear entry: the companion gear window, out of
+    /// combat, on a party member (the host refuses anyone else).
+    pub(crate) fn open_companion_gear(&mut self, companion: ObjectRef) {
+        if !matches!(self.screen, Screen::Map) {
+            return;
+        }
+        match self.host.open_companion_loot(companion) {
+            Ok(Some(session)) => self.show_loot(session),
             Ok(None) => {}
             Err(error) => self.status = error.to_string().into_bytes(),
         }
@@ -195,17 +212,12 @@ impl MapPreview {
         let done = self.button_art(on_screen(DONE), "lilredup.frm", "lilreddn.frm");
         painter.blit(&mut image, done, 0, [ox + DONE.x, oy + DONE.y]);
         if self.take_all_shown(screen) {
-            // Pressed, the button's colors swap.
-            let pressed = self.held == Some(on_screen(TAKE_ALL));
-            let (frame, fill, text) = if pressed {
-                (ColorKey::AMBER, ColorKey::AMBER, ColorKey::BLACK)
-            } else {
-                (ColorKey::AMBER, ColorKey::BLACK, ColorKey::AMBER)
-            };
-            let [x, y, w, h] = [ox + TAKE_ALL.x, oy + TAKE_ALL.y, TAKE_ALL.w, TAKE_ALL.h];
-            image.fill_rect([x, y, w, h], painter.color(frame));
-            image.fill_rect([x + 1, y + 1, w - 2, h - 2], painter.color(fill));
-            painter.centered(&mut image, 101, text, b"TAKE ALL", [x, y + 6], w);
+            self.engine_button(&painter, &mut image, TAKE_ALL, b"TAKE ALL");
+        }
+        if screen.session.companion {
+            let mode = self.host.companion_distance(screen.session.root);
+            let label = format!("DISTANCE: {}", mode.name().to_ascii_uppercase());
+            self.engine_button(&painter, &mut image, DISTANCE, label.as_bytes());
         }
         if let Some((_, menu)) = &screen.menu {
             self.draw_item_menu(&painter, &mut image, menu);
@@ -483,6 +495,12 @@ impl MapPreview {
             self.close_loot_screen();
             return true;
         }
+        if DISTANCE.contains(local) && screen.session.companion {
+            let companion = screen.session.root;
+            self.press_button(on_screen(DISTANCE));
+            self.host.cycle_companion_distance(companion);
+            return true;
+        }
         if TAKE_ALL.contains(local) && self.enhanced.is_some() && !screen.session.steal {
             self.press_button(on_screen(TAKE_ALL));
             self.loot_take_all();
@@ -636,6 +654,21 @@ impl MapPreview {
 }
 
 impl MapPreview {
+    /// An engine-drawn window button at window-relative `rect`, its colors
+    /// swapped while pressed.
+    fn engine_button(&self, painter: &Painter, image: &mut IndexedImage, rect: Rect, label: &[u8]) {
+        let [ox, oy] = skills::LOOT_ORIGIN;
+        let pressed = self.held == Some(on_screen(rect));
+        let (fill, text) = if pressed {
+            (ColorKey::AMBER, ColorKey::BLACK)
+        } else {
+            (ColorKey::BLACK, ColorKey::AMBER)
+        };
+        let [x, y, w, h] = [ox + rect.x, oy + rect.y, rect.w, rect.h];
+        image.fill_rect([x, y, w, h], painter.color(ColorKey::AMBER));
+        image.fill_rect([x + 1, y + 1, w - 2, h - 2], painter.color(fill));
+        painter.centered(image, 101, text, label, [x, y + 6], w);
+    }
     /// The `enhanced` window shows its Take All button outside steal
     /// sessions (Vanilla has Shift+A only).
     fn take_all_shown(&self, screen: &LootScreen) -> bool {

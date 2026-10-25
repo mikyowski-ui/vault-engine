@@ -2916,3 +2916,115 @@ fn spec007_ai_moves_play_as_walks_frame_by_frame() {
         crate::choreography::Action::Walk { arts, .. } if Fid(arts[0]).animation() == 1
     ));
 }
+
+#[test]
+fn enhanced_companion_distance_overrides_the_flee_and_pursuit_stops() {
+    use crate::{EnginePreset, companion::Distance};
+    // A party member 6 hexes from the player with AP: packet max_dist 8
+    // makes it flee (SPEC-009 §3.8 step 2).
+    let setup = |preset: EnginePreset, mode: Distance| {
+        let mut world = self::world();
+        let member = npc(&mut world, 20100 + 6 * 200, 0, 1, &[]);
+        state(&mut world, member).ap = 4;
+        world.get_mut(member).unwrap().raw.id = 18000;
+        world.party.insert(member);
+        world.companion_distance.insert(18000, mode);
+        let mut host = ai_host(world, assets());
+        host.set_preset(preset);
+        (host, member)
+    };
+    // Vanilla ignores the setting: it flees.
+    let (mut host, member) = setup(EnginePreset::Vanilla, Distance::Hold);
+    host.ai_flee(member).unwrap();
+    assert_eq!(
+        host.world.critter_state(member).unwrap().maneuvers,
+        intent::FLEE
+    );
+    // Enhanced Hold (flee limit 1): it stops where it is.
+    let (mut host, member) = setup(EnginePreset::Enhanced, Distance::Hold);
+    host.ai_flee(member).unwrap();
+    assert_eq!(
+        host.world.critter_state(member).unwrap().maneuvers,
+        intent::STOP
+    );
+    assert_eq!(hex(&host.world, member), 20100 + 6 * 200);
+    // Charge keeps the packet's flee limit: it flees as in Vanilla.
+    let (mut host, member) = setup(EnginePreset::Enhanced, Distance::Charge);
+    host.ai_flee(member).unwrap();
+    assert_eq!(
+        host.world.critter_state(member).unwrap().maneuvers,
+        intent::FLEE
+    );
+    // A non-party critter never takes a setting.
+    let (mut host, member) = setup(EnginePreset::Enhanced, Distance::Hold);
+    host.world.party.clear();
+    host.ai_flee(member).unwrap();
+    assert_eq!(
+        host.world.critter_state(member).unwrap().maneuvers,
+        intent::FLEE
+    );
+    // The limits themselves.
+    assert_eq!(Distance::Default.pursuit_limit(8), 8);
+    assert_eq!(Distance::Close.pursuit_limit(8), 3);
+    assert_eq!(Distance::Hold.flee_limit(8), 1);
+    assert_eq!(Distance::Charge.pursuit_limit(8), i32::MAX);
+    assert_eq!(Distance::Charge.flee_limit(8), 8);
+}
+
+#[test]
+fn enhanced_push_steps_a_critter_away_from_the_player() {
+    use crate::{EnginePreset, companion::Push};
+    let world = || {
+        let mut world = self::world();
+        let critter = npc(&mut world, 20100 + 2 * 200, 1, 1, &[]);
+        (world, critter)
+    };
+    // Vanilla: no push.
+    let (vanilla, critter) = world();
+    let mut host = ai_host(vanilla, assets());
+    assert!(!host.can_push(critter));
+    assert_eq!(host.push_critter(critter).unwrap(), None);
+    // Enhanced: one hex directly away from the player.
+    let (enhanced, critter) = world();
+    let mut host = ai_host(enhanced, assets());
+    host.set_preset(EnginePreset::Enhanced);
+    let from = hex(&host.world, critter);
+    let player = hex(&host.world, host.world.player);
+    let away = crate::routing::rotation(player, from).unwrap();
+    let expected = HexGrid::neighbor(from, away).unwrap().unwrap();
+    assert_eq!(
+        host.push_critter(critter).unwrap(),
+        Some(Push::Moved(expected))
+    );
+    let mut now = 0;
+    while host.moving(critter) {
+        host.step_motions(now);
+        now += 100;
+        assert!(now < 10_000, "the push ends");
+    }
+    assert_eq!(hex(&host.world, critter), expected);
+    assert!(
+        HexGrid::lattice_distance(player, expected).unwrap()
+            > HexGrid::lattice_distance(player, from).unwrap()
+    );
+    // Not the player, not in combat, not when fallen.
+    assert!(!host.can_push(host.world.player));
+    host.world.combat = true;
+    assert!(!host.can_push(critter));
+    host.world.combat = false;
+    state(&mut host.world, critter).results.0 |= effect::KNOCKED_OUT;
+    assert!(!host.can_push(critter));
+    // Every candidate blocked: refused with Blocked.
+    let (mut boxed, critter) = world();
+    let from = hex(&boxed, critter);
+    let player = hex(&boxed, boxed.player);
+    let away = crate::routing::rotation(player, from).unwrap();
+    for direction in [away, (away + 1) % 6, (away + 5) % 6] {
+        let hex = HexGrid::neighbor(from, direction).unwrap().unwrap();
+        npc(&mut boxed, hex, 1, 1, &[]);
+    }
+    let mut host = ai_host(boxed, assets());
+    host.set_preset(EnginePreset::Enhanced);
+    assert_eq!(host.push_critter(critter).unwrap(), Some(Push::Blocked));
+    assert_eq!(hex(&host.world, critter), from);
+}

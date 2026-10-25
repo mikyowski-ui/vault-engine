@@ -793,6 +793,9 @@ pub struct WorldState {
     /// SPEC-014 §3.44 the `target_highlight` preference now (0-2, default
     /// 2), which the target-outline enable step reads.
     pub target_highlight: i32,
+    /// The `enhanced` companions' combat distances by object ID
+    /// ([`crate::companion`]); empty under Vanilla.
+    pub companion_distance: BTreeMap<u32, crate::companion::Distance>,
     /// SPEC-014 §3.27 the in-world cursor is in crosshair mode (the
     /// presentation layer keeps it current): enabling target outlines
     /// needs it.
@@ -984,6 +987,7 @@ impl WorldState {
             player_speedup: false,
             verbose_combat_messages: true,
             target_highlight: 2,
+            companion_distance: BTreeMap::new(),
             crosshair: false,
             default_player_art: 0,
             visited: vec![0; crate::persistence::VISITED_BYTES],

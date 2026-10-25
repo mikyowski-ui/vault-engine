@@ -213,12 +213,17 @@ pub enum Entry {
     Skill,
     Rotate,
     Talk,
+    /// The `enhanced` preset's push ([`enhanced_entries`]).
+    Push,
+    /// The `enhanced` preset's companion gear window.
+    Gear,
     Cancel,
 }
 impl Entry {
-    /// Normal and highlighted icon art.
-    pub fn icons(self) -> (&'static str, &'static str) {
-        match self {
+    /// Normal and highlighted icon art; `None` for the `enhanced` entries,
+    /// which have no art of their own (the host draws them).
+    pub fn icons(self) -> Option<(&'static str, &'static str)> {
+        Some(match self {
             Self::Use => ("usegetn.frm", "usegeth.frm"),
             Self::Look => ("lookn.frm", "lookh.frm"),
             Self::Inventory => ("invenn.frm", "invenh.frm"),
@@ -226,8 +231,23 @@ impl Entry {
             Self::Rotate => ("rotaten.frm", "rotateh.frm"),
             Self::Talk => ("talkn.frm", "talkh.frm"),
             Self::Cancel => ("canceln.frm", "cancelh.frm"),
-        }
+            Self::Push | Self::Gear => return None,
+        })
     }
+}
+/// The `enhanced` preset's additions to a critter's menu: Push and Gear,
+/// before Cancel, when allowed. Vanilla menus never call this.
+pub fn enhanced_entries(mut entries: Vec<Entry>, push: bool, gear: bool) -> Vec<Entry> {
+    let at = entries
+        .iter()
+        .position(|entry| *entry == Entry::Cancel)
+        .unwrap_or(entries.len());
+    let added: Vec<Entry> = [(push, Entry::Push), (gear, Entry::Gear)]
+        .into_iter()
+        .filter_map(|(allowed, entry)| allowed.then_some(entry))
+        .collect();
+    entries.splice(at..at, added);
+    entries
 }
 pub fn menu_entries(target: Target, combat: bool) -> Vec<Entry> {
     let mut entries = Vec::new();

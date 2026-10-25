@@ -9,6 +9,7 @@ pub mod clicks;
 pub mod combat;
 pub mod combat_messages;
 pub mod combat_state;
+pub mod companion;
 pub mod critical;
 pub mod debug;
 pub mod dialogue;
