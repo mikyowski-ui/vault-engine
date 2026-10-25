@@ -6,7 +6,6 @@ use crate::{
     EnginePreset, ObjectRef, WorldError, WorldHost, assets::WorldAssets, critical::effect,
 };
 use std::collections::BTreeMap;
-use vault_formats::HexGrid;
 
 /// The enhanced state file in a save slot, beside `SAVE.DAT`.
 pub const SIDECAR: &str = "VAULTENG.TOML";
@@ -124,15 +123,18 @@ pub enum Push {
     Moved(i32),
     /// No free hex away from the player.
     Blocked,
-    /// Under Fallout 2, the critter's `push_p_proc` overrode the push
-    /// (SPEC-017 §2.4); nothing moves.
-    Overridden,
 }
 
 impl<A: WorldAssets> WorldHost<A> {
     /// Whether the enhanced preset's party conveniences apply.
     fn party_tools(&self) -> bool {
         self.preset() == EnginePreset::Enhanced
+    }
+    /// SPEC-019 §3.18: under the Fallout 2 profile the enhanced Push, Gear
+    /// and Distance are not offered or read; Fallout 2's own party control
+    /// takes their place.
+    fn companion_tools(&self) -> bool {
+        self.party_tools() && self.world.fallout2.is_none()
     }
     /// Whether `critter` may be pushed: the enhanced preset, out of
     /// combat, a placed critter other than the player on the player's
@@ -141,7 +143,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// guards stay where their scripts put them.
     pub fn can_push(&self, critter: ObjectRef, any: bool) -> bool {
         let world = &self.world;
-        self.party_tools()
+        self.companion_tools()
             && !world.combat
             && critter != world.player
             && (any || world.party_member(critter))
@@ -160,7 +162,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// enhanced window offers: a party member other than the player, out of
     /// combat.
     pub fn is_companion(&self, critter: ObjectRef) -> bool {
-        self.party_tools()
+        self.companion_tools()
             && !self.world.combat
             && critter != self.world.player
             && self.world.party_member(critter)
@@ -179,36 +181,19 @@ impl<A: WorldAssets> WorldHost<A> {
         if !self.can_push(critter, any) {
             return Ok(None);
         }
-        // SPEC-017 §2.4: under Fallout 2 the critter's `push_p_proc` runs
-        // first, and an override suppresses the push.
-        if self.world.party_member(critter) && self.request_push(critter)? {
-            return Ok(Some(Push::Overridden));
-        }
-        let world = &self.world;
-        let (Some(from), Some(player)) = (
-            world.get(critter).and_then(|object| object.raw.hex),
-            world.get(world.player).and_then(|object| object.raw.hex),
-        ) else {
-            return Ok(None);
-        };
-        let elevation = world.get(critter).map_or(0, |object| object.raw.elevation);
-        let away = crate::routing::rotation(player, from).unwrap_or(0);
-        for direction in [away, (away + 1) % 6, (away + 5) % 6] {
-            let Ok(Some(hex)) = HexGrid::neighbor(from, direction) else {
-                continue;
-            };
-            if self
+        if self.world.get(critter).and_then(|o| o.raw.hex).is_none()
+            || self
                 .world
-                .movement_blocker(hex, elevation, critter)
-                .is_some()
-            {
-                continue;
-            }
-            if self.walk_to(critter, hex)? {
-                return Ok(Some(Push::Moved(hex)));
-            }
+                .get(self.world.player)
+                .and_then(|o| o.raw.hex)
+                .is_none()
+        {
+            return Ok(None);
         }
-        Ok(Some(Push::Blocked))
+        Ok(Some(match self.push_step(critter)? {
+            Some(hex) => Push::Moved(hex),
+            None => Push::Blocked,
+        }))
     }
     /// A companion's combat distance.
     pub fn companion_distance(&self, critter: ObjectRef) -> Distance {
@@ -236,7 +221,10 @@ impl<A: WorldAssets> WorldHost<A> {
     /// The distance mode the AI reads for `critter`: its own under the
     /// enhanced preset when it is a party member, else the default.
     pub(crate) fn ai_distance(&self, critter: ObjectRef) -> Distance {
-        if self.party_tools() && critter != self.world.player && self.world.party_member(critter) {
+        if self.companion_tools()
+            && critter != self.world.player
+            && self.world.party_member(critter)
+        {
             self.companion_distance(critter)
         } else {
             Distance::Default

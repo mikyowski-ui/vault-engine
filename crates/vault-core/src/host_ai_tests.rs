@@ -3045,3 +3045,6 @@ fn enhanced_push_steps_a_party_member_away_from_the_player() {
     );
     assert_eq!(hex(&host.world, critter), from);
 }
+
+#[path = "spec019_ai_tests.rs"]
+mod spec019;

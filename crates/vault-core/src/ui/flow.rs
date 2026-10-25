@@ -108,6 +108,8 @@ pub enum MenuChoice {
     Intro,
     NewGame,
     LoadGame,
+    /// SPEC-019 §3.2, Fallout 2 only: the preferences screen.
+    Options,
     Credits,
     /// Credits with a Shift key physically held.
     Quotes,

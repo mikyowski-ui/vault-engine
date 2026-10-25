@@ -57,6 +57,19 @@ pub const NEW_GAME_MOVIE: (&str, u32) = ("art/cuts/elder.mve", 0x04);
 pub const STARTUP_MOVIES: [&str; 2] = ["art/cuts/iplogo.mve", "art/cuts/intro.mve"];
 /// SPEC-019 §2.6 the car's fuel maximum.
 pub const FUEL_MAX: i32 = vault_formats::fallout2::save::FUEL_MAX;
+/// SPEC-019 §2.6 the fuel one car travel iteration that moved uses.
+pub const FUEL_PER_ITERATION: i32 = 100;
+/// SPEC-019 §3.19.4 the fuel gauge's height in rows.
+pub const GAUGE_ROWS: i32 = 189;
+
+/// SPEC-019 §2.6 a car iteration's pixel steps on terrain difficulty `d`:
+/// `max(1, trunc(4 / d))`.
+pub fn car_steps(difficulty: i32) -> i32 {
+    if difficulty <= 0 {
+        return 4;
+    }
+    (4 / difficulty).max(1)
+}
 
 /// SPEC-017 §2.1 the instruction-word set of a game profile's scripts.
 pub fn word_set(game: crate::GameProfile) -> vault_vm::WordSet {
@@ -131,6 +144,27 @@ impl Default for Car {
             map: -1,
             fuel: 0,
         }
+    }
+}
+
+impl Car {
+    /// SPEC-019 §3.19.2 whether the party drives when the world map opens
+    /// after leaving map `left` (of area `left_area`): with the car, the
+    /// map left is a map of `car_area`, or `car_map` itself when the car's
+    /// area is -1.
+    pub fn drives(&self, left: i32, left_area: i32) -> bool {
+        self.has_car
+            && if self.area != -1 {
+                left_area == self.area
+            } else {
+                left == self.map
+            }
+    }
+    /// SPEC-019 §3.19.4 the gauge's filled rows,
+    /// `trunc(189 × car_fuel / 80000)`.
+    pub fn gauge_rows(&self) -> i32 {
+        (i64::from(GAUGE_ROWS) * i64::from(self.fuel.clamp(0, FUEL_MAX)) / i64::from(FUEL_MAX))
+            as i32
     }
 }
 
@@ -256,6 +290,12 @@ pub struct Fallout2World {
     pub world_map_music: Option<String>,
     /// The world-map screen is open (built and not yet closed).
     pub world_map_open: bool,
+    /// SPEC-019 §3.19.2 the party drives: decided at each opening of the
+    /// world map, not saved.
+    pub driving: bool,
+    /// The map number of the last successful map load (the map just left
+    /// when the world map opens), or -1.
+    pub last_map: i32,
 }
 
 impl Fallout2World {
@@ -301,6 +341,8 @@ impl Fallout2World {
             map_music: BTreeMap::new(),
             world_map_music: None,
             world_map_open: false,
+            driving: false,
+            last_map: -1,
             tables,
         };
         let known: Vec<[i32; 2]> = world
@@ -458,6 +500,43 @@ impl Fallout2World {
         }
         self.travel = (outcome == Step::Moving).then_some(travel);
         outcome
+    }
+    /// SPEC-019 §3.19.3 one car travel iteration: `max(1, trunc(4 / d))`
+    /// pixel steps for the difficulty d of the subtile it starts on, each
+    /// tested against the walk mask (a blocked step stops travel and the
+    /// remaining steps are not made); the terrain counter is not used.
+    /// Returns the outcome and the steps made.
+    pub fn drive(&mut self) -> (Step, i32) {
+        let Some(mut travel) = self.travel else {
+            return (Step::Arrived, 0);
+        };
+        let terrain = self.cell().map_or(0, |cell| self.subtile(cell).terrain);
+        let steps = car_steps(self.tables.worldmap.difficulty(terrain));
+        let mut outcome = Step::Moving;
+        let mut made = 0;
+        for _ in 0..steps {
+            match travel.stepper.step(self.position) {
+                None => {
+                    outcome = Step::Arrived;
+                    break;
+                }
+                Some(next) if self.blocks(next) => {
+                    outcome = Step::Blocked;
+                    break;
+                }
+                Some(next) => {
+                    self.position = next;
+                    made += 1;
+                }
+            }
+        }
+        self.travel = (outcome == Step::Moving).then_some(travel);
+        (outcome, made)
+    }
+    /// SPEC-019 §3.19.3 whether this iteration travels by car: driving,
+    /// with fuel left (an empty tank walks and uses no fuel).
+    pub fn car_travel(&self) -> bool {
+        self.driving && self.car.has_car && self.car.fuel > 0
     }
     /// §5.4 whether a step to `next` is blocked: out of the world, or a set
     /// bit in its tile's walk mask.
@@ -641,6 +720,7 @@ impl Fallout2World {
     /// are set, and (§5.4) a map in an area moves the party to that area's
     /// current position at once.
     pub fn map_loaded(&mut self, map: i32) {
+        self.last_map = map;
         if let Some(flags) = usize::try_from(map)
             .ok()
             .and_then(|map| self.map_flags.get_mut(map))

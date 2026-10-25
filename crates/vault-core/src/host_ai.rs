@@ -101,7 +101,7 @@ impl WorldState {
         }
     }
     /// The extended-flag attack-mode nibble for a hit mode.
-    fn mode_nibble(&self, weapon: ObjectRef, mode: u8) -> u8 {
+    pub(crate) fn mode_nibble(&self, weapon: ObjectRef, mode: u8) -> u8 {
         let secondary = u32::from(matches!(
             mode,
             hit_mode::LEFT_SECONDARY | hit_mode::RIGHT_SECONDARY
@@ -918,30 +918,40 @@ impl<A: WorldAssets> WorldHost<A> {
             return Ok(requested);
         };
         let (maneuvers, results, hp) = (state.maneuvers, state.results.0, state.hp);
-        if maneuvers & intent::FLEE != 0
+        // SPEC-019 §3.16 rule 1: a party member's `run_away_mode`.
+        let spec009 = maneuvers & intent::FLEE != 0
             || results & packet.hurt_too_much != 0
-            || hp < packet.min_hp
-        {
+            || hp < packet.min_hp;
+        let flee = self.party_forced_flee(critter, &packet).unwrap_or(spec009);
+        if flee {
             self.ai_flee(critter)?;
             return Ok(requested);
         }
         let target = match requested {
             None => {
                 self.ai_heal(critter)?;
-                let target = self.danger(critter);
+                // SPEC-019 §3.16 rule 3: a party member's `attack_who`.
+                let target = match self.party_target(critter) {
+                    Some(target) => Some(target),
+                    None => self.danger(critter),
+                };
                 if let Some(target) = target {
+                    self.party_snipe_retreat(critter, target)?;
                     self.ai_attack(critter, target)?;
                 }
                 target
             }
             Some(target) => {
+                self.party_snipe_retreat(critter, target)?;
                 self.ai_attack(critter, target)?;
                 Some(target)
             }
         };
         match target {
             Some(target) => {
-                if !self.world.is_dead(target)
+                // SPEC-019 §3.16 rule 4: `charge` skips the stop.
+                if !self.party_charges(critter)
+                    && !self.world.is_dead(target)
                     && self.world.action_points(critter) != 0
                     && self.world.object_distance(critter, target)
                         > self.ai_distance(critter).pursuit_limit(packet.max_dist)
@@ -964,8 +974,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
             }
             None => {
+                // SPEC-019 §3.16 rule 5: a party member's follow threshold.
                 let player = self.world.player;
-                if self.world.object_distance(critter, player) > 5 {
+                let threshold = self.party_follow(critter).unwrap_or(Some(5));
+                if threshold.is_some_and(|threshold| {
+                    self.world.object_distance(critter, player) > threshold
+                }) {
                     self.ai_approach(critter, player, false)?;
                 }
             }
@@ -975,7 +989,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// Execute a planned movement for at most `budget` hexes. The world
     /// takes it at once; the hexes it crossed are then shown as a walk (or
     /// a run), frame by frame (SPEC-007 §3.11.1), before what follows.
-    fn run_movement(
+    pub(crate) fn run_movement(
         &mut self,
         mut movement: Movement,
         budget: usize,
@@ -1090,6 +1104,23 @@ impl<A: WorldAssets> WorldHost<A> {
     pub(crate) fn ai_heal(&mut self, critter: ObjectRef) -> Result<(), WorldError> {
         if self.world.body_type(critter) != 0 {
             return Ok(());
+        }
+        // SPEC-019 §3.16 rule 2: a party member's `chem_use`.
+        if let Some(healing) = self.party_healing(critter) {
+            let Some(healing) = healing else {
+                return Ok(());
+            };
+            if self.world.hit_points(critter).unwrap_or(0) >= healing.below {
+                return Ok(());
+            }
+            return ai::heal_limited(
+                &mut Healing {
+                    host: self,
+                    critter,
+                },
+                healing.below,
+                healing.limit,
+            );
         }
         let half = self.world.effective(critter, 7) / 2;
         if self.world.hit_points(critter).unwrap_or(0) >= half {
@@ -1252,7 +1283,15 @@ impl<A: WorldAssets> WorldHost<A> {
             });
         }
         let ap = self.world.action_points(critter);
-        ai::inventory_best(&entries, ap_check.then_some(ap)).map(|index| items[index])
+        let ap_check = ap_check.then_some(ap);
+        // SPEC-019 §3.16 rule 8: a party member's `best_weapon` ranking.
+        let best = match self.party_best_weapon(critter) {
+            Some(best_weapon) => ai::inventory_best_by(&entries, ap_check, |held, offered| {
+                crate::fallout2_party::prefers_ranked(best_weapon, held, offered)
+            }),
+            None => ai::inventory_best(&entries, ap_check),
+        };
+        best.map(|index| items[index])
     }
     /// §3.9 environment search (bipeds only): non-hidden item-art objects on
     /// the current elevation in hex order, stably sorted by distance, up to
@@ -1262,7 +1301,10 @@ impl<A: WorldAssets> WorldHost<A> {
         critter: ObjectRef,
         kind: ItemSubtype,
     ) -> Option<ObjectRef> {
-        if self.world.body_type(critter) != 0 {
+        // SPEC-019 §3.16 rule 6: under `stay` the searches find nothing.
+        if self.world.body_type(critter) != 0
+            || self.party_distance(critter) == Some(crate::fallout2_party::distance::STAY)
+        {
             return None;
         }
         let min_to_hit = self.packet(critter).map_or(0, |packet| packet.min_to_hit);
@@ -1542,7 +1584,10 @@ impl<A: WorldAssets> WorldHost<A> {
             .wielded(critter, hit_mode::RIGHT_PRIMARY)
             .filter(|item| self.world.item_subtype(*item) == Some(ItemSubtype::Weapon));
         let mut mode = self.select_mode(critter, weapon)?;
-        if weapon.is_none() {
+        // SPEC-019 §3.16 rule 8: under `unarmed` the upgrade is skipped.
+        let unarmed =
+            self.party_best_weapon(critter) == Some(crate::fallout2_party::best_weapon::UNARMED);
+        if weapon.is_none() && !unarmed {
             let armed = self
                 .world
                 .get(target)
@@ -1565,12 +1610,16 @@ impl<A: WorldAssets> WorldHost<A> {
             }
         }
         let min_to_hit = self.packet(critter).map_or(0, |packet| packet.min_to_hit);
+        // SPEC-019 §3.16 rule 9: a party member's burst gate.
+        let (mode, refused) = self.party_burst_gate(critter, target, weapon, mode);
         ai::attack_loop(
             &mut Engagement {
                 host: self,
                 critter,
                 target,
                 weapon,
+                refused,
+                halted: false,
             },
             mode,
             min_to_hit,
@@ -1740,6 +1789,22 @@ struct Engagement<'a, A: WorldAssets> {
     target: ObjectRef,
     /// The loop's current weapon (replaced by weapon switching).
     weapon: Option<ObjectRef>,
+    /// SPEC-019 §3.16 rule 9: the burst gate refused the selected mode, so
+    /// the next attack step fails.
+    refused: bool,
+    /// SPEC-019 §3.16 rule 6: an approach under `stay` or past the
+    /// stay-close leash ends the loop with failure.
+    halted: bool,
+}
+impl<A: WorldAssets> Engagement<'_, A> {
+    /// The burst gate after a mode was selected again.
+    fn gate(&mut self, switched: Switched) -> Switched {
+        let (mode, refused) =
+            self.host
+                .party_burst_gate(self.critter, self.target, self.weapon, switched.mode);
+        self.refused = refused;
+        Switched { mode, ..switched }
+    }
 }
 impl<A: WorldAssets> AttackEnv for Engagement<'_, A> {
     fn disabled(&self) -> bool {
@@ -1793,6 +1858,9 @@ impl<A: WorldAssets> AttackEnv for Engagement<'_, A> {
         }))
     }
     fn attack(&mut self, mode: u8) -> Result<bool, WorldError> {
+        if std::mem::take(&mut self.refused) {
+            return Ok(false);
+        }
         self.host.ai_strike(self.critter, self.target, mode)
     }
     fn attack_cost(&mut self, mode: u8) -> Result<i32, WorldError> {
@@ -1802,7 +1870,27 @@ impl<A: WorldAssets> AttackEnv for Engagement<'_, A> {
         self.host.world.action_points(self.critter)
     }
     fn approach(&mut self, taunt: bool) -> Result<bool, WorldError> {
+        // SPEC-019 §3.16 rule 6: a party member's `distance`.
+        use crate::fallout2_party::{STAY_CLOSE_LEASH, distance};
+        let player = self.host.world.player;
+        match self.host.party_distance(self.critter) {
+            Some(distance::STAY) => {
+                self.halted = true;
+                return Ok(false);
+            }
+            Some(distance::STAY_CLOSE)
+                if self.host.world.object_distance(self.critter, player) > STAY_CLOSE_LEASH =>
+            {
+                self.halted = true;
+                self.host.ai_approach(self.critter, player, false)?;
+                return Ok(false);
+            }
+            _ => {}
+        }
         self.host.ai_approach(self.critter, self.target, taunt)
+    }
+    fn halted(&self) -> bool {
+        self.halted
     }
     fn flee(&mut self) -> Result<(), WorldError> {
         self.host.ai_flee(self.critter)
@@ -1813,7 +1901,7 @@ impl<A: WorldAssets> AttackEnv for Engagement<'_, A> {
     fn switch_weapon(&mut self) -> Result<Switched, WorldError> {
         let (switched, weapon) = self.host.switch_weapon(self.critter, self.target)?;
         self.weapon = weapon;
-        Ok(switched)
+        Ok(self.gate(switched))
     }
     fn reload(&mut self) -> Result<Option<Switched>, WorldError> {
         let switched = self
@@ -1821,7 +1909,7 @@ impl<A: WorldAssets> AttackEnv for Engagement<'_, A> {
             .ai_reload(self.critter, self.target, self.weapon)?;
         Ok(switched.map(|(switched, weapon)| {
             self.weapon = weapon;
-            switched
+            self.gate(switched)
         }))
     }
 }

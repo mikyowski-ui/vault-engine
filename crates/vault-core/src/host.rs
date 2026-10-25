@@ -127,6 +127,8 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// An interaction's approach has just ended: its action runs as the
     /// sequence's proximity step (SPEC-013 §3.2), not a new approach.
     pub(crate) arriving: bool,
+    /// SPEC-019 §3.6 what the last Fallout 2 push did, for its caller.
+    pub(crate) last_push: Option<crate::host_fallout2_party::Push2>,
     /// SPEC-005 0x80F9: a dialogue-entry request for this object, serviced
     /// by the next tick outside the running script.
     pub(crate) pending_dialogue: Option<ObjectRef>,
@@ -316,6 +318,7 @@ impl<A: WorldAssets> WorldHost<A> {
             transition_world_map: false,
             presentation: None,
             arriving: false,
+            last_push: None,
             pending_dialogue: None,
             vm_observer: None,
             presentation_rng: crate::ParkMiller::seeded(1).expect("a positive seed"),
@@ -515,6 +518,9 @@ impl<A: WorldAssets> WorldHost<A> {
     /// map's save, when one was due, succeeded.
     pub(crate) fn leave_map(&mut self) -> Result<bool, WorldError> {
         self.stop_motions();
+        // SPEC-019 §3.14: dead members leave the party before the map is
+        // left, and stay on it as corpses.
+        self.drop_dead_members();
         self.building_animation = None;
         // SPEC-013 §2.5 map-exit handlers for explosives and sneak.
         self.skill_map_exit()?;
@@ -1295,6 +1301,13 @@ impl<A: WorldAssets> WorldHost<A> {
     /// pending for the next main-loop pass.
     pub fn world_map_closed(&mut self) {
         if let Some(state) = self.world.fallout2.as_deref_mut() {
+            // SPEC-019 §3.19.2: a map entered from the world map while
+            // driving is where the car is now.
+            if state.world_map_open && state.driving {
+                let map = self.world.map.header.map_number;
+                state.car.area = state.tables.city.area_of_map(map);
+                state.car.map = map;
+            }
             state.world_map_open = false;
         }
         if std::mem::take(&mut self.transition_world_map) {
@@ -2013,6 +2026,28 @@ impl<A: WorldAssets> WorldHost<A> {
                 return Ok(());
             }
             return self.enter_dialogue(actor, target);
+        }
+        // SPEC-019 §3.6: Fallout 2's Push takes the talk approach, then
+        // pushes on arrival.
+        if action == ObjectAction::Push {
+            if actor != self.world.player || !self.fallout2_can_push(target) {
+                return Err(WorldError::Invalid(
+                    "push requires the player and a standing party member out of combat".into(),
+                ));
+            }
+            let far =
+                self.world.object_distance(actor, target) >= crate::host_motion::TALK_RUN_DISTANCE;
+            let blocked = self.world.shot(actor, target).hard_obstruction;
+            if (far || blocked) && !self.arriving {
+                return self.approach(actor, target, action, true);
+            }
+            if far || blocked {
+                self.print_game("misc.msg", 2000, &[]);
+                return Ok(());
+            }
+            let pushed = self.perform_push(target)?;
+            self.last_push = Some(pushed);
+            return Ok(());
         }
         if let ObjectAction::UseObject(item) = action {
             if self

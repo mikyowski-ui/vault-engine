@@ -55,6 +55,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 owner: None,
             });
         }
+        // SPEC-019 §3.17: under Fallout 2 each gain may advance members.
+        self.party_level_ups(levels);
     }
     /// SPEC-011 §3.20 experience award (`give_exp_points`, combat kills,
     /// skill and quest awards).

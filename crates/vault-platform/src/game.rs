@@ -645,6 +645,8 @@ impl Game {
                 self.enter_credits("quotes.txt", CreditStyle::Reversed)
             }
             MenuChoice::Quotes => {}
+            // SPEC-019 §3.2: Fallout 2's Options opens the preferences.
+            MenuChoice::Options => {}
             // §3.5: Exit stops the music.
             MenuChoice::Exit => {
                 self.audio.stop_music();

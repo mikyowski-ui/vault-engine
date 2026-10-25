@@ -148,6 +148,9 @@ pub enum ObjectAction {
     Talk,
     UseSkill(i32),
     UseObject(ObjectRef),
+    /// SPEC-019 §3.6, Fallout 2 only: the player pushes a party member,
+    /// after the talk approach.
+    Push,
 }
 #[derive(Debug, Clone)]
 pub struct ScriptRequest {
@@ -1681,7 +1684,11 @@ impl WorldState {
     }
     /// A critter's sheet from its prototype, with any stat arrays this
     /// session changed on that prototype.
-    fn critter_sheet(&self, pid: u32, critter: &vault_formats::pro::Critter) -> CharacterSheet {
+    pub(crate) fn critter_sheet(
+        &self,
+        pid: u32,
+        critter: &vault_formats::pro::Critter,
+    ) -> CharacterSheet {
         let mut sheet = CharacterSheet::from_critter(critter);
         if let Some((base, bonus)) = self.prototype_stats.get(&pid) {
             (sheet.base, sheet.bonus) = (*base, *bonus);

@@ -15,6 +15,7 @@ pub mod debug;
 pub mod dialogue;
 pub mod drugs;
 pub mod fallout2;
+pub mod fallout2_party;
 pub mod floating;
 pub mod handles;
 pub mod host;
@@ -24,6 +25,7 @@ pub mod host_choreography;
 mod host_combat;
 mod host_drugs;
 mod host_fallout2;
+pub mod host_fallout2_party;
 mod host_fallout2_words;
 mod host_fidget;
 mod host_game;
@@ -121,6 +123,8 @@ mod dialogue_tests;
 mod drugs_tests;
 #[cfg(test)]
 mod fallout2_tests;
+#[cfg(test)]
+mod spec019_tests;
 #[cfg(test)]
 pub(crate) use vault_fixtures::formats as fixture_assets;
 #[cfg(test)]

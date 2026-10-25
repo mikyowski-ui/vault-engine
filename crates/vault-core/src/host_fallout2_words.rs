@@ -30,9 +30,10 @@ fn hex_valid(hex: i32) -> bool {
     (0..40000).contains(&hex)
 }
 /// The `metarule` rules SPEC-017 §5.1 gives a Fallout 2 meaning: rule 15
-/// with the engine-owned elevator table, and the new rules 17-51.
+/// with the engine-owned elevator table, rule 16 counting the player
+/// (SPEC-019 §3.14), and the new rules 17-51.
 fn fallout2_rule(rule: i32) -> bool {
-    matches!(rule, 15 | 17..=19 | 30..=32 | 40 | 42..=51)
+    matches!(rule, 15..=19 | 30..=32 | 40 | 42..=51)
 }
 /// SPEC-005's track-name limit, which SPEC-017 §4.4 and §5.2 keep.
 const TRACK_BYTES: usize = 15;
@@ -338,7 +339,7 @@ impl<A: WorldAssets> WorldHost<A> {
         if self.world.party.contains(&member) {
             return;
         }
-        if self.world.party.len() >= 32 {
+        if self.world.party_members().len() >= crate::fallout2_party::CAPACITY {
             self.world
                 .diagnostic("party_add: the party list already holds 32 entries");
             return;
@@ -407,6 +408,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 0
             }
+            // SPEC-019 §3.14: every entry, the player included.
+            16 => self.world.party_members().len() as i32,
             17 => {
                 let state = self.fallout2_world()?;
                 i32::from(

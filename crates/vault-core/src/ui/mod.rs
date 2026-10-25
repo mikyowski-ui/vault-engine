@@ -9,6 +9,7 @@ pub mod character;
 pub mod cursor;
 pub mod editor;
 pub mod endgame;
+pub mod fallout2;
 pub mod flow;
 pub mod inventory;
 pub mod options;

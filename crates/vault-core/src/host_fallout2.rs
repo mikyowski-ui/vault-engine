@@ -26,7 +26,13 @@ pub enum Fallout2Travel {
     Interrupted(i32),
     /// §5.6 an encounter was selected; travel stopped.
     Encounter(Selected),
+    /// SPEC-019 §3.19.3 the iteration emptied the car's tank: travel
+    /// stopped at rest, and the screen shows E-fuel-out.
+    OutOfFuel,
 }
+
+/// SPEC-019 §2.3 E-fuel-out.
+pub const FUEL_OUT: &str = "Your car is out of fuel.";
 
 /// SPEC-018 §4.8: the world tables whose Fallout 1 overrides are not read
 /// under Fallout 2.
@@ -132,6 +138,9 @@ impl<A: WorldAssets> WorldHost<A> {
         let state = self.fallout2_state()?;
         if let Some(speed) = speed {
             state.speed = Some(speed);
+            // SPEC-019 §3.19.2: driving is decided at every opening.
+            let left_area = state.tables.city.area_of_map(state.last_map);
+            state.driving = state.car.drives(state.last_map, left_area);
         }
         state.reveal(scout);
         state.iterations = 0;
@@ -152,7 +161,10 @@ impl<A: WorldAssets> WorldHost<A> {
     /// SPEC-018 §5.4-§5.6 one movement-loop iteration on foot: the terrain
     /// schedule, `Q` charged every iteration, the discovery reveal and
     /// travel dot on iterations 1, 4, 7, ..., and every `W` iterations the
-    /// 24-hour healing and the encounter check.
+    /// 24-hour healing and the encounter check. In the car with fuel
+    /// (SPEC-019 §3.19.3) the iteration makes the car's steps instead, and
+    /// one that moved uses 100 fuel; one that empties the tank stops
+    /// travel.
     pub fn fallout2_travel_iteration(&mut self) -> Result<Fallout2Travel, WorldError> {
         if self.fallout2_state()?.travel.is_none() {
             return Ok(Fallout2Travel::Idle);
@@ -163,7 +175,15 @@ impl<A: WorldAssets> WorldHost<A> {
         };
         let state = self.fallout2_state()?;
         state.mark = None;
-        let step = state.step();
+        let (step, emptied) = if state.car_travel() {
+            let (step, made) = state.drive();
+            if made > 0 {
+                state.car.fuel = (state.car.fuel - fallout2::FUEL_PER_ITERATION).max(0);
+            }
+            (step, made > 0 && state.car.fuel == 0)
+        } else {
+            (state.step(), false)
+        };
         let result = self.charge_travel_time(speed.ticks)?;
         if result != 0 {
             self.fallout2_state()?.travel = None;
@@ -184,6 +204,10 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.fallout2_state()?.travel = None;
                 return Ok(Fallout2Travel::Encounter(selected));
             }
+        }
+        if emptied {
+            self.fallout2_state()?.travel = None;
+            return Ok(Fallout2Travel::OutOfFuel);
         }
         Ok(match step {
             Step::Moving => Fallout2Travel::Moving,

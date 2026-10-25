@@ -359,6 +359,15 @@ pub struct InventoryWeapon {
 /// 2, and empty ranged weapons without compatible ammunition; then fold the
 /// preference rule in inventory order.
 pub fn inventory_best(entries: &[InventoryWeapon], ap_check: Option<i32>) -> Option<usize> {
+    inventory_best_by(entries, ap_check, prefers_challenger)
+}
+/// [`inventory_best`] with another preference rule in place of
+/// [`prefers_challenger`] (SPEC-019 §3.16 rule 8's ranking).
+pub fn inventory_best_by(
+    entries: &[InventoryWeapon],
+    ap_check: Option<i32>,
+    prefers: impl Fn(WeaponChoice, WeaponChoice) -> bool,
+) -> Option<usize> {
     let mut best: Option<usize> = None;
     for (index, weapon) in entries.iter().enumerate() {
         if weapon.right_hand
@@ -371,7 +380,7 @@ pub fn inventory_best(entries: &[InventoryWeapon], ap_check: Option<i32>) -> Opt
             continue;
         }
         best = match best {
-            Some(held) if !prefers_challenger(entries[held].choice, weapon.choice) => Some(held),
+            Some(held) if !prefers(entries[held].choice, weapon.choice) => Some(held),
             _ => Some(index),
         };
     }
@@ -526,8 +535,21 @@ pub trait HealingInventory {
 /// §3.7 healing for a biped below half its maximum HP: stimpaks only, two AP
 /// per consumption attempt (saturating), restarting from the first entry.
 pub fn heal(inventory: &mut impl HealingInventory, half_maximum: i32) -> Result<(), WorldError> {
+    heal_limited(inventory, half_maximum, None)
+}
+/// [`heal`] below `threshold`, stopping after `limit` successful uses
+/// (SPEC-019 §3.16 rule 2); `None` is no limit.
+pub fn heal_limited(
+    inventory: &mut impl HealingInventory,
+    threshold: i32,
+    limit: Option<u32>,
+) -> Result<(), WorldError> {
     let mut position = 0;
-    while inventory.hp() < half_maximum && inventory.ap() >= 2 {
+    let mut uses = 0;
+    while inventory.hp() < threshold
+        && inventory.ap() >= 2
+        && limit.is_none_or(|limit| uses < limit)
+    {
         let pid = loop {
             match inventory.entry(position) {
                 None => return Ok(()),
@@ -545,6 +567,7 @@ pub fn heal(inventory: &mut impl HealingInventory, half_maximum: i32) -> Result<
         };
         if inventory.consume(&unit)? {
             inventory.used(unit)?;
+            uses += 1;
         } else {
             inventory.restore(unit)?;
         }
@@ -578,6 +601,12 @@ pub trait AttackEnv {
     fn switch_weapon(&mut self) -> Result<Switched, WorldError>;
     /// Reloading; `Some` when its out-of-ammo path ran weapon switching.
     fn reload(&mut self) -> Result<Option<Switched>, WorldError>;
+    /// After an approach: whether the loop now returns failure instead of
+    /// going on (SPEC-019 §3.16 rule 6, `stay` and the stay-close leash).
+    /// SPEC-009 never halts.
+    fn halted(&self) -> bool {
+        false
+    }
 }
 /// §3.12 bounded attack loop: at most ten attempts classified by preflight.
 /// Returns the loop's (unconsulted) success value.
@@ -599,7 +628,15 @@ pub fn attack_loop(
                         return Ok(false);
                     }
                 } else {
-                    if env.hit_chance(mode, false)? < min_to_hit || !env.approach(taunt)? {
+                    if env.hit_chance(mode, false)? < min_to_hit {
+                        env.flee()?;
+                        return Ok(true);
+                    }
+                    let approached = env.approach(taunt)?;
+                    if env.halted() {
+                        return Ok(false);
+                    }
+                    if !approached {
                         env.flee()?;
                         return Ok(true);
                     }
@@ -624,7 +661,7 @@ pub fn attack_loop(
                     !switched.success || !switched.weapon
                 };
                 if approach {
-                    if !env.approach(taunt)? {
+                    if !env.approach(taunt)? || env.halted() {
                         return Ok(false);
                     }
                     taunt = false;
@@ -638,7 +675,7 @@ pub fn attack_loop(
                 }
             }
             5 => {
-                if !env.approach(taunt)? {
+                if !env.approach(taunt)? || env.halted() {
                     return Ok(false);
                 }
                 taunt = false;
