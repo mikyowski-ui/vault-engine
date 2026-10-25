@@ -2,8 +2,6 @@
 //! types the desktop shell and the interactive world exchange (the dual-
 //! layer viewport, tactical camera and roof peeking). Engine extension, not
 //! part of any specification: with the Vanilla preset none of it is used.
-// Scaffold: removed once the shell and the world use every item.
-#![allow(dead_code)]
 
 use vault_render::IndexedImage;
 

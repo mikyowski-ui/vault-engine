@@ -236,7 +236,7 @@ to the same entries.
 
 `preset = "enhanced"` (or `--preset enhanced`) selects
 `vault_core::EnginePreset::Enhanced`. That enables the versioned opcode range
-`0x8200`-`0x82FF` (`0x8200` pushes the engine API version, 1) and reads table
+`0x8200`-`0x82FF` (`0x8200` pushes the engine API version, 2) and reads table
 overrides from `data/vault-engine/<table>.txt`. The tables are the critical
 hits, critical failures, terrain, encounter frequency, regions, towns,
 hotspots and map numbers, in the canonical text `build.rs` emits. Vanilla, the
@@ -275,9 +275,23 @@ logs and replay digests are what they were.
   **Alt+R** cycles `roof_peek` between `vanilla` (the Vanilla roof rules),
   `cursor_xray` (a cutaway around the cursor) and `hidden` (no roofs). Alt
   rather than Tab is the peek modifier, because Tab is the automap.
-- **Debug camera.** The **F9** debug overlay offers a free camera, which
-  ignores the scroll blockers, and a camera demo that runs the scripted
-  camera moves.
+  - The cutaway is a 96-pixel disc with a 48-pixel ring, a constant size on
+    screen at every zoom.
+  - The ring dissolves the roof through a 4×4 ordered (Bayer) dither anchored
+    to world pixels, so it stays in the 256-colour palette and does not swim
+    while panning.
+  - Clicks go through a cut-away roof to the floor, object or critter
+    beneath.
+- **Camera bounds.** The camera follows the player and eases back inside
+  the region the map's scroll blockers enclose (`CameraRegion::compute`,
+  below). Hexes outside that region, or off the 200×200 grid, are shrouded
+  with a dithered vignette rather than drawn as empty space.
+- **Debug camera.** On the **F9** overlay, **F8** reaches a Camera page in
+  the unlocked view; the Vanilla page cycle is unchanged.
+  - **F** toggles the "unbounded free-cam and roof cutaway": no bounds, no
+    shroud clamp and no roofs.
+  - **C** runs a camera demo: a pan, a 2× zoom, a shake with an X-ray peek,
+    then a reset.
 
 The settings are `viewport_mode` (`"fixed_640x480"` or
 `"unlocked_widescreen"`), `default_zoom` (a number from 0.5 to 3.0, default
@@ -287,10 +301,54 @@ fits the interface to the window's height, or a number from 0.5 to 8). They
 are read only with the enhanced preset. `--viewport MODE` and `--zoom ZOOM`
 override the first two from the command line (and pre-set the launcher).
 
-<!-- COORDINATOR: camera opcodes and demo map placeholder. -->
-> **Placeholder (to be filled in):** the enhanced camera opcodes
-> `0x8210`-`0x8213` (`op_cam_pan_to`, `op_cam_set_zoom`, `op_cam_shake`,
-> `op_cam_reset`) and the camera demo map fixture.
+#### Camera opcodes and the camera demo
+
+Under `preset = "enhanced"` scripts can drive the view with four words of the
+versioned range. Operands are integers, pushed in the order written and popped
+last first; none pushes a value. Each request leaves the world as a
+`WorldEffect::Camera(CameraCommand)` effect: presentation only, never part of
+the simulation, saves or replays. Durations are presentation milliseconds (0
+applies at once). Requests run in the order given: each starts when the one
+before it has run its duration, so a script can give a whole sequence at once.
+
+| Word | Name | Operands | Meaning |
+|---|---|---|---|
+| `0x8210` | `op_cam_pan_to` | `tile_num, duration_ms` | Move the view center to hex `tile_num` (0-39999) |
+| `0x8211` | `op_cam_set_zoom` | `zoom_pct, duration_ms` | Zoom to `zoom_pct` percent (100 is 1.0x; the view clamps to 50-300) |
+| `0x8212` | `op_cam_shake` | `intensity, duration_ms` | Shake by up to `intensity` pixels, decaying over the duration |
+| `0x8213` | `op_cam_reset` | `duration_ms` | Follow the player again at the configured zoom, with no shake |
+
+A hex outside 0-39999, a negative duration, a zoom of 0% or less or a negative
+intensity is refused with a world diagnostic and no effect; the script goes
+on. A non-integer operand is the ordinary VM type error. `engine_api_version`
+(`0x8200`) now pushes 2. Under Vanilla all four are unknown words: a script
+using them fails to parse with `invalid instruction 0x8210`, and the map
+loads without it.
+
+The view stays in the region `vault_core::camera::CameraRegion::compute`
+returns for the current elevation. It is a breadth-first fill, in hex
+neighbor order, from the player's hex (from the view center while the player
+is not placed), through hexes that pass the map-dependent scroll tests of
+SPEC-014 §3.29: inside the map border, with no unowned scroll blocker (PID
+`0x0500000C`, `SCROLL_BLOCKER_PID`) on that elevation. It omits the
+player-distance limit, so it is every hex the view may ever reach. A start
+hex that fails the tests falls back to the view center, and if both fail the
+region is the start hex alone.
+
+`cargo xtask fixtures --output DIR` also writes `DIR-cam-demo`: the same
+synthetic corpus plus `maps/cam_demo.map` and its map script
+`scripts/camdemo.int`. Scroll blockers on the ring of hex columns and rows 60
+and 140 enclose the camera's region. Inside it stand a walled, roofed building
+with a doorway, a critter and an item, and the entry hex outside the building.
+At map entry the script pans to the building's interior over 1500 ms, zooms to
+200% over 1000 ms, shakes with intensity 6 for 800 ms and resets over 1500 ms,
+all requested at once; the view sequences them by duration. A Vanilla audit
+of `DIR-cam-demo` reports `camdemo.int` as an unknown-word failure; `DIR`
+stays clean.
+
+    cargo xtask fixtures --output target/state-corpus
+    cargo run -p vault-platform -- --corpus-dir target/state-corpus-cam-demo \
+      --preset enhanced --preview-map maps/cam_demo.map
 
 An enhanced session's input log has one more record after `surface` and
 `scaling`, and another on every Alt+V:

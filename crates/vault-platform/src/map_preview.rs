@@ -23,8 +23,8 @@ use vault_render::{
     IndexedImage,
     dialogue::{self, ChoiceHit},
     map::{
-        Cutout, MapArt, MapHover, MapLight, MapScene, MapView, SceneCursor, draw_map_scene,
-        render_floor_lit,
+        Cutout, MapArt, MapHover, MapLight, MapScene, MapView, RoofCutaway, SceneCursor, Shroud,
+        draw_map_scene, render_floor_lit,
     },
     outline::OutlineInks,
 };
@@ -46,6 +46,7 @@ const EGG_ART: u32 = 0x0600_0002;
 mod automap;
 mod barter;
 mod called;
+mod camera;
 mod character;
 mod counter;
 mod debug;
@@ -251,6 +252,9 @@ pub struct MapPreview {
     /// SPEC-014 §3.42 the character screen's info line, folder and skill
     /// cursor, kept from one opening to the next.
     character_memory: character::Remembered,
+    /// The `enhanced` preset's presentation (camera, dual-layer frame and
+    /// roof peeking); `None` is Vanilla, the default.
+    enhanced: Option<Box<enhanced::Enhanced>>,
 }
 
 /// The map's sprites by tile index or object art. Each art file is read and
@@ -566,6 +570,7 @@ impl MapPreview {
             egg: None,
             interrupt_walk: true,
             character_memory: character::Remembered::default(),
+            enhanced: None,
         })
     }
     /// SPEC-014 §3.29 the keyboard for the engine key repeat: no input is
@@ -621,6 +626,10 @@ impl MapPreview {
     }
     /// Held modifiers: shift, control, alt.
     pub fn set_modifiers(&mut self, modifiers: [bool; 3]) {
+        // Holding Alt peeks under the roofs in the `enhanced` world.
+        if self.enhanced.is_some() && modifiers[2] != self.hud.modifiers[2] {
+            self.pointer.redraw = true;
+        }
         self.hud.modifiers = modifiers;
     }
     /// M-P6: the window lost the focus, so the releases of the buttons held
@@ -628,6 +637,7 @@ impl MapPreview {
     /// menu opens later with the button up.
     pub fn focus_lost(&mut self) {
         self.drop_presses();
+        self.enhanced_release_keys();
     }
     /// Every press still held is forgotten (its release was swallowed).
     fn drop_presses(&mut self) {
@@ -639,6 +649,12 @@ impl MapPreview {
     }
     /// The last game fade ended: the pointer's move during it applies.
     fn fade_ended(&mut self) {
+        // The `enhanced` pointer is routed again from where the shell last
+        // reported it.
+        if self.fade_pointer.is_some() && self.enhanced_pointer_again() {
+            self.fade_pointer = None;
+            return;
+        }
         match self.fade_pointer.take() {
             Some(Some(point)) => {
                 self.hover(point);
@@ -1066,6 +1082,9 @@ impl MapPreview {
                 WorldEffect::Floating { object, .. } | WorldEffect::Taunt { object, .. } => {
                     tracing::trace!(object, "floating text created");
                 }
+                // The `enhanced` camera's scripted requests (Vanilla never
+                // emits them; without the enhanced view they do nothing).
+                WorldEffect::Camera(command) => self.camera_command(command),
                 other => tracing::debug!(?other, "host presentation request"),
             }
         }
@@ -1087,6 +1106,16 @@ impl MapPreview {
         self.check_loot();
         // The map view sets it when it draws the in-world cursor.
         self.cursor_in_frame = false;
+        let mut image = self.screen_image()?;
+        self.held_shown = self.held_button().is_some();
+        self.frame = Some(image.clone());
+        self.draw_cursor(&mut image);
+        Ok(image)
+    }
+    /// The screen in front composed with the windows over it (the Set
+    /// Timer and called-shot windows, a dialog box, the debug overlay),
+    /// without the cursor.
+    fn screen_image(&mut self) -> AppResult<IndexedImage> {
         let mut image = match &self.screen {
             Screen::Map => self.map_image(),
             Screen::Skilldex(_) => self.skilldex_image(),
@@ -1104,14 +1133,16 @@ impl MapPreview {
             Screen::Automap(_) => self.automap_image(),
             Screen::Help(_) => self.help_image(),
         }?;
-        self.draw_timer(&mut image);
-        self.draw_called(&mut image);
-        self.draw_dialog(&mut image);
-        self.draw_debug(&mut image);
-        self.held_shown = self.held_button().is_some();
-        self.frame = Some(image.clone());
-        self.draw_cursor(&mut image);
+        self.draw_overlays(&mut image);
         Ok(image)
+    }
+    /// The windows drawn over any screen: the Set Timer and called-shot
+    /// windows, a dialog box and the debug overlay.
+    fn draw_overlays(&self, image: &mut IndexedImage) {
+        self.draw_timer(image);
+        self.draw_called(image);
+        self.draw_dialog(image);
+        self.draw_debug(image);
     }
     /// The last composed frame with the cursor at the pointer's current
     /// place, without composing the scene again. SPEC-014 §3.27: the
@@ -1143,23 +1174,43 @@ impl MapPreview {
         if modal && let Some(view) = &self.frozen_view {
             return Ok(view.clone());
         }
+        // SPEC-014 §3.27: the in-world cursor, a flat object at the hex
+        // under the pointer (movement mode adds its red translucent
+        // outline and the upright AP-text object). It exists only in the
+        // refresh, so no script, save, pick or route ever sees it. A
+        // pointer on the `enhanced` world canvas has none in this view.
+        let cursor = if self.pointer.world {
+            None
+        } else {
+            self.cursor_objects(self.view)
+        };
+        let image = self
+            .render_scenes(&[(self.view, [0, 0])], cursor.as_ref(), None, None)?
+            .pop()
+            .ok_or("no map view")?;
+        self.cursor_in_frame |= cursor.is_some();
+        self.frozen_view = modal.then(|| image.clone());
+        Ok(image)
+    }
+    /// The map view's layers over each of `views`, one refresh each: the
+    /// sprites under the world lighting. A view's offset is where it lies
+    /// in the coordinates `cursor` (the in-world cursor's objects) and
+    /// `cutaway` are given in: the 640-by-380 map view is one view at
+    /// (0, 0), and the `enhanced` world canvas is tiled into several.
+    pub(crate) fn render_scenes(
+        &mut self,
+        views: &[(MapView, [i64; 2])],
+        cursor: Option<&pointer::CursorObjects>,
+        cutaway: Option<RoofCutaway>,
+        shroud: Option<Shroud<'_>>,
+    ) -> AppResult<Vec<IndexedImage>> {
         // P-02: the world's map by reference and its drawn objects; no map
         // clone per frame.
         let egg = self.egg_mask();
         let objects = self.host.world.render_objects();
         let map = &self.host.world.map;
         self.art.bind(&self.host.assets, map, &objects)?;
-        // SPEC-014 §3.44: floor tiles are lit per pixel from ten hex
-        // lights around each tile; objects take their hex's light and roofs
-        // the ambient.
-        let tiles = &self.host.world.tile_light[self.view.elevation as usize];
         let ambient = self.host.world.ambient;
-        let light = MapLight {
-            palette: &self.palette,
-            ambient,
-            tiles,
-        };
-        let mut image = render_floor_lit(map, self.view, &self.art, light)?;
         let inks = OutlineInks::new(&self.palette);
         let extended = |pid: u32| {
             self.host
@@ -1170,41 +1221,51 @@ impl MapPreview {
         let cutout = self.cutout(egg.as_deref(), &extended);
         // SPEC-014 §3.46: the floating texts, the layer after the outlines.
         let floating = self.floating_sprites();
-        // SPEC-014 §3.27: the in-world cursor, a flat object at the hex
-        // under the pointer (movement mode adds its red translucent
-        // outline and the upright AP-text object). It exists only in the
-        // refresh, so no script, save, pick or route ever sees it.
-        let cursor = self.cursor_objects([self.view.width, self.view.height]);
         let ring = cursor
-            .as_ref()
             .and_then(|cursor| cursor.ring.as_ref())
             .and_then(|(art, origin)| Some((art.frame(0, 0)?, *origin)));
-        let scene_cursor = cursor.as_ref().map(|cursor| SceneCursor {
-            hex: cursor.hex,
-            order: self.cursor_order(&objects, cursor.hex),
-            art: (&cursor.art, [0, 0]),
-            outline: ring.map(|(frame, origin)| {
-                (
-                    frame,
-                    origin,
-                    vault_formats::map::outline::RED | vault_formats::map::outline::TRANSLUCENT,
-                )
-            }),
-            text: cursor.text.as_ref().map(|text| (text, [0, 0])),
-        });
-        let scene = MapScene {
-            cutout: cutout.as_ref(),
-            light: Some(light),
-            outlines: Some(&inks),
-            floating: &floating,
-            cursor: scene_cursor,
-            roof_cutaway: None,
-            shroud: None,
-        };
-        draw_map_scene(&mut image, map, &objects, self.view, &self.art, scene)?;
-        self.cursor_in_frame |= cursor.is_some();
-        self.frozen_view = modal.then(|| image.clone());
-        Ok(image)
+        let order = cursor.map_or(0, |cursor| self.cursor_order(&objects, cursor.hex));
+        let mut images = Vec::with_capacity(views.len());
+        for &(view, [ox, oy]) in views {
+            // SPEC-014 §3.44: floor tiles are lit per pixel from ten hex
+            // lights around each tile; objects take their hex's light and
+            // roofs the ambient.
+            let tiles = &self.host.world.tile_light[view.elevation as usize];
+            let light = MapLight {
+                palette: &self.palette,
+                ambient,
+                tiles,
+            };
+            let mut image = render_floor_lit(map, view, &self.art, light)?;
+            let scene_cursor = cursor.map(|cursor| SceneCursor {
+                hex: cursor.hex,
+                order,
+                art: (&cursor.art, [-ox, -oy]),
+                outline: ring.map(|(frame, origin)| {
+                    (
+                        frame,
+                        [origin[0] - ox, origin[1] - oy],
+                        vault_formats::map::outline::RED | vault_formats::map::outline::TRANSLUCENT,
+                    )
+                }),
+                text: cursor.text.as_ref().map(|text| (text, [-ox, -oy])),
+            });
+            let scene = MapScene {
+                cutout: cutout.as_ref(),
+                light: Some(light),
+                outlines: Some(&inks),
+                floating: &floating,
+                cursor: scene_cursor,
+                roof_cutaway: cutaway.map(|cut| RoofCutaway {
+                    center: [cut.center[0] - ox, cut.center[1] - oy],
+                    ..cut
+                }),
+                shroud,
+            };
+            draw_map_scene(&mut image, map, &objects, view, &self.art, scene)?;
+            images.push(image);
+        }
+        Ok(images)
     }
     /// SPEC-014 §3.27 / §3.44 the in-world cursor's place in the view
     /// elevation's object list (insertion order): before the first object
@@ -1259,6 +1320,9 @@ impl MapPreview {
     /// Input or a world change may have changed what the map view shows.
     fn thaw_view(&mut self) {
         self.frozen_view = None;
+        if let Some(enhanced) = &mut self.enhanced {
+            enhanced.frozen = None;
+        }
     }
     /// The map screen: a conversation's window, or the map view with the
     /// indicator boxes and the interface bar.
@@ -1373,6 +1437,7 @@ impl MapPreview {
     }
     pub fn step(&mut self, key: KeyCode) -> bool {
         self.thaw_view();
+        self.enhanced_key_down(key);
         let handled = self.step_key(key);
         // G-22: a key that opened a window over a held map press drops it.
         self.drop_map_press();
@@ -1504,6 +1569,10 @@ impl MapPreview {
             self.open_help();
             return true;
         }
+        // The `enhanced` world's camera and roof-peek keys.
+        if self.enhanced_key(key) {
+            return true;
+        }
         // SPEC-014 §3.19 game-loop hotkeys (Escape opens the options).
         if self.game_hotkey(key) {
             return true;
@@ -1616,7 +1685,7 @@ impl MapPreview {
             if !right
                 && matches!(self.screen, Screen::Map)
                 && !self.host.world.dialogue.open
-                && point[1] <= vault_core::ui::bar::BAR_ORIGIN[1]
+                && self.map_area(point)
             {
                 self.map_press(point);
             }
@@ -1666,12 +1735,12 @@ impl MapPreview {
         // nothing; clicks are discarded, never queued. The Swap hands
         // button alone still presses (§3.27).
         if self.watch_shown() {
-            if !right && point[1] > vault_core::ui::bar::BAR_ORIGIN[1] {
+            if !right && !self.map_area(point) {
                 self.swap_button_press(point);
             }
             return true;
         }
-        if point[1] > vault_core::ui::bar::BAR_ORIGIN[1] {
+        if !self.map_area(point) {
             return self.bar_click(point, right);
         }
         // While the vault-debug overlay is open a map click selects the
@@ -1785,6 +1854,9 @@ impl MapPreview {
         };
         changed |= self.talk_tick(now);
         self.update_audio();
+        // The `enhanced` camera moves (and keeps the world's camera hex at
+        // the hex nearest its center) before the map view follows it.
+        changed |= self.enhanced_tick(now);
         if self.view.grid.pick_hex([320, 190]) != Some(self.host.world.camera_hex) {
             self.view.grid = HexGrid::centered(self.host.world.camera_hex, 640, 380)?;
             changed = true;
@@ -1818,17 +1890,22 @@ impl MapPreview {
     /// The pointer moved over the frame; returns the map hover once per hex
     /// change, for the shell's log.
     pub fn hover(&mut self, point: [i32; 2]) -> Option<MapHover> {
+        self.hover_in(point, false)
+    }
+    /// [`Self::hover`] at a frame pixel, or with `world` at a pixel of the
+    /// `enhanced` world canvas.
+    pub(crate) fn hover_in(&mut self, point: [i32; 2], world: bool) -> Option<MapHover> {
         // SPEC-014 §3.2: the pointer is not polled during a game fade; its
         // last position applies when the fade ends.
         if self.fade_blocks() {
             self.fade_pointer = Some(Some(point));
             return None;
         }
-        self.pointer_moved(point);
+        self.pointer_moved_in(point, world);
         if self.host.world.dialogue.open || !matches!(self.screen, Screen::Map) {
             return None;
         }
-        let hover = self.view.hover(point);
+        let hover = self.pointer_view().hover(point);
         if self.last_hover == Some(hover) {
             return None;
         }

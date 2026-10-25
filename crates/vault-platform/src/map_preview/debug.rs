@@ -10,7 +10,10 @@
 //! The overlay is also a deterministic editor. F8 cycles its pages: the
 //! watch view, the object inspector (a map click selects the object under
 //! the pointer instead of acting while the overlay is open), the GVAR and
-//! MVAR editors, the map jump and the item spawner. Editing is keyboard
+//! MVAR editors, the map jump and the item spawner, and in the unlocked
+//! `enhanced` view a camera page (F: the unbounded free camera with the
+//! roofs cut away; C: the camera demo), whose presentation actions are not
+//! debug commands and never reach the world. Editing is keyboard
 //! driven: Up/Down (PageUp/PageDown by 10) choose a row, digits and Minus
 //! type a value, Backspace deletes, Enter commits, H fully heals the
 //! inspected critter. The overlay never changes the world itself: each
@@ -49,6 +52,9 @@ pub(crate) enum Page {
     MapVars,
     MapJump,
     Spawn,
+    /// The `enhanced` camera's presentation tools (after the spawner, only
+    /// in the unlocked enhanced view): the free camera and the camera demo.
+    Camera,
 }
 impl Page {
     fn next(self) -> Self {
@@ -58,7 +64,7 @@ impl Page {
             Self::Globals => Self::MapVars,
             Self::MapVars => Self::MapJump,
             Self::MapJump => Self::Spawn,
-            Self::Spawn => Self::Watch,
+            Self::Spawn | Self::Camera => Self::Watch,
         }
     }
     fn title(self) -> &'static str {
@@ -69,6 +75,7 @@ impl Page {
             Self::MapVars => "MVAR editor",
             Self::MapJump => "map jump",
             Self::Spawn => "item spawner",
+            Self::Camera => "enhanced camera",
         }
     }
     /// The first row a page's cursor starts on.
@@ -226,8 +233,12 @@ impl MapPreview {
         if right || self.debug.is_none() {
             return false;
         }
+        // A point of the `enhanced` world canvas is never on the panel (the
+        // enhanced pointer routing takes panel clicks itself).
         let [x, y, width, height] = PANEL;
-        let on_panel = (x..x + width).contains(&point[0]) && (y..y + height).contains(&point[1]);
+        let on_panel = !self.pointer.world
+            && (x..x + width).contains(&point[0])
+            && (y..y + height).contains(&point[1]);
         let picked = if on_panel {
             None
         } else {
@@ -249,6 +260,11 @@ impl MapPreview {
         self.thaw_view();
         true
     }
+    /// Whether the overlay is open with its panel under frame pixel `ui`.
+    pub(crate) fn debug_panel_at(&self, ui: [i32; 2]) -> bool {
+        let [x, y, width, height] = PANEL;
+        self.debug.is_some() && (x..x + width).contains(&ui[0]) && (y..y + height).contains(&ui[1])
+    }
     /// The overlay's keys while it is open: F8 cycles the pages; on every
     /// page but the watch view the editing keys are taken. Returns whether
     /// the key was taken; every other key acts as usual.
@@ -257,14 +273,41 @@ impl MapPreview {
             return false;
         };
         if key == KeyCode::F8 {
+            // The camera page follows the spawner in the unlocked
+            // `enhanced` view only.
+            let next = if page == Page::Spawn && self.enhanced_view().is_some() {
+                Page::Camera
+            } else {
+                page.next()
+            };
             if let Some(overlay) = &mut self.debug {
-                overlay.set_page(page.next());
+                overlay.set_page(next);
             }
             self.thaw_view();
             return true;
         }
         if page == Page::Watch {
             return false;
+        }
+        // The camera page's presentation actions (not debug commands: the
+        // world never sees them).
+        if page == Page::Camera {
+            let note = match key {
+                KeyCode::KeyF => {
+                    let on = self.toggle_free_camera();
+                    format!("free camera {}", if on { "on" } else { "off" })
+                }
+                KeyCode::KeyC => {
+                    self.start_camera_demo();
+                    "camera demo started".into()
+                }
+                _ => return false,
+            };
+            if let Some(overlay) = &mut self.debug {
+                overlay.note = note;
+            }
+            self.thaw_view();
+            return true;
         }
         let rows = self.debug_rows(page);
         let selected = self.debug.as_ref().and_then(|overlay| overlay.selected);
@@ -314,7 +357,7 @@ impl MapPreview {
                 let index = overlay.cursor;
                 let typed = "type a number first";
                 let command = match page {
-                    Page::Watch => Err(typed),
+                    Page::Watch | Page::Camera => Err(typed),
                     Page::Inspect => match (selected, overlay.value()) {
                         (None, _) => Err("no object selected"),
                         (Some(object), value) => value
@@ -372,7 +415,7 @@ impl MapPreview {
     fn debug_rows(&self, page: Page) -> usize {
         let world = &self.host.world;
         match page {
-            Page::Watch => 0,
+            Page::Watch | Page::Camera => 0,
             Page::Inspect => self
                 .debug
                 .as_ref()
@@ -566,6 +609,12 @@ impl MapPreview {
                     &format!("tile: {entry} (empty: entrance)"),
                     ColorKey::WHITE,
                 );
+            }
+            Page::Camera => {
+                line(image, "F free camera, C camera demo", ColorKey::AMBER);
+                for text in self.camera_lines() {
+                    line(image, &text, ColorKey::GREEN);
+                }
             }
             Page::Spawn => {
                 line(image, "type the PID (decimal), Enter", ColorKey::AMBER);

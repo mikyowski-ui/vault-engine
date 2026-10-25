@@ -574,7 +574,8 @@ impl MapPreview {
     /// A key went up: held while the keyboard is disabled or a roll or the
     /// panel animation defers keys, so it counts toward the 32 events
     /// (§3.21, §3.27). Game input acts on presses only.
-    pub fn key_up(&mut self, _key: KeyCode) {
+    pub fn key_up(&mut self, key: KeyCode) {
+        self.enhanced_key_up(key);
         if !self.fade_blocks() && (self.keyboard_locked() || self.bar_blocks()) {
             self.hold_key(HeldKey::Release);
         }
@@ -602,7 +603,9 @@ impl MapPreview {
             // code, so its event is removed and nothing acts.
             if let HeldKey::Press(key, modifiers) = event {
                 let current = std::mem::replace(&mut self.hud.modifiers, modifiers);
+                self.set_enhanced_replay(true);
                 self.step(key);
+                self.set_enhanced_replay(false);
                 self.hud.modifiers = current;
                 read |= !crate::input::is_modifier(key);
             }
@@ -1471,7 +1474,7 @@ impl MapPreview {
                 if clicks::input_locked(&self.host.click_state()) {
                     return;
                 }
-                if let Some(hex) = self.view.grid.pick_hex(point) {
+                if let Some(hex) = self.pointer_view().grid.pick_hex(point) {
                     let interrupt = self.interrupt_walk;
                     match self
                         .host

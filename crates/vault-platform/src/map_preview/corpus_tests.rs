@@ -272,3 +272,47 @@ fn dialogue_review_and_ask_about_resources() {
     assert_eq!(painter.message("dbox.msg", 100), b"DONE");
     assert_eq!(painter.message("dbox.msg", 103), b"CANCEL");
 }
+
+/// The `enhanced` world canvas over a corpus map: every zoom draws a
+/// canvas of the layout's size, and the pointer still finds the player's
+/// hex on it.
+#[test]
+#[ignore = "needs the local corpus"]
+fn the_enhanced_canvas_draws_the_cave_at_every_zoom() {
+    use crate::enhanced::{EnhancedSettings, PointerAt};
+    use vault_render::EnhancedLayout;
+    let Some(mut preview) = map("v13ent.map") else {
+        return;
+    };
+    preview.set_enhanced(Some(EnhancedSettings {
+        smooth_camera: false,
+        ..Default::default()
+    }));
+    preview.tick(16).unwrap();
+    let player = hex(&preview, preview.host.world.player).unwrap();
+    for zoom in [0.5_f32, 1.0, 2.0] {
+        let started = std::time::Instant::now();
+        let layout = EnhancedLayout::compute([1920, 1080], None, zoom).unwrap();
+        let frame = preview.enhanced_frame(&layout).unwrap().unwrap();
+        eprintln!(
+            "zoom {zoom}: {:?} in {:?}",
+            layout.world_size,
+            started.elapsed()
+        );
+        assert_eq!(
+            [frame.world.width(), frame.world.height()],
+            layout.world_size
+        );
+        let view = preview.enhanced_view().unwrap();
+        let [x, y] = view.grid.hex_center(player).unwrap();
+        let per_world = f64::from(layout.ui_scale * layout.zoom);
+        let point = [(x as f64 + 0.5) * per_world, (y as f64 + 0.5) * per_world];
+        preview.enhanced_pointer(PointerAt {
+            ui: layout.ui_pixel(point),
+            world: layout.world_point(point),
+            side: false,
+        });
+        let at = preview.pointer.at.unwrap();
+        assert_eq!(preview.pointer_view().grid.pick_hex(at), Some(player));
+    }
+}

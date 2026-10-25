@@ -3853,7 +3853,7 @@ fn spec014_the_in_world_cursor_is_a_flat_scene_object_over_the_map_only() {
     preview.hover(point);
     // SPEC-014 §3.27: movement mode's cursor snaps to the hovered hex and
     // carries the hex outline frame for the outline list.
-    let cursor = preview.cursor_objects([640, 380]).unwrap();
+    let cursor = preview.cursor_objects(preview.view).unwrap();
     assert_eq!(cursor.hex, hex);
     assert!(cursor.ring.is_some());
     assert!(cursor.art.pixels().contains(&9));
@@ -3874,23 +3874,23 @@ fn spec014_the_in_world_cursor_is_a_flat_scene_object_over_the_map_only() {
     let order = preview.cursor_order(&objects, hex);
     assert_eq!(list[order].id, id, "the item draws over the cursor");
     preview.hover([point[0] + 1, point[1]]);
-    assert_eq!(preview.cursor_objects([640, 380]).unwrap().hex, hex);
+    assert_eq!(preview.cursor_objects(preview.view).unwrap().hex, hex);
     let objects = preview.host.world.render_objects();
     let order = preview.cursor_order(&objects, hex);
     assert_eq!(order, objects.elevations[usize::from(elevation)].len());
     // Over the bar the arrow is drawn instead, and the scene is composed
     // again without the cursor object.
     preview.hover([320, 440]);
-    assert!(preview.cursor_objects([640, 380]).is_none());
+    assert!(preview.cursor_objects(preview.view).is_none());
     let bar = preview.pointer_frame().unwrap();
     assert!(!preview.cursor_in_frame);
     assert_ne!(bar.pixels(), base.pixels());
     // A modal window shows no in-world cursor.
     preview.hover(point);
-    assert!(preview.cursor_objects([640, 380]).is_some());
+    assert!(preview.cursor_objects(preview.view).is_some());
     assert!(preview.step(KeyCode::KeyI));
     assert!(matches!(preview.screen, Screen::Inventory(_)));
-    assert!(preview.cursor_objects([640, 380]).is_none());
+    assert!(preview.cursor_objects(preview.view).is_none());
     preview.image().unwrap();
     assert!(!preview.cursor_in_frame);
 }
