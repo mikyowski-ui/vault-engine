@@ -467,6 +467,7 @@ impl MapPreview {
     }
     /// The world for `path`, its player sheet read from `character` (a
     /// `.gcd`) when given, under `preset`.
+    #[cfg(test)]
     pub fn load_with(
         vfs: Arc<dyn Vfs>,
         path: &str,
@@ -475,7 +476,29 @@ impl MapPreview {
         seed: i32,
         preset: EnginePreset,
     ) -> AppResult<Self> {
+        Self::load_for_game(
+            vfs,
+            path,
+            language,
+            character,
+            seed,
+            preset,
+            vault_core::GameProfile::Fallout1,
+        )
+    }
+    /// [`Self::load_with`] reading `game`'s map and prototype layouts
+    /// (SPEC-016) from the first map on.
+    pub fn load_for_game(
+        vfs: Arc<dyn Vfs>,
+        path: &str,
+        language: &str,
+        character: Option<&str>,
+        seed: i32,
+        preset: EnginePreset,
+        game: vault_core::GameProfile,
+    ) -> AppResult<Self> {
         let assets = VfsWorldAssets::new(vfs, language)?;
+        assets.set_game_profile(game);
         let character = if let Some(path) = character {
             CharacterSheet::from_gcd(&assets.gcd(path)?, Default::default())
         } else {

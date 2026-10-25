@@ -5,6 +5,29 @@
 - NEVER reference, search for, or copy decompiled C/C++ source code from original Fallout executables or reverse-engineering repositories.
 - Test all parsers and systems using synthetic fixtures committed in `tests/fixtures/`.
 
+## Spec Authoring (Team A)
+Authorized by the project owner on 2026-10-25.
+
+- **When.** A roadmap item needs a new or revised specification (`SPEC-015` to `SPEC-019`, or any later spec), and no research-vault file is attached. The coordinator may then spawn a dedicated **Spec-Author Sub-Agent (Team A)**. It drafts and approves `specs/approved/SPEC-XXX-*.md` and the synthetic fixtures the spec describes.
+- **Sources Team A may use:**
+  - public format specifications (for example the IETF RFCs);
+  - standard engine documentation;
+  - the project's own approved specs;
+  - the owner's briefs;
+  - its general knowledge of publicly documented file formats and game behavior.
+- **Never allowed:**
+  - reading, searching for, quoting or paraphrasing decompiled or disassembled code, or re-implementation source (`fallout1-re`, `fallout2-ce`, `sfall` and the like);
+  - proprietary game assets;
+  - file paths under a `src/` directory;
+  - 40-character hex hashes.
+- **Open questions never halt the work.** Team A resolves each one with a sensible, documented clean-room default, and records it in the spec's **Decisions** section. Each decision says whether it is an owner instruction or a Team A default.
+- **What every Team A spec carries:**
+  - a **Provenance** line: the author (Team A), the date, the source categories used, and any owner brief;
+  - the usual `[Must-match]` / `[May-improve]` / `[Safe rule]` classification;
+  - test vectors made from synthetic data only.
+- **Separation.** The implementing agent (Team B, or the coordinator) is a different agent from the spec's author. It implements from the approved spec alone, and the ingestion rule in `CLAUDE.md` still applies to every spec.
+- **Recording.** `PROVENANCE.md` records which specs came from Team A.
+
 ## Workspace Architecture
 This Cargo workspace consists of 7 core crates plus CLI tools:
 1. `crates/vault-formats`: VFS (`Vfs` trait, `LocalDirProvider`, `DatProvider`), DAT archives and LZSS, and parsers/writers for `.pal`, `.frm`/`.fr0`–`.fr5`, `.lst`, `.fon`, `.aaf`, `.msg`, `.pro`, `.map`, `.gam`, `.gcd`, `SAVE.DAT`, `AUTOMAP.DB`, `ai.txt`, `.acm`, `.mve`, movie fade `.cfg`, `.sve`, `.rix`, credits and `fallout.cfg`, plus the FID codec, sound-name builders, and hex geometry.

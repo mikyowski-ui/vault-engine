@@ -82,7 +82,8 @@ rules.
 - `count` is bounded by what the tree can hold: each entry takes at least 17
   bytes, so `count * 17 + 4 > tree_size` is refused before any entry is
   read. `[Safe rule]`
-- A `flags` value other than 0 or 1 is refused. `[Safe rule]`
+- `flags` is 0 (stored) or 1 (zlib-compressed). Any other value is refused.
+  `[Must-match: owner decision, 2026-10-25]`
 - A member's stored bytes must lie wholly before the tree:
   `offset + packed_size <= T`. Otherwise refused. `[Safe rule]`
 - A stored member (`flags = 0`) must have `real_size == packed_size`.
@@ -95,11 +96,12 @@ rules.
 
 - A path is 1 to 1024 bytes of printable ASCII (`0x20` to `0x7E`). Anything
   else is refused. `[Safe rule]`
-- Either `\` or `/` separates directories. A path is looked up and listed in
-  the engine's canonical form: lowercase, `/`-separated, with the same
-  component rules as every other loose or archived path (no empty, `.` or
-  `..` component). A path that has no canonical form is refused.
-  `[Safe rule; to confirm]`
+- Either `\` or `/` separates directories, and ASCII letters are folded to
+  lowercase. `[Must-match: owner decision, 2026-10-25]`
+- A path is looked up and listed in the engine's canonical form: lowercase,
+  `/`-separated, with the same component rules as every other loose or
+  archived path (no empty, `.` or `..` component). A path that has no
+  canonical form is refused. `[Safe rule]`
 - Two entries whose canonical paths are equal are refused (an ambiguous
   archive), not resolved by order. `[Safe rule]`
 
@@ -155,17 +157,19 @@ of §3.2.7. `[Must-match: RFC 1951]` It applies these bounds:
   paths in canonical order, and a read of a listed path extracts that
   member. `[Safe rule]`
 
-## 7. Open questions
+## 7. Decisions
 
-These are for the project owner or the research vault. Until answered, the
-safe rules above stand.
+The open questions of the first revision, resolved by the project owner on
+2026-10-25:
 
-1. Path form: are stored paths always one separator style and one case? The
-   engine accepts both and folds case (section 4).
-2. Are there `flags` values besides 0 and 1 in shipped archives?
-3. Which archives a Fallout 2 install has, and which database (master or
-   critter) each serves. This is needed to mount a Fallout 2 game, and
-   belongs with SPEC-018.
+1. **Path form.** Both `/` and `\` separate directories, and ASCII case
+   folds to lowercase (section 4).
+2. **Flag values.** Only 0 (stored) and 1 (zlib-compressed) are valid; any
+   other byte is refused (section 3).
+3. **Archive roles.** Which archive serves which database is part of mounting
+   a Fallout 2 game, so it is specified in SPEC-018: `MASTER.DAT` is the
+   master database, `CRITTER.DAT` the critter-art database, and an optional
+   `patch000.dat` sits above `MASTER.DAT`.
 
 ## 8. Test vectors
 

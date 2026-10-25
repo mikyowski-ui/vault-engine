@@ -262,6 +262,12 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn set_enhanced_scripts(&self, enabled: bool) {
         (**self).set_enhanced_scripts(enabled)
     }
+    fn game_profile(&self) -> crate::GameProfile {
+        (**self).game_profile()
+    }
+    fn set_game_profile(&self, game: crate::GameProfile) {
+        (**self).set_game_profile(game)
+    }
     fn game_messages(
         &self,
         file: &str,
@@ -582,11 +588,21 @@ impl<A: WorldAssets> WorldHost<A> {
     pub(crate) fn unload_map(&mut self) -> Result<bool, WorldError> {
         let saved = self.leave_map()?;
         self.teardown_map()?;
-        self.world.import_map(empty_map(), &self.assets)?;
+        self.world.import_map(self.empty_map(), &self.assets)?;
         self.world.persistence.current_map = None;
         self.world.loading = false;
         self.world.unloaded = true;
         Ok(saved)
+    }
+    /// The SPEC-003 new-map default, at the game's map version (SPEC-016).
+    fn empty_map(&self) -> vault_formats::MapFile {
+        let mut map = empty_map();
+        map.header.version = self.assets.game_profile().map_version();
+        map
+    }
+    /// Read maps and prototypes in `game`'s layouts (SPEC-016) from now on.
+    pub fn set_game_profile(&mut self, game: crate::GameProfile) {
+        self.assets.set_game_profile(game);
     }
     pub fn load_map(&mut self, path: &str) -> Result<(), WorldError> {
         self.world.trace.push(WorldTrace::LoadStep(1));
@@ -598,7 +614,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.trace.push(WorldTrace::LoadStep(2));
         let (map, mut saved, mut load_error, file) = match self.read_map(path) {
             Ok((map, saved, file)) => (map, saved, None, file),
-            Err(error) => (empty_map(), false, Some(error), String::new()),
+            Err(error) => (self.empty_map(), false, Some(error), String::new()),
         };
         self.world.persistence.current_map = None;
         self.world.restoring = map.header.flags.0 & 1 != 0;
@@ -625,7 +641,7 @@ impl<A: WorldAssets> WorldHost<A> {
             load_error = Some(WorldError::Invalid(format!(
                 "map entry hex {entry} is outside the map border"
             )));
-            self.world.import_map(empty_map(), &self.assets)?;
+            self.world.import_map(self.empty_map(), &self.assets)?;
             self.world.restoring = false;
             saved = false;
             self.world.elevation = self.world.map.header.entry_elevation;
@@ -850,7 +866,12 @@ impl<A: WorldAssets> WorldHost<A> {
                         message: error.to_string(),
                     })
             };
-            return Ok((vault_formats::MapFile::parse(bytes, &lookup)?, true, saved));
+            let game = self.assets.game_profile();
+            return Ok((
+                vault_formats::MapFile::parse_for(bytes, &lookup, game)?,
+                true,
+                saved,
+            ));
         }
         Ok((self.assets.map(path)?, false, file))
     }

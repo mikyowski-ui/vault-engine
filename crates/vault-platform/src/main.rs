@@ -1686,6 +1686,9 @@ fn run(mut args: Args) -> AppResult<()> {
     }
     if let Some(path) = &args.replay_inputs {
         args.preview.headless = true;
+        // A replay takes nothing from the settings, but the command line's
+        // game profile chooses the data's formats (SPEC-015/016).
+        args.preview.game_profile = args.game_profile.unwrap_or_default();
         let preview = args
             .preview
             .load()?

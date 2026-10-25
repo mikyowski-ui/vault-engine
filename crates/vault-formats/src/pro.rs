@@ -245,6 +245,16 @@ pub struct Critter {
     pub body: i32,
     pub experience: i32,
     pub kill_category: i32,
+    /// SPEC-016 §3.1: Fallout 2's trailing unarmed damage type; `None` for
+    /// a Fallout 1 record (SPEC-003), whose damage type is 0.
+    pub damage_type: Option<u32>,
+}
+
+impl Critter {
+    /// The unarmed damage type: SPEC-016's word, or 0 (normal) for Fallout 1.
+    pub fn damage_type(&self) -> u32 {
+        self.damage_type.unwrap_or(0)
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SceneryData {
@@ -298,7 +308,14 @@ pub struct Prototype {
 }
 
 impl Prototype {
+    /// A Fallout 1 prototype (SPEC-003).
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
+        Self::parse_for(bytes, crate::GameProfile::Fallout1)
+    }
+    /// A prototype in `game`'s layout: SPEC-016 §3.1 gives Fallout 2 critter
+    /// records one more word and an exact 416-byte length; every other
+    /// record is as SPEC-003.
+    pub fn parse_for(bytes: &[u8], game: crate::GameProfile) -> Result<Self, ParseError> {
         let mut r = Reader::new(bytes, "PRO")?;
         let pid = r.word()?;
         let category = Category::from_pid(pid)?;
@@ -408,6 +425,18 @@ impl Prototype {
                 body: r.be_i32()?,
                 experience: r.be_i32()?,
                 kill_category: r.be_i32()?,
+                damage_type: match game {
+                    crate::GameProfile::Fallout1 => None,
+                    crate::GameProfile::Fallout2 => {
+                        if bytes.len() != 416 {
+                            return Err(r.error(format!(
+                                "a Fallout 2 critter prototype is 416 bytes, not {}",
+                                bytes.len()
+                            )));
+                        }
+                        Some(r.word()?)
+                    }
+                },
             })),
             Category::Scenery => {
                 let subtype = r.be_i32()?;
@@ -580,6 +609,10 @@ impl Prototype {
                     out,
                     &[critter.body, critter.experience, critter.kill_category],
                 );
+                // SPEC-016 §3.1: a Fallout 2 record keeps its 416 bytes.
+                if let Some(damage_type) = critter.damage_type {
+                    put_u32(out, damage_type);
+                }
             }
             PrototypeData::Scenery(scenery) => {
                 let subtype = scenery.data.subtype() as i32;

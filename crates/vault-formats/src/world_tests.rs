@@ -824,3 +824,66 @@ fn corpus_every_map_parses() {
     assert_eq!(maps.len(), 72);
     assert!(failures.is_empty(), "{} maps failed", failures.len());
 }
+
+#[test]
+fn spec016_version_20_maps_read_only_under_fallout2() {
+    let fallout1 = fixture::empty_map();
+    let mut fallout2 = fallout1.clone();
+    fixture::word(&mut fallout2, 0, 20);
+    let map = MapFile::parse_for(&fallout2, &lookup, GameProfile::Fallout2).unwrap();
+    assert_eq!(map.header.version, 20);
+    // Otherwise the version 19 layout, field for field.
+    let classic = MapFile::parse(&fallout1, &lookup).unwrap();
+    assert_eq!(classic.header.version, 19);
+    let mut same = map.header.clone();
+    same.version = 19;
+    assert_eq!(format!("{same:?}"), format!("{:?}", classic.header));
+    // Written back, it keeps version 20 and its bytes.
+    assert_eq!(map.write().unwrap(), fallout2);
+    // One layout per profile: each game refuses the other's version.
+    let error = MapFile::parse(&fallout2, &lookup).unwrap_err().to_string();
+    assert!(error.contains("version 20"), "{error}");
+    let error = MapFile::parse_for(&fallout1, &lookup, GameProfile::Fallout2)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("version 19"), "{error}");
+    assert_eq!(GameProfile::default().map_version(), 19);
+}
+
+#[test]
+fn spec016_fallout2_critters_carry_a_damage_type_word() {
+    let fallout1 = fixture::prototype(1, 0);
+    assert_eq!(fallout1.len(), 412);
+    let mut fallout2 = fallout1.clone();
+    fallout2.extend(3u32.to_be_bytes());
+    let pro = Prototype::parse_for(&fallout2, GameProfile::Fallout2).unwrap();
+    let PrototypeData::Critter(critter) = &pro.data else {
+        panic!()
+    };
+    assert_eq!((critter.damage_type, critter.damage_type()), (Some(3), 3));
+    assert_eq!(pro.write(), fallout2);
+    // Fallout 1: SPEC-003's record, damage type 0, written at 412 bytes.
+    let classic = Prototype::parse(&fallout1).unwrap();
+    let PrototypeData::Critter(critter) = &classic.data else {
+        panic!()
+    };
+    assert_eq!((critter.damage_type, critter.damage_type()), (None, 0));
+    assert_eq!(classic.write(), fallout1);
+    // Fallout 2's length is exact.
+    for length in [412, 420] {
+        let mut bytes = fallout2.clone();
+        bytes.resize(length, 0);
+        let error = Prototype::parse_for(&bytes, GameProfile::Fallout2)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("416 bytes"), "{length}: {error}");
+    }
+    // Other categories are unchanged under Fallout 2.
+    for (category, subtype) in [(0, 0), (2, 5), (3, 0), (4, 0), (5, 0)] {
+        let bytes = fixture::prototype(category, subtype);
+        assert_eq!(
+            Prototype::parse_for(&bytes, GameProfile::Fallout2).unwrap(),
+            Prototype::parse(&bytes).unwrap()
+        );
+    }
+}

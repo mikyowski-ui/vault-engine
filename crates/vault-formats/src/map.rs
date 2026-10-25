@@ -1,4 +1,5 @@
-//! SPEC-003 version-19 map streams, with bounded recursive inventories.
+//! SPEC-003 version-19 map streams (and SPEC-016's version 20, the same
+//! layout, under the Fallout 2 profile), with bounded recursive inventories.
 use crate::{
     ParseError,
     binary::{MAX_ENTRIES, Reader, put_i32, put_u32},
@@ -38,6 +39,8 @@ impl TilePair {
 }
 #[derive(Debug, Clone)]
 pub struct MapHeader {
+    /// 19 (SPEC-003) or 20 (SPEC-016), kept so a written map keeps it.
+    pub version: i32,
     pub name: [u8; 16],
     pub entry_hex: i32,
     pub entry_elevation: u8,
@@ -344,10 +347,24 @@ fn script_category(
 }
 
 impl MapFile {
+    /// A Fallout 1 map (SPEC-003, version 19).
     pub fn parse(bytes: &[u8], prototypes: &impl PrototypeLookup) -> Result<Self, ParseError> {
+        Self::parse_for(bytes, prototypes, crate::GameProfile::Fallout1)
+    }
+    /// A map of `game`'s version only (SPEC-003 19, SPEC-016 20; the same
+    /// layout).
+    pub fn parse_for(
+        bytes: &[u8],
+        prototypes: &impl PrototypeLookup,
+        game: crate::GameProfile,
+    ) -> Result<Self, ParseError> {
         let mut r = Reader::new(bytes, "MAP")?;
-        if r.be_i32()? != 19 {
-            return Err(r.error("only map version 19 is supported"));
+        let version = r.be_i32()?;
+        if version != game.map_version() {
+            return Err(r.error(format!(
+                "map version {version}; {game:?} maps are version {}",
+                game.map_version()
+            )));
         }
         let name = r.take(16)?.try_into().expect("fixed name");
         let entry_hex = r.be_i32()?;
@@ -376,6 +393,7 @@ impl MapFile {
         let last_visit = r.word()?;
         let reserved = r.words()?;
         let header = MapHeader {
+            version,
             name,
             entry_hex,
             entry_elevation,
@@ -836,7 +854,7 @@ impl MapFile {
         }
         let header = &self.header;
         let out = &mut Vec::new();
-        put_i32(out, 19);
+        put_i32(out, self.header.version);
         out.extend_from_slice(&header.name);
         put_i32(out, header.entry_hex);
         put_i32(out, header.entry_elevation.into());

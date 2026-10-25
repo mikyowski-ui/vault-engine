@@ -573,6 +573,27 @@ impl PreviewArgs {
                 loose.ok_or("a preview requires --corpus-dir or --master-dat/--critter-dat")?;
             return Ok(loose);
         };
+        // SPEC-018 §1: Fallout 2's databases over SPEC-015 archives, with an
+        // optional patch000.dat above MASTER.DAT.
+        if self.game_profile == vault_core::GameProfile::Fallout2 {
+            let archive = |path: &Path| -> AppResult<Arc<vault_formats::Dat2Archive>> {
+                Ok(Arc::new(
+                    vault_formats::Dat2Archive::open(path)
+                        .map_err(|error| format!("{}: {error}", path.display()))?,
+                ))
+            };
+            let mut layers = vec![archive(master)?];
+            if let Some(patch) = vault_formats::Dat2Provider::find_patch(master) {
+                tracing::info!(file = %patch.display(), "patch000.dat mounted");
+                layers.push(archive(&patch)?);
+            }
+            let provider = vault_formats::Dat2Provider::new(loose, layers, Some(archive(critter)?));
+            tracing::info!(
+                files = provider.files().count(),
+                "Fallout 2 databases mounted"
+            );
+            return Ok(Arc::new(provider));
+        }
         // Only the directory tables are read here; members stream from the
         // file on demand (SPEC-008 lookup, one member in memory at a time).
         let archive = |path: &PathBuf| -> AppResult<Arc<DatArchive>> {
@@ -609,7 +630,9 @@ impl PreviewArgs {
         }
     }
     pub fn load(&self) -> AppResult<Option<AssetPreview>> {
-        if self.game_profile == vault_core::GameProfile::Fallout2 {
+        // Of Fallout 2, map preview is specified (SPEC-015/016/018 §1);
+        // anything else waits for its specifications.
+        if self.game_profile == vault_core::GameProfile::Fallout2 && self.preview_map.is_none() {
             return Err(vault_core::FALLOUT2_PENDING.into());
         }
         let language = self.language.as_deref().unwrap_or("english");
@@ -634,13 +657,14 @@ impl PreviewArgs {
         }
         if let Some(path) = &self.preview_map {
             let vfs = self.source()?;
-            let mut map = crate::map_preview::MapPreview::load_with(
+            let mut map = crate::map_preview::MapPreview::load_for_game(
                 vfs,
                 path,
                 language,
                 self.player_gcd.as_deref(),
                 self.resolved_seed(),
                 self.preset,
+                self.game_profile,
             )?;
             map.host.set_subtitles(self.subtitles);
             map.save_root = save_root;
@@ -854,6 +878,74 @@ use crate::fixture_assets as fixtures;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spec016_a_fallout2_install_previews_a_version_20_map_end_to_end() {
+        let corpus = crate::map_preview::test_support::synthetic_corpus();
+        let install = tempfile::tempdir().unwrap();
+        let (master, critter) =
+            vault_fixtures::dat2::fallout2_install(corpus.path(), install.path(), 2);
+        let preview = |args: PreviewArgs| match args.load().unwrap() {
+            Some(AssetPreview::Map(map)) => map,
+            _ => panic!("a map preview"),
+        };
+        let map = "maps/synthetic.map".to_owned();
+        let fallout2 = PreviewArgs {
+            game_profile: vault_core::GameProfile::Fallout2,
+            master_dat: Some(master.clone()),
+            critter_dat: Some(critter.clone()),
+            preview_map: Some(map.clone()),
+            headless: true,
+            ..Default::default()
+        };
+        let mut fallout2 = preview(fallout2);
+        assert_eq!(fallout2.host.world.map.header.version, 20);
+        // Its critters read the 416-byte layout.
+        let critter_pid = fallout2
+            .host
+            .world
+            .iter()
+            .find(|(reference, object)| {
+                object.category() == vault_formats::pro::Category::Critter
+                    && *reference != fallout2.host.world.player
+            })
+            .map(|(_, object)| object.raw.pid)
+            .unwrap();
+        let prototype =
+            vault_core::assets::WorldAssets::prototype(&fallout2.host.assets, critter_pid).unwrap();
+        let vault_formats::pro::PrototypeData::Critter(data) = &prototype.data else {
+            panic!("a critter prototype")
+        };
+        assert_eq!(data.damage_type, Some(2));
+        // It renders as the same corpus does loose under Fallout 1.
+        let mut fallout1 = preview(PreviewArgs {
+            corpus_dir: Some(corpus.path().to_path_buf()),
+            preview_map: Some(map.clone()),
+            headless: true,
+            ..Default::default()
+        });
+        assert_eq!(fallout1.host.world.map.header.version, 19);
+        assert_eq!(
+            fallout2.image().unwrap().pixels(),
+            fallout1.image().unwrap().pixels()
+        );
+        // The other game's archives are refused; so is playing Fallout 2.
+        let wrong = PreviewArgs {
+            master_dat: Some(master.clone()),
+            critter_dat: Some(critter.clone()),
+            preview_map: Some(map),
+            ..Default::default()
+        };
+        assert!(wrong.load().is_err());
+        let play = PreviewArgs {
+            game_profile: vault_core::GameProfile::Fallout2,
+            master_dat: Some(master),
+            critter_dat: Some(critter),
+            game: true,
+            ..Default::default()
+        };
+        assert!(play.load().err().unwrap().to_string().contains("SPEC-016"));
+    }
 
     #[test]
     fn music_beside_the_master_database_is_found_in_either_layout() {

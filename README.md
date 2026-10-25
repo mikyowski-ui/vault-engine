@@ -133,8 +133,13 @@ With no arguments the game starts from the data named in `vault-engine.toml`,
 looked for beside the executable and then in the working directory. Keys:
 `master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
 `game` (`fallout1`, the default, or `fallout2`). Under `fallout2` the
-launcher reads the SPEC-015 archive format, but a start is refused until the
-maps, prototypes and scripts are specified (SPEC-016 onward); see the
+data is read in Fallout 2's formats:
+- SPEC-015 archives, mounted as SPEC-018 §1 says: an optional
+  `patch000.dat` over `MASTER.DAT`, and `CRITTER.DAT` for critter art;
+- SPEC-016 version 20 maps and 416-byte critter prototypes.
+
+`--game-profile fallout2 --preview-map MAP` previews a Fallout 2 map. Playing
+waits for SPEC-017 to SPEC-019; see the
 [Fallout 2 and QoL roadmap](docs/fallout2-and-qol-roadmap.md), and the
 `--game-profile` flag), `preset` (`vanilla` or `enhanced`), `scaling`,
 `fullscreen`, `debug` and

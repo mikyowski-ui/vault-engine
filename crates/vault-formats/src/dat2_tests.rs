@@ -172,3 +172,63 @@ fn a_damaged_member_fails_its_read_only() {
     let message = archive.read("huge.bin").unwrap_err().to_string();
     assert!(message.contains("64 MiB"), "{message}");
 }
+
+#[test]
+fn the_fallout2_databases_layer_loose_patch_master_and_critter() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, members: &[Member]| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, archive(members)).unwrap();
+        Arc::new(Dat2Archive::open(&path).unwrap())
+    };
+    let master = write(
+        "MASTER.DAT",
+        &[
+            Member::stored("COLOR.PAL", b"master palette"),
+            Member::stored("DATA\\ONLY.TXT", b"master only"),
+            Member::stored("ART\\CRITTERS\\WRONG.FRM", b"never read here"),
+        ],
+    );
+    let patch = write(
+        "Patch000.DAT",
+        &[Member::stored("color.pal", b"patched palette")],
+    );
+    let critter = write(
+        "CRITTER.DAT",
+        &[Member::stored("ART\\CRITTERS\\HERO.FRM", b"hero")],
+    );
+    std::fs::create_dir_all(dir.path().join("data/data")).unwrap();
+    std::fs::write(dir.path().join("data/data/only.txt"), b"loose").unwrap();
+    // patch000.dat is found beside MASTER.DAT whatever its case.
+    assert_eq!(
+        Dat2Provider::find_patch(&dir.path().join("MASTER.DAT")),
+        Some(dir.path().join("Patch000.DAT"))
+    );
+    assert_eq!(
+        Dat2Provider::find_patch(&dir.path().join("data/x.dat")),
+        None
+    );
+    let loose = Arc::new(crate::LocalDirProvider::mount(dir.path().join("data")).unwrap());
+    let provider = Dat2Provider::new(
+        Some(loose),
+        vec![master.clone(), patch],
+        Some(critter.clone()),
+    );
+    // The patch wins over the master, and the loose folder over both.
+    assert_eq!(provider.read("color.pal").unwrap(), b"patched palette");
+    assert_eq!(provider.read("data/only.txt").unwrap(), b"loose");
+    // Critter art reads the critter archive alone, with no fallback.
+    assert_eq!(provider.read("art/critters/hero.frm").unwrap(), b"hero");
+    assert!(matches!(
+        provider.read("art/critters/wrong.frm"),
+        Err(VfsError::NotFound(_))
+    ));
+    // Without a patch the master answers.
+    let plain = Dat2Provider::new(None, vec![master], Some(critter));
+    assert_eq!(plain.read("color.pal").unwrap(), b"master palette");
+    assert!(
+        plain
+            .files()
+            .any(|path| path.as_str() == "art/critters/hero.frm")
+    );
+}

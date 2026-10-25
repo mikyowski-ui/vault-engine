@@ -495,7 +495,7 @@ impl<A: WorldAssets> WorldHost<A> {
             let bytes = fs::read(&path).map_err(|error| io(&path, error))?;
             // SPEC-008 §3.3 safe rule: every companion map is validated
             // before any working state changes.
-            vault_formats::MapFile::parse(&bytes, &lookup)?;
+            vault_formats::MapFile::parse_for(&bytes, &lookup, self.assets.game_profile())?;
             maps.insert(name, bytes);
         }
         let automap_path = slot_file(&dir, AUTOMAP_FILE)?;

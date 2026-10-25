@@ -35,7 +35,27 @@ pub mod vfs;
 pub use automap::AutomapDb;
 pub use binary::{MAX_ASSET_BYTES, ParseError};
 pub use dat::{DatArchive, DatProvider, Database};
-pub use dat2::Dat2Archive;
+pub use dat2::{Dat2Archive, Dat2Provider};
+
+/// The game whose data an engine reads: it selects the archive format
+/// (SPEC-008 or SPEC-015) and the map and prototype layouts (SPEC-003 or
+/// SPEC-016).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GameProfile {
+    #[default]
+    Fallout1,
+    Fallout2,
+}
+
+impl GameProfile {
+    /// The map version this game's maps carry (SPEC-003 19, SPEC-016 20).
+    pub fn map_version(self) -> i32 {
+        match self {
+            Self::Fallout1 => 19,
+            Self::Fallout2 => 20,
+        }
+    }
+}
 pub use fid::{ArtCatalog, Fid, FidError};
 pub use font::{Font, FontKind, FontSet, TextFlags};
 pub use frm::FrmArchive;

@@ -309,6 +309,93 @@ impl Vfs for Dat2Archive {
     }
 }
 
+/// SPEC-018 §1: a Fallout 2 install's two databases over SPEC-015
+/// archives, in SPEC-008 §3.2's model. The loose data folder is read first.
+/// `art/critters/` requests then read the critter archive alone; every other
+/// request reads the master layers, `patch000.dat` above `MASTER.DAT`. Only
+/// an absent file falls through to the next source.
+#[derive(Debug, Clone)]
+pub struct Dat2Provider {
+    loose: Option<Arc<crate::LocalDirProvider>>,
+    /// Highest first: `patch000.dat`, then `MASTER.DAT`.
+    master: Vec<Arc<Dat2Archive>>,
+    critter: Option<Arc<Dat2Archive>>,
+    files: Vec<VfsPath>,
+}
+
+impl Dat2Provider {
+    /// The databases: `master` lowest first (`MASTER.DAT`, then an optional
+    /// `patch000.dat` above it).
+    pub fn new(
+        loose: Option<Arc<crate::LocalDirProvider>>,
+        master: Vec<Arc<Dat2Archive>>,
+        critter: Option<Arc<Dat2Archive>>,
+    ) -> Self {
+        let mut files = std::collections::BTreeSet::new();
+        if let Some(loose) = &loose {
+            files.extend(loose.files().cloned());
+        }
+        for archive in master.iter().chain(&critter) {
+            files.extend(archive.paths.iter().cloned());
+        }
+        Self {
+            loose,
+            master: master.into_iter().rev().collect(),
+            critter,
+            files: files.into_iter().collect(),
+        }
+    }
+    /// SPEC-018 §1: `patch000.dat` beside `master`, its name compared
+    /// case-insensitively.
+    pub fn find_patch(master: &Path) -> Option<PathBuf> {
+        let dir = master.parent().filter(|dir| !dir.as_os_str().is_empty());
+        let dir = dir.unwrap_or(Path::new("."));
+        std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.is_file()
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case("patch000.dat"))
+            })
+    }
+}
+
+impl Vfs for Dat2Provider {
+    fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        self.read_bounded(path, usize::MAX)
+    }
+    fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
+        let normalized = VfsPath::new(path)?;
+        let absent =
+            |result: &Result<Vec<u8>, VfsError>| matches!(result, Err(VfsError::NotFound(_)));
+        if let Some(loose) = &self.loose {
+            let result = loose.read_bounded(normalized.as_str(), max_bytes);
+            if !absent(&result) {
+                return result;
+            }
+        }
+        let sources: Vec<&Arc<Dat2Archive>> = if normalized.as_str().starts_with("art/critters/") {
+            self.critter.iter().collect()
+        } else {
+            self.master.iter().collect()
+        };
+        for archive in sources {
+            let result = archive.read_bounded(normalized.as_str(), max_bytes);
+            if !absent(&result) {
+                return result;
+            }
+        }
+        Err(VfsError::NotFound(normalized))
+    }
+    fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {
+        Box::new(self.files.iter())
+    }
+}
+
 #[cfg(test)]
 #[path = "dat2_tests.rs"]
 mod tests;

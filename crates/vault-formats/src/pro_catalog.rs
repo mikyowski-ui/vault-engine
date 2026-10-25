@@ -7,13 +7,20 @@ use std::{cell::RefCell, collections::BTreeMap};
 /// On-demand, cached subtype resolution through one-based prototype lists.
 pub struct LocalPrototypeCatalog<'a> {
     vfs: &'a dyn Vfs,
+    game: crate::GameProfile,
     lists: RefCell<BTreeMap<Category, LstTable>>,
     prototypes: RefCell<BTreeMap<u32, PrototypeInfo>>,
 }
 impl<'a> LocalPrototypeCatalog<'a> {
+    /// A Fallout 1 catalog (SPEC-003 prototypes).
     pub fn new(vfs: &'a dyn Vfs) -> Self {
+        Self::for_game(vfs, crate::GameProfile::Fallout1)
+    }
+    /// A catalog reading `game`'s prototype layouts (SPEC-016).
+    pub fn for_game(vfs: &'a dyn Vfs, game: crate::GameProfile) -> Self {
         Self {
             vfs,
+            game,
             lists: RefCell::new(BTreeMap::new()),
             prototypes: RefCell::new(BTreeMap::new()),
         }
@@ -52,7 +59,7 @@ impl PrototypeLookup for LocalPrototypeCatalog<'_> {
         let name = std::str::from_utf8(name)
             .map_err(|_| ParseError::new("PRO lookup", 0, "non-UTF-8 prototype filename"))?;
         let path = format!("proto/{folder}/{name}");
-        let prototype = Prototype::parse(&self.read(&path)?)?;
+        let prototype = Prototype::parse_for(&self.read(&path)?, self.game)?;
         // The list selects the file; its own PID selects its serialized layout.
         // SPEC-003 §3.1 safe rule: a stored PID that differs from the
         // requested PID is rejected.

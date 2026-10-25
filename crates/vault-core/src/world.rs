@@ -324,12 +324,7 @@ impl WorldRules {
 /// The game whose data an engine runs. Fallout 1 is specified (SPEC-001
 /// to SPEC-014); of Fallout 2 only the archives are (SPEC-015), so a
 /// Fallout 2 start is refused ([`FALLOUT2_PENDING`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GameProfile {
-    #[default]
-    Fallout1,
-    Fallout2,
-}
+pub use vault_formats::GameProfile;
 /// Why a Fallout 2 start is refused.
 pub const FALLOUT2_PENDING: &str = "Fallout 2's archives read, but its maps, prototypes and \
      scripts need SPEC-016 to SPEC-019 (docs/fallout2-and-qol-roadmap.md)";
@@ -853,6 +848,7 @@ pub fn next_insertion() -> u64 {
 pub fn empty_map() -> MapFile {
     MapFile {
         header: MapHeader {
+            version: 19,
             name: [0; 16],
             entry_hex: 20100,
             entry_elevation: 0,

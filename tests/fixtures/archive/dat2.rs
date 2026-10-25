@@ -141,3 +141,63 @@ pub fn archive(members: &[Member]) -> Vec<u8> {
     bytes.extend(file_size.to_le_bytes());
     bytes
 }
+
+/// The two archives of a synthetic Fallout 2 install made from a synthetic
+/// Fallout 1 corpus in `corpus`, written to `out`:
+/// - every `.map` gets version 20 (SPEC-016 §2);
+/// - every critter prototype gets SPEC-016 §3.1's trailing `damage_type`
+///   word (`damage_type`), making 416 bytes;
+/// - `art/critters/` goes to `CRITTER.DAT`, everything else to `MASTER.DAT`,
+///   as stored members with backslash paths (SPEC-015).
+///
+/// Returns the master and critter archive paths.
+pub fn fallout2_install(
+    corpus: &std::path::Path,
+    out: &std::path::Path,
+    damage_type: u32,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    fn walk(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                walk(&path, found);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(corpus, &mut files);
+    let (mut master, mut critter) = (Vec::new(), Vec::new());
+    for path in files {
+        let relative = path.strip_prefix(corpus).unwrap();
+        let name = relative
+            .components()
+            .map(|part| part.as_os_str().to_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+            .join("\\");
+        let lower = name.to_ascii_lowercase();
+        let mut bytes = std::fs::read(&path).unwrap();
+        if lower.ends_with(".map") && bytes.len() >= 4 {
+            bytes[..4].copy_from_slice(&20i32.to_be_bytes());
+        }
+        if lower.starts_with("proto\\critters\\") && lower.ends_with(".pro") && bytes.len() == 412 {
+            bytes.extend(damage_type.to_be_bytes());
+        }
+        let member = Member::stored(&name, &bytes);
+        if lower.starts_with("art\\critters\\") {
+            critter.push(member);
+        } else {
+            master.push(member);
+        }
+    }
+    std::fs::create_dir_all(out).unwrap();
+    let (master_path, critter_path) = (out.join("MASTER.DAT"), out.join("CRITTER.DAT"));
+    std::fs::write(&master_path, archive(&master)).unwrap();
+    std::fs::write(&critter_path, archive(&critter)).unwrap();
+    (master_path, critter_path)
+}

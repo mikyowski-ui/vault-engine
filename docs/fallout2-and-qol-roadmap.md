@@ -82,7 +82,7 @@ The phrase "the spec must define" marks what this document does not assume.
 | Spec | Scope | Status |
 |---|---|---|
 | SPEC-015 | Archive version 2: footer, tree, entries, zlib members | **Approved and implemented** (2026-10-25) |
-| SPEC-016 | MAP version 20 and prototype deltas, with round-trip vectors | Waiting for its source |
+| SPEC-016 | MAP version 20 and prototype deltas, with round-trip vectors | **Approved and implemented** (2026-10-25) |
 | SPEC-017 | Host words `0x8156`-`0x8183` and VM deltas from SPEC-004 | Requested |
 | SPEC-018 | Saves, world map, party and the other data tables | Requested |
 | SPEC-019 | Interface, game-flow and movie deltas | Requested |
@@ -96,25 +96,18 @@ code or other engines. It is implemented as:
 
 The launcher reads both games' archives under the Game row.
 
-**SPEC-016 needs a source before it can be written.** The brief names MAP
-version 20 and the prototype extensions but gives no layout, and this
-engine's rules forbid filling one in from memory. Its source (the project
-owner or the research vault) must state:
-1. **MAP v20 header:** every field that differs from SPEC-003 §2.7's version
-   19 header (offsets, widths, meanings), and whether the variable sections
-   change.
-2. **Map objects:** every per-category difference in the object records
-   (SPEC-003 §2.8): new or resized fields for critters, items and scenery.
-3. **Map scripts:** whether the script section differs.
-4. **Prototypes:** each category's record size and its added fields (SPEC-003
-   §2.4-§2.6).
-5. **Choosing the format:** whether the map version alone selects the
-   layout, or the game profile also does (for example, a version 19 map under
-   Fallout 2).
-6. **Test vectors:** at least one small version 20 map and one prototype per
-   changed category, with their decoded field values.
+**SPEC-016** (`specs/approved/SPEC-016-map-v20-and-fallout2-prototypes.md`)
+was written from the owner's layout brief:
+- version 20 maps have version 19's layout;
+- Fallout 2 critter prototypes are 416 bytes, with a trailing `damage_type`.
 
-Until then, `--preview-map` refuses Fallout 2 data before reading it.
+The game profile and the exact version or length choose the layout. With
+SPEC-018 §1's mounting (`vault_formats::Dat2Provider`: loose folder,
+`patch000.dat` over `MASTER.DAT`, and `CRITTER.DAT` for critter art),
+`--game-profile fallout2 --preview-map` loads and renders a Fallout 2 map.
+
+**SPEC-017 to SPEC-019** are drafted by the Spec-Author sub-agent (Team A)
+under `AGENTS.md`'s rule, then implemented by a separate agent.
 
 ### Groundwork (done without a spec)
 

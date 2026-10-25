@@ -149,6 +149,12 @@ pub trait WorldAssets {
     /// Parse scripts with the versioned enhanced opcode range accepted
     /// (`IntProgram::parse_enhanced`); the Enhanced preset turns it on.
     fn set_enhanced_scripts(&self, _enabled: bool) {}
+    /// The game whose map and prototype layouts are read (SPEC-016).
+    fn game_profile(&self) -> crate::GameProfile {
+        crate::GameProfile::Fallout1
+    }
+    /// Read `game`'s layouts from now on.
+    fn set_game_profile(&self, _game: crate::GameProfile) {}
     /// A localized game message catalog (`text/<language>/game/<file>`).
     fn game_messages(&self, file: &str) -> Result<Arc<MsgCatalog>, WorldError> {
         Err(WorldError::Invalid(format!("{file}: messages unavailable")))
@@ -211,6 +217,8 @@ pub struct VfsWorldAssets {
     /// What the mod layers' `vault-mod.toml` manifests register (empty
     /// without mod layers).
     registry: ModRegistry,
+    /// The game whose map and prototype layouts are read (SPEC-016).
+    game: std::cell::Cell<crate::GameProfile>,
 }
 impl VfsWorldAssets {
     pub fn new(vfs: Arc<dyn Vfs>, language: &str) -> Result<Self, WorldError> {
@@ -240,6 +248,7 @@ impl VfsWorldAssets {
             diagnostics: RefCell::new(Vec::new()),
             enhanced_scripts: std::cell::Cell::new(false),
             registry: ModRegistry::default(),
+            game: std::cell::Cell::new(crate::GameProfile::Fallout1),
         }
         .with_registry()
     }
@@ -391,7 +400,7 @@ impl VfsWorldAssets {
             std::str::from_utf8(name)
                 .map_err(|_| WorldError::Invalid("invalid prototype filename".into()))?
         );
-        let prototype = Arc::new(Prototype::parse(&self.read(&path)?)?);
+        let prototype = Arc::new(Prototype::parse_for(&self.read(&path)?, self.game.get())?);
         // SPEC-003 §3.1 safe rule: the stored PID must be the requested one.
         if prototype.pid != pid {
             return Err(WorldError::Invalid(format!(
@@ -682,9 +691,11 @@ impl WorldAssets for VfsWorldAssets {
     /// working map set the host keeps in memory, never from a stray
     /// `<stem>.sav` beside the data files.
     fn map(&self, path: &str) -> Result<MapFile, WorldError> {
-        Ok(MapFile::parse(
+        let game = self.game.get();
+        Ok(MapFile::parse_for(
             &self.read(path)?,
-            &LocalPrototypeCatalog::new(&*self.vfs),
+            &LocalPrototypeCatalog::for_game(&*self.vfs, game),
+            game,
         )?)
     }
     /// SPEC-008 §3.10: a name is matched against `map.msg` 0-65 (uppercased,
@@ -727,6 +738,15 @@ impl WorldAssets for VfsWorldAssets {
             .iter()
             .map(|patch| (patch.table.clone(), patch.file.clone()))
             .collect()
+    }
+    fn game_profile(&self) -> crate::GameProfile {
+        self.game.get()
+    }
+    fn set_game_profile(&self, game: crate::GameProfile) {
+        if self.game.replace(game) != game {
+            // Cached prototypes were read in the other game's layout.
+            self.prototypes.borrow_mut().clear();
+        }
     }
     fn set_enhanced_scripts(&self, enabled: bool) {
         if self.enhanced_scripts.replace(enabled) != enabled {

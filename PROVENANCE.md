@@ -84,6 +84,41 @@ decision for the repository owner, and it must be made before the repository is
 published. Until then, treat the history before `40718af` as containing tainted
 text.
 
+## In-session spec authoring (Team A)
+
+From 2026-10-25 the owner authorized a second route for specifications
+(`AGENTS.md`, "Spec Authoring (Team A)"). When no research-vault file is
+attached, a dedicated Spec-Author sub-agent (Team A) in the builder's own
+session drafts and approves the spec.
+
+- **Its sources:** public format standards, the project's approved specs, the
+  owner's briefs, and its general knowledge of publicly documented formats.
+- **Never:** decompilations, disassembly, re-implementation source,
+  proprietary assets, `src/` paths or 40-character hashes.
+- **The implementation:** another agent writes it, from the approved spec
+  only.
+
+This is a weaker separation than the two-repository process above, and the
+specs it produces say so:
+
+- Team A has no access to the reference, and is told not to consult
+  re-implementations. Its general knowledge, however, comes from model
+  training data whose own sources cannot be audited, so no Team A spec can
+  certify that none of its content traces back to reverse-engineered material.
+- Each Team A spec therefore carries a **Provenance** line and a
+  **Decisions** section. The **Decisions** section separates owner
+  instructions from Team A's own defaults.
+- Specs from this route are listed here. A later research-vault revision of
+  any of them supersedes it.
+
+| Spec | Route | Notes |
+| --- | --- | --- |
+| SPEC-015 | Coordinator, from the owner's brief and RFC 1950/1951 | The owner confirmed the open points on 2026-10-25 |
+| SPEC-016 | Coordinator, from the owner's layout brief | |
+| SPEC-017 | Team A | |
+| SPEC-018 | Team A, with the owner's archive-role decision | |
+| SPEC-019 | Team A | |
+
 ## Hash-only oracle verification
 
 Compatibility with the original data is verified without committing it:
