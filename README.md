@@ -373,6 +373,46 @@ the interface frame, its see-through index and the side-panel tile, in place
 of the Vanilla frame, and `--replay-frame` writes the world canvas. A log
 without an `enhanced` record replays exactly as before.
 
+#### Quality of life
+
+The enhanced preset adds some of Fallout 2's conveniences to Fallout 1
+natively, with no data conversion. The design is in the
+[Fallout 2 and QoL roadmap](docs/fallout2-and-qol-roadmap.md). Under Vanilla
+none of it is reachable, and menus, windows, saves and replay digests are
+unchanged.
+
+- **Take All.** The loot window has an engine-drawn **TAKE ALL** button over
+  its middle panel. It does what Shift+A already does, and is absent while
+  stealing.
+- **Ground items.** Holding **Shift** on the map outlines every item lying
+  on the ground in the item color. The highlight is drawn after the
+  outlines and outside their list of 100.
+- **Push.** Out of combat, a standing critter's action menu has **PUSH**.
+  The critter walks one hex directly away from you, or to one of the two
+  neighbouring directions when that hex is taken. With no free hex the
+  status line says so.
+- **Gear.** A party member's action menu has **GEAR**. It opens the loot
+  window on the companion with no steal roll and no risk of being caught, so
+  gear can be traded both ways. Equipped items stay hidden.
+- **Distance.** The gear window's **DISTANCE** toggle cycles *default*,
+  *close*, *hold* and *charge*. It changes how the companion's AI packet
+  `max_dist` is read at SPEC-009's pursuit stop (§3.6 step 4) and flee stop
+  (§3.8 step 1):
+
+  | Mode | Pursuit stop | Flee stop |
+  |---|---|---|
+  | default | the packet's value | the packet's value |
+  | close | 3 hexes | 3 hexes |
+  | hold | 1 hex | 1 hex |
+  | charge | none | the packet's value |
+
+  The settings are saved beside the slot's `SAVE.DAT` in `VAULTENG.TOML`,
+  only under Enhanced. `SAVE.DAT` itself is byte-identical to a Vanilla
+  save.
+
+Fallout 1 has no art for the new buttons and menu entries, so they are
+drawn by the engine in the palette's amber and black.
+
 #### Mod manifests and exporting a setup
 
 Any loose-folder layer in the load order can carry a `vault-mod.toml` at its
