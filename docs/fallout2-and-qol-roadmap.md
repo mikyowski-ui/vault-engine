@@ -85,7 +85,7 @@ The phrase "the spec must define" marks what this document does not assume.
 | SPEC-016 | MAP version 20 and prototype deltas, with round-trip vectors | **Approved and implemented** (2026-10-25) |
 | SPEC-017 | Host words `0x8156`-`0x8183` and VM deltas from SPEC-004 | Approved (Team A); word numbers provisional, scripts gated by its §8 audit |
 | SPEC-018 | Saves, world map, party and the other data tables | Approved (Team A; §1 owner decision) |
-| SPEC-019 | Interface, party control, car and game-flow deltas | Approved (Team A) |
+| SPEC-019 | Interface, party control, car and game-flow deltas | Approved (Team A) and implemented; checked against synthetic art only (no Fallout 2 corpus here) |
 
 **SPEC-015** (`specs/approved/SPEC-015-dat2-archive-and-zlib.md`) was written
 from the project owner's brief and RFC 1950/1951, with nothing from game
@@ -121,8 +121,7 @@ folder, and the required members), and Play starts a new game on
 `maps/artemple.map` from the `data/*.txt` tables (`vault_formats::fallout2`,
 `vault_core::fallout2`). Saves use the version 1.2 layout. Fallout 2 scripts
 stay gated (SPEC-017 §8.5, `vault_core::fallout2::SCRIPT_GATE_OPEN`): no
-`.INT` loads, and the monitor and launcher say so. SPEC-019's screens (the
-Fallout 2 world map, town map, Pip-Boy and interface) are still to come.
+`.INT` loads, and the monitor and launcher say so.
 - `vault_vm::WordSet` replaces the fixed `0x8000..=0x8155` test. Fallout 1's
   set is unchanged word for word.
 
@@ -136,6 +135,38 @@ Fallout 2 rules and `metarule3` 100-111 (`vault_core` `host_fallout2_words`);
 reports findings on the Fallout 1 corpus (see the README), so it is a
 report and the gate stays closed. Scripts of a Fallout 2 game parse with
 the Fallout 2 set, so opening the gate is the one switch.
+
+**SPEC-019** is implemented under the Fallout 2 profile, every change gated
+on a Fallout 2 game, so Fallout 1 is unchanged:
+- party control (`vault_core::fallout2_party`, `host_fallout2_party`):
+  control records, disposition presets and the custom panel's cycling,
+  the SPEC-009 deltas at each AI site (flee, healing, target choice, the
+  max-distance stop, follow, approach, the snipe retreat, weapon ranking,
+  the burst gate), party-member level-ups, dead members leaving with the
+  map, hidden entries travelling with the player, and the Push with its
+  talk approach and `push_p_proc`. The enhanced Push, Gear and Distance are
+  not offered under Fallout 2 (§3.18);
+- the car: driving decided at each world-map opening, car steps and fuel
+  per travel iteration, running dry, and where the car is;
+- the interface (`vault_core::ui::fallout2` and the platform screens): the
+  six-button main menu with Options opening the preferences, the bar's
+  geometry from `iface.frm` and five indicator boxes, the world map over
+  SPEC-018's tile grid with city circles, the town list, the dial and the
+  fuel gauge, the town map's entrance markers, the Pip-Boy over
+  `quests.txt`, `holodisk.txt`, cities and the 17-movie record, the Karma
+  and Kills folders, the dialogue panel's Combat Control button with the
+  control and custom panels, trading with party members, Take All, the
+  weight line with the carry limit, the old-version save state, the
+  `endgame.txt` slideshow, and `elevators.txt` elevators;
+- `asset-audit --report-fallout2-art --fallout2-dir` lists which §2.2 art
+  names an install's `intrface.lst` lacks (D-2).
+
+There is no Fallout 2 corpus here, so the screens are checked for layout,
+geometry and state with synthetic art; the §2.2 candidate names are Team
+A's and untested against real art. With scripts gated, nothing makes an
+area known or adds a party member, so a game can travel, enter its known
+start areas, drop to terrain, meet encounters, fight, save and load, but
+the campaign does not advance.
 
 ## Part 2: "Better Than Et Tu" enhanced QoL for Fallout 1
 

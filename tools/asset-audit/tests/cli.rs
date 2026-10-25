@@ -1524,3 +1524,36 @@ fn reports_the_spec017_script_stack_model_for_both_tables() {
         .unwrap();
     assert!(inferred.contains("pops 3 push 1"), "{inferred}");
 }
+
+#[test]
+fn reports_which_spec019_interface_art_names_an_install_lists() {
+    use vault_fixtures::dat2::{Member, archive};
+    let temp = tempfile::tempdir().unwrap();
+    world::write_corpus(temp.path());
+    let list = b"IFACE.FRM\nwmdial.frm\ntakeallu.frm\n";
+    let install = tempfile::tempdir().unwrap();
+    std::fs::write(
+        install.path().join("MASTER.DAT"),
+        archive(&[Member::stored("art\\intrface\\intrface.lst", list)]),
+    )
+    .unwrap();
+    std::fs::write(install.path().join("CRITTER.DAT"), archive(&[])).unwrap();
+    let (success, _, text, errors) = audit(
+        temp.path(),
+        &[
+            "--report-fallout2-art",
+            "--fallout2-dir",
+            install.path().to_str().unwrap(),
+        ],
+    );
+    assert!(success, "{errors}");
+    for line in [
+        "Fallout 2 interface art iface.frm: iface.frm",
+        "Fallout 2 interface art wmdial.frm: wmdial.frm",
+        "Fallout 2 interface art invmaup.frm / takeallu.frm: takeallu.frm",
+        "Fallout 2 interface art control.frm: missing",
+        "Fallout 2 interface art: 3 of 12 roles listed",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+}

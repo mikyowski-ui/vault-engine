@@ -140,8 +140,9 @@ data is read in Fallout 2's formats:
 
 `--game-profile fallout2 --preview-map MAP` previews a Fallout 2 map. Under
 `fallout2`, Play validates the install and starts a new game from its SPEC-018
-tables on `maps/artemple.map`, with Fallout 2 scripts gated (SPEC-017 §8.5);
-SPEC-019's screens are still to come. See the
+tables on `maps/artemple.map`, with Fallout 2 scripts gated (SPEC-017 §8.5),
+in SPEC-019's interface: its main menu, world and town maps, Pip-Boy,
+character folders, party control panels, the car and the endgame. See the
 [Fallout 2 and QoL roadmap](docs/fallout2-and-qol-roadmap.md), and the
 `--game-profile` flag), `preset` (`vanilla` or `enhanced`), `scaling`,
 `fullscreen`, `debug` and
@@ -615,6 +616,10 @@ cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
 # Fallout 2 table over a Fallout 2 install (counts and signatures only):
 cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
     --report-script-stack [--fallout2-dir /path/to/fallout2]
+# SPEC-019 §2.2 / D-2: which Fallout 2 interface art names the install's
+# intrface.lst lists, role by role:
+cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
+    --report-fallout2-art --fallout2-dir /path/to/fallout2
 ```
 
 The `--validate-*` flags combine freely. All requested categories share one

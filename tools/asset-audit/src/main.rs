@@ -170,8 +170,45 @@ struct Args {
     /// `CRITTER.DAT` and `patch000.dat`, mounted as SPEC-018 §1 says) whose
     /// scripts the stack model checks with the Fallout 2 table, adding the
     /// per-word summary of SPEC-017's words and stubs that §8.5 records.
-    #[arg(long, value_name = "PATH", requires = "report_script_stack")]
+    /// With `--report-script-stack` or `--report-fallout2-art`.
+    #[arg(long, value_name = "PATH")]
     fallout2_dir: Option<PathBuf>,
+    /// SPEC-019 §2.2 / D-2: which of the Fallout 2 interface art names the
+    /// `--fallout2-dir` install's `intrface.lst` lists, role by role, so a
+    /// spec revision can correct the candidates. A report: it never fails
+    /// the run.
+    #[arg(long, requires = "fallout2_dir")]
+    report_fallout2_art: bool,
+}
+
+/// SPEC-019 §2.2 the interface-art report (`--report-fallout2-art`): per
+/// role, the first candidate `art/intrface/intrface.lst` lists, or
+/// `missing` (the engine then draws the role's stand-in).
+fn report_fallout2_art(folder: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    let install = vault_formats::fallout2::Fallout2Install::discover(folder)?;
+    let provider = install.open()?.provider(None);
+    let catalog = vault_formats::ArtCatalog::load(&provider)?;
+    let roles = vault_core::ui::fallout2::NAMED_ART;
+    let mut present = 0;
+    for role in roles {
+        let found = role
+            .candidates
+            .iter()
+            .find(|name| catalog.last_row(6, name.as_bytes()).is_some());
+        if found.is_some() {
+            present += 1;
+        }
+        println!(
+            "Fallout 2 interface art {}: {}",
+            role.candidates.join(" / "),
+            found.copied().unwrap_or("missing")
+        );
+    }
+    println!(
+        "Fallout 2 interface art: {present} of {} roles listed",
+        roles.len()
+    );
+    Ok(())
 }
 
 /// SPEC-017 §8 the script stack report (`--report-script-stack`): the
@@ -986,6 +1023,11 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
     // A report, outside the categories: it prints and never fails the run.
     if args.report_script_stack {
         report_script_stack(&*vfs, args.fallout2_dir.as_ref())?;
+    }
+    if args.report_fallout2_art
+        && let Some(folder) = &args.fallout2_dir
+    {
+        report_fallout2_art(folder)?;
     }
     if args.validate_saves {
         failures.run("Saves", "save check(s)", || {
