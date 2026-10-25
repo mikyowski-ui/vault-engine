@@ -20,7 +20,10 @@ use vault_core::{
     },
 };
 use vault_formats::{Fid, FrmArchive, HexGrid, map::outline, pro::Category};
-use vault_render::{IndexedImage, map::pick_candidates};
+use vault_render::{
+    IndexedImage,
+    map::{MapView, pick_candidates, pick_candidates_cut},
+};
 
 /// The scroll blocker (misc PID `0x0500000C`).
 const SCROLL_BLOCKER: u32 = 0x0500_000c;
@@ -84,6 +87,10 @@ pub(crate) struct PointerState {
     /// The pointer's frame pixel while it is over the window (clamped to
     /// the frame when it is in the letterbox).
     pub at: Option<[i32; 2]>,
+    /// `at` is a pixel of the `enhanced` world canvas (of any size, all of
+    /// it map area, never the bar) rather than of the 640-by-480 frame.
+    /// Always false with the Vanilla preset.
+    pub world: bool,
     /// H3: the pointer is outside the frame, in the window's letterbox. Its
     /// clamped pixel still hovers and clicks, but it is never an edge for
     /// edge scrolling (the in-game map here, the world map's edges in
@@ -143,7 +150,7 @@ fn window_cursor(counter: bool, arrow: bool, over_entry: bool) -> &'static str {
 }
 
 /// The map area's last row (the bar window starts below it).
-fn map_bottom() -> i32 {
+pub(crate) fn map_bottom() -> i32 {
     bar::BAR_ORIGIN[1]
 }
 
@@ -175,7 +182,7 @@ fn outlined(
 impl MapPreview {
     /// Hover, menu and edge input apply: the map is in front with no
     /// conversation or notice over it.
-    fn world_pointer(&self) -> bool {
+    pub(crate) fn world_pointer(&self) -> bool {
         matches!(self.screen, Screen::Map)
             && !self.host.world.dialogue.open
             && self.dialog.is_none()
@@ -209,11 +216,24 @@ impl MapPreview {
                 .map_or(0, |prototype| prototype.extended.0)
         };
         let cutout = self.cutout(egg.as_deref(), &extended);
-        let hits: Vec<_> =
-            pick_candidates(map, &objects, self.view, &self.art, point, cutout.as_ref())?
-                .into_iter()
-                .filter_map(|(id, solid)| Some((self.host.world.reference_for_id(id)?, solid)))
-                .collect();
+        // A point of the `enhanced` world canvas picks in the canvas tile
+        // that draws it, through the same roof cutaway.
+        let candidates = match self.enhanced_pick(point) {
+            Some((view, point, cutaway)) => pick_candidates_cut(
+                map,
+                &objects,
+                view,
+                &self.art,
+                point,
+                cutout.as_ref(),
+                cutaway,
+            ),
+            None => pick_candidates(map, &objects, self.view, &self.art, point, cutout.as_ref()),
+        };
+        let hits: Vec<_> = candidates?
+            .into_iter()
+            .filter_map(|(id, solid)| Some((self.host.world.reference_for_id(id)?, solid)))
+            .collect();
         let world = &self.host.world;
         let down = |object: ObjectRef| {
             world
@@ -231,7 +251,7 @@ impl MapPreview {
     }
     /// Restart the hover's rest now, or back-date it 250 ms so the next
     /// idle poll computes it (the in-world cursor turned back on).
-    fn restart_rest(&mut self, back_date: bool) {
+    pub(crate) fn restart_rest(&mut self, back_date: bool) {
         self.pointer.rest_since = if back_date {
             self.clock.saturating_sub(cursor::HOVER_REST_MS)
         } else {
@@ -270,24 +290,32 @@ impl MapPreview {
     }
     /// The pointer moved to a frame pixel: the rest restarts, the hover art
     /// reverts, and an open menu tracks the vertical motion.
+    #[cfg(test)]
     pub(crate) fn pointer_moved(&mut self, point: [i32; 2]) {
+        self.pointer_moved_in(point, false);
+    }
+    /// The pointer moved to `point`: a frame pixel, or with `world` a pixel
+    /// of the `enhanced` world canvas.
+    pub(crate) fn pointer_moved_in(&mut self, point: [i32; 2], world: bool) {
         let previous = self.pointer.at;
-        if previous == Some(point) {
+        if previous == Some(point) && self.pointer.world == world {
             return;
         }
+        let was_map = previous.is_some_and(|previous| self.map_area(previous));
         self.pointer.at = Some(point);
+        self.pointer.world = world;
+        let in_map = self.map_area(point);
         // §3.27: the move reinserts the cursor object in its hex list.
         self.pointer.cursor_stamp = vault_core::world::next_insertion();
         // Entering the map window turns the in-world cursor back on.
-        let entered_map =
-            point[1] <= map_bottom() && previous.is_none_or(|[_, y]| y > map_bottom());
+        let entered_map = in_map && !was_map;
         self.restart_rest(entered_map);
         // M-P4: an open menu follows the pointer once per poll
         // (`pointer_tick`), not once per OS pointer event.
         self.window_pointer(point);
         // Leaving the map window out of combat drops the crosshair, use and
         // skill modes back to movement.
-        let left_map = previous.is_some_and(|[_, y]| y <= map_bottom()) && point[1] > map_bottom();
+        let left_map = was_map && !in_map;
         if left_map
             && self.world_pointer()
             && !self.host.world.combat
@@ -339,9 +367,17 @@ impl MapPreview {
             // (G-31: the system pointer is warped there too), and the rest
             // restarts.
             let at = [menu.origin[0], menu.tracker.anchor];
-            self.pointer.at = Some(at);
+            // On the `enhanced` world canvas the menu's place is in
+            // interface pixels; the pointer returns to the canvas pixel
+            // there, and the shell's warp is the canvas point.
+            match self.enhanced_menu_return(at) {
+                Some(world) => self.pointer.at = Some(world),
+                None => {
+                    self.pointer.at = Some(at);
+                    self.hud.warp = Some(at);
+                }
+            }
             self.pointer.cursor_stamp = vault_core::world::next_insertion();
-            self.hud.warp = Some(at);
             self.restart_rest(false);
             let entry = if self.quit_requested {
                 Entry::Cancel
@@ -360,7 +396,7 @@ impl MapPreview {
         };
         // §3.26: map clicks are ignored while the animated watch shows.
         if !self.world_pointer()
-            || point[1] > map_bottom()
+            || !self.map_area(point)
             || self.host.world.ui_disabled
             || self.watch_shown()
         {
@@ -433,10 +469,11 @@ impl MapPreview {
         // §3.21: a counter roll or the panel animation reads no button, so
         // no hold pulse opens the menu meanwhile.
         let mut changed = !self.bar_blocks() && self.menu_repeat();
+        let menu_at = self.menu_point();
         if let Some(menu) = &mut self.pointer.menu {
             // §3.28 Must-match: each poll moves the highlight at most one
             // entry, however far the pointer moved.
-            if let Some([_, y]) = self.pointer.at {
+            if let Some([_, y]) = menu_at {
                 let highlight = menu.tracker.highlight;
                 menu.tracker.moved(y);
                 changed |= menu.tracker.highlight != highlight;
@@ -467,7 +504,7 @@ impl MapPreview {
         let Some(target) = self.target_kind(object) else {
             return false;
         };
-        let at = self.pointer.at.unwrap_or(point);
+        let at = self.menu_point().unwrap_or(point);
         let entries = cursor::menu_entries(target, self.host.world.combat);
         self.pointer.menu = Some(ActionMenu {
             object,
@@ -513,6 +550,10 @@ impl MapPreview {
     /// Leaving the edge restores the previous cursor and turns the
     /// in-world cursor back on.
     fn edge_scroll(&mut self) -> bool {
+        // The `enhanced` world scrolls from its own canvas edges.
+        if let Some(changed) = self.enhanced_edge_scroll() {
+            return changed;
+        }
         // H3: a pointer in the letterbox is not on an edge pixel. §3.29:
         // scrolling is off while the combat panel animates and while the
         // world turned it off (dialogue).
@@ -606,6 +647,10 @@ impl MapPreview {
     /// §3.29 Home: the view walks hex by hex toward the player under the
     /// scroll tests; the first refused step ends the walk.
     pub(crate) fn center_on_player(&mut self) {
+        // The `enhanced` camera follows the player again instead.
+        if self.enhanced_follow_player() {
+            return;
+        }
         let world = &self.host.world;
         let Some(player) = world.get(world.player).and_then(|object| object.raw.hex) else {
             return;
@@ -642,7 +687,7 @@ impl MapPreview {
             return false;
         }
         self.pointer.rested = true;
-        if at[1] > map_bottom() || self.host.world.ui_disabled || self.pointer.edge.is_some() {
+        if !self.map_area(at) || self.host.world.ui_disabled || self.pointer.edge.is_some() {
             return false;
         }
         self.pointer.feedback = self.hover_feedback(at);
@@ -653,7 +698,7 @@ impl MapPreview {
         let player = self.host.world.player;
         match self.hud.mode {
             Mode::Movement => {
-                let hex = self.view.grid.pick_hex(at)?;
+                let hex = self.pointer_view().grid.pick_hex(at)?;
                 let world = &self.host.world;
                 let state = world.critter_state(player);
                 let flags = state.map_or(0, |state| state.results.0);
@@ -776,12 +821,20 @@ impl MapPreview {
     /// Draw the cursor at the pointer: a dragged item, the action menu, the
     /// edge-scroll art, the in-world cursor over the map, else the arrow.
     pub(crate) fn draw_cursor(&self, image: &mut IndexedImage) {
+        self.draw_cursor_shifted(image, [0, 0]);
+    }
+    /// [`Self::draw_cursor`] with the art moved by `shift` (the `enhanced`
+    /// frame draws the cursor apart, into its own image); the pointer's
+    /// place still decides which art shows.
+    pub(crate) fn draw_cursor_shifted(&self, image: &mut IndexedImage, shift: [i32; 2]) {
         let Some(at) = self.pointer.at else {
             return;
         };
         if matches!(self.screen, Screen::Movie(_)) {
             return;
         }
+        let pointer = at;
+        let at = [at[0] + shift[0], at[1] + shift[1]];
         let painter = Painter {
             assets: &self.host.assets,
             palette: &self.palette,
@@ -807,7 +860,13 @@ impl MapPreview {
             return;
         }
         if let Some(menu) = &self.pointer.menu {
-            self.draw_menu(&painter, image, menu);
+            // On the `enhanced` world canvas the menu sits in interface
+            // pixels relative to the pointer's.
+            let shift = match self.menu_point() {
+                Some(menu_at) if self.pointer.world => [at[0] - menu_at[0], at[1] - menu_at[1]],
+                _ => shift,
+            };
+            self.draw_menu(&painter, image, menu, shift);
             return;
         }
         // The inventory-type windows: the hand cursor, or the arrow over a
@@ -830,7 +889,7 @@ impl MapPreview {
                 let art = window_cursor(
                     screen.counter.is_some(),
                     screen.arrow,
-                    self.window_entry_under(at),
+                    self.window_entry_under(pointer),
                 );
                 painter.cursor(image, art, at);
                 return;
@@ -842,7 +901,7 @@ impl MapPreview {
                 let art = window_cursor(
                     screen.dragged().is_none() && screen.counter_open(),
                     screen.arrow,
-                    self.window_entry_under(at),
+                    self.window_entry_under(pointer),
                 );
                 painter.cursor(image, art, at);
                 return;
@@ -850,7 +909,7 @@ impl MapPreview {
             // SPEC-014 §3.39-§3.40: the world map's scroll art, else the
             // arrow.
             Screen::World(_) | Screen::Town(_) => {
-                painter.cursor(image, self.world_cursor(at), at);
+                painter.cursor(image, self.world_cursor(pointer), at);
                 return;
             }
             _ => {}
@@ -889,7 +948,8 @@ impl MapPreview {
         // the bar is enabled, `suparrow.frm` or `sdnarrow.frm`; leaving
         // them restores the arrow.
         if self.world_pointer()
-            && let Some(older) = self.monitor_area(at)
+            && !self.pointer.world
+            && let Some(older) = self.monitor_area(pointer)
         {
             let art = if older {
                 cursor::SMALL_UP
@@ -912,18 +972,19 @@ impl MapPreview {
             && self.pointer.menu.is_none()
             && self.pointer.edge.is_none()
             && self.hud.watch.is_none()
-            && at[1] <= map_bottom()
+            && self.map_area(at)
             && !self.host.world.ui_disabled)
             .then_some(at)
     }
-    /// SPEC-014 §3.27 the in-world cursor's objects over a `size` view, at
-    /// the hex under the pointer: none while it does not show, or off the
-    /// hex grid. Movement mode snaps the `msef003.frm` hex outline to that
-    /// hex, with its AP text at the hex's cell; the other modes follow the
-    /// pointer by pixel.
-    pub(crate) fn cursor_objects(&self, [width, height]: [u32; 2]) -> Option<CursorObjects> {
+    /// SPEC-014 §3.27 the in-world cursor's objects over `view`, at the hex
+    /// under the pointer: none while it does not show, or off the hex grid.
+    /// Movement mode snaps the `msef003.frm` hex outline to that hex, with
+    /// its AP text at the hex's cell; the other modes follow the pointer by
+    /// pixel.
+    pub(crate) fn cursor_objects(&self, view: MapView) -> Option<CursorObjects> {
+        let [width, height] = [view.width, view.height];
         let at = self.world_cursor_at()?;
-        let hex = self.view.grid.pick_hex(at)?;
+        let hex = view.grid.pick_hex(at)?;
         let painter = Painter {
             assets: &self.host.assets,
             palette: &self.palette,
@@ -934,7 +995,7 @@ impl MapPreview {
         let feedback = self.pointer.feedback.as_ref();
         match self.hud.mode {
             Mode::Movement => {
-                let center = self.view.grid.hex_center(hex).ok()?;
+                let center = view.grid.hex_center(hex).ok()?;
                 // The 32-by-16 hex outline at the hex, with outline type 2
                 // and the translucent bit (movement mode only).
                 if let Some(frames) = painter.art(Mode::Movement.art())
@@ -964,7 +1025,10 @@ impl MapPreview {
             }
             Mode::Arrow => match feedback {
                 Some(Feedback::Pick(icon)) => {
-                    let (name, shift) = cursor::pick_art(at[0], at[1]);
+                    // The mirror and shift rules apply at the view's right
+                    // and bottom edges (640 by 380 in Vanilla).
+                    let edge = [width as i32 - 640, height as i32 - 380];
+                    let (name, shift) = cursor::pick_art(at[0] - edge[0], at[1] - edge[1]);
                     let top = at[1] - shift;
                     if name == "actarrom.frm" {
                         painter.blit(&mut art, name, 0, [at[0] - 28, top]);
@@ -1006,10 +1070,21 @@ impl MapPreview {
     }
     /// The arrow and the stacked 40-by-40 icons, the highlighted one in its
     /// `h` art; mirrored at the right edge and shifted up at the bottom.
-    fn draw_menu(&self, painter: &Painter, image: &mut IndexedImage, menu: &ActionMenu) {
+    fn draw_menu(
+        &self,
+        painter: &Painter,
+        image: &mut IndexedImage,
+        menu: &ActionMenu,
+        shift: [i32; 2],
+    ) {
         let [x, y] = menu.origin;
-        let top = y - cursor::menu_shift(y, menu.entries.len());
-        let mirrored = x + 68 >= 640;
+        // The mirror and shift rules apply at the map area's right and
+        // bottom edges (640 and 380 in Vanilla, the `enhanced` world's
+        // edges in interface pixels).
+        let edge = self.menu_edges();
+        let top = y - cursor::menu_shift(y - (edge[1] - 380), menu.entries.len());
+        let mirrored = x + 68 >= edge[0];
+        let (x, top) = (x + shift[0], top + shift[1]);
         let (arrow, icons_x) = if mirrored {
             (("actarrom.frm", x - 28), x - 68)
         } else {
