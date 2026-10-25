@@ -307,6 +307,11 @@ fn spec019_vector_o_party_counts_and_push() {
     let free = HexGrid::neighbor(s_hex, 2).unwrap().unwrap();
     assert_eq!(host.fallout2_push(s).unwrap(), Some(Push2::Moved(free)));
     assert_eq!(host.world.rng.state(), &draws);
+    // §3.14: the hidden trunk travels to the player's hex, still hidden.
+    host.world.place_party().unwrap();
+    let trunk_object = host.world.get(trunk).unwrap();
+    assert_eq!(trunk_object.raw.hex, Some(20100));
+    assert!(trunk_object.raw.flags.contains(BasicFlags::HIDDEN));
     // With directions 1, 2 and 0 blocked: the message, nothing moves.
     let mut host2 = self::host();
     let player = host2.world.player;

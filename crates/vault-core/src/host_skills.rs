@@ -1488,8 +1488,11 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 Ok(true) => {
                     self.transition_world_map = true;
-                    // SPEC-008 §3.10: the world map plays `03wrldmp`.
-                    self.play_world_map_music();
+                    // SPEC-008 §3.10: the world map plays `03wrldmp`; under
+                    // Fallout 2 building it on opening plays its track.
+                    if self.world.fallout2.is_none() {
+                        self.play_world_map_music();
+                    }
                     self.world.emit(WorldEffect::WorldMap);
                 }
                 Err(error) => {

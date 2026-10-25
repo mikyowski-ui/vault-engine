@@ -2152,6 +2152,25 @@ impl WorldState {
                     .is_some_and(|o| o.owner.is_none() && !o.raw.flags.contains(BasicFlags::HIDDEN))
             })
             .collect();
+        // SPEC-019 §3.14: under Fallout 2 a hidden entry (the car trunk)
+        // moves to the player's hex and elevation without the placement
+        // rule, keeping its hidden flag.
+        if self.fallout2.is_some() {
+            let hidden: Vec<_> = self
+                .party
+                .iter()
+                .copied()
+                .filter(|member| *member != player)
+                .filter(|member| {
+                    self.get(*member).is_some_and(|o| {
+                        o.owner.is_none() && o.raw.flags.contains(BasicFlags::HIDDEN)
+                    })
+                })
+                .collect();
+            for member in hidden {
+                self.move_object(member, hex, elevation, false)?;
+            }
+        }
         let mut neighbors =
             (0..6).filter_map(|direction| vault_formats::HexGrid::step(hex, direction, 1).ok());
         for member in members {

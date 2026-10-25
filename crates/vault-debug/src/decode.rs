@@ -1,7 +1,7 @@
 //! Read-only SPEC-004 instruction decoding for inspection. Nothing here
 //! executes or mutates a VM.
 use std::fmt;
-use vault_vm::Vm;
+use vault_vm::{Vm, WordSet};
 
 /// Which SPEC-004 §3.7 registration range an instruction word falls in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -12,7 +12,8 @@ pub enum OpcodeClass {
     Core,
     /// `0x804C`-`0x80A0`, the general interpreter library.
     Library,
-    /// `0x80A1`-`0x8155`, game-specific extensions.
+    /// `0x80A1`-`0x8155`, game-specific extensions (to `0x8183` in a
+    /// Fallout 2 program, SPEC-017 §2.1).
     Game,
     /// A word outside every registered range. `decode` never produces one
     /// (it reports `DecodeError::Invalid`); only an `Instruction` built by
@@ -65,13 +66,19 @@ pub fn instruction_length(word: u16) -> u32 {
 /// the VM, every slot-1 word with bit 15 set is a push (SPEC-004 §2.5),
 /// including the non-standard tags such as `0x8401`.
 pub fn classify(word: u16) -> Option<OpcodeClass> {
+    classify_in(&WordSet::FALLOUT1, word)
+}
+/// [`classify`] for a program of word set `words`: its host words run to
+/// the set's last word (`0x8183` for Fallout 2's, whose 42 reserved words
+/// decode and fail closed when run, SPEC-017 §4).
+pub fn classify_in(words: &WordSet, word: u16) -> Option<OpcodeClass> {
     if word & 0x3ff == 1 {
         return (word & 0x8000 != 0).then_some(OpcodeClass::Push);
     }
     match word {
         0x8000..=0x804b => Some(OpcodeClass::Core),
         0x804c..=0x80a0 => Some(OpcodeClass::Library),
-        0x80a1..=0x8155 => Some(OpcodeClass::Game),
+        word if (0x80a1..=*words.words.end()).contains(&word) => Some(OpcodeClass::Game),
         _ => None,
     }
 }
@@ -79,6 +86,10 @@ pub fn classify(word: u16) -> Option<OpcodeClass> {
 /// Decode the instruction starting at `address` in `code`, without checking
 /// that the address is a boundary.
 pub fn decode(code: &[u8], address: u32) -> Result<Instruction, DecodeError> {
+    decode_in(code, address, &WordSet::FALLOUT1)
+}
+/// [`decode`] for a program of word set `words`.
+pub fn decode_in(code: &[u8], address: u32, words: &WordSet) -> Result<Instruction, DecodeError> {
     let at = address as usize;
     if at == code.len() {
         return Err(DecodeError::End(address));
@@ -87,7 +98,7 @@ pub fn decode(code: &[u8], address: u32) -> Result<Instruction, DecodeError> {
         .get(at..at + 2)
         .ok_or(DecodeError::Truncated(address))?;
     let word = u16::from_be_bytes([bytes[0], bytes[1]]);
-    if classify(word).is_none() {
+    if classify_in(words, word).is_none() {
         return Err(DecodeError::Invalid { address, word });
     }
     let immediate = if instruction_length(word) == 6 {
@@ -113,7 +124,7 @@ pub fn decode_next(vm: &Vm) -> Result<Instruction, DecodeError> {
     if !vm.instruction_boundary(vm.pc) {
         return Err(DecodeError::Address(vm.pc));
     }
-    decode(vm.code(), vm.pc)
+    decode_in(vm.code(), vm.pc, vm.program.words())
 }
 
 /// Decode consecutive instructions from `address`, stopping at the first
@@ -138,8 +149,10 @@ impl Instruction {
     pub fn next_address(&self) -> u32 {
         self.address + self.length()
     }
+    /// The word's class; `decode` accepted it for its word set, so the
+    /// widest set (Fallout 2's) classifies it.
     pub fn class(&self) -> OpcodeClass {
-        classify(self.word).unwrap_or(OpcodeClass::Invalid)
+        classify_in(&WordSet::FALLOUT2, self.word).unwrap_or(OpcodeClass::Invalid)
     }
     /// A short mnemonic for core and push words; extensions, whose catalogs
     /// SPEC-004 defers, are `lib`/`ext` with their word.
@@ -269,7 +282,7 @@ pub fn mnemonic(word: u16) -> &'static str {
         0x8048 => "cancel",
         0x8049 => "cancel.all",
         0x804c..=0x80a0 => "lib",
-        0x80a1..=0x8155 => "ext",
+        0x80a1..=0x8183 => "ext",
         // §2.5: a push whose tag has no defined value semantics.
         word if word & 0x83ff == 0x8001 => "push.tag",
         _ => "invalid",

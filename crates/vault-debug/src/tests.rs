@@ -876,6 +876,34 @@ fn observed_script_runs_end_where_unobserved_ones_do() {
 }
 
 #[test]
+fn spec017_words_decode_in_a_fallout2_program() {
+    use crate::decode::{classify_in, decode_in};
+    use vault_vm::WordSet;
+    // SPEC-017 §2.1: 0x8156-0x8183 are host words of a Fallout 2 program
+    // (the 42 reserved ones fail closed when run, not when decoded).
+    for word in [0x8156, 0x8159, 0x815a, 0x8183] {
+        assert_eq!(
+            classify_in(&WordSet::FALLOUT2, word),
+            Some(OpcodeClass::Game),
+            "{word:#06x}"
+        );
+        assert_eq!(classify_in(&WordSet::FALLOUT1, word), None);
+    }
+    assert_eq!(classify_in(&WordSet::FALLOUT2, 0x8184), None);
+    let inven_cmds = decode_in(&op(0x8156), 0, &WordSet::FALLOUT2).unwrap();
+    assert_eq!(inven_cmds.class(), OpcodeClass::Game);
+    assert_eq!(inven_cmds.text(), "ext 0x8156");
+    assert!(
+        decode(&op(0x8156), 0).is_err(),
+        "Fallout 1 keeps refusing it"
+    );
+    // The next instruction of a Fallout 2 program decodes with its set.
+    let program = IntProgram::parse_in(&fixture::program(), &WordSet::FALLOUT2, false).unwrap();
+    let vm = Vm::fragment(program, &op(0x8157)).unwrap();
+    assert_eq!(decode_next(&vm).unwrap().word, 0x8157);
+}
+
+#[test]
 fn hand_built_instructions_with_unregistered_words_do_not_panic() {
     // `decode` never yields such a word; a hand-built instruction is
     // classified `Invalid` and still renders.

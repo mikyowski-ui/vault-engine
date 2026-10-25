@@ -215,7 +215,10 @@ impl MapPreview {
     /// transition (a town map's World button or failure, the preview's W
     /// key): SPEC-008 §3.10 `03wrldmp` starts each time the screen is built.
     pub(crate) fn open_world_map_with_music(&mut self) {
-        self.host.play_world_map_music();
+        // SPEC-019 §3.12: Fallout 2's opening build plays the track itself.
+        if self.host.world.fallout2.is_none() {
+            self.host.play_world_map_music();
+        }
         self.open_world_map();
     }
     /// Building the screen (SPEC-014 §3.39): the reveal at the party's
