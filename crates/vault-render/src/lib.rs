@@ -9,7 +9,7 @@ pub mod movie;
 pub mod outline;
 
 pub use image::{ImageError, IndexedImage, TextStyle, compose_preview};
-pub use layers::{EnhancedLayout, Layer};
+pub use layers::{EnhancedLayout, Layer, LayerParams, compose_layers};
 #[cfg(test)]
 pub(crate) use vault_fixtures::formats as fixture_assets;
 
@@ -79,6 +79,39 @@ pub struct Renderer {
     /// The surface size last configured; the surface is reconfigured only
     /// when the window size changes (or after a lost surface).
     configured: Option<[u32; 2]>,
+    /// The `enhanced` multi-layer pass: its pipeline, one slot per layer
+    /// (kept across frames and recreated only when a layer's size
+    /// changes), and how many slots the last [`Renderer::set_layers`]
+    /// filled.
+    layer_pipeline: wgpu::RenderPipeline,
+    layer_slots: Vec<LayerSlot>,
+    layer_count: usize,
+    /// What [`Renderer::render`] draws: whichever of the single image and
+    /// the layers was set last.
+    presenting: Presenting,
+}
+
+/// What a frame shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Presenting {
+    /// The single image ([`Renderer::set_image`]) in its [`Viewport`].
+    Image,
+    /// The layer list ([`Renderer::set_layers`]).
+    Layers,
+}
+
+/// One layer's persistent GPU resources: its index texture, its uniform
+/// block and their bind group (with the shared palette), and the
+/// parameters last written.
+struct LayerSlot {
+    texture: wgpu::Texture,
+    params: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    size: [u32; 2],
+    /// The layer's rectangle, transparent index and sampling; the surface
+    /// size is added when the parameters are written.
+    layer: ([f32; 4], Option<u8>, bool),
+    written: Option<LayerParams>,
 }
 
 impl Renderer {
@@ -144,35 +177,18 @@ impl Renderer {
         }
         config.present_mode = wgpu::PresentMode::Fifo;
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("indexed sprite"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("indexed.wgsl").into()),
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("indexed sprite pipeline"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview: None,
-            cache: None,
-        });
+        let pipeline = indexed_pipeline(
+            &device,
+            ["indexed sprite", "indexed sprite pipeline"],
+            include_str!("indexed.wgsl"),
+            config.format,
+        );
+        let layer_pipeline = indexed_pipeline(
+            &device,
+            ["indexed layers", "indexed layers pipeline"],
+            include_str!("layers.wgsl"),
+            config.format,
+        );
         let sprite = sprite_texture(&device, [image.width(), image.height()]);
         let palette_texture = texture(
             &device,
@@ -202,8 +218,12 @@ impl Renderer {
             viewport: None,
             drawable: false,
             configured: None,
+            layer_pipeline,
+            layer_slots: Vec::new(),
+            layer_count: 0,
+            presenting: Presenting::Image,
         };
-        renderer.write_indices(image);
+        write_indices(&renderer.queue, &renderer.sprite, image);
         renderer.set_palette(palette);
         renderer.write_display();
         renderer.resize(width, height);
@@ -248,6 +268,20 @@ impl Renderer {
             self.configured = Some([width, height]);
         }
         self.update_viewport();
+        self.write_layer_params();
+    }
+
+    /// The configured surface size, while the surface is drawable (the
+    /// size an [`EnhancedLayout`] is computed for).
+    pub fn surface_size(&self) -> Option<[u32; 2]> {
+        self.drawable
+            .then_some([self.config.width, self.config.height])
+    }
+
+    /// Whether frames show the layer list (the last call was
+    /// [`Self::set_layers`]) rather than the single image.
+    pub fn presenting_layers(&self) -> bool {
+        self.presenting == Presenting::Layers
     }
 
     /// The frame's [`Viewport`] for the current image and surface sizes
@@ -311,40 +345,58 @@ impl Renderer {
                 self.update_viewport();
             }
         }
-        self.write_indices(image);
+        write_indices(&self.queue, &self.sprite, image);
         self.set_palette(palette);
+        self.presenting = Presenting::Image;
     }
 
     /// The `enhanced` presentation: `layers` drawn back to front into their
-    /// surface rectangles through one palette (see [`layers`]). Until the
-    /// multi-layer pass exists this shows the first layer alone through the
-    /// single-image path.
+    /// surface rectangles through `palette` (the shared palette that
+    /// [`Self::set_palette`] also writes, so palette cycling and brightness
+    /// apply as in the single-image path; see [`layers`]). Each layer's
+    /// texture is kept for the next frame and recreated only when that
+    /// layer's size changes. Frames show the layers until the next
+    /// [`Self::set_image`], and the single image after it; the pointer
+    /// helpers keep mapping the single image, and the layers map pointers
+    /// through their [`EnhancedLayout`].
     pub fn set_layers(&mut self, layers: &[Layer<'_>], palette: &[[u8; 4]; 256]) {
-        if let Some(layer) = layers.first() {
-            self.set_image(layer.image, palette);
+        for (index, layer) in layers.iter().enumerate() {
+            let size = [layer.image.width(), layer.image.height()];
+            if self
+                .layer_slots
+                .get(index)
+                .is_none_or(|slot| slot.size != size)
+            {
+                let slot = LayerSlot::new(&self.device, &self.layer_pipeline, &self.palette, size);
+                if index < self.layer_slots.len() {
+                    self.layer_slots[index] = slot;
+                } else {
+                    self.layer_slots.push(slot);
+                }
+            }
+            let slot = &mut self.layer_slots[index];
+            slot.layer = (layer.rect, layer.transparent, layer.sharp);
+            write_indices(&self.queue, &slot.texture, layer.image);
         }
+        self.layer_count = layers.len();
+        self.write_layer_params();
+        self.set_palette(palette);
+        self.presenting = Presenting::Layers;
     }
 
-    fn write_indices(&self, image: &IndexedImage) {
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.sprite,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            image.pixels(),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(image.width()),
-                rows_per_image: Some(image.height()),
-            },
-            wgpu::Extent3d {
-                width: image.width(),
-                height: image.height(),
-                depth_or_array_layers: 1,
-            },
-        );
+    /// Write each filled layer slot's parameters for the current surface
+    /// size, when they changed.
+    fn write_layer_params(&mut self) {
+        let surface = [self.config.width, self.config.height];
+        for slot in &mut self.layer_slots[..self.layer_count] {
+            let (rect, transparent, sharp) = slot.layer;
+            let params = LayerParams::new(slot.size, rect, transparent, sharp, surface);
+            if slot.written != Some(params) {
+                self.queue
+                    .write_buffer(&slot.params, 0, bytemuck::cast_slice(&params.0));
+                slot.written = Some(params);
+            }
+        }
     }
 
     /// The frame pixel under a surface point, for pointer picking; `None`
@@ -369,8 +421,15 @@ impl Renderer {
     /// Call `before_present` only for a completed frame, allowing the platform
     /// to notify its compositor without scheduling callbacks for skipped frames.
     pub fn render(&mut self, before_present: impl FnOnce()) -> Result<bool, wgpu::SurfaceError> {
-        let Some(viewport) = self.viewport() else {
-            return Ok(false);
+        // The single image draws into its viewport; the layers cover the
+        // whole surface.
+        let viewport = match self.presenting {
+            Presenting::Image => match self.viewport() {
+                Some(viewport) => Some(viewport),
+                None => return Ok(false),
+            },
+            Presenting::Layers if self.drawable => None,
+            Presenting::Layers => return Ok(false),
         };
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
@@ -409,22 +468,96 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            pass.set_viewport(
-                viewport.left as f32,
-                viewport.top as f32,
-                viewport.width as f32,
-                viewport.height as f32,
-                0.0,
-                1.0,
-            );
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.draw(0..6, 0..1);
+            if let Some(viewport) = viewport {
+                pass.set_viewport(
+                    viewport.left as f32,
+                    viewport.top as f32,
+                    viewport.width as f32,
+                    viewport.height as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            } else {
+                pass.set_pipeline(&self.layer_pipeline);
+                for slot in &self.layer_slots[..self.layer_count] {
+                    pass.set_bind_group(0, &slot.bind_group, &[]);
+                    pass.draw(0..6, 0..1);
+                }
+            }
         }
         self.queue.submit([encoder.finish()]);
         before_present();
         frame.present();
         Ok(true)
+    }
+}
+
+/// A pipeline drawing one quad of an index texture through the palette
+/// (`vs_main` and `fs_main` of `source`), alpha-blended over the target;
+/// `labels` name the shader and the pipeline.
+fn indexed_pipeline(
+    device: &wgpu::Device,
+    labels: [&str; 2],
+    source: &str,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(labels[0]),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(labels[1]),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview: None,
+        cache: None,
+    })
+}
+
+impl LayerSlot {
+    fn new(
+        device: &wgpu::Device,
+        pipeline: &wgpu::RenderPipeline,
+        palette: &wgpu::Texture,
+        size: [u32; 2],
+    ) -> Self {
+        let texture = texture(device, "layer indices", size, wgpu::TextureFormat::R8Uint);
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("layer parameters"),
+            size: std::mem::size_of::<LayerParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = image_bind_group(device, pipeline, &texture, palette, &params);
+        Self {
+            texture,
+            params,
+            bind_group,
+            size,
+            layer: ([0.0; 4], None, false),
+            written: None,
+        }
     }
 }
 
@@ -457,6 +590,29 @@ fn image_bind_group(
             },
         ],
     })
+}
+
+/// Write `image` into `texture`, which has its size.
+fn write_indices(queue: &wgpu::Queue, texture: &wgpu::Texture, image: &IndexedImage) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        image.pixels(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(image.width()),
+            rows_per_image: Some(image.height()),
+        },
+        wgpu::Extent3d {
+            width: image.width(),
+            height: image.height(),
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 fn sprite_texture(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
