@@ -24,6 +24,10 @@ pub struct PreviewArgs {
     /// in a replay, which applies the logged ones.
     #[arg(skip)]
     pub enhanced: Option<EnhancedSettings>,
+    /// Where the F9 overlay exports the current setup as a mod (`None`: it
+    /// does not, as in a replay).
+    #[arg(skip)]
+    pub mod_export: Option<PathBuf>,
     /// Mount a loose directory: the whole asset source, or with DAT
     /// archives the loose patch root both databases consult first.
     #[arg(long, requires = "preview_asset", value_name = "PATH")]
@@ -514,10 +518,18 @@ impl PreviewArgs {
     /// directory alone.
     pub fn source(&self) -> AppResult<Arc<dyn Vfs>> {
         let base = self.base_source()?;
-        let Some(mods) = &self.mods else {
-            return Ok(base);
-        };
-        // The mod layers stay outermost, so the world sees them counted.
+        match &self.mods {
+            Some(mods) => Self::mount_mods(base, mods),
+            None => Ok(base),
+        }
+    }
+    /// `mods` mounted over `base`: a `load_order.toml`, or the settings'
+    /// path list. The mod layers stay outermost, so the world sees them
+    /// counted.
+    pub fn mount_mods(
+        base: Arc<dyn Vfs>,
+        mods: &crate::config::ModList,
+    ) -> AppResult<Arc<dyn Vfs>> {
         let layered = match mods {
             crate::config::ModList::File(path) => LayeredVfs::from_load_order(base, path),
             // Paths from the settings are the user's own (already resolved
@@ -607,6 +619,7 @@ impl PreviewArgs {
             game.debug = self.debug;
             game.preset = self.preset;
             game.enhanced = self.enhanced;
+            game.mod_export = self.mod_export.clone();
             // G-09: the preview and debug keys work in the game only with
             // the explicit flag.
             game.debug_keys = self.debug;
@@ -633,6 +646,7 @@ impl PreviewArgs {
             }
             map.set_debug(self.debug);
             map.set_enhanced(self.enhanced);
+            map.mod_export = self.mod_export.clone();
             return Ok(Some(AssetPreview::Map(Box::new(map))));
         }
         if let Some(path) = &self.play_movie {

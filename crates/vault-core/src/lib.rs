@@ -37,6 +37,7 @@ mod host_travel;
 pub mod items;
 pub mod library;
 pub mod loot;
+pub mod mod_export;
 pub mod motion;
 pub mod movie;
 pub mod outline;

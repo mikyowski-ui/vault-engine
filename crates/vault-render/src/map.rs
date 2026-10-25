@@ -180,6 +180,11 @@ pub struct MapScene<'a> {
     /// The `enhanced` preset's shroud over hexes the camera may not reach
     /// (`None` in Vanilla).
     pub shroud: Option<Shroud<'a>>,
+    /// The `enhanced` canvas tiles' overscan ([`overscan_hexes`]): an
+    /// object whose sprite reaches into the view is drawn though its hex
+    /// lies beyond the visited window, so a sprite larger than the
+    /// window's margins is not cut at a tile seam. `false` in Vanilla.
+    pub overscan: bool,
 }
 
 /// The `enhanced` preset's roof peek: roof pixels within `inner` view
@@ -602,9 +607,10 @@ fn visited_hexes(view: MapView) -> impl Iterator<Item = i32> {
 /// visited hex and within a hex in list order (flat objects first, each
 /// group oldest insertion first). Hidden objects and objects on unvisited
 /// hexes are not drawn. The second list holds the objects without a hex,
-/// drawn last.
-fn draw_sequence(view: MapView, objects: &[MapObject]) -> (Vec<usize>, Vec<usize>) {
-    let (placed, hexless) = draw_sequence_with(view, objects, None);
+/// drawn last. The `extra` hexes ([`overscan_hexes`], empty in Vanilla)
+/// are visited too.
+fn draw_sequence(view: MapView, objects: &[MapObject], extra: &[i32]) -> (Vec<usize>, Vec<usize>) {
+    let (placed, hexless) = draw_sequence_with(view, objects, None, extra);
     let placed = placed
         .into_iter()
         .filter_map(|drawn| match drawn {
@@ -618,11 +624,14 @@ fn draw_sequence(view: MapView, objects: &[MapObject]) -> (Vec<usize>, Vec<usize
 /// [`draw_sequence`] with the §3.27 cursor objects at `cursor` (their hex
 /// and list place, [`SceneCursor`]): the cursor in its hex's flat group and
 /// the AP text in its upright group, each before the objects listed from
-/// `order` on. On an unvisited hex neither is drawn.
+/// `order` on. On an unvisited hex neither is drawn. The `extra` hexes
+/// (the enhanced overscan, empty in Vanilla) are visited too, merged into
+/// the ascending order.
 fn draw_sequence_with(
     view: MapView,
     objects: &[MapObject],
     cursor: Option<(i32, usize)>,
+    extra: &[i32],
 ) -> (Vec<Drawn>, Vec<usize>) {
     let mut placed: Vec<(i32, bool, usize)> = Vec::new();
     let mut hexless = Vec::new();
@@ -638,7 +647,13 @@ fn draw_sequence_with(
     placed.sort_unstable();
     let mut flat = Vec::new();
     let mut upright = Vec::new();
-    for hex in visited_hexes(view) {
+    let mut hexes: Vec<i32> = visited_hexes(view).collect();
+    if !extra.is_empty() {
+        hexes.extend_from_slice(extra);
+        hexes.sort_unstable();
+        hexes.dedup();
+    }
+    for hex in hexes {
         let here = cursor.filter(|(at, _)| *at == hex).map(|(_, order)| order);
         let (mut cursor_due, mut text_due) = (here.is_some(), here.is_some());
         let start = placed.partition_point(|(at, ..)| *at < hex);
@@ -667,6 +682,33 @@ fn draw_sequence_with(
     }
     flat.extend(upright);
     (flat, hexless)
+}
+
+/// The `enhanced` overscan: the hexes of the visible objects (not hidden,
+/// on a hex, with art) whose sprite rectangle reaches into `view`. Merged
+/// into the visited hexes, they let a canvas tile draw and pick a sprite
+/// of any size whose hex lies in a neighbouring tile beyond the visited
+/// window's margins (320 pixels each side, 240 above and below): the
+/// margin is each sprite's own extent, so no sprite is cut at a seam. The
+/// global ascending hex order keeps the tiles' overlaps consistent.
+fn overscan_hexes(view: MapView, objects: &[MapObject], art: &impl MapArt) -> Vec<i32> {
+    let (width, height) = (i64::from(view.width), i64::from(view.height));
+    objects
+        .iter()
+        .filter(|object| !object.flags.contains(BasicFlags::HIDDEN))
+        .filter_map(|object| {
+            let hex = object.hex?;
+            let category = Category::from_pid(object.pid).ok()?;
+            let (frame, shift) =
+                art.frame(category, object.art_id, object.orientation, object.frame)?;
+            let ([x, y], _) = placement(view, frame, shift, object).ok()?;
+            let reaches = x < width
+                && y < height
+                && x + i64::from(frame.width) > 0
+                && y + i64::from(frame.height) > 0;
+            reaches.then_some(hex)
+        })
+        .collect()
 }
 
 /// The floor squares of the view (SPEC-003 §2.8), unlit.
@@ -1017,10 +1059,16 @@ pub fn draw_map_scene(
         Ok(Some((frame, placement(view, frame, shift, object)?.0)))
     };
     let cursor = scene.cursor;
+    let extra = if scene.overscan {
+        overscan_hexes(view, objects, art)
+    } else {
+        Vec::new()
+    };
     let (placed, hexless) = draw_sequence_with(
         view,
         objects,
         cursor.map(|cursor| (cursor.hex, cursor.order)),
+        &extra,
     );
     let mut outlines = Vec::new();
     for drawn in placed {
@@ -1241,14 +1289,14 @@ pub fn pick_candidates(
     point: [i32; 2],
     cutout: Option<&Cutout>,
 ) -> Option<Vec<(u32, bool)>> {
-    pick_candidates_cut(map, objects, view, art, point, cutout, None)
+    pick_with(map, objects, view, art, point, cutout, None, false)
 }
 
 /// [`pick_candidates`] with the `enhanced` roof cutaway: a roof pixel the
 /// cutaway removes at `point` (inside its inner radius, or dithered out in
 /// its ring at that exact pixel; [`RoofCutaway::keeps`]) does not stop the
-/// pick, so the pick matches what the scene shows. With `cutaway` `None`
-/// this is [`pick_candidates`].
+/// pick, so the pick matches what the scene shows. It picks as an enhanced
+/// canvas tile draws, with the overscan ([`MapScene::overscan`]).
 pub fn pick_candidates_cut(
     map: &MapFile,
     objects: &MapObjects,
@@ -1257,6 +1305,20 @@ pub fn pick_candidates_cut(
     point: [i32; 2],
     cutout: Option<&Cutout>,
     cutaway: Option<RoofCutaway>,
+) -> Option<Vec<(u32, bool)>> {
+    pick_with(map, objects, view, art, point, cutout, cutaway, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pick_with(
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    point: [i32; 2],
+    cutout: Option<&Cutout>,
+    cutaway: Option<RoofCutaway>,
+    overscan: bool,
 ) -> Option<Vec<(u32, bool)>> {
     if view.elevation > 2 {
         return None;
@@ -1273,7 +1335,12 @@ pub fn pick_candidates_cut(
     }
     let mut hits = Vec::new();
     let objects = &objects.elevations[view.elevation as usize];
-    let (placed, hexless) = draw_sequence(view, objects);
+    let extra = if overscan {
+        overscan_hexes(view, objects, art)
+    } else {
+        Vec::new()
+    };
+    let (placed, hexless) = draw_sequence(view, objects, &extra);
     // Frontmost first: the reverse of the drawing order.
     for index in placed.into_iter().chain(hexless).rev() {
         let object = &objects[index];
@@ -1634,7 +1701,7 @@ mod tests {
         let e = flat(5, 20101);
         let f = object(&map, 6, 0x0300_0001, 20101);
         let order = |objects: Vec<MapObject>| {
-            let (placed, hexless) = draw_sequence(view(), &objects);
+            let (placed, hexless) = draw_sequence(view(), &objects, &[]);
             assert!(hexless.is_empty());
             placed
                 .iter()
@@ -1672,7 +1739,7 @@ mod tests {
         let mut hidden = crossed;
         hidden[2].flags.0 |= BasicFlags::HIDDEN.0;
         hidden[0].hex = None;
-        let (placed, hexless) = draw_sequence(view(), &hidden);
+        let (placed, hexless) = draw_sequence(view(), &hidden, &[]);
         assert_eq!(placed, [1, 3, 4, 5]);
         assert_eq!(hexless, [0]);
     }
@@ -2085,6 +2152,7 @@ mod tests {
                 cursor: None,
                 roof_cutaway: None,
                 shroud: None,
+                overscan: false,
             };
             draw_map_scene(&mut image, &map, &scene(vec![wall]), view, &art, scene_cut).unwrap();
             let [x, y] = view.grid.hex_center(20300).unwrap();

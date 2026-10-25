@@ -21,6 +21,7 @@ use crate::config::{self, Config, ModList, Preset};
 use crate::enhanced::ViewportMode;
 use browse::{Browser, Target};
 use std::path::{Path, PathBuf};
+pub(crate) use validate::Empty;
 use validate::{Check, State};
 use vault_formats::{LayerEntry, LoadOrderPolicy};
 use vault_render::{IndexedImage, ScalingMode};
@@ -190,6 +191,7 @@ impl Mods {
             new_layer: TextField::default(),
             check: validate::Mods {
                 layers: Vec::new(),
+                manifests: Vec::new(),
                 stack: Check::unset("no mod layers"),
             },
         };
@@ -315,6 +317,16 @@ impl Launcher {
         }
         if self.mods.check.stack.state == State::Bad {
             return Err(format!("Mods: {}.", self.mods.check.stack.text));
+        }
+        // A layer that mounts can still fail on its `vault-mod.toml`.
+        if let Some(check) = self
+            .mods
+            .check
+            .layers
+            .iter()
+            .find(|check| check.state == State::Bad)
+        {
+            return Err(format!("Mods: {}.", check.text));
         }
         Ok(())
     }

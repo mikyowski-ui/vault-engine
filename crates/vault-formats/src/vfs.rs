@@ -513,7 +513,7 @@ fn load_order_error(message: impl Into<String>) -> VfsError {
 }
 
 /// Strip a `#` comment that is not inside a string.
-fn strip_comment(line: &str) -> &str {
+pub(crate) fn strip_comment(line: &str) -> &str {
     let mut quote = None;
     let mut escaped = false;
     for (index, ch) in line.char_indices() {
@@ -532,7 +532,7 @@ fn strip_comment(line: &str) -> &str {
 
 /// Parse one TOML string (basic `"..."` with `\\` `\"` escapes, or
 /// literal `'...'`) at the start of `text`; returns it and the rest.
-fn toml_string(text: &str) -> Result<(String, &str), VfsError> {
+pub(crate) fn toml_string(text: &str) -> Result<(String, &str), VfsError> {
     let text = text.trim_start();
     let mut chars = text.char_indices();
     let open = match chars.next() {

@@ -55,7 +55,7 @@ data is needed to build, test, or run the synthetic shell and preview fixtures.
 | `vault-debug` | Headless VM stepper and instruction trace, GVAR/MVAR/LVAR watches, and map object/critter inspectors with tick diffs and text rendering |
 | `vault-platform` | Desktop shell, asset preview, input command logging |
 | `vault-fixtures` | Dev-only synthetic test fixture builders, compiled once and shared by the crates' tests and `xtask` |
-| `xtask` | Engineering gate runner |
+| `xtask` | Engineering gate runner, synthetic fixture writer and mod exporter (`export-mod`) |
 | `asset-audit` | Loose-corpus counts and format validation |
 
 ## Build and verify
@@ -201,7 +201,9 @@ It has three tabs and a bottom bar:
   path list in `vault-engine.toml` is shown read-only, with that explanation:
   edit it in the file, or remove it to manage a `load_order.toml` here. A load
   order that does not parse is also shown read-only, Save leaves it alone, and
-  Play is refused.
+  Play is refused. A layer whose folder has a `vault-mod.toml` is listed by
+  the mod's `name`, with an `[enhanced]` badge when the manifest carries
+  launch settings. A malformed manifest fails its layer and refuses Play.
 - **Save**, **Play**, **Launch with Debug** and **Quit**, with a status line.
   Save writes `vault-engine.toml`, rewriting the file it was read from in
   place or else creating one beside the executable (then in the working
@@ -292,6 +294,8 @@ logs and replay digests are what they were.
     shroud clamp and no roofs.
   - **C** runs a camera demo: a pan, a 2× zoom, a shake with an X-ray peek,
     then a reset.
+  - The **Export Current Setup as Mod** button (or **E**) writes the running
+    setup as a mod folder (below).
 
 The settings are `viewport_mode` (`"fixed_640x480"` or
 `"unlocked_widescreen"`), `default_zoom` (a number from 0.5 to 3.0, default
@@ -364,6 +368,70 @@ does. The digest then covers the enhanced frame, that is the world canvas,
 the interface frame, its see-through index and the side-panel tile, in place
 of the Vanilla frame, and `--replay-frame` writes the world canvas. A log
 without an `enhanced` record replays exactly as before.
+
+#### Mod manifests and exporting a setup
+
+Any loose-folder layer in the load order can carry a `vault-mod.toml` at its
+root. It names the mod and can ship the enhanced launch settings with the
+layer's maps, scripts and `data/vault-engine/<table>.txt` overrides:
+
+```toml
+name = "Tactical camera"
+version = "1.0.0"
+author = "someone"
+description = "Widescreen, a closer default zoom and the roof X-ray."
+
+[enhanced]
+preset = "enhanced"
+viewport_mode = "unlocked_widescreen"
+default_zoom = 1.25
+smooth_camera = true
+roof_peek = "cursor_xray"
+```
+
+- `name` is required; `version`, `author`, `description` and every
+  `[enhanced]` key are optional.
+- The values are those of `vault-engine.toml`. Unknown keys or tables, and
+  values outside their range, are errors naming the line, because a
+  misspelt setting would otherwise do nothing.
+- On launch each **enabled** layer's `[enhanced]` keys apply over
+  `vault-engine.toml`, lowest layer first, so the highest layer wins a key
+  as it wins a file.
+- Command-line flags (`--preset`, `--viewport`, `--zoom`) still win over
+  both. A replay takes nothing from either.
+- A malformed manifest stops the launch with `mod_list:` and the folder's
+  name. The launcher shows the same error on the layer.
+
+A setup can be exported as a ready-to-share mod folder in two ways:
+
+- **In game.** On the **F9** Camera page, the **Export Current Setup as
+  Mod** button or **E** writes `mods/enhanced-setup` (then `-2`, `-3`, and
+  so on; an export never overwrites). The folder goes beside the load order,
+  else in the working directory. The manifest holds the running viewport,
+  smoothing and roof peek (an Alt+R change included), and the camera's
+  current zoom as `default_zoom`.
+- **From the command line.** This reads `vault-engine.toml` as the game does,
+  with the enabled mods' manifests over it, and never discovers data or
+  writes settings:
+
+      cargo xtask export-mod --name tactical-camera --output mods/tactical-camera
+      # extra sources, e.g. the camera demo corpus, and overrides:
+      cargo xtask export-mod --name cam-demo --output mods/cam-demo \
+        --from target/state-corpus-cam-demo --zoom 1.5
+
+  It runs the shell's `--export-mod NAME [--export-output PATH]
+  [--export-from DIR]...`.
+
+Both write the folder's `vault-mod.toml`, a `README.txt` on loading it in
+the launcher's Mods tab, and the setup's files:
+
+- every `data/vault-engine/<table>.txt` override in the game data, mod layers
+  or `--from` folders;
+- every `scripts/*.int` that only an enhanced parse accepts, such as the
+  camera demo's `camdemo.int`.
+
+`scripts.lst` is not copied: a whole-file override would replace the game's.
+A copied script therefore runs only where a map or list row already names it.
 
 With `--record-inputs FILE` (`-` for stdout), keyboard, pointer, wheel,
 focus, modifier, resize, display-scaling, enhanced-presentation, vault-debug and quit observations are

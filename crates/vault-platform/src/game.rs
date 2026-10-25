@@ -145,6 +145,8 @@ pub struct Game {
     /// The `enhanced` presentation every world starts with (`None`:
     /// Vanilla); Alt+V changes it through `AssetPreview::set_enhanced`.
     pub enhanced: Option<crate::enhanced::EnhancedSettings>,
+    /// Where each world's F9 overlay exports the current setup as a mod.
+    pub mod_export: Option<PathBuf>,
     sounds: crate::map_preview::SoundBank,
     finished: bool,
     /// SPEC-014 §3.2 a fade outside the world, and the six-bit levels shown
@@ -251,6 +253,7 @@ impl Game {
             debug_keys: false,
             preset: vault_core::EnginePreset::Vanilla,
             enhanced: None,
+            mod_export: None,
             sounds: Default::default(),
             finished: false,
             fade: None,
@@ -536,6 +539,7 @@ impl Game {
         world.preview_keys = self.debug_keys;
         world.roof_key = false;
         world.set_enhanced(self.enhanced);
+        world.mod_export = self.mod_export.clone();
         Ok(world)
     }
     fn premade(&self, index: usize) -> CharacterSheet {

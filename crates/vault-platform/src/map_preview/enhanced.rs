@@ -342,10 +342,15 @@ impl MapPreview {
     /// frame (Vanilla preset, or the fixed viewport).
     pub fn enhanced_frame(&mut self, layout: &EnhancedLayout) -> Option<AppResult<EnhancedFrame>> {
         let enhanced = self.unlocked_mut()?;
-        enhanced.layout = Some(*layout);
+        let old = enhanced.layout.replace(*layout);
         // The layout may raise the zoom to keep the canvas within its
-        // largest size; the zoom in effect is the layout's.
-        enhanced.camera.raise_zoom(f64::from(layout.zoom));
+        // largest size. Only that floor binds the camera: the layout's own
+        // zoom is the one it was asked for, and as a floor it would pin a
+        // zoom-out (or any zoom from a limit) where it stands.
+        enhanced.camera.raise_zoom(f64::from(layout.min_zoom()));
+        if let Some(old) = old.filter(|old| old != layout) {
+            self.enhanced_relayout(&old, layout);
+        }
         Some(self.compose_enhanced())
     }
     /// The pointer moved; returns whether the frame changed.
@@ -382,6 +387,41 @@ impl MapPreview {
             }
         }
         true
+    }
+    /// The layout changed under a still pointer (a zoom or a resize): the
+    /// surface point it was at is routed again in the new layout, so its
+    /// canvas position never goes stale. A stale one past a smaller
+    /// canvas's edge would read as edge scrolling, which discards keys
+    /// (SPEC-014 §3.28-3.29): `-` and `0` would not reach the zoom. A
+    /// drag's anchor moves with it, so the same point is no motion.
+    fn enhanced_relayout(&mut self, old: &EnhancedLayout, layout: &EnhancedLayout) {
+        let Some(at) = self.unlocked().and_then(|enhanced| enhanced.at) else {
+            return;
+        };
+        let point = match (at.world, at.ui) {
+            (Some(world), _) => old.surface_point(world),
+            (None, Some(ui)) => {
+                let scale = f64::from(old.ui_scale);
+                [0, 1]
+                    .map(|axis| f64::from(old.ui_rect[axis]) + (f64::from(ui[axis]) + 0.5) * scale)
+            }
+            (None, None) => return,
+        };
+        let moved = PointerAt {
+            ui: layout.ui_pixel(point),
+            world: layout.world_point(point),
+            side: layout.in_side_panel(point),
+        };
+        if moved == at {
+            return;
+        }
+        let drag = self
+            .unlocked_mut()
+            .and_then(|enhanced| enhanced.drag.take());
+        self.enhanced_pointer(moved);
+        if let Some(enhanced) = self.unlocked_mut() {
+            enhanced.drag = drag.map(|(button, last)| (button, moved.world.unwrap_or(last)));
+        }
     }
     /// A pointer button; returns whether the frame changed.
     pub fn enhanced_button(&mut self, at: PointerAt, button: PointerButton, pressed: bool) -> bool {
@@ -433,7 +473,11 @@ impl MapPreview {
         let right = button == PointerButton::Right;
         // The debug overlay's panel takes its own presses (it is drawn on
         // the interface frame over the world).
-        if pressed && world_view && at.ui.is_some_and(|ui| self.debug_panel_at(ui)) {
+        if pressed
+            && world_view
+            && let Some(ui) = at.ui.filter(|ui| self.debug_panel_at(*ui))
+        {
+            self.debug_panel_press(ui);
             return true;
         }
         // A press or release can change the cursor art even when nothing
@@ -1115,6 +1159,7 @@ impl MapPreview {
                     && self.hud.panel.animation.is_none()
                     && self.host.world.scrolling_enabled
             })
+            .filter(|[x, y]| f64::from(*x) < width && f64::from(*y) < height)
             .and_then(|[x, y]| {
                 let (x, y) = (f64::from(x), f64::from(y));
                 let band = |size: f64| (size * EDGE_FRACTION).max(EDGE_MIN);
@@ -1222,7 +1267,8 @@ impl MapPreview {
             dark,
         });
         let tiles = tiles(view);
-        let images = self.render_scenes(&tiles, cursor.as_ref(), cutaway, shroud)?;
+        // The tiles overscan: a sprite crossing a seam draws in both.
+        let images = self.render_scenes(&tiles, cursor.as_ref(), cutaway, shroud, true)?;
         let mut canvas = IndexedImage::new(view.width, view.height)?;
         for ((_, [x, y]), image) in tiles.iter().zip(&images) {
             canvas.copy_image(image, [*x as i32, *y as i32]);

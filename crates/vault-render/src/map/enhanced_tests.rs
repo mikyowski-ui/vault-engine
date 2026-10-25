@@ -187,6 +187,7 @@ fn render(
         cursor: extras.then_some(cursor),
         roof_cutaway,
         shroud,
+        overscan: false,
     };
     draw_map_scene(&mut image, &map, &objects, view, &art, layers).unwrap();
     image
@@ -574,4 +575,43 @@ fn the_shroud_spans_darken_exactly_the_pixels_of_the_per_pixel_rule() {
     draw_shroud(&mut image, far, &field, 3);
     assert!(image.pixels().iter().all(|pixel| *pixel == 3));
     assert!(field.darkens(far, [0, 0]));
+}
+
+#[test]
+fn the_overscan_draws_and_picks_a_sprite_reaching_in_from_beyond_the_window() {
+    // A 700-pixel-tall scenery sprite on a hex 400 pixels below the view:
+    // past the visited window's 240-pixel margin, it reaches up into the
+    // view. A Vanilla refresh never visits its hex; an enhanced canvas
+    // tile (the overscan) draws and picks it.
+    let map = preview();
+    let view = view();
+    let mut art = rich_art();
+    art.0
+        .insert((false, 0x0200_0002), pattern(20, 700, |_, _| 222));
+    let x = i64::from(view.width / 2);
+    let below = i64::from(view.height) + 400;
+    let hex = view.grid.pick_hex([x as i32, below as i32]).unwrap();
+    let objects = scene(vec![object(&map, 7, 0x0200_0002, hex)]);
+    let [cx, cy] = view.grid.hex_center(hex).unwrap();
+    assert!(cy - i64::from(view.height) > 240, "{cy}");
+    let point = [cx as i32, 100];
+    let draw = |overscan: bool| {
+        let mut image = render_floor(&map, view, &art).unwrap();
+        let scene = MapScene {
+            overscan,
+            ..MapScene::default()
+        };
+        draw_map_scene(&mut image, &map, &objects, view, &art, scene).unwrap();
+        image.pixels()[point[1] as usize * view.width as usize + point[0] as usize]
+    };
+    assert_ne!(draw(false), 222);
+    assert_eq!(draw(true), 222);
+    let vanilla = pick_candidates(&map, &objects, view, &art, point, None).unwrap();
+    assert!(vanilla.is_empty(), "{vanilla:?}");
+    let tile = pick_candidates_cut(&map, &objects, view, &art, point, None, None).unwrap();
+    assert_eq!(tile, vec![(7, true)]);
+    // A sprite wholly outside the view is not added.
+    let mut far = view;
+    far.grid.origin[0] += 2000;
+    assert!(overscan_hexes(far, &objects.elevations[0], &art).is_empty());
 }

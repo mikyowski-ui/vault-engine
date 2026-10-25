@@ -218,6 +218,105 @@ fn the_wheel_zooms_about_the_world_point_under_the_pointer() {
     assert_ne!(preview.preferences.brightness, brightness);
 }
 
+/// The smooth camera as the shell drives it: a tick and a frame every
+/// 16 ms for `ms` milliseconds; returns the clock.
+fn run(preview: &mut MapPreview, mut now: u64, ms: u64) -> u64 {
+    for _ in 0..ms / 16 {
+        now += 16;
+        preview.tick(now).unwrap();
+        frame(preview, [1920, 1080]);
+    }
+    now
+}
+
+/// Where the pointer rests in the zoom test (surface pixels).
+const STILL: [f64; 2] = [960.0, 420.0];
+/// Wheel `lines` at the resting pointer, mapped through the layout of the
+/// moment as the shell maps it.
+fn wheel(preview: &mut MapPreview, lines: f64) -> bool {
+    let at = at(&frame(preview, [1920, 1080]).0, STILL);
+    preview.enhanced_wheel(at, lines)
+}
+
+#[test]
+fn the_zoom_leaves_both_limits_by_wheel_and_keys() {
+    let dir = synthetic_corpus();
+    let mut preview = interactive(dir.path());
+    preview.set_enhanced(Some(EnhancedSettings::default()));
+    let mut now = run(&mut preview, 16, 64);
+    let pointer = at(&frame(&mut preview, [1920, 1080]).0, STILL);
+    preview.enhanced_pointer(pointer);
+    // Up to the 3.0 limit in several wheel steps (and past it).
+    for _ in 0..12 {
+        assert!(wheel(&mut preview, 1.0));
+        now = run(&mut preview, now, 48);
+    }
+    now = run(&mut preview, now, 300);
+    assert_eq!(camera(&preview).zoom, camera::MAX_ZOOM);
+    // A negative wheel line leaves the limit, and more reach 1.0.
+    wheel(&mut preview, -1.0);
+    now = run(&mut preview, now, 300);
+    let zoom = camera(&preview).zoom;
+    assert!(
+        (zoom - camera::MAX_ZOOM / camera::ZOOM_STEP).abs() < 1e-9,
+        "{zoom}"
+    );
+    for _ in 0..7 {
+        wheel(&mut preview, -1.0);
+        now = run(&mut preview, now, 48);
+    }
+    now = run(&mut preview, now, 300);
+    let zoom = camera(&preview).zoom;
+    assert!(zoom < 1.0 && zoom > 0.9, "{zoom}");
+    // `-` from 3.0, then `0` back to 1.0 from the limit.
+    for _ in 0..12 {
+        wheel(&mut preview, 1.0);
+    }
+    now = run(&mut preview, now, 300);
+    assert_eq!(camera(&preview).zoom, camera::MAX_ZOOM);
+    assert!(preview.step(KeyCode::Minus));
+    assert!(
+        preview.pointer.edge.is_none(),
+        "a still pointer never edge-scrolls"
+    );
+    now = run(&mut preview, now, 300);
+    let zoom = camera(&preview).zoom;
+    assert!(
+        (zoom - camera::MAX_ZOOM / camera::ZOOM_STEP).abs() < 1e-9,
+        "{zoom}"
+    );
+    for _ in 0..2 {
+        wheel(&mut preview, 1.0);
+    }
+    now = run(&mut preview, now, 300);
+    assert_eq!(camera(&preview).zoom, camera::MAX_ZOOM);
+    assert!(preview.step(KeyCode::Digit0));
+    now = run(&mut preview, now, 300);
+    assert_eq!(camera(&preview).zoom, 1.0);
+    // Down to the 0.5 limit with `-` (a pixel-delta wheel's fractional
+    // lines too), and back up from it.
+    wheel(&mut preview, -0.4);
+    for _ in 0..8 {
+        preview.step(KeyCode::Minus);
+        now = run(&mut preview, now, 48);
+    }
+    now = run(&mut preview, now, 300);
+    assert_eq!(camera(&preview).zoom, camera::MIN_ZOOM);
+    assert!(wheel(&mut preview, 1.0));
+    now = run(&mut preview, now, 300);
+    let zoom = camera(&preview).zoom;
+    assert!(
+        (zoom - camera::MIN_ZOOM * camera::ZOOM_STEP).abs() < 1e-9,
+        "{zoom}"
+    );
+    preview.step(KeyCode::Minus);
+    now = run(&mut preview, now, 300);
+    assert_eq!(camera(&preview).zoom, camera::MIN_ZOOM);
+    assert!(preview.step(KeyCode::Digit0));
+    run(&mut preview, now, 300);
+    assert_eq!(camera(&preview).zoom, 1.0);
+}
+
 #[test]
 fn a_middle_drag_pans_the_view() {
     let dir = synthetic_corpus();
@@ -510,4 +609,77 @@ fn the_soft_clamp_keeps_the_center_inside_and_the_free_camera_bypasses_it() {
     // The camera demo runs from the same page.
     assert!(preview.step(KeyCode::KeyC));
     assert!(!preview.unlocked().unwrap().demo.is_empty());
+}
+
+#[test]
+fn the_camera_page_exports_the_setup_as_a_mod() {
+    use super::super::debug::{EXPORT_BUTTON, Page};
+    use vault_formats::{
+        ModManifest,
+        mod_manifest::{MANIFEST, README},
+    };
+    let dir = synthetic_corpus();
+    vault_fixtures::state::write_cam_demo(dir.path());
+    let tables = dir.path().join("data/vault-engine");
+    std::fs::create_dir_all(&tables).unwrap();
+    let towns = vault_core::tables::Table::Towns.canonical();
+    std::fs::write(tables.join("towns.txt"), towns).unwrap();
+    let mut preview = unlocked(dir.path());
+    preview.enhanced.as_mut().unwrap().settings.roof_peek = RoofPeek::CursorXray;
+    set_zoom(&mut preview, 1.5);
+    preview.set_debug(true);
+    while preview.debug.as_ref().unwrap().page != Page::Camera {
+        assert!(preview.step(KeyCode::F8));
+    }
+    let note = |preview: &MapPreview| preview.debug.as_ref().unwrap().note.clone();
+    // Without an export root (a replay, a preview tool) it is refused.
+    assert!(preview.step(KeyCode::KeyE));
+    assert!(note(&preview).starts_with("refused"), "{}", note(&preview));
+    let out = tempfile::tempdir().unwrap();
+    preview.mod_export = Some(out.path().join("mods"));
+    // A press on the button exports, as E does.
+    let (layout, _) = frame(&mut preview, [1920, 1080]);
+    let ui = [EXPORT_BUTTON[0] + 20, EXPORT_BUTTON[1] + 7];
+    let scale = f64::from(layout.ui_scale);
+    let point =
+        [0, 1].map(|axis| f64::from(layout.ui_rect[axis]) + (f64::from(ui[axis]) + 0.5) * scale);
+    let pointer = at(&layout, point);
+    assert_eq!(pointer.ui, Some(ui));
+    assert!(preview.enhanced_button(pointer, PointerButton::Left, true));
+    let folder = out.path().join("mods/enhanced-setup");
+    assert_eq!(note(&preview), format!("exported to {}", folder.display()));
+    let manifest =
+        ModManifest::parse(&std::fs::read_to_string(folder.join(MANIFEST)).unwrap()).unwrap();
+    let enhanced = manifest.enhanced.unwrap();
+    assert_eq!(enhanced.preset.as_deref(), Some("enhanced"));
+    assert_eq!(
+        enhanced.viewport_mode.as_deref(),
+        Some("unlocked_widescreen")
+    );
+    assert_eq!(enhanced.default_zoom, Some(1.5));
+    assert_eq!(enhanced.smooth_camera, Some(false));
+    assert_eq!(enhanced.roof_peek.as_deref(), Some("cursor_xray"));
+    assert_eq!(
+        std::fs::read_to_string(folder.join("data/vault-engine/towns.txt")).unwrap(),
+        towns
+    );
+    assert_eq!(
+        std::fs::read(folder.join("scripts/camdemo.int")).unwrap(),
+        vault_fixtures::state::cam_demo_program()
+    );
+    assert!(folder.join(README).is_file());
+    // A press elsewhere on the panel does nothing; E exports again, to a
+    // fresh folder.
+    let below = [0, 1].map(|axis| {
+        f64::from(layout.ui_rect[axis]) + (f64::from([ui[0], 200][axis]) + 0.5) * scale
+    });
+    assert!(preview.enhanced_button(at(&layout, below), PointerButton::Left, true));
+    assert!(!out.path().join("mods/enhanced-setup-2").exists());
+    assert!(preview.step(KeyCode::KeyE));
+    assert!(
+        out.path()
+            .join("mods/enhanced-setup-2")
+            .join(MANIFEST)
+            .is_file()
+    );
 }

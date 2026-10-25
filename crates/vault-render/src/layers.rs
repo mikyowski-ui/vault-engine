@@ -205,8 +205,7 @@ impl EnhancedLayout {
             ],
         ];
         let world_rect = [0.0, 0.0, width, (height - bar_h).max(1.0)];
-        let largest = world_rect[2].max(world_rect[3]);
-        let zoom = zoom.max(largest / (Self::MAX_WORLD as f32 * ui_scale));
+        let zoom = zoom.max(Self::canvas_floor(world_rect, ui_scale));
         // Divided in f64, as `world_point` maps: an f32 quotient can round
         // down to a whole number the pointer mapping then passes.
         let per_world = f64::from(ui_scale * zoom);
@@ -223,6 +222,19 @@ impl EnhancedLayout {
             world_rect,
             world_size,
         })
+    }
+    /// The least zoom that keeps a `world_rect` canvas within
+    /// [`Self::MAX_WORLD`] at `ui_scale`.
+    fn canvas_floor(world_rect: [f32; 4], ui_scale: f32) -> f32 {
+        world_rect[2].max(world_rect[3]) / (Self::MAX_WORLD as f32 * ui_scale)
+    }
+    /// The least zoom this surface and interface scale can show:
+    /// [`Self::MIN_ZOOM`], or more when the canvas would exceed
+    /// [`Self::MAX_WORLD`]. A zoom the layout raised is raised to this; the
+    /// `zoom` field is no floor (it is only the zoom asked for, often
+    /// mid-animation).
+    pub fn min_zoom(&self) -> f32 {
+        Self::MIN_ZOOM.max(Self::canvas_floor(self.world_rect, self.ui_scale))
     }
     /// The interface frame pixel under `point` (surface pixels), if inside
     /// the frame.
@@ -256,6 +268,12 @@ impl EnhancedLayout {
                 on_canvas(point[1] - y, self.world_size[1]),
             ]
         })
+    }
+    /// The surface point at world-canvas position `world`: the inverse of
+    /// [`Self::world_point`] (not limited to the canvas).
+    pub fn surface_point(&self, world: [f64; 2]) -> [f64; 2] {
+        let per_world = f64::from(self.ui_scale * self.zoom);
+        [0, 1].map(|axis| f64::from(self.world_rect[axis]) + world[axis] * per_world)
     }
     /// Whether `point` is on a side panel.
     pub fn in_side_panel(&self, point: [f64; 2]) -> bool {

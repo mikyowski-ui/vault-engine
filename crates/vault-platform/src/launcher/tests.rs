@@ -561,6 +561,63 @@ fn load_order_edits_round_trip_through_the_writer() {
 }
 
 #[test]
+fn mod_layers_show_their_manifest_name_and_enhanced_badge() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    install(dir);
+    let manifest = |name: &str, text: &str| {
+        fs::create_dir_all(dir.join("mods").join(name)).unwrap();
+        fs::write(dir.join("mods").join(name).join("vault-mod.toml"), text).unwrap();
+    };
+    manifest(
+        "camera",
+        "name = \"Tactical camera\"\n[enhanced]\nroof_peek = \"cursor_xray\"",
+    );
+    manifest("maps", "name = \"New maps\"");
+    manifest("broken", "name = \"Broken\"\n[enhanced]\nzoom = 9");
+    fs::create_dir_all(dir.join("mods/plain/data")).unwrap();
+    fs::write(dir.join("mods/plain/data/x.txt"), "x").unwrap();
+    fs::write(
+        dir.join("load_order.toml"),
+        "layers = [\"mods/camera\", \"mods/maps\", \"mods/plain\", \"mods/broken\"]",
+    )
+    .unwrap();
+    let config = Config {
+        master_dat: Some(dir.join("MASTER.DAT")),
+        critter_dat: Some(dir.join("CRITTER.DAT")),
+        mod_list: Some(ModList::File(dir.join("load_order.toml"))),
+        ..Config::default()
+    };
+    let launcher = Launcher::new(setup(dir, config));
+    let check = &launcher.mods.check;
+    let names: Vec<String> = launcher
+        .mods
+        .entries
+        .iter()
+        .zip(&check.manifests)
+        .map(|(entry, manifest)| view::layer_name(entry, manifest.as_ref()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Tactical camera [enhanced] (mods/camera)",
+            "New maps (mods/maps)",
+            "mods/plain",
+            "mods/broken",
+        ]
+    );
+    // The malformed manifest fails its layer (it would stop the launch).
+    let states: Vec<State> = check.layers.iter().map(|check| check.state).collect();
+    assert_eq!(states, [State::Ok, State::Ok, State::Ok, State::Bad]);
+    assert!(
+        check.layers[3].text.contains("zoom"),
+        "{:?}",
+        check.layers[3]
+    );
+    assert!(launcher.ready().unwrap_err().starts_with("Mods:"));
+}
+
+#[test]
 fn the_keyboard_moves_the_focus_in_layout_order() {
     let temp = tempfile::tempdir().unwrap();
     let mut launcher = Launcher::new(setup(temp.path(), Config::default()));

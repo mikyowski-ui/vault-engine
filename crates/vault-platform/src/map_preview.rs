@@ -53,6 +53,7 @@ mod debug;
 mod dialog;
 mod elevator;
 mod enhanced;
+mod export;
 mod fade;
 pub(crate) use fade::FADE_MS;
 mod floating;
@@ -177,6 +178,9 @@ pub struct MapPreview {
     pub preferences: vault_core::ui::options::Preferences,
     /// `fallout.cfg`, written when preferences change.
     pub config_path: Option<std::path::PathBuf>,
+    /// Where the F9 overlay exports the current setup as a mod (`None`:
+    /// the export is refused, as in a replay).
+    pub mod_export: Option<std::path::PathBuf>,
     /// The directory holding `SAVEGAME/SLOTnn`.
     pub save_root: std::path::PathBuf,
     /// SPEC-014 §3.19 where F12 writes `scrNNNNN.bmp`: the process's
@@ -541,6 +545,7 @@ impl MapPreview {
             hud: hud::Hud::default(),
             preferences: Default::default(),
             config_path: None,
+            mod_export: None,
             save_root: std::path::PathBuf::from("."),
             screenshot_dir: std::path::PathBuf::new(),
             quick: Default::default(),
@@ -1185,7 +1190,7 @@ impl MapPreview {
             self.cursor_objects(self.view)
         };
         let image = self
-            .render_scenes(&[(self.view, [0, 0])], cursor.as_ref(), None, None)?
+            .render_scenes(&[(self.view, [0, 0])], cursor.as_ref(), None, None, false)?
             .pop()
             .ok_or("no map view")?;
         self.cursor_in_frame |= cursor.is_some();
@@ -1196,13 +1201,16 @@ impl MapPreview {
     /// sprites under the world lighting. A view's offset is where it lies
     /// in the coordinates `cursor` (the in-world cursor's objects) and
     /// `cutaway` are given in: the 640-by-380 map view is one view at
-    /// (0, 0), and the `enhanced` world canvas is tiled into several.
+    /// (0, 0), and the `enhanced` world canvas is tiled into several,
+    /// drawn with `overscan` ([`MapScene::overscan`]) so a sprite is never
+    /// cut at a tile seam.
     pub(crate) fn render_scenes(
         &mut self,
         views: &[(MapView, [i64; 2])],
         cursor: Option<&pointer::CursorObjects>,
         cutaway: Option<RoofCutaway>,
         shroud: Option<Shroud<'_>>,
+        overscan: bool,
     ) -> AppResult<Vec<IndexedImage>> {
         // P-02: the world's map by reference and its drawn objects; no map
         // clone per frame.
@@ -1261,6 +1269,7 @@ impl MapPreview {
                     ..cut
                 }),
                 shroud,
+                overscan,
             };
             draw_map_scene(&mut image, map, &objects, view, &self.art, scene)?;
             images.push(image);

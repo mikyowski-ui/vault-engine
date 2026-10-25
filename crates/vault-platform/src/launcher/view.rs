@@ -8,6 +8,7 @@ use super::widgets::{self, Look, Rect, Row};
 use super::{Field, Launcher, Tab, Widget};
 use crate::config::{Preset, roof_peek_name, scaling_name, viewport_name};
 use crate::enhanced::{RoofPeek, ViewportMode};
+use vault_formats::{LayerEntry, ModManifest};
 use vault_render::{IndexedImage, ScalingMode};
 
 /// The launcher palette's entries.
@@ -445,6 +446,30 @@ fn draw_enhanced(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, r
     }
 }
 
+/// A mod layer's list text: its path, or with a `vault-mod.toml` the mod's
+/// name, an `[enhanced]` badge when it carries launch settings (they apply
+/// on Play), and the path.
+pub(super) fn layer_name(entry: &LayerEntry, manifest: Option<&ModManifest>) -> String {
+    let path = entry
+        .path
+        .clone()
+        .or_else(|| entry.master_dat.clone())
+        .or_else(|| entry.critter_dat.clone())
+        .unwrap_or_default();
+    match manifest {
+        Some(manifest) => format!(
+            "{}{} ({path})",
+            manifest.name,
+            if manifest.enhanced.is_some() {
+                " [enhanced]"
+            } else {
+                ""
+            }
+        ),
+        None => path,
+    }
+}
+
 fn draw_mods(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, rect: &RectFn) {
     let mods = &launcher.mods;
     let file = mods.file.as_ref().map_or_else(
@@ -467,13 +492,10 @@ fn draw_mods(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, rect:
         .entries
         .iter()
         .zip(&mods.check.layers)
-        .map(|(entry, check)| {
-            let name = entry
-                .path
-                .clone()
-                .or_else(|| entry.master_dat.clone())
-                .or_else(|| entry.critter_dat.clone())
-                .unwrap_or_default();
+        .enumerate()
+        .map(|(index, (entry, check))| {
+            let manifest = mods.check.manifests.get(index).and_then(Option::as_ref);
+            let name = layer_name(entry, manifest);
             let (glyph, tone) = mark(check);
             Row {
                 text: format!("{} {name}", if entry.enabled { "[x]" } else { "[ ]" }),

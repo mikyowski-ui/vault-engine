@@ -37,6 +37,9 @@ const RECENT: usize = 12;
 /// Trace entries shown.
 const TRACE_LINES: usize = 16;
 const PANEL: [i32; 4] = [352, 0, 288, 380];
+/// The camera page's "Export Current Setup as Mod" button (E presses it),
+/// below the page's six lines.
+pub(crate) const EXPORT_BUTTON: [i32; 4] = [PANEL[0] + 4, 62, PANEL[2] - 8, 14];
 /// Rows of a variable or map list shown around the cursor.
 const LIST_ROWS: usize = 18;
 /// The longest typed entry.
@@ -103,7 +106,7 @@ pub(crate) struct DebugOverlay {
     /// Commands committed and not yet taken by the shell.
     outbox: Vec<DebugCommand>,
     /// The last commit's or application's result.
-    note: String,
+    pub(crate) note: String,
 }
 impl DebugOverlay {
     /// The newest variable change lines.
@@ -227,8 +230,9 @@ impl MapPreview {
     }
     /// A left click in the map area while the overlay is open selects the
     /// object under the pointer (or nothing) for the inspector instead of
-    /// acting; a click on the panel itself does nothing. Right clicks act
-    /// as usual. Returns whether the click was taken.
+    /// acting; a click on the panel presses its button, if any
+    /// ([`Self::debug_panel_press`]). Right clicks act as usual. Returns
+    /// whether the click was taken.
     pub(crate) fn debug_click(&mut self, point: [i32; 2], right: bool) -> bool {
         if right || self.debug.is_none() {
             return false;
@@ -239,26 +243,49 @@ impl MapPreview {
         let on_panel = !self.pointer.world
             && (x..x + width).contains(&point[0])
             && (y..y + height).contains(&point[1]);
-        let picked = if on_panel {
-            None
-        } else {
-            self.object_at(point)
-                .and_then(|object| self.host.world.get(object))
-                .map(|object| object.raw.id)
-        };
+        if on_panel {
+            self.debug_panel_press(point);
+            return true;
+        }
+        let picked = self
+            .object_at(point)
+            .and_then(|object| self.host.world.get(object))
+            .map(|object| object.raw.id);
         let Some(overlay) = &mut self.debug else {
             return false;
         };
-        if !on_panel {
-            overlay.selected = picked;
-            overlay.set_page(Page::Inspect);
-            overlay.note = match picked {
-                Some(id) => format!("selected object {id:#x}"),
-                None => "nothing under the pointer".into(),
-            };
-        }
+        overlay.selected = picked;
+        overlay.set_page(Page::Inspect);
+        overlay.note = match picked {
+            Some(id) => format!("selected object {id:#x}"),
+            None => "nothing under the pointer".into(),
+        };
         self.thaw_view();
         true
+    }
+    /// A press on the open panel at frame pixel `ui`: the camera page's
+    /// export button acts, any other spot does nothing. The panel takes
+    /// the press either way.
+    pub(crate) fn debug_panel_press(&mut self, ui: [i32; 2]) {
+        let [x, y, width, height] = EXPORT_BUTTON;
+        let camera = self
+            .debug
+            .as_ref()
+            .is_some_and(|overlay| overlay.page == Page::Camera);
+        if camera && (x..x + width).contains(&ui[0]) && (y..y + height).contains(&ui[1]) {
+            let note = self.export_note();
+            if let Some(overlay) = &mut self.debug {
+                overlay.note = note;
+            }
+            self.thaw_view();
+        }
+    }
+    /// Export the setup; the overlay's note on how it went.
+    fn export_note(&mut self) -> String {
+        match self.export_setup() {
+            Ok(folder) => format!("exported to {}", folder.display()),
+            Err(error) => format!("refused: {error}"),
+        }
     }
     /// Whether the overlay is open with its panel under frame pixel `ui`.
     pub(crate) fn debug_panel_at(&self, ui: [i32; 2]) -> bool {
@@ -301,6 +328,7 @@ impl MapPreview {
                     self.start_camera_demo();
                     "camera demo started".into()
                 }
+                KeyCode::KeyE => self.export_note(),
                 _ => return false,
             };
             if let Some(overlay) = &mut self.debug {
@@ -611,9 +639,32 @@ impl MapPreview {
                 );
             }
             Page::Camera => {
-                line(image, "F free camera, C camera demo", ColorKey::AMBER);
-                for text in self.camera_lines() {
-                    line(image, &text, ColorKey::GREEN);
+                line(
+                    image,
+                    "F free camera, C camera demo, E export",
+                    ColorKey::AMBER,
+                );
+                let lines = self.camera_lines();
+                for text in &lines {
+                    line(image, text, ColorKey::GREEN);
+                }
+                // The button over the next lines; the note goes below it.
+                let [bx, by, bw, bh] = EXPORT_BUTTON;
+                image.fill_rect(EXPORT_BUTTON, painter.color(ColorKey::AMBER));
+                image.fill_rect(
+                    [bx + 1, by + 1, bw - 2, bh - 2],
+                    painter.color(ColorKey::BLACK),
+                );
+                painter.text(
+                    image,
+                    101,
+                    ColorKey::WHITE,
+                    b"Export Current Setup as Mod (E)",
+                    [bx + 4, by + 3],
+                    bw - 8,
+                );
+                for _ in lines.len()..6 {
+                    line(image, "", ColorKey::WHITE);
                 }
             }
             Page::Spawn => {

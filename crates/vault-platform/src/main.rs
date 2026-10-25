@@ -7,6 +7,7 @@ mod input;
 mod interface;
 mod launcher;
 mod map_preview;
+mod mods;
 mod movie;
 mod preview;
 mod replay;
@@ -70,6 +71,28 @@ struct Args {
     /// input log is written.
     #[arg(long, value_name = "FILE", conflicts_with = "replay_inputs")]
     record_inputs: Option<PathBuf>,
+    /// Export the current setup as a mod folder named NAME and exit
+    /// (`cargo xtask export-mod` runs this): a `vault-mod.toml` of the
+    /// settings file's enhanced settings (the enabled mods' manifests and
+    /// `--viewport`/`--zoom` over them), the table overrides and enhanced
+    /// scripts of its game data and mods (and of each `--export-from`
+    /// folder), and a README.txt. Nothing is discovered or saved.
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with_all = ["replay_inputs", "smoke_test", "launcher", "preview_asset"]
+    )]
+    export_mod: Option<String>,
+    /// The folder `--export-mod` writes; it must not exist or be empty.
+    /// Default: mods/NAME beside the load order, else in the working
+    /// directory.
+    #[arg(long, value_name = "PATH", requires = "export_mod")]
+    export_output: Option<PathBuf>,
+    /// A loose folder `--export-mod` also takes table overrides and
+    /// enhanced scripts from (repeatable; a later one wins a file), such
+    /// as the camera demo corpus `cargo xtask fixtures` writes.
+    #[arg(long, value_name = "PATH", requires = "export_mod")]
+    export_from: Vec<PathBuf>,
     /// How the frame is scaled into the window: `aspect_fit` (the largest
     /// fit, sharp-bilinear at fractional scales) or `integer` (whole scales
     /// only). Default: the settings file's, else integer. Alt+S toggles it.
@@ -202,13 +225,34 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
     }
 }
 
+/// The settings with the enabled mod layers' `vault-mod.toml` `[enhanced]`
+/// settings over them ([`mods::with_mods`]), which [`resolve_launch`]
+/// then puts under the command line's flags. `None` for a replay, which
+/// takes nothing from the settings, or without settings. A malformed
+/// manifest stops the launch.
+fn with_mod_settings(
+    args: &Args,
+    config: Option<&config::Config>,
+) -> AppResult<Option<config::Config>> {
+    let Some(config) = config.filter(|_| args.replay_inputs.is_none()) else {
+        return Ok(None);
+    };
+    let (merged, applied) =
+        mods::with_mods(config).map_err(|error| format!("mod_list: {error}"))?;
+    if !applied.is_empty() {
+        tracing::info!(?applied, "mod settings applied");
+    }
+    Ok(Some(merged))
+}
+
 /// Merge the settings into the command line, load what it names, and open
 /// the audio output a world or a movie plays through.
 fn start(
     args: &mut Args,
     config: Option<&config::Config>,
 ) -> AppResult<(Launch, Option<preview::AssetPreview>, Option<audio::Audio>)> {
-    let launch = resolve_launch(args, config);
+    let modded = with_mod_settings(args, config)?;
+    let launch = resolve_launch(args, modded.as_ref().or(config));
     if launch.zero_arg_game {
         tracing::info!("starting the game from the settings' data");
     }
@@ -218,6 +262,7 @@ fn start(
     };
     args.preview.mods = launch.mod_list.clone();
     args.preview.enhanced = launch.enhanced;
+    args.preview.mod_export = Some(mods::export_root(launch.mod_list.as_ref()));
     let mut preview = args.preview.load()?;
     // Audio serves an interactive world or a movie; sprites need none.
     let output = || {
@@ -1603,6 +1648,27 @@ impl ApplicationHandler for Shell {
 }
 
 fn run(mut args: Args) -> AppResult<()> {
+    if let Some(name) = &args.export_mod {
+        // Only a settings file already there: an export never discovers
+        // data or writes settings.
+        let config = config::find(&config::search_dirs())
+            .map(|path| config::Config::load(&path))
+            .transpose()?;
+        let request = mods::ExportRequest {
+            name: name.clone(),
+            output: args.export_output.clone(),
+            from: args.export_from.clone(),
+            viewport: args.viewport,
+            zoom: args.zoom,
+        };
+        let (folder, files) = mods::export_setup(config.as_ref(), &request)?;
+        println!(
+            "Mod {name} exported to {} ({files} game file{}); add it in the launcher's Mods tab.",
+            folder.display(),
+            if files == 1 { "" } else { "s" }
+        );
+        return Ok(());
+    }
     if let Some(path) = &args.replay_inputs {
         args.preview.headless = true;
         let preview = args
@@ -1980,6 +2046,62 @@ mod tests {
             shell_hotkey(KeyCode::KeyS, true, true),
             Some(ShellHotkey::Scaling)
         );
+    }
+
+    #[test]
+    fn mod_manifests_set_the_launch_under_the_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let layer = dir.path().join("mods/camera");
+        std::fs::create_dir_all(&layer).unwrap();
+        std::fs::write(
+            layer.join("vault-mod.toml"),
+            "name = \"Camera\"\n[enhanced]\npreset = \"enhanced\"\ndefault_zoom = 2.0\n\
+             roof_peek = \"cursor_xray\"\nsmooth_camera = false",
+        )
+        .unwrap();
+        let load_order = dir.path().join("load_order.toml");
+        std::fs::write(&load_order, "layers = [\"mods/camera\"]").unwrap();
+        let settings = config::Config {
+            preset: Some(config::Preset::Vanilla),
+            roof_peek: Some(enhanced::RoofPeek::Hidden),
+            mod_list: Some(config::ModList::File(load_order.clone())),
+            ..installed()
+        };
+        let launch = |flags: &[&str]| {
+            let mut args = parse(flags);
+            let modded = with_mod_settings(&args, Some(&settings)).unwrap();
+            resolve_launch(&mut args, modded.as_ref().or(Some(&settings)))
+        };
+        // The mod's settings win over the file's, preset included.
+        let launch_plain = launch(&[]);
+        assert_eq!(launch_plain.preset, config::Preset::Enhanced);
+        assert_eq!(
+            launch_plain.enhanced,
+            Some(enhanced::EnhancedSettings {
+                default_zoom: 2.0,
+                smooth_camera: false,
+                roof_peek: enhanced::RoofPeek::CursorXray,
+                ..Default::default()
+            })
+        );
+        // The command line's flags win over the mod's.
+        let flagged = launch(&["--zoom", "1.5"]);
+        assert_eq!(
+            flagged.enhanced.map(|settings| settings.default_zoom),
+            Some(1.5)
+        );
+        assert_eq!(launch(&["--preset", "vanilla"]).enhanced, None);
+        // A replay takes nothing from the settings or the mods.
+        let replay = parse(&["--replay-inputs", "log.jsonl", "--game"]);
+        assert!(
+            with_mod_settings(&replay, Some(&settings))
+                .unwrap()
+                .is_none()
+        );
+        // A malformed manifest stops the launch.
+        std::fs::write(layer.join("vault-mod.toml"), "name = \"Camera\"\nzoom = 2").unwrap();
+        let error = with_mod_settings(&parse(&[]), Some(&settings)).unwrap_err();
+        assert!(error.to_string().starts_with("mod_list:"), "{error}");
     }
 
     #[test]

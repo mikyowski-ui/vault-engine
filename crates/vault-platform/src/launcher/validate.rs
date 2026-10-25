@@ -5,7 +5,9 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use vault_formats::{DatArchive, LayerEntry, LayeredVfs, LoadOrderPolicy, Vfs, VfsError, VfsPath};
+use vault_formats::{
+    DatArchive, LayerEntry, LayeredVfs, LoadOrderPolicy, ModManifest, Vfs, VfsError, VfsPath,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -164,7 +166,7 @@ pub fn find_loose(root: &Path, path: &str) -> Option<PathBuf> {
 }
 
 /// No files: the cheap base the mod layers are validated over.
-struct Empty;
+pub(crate) struct Empty;
 impl Vfs for Empty {
     fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
         Err(VfsError::NotFound(VfsPath::new(path)?))
@@ -175,31 +177,42 @@ impl Vfs for Empty {
 }
 
 /// The mod layers' checks, one per entry, and the whole stack's.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Mods {
     pub layers: Vec<Check>,
+    /// Each entry's `vault-mod.toml`, when its folder has a valid one.
+    pub manifests: Vec<Option<ModManifest>>,
     pub stack: Check,
 }
 
 /// Mount each enabled layer on its own (for its error), then the whole
-/// stack, as the game would: paths resolved against `directory`.
+/// stack, as the game would: paths resolved against `directory`. Each
+/// folder's `vault-mod.toml` is read too (also for a disabled layer, so the
+/// list names it); a malformed one fails its layer, as it fails a launch.
 pub fn mods(directory: &Path, entries: &[LayerEntry], policy: LoadOrderPolicy) -> Mods {
     let mount = |entries: &[LayerEntry]| {
         LayeredVfs::from_entries(Arc::new(Empty), directory, entries, policy)
             .map_err(|error| error.to_string())
     };
-    let layers = entries
+    let manifest = |entry: &LayerEntry| match crate::mods::layer_dir(directory, entry, policy) {
+        Some(dir) => crate::mods::read_manifest(&dir),
+        None => Ok(None),
+    };
+    let (layers, manifests) = entries
         .iter()
         .map(|entry| {
+            let manifest = manifest(entry);
             if !entry.enabled {
-                return Check::unset("disabled");
+                return (Check::unset("disabled"), manifest.ok().flatten());
             }
-            match mount(std::slice::from_ref(entry)) {
-                Ok(vfs) => Check::ok(plural(vfs.files().count(), "file")),
-                Err(error) => Check::bad(error),
-            }
+            let check = match (mount(std::slice::from_ref(entry)), &manifest) {
+                (Err(error), _) => Check::bad(error),
+                (Ok(_), Err(error)) => Check::bad(error.clone()),
+                (Ok(vfs), Ok(_)) => Check::ok(plural(vfs.files().count(), "file")),
+            };
+            (check, manifest.ok().flatten())
         })
-        .collect();
+        .unzip();
     let stack = if entries.is_empty() {
         Check::unset("no mod layers")
     } else {
@@ -213,7 +226,11 @@ pub fn mods(directory: &Path, entries: &[LayerEntry], policy: LoadOrderPolicy) -
             Err(error) => Check::bad(error),
         }
     };
-    Mods { layers, stack }
+    Mods {
+        layers,
+        manifests,
+        stack,
+    }
 }
 
 /// `count` and `noun`, with an `s` unless the count is one.
