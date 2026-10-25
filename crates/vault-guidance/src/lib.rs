@@ -143,8 +143,15 @@ pub fn holodisk(ordinal: usize, messages: &MsgCatalog) -> Result<Holodisk, DiskE
     if ordinal >= DISK_GLOBALS.len() {
         return Err(DiskError::Ordinal(ordinal));
     }
-    let mut diagnostics = Vec::new();
     let title_id = DISK_TITLE_BASE + ordinal as i32;
+    let first = 1000 * ordinal as i32 + 1000;
+    Ok(holodisk_at(ordinal, title_id, first, messages))
+}
+/// A disk whose title is message `title_id` and whose content window is
+/// the 500 ids from `first`, read as [`holodisk`] reads its fixed ids
+/// (SPEC-018 §5.9's Fallout 2 holodisks name both in `holodisk.txt`).
+pub fn holodisk_at(ordinal: usize, title_id: i32, first: i32, messages: &MsgCatalog) -> Holodisk {
+    let mut diagnostics = Vec::new();
     let title = match messages.get(title_id) {
         Some(message) => message.text.clone(),
         None => {
@@ -152,10 +159,9 @@ pub fn holodisk(ordinal: usize, messages: &MsgCatalog) -> Result<Holodisk, DiskE
             MISSING_TEXT.to_vec()
         }
     };
-    let first = 1000 * ordinal as i32 + 1000;
     let mut records = Vec::new();
     let mut terminated = false;
-    for id in first..first + DISK_RECORD_LIMIT {
+    for id in first..first.saturating_add(DISK_RECORD_LIMIT) {
         let Some(message) = messages.get(id) else {
             diagnostics.push(DiskDiagnostic::MissingRecord(id));
             records.push(DiskLine::Text(MISSING_TEXT.to_vec()));
@@ -175,13 +181,13 @@ pub fn holodisk(ordinal: usize, messages: &MsgCatalog) -> Result<Holodisk, DiskE
     if !terminated {
         diagnostics.push(DiskDiagnostic::Unterminated(ordinal));
     }
-    Ok(Holodisk {
+    Holodisk {
         ordinal,
         title,
         last_page: records.len().saturating_sub(1) / RECORDS_PER_PAGE,
         records,
         diagnostics,
-    })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

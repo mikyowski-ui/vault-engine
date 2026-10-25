@@ -264,6 +264,55 @@ pub struct FolderView {
     pub karma: Vec<usize>,
     /// Kill rows in name order: kill type and count.
     pub kills: Vec<(usize, i32)>,
+    /// SPEC-019 §3.9 the Fallout 2 Karma and Kills folders, which replace
+    /// `karma` and `kills` under the Fallout 2 profile.
+    pub fallout2: Option<Folders2>,
+}
+
+/// SPEC-019 §3.9 the Fallout 2 Karma and Kills folders.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Folders2 {
+    /// Row 0's value: the player's progression karma.
+    pub karma: i32,
+    /// The `genrep.txt` title selected by the karma, as an `editor.msg` ID.
+    pub reputation: Option<i32>,
+    /// The `karmavar.txt` records whose global is nonzero, in table order:
+    /// art row (`intrface.lst`, -1 none), name and description messages.
+    pub variables: Vec<(i32, i32, i32)>,
+    /// Kill types 0-18 with a nonzero count, sorted by name.
+    pub kills: Vec<(usize, i32)>,
+}
+impl Folders2 {
+    /// The Karma folder's rows after row 0, as cards: the reputation title
+    /// (row 0's picture and description), then the variables with their
+    /// own art rows.
+    pub fn karma_rows(&self) -> Vec<Card> {
+        const EDITOR: &str = "editor.msg";
+        self.reputation
+            .map(|title| card(KARMA_PICTURE, (EDITOR, title), (EDITOR, 1100)))
+            .into_iter()
+            .chain(self.variables.iter().map(|(art, name, description)| Card {
+                interface: true,
+                ..card(*art, (EDITOR, *name), (EDITOR, *description))
+            }))
+            .collect()
+    }
+}
+/// The Karma folder's general picture (`art/skilldex/` index 48).
+const KARMA_PICTURE: i32 = 48;
+/// SPEC-019 §3.9 the Fallout 2 kill rows: types with a nonzero count,
+/// sorted by name as [`kill_rows`] sorts.
+pub fn kill_rows2(kills: &[i32], name: impl Fn(usize) -> Vec<u8>) -> Vec<(usize, i32)> {
+    let mut rows: Vec<_> = kills
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count != 0)
+        .map(|(kind, count)| (name(kind), kind, *count))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    rows.into_iter()
+        .map(|(_, kind, count)| (kind, count))
+        .collect()
 }
 
 /// An info card's title text.
@@ -272,6 +321,9 @@ pub enum Title {
     Message(&'static str, i32),
     /// `proto.msg` 450 + t, a space, `editor.msg` 126 "Kills".
     Kill(usize),
+    /// SPEC-019 §3.9: `proto.msg` 1450 + t (or its English fallback), a
+    /// space, `editor.msg` 126.
+    Kill2(usize),
 }
 
 /// One info card: the `art/skilldex/` picture (list index), the title, the
@@ -282,6 +334,9 @@ pub struct Card {
     pub title: Title,
     pub base: Option<usize>,
     pub description: (&'static str, i32),
+    /// SPEC-019 §3.9: `picture` is an `intrface.lst` row (a
+    /// `karmavar.txt` art index) instead of an `art/skilldex/` index.
+    pub interface: bool,
 }
 const fn card(picture: i32, title: (&'static str, i32), description: (&'static str, i32)) -> Card {
     Card {
@@ -289,6 +344,7 @@ const fn card(picture: i32, title: (&'static str, i32), description: (&'static s
         title: Title::Message(title.0, title.1),
         base: None,
         description,
+        interface: false,
     }
 }
 
@@ -340,6 +396,33 @@ pub fn info_card(line: InfoLine, view: Option<&FolderView>) -> Card {
 
 fn folder_card(line: usize, view: FolderView) -> Card {
     const EDITOR: &str = "editor.msg";
+    if let Some(folders) = &view.fallout2 {
+        match view.folder {
+            Folder::Karma => {
+                return match line.checked_sub(1) {
+                    None => card(KARMA_PICTURE, (EDITOR, 1000), (EDITOR, 1100)),
+                    Some(row) => folders.karma_rows().get(row).copied().unwrap_or(card(
+                        47,
+                        (EDITOR, 125),
+                        (EDITOR, 128),
+                    )),
+                };
+            }
+            Folder::Kills => {
+                return match folders.kills.get(line) {
+                    Some((kind, _)) => Card {
+                        picture: 36,
+                        title: Title::Kill2(*kind),
+                        base: None,
+                        description: ("proto.msg", 1469 + *kind as i32),
+                        interface: false,
+                    },
+                    None => card(46, (EDITOR, 126), (EDITOR, 129)),
+                };
+            }
+            Folder::Perks => {}
+        }
+    }
     match view.folder {
         Folder::Perks => {
             let shown = view.perks.len().min(PERK_ROWS);
@@ -374,6 +457,7 @@ fn folder_card(line: usize, view: FolderView) -> Card {
                 title: Title::Kill(*kind),
                 base: None,
                 description: ("proto.msg", 465 + *kind as i32),
+                interface: false,
             },
             None => card(46, (EDITOR, 126), (EDITOR, 129)),
         },

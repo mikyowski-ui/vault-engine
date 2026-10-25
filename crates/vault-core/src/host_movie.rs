@@ -79,19 +79,19 @@ impl<A: WorldAssets> WorldHost<A> {
     /// 17-entry table with SPEC-019 §3.21's flags `0x0B`, and its own
     /// played record. An index outside 0-16, or a movie not found, is a
     /// failed play: a diagnostic only.
-    fn fallout2_gmovie(&mut self, index: i32) {
+    fn fallout2_gmovie(&mut self, index: i32) -> bool {
         let Some(file) = usize::try_from(index)
             .ok()
             .and_then(|index| crate::fallout2::MOVIES.get(index))
         else {
             self.world
                 .diagnostic(format!("play_gmovie: movie {index} is outside 0-16"));
-            return;
+            return false;
         };
         let path = format!("art/cuts/{file}");
         if !self.assets.available(path.as_bytes()) {
             self.world.diagnostic(format!("{path}: movie not found"));
-            return;
+            return false;
         }
         let subtitles = self
             .subtitles_enabled()
@@ -109,6 +109,7 @@ impl<A: WorldAssets> WorldHost<A> {
             subtitles,
             fades,
         }));
+        true
     }
     /// The endgame movie: walkm or walkw by the player's gender, flags 0.
     pub fn play_endgame_movie(&mut self) -> bool {
@@ -123,6 +124,14 @@ impl<A: WorldAssets> WorldHost<A> {
     /// The Pip-Boy video archive: selection `a` through §3.12's scan, with
     /// flags `0x0B`. No qualifying movie plays nothing (safe rule).
     pub fn play_archive_movie(&mut self, selection: i32) -> bool {
+        // SPEC-019 §3.10: Fallout 2's archives scan indexes 2-15 of its own
+        // played record.
+        if let Some(state) = self.world.fallout2.as_deref() {
+            return match crate::ui::fallout2::archive_selection(&state.movies, selection) {
+                Some(index) => self.fallout2_gmovie(index as i32),
+                None => false,
+            };
+        }
         match movie::archive_selection(&self.world.persistence.movies, selection) {
             Some(index) => self.play_game_movie(index, movie::ARCHIVE_FLAGS),
             None => false,

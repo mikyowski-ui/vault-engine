@@ -143,3 +143,133 @@ fn spec019_the_action_menu_push_and_no_enhanced_companion_entries() {
     let (_, entries) = open(&mut preview, stranger, 16);
     assert!(!entries.contains(&Entry::Push) && !entries.contains(&Entry::Gear));
 }
+
+#[test]
+fn spec019_character_karma_and_kills_folders() {
+    use vault_core::ui::{
+        character::{Folder, Title, info_card},
+        editor::InfoLine,
+    };
+    let dir = corpus();
+    let mut files = vault_fixtures::fallout2::tables();
+    files.push(("data/genrep.txt", vault_fixtures::fallout2::GENREP));
+    files.push((
+        "data/karmavar.txt",
+        "3, 104, 2000, 2100\n4, -1, 2001, 2101\n",
+    ));
+    let tables =
+        Arc::new(Fallout2Tables::load(&mut vault_fixtures::fallout2::reader(files)).unwrap());
+    let mut preview = world(dir.path());
+    preview.host.world.fallout2 = Some(Box::new(Fallout2World::new_game(tables, -1)));
+    preview.host.world.gvars = Some(vec![0, 0, 0, 1, 0]);
+    preview.host.world.player_sheet_mut().unwrap().karma = 10;
+    preview.host.world.kills[1] = 2;
+    preview.host.world.fallout2.as_deref_mut().unwrap().kills[3] = 1;
+    let view = preview.folder_view(Folder::Karma);
+    let folders = view.fallout2.clone().unwrap();
+    // Karma 10: the greatest threshold not above it is 0 (first in file
+    // order, title 1002); karma variable 0's global (3) is set, 1's not.
+    assert_eq!(folders.karma, 10);
+    assert_eq!(folders.reputation, Some(1002));
+    assert_eq!(folders.variables, [(104, 2000, 2100)]);
+    // Kill types 1 and 18 (Big Bad Boss, by the English fallback), by name.
+    assert_eq!(folders.kills, [(18, 1), (1, 2)]);
+    assert_eq!(preview.kill_name(18), b"Big Bad Boss");
+    // The cards: row 1 the title, row 2 the variable with its interface
+    // row; the kills from `proto.msg` 1450 + t and 1469 + t.
+    let reputation = info_card(InfoLine::Folder(1), Some(&view));
+    assert_eq!(reputation.title, Title::Message("editor.msg", 1002));
+    let variable = info_card(InfoLine::Folder(2), Some(&view));
+    assert_eq!((variable.picture, variable.interface), (104, true));
+    assert_eq!(variable.description, ("editor.msg", 2100));
+    let kills = preview.folder_view(Folder::Kills);
+    let card = info_card(InfoLine::Folder(0), Some(&kills));
+    assert_eq!(card.title, Title::Kill2(18));
+    assert_eq!(card.description, ("proto.msg", 1487));
+    // Fallout 1 keeps its folders.
+    preview.host.world.fallout2 = None;
+    assert!(preview.folder_view(Folder::Karma).fallout2.is_none());
+}
+
+#[test]
+fn spec019_pipboy_status_holodisks_automaps_archives_and_availability() {
+    let dir = corpus();
+    let game = dir.path().join("text/english/game");
+    std::fs::write(
+        game.join("pipboy.msg"),
+        "{201}{}{BACK}\n{202}{}{STATUS}\n{210}{}{Status}\n{211}{}{DATA}\n{212}{}{of}\n\
+         {200}{}{MORE}\n{214}{}{DONE}\n{400}{}{Disk A}\n{1000}{}{Line one}\n\
+         {1001}{}{**END-DISK**}\n{502}{}{Elder}\n{505}{}{Destroyed}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        game.join("quests.msg"),
+        "{100}{}{Kill bugs}\n{101}{}{Find Vic}\n",
+    )
+    .unwrap();
+    let mut map = std::fs::read(game.join("map.msg")).unwrap();
+    map.extend_from_slice(b"{1500}{}{Arroyo}\n{1501}{}{Den}\n");
+    std::fs::write(game.join("map.msg"), map).unwrap();
+    let mut preview = world(dir.path());
+    fallout2(&mut preview);
+    preview.image().unwrap();
+    preview.host.world.gvars = Some(vec![0; 20]);
+    let gvars = preview.host.world.gvars.as_mut().unwrap();
+    // Quest 0 active, quest 1 completed, quest 2 active at threshold 0;
+    // holodisk 0 held, 1 not.
+    gvars[7] = 1;
+    gvars[8] = 2;
+    gvars[12] = 1;
+    // §3.10: a map whose record has `pipboy_active=No` (map 2) keeps it
+    // shut; map 1 opens it.
+    preview.host.world.map.header.map_number = 2;
+    assert!(!preview.pipboy_active());
+    assert!(preview.step(KeyCode::KeyP));
+    assert!(matches!(preview.screen, Screen::Map));
+    preview.host.world.map.header.map_number = 1;
+    assert!(preview.pipboy_active());
+    assert!(preview.step(KeyCode::KeyP));
+    assert!(matches!(preview.screen, Screen::PipBoy(_)));
+    assert_eq!(
+        preview.status_locations(),
+        [(0, b"Arroyo".to_vec()), (1, b"Den".to_vec())]
+    );
+    assert_eq!(preview.status_disks(), [(0, b"Disk A".to_vec())]);
+    let (title, quests) = preview.status_detail(0);
+    assert_eq!(title, b"Arroyo");
+    assert_eq!(
+        quests,
+        [
+            (1, b"Kill bugs".to_vec(), false),
+            (2, b"Find Vic".to_vec(), true)
+        ]
+    );
+    // A missing quest text shows SPEC-002's placeholder.
+    assert_eq!(preview.status_detail(1).1, [(1, b"Error".to_vec(), false)]);
+    let disk = preview.read_disk(0).unwrap();
+    assert_eq!(disk.title, b"Disk A");
+    assert_eq!(disk.records.len(), 1);
+    // The Status page draws; the water note is never drawn.
+    assert!(preview.tap([60, 345]), "Status");
+    let image = preview.image().unwrap();
+    assert_ne!(pixel(&image, [32, 83]), 33);
+    // Video Archives: indexes 2 through 15 that were played.
+    let state = preview.host.world.fallout2.as_deref_mut().unwrap();
+    state.movies[1] = 1;
+    state.movies[2] = 1;
+    state.movies[5] = 1;
+    assert_eq!(preview.archive_list(), [2, 5]);
+    // Automaps by city: map 1 (Test Village, area 0) and map 0 (no city).
+    preview.host.world.persistence.automap = vault_formats::AutomapDb::fallout2(|_| false);
+    let raster = vec![0; 10000];
+    let db = &mut preview.host.world.persistence.automap;
+    assert!(db.store(1, 0, &raster).unwrap());
+    assert!(db.store(1, 2, &raster).unwrap());
+    assert!(db.store(0, 1, &raster).unwrap());
+    let areas = preview.fallout2_automap_areas();
+    assert_eq!(areas, [1000, 0], "Desert Encounter 1 sorts first");
+    assert_eq!(preview.automap_name(0), b"Test Village");
+    assert_eq!(preview.fallout2_automap_entries(0), [(1, 0), (1, 2)]);
+    assert_eq!(preview.automap_entry(1, 2), b"Test Village 3");
+    assert_eq!(preview.fallout2_automap_entries(1000), [(0, 1)]);
+}

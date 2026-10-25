@@ -251,6 +251,11 @@ impl MapPreview {
     /// fails the Pip-Boy stays shut without a message (and, under the safe
     /// rule, nothing stays paused).
     pub(crate) fn open_pipboy_on(&mut self, tab: Tab) {
+        // SPEC-019 §3.10: on a map whose record has `pipboy_active=No` the
+        // button and its key do nothing.
+        if !self.pipboy_active() {
+            return;
+        }
         self.play_effect(BUTTON_PRESS.as_bytes(), None);
         self.host.open_pipboy();
         let painter = Painter {
@@ -432,12 +437,11 @@ impl MapPreview {
         let Screen::PipBoy(pipboy) = &self.screen else {
             return (0, 0, false);
         };
-        let gvars = self.gvars();
         match &pipboy.page {
             None => (0, 0, false),
             Some(Page::Status(StatusView::List)) => {
-                let locations = vault_guidance::quest_locations(&gvars).len();
-                let disks = vault_guidance::listed_disks(&gvars).len();
+                let locations = self.status_locations().len();
+                let disks = self.status_disks().len();
                 (2, pipboy::status_zone_count(locations, disks), false)
             }
             Some(Page::Status(_)) => (0, 0, true),
@@ -445,11 +449,7 @@ impl MapPreview {
             Some(Page::Automaps(AutomapView::Elevations { area, .. })) => {
                 (0, self.automap_entries(*area).len() + 2, true)
             }
-            Some(Page::Archives) => (
-                2,
-                movie::archive_movies(&self.host.world.persistence.movies).len(),
-                false,
-            ),
+            Some(Page::Archives) => (2, self.archive_list().len(), false),
             Some(Page::Alarm) => (pipboy::OPTION_LINE, ALARM_OPTIONS.len(), false),
         }
     }
@@ -476,31 +476,27 @@ impl MapPreview {
         let Screen::PipBoy(pipboy) = &self.screen else {
             return;
         };
-        let gvars = self.gvars();
         match (&pipboy.page, zone) {
             (Some(Page::Status(StatusView::List)), Zone::Row(row)) => {
-                let locations = vault_guidance::quest_locations(&gvars);
-                let disks = vault_guidance::listed_disks(&gvars).len();
-                match pipboy::status_click(x, row, locations.len(), disks) {
+                let locations = self.status_locations();
+                let disks = self.status_disks();
+                match pipboy::status_click(x, row, locations.len(), disks.len()) {
                     Some(StatusClick::Location(row)) => {
                         let town = locations[row - 1].0;
                         self.flash(Highlight::Location(row), Deferred::Detail(town));
                     }
                     Some(StatusClick::Disk(row)) => {
-                        let Some(ordinal) = vault_guidance::selected_disk(&gvars, row - 1) else {
+                        let Some((ordinal, _)) = disks.get(row - 1) else {
                             return;
                         };
-                        let Some(messages) = self.pipboy_messages() else {
-                            return;
-                        };
-                        match vault_guidance::holodisk(ordinal, &messages) {
+                        match self.read_disk(*ordinal) {
                             Ok(disk) => {
                                 for diagnostic in &disk.diagnostics {
                                     tracing::warn!(%diagnostic, "holodisk diagnostic");
                                 }
                                 self.flash(Highlight::Disk(row), Deferred::Reading(disk));
                             }
-                            Err(error) => self.status = error.to_string().into_bytes(),
+                            Err(error) => self.status = error.into_bytes(),
                         }
                     }
                     None => {}
@@ -703,6 +699,9 @@ impl MapPreview {
     }
     /// The areas of the automap database, sorted by short name bytes.
     fn automap_areas(&self) -> Vec<usize> {
+        if self.host.world.fallout2.is_some() {
+            return self.fallout2_automap_areas();
+        }
         let db = &self.host.world.persistence.automap;
         let mut areas: Vec<(Vec<u8>, usize)> =
             automaps::area_groups(|map, elevation| automaps::captured(db, map, elevation))
@@ -713,6 +712,9 @@ impl MapPreview {
         areas.into_iter().map(|(_, map)| map).collect()
     }
     fn automap_entries(&self, area: usize) -> Vec<(usize, usize)> {
+        if self.host.world.fallout2.is_some() {
+            return self.fallout2_automap_entries(area);
+        }
         let db = &self.host.world.persistence.automap;
         automaps::elevation_entries(area, |map, elevation| {
             automaps::captured(db, map, elevation)
@@ -759,7 +761,10 @@ impl MapPreview {
         let gvars = self.gvars();
         let global = |index: usize| gvars.get(index).copied().unwrap_or(0);
         let days = global(pipboy::WATER_DAYS_GLOBAL);
-        if pipboy::note_shown(global(pipboy::WATER_CHIP_GLOBAL), days) {
+        // SPEC-019 §2.7: the vault-water note is never drawn under Fallout 2.
+        if self.host.world.fallout2.is_none()
+            && pipboy::note_shown(global(pipboy::WATER_CHIP_GLOBAL), days)
+        {
             let note = pipboy::NOTE_RECT;
             painter.blit_opaque(&mut image, pipboy::NOTE, 0, [note.x, note.y]);
             for cell in pipboy::note_digits(days) {
@@ -821,8 +826,8 @@ impl MapPreview {
                 }
             }
             Some(Page::Status(StatusView::List)) => {
-                let locations = vault_guidance::quest_locations(&gvars);
-                let disks = vault_guidance::listed_disks(&gvars);
+                let locations = self.status_locations();
+                let disks = self.status_disks();
                 let status = self.pip_text(msg::STATUS);
                 if disks.is_empty() {
                     pen.line(&mut image, &status, Align::Centered, 0, pipboy::TEXT, true);
@@ -842,19 +847,17 @@ impl MapPreview {
                     let text = self.pip_text(msg::NO_TASKS);
                     pen.line(&mut image, &text, Align::Normal, 2, pipboy::TEXT, false);
                 }
-                for (index, (_, title)) in locations.iter().enumerate() {
+                for (index, (_, text)) in locations.iter().enumerate() {
                     let selected = highlight == Highlight::Location(index + 1);
-                    let text = self.pip_text(*title);
                     let line = 2 + 2 * index as i32;
-                    pen.line(&mut image, &text, Align::Normal, line, key(selected), false);
+                    pen.line(&mut image, text, Align::Normal, line, key(selected), false);
                 }
-                for (index, ordinal) in disks.iter().enumerate() {
+                for (index, (_, text)) in disks.iter().enumerate() {
                     let selected = highlight == Highlight::Disk(index + 1);
-                    let text = self.pip_text(vault_guidance::DISK_TITLE_BASE + *ordinal as i32);
                     let line = 2 + 2 * index as i32;
                     pen.line(
                         &mut image,
-                        &text,
+                        text,
                         Align::RightColumn,
                         line,
                         key(selected),
@@ -863,21 +866,12 @@ impl MapPreview {
                 }
             }
             Some(Page::Status(StatusView::Detail(town))) => {
-                let title = [
-                    self.pip_text(vault_guidance::LOCATION_TITLE_BASE + 10 * *town as i32),
-                    b" ".to_vec(),
-                    self.pip_text(msg::STATUS_SUFFIX),
-                ]
-                .concat();
+                let (location, quests) = self.status_detail(*town);
+                let title = [location, b" ".to_vec(), self.pip_text(msg::STATUS_SUFFIX)].concat();
                 pen.line(&mut image, &title, Align::Normal, 1, pipboy::TEXT, true);
                 let mut line = 3;
-                for quest in vault_guidance::town_quests(*town, &gvars) {
-                    let entry = [
-                        format!("{}. ", quest.number).into_bytes(),
-                        self.pip_text(quest.message),
-                    ]
-                    .concat();
-                    let completed = quest.state == QuestState::Completed;
+                for (number, text, completed) in quests {
+                    let entry = [format!("{number}. ").into_bytes(), text].concat();
                     let color = if completed {
                         pipboy::COMPLETED
                     } else {
@@ -955,19 +949,18 @@ impl MapPreview {
                 match *view {
                     AutomapView::List => {
                         for (index, map) in self.automap_areas().into_iter().enumerate() {
-                            let text = self.message("map.msg", MAP_SHORT_NAMES[map]);
+                            let text = self.automap_name(map);
                             let line = 2 + 2 * index as i32;
                             pen.line(&mut image, &text, Align::Normal, line, pipboy::TEXT, false);
                         }
                     }
                     AutomapView::Elevations { area, entry } => {
-                        let text = self.message("map.msg", 100 + area as i32);
+                        let text = self.automap_title(area);
                         pen.line(&mut image, &text, Align::Centered, 2, pipboy::TEXT, false);
                         for (index, (map, elevation)) in
                             self.automap_entries(area).into_iter().enumerate()
                         {
-                            let id = 200 + 3 * map as i32 + elevation as i32;
-                            let text = self.message("map.msg", id);
+                            let text = self.automap_entry(map, elevation);
                             let line = pipboy::ENTRY_LINE + 2 * index as i32;
                             let color = key(index == entry);
                             pen.line(&mut image, &text, Align::Normal, line, color, false);
@@ -981,8 +974,7 @@ impl MapPreview {
             Some(Page::Archives) => {
                 let title = self.pip_text(msg::ARCHIVES);
                 pen.line(&mut image, &title, Align::Centered, 0, pipboy::TEXT, true);
-                let played = movie::archive_movies(&self.host.world.persistence.movies);
-                for (index, movie) in played.into_iter().enumerate() {
+                for (index, movie) in self.archive_list().into_iter().enumerate() {
                     let text = self.pip_text(vault_guidance::ARCHIVE_TITLE_BASE + movie as i32);
                     let line = 2 + 2 * index as i32;
                     pen.line(&mut image, &text, Align::Normal, line, pipboy::TEXT, false);
@@ -1049,6 +1041,234 @@ impl MapPreview {
             vault_core::ui::cursor::animated_frame(self.clock.saturating_sub(since), frames)
                 as usize,
         )
+    }
+}
+
+/// A Status detail row: its number, text and whether it is completed.
+pub(super) type QuestRow = (usize, Vec<u8>, bool);
+
+/// SPEC-019 §3.10 the Pip-Boy's data under either profile: Fallout 1's
+/// fixed tables (vault-guidance), or SPEC-018 §5.9's quest and holodisk
+/// tables, SPEC-018 §5.2's cities for the automaps and the Fallout 2
+/// played-movie record for the archives.
+impl MapPreview {
+    /// §3.10 the Pip-Boy may open: always under Fallout 1; under Fallout 2
+    /// unless the current map's record has `pipboy_active=No`.
+    pub(crate) fn pipboy_active(&self) -> bool {
+        self.host.world.fallout2.as_deref().is_none_or(|state| {
+            state
+                .tables
+                .maps
+                .get(self.host.world.map.header.map_number)
+                .is_none_or(|record| record.pipboy_active)
+        })
+    }
+    /// A game message, or SPEC-002 §3.5's placeholder when it is missing.
+    fn game_text(&self, file: &str, id: i32) -> Vec<u8> {
+        self.host
+            .assets
+            .game_messages(file)
+            .ok()
+            .and_then(|catalog| catalog.get(id).map(|message| message.text.clone()))
+            .unwrap_or_else(|| vault_guidance::MISSING_TEXT.to_vec())
+    }
+    /// The Status page's locations: a key for the detail view (Fallout 1's
+    /// town, Fallout 2's group) and the title.
+    pub(super) fn status_locations(&self) -> Vec<(usize, Vec<u8>)> {
+        let gvars = self.gvars();
+        match self.host.world.fallout2.as_deref() {
+            Some(state) => state
+                .quest_list(&gvars)
+                .into_iter()
+                .enumerate()
+                .map(|(group, (location, _))| (group, self.game_text("map.msg", location)))
+                .collect(),
+            None => vault_guidance::quest_locations(&gvars)
+                .into_iter()
+                .map(|(town, title)| (town, self.pip_text(title)))
+                .collect(),
+        }
+    }
+    /// The held holodisks: ordinal and title.
+    pub(super) fn status_disks(&self) -> Vec<(usize, Vec<u8>)> {
+        let gvars = self.gvars();
+        match self.host.world.fallout2.as_deref() {
+            Some(state) => state
+                .holodisk_list(&gvars)
+                .into_iter()
+                .map(|ordinal| {
+                    (
+                        ordinal,
+                        self.pip_text(state.tables.holodisks[ordinal].title),
+                    )
+                })
+                .collect(),
+            None => vault_guidance::listed_disks(&gvars)
+                .into_iter()
+                .map(|ordinal| {
+                    let title = self.pip_text(vault_guidance::DISK_TITLE_BASE + ordinal as i32);
+                    (ordinal, title)
+                })
+                .collect(),
+        }
+    }
+    /// Disk `ordinal`'s pages.
+    pub(super) fn read_disk(&self, ordinal: usize) -> Result<Holodisk, String> {
+        let messages = self
+            .pipboy_messages()
+            .ok_or_else(|| "pipboy.msg is unavailable".to_string())?;
+        match self.host.world.fallout2.as_deref() {
+            Some(state) => {
+                let disk = state
+                    .tables
+                    .holodisks
+                    .get(ordinal)
+                    .ok_or_else(|| format!("holodisk {ordinal} is not in holodisk.txt"))?;
+                Ok(vault_guidance::holodisk_at(
+                    ordinal, disk.title, disk.text, &messages,
+                ))
+            }
+            None => vault_guidance::holodisk(ordinal, &messages).map_err(|error| error.to_string()),
+        }
+    }
+    /// A location's detail: its title and its visible quests as (number,
+    /// text, completed).
+    pub(super) fn status_detail(&self, key: usize) -> (Vec<u8>, Vec<QuestRow>) {
+        let gvars = self.gvars();
+        match self.host.world.fallout2.as_deref() {
+            Some(state) => {
+                use vault_formats::fallout2::lines::QuestStatus;
+                let Some((location, quests)) = state.quest_list(&gvars).into_iter().nth(key) else {
+                    return (Vec::new(), Vec::new());
+                };
+                let rows = quests
+                    .into_iter()
+                    .enumerate()
+                    .map(|(visible, (ordinal, status))| {
+                        let quest = &state.tables.quests[ordinal];
+                        (
+                            visible + 1,
+                            self.game_text("quests.msg", quest.description),
+                            status == QuestStatus::Completed,
+                        )
+                    })
+                    .collect();
+                (self.game_text("map.msg", location), rows)
+            }
+            None => {
+                let title = self.pip_text(vault_guidance::LOCATION_TITLE_BASE + 10 * key as i32);
+                let rows = vault_guidance::town_quests(key, &gvars)
+                    .into_iter()
+                    .map(|quest| {
+                        (
+                            quest.number,
+                            self.pip_text(quest.message),
+                            quest.state == QuestState::Completed,
+                        )
+                    })
+                    .collect();
+                (title, rows)
+            }
+        }
+    }
+    /// The Video Archives' movie indexes.
+    pub(super) fn archive_list(&self) -> Vec<usize> {
+        match self.host.world.fallout2.as_deref() {
+            Some(state) => vault_core::ui::fallout2::archive_movies(&state.movies),
+            None => movie::archive_movies(&self.host.world.persistence.movies),
+        }
+    }
+    /// §3.10 the Fallout 2 automap groups: each city with a captured
+    /// elevation of one of its maps (SPEC-018 §5.2's area of a map), and
+    /// each captured map of no city on its own (keyed 1000 + map), sorted
+    /// by name as SPEC-014 sorts its groups.
+    pub(super) fn fallout2_automap_areas(&self) -> Vec<usize> {
+        let Some(state) = self.host.world.fallout2.as_deref() else {
+            return Vec::new();
+        };
+        let db = &self.host.world.persistence.automap;
+        let mut groups: Vec<usize> = Vec::new();
+        for map in 0..state.tables.maps.count() {
+            if !(0..3).any(|elevation| automaps::captured(db, map, elevation)) {
+                continue;
+            }
+            let area = state.tables.city.area_of_map(map as i32);
+            let key = usize::try_from(area).unwrap_or(1000 + map);
+            if !groups.contains(&key) {
+                groups.push(key);
+            }
+        }
+        let mut named: Vec<(Vec<u8>, usize)> = groups
+            .into_iter()
+            .map(|key| (self.automap_name(key), key))
+            .collect();
+        named.sort();
+        named.into_iter().map(|(_, key)| key).collect()
+    }
+    /// A group's captured elevations, every map of the city in ascending
+    /// map number.
+    pub(super) fn fallout2_automap_entries(&self, key: usize) -> Vec<(usize, usize)> {
+        let Some(state) = self.host.world.fallout2.as_deref() else {
+            return Vec::new();
+        };
+        let db = &self.host.world.persistence.automap;
+        (0..state.tables.maps.count())
+            .filter(|map| match key.checked_sub(1000) {
+                Some(single) => *map == single,
+                None => state.tables.city.area_of_map(*map as i32) == key as i32,
+            })
+            .flat_map(|map| (0..3).map(move |elevation| (map, elevation)))
+            .filter(|(map, elevation)| automaps::captured(db, *map, *elevation))
+            .collect()
+    }
+    /// An automap group's name in the list.
+    pub(super) fn automap_name(&self, key: usize) -> Vec<u8> {
+        match self.host.world.fallout2.as_deref() {
+            Some(state) => match key.checked_sub(1000) {
+                Some(map) => self.map_lookup_name(state, map),
+                None => state
+                    .tables
+                    .city
+                    .get(key as i32)
+                    .map(|area| area.name.clone().into_bytes())
+                    .unwrap_or_default(),
+            },
+            None => self.message("map.msg", MAP_SHORT_NAMES[key]),
+        }
+    }
+    /// The elevation view's title.
+    fn automap_title(&self, key: usize) -> Vec<u8> {
+        match self.host.world.fallout2 {
+            Some(_) => self.automap_name(key),
+            None => self.message("map.msg", 100 + key as i32),
+        }
+    }
+    /// An elevation entry: Fallout 1's elevation name; under Fallout 2,
+    /// which has no elevation names, the map's lookup name and the
+    /// elevation counted from 1.
+    pub(super) fn automap_entry(&self, map: usize, elevation: usize) -> Vec<u8> {
+        match self.host.world.fallout2.as_deref() {
+            Some(state) => {
+                let mut text = self.map_lookup_name(state, map);
+                text.extend_from_slice(format!(" {}", elevation + 1).as_bytes());
+                text
+            }
+            None => self.message("map.msg", 200 + 3 * map as i32 + elevation as i32),
+        }
+    }
+    fn map_lookup_name(&self, state: &vault_core::fallout2::Fallout2World, map: usize) -> Vec<u8> {
+        state
+            .tables
+            .maps
+            .get(map as i32)
+            .map(|record| {
+                record
+                    .lookup_name
+                    .clone()
+                    .unwrap_or_else(|| record.stem.clone())
+                    .into_bytes()
+            })
+            .unwrap_or_default()
     }
 }
 

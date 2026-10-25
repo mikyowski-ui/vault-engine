@@ -300,7 +300,7 @@ impl MapPreview {
             .unwrap_or(0)
     }
     /// What the folders hold now.
-    fn folder_view(&self, folder: Folder) -> FolderView {
+    pub(super) fn folder_view(&self, folder: Folder) -> FolderView {
         let Some(sheet) = self.host.world.player_sheet() else {
             return FolderView::default();
         };
@@ -312,7 +312,60 @@ impl MapPreview {
             kills: character::kill_rows(&self.host.world.kills, |kind| {
                 self.message("proto.msg", 450 + kind as i32)
             }),
+            fallout2: self.folders2(),
         }
+    }
+    /// SPEC-019 §3.9 the Fallout 2 folders: the player's karma, the
+    /// `genrep.txt` title it selects, the `karmavar.txt` rows whose global
+    /// is nonzero, and kill types 0-18.
+    fn folders2(&self) -> Option<character::Folders2> {
+        let state = self.host.world.fallout2.as_deref()?;
+        let karma = self
+            .host
+            .world
+            .player_sheet()
+            .map_or(0, |sheet| sheet.karma);
+        let reputation =
+            vault_formats::fallout2::lines::reputation_title(&state.tables.genrep, karma);
+        let variables = state
+            .tables
+            .karmavar
+            .iter()
+            .filter(|record| self.global(record.global as usize) != 0 && record.global >= 0)
+            .map(|record| (record.art, record.name, record.description))
+            .collect();
+        let counts: Vec<i32> = self
+            .host
+            .world
+            .kills
+            .iter()
+            .chain(state.kills.iter())
+            .copied()
+            .collect();
+        let kills = character::kill_rows2(&counts, |kind| self.kill_name(kind));
+        Some(character::Folders2 {
+            karma,
+            reputation,
+            variables,
+            kills,
+        })
+    }
+    /// §3.9 kill type t's name: `proto.msg` 1450 + t, else the English
+    /// fallback.
+    pub(crate) fn kill_name(&self, kind: usize) -> Vec<u8> {
+        let (name, _) = vault_core::ui::fallout2::kill_messages(kind);
+        Painter {
+            assets: &self.host.assets,
+            palette: &self.palette,
+        }
+        .message_or(
+            "proto.msg",
+            name,
+            vault_core::ui::fallout2::KILL_FALLBACKS
+                .get(kind)
+                .copied()
+                .unwrap_or_default(),
+        )
     }
     /// The selected line's card.
     fn current_card(&self) -> Option<Card> {
@@ -1228,6 +1281,34 @@ impl MapPreview {
                     let y = character::trait_slot_y(slot, view.traits, true);
                     let text = painter.message("trait.msg", 100 + t);
                     painter.text(image, 101, lit(8 + slot), &text, [34, y], 250);
+                }
+            }
+            Folder::Karma if view.fallout2.is_some() => {
+                let folders = view.fallout2.as_ref().expect("Fallout 2 folders");
+                let mut text = painter.message("editor.msg", 1000);
+                text.extend(folders.karma.to_string().bytes());
+                painter.text(image, 101, lit(0), &text, [34, 362], 270);
+                // §3.9: rows beyond the folder area are not drawn.
+                for (j, card) in folders.karma_rows().iter().enumerate().take(9) {
+                    let text = editor_screen::card_title(painter, card);
+                    painter.text(
+                        image,
+                        101,
+                        lit(j + 1),
+                        &text,
+                        [34, 373 + 11 * j as i32],
+                        270,
+                    );
+                }
+            }
+            Folder::Kills if view.fallout2.is_some() => {
+                let folders = view.fallout2.as_ref().expect("Fallout 2 folders");
+                for (index, (kind, count)) in folders.kills.iter().enumerate().take(20) {
+                    let ([x, y], count_x) = character::kill_row_position(index);
+                    let name = self.kill_name(*kind);
+                    painter.text(image, 101, lit(index), &name, [x, y], count_x - x);
+                    let count = count.to_string();
+                    painter.text(image, 101, lit(index), count.as_bytes(), [count_x, y], 40);
                 }
             }
             Folder::Karma => {

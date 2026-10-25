@@ -1115,6 +1115,17 @@ pub(crate) fn card_title(painter: &Painter, card: &Card) -> Vec<u8> {
             text.extend(painter.message("editor.msg", 126));
             text
         }
+        Title::Kill2(kind) => {
+            let fallback = vault_core::ui::fallout2::KILL_FALLBACKS
+                .get(kind)
+                .copied()
+                .unwrap_or_default();
+            let (name, _) = vault_core::ui::fallout2::kill_messages(kind);
+            let mut text = painter.message_or("proto.msg", name, fallback);
+            text.push(b' ');
+            text.extend(painter.message("editor.msg", 126));
+            text
+        }
     }
 }
 
@@ -1170,7 +1181,14 @@ pub(crate) fn wrap_words(painter: &Painter, text: &[u8], limit: i32) -> Vec<Vec<
 /// 8)`. A card without a picture (the effect perks, past the list) keeps
 /// its title and description (`[May-improve]` safe rule) and wraps at 136.
 pub(crate) fn draw_card(painter: &Painter, image: &mut IndexedImage, card: &Card) {
-    let picture = skilldex_art(painter, card.picture);
+    // SPEC-019 §3.9: a karma variable's picture is an `intrface.lst` row.
+    let picture = if card.interface {
+        painter
+            .interface_row(card.picture)
+            .filter(|name| painter.art(name).is_some())
+    } else {
+        skilldex_art(painter, card.picture)
+    };
     let column = picture
         .as_deref()
         .map_or(0, |path| dark_column(painter, path));
