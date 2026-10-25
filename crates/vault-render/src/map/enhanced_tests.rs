@@ -188,6 +188,7 @@ fn render(
         roof_cutaway,
         shroud,
         overscan: false,
+        highlight: None,
     };
     draw_map_scene(&mut image, &map, &objects, view, &art, layers).unwrap();
     image

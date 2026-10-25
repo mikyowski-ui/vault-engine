@@ -53,6 +53,9 @@ pub(crate) enum LootCount {
 }
 
 const DONE: Rect = Rect::new(288, 328, 15, 16);
+/// The `enhanced` window's engine-drawn Take All button, centered over the
+/// middle panel above its emblem (the window's art has no such button).
+pub(crate) const TAKE_ALL: Rect = Rect::new(214, 236, 108, 20);
 /// Body cycling (sending PgUp and PgDn) with its up and down art.
 const CYCLE: [(Rect, bool, &str, &str); 2] = [
     (Rect::new(436, 162, 20, 18), false, "slu.frm", "sld.frm"),
@@ -191,6 +194,19 @@ impl MapPreview {
         }
         let done = self.button_art(on_screen(DONE), "lilredup.frm", "lilreddn.frm");
         painter.blit(&mut image, done, 0, [ox + DONE.x, oy + DONE.y]);
+        if self.take_all_shown(screen) {
+            // Pressed, the button's colors swap.
+            let pressed = self.held == Some(on_screen(TAKE_ALL));
+            let (frame, fill, text) = if pressed {
+                (ColorKey::AMBER, ColorKey::AMBER, ColorKey::BLACK)
+            } else {
+                (ColorKey::AMBER, ColorKey::BLACK, ColorKey::AMBER)
+            };
+            let [x, y, w, h] = [ox + TAKE_ALL.x, oy + TAKE_ALL.y, TAKE_ALL.w, TAKE_ALL.h];
+            image.fill_rect([x, y, w, h], painter.color(frame));
+            image.fill_rect([x + 1, y + 1, w - 2, h - 2], painter.color(fill));
+            painter.centered(&mut image, 101, text, b"TAKE ALL", [x, y + 6], w);
+        }
         if let Some((_, menu)) = &screen.menu {
             self.draw_item_menu(&painter, &mut image, menu);
         }
@@ -467,6 +483,11 @@ impl MapPreview {
             self.close_loot_screen();
             return true;
         }
+        if TAKE_ALL.contains(local) && self.enhanced.is_some() && !screen.session.steal {
+            self.press_button(on_screen(TAKE_ALL));
+            self.loot_take_all();
+            return true;
+        }
         if let Some((target, up, rect)) = SCROLL.iter().find(|(_, _, rect)| rect.contains(local)) {
             let index = usize::from(*target);
             let count = self.host.loot_items(&screen.session, *target).len();
@@ -593,12 +614,7 @@ impl MapPreview {
             KeyCode::F10 => self.confirm_quit(),
             // G-20: Take All is Shift+A (code `A`) only, in non-steal
             // sessions; the refusal is silent.
-            KeyCode::KeyA if shift => {
-                let session = screen.session.clone();
-                if let Err(error) = self.host.loot_take_all(&session) {
-                    self.status = error.to_string().into_bytes();
-                }
-            }
+            KeyCode::KeyA if shift => self.loot_take_all(),
             KeyCode::ArrowUp | KeyCode::ArrowDown => {
                 let target = control;
                 let count = self.host.loot_items(&screen.session, target).len();
@@ -616,6 +632,25 @@ impl MapPreview {
             _ => return false,
         }
         true
+    }
+}
+
+impl MapPreview {
+    /// The `enhanced` window shows its Take All button outside steal
+    /// sessions (Vanilla has Shift+A only).
+    fn take_all_shown(&self, screen: &LootScreen) -> bool {
+        self.enhanced().is_some() && !screen.session.steal
+    }
+    /// G-20 Take All (Shift+A, or the enhanced button): refused silently
+    /// in steal sessions by the host.
+    fn loot_take_all(&mut self) {
+        let Screen::Loot(screen) = &self.screen else {
+            return;
+        };
+        let session = screen.session.clone();
+        if let Err(error) = self.host.loot_take_all(&session) {
+            self.status = error.to_string().into_bytes();
+        }
     }
 }
 

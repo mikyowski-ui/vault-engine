@@ -185,6 +185,11 @@ pub struct MapScene<'a> {
     /// lies beyond the visited window, so a sprite larger than the
     /// window's margins is not cut at a tile seam. `false` in Vanilla.
     pub overscan: bool,
+    /// The `enhanced` ground-item highlight (Shift held): every drawn item
+    /// on a hex whose own outline word draws nothing is outlined with this
+    /// word, after the outlines and outside their list of 100, so the
+    /// Vanilla outlines never change. `None` in Vanilla.
+    pub highlight: Option<u32>,
 }
 
 /// The `enhanced` preset's roof peek: roof pixels within `inner` view
@@ -1071,6 +1076,7 @@ pub fn draw_map_scene(
         &extra,
     );
     let mut outlines = Vec::new();
+    let mut highlights = Vec::new();
     for drawn in placed {
         let index = match (drawn, cursor) {
             (Drawn::Object(index), _) => index,
@@ -1112,6 +1118,16 @@ pub fn draw_map_scene(
             && let Some(ink) = scene.outlines.and_then(|inks| inks.ink(object.outline))
         {
             outlines.push((frame, origin, ink));
+        }
+        if let Some(word) = scene.highlight
+            && Category::from_pid(object.pid) == Ok(Category::Item)
+            && scene
+                .outlines
+                .and_then(|inks| inks.ink(object.outline))
+                .is_none()
+            && let Some(ink) = scene.outlines.and_then(|inks| inks.ink(word))
+        {
+            highlights.push((frame, origin, ink));
         }
     }
     if view.roofs {
@@ -1155,7 +1171,7 @@ pub fn draw_map_scene(
     }
     // The refresh covers the whole view, which is the map buffer.
     let (width, height) = (i64::from(image.width()), i64::from(image.height()));
-    for (frame, origin, ink) in outlines {
+    for (frame, origin, ink) in outlines.into_iter().chain(highlights) {
         draw_outline(
             image,
             frame,
@@ -2153,6 +2169,7 @@ mod tests {
                 roof_cutaway: None,
                 shroud: None,
                 overscan: false,
+                highlight: None,
             };
             draw_map_scene(&mut image, &map, &scene(vec![wall]), view, &art, scene_cut).unwrap();
             let [x, y] = view.grid.hex_center(20300).unwrap();

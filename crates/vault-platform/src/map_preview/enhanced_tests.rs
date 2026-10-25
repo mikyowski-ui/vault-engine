@@ -742,3 +742,102 @@ fn a_registered_mod_layer_runs_the_camera_demo() {
     let error = load(mount()).err().unwrap().to_string();
     assert!(error.contains("scripts.lst row"), "{error}");
 }
+
+/// The synthetic world's first item, given to a dead `npc`, and a
+/// non-steal loot window on that corpse.
+fn loot_corpse(preview: &mut MapPreview) -> vault_core::ObjectRef {
+    use vault_core::LootRequest;
+    use vault_formats::map::ObjectState;
+    let player = preview.host.world.player;
+    let npc = npc(preview);
+    if let Some(ObjectState::Critter(state)) =
+        preview.host.world.get_mut(npc).map(|o| &mut o.raw.state)
+    {
+        state.results.0 |= vault_core::critical::effect::DEAD;
+    }
+    let item = preview
+        .host
+        .world
+        .iter()
+        .find(|(_, object)| object.category() == vault_formats::pro::Category::Item)
+        .unwrap()
+        .0;
+    preview.host.world.add_item(npc, item, 1, true).unwrap();
+    preview.host.world.pending_loot = Some(LootRequest {
+        looter: player,
+        target: npc,
+        steal: false,
+    });
+    preview.image().unwrap();
+    assert!(matches!(preview.screen, Screen::Loot(_)));
+    item
+}
+
+#[test]
+fn the_enhanced_loot_window_has_a_take_all_button() {
+    use super::super::loot::TAKE_ALL;
+    let [ox, oy] = vault_core::skills::LOOT_ORIGIN;
+    let button = [ox + TAKE_ALL.x + 10, oy + TAKE_ALL.y + 10];
+    let dir = synthetic_corpus();
+    // Vanilla: no button (Shift+A only); the press takes nothing.
+    let mut vanilla = interactive(dir.path());
+    let item = loot_corpse(&mut vanilla);
+    let plain = vanilla.image().unwrap();
+    vanilla.click(button, false);
+    vanilla.release(Some(button), false);
+    assert_ne!(
+        vanilla.host.world.get(item).unwrap().owner,
+        Some(vanilla.host.world.player)
+    );
+    // Enhanced: the button is drawn and takes everything, as Shift+A does.
+    let mut preview = unlocked(dir.path());
+    let item = loot_corpse(&mut preview);
+    let drawn = preview.image().unwrap();
+    assert_ne!(drawn.pixels(), plain.pixels(), "the button is drawn");
+    assert!(preview.click(button, false));
+    preview.release(Some(button), false);
+    assert_eq!(
+        preview.host.world.get(item).unwrap().owner,
+        Some(preview.host.world.player)
+    );
+}
+
+#[test]
+fn shift_highlights_the_ground_items_in_the_enhanced_world_only() {
+    let dir = synthetic_corpus();
+    let ground = |preview: &mut MapPreview| {
+        let player = preview.host.world.player;
+        let hex = preview.host.world.get(player).unwrap().raw.hex.unwrap();
+        let item = preview
+            .host
+            .world
+            .iter()
+            .find(|(_, object)| {
+                object.category() == vault_formats::pro::Category::Item && object.owner.is_none()
+            })
+            .map(|(item, _)| item)
+            .expect("an item on the map");
+        let next = HexGrid::step(hex, 1, 2).unwrap();
+        preview
+            .host
+            .world
+            .move_object(item, next, 0, false)
+            .unwrap();
+    };
+    // Vanilla: Shift changes nothing.
+    let mut vanilla = interactive(dir.path());
+    ground(&mut vanilla);
+    let before = vanilla.image().unwrap();
+    vanilla.set_modifiers([true, false, false]);
+    assert_eq!(vanilla.image().unwrap().pixels(), before.pixels());
+    // Enhanced: the item is outlined while Shift is held.
+    let mut preview = unlocked(dir.path());
+    ground(&mut preview);
+    let (_, plain) = frame(&mut preview, [1920, 1080]);
+    preview.set_modifiers([true, false, false]);
+    let (_, lit) = frame(&mut preview, [1920, 1080]);
+    assert_ne!(lit.world.pixels(), plain.world.pixels());
+    preview.set_modifiers([false, false, false]);
+    let (_, again) = frame(&mut preview, [1920, 1080]);
+    assert_eq!(again.world.pixels(), plain.world.pixels());
+}
