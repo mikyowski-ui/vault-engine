@@ -5,8 +5,24 @@
 use std::sync::Arc;
 use vault_core::{
     assets::{VfsWorldAssets, WorldAssets},
-    ui::{ColorKey, Rect},
+    ui::{
+        ColorKey, Rect,
+        fallout2::{ArtRole, StandIn},
+    },
 };
+
+/// SPEC-019 §2.2 rule 3 and §2.3: one diagnostic per missing art name or
+/// message per session.
+pub(crate) fn note_once(key: &str, what: &str) {
+    static NOTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut noted = NOTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if noted.insert(key.to_owned()) {
+        tracing::warn!(name = key, "{what}");
+    }
+}
 use vault_formats::{Font, FrmArchive, Palette};
 use vault_render::{IndexedImage, TextStyle};
 
@@ -224,6 +240,79 @@ impl Painter<'_> {
             .ok()
             .and_then(|catalog| catalog.get(id).map(|message| message.text.clone()))
             .unwrap_or_default()
+    }
+    /// SPEC-019 §2.3 a message, or its English engine string when the
+    /// message is missing (with one diagnostic per message).
+    pub fn message_or(&self, file: &str, id: i32, fallback: &str) -> Vec<u8> {
+        let found = self
+            .assets
+            .game_messages(file)
+            .ok()
+            .and_then(|catalog| catalog.get(id).map(|message| message.text.clone()));
+        found.unwrap_or_else(|| {
+            note_once(
+                &format!("{file} {id}"),
+                "message missing; engine string used",
+            );
+            fallback.as_bytes().to_vec()
+        })
+    }
+    /// The name in `art/intrface/intrface.lst` row `row`, lower-cased
+    /// (SPEC-019 §2.2: the rows SPEC-018's data give directly).
+    pub fn interface_row(&self, row: i32) -> Option<String> {
+        let row = u16::try_from(row).ok()?;
+        let catalog = self.assets.art_catalog().ok()?;
+        let name = catalog.base_token(6, row)?;
+        Some(String::from_utf8_lossy(name).to_ascii_lowercase())
+    }
+    /// SPEC-019 §2.2 a role's art: the first candidate present in
+    /// `intrface.lst` that loads, else `None` (the caller draws the
+    /// stand-in), with one diagnostic per art name per session.
+    pub fn role(&self, role: &ArtRole) -> Option<(&'static str, Arc<FrmArchive>)> {
+        let catalog = self.assets.art_catalog().ok();
+        let found = role.candidates.iter().find_map(|name| {
+            // Without a readable list the file is taken by name.
+            let listed = catalog
+                .as_ref()
+                .is_none_or(|catalog| catalog.last_row(6, name.as_bytes()).is_some());
+            listed
+                .then(|| self.art(name))
+                .flatten()
+                .map(|art| (*name, art))
+        });
+        if found.is_none() {
+            note_once(role.candidates[0], "interface art missing; stand-in drawn");
+        }
+        found
+    }
+    /// A role's frame 0 at `origin`, transparently, or its stand-in.
+    pub fn blit_role(&self, image: &mut IndexedImage, role: &ArtRole, origin: [i32; 2]) {
+        if let Some((_, art)) = self.role(role)
+            && let Some(frame) = art.frame(0, 0)
+        {
+            image.blit(frame, [i64::from(origin[0]), i64::from(origin[1])]);
+            return;
+        }
+        match role.stand_in {
+            StandIn::Background([w, h]) => {
+                image.fill_rect([origin[0], origin[1], w, h], self.color(ColorKey::BLACK));
+            }
+            StandIn::Button => self.stand_in_button(image, origin),
+            StandIn::Icon | StandIn::None => {}
+        }
+    }
+    /// §2.2 rule 4 the button stand-in: the red button, else a 15-by-16
+    /// key 18979 rectangle with a one-pixel key 14723 border.
+    pub fn stand_in_button(&self, image: &mut IndexedImage, origin: [i32; 2]) {
+        if self.blit(image, vault_core::ui::RED_BUTTON.0, 0, origin) {
+            return;
+        }
+        let ([w, h], fill, border) = vault_core::ui::fallout2::STAND_IN_BUTTON;
+        image.fill_rect([origin[0], origin[1], w, h], self.color(border));
+        image.fill_rect(
+            [origin[0] + 1, origin[1] + 1, w - 2, h - 2],
+            self.color(fill),
+        );
     }
     /// One `bignum.frm` cell (14 by 24; 0-9 digits, 11 rolling; red set at
     /// x offset 168).

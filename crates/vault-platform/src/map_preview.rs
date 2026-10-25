@@ -70,6 +70,7 @@ mod skilldex;
 mod talk;
 mod timer;
 mod world;
+mod world2;
 
 /// Fixed interface button cues (small red button press/release).
 const BUTTON_PRESS: &[u8] = b"ib1p1xx1";
@@ -84,6 +85,9 @@ pub(crate) enum Screen {
     Map,
     World(world::WorldScreen),
     Town(world::TownScreen),
+    /// SPEC-019 §3.12-§3.13 the Fallout 2 world and town maps.
+    World2(Box<world2::World2Screen>),
+    Town2(Box<world2::Town2Screen>),
     PipBoy(Box<pipboy::PipBoy>),
     Inventory(inventory::InventoryScreen),
     Character(Box<character::CharacterScreen>),
@@ -743,6 +747,8 @@ impl MapPreview {
                     | Screen::PipBoy(_)
                     | Screen::World(_)
                     | Screen::Town(_)
+                    | Screen::World2(_)
+                    | Screen::Town2(_)
                     | Screen::Options(options::OptionsScreen::Pause)
                     | Screen::SaveLoad(_)
                     | Screen::Help(_)
@@ -851,6 +857,8 @@ impl MapPreview {
                     Screen::PipBoy(_) => self.pipboy_release(point),
                     Screen::World(_) => self.world_release(point),
                     Screen::Town(_) => self.town_release(point),
+                    Screen::World2(_) => self.world2_release(point),
+                    Screen::Town2(_) => self.town2_release(point),
                     Screen::Character(_) => self.character_release(point, over.is_some()),
                     _ => false,
                 });
@@ -1175,6 +1183,8 @@ impl MapPreview {
             Screen::SaveLoad(_) => self.saveload_image(),
             Screen::World(_) => self.world_image(),
             Screen::Town(_) => self.town_image(),
+            Screen::World2(_) => self.world2_image(),
+            Screen::Town2(_) => self.town2_image(),
             Screen::PipBoy(_) => self.pipboy_image(),
             Screen::Inventory(_) => self.inventory_image(),
             Screen::Character(_) => self.character_image(),
@@ -1435,10 +1445,12 @@ impl MapPreview {
             return "Fallout — Vault Engine".into();
         }
         match &self.screen {
-            Screen::World(_) => {
+            Screen::World(_) | Screen::World2(_) => {
                 return "Vault — world map — click to travel; click the party to enter".into();
             }
-            Screen::Town(_) => return "Vault — town map — choose an area".into(),
+            Screen::Town(_) | Screen::Town2(_) => {
+                return "Vault — town map — choose an area".into();
+            }
             Screen::PipBoy(_) => return "Vault — Pip-Boy — Escape returns".into(),
             Screen::Inventory(_) => {
                 return "Vault — inventory — click an item, then an action; Escape returns".into();
@@ -1611,6 +1623,8 @@ impl MapPreview {
         match self.screen {
             Screen::World(_) => return self.world_key(key),
             Screen::Town(_) => return self.town_key(key),
+            Screen::World2(_) => return self.world2_key(key),
+            Screen::Town2(_) => return self.town2_key(key),
             Screen::PipBoy(_) => return self.pipboy_key(key),
             Screen::Inventory(_) => return self.inventory_key(key),
             Screen::Character(_) => return self.character_key(key),
@@ -1775,6 +1789,8 @@ impl MapPreview {
         match self.screen {
             Screen::World(_) => return self.world_click(point, right),
             Screen::Town(_) => return self.town_click(point, right),
+            Screen::World2(_) => return self.world2_click(point, right),
+            Screen::Town2(_) => return self.town2_click(point, right),
             Screen::PipBoy(_) => return self.pipboy_click(point),
             Screen::Inventory(_) => return self.inventory_click(point, right),
             Screen::Character(_) => return self.character_click(point),
@@ -1843,7 +1859,10 @@ impl MapPreview {
         // ends; only the fade advances, and sound keeps playing.
         // SPEC-014 §3.28 / §3.2: a frame that skips the world's tick on the
         // local map pauses its sequences, which resume where they stood.
-        let local_map = !matches!(self.screen, Screen::World(_) | Screen::Town(_));
+        let local_map = !matches!(
+            self.screen,
+            Screen::World(_) | Screen::Town(_) | Screen::World2(_) | Screen::Town2(_)
+        );
         if self.fade_blocks() {
             if local_map {
                 self.host.pause_background(now);
@@ -1883,6 +1902,9 @@ impl MapPreview {
             }
             Screen::World(_) | Screen::Town(_) => self
                 .world_tick(now)
+                .map_err(|error| vault_core::WorldError::Invalid(error.to_string())),
+            Screen::World2(_) | Screen::Town2(_) => self
+                .world2_tick(now)
                 .map_err(|error| vault_core::WorldError::Invalid(error.to_string())),
             Screen::PipBoy(_) => self
                 .pipboy_tick(now)

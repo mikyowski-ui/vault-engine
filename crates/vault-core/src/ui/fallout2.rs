@@ -334,6 +334,53 @@ pub fn indicators(
     .collect()
 }
 
+/// §3.12.1 the view over a world of `world` pixels (SPEC-018 §5.3): the
+/// SPEC-014 §3.39 rules with the origin clamped to 0 through world width
+/// - 450 and 0 through world height - 442.
+pub mod view {
+    use crate::worldmap::{VIEWPORT_SIZE, screen::SCROLL_STEP};
+    pub fn limit(world: [i32; 2]) -> [i32; 2] {
+        [
+            (world[0] - VIEWPORT_SIZE[0]).max(0),
+            (world[1] - VIEWPORT_SIZE[1]).max(0),
+        ]
+    }
+    pub fn clamp(view: [i32; 2], world: [i32; 2]) -> [i32; 2] {
+        let limit = limit(world);
+        [view[0].clamp(0, limit[0]), view[1].clamp(0, limit[1])]
+    }
+    /// Centering on world position (X, Y): `(X - 247, Y - 242)`, clamped.
+    pub fn centered(position: [i32; 2], world: [i32; 2]) -> [i32; 2] {
+        clamp([position[0] - 247, position[1] - 242], world)
+    }
+    /// One 16-pixel step on each requested axis, each clamped on its own;
+    /// also whether every requested axis was already at its limit.
+    pub fn scroll(view: [i32; 2], direction: [i32; 2], world: [i32; 2]) -> ([i32; 2], bool) {
+        let limits = limit(world);
+        let mut next = view;
+        let mut blocked = direction != [0, 0];
+        for axis in 0..2 {
+            let step = direction[axis];
+            if step == 0 {
+                continue;
+            }
+            let limit = if step < 0 { 0 } else { limits[axis] };
+            if view[axis] != limit {
+                blocked = false;
+            }
+            next[axis] = (view[axis] + SCROLL_STEP * step).clamp(0, limits[axis]);
+        }
+        (next, blocked)
+    }
+    /// Home centers on the party with vy 0; End takes vy to its limit.
+    pub fn home(position: [i32; 2], world: [i32; 2]) -> [i32; 2] {
+        [centered(position, world)[0], 0]
+    }
+    pub fn end(view: [i32; 2], world: [i32; 2]) -> [i32; 2] {
+        [view[0], limit(world)[1]]
+    }
+}
+
 /// §3.12.2 a city's circle outline of radius r around `center`: the pixels
 /// whose rounded distance from the center is r (one pixel thick, eight-way
 /// symmetric), from the midpoint circle rule.

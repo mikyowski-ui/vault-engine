@@ -4038,3 +4038,6 @@ fn enhanced_push_reaches_strangers_only_in_a_debug_session() {
     let entries = menu(true);
     assert!(entries.contains(&Entry::Push) && !entries.contains(&Entry::Gear));
 }
+
+#[path = "fallout2_tests.rs"]
+mod fallout2;

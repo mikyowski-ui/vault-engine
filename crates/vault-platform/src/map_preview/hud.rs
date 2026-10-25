@@ -314,7 +314,35 @@ impl MapPreview {
         self.draw_bar(&painter, &mut image);
         image
     }
+    /// SPEC-019 §3.5.1 the bar's geometry from `iface.frm`'s height,
+    /// under the Fallout 2 profile only (Fallout 1 keeps SPEC-014's).
+    pub(crate) fn bar_geometry(&self) -> Option<vault_core::ui::fallout2::BarGeometry> {
+        self.host.world.fallout2.as_ref()?;
+        let height = Painter {
+            assets: &self.host.assets,
+            palette: &self.palette,
+        }
+        .size(bar::BAR_BACKGROUND)
+        .map_or(0, |[_, height]| height);
+        let geometry = vault_core::ui::fallout2::BarGeometry::new(height);
+        if geometry.clamped {
+            crate::interface::note_once(
+                "iface.frm height",
+                "the bar art's height is outside 60-100; 100 is used",
+            );
+        }
+        Some(geometry)
+    }
+    /// The map area's last screen row: 379, or `479 - h` under Fallout 2.
+    pub(crate) fn map_bottom_row(&self) -> i32 {
+        self.bar_geometry()
+            .map_or_else(super::pointer::map_bottom, |geometry| geometry.map_bottom())
+    }
     fn draw_indicators(&self, painter: &Painter, image: &mut IndexedImage) {
+        if self.bar_geometry().is_some() {
+            self.draw_indicators2(painter, image);
+            return;
+        }
         let sheet = self.host.world.player_sheet();
         let flags = sheet.map_or(0, |sheet| sheet.flags);
         let boxes = bar::indicators(
@@ -349,9 +377,57 @@ impl MapPreview {
             );
         }
     }
+    /// SPEC-019 §3.5.2 the five indicator boxes: ADDICT, SNEAK, LEVEL,
+    /// POISONED, RADIATED, at the window above the bar.
+    fn draw_indicators2(&self, painter: &Painter, image: &mut IndexedImage) {
+        use vault_core::ui::fallout2 as ui2;
+        let sheet = self.host.world.player_sheet();
+        let flags = sheet.map_or(0, |sheet| sheet.flags);
+        let boxes = ui2::indicators(
+            flags & progression::ADDICTED_FLAG != 0,
+            flags & 1 != 0,
+            flags & progression::LEVEL_UP_FLAG != 0,
+            sheet.map_or(0, |sheet| sheet.poison),
+            sheet.map_or(0, |sheet| sheet.radiation),
+        );
+        let Some(geometry) = self.bar_geometry() else {
+            return;
+        };
+        let [ox, oy] = geometry.indicator_origin();
+        for (k, indicator) in boxes.iter().enumerate() {
+            let x = ox + bar::indicator_x(k);
+            if k == 0 {
+                painter.blit_region(
+                    image,
+                    bar::INDICATOR_BOX.0,
+                    Rect::new(3, 0, 127, 21),
+                    [x, oy],
+                    true,
+                );
+            } else {
+                painter.blit_opaque(image, bar::INDICATOR_BOX.0, 0, [x, oy]);
+            }
+            let (id, fallback, key) = indicator.label();
+            let label = painter.message_or("intrface.msg", id, fallback);
+            let width = if k == 0 { 127 } else { 130 };
+            painter.centered(
+                image,
+                101,
+                key,
+                &label,
+                [x, oy + bar::INDICATOR_LABEL_Y],
+                width,
+            );
+        }
+    }
     fn draw_bar(&self, painter: &Painter, image: &mut IndexedImage) {
         let [bx, by] = bar::BAR_ORIGIN;
-        painter.blit_opaque(image, bar::BAR_BACKGROUND, 0, [bx, by]);
+        // SPEC-019 §3.5.1: the bar window starts at `479 - h`; every
+        // element keeps its SPEC-014 screen position.
+        let background = self
+            .bar_geometry()
+            .map_or([bx, by], |geometry| geometry.origin());
+        painter.blit_opaque(image, bar::BAR_BACKGROUND, 0, background);
         let panel = self.hud.panel;
         for (button, _, up, down, _) in bar::BAR_BUTTONS {
             // The End turn and End combat buttons exist only while the

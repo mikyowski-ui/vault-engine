@@ -577,7 +577,7 @@ impl MapPreview {
     /// Whether a pointer pixel is in the map area: every canvas pixel, or
     /// a frame pixel above the bar (rows up to 379).
     pub(crate) fn map_area(&self, point: [i32; 2]) -> bool {
-        self.pointer.world || point[1] <= map_bottom()
+        self.pointer.world || point[1] <= self.map_bottom_row()
     }
     /// The roof cutaway under the pointer: the cursor X-ray, Alt held or
     /// the demo's peek, while the pointer is on the canvas and roofs draw.
@@ -1284,7 +1284,11 @@ impl MapPreview {
             .map_or([1, 1], |enhanced| enhanced.world_size());
         if matches!(
             self.screen,
-            Screen::World(_) | Screen::Town(_) | Screen::Movie(_)
+            Screen::World(_)
+                | Screen::Town(_)
+                | Screen::World2(_)
+                | Screen::Town2(_)
+                | Screen::Movie(_)
         ) {
             return Ok(IndexedImage::new(width, height)?);
         }

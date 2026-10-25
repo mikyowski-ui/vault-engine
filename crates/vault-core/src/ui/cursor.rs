@@ -235,6 +235,14 @@ impl Entry {
         })
     }
 }
+/// SPEC-019 §3.6 Fallout 2's Push, inserted directly after a critter's
+/// first entry (Talk, or Use), when allowed.
+pub fn fallout2_entries(mut entries: Vec<Entry>, push: bool) -> Vec<Entry> {
+    if push {
+        entries.insert(1.min(entries.len()), Entry::Push);
+    }
+    entries
+}
 /// The `enhanced` preset's additions to a critter's menu: Push and Gear,
 /// before Cancel, when allowed. Vanilla menus never call this.
 pub fn enhanced_entries(mut entries: Vec<Entry>, push: bool, gear: bool) -> Vec<Entry> {

@@ -105,6 +105,26 @@ pub fn random(rng: &mut impl RandomSource, first: i32, last: i32) -> Result<i32,
     }
 }
 
+/// SPEC-019 §3.12.3 a city destination: SPEC-008 §3.7's jitter around the
+/// city's world position, four draws (X magnitude 0-16, X sign 0-1, Y
+/// magnitude 0-16, Y sign 0-1, where sign 1 adds and 0 subtracts).
+pub fn city_target(
+    position: [i32; 2],
+    rng: &mut impl RandomSource,
+) -> Result<[i32; 2], WorldError> {
+    let mut jitter = || -> Result<i32, WorldError> {
+        let magnitude = rng.range(0, 16)?;
+        Ok(if rng.range(0, 1)? == 1 {
+            magnitude
+        } else {
+            -magnitude
+        })
+    };
+    let x = position[0] + jitter()?;
+    let y = position[1] + jitter()?;
+    Ok([x, y])
+}
+
 /// §5.6 step 1 the period of a game time: 0 morning (06:00-11:59), 1
 /// afternoon (12:00-17:59), 2 night (18:00-05:59).
 pub fn period(ticks: u64) -> usize {

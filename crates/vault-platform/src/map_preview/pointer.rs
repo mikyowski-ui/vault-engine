@@ -506,8 +506,12 @@ impl MapPreview {
         };
         let at = self.menu_point().unwrap_or(point);
         let mut entries = cursor::menu_entries(target, self.host.world.combat);
-        // The `enhanced` critter entries (the host refuses them in Vanilla).
-        if matches!(target, Target::Critter { .. }) {
+        // SPEC-019 §3.6: Fallout 2's Push; it takes the enhanced entries'
+        // place under the Fallout 2 profile (§3.18).
+        if matches!(target, Target::Critter { .. }) && self.host.world.fallout2.is_some() {
+            entries = cursor::fallout2_entries(entries, self.host.fallout2_can_push(object));
+        } else if matches!(target, Target::Critter { .. }) {
+            // The `enhanced` critter entries (the host refuses them in Vanilla).
             entries = cursor::enhanced_entries(
                 entries,
                 self.host.can_push(object, self.debug_session),
@@ -550,6 +554,13 @@ impl MapPreview {
             }
             Entry::Inventory => self.open_inventory_on(Some(object)),
             Entry::Skill => self.open_skilldex_on(Some(object)),
+            // SPEC-019 §3.6: the talk approach, `push_p_proc`, then the
+            // step; E-push-blocked reaches the monitor as a message.
+            Entry::Push if self.host.world.fallout2.is_some() => {
+                if let Err(error) = self.host.fallout2_push(object) {
+                    self.status = error.to_string().into_bytes();
+                }
+            }
             Entry::Push => match self.host.push_critter(object, self.debug_session) {
                 Ok(Some(vault_core::companion::Push::Blocked)) => {
                     self.status = b"There is no room to push.".to_vec();
@@ -928,6 +939,10 @@ impl MapPreview {
                 painter.cursor(image, self.world_cursor(pointer), at);
                 return;
             }
+            Screen::World2(_) | Screen::Town2(_) => {
+                painter.cursor(image, self.world2_cursor(pointer), at);
+                return;
+            }
             _ => {}
         }
         // SPEC-014 §3.41.6: the animated watch while the Pip-Boy rests.
@@ -1110,11 +1125,18 @@ impl MapPreview {
         for (index, entry) in menu.entries.iter().enumerate() {
             let lit = index == menu.tracker.highlight;
             let at = [icons_x, top + 40 * index as i32];
-            match entry.icons() {
-                Some((normal, highlighted)) => {
+            // SPEC-019 §2.2: Fallout 2's push icon pair, else the engine's.
+            let fallout2 = (*entry == Entry::Push && self.host.world.fallout2.is_some())
+                .then(|| painter.role(&vault_core::ui::fallout2::PUSH_ICONS[usize::from(lit)]))
+                .flatten();
+            match (fallout2, entry.icons()) {
+                (Some((name, _)), _) => {
+                    painter.blit(image, name, 0, at);
+                }
+                (None, Some((normal, highlighted))) => {
                     painter.blit(image, if lit { highlighted } else { normal }, 0, at);
                 }
-                None => draw_engine_icon(painter, image, *entry, lit, at),
+                (None, None) => draw_engine_icon(painter, image, *entry, lit, at),
             }
         }
     }

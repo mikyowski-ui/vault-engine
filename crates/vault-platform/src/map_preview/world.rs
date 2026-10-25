@@ -149,7 +149,7 @@ impl WorldScreen {
     }
 }
 
-fn inside(rect: [i32; 4], point: [i32; 2]) -> bool {
+pub(super) fn inside(rect: [i32; 4], point: [i32; 2]) -> bool {
     (rect[0]..rect[0] + rect[2]).contains(&point[0])
         && (rect[1]..rect[1] + rect[3]).contains(&point[1])
 }
@@ -163,7 +163,7 @@ fn panel_button(point: [i32; 2]) -> Option<usize> {
 fn panel_rect(button: usize) -> [i32; 4] {
     screen::town_button(button).unwrap_or_else(screen::town_world_button)
 }
-const VIEW_CLIP: [i64; 4] = [
+pub(super) const VIEW_CLIP: [i64; 4] = [
     VIEWPORT_ORIGIN[0] as i64,
     VIEWPORT_ORIGIN[1] as i64,
     VIEWPORT_SIZE[0] as i64,
@@ -176,7 +176,7 @@ impl MapPreview {
             .filter(|town| self.host.world.world_map.town_enabled(*town))
             .fold(0, |bits, town| bits | 1 << town)
     }
-    fn painter(&self) -> Painter<'_> {
+    pub(super) fn painter(&self) -> Painter<'_> {
         Painter {
             assets: &self.host.assets,
             palette: &self.palette,
@@ -186,6 +186,11 @@ impl MapPreview {
     /// mode on and the view centered on the party. The music was requested
     /// by the transition that opened it.
     pub(crate) fn open_world_map(&mut self) {
+        // SPEC-019 §3.12: a Fallout 2 game has its own world map.
+        if self.host.world.fallout2.is_some() {
+            self.open_world2();
+            return;
+        }
         // §3.39: opening the screen shows the party at rest (a town-map
         // choice that starts a journey sets its travel after this).
         self.end_world_travel();
@@ -268,6 +273,10 @@ impl MapPreview {
     /// opcode). Under the safe rule a failure opens the world map at the
     /// current town instead.
     pub(crate) fn open_town_map(&mut self) {
+        if self.host.world.fallout2.is_some() {
+            self.open_town2();
+            return;
+        }
         let town = self.host.world.world_map.saved.town;
         match self.town_screen(town, TownOrigin::Transition, None) {
             Ok(screen) => self.screen = Screen::Town(screen),
@@ -716,7 +725,7 @@ impl MapPreview {
         }
     }
     /// A marker, skipped outside its drawing window and clipped to the view.
-    fn draw_marker(
+    pub(super) fn draw_marker(
         &self,
         painter: &Painter,
         image: &mut IndexedImage,
@@ -768,7 +777,7 @@ impl MapPreview {
     }
     /// Text in font 101, key 992, with shadow, written only within its
     /// w-by-10 rectangle at `origin` and within `clip`.
-    fn draw_label(
+    pub(super) fn draw_label(
         &self,
         painter: &Painter,
         image: &mut IndexedImage,
@@ -857,7 +866,7 @@ impl MapPreview {
     }
     /// The date and time from the game clock (SPEC-005 calendar), written
     /// opaque: day, month row, year, and HHMM.
-    fn draw_date(&self, painter: &Painter, image: &mut IndexedImage) {
+    pub(super) fn draw_date(&self, painter: &Painter, image: &mut IndexedImage) {
         let world = &self.host.world;
         let [month, day, year] = world.game_date();
         let digits = |image: &mut IndexedImage, value: i32, count: u32, origin: [i32; 2]| {

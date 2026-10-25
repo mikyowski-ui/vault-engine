@@ -198,8 +198,10 @@ impl MapPreview {
         let Some(dialog) = &self.dialog else {
             return false;
         };
-        if let Screen::World(world) = &mut self.screen {
-            world.swallow_release();
+        match &mut self.screen {
+            Screen::World(world) => world.swallow_release(),
+            Screen::World2(world) => world.swallow_release(),
+            _ => {}
         }
         let [ox, oy] = dialog.origin;
         let pressed = flow::dialog_buttons(dialog.yes_no)
