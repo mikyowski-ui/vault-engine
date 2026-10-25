@@ -12,6 +12,9 @@ use crate::{
     motion::{Goal, Motion, MotionSequence, Play, Walk},
 };
 
+/// SPEC-007 §2.1 the take-out animation.
+const TAKE_OUT: u8 = 38;
+
 /// The animated object is each registration's last operand.
 fn animated_object(command: &(u16, Vec<i32>)) -> Option<ObjectRef> {
     command.1.last().map(|object| *object as ObjectRef)
@@ -113,6 +116,38 @@ impl<A: WorldAssets> WorldHost<A> {
                         frames: Frames::default(),
                     };
                     motion.push(object, 0, entry)?;
+                }
+                // SPEC-017 §4.1, Fallout 2 only: the complete art
+                // identifier, used as given (instant); art that cannot be
+                // loaded fails the whole sequence.
+                0x8157 => {
+                    let art = values[1] as u32;
+                    if !self.assets.art_exists(art) {
+                        return Err(Refused::Art(art));
+                    }
+                    motion.push(object, delay, Motion::SetArt { art })?;
+                }
+                // The take-out animation for the weapon code (timed); the
+                // art then keeps that code.
+                0x8158 => {
+                    let code = values[1] as u8;
+                    let facing = self.world.get(object).map_or(0, |o| o.raw.orientation);
+                    let art = self.critter_fid(object, TAKE_OUT, Some(code), facing);
+                    if !self.assets.art_exists(art) {
+                        return Err(Refused::Art(art));
+                    }
+                    let entry = Motion::Animate {
+                        animation: TAKE_OUT,
+                        weapon: Some(code),
+                        art,
+                        frames: Frames::default(),
+                    };
+                    motion.push(object, delay, entry)?;
+                }
+                // Facing the hex, as `rotation_to_tile` from its own hex.
+                0x8159 => {
+                    let toward = Goal::Hex(values[1]);
+                    motion.push(object, delay, Motion::Turn { toward })?;
                 }
                 _ => {}
             }

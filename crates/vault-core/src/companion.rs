@@ -124,6 +124,9 @@ pub enum Push {
     Moved(i32),
     /// No free hex away from the player.
     Blocked,
+    /// Under Fallout 2, the critter's `push_p_proc` overrode the push
+    /// (SPEC-017 §2.4); nothing moves.
+    Overridden,
 }
 
 impl<A: WorldAssets> WorldHost<A> {
@@ -175,6 +178,11 @@ impl<A: WorldAssets> WorldHost<A> {
     ) -> Result<Option<Push>, WorldError> {
         if !self.can_push(critter, any) {
             return Ok(None);
+        }
+        // SPEC-017 §2.4: under Fallout 2 the critter's `push_p_proc` runs
+        // first, and an override suppresses the push.
+        if self.world.party_member(critter) && self.request_push(critter)? {
+            return Ok(Some(Push::Overridden));
         }
         let world = &self.world;
         let (Some(from), Some(player)) = (

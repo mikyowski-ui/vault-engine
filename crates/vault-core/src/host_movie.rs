@@ -61,6 +61,10 @@ impl<A: WorldAssets> WorldHost<A> {
     /// without a loaded map). An index outside 0..13 is a failed play
     /// (safe rule); a failed play is a diagnostic only.
     pub(crate) fn play_gmovie(&mut self, index: i32) {
+        if self.world.fallout2.is_some() {
+            self.fallout2_gmovie(index);
+            return;
+        }
         let map_loaded = self.world.map.header.name[0] != 0;
         match movie::play_gmovie_flags(index, map_loaded) {
             Some(flags) => {
@@ -70,6 +74,41 @@ impl<A: WorldAssets> WorldHost<A> {
                 .world
                 .diagnostic(format!("play_gmovie: movie {index} is outside 0-13")),
         }
+    }
+    /// SPEC-017 §3.1 `play_gmovie` under Fallout 2: SPEC-018 §6.4's
+    /// 17-entry table with SPEC-019 §3.21's flags `0x0B`, and its own
+    /// played record. An index outside 0-16, or a movie not found, is a
+    /// failed play: a diagnostic only.
+    fn fallout2_gmovie(&mut self, index: i32) {
+        let Some(file) = usize::try_from(index)
+            .ok()
+            .and_then(|index| crate::fallout2::MOVIES.get(index))
+        else {
+            self.world
+                .diagnostic(format!("play_gmovie: movie {index} is outside 0-16"));
+            return;
+        };
+        let path = format!("art/cuts/{file}");
+        if !self.assets.available(path.as_bytes()) {
+            self.world.diagnostic(format!("{path}: movie not found"));
+            return;
+        }
+        let subtitles = self
+            .subtitles_enabled()
+            .then(|| movie::subtitle_path(self.assets.language(), &path))
+            .filter(|subtitles| self.assets.available(subtitles.as_bytes()));
+        let fades =
+            Some(movie::fade_path(&path)).filter(|fades| self.assets.available(fades.as_bytes()));
+        if let Some(state) = self.world.fallout2.as_deref_mut() {
+            state.movies[index as usize] = 1;
+        }
+        self.world.emit(WorldEffect::Movie(MovieRequest {
+            index: None,
+            flags: 0x0b,
+            path,
+            subtitles,
+            fades,
+        }));
     }
     /// The endgame movie: walkm or walkw by the player's gender, flags 0.
     pub fn play_endgame_movie(&mut self) -> bool {

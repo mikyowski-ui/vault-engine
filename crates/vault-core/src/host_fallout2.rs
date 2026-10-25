@@ -136,8 +136,11 @@ impl<A: WorldAssets> WorldHost<A> {
         state.reveal(scout);
         state.iterations = 0;
         state.mark = None;
+        state.world_map_open = true;
         if opening {
-            self.request_music(fallout2::WORLD_MAP_MUSIC);
+            // `03wrldmp`, or SPEC-017 §5.2's `metarule3` 102 override.
+            let track = self.world_map_track();
+            self.request_music(&track);
         }
         Ok(())
     }

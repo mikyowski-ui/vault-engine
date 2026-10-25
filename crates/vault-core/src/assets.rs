@@ -318,6 +318,16 @@ impl VfsWorldAssets {
             .read_bounded(path, MAX_ASSET_BYTES)
             .map_err(|error| WorldError::Invalid(format!("{path}: {error}")))
     }
+    /// A script, checked against the game profile's word set (SPEC-017
+    /// §2.1), with the enhanced range as the preset says.
+    fn parse_program(&self, bytes: &[u8]) -> Result<IntProgram, WorldError> {
+        let words = crate::fallout2::word_set(self.game.get());
+        Ok(IntProgram::parse_in(
+            bytes,
+            &words,
+            self.enhanced_scripts.get(),
+        )?)
+    }
     /// A list file, parsed once (each path has one kind).
     fn list(&self, path: &str, kind: LstKind) -> Result<Arc<LstTable>, WorldError> {
         if let Some(list) = self.lists.borrow().get(path) {
@@ -451,7 +461,7 @@ impl WorldAssets for VfsWorldAssets {
             std::str::from_utf8(name)
                 .map_err(|_| WorldError::Invalid("invalid script name".into()))?
         );
-        let program = IntProgram::parse_with(&self.read(&path)?, self.enhanced_scripts.get())?;
+        let program = self.parse_program(&self.read(&path)?)?;
         self.programs
             .borrow_mut()
             .insert(index, (path.clone(), program.clone()));
@@ -469,7 +479,7 @@ impl WorldAssets for VfsWorldAssets {
         } else {
             format!("scripts/{path}")
         };
-        let program = IntProgram::parse_with(&self.read(&path)?, self.enhanced_scripts.get())?;
+        let program = self.parse_program(&self.read(&path)?)?;
         Ok((path, program))
     }
     fn local_count(&self, index: i32) -> usize {
@@ -744,8 +754,10 @@ impl WorldAssets for VfsWorldAssets {
     }
     fn set_game_profile(&self, game: crate::GameProfile) {
         if self.game.replace(game) != game {
-            // Cached prototypes were read in the other game's layout.
+            // Cached prototypes were read in the other game's layout, and
+            // cached programs checked against its word set.
             self.prototypes.borrow_mut().clear();
+            self.programs.borrow_mut().clear();
         }
     }
     fn set_enhanced_scripts(&self, enabled: bool) {

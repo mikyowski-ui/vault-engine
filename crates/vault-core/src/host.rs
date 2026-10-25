@@ -351,7 +351,17 @@ impl<A: WorldAssets> WorldHost<A> {
     /// world map on its own (a key, the town map's World Map button) calls
     /// this when it does.
     pub fn play_world_map_music(&mut self) {
-        self.request_music(crate::worldmap::WORLD_MAP_MUSIC);
+        let track = self.world_map_track();
+        self.request_music(&track);
+    }
+    /// The world map's track: `03wrldmp`, or under Fallout 2 the
+    /// `metarule3` 102 override while it lasts (SPEC-017 §5.2).
+    pub(crate) fn world_map_track(&self) -> String {
+        self.world
+            .fallout2
+            .as_deref()
+            .and_then(|state| state.world_map_music.clone())
+            .unwrap_or_else(|| crate::worldmap::WORLD_MAP_MUSIC.to_string())
     }
     pub fn rules(&mut self, rules: WorldRules) {
         self.world.rules = rules;
@@ -859,11 +869,16 @@ impl<A: WorldAssets> WorldHost<A> {
                 if load_error.is_none() {
                     state.map_loaded(number);
                 }
-                state
-                    .tables
-                    .maps
-                    .get(number)
-                    .and_then(|record| record.music.clone())
+                // SPEC-017 §4.4: a `set_map_music` override takes
+                // precedence while it lasts.
+                match state.map_music.get(&number) {
+                    Some(track) => Some(track.clone()),
+                    None => state
+                        .tables
+                        .maps
+                        .get(number)
+                        .and_then(|record| record.music.clone()),
+                }
             }
             None => self
                 .world
@@ -1279,6 +1294,9 @@ impl<A: WorldAssets> WorldHost<A> {
     /// entrance, is cleared; after a world map a script opened it stays
     /// pending for the next main-loop pass.
     pub fn world_map_closed(&mut self) {
+        if let Some(state) = self.world.fallout2.as_deref_mut() {
+            state.world_map_open = false;
+        }
         if std::mem::take(&mut self.transition_world_map) {
             self.world.pending_transition = None;
         }
@@ -2412,8 +2430,11 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
         }
         Ok(())
     }
+    /// A host word, with the row of the active profile (SPEC-017 §2.3): a
+    /// reserved Fallout 2 word consumes nothing and is the
+    /// undefined-instruction error.
     fn extension(&mut self, opcode: u16, vm: &mut Vm) -> Result<(), VmError> {
-        let call = extensions::decode(vm, opcode)?;
+        let call = extensions::decode_in(vm, &self.word_set(), opcode)?;
         if self.calls.len() < 100_000 {
             self.calls.push(CallTrace {
                 opcode,

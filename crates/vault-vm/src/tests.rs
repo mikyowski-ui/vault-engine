@@ -1127,3 +1127,139 @@ fn enhanced_camera_words_pop_their_operands_and_push_nothing() {
     let mut vm = Vm::fragment(enhanced(), &op(0x8214)).unwrap();
     assert_eq!(vm.run(&mut EnhancedHost, 10), Err(VmError::Opcode(0x8214)));
 }
+
+/// A host whose words are the Fallout 2 profile's rows: each defined word
+/// pops and checks its operands and pushes I 0 when its row pushes; a
+/// reserved word is the undefined-instruction error (SPEC-017 §2.1).
+struct Fallout2Host;
+impl VmHost for Fallout2Host {
+    fn enhanced_opcodes(&self) -> bool {
+        true
+    }
+    fn extension(&mut self, opcode: u16, vm: &mut Vm) -> Result<(), VmError> {
+        let call = crate::extensions::decode_in(vm, &WordSet::FALLOUT2, opcode)?;
+        if call.spec.push != crate::extensions::PushKind::None {
+            vm.value_stack.push(Value::integer(0))?;
+        }
+        Ok(())
+    }
+}
+/// The SPEC-004 fixture with its first initial-stream word replaced.
+fn with_word(word: u16) -> Vec<u8> {
+    let mut image = fixture::program();
+    let code = IntProgram::parse(&image).unwrap().code_start;
+    image[code..code + 2].copy_from_slice(&word.to_be_bytes());
+    image
+}
+#[test]
+fn spec017_vector_a_word_sets_at_load() {
+    // (word, fallout1 loads, fallout2 loads, enhanced loads under both)
+    for (word, fallout1, fallout2, enhanced) in [
+        (0x8155_u16, true, true, true),
+        (0x8156, false, true, true),
+        (0x8183, false, true, true),
+        (0x8184, false, false, false),
+        (0x81ff, false, false, false),
+        (0x8200, false, false, true),
+    ] {
+        let image = with_word(word);
+        let loads =
+            |words: &WordSet, enhanced: bool| IntProgram::parse_in(&image, words, enhanced).is_ok();
+        assert_eq!(loads(&WordSet::FALLOUT1, false), fallout1, "{word:#06x}");
+        assert_eq!(loads(&WordSet::FALLOUT2, false), fallout2, "{word:#06x}");
+        // The enhanced preset adds only its own range, under either set.
+        assert_eq!(
+            loads(&WordSet::FALLOUT1, true),
+            fallout1 || enhanced && word >= 0x8200,
+            "{word:#06x}"
+        );
+        assert_eq!(loads(&WordSet::FALLOUT2, true), enhanced, "{word:#06x}");
+    }
+    // The Fallout 1 entry points are unchanged.
+    assert_eq!(
+        IntProgram::parse(&with_word(0x8156)).is_ok(),
+        IntProgram::parse_in(&with_word(0x8156), &WordSet::FALLOUT1, false).is_ok()
+    );
+    assert_eq!(WordSet::FALLOUT2.words.len(), 388);
+    assert!(WordSet::FALLOUT2.fallout2() && !WordSet::FALLOUT1.fallout2());
+    for slot in 0..32_u16 {
+        assert!(WordSet::FALLOUT2.accepts(0x8001 + slot * 0x0400));
+    }
+    // Bits 10-14 set on a non-push word stay refused.
+    assert!(!WordSet::FALLOUT2.accepts(0xc039));
+    let program = IntProgram::parse_in(&with_word(0x8156), &WordSet::FALLOUT2, false).unwrap();
+    assert!(program.words().fallout2());
+}
+#[test]
+fn spec017_vector_b_a_reserved_word_fails_closed() {
+    for word in [0x815a_u16, 0x8183] {
+        let code = [push(5), op(word)].concat();
+        let program = IntProgram::parse_in(&fixture::program(), &WordSet::FALLOUT2, false).unwrap();
+        let mut vm = Vm::fragment(program, &code).unwrap();
+        assert_eq!(vm.run(&mut Fallout2Host, 10), Err(VmError::Opcode(word)));
+        // Nothing was popped: the value stack still holds I 5.
+        assert_eq!(vm.value_stack.bytes(), [0, 0, 0, 5, 0xc0, 0x01]);
+        assert_eq!(vm.status.0 & 0x000f, VmStatus::ENDED | VmStatus::ERROR);
+        // Under Fallout 1 the word is refused at load (and at fetch).
+        assert!(IntProgram::parse(&with_word(word)).is_err());
+        let mut vm = fragment(&code);
+        assert_eq!(vm.run(&mut Fallout2Host, 10), Err(VmError::Opcode(word)));
+    }
+    // A defined Fallout 2 word runs; the same word on a Fallout 1 program
+    // is refused before it reaches the host.
+    let code = [push(1), push(13), push(0), op(0x8156)].concat();
+    let program = IntProgram::parse_in(&fixture::program(), &WordSet::FALLOUT2, false).unwrap();
+    let mut vm = Vm::fragment(program, &code).unwrap();
+    assert_eq!(vm.run(&mut Fallout2Host, 10), Ok(RunOutcome::FragmentEnd));
+    assert_eq!(vm.value_stack.bytes(), [0, 0, 0, 0, 0xc0, 0x01]);
+    let mut vm = fragment(&code);
+    assert_eq!(vm.run(&mut Fallout2Host, 10), Err(VmError::Opcode(0x8156)));
+}
+#[test]
+fn spec017_fallout2_rows_amend_spec005_only_where_section_3_2_says() {
+    use crate::extensions::{FALLOUT2, PushKind, Rule, opcode, opcode_in};
+    let reassigned = [0x80b2_u16, 0x80cf, 0x80e1, 0x80e2, 0x80e5, 0x80e6];
+    for word in 0x804c..=0x8155_u16 {
+        let fallout1 = opcode_in(&WordSet::FALLOUT1, word).unwrap();
+        assert_eq!(fallout1.name, opcode(word).unwrap().name);
+        let fallout2 = opcode_in(&WordSet::FALLOUT2, word).unwrap();
+        assert_eq!(
+            fallout1.name == fallout2.name,
+            !reassigned.contains(&word),
+            "{word:#06x}"
+        );
+    }
+    let row = |word| opcode_in(&WordSet::FALLOUT2, word).unwrap();
+    let shape = |word| {
+        let spec = row(word);
+        (spec.name, spec.operands.len(), spec.push != PushKind::None)
+    };
+    assert_eq!(shape(0x80b2), ("mark_area_known", 3, false));
+    assert_eq!(shape(0x80cf), ("tile_in_tile_rect", 5, true));
+    assert_eq!(shape(0x80e1), ("metarule3", 4, true));
+    assert_eq!(shape(0x80e2), ("set_map_music", 2, false));
+    assert_eq!(shape(0x80e5), ("wm_area_set_pos", 3, false));
+    assert_eq!(shape(0x80e6), ("set_exit_grids", 5, false));
+    assert_eq!(shape(0x8156), ("inven_cmds", 3, true));
+    assert_eq!(shape(0x8157), ("reg_anim_change_fid", 3, false));
+    assert_eq!(shape(0x8158), ("reg_anim_take_out", 3, false));
+    assert_eq!(shape(0x8159), ("reg_anim_turn_towards", 3, false));
+    // metarule3 checks only its sub-function; set_map_music's track is S.
+    assert_eq!(
+        row(0x80e1).operands,
+        [
+            Rule::Unchecked,
+            Rule::Unchecked,
+            Rule::Unchecked,
+            Rule::Integer
+        ]
+    );
+    assert_eq!(row(0x80e2).operands, [Rule::String, Rule::Integer]);
+    for word in 0x815a..=0x8183_u16 {
+        assert!(opcode_in(&WordSet::FALLOUT2, word).is_none());
+    }
+    for word in [0x8156_u16, 0x8184, 0x8200] {
+        assert!(opcode_in(&WordSet::FALLOUT1, word).is_none());
+    }
+    assert!(FALLOUT2.windows(2).all(|pair| pair[0].word < pair[1].word));
+}

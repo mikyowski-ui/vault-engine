@@ -58,6 +58,14 @@ pub const STARTUP_MOVIES: [&str; 2] = ["art/cuts/iplogo.mve", "art/cuts/intro.mv
 /// SPEC-019 §2.6 the car's fuel maximum.
 pub const FUEL_MAX: i32 = vault_formats::fallout2::save::FUEL_MAX;
 
+/// SPEC-017 §2.1 the instruction-word set of a game profile's scripts.
+pub fn word_set(game: crate::GameProfile) -> vault_vm::WordSet {
+    match game {
+        crate::GameProfile::Fallout1 => vault_vm::WordSet::FALLOUT1,
+        crate::GameProfile::Fallout2 => vault_vm::WordSet::FALLOUT2,
+    }
+}
+
 /// §6.1 month, day and year of a game tick.
 pub fn game_date(ticks: u64) -> [u16; 3] {
     crate::host_save::calendar_date(ticks, CALENDAR_YEAR, CALENDAR_DAY)
@@ -240,6 +248,14 @@ pub struct Fallout2World {
     pub mark: Option<[i32; 2]>,
     /// The session's one gated-scripts diagnostic was recorded.
     pub gate_noted: bool,
+    /// SPEC-017 §4.4 `set_map_music` overrides of the city track, by map
+    /// number. Not saved: they last until the next full game reset.
+    pub map_music: BTreeMap<i32, String>,
+    /// SPEC-017 §5.2 `metarule3` 102's world-map track, when overridden;
+    /// not saved either.
+    pub world_map_music: Option<String>,
+    /// The world-map screen is open (built and not yet closed).
+    pub world_map_open: bool,
 }
 
 impl Fallout2World {
@@ -282,6 +298,9 @@ impl Fallout2World {
             speed: None,
             mark: None,
             gate_noted: false,
+            map_music: BTreeMap::new(),
+            world_map_music: None,
+            world_map_open: false,
             tables,
         };
         let known: Vec<[i32; 2]> = world

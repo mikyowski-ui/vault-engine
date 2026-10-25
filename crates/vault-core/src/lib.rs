@@ -24,6 +24,7 @@ pub mod host_choreography;
 mod host_combat;
 mod host_drugs;
 mod host_fallout2;
+mod host_fallout2_words;
 mod host_fidget;
 mod host_game;
 mod host_items;
@@ -159,6 +160,8 @@ mod script_request_tests;
 mod self_stop_tests;
 #[cfg(test)]
 mod skills_tests;
+#[cfg(test)]
+mod spec017_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]

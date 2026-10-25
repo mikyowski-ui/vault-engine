@@ -1,4 +1,4 @@
-use crate::program::{self, instruction_length, valid_word_in};
+use crate::program::{self, instruction_length};
 use crate::{
     ExportedProcedure, ExternalValue, IntProgram, LaunchMode, Lifecycle, Stack, Value, VmError,
     VmHost,
@@ -240,7 +240,7 @@ impl Vm {
         let code = self.code();
         let bytes = code.get(at..at + 2).ok_or(VmError::Truncated(self.pc))?;
         let word = u16::from_be_bytes(bytes.try_into().expect("instruction word"));
-        if !valid_word_in(word, self.program.enhanced()) {
+        if !self.program.accepts(word) {
             return Err(VmError::Opcode(word));
         }
         let size = instruction_length(word);
@@ -603,7 +603,11 @@ impl Vm {
                     self.program.schedule(index, 0, 0, 0);
                 }
             }
-            0x804c..=0x8155 => host.extension(word, self)?,
+            // The program's word set decided at fetch whether the word
+            // exists: under Fallout 1 the range ends at 0x8155, under
+            // Fallout 2 at 0x8183 (SPEC-017 §2.1). The host's table for its
+            // profile gives the meaning; a reserved word is its error.
+            0x804c..=0x8183 => host.extension(word, self)?,
             // The versioned enhanced range exists only when the host turns it
             // on; otherwise it falls through to the unknown-word error below,
             // exactly as SPEC-004 requires for any undefined word.

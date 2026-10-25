@@ -45,6 +45,8 @@ pub struct IntProgram {
     /// Parsed with [`IntProgram::parse_enhanced`]: the versioned enhanced
     /// range is accepted as instruction words.
     enhanced: bool,
+    /// The game word set it was checked against (SPEC-017 §2.1).
+    words: WordSet,
 }
 
 fn word(bytes: &[u8], at: usize) -> Result<u32, IntError> {
@@ -107,9 +109,9 @@ pub(crate) fn instruction_length(word: u16) -> usize {
     if word & 0x3ff == 1 { 6 } else { 2 }
 }
 /// The instruction words a game's programs may use besides the slot-1
-/// pushes: the SPEC-004 core words and the SPEC-005 host words. Only
-/// Fallout 1's set is specified; another game's words join only with its
-/// approved specification (docs/fallout2-and-qol-roadmap.md).
+/// pushes: the SPEC-004 core words and the host words of the game's
+/// profile (SPEC-017 §2.1). The versioned enhanced range belongs to
+/// neither set (SPEC-017 §2.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WordSet {
     /// The core and host words, `0x8000` up to the last host word.
@@ -120,6 +122,22 @@ impl WordSet {
     pub const FALLOUT1: Self = Self {
         words: 0x8000..=0x8155,
     };
+    /// SPEC-017 §2.1: `0x8000` to `0x8183`: SPEC-005 as amended by
+    /// SPEC-017 §3, plus the 46 words of SPEC-017 §4 (four defined, 42
+    /// reserved). Its dispatch table has 388 entries.
+    pub const FALLOUT2: Self = Self {
+        words: 0x8000..=0x8183,
+    };
+    /// Whether this is the Fallout 2 set, whose host words are SPEC-005's
+    /// as amended by SPEC-017 ([`crate::extensions::opcode_in`]).
+    pub fn fallout2(&self) -> bool {
+        *self == Self::FALLOUT2
+    }
+    /// [`Self::accepts`], plus the versioned enhanced range
+    /// ([`crate::extensions::ENHANCED_RANGE`]) when `enhanced` is set.
+    pub fn accepts_in(&self, word: u16, enhanced: bool) -> bool {
+        self.accepts(word) || (enhanced && crate::extensions::ENHANCED_RANGE.contains(&word))
+    }
     /// SPEC-004 §2.5: bit 15 must be set. All 32 slot-1 words `0x8001 + n *
     /// 0x0400` are valid pushes that keep their full word as the tag (a
     /// non-standard tag such as `0x8401` fails later, at a type check).
@@ -133,14 +151,6 @@ impl WordSet {
         }
     }
 }
-pub(crate) fn valid_word(word: u16) -> bool {
-    WordSet::FALLOUT1.accepts(word)
-}
-/// [`valid_word`], plus the versioned enhanced range
-/// ([`crate::extensions::ENHANCED_RANGE`]) when `enhanced` is set.
-pub(crate) fn valid_word_in(word: u16, enhanced: bool) -> bool {
-    valid_word(word) || (enhanced && crate::extensions::ENHANCED_RANGE.contains(&word))
-}
 impl IntProgram {
     /// Parse under SPEC-004: any word outside the defined set, including
     /// the enhanced range, is an invalid instruction.
@@ -152,7 +162,15 @@ impl IntProgram {
     pub fn parse_enhanced(bytes: &[u8]) -> Result<Self, IntError> {
         Self::parse_with(bytes, true)
     }
+    /// Parse under the Fallout 1 word set, with the enhanced range accepted
+    /// when `enhanced` is set.
     pub fn parse_with(bytes: &[u8], enhanced: bool) -> Result<Self, IntError> {
+        Self::parse_in(bytes, &WordSet::FALLOUT1, enhanced)
+    }
+    /// Parse under `words`, a game profile's word set (SPEC-017 §2.1): any
+    /// other non-push word is an invalid instruction, except the enhanced
+    /// range when `enhanced` is set. Every other rule is unchanged.
+    pub fn parse_in(bytes: &[u8], words: &WordSet, enhanced: bool) -> Result<Self, IntError> {
         if bytes.len() > MAX_PROGRAM_BYTES {
             return Err(IntError::new(0, "program exceeds 64 MiB limit"));
         }
@@ -196,7 +214,7 @@ impl IntProgram {
                     return Err(IntError::new(at, "truncated instruction"));
                 }
                 let op = u16::from_be_bytes([bytes[at], bytes[at + 1]]);
-                if !valid_word_in(op, enhanced) {
+                if !words.accepts_in(op, enhanced) {
                     return Err(IntError::new(at, format!("invalid instruction {op:#06x}")));
                 }
                 let size = instruction_length(op);
@@ -245,11 +263,29 @@ impl IntProgram {
             literal_origin,
             code_start,
             enhanced,
+            words: words.clone(),
         })
     }
     /// Whether the program was parsed with the enhanced range accepted.
     pub fn enhanced(&self) -> bool {
         self.enhanced
+    }
+    /// The game word set the program was parsed under.
+    pub fn words(&self) -> &WordSet {
+        &self.words
+    }
+    /// Whether the program may execute `word`: its word set, plus the
+    /// enhanced range when it was parsed enhanced.
+    pub fn accepts(&self, word: u16) -> bool {
+        self.words.accepts_in(word, self.enhanced)
+    }
+    /// Whether `address` starts an instruction of the linear decode (the
+    /// bootstrap area and the code after the string tables).
+    pub fn boundary(&self, address: u32) -> bool {
+        self.boundaries
+            .get(address as usize)
+            .copied()
+            .unwrap_or(false)
     }
     pub fn image(&self) -> &[u8] {
         &self.image

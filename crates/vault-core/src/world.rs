@@ -70,6 +70,16 @@ pub enum ScriptEvent {
     Drop,
     /// Never requested by the host (SPEC-004 §3.7).
     Create,
+    /// SPEC-017 §2.4, Fallout 2 only: the player's Push action on a party
+    /// member (SPEC-019 §3.6); an override suppresses the default push.
+    Push,
+    /// SPEC-017 §2.4, Fallout 2 only; never requested in this revision.
+    IsDropping,
+    /// SPEC-017 §2.4, Fallout 2 only; never requested: SPEC-019 defines no
+    /// path.
+    CombatIsStarting,
+    /// SPEC-017 §2.4, Fallout 2 only; never requested either.
+    CombatIsOver,
 }
 impl ScriptEvent {
     pub fn name(self) -> &'static [u8] {
@@ -93,6 +103,10 @@ impl ScriptEvent {
             Self::Destroy => b"destroy_p_proc",
             Self::Drop => b"drop_p_proc",
             Self::Create => b"create_p_proc",
+            Self::Push => b"push_p_proc",
+            Self::IsDropping => b"is_dropping_p_proc",
+            Self::CombatIsStarting => b"combat_is_starting_p_proc",
+            Self::CombatIsOver => b"combat_is_over_p_proc",
         }
     }
     /// SPEC-004 §3.7 the host event number a request stores as the
@@ -118,6 +132,10 @@ impl ScriptEvent {
             Self::LookAt => 21,
             Self::Timed => 22,
             Self::MapUpdate => 23,
+            Self::Push => 24,
+            Self::IsDropping => 25,
+            Self::CombatIsStarting => 26,
+            Self::CombatIsOver => 27,
         }
     }
 }

@@ -93,7 +93,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         Ok(())
     }
-    fn queue_animation(&mut self, word: u16, values: Vec<i32>, sound: Option<Vec<u8>>) {
+    pub(crate) fn queue_animation(&mut self, word: u16, values: Vec<i32>, sound: Option<Vec<u8>>) {
         self.world.emit(WorldEffect::Animation {
             opcode: word,
             values: values.clone(),
@@ -461,7 +461,14 @@ impl<A: WorldAssets> WorldHost<A> {
         Ok(integer(value))
     }
     pub(crate) fn game_call(&mut self, vm: &mut Vm, call: &HostCall) -> HostResult {
-        match self.game_call_row(vm, call) {
+        // SPEC-017 §3.2, §4 and §5: under Fallout 2 the reassigned and new
+        // words, and `metarule`'s Fallout 2 rules, take their own rows.
+        let row = if self.fallout2_row(call) {
+            self.fallout2_call(vm, call)
+        } else {
+            self.game_call_row(vm, call)
+        };
+        match row {
             // SPEC-005 §2.1 safe rule: a stale nonzero reference gives a
             // diagnostic and the row's null result, not a VM error.
             Err(VmError::Host(message))
@@ -1846,6 +1853,10 @@ impl<A: WorldAssets> WorldHost<A> {
             0x8124 => {
                 if call.uint(0) != 0 {
                     self.object(call.uint(0))?;
+                    if self.world.fallout2.is_some() {
+                        self.fallout2_party_add(call.uint(0));
+                        return Ok(None);
+                    }
                     self.world.party.insert(call.uint(0));
                     // SPEC-009 §3.15: the new member switches to team 0.
                     self.set_team(call.uint(0), 0);
@@ -1853,8 +1864,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x8125 => {
-                if call.uint(0) != 0 {
-                    self.world.party.remove(&call.uint(0));
+                if call.uint(0) != 0 && self.world.party.remove(&call.uint(0)) {
+                    self.fallout2_party_left(call.uint(0));
                 }
                 None
             }

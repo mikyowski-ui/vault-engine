@@ -130,7 +130,7 @@ impl<A: WorldAssets> WorldHost<A> {
         true
     }
     /// The armor `critter` wears.
-    fn worn_armor(&self, critter: ObjectRef) -> Option<ObjectRef> {
+    pub(crate) fn worn_armor(&self, critter: ObjectRef) -> Option<ObjectRef> {
         self.world
             .get(critter)?
             .inventory

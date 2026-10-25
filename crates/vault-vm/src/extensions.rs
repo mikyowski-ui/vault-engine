@@ -34,6 +34,78 @@ include!(concat!(env!("OUT_DIR"), "/extension_catalog.rs"));
 pub fn opcode(word: u16) -> Option<&'static OpcodeSpec> {
     EXTENSIONS.get(usize::from(word.checked_sub(0x804c)?))
 }
+/// An integer-operand row of [`FALLOUT2`].
+const fn fallout2(
+    word: u16,
+    name: &'static str,
+    operands: &'static [Rule],
+    push: PushKind,
+) -> OpcodeSpec {
+    OpcodeSpec {
+        word,
+        name,
+        operands,
+        push,
+        registered: true,
+        variable: false,
+    }
+}
+const I: Rule = Rule::Integer;
+/// SPEC-017's rows under the Fallout 2 profile, in ascending word order:
+/// the six SPEC-005 words §3.2 reassigns and the four words of §4.1.
+/// Operands are listed in pop order, first popped first. Every other word
+/// of `0x804C..=0x8155` keeps its SPEC-005 row (§3.1), and the 42 reserved
+/// words `0x815A..=0x8183` have no row: executing one is the
+/// undefined-instruction VM error.
+pub static FALLOUT2: &[OpcodeSpec] = &[
+    // mark_area_known(mark type, index, state)
+    fallout2(0x80b2, "mark_area_known", &[I, I, I], PushKind::None),
+    // tile_in_tile_rect(upper-left, upper-right, lower-left, lower-right, test)
+    fallout2(
+        0x80cf,
+        "tile_in_tile_rect",
+        &[I, I, I, I, I],
+        PushKind::Value,
+    ),
+    // metarule3(sub-function, p1, p2, p3): the parameters are unchecked.
+    fallout2(
+        0x80e1,
+        "metarule3",
+        &[Rule::Unchecked, Rule::Unchecked, Rule::Unchecked, I],
+        PushKind::Value,
+    ),
+    // set_map_music(map number, track name)
+    fallout2(0x80e2, "set_map_music", &[Rule::String, I], PushKind::None),
+    // wm_area_set_pos(area, x, y)
+    fallout2(0x80e5, "wm_area_set_pos", &[I, I, I], PushKind::None),
+    // set_exit_grids(marked elevation, map, elevation, hex, orientation)
+    fallout2(0x80e6, "set_exit_grids", &[I, I, I, I, I], PushKind::None),
+    // inven_cmds(owner, command, index)
+    fallout2(0x8156, "inven_cmds", &[I, I, I], PushKind::Value),
+    // reg_anim_change_fid(object, art, delay)
+    fallout2(0x8157, "reg_anim_change_fid", &[I, I, I], PushKind::None),
+    // reg_anim_take_out(object, weapon code, delay)
+    fallout2(0x8158, "reg_anim_take_out", &[I, I, I], PushKind::None),
+    // reg_anim_turn_towards(object, hex, delay)
+    fallout2(0x8159, "reg_anim_turn_towards", &[I, I, I], PushKind::None),
+];
+/// SPEC-017 §4.1: the reserved words of the Fallout 2 range.
+pub const FALLOUT2_RESERVED: std::ops::RangeInclusive<u16> = 0x815a..=0x8183;
+/// The host-word row of `word` under the profile whose word set is
+/// `words` (SPEC-017 §2.3): under Fallout 2, [`FALLOUT2`]'s row where it
+/// has one, otherwise SPEC-005's. A reserved word, or one outside the set,
+/// has no row.
+pub fn opcode_in(words: &crate::WordSet, word: u16) -> Option<&'static OpcodeSpec> {
+    if !words.words.contains(&word) {
+        return None;
+    }
+    if words.fallout2()
+        && let Ok(index) = FALLOUT2.binary_search_by_key(&word, |spec| spec.word)
+    {
+        return FALLOUT2.get(index);
+    }
+    opcode(word)
+}
 /// The versioned "enhanced" opcode range. These words are not part of
 /// SPEC-004/005: a vanilla host rejects every one of them as an unknown
 /// word, and only an enhanced host ([`crate::VmHost::enhanced_opcodes`])
@@ -211,8 +283,16 @@ fn checked(vm: &Vm, value: Value, rule: Rule) -> Result<Argument, VmError> {
     }
     Ok(arg)
 }
+/// Pop and check the operands of SPEC-005 host word `word`, the Fallout 1
+/// rows.
 pub fn decode(vm: &mut Vm, word: u16) -> Result<HostCall, VmError> {
-    let spec = opcode(word).ok_or(VmError::Opcode(word))?;
+    decode_in(vm, &crate::WordSet::FALLOUT1, word)
+}
+/// [`decode`] under the profile whose word set is `words`
+/// ([`opcode_in`]). A word without a row, such as a reserved Fallout 2
+/// word, consumes nothing and is the undefined-instruction error.
+pub fn decode_in(vm: &mut Vm, words: &crate::WordSet, word: u16) -> Result<HostCall, VmError> {
+    let spec = opcode_in(words, word).ok_or(VmError::Opcode(word))?;
     if !spec.registered || word == 0x8091 {
         return Err(VmError::Opcode(word));
     }
