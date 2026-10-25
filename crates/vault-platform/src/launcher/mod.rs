@@ -18,6 +18,7 @@ mod widgets;
 mod tests;
 
 use crate::config::{self, Config, ModList, Preset};
+use crate::enhanced::ViewportMode;
 use browse::{Browser, Target};
 use std::path::{Path, PathBuf};
 use validate::{Check, State};
@@ -29,6 +30,12 @@ use winit::keyboard::KeyCode;
 
 /// The load order a new mod list is written to, beside the settings.
 const LOAD_ORDER: &str = "load_order.toml";
+
+/// The enhanced preset's zoom stepper.
+pub const ZOOM_STEPS: [f32; 8] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
+/// The enhanced preset's interface scales (`None`: auto).
+pub const UI_SCALES: [Option<f32>; 6] =
+    [None, Some(1.0), Some(1.5), Some(2.0), Some(2.5), Some(3.0)];
 
 /// One input the shell passes on: frame pixels for the pointer.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +98,12 @@ pub enum Widget {
     Preset,
     Audio,
     Debug,
+    /// The `enhanced` preset's presentation, shown with that preset only.
+    Viewport,
+    Zoom,
+    SmoothCamera,
+    RoofPeek,
+    UiScale,
     Layers,
     LayerUp,
     LayerDown,
@@ -363,7 +376,8 @@ impl Launcher {
             }
             KeyCode::ArrowLeft | KeyCode::ArrowRight => match focus {
                 Widget::Tab(_) => self.switch_tab(delta),
-                Widget::Scaling | Widget::Preset => return self.activate(focus),
+                Widget::Scaling | Widget::Preset | Widget::Viewport => return self.activate(focus),
+                Widget::Zoom | Widget::RoofPeek | Widget::UiScale => self.choose(focus, delta),
                 _ => self.move_focus(delta),
             },
             KeyCode::ArrowUp | KeyCode::ArrowDown => self.move_focus(delta),
@@ -531,6 +545,11 @@ impl Launcher {
             Widget::Fullscreen => config.fullscreen = Some(!config.fullscreen.unwrap_or(false)),
             Widget::Audio => config.audio = Some(!config.audio.unwrap_or(true)),
             Widget::Debug => config.debug = Some(!config.debug.unwrap_or(false)),
+            Widget::Viewport
+            | Widget::Zoom
+            | Widget::SmoothCamera
+            | Widget::RoofPeek
+            | Widget::UiScale => self.choose(widget, 1),
             Widget::Layers | Widget::LayerToggle => self.edit_layers(Edit::Toggle),
             Widget::LayerUp => self.move_layer(-1),
             Widget::LayerDown => self.move_layer(1),
@@ -560,6 +579,56 @@ impl Launcher {
             Widget::BrowseCancel => self.close_browser(),
         }
         None
+    }
+
+    /// The next (`delta` 1) or previous (-1) choice of an enhanced
+    /// presentation widget, wrapping: the viewport and camera smoothing
+    /// toggle, the zoom steps through [`ZOOM_STEPS`], the roof peek cycles
+    /// as Alt+R does, and the interface scale steps through [`UI_SCALES`].
+    /// A value from the file between two steps moves from the nearest.
+    fn choose(&mut self, widget: Widget, delta: isize) {
+        let settings = self.config.enhanced_settings();
+        let step = |at: usize, len: usize| (at as isize + delta).rem_euclid(len as isize) as usize;
+        let nearest = |values: &mut dyn Iterator<Item = f32>, value: f32| {
+            values
+                .enumerate()
+                .min_by(|(_, a), (_, b)| (a - value).abs().total_cmp(&(b - value).abs()))
+                .map_or(0, |(at, _)| at)
+        };
+        let config = &mut self.config;
+        match widget {
+            Widget::Viewport => {
+                config.viewport_mode = Some(match settings.viewport {
+                    ViewportMode::Fixed => ViewportMode::Unlocked,
+                    ViewportMode::Unlocked => ViewportMode::Fixed,
+                });
+            }
+            Widget::SmoothCamera => config.smooth_camera = Some(!settings.smooth_camera),
+            Widget::Zoom => {
+                let at = nearest(&mut ZOOM_STEPS.into_iter(), settings.default_zoom);
+                config.default_zoom = Some(ZOOM_STEPS[step(at, ZOOM_STEPS.len())]);
+            }
+            Widget::RoofPeek => {
+                let mut mode = settings.roof_peek;
+                // Backwards is two steps forwards in the three-mode cycle.
+                for _ in 0..step(0, 3) {
+                    mode = mode.next();
+                }
+                config.roof_peek = Some(mode);
+            }
+            Widget::UiScale => {
+                // `auto` sorts before every number.
+                let at = match settings.ui_scale {
+                    None => 0,
+                    Some(scale) => {
+                        1 + nearest(&mut UI_SCALES[1..].iter().flatten().copied(), scale)
+                    }
+                };
+                let next = UI_SCALES[step(at, UI_SCALES.len())];
+                config.ui_scale = Some(config::UiScale::from_factor(next));
+            }
+            _ => {}
+        }
     }
 
     /// Play: the settings are saved, then the shell starts the game; a

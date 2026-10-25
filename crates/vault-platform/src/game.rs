@@ -142,6 +142,9 @@ pub struct Game {
     /// The configured engine preset: every world starts with it, and the
     /// enhanced one is named in the title.
     pub preset: vault_core::EnginePreset,
+    /// The `enhanced` presentation every world starts with (`None`:
+    /// Vanilla); Alt+V changes it through `AssetPreview::set_enhanced`.
+    pub enhanced: Option<crate::enhanced::EnhancedSettings>,
     sounds: crate::map_preview::SoundBank,
     finished: bool,
     /// SPEC-014 §3.2 a fade outside the world, and the six-bit levels shown
@@ -247,6 +250,7 @@ impl Game {
             debug: false,
             debug_keys: false,
             preset: vault_core::EnginePreset::Vanilla,
+            enhanced: None,
             sounds: Default::default(),
             finished: false,
             fade: None,
@@ -499,6 +503,10 @@ impl Game {
         self.critter_cycle = world.host.critter_cycle;
         self.head_idle = world.host.world.dialogue.idle;
         self.debug = world.debug_enabled();
+        // The enhanced presentation (an Alt+R roof mode) carries on.
+        if self.enhanced.is_some() {
+            self.enhanced = world.enhanced().or(self.enhanced);
+        }
     }
     fn world_with(&self, sheet: CharacterSheet) -> AppResult<MapPreview> {
         let assets = VfsWorldAssets::new(self.vfs.clone(), &self.language)?;
@@ -527,6 +535,7 @@ impl Game {
         // turns the roofs off in the game (SPEC-014 §3.36).
         world.preview_keys = self.debug_keys;
         world.roof_key = false;
+        world.set_enhanced(self.enhanced);
         Ok(world)
     }
     fn premade(&self, index: usize) -> CharacterSheet {

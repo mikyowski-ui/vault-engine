@@ -6,7 +6,8 @@ use super::font::{self, CHECK, CROSS};
 use super::validate::{Check, State};
 use super::widgets::{self, Look, Rect, Row};
 use super::{Field, Launcher, Tab, Widget};
-use crate::config::{Preset, scaling_name};
+use crate::config::{Preset, roof_peek_name, scaling_name, viewport_name};
+use crate::enhanced::{RoofPeek, ViewportMode};
 use vault_render::{IndexedImage, ScalingMode};
 
 /// The launcher palette's entries.
@@ -77,6 +78,20 @@ const DISPLAY: [Widget; 5] = [
     Widget::Audio,
     Widget::Debug,
 ];
+/// The enhanced preset's rows, below the others, shown with it only.
+const ENHANCED: [Widget; 5] = [
+    Widget::Viewport,
+    Widget::Zoom,
+    Widget::SmoothCamera,
+    Widget::RoofPeek,
+    Widget::UiScale,
+];
+fn enhanced_top(row: i32) -> i32 {
+    254 + row * 24
+}
+fn enhanced_shown(launcher: &Launcher) -> bool {
+    launcher.config.preset == Some(Preset::Enhanced)
+}
 
 /// The widgets in focus order, with their rectangles. An open browser is
 /// modal: only its own widgets are listed.
@@ -106,6 +121,11 @@ pub fn layout(launcher: &Launcher) -> Vec<(Widget, Rect)> {
         Tab::Display => {
             for (row, widget) in (0..).zip(DISPLAY) {
                 out.push((widget, Rect::new(160, display_top(row), 150, 18)));
+            }
+            if enhanced_shown(launcher) {
+                for (row, widget) in (0..).zip(ENHANCED) {
+                    out.push((widget, Rect::new(160, enhanced_top(row), 150, 18)));
+                }
             }
         }
         Tab::Mods => {
@@ -348,12 +368,81 @@ fn draw_display(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, re
         }
         font::draw(image, [322, y + 5], hint, color::DIM);
     }
+    let note = if enhanced_shown(launcher) {
+        draw_enhanced(image, launcher, look, rect);
+        384
+    } else {
+        260
+    };
     font::draw(
         image,
-        [28, 260],
+        [28, note],
         "Written to vault-engine.toml on Save or Play. Command-line flags still win.",
         color::DIM,
     );
+}
+
+/// The enhanced preset's presentation rows.
+fn draw_enhanced(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, rect: &RectFn) {
+    let settings = launcher.config.enhanced_settings();
+    font::draw(
+        image,
+        [28, 238],
+        "Enhanced viewport & camera",
+        color::ACCENT,
+    );
+    let zoom = format!("< {}x >", settings.default_zoom);
+    let scale = match settings.ui_scale {
+        None => "< auto >".to_owned(),
+        Some(scale) => format!("< {scale}x >"),
+    };
+    let rows: [(Widget, &str, String, &str); 5] = [
+        (
+            Widget::Viewport,
+            "Viewport",
+            format!("< {} >", viewport_name(settings.viewport)),
+            match settings.viewport {
+                ViewportMode::Fixed => "the 640x480 frame; Alt+V toggles",
+                ViewportMode::Unlocked => "the world fills the window; Alt+V",
+            },
+        ),
+        (
+            Widget::Zoom,
+            "Default zoom",
+            zoom,
+            "where maps start; - and = zoom in play",
+        ),
+        (
+            Widget::SmoothCamera,
+            "Smooth camera",
+            on_off(settings.smooth_camera).into(),
+            "glide camera moves (off: snap)",
+        ),
+        (
+            Widget::RoofPeek,
+            "Roof peek",
+            format!("< {} >", roof_peek_name(settings.roof_peek)),
+            match settings.roof_peek {
+                RoofPeek::Vanilla => "roofs as the original; Alt peeks",
+                RoofPeek::CursorXray => "cut roofs away around the cursor",
+                RoofPeek::Hidden => "no roofs at all; Alt+R cycles",
+            },
+        ),
+        (
+            Widget::UiScale,
+            "Interface scale",
+            scale,
+            "auto fits the interface to the height",
+        ),
+    ];
+    for (row, (widget, label, value, hint)) in (0..).zip(rows) {
+        let y = enhanced_top(row);
+        font::draw(image, [28, y + 5], label, color::TEXT);
+        if let Some(r) = rect(widget) {
+            widgets::toggle(image, r, &value, look(widget));
+        }
+        font::draw(image, [322, y + 5], hint, color::DIM);
+    }
 }
 
 fn draw_mods(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, rect: &RectFn) {

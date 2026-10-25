@@ -133,7 +133,13 @@ With no arguments the game starts from the data named in `vault-engine.toml`,
 looked for beside the executable and then in the working directory. Keys:
 `master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
 `preset` (`vanilla` or `enhanced`), `scaling`, `fullscreen`, `debug` and
-`audio` (`false` keeps the audio device closed, as `--no-audio` does). When
+`audio` (`false` keeps the audio device closed, as `--no-audio` does), plus
+the enhanced preset's `viewport_mode`, `default_zoom`, `smooth_camera`,
+`roof_peek` and `ui_scale` (see
+[Enhanced viewport & camera](#enhanced-viewport--camera)). Values are quoted
+strings, `true`/`false`, decimal numbers (`2`, `1.25`, `5e-1`, `1_000`) or
+one-line string arrays; a bad value or an out-of-range number fails with
+`line N:` and the reason. When
 there is no file, `MASTER.DAT` and `CRITTER.DAT` are looked for in the working
 directory, beside the executable, in `../local-corpus` and in the usual Steam
 and GOG install directories, and what is found is written to a new
@@ -153,7 +159,8 @@ opens when:
   to parse (the error shows in the status line, and Save replaces the file),
   or names game data that does not validate; or
 - `--launcher` is given. Display flags given with it (`--scaling`,
-  `--fullscreen`, `--preset`, `--no-audio`) pre-set its choices.
+  `--fullscreen`, `--preset`, `--viewport`, `--zoom`, `--no-audio`) pre-set its
+  choices.
 
 Replays (`--replay-inputs`), `--smoke-test`, `--game` and the `--preview-*`
 and `--play-movie` flags never show it, and `--launcher` conflicts with them.
@@ -178,6 +185,11 @@ It has three tabs and a bottom bar:
   - The two archives are named together or not at all.
 - **Display & audio**: scaling (`aspect_fit` or `integer`), fullscreen,
   preset (`vanilla` or `enhanced`), audio on or off, and the debug overlay.
+  With the enhanced preset selected, five more rows follow (hidden, and out
+  of the focus order, under Vanilla): the viewport, the default zoom (a
+  stepper over 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5 and 3), smooth camera, the
+  roof peek mode and the interface scale (auto, 1, 1.5, 2, 2.5 or 3). Left
+  and Right step them back and forth; Save writes them.
 - **Mods**: the `load_order.toml` layers, lowest first, with their per-layer
   check (each layer is mounted on its own over an empty base) and the whole
   stack's check. Layers can be added (typed, browsed or dropped while the tab
@@ -238,8 +250,65 @@ either a list of paths or the path of a `load_order.toml` (`layers = [...]`, or
 layers must lie inside its own directory. A mounted mod layer also enables the
 table overrides.
 
+### Enhanced viewport & camera
+
+The enhanced preset also changes the presentation; Vanilla (the default) is
+untouched by everything here. Its shell, settings, launcher defaults, input
+logs and replay digests are what they were.
+
+- **Dual-layer viewport.** With `viewport_mode = "unlocked_widescreen"` (the
+  default) the world is drawn across the whole window at an aspect-matched
+  resolution, and the 640×480 interface frame is drawn over it at its own
+  scale, anchored bottom-center. The map screen's interface is see-through
+  over the world, and side panels continue the interface bar to the window's
+  edges. `fixed_640x480` keeps the Vanilla frame. **Alt+V** toggles the two
+  in play (a shell key, like Alt+S; V is no game key).
+- **Zoom.** The mouse wheel and `-`/`=` zoom the world (0.5× to 3×), and `0`
+  goes back to `default_zoom`. On the enhanced map screen this takes `-` and
+  `=` from Vanilla's brightness keys: **Ctrl+`-`/`=`** adjust the brightness
+  there instead.
+- **Panning.** Dragging with the middle button pans the camera. Holding
+  **Space** and dragging does too, out of combat only, because Space ends the
+  turn in combat. `smooth_camera = false` makes camera moves snap instead of
+  glide.
+- **Roof peek.** Holding **Alt** peeks under the roofs around the cursor.
+  **Alt+R** cycles `roof_peek` between `vanilla` (the Vanilla roof rules),
+  `cursor_xray` (a cutaway around the cursor) and `hidden` (no roofs). Alt
+  rather than Tab is the peek modifier, because Tab is the automap.
+- **Debug camera.** The **F9** debug overlay offers a free camera, which
+  ignores the scroll blockers, and a camera demo that runs the scripted
+  camera moves.
+
+The settings are `viewport_mode` (`"fixed_640x480"` or
+`"unlocked_widescreen"`), `default_zoom` (a number from 0.5 to 3.0, default
+1.0), `smooth_camera` (default `true`), `roof_peek` (`"vanilla"`, the default,
+`"cursor_xray"` or `"hidden"`) and `ui_scale` (`"auto"`, the default, which
+fits the interface to the window's height, or a number from 0.5 to 8). They
+are read only with the enhanced preset. `--viewport MODE` and `--zoom ZOOM`
+override the first two from the command line (and pre-set the launcher).
+
+<!-- COORDINATOR: camera opcodes and demo map placeholder. -->
+> **Placeholder (to be filled in):** the enhanced camera opcodes
+> `0x8210`-`0x8213` (`op_cam_pan_to`, `op_cam_set_zoom`, `op_cam_shake`,
+> `op_cam_reset`) and the camera demo map fixture.
+
+An enhanced session's input log has one more record after `surface` and
+`scaling`, and another on every Alt+V:
+
+```json
+{"command_id":3,"kind":"enhanced","settings":{"viewport_mode":"unlocked_widescreen","default_zoom":1.0,"smooth_camera":true,"roof_peek":"vanilla","ui_scale":null}}
+```
+
+A replay applies it to the world. While the world shows the unlocked
+viewport, the replay routes pointer moves, buttons (the middle one included)
+and the wheel through the same layout for the logged surface as the desktop
+does. The digest then covers the enhanced frame, that is the world canvas,
+the interface frame, its see-through index and the side-panel tile, in place
+of the Vanilla frame, and `--replay-frame` writes the world canvas. A log
+without an `enhanced` record replays exactly as before.
+
 With `--record-inputs FILE` (`-` for stdout), keyboard, pointer, wheel,
-focus, modifier, resize, display-scaling, vault-debug and quit observations are
+focus, modifier, resize, display-scaling, enhanced-presentation, vault-debug and quit observations are
 written as JSON Lines; without it nothing is logged. Command IDs begin at 1 in
 each session:
 

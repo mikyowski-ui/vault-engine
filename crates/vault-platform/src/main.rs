@@ -27,7 +27,7 @@ use input::InputCommand;
 use tracing_subscriber::EnvFilter;
 use vault_core::SequenceIds;
 use vault_formats::{Palette, palette::PaletteCycler};
-use vault_render::{Renderer, ScalingMode};
+use vault_render::{EnhancedLayout, IndexedImage, Layer, Renderer, ScalingMode};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -43,7 +43,7 @@ type AppResult<T> = Result<T, AppError>;
 #[derive(Parser, Clone)]
 #[command(
     about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives",
-    long_about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives.\n\nWithout arguments the game starts from the data named in vault-engine.toml (beside the executable, else in the working directory). Without that file, MASTER.DAT and CRITTER.DAT are looked for in the working directory, beside the executable, in ../local-corpus and in the usual Steam and GOG install directories, and what is found is saved to vault-engine.toml. Command-line flags always win over the file.\n\nF11 or Alt+Enter toggles borderless fullscreen; Alt+S toggles aspect-fit and integer scaling."
+    long_about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives.\n\nWithout arguments the game starts from the data named in vault-engine.toml (beside the executable, else in the working directory). Without that file, MASTER.DAT and CRITTER.DAT are looked for in the working directory, beside the executable, in ../local-corpus and in the usual Steam and GOG install directories, and what is found is saved to vault-engine.toml. Command-line flags always win over the file.\n\nF11 or Alt+Enter toggles borderless fullscreen; Alt+S toggles aspect-fit and integer scaling; with the enhanced preset, Alt+V toggles the fixed and unlocked viewports."
 )]
 struct Args {
     /// Present one frame and exit successfully (requires a desktop and GPU backend).
@@ -82,6 +82,16 @@ struct Args {
     /// file's, else vanilla.
     #[arg(long, value_name = "PRESET", value_parser = preset_arg)]
     preset: Option<config::Preset>,
+    /// With the enhanced preset, the viewport: `fixed_640x480` or
+    /// `unlocked_widescreen` (the world across the window behind the
+    /// interface). Default: the settings file's `viewport_mode`, else
+    /// unlocked. Alt+V toggles it.
+    #[arg(long, value_name = "MODE", value_parser = viewport_arg)]
+    viewport: Option<enhanced::ViewportMode>,
+    /// With the enhanced preset, the zoom a map starts at, 0.5 to 3.0.
+    /// Default: the settings file's `default_zoom`, else 1.0.
+    #[arg(long, value_name = "ZOOM", value_parser = zoom_arg)]
+    zoom: Option<f32>,
     /// Open the launcher (game data, display, audio and mod settings, then
     /// Play) even when the settings are complete. A start naming nothing
     /// opens it anyway while the settings name no valid game data.
@@ -96,6 +106,13 @@ fn scaling_arg(text: &str) -> Result<ScalingMode, String> {
 }
 fn preset_arg(text: &str) -> Result<config::Preset, String> {
     config::Preset::parse(text).ok_or_else(|| "expected vanilla or enhanced".into())
+}
+fn viewport_arg(text: &str) -> Result<enhanced::ViewportMode, String> {
+    config::parse_viewport(text)
+        .ok_or_else(|| "expected fixed_640x480 or unlocked_widescreen".into())
+}
+fn zoom_arg(text: &str) -> Result<f32, String> {
+    config::parse_zoom(text).ok_or_else(|| "expected a number from 0.5 to 3.0".into())
 }
 
 impl Args {
@@ -122,11 +139,13 @@ impl Args {
 }
 
 /// What the command line and the settings file make of a launch.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Launch {
     scaling: ScalingMode,
     fullscreen: bool,
     preset: config::Preset,
+    /// With the enhanced preset only, its presentation settings.
+    enhanced: Option<enhanced::EnhancedSettings>,
     /// The settings' mod list, for the engine to load.
     mod_list: Option<config::ModList>,
     /// No asset was named and the settings' game data starts the game.
@@ -160,13 +179,23 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
         args.preview.corpus_dir = config.data_root.clone();
     }
     args.preview.debug |= config.debug.unwrap_or(false);
+    let preset = args.preset.or(config.preset).unwrap_or_default();
+    let enhanced = (preset == config::Preset::Enhanced).then(|| {
+        let settings = config.enhanced_settings();
+        enhanced::EnhancedSettings {
+            viewport: args.viewport.unwrap_or(settings.viewport),
+            default_zoom: args.zoom.unwrap_or(settings.default_zoom),
+            ..settings
+        }
+    });
     Launch {
         scaling: args
             .scaling
             .or(config.scaling)
             .unwrap_or(ScalingMode::AspectFit),
         fullscreen: args.fullscreen || config.fullscreen.unwrap_or(false),
-        preset: args.preset.or(config.preset).unwrap_or_default(),
+        preset,
+        enhanced,
         mod_list: config.mod_list.clone(),
         zero_arg_game,
         audio: !args.no_audio && config.audio.unwrap_or(true),
@@ -188,6 +217,7 @@ fn start(
         config::Preset::Enhanced => vault_core::EnginePreset::Enhanced,
     };
     args.preview.mods = launch.mod_list.clone();
+    args.preview.enhanced = launch.enhanced;
     let mut preview = args.preview.load()?;
     // Audio serves an interactive world or a movie; sprites need none.
     let output = || {
@@ -228,6 +258,8 @@ fn play_args(shown: &Args, debug: bool) -> Args {
     args.scaling = None;
     args.fullscreen = false;
     args.preset = None;
+    args.viewport = None;
+    args.zoom = None;
     args.no_audio = false;
     args.preview.debug |= debug;
     args
@@ -251,6 +283,12 @@ fn launcher_for(
     }
     if args.fullscreen {
         config.fullscreen = Some(true);
+    }
+    if let Some(viewport) = args.viewport {
+        config.viewport_mode = Some(viewport);
+    }
+    if let Some(zoom) = args.zoom {
+        config.default_zoom = Some(zoom);
     }
     if args.no_audio {
         config.audio = Some(false);
@@ -325,15 +363,20 @@ enum ShellHotkey {
     Fullscreen,
     /// Alt+S: aspect-fit or integer scaling.
     Scaling,
+    /// Alt+V, with the enhanced preset only: the fixed or unlocked
+    /// viewport.
+    Viewport,
 }
 
-/// The shell hotkey `key` is with Alt held or not. F10 is never one: it
-/// is the game's quit-confirmation key (SPEC-014).
-fn shell_hotkey(key: KeyCode, alt: bool) -> Option<ShellHotkey> {
+/// The shell hotkey `key` is with Alt held or not, in an `enhanced`
+/// session or not. F10 is never one: it is the game's quit-confirmation
+/// key (SPEC-014), and V is no game key, so Alt+V takes nothing from it.
+fn shell_hotkey(key: KeyCode, alt: bool, enhanced: bool) -> Option<ShellHotkey> {
     match key {
         KeyCode::F11 => Some(ShellHotkey::Fullscreen),
         KeyCode::Enter | KeyCode::NumpadEnter if alt => Some(ShellHotkey::Fullscreen),
         KeyCode::KeyS if alt => Some(ShellHotkey::Scaling),
+        KeyCode::KeyV if alt && enhanced => Some(ShellHotkey::Viewport),
         _ => None,
     }
 }
@@ -428,6 +471,102 @@ struct Shell {
     pending: Option<Box<Args>>,
     /// Shift is held, for the launcher's text entry.
     shift: bool,
+    /// The `enhanced` session's presentation settings (`None` under
+    /// Vanilla): logged when the game starts and changed by Alt+V.
+    enhanced: Option<enhanced::EnhancedSettings>,
+    /// The enhanced frame last presented, with the layout it was built
+    /// for and its side-panel tiles; a pointer-only move redraws it with
+    /// the cursor moved.
+    shown: Option<EnhancedShown>,
+    /// The world changed since `shown` was built.
+    enhanced_dirty: bool,
+}
+
+/// An enhanced frame, its layout and its side panels tiled to that layout.
+struct EnhancedShown {
+    layout: EnhancedLayout,
+    frame: enhanced::EnhancedFrame,
+    sides: Vec<(IndexedImage, [f32; 4])>,
+}
+
+/// The side panels' images and surface rectangles: `panel` tiled to each
+/// side rectangle's size in interface pixels (rounded up), the left one
+/// aligned to its right edge and the right one to its left edge, so both
+/// continue from the interface bar. Empty sides have none.
+fn side_tiles(layout: &EnhancedLayout, panel: &IndexedImage) -> Vec<(IndexedImage, [f32; 4])> {
+    let scale = layout.ui_scale;
+    let [panel_w, panel_h] = [panel.width() as usize, panel.height() as usize];
+    let mut out = Vec::new();
+    for (side, [x, y, w, h]) in layout.side_rects.into_iter().enumerate() {
+        let width = (w / scale).ceil() as u32;
+        let height = (h / scale).ceil() as u32;
+        let Ok(mut tile) = IndexedImage::new(width, height) else {
+            continue;
+        };
+        let cols = width as usize;
+        // The left panel's last column is the tile's last column.
+        let offset = if side == 0 {
+            panel_w - cols % panel_w
+        } else {
+            0
+        };
+        let pixels = panel.pixels();
+        for (row, line) in tile.pixels_mut().chunks_exact_mut(cols).enumerate() {
+            let source = &pixels[(row % panel_h) * panel_w..][..panel_w];
+            for (col, pixel) in line.iter_mut().enumerate() {
+                *pixel = source[(col + offset) % panel_w];
+            }
+        }
+        let (drawn_w, drawn_h) = (width as f32 * scale, height as f32 * scale);
+        let left = if side == 0 { x + w - drawn_w } else { x };
+        out.push((tile, [left, y, drawn_w, drawn_h]));
+    }
+    out
+}
+
+/// The enhanced layers back to front: the world (opaque), the side
+/// panels, the interface frame (see-through where it says), then the
+/// pointer art at the pointer, its hotspot and size at interface scale
+/// (index 0 see-through).
+fn enhanced_layers<'a>(shown: &'a EnhancedShown, pointer: Option<[f64; 2]>) -> Vec<Layer<'a>> {
+    let EnhancedShown {
+        layout,
+        frame,
+        sides,
+    } = shown;
+    let mut layers = vec![Layer {
+        image: &frame.world,
+        rect: layout.world_layer_rect(),
+        transparent: None,
+        sharp: true,
+    }];
+    layers.extend(sides.iter().map(|(image, rect)| Layer {
+        image,
+        rect: *rect,
+        transparent: None,
+        sharp: true,
+    }));
+    layers.push(Layer {
+        image: &frame.ui,
+        rect: layout.ui_rect,
+        transparent: frame.ui_transparent,
+        sharp: true,
+    });
+    if let (Some((cursor, [hot_x, hot_y])), Some([x, y])) = (&frame.cursor, pointer) {
+        let scale = layout.ui_scale;
+        layers.push(Layer {
+            image: cursor,
+            rect: [
+                x as f32 - *hot_x as f32 * scale,
+                y as f32 - *hot_y as f32 * scale,
+                cursor.width() as f32 * scale,
+                cursor.height() as f32 * scale,
+            ],
+            transparent: Some(0),
+            sharp: true,
+        });
+    }
+    layers
 }
 
 impl Shell {
@@ -456,6 +595,19 @@ impl Shell {
     fn log_scaling(&mut self, event_loop: &ActiveEventLoop) {
         let aspect_fit = self.scaling == ScalingMode::AspectFit;
         self.log(event_loop, InputCommand::Scaling { aspect_fit });
+    }
+    /// An enhanced session's settings reach the log after the surface and
+    /// scaling, so a replay presents the same layers; a Vanilla session
+    /// logs nothing here.
+    fn log_enhanced(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(settings) = self.enhanced {
+            self.log(
+                event_loop,
+                InputCommand::Enhanced {
+                    settings: settings.into(),
+                },
+            );
+        }
     }
     /// The F9 overlay's committed commands: each is logged, then applied,
     /// so a replay of the log applies it at the same point, exactly once.
@@ -518,6 +670,10 @@ impl Shell {
         true
     }
     fn refresh_preview(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        if self.enhanced_layout(window).is_some() {
+            return self.refresh_enhanced(event_loop, window);
+        }
+        self.shown = None;
         let Some(preview) = &mut self.preview else {
             return;
         };
@@ -546,6 +702,169 @@ impl Shell {
         if let Some(pointer) = self.pointer {
             self.log_hover(event_loop, pointer);
         }
+    }
+    /// The enhanced presentation's refresh: the next redraw builds the
+    /// frame for the window's layout then; the title and the pointer
+    /// follow as in [`Shell::refresh_preview`].
+    fn refresh_enhanced(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        let Some(preview) = &mut self.preview else {
+            return;
+        };
+        self.enhanced_dirty = true;
+        self.pointer_moved = false;
+        let title = preview.title();
+        if title != self.title {
+            window.set_title(&title);
+            self.title = title;
+        }
+        window.request_redraw();
+        if let Some(pointer) = self.pointer {
+            self.log_hover(event_loop, pointer);
+        }
+    }
+    /// The enhanced layout for the window, while the preview's world shows
+    /// the unlocked viewport (it follows the window size and the zoom, so
+    /// resizes, DPI and fullscreen changes and zooms all lay it out anew).
+    fn enhanced_layout(&mut self, window: &Window) -> Option<EnhancedLayout> {
+        let size = window.inner_size();
+        replay::enhanced_layout(self.preview.as_mut()?, [size.width, size.height])
+    }
+    /// Present the enhanced layers for this redraw, building the frame
+    /// again when the world or the layout changed; returns whether the
+    /// enhanced frame is shown. When the world answers with no enhanced
+    /// frame the Vanilla frame is shown instead.
+    fn present_enhanced(&mut self, event_loop: &ActiveEventLoop, window: &Window) -> bool {
+        let Some(layout) = self.enhanced_layout(window) else {
+            return false;
+        };
+        let stale = self.enhanced_dirty
+            || self
+                .shown
+                .as_ref()
+                .is_none_or(|shown| shown.layout != layout);
+        if stale {
+            let Some(preview) = &mut self.preview else {
+                return false;
+            };
+            match preview.enhanced_frame(&layout) {
+                Some(Ok(frame)) => {
+                    let sides = frame
+                        .side_panel
+                        .as_ref()
+                        .map(|panel| side_tiles(&layout, panel))
+                        .unwrap_or_default();
+                    self.shown = Some(EnhancedShown {
+                        layout,
+                        frame,
+                        sides,
+                    });
+                    self.enhanced_dirty = false;
+                }
+                Some(Err(error)) => {
+                    self.fail(event_loop, error);
+                    return false;
+                }
+                None => {
+                    self.shown = None;
+                    self.enhanced_dirty = false;
+                    match preview.image() {
+                        Ok(image) => {
+                            let palette = self.palette();
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.set_image(&image, &palette);
+                            }
+                        }
+                        Err(error) => self.fail(event_loop, error),
+                    }
+                    return false;
+                }
+            }
+        }
+        let (Some(shown), Some(preview)) = (&self.shown, &self.preview) else {
+            return false;
+        };
+        let palette = self.palette();
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_layers(&enhanced_layers(shown, self.pointer), &palette);
+        }
+        // The frame draws its own pointer art: the OS pointer hides then.
+        window.set_cursor_visible(shown.frame.cursor.is_none() && preview.system_cursor());
+        true
+    }
+    /// The display palette the frame is drawn through.
+    fn palette(&self) -> [[u8; 4]; 256] {
+        let Some(preview) = &self.preview else {
+            return [[0, 0, 0, 255]; 256];
+        };
+        preview.display_override().unwrap_or_else(|| {
+            self.display
+                .as_ref()
+                .map_or_else(|| preview.palette().rgba8(), |display| display.entries)
+        })
+    }
+    /// A mouse button in enhanced routing: a movie takes any button, else
+    /// the left, right and middle ones reach the world in both layers'
+    /// coordinates (extra buttons do nothing). Returns `false`, leaving
+    /// the button to the Vanilla routing, outside the enhanced viewport.
+    fn enhanced_button(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        button: MouseButton,
+        pressed: bool,
+    ) -> bool {
+        let Some(layout) = self.enhanced_layout(window) else {
+            return false;
+        };
+        let at = replay::pointer_at(&layout, self.pointer);
+        let Some(preview) = &mut self.preview else {
+            return true;
+        };
+        let button = match button {
+            MouseButton::Left => enhanced::PointerButton::Left,
+            MouseButton::Right => enhanced::PointerButton::Right,
+            MouseButton::Middle => enhanced::PointerButton::Middle,
+            _ => {
+                if preview.movie_button(pressed) {
+                    self.refresh_preview(event_loop, window);
+                }
+                return true;
+            }
+        };
+        if preview.movie_button(pressed) || preview.enhanced_button(at, button, pressed) {
+            self.refresh_preview(event_loop, window);
+        }
+        if !pressed {
+            self.warp_pointer(window);
+        }
+        true
+    }
+    /// Alt+V: the other viewport, applied, logged and drawn.
+    fn toggle_viewport(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        let Some(session) = self.enhanced else {
+            return;
+        };
+        let current = self
+            .preview
+            .as_mut()
+            .and_then(preview::AssetPreview::enhanced_settings)
+            .unwrap_or(session);
+        let settings = replay::toggled_viewport(current);
+        tracing::info!(
+            viewport = config::viewport_name(settings.viewport),
+            "viewport changed"
+        );
+        self.enhanced = Some(settings);
+        self.log(
+            event_loop,
+            InputCommand::Enhanced {
+                settings: settings.into(),
+            },
+        );
+        if let Some(preview) = &mut self.preview {
+            preview.set_enhanced(Some(settings));
+        }
+        self.refresh_preview(event_loop, window);
     }
     /// The drawn cursor moved: the next redraw presents it.
     fn refresh_pointer(&mut self, window: &Window) {
@@ -586,12 +905,26 @@ impl Shell {
             return;
         };
         // The renderer's own viewport: the warp lands on the surface pixel
-        // that shows the frame pixel, never in the letterbox.
-        let Some([x, y]) = self
-            .renderer
-            .as_ref()
-            .and_then(|renderer| renderer.surface_point(pixel))
-        else {
+        // that shows the frame pixel, never in the letterbox. In the
+        // enhanced presentation the pixel is an interface pixel.
+        let target = match self.enhanced_layout(window) {
+            Some(layout) => {
+                let [x, y, _, _] = layout.ui_rect.map(f64::from);
+                let scale = f64::from(layout.ui_scale);
+                let center = |origin: f64, pixel: i32, size: u32| {
+                    (origin + (f64::from(pixel.clamp(0, size as i32 - 1)) + 0.5) * scale).floor()
+                };
+                Some([
+                    center(x, pixel[0], EnhancedLayout::UI_FRAME[0]),
+                    center(y, pixel[1], EnhancedLayout::UI_FRAME[1]),
+                ])
+            }
+            None => self
+                .renderer
+                .as_ref()
+                .and_then(|renderer| renderer.surface_point(pixel)),
+        };
+        let Some([x, y]) = target else {
             return;
         };
         match window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y)) {
@@ -628,7 +961,8 @@ impl Shell {
         }
     }
     /// F11 and Alt+Enter toggle borderless fullscreen, Alt+S the scaling
-    /// mode. The shell keeps these keys: neither their presses (with the
+    /// mode, and in an enhanced session Alt+V the viewport. The shell
+    /// keeps these keys: neither their presses (with the
     /// repeats) nor their releases reach the game or the input log.
     /// Returns whether the shell took the key.
     fn shell_key(
@@ -649,7 +983,7 @@ impl Shell {
         if repeat {
             return self.shell_keys.contains(&key);
         }
-        let Some(hotkey) = shell_hotkey(key, self.alt) else {
+        let Some(hotkey) = shell_hotkey(key, self.alt, self.enhanced.is_some()) else {
             return false;
         };
         if !self.shell_keys.contains(&key) {
@@ -672,6 +1006,7 @@ impl Shell {
                 );
                 self.log_scaling(event_loop);
             }
+            ShellHotkey::Viewport => self.toggle_viewport(event_loop, window),
         }
         self.viewport_changed(event_loop, window);
         true
@@ -704,6 +1039,23 @@ impl Shell {
     /// so its edge pixels stay reachable (SPEC-014 §3.29 edge scrolling),
     /// with whether it is outside the frame (H3: never an edge).
     fn log_hover(&mut self, event_loop: &ActiveEventLoop, point: [f64; 2]) {
+        // In the enhanced presentation the pointer reaches the world in
+        // both layers' coordinates (no hover record: the replay recomputes
+        // it), and the next redraw moves the cursor layer.
+        if let Some(window) = self.window.clone()
+            && let Some(layout) = self.enhanced_layout(&window)
+        {
+            let at = replay::pointer_at(&layout, Some(point));
+            if self
+                .preview
+                .as_mut()
+                .is_some_and(|preview| preview.enhanced_pointer(at))
+            {
+                self.enhanced_dirty = true;
+            }
+            window.request_redraw();
+            return;
+        }
         let hover = self
             .renderer
             .as_ref()
@@ -833,6 +1185,7 @@ impl Shell {
         // The game's clock starts at its first frame, as in a direct start.
         self.started = Some(Instant::now());
         self.scaling = launch.scaling;
+        self.enhanced = launch.enhanced;
         if let Some(renderer) = &mut self.renderer {
             renderer.set_scaling(self.scaling);
         }
@@ -849,6 +1202,7 @@ impl Shell {
             },
         );
         self.log_scaling(event_loop);
+        self.log_enhanced(event_loop);
         self.refresh_preview(event_loop, window);
     }
 }
@@ -927,6 +1281,7 @@ impl ApplicationHandler for Shell {
                 renderer.set_scaling(self.scaling);
                 self.renderer = Some(renderer);
                 self.log_scaling(event_loop);
+                self.log_enhanced(event_loop);
             }
             Err(error) => {
                 self.fail(event_loop, error);
@@ -1103,6 +1458,10 @@ impl ApplicationHandler for Shell {
                         pressed: state == ElementState::Pressed,
                     },
                 );
+                if self.enhanced_button(event_loop, &window, button, state == ElementState::Pressed)
+                {
+                    return;
+                }
                 // H3: presses and releases map with the same clamping as
                 // hover, so the letterbox acts at the nearest frame pixel.
                 let pixel = self.clamped_pixel();
@@ -1151,11 +1510,13 @@ impl ApplicationHandler for Shell {
                     }
                 };
                 self.log(event_loop, InputCommand::Wheel { x, y, unit });
-                if self
-                    .preview
-                    .as_mut()
-                    .is_some_and(|preview| preview.scroll(y))
-                {
+                let at = self
+                    .enhanced_layout(&window)
+                    .map(|layout| replay::pointer_at(&layout, self.pointer));
+                if self.preview.as_mut().is_some_and(|preview| match at {
+                    Some(at) => preview.enhanced_wheel(at, replay::wheel_lines(y, unit)),
+                    None => preview.scroll(y),
+                }) {
                     self.refresh_preview(event_loop, &window);
                 }
             }
@@ -1211,7 +1572,9 @@ impl ApplicationHandler for Shell {
             // (handled above); `inner_size` here is still the old one.
             WindowEvent::ScaleFactorChanged { .. } => window.request_redraw(),
             WindowEvent::RedrawRequested => {
-                if std::mem::take(&mut self.pointer_moved) {
+                // The enhanced layers draw the cursor themselves.
+                let enhanced = self.present_enhanced(event_loop, &window);
+                if std::mem::take(&mut self.pointer_moved) && !enhanced {
                     self.present_pointer();
                 }
                 let Some(renderer) = &mut self.renderer else {
@@ -1285,6 +1648,7 @@ fn run(mut args: Args) -> AppResult<()> {
     } else {
         let (launch, preview, audio) = start(&mut args, config.as_ref())?;
         shell.scaling = launch.scaling;
+        shell.enhanced = launch.enhanced;
         shell.fullscreen = launch.fullscreen;
         shell._audio = audio;
         shell.display = preview
@@ -1369,6 +1733,7 @@ mod tests {
                 scaling: ScalingMode::AspectFit,
                 fullscreen: true,
                 preset: config::Preset::Enhanced,
+                enhanced: Some(enhanced::EnhancedSettings::default()),
                 mod_list: None,
                 zero_arg_game: true,
                 audio: true,
@@ -1513,6 +1878,7 @@ mod tests {
                 scaling: ScalingMode::AspectFit,
                 fullscreen: true,
                 preset: config::Preset::Enhanced,
+                enhanced: Some(enhanced::EnhancedSettings::default()),
                 mod_list: chosen.mod_list.clone(),
                 zero_arg_game: true,
                 audio: false,
@@ -1580,27 +1946,157 @@ mod tests {
     #[test]
     fn the_shell_hotkeys_leave_f10_to_the_game() {
         assert_eq!(
-            shell_hotkey(KeyCode::F11, false),
+            shell_hotkey(KeyCode::F11, false, false),
             Some(ShellHotkey::Fullscreen)
         );
         assert_eq!(
-            shell_hotkey(KeyCode::Enter, true),
+            shell_hotkey(KeyCode::Enter, true, false),
             Some(ShellHotkey::Fullscreen)
         );
         assert_eq!(
-            shell_hotkey(KeyCode::NumpadEnter, true),
+            shell_hotkey(KeyCode::NumpadEnter, true, false),
             Some(ShellHotkey::Fullscreen)
         );
         assert_eq!(
-            shell_hotkey(KeyCode::KeyS, true),
+            shell_hotkey(KeyCode::KeyS, true, false),
             Some(ShellHotkey::Scaling)
         );
         // SPEC-014: F10 is the game's quit confirmation; plain Enter and S
         // are the game's keys.
         for alt in [false, true] {
-            assert_eq!(shell_hotkey(KeyCode::F10, alt), None);
+            assert_eq!(shell_hotkey(KeyCode::F10, alt, false), None);
         }
-        assert_eq!(shell_hotkey(KeyCode::Enter, false), None);
-        assert_eq!(shell_hotkey(KeyCode::KeyS, false), None);
+        assert_eq!(shell_hotkey(KeyCode::Enter, false, false), None);
+        assert_eq!(shell_hotkey(KeyCode::KeyS, false, false), None);
+        // Alt+V is the shell's in an enhanced session only; V and Alt+V
+        // otherwise reach the game as before.
+        assert_eq!(
+            shell_hotkey(KeyCode::KeyV, true, true),
+            Some(ShellHotkey::Viewport)
+        );
+        assert_eq!(shell_hotkey(KeyCode::KeyV, true, false), None);
+        assert_eq!(shell_hotkey(KeyCode::KeyV, false, true), None);
+        assert_eq!(
+            shell_hotkey(KeyCode::KeyS, true, true),
+            Some(ShellHotkey::Scaling)
+        );
+    }
+
+    #[test]
+    fn the_enhanced_settings_reach_the_launch_with_the_enhanced_preset_only() {
+        let settings = config::Config {
+            viewport_mode: Some(enhanced::ViewportMode::Fixed),
+            default_zoom: Some(1.5),
+            roof_peek: Some(enhanced::RoofPeek::Hidden),
+            ..installed()
+        };
+        let mut args = parse(&[]);
+        let launch = resolve_launch(&mut args, Some(&settings));
+        let expected = enhanced::EnhancedSettings {
+            viewport: enhanced::ViewportMode::Fixed,
+            default_zoom: 1.5,
+            roof_peek: enhanced::RoofPeek::Hidden,
+            ..Default::default()
+        };
+        assert_eq!(launch.enhanced, Some(expected));
+        // The flags win over the file.
+        let mut args = parse(&["--viewport", "unlocked_widescreen", "--zoom", "2.5"]);
+        let launch = resolve_launch(&mut args, Some(&settings));
+        assert_eq!(
+            launch.enhanced,
+            Some(enhanced::EnhancedSettings {
+                viewport: enhanced::ViewportMode::Unlocked,
+                default_zoom: 2.5,
+                ..expected
+            })
+        );
+        // Vanilla carries none, whatever the file and flags say.
+        let mut args = parse(&["--preset", "vanilla", "--zoom", "2"]);
+        assert_eq!(resolve_launch(&mut args, Some(&settings)).enhanced, None);
+        assert_eq!(resolve_launch(&mut parse(&[]), None).enhanced, None);
+        // The values are checked, and Play drops the flags as it does the
+        // other display flags.
+        for bad in [["--viewport", "wide"], ["--zoom", "4"], ["--zoom", "x"]] {
+            assert!(Args::try_parse_from(["vault-platform", bad[0], bad[1]]).is_err());
+        }
+        let shown = parse(&["--launcher", "--viewport", "fixed_640x480", "--zoom", "3"]);
+        let args = play_args(&shown, false);
+        assert_eq!((args.viewport, args.zoom), (None, None));
+    }
+
+    fn image(width: u32, height: u32, pixels: impl IntoIterator<Item = u8>) -> IndexedImage {
+        IndexedImage::from_pixels(width, height, pixels.into_iter().collect()).unwrap()
+    }
+
+    #[test]
+    fn side_panels_tile_from_the_bar_outward() {
+        // 1000 x 480 at interface scale 1: the 640-pixel frame at x 180,
+        // so each side is 180 x 100 interface pixels.
+        let layout = EnhancedLayout::compute([1000, 480], Some(1.0), 1.0).unwrap();
+        let panel = image(4, 2, [1, 2, 3, 4, 5, 6, 7, 8]);
+        let tiles = side_tiles(&layout, &panel);
+        assert_eq!(tiles.len(), 2);
+        let (left, left_rect) = &tiles[0];
+        let (right, right_rect) = &tiles[1];
+        assert_eq!((left.width(), left.height()), (180, 100));
+        assert_eq!(*left_rect, [0.0, 380.0, 180.0, 100.0]);
+        assert_eq!(*right_rect, [820.0, 380.0, 180.0, 100.0]);
+        // The left tile ends on the panel's last column next to the bar,
+        // and the right one starts on its first; rows repeat.
+        assert_eq!(&left.pixels()[176..180], &[1, 2, 3, 4]);
+        assert_eq!(&right.pixels()[..4], &[1, 2, 3, 4]);
+        assert_eq!(&right.pixels()[180..184], &[5, 6, 7, 8]);
+        assert_eq!(&right.pixels()[360..364], &[1, 2, 3, 4]);
+        // At a fractional scale the tile rounds up and overhangs outward.
+        let layout = EnhancedLayout::compute([1001, 720], Some(1.5), 1.0).unwrap();
+        let tiles = side_tiles(&layout, &panel);
+        let [x, _, w, h] = layout.side_rects[0];
+        let (left, rect) = &tiles[0];
+        assert_eq!(left.width(), (w / 1.5).ceil() as u32);
+        assert_eq!(rect[0] + rect[2], x + w);
+        assert_eq!(rect[3], h);
+        // A frame spanning the window has no side panels.
+        let layout = EnhancedLayout::compute([640, 480], None, 1.0).unwrap();
+        assert!(side_tiles(&layout, &panel).is_empty());
+    }
+
+    #[test]
+    fn the_enhanced_layers_go_world_sides_interface_cursor() {
+        let layout = EnhancedLayout::compute([1280, 480], Some(1.0), 2.0).unwrap();
+        let frame = enhanced::EnhancedFrame {
+            world: IndexedImage::new(layout.world_size[0], layout.world_size[1]).unwrap(),
+            ui: IndexedImage::new(640, 480).unwrap(),
+            ui_transparent: Some(0),
+            side_panel: Some(image(2, 1, [9, 9])),
+            cursor: Some((image(3, 2, [0; 6]), [1, 2])),
+        };
+        let sides = side_tiles(&layout, frame.side_panel.as_ref().unwrap());
+        let shown = EnhancedShown {
+            layout,
+            frame,
+            sides,
+        };
+        let layers = enhanced_layers(&shown, Some([700.0, 300.0]));
+        let rects: Vec<[f32; 4]> = layers.iter().map(|layer| layer.rect).collect();
+        assert_eq!(
+            rects,
+            [
+                layout.world_layer_rect(),
+                [0.0, 380.0, 320.0, 100.0],
+                [960.0, 380.0, 320.0, 100.0],
+                layout.ui_rect,
+                [699.0, 298.0, 3.0, 2.0],
+            ]
+        );
+        let transparent: Vec<Option<u8>> = layers.iter().map(|layer| layer.transparent).collect();
+        assert_eq!(transparent, [None, None, None, Some(0), Some(0)]);
+        assert!(layers.iter().all(|layer| layer.sharp));
+        // Without a pointer there is no cursor layer.
+        assert_eq!(enhanced_layers(&shown, None).len(), 4);
+        // At interface scale 2 the cursor's hotspot and size double.
+        let layout = EnhancedLayout::compute([1280, 960], Some(2.0), 1.0).unwrap();
+        let shown = EnhancedShown { layout, ..shown };
+        let layers = enhanced_layers(&shown, Some([700.0, 300.0]));
+        assert_eq!(layers.last().unwrap().rect, [698.0, 296.0, 6.0, 4.0]);
     }
 }

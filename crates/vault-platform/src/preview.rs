@@ -1,4 +1,5 @@
 use crate::AppResult;
+use crate::enhanced::{EnhancedFrame, EnhancedSettings, PointerAt, PointerButton};
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
 use vault_formats::{
@@ -18,6 +19,11 @@ pub struct PreviewArgs {
     /// `mod_list`): paths, or a `load_order.toml`.
     #[arg(skip)]
     pub mods: Option<crate::config::ModList>,
+    /// The `enhanced` preset's presentation settings (from the settings,
+    /// the launcher or `--viewport`/`--zoom`); `None` under Vanilla, and
+    /// in a replay, which applies the logged ones.
+    #[arg(skip)]
+    pub enhanced: Option<EnhancedSettings>,
     /// Mount a loose directory: the whole asset source, or with DAT
     /// archives the loose patch root both databases consult first.
     #[arg(long, requires = "preview_asset", value_name = "PATH")]
@@ -392,6 +398,83 @@ impl AssetPreview {
             Self::Game(game) => game.tick(now),
         }
     }
+
+    // The `enhanced` presentation, for a map preview or the game's current
+    // world; the other previews (and the game outside a world) keep the
+    // Vanilla frame.
+
+    /// Select the enhanced presentation (`None` is Vanilla). The game
+    /// keeps it for every world it creates next, and gives it to the
+    /// current one.
+    pub fn set_enhanced(&mut self, settings: Option<EnhancedSettings>) {
+        match self {
+            Self::Map(preview) => preview.set_enhanced(settings),
+            Self::Game(game) => {
+                game.enhanced = settings;
+                if let Some(world) = game.world() {
+                    world.set_enhanced(settings);
+                }
+            }
+            _ => {}
+        }
+    }
+    /// The world's enhanced settings, when it shows the enhanced
+    /// presentation.
+    pub fn enhanced_settings(&mut self) -> Option<EnhancedSettings> {
+        match self {
+            Self::Map(preview) => preview.enhanced(),
+            Self::Game(game) => game.world()?.enhanced(),
+            _ => None,
+        }
+    }
+    /// The world zoom the next enhanced frame is laid out with.
+    pub fn enhanced_zoom(&mut self) -> f32 {
+        match self {
+            Self::Map(preview) => preview.enhanced_zoom(),
+            Self::Game(game) => game.world().map_or(1.0, |world| world.enhanced_zoom()),
+            _ => 1.0,
+        }
+    }
+    /// The enhanced frame for `layout`, or `None` for the Vanilla frame.
+    pub fn enhanced_frame(
+        &mut self,
+        layout: &vault_render::EnhancedLayout,
+    ) -> Option<AppResult<EnhancedFrame>> {
+        match self {
+            Self::Map(preview) => preview.enhanced_frame(layout),
+            Self::Game(game) => game.world()?.enhanced_frame(layout),
+            _ => None,
+        }
+    }
+    /// The pointer moved; returns whether the frame changed.
+    pub fn enhanced_pointer(&mut self, at: PointerAt) -> bool {
+        match self {
+            Self::Map(preview) => preview.enhanced_pointer(at),
+            Self::Game(game) => game.world().is_some_and(|world| world.enhanced_pointer(at)),
+            _ => false,
+        }
+    }
+    /// A pointer button; returns whether the frame changed.
+    pub fn enhanced_button(&mut self, at: PointerAt, button: PointerButton, pressed: bool) -> bool {
+        match self {
+            Self::Map(preview) => preview.enhanced_button(at, button, pressed),
+            Self::Game(game) => game
+                .world()
+                .is_some_and(|world| world.enhanced_button(at, button, pressed)),
+            _ => false,
+        }
+    }
+    /// Wheel lines (positive away from the user); returns whether the
+    /// frame changed.
+    pub fn enhanced_wheel(&mut self, at: PointerAt, lines: f64) -> bool {
+        match self {
+            Self::Map(preview) => preview.enhanced_wheel(at, lines),
+            Self::Game(game) => game
+                .world()
+                .is_some_and(|world| world.enhanced_wheel(at, lines)),
+            _ => false,
+        }
+    }
 }
 
 fn parse_asset<T>(
@@ -523,6 +606,7 @@ impl PreviewArgs {
             game.headless = self.headless;
             game.debug = self.debug;
             game.preset = self.preset;
+            game.enhanced = self.enhanced;
             // G-09: the preview and debug keys work in the game only with
             // the explicit flag.
             game.debug_keys = self.debug;
@@ -548,6 +632,7 @@ impl PreviewArgs {
                 map.queue_startup_movies();
             }
             map.set_debug(self.debug);
+            map.set_enhanced(self.enhanced);
             return Ok(Some(AssetPreview::Map(Box::new(map))));
         }
         if let Some(path) = &self.play_movie {

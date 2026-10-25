@@ -4,12 +4,14 @@
 //! The file is a small TOML subset read and written by hand: one
 //! `key = value` per line, where a value is a basic `"string"` (with the
 //! `\\ \" \n \t \r \uXXXX \UXXXXXXXX` escapes), a literal `'string'`,
-//! `true` or `false`, or a one-line array of strings; `#` starts a comment.
+//! `true` or `false`, a decimal integer or float (`2`, `-1_000`, `1.25`,
+//! `5e-1`), or a one-line array of strings; `#` starts a comment.
 //! Tables are not used. Relative paths are relative to the file's
 //! directory.
 //!
 //! This is engine infrastructure, not part of any specification: it only
 //! decides which game data and display options the shell starts with.
+use crate::enhanced::{EnhancedSettings, RoofPeek, ViewportMode};
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -60,12 +62,91 @@ pub fn scaling_name(mode: ScalingMode) -> &'static str {
     }
 }
 
+/// `fixed_640x480` or `unlocked_widescreen` (the `enhanced` preset's
+/// `viewport_mode`).
+pub fn parse_viewport(text: &str) -> Option<ViewportMode> {
+    match text {
+        "fixed_640x480" => Some(ViewportMode::Fixed),
+        "unlocked_widescreen" => Some(ViewportMode::Unlocked),
+        _ => None,
+    }
+}
+pub fn viewport_name(mode: ViewportMode) -> &'static str {
+    match mode {
+        ViewportMode::Fixed => "fixed_640x480",
+        ViewportMode::Unlocked => "unlocked_widescreen",
+    }
+}
+
+/// `vanilla`, `cursor_xray` or `hidden` (the `enhanced` preset's
+/// `roof_peek`).
+pub fn parse_roof_peek(text: &str) -> Option<RoofPeek> {
+    match text {
+        "vanilla" => Some(RoofPeek::Vanilla),
+        "cursor_xray" => Some(RoofPeek::CursorXray),
+        "hidden" => Some(RoofPeek::Hidden),
+        _ => None,
+    }
+}
+pub fn roof_peek_name(mode: RoofPeek) -> &'static str {
+    match mode {
+        RoofPeek::Vanilla => "vanilla",
+        RoofPeek::CursorXray => "cursor_xray",
+        RoofPeek::Hidden => "hidden",
+    }
+}
+
+/// `default_zoom`'s range (the enhanced view's zoom range).
+pub const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 0.5..=3.0;
+/// A numeric `ui_scale`'s range.
+pub const UI_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=8.0;
+
+/// `default_zoom` on the command line: a number from 0.5 to 3.0.
+pub fn parse_zoom(text: &str) -> Option<f32> {
+    text.parse::<f32>()
+        .ok()
+        .filter(|zoom| ZOOM_RANGE.contains(zoom))
+}
+
+/// `ui_scale`: `auto` fits the interface to the window's height, else
+/// surface pixels per interface pixel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UiScale {
+    Auto,
+    Scale(f32),
+}
+impl UiScale {
+    /// The enhanced settings' form: `None` is `auto`.
+    pub fn factor(self) -> Option<f32> {
+        match self {
+            Self::Auto => None,
+            Self::Scale(scale) => Some(scale),
+        }
+    }
+    pub fn from_factor(factor: Option<f32>) -> Self {
+        factor.map_or(Self::Auto, Self::Scale)
+    }
+}
+
 /// A value of the TOML subset.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     String(String),
     Bool(bool),
+    Integer(i64),
+    Float(f64),
     Array(Vec<String>),
+}
+
+impl Value {
+    /// An integer or a float, as a number.
+    fn number(&self) -> Option<f64> {
+        match self {
+            Self::Integer(value) => Some(*value as f64),
+            Self::Float(value) => Some(*value),
+            _ => None,
+        }
+    }
 }
 
 /// `mod_list` (alias `load_order`): the mods in load order, or the path of
@@ -77,7 +158,7 @@ pub enum ModList {
 }
 
 /// The settings in `vault-engine.toml`; an absent key is `None`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
     pub master_dat: Option<PathBuf>,
     pub critter_dat: Option<PathBuf>,
@@ -90,6 +171,14 @@ pub struct Config {
     pub debug: Option<bool>,
     /// `false` keeps the audio device closed, as `--no-audio` does.
     pub audio: Option<bool>,
+    /// The `enhanced` preset's presentation (unused under Vanilla): the
+    /// viewport, the zoom a map starts at, camera smoothing, the roof peek
+    /// mode and the interface scale.
+    pub viewport_mode: Option<ViewportMode>,
+    pub default_zoom: Option<f32>,
+    pub smooth_camera: Option<bool>,
+    pub roof_peek: Option<RoofPeek>,
+    pub ui_scale: Option<UiScale>,
     /// Keys this engine does not know, in file order: ignored, but kept
     /// so that a rewrite does not lose them.
     pub unknown: Vec<(String, Value)>,
@@ -186,7 +275,7 @@ impl Config {
                         ModList::Paths(paths.into_iter().map(Into::into).collect())
                     }
                     Value::String(path) => ModList::File(path.into()),
-                    Value::Bool(_) => {
+                    Value::Bool(_) | Value::Integer(_) | Value::Float(_) => {
                         return Err(format!("`{key}` expects an array of paths or a path"));
                     }
                 })
@@ -206,6 +295,47 @@ impl Config {
             "fullscreen" => self.fullscreen = Some(boolean(value)?),
             "debug" => self.debug = Some(boolean(value)?),
             "audio" => self.audio = Some(boolean(value)?),
+            "viewport_mode" => {
+                let text = string(value)?;
+                self.viewport_mode = Some(parse_viewport(&text).ok_or_else(|| {
+                    format!(
+                        "`viewport_mode` is \"fixed_640x480\" or \"unlocked_widescreen\", not \"{text}\""
+                    )
+                })?);
+            }
+            "default_zoom" => {
+                let expects = "`default_zoom` is a number from 0.5 to 3.0";
+                let zoom = value.number().ok_or_else(|| expects.to_owned())?;
+                self.default_zoom = Some(
+                    Some(zoom as f32)
+                        .filter(|zoom| ZOOM_RANGE.contains(zoom))
+                        .ok_or_else(|| format!("{expects}, not {zoom}"))?,
+                );
+            }
+            "smooth_camera" => self.smooth_camera = Some(boolean(value)?),
+            "roof_peek" => {
+                let text = string(value)?;
+                self.roof_peek = Some(parse_roof_peek(&text).ok_or_else(|| {
+                    format!(
+                        "`roof_peek` is \"vanilla\", \"cursor_xray\" or \"hidden\", not \"{text}\""
+                    )
+                })?);
+            }
+            "ui_scale" => {
+                let expects = "`ui_scale` is \"auto\" or a number from 0.5 to 8";
+                self.ui_scale = Some(match value {
+                    Value::String(text) if text == "auto" => UiScale::Auto,
+                    Value::String(text) => return Err(format!("{expects}, not \"{text}\"")),
+                    value => {
+                        let scale = value.number().ok_or_else(|| expects.to_owned())?;
+                        UiScale::Scale(
+                            Some(scale as f32)
+                                .filter(|scale| UI_SCALE_RANGE.contains(scale))
+                                .ok_or_else(|| format!("{expects}, not {scale}"))?,
+                        )
+                    }
+                });
+            }
             _ => self.unknown.push((key.to_owned(), value)),
         }
         Ok(())
@@ -264,12 +394,31 @@ impl Config {
                 line(key, value.to_string());
             }
         }
+        if let Some(mode) = self.viewport_mode {
+            line("viewport_mode", quote(viewport_name(mode)));
+        }
+        if let Some(zoom) = self.default_zoom {
+            line("default_zoom", float(f64::from(zoom)));
+        }
+        if let Some(smooth) = self.smooth_camera {
+            line("smooth_camera", smooth.to_string());
+        }
+        if let Some(mode) = self.roof_peek {
+            line("roof_peek", quote(roof_peek_name(mode)));
+        }
+        match self.ui_scale {
+            Some(UiScale::Auto) => line("ui_scale", quote("auto")),
+            Some(UiScale::Scale(scale)) => line("ui_scale", float(f64::from(scale))),
+            None => {}
+        }
         for (key, value) in &self.unknown {
             line(
                 key,
                 match value {
                     Value::String(text) => quote(text),
                     Value::Bool(flag) => flag.to_string(),
+                    Value::Integer(number) => number.to_string(),
+                    Value::Float(number) => float(*number),
                     Value::Array(items) => format!(
                         "[{}]",
                         items
@@ -351,6 +500,19 @@ impl Config {
         Ok(config.relative_to(base))
     }
 
+    /// The `enhanced` preset's presentation settings; missing keys take
+    /// [`EnhancedSettings::default`].
+    pub fn enhanced_settings(&self) -> EnhancedSettings {
+        let default = EnhancedSettings::default();
+        EnhancedSettings {
+            viewport: self.viewport_mode.unwrap_or(default.viewport),
+            default_zoom: self.default_zoom.unwrap_or(default.default_zoom),
+            smooth_camera: self.smooth_camera.unwrap_or(default.smooth_camera),
+            roof_peek: self.roof_peek.unwrap_or(default.roof_peek),
+            ui_scale: self.ui_scale.map_or(default.ui_scale, UiScale::factor),
+        }
+    }
+
     /// Whether the settings name game data: both databases, or a loose
     /// data directory.
     pub fn has_game_data(&self) -> bool {
@@ -358,7 +520,7 @@ impl Config {
     }
 }
 
-const KNOWN: [&str; 10] = [
+const KNOWN: [&str; 15] = [
     "master_dat",
     "critter_dat",
     "data_root",
@@ -368,8 +530,85 @@ const KNOWN: [&str; 10] = [
     "fullscreen",
     "debug",
     "audio",
+    "viewport_mode",
+    "default_zoom",
+    "smooth_camera",
+    "roof_peek",
+    "ui_scale",
     "load_order",
 ];
+
+/// A float as TOML writes it: always with a fraction or an exponent, so it
+/// reads back as a float. A value that is an `f32` is written at that
+/// precision (`1.1`, not `1.100000023841858`).
+fn float(value: f64) -> String {
+    // `Debug` keeps the fraction (`2.0`) and uses an exponent for very
+    // large and small values (`1e300`).
+    let text = if value == f64::from(value as f32) {
+        format!("{:?}", value as f32)
+    } else {
+        format!("{value:?}")
+    };
+    if text.contains(['.', 'e', 'E']) {
+        text
+    } else {
+        format!("{text}.0")
+    }
+}
+
+/// A decimal integer or float at the start of `text`, and the text after
+/// it; `None` when the text does not start like a number. TOML's decimal
+/// forms: an optional sign, digits with single underscores between them
+/// and no leading zero, then for a float a fraction, an exponent or both.
+/// Infinities, NaN and the hexadecimal, octal and binary forms are not
+/// part of the subset.
+fn parse_number(text: &str) -> Option<Result<(Value, &str), String>> {
+    let end = text
+        .find(|c: char| c.is_whitespace() || matches!(c, '#' | ',' | ']'))
+        .unwrap_or(text.len());
+    let (word, rest) = text.split_at(end);
+    let unsigned = word.strip_prefix(['+', '-']).unwrap_or(word);
+    if !unsigned.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let invalid = || Some(Err(format!("invalid number `{word}`")));
+    let digits = |part: &str| {
+        !part.is_empty()
+            && !part.starts_with('_')
+            && !part.ends_with('_')
+            && !part.contains("__")
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'_')
+    };
+    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+        Some(at) => (&unsigned[..at], Some(&unsigned[at + 1..])),
+        None => (unsigned, None),
+    };
+    let (whole, fraction) = match mantissa.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (mantissa, None),
+    };
+    let leading_zero = whole.len() > 1 && whole.starts_with('0');
+    let exponent_ok = exponent
+        .is_none_or(|exponent| digits(exponent.strip_prefix(['+', '-']).unwrap_or(exponent)));
+    if !digits(whole) || leading_zero || !fraction.is_none_or(digits) || !exponent_ok {
+        return invalid();
+    }
+    let plain: String = word.chars().filter(|c| *c != '_').collect();
+    let value = if fraction.is_some() || exponent.is_some() {
+        match plain.parse::<f64>() {
+            Ok(value) if value.is_finite() => Value::Float(value),
+            _ => return invalid(),
+        }
+    } else {
+        match plain.parse::<i64>() {
+            Ok(value) => Value::Integer(value),
+            Err(_) => return Some(Err(format!("number `{word}` is out of range"))),
+        }
+    };
+    Some(Ok((value, rest)))
+}
 
 /// A basic string with its escapes.
 fn quote(text: &str) -> String {
@@ -416,6 +655,9 @@ fn parse_value(text: &str) -> Result<(Value, &str), String> {
     if let Some((text, rest)) = parse_string(text)? {
         return Ok((Value::String(text), rest));
     }
+    if let Some(number) = parse_number(text) {
+        return number;
+    }
     for (word, flag) in [("true", true), ("false", false)] {
         if let Some(rest) = text.strip_prefix(word)
             && rest
@@ -430,7 +672,7 @@ fn parse_value(text: &str) -> Result<(Value, &str), String> {
         Err("missing value".into())
     } else {
         Err(format!(
-            "unsupported value `{text}` (use a quoted string, true, false or an array)"
+            "unsupported value `{text}` (use a quoted string, true, false, a number or an array)"
         ))
     }
 }
@@ -753,7 +995,7 @@ future_list = []
         assert_eq!(line("master_dat = \"unterminated"), 1);
         assert_eq!(line("master_dat = \"C:\\Games\""), 1);
         assert!(message("master_dat = \"C:\\Games\"").contains("invalid escape"));
-        assert_eq!(line("a = 1\n"), 1);
+        assert_eq!(line("a = 01\n"), 1);
         assert_eq!(line("debug = \"true\""), 1);
         assert!(message("fullscreen = \"yes\"").contains("`fullscreen` expects true or false"));
         assert_eq!(line("preset = \"modern\""), 1);
@@ -769,6 +1011,149 @@ future_list = []
         assert_eq!(line("x = true\nx = true"), 2);
         assert_eq!(line("debug = truer"), 1);
         assert_eq!(line("x = \"\\u12\""), 1);
+    }
+
+    #[test]
+    fn the_enhanced_settings_round_trip_and_default_when_missing() {
+        let text = r#"
+preset = "enhanced"
+viewport_mode = "fixed_640x480"
+default_zoom = 1.25
+smooth_camera = false
+roof_peek = "cursor_xray"
+ui_scale = 2
+future_number = -1_000
+future_float = 5e-1
+"#;
+        let config = Config::parse(text).unwrap();
+        assert_eq!(config.viewport_mode, Some(ViewportMode::Fixed));
+        assert_eq!(config.default_zoom, Some(1.25));
+        assert_eq!(config.smooth_camera, Some(false));
+        assert_eq!(config.roof_peek, Some(RoofPeek::CursorXray));
+        assert_eq!(config.ui_scale, Some(UiScale::Scale(2.0)));
+        assert_eq!(
+            config.unknown,
+            vec![
+                ("future_number".to_owned(), Value::Integer(-1000)),
+                ("future_float".to_owned(), Value::Float(0.5)),
+            ]
+        );
+        assert_eq!(
+            config.enhanced_settings(),
+            EnhancedSettings {
+                viewport: ViewportMode::Fixed,
+                default_zoom: 1.25,
+                smooth_camera: false,
+                roof_peek: RoofPeek::CursorXray,
+                ui_scale: Some(2.0),
+            }
+        );
+        // The writer keeps every key, numbers as numbers (floats with a
+        // fraction), and reads back the same settings.
+        let written = config.to_toml().unwrap();
+        for line in [
+            "viewport_mode = \"fixed_640x480\"\n",
+            "default_zoom = 1.25\n",
+            "smooth_camera = false\n",
+            "roof_peek = \"cursor_xray\"\n",
+            "ui_scale = 2.0\n",
+            "future_number = -1000\n",
+            "future_float = 0.5\n",
+        ] {
+            assert!(written.contains(line), "{line}: {written}");
+        }
+        assert_eq!(Config::parse(&written).unwrap(), config);
+        // `auto`, the other names, and a zoom of 1.1 written at its own
+        // precision.
+        let other = Config::parse(
+            "viewport_mode = \"unlocked_widescreen\"\nroof_peek = 'hidden'\nui_scale = \"auto\"\n\
+             default_zoom = 1.1\n",
+        )
+        .unwrap();
+        assert_eq!(other.ui_scale, Some(UiScale::Auto));
+        assert_eq!(other.enhanced_settings().ui_scale, None);
+        assert_eq!(other.roof_peek, Some(RoofPeek::Hidden));
+        let written = other.to_toml().unwrap();
+        assert!(written.contains("ui_scale = \"auto\"\n"), "{written}");
+        assert!(written.contains("default_zoom = 1.1\n"), "{written}");
+        assert_eq!(Config::parse(&written).unwrap(), other);
+        // Missing keys take the defaults; whole numbers are numbers too.
+        assert_eq!(
+            Config::default().enhanced_settings(),
+            EnhancedSettings::default()
+        );
+        let zoom = Config::parse("default_zoom = 3\nsmooth_camera = true").unwrap();
+        assert_eq!(
+            zoom.enhanced_settings(),
+            EnhancedSettings {
+                default_zoom: 3.0,
+                ..EnhancedSettings::default()
+            }
+        );
+        // A Vanilla file writes none of them.
+        let vanilla = Config::parse("preset = \"vanilla\"\n").unwrap();
+        assert_eq!(
+            vanilla.to_toml().unwrap(),
+            "# Vault Engine launcher settings.\npreset = \"vanilla\"\n"
+        );
+    }
+
+    #[test]
+    fn bad_enhanced_values_and_numbers_name_their_line() {
+        let error = |text: &str| Config::parse(text).unwrap_err();
+        for (text, message) in [
+            (
+                "default_zoom = 4",
+                "`default_zoom` is a number from 0.5 to 3.0, not 4",
+            ),
+            ("default_zoom = 0.25", "not 0.25"),
+            ("default_zoom = \"2\"", "`default_zoom` is a number"),
+            (
+                "ui_scale = 0",
+                "`ui_scale` is \"auto\" or a number from 0.5 to 8, not 0",
+            ),
+            ("ui_scale = \"big\"", "not \"big\""),
+            ("ui_scale = true", "`ui_scale` is \"auto\""),
+            (
+                "viewport_mode = \"wide\"",
+                "`viewport_mode` is \"fixed_640x480\"",
+            ),
+            ("roof_peek = \"xray\"", "`roof_peek` is \"vanilla\""),
+            ("smooth_camera = 1", "`smooth_camera` expects true or false"),
+            ("mod_list = 2", "expects an array of paths or a path"),
+            ("x = 1__0", "invalid number `1__0`"),
+            ("x = 1.", "invalid number `1.`"),
+            ("x = 1.e3", "invalid number"),
+            ("x = 1e", "invalid number"),
+            ("x = 007", "invalid number"),
+            ("x = 1_", "invalid number"),
+            ("x = 0x10", "invalid number"),
+            ("x = 1e999", "invalid number"),
+            ("x = 99999999999999999999", "out of range"),
+        ] {
+            let error = error(&format!("audio = true\n{text}"));
+            assert_eq!(error.line, 2, "{text}");
+            assert!(error.to_string().contains(message), "{text}: {error}");
+        }
+        assert_eq!(
+            error("default_zoom = 1\ndefault_zoom = 2").to_string(),
+            "line 2: duplicate key `default_zoom`"
+        );
+        // A number then a comment or nothing; signs and exponents.
+        let config = Config::parse("a = +3 # three\nb = -0.5e+1\nc = 0\nd = 1_000.000_1").unwrap();
+        assert_eq!(
+            config.unknown,
+            vec![
+                ("a".to_owned(), Value::Integer(3)),
+                ("b".to_owned(), Value::Float(-5.0)),
+                ("c".to_owned(), Value::Integer(0)),
+                ("d".to_owned(), Value::Float(1000.0001)),
+            ]
+        );
+        assert_eq!(float(-5.0), "-5.0");
+        assert_eq!(float(1e300), "1e300");
+        assert_eq!(parse_zoom("0.75"), Some(0.75));
+        assert_eq!(parse_zoom("3.5"), None);
     }
 
     #[test]

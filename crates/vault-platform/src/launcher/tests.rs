@@ -633,6 +633,141 @@ fn the_keyboard_moves_the_focus_in_layout_order() {
 }
 
 #[test]
+fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
+    use crate::config::UiScale;
+    use crate::enhanced::{RoofPeek, ViewportMode};
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let mut launcher = Launcher::new(setup(dir, Config::default()));
+    launcher.tab = Tab::Display;
+    let enhanced = [
+        Widget::Viewport,
+        Widget::Zoom,
+        Widget::SmoothCamera,
+        Widget::RoofPeek,
+        Widget::UiScale,
+    ];
+    // Vanilla: hidden, out of the focus order, and the tab draws as before.
+    launcher.focus = Widget::Preset;
+    let vanilla = launcher.image();
+    assert!(
+        enhanced
+            .iter()
+            .all(|widget| !launcher.order().contains(widget))
+    );
+    key(&mut launcher, KeyCode::Space);
+    assert_eq!(launcher.config.preset, Some(Preset::Enhanced));
+    // Enhanced: the rows follow Debug in the focus order.
+    let order = launcher.order();
+    let debug = order
+        .iter()
+        .position(|widget| *widget == Widget::Debug)
+        .unwrap();
+    assert_eq!(&order[debug + 1..debug + 6], &enhanced);
+    assert_eq!(order[debug + 6], Widget::Save);
+    launcher.focus = Widget::Debug;
+    for widget in enhanced {
+        key(&mut launcher, KeyCode::Tab);
+        assert_eq!(launcher.focus, widget);
+    }
+    assert_ne!(launcher.image().pixels(), vanilla.pixels());
+    assert!(
+        launcher
+            .image()
+            .pixels()
+            .iter()
+            .all(|p| *p <= view::color::FIELD)
+    );
+    // The defaults, then each choice.
+    assert_eq!(
+        launcher.config.enhanced_settings(),
+        crate::enhanced::EnhancedSettings::default()
+    );
+    launcher.focus = Widget::Viewport;
+    key(&mut launcher, KeyCode::ArrowRight);
+    assert_eq!(launcher.config.viewport_mode, Some(ViewportMode::Fixed));
+    // The zoom steps through its stops, both ways, wrapping at the ends.
+    launcher.focus = Widget::Zoom;
+    let mut zooms = Vec::new();
+    for _ in 0..8 {
+        key(&mut launcher, KeyCode::ArrowRight);
+        zooms.push(launcher.config.default_zoom.unwrap());
+    }
+    assert_eq!(zooms, [1.25, 1.5, 2.0, 2.5, 3.0, 0.5, 0.75, 1.0]);
+    key(&mut launcher, KeyCode::ArrowLeft);
+    assert_eq!(launcher.config.default_zoom, Some(0.75));
+    // A value from the file between stops moves from the nearest one.
+    launcher.config.default_zoom = Some(1.1);
+    key(&mut launcher, KeyCode::ArrowRight);
+    assert_eq!(launcher.config.default_zoom, Some(1.25));
+    launcher.focus = Widget::SmoothCamera;
+    key(&mut launcher, KeyCode::Enter);
+    assert_eq!(launcher.config.smooth_camera, Some(false));
+    launcher.focus = Widget::RoofPeek;
+    key(&mut launcher, KeyCode::Space);
+    assert_eq!(launcher.config.roof_peek, Some(RoofPeek::CursorXray));
+    key(&mut launcher, KeyCode::ArrowLeft);
+    key(&mut launcher, KeyCode::ArrowLeft);
+    assert_eq!(launcher.config.roof_peek, Some(RoofPeek::Hidden));
+    launcher.focus = Widget::UiScale;
+    let mut scales = Vec::new();
+    for _ in 0..6 {
+        key(&mut launcher, KeyCode::ArrowRight);
+        scales.push(launcher.config.ui_scale.unwrap());
+    }
+    assert_eq!(
+        scales,
+        [
+            UiScale::Scale(1.0),
+            UiScale::Scale(1.5),
+            UiScale::Scale(2.0),
+            UiScale::Scale(2.5),
+            UiScale::Scale(3.0),
+            UiScale::Auto,
+        ]
+    );
+    key(&mut launcher, KeyCode::ArrowLeft);
+    assert_eq!(launcher.config.ui_scale, Some(UiScale::Scale(3.0)));
+    // A click on a row steps it too.
+    let rect = launcher.rect(Widget::Zoom).unwrap();
+    launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
+    assert_eq!(launcher.config.default_zoom, Some(1.5));
+    // Save writes them, and they read back.
+    assert_eq!(launcher.save(), Ok(dir.join(config::FILE_NAME)));
+    let text = fs::read_to_string(dir.join(config::FILE_NAME)).unwrap();
+    for line in [
+        "preset = \"enhanced\"\n",
+        "viewport_mode = \"fixed_640x480\"\n",
+        "default_zoom = 1.5\n",
+        "smooth_camera = false\n",
+        "roof_peek = \"hidden\"\n",
+        "ui_scale = 3.0\n",
+    ] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    let saved = Config::parse(&text).unwrap();
+    assert_eq!(
+        saved.enhanced_settings(),
+        crate::enhanced::EnhancedSettings {
+            viewport: ViewportMode::Fixed,
+            default_zoom: 1.5,
+            smooth_camera: false,
+            roof_peek: RoofPeek::Hidden,
+            ui_scale: Some(3.0),
+        }
+    );
+    // Back to Vanilla, the rows hide again (their keys stay saved).
+    launcher.focus = Widget::Preset;
+    key(&mut launcher, KeyCode::Space);
+    assert!(
+        enhanced
+            .iter()
+            .all(|widget| !launcher.order().contains(widget))
+    );
+    assert_eq!(launcher.image().pixels(), vanilla.pixels());
+}
+
+#[test]
 fn play_saves_and_asks_for_the_game() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();

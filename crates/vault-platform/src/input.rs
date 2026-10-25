@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use vault_core::{CommandId, SequenceIds};
 
 use crate::AppResult;
+use crate::enhanced::{EnhancedSettings, RoofPeek, ViewportMode};
 
 /// Platform observations only; game-specific input bindings belong to later phases.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -73,6 +74,78 @@ pub enum InputCommand {
     Scaling {
         aspect_fit: bool,
     },
+    /// The `enhanced` preset's presentation settings: logged after the
+    /// surface and scaling when an enhanced session starts, and on every
+    /// Alt+V viewport change. A replay applies them to the world; a log
+    /// without one replays the Vanilla presentation.
+    Enhanced {
+        settings: EnhancedRecord,
+    },
+}
+
+/// The logged form of [`EnhancedSettings`], named as in `vault-engine.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EnhancedRecord {
+    pub viewport_mode: LoggedViewport,
+    pub default_zoom: f32,
+    pub smooth_camera: bool,
+    pub roof_peek: LoggedRoofPeek,
+    /// `None`: fit the window's height (`auto`).
+    pub ui_scale: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoggedViewport {
+    #[serde(rename = "fixed_640x480")]
+    Fixed,
+    #[serde(rename = "unlocked_widescreen")]
+    Unlocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoggedRoofPeek {
+    Vanilla,
+    CursorXray,
+    Hidden,
+}
+
+impl From<EnhancedSettings> for EnhancedRecord {
+    fn from(settings: EnhancedSettings) -> Self {
+        Self {
+            viewport_mode: match settings.viewport {
+                ViewportMode::Fixed => LoggedViewport::Fixed,
+                ViewportMode::Unlocked => LoggedViewport::Unlocked,
+            },
+            default_zoom: settings.default_zoom,
+            smooth_camera: settings.smooth_camera,
+            roof_peek: match settings.roof_peek {
+                RoofPeek::Vanilla => LoggedRoofPeek::Vanilla,
+                RoofPeek::CursorXray => LoggedRoofPeek::CursorXray,
+                RoofPeek::Hidden => LoggedRoofPeek::Hidden,
+            },
+            ui_scale: settings.ui_scale,
+        }
+    }
+}
+
+impl From<EnhancedRecord> for EnhancedSettings {
+    fn from(record: EnhancedRecord) -> Self {
+        Self {
+            viewport: match record.viewport_mode {
+                LoggedViewport::Fixed => ViewportMode::Fixed,
+                LoggedViewport::Unlocked => ViewportMode::Unlocked,
+            },
+            default_zoom: record.default_zoom,
+            smooth_camera: record.smooth_camera,
+            roof_peek: match record.roof_peek {
+                LoggedRoofPeek::Vanilla => RoofPeek::Vanilla,
+                LoggedRoofPeek::CursorXray => RoofPeek::CursorXray,
+                LoggedRoofPeek::Hidden => RoofPeek::Hidden,
+            },
+            ui_scale: record.ui_scale,
+        }
+    }
 }
 
 /// SPEC-014 §3.29: key auto-repeat starts after more than 500 ms...
@@ -614,6 +687,49 @@ mod tests {
         );
         let logged: LoggedCommand = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(logged.command, command);
+    }
+
+    #[test]
+    fn enhanced_records_round_trip_with_the_settings_file_names() {
+        let mut output = Vec::new();
+        let mut ids = SequenceIds::default();
+        let settings = EnhancedSettings {
+            viewport: ViewportMode::Fixed,
+            default_zoom: 1.25,
+            smooth_camera: false,
+            roof_peek: RoofPeek::CursorXray,
+            ui_scale: Some(2.0),
+        };
+        let command = InputCommand::Enhanced {
+            settings: settings.into(),
+        };
+        write_command(&mut output, &mut ids, &command).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(
+            text,
+            "{\"command_id\":1,\"kind\":\"enhanced\",\"settings\":{\"viewport_mode\":\"fixed_640x480\",\
+             \"default_zoom\":1.25,\"smooth_camera\":false,\"roof_peek\":\"cursor_xray\",\"ui_scale\":2.0}}\n"
+        );
+        let logged: LoggedCommand = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(logged.command, command);
+        let InputCommand::Enhanced { settings: record } = logged.command else {
+            unreachable!()
+        };
+        assert_eq!(EnhancedSettings::from(record), settings);
+        let auto: LoggedCommand = serde_json::from_str(
+            r#"{"command_id":2,"kind":"enhanced","settings":{"viewport_mode":"unlocked_widescreen","default_zoom":1.0,"smooth_camera":true,"roof_peek":"hidden","ui_scale":null}}"#,
+        )
+        .unwrap();
+        let InputCommand::Enhanced { settings: record } = auto.command else {
+            panic!("an enhanced record expected");
+        };
+        assert_eq!(
+            EnhancedSettings::from(record),
+            EnhancedSettings {
+                roof_peek: RoofPeek::Hidden,
+                ..EnhancedSettings::default()
+            }
+        );
     }
 
     #[test]
