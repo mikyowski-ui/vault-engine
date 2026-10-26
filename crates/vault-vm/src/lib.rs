@@ -5,6 +5,7 @@ mod host;
 mod machine;
 mod program;
 mod stack;
+pub mod stack_check;
 
 pub mod procedure_flags {
     pub use crate::program::{CONDITIONAL, CRITICAL, EXPORT, IMPORT, TIMED};
