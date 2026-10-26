@@ -1647,3 +1647,73 @@ fn reports_which_spec019_interface_art_names_an_install_lists() {
         assert!(text.contains(line), "{line}\n{text}");
     }
 }
+
+#[test]
+fn reports_a_fallout2_install_with_a_smoke_run() {
+    // The synthetic corpus with SPEC-018's tables, its start map's script
+    // (`scripts.lst` row 3) faulting in `map_enter_p_proc` on a division by
+    // zero, packed as a SPEC-015 install with a loose `data` folder.
+    let corpus = tempfile::tempdir().unwrap();
+    state::write_corpus(corpus.path());
+    vault_fixtures::fallout2::write_tables(corpus.path());
+    let enter = [state::push(1), state::push(0), state::instruction(0x803c)].concat();
+    std::fs::write(
+        corpus.path().join("scripts/f2enter.int"),
+        state::program(&[], &[(b"map_enter_p_proc", state::returning(enter))]),
+    )
+    .unwrap();
+    let list = corpus.path().join("scripts/scripts.lst");
+    let mut rows = std::fs::read(&list).unwrap();
+    rows.extend(b"f2enter.int # local_vars=0\n");
+    std::fs::write(&list, rows).unwrap();
+    let map = std::fs::read(corpus.path().join("maps/synthetic.map")).unwrap();
+    std::fs::write(
+        corpus.path().join("maps/artemple.map"),
+        vault_fixtures::fallout2::named_map(map, "artemple.map", 3, 20100, 2),
+    )
+    .unwrap();
+    let install = tempfile::tempdir().unwrap();
+    vault_fixtures::dat2::fallout2_install(corpus.path(), install.path(), 2);
+    std::fs::create_dir_all(install.path().join("data")).unwrap();
+    std::fs::write(install.path().join("data/note.txt"), b"loose\n").unwrap();
+    let (success, _, text, errors) = audit(
+        corpus.path(),
+        &[
+            "--report-fallout2-install",
+            "--fallout2-dir",
+            install.path().to_str().unwrap(),
+        ],
+    );
+    // A report, not a category: it never fails the run.
+    assert!(success, "{errors}");
+    assert!(!text.contains("Audit categories"), "{text}");
+    for line in [
+        "Fallout 2 install: MASTER.DAT, CRITTER.DAT\n",
+        "Fallout 2 data root: data (1 files)",
+        "Fallout 2 required members: 7 of 7 present",
+        "Fallout 2 tables: loaded: 3 maps, 1 areas, 1 encounter tables, 2 encounter groups, \
+         1 party records",
+        "Fallout 2 table diagnostic: 1 x data/worldmap.txt: enc_N dropped (lines 21)",
+        "Fallout 2 parsing: ",
+        "Fallout 2 critter prototypes read at 412 bytes (SPEC-016 Decision 9): 0\n",
+        "Fallout 2 writers: .map ",
+        "Fallout 2 smoke run: ARTEMPLE.SAV (map 2), 1200 ticks of 50 ms",
+        "Fallout 2 word set: true",
+        "Fallout 2 smoke script: 0x00000001 scripts/f2enter.int: 0 locals declared, a slice of 0",
+        "Fallout 2 smoke VM errors: 1 (1 distinct)",
+        "Fallout 2 smoke VM error: 1 x scripts/f2enter.int map_enter_p_proc word 0x803c: \
+         division by zero",
+        "Fallout 2 smoke VM error kind: 1 x division by zero",
+        "Fallout 2 install check: passed",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    // Every member of a parsed extension parses and round-trips.
+    let parsing = text
+        .lines()
+        .find(|line| line.starts_with("Fallout 2 parsing: "))
+        .unwrap();
+    assert!(parsing.ends_with(" passed, 0 failed"), "{parsing}");
+    assert!(text.contains(".map\t5\t0"), "{text}");
+    assert!(text.contains(", 0 failed; .pro "), "{text}");
+}

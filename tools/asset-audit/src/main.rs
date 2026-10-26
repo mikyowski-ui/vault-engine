@@ -1,4 +1,5 @@
 mod archives;
+mod fallout2;
 mod items;
 mod movies;
 mod readiness;
@@ -168,7 +169,8 @@ struct Args {
     /// `CRITTER.DAT` and `patch000.dat`, mounted as SPEC-018 §1 says) whose
     /// scripts the stack model checks with the Fallout 2 table, adding the
     /// per-word summary of SPEC-017's words and stubs that §8.5 records.
-    /// With `--report-script-stack` or `--report-fallout2-art`.
+    /// With `--report-script-stack`, `--report-fallout2-art` or
+    /// `--report-fallout2-install`.
     #[arg(long, value_name = "PATH")]
     fallout2_dir: Option<PathBuf>,
     /// SPEC-019 §2.2 / D-2: which of the Fallout 2 interface art names the
@@ -177,6 +179,15 @@ struct Args {
     /// the run.
     #[arg(long, requires = "fallout2_dir")]
     report_fallout2_art: bool,
+    /// SPEC-016 to SPEC-019 over the `--fallout2-dir` install as SPEC-018
+    /// §1 mounts it (its loose `data` folder as the data root): the
+    /// required members, the tables' load and diagnostics by kind, every
+    /// map, prototype, FRM, message, palette, list and script parsed under
+    /// the `fallout2` profile with the map and prototype writers' round
+    /// trips, and a headless new-game smoke run on `artemple` with its
+    /// scripts running. A report: it never fails the run.
+    #[arg(long, requires = "fallout2_dir")]
+    report_fallout2_install: bool,
 }
 
 /// SPEC-019 §2.2 the interface-art report (`--report-fallout2-art`): per
@@ -1038,6 +1049,11 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
         && let Some(folder) = &args.fallout2_dir
     {
         report_fallout2_art(folder)?;
+    }
+    if args.report_fallout2_install
+        && let Some(folder) = &args.fallout2_dir
+    {
+        fallout2::report(folder)?;
     }
     if args.validate_saves {
         failures.run("Saves", "save check(s)", || {
