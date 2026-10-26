@@ -1,6 +1,6 @@
 # SPEC-018: Fallout 2 Mounting, Saves and Data Tables
 
-**Status:** approved. Section 1 is an owner decision of 2026-10-25; the rest by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)".
+**Status:** approved. Section 1 is an owner decision of 2026-10-25; the rest by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail corpus audit) by the coordinator, 2026-10-25.
 
 **Provenance:** Team A (the Spec-Author sub-agent), 2026-10-25, from the
 coordinator's brief of the same day and the owner's archive-role decision
@@ -19,6 +19,28 @@ none of its content traces back to reverse-engineered material (see
 `PROVENANCE.md`, "In-session spec authoring (Team A)"). Every point that
 Team A settled without a source is listed in section 10, **Decisions**. A
 later research-vault revision of any part supersedes that part.
+
+**Revision 2 (retail corpus audit), 2026-10-25.** The coordinator wrote this
+revision at the owner's request. It is based on loading the owner's retail
+Fallout 2 install (the GOG release) through this specification's own
+parsers.
+
+- **What was opened.** Only section 1's three archives, plus the
+  install's loose `data` folder, which holds `worldmap.dat` and one tile FRM
+  and nothing this specification reads. sfall's archive, `f2_res.dat` and
+  the `mods` folder were neither mounted nor opened.
+- **Results on the retail install.**
+  - Section 2 accepts the install, with no required member missing.
+  - Every required table loads.
+  - The line tables give 110 quests, 20 holodisks, 9 reputation rows, 17
+    karma variables and 52 endgame slides.
+  - 7 walk masks load.
+- **The discrepancy.** Section 4 gave 1123 drop-or-default diagnostics. Most
+  of them come from the encounter grammar of section 4.4, which the
+  retail file writes differently.
+- **What changes.** Each change below is marked "(Revision 2)", and
+  Decisions R7 to R13 record the measurements. No game text is reproduced
+  beyond single tokens and field shapes.
 
 ## 1. Archive roles and mounting `[Must-match: owner decision, 2026-10-25]`
 
@@ -285,8 +307,8 @@ An entrance value is a List of exactly seven items, in this order:
 | Item | Form | Meaning |
 | ---: | --- | --- |
 | 1 | Boolean | Known at a new game |
-| 2 | Integer 0-1023 | X of the entrance marker on the town map picture |
-| 3 | Integer 0-1023 | Y of the marker |
+| 2 | Integer 0-1023, or -1 | X of the entrance marker on the town map picture; -1 with item 3 also -1 is an entrance with no marker (Revision 2, R12) |
+| 3 | Integer 0-1023, or -1 | Y of the marker |
 | 4 | Name | The `lookup_name` of the destination map in `maps.txt` |
 | 5 | Integer -1 to 2 | Entry elevation; -1 takes the map header's elevation |
 | 6 | Integer -1 to 39999 | Entry hex; -1 takes the map header's whole default entrance (hex, elevation and orientation), ignoring items 5 and 7 |
@@ -294,6 +316,9 @@ An entrance value is a List of exactly seven items, in this order:
 
 - An entrance with the wrong item count, an invalid item, or a lookup name
   that no map has, is dropped with a diagnostic. `[Safe rule]`
+- An entrance whose X and Y are both -1 is valid, and is never drawn on the
+  town map. Scripts and section 5 still use it. Only one of the two at -1 is
+  invalid. `[Safe rule]` (Revision 2, R12)
 - An area's **entrance count** `E` is its highest valid slot number plus 1.
   A slot below `E` without a valid entrance is an absent slot, which is
   never known and never shown.
@@ -385,7 +410,7 @@ An **entry** value is a List of fields. Each field is one of:
 | `Special` | The bare word | Not special | A special encounter (section 5.6) |
 | `Map:<name>` | A map lookup name | None | Forces this map |
 | `Enc:<expression>` | Group expression, below | No groups | What appears |
-| `If(<condition>)` | Condition, section 4.4.6 | Always true | Eligibility |
+| `If(<condition>)` | Condition field, section 4.4.6 | Always true | Eligibility |
 
 Keywords before `:` and the word `Special` are case folded. An unknown field
 is ignored with a diagnostic; the entry stays. An invalid known field drops
@@ -396,7 +421,7 @@ nothing added. `[Safe rule]`
 
 ```text
 expression := group { relation target }
-group      := "(" count [ "-" count ] ")" groupname
+group      := [ "(" count [ "-" count ] ")" ] groupname
 relation   := "AND" | "FIGHTING" | "AMBUSH"
 target     := group | "Player"
 count      := Integer 0-25
@@ -404,10 +429,14 @@ groupname  := Name without spaces
 ```
 
 - Spaces may separate any two tokens. Keywords are case folded.
+- (Revision 2, R8) A group without a count is `(1)`. The retail file writes
+  every special encounter's group this way, and so drops 375 entries
+  without this rule.
 - `(n)` means exactly n; `(a-b)` means from a to b. a greater than b drops
   the entry.
-- `Player` may follow `AMBUSH` only, and `AMBUSH` must be followed by
-  `Player`. Any other pairing drops the entry.
+- `Player` may follow `AMBUSH` or `FIGHTING`, and `AMBUSH` must be followed by
+  `Player`. Any other pairing drops the entry. (Revision 2, R8: the retail
+  file has 3 entries ending `FIGHTING Player`.)
 - `groupname` names an `[Encounter: <groupname>]` section (section 4.4.5).
   An unknown name is kept and skipped when spawning, with a diagnostic.
 
@@ -422,30 +451,42 @@ folded). `[Must-match]` (D11, D21)
 - `position`: a List whose first item is a formation, `surrounding`,
   `straight_line`, `double_line`, `wedge`, `cone` or `huddle`, followed by
   optional `spacing:<n>`, an Integer 1-10, default 1, and `distance:<n>`, an
-  Integer 0-30, default 8. Invalid items take their defaults. Section 5.7
+  Integer 0-30, or `Player(Perception)`, default 8. `Player(Perception)` is
+  the player's Perception (SPEC-011), clamped to 0-30, when the group
+  spawns (Revision 2, R10). Invalid items take their defaults. Section 5.7
   places every formation by one rule; the formation name is stored for
   SPEC-019.
+- `team_num`: an Integer, stored with the group and given no engine effect,
+  as for the relations of section 5.7. It is accepted without a diagnostic.
+  (Revision 2, R10)
 - `type_NN`, NN 0-99: a **critter type**, a List of fields:
 
 | Field | Form | Meaning |
 | --- | --- | --- |
-| `pid:<n>` | Integer, a critter PID (category 1, SPEC-003 §2.1) | Required; without it, or with another category, the type is dropped |
+| `pid:<n>` | Integer, a PID of category 0 (item), 1 (critter) or 2 (scenery) (SPEC-003 §2.1) | Required; without it, or with another category, the type is dropped. An item or scenery type places that object (section 5.7); its `Dead`, `Script` and `Item` fields are ignored with a diagnostic (Revision 2, R9) |
 | `Ratio:<p>` | Percent | Selection weight (section 5.7) |
 | `Dead` | Bare word | The critter is placed dead |
 | `Script:<n>` | Integer -1 or more | Zero-based `scripts.lst` index of the critter's script; -1 or absent uses the prototype's script |
 | `Item:<spec>` | Item spec, below; the field may repeat | Inventory added to the critter |
-| `If(<condition>)` | Condition | The type is eligible only while it holds |
+| `Distance:<n>` | Integer 0-30 | This type's placement distance, replacing the group's `distance` (section 5.7). An invalid value is ignored with a diagnostic (Revision 2, R10) |
+| `If(<condition>)` | Condition field | The type is eligible only while it holds |
 
-An item spec is `[ "(" count [ "-" count ] ")" ] pid [ "(wielded)" ]`, with
-count an Integer 0-1000 and pid an item PID (category 0). The count defaults
-to 1. `(wielded)` makes the item the critter's held weapon. An invalid item
+An item spec is `[ "(" count [ "-" count ] ")" ] pid [ "(wielded)" | "{wielded}" ]`,
+with count an Integer 0-1000 and pid an item PID (category 0). The count
+defaults to 1. `(wielded)` or `{wielded}`, with the word case folded, makes
+the item the critter's held weapon (Revision 2, R11: 5 retail items use the
+brace form). An invalid item
 spec is dropped with a diagnostic; the type stays. `[Safe rule]`
 
 #### 4.4.6 Conditions
 
 `[Must-match]` (D11)
 
+A **condition field** is one or more conditions, each wrapped in `If(...)`,
+joined by `And` or `Or` (Revision 2, R7):
+
 ```text
+field     := "If" "(" condition ")" { ("And" | "Or") "If" "(" condition ")" }
 condition := clause { ("And" | "Or") clause }
 clause    := operand compare Integer
            | "Rand(" Percent ")"
@@ -454,7 +495,14 @@ operand   := "Global(" Integer ")" | "Player(Level)"
 compare   := "==" | "=" | "!=" | "<" | "<=" | ">" | ">="
 ```
 
-- Spaces may separate tokens. Keywords are case folded. `=` means `==`.
+- Spaces may separate tokens, including between `If` and `(`. Keywords are
+  case folded, so `time_of_day` is `Time_Of_Day`. `=` means `==`.
+- The field is evaluated like one condition whose clauses are all of its
+  conditions' clauses, in order. Each `And` or `Or` between two `If(...)`
+  joins the last clause of one to the first clause of the next, under the
+  evaluation rule below. (Revision 2, R7: the retail file writes 1004 of its
+  1033 entry conditions as two or three `If(...)` joined by `And`. Read as
+  one condition, they never held.)
 - `Global(n)` is campaign global n; out of range reads 0 (SPEC-006 §2.1).
   `Player(Level)` is the player's level. `Days_Played` is
   `trunc(game ticks / 864000)`. `Time_Of_Day` is the HHMM value of SPEC-005
@@ -477,7 +525,7 @@ party size, the combat-control choices, NPC level-ups). `[Must-match]` (D13)
 
 | Key | Form | Default | Meaning |
 | --- | --- | --- | --- |
-| `party_member_pid` | Integer, a critter PID | Required | The member's base prototype |
+| `party_member_pid` | Integer, a PID of category 0, 1 or 2 | Required | The member's base prototype. A record whose PID is not a critter's, as the retail file's car trunk is, follows the member, has no control panel and takes no part in combat AI or level-ups (SPEC-019 §3.14) (Revision 2, R13) |
 | `area_attack_mode` | List of option words | Empty | Choices the player may set, from the vocabulary below |
 | `attack_who` | List | Empty | As above |
 | `best_weapon` | List | Empty | As above |
@@ -487,7 +535,7 @@ party size, the combat-control choices, NPC level-ups). `[Must-match]` (D13)
 | `run_away_mode` | List | Empty | As above |
 | `level_minimum` | Integer 0-99 | 0 | First player level at which the member may level up |
 | `level_up_every` | Integer 0-99 | 0 | Player levels between member level-ups; 0 never |
-| `level_pids` | List of critter PIDs | Empty | Prototypes for successive member levels |
+| `level_pids` | List of critter PIDs, or `-1` | Empty | Prototypes for successive member levels; `-1` alone is the empty list, with no diagnostic (Revision 2, R13) |
 
 An option list is the member's **allowed set** for that field (SPEC-019 §2.5).
 An empty list offers no choice for that field on SPEC-019's panels. An
@@ -854,8 +902,10 @@ chosen by step 1 below. No group is spawned and no counter changes. (R6)
       hex on the player's elevation that no blocking object occupies. Rings
       are walked in SPEC-003's neighbor order. When no hex is free, the
       critter is not created, with a diagnostic. `[Safe rule]`
-   6. **Creation.** Create the critter from the type's PID at that hex,
-      facing the player. Add each `Item:` stack, drawing each count with
+   6. **Creation.** In step 5, `distance` is the type's own `Distance` when
+      it has one, else the group's (Revision 2). Create the critter from the
+      type's PID at that hex, facing the player. An item or scenery type
+      creates that object at the hex, with nothing else applied (Revision 2). Add each `Item:` stack, drawing each count with
       `random(min, max)` in field order. Make a `(wielded)` item its held
       weapon. Attach the type's script, if given, as a new critter-category
       instance. A `Dead` critter is then put into the dead state that
@@ -1035,8 +1085,13 @@ The Fallout 2 game movie table replaces SPEC-012 §2.11's. Index m is the
 
 ### 6.7 Play while scripts are gated
 
-SPEC-017 §8.5 keeps Fallout 2 **script execution** gated until its corpus
-audit is recorded. Play itself is not gated: SPEC-017 §8.7 defines what a
+**Revision 2: the gate is open.** SPEC-017 Revision 3 records the retail
+audit and opens the gate, so Fallout 2 Play runs scripts. The rules of this
+section no longer apply. A save that carries the gated mark is refused, as
+section 7.2 says. The text below is kept to define that mark.
+
+SPEC-017 §8.5 kept Fallout 2 **script execution** gated until its corpus
+audit was recorded. Play itself is not gated: SPEC-017 §8.7 defines what a
 Play session does meanwhile, and this specification, SPEC-017 and SPEC-019
 all follow it. In short (SPEC-017 §8.7 is the full rule): `[Must-match]` (R4)
 
@@ -1742,6 +1797,13 @@ written the same way into every spec it touches.
 | R3 | No Fallout 2 elevator table | An engine-owned optional table `data/vault-engine/elevators.txt` (section 4.9), with SPEC-013 §3.21's behavior and all four of its safe rules. Without a record, `metarule` 15 does nothing | Team A default, reconciliation 2026-10-25 |
 | R4 | SPEC-017's script gate against the owner's goal that Play unlocks | Play is available, and only script execution is gated: no `.INT` loads and no procedure runs, script records are kept, and a one-line notice appears (SPEC-017 §8.7, section 6.7). Saves made while gated carry a header mark (section 7.2) | Team A default, reconciliation 2026-10-25 |
 | R5 | Terms and stored fields: area against city; disposition indices; the order of the control fields; the saved party state | Area and city are one record (section 4.3). Disposition indices are SPEC-019's five tokens, with no `none`. Member records use SPEC-019 §2.5's field order, store the level stage, and are joined by retained records for members who left (section 7.5). The 17-entry movie table and `elder.mve` agree in all three specs | Team A default, reconciliation 2026-10-25 |
+| R7 | The retail encounter conditions are `If(...) And If(...)` (1004 of 1033) | The condition field of section 4.4.6, with spaces allowed after `If` and case folding | Coordinator, Revision 2, measured |
+| R8 | 375 special entries name their group with no count; 3 entries end `FIGHTING Player` | A group without a count is `(1)`; `FIGHTING Player` is accepted, and relations still have no effect | Coordinator, Revision 2, measured |
+| R9 | 10 encounter types place item or scenery PIDs | Types may name categories 0, 1 or 2, and non-critter types place the object | Coordinator, Revision 2, measured |
+| R10 | `Distance:` in 13 types and in one `position`, written as `Player(Perception)`; one `team_num` key | Per-type distance; `Player(Perception)`; `team_num` stored with no effect | Coordinator, Revision 2, measured |
+| R11 | 5 items use `{Wielded}` | Accepted as `(wielded)`. The 2 retail item fields that run two items together with no comma stay dropped, as before | Coordinator, Revision 2, measured |
+| R12 | Area 47 has two entrances at X and Y -1 | -1, -1 is an entrance with no marker | Coordinator, Revision 2, measured |
+| R13 | Party record 25's PID is a non-critter (the car trunk); 14 records write `level_pids=-1` | Non-critter records are accepted as followers; `-1` is the empty list | Coordinator, Revision 2, measured |
 | R6 | Other contradictions | Script-directed travel is SPEC-019's direct move. Encounter suppression uses SPEC-019's area circles. This spec defines dropping to terrain, the map known/visited flags, the saved area positions, the `metarule3` 104 entrance match, the world-map music, display and location names, and the `genrep.txt`, `karmavar.txt` and `endgame.txt` grammars. SPEC-011's progression tables apply provisionally. The Fallout 2 `ai.txt` keys and town reputations are not read | Team A default, reconciliation 2026-10-25 |
 
 ## 11. Verification notes
@@ -1758,8 +1820,12 @@ written the same way into every spec it touches.
   or `[May-improve]`, or inherits its tag from the cited section.
 - [ ] Not checked against the research vault's `spec_lint.py`, which is not
   available on this side of the wall.
-- [ ] Not checked against a local Fallout 2 corpus. The key names, defaults
-  and table shapes of section 4 come from Team A's general knowledge and
-  should be confirmed by the corpus audit. A shipped file that section 4
-  refuses, or a key that it misnames, is a reason to revise this
-  specification, not to relax the implementation.
+- [x] Checked against the owner's retail Fallout 2 install (Revision 2,
+  2026-10-25). The discrepancies found are corrected above (R7 to R13).
+  The diagnostics that remain on the retail files are genuine data
+  defects, all of which section 4's safe rules drop:
+  - one start point at elevation 3;
+  - one `music` line with no `=`;
+  - one `ambient_sfx` list missing a comma;
+  - two item fields running two items together;
+  - two repeated keys, of which the later is kept.

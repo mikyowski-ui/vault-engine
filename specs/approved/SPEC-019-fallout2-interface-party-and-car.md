@@ -1,6 +1,6 @@
 # SPEC-019: Fallout 2 Interface, Party Control, the Car, and Game-Flow Deltas
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail art audit; scripts run) by the coordinator, 2026-10-25.
 
 **Provenance:** written by Team A (the Spec-Author sub-agent) on 2026-10-25 from
 the coordinator's brief of the same day. Source categories:
@@ -19,6 +19,18 @@ data whose own sources cannot be audited, so this specification cannot
 certify that none of its content traces back to reverse-engineered material
 (`PROVENANCE.md`, "In-session spec authoring (Team A)"). A later
 research-vault revision of any section supersedes it.
+
+**Revision 2 (retail corpus audit), 2026-10-25.** The coordinator wrote this
+revision at the owner's request, from D-2's art report and from frame sizes
+read from the owner's retail Fallout 2 install (the GOG release). It changes
+three things:
+
+- section 2.2 records the audit;
+- section 3.15.3's custom panel takes its art's size;
+- section 3.4's gated session no longer applies, because SPEC-017 Revision 3
+  opens the script gate.
+
+No game art is reproduced.
 
 ## 1. Overview & Scope
 
@@ -136,6 +148,26 @@ The Fallout 2 art the engine uses, beyond the names it shares with SPEC-014:
 
 These names are Team A's best knowledge and must be checked against a local
 corpus by the asset audit (section 5, D-2). `[Team A default]`
+
+**Retail audit (Revision 2).** The retail `intrface.lst` lists all 12 roles,
+so every role resolves with no stand-in. The names and first-frame sizes in
+use:
+
+| Role | Name used | Size | Frames |
+| --- | --- | --- | --- |
+| Interface bar | `iface.frm` | 640 by 99, so h = 99 (section 3.5) | 1 |
+| Push icon pair | `pushn.frm` / `pushh.frm` | 40 by 40 | 1 |
+| Loot Take All button | `invmaup.frm` / `invmadn.frm` (`takeallu.frm` / `takealld.frm` are absent) | 39 by 41 | 1 |
+| Party dialogue panel | `di_talkp.frm` | 640 by 190 | 1 |
+| Combat control panel | `control.frm` | 640 by 190 | 1 |
+| Custom settings panel | `custom.frm` | **640 by 190** | 1 |
+| Day and night dial | `wmdial.frm` | 58 by 29 | 24 |
+| Town-list scroll arrows | `uparwoff.frm` / `dnarwoff.frm` (`wmlstup.frm` / `wmlstdn.frm` are absent) | 11 by 14 | 1 |
+| Main menu | `mainmenu.frm` | 640 by 480 | 1 |
+
+The candidate order of the table above is kept, so an install that has the
+first candidate still uses it. The custom panel is the one size that differs
+from this spec's stand-in. Section 3.15.3 follows the art (Revision 2).
 
 ### 2.3 Messages and Engine Strings
 
@@ -357,8 +389,13 @@ which are SPEC-018 §6.6's. `[Must-match]`
 | 8 | Start that map's city music from SPEC-018 §5.2 |
 | Initial state | SPEC-018 §6.1's clock (tick 264600) and calendar (tick 0 is 25 July 2241); campaign globals from `data/vault13.gam`; SPEC-018 §6.5's world state; party list the player only; no car (section 2.4); played-movie record all 0. Everything else as SPEC-014 §3.12 |
 
-**While Fallout 2 scripts are gated** (SPEC-017 §8.5), New Game and Load
-Game work as above. The session follows SPEC-017 §8.7: no script runs, and
+**Revision 2:** SPEC-017 Revision 3 opens the script gate. New Game and Load
+Game run scripts, and the paragraph below no longer applies. A gated save
+is refused (SPEC-018 §7.2). The main menu, premade selection and editor are
+unchanged.
+
+**While Fallout 2 scripts were gated** (SPEC-017 §8.5), New Game and Load
+Game worked as above. The session follows SPEC-017 §8.7: no script runs, and
 after the hand-off completes, and after each successful load, the message
 monitor prints SPEC-017 §8.7's one-line notice. The main menu, premade
 selection and editor (sections 3.2 and 3.3) need no scripts and are
@@ -780,7 +817,11 @@ stays visible above it. Coordinates are window-relative. `[Team A default]`
 
 #### 3.15.3 Custom Panel
 
-A modal window at screen (170, 145), 300 by 190. `[Team A default]`
+A modal window the size of its background. With the retail `custom.frm`
+(640 by 190) it sits at screen (0, 290), in the control panel's place
+(Revision 2). With the stand-in it is at screen (170, 145), 300 by 190. The
+rows and Done keep the window-relative positions below in both cases.
+`[Team A default]`
 
 - Background `custom.frm`, or its stand-in with a one-pixel key 992 border.
 - Six rows j = 0-5, in section 2.5 field order from `area_attack_mode`: label
@@ -1348,6 +1389,9 @@ here. None is an owner instruction except D-1.
   `intrface.lst` by name with stand-ins (section 2.2). The candidate names are
   Team A's best knowledge. The asset audit should list which section 2.2 names
   the local corpus lacks, so that a later revision can correct them.
+  *(Revision 2: the retail audit resolves all 12 roles, and section 2.2
+  records the names and sizes. Only the custom panel's size changes
+  this spec.)*
 - **D-3 (Team A default).** Missing messages fall back to English engine
   strings; the main-menu label IDs 9-14 and copyright ID 20, and the indicator
   IDs 102-104, are defaults.

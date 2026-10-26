@@ -114,10 +114,10 @@ specs it produces say so:
 | Spec | Route | Notes |
 | --- | --- | --- |
 | SPEC-015 | Coordinator, from the owner's brief and RFC 1950/1951 | The owner confirmed the open points on 2026-10-25 |
-| SPEC-016 | Coordinator, from the owner's layout brief | |
-| SPEC-017 | Team A; Revision 2 of §8 by the coordinator | Every word number is provisional. Fallout 2 script execution stays off until its §8 audit of a real Fallout 2 install is recorded. Revision 2 (owner's request) revises the audit model from the measured Fallout 1 findings, citing counts, one script name and one word, with no script bytes |
-| SPEC-018 | Team A, with the owner's archive-role decision | Table grammars and defaults are to be confirmed by a corpus audit (its §11) |
-| SPEC-019 | Team A | Layout numbers and gameplay values marked `[Team A default]` are Team A's own choices |
+| SPEC-016 | Coordinator, from the owner's layout brief; Revision 2 by the coordinator | Revision 2 corrects ladder records and accepts 412-byte critters, measured on the owner's retail install |
+| SPEC-017 | Team A; Revisions 2 and 3 by the coordinator | Every word number is provisional. Fallout 2 script execution stays off until its §8 audit of a real Fallout 2 install is recorded. Revision 2 (owner's request) revises the audit model from the measured Fallout 1 findings, citing counts, one script name and one word, with no script bytes. Revision 3 records the retail Fallout 2 audit (0 findings) and opens the gate; every host effect stays provisional until confirmed in play |
+| SPEC-018 | Team A, with the owner's archive-role decision; Revision 2 by the coordinator | Revision 2 corrects the table grammars against the owner's retail install (its R7-R13) |
+| SPEC-019 | Team A; Revision 2 by the coordinator | Layout numbers and gameplay values marked `[Team A default]` are Team A's own choices. Revision 2 records the retail art audit |
 
 ## Hash-only oracle verification
 

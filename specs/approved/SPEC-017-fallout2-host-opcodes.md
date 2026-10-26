@@ -1,6 +1,6 @@
 # SPEC-017: Fallout 2 Host Words and VM Deltas
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Section 8 revised (Revision 2) by the coordinator at the owner's request, 2026-10-25.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Section 8 revised (Revision 2) by the coordinator at the owner's request, 2026-10-25. Revision 3 (retail audit recorded; script gate open) by the coordinator, 2026-10-25.
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-25.
 Sources:
@@ -35,6 +35,21 @@ reported 1082 findings over the owner's Fallout 1 corpus. Its sources are:
 No script byte is reproduced here, and nothing outside section 8, Decisions
 31 to 35 and this note changes. The implementing agent is not this
 revision's author.
+
+**Revision 3 (retail Fallout 2 audit), 2026-10-25.** The coordinator wrote this
+revision at the owner's request. It ran section 8's audit over the owner's
+retail Fallout 2 install (the GOG release).
+
+- **What was opened.** Only SPEC-018 §1's three archives, mounted as SPEC-018
+  says. sfall's archive and DLL, `f2_res.dat` and the `mods` folder were
+  neither mounted nor opened.
+- **What changed.**
+  - section 3.2 gains `0x8109`;
+  - section 8.4 records the audit;
+  - section 8.5's gate is **open**;
+  - Decisions 36 to 41 are new.
+- **What it cites.** Counts, word numbers, two script names and constant
+  selector values only. No script byte is reproduced.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary file layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -243,7 +258,8 @@ script headers. It is checked only indirectly, through the section 8 audit.
 
 ### 3.2 Words reassigned under Fallout 2
 
-Under `fallout2` these six words replace their SPEC-005 rows. In Fallout 1
+Under `fallout2` these seven words replace their SPEC-005 rows (six from
+the first revision, and `0x8109` from Revision 3's audit). In Fallout 1
 each was a stub, or a routine with a defect so severe that its slot was
 reusable: barter stubs, reaction stubs, an unsupported jump, and the
 non-terminating area-visibility loops. Fallout 2's public script calls of
@@ -258,6 +274,7 @@ rows are unchanged. `[Must-match]` for each row's pop order, push and checks.
 | `0x80E2` | `turn_on_objs_in_area` | `set_map_music` | track name S, map number | none | See section 4.4. `[Must-match]` |
 | `0x80E5` | `barter_offer` stub | `wm_area_set_pos` | y, x, area | none | See section 4.5. `[Must-match]` |
 | `0x80E6` | `barter_asking` stub | `set_exit_grids` | orientation, destination hex, destination elevation, destination map, marked elevation | none | See section 4.6. `[Must-match]` |
+| `0x8109` | `town_map`, pops nothing | *(unnamed; Revision 3)* | third operand U, second operand I, first operand U | I 0 | No effect, with one diagnostic per program. `[Safe rule]` (Decision 37) |
 
 The SPEC-005 `[May-improve]` rules of `0x80E1` and `0x80E2` (the area-loop
 termination) do not apply under Fallout 2, because those routines do not
@@ -944,6 +961,56 @@ findings count as findings. `[Safe rule]` (Revision 2, Decision 33)
 
 The `fallout2` table has no recorded exception in this revision.
 
+**The retail Fallout 2 audit (Revision 3, 2026-10-25).** This is the audit the
+gate of section 8.5 asks for, run over the owner's retail install with the
+`fallout2` table of Revision 3:
+
+- 1248 scripts analysed, 40 listed but absent, 0 undecodable, 29956 units,
+  0 empty procedure bodies, 74 units with leaked results.
+- **0 findings** of every kind, and no recorded exception.
+- Before Revision 3's `0x8109` row, it gave 3 merge conflicts. All three
+  were in the units that hold `0x8109`'s 4 occurrences, in two scripts.
+  Inference found two consistent candidates, pops 2 with push 0 and pops 3
+  with push 1.
+- Every one of those call sites pushes an object, the constant 13 and a
+  value. Pops 2 is consistent only because the object, a host result, would
+  then be absorbed as a leak. Pops 3 with push 1 is the reading that uses
+  every pushed operand (Decision 37).
+- The Fallout 1 model check of the same run passed: 0 findings, with the one
+  recorded exception of `gatedemo.int`.
+
+The per-word summary that section 8.5 asks to be recorded:
+
+| Word | Occurrences | Table | Consistent candidates | Operand evidence |
+| --- | ---: | --- | --- | --- |
+| `0x80B2` `mark_area_known` | 124 | pops 3, push 0 | pops 3 with push 0 or 1 | all three operands are integer constants in every call |
+| `0x80CF` `tile_in_tile_rect` | 1053 | pops 5, push 1 | pops 4, push 0; pops 5, push 1 | the four rectangle hexes are integer constants in every call |
+| `0x80E1` `metarule3` | 1188 | pops 4, push 1 | pops 3, push 0; pops 4, push 1 | the sub-function is an integer constant in every call |
+| `0x80E2` `set_map_music` | 0 | pops 2, push 0 | not inferred | — |
+| `0x80E5` `wm_area_set_pos` | 96 | pops 3, push 0 | pops 3 with push 0 or 1; pops 4, push 1 | — |
+| `0x80E6` `set_exit_grids` | 104 | pops 5, push 0 | pops 5 with push 0 or 1; pops 6, push 1 | integer constants; destination map -2 (the world map) is common |
+| `0x8156`-`0x8159` | 0 each | as section 4 | not inferred | — |
+| `0x815A`-`0x8183` (reserved) | 0 | — | — | — |
+| Stubs `0x80AD`, `0x80B3`, `0x80B5`, `0x80D1` | 0 each | as SPEC-005 | — | — |
+
+Each table signature is among its consistent candidates, so the audit
+confirms sections 3.2 and 4 as far as stack shape can.
+
+- **Words in use.** No retail script uses a word above `0x8155`. Section 4's
+  four words and the reserved range are never executed by the retail game.
+- **Selectors in use.**
+  - `metarule3` sub-functions: 100, 101, 105, 106, 108, 109, 110 and 111,
+    all inside section 5.2's range.
+  - `metarule` rules: 13 to 19, 22, 30, 31, 40, 42 to 49, and 51 to 53.
+  - Rules 52 and 53 (2 calls each) are not defined, so they take section
+    5.1's "any other" row (I 0). (Decision 39)
+
+**What the audit does not check.** It checks the stack shape of every word,
+not what a word does. Section 3.2 and 4 host effects, section 5's rules and
+sub-functions, and the SPEC-005 rows that Fallout 2 keeps are Team A's or
+SPEC-005's statements. They stay `[Must-match]` as written, and are
+confirmed by play, not by this audit. (Decision 38)
+
 **Result of Revision 2.** With this model and the exception above, the
 Fallout 1 corpus gives zero findings. The coordinator measured this on
 2026-10-25 against a prototype of the model (884 scripts, 16148 units). The
@@ -961,7 +1028,12 @@ Fallout 2 **script execution** stays gated until both hold:
 
 The gate is part of the specification, not a setting: no configuration key,
 command-line flag or preset opens it. A spec revision that records the audit
-opens it. In this revision it is **closed**. `[Safe rule]` (Decision 28)
+opens it. In the first two revisions it was closed. **Revision 3 records the
+audit (section 8.4) and opens it.** `[Safe rule]` (Decisions 28, 36)
+
+With the gate open, Fallout 2 Play loads every `.INT` with the `FALLOUT2`
+word set and runs it through the Fallout 2 host table, as map preview and the
+headless harness already did. Section 8.7's rules 2 to 7 no longer apply.
 
 Only script execution is gated. Play is not: section 8.7 says what a Play
 session does while the gate is closed. Map preview, the VM test harness of
@@ -1172,6 +1244,28 @@ it touches, and SPEC-018 §10 lists them as R1-R6.
     provisionally; the movie table is SPEC-018 §6.4 with SPEC-019 §3.21's
     flags; the kill categories are 0-18; and `push_p_proc` is event 24 in all
     three specs.
+
+**Revision 3 decisions** (2026-10-25, coordinator, at the owner's request)
+
+36. **The gate is open** (owner instruction, with the audit recorded). The
+    retail audit gives zero findings, and its per-word summary is recorded in
+    section 8.4, which is what section 8.5 asks for.
+37. **`0x8109` pops three operands and pushes I 0, with no effect under
+    Fallout 2** (coordinator default, measured). The audit shows that
+    Fallout 2 does not use Fallout 1's zero-operand `town_map` there. It does
+    not show what the word does. A diagnostic marks each program that
+    reaches it, so play can find its four call sites (two scripts). The
+    second operand is checked as I, since it is a direct integer constant at
+    every site. The other two are unchecked. A later revision that knows the
+    word replaces this row.
+38. **Stack shape is the audit's whole claim** (coordinator default). The
+    host effects stay provisional statements, now exercised by Play.
+39. **`metarule` rules 52 and 53 stay undefined, and push 0** (coordinator
+    default). The retail scripts use each twice.
+40. **Section 4's words stay defined, although the retail game never uses
+    them** (coordinator default). They cost nothing, and mods may use them.
+41. **Saves made while gated stay refused once the gate opens**, as SPEC-018
+    §7.2 says (unchanged).
 
 **Revision 2 decisions** (2026-10-25, coordinator, at the owner's request)
 
