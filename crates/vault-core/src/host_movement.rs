@@ -123,8 +123,14 @@ impl<A: WorldAssets> WorldHost<A> {
         let next = step(current, direction);
         if let Some(blocker) = self.world.movement_blocker(next, elevation, movement.actor) {
             if self.world.may_auto_open(movement.actor, blocker) {
-                // The door action's result is not checked before moving on.
-                self.request_door_open(movement.actor, blocker)?;
+                // The door action's result is not checked before moving on,
+                // except by the `enhanced` player (`crate::doors`), which stops
+                // beside a door its use did not open.
+                if !self.request_door_open(movement.actor, blocker)?
+                    && movement.actor == self.world.player
+                {
+                    return Ok(StepOutcome::Stopped);
+                }
             } else {
                 let rebuilt = self
                     .world
@@ -152,8 +158,9 @@ impl<A: WorldAssets> WorldHost<A> {
         Ok(StepOutcome::Moved)
     }
     /// The door's use (SPEC-007 §3.11.4): its script runs first; unless
-    /// overridden, the door opens or closes in its own sequence.
-    fn request_door_open(&mut self, actor: ObjectRef, door: ObjectRef) -> Result<(), WorldError> {
+    /// overridden, the door opens or closes in its own sequence. Returns
+    /// whether it started opening.
+    fn request_door_open(&mut self, actor: ObjectRef, door: ObjectRef) -> Result<bool, WorldError> {
         self.use_door(actor, door)
     }
     /// SPEC-007 §3.4: in combat each committed hex costs 1 AP with sound legs,

@@ -78,7 +78,7 @@ pub fn write_sidecar(distances: &BTreeMap<u32, Distance>) -> String {
 }
 
 /// The distances a sidecar's text records; a malformed line is an error
-/// naming it.
+/// naming it. The doors' table is [`crate::doors::parse_table`]'s.
 pub fn parse_sidecar(text: &str) -> Result<BTreeMap<u32, Distance>, String> {
     let mut distances = BTreeMap::new();
     let mut section = "";
@@ -92,11 +92,14 @@ pub fn parse_sidecar(text: &str) -> Result<BTreeMap<u32, Distance>, String> {
             .strip_prefix('[')
             .and_then(|line| line.strip_suffix(']'))
         {
-            section = if name.trim() == "companion_distance" {
-                "companion_distance"
-            } else {
-                return Err(at(format!("unknown table `[{name}]`")));
+            section = match name.trim() {
+                "companion_distance" => "companion_distance",
+                crate::doors::TABLE => crate::doors::TABLE,
+                _ => return Err(at(format!("unknown table `[{name}]`"))),
             };
+            continue;
+        }
+        if section == crate::doors::TABLE {
             continue;
         }
         if section.is_empty() {

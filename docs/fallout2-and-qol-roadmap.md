@@ -263,3 +263,24 @@ file = "data/mymod/towns.patch.txt"  # lines: <record index>|<fields>
   or a map number below 66, stop the launch with both mods named.
 - **Gating.** Registrations apply under the same rule as table overrides:
   with the Enhanced preset or a mounted mod layer.
+
+### e) Auto-open doors
+
+- **What.** Out of combat, the player's walk may pass a door, as SPEC-007
+  §3.1 and §3.11.1 already let other critters do. A click beyond the door
+  routes through its hex. On reaching it, the player uses the door through
+  the ordinary §3.11.4 use, then walks on to the clicked hex. In combat the
+  player's routes keep the Vanilla rules.
+- **Which doors.** The door must be a closed scenery door with a prototype,
+  and its lock word must be neither locked nor jammed. It must also have
+  either no script instance, or a script and an earlier open by hand in this
+  game. An open by hand is a use from the player's own click that the
+  door's `use_p_proc` let through. A script's `use_obj` request does not
+  count, and neither does an auto-open. Traps are script-driven in both
+  games, so a scripted door the player has never opened stays a blocker.
+- **Scripts.** A remembered door's `use_p_proc` still runs on every pass. If
+  it overrides, the door stays shut and the walk stops beside it.
+- **Saves.** The doors opened by hand are keyed by the map's working `.SAV`
+  name, the door's unique object identifier and its PID. They are saved in
+  `VAULTENG.TOML`'s `[opened_doors]` table, under the same sidecar rules as
+  the companion settings.

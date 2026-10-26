@@ -467,12 +467,14 @@ impl WorldState {
         })
     }
     /// Auto-door permission: a non-player actor with critter art and a biped
-    /// or robotic body, and an unlocked scenery door with a prototype.
+    /// or robotic body, and an unlocked scenery door with a prototype. The
+    /// `enhanced` preset also lets the player open some doors outside
+    /// combat ([`crate::doors`]).
     pub fn may_auto_open(&self, actor: ObjectRef, door: ObjectRef) -> bool {
         let (Some(mover), Some(blocker)) = (self.get(actor), self.get(door)) else {
             return false;
         };
-        actor != self.player
+        (actor != self.player || self.player_may_auto_open(door))
             && Fid(mover.raw.art_id).category() == 1
             && mover
                 .character

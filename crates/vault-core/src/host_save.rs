@@ -444,12 +444,11 @@ impl<A: WorldAssets> WorldHost<A> {
         // settings to keep writes it; any other save removes an old one, so
         // an overwritten slot never carries stale settings.
         let sidecar = self.preset() == crate::EnginePreset::Enhanced
-            && !self.world.companion_distance.is_empty();
+            && !(self.world.companion_distance.is_empty() && self.world.enhanced.is_empty());
         if sidecar {
-            files.push((
-                crate::companion::SIDECAR.to_string(),
-                crate::companion::write_sidecar(&self.world.companion_distance).into_bytes(),
-            ));
+            let text = crate::companion::write_sidecar(&self.world.companion_distance)
+                + &crate::doors::write_table(&self.world.enhanced.opened_doors);
+            files.push((crate::companion::SIDECAR.to_string(), text.into_bytes()));
         }
         fs::create_dir_all(&dir).map_err(|error| io(&dir, error))?;
         let staged = |name: &str| dir.join(format!("{name}.TMP"));
@@ -602,22 +601,29 @@ impl<A: WorldAssets> WorldHost<A> {
             )));
         }
         // The `enhanced` sidecar, read (and validated) under Enhanced only;
-        // a slot without one has no companion settings.
-        let distances = if self.preset() == crate::EnginePreset::Enhanced {
+        // a slot without one has no companion settings or opened doors.
+        let (distances, enhanced) = if self.preset() == crate::EnginePreset::Enhanced {
             let path = dir.join(crate::companion::SIDECAR);
             match fs::read_to_string(&path) {
-                Ok(text) => crate::companion::parse_sidecar(&text).map_err(WorldError::Invalid)?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+                Ok(text) => (
+                    crate::companion::parse_sidecar(&text).map_err(WorldError::Invalid)?,
+                    crate::doors::EnhancedState {
+                        opened_doors: crate::doors::parse_table(&text)
+                            .map_err(WorldError::Invalid)?,
+                    },
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
                 Err(error) => return Err(io(&path, error)),
             }
         } else {
-            BTreeMap::new()
+            Default::default()
         };
         match tables {
             Some(tables) => self.apply_fallout2_save(save, maps, automap, tables)?,
             None => self.apply_save(save, maps, automap)?,
         }
         self.world.companion_distance = distances;
+        self.world.enhanced = enhanced;
         Ok(())
     }
     /// SPEC-018 §7: restore a validated Fallout 2 slot: its world state is

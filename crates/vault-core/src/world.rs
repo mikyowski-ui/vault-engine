@@ -812,6 +812,9 @@ pub struct WorldState {
     /// The `enhanced` companions' combat distances by object ID
     /// ([`crate::companion`]); empty under Vanilla.
     pub companion_distance: BTreeMap<u32, crate::companion::Distance>,
+    /// The `enhanced` preset's other game state, the doors the player
+    /// opened by hand ([`crate::doors`]); empty under Vanilla.
+    pub enhanced: crate::doors::EnhancedState,
     /// SPEC-014 §3.27 the in-world cursor is in crosshair mode (the
     /// presentation layer keeps it current): enabling target outlines
     /// needs it.
@@ -1006,6 +1009,7 @@ impl WorldState {
             verbose_combat_messages: true,
             target_highlight: 2,
             companion_distance: BTreeMap::new(),
+            enhanced: Default::default(),
             crosshair: false,
             default_player_art: 0,
             visited: vec![0; crate::persistence::VISITED_BYTES],

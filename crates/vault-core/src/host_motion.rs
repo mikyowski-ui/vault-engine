@@ -76,6 +76,8 @@ pub(crate) struct Running {
     /// Entries a callback registered as it started, to follow it
     /// (§3.11.4 the container use).
     appends: Vec<(ObjectRef, i32, Motion)>,
+    /// [`MotionSequence::by_hand`].
+    by_hand: bool,
 }
 impl Running {
     fn of(sequence: &MotionSequence, cancelled: bool) -> Self {
@@ -83,6 +85,7 @@ impl Running {
             id: sequence.id,
             owners: sequence.owned(),
             insignificant: sequence.insignificant,
+            by_hand: sequence.by_hand,
             cancelled,
             appends: Vec::new(),
         }
@@ -612,8 +615,16 @@ impl<A: WorldAssets> WorldHost<A> {
         let next = step(hex, facing);
         if let Some(blocker) = self.world.movement_blocker(next, elevation, mover) {
             if self.world.may_auto_open(mover, blocker) {
-                if let Err(error) = self.use_door(mover, blocker) {
+                let opened = self.use_door(mover, blocker).unwrap_or_else(|error| {
                     self.world.diagnostic(error.to_string());
+                    false
+                });
+                // The `enhanced` player's walk (`crate::doors`) stops beside
+                // a door its use did not open (a script override); other
+                // walkers move on whatever the use did.
+                if mover == self.world.player && !opened {
+                    self.stand_on_hex(mover);
+                    return Stepped::Done;
                 }
             } else {
                 // §3.1 the request's limit still bounds the scheduled
@@ -1253,7 +1264,8 @@ impl<A: WorldAssets> WorldHost<A> {
         target: ObjectRef,
         call: Call,
     ) -> Result<(), WorldError> {
-        let sequence = self.use_motion(actor, target, call).map_err(refused)?;
+        let mut sequence = self.use_motion(actor, target, call).map_err(refused)?;
+        sequence.by_hand = actor == self.world.player && !self.script_action;
         self.start_interaction(actor, sequence, Click::Action, true)?;
         Ok(())
     }
@@ -1606,7 +1618,15 @@ impl<A: WorldAssets> WorldHost<A> {
     /// for a player using scenery; then the map update.
     fn use_object(&mut self, user: ObjectRef, target: ObjectRef) -> Result<(), WorldError> {
         if self.is_door(target) {
-            return self.use_door(user, target);
+            let by_hand = user == self.world.player
+                && self
+                    .running_motions
+                    .last()
+                    .is_some_and(|running| running.by_hand);
+            if self.use_door(user, target)? && by_hand {
+                self.opened_by_hand(target);
+            }
+            return Ok(());
         }
         let result = self.request(target, ScriptEvent::Use, user, target)?;
         if result.pending {
@@ -1632,20 +1652,24 @@ impl<A: WorldAssets> WorldHost<A> {
     /// a locked door's locked sound at once, then its `use_p_proc`; unless
     /// that overrides, a door not at frame 0 closes and a closed one opens
     /// (one already marked open stays as it is). A locked door is not
-    /// refused here.
-    pub(crate) fn use_door(&mut self, user: ObjectRef, door: ObjectRef) -> Result<(), WorldError> {
+    /// refused here. Returns whether the use started opening the door.
+    pub(crate) fn use_door(
+        &mut self,
+        user: ObjectRef,
+        door: ObjectRef,
+    ) -> Result<bool, WorldError> {
         let Some(lock) = self.world.get(door).and_then(|object| object.lock()) else {
-            return Ok(());
+            return Ok(false);
         };
         if lock.contains(LockFlags::LOCKED) {
             self.emit_open_sound(door, sound::LOCKED);
         }
         let result = self.request(door, ScriptEvent::Use, user, door)?;
         if result.overridden || result.pending {
-            return Ok(());
+            return Ok(false);
         }
         let Some(object) = self.world.get(door) else {
-            return Ok(());
+            return Ok(false);
         };
         let open_bit = object
             .lock()
@@ -1654,8 +1678,9 @@ impl<A: WorldAssets> WorldHost<A> {
             self.swing(door, false, false);
         } else if !open_bit {
             self.swing(door, true, false);
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
     /// The open or close sequence of a door or container (§3.11.4): its
     /// open bit (a forced callback for a script's request), the open or

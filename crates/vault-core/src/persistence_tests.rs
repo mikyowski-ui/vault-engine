@@ -1798,3 +1798,62 @@ fn a_save_without_enhanced_settings_removes_a_stale_sidecar() {
         .unwrap();
     assert!(!sidecar.exists());
 }
+
+#[test]
+fn enhanced_opened_doors_round_trip_through_the_sidecar() {
+    use crate::{
+        EnginePreset,
+        companion::SIDECAR,
+        doors::{DoorKey, EnhancedState},
+    };
+    let dir = corpus();
+    let door = DoorKey {
+        map: "SYNTH.SAV".into(),
+        id: 18000,
+        pid: 0x0200_0001,
+    };
+    let save = |preset: EnginePreset| {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = host(dir.path());
+        host.set_preset(preset);
+        host.load_map("maps/synth.map").unwrap();
+        host.world.enhanced.opened_doors.insert(door.clone());
+        host.save_game(root.path(), 1, &SaveInfo::default())
+            .unwrap();
+        (root, host)
+    };
+    let (vanilla_root, _) = save(EnginePreset::Vanilla);
+    let (enhanced_root, mut host) = save(EnginePreset::Enhanced);
+    let slot = |root: &tempfile::TempDir| root.path().join("SAVEGAME/SLOT01");
+    // Vanilla writes no sidecar; SAVE.DAT is the same either way.
+    assert!(!slot(&vanilla_root).join(SIDECAR).exists());
+    let text = fs::read_to_string(slot(&enhanced_root).join(SIDECAR)).unwrap();
+    assert!(text.contains("[opened_doors]\n\"SYNTH.SAV:18000\" = 33554433\n"));
+    assert_eq!(
+        fs::read(slot(&vanilla_root).join("SAVE.DAT")).unwrap(),
+        fs::read(slot(&enhanced_root).join("SAVE.DAT")).unwrap()
+    );
+    // An enhanced load restores the doors; a Vanilla load never reads them.
+    host.world.enhanced = EnhancedState::default();
+    host.load_game(enhanced_root.path(), 1).unwrap();
+    assert!(host.world.enhanced.opened_doors.contains(&door));
+    assert!(host.world.companion_distance.is_empty());
+    host.set_preset(EnginePreset::Vanilla);
+    host.load_game(enhanced_root.path(), 1).unwrap();
+    assert!(host.world.enhanced.is_empty());
+    // An enhanced save with neither doors nor companion settings removes
+    // the stale sidecar.
+    host.set_preset(EnginePreset::Enhanced);
+    host.load_game(enhanced_root.path(), 1).unwrap();
+    host.world.enhanced = EnhancedState::default();
+    host.save_game(enhanced_root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    assert!(!slot(&enhanced_root).join(SIDECAR).exists());
+    // A malformed door line fails an enhanced load.
+    fs::write(
+        slot(&enhanced_root).join(SIDECAR),
+        "[opened_doors]\n\"SYNTH.SAV:x\" = 1\n",
+    )
+    .unwrap();
+    assert!(host.load_game(enhanced_root.path(), 1).is_err());
+}

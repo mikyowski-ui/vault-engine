@@ -423,6 +423,14 @@ unchanged.
   slot, a Vanilla one included, removes an old `VAULTENG.TOML`, so an
   overwritten slot never carries stale settings. `SAVE.DAT` itself is
   byte-identical to a Vanilla save.
+- **Auto-open doors.** Out of combat, a click beyond a closed door routes
+  you through it, in both games. You open it on the way, as other critters
+  do, and walk on. The door must be neither locked nor jammed. It must also
+  have no script, or be one you have already opened yourself in this game,
+  since traps are scripted. A scripted door still runs its use script each
+  time, and if that script stops the door, you stop beside it. The doors you
+  opened are kept in `VAULTENG.TOML` the same way. In combat, doors block
+  your route as in Vanilla.
 
 Fallout 1 has no art for the new buttons and menu entries, so they are
 drawn by the engine in the palette's amber and black.

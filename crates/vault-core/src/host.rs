@@ -130,6 +130,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// An interaction's approach has just ended: its action runs as the
     /// sequence's proximity step (SPEC-013 §3.2), not a new approach.
     pub(crate) arriving: bool,
+    /// A script's `use_obj` request (SPEC-005 0x80DB) is being made: the
+    /// use it starts is not the player's own ([`crate::doors`]).
+    pub(crate) script_action: bool,
     /// SPEC-019 §3.6 what the last Fallout 2 push did, for its caller.
     pub(crate) last_push: Option<crate::host_fallout2_party::Push2>,
     /// SPEC-005 0x80F9: a dialogue-entry request for this object, serviced
@@ -322,6 +325,7 @@ impl<A: WorldAssets> WorldHost<A> {
             transition_world_map: false,
             presentation: None,
             arriving: false,
+            script_action: false,
             last_push: None,
             pending_dialogue: None,
             vm_observer: None,

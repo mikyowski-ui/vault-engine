@@ -13,6 +13,7 @@ pub mod companion;
 pub mod critical;
 pub mod debug;
 pub mod dialogue;
+pub mod doors;
 pub mod drugs;
 pub mod fallout2;
 pub mod fallout2_party;

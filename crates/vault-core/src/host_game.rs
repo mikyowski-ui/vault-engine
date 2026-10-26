@@ -1034,12 +1034,13 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             0x80db => {
                 let actor = self.target(vm);
-                if call.uint(0) != 0
-                    && actor != 0
-                    && self.sid(vm).is_some()
-                    && let Err(error) = self.action(actor, call.uint(0), ObjectAction::Use)
-                {
-                    self.world.diagnostic(error.to_string());
+                if call.uint(0) != 0 && actor != 0 && self.sid(vm).is_some() {
+                    let outer = std::mem::replace(&mut self.script_action, true);
+                    let result = self.action(actor, call.uint(0), ObjectAction::Use);
+                    self.script_action = outer;
+                    if let Err(error) = result {
+                        self.world.diagnostic(error.to_string());
+                    }
                 }
                 None
             }

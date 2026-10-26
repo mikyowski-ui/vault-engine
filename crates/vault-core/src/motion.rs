@@ -175,6 +175,9 @@ pub struct MotionSequence {
     /// Registered while combat was active: it counts toward the SPEC-014
     /// §3.27 combat lock until it ends (`clicks::CombatLock`).
     pub combat: bool,
+    /// The player's own use of an object, not a script's request: the
+    /// `enhanced` preset remembers a door it opens ([`crate::doors`]).
+    pub by_hand: bool,
 }
 impl MotionSequence {
     pub fn new() -> Self {
