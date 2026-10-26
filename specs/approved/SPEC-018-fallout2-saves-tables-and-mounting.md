@@ -1,6 +1,6 @@
 # SPEC-018: Fallout 2 Mounting, Saves and Data Tables
 
-**Status:** approved. Section 1 is an owner decision of 2026-10-25; the rest by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail corpus audit) by the coordinator, 2026-10-25.
+**Status:** approved. Section 1 is an owner decision of 2026-10-25; the rest by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail corpus audit) and Revision 3 (AI packets, player locals) by the coordinator, 2026-10-25.
 
 **Provenance:** Team A (the Spec-Author sub-agent), 2026-10-25, from the
 coordinator's brief of the same day and the owner's archive-role decision
@@ -41,6 +41,18 @@ parsers.
 - **What changes.** Each change below is marked "(Revision 2)", and
   Decisions R7 to R13 record the measurements. No game text is reproduced
   beyond single tokens and field shapes.
+
+**Revision 3 (install report and smoke run), 2026-10-25.** This revision also
+comes from the coordinator. It follows the engine's own
+`--report-fallout2-install` report and its headless new-game run over the
+same retail install, which found three more discrepancies:
+
+- Fallout 2's `ai.txt` packets do not have SPEC-009's 25 keys, so combat AI
+  failed to load;
+- the player script declares local variables in Fallout 2;
+- two city entrances have 8 items.
+
+The changes are marked "(Revision 3)", with Decisions R14 to R16.
 
 ## 1. Archive roles and mounting `[Must-match: owner decision, 2026-10-25]`
 
@@ -316,6 +328,8 @@ An entrance value is a List of exactly seven items, in this order:
 
 - An entrance with the wrong item count, an invalid item, or a lookup name
   that no map has, is dropped with a diagnostic. `[Safe rule]`
+- An entrance with exactly 8 items is read from its first seven, ignoring
+  the eighth, with a diagnostic. (Revision 3, R16)
 - An entrance whose X and Y are both -1 is valid, and is never drawn on the
   town map. Scripts and section 5 still use it. Only one of the two at -1 is
   invalid. `[Safe rule]` (Revision 2, R12)
@@ -608,10 +622,36 @@ These Fallout 2 files are outside this specification, and the engine does not
 read them under the Fallout 2 profile until another specification defines
 them. (D15)
 
-- `data/ai.txt`'s Fallout 2 keys (the seven control keys of section 4.5 inside
-  packets). The packets are read as SPEC-009 reads Fallout 1's; the added
-  keys are ignored. So SPEC-019 §2.5's second source of initial values never
-  applies in this revision. (R6)
+- `data/ai.txt`'s Fallout 2 control keys (the seven control keys of section
+  4.5 inside packets) are ignored, so SPEC-019 §2.5's second source of
+  initial values never applies. So are `body_type`, `general_type` and
+  `chem_primary_desire`. (R6) The packets themselves are read as section
+  4.7.1 says. (Revision 3)
+
+#### 4.7.1 `data/ai.txt` under Fallout 2 (Revision 3)
+
+The file grammar, the section order, packet resolution and every behavior
+are SPEC-009's. Only a packet's required keys, and its message ranges,
+differ under `fallout2`. `[Safe rule]` (R14)
+
+- **Required keys.** A packet must have SPEC-009 §2.3's keys except
+  `last_msg` and `hurt_too_much`, and also the twelve range-end keys:
+  - `run_end`, `move_end`, `attack_end`, `miss_end`;
+  - `hit_head_end`, `hit_left_arm_end`, `hit_right_arm_end`,
+    `hit_torso_end`, `hit_right_leg_end`, `hit_left_leg_end`,
+    `hit_eyes_end`, `hit_groin_end`.
+
+  As in SPEC-009 §3.1, a packet that lacks a required key fails the whole
+  table.
+- **`hurt_too_much`** is optional. Absent, the mask is 0, with no
+  diagnostic. Present, it follows SPEC-009 §2.4.
+- **`last_msg`** is not read.
+- **Message ranges.** SPEC-009 §3.17's taunt range for each type runs from
+  its start key to its own end key, both inclusive. The Run range, for
+  example, runs from `run_start` to `run_end`, not to `move_start`. A range
+  whose end is below its start is empty, so no message is printed for it,
+  and the animation still occurs, as SPEC-009 says for a missing ID.
+
 - `data/enddeath.txt` (death endings): not shown in this revision.
 - Town reputations: Team A knows no Fallout 2 data file for them, so
   SPEC-019 §3.9 draws no town-reputation rows. (R6)
@@ -1061,6 +1101,11 @@ The Fallout 2 game movie table replaces SPEC-012 §2.11's. Index m is the
   - car: `has_car` 0, `car_area` -1, `car_map` -1, `car_fuel` 0 (SPEC-019
     §2.4);
   - party: the player alone, with no retained control records;
+  - the player's script record (SPEC-006 §3.5) has a local-variable slice of
+    the count that `scripts.lst` entry 0 declares, every value 0. It is kept,
+    carried and saved as SPEC-006 §3.5 keeps any party member's locals.
+    Under Fallout 1 the entry declares none, as SPEC-006 says. (Revision 3,
+    R15)
   - played-movie record: all 17 bytes 0.
 - City music is the starting map's `music` (section 5.2), in place of
   SPEC-014 §3.12 step 8's `06vault`.
@@ -1804,6 +1849,9 @@ written the same way into every spec it touches.
 | R11 | 5 items use `{Wielded}` | Accepted as `(wielded)`. The 2 retail item fields that run two items together with no comma stay dropped, as before | Coordinator, Revision 2, measured |
 | R12 | Area 47 has two entrances at X and Y -1 | -1, -1 is an entrance with no marker | Coordinator, Revision 2, measured |
 | R13 | Party record 25's PID is a non-critter (the car trunk); 14 records write `level_pids=-1` | Non-critter records are accepted as followers; `-1` is the empty list | Coordinator, Revision 2, measured |
+| R14 | The retail `ai.txt` has 187 packets. None has `last_msg`; 43 have no `hurt_too_much`; all 187 have the twelve `*_end` keys, each at or above its start | Section 4.7.1: Fallout 2 required keys, optional `hurt_too_much`, and explicit range ends. Without it, combat AI did not load at all | Coordinator, Revision 3, measured |
+| R15 | The retail player script, `scripts.lst` entry 0, declares 5 local variables; SPEC-006 §3.5 says the Fallout 1 entry declares none | Under Fallout 2 the player's script record gets a local slice of the entry's declared count, all 0 at a new game, kept and saved like any party member's (section 6.5) | Coordinator, Revision 3, measured |
+| R16 | Two retail entrances (areas 30 and 31) have 8 items, and area 30's only entrance was dropped | An 8-item entrance is read from its first seven items. Both retail lines have -1 for the hex however they are read, so both take the header's default entrance | Coordinator, Revision 3, measured |
 | R6 | Other contradictions | Script-directed travel is SPEC-019's direct move. Encounter suppression uses SPEC-019's area circles. This spec defines dropping to terrain, the map known/visited flags, the saved area positions, the `metarule3` 104 entrance match, the world-map music, display and location names, and the `genrep.txt`, `karmavar.txt` and `endgame.txt` grammars. SPEC-011's progression tables apply provisionally. The Fallout 2 `ai.txt` keys and town reputations are not read | Team A default, reconciliation 2026-10-25 |
 
 ## 11. Verification notes
