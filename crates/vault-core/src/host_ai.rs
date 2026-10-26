@@ -206,11 +206,15 @@ fn refusal_code(refusal: Refusal) -> u8 {
 
 impl<A: WorldAssets> WorldHost<A> {
     /// §3.1 initialization: `combatai.msg` (failure is an error), then
-    /// `data/ai.txt` into the sorted packet table. A missing file or a
+    /// `data/ai.txt` into the sorted packet table, in the running game's
+    /// key set (SPEC-018 §4.7.1 under Fallout 2). A missing file or a
     /// zero-packet table is an error rather than an empty table.
     pub fn load_combat_ai(&mut self) -> Result<(), WorldError> {
         let messages = self.assets.game_messages("combatai.msg")?;
-        let packets = Packets::parse(&self.assets.resource("data/ai.txt")?)?;
+        let packets = Packets::parse_for(
+            &self.assets.resource("data/ai.txt")?,
+            self.assets.game_profile(),
+        )?;
         for diagnostic in &packets.diagnostics {
             self.world.diagnostic(format!("ai.txt: {diagnostic}"));
         }

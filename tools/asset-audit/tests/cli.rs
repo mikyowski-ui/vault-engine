@@ -1672,6 +1672,39 @@ fn reports_a_fallout2_install_with_a_smoke_run() {
         vault_fixtures::fallout2::named_map(map, "artemple.map", 3, 20100, 2),
     )
     .unwrap();
+    // SPEC-018 §4.7.1 (Revision 3): a Fallout 2 `ai.txt` packet, with no
+    // `last_msg` or `hurt_too_much` and with the twelve range ends.
+    let mut packet = String::from(
+        "[Synthetic]\npacket_num=0\nmax_dist=8\nmin_to_hit=40\nmin_hp=12\naggression=50\n\
+         secondary_freq=4\ncalled_freq=3\nfont=101\ncolor=145\noutline_color=-1\nchance=35\n",
+    );
+    for (index, key) in [
+        "run",
+        "move",
+        "attack",
+        "miss",
+        "hit_head",
+        "hit_left_arm",
+        "hit_right_arm",
+        "hit_torso",
+        "hit_right_leg",
+        "hit_left_leg",
+        "hit_eyes",
+        "hit_groin",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let start = 1000 + 10 * index;
+        packet.push_str(&format!("{key}_start={start}\n{key}_end={}\n", start + 5));
+    }
+    std::fs::write(corpus.path().join("data/ai.txt"), packet).unwrap();
+    std::fs::create_dir_all(corpus.path().join("text/english/game")).unwrap();
+    std::fs::write(
+        corpus.path().join("text/english/game/combatai.msg"),
+        b"{1000}{}{Run}\n",
+    )
+    .unwrap();
     let install = tempfile::tempdir().unwrap();
     vault_fixtures::dat2::fallout2_install(corpus.path(), install.path(), 2);
     std::fs::create_dir_all(install.path().join("data")).unwrap();
@@ -1700,6 +1733,8 @@ fn reports_a_fallout2_install_with_a_smoke_run() {
         "Fallout 2 smoke run: ARTEMPLE.SAV (map 2), 1200 ticks of 50 ms",
         "Fallout 2 word set: true",
         "Fallout 2 smoke script: 0x00000001 scripts/f2enter.int: 0 locals declared, a slice of 0",
+        // SPEC-018 §6.5 (Revision 3): the player's record has entry 0's slice.
+        "Fallout 2 smoke script: 0x04004650 scripts/synthetic.int: 4 locals declared, a slice of 4",
         "Fallout 2 smoke VM errors: 1 (1 distinct)",
         "Fallout 2 smoke VM error: 1 x scripts/f2enter.int map_enter_p_proc word 0x803c: \
          division by zero",
@@ -1716,4 +1751,6 @@ fn reports_a_fallout2_install_with_a_smoke_run() {
     assert!(parsing.ends_with(" passed, 0 failed"), "{parsing}");
     assert!(text.contains(".map\t5\t0"), "{text}");
     assert!(text.contains(", 0 failed; .pro "), "{text}");
+    // The Fallout 2 packet table loads, so combat AI is available.
+    assert!(!text.contains("combat AI unavailable"), "{text}");
 }

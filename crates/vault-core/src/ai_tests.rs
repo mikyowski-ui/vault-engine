@@ -615,3 +615,25 @@ fn spec009_fixture_j_attack_loop_trace() {
     assert_eq!(attack_loop(&mut env, RIGHT_PRIMARY, 40), Ok(false));
     assert_eq!(env.log, ["approach, taunt true"]);
 }
+
+/// SPEC-018 §4.7.1 (Revision 3): a Fallout 2 packet's taunt ranges end at
+/// their own end keys; an end below its start is empty. Fallout 1's still
+/// end at the next start.
+#[test]
+fn spec018_revision3_taunt_ranges_use_the_end_keys() {
+    let mut packet = fixture_a().packets[1].clone();
+    assert_eq!(taunt_range(&packet, Taunt::Run), (1000, 1010));
+    assert_eq!(taunt_range(&packet, Taunt::Hit(7)), (1110, 1119));
+    packet.ends = Some([
+        1005, 1015, 1025, 1035, 1045, 1055, 1065, 1075, 1085, 1095, 1105, 1100,
+    ]);
+    assert_eq!(taunt_range(&packet, Taunt::Run), (1000, 1005));
+    assert_eq!(taunt_range(&packet, Taunt::Move), (1010, 1015));
+    assert_eq!(taunt_range(&packet, Taunt::Attack), (1020, 1025));
+    assert_eq!(taunt_range(&packet, Taunt::Miss), (1030, 1035));
+    assert_eq!(taunt_range(&packet, Taunt::Hit(0)), (1040, 1045));
+    // An out-of-range location is the torso, as in SPEC-009.
+    assert_eq!(taunt_range(&packet, Taunt::Hit(9)), (1070, 1075));
+    let (start, end) = taunt_range(&packet, Taunt::Hit(7));
+    assert!(end < start, "the groin range is empty");
+}

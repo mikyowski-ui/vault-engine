@@ -491,8 +491,26 @@ impl Taunt {
         }
     }
 }
-/// §3.17 inclusive message-ID range for a taunt type.
+/// §3.17 inclusive message-ID range for a taunt type. A Fallout 2 packet's
+/// range ends at its own end key (SPEC-018 §4.7.1); an end below the start
+/// is an empty range.
 pub fn taunt_range(packet: &Packet, taunt: Taunt) -> (i32, i32) {
+    if let Some(ends) = &packet.ends {
+        return match taunt {
+            Taunt::Run => (packet.run_start, ends[0]),
+            Taunt::Move => (packet.move_start, ends[1]),
+            Taunt::Attack => (packet.attack_start, ends[2]),
+            Taunt::Miss => (packet.miss_start, ends[3]),
+            Taunt::Hit(location) => {
+                let location = if location > 7 {
+                    3
+                } else {
+                    usize::from(location)
+                };
+                (packet.hit_start[location], ends[4 + location])
+            }
+        };
+    }
     match taunt {
         Taunt::Run => (packet.run_start, packet.move_start),
         Taunt::Move => (packet.move_start, packet.attack_start),

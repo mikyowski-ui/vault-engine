@@ -32,6 +32,23 @@ pub const KEYS: [&str; 25] = [
     "last_msg",
 ];
 
+/// SPEC-018 §4.7.1 (Revision 3, R14): the twelve range-end keys every
+/// Fallout 2 packet holds, in [`Packet::ends`] order.
+pub const END_KEYS: [&str; 12] = [
+    "run_end",
+    "move_end",
+    "attack_end",
+    "miss_end",
+    "hit_head_end",
+    "hit_left_arm_end",
+    "hit_right_arm_end",
+    "hit_torso_end",
+    "hit_right_leg_end",
+    "hit_left_leg_end",
+    "hit_eyes_end",
+    "hit_groin_end",
+];
+
 /// Damage-flag masks named by `hurt_too_much` tokens.
 pub const HURT_TOKENS: [(&[u8], u32); 4] = [
     (b"blind", 0x40),
@@ -243,7 +260,12 @@ pub struct Packet {
     pub attack_start: i32,
     pub miss_start: i32,
     pub hit_start: [i32; 8],
+    /// 0 under Fallout 2, which does not read it (SPEC-018 §4.7.1).
     pub last_msg: i32,
+    /// SPEC-018 §4.7.1: under Fallout 2, each range's own end, in
+    /// [`END_KEYS`] order; `None` for a Fallout 1 packet, whose ranges end
+    /// at the next start.
+    pub ends: Option<[i32; 12]>,
 }
 
 /// The packet table in sorted section order, plus parse diagnostics.
@@ -256,17 +278,33 @@ impl Packets {
     /// Build every section's packet; a section lacking any of the 25 keys
     /// fails the whole table. A zero-packet table is also an error.
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
+        Self::parse_for(bytes, crate::GameProfile::Fallout1)
+    }
+    /// [`Packets::parse`] in `game`'s key set. Under Fallout 2 (SPEC-018
+    /// §4.7.1, Revision 3) a packet needs SPEC-009's keys except `last_msg`
+    /// (not read) and `hurt_too_much` (optional: absent is mask 0, with no
+    /// diagnostic), and also the twelve [`END_KEYS`]; a packet lacking a
+    /// required key still fails the whole table.
+    pub fn parse_for(bytes: &[u8], game: crate::GameProfile) -> Result<Self, ParseError> {
+        let fallout2 = game == crate::GameProfile::Fallout2;
         let config = Config::parse(bytes)?;
         let mut diagnostics = Vec::new();
         let mut packets = Vec::with_capacity(config.sections.len());
         for section in &config.sections {
             let label = String::from_utf8_lossy(&section.name).into_owned();
+            let lacks =
+                |key: &str| ParseError::new("AI", 0, format!("packet [{label}] lacks key {key}"));
             let mut values = [0_i32; 25];
             let mut hurt = 0;
             for (index, key) in KEYS.iter().enumerate() {
-                let value = section.get(key.as_bytes()).ok_or_else(|| {
-                    ParseError::new("AI", 0, format!("packet [{label}] lacks key {key}"))
-                })?;
+                let value = match section.get(key.as_bytes()) {
+                    Some(value) => value,
+                    None if fallout2 && (*key == "hurt_too_much" || *key == "last_msg") => continue,
+                    None => return Err(lacks(key)),
+                };
+                if fallout2 && *key == "last_msg" {
+                    continue;
+                }
                 if *key == "hurt_too_much" {
                     let (mask, unknown) = hurt_mask(value);
                     hurt = mask;
@@ -284,6 +322,20 @@ impl Packets {
                 }
                 values[index] = number;
             }
+            let ends = if fallout2 {
+                let mut ends = [0_i32; 12];
+                for (end, key) in ends.iter_mut().zip(END_KEYS) {
+                    let value = section.get(key.as_bytes()).ok_or_else(|| lacks(key))?;
+                    let (number, saturated) = decimal_prefix(value);
+                    if saturated {
+                        diagnostics.push(format!("packet [{label}]: {key} saturated to {number}"));
+                    }
+                    *end = number;
+                }
+                Some(ends)
+            } else {
+                None
+            };
             packets.push(Packet {
                 name: section.name.clone(),
                 packet_num: values[0],
@@ -304,6 +356,7 @@ impl Packets {
                 miss_start: values[15],
                 hit_start: std::array::from_fn(|location| values[16 + location]),
                 last_msg: values[24],
+                ends,
             });
         }
         if packets.is_empty() {

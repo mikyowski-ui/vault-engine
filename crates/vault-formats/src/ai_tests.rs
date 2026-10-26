@@ -199,3 +199,55 @@ fn spec009_reader_lines_keys_values_and_integers() {
     );
     assert_eq!(hurt_mask(b"\tblind"), (0, vec![b"\tblind".to_vec()]));
 }
+
+/// Fallout 2's packet: no `last_msg`, and the twelve range ends.
+fn fallout2_zeta(hurt: bool) -> String {
+    let mut text = ZETA.replace("\nlast_msg=1119", "");
+    if !hurt {
+        text = text.replace("\nhurt_too_much=Blind, crippled_legs", "");
+    }
+    for (key, end) in END_KEYS.iter().zip([
+        1005, 1015, 1025, 1035, 1045, 1055, 1065, 1075, 1085, 1095, 1105, 1100,
+    ]) {
+        text.push_str(&format!("\n{key}={end}"));
+    }
+    text
+}
+
+#[test]
+fn spec018_revision3_fallout2_packets() {
+    use crate::GameProfile::Fallout2;
+    // Without `hurt_too_much` the mask is 0, with no diagnostic;
+    // `last_msg` is not read.
+    let bytes = fixture(&fallout2_zeta(false), "", "");
+    let packets = Packets::parse_for(&bytes, Fallout2).unwrap();
+    let zeta = &packets.packets[0];
+    assert_eq!((zeta.hurt_too_much, zeta.last_msg), (0, 0));
+    assert!(packets.diagnostics.is_empty(), "{:?}", packets.diagnostics);
+    assert_eq!(
+        zeta.ends,
+        Some([
+            1005, 1015, 1025, 1035, 1045, 1055, 1065, 1075, 1085, 1095, 1105, 1100
+        ])
+    );
+    assert_eq!((zeta.run_start, zeta.hit_start[7]), (1000, 1110));
+    // A present `hurt_too_much` follows SPEC-009 §2.4.
+    let packets = Packets::parse_for(&fixture(&fallout2_zeta(true), "", ""), Fallout2).unwrap();
+    assert_eq!(packets.packets[0].hurt_too_much, 0x4c);
+    // A missing end key fails the whole table, as does another SPEC-009 key.
+    for key in ["run_end", "hit_groin_end"] {
+        let lacking: String = fallout2_zeta(false)
+            .lines()
+            .filter(|line| !line.starts_with(key))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = Packets::parse_for(&fixture(&lacking, "", ""), Fallout2).unwrap_err();
+        assert!(error.to_string().contains(key), "{error}");
+    }
+    let lacking = fallout2_zeta(false).replace("\nchance=10\nchance=35", "");
+    assert!(Packets::parse_for(&fixture(&lacking, "", ""), Fallout2).is_err());
+    // Fallout 1 still requires all 25 keys and reads no end keys.
+    assert!(Packets::parse(&fixture(&fallout2_zeta(true), "", "")).is_err());
+    let packets = Packets::parse(&standard()).unwrap();
+    assert!(packets.packets.iter().all(|packet| packet.ends.is_none()));
+}
