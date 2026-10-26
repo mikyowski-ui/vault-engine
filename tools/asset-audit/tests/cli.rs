@@ -1499,15 +1499,22 @@ fn reports_the_spec017_script_stack_model_for_both_tables() {
     // A report, not a category: it never fails the run.
     assert!(success, "{errors}");
     assert!(!text.contains("Audit categories"), "{text}");
+    // The fallout1 table's recorded exception names a script this mount
+    // lacks: it is stale, and counts as a finding.
     for line in [
         "Script stack (fallout1 table): 3 scripts, 1 listed but absent, 0 undecodable",
-        "Script stack findings: 2 (underflow 0, overflow 0, merge conflict 0, unresolved 0, \
-         refused word 2, reserved word 0, unexpected frame 0, data-dependent 0)",
+        "Script stack findings: 3 (underflow 0, overflow 0, merge conflict 0, unresolved 0, \
+         refused word 2, reserved word 0, unexpected frame 0, data-dependent 0, \
+         stale exception 1)",
+        "Script stack units with leaked results: 0",
+        "Script stack stale exception: gatedemo.int underflow at word 0x80de recorded x1, \
+         script not in the mount",
         "Script stack finding: refused word at word 0x8156 x1",
         "Script stack finding: refused word at word 0x815a x1",
         "Script stack (fallout2 table): 3 scripts, 1 listed but absent, 0 undecodable",
         "Script stack findings: 1 (underflow 0, overflow 0, merge conflict 0, unresolved 0, \
-         refused word 0, reserved word 1, unexpected frame 0, data-dependent 0)",
+         refused word 0, reserved word 1, unexpected frame 0, data-dependent 0, \
+         stale exception 0)",
         "Script stack finding: reserved word at word 0x815a x1",
         "Script stack word 0x8156 (inven_cmds): 1 occurrences, table pops 3 push 1, consistent: ",
         "Script stack word 0x80e6 (set_exit_grids): 0 occurrences, table pops 5 push 0, \
@@ -1523,6 +1530,89 @@ fn reports_the_spec017_script_stack_model_for_both_tables() {
         .find(|line| line.starts_with("Script stack word 0x8156"))
         .unwrap();
     assert!(inferred.contains("pops 3 push 1"), "{inferred}");
+    // The model check is the report's final line.
+    assert_eq!(
+        text.lines()
+            .rfind(|line| line.starts_with("Script stack"))
+            .unwrap(),
+        "Script stack model check: failed"
+    );
+}
+
+#[test]
+fn the_spec017_model_check_passes_with_a_matched_exception_and_leaked_results() {
+    // A statement call of self_obj whose result is left on the stack where
+    // a branch rejoins at body offset 0x12, and gatedemo.int's
+    // four-operand start_gdialog.
+    let leaking = |target: i32| {
+        state::returning(
+            [
+                state::push(target),
+                state::push(1),
+                state::instruction(0x802f),
+                state::instruction(0x80bc),
+                state::instruction(0x8000),
+            ]
+            .concat(),
+        )
+    };
+    // The body is the last thing in the image.
+    let probe = state::program(&[], &[(b"start".as_slice(), leaking(0))]);
+    let body = (probe.len() - leaking(0).len()) as i32;
+    let scripts = [
+        (
+            "leak.int",
+            state::program(&[], &[(b"start".as_slice(), leaking(body + 0x12))]),
+        ),
+        (
+            "gatedemo.int",
+            state::program(
+                &[],
+                &[(
+                    b"start".as_slice(),
+                    state::returning(
+                        [
+                            state::push(0),
+                            state::push(0),
+                            state::push(0),
+                            state::push(0),
+                            state::instruction(0x80de),
+                        ]
+                        .concat(),
+                    ),
+                )],
+            ),
+        ),
+    ];
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("scripts")).unwrap();
+    std::fs::write(
+        temp.path().join("scripts/scripts.lst"),
+        b"leak.int # local_vars=0\nGATEDEMO.INT # local_vars=0\n",
+    )
+    .unwrap();
+    for (name, bytes) in &scripts {
+        std::fs::write(temp.path().join("scripts").join(name), bytes).unwrap();
+    }
+    let (success, _, text, errors) = audit(temp.path(), &["--report-script-stack"]);
+    assert!(success, "{errors}");
+    for line in [
+        "Script stack (fallout1 table): 2 scripts, 0 listed but absent, 0 undecodable",
+        "Script stack findings: 0 (underflow 0, overflow 0, merge conflict 0, unresolved 0, \
+         refused word 0, reserved word 0, unexpected frame 0, data-dependent 0, \
+         stale exception 0)",
+        "Script stack units with leaked results: 1",
+        "Script stack recorded exception: gatedemo.int underflow at word 0x80de x1",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    assert!(!text.contains("Script stack finding:"), "{text}");
+    assert_eq!(
+        text.lines()
+            .rfind(|line| line.starts_with("Script stack"))
+            .unwrap(),
+        "Script stack model check: passed"
+    );
 }
 
 #[test]

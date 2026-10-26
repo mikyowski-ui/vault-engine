@@ -655,15 +655,16 @@ every `.int` that `scripts.lst` names, with SPEC-005's host-word table, and
 with `--fallout2-dir` also over a Fallout 2 install's scripts with SPEC-017's
 table. It prints findings by kind, the consistent pop/push signatures of the
 host words involved (and of SPEC-017's ten words under Fallout 2) and
-operand-type evidence; no script byte. It is a report, not a category, and
-never fails the run: §8.4's model check is not clean on the local corpus
-(884 scripts, 62 listed ones absent; 1082 findings: 1080 merge conflicts, 1
-underflow at `start_gdialog`, 1 unresolved call through a name lookup).
-Statement calls of value-returning words leave their result on the stack
-where branches rejoin; inference finds `set_critter_stat`,
-`critter_add_trait` and `critter_mod_skill` consistent only with push 0.
-That is a revision request for SPEC-017 §8.2, and Fallout 2 scripts stay
-gated.
+operand-type evidence; no script byte. Host results that statement calls
+leave on the stack are absorbed where branches rejoin (Revision 2), and the
+units where that happened are counted. Recorded exceptions print on their
+own line and are not findings; a stale one is. The report ends with
+`Script stack model check: passed` or `failed`. It is a report, not a
+category, and never fails the run. On the local corpus the model check
+passes: 884 scripts (62 listed ones absent), 16148 units, 0 findings, 487
+units with leaked results, and the one recorded exception, `gatedemo.int`'s
+underflow at `start_gdialog` (`0x80de`). Fallout 2 scripts stay gated until
+a Fallout 2 audit is recorded (SPEC-017 §8.5).
 
 `--validate-exits` checks every distinct exit grid destination of each map
 (map 0 and -1 open the world and town maps and need no tile) and every

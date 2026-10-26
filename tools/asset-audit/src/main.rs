@@ -157,13 +157,11 @@ struct Args {
     validate_transitions: bool,
     /// SPEC-017 §8: run every `.INT` that `scripts/scripts.lst` names
     /// through the abstract value-stack model with the Fallout 1 host-word
-    /// table (§8.4's model check), and report the findings by kind,
-    /// signature inference and operand-type evidence. Counts and
-    /// signatures only; no script byte is printed. A report, not an audit
-    /// category: §8.4 finds the Fallout 1 corpus is not clean under the
-    /// §8.2 model (statement calls of value-returning words leave their
-    /// result on the stack), which is a spec-revision request, so it never
-    /// fails the run.
+    /// table (§8.4's model check), and report the findings by kind, the
+    /// recorded exceptions, signature inference and operand-type evidence,
+    /// ending with the model check's pass/fail line. Counts and signatures
+    /// only; no script byte is printed. A report, not an audit category
+    /// (Decision 35): it never fails the run.
     #[arg(long)]
     report_script_stack: bool,
     /// SPEC-017 §8.1: a Fallout 2 install folder (its `MASTER.DAT`,
@@ -213,13 +211,25 @@ fn report_fallout2_art(folder: &std::path::Path) -> Result<(), Box<dyn Error>> {
 
 /// SPEC-017 §8 the script stack report (`--report-script-stack`): the
 /// Fallout 1 corpus with the Fallout 1 table, then a Fallout 2 install with
-/// the Fallout 2 table when one is given.
+/// the Fallout 2 table when one is given. The final line is §8.4's model
+/// check: the Fallout 1 run passes with zero findings.
 fn report_script_stack(vfs: &dyn Vfs, fallout2: Option<&PathBuf>) -> Result<(), Box<dyn Error>> {
     let (audit, table) = stack::audit(vfs, vault_vm::WordSet::FALLOUT1)?;
     audit.report("fallout1", &table, &[]);
-    let Some(folder) = fallout2 else {
-        return Ok(());
-    };
+    let passed = audit.total() == 0;
+    if let Some(folder) = fallout2 {
+        report_fallout2_script_stack(folder)?;
+    }
+    println!(
+        "Script stack model check: {}",
+        if passed { "passed" } else { "failed" }
+    );
+    Ok(())
+}
+
+/// SPEC-017 §8.1 a Fallout 2 install's scripts with the Fallout 2 table,
+/// with the per-word summary §8.5 records.
+fn report_fallout2_script_stack(folder: &std::path::Path) -> Result<(), Box<dyn Error>> {
     let install = vault_formats::fallout2::Fallout2Install::discover(folder)?;
     let provider = install.open()?.provider(None);
     let (audit, table) = stack::audit(&provider, vault_vm::WordSet::FALLOUT2)?;

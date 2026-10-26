@@ -7,8 +7,10 @@
 //! the model's findings, signature inference for the host words involved
 //! (§8.3) and operand-type evidence, as counts and signatures only: no
 //! script byte is printed. §8.4: with the Fallout 1 table over a Fallout 1
-//! corpus it must find nothing.
-use std::collections::{BTreeMap, BTreeSet};
+//! corpus it must find nothing, apart from the recorded exceptions.
+//! Revision 2: host results that statement calls leave on the stack are
+//! absorbed where paths rejoin.
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use vault_formats::{LstKind, LstTable, MAX_ASSET_BYTES, Vfs};
 use vault_vm::{IntProgram, WordSet, extensions};
@@ -124,6 +126,8 @@ impl Table {
 /// linear decode, and the procedure body addresses.
 #[derive(Debug, Clone)]
 pub struct Image {
+    /// The script's name, lowercase, as `scripts.lst` lists it (§8.4).
+    pub name: String,
     pub bytes: Vec<u8>,
     boundaries: BTreeSet<u32>,
     bodies: BTreeSet<u32>,
@@ -151,7 +155,7 @@ impl Image {
     /// A program's image: the initial stream unit at offset 0, depth 0,
     /// and one unit per distinct procedure body, at its declared argument
     /// count plus 1.
-    pub fn of(program: &IntProgram) -> Self {
+    pub fn of(name: String, program: &IntProgram) -> Self {
         let bytes = program.image().to_vec();
         let boundaries = linear(&bytes, &[(0, 42), (program.code_start, bytes.len())]);
         let mut units = vec![(0, 0, 0)];
@@ -170,6 +174,7 @@ impl Image {
             }
         }
         Self {
+            name,
             bytes,
             boundaries,
             bodies,
@@ -181,6 +186,7 @@ impl Image {
     #[cfg(test)]
     pub fn body(bytes: &[u8], arguments: usize) -> Self {
         Self {
+            name: String::new(),
             boundaries: linear(bytes, &[(0, bytes.len())]),
             bytes: bytes.to_vec(),
             bodies: BTreeSet::from([0]),
@@ -202,74 +208,179 @@ impl Image {
     }
 }
 
-/// A model slot: the tag and payload of the push that produced it
-/// directly, or `None` for a computed value.
-type Slot = Option<(u16, u32)>;
+/// A model slot (§8.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// The tag and payload of the slot-1 push that produced it directly.
+    Pushed(u16, u32),
+    /// A value a host word's row pushes (Revision 2).
+    Host,
+    /// Every other value, including a procedure call's and a core word's
+    /// result.
+    Unknown,
+}
 fn known(slot: Slot) -> Option<i32> {
-    slot.filter(|(tag, _)| tag & 0xf7ff == 0xc001)
-        .map(|(_, payload)| payload as i32)
+    match slot {
+        Slot::Pushed(tag, payload) if tag & 0xf7ff == 0xc001 => Some(payload as i32),
+        _ => None,
+    }
+}
+
+/// §8.2 "Leaked results" steps 1-4: an arrival's stack met with the
+/// recorded one, and whether step 3 removed a host result; `None` for a
+/// merge conflict (step 2).
+fn meet(recorded: &[Slot], arrival: &[Slot]) -> Option<(Vec<Slot>, bool)> {
+    let (deeper, shallower) = if arrival.len() > recorded.len() {
+        (arrival, recorded)
+    } else {
+        (recorded, arrival)
+    };
+    let mut k = deeper.len() - shallower.len();
+    if deeper.iter().filter(|slot| **slot == Slot::Host).count() < k {
+        return None;
+    }
+    let leaked = k > 0;
+    // The k lowest host results, nearest the bottom, are the leaked ones.
+    let remainder = deeper.iter().filter(|slot| {
+        let leak = k > 0 && **slot == Slot::Host;
+        k -= usize::from(leak);
+        !leak
+    });
+    let met = remainder
+        .zip(shallower)
+        .map(|(a, b)| if a == b { *a } else { Slot::Unknown })
+        .collect();
+    Some((met, leaked))
 }
 
 /// What one unit's analysis found.
 #[derive(Debug, Clone, Default)]
 pub struct UnitReport {
-    /// Each finding with the word involved (0 for none).
+    /// Each finding with the word involved (0 for none): at most one of a
+    /// kind per instruction address, in address order.
     pub findings: Vec<(Finding, u16)>,
     /// The host words reached, by occurrence.
     pub reached: BTreeMap<u16, usize>,
     /// Per host word and operand position (first popped first): direct
     /// constant pushes, and how many of them were static strings.
     pub operands: BTreeMap<(u16, usize), [u64; 2]>,
+    /// Whether a merge removed a leaked host result (a unit with leaked
+    /// results).
+    pub leaked: bool,
 }
 
-struct Path {
-    at: u32,
+/// The state recorded at an address: the model stack, and whether the
+/// path has run its frame word (`0x802B`).
+#[derive(Debug, Clone)]
+struct State {
     stack: Vec<Slot>,
     framed: bool,
 }
 
-/// §8.2 one unit from `start` at depth `depth`.
-pub fn analyse_unit(image: &Image, table: &Table, (start, depth, arguments): Unit) -> UnitReport {
-    let mut report = UnitReport::default();
-    let mut arrivals: BTreeMap<u32, usize> = BTreeMap::from([(start, depth)]);
-    let mut work = vec![Path {
-        at: start,
-        stack: vec![None; depth],
-        framed: false,
-    }];
-    // An arrival at an address seen before ends the path; a different
-    // depth is a merge conflict, the first arrival's kept.
-    let mut arrive =
-        |path: Path, work: &mut Vec<Path>, report: &mut UnitReport| match arrivals.get(&path.at) {
-            Some(first) => {
-                if *first != path.stack.len() {
-                    report.findings.push((Finding::MergeConflict, 0));
-                }
-            }
-            None => {
-                arrivals.insert(path.at, path.stack.len());
-                work.push(path);
-            }
+/// One unit's exploration: the state recorded per address, and the
+/// worklist of addresses to explore from their recorded state.
+struct Walk {
+    states: BTreeMap<u32, State>,
+    work: VecDeque<u32>,
+    queued: BTreeSet<u32>,
+    breadth_first: bool,
+    found: BTreeMap<(u32, Finding), u16>,
+    leaked: bool,
+}
+impl Walk {
+    fn find(&mut self, at: u32, finding: Finding, word: u16) {
+        self.found.entry((at, finding)).or_insert(word);
+    }
+    fn queue(&mut self, at: u32) {
+        if self.queued.insert(at) {
+            self.work.push_back(at);
+        }
+    }
+    fn next(&mut self) -> Option<u32> {
+        let at = if self.breadth_first {
+            self.work.pop_front()
+        } else {
+            self.work.pop_back()
+        }?;
+        self.queued.remove(&at);
+        Some(at)
+    }
+    /// §8.2 a path arriving at `at`: recorded on the first arrival, else
+    /// met with the recorded state, which a changed state replaces and
+    /// explores again (step 5). The frame flag stays the first arrival's.
+    fn arrive(&mut self, at: u32, arrival: State) {
+        let Some(recorded) = self.states.get_mut(&at) else {
+            self.states.insert(at, arrival);
+            self.queue(at);
+            return;
         };
-    while let Some(mut path) = work.pop() {
-        let Some((word, payload)) = image.word(path.at) else {
+        let Some((stack, leaked)) = meet(&recorded.stack, &arrival.stack) else {
+            self.find(at, Finding::MergeConflict, 0);
+            return;
+        };
+        self.leaked |= leaked;
+        if stack != recorded.stack {
+            recorded.stack = stack;
+            self.queue(at);
+        }
+    }
+}
+
+/// §8.2 one unit from `start` at depth `depth`.
+pub fn analyse_unit(image: &Image, table: &Table, unit: Unit) -> UnitReport {
+    explore(image, table, unit, false)
+}
+
+/// §8.2 one unit, exploring the worklist's newest address first, or with
+/// `breadth_first` its oldest.
+fn explore(
+    image: &Image,
+    table: &Table,
+    (start, depth, arguments): Unit,
+    breadth_first: bool,
+) -> UnitReport {
+    let mut walk = Walk {
+        states: BTreeMap::new(),
+        work: VecDeque::new(),
+        queued: BTreeSet::new(),
+        breadth_first,
+        found: BTreeMap::new(),
+        leaked: false,
+    };
+    walk.arrive(
+        start,
+        State {
+            stack: vec![Slot::Unknown; depth],
+            framed: false,
+        },
+    );
+    // Per host word address, from its latest exploration: the word, and
+    // per operand position whether a direct push supplied it and whether
+    // that was a static string.
+    let mut evidence: BTreeMap<u32, (u16, Vec<Option<bool>>)> = BTreeMap::new();
+    let mut reached: BTreeMap<u32, u16> = BTreeMap::new();
+    while let Some(at) = walk.next() {
+        let State {
+            mut stack,
+            mut framed,
+        } = walk.states[&at].clone();
+        let Some((word, payload)) = image.word(at) else {
             continue;
         };
-        let next = path.at + instruction_length(word);
-        let stack = &mut path.stack;
+        let next = at + instruction_length(word);
         macro_rules! pop {
             ($count:expr) => {{
                 let count: usize = $count;
                 if stack.len() < count {
-                    report.findings.push((Finding::Underflow, word));
+                    walk.find(at, Finding::Underflow, word);
                     continue;
                 }
                 let popped = stack.split_off(stack.len() - count);
                 popped
             }};
         }
-        // A jump or call target: a known integer at an instruction
-        // boundary of the linear decode.
+        // A jump target: a known integer at an instruction boundary of the
+        // linear decode.
         let target = |slot: Slot| {
             known(slot)
                 .and_then(|address| u32::try_from(address).ok())
@@ -277,21 +388,21 @@ pub fn analyse_unit(image: &Image, table: &Table, (start, depth, arguments): Uni
         };
         if word & 0x3ff == 1 {
             if !table.words.accepts(word) {
-                report.findings.push((Finding::RefusedWord, word));
+                walk.find(at, Finding::RefusedWord, word);
                 continue;
             }
-            stack.push(payload.map(|payload| (word, payload)));
+            stack.push(payload.map_or(Slot::Unknown, |payload| Slot::Pushed(word, payload)));
         } else if !table.words.accepts(word) {
-            report.findings.push((Finding::RefusedWord, word));
+            walk.find(at, Finding::RefusedWord, word);
             continue;
         } else {
             match word {
                 0x8000 | 0x8002 | 0x8003 | 0x8019 | 0x801e | 0x8029 | 0x802c | 0x8049 | 0x804a
                 | 0x804b | 0x800f => {}
-                0x800c => stack.push(None),
+                0x800c => stack.push(Slot::Unknown),
                 0x8012 | 0x8014 | 0x8028 | 0x802d | 0x8032 | 0x8043..=0x8046 => {
                     pop!(1);
-                    stack.push(None);
+                    stack.push(Slot::Unknown);
                 }
                 0x800d | 0x801a | 0x8016 | 0x8047 | 0x8048 | 0x8008 | 0x800a | 0x800b => {
                     pop!(1);
@@ -310,77 +421,75 @@ pub fn analyse_unit(image: &Image, table: &Table, (start, depth, arguments): Uni
                 }
                 0x8033..=0x8042 => {
                     pop!(2);
-                    stack.push(None);
+                    stack.push(Slot::Unknown);
                 }
                 0x801f => {
                     pop!(3);
                 }
                 0x802b => {
                     pop!(1);
-                    if path.framed {
-                        report.findings.push((Finding::UnexpectedFrame, word));
+                    if framed {
+                        walk.find(at, Finding::UnexpectedFrame, word);
                         continue;
                     }
-                    path.framed = true;
-                    stack.resize(arguments, None);
+                    framed = true;
+                    stack.resize(arguments, Slot::Unknown);
                 }
                 0x802a => stack.clear(),
                 0x8004 => {
                     let slot = pop!(1)[0];
                     let Some(target) = target(slot) else {
-                        report.findings.push((Finding::Unresolved, word));
+                        walk.find(at, Finding::Unresolved, word);
                         continue;
                     };
                     if !image.bodies.contains(&target) {
-                        path.at = target;
-                        arrive(path, &mut work, &mut report);
+                        walk.arrive(target, State { stack, framed });
                     }
                     continue;
                 }
                 0x802f => {
                     let popped = pop!(2);
                     let Some(target) = target(popped[0]) else {
-                        report.findings.push((Finding::Unresolved, word));
+                        walk.find(at, Finding::Unresolved, word);
                         continue;
                     };
-                    let branch = Path {
-                        at: target,
+                    let branch = State {
                         stack: stack.clone(),
-                        framed: path.framed,
+                        framed,
                     };
-                    arrive(branch, &mut work, &mut report);
+                    walk.arrive(target, branch);
                 }
                 0x8030 => {
                     if stack.len() < 2 {
-                        report.findings.push((Finding::Underflow, word));
+                        walk.find(at, Finding::Underflow, word);
                         continue;
                     }
                     let Some(target) = target(stack[stack.len() - 2]) else {
-                        report.findings.push((Finding::Unresolved, word));
+                        walk.find(at, Finding::Unresolved, word);
                         continue;
                     };
-                    let branch = Path {
-                        at: target,
+                    let branch = State {
                         stack: stack[..stack.len() - 2].to_vec(),
-                        framed: path.framed,
+                        framed,
                     };
-                    arrive(branch, &mut work, &mut report);
+                    walk.arrive(target, branch);
                     stack.pop();
                 }
                 0x8005 => {
+                    // Only the argument count, below the index, must be
+                    // known (Revision 2).
                     let popped = pop!(2);
-                    let (Some(_), Some(count)) = (
-                        known(popped[1]),
-                        known(popped[0]).and_then(|count| usize::try_from(count).ok()),
-                    ) else {
-                        report.findings.push((Finding::Unresolved, word));
+                    let Some(count) =
+                        known(popped[0]).and_then(|count| usize::try_from(count).ok())
+                    else {
+                        walk.find(at, Finding::Unresolved, word);
                         continue;
                     };
                     pop!(count);
-                    stack.push(None);
+                    stack.push(Slot::Unknown);
                 }
                 0x802e => {
-                    report.findings.push((Finding::DataDependent, word));
+                    walk.find(at, Finding::DataDependent, word);
                     continue;
                 }
                 0x8009 => {
@@ -389,10 +498,10 @@ pub fn analyse_unit(image: &Image, table: &Table, (start, depth, arguments): Uni
                 }
                 0x800e | 0x8010 | 0x8011 | 0x801c | 0x801d | 0x8020..=0x8026 => continue,
                 0x804c..=0xffff => {
-                    *report.reached.entry(word).or_default() += 1;
+                    reached.insert(at, word);
                     match table.effect(word) {
                         None => {
-                            report.findings.push((Finding::ReservedWord, word));
+                            walk.find(at, Finding::ReservedWord, word);
                             continue;
                         }
                         Some(Effect::Variable) => {
@@ -402,7 +511,7 @@ pub fn analyse_unit(image: &Image, table: &Table, (start, depth, arguments): Uni
                                 .and_then(known)
                                 .and_then(|count| usize::try_from(count).ok())
                             else {
-                                report.findings.push((Finding::Unresolved, word));
+                                walk.find(at, Finding::Unresolved, word);
                                 continue;
                             };
                             pop!(1);
@@ -410,44 +519,83 @@ pub fn analyse_unit(image: &Image, table: &Table, (start, depth, arguments): Uni
                         }
                         Some(Effect::Fixed { pops, push }) => {
                             let popped = pop!(usize::from(pops));
-                            for (position, slot) in popped.iter().rev().enumerate() {
-                                if let Some((tag, _)) = slot {
-                                    let evidence =
-                                        report.operands.entry((word, position)).or_default();
-                                    evidence[0] += 1;
-                                    evidence[1] += u64::from(*tag == 0x9001);
-                                }
-                            }
-                            stack.extend(std::iter::repeat_n(None, usize::from(push)));
+                            let operands = popped
+                                .iter()
+                                .rev()
+                                .map(|slot| match slot {
+                                    Slot::Pushed(tag, _) => Some(*tag == 0x9001),
+                                    _ => None,
+                                })
+                                .collect();
+                            evidence.insert(at, (word, operands));
+                            stack.extend(std::iter::repeat_n(Slot::Host, usize::from(push)));
                         }
                     }
                 }
                 _ => {
-                    report.findings.push((Finding::ReservedWord, word));
+                    walk.find(at, Finding::ReservedWord, word);
                     continue;
                 }
             }
         }
-        if path.stack.len() > MAX_DEPTH {
-            report.findings.push((Finding::Overflow, word));
+        if stack.len() > MAX_DEPTH {
+            walk.find(at, Finding::Overflow, word);
             continue;
         }
-        path.at = next;
-        arrive(path, &mut work, &mut report);
+        walk.arrive(next, State { stack, framed });
+    }
+    let mut report = UnitReport {
+        findings: walk
+            .found
+            .into_iter()
+            .map(|((_, finding), word)| (finding, word))
+            .collect(),
+        leaked: walk.leaked,
+        ..UnitReport::default()
+    };
+    for word in reached.values() {
+        *report.reached.entry(*word).or_default() += 1;
+    }
+    for (word, operands) in evidence.values() {
+        for (position, operand) in operands.iter().enumerate() {
+            if let Some(string) = operand {
+                let counts = report.operands.entry((*word, position)).or_default();
+                counts[0] += 1;
+                counts[1] += u64::from(*string);
+            }
+        }
     }
     report
 }
 
+/// §8.4 the findings recorded exceptions excuse, by script name: kind and
+/// word.
+pub type Excused = BTreeMap<String, BTreeSet<(Finding, u16)>>;
+/// Whether a unit's findings are all excused (§8.3: a recorded exception
+/// does not make a unit count as one with a finding).
+fn clean(image: &Image, report: &UnitReport, excused: &Excused) -> bool {
+    let excused = excused.get(&image.name);
+    report
+        .findings
+        .iter()
+        .all(|key| excused.is_some_and(|keys| keys.contains(key)))
+}
+
 /// §8.3 the candidates for `word` under which none of `units` has a
-/// finding.
-pub fn consistent(units: &[(&Image, Unit)], table: &Table, word: u16) -> Vec<(u8, u8)> {
+/// finding, apart from `excused` ones.
+pub fn consistent(
+    units: &[(&Image, Unit)],
+    table: &Table,
+    word: u16,
+    excused: &Excused,
+) -> Vec<(u8, u8)> {
     let mut candidates = Vec::new();
     for pops in 0..=MAX_POPS {
         for push in 0..=1 {
             let table = table.with(word, (pops, push));
             if units
                 .iter()
-                .all(|(image, unit)| analyse_unit(image, &table, *unit).findings.is_empty())
+                .all(|(image, unit)| clean(image, &analyse_unit(image, &table, *unit), excused))
             {
                 candidates.push((pops, push));
             }
@@ -455,6 +603,26 @@ pub fn consistent(units: &[(&Image, Unit)], table: &Table, word: u16) -> Vec<(u8
     }
     candidates
 }
+
+/// §8.4 a recorded exception: a finding in game data that the model
+/// correctly reports, matched exactly by the profile table (the list it is
+/// in), script, finding kind, word and count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exception {
+    pub script: &'static str,
+    pub finding: Finding,
+    pub word: u16,
+    pub count: u64,
+}
+/// §8.4 the `fallout1` table's recorded exceptions: `gatedemo.int`'s one
+/// `start_gdialog` pushes four operands, not five. The `fallout2` table
+/// has none.
+pub const FALLOUT1_EXCEPTIONS: [Exception; 1] = [Exception {
+    script: "gatedemo.int",
+    finding: Finding::Underflow,
+    word: 0x80de,
+    count: 1,
+}];
 
 /// The whole audit's tallies.
 #[derive(Debug, Default)]
@@ -467,9 +635,16 @@ pub struct StackAudit {
     pub undecodable: usize,
     pub units: usize,
     pub empty_bodies: usize,
+    /// Units in which a merge removed a leaked host result (not a
+    /// finding).
+    pub leaked_units: usize,
+    /// The findings by kind, the recorded exceptions' excluded.
     pub findings: BTreeMap<Finding, u64>,
     /// Findings by kind and word (0 for none).
     pub finding_words: BTreeMap<(Finding, u16), u64>,
+    /// §8.4 each recorded exception with its observed count, `None` when
+    /// the script is not in the mount; it matches when the counts agree.
+    pub exceptions: Vec<(Exception, Option<u64>)>,
     /// Instruction occurrences of each host word in the linear decode.
     pub occurrences: BTreeMap<u16, u64>,
     pub operands: BTreeMap<(u16, usize), [u64; 2]>,
@@ -477,17 +652,57 @@ pub struct StackAudit {
     pub inferred: BTreeMap<u16, Vec<(u8, u8)>>,
 }
 impl StackAudit {
-    pub fn total(&self) -> u64 {
-        self.findings.values().sum()
+    /// The stale exceptions: each one counts as a finding.
+    pub fn stale(&self) -> u64 {
+        self.exceptions
+            .iter()
+            .filter(|(exception, observed)| *observed != Some(exception.count))
+            .count() as u64
     }
-    /// Run over `images` with `table`, then infer the signatures of the
-    /// host words in units with findings, and of the `extra` words that
-    /// occur.
-    pub fn run(images: &[Image], table: &Table, extra: &[u16]) -> Self {
+    pub fn total(&self) -> u64 {
+        self.findings.values().sum::<u64>() + self.stale()
+    }
+    /// Run over `images` with `table` and its recorded `exceptions`, then
+    /// infer the signatures of the host words in units with findings, and
+    /// of the `extra` words that occur.
+    pub fn run(images: &[Image], table: &Table, extra: &[u16], exceptions: &[Exception]) -> Self {
         let mut audit = Self::default();
+        let reports: Vec<Vec<UnitReport>> = images
+            .iter()
+            .map(|image| {
+                image
+                    .units
+                    .iter()
+                    .map(|unit| analyse_unit(image, table, *unit))
+                    .collect()
+            })
+            .collect();
+        // §8.4 a matched exception excuses its findings; a stale one
+        // excuses none.
+        let mut excused = Excused::new();
+        for exception in exceptions {
+            let observed = images
+                .iter()
+                .zip(&reports)
+                .find(|(image, _)| image.name == exception.script)
+                .map(|(_, reports)| {
+                    reports
+                        .iter()
+                        .flat_map(|report| &report.findings)
+                        .filter(|key| **key == (exception.finding, exception.word))
+                        .count() as u64
+                });
+            if observed == Some(exception.count) {
+                excused
+                    .entry(exception.script.to_string())
+                    .or_default()
+                    .insert((exception.finding, exception.word));
+            }
+            audit.exceptions.push((*exception, observed));
+        }
         let mut containing: BTreeMap<u16, Vec<(&Image, Unit)>> = BTreeMap::new();
         let mut flagged: BTreeSet<u16> = BTreeSet::new();
-        for image in images {
+        for (image, reports) in images.iter().zip(&reports) {
             audit.scripts += 1;
             audit.empty_bodies += image.empty_bodies;
             for at in &image.boundaries {
@@ -498,10 +713,14 @@ impl StackAudit {
                     *audit.occurrences.entry(word).or_default() += 1;
                 }
             }
-            for unit in &image.units {
+            let excused_here = excused.get(&image.name);
+            for (unit, report) in image.units.iter().zip(reports) {
                 audit.units += 1;
-                let report = analyse_unit(image, table, *unit);
+                audit.leaked_units += usize::from(report.leaked);
                 for (finding, word) in &report.findings {
+                    if excused_here.is_some_and(|keys| keys.contains(&(*finding, *word))) {
+                        continue;
+                    }
                     *audit.findings.entry(*finding).or_default() += 1;
                     *audit.finding_words.entry((*finding, *word)).or_default() += 1;
                 }
@@ -510,13 +729,14 @@ impl StackAudit {
                     evidence[0] += constants;
                     evidence[1] += strings;
                 }
+                let found = !clean(image, report, &excused);
                 for word in report
                     .reached
                     .keys()
                     .filter(|word| GAME_WORDS.contains(word))
                 {
                     containing.entry(*word).or_default().push((image, *unit));
-                    if !report.findings.is_empty() {
+                    if found {
                         flagged.insert(*word);
                     }
                 }
@@ -526,7 +746,7 @@ impl StackAudit {
         for word in flagged {
             audit
                 .inferred
-                .insert(word, consistent(&containing[&word], table, word));
+                .insert(word, consistent(&containing[&word], table, word, &excused));
         }
         audit
     }
@@ -539,7 +759,7 @@ impl StackAudit {
             self.scripts, self.absent, self.undecodable, self.units, self.empty_bodies
         );
         println!(
-            "Script stack findings: {} ({})",
+            "Script stack findings: {} ({}, stale exception {})",
             self.total(),
             Finding::ALL
                 .iter()
@@ -549,8 +769,35 @@ impl StackAudit {
                     self.findings.get(kind).copied().unwrap_or(0)
                 ))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            self.stale()
         );
+        println!(
+            "Script stack units with leaked results: {}",
+            self.leaked_units
+        );
+        for (exception, observed) in &self.exceptions {
+            let Exception {
+                script,
+                finding,
+                word,
+                count,
+            } = exception;
+            let finding = finding.name();
+            match observed {
+                Some(observed) if observed == count => println!(
+                    "Script stack recorded exception: {script} {finding} at word {word:#06x} x{count}"
+                ),
+                Some(observed) => println!(
+                    "Script stack stale exception: {script} {finding} at word {word:#06x} \
+                     recorded x{count}, found x{observed}"
+                ),
+                None => println!(
+                    "Script stack stale exception: {script} {finding} at word {word:#06x} \
+                     recorded x{count}, script not in the mount"
+                ),
+            }
+        }
         for ((kind, word), count) in &self.finding_words {
             if *word == 0 {
                 println!("Script stack finding: {} x{count}", kind.name());
@@ -629,7 +876,7 @@ pub fn listed_images(vfs: &dyn Vfs) -> Result<(Vec<Image>, usize, usize), String
             continue;
         };
         match IntProgram::parse_in(&bytes, &every, false) {
-            Ok(program) => images.push(Image::of(&program)),
+            Ok(program) => images.push(Image::of(name, &program)),
             Err(error) => {
                 undecodable += 1;
                 eprintln!("SCRIPT STACK UNDECODABLE {path}: {error}");
@@ -639,17 +886,18 @@ pub fn listed_images(vfs: &dyn Vfs) -> Result<(Vec<Image>, usize, usize), String
     Ok((images, absent, undecodable))
 }
 
-/// The audit over a mounted corpus with `words`' table. Under Fallout 2,
-/// SPEC-017's ten words are inferred whenever they occur.
+/// The audit over a mounted corpus with `words`' table and its recorded
+/// exceptions. Under Fallout 2, SPEC-017's ten words are inferred whenever
+/// they occur.
 pub fn audit(vfs: &dyn Vfs, words: WordSet) -> Result<(StackAudit, Table), String> {
     let (images, absent, undecodable) = listed_images(vfs)?;
     let table = Table::new(words);
-    let extra: &[u16] = if table.words.fallout2() {
-        &SPEC017_WORDS
+    let (extra, exceptions): (&[u16], &[Exception]) = if table.words.fallout2() {
+        (&SPEC017_WORDS, &[])
     } else {
-        &[]
+        (&[], &FALLOUT1_EXCEPTIONS)
     };
-    let mut audit = StackAudit::run(&images, &table, extra);
+    let mut audit = StackAudit::run(&images, &table, extra, exceptions);
     audit.absent = absent;
     audit.undecodable = undecodable;
     Ok((audit, table))
@@ -689,20 +937,213 @@ mod tests {
     }
 
     #[test]
-    fn spec017_vector_n_the_fallout1_table_merges_at_0x30_and_infers_5_0() {
+    fn spec017_vector_n_the_fallout1_table_merges_at_0x30_and_infers_5_0_and_5_1() {
         let image = vector_n();
         let table = Table::new(WordSet::FALLOUT1);
-        let report = analyse_unit(&image, &table, image.units[0]);
-        assert_eq!(report.findings, [(Finding::MergeConflict, 0)]);
-        // Inference: only pops 5, push 0; pops 6, push 1 underflows.
+        // barter_asking leaves two known constants and no host result:
+        // a merge conflict, whichever successor is explored first.
+        for breadth_first in [false, true] {
+            let report = explore(&image, &table, image.units[0], breadth_first);
+            assert_eq!(report.findings, [(Finding::MergeConflict, 0)]);
+            assert!(!report.leaked);
+        }
+        // Inference: pops 5 with push 0, and with push 1 (the result is
+        // never consumed, so it leaks); pops 6, push 1 underflows.
         let units = [(&image, image.units[0])];
-        assert_eq!(consistent(&units, &table, 0x80e6), [(5, 0)]);
+        assert_eq!(
+            consistent(&units, &table, 0x80e6, &Excused::new()),
+            [(5, 0), (5, 1)]
+        );
+        let leak = analyse_unit(&image, &table.with(0x80e6, (5, 1)), image.units[0]);
+        assert!(leak.findings.is_empty() && leak.leaked);
         let underflow = analyse_unit(&image, &table.with(0x80e6, (6, 1)), image.units[0]);
         assert_eq!(underflow.findings, [(Finding::Underflow, 0x80e6)]);
-        let audit = StackAudit::run(&[image], &table, &[]);
+        let audit = StackAudit::run(&[image], &table, &[], &[]);
         assert_eq!(audit.total(), 1);
-        assert_eq!(audit.inferred[&0x80e6], [(5, 0)]);
+        assert_eq!(audit.leaked_units, 0);
+        assert_eq!(audit.inferred[&0x80e6], [(5, 0), (5, 1)]);
         assert_eq!(audit.occurrences[&0x80e6], 1);
+    }
+
+    #[test]
+    fn spec017_vector_o_absorbs_a_leaked_host_result_and_an_unknown_call_index() {
+        let image = Image::body(
+            &hex("80 2B C0 01 00 00 00 24 C0 01 00 00 00 01 80 2F \
+                 C0 01 00 00 00 01 C0 01 00 00 00 02 C0 01 00 00 \
+                 00 03 80 B6 C0 01 00 00 00 00 90 01 00 00 00 00 \
+                 80 28 80 05 80 1A 80 2A 80 29 80 1C"),
+            0,
+        );
+        let table = Table::new(WordSet::FALLOUT1);
+        for breadth_first in [false, true] {
+            let report = explore(&image, &table, image.units[0], breadth_first);
+            assert!(report.findings.is_empty(), "{:?}", report.findings);
+            assert!(report.leaked);
+        }
+        let audit = StackAudit::run(&[image], &table, &[], &[]);
+        assert_eq!(audit.total(), 0);
+        assert_eq!(audit.leaked_units, 1);
+        assert!(audit.inferred.is_empty());
+    }
+
+    #[test]
+    fn a_merge_removes_the_lowest_host_results_and_meets_the_rest() {
+        let constant = |value| Slot::Pushed(0xc001, value);
+        // The lowest host result goes; the one above the constant stays.
+        assert_eq!(
+            meet(
+                &[Slot::Host, constant(5), Slot::Host],
+                &[constant(5), Slot::Host]
+            ),
+            Some((vec![constant(5), Slot::Host], true))
+        );
+        // The shallower state may be the recorded one.
+        assert_eq!(
+            meet(&[constant(5)], &[Slot::Host, constant(5)]),
+            Some((vec![constant(5)], true))
+        );
+        // Equal depths: different values meet to unknown.
+        assert_eq!(
+            meet(&[constant(5), Slot::Host], &[constant(6), Slot::Host]),
+            Some((vec![Slot::Unknown, Slot::Host], false))
+        );
+        // Too few host results: pushed operands and call results are not
+        // absorbed.
+        assert_eq!(meet(&[constant(5), Slot::Host], &[]), None);
+        assert_eq!(meet(&[Slot::Unknown], &[]), None);
+    }
+
+    #[test]
+    fn a_buried_leaked_result_keeps_the_known_jump_target_above_it() {
+        // The then-arm leaves move_to's result below the end address and
+        // jumps to 0x38; the else-arm pushes the end address alone and
+        // falls through to it. 0x38 jumps to the address on top.
+        let image = Image::body(
+            &hex("80 2B C0 01 00 00 00 32 C0 01 00 00 00 01 80 2F \
+                 C0 01 00 00 00 01 C0 01 00 00 00 02 C0 01 00 00 \
+                 00 03 80 B6 C0 01 00 00 00 3A C0 01 00 00 00 38 \
+                 80 04 C0 01 00 00 00 3A 80 04 80 2A 80 29 80 1C"),
+            0,
+        );
+        let table = Table::new(WordSet::FALLOUT1);
+        for breadth_first in [false, true] {
+            let report = explore(&image, &table, image.units[0], breadth_first);
+            assert!(report.findings.is_empty(), "{:?}", report.findings);
+            assert!(report.leaked);
+        }
+    }
+
+    #[test]
+    fn a_call_needs_only_a_known_argument_count() {
+        let table = Table::new(WordSet::FALLOUT1);
+        let findings = |code: &str| {
+            let image = Image::body(&hex(code), 0);
+            analyse_unit(&image, &table, image.units[0]).findings
+        };
+        // The index comes from a name lookup: no finding.
+        assert!(
+            findings(
+                "80 2B C0 01 00 00 00 00 90 01 00 00 00 00 80 28 80 05 80 1A \
+                 80 2A 80 29 80 1C"
+            )
+            .is_empty()
+        );
+        // A computed count, or a host result as the count, is unresolved.
+        assert_eq!(
+            findings("80 2B C0 01 00 00 00 00 80 28 C0 01 00 00 00 07 80 05 80 1C"),
+            [(Finding::Unresolved, 0x8005)]
+        );
+        assert_eq!(
+            findings("80 2B 80 BC C0 01 00 00 00 07 80 05 80 1C"),
+            [(Finding::Unresolved, 0x8005)]
+        );
+    }
+
+    #[test]
+    fn recorded_exceptions_match_exactly_and_stale_ones_count() {
+        // A four-operand start_gdialog: one underflow at 0x80DE.
+        let mut image = Image::body(
+            &hex(
+                "80 2B C0 01 00 00 00 00 C0 01 00 00 00 00 C0 01 00 00 00 00 \
+                 C0 01 00 00 00 00 80 DE 80 1C",
+            ),
+            0,
+        );
+        image.name = "gatedemo.int".into();
+        let table = Table::new(WordSet::FALLOUT1);
+        let exception = |script, count| Exception {
+            script,
+            finding: Finding::Underflow,
+            word: 0x80de,
+            count,
+        };
+        // Matched: not a finding, and the unit is not one with a finding.
+        let matched = StackAudit::run(
+            std::slice::from_ref(&image),
+            &table,
+            &[],
+            &[exception("gatedemo.int", 1)],
+        );
+        assert_eq!(matched.total(), 0);
+        assert_eq!(matched.stale(), 0);
+        assert!(matched.findings.is_empty() && matched.finding_words.is_empty());
+        assert_eq!(
+            matched.exceptions,
+            [(exception("gatedemo.int", 1), Some(1))]
+        );
+        assert!(matched.inferred.is_empty());
+        // FALLOUT1_EXCEPTIONS is that row.
+        assert_eq!(FALLOUT1_EXCEPTIONS, [exception("gatedemo.int", 1)]);
+        // The count differs: one stale exception, and the finding counts.
+        let count = StackAudit::run(
+            std::slice::from_ref(&image),
+            &table,
+            &[],
+            &[exception("gatedemo.int", 2)],
+        );
+        assert_eq!(count.total(), 2);
+        assert_eq!(count.stale(), 1);
+        assert_eq!(count.findings[&Finding::Underflow], 1);
+        assert!(count.inferred.contains_key(&0x80de));
+        // The script is not in the mount.
+        let absent = StackAudit::run(
+            std::slice::from_ref(&image),
+            &table,
+            &[],
+            &[exception("absent.int", 1)],
+        );
+        assert_eq!(absent.total(), 2);
+        assert_eq!(absent.exceptions, [(exception("absent.int", 1), None)]);
+        // A different kind or word is not excused.
+        let other = StackAudit::run(
+            &[image],
+            &table,
+            &[],
+            &[Exception {
+                word: 0x80df,
+                ..exception("gatedemo.int", 1)
+            }],
+        );
+        assert_eq!(other.total(), 2);
+    }
+
+    #[test]
+    fn a_finding_is_reported_once_per_address_and_kind() {
+        // The short arm reaches 0x26 first with a leaked self_obj result;
+        // the long arm's arrival there without it re-explores 0x26, whose
+        // data-dependent jump is reported once.
+        let image = Image::body(
+            &hex("80 2B C0 01 00 00 00 1A C0 01 00 00 00 01 80 2F \
+                 80 BC C0 01 00 00 00 26 80 04 80 00 80 00 80 00 \
+                 80 00 80 00 80 00 80 2E"),
+            0,
+        );
+        let table = Table::new(WordSet::FALLOUT1);
+        for breadth_first in [false, true] {
+            let report = explore(&image, &table, image.units[0], breadth_first);
+            assert_eq!(report.findings, [(Finding::DataDependent, 0x802e)]);
+            assert!(report.leaked);
+        }
     }
 
     #[test]

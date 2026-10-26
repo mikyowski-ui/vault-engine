@@ -131,9 +131,10 @@ running game's profile; the six reassigned words, the four words
 `0x8156`-`0x8159`, the 42 reserved words that fail closed, `metarule`'s
 Fallout 2 rules and `metarule3` 100-111 (`vault_core` `host_fallout2_words`);
 `push_p_proc` and the other lifecycle names 24-27; and the §8 audit as
-`asset-audit --report-script-stack [--fallout2-dir]`. Its §8.4 model check
-reports findings on the Fallout 1 corpus (see the README), so it is a
-report and the gate stays closed. Scripts of a Fallout 2 game parse with
+`asset-audit --report-script-stack [--fallout2-dir]`. Under §8's Revision 2
+model its §8.4 model check passes on the Fallout 1 corpus, with one recorded
+exception (see the README). The gate stays closed until a Fallout 2 audit is
+recorded. Scripts of a Fallout 2 game parse with
 the Fallout 2 set, so opening the gate is the one switch.
 
 **SPEC-019** is implemented under the Fallout 2 profile, every change gated
