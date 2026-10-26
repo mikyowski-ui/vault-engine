@@ -305,6 +305,8 @@ pub struct Prototype {
     pub script: Option<i32>,
     pub data: PrototypeData,
     pub consumed_len: usize,
+    /// Safe-rule substitutions made while reading (SPEC-016 §3.1).
+    pub diagnostics: Vec<String>,
 }
 
 impl Prototype {
@@ -313,10 +315,12 @@ impl Prototype {
         Self::parse_for(bytes, crate::GameProfile::Fallout1)
     }
     /// A prototype in `game`'s layout: SPEC-016 §3.1 gives Fallout 2 critter
-    /// records one more word and an exact 416-byte length; every other
-    /// record is as SPEC-003.
+    /// records one more word and a 416-byte length, or SPEC-003's 412 bytes
+    /// with damage type 0 and a diagnostic (Revision 2); every other record
+    /// is as SPEC-003.
     pub fn parse_for(bytes: &[u8], game: crate::GameProfile) -> Result<Self, ParseError> {
         let mut r = Reader::new(bytes, "PRO")?;
+        let mut diagnostics = Vec::new();
         let pid = r.word()?;
         let category = Category::from_pid(pid)?;
         if pid & 0xffffff == 0 && pid != 0x01000000 {
@@ -427,15 +431,22 @@ impl Prototype {
                 kill_category: r.be_i32()?,
                 damage_type: match game {
                     crate::GameProfile::Fallout1 => None,
-                    crate::GameProfile::Fallout2 => {
-                        if bytes.len() != 416 {
+                    crate::GameProfile::Fallout2 => match bytes.len() {
+                        416 => Some(r.word()?),
+                        // Read at 412, it is written back at 412.
+                        412 => {
+                            diagnostics.push(format!(
+                                "critter prototype {pid:#010x} is 412 bytes, not 416; \
+                                 its damage type is 0 (normal)"
+                            ));
+                            None
+                        }
+                        length => {
                             return Err(r.error(format!(
-                                "a Fallout 2 critter prototype is 416 bytes, not {}",
-                                bytes.len()
+                                "a Fallout 2 critter prototype is 416 or 412 bytes, not {length}"
                             )));
                         }
-                        Some(r.word()?)
-                    }
+                    },
                 },
             })),
             Category::Scenery => {
@@ -489,6 +500,7 @@ impl Prototype {
             script,
             data,
             consumed_len: r.pos,
+            diagnostics,
         })
     }
 }

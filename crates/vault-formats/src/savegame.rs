@@ -476,7 +476,11 @@ impl SaveGame {
         }
         let automap_length = r.be_i32()?;
         let (campaign_b, campaign_b_status) = snapshot(&mut r)?;
-        let player = MapObject::read_tree(&mut r, prototypes, header.elevation.min(2) as u8)?;
+        let game = match shape {
+            None => crate::GameProfile::Fallout1,
+            Some(_) => crate::GameProfile::Fallout2,
+        };
+        let player = MapObject::read_tree(&mut r, prototypes, header.elevation.min(2) as u8, game)?;
         let viewport = r.be_i32()?;
         let sneak_working = r.be_i32()?;
         let stats = CritterStats {
@@ -700,7 +704,11 @@ impl SaveGame {
         snapshot(out, &self.campaign_b, self.campaign_b_status);
         let mut player = self.player.clone();
         clear_tree(&mut player);
-        player.write_tree(out)?;
+        let game = match self.fallout2 {
+            None => crate::GameProfile::Fallout1,
+            Some(_) => crate::GameProfile::Fallout2,
+        };
+        player.write_tree(out, game)?;
         put_i32(out, self.viewport);
         put_i32(out, self.sneak_working);
         put_u32(out, self.stats.flags);

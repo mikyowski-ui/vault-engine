@@ -1742,9 +1742,10 @@ impl WorldState {
                     },
                     SceneryData::Elevator { kind, level } => ObjectDetail::Elevator { kind, level },
                     SceneryData::LadderUp { destination }
-                    | SceneryData::LadderDown { destination } => {
-                        ObjectDetail::Ladder(vault_formats::pro::PackedLocation(destination))
-                    }
+                    | SceneryData::LadderDown { destination } => ObjectDetail::Ladder {
+                        map: None,
+                        destination: vault_formats::pro::PackedLocation(destination),
+                    },
                     _ => ObjectDetail::Plain,
                 },
                 _ => ObjectDetail::Plain,

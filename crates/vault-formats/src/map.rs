@@ -141,7 +141,13 @@ pub enum ObjectDetail {
         kind: i32,
         level: i32,
     },
-    Ladder(PackedLocation),
+    /// A ladder's destination. SPEC-016 §2 (Revision 2): a Fallout 2 record
+    /// carries the destination map before the packed destination; a
+    /// Fallout 1 record has only the packed destination (`map` is `None`).
+    Ladder {
+        map: Option<i32>,
+        destination: PackedLocation,
+    },
     ExitGrid {
         map: i32,
         hex: i32,
@@ -466,6 +472,7 @@ impl MapFile {
             &mut r,
             prototypes,
             flags.contains(MapFlags::SAVED),
+            game,
             &mut diagnostics,
         )?;
         for object in objects.elevations.iter_mut().flatten() {
@@ -509,6 +516,20 @@ impl MapFile {
             .copied()
     }
 }
+/// What every record of one object tree is read with.
+#[derive(Clone, Copy)]
+struct ObjectContext {
+    saved: bool,
+    game: crate::GameProfile,
+    elevation: u8,
+}
+/// What every record of one object tree is written with: the layout, and
+/// the destination map a Fallout 2 ladder without one takes.
+#[derive(Clone, Copy)]
+struct WriteContext {
+    game: crate::GameProfile,
+    map: i32,
+}
 impl MapObjects {
     /// An object section on its own. Safe-rule substitutions are not
     /// reported here; `MapFile::parse` collects them for a whole map.
@@ -517,10 +538,20 @@ impl MapObjects {
         prototypes: &impl PrototypeLookup,
         saved: bool,
     ) -> Result<Self, ParseError> {
+        Self::parse_for(bytes, prototypes, saved, crate::GameProfile::Fallout1)
+    }
+    /// An object section in `game`'s record layout (SPEC-016 §2).
+    pub fn parse_for(
+        bytes: &[u8],
+        prototypes: &impl PrototypeLookup,
+        saved: bool,
+        game: crate::GameProfile,
+    ) -> Result<Self, ParseError> {
         Self::read(
             &mut Reader::new(bytes, "MAP objects")?,
             prototypes,
             saved,
+            game,
             &mut Vec::new(),
         )
     }
@@ -528,6 +559,7 @@ impl MapObjects {
         r: &mut Reader<'_>,
         prototypes: &impl PrototypeLookup,
         saved: bool,
+        game: crate::GameProfile,
         diagnostics: &mut Vec<String>,
     ) -> Result<Self, ParseError> {
         let start = r.pos;
@@ -545,8 +577,11 @@ impl MapObjects {
                 objects.push(MapObject::read(
                     r,
                     prototypes,
-                    saved,
-                    elevation as u8,
+                    ObjectContext {
+                        saved,
+                        game,
+                        elevation: elevation as u8,
+                    },
                     None,
                     0,
                     &mut budget,
@@ -580,6 +615,7 @@ impl MapObject {
         r: &mut Reader<'_>,
         prototypes: &impl PrototypeLookup,
         elevation: u8,
+        game: crate::GameProfile,
     ) -> Result<Self, ParseError> {
         let mut budget = MAX_OBJECTS;
         // The save's player record has no diagnostics sink; substitutions
@@ -587,23 +623,31 @@ impl MapObject {
         Self::read(
             r,
             prototypes,
-            true,
-            elevation,
+            ObjectContext {
+                saved: true,
+                game,
+                elevation,
+            },
             None,
             0,
             &mut budget,
             &mut Vec::new(),
         )
     }
-    pub(crate) fn write_tree(&self, out: &mut Vec<u8>) -> Result<(), ParseError> {
-        self.write(out, self.elevation, 0)
+    /// The save's player tree. A Fallout 2 ladder in it has no map of its
+    /// own to default to, so a missing destination map is written as -1.
+    pub(crate) fn write_tree(
+        &self,
+        out: &mut Vec<u8>,
+        game: crate::GameProfile,
+    ) -> Result<(), ParseError> {
+        let context = WriteContext { game, map: -1 };
+        self.write(out, self.elevation, 0, context)
     }
-    #[allow(clippy::too_many_arguments)]
     fn read(
         r: &mut Reader<'_>,
         prototypes: &impl PrototypeLookup,
-        saved: bool,
-        elevation: u8,
+        context: ObjectContext,
         owner: Option<u32>,
         depth: usize,
         budget: &mut usize,
@@ -685,7 +729,7 @@ impl MapObject {
                                 ItemSubtype::Weapon => {
                                     let mut rounds = r.be_i32()?;
                                     let mut ammo_pid = r.be_i32()?;
-                                    if !saved {
+                                    if !context.saved {
                                         let (default_pid,capacity)=info.weapon_defaults.ok_or_else(||r.error("weapon defaults missing from prototype provider"))?;
                                         if ammo_pid == -1 || ammo_pid as u32 == 0xcccccccc {
                                             ammo_pid = default_pid;
@@ -710,8 +754,17 @@ impl MapObject {
                                 kind: r.be_i32()?,
                                 level: r.be_i32()?,
                             },
+                            // SPEC-016 §2 (Revision 2): a Fallout 2 ladder
+                            // record carries its destination map first.
                             ScenerySubtype::LadderUp | ScenerySubtype::LadderDown => {
-                                ObjectDetail::Ladder(PackedLocation(r.word()?))
+                                let map = match context.game {
+                                    crate::GameProfile::Fallout1 => None,
+                                    crate::GameProfile::Fallout2 => Some(r.be_i32()?),
+                                };
+                                ObjectDetail::Ladder {
+                                    map,
+                                    destination: PackedLocation(r.word()?),
+                                }
                             }
                             ScenerySubtype::Generic => ObjectDetail::Plain,
                         },
@@ -751,8 +804,7 @@ impl MapObject {
                 object: Self::read(
                     r,
                     prototypes,
-                    saved,
-                    elevation,
+                    context,
                     Some(p[0] as u32),
                     depth + 1,
                     budget,
@@ -791,7 +843,7 @@ impl MapObject {
             art_id,
             flags,
             stored_elevation: p[10],
-            elevation,
+            elevation: context.elevation,
             pid,
             combat_id: p[12],
             light: Light {
@@ -897,11 +949,21 @@ impl MapFile {
                 put_i32(out, 0); // obsolete next-block address
             }
         }
+        // The version selects the record layout (SPEC-016 §2); a ladder
+        // made without a destination map leads within this map.
+        let context = WriteContext {
+            game: if header.version == crate::GameProfile::Fallout2.map_version() {
+                crate::GameProfile::Fallout2
+            } else {
+                crate::GameProfile::Fallout1
+            },
+            map: header.map_number,
+        };
         put_i32(out, count(objects.iter().map(Vec::len).sum())?);
         for (elevation, saved) in objects.iter().enumerate() {
             put_i32(out, count(saved.len())?);
             for object in saved {
-                object.write(out, elevation as u8, 0)?;
+                object.write(out, elevation as u8, 0, context)?;
             }
         }
         Ok(std::mem::take(out))
@@ -943,7 +1005,13 @@ impl MapScript {
     }
 }
 impl MapObject {
-    fn write(&self, out: &mut Vec<u8>, elevation: u8, depth: usize) -> Result<(), ParseError> {
+    fn write(
+        &self,
+        out: &mut Vec<u8>,
+        elevation: u8,
+        depth: usize,
+        context: WriteContext,
+    ) -> Result<(), ParseError> {
         let error = |message: &str| ParseError::new("MAP", 0, message);
         if depth > MAX_INVENTORY_DEPTH {
             return Err(error("inventory depth exceeds the resource limit"));
@@ -1019,7 +1087,12 @@ impl MapObject {
                     ObjectDetail::Door(flags) => &[flags.0 as i32],
                     ObjectDetail::Stairs { map, destination } => &[map, destination.0 as i32],
                     ObjectDetail::Elevator { kind, level } => &[kind, level],
-                    ObjectDetail::Ladder(destination) => &[destination.0 as i32],
+                    ObjectDetail::Ladder { map, destination } => match context.game {
+                        crate::GameProfile::Fallout1 => &[destination.0 as i32],
+                        crate::GameProfile::Fallout2 => {
+                            &[map.unwrap_or(context.map), destination.0 as i32]
+                        }
+                    },
                     ObjectDetail::ExitGrid {
                         map,
                         hex,
@@ -1038,7 +1111,7 @@ impl MapObject {
                 .filter(|quantity| *quantity > 0)
                 .ok_or_else(|| error("inventory quantity must be 1..=i32::MAX"))?;
             put_i32(out, quantity);
-            entry.object.write(out, elevation, depth + 1)?;
+            entry.object.write(out, elevation, depth + 1, context)?;
         }
         Ok(())
     }

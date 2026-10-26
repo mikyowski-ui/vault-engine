@@ -869,14 +869,15 @@ fn spec016_fallout2_critters_carry_a_damage_type_word() {
     };
     assert_eq!((critter.damage_type, critter.damage_type()), (None, 0));
     assert_eq!(classic.write(), fallout1);
-    // Fallout 2's length is exact.
-    for length in [412, 420] {
+    assert!(classic.diagnostics.is_empty() && pro.diagnostics.is_empty());
+    // Fallout 2's lengths are exact: 416, or 412 (Revision 2).
+    for length in [414, 420] {
         let mut bytes = fallout2.clone();
         bytes.resize(length, 0);
         let error = Prototype::parse_for(&bytes, GameProfile::Fallout2)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("416 bytes"), "{length}: {error}");
+        assert!(error.contains("416 or 412 bytes"), "{length}: {error}");
     }
     // Other categories are unchanged under Fallout 2.
     for (category, subtype) in [(0, 0), (2, 5), (3, 0), (4, 0), (5, 0)] {
@@ -886,4 +887,107 @@ fn spec016_fallout2_critters_carry_a_damage_type_word() {
             Prototype::parse(&bytes).unwrap()
         );
     }
+}
+
+#[test]
+fn spec016_fallout2_reads_412_byte_critters_with_damage_type_0() {
+    // Revision 2: SPEC-003's record under Fallout 2 takes damage type 0
+    // with one diagnostic, and keeps its length when written back.
+    let bytes = fixture::prototype(1, 0);
+    assert_eq!(bytes.len(), 412);
+    let pro = Prototype::parse_for(&bytes, GameProfile::Fallout2).unwrap();
+    let PrototypeData::Critter(critter) = &pro.data else {
+        panic!()
+    };
+    assert_eq!((critter.damage_type, critter.damage_type()), (None, 0));
+    assert_eq!(pro.diagnostics.len(), 1, "{:?}", pro.diagnostics);
+    assert!(pro.diagnostics[0].contains("412 bytes"));
+    assert_eq!(pro.write(), bytes);
+    assert_eq!(pro.consumed_len, 412);
+}
+
+#[test]
+fn spec016_fallout2_ladder_records_carry_a_destination_map() {
+    let lookup = |pid: u32| match pid {
+        0x0200_0001 => Ok(Prototype::parse(&fixture::prototype(2, 3))?.info()),
+        _ => panic!("{pid:#x}"),
+    };
+    assert_eq!(fixture::prototype(2, 3).len(), 45);
+    // Elevation 0 has tiles (all blank) and two objects; 1 and 2 are
+    // omitted, so the writer's omission bits agree with the input.
+    let map = |version: i32, ladder: &[i32]| {
+        let mut bytes = fixture::empty_map();
+        bytes.truncate(248);
+        fixture::word(&mut bytes, 0, version);
+        fixture::word(&mut bytes, 0x28, 0xc);
+        for _ in 0..10000 {
+            bytes.extend(0x0001_0001_i32.to_be_bytes());
+        }
+        bytes.extend(fixture::words(&[0, 0, 0, 0, 0, 2, 2]));
+        let record = fixture::object(2, 20100, 1, ladder);
+        let length = record.len();
+        bytes.extend(record);
+        bytes.extend(fixture::object(5, 20101, 2, &[]));
+        bytes.extend(fixture::words(&[0, 0]));
+        (bytes, length)
+    };
+    let destination = 0x0000_4E84;
+    assert_eq!(PackedLocation(destination as u32).hex(), 20100);
+    assert_eq!(PackedLocation(destination as u32).elevation(), 0);
+    // Fallout 2: the destination map, then the packed destination.
+    let (fallout2, length) = map(20, &[7, destination]);
+    assert_eq!(length, 96);
+    let parsed = MapFile::parse_for(&fallout2, &lookup, GameProfile::Fallout2).unwrap();
+    let [ladder, second] = &parsed.objects.elevations[0][..] else {
+        panic!("{:?}", parsed.objects.elevations[0].len())
+    };
+    assert_eq!(
+        ladder.state,
+        ObjectState::Other {
+            word: 0,
+            detail: ObjectDetail::Ladder {
+                map: Some(7),
+                destination: PackedLocation(destination as u32),
+            },
+        }
+    );
+    assert_eq!((second.id, second.hex), (2, Some(20101)));
+    assert_eq!(parsed.write().unwrap(), fallout2);
+    // Fallout 1: SPEC-003's one-word, 92-byte record.
+    let (fallout1, length) = map(19, &[destination]);
+    assert_eq!(length, 92);
+    let parsed = MapFile::parse(&fallout1, &lookup).unwrap();
+    assert_eq!(
+        parsed.objects.elevations[0][0].state,
+        ObjectState::Other {
+            word: 0,
+            detail: ObjectDetail::Ladder {
+                map: None,
+                destination: PackedLocation(destination as u32),
+            },
+        }
+    );
+    assert_eq!(parsed.objects.elevations[0][1].id, 2);
+    assert_eq!(parsed.write().unwrap(), fallout1);
+    // A ladder made without a destination map leads within its own map.
+    let mut made = MapFile::parse_for(&fallout2, &lookup, GameProfile::Fallout2).unwrap();
+    made.header.map_number = 9;
+    if let ObjectState::Other { detail, .. } = &mut made.objects.elevations[0][0].state {
+        *detail = ObjectDetail::Ladder {
+            map: None,
+            destination: PackedLocation(destination as u32),
+        };
+    }
+    let written = made.write().unwrap();
+    let reread = MapFile::parse_for(&written, &lookup, GameProfile::Fallout2).unwrap();
+    let ObjectState::Other { detail, .. } = &reread.objects.elevations[0][0].state else {
+        panic!()
+    };
+    assert_eq!(
+        *detail,
+        ObjectDetail::Ladder {
+            map: Some(9),
+            destination: PackedLocation(destination as u32),
+        }
+    );
 }

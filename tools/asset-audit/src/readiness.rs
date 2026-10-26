@@ -482,14 +482,22 @@ pub fn audit_exits(
                     };
                     audit.record("exit grids", &label, result);
                 }
-                ObjectDetail::Ladder(PackedLocation(word))
+                ObjectDetail::Ladder {
+                    destination: PackedLocation(word),
+                    ..
+                }
                 | ObjectDetail::Stairs {
                     destination: PackedLocation(word),
                     ..
                 } => {
                     ladders += 1;
                     let to = match *detail {
-                        ObjectDetail::Stairs { map, .. } if map > 0 => map,
+                        ObjectDetail::Stairs { map, .. }
+                        | ObjectDetail::Ladder { map: Some(map), .. }
+                            if map > 0 =>
+                        {
+                            map
+                        }
                         _ => number,
                     };
                     let location = PackedLocation(word);

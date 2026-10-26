@@ -411,6 +411,12 @@ impl VfsWorldAssets {
                 .map_err(|_| WorldError::Invalid("invalid prototype filename".into()))?
         );
         let prototype = Arc::new(Prototype::parse_for(&self.read(&path)?, self.game.get())?);
+        for line in &prototype.diagnostics {
+            let mut diagnostics = self.diagnostics.borrow_mut();
+            if diagnostics.len() < FAILURE_CACHE_LIMIT {
+                diagnostics.push(format!("{path}: {line}"));
+            }
+        }
         // SPEC-003 §3.1 safe rule: the stored PID must be the requested one.
         if prototype.pid != pid {
             return Err(WorldError::Invalid(format!(
