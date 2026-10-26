@@ -1,6 +1,6 @@
 # SPEC-017: Fallout 2 Host Words and VM Deltas
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Section 8 revised (Revision 2) by the coordinator at the owner's request, 2026-10-25.
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-25.
 Sources:
@@ -22,6 +22,19 @@ this spec cannot certify that none of its content traces back to
 reverse-engineered material (see `PROVENANCE.md`, "In-session spec
 authoring"). Section 8 defines a corpus audit that checks the word table
 against the user's own Fallout 2 scripts, using counts only.
+
+**Revision 2 (§8 audit model), 2026-10-25.** The coordinator wrote this
+revision at the owner's request, after the first revision's §8.4 model check
+reported 1082 findings over the owner's Fallout 1 corpus. Its sources are:
+
+- the approved SPEC-004 and SPEC-005;
+- the counts the §8 audit reports;
+- the instruction words of a few Fallout 1 procedures in the owner's local
+  corpus, read only to classify those findings.
+
+No script byte is reproduced here, and nothing outside section 8, Decisions
+31 to 35 and this note changes. The implementing agent is not this
+revision's author.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary file layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -800,11 +813,17 @@ Each program is analysed in units:
 - each distinct procedure body address, starting at depth `declared argument
   count + 1`: the arguments plus the count that `0x802B` pops.
 
-Within a unit, abstract execution tracks the value-stack depth and, for each
-slot, a known integer constant or "unknown". A slot-1 push whose tag masks
-to `0xC001` is a known constant. Every other result is unknown, except that
-duplicate (`0x801B`) and swap (`0x8018`) move known values unchanged.
-Successor addresses are explored by a worklist.
+Within a unit, abstract execution tracks the value-stack depth, and for each
+slot one of these:
+
+- a **known constant**: a slot-1 push whose tag masks to `0xC001`;
+- a **host result**: the value a host word's row pushes (rows with push 1,
+  in the host-word row of the table below);
+- **unknown**: everything else, including a procedure call's result
+  (`0x8005`) and every core word's result.
+
+Duplicate (`0x801B`) and swap (`0x8018`) move slots unchanged, marks
+included. Successor addresses are explored by a worklist. (Revision 2)
 
 | Words | Effect on the model |
 | --- | --- |
@@ -822,30 +841,67 @@ Successor addresses are explored by a worklist.
 | `0x8004` | Pop the target. Continue only at the target. A target equal to a procedure body address ends the path |
 | `0x802F` | Pop the condition, then the target. Continue at the next instruction and at the target, both at the new depth |
 | `0x8030` | Continue at the next instruction at depth - 1 (the target stays), and at the target at depth - 2 |
-| `0x8005` | The top must be a known procedure index and, below it, a known argument count c. Pop both and c more values, push 1 (the procedure's result), and continue at the next instruction |
+| `0x8005` | The top is the procedure index and, below it, the argument count c, which must be known. Pop both and c more values, push 1 (the procedure's result, unknown), and continue at the next instruction. The index need not be known: an index computed by a name lookup (`0x8028`) does not change the call's stack effect (Revision 2) |
 | `0x802E` | Ends the path, recorded as **data-dependent** |
 | `0x8009` | Pop 1 and end the path |
 | `0x800E`, `0x8010`, `0x8011`, `0x801C`, `0x801D`, `0x8020`-`0x8026` | End the path |
-| Host words | Pop and push by the active profile's table: the SPEC-005 rows, as amended by sections 3 and 4. A row that sometimes omits its push (for example `critter_attempt_placement` on null) counts its normal-path push. `addregion` (`0x807F`) pops a known count n and then n more values. Reserved and unregistered words are a **reserved-word** finding and end the path |
+| Host words | Pop and push by the active profile's table: the SPEC-005 rows, as amended by sections 3 and 4. A row that sometimes omits its push (for example `critter_attempt_placement` on null) counts its normal-path push. `addregion` (`0x807F`) pops a known count n and then n more values. Each pushed value is a host result. Reserved and unregistered words are a **reserved-word** finding and end the path |
+
+**Leaked results.** The compiler emits a host word called as a statement
+without discarding its result, so the value stays on the stack until the
+procedure's frame is cleared (`0x802A`). A procedure call's result is
+discarded explicitly (`0x801A`). An address can therefore be reached with
+host results left over on one path and not on another. This is how the
+corpus is built, not a defect, and the model accepts it. (Revision 2,
+Decision 31)
+
+When a path arrives at an address that already has a recorded state:
+
+1. Let D be the deeper of the two states and S the shallower, with
+   k = depth(D) - depth(S). (When the depths are equal, D is the recorded
+   state and k = 0.)
+2. If D holds fewer than k host results, the arrival is a **merge
+   conflict**. The recorded state is kept, and this arrival ends.
+3. Otherwise remove D's k lowest host results, that is, those nearest the
+   bottom of the stack. A leaked result lies below everything the current
+   statement has pushed since. What remains has S's depth.
+4. Meet the remainder with S slot by slot, from the bottom. Two equal slots
+   keep their value. Any other pair becomes unknown.
+5. If the met state differs from the recorded state, it replaces it, and the
+   address is explored again from it. Otherwise this arrival ends.
+
+This terminates: a state only ever gets shallower, or a slot only ever
+becomes unknown. A unit in which step 3 removed at least one result is
+counted as a **unit with leaked results**. That count is reported, but it is
+not a finding.
 
 **Findings.** Each of these is reported:
 
 - **Underflow:** the depth falls below 0 before a word's pushes.
 - **Overflow:** the depth rises above 341.
-- **Merge conflict:** an address is reached at two different depths. The
-  first arrival's depth is kept, and the address is not explored again.
-- **Unresolved:** a jump or call operand is not a known constant, or a
-  target is not an instruction boundary of the linear decode. This ends the
-  path.
+- **Merge conflict:** step 2 above.
+- **Unresolved:** a jump operand, or a call's argument count, is not a known
+  constant, or a jump target is not an instruction boundary of the linear
+  decode. This ends the path.
 - The refused-word, reserved-word, unexpected-frame and data-dependent
   findings above.
+
+A unit reports each finding kind at most once per instruction address, however
+often re-exploration reaches it. A merge conflict is reported at the address
+of the arrival. (Revision 2)
 
 ### 8.3 Signature inference
 
 Take each host word W in `0x80A1..=0x8183` that occurs in at least one unit
 with a finding. Re-analyse every unit containing W once for each candidate
 signature: pops 0-8, push 0 or 1, with every other word unchanged. Report
-the candidates under which none of those units has a finding.
+the candidates under which none of those units has a finding. A recorded
+exception (section 8.4) does not make a unit count as one with a finding.
+
+A host result that is never consumed is accepted as a leak, so the corpus
+cannot tell push 0 from push 1 for a word whose result is never used. Both
+candidates are then consistent, and the report shows both. (Revision 2,
+Decision 34)
 
 The output per word is:
 
@@ -861,8 +917,38 @@ This tells, for example, whether `0x80E2`'s top operand really is text.
 
 Before any Fallout 2 result is trusted, run the same audit with the
 `fallout1` table over the user's Fallout 1 corpus. It must report zero
-findings. If it does not, the model of section 8.2 is wrong, not the host
-table: report the findings for a revision of this section.
+findings, apart from the recorded exceptions below. If it does not, the
+model of section 8.2 is wrong, not the host table: report the findings for a
+revision of this section.
+
+**Recorded exceptions.** An exception is a finding in game data that the
+model correctly reports. It is a defect in that script, not in the model or
+the table, and a spec revision records each one with its reason. An exception
+is matched exactly by:
+
+- the profile table;
+- the script's name, lowercase, as `scripts/scripts.lst` lists it;
+- the finding kind;
+- the word;
+- the count.
+
+A matching finding is reported on its own line as a recorded exception, and
+is not counted among the findings. If the observed count differs from the
+recorded count, or the script is not in the mount, that is a **stale
+exception**. A stale exception counts as one finding, and its recorded
+findings count as findings. `[Safe rule]` (Revision 2, Decision 33)
+
+| Table | Script | Finding | Word | Count | Reason |
+| --- | --- | --- | --- | --- | --- |
+| `fallout1` | `gatedemo.int` | underflow | `0x80DE` | 1 | Its one call to `start_gdialog` pushes four operands, not five. The bottommost operand is the unused list number of SPEC-005 §3. The other 430 occurrences in the Fallout 1 corpus are consistent with five pops. |
+
+The `fallout2` table has no recorded exception in this revision.
+
+**Result of Revision 2.** With this model and the exception above, the
+Fallout 1 corpus gives zero findings. The coordinator measured this on
+2026-10-25 against a prototype of the model (884 scripts, 16148 units). The
+report also prints a final line, `Script stack model check: passed` or
+`Script stack model check: failed`, when it runs the `fallout1` table.
 
 ### 8.5 The gate
 
@@ -902,8 +988,36 @@ so the entry depth is 1.
   `0x30` at depth 0: no finding.
 - With the Fallout 1 table (`barter_asking`, pops 3), it reaches `0x30` at
   depth 2: one merge conflict at `0x30`.
-- Inference then reports the single consistent candidate for `0x80E6`: pops
-  5, push 0. The candidate pops 6, push 1 underflows before its push.
+- With the Fallout 1 table (`barter_asking` pushes nothing), D holds two
+  known constants and no host result, with k = 2, so the leaked-result rule
+  cannot absorb them.
+- Inference then reports two consistent candidates for `0x80E6`: pops 5 with
+  push 0, and pops 5 with push 1. The push-1 candidate's result is never
+  consumed, so it is accepted as a leaked result (Decision 34). The
+  candidate pops 6, push 1 underflows before its push.
+
+Vector O (Revision 2) is one procedure body at offset 0, with declared
+argument count 0, so the entry depth is 1:
+
+```text
+0000: 80 2B C0 01 00 00 00 24 C0 01 00 00 00 01 80 2F
+0010: C0 01 00 00 00 01 C0 01 00 00 00 02 C0 01 00 00
+0020: 00 03 80 B6 C0 01 00 00 00 00 90 01 00 00 00 00
+0030: 80 28 80 05 80 1A 80 2A 80 29 80 1C
+```
+
+- `802B` brings the depth to 0. The branch at `0x0E` pops the condition and
+  the target `0x24`.
+- The then-arm pushes three values and runs `80B6` (`move_to`, pops 3,
+  push 1) as a statement. It reaches `0x24` holding one host result.
+- The other successor reaches `0x24` at depth 0.
+- At `0x24` the code pushes the argument count 0 and a static string, looks
+  the string up as a procedure (`8028`, so the index is unknown), calls it
+  (`8005`), and discards the call's result (`801A`).
+- Under the first revision's model, the table `fallout1` gives one merge
+  conflict and one unresolved call.
+- Under Revision 2's model it gives no finding, and one unit with leaked
+  results. That holds whichever successor is explored first.
 
 ### 8.7 Play while scripts are gated
 
@@ -1058,6 +1172,28 @@ it touches, and SPEC-018 §10 lists them as R1-R6.
     provisionally; the movie table is SPEC-018 §6.4 with SPEC-019 §3.21's
     flags; the kill categories are 0-18; and `push_p_proc` is event 24 in all
     three specs.
+
+**Revision 2 decisions** (2026-10-25, coordinator, at the owner's request)
+
+31. **Host results left on the stack by statement calls are accepted at
+    merges** (coordinator default). The first revision's model counted 1080
+    merge conflicts in the Fallout 1 corpus, all of this kind. Only host
+    results are absorbed. Pushed operands and procedure-call results are
+    not, so a row that pops too few operands is still a merge conflict
+    (Vector N).
+32. **A call's procedure index need not be known** (coordinator default).
+    The index does not change the stack effect, and one Fallout 1 call takes
+    its index from a name lookup.
+33. **A finding in game data is recorded as an exception, never modelled
+    away** (coordinator default). Each exception is matched exactly, and a
+    stale one counts as a finding. Fallout 1 has one: `gatedemo.int`'s
+    four-operand `start_gdialog`.
+34. **Push 0 and push 1 are both consistent when a word's result is never
+    consumed** (coordinator default). This is a measurement limit of a
+    corpus audit, so a word's push stays as its table states until a
+    consumed use decides it.
+35. **The model check prints a pass/fail line** (coordinator default). It
+    stays a report outside the audit categories, which are unchanged.
 
 ## 10. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included

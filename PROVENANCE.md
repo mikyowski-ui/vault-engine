@@ -115,7 +115,7 @@ specs it produces say so:
 | --- | --- | --- |
 | SPEC-015 | Coordinator, from the owner's brief and RFC 1950/1951 | The owner confirmed the open points on 2026-10-25 |
 | SPEC-016 | Coordinator, from the owner's layout brief | |
-| SPEC-017 | Team A | Every word number is provisional. Fallout 2 script execution stays off until its §8 audit of a real Fallout 2 install is recorded |
+| SPEC-017 | Team A; Revision 2 of §8 by the coordinator | Every word number is provisional. Fallout 2 script execution stays off until its §8 audit of a real Fallout 2 install is recorded. Revision 2 (owner's request) revises the audit model from the measured Fallout 1 findings, citing counts, one script name and one word, with no script bytes |
 | SPEC-018 | Team A, with the owner's archive-role decision | Table grammars and defaults are to be confirmed by a corpus audit (its §11) |
 | SPEC-019 | Team A | Layout numbers and gameplay values marked `[Team A default]` are Team A's own choices |
 
