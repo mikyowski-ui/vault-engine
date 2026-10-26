@@ -4,8 +4,14 @@
 //!
 //! The state machine is headless: [`Launcher::handle`] takes one input and
 //! may answer with an action, and [`Launcher::image`] draws the frame.
-//! File-system access goes through `validate`, `browse` and the settings
-//! writers, so tests point it at temporary directories.
+//! File-system access goes through `validate`, `browse`, the settings
+//! writers and discovery in [`Setup::data_dirs`], so tests point it at
+//! temporary directories.
+//!
+//! Each game keeps its own paths (`[profiles.<game>]` in the settings):
+//! the Game toggle keeps the fields as the old game's profile and fills
+//! them from the new game's, or, when it has none yet, with that game's
+//! data discovered in its own directories.
 //!
 //! This is engine infrastructure, not part of any specification.
 mod browse;
@@ -17,7 +23,7 @@ mod widgets;
 #[cfg(test)]
 mod tests;
 
-use crate::config::{self, Config, ModList, Preset};
+use crate::config::{self, Config, GamePaths, ModList, PerGame, Preset};
 use crate::enhanced::ViewportMode;
 use browse::{Browser, Target};
 use std::path::{Path, PathBuf};
@@ -138,6 +144,9 @@ pub struct Setup {
     /// Why the settings could not be used (a malformed file), if they
     /// could not.
     pub problem: Option<String>,
+    /// Where each game's data is looked for when its profile names none
+    /// ([`config::data_dirs`]).
+    pub data_dirs: PerGame<Vec<PathBuf>>,
 }
 
 /// Where a dropped path goes: a `.DAT` to the field its name matches
@@ -249,24 +258,25 @@ pub struct Launcher {
     browser: Option<Browser>,
     status: String,
     status_state: State,
+    data_dirs: PerGame<Vec<PathBuf>>,
+    /// The start found the fields' data on disk (the active game's profile
+    /// named none).
+    discovered: bool,
+}
+
+/// A game's name in the launcher's messages.
+fn title(game: GameProfile) -> &'static str {
+    match game {
+        GameProfile::Fallout1 => "Fallout 1",
+        GameProfile::Fallout2 => "Fallout 2",
+    }
 }
 
 impl Launcher {
     pub fn new(setup: Setup) -> Self {
-        let text = |path: &Option<PathBuf>| {
-            TextField::new(
-                path.as_ref()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            )
-        };
         let config = setup.config;
         let mut launcher = Self {
-            fields: [
-                text(&config.master_dat),
-                text(&config.critter_dat),
-                text(&config.data_root),
-            ],
+            fields: Default::default(),
             checks: [Check::unset(""), Check::unset(""), Check::unset("")],
             mods: Mods::load(config.mod_list.as_ref()),
             config,
@@ -279,14 +289,32 @@ impl Launcher {
             browser: None,
             status: String::new(),
             status_state: State::Unset,
+            data_dirs: setup.data_dirs,
+            discovered: false,
         };
+        let paths = launcher.config.paths();
+        launcher.load_fields(&paths);
+        let found = if paths.is_empty() {
+            launcher.discover_fields()
+        } else {
+            None
+        };
+        launcher.discovered = found.is_some();
         launcher.revalidate();
         launcher.revalidate_mods();
         match (setup.problem, launcher.ready()) {
             (Some(problem), _) => launcher.report(State::Bad, problem),
             (None, Ok(())) => {
                 launcher.focus = Widget::Play;
-                launcher.report(State::Ok, "Ready: Enter plays.");
+                let text = match found {
+                    Some(dir) => format!(
+                        "{} data found in {}: Enter plays.",
+                        title(launcher.config.active_game()),
+                        dir.display()
+                    ),
+                    None => "Ready: Enter plays.".into(),
+                };
+                launcher.report(State::Ok, text);
             }
             (None, Err(reason)) => launcher.report(State::Unset, reason),
         }
@@ -299,6 +327,12 @@ impl Launcher {
 
     pub fn title(&self) -> String {
         "Vault Engine — Launcher".into()
+    }
+
+    /// Whether the start found the game data on disk: the launcher shows
+    /// it before it is played.
+    pub fn discovered(&self) -> bool {
+        self.discovered
     }
 
     /// Whether the game data and the mod stack can start the game, or the
@@ -554,12 +588,11 @@ impl Launcher {
                 config.scaling = Some(config.scaling.unwrap_or(ScalingMode::AspectFit).toggled());
             }
             Widget::Game => {
-                config.game = Some(match config.game.unwrap_or_default() {
+                let game = match config.active_game() {
                     GameProfile::Fallout1 => GameProfile::Fallout2,
                     GameProfile::Fallout2 => GameProfile::Fallout1,
-                });
-                // The archives are read as the other game's format now.
-                self.revalidate();
+                };
+                self.switch_game(game);
             }
             Widget::Preset => {
                 config.preset = Some(match config.preset.unwrap_or_default() {
@@ -689,7 +722,7 @@ impl Launcher {
     /// Validate the three fields again.
     fn revalidate(&mut self) {
         let [master, critter, root] = Field::ALL.map(|field| self.path(field));
-        let game = self.config.game.unwrap_or_default();
+        let game = self.config.active_game();
         let databases = master.is_some() || critter.is_some();
         self.checks[2] = match &root {
             None => Check::unset("optional: loose files read before the archives"),
@@ -728,6 +761,59 @@ impl Launcher {
         };
     }
 
+    /// The Game toggle: the fields are kept as the old game's profile and
+    /// show the new game's, or, when it has none yet, its data discovered
+    /// in its own directories; then they validate in its format.
+    fn switch_game(&mut self, game: GameProfile) {
+        self.apply_fields();
+        self.config.switch_game(game);
+        let paths = self.config.paths();
+        self.load_fields(&paths);
+        let found = if paths.is_empty() {
+            self.discover_fields()
+        } else {
+            None
+        };
+        self.revalidate();
+        let name = title(game);
+        let source = match found {
+            Some(dir) => format!("{name} data found in {}", dir.display()),
+            None if paths.is_empty() => format!("No {name} data found"),
+            None => format!("{name} paths restored"),
+        };
+        match self.ready() {
+            Ok(()) => self.report(State::Ok, format!("{source}: ready to play.")),
+            Err(reason) => self.report(State::Unset, format!("{source}. {reason}")),
+        }
+    }
+
+    /// The active game's data discovered in its own directories fills the
+    /// fields; returns the folder it was found in.
+    fn discover_fields(&mut self) -> Option<PathBuf> {
+        let game = self.config.active_game();
+        let found = config::discover_game(self.data_dirs.get(game), game)?;
+        self.load_fields(&found);
+        found
+            .master_dat
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+    }
+
+    fn load_fields(&mut self, paths: &GamePaths) {
+        for (field, path) in
+            Field::ALL
+                .into_iter()
+                .zip([&paths.master_dat, &paths.critter_dat, &paths.data_root])
+        {
+            self.fields[field.index()] = TextField::new(
+                path.as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+        }
+    }
+
     fn set_field(&mut self, field: Field, path: &Path) {
         self.fields[field.index()] = TextField::new(path.to_string_lossy());
         self.revalidate();
@@ -736,13 +822,15 @@ impl Launcher {
     /// The fields' paths into the settings, made absolute (relative ones
     /// are relative to the working directory, as they were validated).
     fn apply_fields(&mut self) {
-        let [master, critter, root] = Field::ALL.map(|field| {
+        let [master_dat, critter_dat, data_root] = Field::ALL.map(|field| {
             self.path(field)
                 .map(|path| std::path::absolute(&path).unwrap_or(path))
         });
-        self.config.master_dat = master;
-        self.config.critter_dat = critter;
-        self.config.data_root = root;
+        self.config.set_paths(GamePaths {
+            master_dat,
+            critter_dat,
+            data_root,
+        });
     }
 
     /// A game folder holding MASTER.DAT and CRITTER.DAT fills all three

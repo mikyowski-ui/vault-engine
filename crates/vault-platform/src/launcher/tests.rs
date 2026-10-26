@@ -74,6 +74,7 @@ fn setup(dir: &Path, config: Config) -> Setup {
         save_dirs: vec![dir.to_path_buf()],
         start_dir: dir.to_path_buf(),
         problem: None,
+        data_dirs: PerGame::default(),
     }
 }
 
@@ -610,11 +611,20 @@ fn the_game_row_reads_each_games_archives() {
         .position(|widget| *widget == Widget::Browse(Field::DataRoot))
         .unwrap();
     assert_eq!(order[browse + 1], Widget::Game);
-    // Fallout 2 reads the archives as version 2: Fallout 1's are refused,
-    // with a hint.
+    // Fallout 2 has no paths of its own yet, and nothing to discover: its
+    // fields are empty. It reads the archives as version 2, so Fallout 1's
+    // are refused there, with a hint.
     launcher.focus = Widget::Game;
     key(&mut launcher, KeyCode::ArrowRight);
     assert_eq!(launcher.config.game, Some(GameProfile::Fallout2));
+    assert_eq!(launcher.path(Field::Master), None);
+    assert!(
+        launcher.status.starts_with("No Fallout 2 data found. "),
+        "{}",
+        launcher.status
+    );
+    launcher.set_field(Field::Master, &dir.join("MASTER.DAT"));
+    launcher.set_field(Field::Critter, &dir.join("CRITTER.DAT"));
     assert_eq!(launcher.checks[0].state, State::Bad);
     assert!(
         launcher.checks[0].text.contains("set Game to fallout1"),
@@ -661,14 +671,155 @@ fn the_game_row_reads_each_games_archives() {
     );
     fs::remove_file(fallout2.join("PATCH000.DAT")).unwrap();
     launcher.revalidate();
-    // Back to Fallout 1: these archives are refused, with the other hint.
+    // Back to Fallout 1: its own archives come back and validate. Fallout
+    // 2's are refused there, with the other hint.
     key(&mut launcher, KeyCode::Space);
     assert_eq!(launcher.config.game, Some(GameProfile::Fallout1));
+    assert_eq!(launcher.path(Field::Master), Some(dir.join("MASTER.DAT")));
+    assert_eq!(launcher.ready(), Ok(()));
+    launcher.set_field(Field::Master, &fallout2.join("master.dat"));
     assert!(
         launcher.checks[0].text.contains("set Game to fallout2"),
         "{:?}",
         launcher.checks[0]
     );
+}
+
+/// A Fallout 2 install whose MASTER.DAT holds every SPEC-018 §2.2
+/// required member (SPEC-015 archives).
+fn fallout2_install(dir: &Path) {
+    use vault_fixtures::dat2::{Member, archive, zlib_vector};
+    let members: Vec<Member> = vault_formats::fallout2::REQUIRED_MEMBERS
+        .iter()
+        .map(|path| Member::stored(&path.to_ascii_uppercase().replace('/', "\\"), b"x"))
+        .collect();
+    fs::write(dir.join("master.dat"), archive(&members)).unwrap();
+    fs::write(
+        dir.join("critter.dat"),
+        archive(&[Member::zlib(
+            "ART\\CRITTERS\\HERO.FRM",
+            &zlib_vector("repeat"),
+        )]),
+    )
+    .unwrap();
+}
+
+#[test]
+fn each_game_keeps_its_own_paths_through_the_toggle_and_the_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let (fallout1, fallout2) = (dir.join("fo1"), dir.join("fo2"));
+    for (folder, make) in [
+        (&fallout1, install as fn(&Path)),
+        (&fallout2, fallout2_install),
+    ] {
+        fs::create_dir_all(folder).unwrap();
+        make(folder);
+    }
+    let fo1 = [fallout1.join("MASTER.DAT"), fallout1.join("CRITTER.DAT")];
+    let fo2 = [fallout2.join("master.dat"), fallout2.join("critter.dat")];
+    let shown = |launcher: &Launcher| [Field::Master, Field::Critter].map(|f| launcher.path(f));
+    let named = |paths: &[PathBuf; 2]| paths.clone().map(Some);
+    // Each game's directories hold both games' installs: discovery takes
+    // only the archives in the game's own format.
+    let both = vec![fallout2.clone(), fallout1.clone()];
+    let path = dir.join(config::FILE_NAME);
+    let mut launcher = Launcher::new(Setup {
+        data_dirs: PerGame {
+            fallout1: both.clone(),
+            fallout2: both,
+        },
+        ..setup(dir, Config::default())
+    });
+    // No profile yet: Fallout 1's data is discovered at the start.
+    assert!(launcher.discovered());
+    assert_eq!(shown(&launcher), named(&fo1));
+    assert_eq!(launcher.ready(), Ok(()));
+    assert_eq!(
+        launcher.status,
+        format!(
+            "Fallout 1 data found in {}: Enter plays.",
+            fallout1.display()
+        )
+    );
+    // One click on Game: Fallout 2's data is discovered for its profile.
+    let game = launcher.rect(Widget::Game).unwrap();
+    let click = [game.x + 4, game.y + 4];
+    launcher.handle(LauncherInput::Press(click));
+    assert_eq!(launcher.config.game, Some(GameProfile::Fallout2));
+    assert_eq!(shown(&launcher), named(&fo2));
+    assert_eq!(launcher.ready(), Ok(()));
+    assert!(launcher.checks[..2].iter().all(Check::is_ok));
+    assert!(
+        launcher.status.starts_with("Fallout 2 data found in "),
+        "{}",
+        launcher.status
+    );
+    // From here on nothing is discovered: each click restores the other
+    // game's own validated archives.
+    launcher.data_dirs = PerGame::default();
+    for (game, paths) in [
+        (GameProfile::Fallout1, &fo1),
+        (GameProfile::Fallout2, &fo2),
+        (GameProfile::Fallout1, &fo1),
+    ] {
+        launcher.handle(LauncherInput::Press(click));
+        assert_eq!(launcher.config.game, Some(game));
+        assert_eq!(shown(&launcher), named(paths));
+        assert!(launcher.checks[..2].iter().all(Check::is_ok));
+        assert_eq!(
+            launcher.status,
+            format!("{} paths restored: ready to play.", title(game))
+        );
+    }
+    // Saved and loaded, then toggled and saved again, round after round:
+    // the active game's paths are the top-level keys and each game keeps
+    // its own table.
+    assert_eq!(launcher.save(), Ok(path.clone()));
+    for (active, paths, other, other_paths) in [
+        (GameProfile::Fallout1, &fo1, GameProfile::Fallout2, &fo2),
+        (GameProfile::Fallout2, &fo2, GameProfile::Fallout1, &fo1),
+        (GameProfile::Fallout1, &fo1, GameProfile::Fallout2, &fo2),
+    ] {
+        let text = fs::read_to_string(&path).unwrap();
+        for (name, master) in [
+            ("fallout1", "fo1/MASTER.DAT"),
+            ("fallout2", "fo2/master.dat"),
+        ] {
+            let table = format!("[profiles.{name}]\nmaster_dat = \"{master}\"\n");
+            assert!(text.contains(&table), "{text}");
+        }
+        let top = format!(
+            "master_dat = \"{}\"\n",
+            paths[0].strip_prefix(dir).unwrap().display()
+        );
+        assert!(
+            text.starts_with(&format!("# Vault Engine launcher settings.\n{top}")),
+            "{text}"
+        );
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.game, Some(active));
+        assert_eq!(loaded.master_dat.as_ref(), Some(&paths[0]));
+        assert_eq!(
+            loaded.profile(other).master_dat.as_ref(),
+            Some(&other_paths[0])
+        );
+        assert_eq!(
+            loaded.profile(other).critter_dat.as_ref(),
+            Some(&other_paths[1])
+        );
+        let mut reloaded = Launcher::new(Setup {
+            settings_path: Some(path.clone()),
+            ..setup(dir, loaded)
+        });
+        assert!(!reloaded.discovered());
+        assert_eq!(shown(&reloaded), named(paths));
+        assert_eq!(reloaded.ready(), Ok(()));
+        reloaded.handle(LauncherInput::Press(click));
+        assert_eq!(shown(&reloaded), named(other_paths));
+        assert_eq!(reloaded.ready(), Ok(()));
+        assert_eq!(reloaded.save(), Ok(path.clone()));
+    }
 }
 
 #[test]
@@ -973,6 +1124,7 @@ fn the_initial_screen_draws_the_same_frame() {
         save_dirs: Vec::new(),
         start_dir: PathBuf::from("/nonexistent"),
         problem: None,
+        data_dirs: PerGame::default(),
     });
     let image = launcher.image();
     assert_eq!((image.width(), image.height()), (640, 480));

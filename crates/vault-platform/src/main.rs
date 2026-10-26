@@ -199,16 +199,20 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
         _ => &none,
     };
     let named = args.names_asset();
-    let zero_arg_game = args.wants_data() && !named && config.has_game_data();
+    let game = args.game_profile.or(config.game).unwrap_or_default();
+    // The launched game's own paths (its profile when the flag names the
+    // other game).
+    let paths = config.launch_paths(game);
+    let zero_arg_game = args.wants_data() && !named && paths.has_game_data();
     if zero_arg_game {
         args.preview.game = true;
     }
     if (named || zero_arg_game) && args.wants_data() {
-        if let (Some(master), Some(critter)) = (&config.master_dat, &config.critter_dat) {
-            args.preview.master_dat = Some(master.clone());
-            args.preview.critter_dat = Some(critter.clone());
+        if let (Some(master), Some(critter)) = (paths.master_dat, paths.critter_dat) {
+            args.preview.master_dat = Some(master);
+            args.preview.critter_dat = Some(critter);
         }
-        args.preview.corpus_dir = config.data_root.clone();
+        args.preview.corpus_dir = paths.data_root;
     }
     args.preview.debug |= config.debug.unwrap_or(false);
     let preset = args.preset.or(config.preset).unwrap_or_default();
@@ -226,7 +230,7 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
             .or(config.scaling)
             .unwrap_or(ScalingMode::AspectFit),
         fullscreen: args.fullscreen || config.fullscreen.unwrap_or(false),
-        game: args.game_profile.or(config.game).unwrap_or_default(),
+        game,
         preset,
         enhanced,
         mod_list: config.mod_list.clone(),
@@ -339,7 +343,8 @@ fn launcher_for(
         config.preset = Some(preset);
     }
     if let Some(game) = args.game_profile {
-        config.game = Some(game);
+        // That game's profile comes up into the launcher's fields.
+        config.switch_game(game);
     }
     if args.fullscreen {
         config.fullscreen = Some(true);
@@ -360,9 +365,12 @@ fn launcher_for(
         save_dirs: config::search_dirs(),
         start_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         problem,
+        data_dirs: config::standard_data_dirs(),
     });
     match launcher.ready() {
-        Ok(()) if !forced => None,
+        // Data the launcher discovered is shown before it is played (and
+        // saved by Play).
+        Ok(()) if !forced && !launcher.discovered() => None,
         Ok(()) => Some(launcher),
         Err(reason) => {
             tracing::info!(%reason, "no valid game data set up: showing the launcher");
@@ -373,7 +381,9 @@ fn launcher_for(
 
 /// The settings file beside the executable or in the working directory.
 /// Without one, when the launch wants game data the command line does not
-/// name, the data discovered on disk, saved for the next launch.
+/// name, each game's data discovered on disk, saved for the next launch:
+/// the game the command line names is the active one, else the first
+/// found.
 fn settings(args: &Args) -> AppResult<Option<config::Config>> {
     if args.replay_inputs.is_some() {
         return Ok(None);
@@ -386,20 +396,26 @@ fn settings(args: &Args) -> AppResult<Option<config::Config>> {
     if !args.wants_data() {
         return Ok(None);
     }
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    let home = config::home_dir();
-    let Some(found) = config::discover(&config::data_dirs(exe_dir.as_deref(), home.as_deref()))
+    let profiles = config::discover_games(&config::standard_data_dirs());
+    let Some(first) = config::GAMES
+        .into_iter()
+        .find(|game| !profiles.get(*game).is_empty())
     else {
         return Ok(None);
     };
-    tracing::info!(
-        master = ?found.master_dat,
-        critter = ?found.critter_dat,
-        data = ?found.data_root,
-        "game data discovered"
-    );
+    for game in config::GAMES {
+        let paths = profiles.get(game);
+        if !paths.is_empty() {
+            tracing::info!(
+                game = config::game_name(game),
+                master = ?paths.master_dat,
+                critter = ?paths.critter_dat,
+                data = ?paths.data_root,
+                "game data discovered"
+            );
+        }
+    }
+    let found = config::Config::with_profiles(args.game_profile.unwrap_or(first), profiles);
     config::persist(&found, &dirs);
     Ok(Some(found))
 }
@@ -2085,6 +2101,22 @@ mod tests {
             vault_core::GameProfile::Fallout1
         );
         assert!(Args::try_parse_from(["vault-platform", "--game-profile", "fallout3"]).is_err());
+        // The flag's game launches with that game's own profile; a file
+        // without one (from before profiles) gives its top-level paths.
+        assert_eq!(
+            args.preview.master_dat,
+            Some("/games/fallout/MASTER.DAT".into())
+        );
+        let mut profiled = settings.clone();
+        profiled.profiles.fallout1 = config::GamePaths {
+            master_dat: Some("/fo1/MASTER.DAT".into()),
+            critter_dat: Some("/fo1/CRITTER.DAT".into()),
+            data_root: None,
+        };
+        let mut args = parse(&["--game-profile", "fallout1"]);
+        resolve_launch(&mut args, Some(&profiled));
+        assert_eq!(args.preview.master_dat, Some("/fo1/MASTER.DAT".into()));
+        assert_eq!(args.preview.corpus_dir, None);
         // SPEC-018 §6.7: Play is not refused for being Fallout 2; without
         // game data it fails on its sources, as Fallout 1 does.
         let preview = preview::PreviewArgs {

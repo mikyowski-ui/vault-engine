@@ -6,8 +6,14 @@
 //! `\\ \" \n \t \r \uXXXX \UXXXXXXXX` escapes), a literal `'string'`,
 //! `true` or `false`, a decimal integer or float (`2`, `-1_000`, `1.25`,
 //! `5e-1`), or a one-line array of strings; `#` starts a comment.
-//! Tables are not used. Relative paths are relative to the file's
-//! directory.
+//! Relative paths are relative to the file's directory.
+//!
+//! The only tables are `[profiles.fallout1]` and `[profiles.fallout2]`,
+//! after the top-level keys: each game's last-used `master_dat`,
+//! `critter_dat` and `data_root`, so switching games keeps both sets. The
+//! top-level keys stay the active game's paths (a file from before
+//! profiles is read as it always was) and win over its table when both
+//! name paths.
 //!
 //! This is engine infrastructure, not part of any specification: it only
 //! decides which game data and display options the shell starts with.
@@ -47,6 +53,9 @@ impl Preset {
         }
     }
 }
+
+/// Both games, in profile order.
+pub const GAMES: [GameProfile; 2] = [GameProfile::Fallout1, GameProfile::Fallout2];
 
 /// `fallout1` or `fallout2` (the `game` key and `--game-profile`).
 pub fn parse_game(text: &str) -> Option<GameProfile> {
@@ -173,6 +182,63 @@ pub enum ModList {
     File(PathBuf),
 }
 
+/// One game's data paths: the top-level keys for the active game, a
+/// `[profiles.<game>]` table for each game.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GamePaths {
+    pub master_dat: Option<PathBuf>,
+    pub critter_dat: Option<PathBuf>,
+    /// The loose data directory both databases consult first.
+    pub data_root: Option<PathBuf>,
+}
+
+impl GamePaths {
+    pub fn is_empty(&self) -> bool {
+        self.entries().iter().all(|(_, path)| path.is_none())
+    }
+    /// Whether the paths name game data: both databases, or a loose data
+    /// directory.
+    pub fn has_game_data(&self) -> bool {
+        (self.master_dat.is_some() && self.critter_dat.is_some()) || self.data_root.is_some()
+    }
+    fn entries(&self) -> [(&'static str, &Option<PathBuf>); 3] {
+        [
+            ("master_dat", &self.master_dat),
+            ("critter_dat", &self.critter_dat),
+            ("data_root", &self.data_root),
+        ]
+    }
+    fn entries_mut(&mut self) -> [(&'static str, &mut Option<PathBuf>); 3] {
+        [
+            ("master_dat", &mut self.master_dat),
+            ("critter_dat", &mut self.critter_dat),
+            ("data_root", &mut self.data_root),
+        ]
+    }
+}
+
+/// One value for each game.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PerGame<T> {
+    pub fallout1: T,
+    pub fallout2: T,
+}
+
+impl<T> PerGame<T> {
+    pub fn get(&self, game: GameProfile) -> &T {
+        match game {
+            GameProfile::Fallout1 => &self.fallout1,
+            GameProfile::Fallout2 => &self.fallout2,
+        }
+    }
+    pub fn get_mut(&mut self, game: GameProfile) -> &mut T {
+        match game {
+            GameProfile::Fallout1 => &mut self.fallout1,
+            GameProfile::Fallout2 => &mut self.fallout2,
+        }
+    }
+}
+
 /// The settings in `vault-engine.toml`; an absent key is `None`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
@@ -200,6 +266,10 @@ pub struct Config {
     /// Keys this engine does not know, in file order: ignored, but kept
     /// so that a rewrite does not lose them.
     pub unknown: Vec<(String, Value)>,
+    /// The other game's last-used paths (`[profiles.<game>]`). The active
+    /// game's are the top-level fields, so its entry here stays empty;
+    /// [`Config::switch_game`] moves them between the two.
+    pub profiles: PerGame<GamePaths>,
 }
 
 /// A malformed line of the settings file.
@@ -222,6 +292,9 @@ impl Config {
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let mut config = Self::default();
         let mut seen: Vec<&'static str> = Vec::new();
+        // The profile table being read, and the tables read.
+        let mut table: Option<GameProfile> = None;
+        let mut tables: Vec<GameProfile> = Vec::new();
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
             let error = |message: String| ConfigError { line, message };
@@ -234,8 +307,30 @@ impl Config {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            if trimmed.starts_with('[') {
-                return Err(error("tables are not supported".into()));
+            if let Some(header) = trimmed.strip_prefix('[') {
+                let (name, rest) = header
+                    .split_once(']')
+                    .ok_or_else(|| error("unterminated table header".into()))?;
+                let rest = rest.trim_start();
+                if !(rest.is_empty() || rest.starts_with('#')) {
+                    return Err(error(format!("unexpected `{rest}` after the table header")));
+                }
+                let name = name.trim();
+                let game = name
+                    .strip_prefix("profiles.")
+                    .and_then(parse_game)
+                    .ok_or_else(|| {
+                        error(format!(
+                            "unsupported table `[{name}]` (only [profiles.fallout1] and \
+                             [profiles.fallout2])"
+                        ))
+                    })?;
+                if tables.contains(&game) {
+                    return Err(error(format!("duplicate table `[{name}]`")));
+                }
+                tables.push(game);
+                table = Some(game);
+                continue;
             }
             let (key, rest) = trimmed
                 .split_once('=')
@@ -252,6 +347,27 @@ impl Config {
             let rest = rest.trim_start();
             if !(rest.is_empty() || rest.starts_with('#')) {
                 return Err(error(format!("unexpected `{rest}` after the value")));
+            }
+            if let Some(game) = table {
+                let paths = config.profiles.get_mut(game);
+                let (_, slot) = paths
+                    .entries_mut()
+                    .into_iter()
+                    .find(|(name, _)| *name == key)
+                    .ok_or_else(|| {
+                        error(format!(
+                            "`{key}` is not a profile setting (master_dat, critter_dat or \
+                             data_root)"
+                        ))
+                    })?;
+                if slot.is_some() {
+                    return Err(error(format!("duplicate key `{key}`")));
+                }
+                match value {
+                    Value::String(text) => *slot = Some(text.into()),
+                    _ => return Err(error(format!("`{key}` expects a string"))),
+                }
+                continue;
             }
             let canonical = match key {
                 "load_order" => "mod_list",
@@ -270,6 +386,12 @@ impl Config {
                 return Err(error(format!("duplicate key `{key}`")));
             }
             config.assign(canonical, key, value).map_err(error)?;
+        }
+        // The active game's table fills the top-level paths only when they
+        // name none; either way the top level holds them from here on.
+        let stored = std::mem::take(config.profiles.get_mut(config.active_game()));
+        if config.paths().is_empty() {
+            config.set_paths(stored);
         }
         Ok(config)
     }
@@ -366,7 +488,9 @@ impl Config {
     }
 
     /// The file text: the known keys in a fixed order, then the unknown
-    /// ones. A path that is not valid UTF-8 cannot be written.
+    /// ones, then each game's profile table that names a path (the active
+    /// game's repeating the top-level paths). A path that is not valid
+    /// UTF-8 cannot be written.
     pub fn to_toml(&self) -> std::io::Result<String> {
         let mut out = String::from("# Vault Engine launcher settings.\n");
         let path = |path: &Path| {
@@ -377,6 +501,19 @@ impl Config {
                 )
             })
         };
+        let mut tables = String::new();
+        for game in GAMES {
+            let paths = self.profile(game);
+            if paths.is_empty() {
+                continue;
+            }
+            tables.push_str(&format!("\n[profiles.{}]\n", game_name(game)));
+            for (key, value) in paths.entries() {
+                if let Some(value) = value {
+                    tables.push_str(&format!("{key} = {}\n", path(value)?));
+                }
+            }
+        }
         let mut line = |key: &str, value: String| {
             out.push_str(key);
             out.push_str(" = ");
@@ -457,6 +594,7 @@ impl Config {
                 },
             );
         }
+        out.push_str(&tables);
         Ok(out)
     }
 
@@ -485,12 +623,15 @@ impl Config {
     }
 
     fn each_path(&mut self, mut visit: impl FnMut(&mut PathBuf)) {
+        let profiles = &mut self.profiles;
         for path in [
             &mut self.master_dat,
             &mut self.critter_dat,
             &mut self.data_root,
         ]
         .into_iter()
+        .chain(profiles.fallout1.entries_mut().map(|(_, path)| path))
+        .chain(profiles.fallout2.entries_mut().map(|(_, path)| path))
         .flatten()
         {
             visit(path);
@@ -543,7 +684,73 @@ impl Config {
     /// Whether the settings name game data: both databases, or a loose
     /// data directory.
     pub fn has_game_data(&self) -> bool {
-        (self.master_dat.is_some() && self.critter_dat.is_some()) || self.data_root.is_some()
+        self.paths().has_game_data()
+    }
+
+    /// Settings for `game` from each game's paths: `game`'s become the
+    /// top-level keys.
+    pub fn with_profiles(game: GameProfile, mut profiles: PerGame<GamePaths>) -> Self {
+        let mut config = Self {
+            game: Some(game),
+            ..Self::default()
+        };
+        config.set_paths(std::mem::take(profiles.get_mut(game)));
+        config.profiles = profiles;
+        config
+    }
+
+    /// The game the top-level paths are for.
+    pub fn active_game(&self) -> GameProfile {
+        self.game.unwrap_or_default()
+    }
+
+    /// The top-level paths: the active game's.
+    pub fn paths(&self) -> GamePaths {
+        GamePaths {
+            master_dat: self.master_dat.clone(),
+            critter_dat: self.critter_dat.clone(),
+            data_root: self.data_root.clone(),
+        }
+    }
+
+    pub fn set_paths(&mut self, paths: GamePaths) {
+        self.master_dat = paths.master_dat;
+        self.critter_dat = paths.critter_dat;
+        self.data_root = paths.data_root;
+    }
+
+    /// `game`'s last-used paths: the top-level ones for the active game.
+    pub fn profile(&self, game: GameProfile) -> GamePaths {
+        if game == self.active_game() {
+            self.paths()
+        } else {
+            self.profiles.get(game).clone()
+        }
+    }
+
+    /// The paths a launch of `game` reads: its profile, or the top-level
+    /// paths when it has none (a file from before profiles, launched with
+    /// `--game-profile`).
+    pub fn launch_paths(&self, game: GameProfile) -> GamePaths {
+        let paths = self.profile(game);
+        if paths.is_empty() {
+            self.paths()
+        } else {
+            paths
+        }
+    }
+
+    /// Make `game` the active game: the top-level paths are kept as the
+    /// old game's profile, and `game`'s profile becomes the top-level
+    /// paths (none when it has none yet).
+    pub fn switch_game(&mut self, game: GameProfile) {
+        let active = self.active_game();
+        if game != active {
+            *self.profiles.get_mut(active) = self.paths();
+            let paths = std::mem::take(self.profiles.get_mut(game));
+            self.set_paths(paths);
+        }
+        self.game = Some(game);
     }
 }
 
@@ -779,22 +986,31 @@ pub fn find(dirs: &[PathBuf]) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// The directories game data is looked for in, in order: the working
-/// directory, the executable's, `../local-corpus`, and the usual Steam and
-/// GOG install directories under `home`.
-pub fn data_dirs(exe_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+/// The directories `game`'s data is looked for in, in order: the working
+/// directory, the executable's, then for Fallout 1 `../local-corpus`, and
+/// the game's usual install directories under `home` (`games/fallout1` or
+/// `games/fallout2`, Steam and GOG).
+pub fn data_dirs(game: GameProfile, exe_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = vec![PathBuf::from(".")];
     dirs.extend(exe_dir.map(Path::to_path_buf));
-    dirs.push(PathBuf::from("../local-corpus"));
+    let install = match game {
+        GameProfile::Fallout1 => {
+            dirs.push(PathBuf::from("../local-corpus"));
+            "Fallout"
+        }
+        GameProfile::Fallout2 => "Fallout 2",
+    };
     if let Some(home) = home {
+        dirs.push(home.join("games").join(game_name(game)));
         #[cfg(not(windows))]
         dirs.extend([
-            home.join(".steam/steam/steamapps/common/Fallout"),
-            home.join(".local/share/Steam/steamapps/common/Fallout"),
-            home.join("GOG Games/Fallout"),
+            home.join(".steam/steam/steamapps/common").join(install),
+            home.join(".local/share/Steam/steamapps/common")
+                .join(install),
+            home.join("GOG Games").join(install),
         ]);
         #[cfg(windows)]
-        dirs.push(home.join("GOG Games").join("Fallout"));
+        dirs.push(home.join("GOG Games").join(install));
     }
     #[cfg(windows)]
     {
@@ -802,13 +1018,27 @@ pub fn data_dirs(exe_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)"));
         dirs.extend([
-            x86.join(r"Steam\steamapps\common\Fallout"),
-            x86.join(r"GOG Galaxy\Games\Fallout"),
-            x86.join(r"GOG.com\Fallout"),
-            PathBuf::from(r"C:\GOG Games\Fallout"),
+            x86.join(r"Steam\steamapps\common").join(install),
+            x86.join(r"GOG Galaxy\Games").join(install),
+            x86.join("GOG.com").join(install),
+            PathBuf::from(r"C:\GOG Games").join(install),
         ]);
     }
     dirs
+}
+
+/// [`data_dirs`] for each game, from this executable's directory and the
+/// user's home.
+pub fn standard_data_dirs() -> PerGame<Vec<PathBuf>> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let home = home_dir();
+    let dirs = |game| data_dirs(game, exe_dir.as_deref(), home.as_deref());
+    PerGame {
+        fallout1: dirs(GameProfile::Fallout1),
+        fallout2: dirs(GameProfile::Fallout2),
+    }
 }
 
 /// The user's home directory from `HOME` (or `USERPROFILE`).
@@ -862,6 +1092,31 @@ pub fn discover(dirs: &[PathBuf]) -> Option<Config> {
             ..Default::default()
         })
     })
+}
+
+/// [`discover`] for one game: the first of `dirs` whose MASTER.DAT opens
+/// in that game's archive format (SPEC-008 for Fallout 1, SPEC-015 for
+/// Fallout 2; directory tables only), so neither game's folder is taken
+/// for the other's.
+pub fn discover_game(dirs: &[PathBuf], game: GameProfile) -> Option<GamePaths> {
+    dirs.iter().find_map(|dir| {
+        let found = discover(std::slice::from_ref(dir))?.paths();
+        let master = found.master_dat.as_deref()?;
+        let opens = match game {
+            GameProfile::Fallout1 => vault_formats::DatArchive::open(master).is_ok(),
+            GameProfile::Fallout2 => vault_formats::Dat2Archive::open(master).is_ok(),
+        };
+        opens.then_some(found)
+    })
+}
+
+/// Each game's data, discovered in its own directories.
+pub fn discover_games(dirs: &PerGame<Vec<PathBuf>>) -> PerGame<GamePaths> {
+    let found = |game| discover_game(dirs.get(game), game).unwrap_or_default();
+    PerGame {
+        fallout1: found(GameProfile::Fallout1),
+        fallout2: found(GameProfile::Fallout2),
+    }
 }
 
 /// Replace the file at `path` with `bytes`: a temporary sibling is written
@@ -1271,22 +1526,178 @@ future_float = 5e-1
     }
 
     #[test]
+    fn each_game_keeps_its_profile_through_switches_and_the_file() {
+        let paths = |root: &str| GamePaths {
+            master_dat: Some(format!("{root}/MASTER.DAT").into()),
+            critter_dat: Some(format!("{root}/CRITTER.DAT").into()),
+            data_root: None,
+        };
+        // A file from before profiles: its top-level paths are Fallout
+        // 1's, and a launch of Fallout 2 still reads them.
+        let legacy =
+            Config::parse("master_dat = \"/fo1/MASTER.DAT\"\ncritter_dat = \"/fo1/CRITTER.DAT\"\n")
+                .unwrap();
+        assert_eq!(legacy.profile(GameProfile::Fallout1), paths("/fo1"));
+        assert!(legacy.profile(GameProfile::Fallout2).is_empty());
+        assert_eq!(legacy.launch_paths(GameProfile::Fallout2), paths("/fo1"));
+        // Switching keeps the old game's paths and brings up the other's
+        // (none yet).
+        let mut config = legacy.clone();
+        config.switch_game(GameProfile::Fallout2);
+        assert_eq!(config.game, Some(GameProfile::Fallout2));
+        assert!(config.paths().is_empty());
+        assert_eq!(config.profile(GameProfile::Fallout1), paths("/fo1"));
+        config.set_paths(paths("/fo2"));
+        let text = config.to_toml().unwrap();
+        assert!(
+            text.ends_with(
+                "game = \"fallout2\"\n\n\
+                 [profiles.fallout1]\nmaster_dat = \"/fo1/MASTER.DAT\"\n\
+                 critter_dat = \"/fo1/CRITTER.DAT\"\n\n\
+                 [profiles.fallout2]\nmaster_dat = \"/fo2/MASTER.DAT\"\n\
+                 critter_dat = \"/fo2/CRITTER.DAT\"\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.starts_with(
+                "# Vault Engine launcher settings.\nmaster_dat = \"/fo2/MASTER.DAT\"\n"
+            )
+        );
+        let read = Config::parse(&text).unwrap();
+        assert_eq!(read, config);
+        assert_eq!(read.launch_paths(GameProfile::Fallout1), paths("/fo1"));
+        assert_eq!(read.launch_paths(GameProfile::Fallout2), paths("/fo2"));
+        // And back, through the file again.
+        let mut back = read;
+        back.switch_game(GameProfile::Fallout1);
+        assert_eq!(back.paths(), paths("/fo1"));
+        let back = Config::parse(&back.to_toml().unwrap()).unwrap();
+        assert_eq!(
+            (back.paths(), back.profile(GameProfile::Fallout2)),
+            (paths("/fo1"), paths("/fo2"))
+        );
+        // The active game's table fills absent top-level keys, which win
+        // when both are there.
+        let tables_only = "game = \"fallout2\"\n[profiles.fallout2] # its own\n\
+             master_dat = \"/fo2/MASTER.DAT\"\ncritter_dat = \"/fo2/CRITTER.DAT\"\n";
+        assert_eq!(Config::parse(tables_only).unwrap().paths(), paths("/fo2"));
+        let both = format!("master_dat = \"/top/MASTER.DAT\"\n{tables_only}");
+        let both = Config::parse(&both).unwrap();
+        assert_eq!(both.master_dat, Some("/top/MASTER.DAT".into()));
+        assert_eq!(both.critter_dat, None);
+        assert!(both.profiles.fallout2.is_empty());
+        // Only the two profile tables, each once, with path keys.
+        let error = |text: &str| Config::parse(text).unwrap_err().to_string();
+        for (text, message) in [
+            (
+                "[profiles.fallout3]",
+                "line 1: unsupported table `[profiles.fallout3]`",
+            ),
+            ("[profiles]", "unsupported table"),
+            ("[profiles.fallout1", "unterminated table header"),
+            (
+                "[profiles.fallout1] x",
+                "unexpected `x` after the table header",
+            ),
+            (
+                "[profiles.fallout1]\n[profiles.fallout1]",
+                "line 2: duplicate table",
+            ),
+            (
+                "[profiles.fallout1]\ngame = \"fallout1\"",
+                "line 2: `game` is not a profile setting",
+            ),
+            (
+                "[profiles.fallout2]\ndata_root = true",
+                "`data_root` expects a string",
+            ),
+            (
+                "[profiles.fallout2]\ndata_root = \"a\"\ndata_root = \"b\"",
+                "line 3: duplicate key",
+            ),
+        ] {
+            assert!(error(text).contains(message), "{text}: {}", error(text));
+        }
+        // Table paths are relative to the file like the others, and are
+        // written back relative.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(FILE_NAME);
+        std::fs::write(
+            &path,
+            "[profiles.fallout2]\nmaster_dat = \"fo2/master.dat\"\n",
+        )
+        .unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(
+            loaded.profile(GameProfile::Fallout2).master_dat,
+            Some(temp.path().join("fo2/master.dat"))
+        );
+        loaded.save(&path).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("[profiles.fallout2]\nmaster_dat = \"fo2/master.dat\"\n")
+        );
+    }
+
+    #[test]
+    fn discovery_takes_each_games_own_archive_format() {
+        let temp = tempfile::tempdir().unwrap();
+        let (fallout1, fallout2) = (temp.path().join("fo1"), temp.path().join("fo2"));
+        for dir in [&fallout1, &fallout2] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        // Empty archives of each format (SPEC-008: four zero words;
+        // SPEC-015: an empty tree and its two trailing words).
+        std::fs::write(fallout1.join("MASTER.DAT"), [0u8; 16]).unwrap();
+        std::fs::write(fallout1.join("CRITTER.DAT"), [0u8; 16]).unwrap();
+        let dat2 = vault_fixtures::dat2::archive(&[]);
+        std::fs::write(fallout2.join("master.dat"), &dat2).unwrap();
+        std::fs::write(fallout2.join("critter.dat"), &dat2).unwrap();
+        std::fs::create_dir_all(fallout2.join("data")).unwrap();
+        let dirs = PerGame {
+            fallout1: vec![fallout2.clone(), fallout1.clone()],
+            fallout2: vec![fallout1.clone(), fallout2.clone()],
+        };
+        let found = discover_games(&dirs);
+        assert_eq!(found.fallout1.master_dat, Some(fallout1.join("MASTER.DAT")));
+        assert_eq!(found.fallout2.master_dat, Some(fallout2.join("master.dat")));
+        assert_eq!(found.fallout2.data_root, Some(fallout2.join("data")));
+        let config = Config::with_profiles(GameProfile::Fallout2, found.clone());
+        assert_eq!(config.paths(), found.fallout2);
+        assert_eq!(config.profile(GameProfile::Fallout1), found.fallout1);
+        assert!(config.profiles.fallout2.is_empty());
+        assert!(discover_game(&[fallout1], GameProfile::Fallout2).is_none());
+    }
+
+    #[test]
     fn install_directories_come_after_the_local_ones() {
         let home = Path::new("/home/someone");
-        let dirs = data_dirs(Some(Path::new("/opt/vault")), Some(home));
+        let exe = Some(Path::new("/opt/vault"));
+        let dirs = data_dirs(GameProfile::Fallout1, exe, Some(home));
         assert_eq!(dirs[0], PathBuf::from("."));
         assert_eq!(dirs[1], PathBuf::from("/opt/vault"));
         assert_eq!(dirs[2], PathBuf::from("../local-corpus"));
+        assert_eq!(dirs[3], home.join("games/fallout1"));
+        let fallout2 = data_dirs(GameProfile::Fallout2, exe, Some(home));
+        assert_eq!(&fallout2[..2], &dirs[..2]);
+        assert_eq!(fallout2[2], home.join("games/fallout2"));
+        assert!(!fallout2.contains(&PathBuf::from("../local-corpus")));
         #[cfg(not(windows))]
         {
             assert!(dirs.contains(&home.join(".steam/steam/steamapps/common/Fallout")));
             assert!(dirs.contains(&home.join(".local/share/Steam/steamapps/common/Fallout")));
             assert!(dirs.contains(&home.join("GOG Games/Fallout")));
+            assert!(fallout2.contains(&home.join(".steam/steam/steamapps/common/Fallout 2")));
+            assert!(fallout2.contains(&home.join("GOG Games/Fallout 2")));
         }
-        assert_eq!(
-            data_dirs(None, None).len(),
-            2 + usize::from(cfg!(windows)) * 4
-        );
+        for game in GAMES {
+            assert_eq!(
+                data_dirs(game, None, None).len(),
+                1 + usize::from(game == GameProfile::Fallout1) + usize::from(cfg!(windows)) * 4
+            );
+        }
     }
 
     #[test]

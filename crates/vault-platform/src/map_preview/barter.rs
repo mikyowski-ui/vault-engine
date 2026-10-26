@@ -171,6 +171,8 @@ const TALK: Rect = Rect::new(584, 162, 14, 14);
 /// The `enhanced` party Trade window's engine-drawn WIELD button and the
 /// plate naming the member's held weapon (barter-window coordinates), side
 /// by side along the middle panel's top edge, above the two tables' slots.
+/// Fallout 2's `barter.frm` is the same frame as Fallout 1's, so they
+/// clear its native buttons, slots and portraits in both games.
 pub(crate) const TRADE_WIELD: Rect = Rect::new(332, 4, 66, 15);
 pub(crate) const TRADE_WIELD_LABEL: Rect = Rect::new(240, 4, 88, 15);
 /// The portraits (barter-window coordinates), the player's and the
@@ -196,6 +198,18 @@ fn route(column: usize) -> (usize, &'static [(i32, i32)], i32) {
         2 => (3, &[(475, 539)], 25),
         _ => (2, &[(330, 394)], 25),
     }
+}
+
+/// The barter window's click targets (screen coordinates): the four
+/// columns' slots, the scroll buttons, the portraits, Offer and Talk.
+#[cfg(test)]
+pub(crate) fn trade_targets() -> Vec<Rect> {
+    let slots = (0..4).flat_map(|column| (0..ROWS).map(move |row| slot_rect(column, row)));
+    slots
+        .chain(SCROLL.map(|(_, _, rect, ..)| at(SUBWINDOW, rect)))
+        .chain(PORTRAITS.map(|(_, rect)| at(WINDOW, rect)))
+        .chain([OFFER, TALK].map(|rect| at(WINDOW, rect)))
+        .collect()
 }
 
 fn slot_rect(column: usize, row: usize) -> Rect {

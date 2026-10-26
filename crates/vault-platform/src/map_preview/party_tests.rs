@@ -1,9 +1,9 @@
 //! The `enhanced` HUD's party pills and the WIELD buttons of the Gear and
 //! party Trade windows, over the synthetic corpus with synthetic items.
 use super::super::{
-    barter::{BarterScreen, TRADE_WIELD},
+    barter::{BarterScreen, TRADE_WIELD, TRADE_WIELD_LABEL, trade_targets},
     fixture,
-    loot::WIELD,
+    loot::{WIELD, WIELD_LABEL, gear_targets},
     test_support::{interactive, npc, synthetic_corpus},
 };
 use super::*;
@@ -310,4 +310,68 @@ fn a_pill_takes_its_press_on_the_unlocked_canvas() {
     preview.enhanced_button(at, PointerButton::Left, false);
     assert_eq!(preview.host.companion_distance(member), Distance::Close);
     assert!(matches!(preview.screen, Screen::Map));
+}
+
+/// Whether two rectangles share a pixel.
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+#[test]
+fn the_wield_buttons_clear_every_gear_and_trade_target() {
+    // Fallout 1's Gear window in window coordinates, inside `loot.frm`
+    // (537 by 376); Fallout 2's Trade window on the screen, inside
+    // `barter.frm` at (0, 289) (640 by 191, the same frame in both games).
+    let trade = [TRADE_WIELD, TRADE_WIELD_LABEL]
+        .map(|rect| Rect::new(rect.x, 289 + rect.y, rect.w, rect.h));
+    for (screen, wield, window, targets, count) in [
+        (
+            "Gear",
+            [WIELD, WIELD_LABEL],
+            Rect::new(0, 0, 537, 376),
+            gear_targets(),
+            23,
+        ),
+        (
+            "Trade",
+            trade,
+            Rect::new(0, 289, 640, 191),
+            trade_targets(),
+            24,
+        ),
+    ] {
+        assert_eq!(targets.len(), count, "{screen}");
+        assert!(!overlaps(wield[0], wield[1]), "{screen}");
+        for rect in wield {
+            let inside = rect.x >= window.x
+                && rect.y >= window.y
+                && rect.x + rect.w <= window.x + window.w
+                && rect.y + rect.h <= window.y + window.h;
+            assert!(inside, "{screen}: {rect:?} leaves the window");
+            for target in &targets {
+                assert!(
+                    !overlaps(rect, *target),
+                    "{screen}: {rect:?} overlaps {target:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a Fallout 2 install"]
+fn the_trade_wield_fits_fallout2s_barter_art() {
+    use vault_formats::{FrmArchive, Vfs, fallout2::Fallout2Install};
+    let folder = std::env::var_os("VAULT_FALLOUT2")
+        .map(std::path::PathBuf::from)
+        .or_else(|| crate::config::home_dir().map(|home| home.join("games/fallout2")));
+    let Some(install) = folder.and_then(|folder| Fallout2Install::discover(&folder).ok()) else {
+        eprintln!("skipping: no Fallout 2 install (set VAULT_FALLOUT2)");
+        return;
+    };
+    let provider = install.open().unwrap().provider(None);
+    let art = FrmArchive::parse(&provider.read("art/intrface/barter.frm").unwrap()).unwrap();
+    let frame = art.frame(0, 0).unwrap();
+    // The frame the Trade window's layout (and the test above) assumes.
+    assert_eq!((frame.width, frame.height), (640, 191));
 }

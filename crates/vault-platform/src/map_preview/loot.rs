@@ -83,6 +83,20 @@ const SCROLL: [(bool, bool, Rect); 4] = [
     (true, false, Rect::new(379, 62, 22, 23)),
 ];
 
+/// The Gear window's click targets other than WIELD (window
+/// coordinates): the item slots, scroll and body-cycling buttons, the
+/// portraits, Done, and the engine-drawn Take All and Distance.
+#[cfg(test)]
+pub(crate) fn gear_targets() -> Vec<Rect> {
+    let slots = (0..skills::LOOT_ROWS).flat_map(|row| [slot(false, row), slot(true, row)]);
+    slots
+        .chain(SCROLL.map(|(_, _, rect)| rect))
+        .chain(CYCLE.map(|(rect, ..)| rect))
+        .chain(PORTRAITS.map(|(_, rect)| rect))
+        .chain([DONE, TAKE_ALL, DISTANCE])
+        .collect()
+}
+
 fn slot(target: bool, row: usize) -> Rect {
     let [x, y] = if target {
         skills::loot_target_slot(row)

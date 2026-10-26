@@ -153,12 +153,25 @@ the enhanced preset's `viewport_mode`, `default_zoom`, `smooth_camera`,
 [Enhanced viewport & camera](#enhanced-viewport--camera)). Values are quoted
 strings, `true`/`false`, decimal numbers (`2`, `1.25`, `5e-1`, `1_000`) or
 one-line string arrays; a bad value or an out-of-range number fails with
-`line N:` and the reason. When
-there is no file, `MASTER.DAT` and `CRITTER.DAT` are looked for in the working
-directory, beside the executable, in `../local-corpus` and in the usual Steam
-and GOG install directories, and what is found is written to a new
-`vault-engine.toml`. Command-line flags always win over the file. When that
-still names no game data that validates, the launcher opens instead (below).
+`line N:` and the reason.
+
+Each game keeps its own last-used paths in a `[profiles.fallout1]` and a
+`[profiles.fallout2]` table at the end of the file (`master_dat`,
+`critter_dat` and `data_root` only). The top-level path keys stay the active
+game's, so a file from before profiles reads as it always did; when both name
+paths, the top-level keys win. `--game-profile` launches with that game's
+profile (or the top-level paths when it has none).
+
+When there is no file, each game's `MASTER.DAT` and `CRITTER.DAT` are looked
+for in its own directories. Both games check the working directory and the
+executable's. Fallout 1 then checks `../local-corpus`, `~/games/fallout1`
+and its usual Steam and GOG install directories (`Fallout`). Fallout 2 checks
+`~/games/fallout2` and its Steam and GOG directories (`Fallout 2`). A folder
+counts for a game only when its `MASTER.DAT` opens in that game's archive
+format. What is found is written to a new `vault-engine.toml`, the game named
+by `--game-profile` (else the first found) active. Command-line flags always
+win over the file. When that still names no game data that validates, the
+launcher opens instead (below).
 
 ### Launcher
 
@@ -197,6 +210,11 @@ It has three tabs and a bottom bar:
   - The data folder must be an existing directory. Without the archives it is
     the whole game data, so it must then hold those three files itself.
   - The two archives are named together or not at all.
+  - **Game** toggles `fallout1` and `fallout2`. The fields are kept as the
+    old game's profile and show the new game's. A game with no paths yet gets
+    its data discovered as above (and a start whose active game has none does
+    the same, showing the launcher with what it found). Save and Play write
+    both profiles.
 - **Display & audio**: scaling (`aspect_fit` or `integer`), fullscreen,
   preset (`vanilla` or `enhanced`), audio on or off, and the debug overlay.
   With the enhanced preset selected, five more rows follow (hidden, and out

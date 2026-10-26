@@ -1022,6 +1022,7 @@ mod tests {
             save_dirs: vec![saves.path().to_path_buf()],
             start_dir: saves.path().to_path_buf(),
             problem: None,
+            data_dirs: Default::default(),
         });
         assert_eq!(launcher.ready(), Ok(()));
         // §6.7: `--game` loads under Fallout 2.
