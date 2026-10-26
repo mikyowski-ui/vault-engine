@@ -1,5 +1,5 @@
 //! The `enhanced` preset's map layers: the roof cutaway around the cursor
-//! ([`RoofCutaway`]) and the shroud over hexes the camera may not reach
+//! ([`RoofCutaway`]) and the shroud over hexes outside an allowed set
 //! ([`Shroud`]). Engine extension, not part of any specification; with
 //! both [`MapScene`](super::MapScene) fields `None` (Vanilla) nothing here
 //! runs.

@@ -176,7 +176,7 @@ impl CameraRegion {
             .copied()
             .unwrap_or(false)
     }
-    /// The per-hex flags, for drawing the shroud.
+    /// The per-hex flags.
     pub fn allowed(&self) -> &[bool] {
         &self.allowed
     }

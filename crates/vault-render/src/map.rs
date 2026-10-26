@@ -177,7 +177,7 @@ pub struct MapScene<'a> {
     /// The `enhanced` preset's roof cutaway around the cursor (`None` in
     /// Vanilla).
     pub roof_cutaway: Option<RoofCutaway>,
-    /// The `enhanced` preset's shroud over hexes the camera may not reach
+    /// The `enhanced` preset's shroud over hexes outside its allowed set
     /// (`None` in Vanilla).
     pub shroud: Option<Shroud<'a>>,
     /// The `enhanced` canvas tiles' overscan ([`overscan_hexes`]): an
@@ -207,9 +207,10 @@ pub struct RoofCutaway {
 }
 
 /// The `enhanced` preset's shroud: view pixels over hexes outside the
-/// camera's region (or off the grid) are darkened toward `dark` through an
+/// allowed set (or off the grid) are darkened toward `dark` through an
 /// ordered dither, fully dark from two hexes (64 pixels) beyond the
-/// region's edge ([`ShroudField::darkens`]). It is painted after the roofs
+/// set's edge ([`ShroudField::darkens`]). The unlocked view allows the
+/// whole grid, so only what lies off it is darkened. It is painted after the roofs
 /// and before the outlines, floating text and hexless objects; the
 /// in-world cursor's art, drawn in the flat pass (§3.27), is shrouded with
 /// the scene, its outline is not. The per-hex distance field is built from

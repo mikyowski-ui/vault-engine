@@ -318,12 +318,18 @@ logs and replay digests are what they were.
     beneath.
 - **Camera bounds.** The camera follows the player and eases back inside
   the region the map's scroll blockers enclose (`CameraRegion::compute`,
-  below). Hexes outside that region, or off the 200×200 grid, are shrouded
-  with a dithered vignette rather than drawn as empty space.
+  below). The blockers bound only the camera center, never what is drawn.
+  Floor, walls, scenery and critters past them are drawn normally, because
+  narrow maps such as `artemple.map` rely on that art to fill the view. A
+  view zoomed in smaller than 640×380 may move as far as that view's edges
+  would reach, so the player stays in sight at the region's edges. A larger
+  view (zoomed out, or widescreen) keeps the region's bounds. Only what lies
+  off the 200×200 grid is shrouded, in a flat dark colour rather than
+  drawn as empty space.
 - **Debug camera.** On the **F9** overlay, **F8** reaches a Camera page in
   the unlocked view; the Vanilla page cycle is unchanged.
   - **F** toggles the "unbounded free-cam and roof cutaway": no bounds, no
-    shroud clamp and no roofs.
+    clamp and no roofs.
   - **C** runs a camera demo: a pan, a 2× zoom, a shake with an X-ray peek,
     then a reset.
   - The **Export Current Setup as Mod** button (or **E**) writes the running

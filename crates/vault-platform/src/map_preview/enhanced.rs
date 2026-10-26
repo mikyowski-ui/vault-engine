@@ -123,7 +123,6 @@ pub(crate) struct Enhanced {
     synced_hex: i32,
     /// The debug free camera: no region, no clamp, roofs cut away.
     pub(crate) free_camera: bool,
-    unbounded: Option<Arc<CameraRegion>>,
     demo: VecDeque<(u64, DemoStep)>,
     /// Scripted camera requests not yet started: they run in the order
     /// given, each once the one before has run its duration.
@@ -161,6 +160,12 @@ impl Enhanced {
             .map_or(self.camera.zoom, |layout| f64::from(layout.zoom))
     }
     /// The camera center's soft bounds, or none for the free camera.
+    ///
+    /// The scroll blockers' region bounds the center, as Vanilla's scroll
+    /// tests bound its 640-by-380 view. A view zoomed in smaller than that
+    /// may go further, as far as that view's edges reach, so the player
+    /// stays in sight at the region's edges. A larger view (zoomed out,
+    /// widescreen) keeps the region's bounds and shows the map around them.
     fn bounds(&self) -> Option<[f64; 4]> {
         if self.free_camera {
             return None;
@@ -168,19 +173,17 @@ impl Enhanced {
         // The region bounds a hex's reference (cell corner); the camera
         // works with hex centers, 16 and 8 pixels further.
         let [x0, y0, x1, y1] = self.region.bounds.map(|value| value as f64);
-        Some([x0 + 16.0, y0 + 8.0, x1 + 16.0, y1 + 8.0])
-    }
-    /// The region the shroud shows.
-    fn shown_region(&mut self) -> Arc<CameraRegion> {
-        if self.free_camera {
-            self.unbounded
-                .get_or_insert_with(|| Arc::new(CameraRegion::unbounded()))
-                .clone()
-        } else {
-            self.region.clone()
-        }
+        let size = self.world_size();
+        let [sx, sy] =
+            [0, 1].map(|axis| ((f64::from(TILE[axis]) - f64::from(size[axis])) / 2.0).max(0.0));
+        Some([x0 + 16.0 - sx, y0 + 8.0 - sy, x1 + 16.0 + sx, y1 + 8.0 + sy])
     }
 }
+
+/// Every hex of the 200-by-200 grid: the shroud darkens only what lies
+/// off the grid. The scroll blockers bound the camera center, not what is
+/// drawn: a map's floor, walls and objects past them fill the view.
+static WHOLE_GRID: [bool; 40000] = [true; 40000];
 
 /// The canvas tiles of `view`, each with its place on the canvas.
 fn tiles(view: MapView) -> Vec<(MapView, [i64; 2])> {
@@ -314,7 +317,6 @@ impl MapPreview {
             region_key: None,
             synced_hex: self.host.world.camera_hex,
             free_camera: false,
-            unbounded: None,
             demo: VecDeque::new(),
             scripted: VecDeque::new(),
             scripted_until: 0,
@@ -1260,7 +1262,7 @@ impl MapPreview {
     }
     /// The world canvas: every tile drawn as one map refresh, with the
     /// in-world cursor (while the pointer is on the canvas), the roof
-    /// peek and the shroud over the hexes outside the camera's region.
+    /// peek and the shroud past the grid's edges.
     fn enhanced_world(&mut self) -> AppResult<IndexedImage> {
         let view = self.enhanced_view().ok_or("no enhanced view")?;
         let cursor = if self.pointer.world {
@@ -1270,9 +1272,8 @@ impl MapPreview {
         };
         let cutaway = self.peek_cutaway();
         let dark = nearest(self.game_palette(), [0, 0, 0]);
-        let region = self.unlocked_mut().map(|enhanced| enhanced.shown_region());
-        let shroud = region.as_deref().map(|region| Shroud {
-            allowed: region.allowed(),
+        let shroud = self.unlocked().map(|_| Shroud {
+            allowed: &WHOLE_GRID,
             dark,
         });
         let tiles = tiles(view);

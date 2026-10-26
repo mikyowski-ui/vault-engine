@@ -612,6 +612,55 @@ fn the_soft_clamp_keeps_the_center_inside_and_the_free_camera_bypasses_it() {
 }
 
 #[test]
+fn scroll_blockers_bound_the_camera_but_never_shroud_the_grid() {
+    let dir = synthetic_corpus();
+    let mut preview = unlocked(dir.path());
+    let world = &preview.host.world;
+    let player = world.get(world.player).unwrap().raw.hex.unwrap();
+    // A narrow strip, as artemple.map's blockers make: the player's column
+    // and two either side, every row.
+    let column = player % 200;
+    let strip: Vec<bool> = (0..40000)
+        .map(|hex| (hex % 200 - column).abs() <= 2)
+        .collect();
+    let strip = Arc::new(CameraRegion::from_allowed(strip));
+    let wide = [1920, 1080];
+    let open = frame(&mut preview, wide).1.world;
+    preview.unlocked_mut().unwrap().region = strip.clone();
+    // The same view draws the same: floor, walls and objects past the
+    // blockers are not shrouded.
+    let narrowed = frame(&mut preview, wide).1.world;
+    let differing = (narrowed.pixels().iter())
+        .zip(open.pixels())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(differing, 0, "pixels shrouded past the blockers");
+    // A view at least 640 by 380 keeps the strip's bounds (hex centers).
+    let [x0, y0, x1, y1] = strip.bounds.map(|value| value as f64);
+    let held = [x0 + 16.0, y0 + 8.0, x1 + 16.0, y1 + 8.0];
+    assert_eq!(preview.unlocked().unwrap().bounds(), Some(held));
+    set_zoom(&mut preview, 0.5);
+    frame(&mut preview, wide);
+    assert_eq!(preview.unlocked().unwrap().bounds(), Some(held));
+    // Zoomed in, a smaller view may go as far as a 640-by-380 view's
+    // edges reach, so the player at the strip's edge stays in sight.
+    set_zoom(&mut preview, 3.0);
+    frame(&mut preview, [960, 720]);
+    let size = preview.unlocked().unwrap().world_size().map(f64::from);
+    let slack = [(640.0 - size[0]) / 2.0, (380.0 - size[1]) / 2.0];
+    assert!(slack.iter().all(|value| *value > 0.0), "{size:?}");
+    assert_eq!(
+        preview.unlocked().unwrap().bounds(),
+        Some([
+            held[0] - slack[0],
+            held[1] - slack[1],
+            held[2] + slack[0],
+            held[3] + slack[1]
+        ])
+    );
+}
+
+#[test]
 fn the_camera_page_exports_the_setup_as_a_mod() {
     use super::super::debug::{EXPORT_BUTTON, Page};
     use vault_formats::{
