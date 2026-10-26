@@ -81,6 +81,15 @@ pub enum InputCommand {
     Enhanced {
         settings: EnhancedRecord,
     },
+    /// The touch UI (`--touch-ui`): logged after the surface, scaling and
+    /// enhanced records when a session starts with it on (a session
+    /// without it logs none). A replay shows the pill bar from it, so the
+    /// bar's buttons take the logged presses again; a log without one
+    /// replays without the bar. Touches themselves are logged as the
+    /// pointer, button and wheel records they become.
+    TouchUi {
+        enabled: bool,
+    },
 }
 
 /// The logged form of [`EnhancedSettings`], named as in `vault-engine.toml`.
@@ -730,6 +739,21 @@ mod tests {
                 ..EnhancedSettings::default()
             }
         );
+    }
+
+    #[test]
+    fn touch_ui_records_round_trip() {
+        let mut output = Vec::new();
+        let mut ids = SequenceIds::default();
+        let command = InputCommand::TouchUi { enabled: true };
+        write_command(&mut output, &mut ids, &command).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(
+            text,
+            "{\"command_id\":1,\"kind\":\"touch_ui\",\"enabled\":true}\n"
+        );
+        let logged: LoggedCommand = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(logged.command, command);
     }
 
     #[test]

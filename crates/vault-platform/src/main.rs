@@ -11,6 +11,7 @@ mod mods;
 mod movie;
 mod preview;
 mod replay;
+mod touch;
 
 #[cfg(test)]
 pub(crate) use vault_fixtures::formats as fixture_assets;
@@ -32,7 +33,7 @@ use vault_render::{EnhancedLayout, IndexedImage, Layer, Renderer, ScalingMode};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Fullscreen, Window, WindowId},
@@ -101,6 +102,12 @@ struct Args {
     /// Start in borderless fullscreen (F11 or Alt+Enter toggles it).
     #[arg(long)]
     fullscreen: bool,
+    /// Turn on the touch UI: taps click, a drag pans and a pinch zooms the
+    /// enhanced camera, a long press or a two-finger tap right-clicks, and
+    /// an on-screen pill bar has MODE, PEEK, TURN, INV, PIP and ESC.
+    /// Default: the settings file's `touch_ui`, else off.
+    #[arg(long)]
+    touch_ui: bool,
     /// The engine preset: `vanilla` or `enhanced`. Default: the settings
     /// file's, else vanilla.
     #[arg(long, value_name = "PRESET", value_parser = preset_arg)]
@@ -174,6 +181,8 @@ impl Args {
 struct Launch {
     scaling: ScalingMode,
     fullscreen: bool,
+    /// The touch UI (gestures and the pill bar).
+    touch_ui: bool,
     game: vault_core::GameProfile,
     preset: config::Preset,
     /// With the enhanced preset only, its presentation settings.
@@ -230,6 +239,7 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
             .or(config.scaling)
             .unwrap_or(ScalingMode::AspectFit),
         fullscreen: args.fullscreen || config.fullscreen.unwrap_or(false),
+        touch_ui: args.touch_ui || config.touch_ui.unwrap_or(false),
         game,
         preset,
         enhanced,
@@ -277,6 +287,7 @@ fn start(
     args.preview.game_profile = launch.game;
     args.preview.mods = launch.mod_list.clone();
     args.preview.enhanced = launch.enhanced;
+    args.preview.touch_ui = launch.touch_ui;
     args.preview.mod_export = Some(mods::export_root(launch.mod_list.as_ref()));
     let mut preview = args.preview.load()?;
     // Audio serves an interactive world or a movie; sprites need none.
@@ -317,6 +328,7 @@ fn play_args(shown: &Args, debug: bool) -> Args {
     let mut args = shown.clone();
     args.scaling = None;
     args.fullscreen = false;
+    args.touch_ui = false;
     args.preset = None;
     args.game_profile = None;
     args.viewport = None;
@@ -348,6 +360,9 @@ fn launcher_for(
     }
     if args.fullscreen {
         config.fullscreen = Some(true);
+    }
+    if args.touch_ui {
+        config.touch_ui = Some(true);
     }
     if let Some(viewport) = args.viewport {
         config.viewport_mode = Some(viewport);
@@ -556,6 +571,11 @@ struct Shell {
     shown: Option<EnhancedShown>,
     /// The world changed since `shown` was built.
     enhanced_dirty: bool,
+    /// The touch UI is on: touches are read (else ignored) and the game's
+    /// worlds show the pill bar.
+    touch_ui: bool,
+    /// The touch gestures, which become pointer, button and wheel input.
+    touch: touch::TouchGestures,
 }
 
 /// An enhanced frame, its layout and its side panels tiled to that layout.
@@ -683,6 +703,14 @@ impl Shell {
                     settings: settings.into(),
                 },
             );
+        }
+    }
+    /// A touch UI session logs that it is one after the surface, scaling
+    /// and enhanced records, so a replay shows the pill bar; a session
+    /// without it logs nothing here.
+    fn log_touch_ui(&mut self, event_loop: &ActiveEventLoop) {
+        if self.touch_ui {
+            self.log(event_loop, InputCommand::TouchUi { enabled: true });
         }
     }
     /// The F9 overlay's committed commands: each is logged, then applied,
@@ -1151,6 +1179,180 @@ impl Shell {
     }
 }
 
+/// The mouse's handlers, which the touch gestures reach through the same
+/// log records.
+impl Shell {
+    /// The game's pointer moved to surface point `point` (the OS pointer,
+    /// scaled, or a finger): it is logged, hovers, and the drawn cursor
+    /// follows.
+    fn pointer_to(&mut self, event_loop: &ActiveEventLoop, window: &Window, point: [f64; 2]) {
+        let [x, y] = point;
+        self.pointer = Some(point);
+        self.log_hover(event_loop, point);
+        self.log(event_loop, InputCommand::PointerMoved { x, y });
+        self.refresh_pointer(window);
+    }
+    /// The pointer left the window.
+    fn pointer_leave(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        self.pointer = None;
+        self.virtual_pointer.left();
+        if let Some(preview) = &mut self.preview {
+            preview.pointer_left();
+        }
+        self.log(event_loop, InputCommand::PointerLeft);
+        self.refresh_pointer(window);
+    }
+    /// A pointer button went down or up at the pointer.
+    fn pointer_button(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        button: MouseButton,
+        pressed: bool,
+    ) {
+        self.log(
+            event_loop,
+            InputCommand::PointerButton {
+                button: format!("{button:?}"),
+                pressed,
+            },
+        );
+        if self.enhanced_button(event_loop, window, button, pressed) {
+            return;
+        }
+        // H3: presses and releases map with the same clamping as
+        // hover, so the letterbox acts at the nearest frame pixel.
+        let pixel = self.clamped_pixel();
+        // SPEC-012 §3.12 (G-31): a movie counts the buttons the
+        // frame paths below never see, a middle or extra button
+        // and a press in the letterbox around the frame.
+        let framed = matches!(button, MouseButton::Left | MouseButton::Right);
+        if (!framed || pressed && self.pixel().is_none())
+            && self
+                .preview
+                .as_mut()
+                .is_some_and(|preview| preview.movie_button(pressed))
+        {
+            self.refresh_preview(event_loop, window);
+            return;
+        }
+        if !pressed
+            && framed
+            && self
+                .preview
+                .as_mut()
+                .is_some_and(|preview| preview.release(pixel, button == MouseButton::Right))
+        {
+            self.refresh_preview(event_loop, window);
+            self.warp_pointer(window);
+        }
+        if pressed
+            && framed
+            && let Some(pixel) = pixel
+            && self
+                .preview
+                .as_mut()
+                .is_some_and(|preview| preview.click(pixel, button == MouseButton::Right))
+        {
+            self.refresh_preview(event_loop, window);
+        }
+    }
+    /// A wheel delta at the pointer.
+    fn wheel(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        [x, y]: [f64; 2],
+        unit: input::WheelUnit,
+    ) {
+        self.log(event_loop, InputCommand::Wheel { x, y, unit });
+        let at = self
+            .enhanced_layout(window)
+            .map(|layout| replay::pointer_at(&layout, self.pointer));
+        if self.preview.as_mut().is_some_and(|preview| match at {
+            Some(at) => preview.enhanced_wheel(at, replay::wheel_lines(y, unit)),
+            None => preview.scroll(y),
+        }) {
+            self.refresh_preview(event_loop, window);
+        }
+    }
+    /// The shell clock, in milliseconds since the window opened (or the
+    /// launcher's game started).
+    fn now(&self) -> u64 {
+        self.started.map_or(0, |started| {
+            started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+        })
+    }
+    /// Whether a finger landing at surface point `point` is on the touch
+    /// UI's pill bar.
+    fn touch_button_at(&mut self, window: &Window, point: [f64; 2]) -> bool {
+        let pixel = match self.enhanced_layout(window) {
+            Some(layout) => layout.ui_pixel(point),
+            None => self
+                .renderer
+                .as_ref()
+                .and_then(|renderer| renderer.image_position(point)),
+        };
+        let Some(pixel) = pixel else {
+            return false;
+        };
+        self.preview
+            .as_mut()
+            .is_some_and(|preview| preview.touch_button_at(pixel))
+    }
+    /// A touch, with the touch UI on: its gesture's actions.
+    fn touch_event(&mut self, event_loop: &ActiveEventLoop, window: &Window, touch: Touch) {
+        let point = [touch.location.x, touch.location.y];
+        let context = touch::TouchContext {
+            camera: self.enhanced_layout(window).is_some(),
+            button: touch.phase == TouchPhase::Started && self.touch_button_at(window, point),
+        };
+        let now = self.now();
+        let actions = self.touch.feed(touch.phase, touch.id, point, now, context);
+        self.touch_actions(event_loop, window, actions);
+    }
+    /// Gesture actions, each as the input record it is, through the
+    /// mouse's handler for that record (which logs it). A pinch's wheel
+    /// lines zoom over the world only: elsewhere wheel lines would scroll
+    /// a conversation's options, so they are not sent.
+    fn touch_actions(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        actions: Vec<touch::TouchAction>,
+    ) {
+        for action in actions {
+            match action.command() {
+                InputCommand::PointerMoved { x, y } => {
+                    self.virtual_pointer.anchor([x, y]);
+                    self.pointer_to(event_loop, window, [x, y]);
+                }
+                InputCommand::PointerLeft => self.pointer_leave(event_loop, window),
+                InputCommand::PointerButton { button, pressed } => {
+                    let button = match button.as_str() {
+                        "Left" => MouseButton::Left,
+                        "Right" => MouseButton::Right,
+                        _ => MouseButton::Middle,
+                    };
+                    self.pointer_button(event_loop, window, button, pressed);
+                }
+                InputCommand::Wheel { x, y, unit } => {
+                    let zoomable = self.enhanced_layout(window).is_some_and(|layout| {
+                        let at = replay::pointer_at(&layout, self.pointer);
+                        self.preview
+                            .as_mut()
+                            .is_some_and(|preview| preview.enhanced_zoomable(at))
+                    });
+                    if zoomable {
+                        self.wheel(event_loop, window, [x, y], unit);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 impl Shell {
     fn refresh_launcher(&mut self, window: &Window) {
         let Some(launcher) = &self.launcher else {
@@ -1174,6 +1376,12 @@ impl Shell {
         let input = match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
+                return None;
+            }
+            // While a finger is down mouse events derived from it drop.
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. }
+                if self.touch.active() =>
+            {
                 return None;
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1216,18 +1424,70 @@ impl Shell {
             WindowEvent::DroppedFile(path) => launcher::LauncherInput::Dropped(path),
             WindowEvent::Focused(false) => {
                 self.shell_keys.clear();
+                self.touch = touch::TouchGestures::new(self.touch.slop);
+                return None;
+            }
+            // With the touch UI a tap hovers and presses as the mouse does
+            // (the launcher has no camera or right button).
+            WindowEvent::Touch(touch) if self.touch_ui => {
+                let point = [touch.location.x, touch.location.y];
+                let now = self.now();
+                let actions = self.touch.feed(
+                    touch.phase,
+                    touch.id,
+                    point,
+                    now,
+                    touch::TouchContext::default(),
+                );
+                for action in actions {
+                    if self.launcher.is_none() {
+                        break;
+                    }
+                    let input = match action {
+                        touch::TouchAction::Pointer(point) => {
+                            self.pointer = Some(point);
+                            self.virtual_pointer.anchor(point);
+                            match self.pixel() {
+                                Some(pixel) => launcher::LauncherInput::Pointer(pixel),
+                                None => continue,
+                            }
+                        }
+                        touch::TouchAction::Button {
+                            button: touch::TouchButton::Left,
+                            pressed: true,
+                        } => match self.pixel() {
+                            Some(pixel) => launcher::LauncherInput::Press(pixel),
+                            None => continue,
+                        },
+                        _ => continue,
+                    };
+                    self.launcher_input(event_loop, window, input);
+                }
                 return None;
             }
             other => return Some(other),
         };
-        let action = self.launcher.as_mut()?.handle(input);
+        self.launcher_input(event_loop, window, input);
+        None
+    }
+
+    /// One launcher input, and what its action asks for.
+    fn launcher_input(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        input: launcher::LauncherInput,
+    ) {
+        let Some(launcher) = self.launcher.as_mut() else {
+            return;
+        };
+        let action = launcher.handle(input);
         match action {
             None => self.refresh_launcher(window),
             Some(launcher::LauncherAction::Quit) => event_loop.exit(),
             Some(launcher::LauncherAction::Play) => self.start_game(event_loop, window, false),
             Some(launcher::LauncherAction::PlayDebug) => self.start_game(event_loop, window, true),
         }
-        None
     }
 
     /// Play: the launcher's settings start the game exactly as a
@@ -1262,6 +1522,7 @@ impl Shell {
         self.started = Some(Instant::now());
         self.scaling = launch.scaling;
         self.enhanced = launch.enhanced;
+        self.touch_ui = launch.touch_ui;
         if let Some(renderer) = &mut self.renderer {
             renderer.set_scaling(self.scaling);
         }
@@ -1279,6 +1540,7 @@ impl Shell {
         );
         self.log_scaling(event_loop);
         self.log_enhanced(event_loop);
+        self.log_touch_ui(event_loop);
         self.refresh_preview(event_loop, window);
     }
 }
@@ -1358,6 +1620,7 @@ impl ApplicationHandler for Shell {
                 self.renderer = Some(renderer);
                 self.log_scaling(event_loop);
                 self.log_enhanced(event_loop);
+                self.log_touch_ui(event_loop);
             }
             Err(error) => {
                 self.fail(event_loop, error);
@@ -1367,6 +1630,8 @@ impl ApplicationHandler for Shell {
         if let Some(preview) = &self.preview {
             window.set_cursor_visible(preview.system_cursor());
         }
+        // The gestures' slop is in logical pixels.
+        self.touch.slop = touch::SLOP * window.scale_factor();
         window.request_redraw();
         self.window = Some(window);
         tracing::info!("desktop ready; Escape or close the window to exit");
@@ -1387,6 +1652,13 @@ impl ApplicationHandler for Shell {
             return;
         };
         let now = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        // A touch held long enough comes due as a long press.
+        if self.touch_ui
+            && let Some(window) = self.window.clone()
+        {
+            let actions = self.touch.poll(now);
+            self.touch_actions(event_loop, &window, actions);
+        }
         // D-11: every frame's clock is logged, so a replay ticks the preview
         // at the same times between the same commands.
         self.log(event_loop, InputCommand::Tick { now_ms: now });
@@ -1508,73 +1780,21 @@ impl ApplicationHandler for Shell {
                     self.press_key(event_loop, &window, key);
                 }
             }
+            // While a finger is down the touch gestures own the pointer:
+            // mouse events a platform derives from the touch are dropped.
+            WindowEvent::CursorMoved { .. }
+            | WindowEvent::CursorLeft { .. }
+            | WindowEvent::MouseInput { .. }
+                if self.touch.active() => {}
             WindowEvent::CursorMoved { position, .. } => {
                 // The log records the game's pointer, so a replay needs no
                 // sensitivity of its own.
-                let [x, y] = self.scaled_pointer(&window, [position.x, position.y]);
-                self.pointer = Some([x, y]);
-                self.log_hover(event_loop, [x, y]);
-                self.log(event_loop, InputCommand::PointerMoved { x, y });
-                self.refresh_pointer(&window);
+                let point = self.scaled_pointer(&window, [position.x, position.y]);
+                self.pointer_to(event_loop, &window, point);
             }
-            WindowEvent::CursorLeft { .. } => {
-                self.pointer = None;
-                self.virtual_pointer.left();
-                if let Some(preview) = &mut self.preview {
-                    preview.pointer_left();
-                }
-                self.log(event_loop, InputCommand::PointerLeft);
-                self.refresh_pointer(&window);
-            }
+            WindowEvent::CursorLeft { .. } => self.pointer_leave(event_loop, &window),
             WindowEvent::MouseInput { state, button, .. } => {
-                self.log(
-                    event_loop,
-                    InputCommand::PointerButton {
-                        button: format!("{button:?}"),
-                        pressed: state == ElementState::Pressed,
-                    },
-                );
-                if self.enhanced_button(event_loop, &window, button, state == ElementState::Pressed)
-                {
-                    return;
-                }
-                // H3: presses and releases map with the same clamping as
-                // hover, so the letterbox acts at the nearest frame pixel.
-                let pixel = self.clamped_pixel();
-                let pressed = state == ElementState::Pressed;
-                // SPEC-012 §3.12 (G-31): a movie counts the buttons the
-                // frame paths below never see, a middle or extra button
-                // and a press in the letterbox around the frame.
-                let framed = matches!(button, MouseButton::Left | MouseButton::Right);
-                if (!framed || pressed && self.pixel().is_none())
-                    && self
-                        .preview
-                        .as_mut()
-                        .is_some_and(|preview| preview.movie_button(pressed))
-                {
-                    self.refresh_preview(event_loop, &window);
-                    return;
-                }
-                if state == ElementState::Released
-                    && matches!(button, MouseButton::Left | MouseButton::Right)
-                    && self
-                        .preview
-                        .as_mut()
-                        .is_some_and(|preview| preview.release(pixel, button == MouseButton::Right))
-                {
-                    self.refresh_preview(event_loop, &window);
-                    self.warp_pointer(&window);
-                }
-                if state == ElementState::Pressed
-                    && matches!(button, MouseButton::Left | MouseButton::Right)
-                    && let Some(pixel) = pixel
-                    && self
-                        .preview
-                        .as_mut()
-                        .is_some_and(|preview| preview.click(pixel, button == MouseButton::Right))
-                {
-                    self.refresh_preview(event_loop, &window);
-                }
+                self.pointer_button(event_loop, &window, button, state == ElementState::Pressed);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (x, y, unit) = match delta {
@@ -1585,16 +1805,10 @@ impl ApplicationHandler for Shell {
                         (position.x, position.y, input::WheelUnit::Pixels)
                     }
                 };
-                self.log(event_loop, InputCommand::Wheel { x, y, unit });
-                let at = self
-                    .enhanced_layout(&window)
-                    .map(|layout| replay::pointer_at(&layout, self.pointer));
-                if self.preview.as_mut().is_some_and(|preview| match at {
-                    Some(at) => preview.enhanced_wheel(at, replay::wheel_lines(y, unit)),
-                    None => preview.scroll(y),
-                }) {
-                    self.refresh_preview(event_loop, &window);
-                }
+                self.wheel(event_loop, &window, [x, y], unit);
+            }
+            WindowEvent::Touch(touch) if self.touch_ui => {
+                self.touch_event(event_loop, &window, touch);
             }
             WindowEvent::Focused(focused) => {
                 // Keys held when the focus goes stop repeating, and (M-P6)
@@ -1602,8 +1816,10 @@ impl ApplicationHandler for Shell {
                 // another window.
                 if !focused {
                     self.repeat.clear();
-                    // Their releases go elsewhere too.
+                    // Their releases go elsewhere too, and so do the
+                    // fingers' lifts.
                     self.shell_keys.clear();
+                    self.touch = touch::TouchGestures::new(self.touch.slop);
                     if let Some(preview) = &mut self.preview {
                         preview.focus_lost();
                     }
@@ -1646,7 +1862,10 @@ impl ApplicationHandler for Shell {
             // The window is resized to the new scale's suggested size after
             // this event, which reports the new physical size in `Resized`
             // (handled above); `inner_size` here is still the old one.
-            WindowEvent::ScaleFactorChanged { .. } => window.request_redraw(),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.touch.slop = touch::SLOP * scale_factor;
+                window.request_redraw();
+            }
             WindowEvent::RedrawRequested => {
                 // The enhanced layers draw the cursor themselves.
                 let enhanced = self.present_enhanced(event_loop, &window);
@@ -1742,7 +1961,9 @@ fn run(mut args: Args) -> AppResult<()> {
         ..Default::default()
     };
     if let Some(launcher) = launcher {
-        shell.scaling = resolve_launch(&mut args.clone(), config.as_ref()).scaling;
+        let shown = resolve_launch(&mut args.clone(), config.as_ref());
+        shell.scaling = shown.scaling;
+        shell.touch_ui = shown.touch_ui;
         shell.launcher = Some(Box::new(launcher));
         shell.pending = Some(Box::new(args));
     } else {
@@ -1750,6 +1971,7 @@ fn run(mut args: Args) -> AppResult<()> {
         shell.scaling = launch.scaling;
         shell.enhanced = launch.enhanced;
         shell.fullscreen = launch.fullscreen;
+        shell.touch_ui = launch.touch_ui;
         shell._audio = audio;
         shell.display = preview
             .as_ref()
@@ -1832,6 +2054,7 @@ mod tests {
             Launch {
                 scaling: ScalingMode::AspectFit,
                 fullscreen: true,
+                touch_ui: false,
                 game: vault_core::GameProfile::Fallout1,
                 preset: config::Preset::Enhanced,
                 enhanced: Some(enhanced::EnhancedSettings::default()),
@@ -1978,6 +2201,7 @@ mod tests {
             Launch {
                 scaling: ScalingMode::AspectFit,
                 fullscreen: true,
+                touch_ui: false,
                 game: vault_core::GameProfile::Fallout1,
                 preset: config::Preset::Enhanced,
                 enhanced: Some(enhanced::EnhancedSettings::default()),
@@ -2228,6 +2452,33 @@ mod tests {
         let shown = parse(&["--launcher", "--viewport", "fixed_640x480", "--zoom", "3"]);
         let args = play_args(&shown, false);
         assert_eq!((args.viewport, args.zoom), (None, None));
+    }
+
+    #[test]
+    fn the_touch_ui_merges_like_fullscreen_and_play_drops_its_flag() {
+        let on = config::Config {
+            touch_ui: Some(true),
+            ..installed()
+        };
+        let off = config::Config {
+            touch_ui: Some(false),
+            ..installed()
+        };
+        // Off by default; the file turns it on; the flag wins over `false`.
+        assert!(!resolve_launch(&mut parse(&[]), Some(&installed())).touch_ui);
+        assert!(!resolve_launch(&mut parse(&[]), None).touch_ui);
+        assert!(resolve_launch(&mut parse(&[]), Some(&on)).touch_ui);
+        assert!(resolve_launch(&mut parse(&["--touch-ui"]), Some(&off)).touch_ui);
+        assert!(resolve_launch(&mut parse(&["--touch-ui"]), None).touch_ui);
+        // A replay takes nothing from the settings: its log says.
+        let mut replay = parse(&["--replay-inputs", "log.jsonl", "--preview-map", "m.map"]);
+        assert!(!resolve_launch(&mut replay, Some(&on)).touch_ui);
+        // Play drops the flag (the launcher showed it as its choice).
+        let shown = parse(&["--launcher", "--touch-ui"]);
+        assert!(shown.touch_ui);
+        let mut args = play_args(&shown, false);
+        assert!(!args.touch_ui);
+        assert!(!resolve_launch(&mut args, Some(&off)).touch_ui);
     }
 
     fn image(width: u32, height: u32, pixels: impl IntoIterator<Item = u8>) -> IndexedImage {

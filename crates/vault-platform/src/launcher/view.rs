@@ -74,11 +74,12 @@ fn field_top(field: Field) -> i32 {
     72 + field.index() as i32 * 84
 }
 fn display_top(row: i32) -> i32 {
-    80 + row * 34
+    76 + row * 28
 }
-const DISPLAY: [Widget; 5] = [
+const DISPLAY: [Widget; 6] = [
     Widget::Scaling,
     Widget::Fullscreen,
+    Widget::TouchUi,
     Widget::Preset,
     Widget::Audio,
     Widget::Debug,
@@ -351,7 +352,7 @@ fn draw_display(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, re
     let config = &launcher.config;
     let scaling = config.scaling.unwrap_or(ScalingMode::AspectFit);
     let preset = config.preset.unwrap_or_default();
-    let rows: [(Widget, &str, String, &str); 5] = [
+    let rows: [(Widget, &str, String, &str); 6] = [
         (
             Widget::Scaling,
             "Scaling",
@@ -366,6 +367,12 @@ fn draw_display(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, re
             "Fullscreen",
             on_off(config.fullscreen.unwrap_or(false)).into(),
             "borderless; F11 or Alt+Enter toggles",
+        ),
+        (
+            Widget::TouchUi,
+            "Touch UI",
+            on_off(config.touch_ui.unwrap_or(false)).into(),
+            "tap, drag, pinch; on-screen buttons",
         ),
         (
             Widget::Preset,

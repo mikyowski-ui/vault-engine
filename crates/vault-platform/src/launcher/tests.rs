@@ -1183,3 +1183,62 @@ fn the_local_corpus_databases_validate() {
     assert_eq!(launcher.ready(), Ok(()));
     eprintln!("{:?}", launcher.checks);
 }
+
+#[test]
+fn the_touch_ui_row_follows_fullscreen_toggles_and_saves() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let mut launcher = Launcher::new(setup(dir, Config::default()));
+    launcher.tab = Tab::Display;
+    // In the focus order right after Fullscreen.
+    let order = launcher.order();
+    let at = order
+        .iter()
+        .position(|widget| *widget == Widget::Fullscreen)
+        .unwrap();
+    assert_eq!(&order[at + 1..at + 3], &[Widget::TouchUi, Widget::Preset]);
+    launcher.focus = Widget::Fullscreen;
+    key(&mut launcher, KeyCode::Tab);
+    assert_eq!(launcher.focus, Widget::TouchUi);
+    // Off by default; Space turns it on, and the row draws it.
+    assert_eq!(launcher.config.touch_ui, None);
+    let off = launcher.image();
+    key(&mut launcher, KeyCode::Space);
+    assert_eq!(launcher.config.touch_ui, Some(true));
+    assert_ne!(launcher.image().pixels(), off.pixels());
+    // With the enhanced rows shown too, no two rows overlap, and the
+    // display rows end above the enhanced section's title (y 238).
+    launcher.config.preset = Some(Preset::Enhanced);
+    let rows: Vec<_> = [
+        Widget::Scaling,
+        Widget::Fullscreen,
+        Widget::TouchUi,
+        Widget::Preset,
+        Widget::Audio,
+        Widget::Debug,
+        Widget::Viewport,
+        Widget::Zoom,
+        Widget::SmoothCamera,
+        Widget::RoofPeek,
+        Widget::UiScale,
+    ]
+    .into_iter()
+    .map(|widget| launcher.rect(widget).unwrap())
+    .collect();
+    for pair in rows.windows(2) {
+        assert!(pair[0].y + pair[0].h < pair[1].y, "{pair:?}");
+    }
+    assert!(rows[5].y + rows[5].h < 238);
+    // Save writes it, and a launcher from the file shows it.
+    assert_eq!(launcher.save(), Ok(dir.join(config::FILE_NAME)));
+    let text = fs::read_to_string(dir.join(config::FILE_NAME)).unwrap();
+    assert!(text.contains("touch_ui = true\n"), "{text}");
+    let saved = Config::parse(&text).unwrap();
+    assert_eq!(saved.touch_ui, Some(true));
+    let reloaded = Launcher::new(setup(dir, saved));
+    assert_eq!(reloaded.config.touch_ui, Some(true));
+    // A click on the row turns it off again.
+    let rect = launcher.rect(Widget::TouchUi).unwrap();
+    launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
+    assert_eq!(launcher.config.touch_ui, Some(false));
+}

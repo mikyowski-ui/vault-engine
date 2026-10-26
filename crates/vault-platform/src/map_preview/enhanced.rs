@@ -431,6 +431,17 @@ impl MapPreview {
         if enhanced.at != Some(at) {
             self.enhanced_pointer(at);
         }
+        // The touch UI's pill bar takes left presses on its buttons
+        // (interface pixels), and the release of a press it took.
+        if button == PointerButton::Left {
+            if !pressed && self.touch_bar_held() {
+                self.touch_bar_release(at.ui);
+                return true;
+            }
+            if pressed && at.ui.is_some_and(|ui| self.touch_bar_press(ui)) {
+                return true;
+            }
+        }
         let route = self.route(at);
         let dragging = self.unlocked().and_then(|enhanced| enhanced.drag);
         let world_view = matches!(route, Route::World(_)) && self.world_pointer();
@@ -515,6 +526,15 @@ impl MapPreview {
             }
             _ => self.scroll(lines),
         }
+    }
+    /// Whether wheel lines at `at` zoom the camera, as over the world with
+    /// no window or action menu open; the touch UI's pinch zooms only
+    /// there.
+    pub fn enhanced_zoomable(&self, at: PointerAt) -> bool {
+        self.unlocked().is_some()
+            && matches!(self.route(at), Route::World(_))
+            && self.world_pointer()
+            && self.pointer.menu.is_none()
     }
 }
 

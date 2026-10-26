@@ -452,6 +452,11 @@ impl Replay {
                 self.preview.set_enhanced(Some(settings.into()));
                 self.present()?;
             }
+            // The desktop showed the touch UI's pill bar from the start.
+            InputCommand::TouchUi { enabled } => {
+                self.preview.set_touch_ui(enabled);
+                self.present()?;
+            }
             InputCommand::Modifiers {
                 shift,
                 control,
@@ -725,6 +730,169 @@ mod tests {
                 assert_eq!(first.state_sha256, vanilla.state_sha256);
             }
         }
+    }
+
+    /// A touch session's log, as the desktop writes it: each gesture's
+    /// actions as the mouse records they are, between frame ticks.
+    struct TouchLog {
+        out: Vec<u8>,
+        ids: vault_core::SequenceIds,
+        touch: crate::touch::TouchGestures,
+        now: u64,
+    }
+    impl TouchLog {
+        fn new(touch_ui: bool) -> Self {
+            let mut log = Self {
+                out: Vec::new(),
+                ids: Default::default(),
+                touch: Default::default(),
+                now: 0,
+            };
+            log.push(InputCommand::Surface {
+                width: 1920,
+                height: 1080,
+            });
+            log.push(InputCommand::Scaling { aspect_fit: true });
+            log.push(InputCommand::Enhanced {
+                settings: EnhancedSettings {
+                    smooth_camera: false,
+                    ..Default::default()
+                }
+                .into(),
+            });
+            if touch_ui {
+                log.push(InputCommand::TouchUi { enabled: true });
+            }
+            log.tick();
+            log
+        }
+        fn push(&mut self, command: InputCommand) {
+            crate::input::write_command(&mut self.out, &mut self.ids, &command).unwrap();
+        }
+        fn tick(&mut self) {
+            self.now += 16;
+            for action in self.touch.poll(self.now) {
+                self.push(action.command());
+            }
+            self.push(InputCommand::Tick { now_ms: self.now });
+        }
+        fn feed(&mut self, phase: winit::event::TouchPhase, id: u64, at: [f64; 2], button: bool) {
+            let context = crate::touch::TouchContext {
+                camera: true,
+                button,
+            };
+            for action in self.touch.feed(phase, id, at, self.now, context) {
+                self.push(action.command());
+            }
+            self.tick();
+        }
+        fn take(&mut self) -> String {
+            String::from_utf8(std::mem::take(&mut self.out)).unwrap()
+        }
+    }
+
+    /// Drag, pinch, two-finger tap and a bar button, replayed: the drag
+    /// pans, the pinch zooms about its midpoint and clamps at 3.0, the
+    /// two-finger tap cycles the cursor, and the INV button opens the
+    /// inventory only when the log says the touch UI was on.
+    #[test]
+    fn touch_gestures_replay_as_the_mouse_records_they_are() {
+        use winit::event::TouchPhase::{Ended, Moved, Started};
+        let dir = synthetic_corpus();
+        fn world(replay: &mut Replay) -> &mut MapPreview {
+            interactive_world(&mut replay.preview).unwrap()
+        }
+        let mut log = TouchLog::new(true);
+        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        replay.run(log.take().as_bytes()).unwrap();
+        let layout = replay.layout().expect("the unlocked viewport");
+        let origin = |replay: &mut Replay| world(replay).enhanced_view().unwrap().grid.origin;
+        // A drag pans by the finger's motion.
+        let before = origin(&mut replay);
+        log.feed(Started, 1, [900.0, 400.0], false);
+        log.feed(Moved, 1, [960.0, 430.0], false);
+        log.feed(Moved, 1, [990.0, 445.0], false);
+        log.feed(Ended, 1, [990.0, 445.0], false);
+        replay.run(log.take().as_bytes()).unwrap();
+        let after = origin(&mut replay);
+        let per_world = f64::from(layout.ui_scale * layout.zoom);
+        assert_eq!(
+            [after[0] - before[0], after[1] - before[1]],
+            [
+                (90.0 / per_world).round() as i64,
+                (45.0 / per_world).round() as i64
+            ],
+            "{before:?} -> {after:?}"
+        );
+        // A pinch spreading 3x in one move zooms to the limit about the
+        // fingers' midpoint then, and spreading further stays there.
+        let mid = [1100.0, 500.0];
+        let grid_point = |replay: &mut Replay| {
+            let layout = replay.layout().unwrap();
+            let world = layout.world_point(mid).unwrap();
+            let origin = origin(replay);
+            [world[0] - origin[0] as f64, world[1] - origin[1] as f64]
+        };
+        let anchored = grid_point(&mut replay);
+        log.feed(Started, 1, [800.0, 500.0], false);
+        log.feed(Started, 2, [1000.0, 500.0], false);
+        log.feed(Moved, 2, [1400.0, 500.0], false);
+        replay.run(log.take().as_bytes()).unwrap();
+        assert!((replay.preview.enhanced_zoom() - 3.0).abs() < 1e-4);
+        let moved = grid_point(&mut replay);
+        for axis in 0..2 {
+            assert!(
+                (moved[axis] - anchored[axis]).abs() <= 1.5,
+                "{anchored:?} -> {moved:?}"
+            );
+        }
+        log.feed(Moved, 1, [400.0, 500.0], false);
+        replay.run(log.take().as_bytes()).unwrap();
+        assert_eq!(replay.preview.enhanced_zoom(), 3.0);
+        // Halving the spread from there halves the zoom: the excess was
+        // never stored.
+        log.feed(Moved, 2, [900.0, 500.0], false);
+        log.feed(Ended, 1, [400.0, 500.0], false);
+        log.feed(Ended, 2, [900.0, 500.0], false);
+        replay.run(log.take().as_bytes()).unwrap();
+        assert!((replay.preview.enhanced_zoom() - 1.5).abs() < 1e-4);
+        // A two-finger tap is a right click: the cursor mode cycles.
+        let mode = world(&mut replay).mode_name();
+        log.feed(Started, 1, [900.0, 500.0], false);
+        log.feed(Started, 2, [1000.0, 500.0], false);
+        log.feed(Ended, 2, [1000.0, 500.0], false);
+        log.feed(Ended, 1, [900.0, 500.0], false);
+        replay.run(log.take().as_bytes()).unwrap();
+        assert_ne!(world(&mut replay).mode_name(), mode);
+        // The INV button, pressed when the finger lands.
+        let layout = replay.layout().unwrap();
+        let inventory = world(&mut replay)
+            .touch_bar()
+            .into_iter()
+            .find(|(button, _)| button.label() == "INV")
+            .unwrap()
+            .1;
+        let scale = f64::from(layout.ui_scale);
+        let at = [
+            f64::from(layout.ui_rect[0]) + (f64::from(inventory.x + 20) + 0.5) * scale,
+            f64::from(layout.ui_rect[1]) + (f64::from(inventory.y + 20) + 0.5) * scale,
+        ];
+        log.feed(Started, 1, at, true);
+        log.feed(Ended, 1, at, true);
+        let rest = log.take();
+        assert!(rest.contains(r#""kind":"pointer_button","button":"Left","pressed":true"#));
+        replay.run(rest.as_bytes()).unwrap();
+        assert!(world(&mut replay).touch_bar().is_empty());
+        // The whole log replays to one digest, and differs without the
+        // `touch_ui` record (the bar is not drawn and takes no press).
+        let whole = |touch_ui: bool| {
+            let mut log = TouchLog::new(touch_ui);
+            log.feed(Started, 1, at, touch_ui);
+            log.feed(Ended, 1, at, touch_ui);
+            replay_log(dir.path(), &log.take())
+        };
+        assert_eq!(whole(true), whole(true));
+        assert_ne!(whole(true).state_sha256, whole(false).state_sha256);
     }
 
     #[test]

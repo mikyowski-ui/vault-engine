@@ -252,6 +252,8 @@ pub struct Config {
     pub preset: Option<Preset>,
     pub scaling: Option<ScalingMode>,
     pub fullscreen: Option<bool>,
+    /// The touch UI: touch gestures and the on-screen pill bar.
+    pub touch_ui: Option<bool>,
     pub debug: Option<bool>,
     /// `false` keeps the audio device closed, as `--no-audio` does.
     pub audio: Option<bool>,
@@ -439,6 +441,7 @@ impl Config {
                 })?);
             }
             "fullscreen" => self.fullscreen = Some(boolean(value)?),
+            "touch_ui" => self.touch_ui = Some(boolean(value)?),
             "debug" => self.debug = Some(boolean(value)?),
             "audio" => self.audio = Some(boolean(value)?),
             "viewport_mode" => {
@@ -551,6 +554,7 @@ impl Config {
         }
         for (key, value) in [
             ("fullscreen", self.fullscreen),
+            ("touch_ui", self.touch_ui),
             ("debug", self.debug),
             ("audio", self.audio),
         ] {
@@ -754,7 +758,7 @@ impl Config {
     }
 }
 
-const KNOWN: [&str; 16] = [
+const KNOWN: [&str; 17] = [
     "master_dat",
     "critter_dat",
     "data_root",
@@ -763,6 +767,7 @@ const KNOWN: [&str; 16] = [
     "preset",
     "scaling",
     "fullscreen",
+    "touch_ui",
     "debug",
     "audio",
     "viewport_mode",
@@ -1186,6 +1191,7 @@ game = "fallout1"
 preset = "enhanced"
 scaling = "aspect_fit"
 fullscreen = true
+touch_ui = true
 debug = false
 future_key = "kept"
 future_list = []
@@ -1207,6 +1213,12 @@ future_list = []
         assert_eq!(config.preset, Some(Preset::Enhanced));
         assert_eq!(config.scaling, Some(ScalingMode::AspectFit));
         assert_eq!((config.fullscreen, config.debug), (Some(true), Some(false)));
+        assert_eq!(config.touch_ui, Some(true));
+        assert_eq!(
+            Config::parse("touch_ui = false").unwrap().touch_ui,
+            Some(false)
+        );
+        assert_eq!(Config::parse("").unwrap().touch_ui, None);
         assert_eq!(
             Config::parse("game = \"fallout2\"").unwrap().game,
             Some(GameProfile::Fallout2)
@@ -1292,6 +1304,7 @@ future_list = []
         assert_eq!(line("a = 01\n"), 1);
         assert_eq!(line("debug = \"true\""), 1);
         assert!(message("fullscreen = \"yes\"").contains("`fullscreen` expects true or false"));
+        assert!(message("touch_ui = 1").contains("`touch_ui` expects true or false"));
         assert_eq!(line("preset = \"modern\""), 1);
         assert_eq!(line("scaling = \"stretch\""), 1);
         assert_eq!(line("master_dat = \"a\" trailing"), 1);
