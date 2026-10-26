@@ -4,7 +4,7 @@
 //! built from synthetic tables. Also the §8.5 gate's script path.
 use crate::{
     CharacterSheet, ScriptEvent, WorldEffect, WorldHost, WorldState,
-    fallout2::{self, Fallout2Tables, Fallout2World},
+    fallout2::{Fallout2Tables, Fallout2World},
     fixture_items as items, fixture_state as fixture,
     queue::EventKind,
     test_support::{TestAssets, dir_assets, npc_prototype, patched, program, requested},
@@ -889,8 +889,7 @@ fn spec017_vector_m_lifecycle_names() {
 }
 
 #[test]
-fn spec017_the_gate_keeps_play_closed_but_the_fallout2_path_exists() {
-    const { assert!(!fallout2::SCRIPT_GATE_OPEN) };
+fn spec017_the_gate_is_open_and_fallout2_requests_run_their_scripts() {
     // A script using a Fallout 2 word: Fallout 1 refuses it at load; the
     // Fallout 2 profile parses it with the Fallout 2 word set.
     let dir = tempfile::tempdir().unwrap();
@@ -918,15 +917,11 @@ fn spec017_the_gate_keeps_play_closed_but_the_fallout2_path_exists() {
     assert!(program.words().fallout2());
     assets.set_game_profile(crate::GameProfile::Fallout1);
     assert!(assets.program(0).is_err());
-    // While gated, a Fallout 2 request loads nothing; the VM harness runs
-    // the same program's words directly with the Fallout 2 rows.
+    // Revision 3 opens the gate: a Fallout 2 game is not gated, and runs
+    // the program's words with the Fallout 2 rows.
     let mut h = harness(true);
-    assert!(h.host.scripts_gated());
+    assert!(!h.host.scripts_gated());
     assert_eq!(h.host.word_set(), WordSet::FALLOUT2);
-    h.host
-        .dispatch(crate::test_support::request(h.script, ScriptEvent::Use))
-        .ok();
-    assert!(h.host.programs.is_empty());
     let mut vm = Vm::new(program);
     vm.id = 70;
     h.host.bind_program(&vm, h.script);
@@ -978,4 +973,35 @@ fn spec017_party_add_keeps_control_records_and_a_32_entry_cap() {
     h.run(&add(h.me)).unwrap();
     assert!(!h.host.world.party.contains(&h.me));
     assert!(h.diagnostics().iter().any(|n| n.contains("32 entries")));
+}
+
+/// Revision 3 (Decision 37): under Fallout 2, `0x8109` pops an unchecked
+/// object, the integer 13 and an unchecked value, pushes I 0, changes
+/// nothing, and gives one diagnostic per program.
+#[test]
+fn spec017_0x8109_pops_three_and_pushes_0_once_diagnosed() {
+    let mut h = harness(true);
+    let call = [
+        fixture::instruction(0x80bc),
+        fixture::push(13),
+        fixture::push(4),
+        fixture::instruction(0x8109),
+    ]
+    .concat();
+    let ticks = h.host.world.clock.ticks;
+    let vm = h.run(&[call.clone(), call.clone()].concat()).unwrap();
+    assert_eq!(integers(&vm), [0, 0]);
+    assert_eq!(h.host.world.clock.ticks, ticks);
+    let notes = h.diagnostics();
+    let reached: Vec<_> = notes.iter().filter(|n| n.contains("0x8109")).collect();
+    assert_eq!(reached.len(), 1, "{notes:?}");
+    // The same program again: no second diagnostic.
+    h.run(&call).unwrap();
+    assert!(!h.diagnostics().iter().any(|n| n.contains("0x8109")));
+    // Fallout 1's town_map pops nothing.
+    let mut f1 = harness(false);
+    let vm = f1
+        .run(&[fixture::push(7), fixture::instruction(0x8109)].concat())
+        .unwrap();
+    assert_eq!(integers(&vm), [7]);
 }

@@ -1218,7 +1218,7 @@ fn spec017_vector_b_a_reserved_word_fails_closed() {
 #[test]
 fn spec017_fallout2_rows_amend_spec005_only_where_section_3_2_says() {
     use crate::extensions::{FALLOUT2, PushKind, Rule, opcode, opcode_in};
-    let reassigned = [0x80b2_u16, 0x80cf, 0x80e1, 0x80e2, 0x80e5, 0x80e6];
+    let reassigned = [0x80b2_u16, 0x80cf, 0x80e1, 0x80e2, 0x80e5, 0x80e6, 0x8109];
     for word in 0x804c..=0x8155_u16 {
         let fallout1 = opcode_in(&WordSet::FALLOUT1, word).unwrap();
         assert_eq!(fallout1.name, opcode(word).unwrap().name);
@@ -1240,6 +1240,16 @@ fn spec017_fallout2_rows_amend_spec005_only_where_section_3_2_says() {
     assert_eq!(shape(0x80e2), ("set_map_music", 2, false));
     assert_eq!(shape(0x80e5), ("wm_area_set_pos", 3, false));
     assert_eq!(shape(0x80e6), ("set_exit_grids", 5, false));
+    assert_eq!(shape(0x8109), ("unnamed", 3, true));
+    assert_eq!(
+        opcode(0x8109).unwrap().operands.len(),
+        0,
+        "Fallout 1's town_map"
+    );
+    assert_eq!(
+        row(0x8109).operands,
+        [Rule::Unchecked, Rule::Integer, Rule::Unchecked]
+    );
     assert_eq!(shape(0x8156), ("inven_cmds", 3, true));
     assert_eq!(shape(0x8157), ("reg_anim_change_fid", 3, false));
     assert_eq!(shape(0x8158), ("reg_anim_take_out", 3, false));

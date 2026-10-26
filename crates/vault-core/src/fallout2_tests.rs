@@ -345,14 +345,17 @@ fn diagnostics(host: &mut WorldHost<TestAssets>) -> Vec<String> {
         .collect()
 }
 
+/// SPEC-017 Revision 3: the gate is open, so a Fallout 2 request loads
+/// and runs its script as a Fallout 1 one does, with no gate diagnostic or
+/// notice.
 #[test]
-fn spec018_gated_scripts_load_nothing() {
-    for gated in [true, false] {
+fn spec018_open_gate_scripts_load_and_run() {
+    for fallout2 in [true, false] {
         let mut host = fallout2_host();
-        if !gated {
+        if !fallout2 {
             host.world.fallout2 = None;
         }
-        assert_eq!(host.scripts_gated(), gated);
+        assert!(!host.scripts_gated());
         host.world.scripts_enabled = true;
         let owner = host.world.player;
         let sid = host.world.add_script(owner, 0, 4, 0).unwrap();
@@ -369,27 +372,25 @@ fn spec018_gated_scripts_load_nothing() {
             let result = host.dispatch(request).unwrap();
             assert!(!result.overridden);
         }
-        // No program enters the VM run list while gated; the record stays.
-        assert_eq!(host.programs.is_empty(), gated);
+        // The program enters the VM run list; the record stays.
+        assert!(!host.programs.is_empty());
         assert!(host.world.scripts.contains_key(&sid));
         let notes = diagnostics(&mut host);
-        let gate = notes.iter().filter(|note| note.contains("gated")).count();
-        assert_eq!(gate, usize::from(gated), "{notes:?}");
+        assert!(
+            !notes.iter().any(|note| note.contains("gated")),
+            "{notes:?}"
+        );
     }
-    // The notice is printed once per call, only while gated.
+    // No notice is printed.
     let mut host = fallout2_host();
     host.fallout2_notice();
-    let messages: Vec<_> = host
-        .world
-        .effects
-        .drain(..)
-        .filter_map(|effect| match effect {
-            WorldEffect::Message(text) => Some(text),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(messages, [fallout2::GATE_NOTICE.as_bytes().to_vec()]);
-    const { assert!(!fallout2::SCRIPT_GATE_OPEN) };
+    assert!(
+        !host
+            .world
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, WorldEffect::Message(_)))
+    );
 }
 
 #[test]

@@ -52,7 +52,7 @@ const fn fallout2(
 }
 const I: Rule = Rule::Integer;
 /// SPEC-017's rows under the Fallout 2 profile, in ascending word order:
-/// the six SPEC-005 words §3.2 reassigns and the four words of §4.1.
+/// the seven SPEC-005 words §3.2 reassigns and the four words of §4.1.
 /// Operands are listed in pop order, first popped first. Every other word
 /// of `0x804C..=0x8155` keeps its SPEC-005 row (§3.1), and the 42 reserved
 /// words `0x815A..=0x8183` have no row: executing one is the
@@ -80,6 +80,14 @@ pub static FALLOUT2: &[OpcodeSpec] = &[
     fallout2(0x80e5, "wm_area_set_pos", &[I, I, I], PushKind::None),
     // set_exit_grids(marked elevation, map, elevation, hex, orientation)
     fallout2(0x80e6, "set_exit_grids", &[I, I, I, I, I], PushKind::None),
+    // Revision 3 (Decision 37): an unnamed word of three operands, the
+    // second an integer, pushing 0 with no effect.
+    fallout2(
+        0x8109,
+        "unnamed",
+        &[Rule::Unchecked, I, Rule::Unchecked],
+        PushKind::Value,
+    ),
     // inven_cmds(owner, command, index)
     fallout2(0x8156, "inven_cmds", &[I, I, I], PushKind::Value),
     // reg_anim_change_fid(object, art, delay)

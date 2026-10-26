@@ -161,6 +161,20 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.fallout2_registration(call);
                 Ok(None)
             }
+            // Revision 3 (Decision 37): no effect, and one diagnostic per
+            // program so play can find its call sites.
+            0x8109 => {
+                if self.unnamed_words.insert(vm.id) {
+                    self.world.diagnostic(format!(
+                        "{:#06x} ({name}): reached with operands {}, {}, {}; it has no effect and pushes 0",
+                        call.spec.word,
+                        call.args[2].value.payload,
+                        call.int(1),
+                        call.args[0].value.payload
+                    ));
+                }
+                Ok(integer(0))
+            }
             0x810b => self.fallout2_metarule(call.int(1), call.int(0)),
             word => Err(VmError::Opcode(word)),
         }

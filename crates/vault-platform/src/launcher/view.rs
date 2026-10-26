@@ -272,8 +272,11 @@ pub fn draw(launcher: &Launcher) -> IndexedImage {
         &font::clip_end(&launcher.status, 104),
         tone,
     );
-    // SPEC-017 §8.7 rule 6: under Play, the script gate's notice.
-    let help = if launcher.config.game == Some(GameProfile::Fallout2) {
+    // SPEC-017 §8.7 rule 6: under Play, the script gate's notice while the
+    // gate is closed (Revision 3 opens it).
+    let help = if launcher.config.game == Some(GameProfile::Fallout2)
+        && !vault_core::fallout2::SCRIPT_GATE_OPEN
+    {
         vault_core::fallout2::GATE_NOTICE
     } else {
         "Tab/Shift+Tab move   Enter/Space activate   Arrows choose   Esc backs out"

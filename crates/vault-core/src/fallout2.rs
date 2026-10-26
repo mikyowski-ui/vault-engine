@@ -15,10 +15,11 @@ use vault_formats::fallout2::{
     worldmap::{ConditionContext, Fill, Subtile},
 };
 
-/// SPEC-017 §8.5: Fallout 2 script execution stays gated until a spec
-/// revision records the corpus audit. This is the one switch; it is not a
-/// setting, and no configuration key, flag or preset opens it.
-pub const SCRIPT_GATE_OPEN: bool = false;
+/// SPEC-017 §8.5: Fallout 2 script execution was gated until a spec
+/// revision recorded the corpus audit; Revision 3 records it and opens the
+/// gate (Decision 36). This is the one switch; it is not a setting, and no
+/// configuration key, flag or preset changes it.
+pub const SCRIPT_GATE_OPEN: bool = true;
 /// SPEC-017 §8.7 rule 6: the monitor's notice while scripts are gated.
 pub const GATE_NOTICE: &str = "Scripts are off: the Fallout 2 script audit is not recorded yet.";
 /// §6.5 the new-game map, loaded by this fixed name.

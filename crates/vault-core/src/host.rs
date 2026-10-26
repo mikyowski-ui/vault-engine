@@ -119,6 +119,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// SPEC-018 §7: a Fallout 2 load's restored state, installed by the
     /// reset that precedes its map load.
     pub(crate) install_fallout2: Option<Box<crate::fallout2::Fallout2World>>,
+    /// SPEC-017 Decision 37: the programs that have reached Fallout 2's
+    /// unnamed `0x8109`, each diagnosed once.
+    pub(crate) unnamed_words: BTreeSet<u32>,
     /// SPEC-013 §3.22: the open town or world map was started by a
     /// transition to map -1 or -2, so the request pending when it closes
     /// is discarded.
@@ -315,6 +318,7 @@ impl<A: WorldAssets> WorldHost<A> {
             fidget: None,
             critter_cycle: 0,
             install_fallout2: None,
+            unnamed_words: BTreeSet::new(),
             transition_world_map: false,
             presentation: None,
             arriving: false,

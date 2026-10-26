@@ -343,8 +343,8 @@ impl WorldRules {
     }
 }
 /// The game whose data an engine runs: Fallout 1 (SPEC-001 to SPEC-014)
-/// or Fallout 2 (SPEC-015 to SPEC-019; its scripts stay gated by SPEC-017
-/// §8.5, [`crate::fallout2::SCRIPT_GATE_OPEN`]).
+/// or Fallout 2 (SPEC-015 to SPEC-019; its scripts run since SPEC-017
+/// Revision 3 opened the §8.5 gate, [`crate::fallout2::SCRIPT_GATE_OPEN`]).
 pub use vault_formats::GameProfile;
 /// Which engine behaviour a world runs with. [`Vanilla`](Self::Vanilla), the
 /// default everywhere, is the spec-conformant reference behaviour: every

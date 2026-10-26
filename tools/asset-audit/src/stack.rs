@@ -22,8 +22,8 @@ const MAX_POPS: u8 = 8;
 /// The host words inference covers (§8.3).
 const GAME_WORDS: std::ops::RangeInclusive<u16> = 0x80a1..=0x8183;
 /// SPEC-017's words: the six §3.2 reassigns and the four of §4.1.
-pub const SPEC017_WORDS: [u16; 10] = [
-    0x80b2, 0x80cf, 0x80e1, 0x80e2, 0x80e5, 0x80e6, 0x8156, 0x8157, 0x8158, 0x8159,
+pub const SPEC017_WORDS: [u16; 11] = [
+    0x80b2, 0x80cf, 0x80e1, 0x80e2, 0x80e5, 0x80e6, 0x8109, 0x8156, 0x8157, 0x8158, 0x8159,
 ];
 /// SPEC-017 §3.2: the Fallout 1 stubs whose Fallout 2 use is reported.
 pub const STUB_WORDS: [u16; 4] = [0x80ad, 0x80b3, 0x80b5, 0x80d1];

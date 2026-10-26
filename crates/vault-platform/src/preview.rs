@@ -974,13 +974,38 @@ mod tests {
     /// SPEC-018 §8.13 and the end-to-end Fallout 2 path: a synthetic
     /// install of SPEC-015 archives (SPEC-016 layouts, the SPEC-018 tables,
     /// a synthetic `artemple.map`) validates in the launcher, Play's start
-    /// makes a new game on the start map with scripts gated, the world map
-    /// is reachable, and save and load round-trip.
+    /// makes a new game on the start map with its scripts running (SPEC-017
+    /// Revision 3 opens the gate), the world map is reachable, and save and
+    /// load round-trip.
     #[test]
     fn spec018_a_fallout2_install_plays_end_to_end() {
         use vault_core::{GameProfile::Fallout2, fallout2, host_save::SaveInfo};
+        use vault_fixtures::state as fixture;
         let corpus = crate::map_preview::test_support::synthetic_corpus();
         vault_fixtures::fallout2::write_tables(corpus.path());
+        // The start map's script (`scripts.lst` row 3): its
+        // `map_enter_p_proc` sets campaign global 3 to 2241.
+        let enter = [
+            fixture::push(3),
+            fixture::push(2241),
+            fixture::instruction(0x80c6),
+        ]
+        .concat();
+        std::fs::write(
+            corpus.path().join("scripts/f2enter.int"),
+            fixture::program(&[], &[(b"map_enter_p_proc", fixture::returning(enter))]),
+        )
+        .unwrap();
+        let list = corpus.path().join("scripts/scripts.lst");
+        let mut rows = std::fs::read(&list).unwrap();
+        rows.extend(b"f2enter.int # local_vars=0\n");
+        std::fs::write(&list, rows).unwrap();
+        let map = std::fs::read(corpus.path().join("maps/synthetic.map")).unwrap();
+        std::fs::write(
+            corpus.path().join("maps/artemple.map"),
+            vault_fixtures::fallout2::named_map(map, "artemple.map", 3, 20100, 2),
+        )
+        .unwrap();
         let install = tempfile::tempdir().unwrap();
         let (master, critter) =
             vault_fixtures::dat2::fallout2_install(corpus.path(), install.path(), 2);
@@ -1045,14 +1070,20 @@ mod tests {
         assert_eq!(state.map_flags, [0, 0, 3]);
         assert_eq!(host.world.clock.ticks, fallout2::START_TICKS);
         assert_eq!(host.world.game_date(), [7, 25, 2241]);
-        // No `.int` was read and no program runs; the scripts' records are
-        // kept, the critter's among them.
-        assert!(host.scripts_gated());
-        assert!(host.programs.is_empty());
+        // The scripts run: the map script was read with the Fallout 2 word
+        // set and its `map_enter_p_proc` set the global.
+        assert!(!host.scripts_gated());
+        assert!(!host.programs.is_empty());
         let reads = logged.reads.lock().unwrap().clone();
         assert!(
-            !reads.iter().any(|path| path.ends_with(".int")),
+            reads.iter().any(|path| path.ends_with("f2enter.int")),
             "{reads:?}"
+        );
+        assert_eq!(host.world.gvars.as_ref().unwrap()[3], 2241);
+        assert!(
+            host.programs
+                .values()
+                .all(|vm| vm.program.words().fallout2())
         );
         let critter = host
             .world
@@ -1067,8 +1098,8 @@ mod tests {
             .world
             .script_for(critter)
             .expect("the critter's script record");
-        // The monitor's last message is the notice, once (it wraps over
-        // rows; a message's first row starts with the bullet).
+        // The monitor never shows the gate's notice (it wraps over rows; a
+        // message's first row starts with the bullet).
         world.image().unwrap();
         let squeeze = |text: &[u8]| {
             text.iter()
@@ -1093,17 +1124,13 @@ mod tests {
             out
         };
         let shown = messages(world);
-        assert_eq!(shown.last(), Some(&notice), "{shown:?}");
-        assert_eq!(
-            shown.iter().filter(|message| **message == notice).count(),
-            1
-        );
-        // A save made now carries the gated mark and the critter's record.
+        assert!(!shown.contains(&notice), "{shown:?}");
+        // A save made now carries no gated mark, and the critter's record.
         let root = saves.path();
         world.host.save_game(root, 1, &SaveInfo::default()).unwrap();
         let slot = root.join("SAVEGAME/SLOT01");
         let central = std::fs::read(slot.join("SAVE.DAT")).unwrap();
-        assert_eq!(central[0x74F7], 1);
+        assert_eq!(central[0x74F7], 0);
         assert_eq!(&central[0x18..0x1C], &[0, 1, 0, 2]);
         assert_eq!(&central[0x74E3..0x74F3], b"VAULTENG F2SAVE1");
         assert_eq!(&central[0x71..0x73], &[0, 2]);
@@ -1129,7 +1156,7 @@ mod tests {
         let automap = std::fs::read(slot.join("AUTOMAP.SAV")).unwrap();
         assert!(automap.len() >= 12005);
         // An exit-grid transition (to map 1) loads Test Village, with no
-        // second notice; its area moves the party there.
+        // notice; its area moves the party there.
         world.host.request_transition(vault_core::Transition {
             map: 1,
             elevation: -1,
@@ -1139,11 +1166,7 @@ mod tests {
         assert!(world.host.process_transition().unwrap());
         assert_eq!(world.host.world.map.header.map_number, 1);
         world.image().unwrap();
-        let shown = messages(world);
-        assert_eq!(
-            shown.iter().filter(|message| **message == notice).count(),
-            1
-        );
+        assert!(!messages(world).contains(&notice));
         // The world map is reachable: a transition to it, travel with no
         // encounter table on the way, and an area entrance back.
         world.host.request_transition(vault_core::Transition {
@@ -1195,10 +1218,21 @@ mod tests {
         let after = world.host.world.fallout2.as_deref().unwrap();
         assert_eq!(after.save(), before.save());
         assert_eq!(after.position, before.position);
-        // The load printed the notice again.
+        // The load printed no notice.
         let effects: Vec<_> = world.host.world.effects.iter().cloned().collect();
-        assert!(effects.iter().any(|effect| matches!(effect,
+        assert!(!effects.iter().any(|effect| matches!(effect,
             vault_core::WorldEffect::Message(text) if squeeze(text) == notice)));
+        // SPEC-018 §7.2: a slot carrying the gated mark is refused now that
+        // the gate is open, and nothing changes.
+        let central = root.join("SAVEGAME/SLOT02/SAVE.DAT");
+        let good = std::fs::read(&central).unwrap();
+        let mut marked = good.clone();
+        marked[0x74F7] = 1;
+        std::fs::write(&central, marked).unwrap();
+        assert!(world.host.load_game(root, 2).is_err());
+        assert_eq!(world.host.world.map.header.map_number, 1);
+        std::fs::write(&central, good).unwrap();
+        world.host.load_game(root, 2).unwrap();
         // A Fallout 1 slot never loads under Fallout 2, nor a Fallout 2 slot
         // under Fallout 1.
         let mut fallout1 =
