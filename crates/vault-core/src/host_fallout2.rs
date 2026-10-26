@@ -347,6 +347,9 @@ impl<A: WorldAssets> WorldHost<A> {
             weights.fill(1);
         }
         let total: i32 = weights.iter().sum();
+        // §4.4.5 (Revision 2): `Player(Perception)` is read as the group
+        // spawns.
+        let distance = group.distance.hexes(self.world.player_stat(1));
         let player = self.world.player;
         let (origin, elevation) = self
             .world
@@ -368,7 +371,9 @@ impl<A: WorldAssets> WorldHost<A> {
                     .unwrap_or(0);
                 eligible[index]
             };
-            let steps = group.distance + group.spacing * (k / 6);
+            // §5.7 step 6 (Revision 2): a type's own distance replaces the
+            // group's.
+            let steps = critter.distance.unwrap_or(distance) + group.spacing * (k / 6);
             let toward = ((direction + k) % 6) as u8;
             let start = HexGrid::step(origin, toward, steps)
                 .map_err(|_| WorldError::Invalid("player hex outside the grid".into()))?;
@@ -405,7 +410,9 @@ impl<A: WorldAssets> WorldHost<A> {
         None
     }
     /// §5.7 creation: the critter at `hex`, facing the player at `player`,
-    /// with its items, held weapon, script and dead state.
+    /// with its items, held weapon, script and dead state. An item or
+    /// scenery type is that object at `hex`, with nothing else applied
+    /// (Revision 2).
     fn fallout2_create_critter(
         &mut self,
         critter: &CritterType,
@@ -415,6 +422,9 @@ impl<A: WorldAssets> WorldHost<A> {
     ) -> Result<ObjectRef, WorldError> {
         let prototype = self.assets.prototype(critter.pid)?;
         let object = self.spawn(prototype.clone(), hex, elevation)?;
+        if !critter.is_critter() {
+            return Ok(object);
+        }
         let name = self.assets.prototype_text(&prototype, false);
         let description = self.assets.prototype_text(&prototype, true);
         if let Some(target) = self.world.get_mut(object) {

@@ -447,6 +447,83 @@ fn spec018_entering_an_encounter_spawns_its_groups() {
     assert!(host.world.gvars.is_none());
 }
 
+/// SPEC-018 §5.7 (Revision 2): a type's own `Distance` replaces the
+/// group's, `Player(Perception)` is read as the group spawns, and an item
+/// or scenery type creates that object with nothing else applied.
+#[test]
+fn spec018_revision2_spawning_distances_and_objects() {
+    let worldmap = fixture::WORLDMAP
+        .replace(
+            "position=surrounding, spacing:2, distance:6\n\
+             type_00=Ratio:75%, pid:16777217\n\
+             type_01=Ratio:25%, pid:16777218, Item:(1-3)41, Item:4(wielded)",
+            "position=surrounding, spacing:2, distance:6\ntype_00=pid:16777217, Distance:3",
+        )
+        .replace(
+            "type_00=pid:16777219, Script:12, If(Player(Level) >= 5)\ntype_01=pid:16777220, Dead",
+            "position=wedge, distance:Player(Perception)\ntype_00=pid:33554433, Dead",
+        );
+    assert_ne!(worldmap, fixture::WORLDMAP);
+    let leaked: &'static str = Box::leak(worldmap.into_boxed_str());
+    let files: Vec<_> = fixture::tables()
+        .into_iter()
+        .map(|(path, text)| match path {
+            "data/worldmap.txt" => (path, leaked),
+            _ => (path, text),
+        })
+        .collect();
+    let tables = Arc::new(Fallout2Tables::load(&mut fixture::reader(files)).unwrap());
+    let mut assets = TestAssets::all_art();
+    let mut critter = (*crate::test_support::npc_prototype()).clone();
+    critter.pid = 16777217;
+    assets.prototypes.insert(critter.pid, Arc::new(critter));
+    let scenery = vault_formats::Prototype::parse(&vault_fixtures::world::prototype(2, 5)).unwrap();
+    assert_eq!(scenery.pid, 0x0200_0001);
+    assets.prototypes.insert(scenery.pid, Arc::new(scenery));
+    assets.any_map = Some(crate::world::empty_map());
+    let world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+    let mut host = WorldHost::new(world, assets);
+    host.world.fallout2 = Some(Box::new(Fallout2World::new_game(tables, 2)));
+    // enc_01: TEST_Geckos count 1 (no draw), direction 0, one type (no
+    // draw); TEST_Hunters count draw 2, direction 3, one type.
+    host.world.rng.script(&[0, 2, 3]);
+    host.fallout2_enter_encounter(Selected {
+        table: 0,
+        entry: 1,
+        map: 0,
+        special: false,
+    })
+    .unwrap();
+    assert!(host.world.rng.unused_script().is_empty());
+    let player = host.world.player;
+    let perception = host.world.player_stat(1).clamp(0, 30);
+    let mut spawned: Vec<(u32, i32, bool, Option<i32>)> = host
+        .world
+        .iter()
+        .filter(|(reference, _)| *reference != player)
+        .map(|(reference, object)| {
+            (
+                object.raw.pid,
+                object.raw.hex.unwrap(),
+                host.world.is_dead(reference),
+                host.world.script_for(reference).map(|_| 0),
+            )
+        })
+        .collect();
+    spawned.sort();
+    let step =
+        |direction: u8, count: i32| vault_formats::HexGrid::step(19086, direction, count).unwrap();
+    let mut expected = vec![
+        // The critter takes its prototype's script.
+        (16777217, step(0, 3), false, Some(0)),
+        // The scenery's `Dead` is ignored when the table loads.
+        (0x0200_0001, step(3, perception), false, None),
+        (0x0200_0001, step(4, perception), false, None),
+    ];
+    expected.sort();
+    assert_eq!(spawned, expected);
+}
+
 #[test]
 fn spec018_elevator_records() {
     let mut host = fallout2_host();

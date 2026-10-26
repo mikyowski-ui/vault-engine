@@ -267,7 +267,9 @@ impl MapPreview {
             .iter()
             .enumerate()
             .filter_map(|(slot, entrance)| {
-                let entrance = entrance.as_ref()?;
+                // SPEC-018 §4.3 (Revision 2): an entrance at -1, -1 has no
+                // marker.
+                let marker = entrance.as_ref()?.marker?;
                 known
                     .as_ref()
                     .and_then(|known| known.get(slot))
@@ -276,8 +278,8 @@ impl MapPreview {
                     .then_some((
                         slot,
                         [
-                            ui2::TOWN_PICTURE[0] + entrance.marker[0],
-                            ui2::TOWN_PICTURE[1] + entrance.marker[1],
+                            ui2::TOWN_PICTURE[0] + marker[0],
+                            ui2::TOWN_PICTURE[1] + marker[1],
                         ],
                     ))
             })

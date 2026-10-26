@@ -140,6 +140,13 @@ fn critter_pid(text: &str) -> Option<u32> {
         .map(|pid| pid as u32)
 }
 
+/// A record's own PID: a critter's, an item's or a scenery object's.
+fn member_pid(text: &str) -> Option<u32> {
+    text::integer(text)
+        .filter(|pid| (0..=2).contains(&(pid >> 24)))
+        .map(|pid| pid as u32)
+}
+
 impl PartyTable {
     pub fn parse(bytes: &[u8], notes: &mut Diagnostics) -> Result<Self, TableError> {
         let file = FILE;
@@ -155,9 +162,11 @@ impl PartyTable {
                 );
                 continue;
             }
+            // Revision 2 (R13): an item or scenery record (the car trunk)
+            // is a follower.
             let Some(pid) = section
                 .get("party_member_pid")
-                .and_then(|value| critter_pid(&value.text))
+                .and_then(|value| member_pid(&value.text))
             else {
                 notes.push(
                     file,
@@ -194,7 +203,10 @@ impl PartyTable {
                 }),
             };
             let mut level_pids = Vec::new();
-            if let Some(value) = section.get("level_pids") {
+            // Revision 2 (R13): `-1` alone is the empty list.
+            if let Some(value) = section.get("level_pids")
+                && text::integer(&value.text) != Some(-1)
+            {
                 for item in text::list(&value.text) {
                     match critter_pid(&item) {
                         Some(pid) => level_pids.push(pid),

@@ -34,8 +34,9 @@ impl AreaSize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entrance {
     pub known: bool,
-    /// The marker on the town map picture.
-    pub marker: [i32; 2],
+    /// The marker on the town map picture; `None` (stored as -1, -1) is an
+    /// entrance with no marker, never drawn (Revision 2, R12).
+    pub marker: Option<[i32; 2]>,
     /// The destination's map number (from its lookup name).
     pub map: u32,
     /// -1 takes the header's elevation.
@@ -233,12 +234,16 @@ fn entrance(value: &str, maps: &MapsTable) -> Option<Entrance> {
     let [known, x, y, name, elevation, tile, orientation] = items.as_slice() else {
         return None;
     };
+    // Revision 2 (R12): -1, -1 is an entrance with no marker; only one of
+    // the two at -1 is invalid.
+    let marker = match [text::integer(x)?, text::integer(y)?] {
+        [-1, -1] => None,
+        marker if marker.iter().all(|value| (0..=1023).contains(value)) => Some(marker),
+        _ => return None,
+    };
     Some(Entrance {
         known: text::boolean(known)?,
-        marker: [
-            text::integer_in(x, 0..=1023)?,
-            text::integer_in(y, 0..=1023)?,
-        ],
+        marker,
         map: maps.by_lookup_name(&text::name(name)?)?,
         elevation: text::integer_in(elevation, -1..=2)?,
         tile: text::integer_in(tile, -1..=39999)?,

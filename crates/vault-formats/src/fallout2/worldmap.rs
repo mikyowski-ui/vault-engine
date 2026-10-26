@@ -123,11 +123,14 @@ pub struct GroupCount {
 }
 
 /// An entry's `Enc:` expression: its groups in order, and the relation
-/// before each later target (a group, or `Player` after `AMBUSH`).
+/// before each later target (a group, or `Player` after `AMBUSH` or
+/// `FIGHTING`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Expression {
     pub groups: Vec<GroupCount>,
     pub relations: Vec<Relation>,
+    /// For each relation, whether its target is `Player`.
+    pub player_targets: Vec<bool>,
 }
 
 /// §4.4.6 a comparison operator.
@@ -265,7 +268,8 @@ pub struct ItemSpec {
     pub wielded: bool,
 }
 
-/// One `type_NN` critter type.
+/// One `type_NN` critter type. Revision 2 (R9): its PID may also be an
+/// item's or a scenery object's, which is placed with nothing applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CritterType {
     pub number: u32,
@@ -275,7 +279,37 @@ pub struct CritterType {
     /// Zero-based `scripts.lst` index; -1 uses the prototype's script.
     pub script: i32,
     pub items: Vec<ItemSpec>,
+    /// Revision 2 (R10): this type's placement distance, replacing the
+    /// group's.
+    pub distance: Option<i32>,
     pub condition: Condition,
+}
+
+impl CritterType {
+    /// Whether the type places a critter (category 1), not an item or
+    /// scenery object.
+    pub fn is_critter(&self) -> bool {
+        self.pid >> 24 == 1
+    }
+}
+
+/// A group's placement distance (§4.4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Distance {
+    Hexes(i32),
+    /// Revision 2 (R10): `Player(Perception)`, the player's Perception
+    /// clamped to 0-30 when the group spawns.
+    PlayerPerception,
+}
+
+impl Distance {
+    /// The hexes it is when the player's Perception is `perception`.
+    pub fn hexes(self, perception: i32) -> i32 {
+        match self {
+            Self::Hexes(hexes) => hexes,
+            Self::PlayerPerception => perception.clamp(0, 30),
+        }
+    }
 }
 
 /// One `[Encounter: <name>]` group.
@@ -284,7 +318,9 @@ pub struct Group {
     pub name: String,
     pub formation: Formation,
     pub spacing: i32,
-    pub distance: i32,
+    pub distance: Distance,
+    /// Revision 2 (R10): `team_num`, stored with no engine effect.
+    pub team: Option<i32>,
     /// In ascending type number.
     pub types: Vec<CritterType>,
 }
@@ -650,7 +686,7 @@ impl WorldmapTable {
 }
 
 fn group(name: &str, section: &Section, notes: &mut Diagnostics, file: &str) -> Group {
-    let (mut formation, mut spacing, mut distance) = (Formation::default(), 1, 8);
+    let (mut formation, mut spacing, mut distance) = (Formation::default(), 1, Distance::Hexes(8));
     if let Some(value) = section.get("position") {
         let items = text::list(&value.text);
         if let Some(first) = items.first() {
@@ -677,12 +713,20 @@ fn group(name: &str, section: &Section, notes: &mut Diagnostics, file: &str) -> 
                     spacing = text::integer_in(value, 1..=10).unwrap_or(1)
                 }
                 Some((keyword, value)) if keyword == "distance" => {
-                    distance = text::integer_in(value, 0..=30).unwrap_or(8)
+                    distance = if text::fold(&value.replace(' ', "")) == "player(perception)" {
+                        Distance::PlayerPerception
+                    } else {
+                        Distance::Hexes(text::integer_in(value, 0..=30).unwrap_or(8))
+                    }
                 }
                 _ => notes.push(file, section.line, format!("position: {item:?} ignored")),
             }
         }
     }
+    // Revision 2 (R10): stored, with no engine effect and no diagnostic.
+    let team = section
+        .get("team_num")
+        .and_then(|value| text::integer(&value.text));
     let mut types = Vec::new();
     for (n, value) in section.indexed("type", 0..=99) {
         match critter_type(n, &value.text, notes, file, value.line) {
@@ -699,17 +743,18 @@ fn group(name: &str, section: &Section, notes: &mut Diagnostics, file: &str) -> 
         formation,
         spacing,
         distance,
+        team,
         types,
     }
 }
 
-/// `If(...)`'s inner text, when `field` is an `If` field.
-fn if_field(field: &str) -> Option<&str> {
-    let head = field.get(..3)?;
-    if !head.eq_ignore_ascii_case("if(") || !field.ends_with(')') {
-        return None;
-    }
-    Some(&field[3..field.len() - 1])
+/// Whether a list item is a condition field: `If`, then optional spaces,
+/// then `(` (Revision 2, R7).
+fn is_condition_field(field: &str) -> bool {
+    field
+        .get(..2)
+        .is_some_and(|head| head.eq_ignore_ascii_case("if"))
+        && field[2..].trim_start().starts_with('(')
 }
 
 fn critter_type(
@@ -726,16 +771,18 @@ fn critter_type(
         dead: false,
         script: -1,
         items: Vec::new(),
+        distance: None,
         condition: Condition::Always,
     };
     let mut pid = None;
+    let mut scripted = false;
     for item in text::list(value) {
-        if let Some(inner) = if_field(&item) {
-            out.condition = condition(inner).unwrap_or_else(|| {
+        if is_condition_field(&item) {
+            out.condition = condition_field(&item).unwrap_or_else(|| {
                 notes.push(
                     file,
                     line,
-                    format!("type_{number:02}: condition {inner:?} never holds"),
+                    format!("type_{number:02}: condition {item:?} never holds"),
                 );
                 Condition::Never
             });
@@ -750,9 +797,23 @@ fn critter_type(
             continue;
         };
         match keyword.as_str() {
-            "pid" => pid = Some(text::integer(field).filter(|pid| pid >> 24 == 1)? as u32),
+            "pid" => {
+                pid =
+                    Some(text::integer(field).filter(|pid| (0..=2).contains(&(pid >> 24)))? as u32)
+            }
             "ratio" => out.ratio = Some(text::percent(field)?),
-            "script" => out.script = text::integer_in(field, -1..=i32::MAX)?,
+            "script" => {
+                out.script = text::integer_in(field, -1..=i32::MAX)?;
+                scripted = true;
+            }
+            "distance" => match text::integer_in(field, 0..=30) {
+                Some(distance) => out.distance = Some(distance),
+                None => notes.push(
+                    file,
+                    line,
+                    format!("type_{number:02}: distance {field:?} ignored"),
+                ),
+            },
             "item" => match item_spec(field) {
                 Some(spec) => out.items.push(spec),
                 None => notes.push(
@@ -765,10 +826,24 @@ fn critter_type(
         }
     }
     out.pid = pid?;
+    // Revision 2 (R9): an item or scenery type places the object alone.
+    if !out.is_critter() && (out.dead || scripted || !out.items.is_empty()) {
+        notes.push(
+            file,
+            line,
+            format!(
+                "type_{number:02}: PID {:#010x} is not a critter's; its Dead, Script and Item fields are ignored",
+                out.pid
+            ),
+        );
+        out.dead = false;
+        out.script = -1;
+        out.items.clear();
+    }
     Some(out)
 }
 
-/// `[ "(" count [ "-" count ] ")" ] pid [ "(wielded)" ]`.
+/// `[ "(" count [ "-" count ] ")" ] pid [ "(wielded)" | "{wielded}" ]`.
 fn item_spec(text: &str) -> Option<ItemSpec> {
     let mut rest = text.trim();
     let (mut min, mut max) = (1, 1);
@@ -779,7 +854,11 @@ fn item_spec(text: &str) -> Option<ItemSpec> {
     }
     let mut wielded = false;
     let lower = rest.to_ascii_lowercase();
-    if let Some(head) = lower.strip_suffix("(wielded)") {
+    // Revision 2 (R11): the brace form is the same mark.
+    if let Some(head) = lower
+        .strip_suffix("(wielded)")
+        .or_else(|| lower.strip_suffix("{wielded}"))
+    {
         wielded = true;
         rest = rest[..head.len()].trim();
     }
@@ -823,12 +902,12 @@ fn entry(
         condition: Condition::Always,
     };
     for item in text::list(value) {
-        if let Some(inner) = if_field(&item) {
-            out.condition = condition(inner).unwrap_or_else(|| {
+        if is_condition_field(&item) {
+            out.condition = condition_field(&item).unwrap_or_else(|| {
                 notes.push(
                     file,
                     line,
-                    format!("enc_{number:02}: condition {inner:?} never holds"),
+                    format!("enc_{number:02}: condition {item:?} never holds"),
                 );
                 Condition::Never
             });
@@ -866,10 +945,16 @@ fn entry(
 fn expression(text: &str) -> Option<Expression> {
     let mut rest = text.trim_start();
     let mut out = Expression::default();
+    // Revision 2 (R8): a group without a count is `(1)`.
     let group = |rest: &mut &str| -> Option<GroupCount> {
-        let after = rest.strip_prefix('(')?;
-        let (inside, tail) = after.split_once(')')?;
-        let (min, max) = count_range(inside, 0..=25)?;
+        let (min, max, tail) = match rest.strip_prefix('(') {
+            Some(after) => {
+                let (inside, tail) = after.split_once(')')?;
+                let (min, max) = count_range(inside, 0..=25)?;
+                (min, max, tail)
+            }
+            None => (1, 1, *rest),
+        };
         let tail = tail.trim_start();
         let end = tail
             .find(|c: char| c.is_whitespace() || c == '(')
@@ -894,11 +979,16 @@ fn expression(text: &str) -> Option<Expression> {
             _ => return None,
         };
         out.relations.push(relation);
-        if rest.len() >= 6 && rest[..6].eq_ignore_ascii_case("player") {
-            if relation != Relation::Ambush {
+        // `Player` is a whole word, so a count-less group may start with it.
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let player = rest[..end].eq_ignore_ascii_case("player");
+        out.player_targets.push(player);
+        if player {
+            // Revision 2 (R8): `FIGHTING Player` as well as `AMBUSH Player`.
+            if relation == Relation::And {
                 return None;
             }
-            rest = rest[6..].trim_start();
+            rest = rest[end..].trim_start();
         } else {
             if relation == Relation::Ambush {
                 return None;
@@ -975,86 +1065,130 @@ fn tokens(text: &str) -> Option<Vec<Token>> {
     Some(out)
 }
 
-/// §4.4.6 the condition grammar; `None` when it does not match.
-pub fn condition(text: &str) -> Option<Condition> {
-    let tokens = tokens(text)?;
-    let mut at = 0;
+/// One §4.4.6 clause at `at`, which moves past it.
+fn clause(tokens: &[Token], at: &mut usize) -> Option<Clause> {
     let word = |at: usize| match tokens.get(at) {
         Some(Token::Word(word)) => Some(word.as_str()),
         _ => None,
     };
-    let clause = |at: &mut usize| -> Option<Clause> {
-        let start = *at;
-        let operand = match word(start)? {
-            "rand" => {
-                if tokens.get(start + 1) != Some(&Token::Open) {
-                    return None;
-                }
-                let Some(Token::Number(p)) = tokens.get(start + 2) else {
-                    return None;
-                };
-                let mut next = start + 3;
-                if tokens.get(next) == Some(&Token::Percent) {
-                    next += 1;
-                }
-                if tokens.get(next) != Some(&Token::Close) || !(0..=100).contains(p) {
-                    return None;
-                }
-                *at = next + 1;
-                return Some(Clause::Rand(*p));
+    let start = *at;
+    let operand = match word(start)? {
+        "rand" => {
+            if tokens.get(start + 1) != Some(&Token::Open) {
+                return None;
             }
-            "global" => {
-                if tokens.get(start + 1) != Some(&Token::Open) {
-                    return None;
-                }
-                let Some(Token::Number(index)) = tokens.get(start + 2) else {
-                    return None;
-                };
-                if tokens.get(start + 3) != Some(&Token::Close) {
-                    return None;
-                }
-                *at = start + 4;
-                Operand::Global(*index)
+            let Some(Token::Number(p)) = tokens.get(start + 2) else {
+                return None;
+            };
+            let mut next = start + 3;
+            if tokens.get(next) == Some(&Token::Percent) {
+                next += 1;
             }
-            "player" => {
-                if tokens.get(start + 1) != Some(&Token::Open)
-                    || word(start + 2) != Some("level")
-                    || tokens.get(start + 3) != Some(&Token::Close)
-                {
-                    return None;
-                }
-                *at = start + 4;
-                Operand::PlayerLevel
+            if tokens.get(next) != Some(&Token::Close) || !(0..=100).contains(p) {
+                return None;
             }
-            "days_played" => {
-                *at = start + 1;
-                Operand::DaysPlayed
+            *at = next + 1;
+            return Some(Clause::Rand(*p));
+        }
+        "global" => {
+            if tokens.get(start + 1) != Some(&Token::Open) {
+                return None;
             }
-            "time_of_day" => {
-                *at = start + 1;
-                Operand::TimeOfDay
+            let Some(Token::Number(index)) = tokens.get(start + 2) else {
+                return None;
+            };
+            if tokens.get(start + 3) != Some(&Token::Close) {
+                return None;
             }
-            _ => return None,
-        };
-        let Some(Token::Op(compare)) = tokens.get(*at) else {
-            return None;
-        };
-        let Some(Token::Number(value)) = tokens.get(*at + 1) else {
-            return None;
-        };
-        *at += 2;
-        Some(Clause::Compare(operand, *compare, *value))
+            *at = start + 4;
+            Operand::Global(*index)
+        }
+        "player" => {
+            if tokens.get(start + 1) != Some(&Token::Open)
+                || word(start + 2) != Some("level")
+                || tokens.get(start + 3) != Some(&Token::Close)
+            {
+                return None;
+            }
+            *at = start + 4;
+            Operand::PlayerLevel
+        }
+        "days_played" => {
+            *at = start + 1;
+            Operand::DaysPlayed
+        }
+        "time_of_day" => {
+            *at = start + 1;
+            Operand::TimeOfDay
+        }
+        _ => return None,
     };
-    let first = clause(&mut at)?;
+    let Some(Token::Op(compare)) = tokens.get(*at) else {
+        return None;
+    };
+    let Some(Token::Number(value)) = tokens.get(*at + 1) else {
+        return None;
+    };
+    *at += 2;
+    Some(Clause::Compare(operand, *compare, *value))
+}
+
+/// The `And` or `Or` at `at` (`true` is `And`), which moves past it.
+fn join(tokens: &[Token], at: &mut usize) -> Option<bool> {
+    let and = match tokens.get(*at)? {
+        Token::Word(word) if word == "and" => true,
+        Token::Word(word) if word == "or" => false,
+        _ => return None,
+    };
+    *at += 1;
+    Some(and)
+}
+
+/// §4.4.6 the condition grammar; `None` when it does not match.
+pub fn condition(text: &str) -> Option<Condition> {
+    let tokens = tokens(text)?;
+    let mut at = 0;
+    let first = clause(&tokens, &mut at)?;
     let mut rest = Vec::new();
     while at < tokens.len() {
-        let and = match word(at)? {
-            "and" => true,
-            "or" => false,
-            _ => return None,
-        };
-        at += 1;
-        rest.push((and, clause(&mut at)?));
+        let and = join(&tokens, &mut at)?;
+        rest.push((and, clause(&tokens, &mut at)?));
     }
     Some(Condition::Clauses { first, rest })
+}
+
+/// §4.4.6 a condition field (Revision 2, R7): `If(...)` conditions joined
+/// by `And` or `Or`, read as one condition whose clauses are all of theirs
+/// in order; each join between two `If(...)` joins the last clause of one to
+/// the first of the next. `None` when it does not match.
+pub fn condition_field(text: &str) -> Option<Condition> {
+    let tokens = tokens(text)?;
+    let mut at = 0;
+    let mut clauses = Vec::new();
+    // The first clause's join is never read.
+    let mut and = true;
+    loop {
+        if tokens.get(at) != Some(&Token::Word("if".into()))
+            || tokens.get(at + 1) != Some(&Token::Open)
+        {
+            return None;
+        }
+        at += 2;
+        clauses.push((and, clause(&tokens, &mut at)?));
+        while tokens.get(at) != Some(&Token::Close) {
+            let and = join(&tokens, &mut at)?;
+            clauses.push((and, clause(&tokens, &mut at)?));
+        }
+        at += 1;
+        if at == tokens.len() {
+            break;
+        }
+        and = join(&tokens, &mut at)?;
+    }
+    let mut clauses = clauses.into_iter();
+    let (_, first) = clauses.next()?;
+    Some(Condition::Clauses {
+        first,
+        rest: clauses.collect(),
+    })
 }

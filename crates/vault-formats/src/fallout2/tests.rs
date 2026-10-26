@@ -9,7 +9,7 @@ use super::{
     party::{ControlField, PartyTable},
     save::{AreaSave, Fallout2Shape, MemberRecord, PartySave2, WorldMapSave2},
     text::Diagnostics,
-    worldmap::{Condition, ConditionContext, Fill, Relation, WorldmapTable},
+    worldmap::{Condition, ConditionContext, Distance, Fill, Relation, WorldmapTable},
     *,
 };
 use crate::{
@@ -434,7 +434,7 @@ fn spec018_worldmap_table() {
     assert_eq!((e3.counter, e3.map), (1, Some(2)));
     assert!(e3.expression.groups.is_empty());
     let geckos = table.group("TEST_Geckos").unwrap();
-    assert_eq!((geckos.spacing, geckos.distance), (2, 6));
+    assert_eq!((geckos.spacing, geckos.distance), (2, Distance::Hexes(6)));
     assert_eq!(geckos.types[1].items.len(), 2);
     let item0 = geckos.types[1].items[0];
     assert_eq!(
@@ -470,6 +470,198 @@ fn spec018_worldmap_table() {
     assert!(level.holds(&mut context));
     // A missing num_horizontal_tiles refuses.
     assert!(WorldmapTable::parse(b"[Tile 0]\n", &maps(), &mut Diagnostics::default()).is_err());
+}
+
+/// SPEC-018 Revision 2 (R7-R11): the encounter grammar the retail file
+/// uses, on a synthetic table.
+#[test]
+fn spec018_revision2_encounter_grammar() {
+    let text = "[Data]\nterrain_types=Desert:1\n[Tile Data]\nnum_horizontal_tiles=1\n\
+        [Tile 0]\nart_idx=1\n\
+        [Encounter Table 0]\nlookup_name=Test_Desert\n\
+        enc_00=Chance:5%, If(Global(3) > 1) And If (Rand(50%)), Enc:(2) TEST_Geckos\n\
+        enc_01=Chance:5%, Special, Enc:TEST_Hunters, If(time_of_day >= 600) Or if(GLOBAL(1)==2)\n\
+        enc_02=Chance:5%, Enc:(1) TEST_Geckos FIGHTING Player\n\
+        enc_03=Chance:5%, Enc:TEST_Geckos AND (1-2) TEST_Hunters AMBUSH Player\n\
+        enc_04=Chance:5%, Enc:(1) TEST_Geckos AND Player\n\
+        enc_05=Chance:5%, If(Global(3) > 1) And, Enc:(1) TEST_Geckos\n\
+        [Encounter: TEST_Geckos]\n\
+        position=wedge, spacing:2, distance:Player(Perception)\nteam_num=4\n\
+        type_00=pid:16777217, Distance:3, Item:(1-2)7{Wielded}, Item:8 {wielded}\n\
+        type_01=pid:5, Ratio:10%, Dead, Script:4, Item:9\n\
+        type_02=pid:33554440\n\
+        type_03=pid:50331649\n\
+        type_04=pid:16777218, Distance:31, If (Player(Level) >= 2) And If(Days_Played = 0)\n\
+        [Encounter: TEST_Hunters]\n\
+        position=surrounding, distance:12\n\
+        type_00=pid:16777219\n";
+    let mut notes = Diagnostics::default();
+    let table = WorldmapTable::parse(text.as_bytes(), &maps(), &mut notes).unwrap();
+    let encounters = &table.tables[&0];
+    let numbers: Vec<u32> = encounters.entries.iter().map(|e| e.number).collect();
+    // `AND Player` stays invalid, as does a field with a dangling join.
+    assert_eq!(numbers, [0, 1, 2, 3, 5]);
+    // R7: two `If(...)` read as one condition, joined at their boundary.
+    let e0 = &encounters.entries[0];
+    let mut context = Context {
+        globals: vec![0; 4],
+        level: 1,
+        draws: vec![50, 51, 10],
+        drawn: 0,
+    };
+    context.globals[3] = 2;
+    assert!(e0.condition.holds(&mut context));
+    assert!(!e0.condition.holds(&mut context));
+    // No short-circuit: the Rand draws with the left side false.
+    context.globals[3] = 0;
+    assert!(!e0.condition.holds(&mut context));
+    assert_eq!(context.drawn, 3);
+    // R7: spaces after `If`, case folding, and `Or` between fields.
+    let e1 = &encounters.entries[1];
+    assert!(e1.special);
+    assert!(e1.condition.holds(&mut context), "time 721 >= 600");
+    let either = worldmap::condition_field("If(time_of_day >= 800) Or if(GLOBAL(1)==2)").unwrap();
+    assert!(either.holds(&mut Context {
+        globals: vec![0, 2],
+        level: 1,
+        draws: Vec::new(),
+        drawn: 0,
+    }));
+    // An invalid field never holds, with a diagnostic.
+    let e5 = &encounters.entries[4];
+    assert_eq!((e5.number, &e5.condition), (5, &Condition::Never));
+    assert!(
+        notes
+            .0
+            .iter()
+            .any(|note| note.message.contains("enc_05: condition"))
+    );
+    // R8: a group without a count is `(1)`.
+    let hunters = &e1.expression.groups[0];
+    assert_eq!(
+        (hunters.min, hunters.max, hunters.name.as_str()),
+        (1, 1, "test_hunters")
+    );
+    // R8: `FIGHTING Player`, and each relation records a Player target.
+    let e2 = &encounters.entries[2];
+    assert_eq!(e2.expression.relations, [Relation::Fighting]);
+    assert_eq!(e2.expression.player_targets, [true]);
+    assert_eq!(e2.expression.groups.len(), 1);
+    let e3 = &encounters.entries[3];
+    assert_eq!(e3.expression.relations, [Relation::And, Relation::Ambush]);
+    assert_eq!(e3.expression.player_targets, [false, true]);
+    assert_eq!(
+        e3.expression
+            .groups
+            .iter()
+            .map(|group| (group.min, group.max))
+            .collect::<Vec<_>>(),
+        [(1, 1), (1, 2)]
+    );
+    // R10: `Player(Perception)` in `position`, clamped when spawning;
+    // `team_num` stored with no diagnostic.
+    let geckos = table.group("test_geckos").unwrap();
+    assert_eq!(geckos.distance, Distance::PlayerPerception);
+    assert_eq!(
+        [3, 40, -1].map(|perception| geckos.distance.hexes(perception)),
+        [3, 30, 0]
+    );
+    assert_eq!(geckos.team, Some(4));
+    assert!(!notes.0.iter().any(|note| note.message.contains("team_num")));
+    let other = table.group("test_hunters").unwrap();
+    assert_eq!((other.distance, other.team), (Distance::Hexes(12), None));
+    // R10: a type's own Distance; an invalid one is ignored with a
+    // diagnostic. R7 applies to types' conditions too.
+    let numbers: Vec<u32> = geckos.types.iter().map(|t| t.number).collect();
+    assert_eq!(numbers, [0, 1, 2, 4], "a misc PID (category 3) is dropped");
+    let [critter, item, scenery, last] = &geckos.types[..] else {
+        panic!()
+    };
+    assert_eq!(critter.distance, Some(3));
+    assert_eq!(last.distance, None);
+    assert!(
+        notes
+            .0
+            .iter()
+            .any(|note| note.message.contains("type_04: distance"))
+    );
+    assert!(last.condition.holds(&mut Context {
+        globals: Vec::new(),
+        level: 2,
+        draws: Vec::new(),
+        drawn: 0,
+    }));
+    // R11: `{Wielded}` is `(wielded)`, with or without a space.
+    assert_eq!(
+        critter
+            .items
+            .iter()
+            .map(|item| (item.min, item.max, item.pid, item.wielded))
+            .collect::<Vec<_>>(),
+        [(1, 2, 7, true), (1, 1, 8, true)]
+    );
+    // R9: item and scenery types are kept; their Dead, Script and Item
+    // fields are ignored with a diagnostic.
+    assert!(critter.is_critter() && !item.is_critter() && !scenery.is_critter());
+    assert_eq!((item.pid, item.ratio), (5, Some(10)));
+    assert!(!item.dead && item.script == -1 && item.items.is_empty());
+    assert_eq!(scenery.pid, 0x0200_0008);
+    let ignored: Vec<_> = notes
+        .0
+        .iter()
+        .filter(|note| note.message.contains("is not a critter's"))
+        .collect();
+    assert_eq!(ignored.len(), 1, "{ignored:?}");
+    assert!(ignored[0].message.starts_with("type_01"));
+}
+
+/// SPEC-018 Revision 2 (R12, R13): entrances with no marker, a non-critter
+/// party record and `level_pids=-1`.
+#[test]
+fn spec018_revision2_entrances_and_party_records() {
+    let maps = maps();
+    let world = worldmap().world_size();
+    let mut notes = Diagnostics::default();
+    let city = CityTable::parse(
+        b"[Area 0]\nworld_pos=1,1\nentrance_0=On,-1,-1,Temple,-1,-1,0\n\
+          entrance_1=On,5,-1,Temple,-1,-1,0\nentrance_2=Off,-1,7,Temple,-1,-1,0\n\
+          entrance_3=On,1023,0,Temple,-1,-1,0\n",
+        &maps,
+        world,
+        &mut notes,
+    )
+    .unwrap();
+    let area = city.get(0).unwrap();
+    let markers: Vec<_> = area
+        .entrances
+        .iter()
+        .map(|entrance| entrance.map(|entrance| entrance.marker))
+        .collect();
+    // Only one of the two at -1 is invalid, and drops the entrance.
+    assert_eq!(markers, [Some(None), None, None, Some(Some([1023, 0]))]);
+    assert_eq!(area.entrances[0].unwrap().map, 2);
+    // The unmarked entrance still serves scripts (metarule3 104).
+    assert_eq!(city.entrances_by_map(2, 0), [(0, 0), (0, 3)]);
+    let mut notes = Diagnostics::default();
+    let party = PartyTable::parse(
+        b"[Party Member 0]\nparty_member_pid=16777300\nlevel_pids=-1\n\
+          [Party Member 1]\nparty_member_pid=33554500\nlevel_pids = -1\n\
+          [Party Member 2]\nparty_member_pid=10\n\
+          [Party Member 3]\nparty_member_pid=50331649\n\
+          [Party Member 4]\nparty_member_pid=16777301\nlevel_pids=-1, 16777302\n",
+        &mut notes,
+    )
+    .unwrap();
+    assert!(party.get(0).unwrap().level_pids.is_empty());
+    assert_eq!(party.get(1).unwrap().pid, 0x0200_0044);
+    assert_eq!(party.get(2).unwrap().pid, 10);
+    assert!(party.get(3).is_none(), "a misc PID is not a member's");
+    // `-1` is the empty list only alone; in a longer list it is dropped.
+    assert_eq!(party.get(4).unwrap().level_pids, [16777302]);
+    let messages: Vec<&str> = notes.0.iter().map(|note| note.message.as_str()).collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].contains("[Party Member 3]"));
+    assert!(messages[1].contains("level_pids: \"-1\" dropped"));
 }
 
 #[test]
