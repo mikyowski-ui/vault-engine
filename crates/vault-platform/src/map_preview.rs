@@ -64,6 +64,7 @@ mod inventory;
 mod loot;
 mod movies;
 mod options;
+mod party;
 mod pipboy;
 mod pointer;
 mod saveload;
@@ -1823,6 +1824,11 @@ impl MapPreview {
             if !right && !self.map_area(point) {
                 self.swap_button_press(point);
             }
+            return true;
+        }
+        // The `enhanced` HUD's party pills, in frame pixels (on the unlocked
+        // canvas `enhanced_button` routes them).
+        if !right && !self.pointer.world && self.party_pill_click(point) {
             return true;
         }
         if !self.map_area(point) {

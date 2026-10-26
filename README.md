@@ -431,6 +431,24 @@ unchanged.
   time, and if that script stops the door, you stop beside it. The doors you
   opened are kept in `VAULTENG.TOML` the same way. In combat, doors block
   your route as in Vanilla.
+- **Companion WIELD.** The gear window has a **WIELD** button above
+  **DISTANCE**, with a plate naming the companion's held weapon, or
+  *Unarmed*. Each press takes the next weapon of the companion's inventory
+  in hand, in inventory order, then none, through the same wield and
+  unwield path the script words use. The companion's art shows the
+  weapon's animation code when its critter art has that weapon, else it
+  keeps its unarmed art while holding the weapon. Under the Fallout 2
+  profile there is no gear window: the same button and plate sit along the
+  top of the middle panel of a party member's **Trade** window, and the
+  held weapon stays hidden from the trade.
+- **Party status pills.** The HUD shows a small amber-and-black pill for
+  each companion in the top-left corner: its name, current and maximum
+  HP, and its distance mode (*DEF*, *CLS*, *HLD*, *CHG*; under Fallout 2
+  the control record's distance, with *SNP* for snipe). Clicking the name
+  opens the companion's gear window, or under Fallout 2 its Trade window
+  (within talking distance), and clicking the mode cycles the distance.
+  Out of combat only; otherwise the status line says so. No companion, no
+  pills.
 
 Fallout 1 has no art for the new buttons and menu entries, so they are
 drawn by the engine in the palette's amber and black.

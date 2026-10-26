@@ -69,6 +69,9 @@ pub struct BarterSession {
     pub table: ObjectRef,
     pub offer: ObjectRef,
     hidden: Vec<(ObjectRef, u32)>,
+    /// The inventory place the hidden weapon left, where the `enhanced`
+    /// WIELD button puts it back ([`WorldHost::barter_wield`]).
+    weapon_slot: usize,
 }
 impl BarterSession {
     /// Merchant items hidden (unbuyable) during the session.
@@ -93,13 +96,24 @@ impl<A: WorldAssets> WorldHost<A> {
             opponent: 0,
         })
     }
-    /// Take one unit out of the merchant's inventory for the session.
-    fn hide(&mut self, merchant: ObjectRef, item: ObjectRef) -> Result<(), WorldError> {
+    /// Take one unit out of the merchant's inventory for the session;
+    /// returns the inventory place its entry had.
+    fn hide(&mut self, merchant: ObjectRef, item: ObjectRef) -> Result<usize, WorldError> {
+        let slot = self
+            .world
+            .get(merchant)
+            .and_then(|object| {
+                object
+                    .inventory
+                    .iter()
+                    .position(|(entry, _)| *entry == item)
+            })
+            .unwrap_or(0);
         self.world.remove_item(merchant, item, 1)?;
         if let Some(object) = self.world.get_mut(item) {
             object.raw.hex = None;
         }
-        Ok(())
+        Ok(slot)
     }
     /// §3.17 barter entry: the merchant's worn armor is hidden, then its
     /// right-hand item or, without one, its first weapon in inventory
@@ -136,15 +150,112 @@ impl<A: WorldAssets> WorldHost<A> {
                     .map(|item| (item, 0))
             });
         hidden.extend(held);
-        for (item, _) in &hidden {
-            self.hide(merchant, *item)?;
+        let mut weapon_slot = 0;
+        for (item, flag) in &hidden {
+            let slot = self.hide(merchant, *item)?;
+            if *flag != BasicFlags::WORN.0 {
+                weapon_slot = slot;
+            }
         }
         Ok(BarterSession {
             merchant,
             table: self.barter_table()?,
             offer: self.barter_table()?,
             hidden,
+            weapon_slot,
         })
+    }
+    /// The `enhanced` WIELD button in a Fallout 2 party Trade window
+    /// ([`WorldHost::can_wield_for`]). The member's hidden weapon first goes
+    /// back to its inventory place, so the cycle
+    /// ([`WorldHost::cycle_companion_weapon`]) runs over every weapon it
+    /// carries; then §3.17's rule hides the weapon now held, or without one
+    /// the first weapon, as on entry. Returns the weapon now held, or
+    /// `None` when refused (under Fallout 1, and in a merchant's barter).
+    pub fn barter_wield(
+        &mut self,
+        session: &mut BarterSession,
+    ) -> Result<Option<Option<ObjectRef>>, WorldError> {
+        let merchant = session.merchant;
+        if self.world.fallout2.is_none() || !self.can_wield_for(merchant) {
+            return Ok(None);
+        }
+        let mut held = None;
+        let mut kept = Vec::new();
+        for (item, flag) in std::mem::take(&mut session.hidden) {
+            if flag == BasicFlags::WORN.0 {
+                kept.push((item, flag));
+                continue;
+            }
+            let count = self.world.get(merchant).map_or(0, |o| o.inventory.len());
+            self.world.add_item(merchant, item, 1, true)?;
+            // A unit that did not join a stack returns to its own place.
+            if let Some(object) = self.world.get_mut(merchant)
+                && object.inventory.len() > count
+                && let Some(entry) = object.inventory.pop()
+            {
+                let slot = session.weapon_slot.min(object.inventory.len());
+                object.inventory.insert(slot, entry);
+            }
+            if flag == BasicFlags::RIGHT_HAND.0 {
+                held = Some(item);
+            }
+        }
+        session.hidden = kept;
+        let next = crate::companion::next_weapon(&self.companion_weapons(merchant), held);
+        self.wield_companion(merchant, next)?;
+        let hide = match next {
+            Some(weapon) => Some((weapon, BasicFlags::RIGHT_HAND.0)),
+            None => self
+                .companion_weapons(merchant)
+                .first()
+                .map(|item| (*item, 0)),
+        };
+        if let Some((item, flag)) = hide {
+            session.weapon_slot = self.hide(merchant, item)?;
+            session.hidden.push((item, flag));
+        }
+        Ok(Some(next))
+    }
+    /// The held weapon a party Trade window's WIELD label names: the hidden
+    /// right-hand item (§3.17 takes it out of the inventory).
+    pub fn barter_held_weapon(&self, session: &BarterSession) -> Option<ObjectRef> {
+        session
+            .hidden
+            .iter()
+            .find(|(_, flag)| *flag == BasicFlags::RIGHT_HAND.0)
+            .map(|(item, _)| *item)
+    }
+    /// Whether [`Self::open_party_trade`] may open on `member`, before its
+    /// reach test.
+    pub fn can_open_party_trade(&self, member: ObjectRef) -> bool {
+        self.preset() == crate::EnginePreset::Enhanced
+            && self.control_of(member).is_some()
+            && self.fallout2_can_push(member)
+    }
+    /// The enhanced HUD pill's party Trade window under Fallout 2: SPEC-019
+    /// §3.7's trade session opened on `member` without a conversation,
+    /// under the conditions a conversation needs. Out of combat, a party
+    /// member with a control record that is neither dead nor knocked out
+    /// ([`WorldHost::fallout2_can_push`]'s test); at object distance 9 or
+    /// more, or behind a shot-blocked line, the talk exception's
+    /// `misc.msg` 2000 is printed instead (SPEC-007 §3.11.3, with no
+    /// approach). `None` when refused.
+    pub fn open_party_trade(
+        &mut self,
+        member: ObjectRef,
+    ) -> Result<Option<BarterSession>, WorldError> {
+        if !self.can_open_party_trade(member) {
+            return Ok(None);
+        }
+        let player = self.world.player;
+        let far =
+            self.world.object_distance(player, member) >= crate::host_motion::TALK_RUN_DISTANCE;
+        if far || self.world.shot(player, member).hard_obstruction {
+            self.print_game("misc.msg", 2000, &[]);
+            return Ok(None);
+        }
+        self.begin_barter(member).map(Some)
     }
     /// §3.17 effective modifier `M = M_s + M_r`. Safe rule: applied from
     /// the first frame (the reference's very first price uses M_s alone).

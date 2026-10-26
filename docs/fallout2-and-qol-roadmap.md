@@ -256,6 +256,65 @@ Vanilla the menus, windows, saves and replay digests are byte-identical.
   Enhanced save that has some to keep. Any other save into the slot removes
   an old sidecar. `SAVE.DAT` itself is unchanged.
 
+### Companion WIELD
+
+- **What.** The Gear window has an engine-drawn **WIELD** button at window
+  (214, 184), 108 by 20, above Distance, and a plate at (214, 168), 108 by
+  12, naming the held (right-hand) weapon, or *Unarmed*. Each press takes
+  the next weapon in hand: the weapons of the companion's inventory in
+  inventory order, then none, then the first again. A held item that is
+  not among them (a flare) counts as none.
+- **How.** A weapon goes through `wield_obj_critter`'s path (SPEC-005: the
+  right-hand flag, one unit of a stack); none through `inven_unwield`'s
+  (the flag cleared, the entry left in place). The critter's art then takes
+  the weapon's animation code (SPEC-007 §2.1) at once, with no animation,
+  as the inventory window applies the figure art (SPEC-005 §3.8). The code
+  is set only when the critter-art database has the critter's standing art
+  with it, through the same FID-to-path catalog; otherwise the art keeps
+  weapon code 0, so the weapon is held but drawn unarmed, with no error.
+  The window hides the companion's equipment again after each press, so the
+  weapon taken in hand leaves the pane and the one put away comes back.
+- **Fallout 2.** SPEC-019 §3.18 keeps the Gear window off. Under the
+  enhanced preset the same button and plate sit in a party member's Trade
+  window (§3.7), along the middle panel's top edge: the plate at window
+  (240, 4), 88 by 15, and the button at (332, 4), 66 by 15. §3.7 hides the
+  member's held weapon for the session, so a press first puts the hidden
+  weapon back at its inventory place, cycles over every weapon, then hides
+  the weapon now held, or without one the first weapon, as on entry.
+  Leaving the window puts the held weapon back in the right hand. Vanilla
+  Fallout 2 trade is unchanged.
+
+### Party status pills
+
+- **What.** The enhanced HUD shows one compact amber-and-black pill per
+  active companion: a party member that is a placed, visible critter, not
+  dead, other than the player. A non-critter entry such as the Fallout 2
+  car trunk has none. Each pill shows the name, `hp/max` and the distance
+  mode: *DEF*, *CLS*, *HLD*, *CHG* for the enhanced Distance; under
+  Fallout 2 the control record's `distance` (`on_your_own` DEF,
+  `stay_close` CLS, `stay` HLD, `charge` CHG, `snipe` SNP, and `---` without
+  a control record).
+- **Layout.** A fixed stack in the interface frame's top-left corner: pill
+  k at (4, 4 + 18k), 152 by 16, at most six (down to y 111). It is clear of
+  the bar and indicator boxes (y 358 down) and the debug overlay's panel
+  (x 352 right); the windows draw over it, and it shows on the map screen
+  only, outside conversations. Colors are the palette's nearest to the
+  engine's amber and black keys, as the other engine-drawn buttons use.
+- **Clicks.** The first 118 pixels are the name/HP region: under Fallout 1
+  it opens the Gear window on the Gear entry's conditions (out of combat, a
+  party member); under Fallout 2 it opens the Trade window directly, without
+  a conversation, on a standing member with a control record, out of
+  combat, and within talking distance (object distance below 9 and an
+  unblocked line, else the talk exception's `misc.msg` 2000, with no
+  approach). The last 34 pixels are the mode region: under Fallout 1 it
+  cycles the enhanced Distance, and under Fallout 2 the control record's
+  `distance` takes the next value of the member's allowed set, as a
+  SPEC-019 §3.15.3 custom-panel row does, which makes the disposition
+  `custom`. In combat, or for a member that cannot take it, the status line
+  reads "You can't do that now."
+- **Vanilla.** Nothing draws and no click is taken; the pills read the
+  host's preset, so the Vanilla frames are unchanged.
+
 ### d) Additive mod registration
 
 A mod can add to the game without replacing whole files, through

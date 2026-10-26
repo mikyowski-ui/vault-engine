@@ -14,7 +14,9 @@
 //! player's); Use opens a container in its column, and the portraits go
 //! back up a level. Offer (`m`) attempts the trade at the merchant's price;
 //! Talk (`t`) and Esc return every table and the hidden equipment, then
-//! resume dialogue.
+//! resume dialogue. Under the `enhanced` preset a Fallout 2 party Trade
+//! window adds the engine-drawn WIELD button, and a HUD party pill can
+//! open it without a conversation (leaving then returns to the map).
 use super::{
     MapPreview, Screen,
     counter::{CounterInput, counter_click, counter_key, draw_counter},
@@ -57,8 +59,27 @@ pub(crate) struct BarterScreen {
     hovered: Option<ObjectRef>,
     /// Containers opened in each column, outermost first.
     pub views: [Vec<ObjectRef>; 4],
+    /// Opened from an `enhanced` HUD pill without a conversation: leaving
+    /// returns to the map.
+    pub direct: bool,
 }
 impl BarterScreen {
+    pub(super) fn new(session: BarterSession, direct: bool) -> Self {
+        Self {
+            session,
+            offsets: [0; 4],
+            held: None,
+            counter: None,
+            dropping: None,
+            reply: None,
+            arrow: false,
+            press: None,
+            menu: None,
+            hovered: None,
+            views: Default::default(),
+            direct,
+        }
+    }
     /// The item a drag holds (the counter shows the arrow instead).
     pub fn dragged(&self) -> Option<ObjectRef> {
         self.held
@@ -147,6 +168,11 @@ const SCROLL: [(usize, bool, Rect, &str, &str); 8] = [
 /// `di_rdbt1.frm`.
 const OFFER: Rect = Rect::new(41, 163, 14, 14);
 const TALK: Rect = Rect::new(584, 162, 14, 14);
+/// The `enhanced` party Trade window's engine-drawn WIELD button and the
+/// plate naming the member's held weapon (barter-window coordinates), side
+/// by side along the middle panel's top edge, above the two tables' slots.
+pub(crate) const TRADE_WIELD: Rect = Rect::new(332, 4, 66, 15);
+pub(crate) const TRADE_WIELD_LABEL: Rect = Rect::new(240, 4, 88, 15);
 /// The portraits (barter-window coordinates), the player's and the
 /// merchant's; their invisible buttons go up one container level.
 const PORTRAITS: [(bool, Rect); 2] = [
@@ -195,25 +221,40 @@ impl MapPreview {
                 // SPEC-010 §3.12: switching to Barter stops speech without
                 // an ending.
                 self.host.stop_speech();
-                self.screen = Screen::Barter(Box::new(BarterScreen {
-                    session,
-                    offsets: [0; 4],
-                    held: None,
-                    counter: None,
-                    dropping: None,
-                    reply: None,
-                    arrow: false,
-                    press: None,
-                    menu: None,
-                    hovered: None,
-                    views: Default::default(),
-                }))
+                self.screen = Screen::Barter(Box::new(BarterScreen::new(session, false)))
             }
             Err(error) => {
                 self.status = error.to_string().into_bytes();
                 self.host.world.dialogue.pending_barter = false;
             }
         }
+    }
+    /// The `enhanced` HUD pill's party Trade window under Fallout 2, opened
+    /// on the map without a conversation (the host refuses it otherwise,
+    /// printing the talk exception's message when the member is out of
+    /// reach). Returns whether it opened.
+    pub(crate) fn open_party_trade(&mut self, member: ObjectRef) -> bool {
+        if !matches!(self.screen, Screen::Map) || self.host.world.dialogue.open {
+            return false;
+        }
+        let opened = match self.host.open_party_trade(member) {
+            Ok(Some(session)) => {
+                self.screen = Screen::Barter(Box::new(BarterScreen::new(session, true)));
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                self.status = error.to_string().into_bytes();
+                false
+            }
+        };
+        self.drain_effects();
+        opened
+    }
+    /// Whether the barter window shows the `enhanced` WIELD button: a
+    /// Fallout 2 party Trade window under the enhanced preset.
+    fn trade_wield_shown(&self, screen: &BarterScreen) -> bool {
+        self.host.world.fallout2.is_some() && self.host.can_wield_for(screen.session.merchant)
     }
     /// The four holders shown, left to right: each column's innermost open
     /// container, else the player, the two tables and the merchant.
@@ -453,6 +494,10 @@ impl MapPreview {
         if let Err(error) = self.host.end_barter(screen.session) {
             self.status = error.to_string().into_bytes();
         }
+        if screen.direct {
+            self.drain_effects();
+            return;
+        }
         let dialogue = &mut self.host.world.dialogue;
         dialogue.pending_barter = false;
         if dialogue.options.is_empty()
@@ -555,6 +600,8 @@ impl MapPreview {
         true
     }
     pub(crate) fn barter_click(&mut self, point: [i32; 2], right: bool) -> bool {
+        let wield =
+            matches!(&self.screen, Screen::Barter(screen) if self.trade_wield_shown(screen));
         let Screen::Barter(screen) = &mut self.screen else {
             return false;
         };
@@ -593,6 +640,17 @@ impl MapPreview {
         if TALK.contains(window) {
             self.press_button_cue(b"ib2p1xx1", b"ib2lu1x1", at(WINDOW, TALK));
             self.end_barter_screen();
+            return true;
+        }
+        if TRADE_WIELD.contains(window) && wield {
+            self.press_button(at(WINDOW, TRADE_WIELD));
+            let Screen::Barter(screen) = &mut self.screen else {
+                return true;
+            };
+            if let Err(error) = self.host.barter_wield(&mut screen.session) {
+                self.status = error.to_string().into_bytes();
+            }
+            self.drain_effects();
             return true;
         }
         let local = [point[0] - SUBWINDOW[0], point[1] - SUBWINDOW[1]];
@@ -865,6 +923,11 @@ impl MapPreview {
         for rect in [OFFER, TALK] {
             let art = self.button_art(at(WINDOW, rect), "di_rdbt2.frm", "di_rdbt1.frm");
             painter.blit(&mut image, art, 0, [WINDOW[0] + rect.x, WINDOW[1] + rect.y]);
+        }
+        if self.trade_wield_shown(screen) {
+            let weapon = self.host.barter_held_weapon(&screen.session);
+            let rects = [at(WINDOW, TRADE_WIELD), at(WINDOW, TRADE_WIELD_LABEL)];
+            self.draw_wield(&painter, &mut image, rects, weapon);
         }
         if let Some((_, menu)) = &screen.menu {
             self.draw_item_menu(&painter, &mut image, menu);

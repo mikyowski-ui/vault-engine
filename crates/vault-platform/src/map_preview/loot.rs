@@ -59,6 +59,10 @@ pub(crate) const TAKE_ALL: Rect = Rect::new(214, 236, 108, 20);
 /// The companion gear window's engine-drawn Distance toggle, above Take
 /// All.
 pub(crate) const DISTANCE: Rect = Rect::new(214, 210, 108, 20);
+/// The companion gear window's engine-drawn WIELD button, above Distance,
+/// and the label naming the held weapon above it.
+pub(crate) const WIELD: Rect = Rect::new(214, 184, 108, 20);
+pub(crate) const WIELD_LABEL: Rect = Rect::new(214, 168, 108, 12);
 /// Body cycling (sending PgUp and PgDn) with its up and down art.
 const CYCLE: [(Rect, bool, &str, &str); 2] = [
     (Rect::new(436, 162, 20, 18), false, "slu.frm", "sld.frm"),
@@ -232,6 +236,9 @@ impl MapPreview {
             let mode = self.host.companion_distance(screen.session.root);
             let label = format!("DISTANCE: {}", mode.name().to_ascii_uppercase());
             self.engine_button(&painter, &mut image, DISTANCE, label.as_bytes());
+            let weapon = self.host.companion_weapon(screen.session.root);
+            let rects = [on_screen(WIELD), on_screen(WIELD_LABEL)];
+            self.draw_wield(&painter, &mut image, rects, weapon);
         }
         if let Some((_, menu)) = &screen.menu {
             self.draw_item_menu(&painter, &mut image, menu);
@@ -520,6 +527,17 @@ impl MapPreview {
             self.host.cycle_companion_distance(companion);
             return true;
         }
+        if WIELD.contains(local) && screen.session.companion {
+            self.press_button(on_screen(WIELD));
+            let Screen::Loot(screen) = &mut self.screen else {
+                return true;
+            };
+            if let Err(error) = self.host.loot_wield(&mut screen.session) {
+                self.status = error.to_string().into_bytes();
+            }
+            self.drain_effects();
+            return true;
+        }
         if take_all.contains(local) && take_all_shown {
             self.press_button(on_screen(take_all));
             self.loot_take_all();
@@ -676,17 +694,53 @@ impl MapPreview {
     /// An engine-drawn window button at window-relative `rect`, its colors
     /// swapped while pressed.
     fn engine_button(&self, painter: &Painter, image: &mut IndexedImage, rect: Rect, label: &[u8]) {
-        let [ox, oy] = skills::LOOT_ORIGIN;
-        let pressed = self.held == Some(on_screen(rect));
+        self.engine_button_at(painter, image, on_screen(rect), label);
+    }
+    /// An engine-drawn button at screen `rect`: an amber frame, the label
+    /// amber on black, the colors swapped while pressed.
+    pub(crate) fn engine_button_at(
+        &self,
+        painter: &Painter,
+        image: &mut IndexedImage,
+        rect: Rect,
+        label: &[u8],
+    ) {
+        let pressed = self.held == Some(rect);
         let (fill, text) = if pressed {
             (ColorKey::AMBER, ColorKey::BLACK)
         } else {
             (ColorKey::BLACK, ColorKey::AMBER)
         };
-        let [x, y, w, h] = [ox + rect.x, oy + rect.y, rect.w, rect.h];
+        let Rect { x, y, w, h } = rect;
         image.fill_rect([x, y, w, h], painter.color(ColorKey::AMBER));
         image.fill_rect([x + 1, y + 1, w - 2, h - 2], painter.color(fill));
-        painter.centered(image, 101, text, label, [x, y + 6], w);
+        painter.centered(image, 101, text, label, [x, y + (h - 8) / 2], w);
+    }
+    /// The WIELD button and its label plate at screen rectangles: the held
+    /// weapon's name, or "Unarmed", amber on black and clipped to the
+    /// plate.
+    pub(crate) fn draw_wield(
+        &self,
+        painter: &Painter,
+        image: &mut IndexedImage,
+        [button, label]: [Rect; 2],
+        weapon: Option<ObjectRef>,
+    ) {
+        self.engine_button_at(painter, image, button, b"WIELD");
+        let name = weapon
+            .and_then(|item| self.host.world.get(item))
+            .map_or_else(|| b"Unarmed".to_vec(), |object| object.name.clone());
+        let Rect { x, y, w, h } = label;
+        image.fill_rect([x, y, w, h], painter.color(ColorKey::BLACK));
+        let width = painter.width(101, &name).min(w - 4);
+        painter.text(
+            image,
+            101,
+            ColorKey::AMBER,
+            &name,
+            [x + (w - width) / 2, y + (h - 8) / 2],
+            w - 4,
+        );
     }
     /// The `enhanced` window shows its Take All button outside steal
     /// sessions (Vanilla has Shift+A only).

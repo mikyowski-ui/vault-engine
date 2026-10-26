@@ -1,11 +1,21 @@
 //! The `enhanced` preset's party conveniences: pushing a critter out of
-//! the way, and each companion's combat distance, saved beside the slot
-//! in [`SIDECAR`]. Engine extension, not part of any specification; under
-//! Vanilla nothing here is reachable, and `SAVE.DAT` never changes.
+//! the way, each companion's combat distance, saved beside the slot in
+//! [`SIDECAR`], the WIELD button of the Gear and party Trade windows, and
+//! the HUD's party status pills. Engine extension, not part of any
+//! specification; under Vanilla nothing here is reachable, and `SAVE.DAT`
+//! never changes.
 use crate::{
-    EnginePreset, ObjectRef, WorldError, WorldHost, assets::WorldAssets, critical::effect,
+    EnginePreset, ObjectRef, WorldError, WorldHost,
+    assets::WorldAssets,
+    critical::{effect, hit_mode},
+    fallout2_party::distance as distance2,
 };
 use std::collections::BTreeMap;
+use vault_formats::{
+    Fid,
+    fallout2::party::ControlField,
+    pro::{BasicFlags, Category, ItemData},
+};
 
 /// The enhanced state file in a save slot, beside `SAVE.DAT`.
 pub const SIDECAR: &str = "VAULTENG.TOML";
@@ -38,6 +48,15 @@ impl Distance {
     }
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|mode| mode.name() == text)
+    }
+    /// The HUD pill's three-letter label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "DEF",
+            Self::Close => "CLS",
+            Self::Hold => "HLD",
+            Self::Charge => "CHG",
+        }
     }
     /// The next mode in the window's cycle.
     pub fn next(self) -> Self {
@@ -117,6 +136,42 @@ pub fn parse_sidecar(text: &str) -> Result<BTreeMap<u32, Distance>, String> {
         distances.insert(id, mode);
     }
     Ok(distances)
+}
+
+/// The HUD pill's label for a SPEC-019 §2.5 `distance` value: `on_your_own`
+/// reads as the Fallout 1 Default (§3.18), and `snipe`, which has no
+/// Fallout 1 equivalent, as SNP. A value outside the vocabulary has none.
+pub fn distance_label2(value: i32) -> Option<&'static str> {
+    Some(match value {
+        distance2::ON_YOUR_OWN => "DEF",
+        distance2::STAY_CLOSE => "CLS",
+        distance2::STAY => "HLD",
+        distance2::CHARGE => "CHG",
+        distance2::SNIPE => "SNP",
+        _ => return None,
+    })
+}
+
+/// The WIELD cycle's next weapon: the one after `current` in `weapons`
+/// (inventory order), "none" after the last, and the first from "none" or
+/// from a held item the list lacks.
+pub fn next_weapon(weapons: &[ObjectRef], current: Option<ObjectRef>) -> Option<ObjectRef> {
+    match current.and_then(|held| weapons.iter().position(|weapon| *weapon == held)) {
+        Some(index) => weapons.get(index + 1).copied(),
+        None => weapons.first().copied(),
+    }
+}
+
+/// One HUD status pill: an active companion's name, hit points and
+/// distance label (`None` for a Fallout 2 member without a control
+/// record, which has no distance to show or cycle).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartyStatus {
+    pub critter: ObjectRef,
+    pub name: Vec<u8>,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub mode: Option<&'static str>,
 }
 
 /// What a push did.
@@ -231,6 +286,183 @@ impl<A: WorldAssets> WorldHost<A> {
             self.companion_distance(critter)
         } else {
             Distance::Default
+        }
+    }
+
+    /// Whether the WIELD button is offered on `critter`, a critter, under
+    /// the enhanced preset: the Gear window's companion
+    /// ([`Self::is_companion`]) under Fallout 1, or under Fallout 2, out of
+    /// combat, a party member with a control record, as SPEC-019 §3.7's
+    /// Trade window takes it.
+    pub fn can_wield_for(&self, critter: ObjectRef) -> bool {
+        let is_critter = self
+            .world
+            .get(critter)
+            .is_some_and(|object| object.category() == Category::Critter);
+        is_critter
+            && if self.world.fallout2.is_some() {
+                self.party_tools() && !self.world.combat && self.control_of(critter).is_some()
+            } else {
+                self.is_companion(critter)
+            }
+    }
+    /// The weapons WIELD cycles through: `critter`'s weapon entries, in
+    /// inventory order.
+    pub fn companion_weapons(&self, critter: ObjectRef) -> Vec<ObjectRef> {
+        self.world.get(critter).map_or(Vec::new(), |object| {
+            object
+                .inventory
+                .iter()
+                .map(|(item, _)| *item)
+                .filter(|item| {
+                    self.world
+                        .item_data(*item)
+                        .is_some_and(|data| matches!(data.data, ItemData::Weapon(_)))
+                })
+                .collect()
+        })
+    }
+    /// The held (primary) weapon WIELD names: the right hand's item.
+    pub fn companion_weapon(&self, critter: ObjectRef) -> Option<ObjectRef> {
+        self.world.wielded(critter, hit_mode::RIGHT_PRIMARY)
+    }
+    /// One WIELD press: the next weapon of [`next_weapon`] in the right
+    /// hand ([`Self::wield_companion`]). Returns the weapon now held, or
+    /// `None` when the button is not offered ([`Self::can_wield_for`]).
+    pub fn cycle_companion_weapon(
+        &mut self,
+        critter: ObjectRef,
+    ) -> Result<Option<Option<ObjectRef>>, WorldError> {
+        if !self.can_wield_for(critter) {
+            return Ok(None);
+        }
+        let next = next_weapon(
+            &self.companion_weapons(critter),
+            self.companion_weapon(critter),
+        );
+        self.wield_companion(critter, next)?;
+        Ok(Some(next))
+    }
+    /// Hold `weapon` in `critter`'s right hand, or nothing, through the
+    /// script words' paths (SPEC-005): `wield_obj_critter` (one unit of a
+    /// stack takes the hand) or `inven_unwield` (the right-hand flag
+    /// cleared, the entry left in its place). The critter's art then takes
+    /// the weapon's animation code (SPEC-007 §2.1) as
+    /// [`Self::held_weapon_code`] allows, at once and without an animation,
+    /// as the inventory window's figure art is applied (SPEC-005 §3.8).
+    pub(crate) fn wield_companion(
+        &mut self,
+        critter: ObjectRef,
+        weapon: Option<ObjectRef>,
+    ) -> Result<(), WorldError> {
+        let code = match weapon {
+            Some(weapon) => {
+                self.wield_object(critter, weapon)?;
+                self.world
+                    .weapon_data(weapon)
+                    .and_then(|gun| u8::try_from(gun.animation).ok())
+                    .unwrap_or(0)
+            }
+            None => {
+                let inventory = self
+                    .world
+                    .get(critter)
+                    .map(|object| object.inventory.clone())
+                    .unwrap_or_default();
+                for (item, _) in inventory {
+                    if let Some(object) = self.world.get_mut(item) {
+                        object.raw.flags.0 &= !BasicFlags::RIGHT_HAND.0;
+                    }
+                }
+                0
+            }
+        };
+        let code = self.held_weapon_code(critter, code);
+        if self.world.critter_art(critter)
+            && let Some(object) = self.world.get_mut(critter)
+        {
+            let art = Fid(object.raw.art_id);
+            object.raw.art_id = Fid::new(
+                art.category(),
+                art.base(),
+                art.animation(),
+                code,
+                art.selector(),
+            )
+            .0;
+        }
+        Ok(())
+    }
+    /// The weapon code `critter`'s art takes for a held weapon of `code`:
+    /// the code itself when the critter-art database has the critter's
+    /// standing art with it (SPEC-007 §2.1-§2.2, at its facing), else 0, so
+    /// the weapon is held but drawn unarmed.
+    pub fn held_weapon_code(&self, critter: ObjectRef, code: u8) -> u8 {
+        if code == 0 || code > 15 {
+            return 0;
+        }
+        let facing = self
+            .world
+            .get(critter)
+            .map_or(0, |object| object.raw.orientation);
+        let fid = self.critter_fid(critter, 0, Some(code), facing);
+        if self.assets.art_exists(fid) { code } else { 0 }
+    }
+
+    /// The HUD's status pills, in party order: every party member but the
+    /// player that is a placed, visible critter and not dead (a Fallout 1
+    /// companion as [`Self::is_companion`] counts it, without the combat
+    /// test). A non-critter entry such as the Fallout 2 car trunk has none.
+    /// Empty without the enhanced preset.
+    pub fn party_status(&self) -> Vec<PartyStatus> {
+        if !self.party_tools() {
+            return Vec::new();
+        }
+        let world = &self.world;
+        let fallout2 = world.fallout2.is_some();
+        world
+            .party_members()
+            .into_iter()
+            .filter(|member| *member != world.player)
+            .filter_map(|critter| {
+                let object = world.get(critter)?;
+                let active = object.category() == Category::Critter
+                    && object.raw.hex.is_some()
+                    && !object.raw.flags.contains(BasicFlags::HIDDEN)
+                    && world
+                        .critter_state(critter)
+                        .is_some_and(|state| state.results.0 & effect::DEAD == 0)
+                    && (fallout2 || world.party_member(critter));
+                let mode = if fallout2 {
+                    self.control_of(critter).and_then(|record| {
+                        distance_label2(record.fields[ControlField::Distance as usize])
+                    })
+                } else {
+                    Some(self.companion_distance(critter).label())
+                };
+                active.then(|| PartyStatus {
+                    critter,
+                    name: object.name.clone(),
+                    hp: world.hit_points(critter).unwrap_or(0),
+                    max_hp: world.effective(critter, 7),
+                    mode,
+                })
+            })
+            .collect()
+    }
+    /// A pill's mode region, out of combat: under Fallout 1 the enhanced
+    /// Distance cycles ([`Self::cycle_companion_distance`]); under Fallout 2
+    /// the control record's `distance` takes the next value of the member's
+    /// allowed set, as a SPEC-019 §3.15.3 custom-panel row does, which makes
+    /// the disposition `custom`. Returns whether it changed.
+    pub fn cycle_party_distance(&mut self, critter: ObjectRef) -> bool {
+        if !self.party_tools() || self.world.combat {
+            return false;
+        }
+        if self.world.fallout2.is_some() {
+            self.cycle_control(critter, ControlField::Distance)
+        } else {
+            self.cycle_companion_distance(critter).is_some()
         }
     }
 }

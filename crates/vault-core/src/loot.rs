@@ -275,6 +275,26 @@ impl<A: WorldAssets> WorldHost<A> {
             body: 0,
         }))
     }
+    /// The `enhanced` Gear window's WIELD button
+    /// ([`WorldHost::cycle_companion_weapon`]): the companion's equipment
+    /// is hidden again afterwards, so the weapon taken in hand leaves its
+    /// pane and the one put away comes back. `None` outside a Gear session
+    /// or when refused.
+    pub fn loot_wield(
+        &mut self,
+        session: &mut LootSession,
+    ) -> Result<Option<Option<ObjectRef>>, WorldError> {
+        if !session.companion {
+            return Ok(None);
+        }
+        let held = self.cycle_companion_weapon(session.root)?;
+        if held.is_some() {
+            let mut hidden = self.equipped(session.looter);
+            hidden.extend(self.equipped(session.root));
+            session.hidden = hidden;
+        }
+        Ok(held)
+    }
     /// The entries a pane lists: the shown container's inventory without
     /// the session's hidden equipment.
     pub fn loot_items(&self, session: &LootSession, target_side: bool) -> Vec<(ObjectRef, i32)> {

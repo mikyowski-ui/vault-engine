@@ -480,6 +480,15 @@ impl MapPreview {
             self.debug_panel_press(ui);
             return true;
         }
+        // So do the HUD's party pills.
+        if pressed
+            && world_view
+            && !right
+            && let Some(ui) = at.ui.filter(|ui| self.party_pill_at(*ui).is_some())
+        {
+            self.party_pill_click(ui);
+            return true;
+        }
         // A press or release can change the cursor art even when nothing
         // acts (a held button, the menu's art), so the frame is redrawn.
         match route {
