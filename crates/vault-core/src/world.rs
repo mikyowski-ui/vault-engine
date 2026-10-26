@@ -1080,6 +1080,14 @@ impl WorldState {
             active: true,
             opponent: 0,
         })?;
+        // SPEC-007 §3.3: the combat system's normal initialization (at
+        // program start, for a new game and at the reset before a load)
+        // leaves the player's AP at the effective maximum. Out of combat
+        // that AP is what the attack preflight checks (SPEC-014 §3.38 step
+        // 2), so a player left at 0 could never open combat with an attack
+        // until some combat had ended. A load then restores its saved AP.
+        let maximum = world.maximum_ap(world.player);
+        world.set_ap(world.player, maximum);
         world.create_player_script()?;
         Ok(())
     }

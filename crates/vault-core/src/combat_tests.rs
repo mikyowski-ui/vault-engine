@@ -1381,6 +1381,23 @@ impl CombatAi for Scripted {
 }
 
 #[test]
+fn spec007_normal_initialization_gives_the_player_maximum_ap() {
+    // SPEC-007 §3.3: every new world (program start, a new game, the reset
+    // before a load) starts the player at its effective maximum AP, so an
+    // out-of-combat attack passes the AP preflight.
+    let sheet = CharacterSheet::default();
+    for world in [
+        WorldState::new(sheet.clone(), 1).unwrap(),
+        WorldState::fresh(sheet.clone(), 1).unwrap(),
+    ] {
+        let player = world.player;
+        let maximum = world.maximum_ap(player);
+        assert!(maximum > 0);
+        assert_eq!(world.critter_state(player).unwrap().ap, maximum);
+    }
+}
+
+#[test]
 fn spec007_combat_initialization_rounds_turns_and_cleanup() {
     use crate::critical::{maneuver, state};
     let mut world = world();

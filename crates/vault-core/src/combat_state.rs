@@ -165,13 +165,13 @@ impl WorldState {
         self.status(critter) & (effect::KNOCKED_OUT | effect::KNOCKED_DOWN) != 0
             || matches!(animation, 20..=35 | 48..=63)
     }
-    fn maximum_ap(&self, critter: ObjectRef) -> i32 {
+    pub(crate) fn maximum_ap(&self, critter: ObjectRef) -> i32 {
         let context = self.context(critter);
         self.get(critter)
             .and_then(|o| o.character.as_ref())
             .map_or(0, |sheet| sheet.stat(8, context))
     }
-    fn set_ap(&mut self, critter: ObjectRef, ap: i32) {
+    pub(crate) fn set_ap(&mut self, critter: ObjectRef, ap: i32) {
         if let Some(state) = self.critter_state_mut(critter) {
             state.ap = ap;
         }
