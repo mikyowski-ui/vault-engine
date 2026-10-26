@@ -709,7 +709,7 @@ fn object_tables_are_fixed_column() {
     assert_eq!(
         critters,
         "REF        HP  AP TEAM  AI  CID POISON  RAD ALIVE ROLE   NAME\n\
-         0x10000    25   0    0   0   -1      0    6 yes   player Player\n\
+         0x10000    25   7    0   0   -1      0    6 yes   player Player\n\
          0x10002    12   8    3   4   -1      2    0 yes   -      raider\n"
     );
     let raider_view = snapshot_objects(&world, &ObjectFilter::default().reference(raider));

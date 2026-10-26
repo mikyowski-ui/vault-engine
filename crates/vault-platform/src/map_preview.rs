@@ -2029,6 +2029,8 @@ impl MapPreview {
 #[cfg(test)]
 mod corpus_tests;
 #[cfg(test)]
+mod fallout2_combat_tests;
+#[cfg(test)]
 pub(crate) use vault_fixtures::world as fixture;
 #[cfg(test)]
 mod interface_tests;
