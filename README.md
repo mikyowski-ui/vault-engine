@@ -506,6 +506,20 @@ file = "data/mymod/towns.patch.txt"
   `vault_fixtures::state::write_cam_demo_mod` ships the camera demo this way,
   leaving `scripts.lst` untouched.
 
+**Mod-script verification.** Every `.INT` a mod layer serves is checked
+before it enters the VM. That covers a registered script and an override of
+a retail script path. The check runs the SPEC-017 §8 stack model
+(`vault_vm::stack_check`) with the active profile's table: `fallout1` or
+`fallout2`, plus the enhanced range under `preset = "enhanced"`.
+
+- **Clean.** A script with no finding runs, under either profile.
+- **Refused.** A script with a finding, or one its word set refuses, does not
+  load: nothing runs and the host default follows. One diagnostic names the
+  script's path and layer, with the findings by kind and word.
+- **Caching.** The verdict lasts the session.
+- **Retail scripts.** Scripts from the base archives or folder are not
+  checked at load. `asset-audit --report-script-stack` audits them offline.
+
 A setup can be exported as a ready-to-share mod folder in two ways:
 
 - **In game.** On the **F9** Camera page, the **Export Current Setup as

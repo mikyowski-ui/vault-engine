@@ -26,7 +26,7 @@ fn hex(text: &str) -> Vec<u8> {
 /// §7.8's world: areas 0-9 and maps 0-9, with a 14 by 18 subtile grid
 /// (700 by 900 pixels); area 2 at (100, 100); area 1 with three entrances
 /// to maps 3 and 4.
-fn tables() -> Arc<Fallout2Tables> {
+pub(crate) fn tables() -> Arc<Fallout2Tables> {
     let mut city = String::new();
     for area in 0..10 {
         let position = if area == 2 { 100 } else { 10 + area * 20 };

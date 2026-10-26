@@ -178,6 +178,33 @@ resolve. With scripts running, the campaign's script effects (areas made
 known, party members joining) are exercised by Play; their host effects
 stay provisional until confirmed in play (SPEC-017 Decision 38).
 
+### Mod-script verification on load
+
+An engine extension under both profiles. The SPEC-017 §8 stack model lives in
+`vault_vm::stack_check`, where `asset-audit --report-script-stack` and the
+engine both use it.
+
+- **What is checked.** Each `.INT` that a mod layer serves, through a
+  `load_order.toml` layer or a `vault-mod.toml` mod. That covers an override
+  of a retail script path and a `[[scripts]]` registration.
+  `Vfs::read_with_layer` names the layer that served a read. Retail scripts
+  from the base archives or folder are not checked at load: the offline audit
+  covers them, `gatedemo.int`'s recorded exception included.
+- **How.** The script is decoded with every word accepted. It is run through
+  the model with the active profile's table (`fallout1` or `fallout2`, plus
+  `0x8200`-`0x82FF` from `vault_vm::extensions::ENHANCED` under the
+  `enhanced` preset). It is then parsed under the profile's word set, which
+  still refuses words outside it.
+- **Clean.** With no finding, the script loads and runs at once. A
+  registration needs no retail table row and runs under either profile.
+- **Refused.** On a finding or a parse refusal, the script takes SPEC-006
+  §3.7's cannot-load path: nothing runs and the host's default follows. The
+  engine logs one diagnostic per script, naming the path, the layer, the
+  table, and the findings by kind and word. It never logs script bytes.
+- **Caching.** The verdict is kept per path for the session, and a clean
+  script keeps its checked program. A change of profile or preset checks
+  again.
+
 ## Part 2: "Better Than Et Tu" enhanced QoL for Fallout 1
 
 Everything here runs only with `preset = "enhanced"` (from

@@ -13,7 +13,7 @@ use vault_formats::{
     LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype, Vfs,
     VfsPath, pro::Category,
 };
-use vault_vm::IntProgram;
+use vault_vm::{IntProgram, WordSet, stack_check};
 
 /// Resource policy is explicit. Numeric perk IDs/XP curves and other tables not
 /// specified by SPEC-005/006 belong to WorldRules, not inferred bytecode constants.
@@ -219,6 +219,10 @@ pub struct VfsWorldAssets {
     registry: ModRegistry,
     /// The game whose map and prototype layouts are read (SPEC-016).
     game: std::cell::Cell<crate::GameProfile>,
+    /// The on-load verdicts of the scripts mod layers supplied, by
+    /// normalized path: the checked program, or `None` for a refusal.
+    /// Retail scripts are never entered.
+    mod_scripts: RefCell<BTreeMap<String, Option<IntProgram>>>,
 }
 impl VfsWorldAssets {
     pub fn new(vfs: Arc<dyn Vfs>, language: &str) -> Result<Self, WorldError> {
@@ -249,6 +253,7 @@ impl VfsWorldAssets {
             enhanced_scripts: std::cell::Cell::new(false),
             registry: ModRegistry::default(),
             game: std::cell::Cell::new(crate::GameProfile::Fallout1),
+            mod_scripts: RefCell::new(BTreeMap::new()),
         }
         .with_registry()
     }
@@ -327,6 +332,91 @@ impl VfsWorldAssets {
             &words,
             self.enhanced_scripts.get(),
         )?)
+    }
+    /// The script at `path`. One a mod layer supplies is checked before it
+    /// enters the VM ([`Self::check_mod_script`]) and its verdict kept for
+    /// the session; a refused one is [`WorldError::ScriptRefused`]. Retail
+    /// scripts, from the base archives or folder, are parsed unchecked
+    /// (the offline audit covers them).
+    fn load_program(&self, path: &str) -> Result<IntProgram, WorldError> {
+        let key = VfsPath::new(path)
+            .map(|normalized| normalized.as_str().to_owned())
+            .unwrap_or_else(|_| path.to_owned());
+        let refused = || WorldError::ScriptRefused(path.to_owned());
+        if let Some(verdict) = self.mod_scripts.borrow().get(&key) {
+            return verdict.clone().ok_or_else(refused);
+        }
+        let (bytes, layer) = self
+            .vfs
+            .read_with_layer(path, MAX_ASSET_BYTES)
+            .map_err(|error| WorldError::Invalid(format!("{path}: {error}")))?;
+        let Some(layer) = layer else {
+            return self.parse_program(&bytes);
+        };
+        let verdict = match self.check_mod_script(path, &layer, &bytes) {
+            Ok(program) => Some(program),
+            Err(diagnostic) => {
+                let mut diagnostics = self.diagnostics.borrow_mut();
+                if diagnostics.len() < FAILURE_CACHE_LIMIT {
+                    diagnostics.push(diagnostic);
+                }
+                None
+            }
+        };
+        self.mod_scripts.borrow_mut().insert(key, verdict.clone());
+        verdict.ok_or_else(refused)
+    }
+    /// The on-load check of a script mod layer `layer` supplies: decoded by
+    /// SPEC-004's layout with every bit-15 word accepted, run through the
+    /// SPEC-017 §8 stack model with the active profile's table (the
+    /// enhanced range included when scripts parse enhanced, and the
+    /// table's recorded exceptions), then parsed under the profile's word
+    /// set as [`Self::parse_program`] does. A finding, or a refusal by
+    /// either decode, refuses it with the one diagnostic returned: the
+    /// path, the layer, and the findings by kind and word (never script
+    /// bytes).
+    fn check_mod_script(
+        &self,
+        path: &str,
+        layer: &str,
+        bytes: &[u8],
+    ) -> Result<IntProgram, String> {
+        let words = crate::fallout2::word_set(self.game.get());
+        let enhanced = self.enhanced_scripts.get();
+        let table = stack_check::Table::with_enhanced(words.clone(), enhanced);
+        let profile = match self.game.get() {
+            crate::GameProfile::Fallout1 => "fallout1",
+            crate::GameProfile::Fallout2 => "fallout2",
+        };
+        let every = WordSet {
+            words: 0x8000..=0xffff,
+        };
+        let refusal = match IntProgram::parse_in(bytes, &every, false) {
+            Err(error) => format!("undecodable: {error}"),
+            Ok(decoded) => {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                let findings =
+                    stack_check::check(name, &decoded, &table, stack_check::exceptions(&words));
+                if findings.is_empty() {
+                    match IntProgram::parse_in(bytes, &words, enhanced) {
+                        Ok(program) => return Ok(program),
+                        Err(error) => format!("refused by the word set: {error}"),
+                    }
+                } else {
+                    let total = findings.values().sum::<u64>();
+                    let plural = if total == 1 { "" } else { "s" };
+                    format!(
+                        "{total} finding{plural}: {}",
+                        stack_check::summary(&findings)
+                    )
+                }
+            }
+        };
+        Err(format!(
+            "{path}: mod script from layer {layer:?} refused at load ({profile}{} table): \
+             {refusal}",
+            if enhanced { " + enhanced" } else { "" }
+        ))
     }
     /// A list file, parsed once (each path has one kind).
     fn list(&self, path: &str, kind: LstKind) -> Result<Arc<LstTable>, WorldError> {
@@ -467,7 +557,7 @@ impl WorldAssets for VfsWorldAssets {
             std::str::from_utf8(name)
                 .map_err(|_| WorldError::Invalid("invalid script name".into()))?
         );
-        let program = self.parse_program(&self.read(&path)?)?;
+        let program = self.load_program(&path)?;
         self.programs
             .borrow_mut()
             .insert(index, (path.clone(), program.clone()));
@@ -485,7 +575,7 @@ impl WorldAssets for VfsWorldAssets {
         } else {
             format!("scripts/{path}")
         };
-        let program = self.parse_program(&self.read(&path)?)?;
+        let program = self.load_program(&path)?;
         Ok((path, program))
     }
     fn local_count(&self, index: i32) -> usize {
@@ -761,15 +851,18 @@ impl WorldAssets for VfsWorldAssets {
     fn set_game_profile(&self, game: crate::GameProfile) {
         if self.game.replace(game) != game {
             // Cached prototypes were read in the other game's layout, and
-            // cached programs checked against its word set.
+            // cached programs and verdicts checked against its word set.
             self.prototypes.borrow_mut().clear();
             self.programs.borrow_mut().clear();
+            self.mod_scripts.borrow_mut().clear();
         }
     }
     fn set_enhanced_scripts(&self, enabled: bool) {
         if self.enhanced_scripts.replace(enabled) != enabled {
-            // Cached programs were parsed under the other profile.
+            // Cached programs and verdicts were parsed under the other
+            // profile.
             self.programs.borrow_mut().clear();
+            self.mod_scripts.borrow_mut().clear();
         }
     }
     fn files(&self, pattern: &[u8]) -> Vec<Vec<u8>> {

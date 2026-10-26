@@ -129,6 +129,19 @@ pub trait Vfs: Send + Sync {
         Ok(bytes)
     }
 
+    /// [`Vfs::read_bounded`], with the name of the mod layer
+    /// ([`LayeredVfs`]) that served the file: `None` when the base data
+    /// served it, and always for a plain provider. One read, so the name is
+    /// the bytes' own layer.
+    fn read_with_layer(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<(Vec<u8>, Option<String>), VfsError> {
+        self.read_bounded(path, max_bytes)
+            .map(|bytes| (bytes, None))
+    }
+
     /// Walk all mounted files in canonical lexical order (directories excluded).
     fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_>;
 
@@ -409,11 +422,22 @@ impl Vfs for PrefixMount {
     }
 
     fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
-        match self.primary.read_bounded(path, max_bytes) {
+        self.read_with_layer(path, max_bytes)
+            .map(|(bytes, _)| bytes)
+    }
+
+    fn read_with_layer(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<(Vec<u8>, Option<String>), VfsError> {
+        match self.primary.read_with_layer(path, max_bytes) {
+            // The mounted directory is base data.
             Err(VfsError::NotFound(missing)) => match missing.as_str().strip_prefix(&self.prefix) {
                 Some(rest) => self
                     .dir
                     .read_bounded(rest, max_bytes)
+                    .map(|bytes| (bytes, None))
                     .map_err(|error| match error {
                         VfsError::NotFound(_) => VfsError::NotFound(missing),
                         other => other,
@@ -942,14 +966,23 @@ impl Vfs for LayeredVfs {
     }
 
     fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
+        self.read_with_layer(path, max_bytes)
+            .map(|(bytes, _)| bytes)
+    }
+
+    fn read_with_layer(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<(Vec<u8>, Option<String>), VfsError> {
         let normalized = VfsPath::new(path)?;
         for layer in self.layers.iter().rev() {
             match layer.provider.read_bounded(normalized.as_str(), max_bytes) {
                 Err(VfsError::NotFound(_)) => {}
-                result => return result,
+                result => return result.map(|bytes| (bytes, Some(layer.name.clone()))),
             }
         }
-        self.base.read_bounded(normalized.as_str(), max_bytes)
+        self.base.read_with_layer(normalized.as_str(), max_bytes)
     }
 
     fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {
@@ -1059,5 +1092,54 @@ mod tests {
             write_load_order(&[layer("bad\nname", true)]),
             Err(VfsError::LoadOrder(_))
         ));
+    }
+
+    #[test]
+    fn a_layered_read_names_the_layer_that_served_it() {
+        let dir = tempfile::tempdir().unwrap();
+        for (folder, files) in [
+            ("base", ["a.txt", "b.txt"].as_slice()),
+            ("mods/one", &["a.txt", "c.txt"]),
+            ("mods/two", &["c.txt"]),
+            ("music", &["track.acm"]),
+        ] {
+            let folder = dir.path().join(folder);
+            std::fs::create_dir_all(&folder).unwrap();
+            for file in files {
+                std::fs::write(folder.join(file), *file).unwrap();
+            }
+        }
+        let base: Arc<dyn Vfs> =
+            Arc::new(LocalDirProvider::mount(dir.path().join("base")).unwrap());
+        let entries = [layer("mods/one", true), layer("mods/two", true)];
+        let layered: Arc<dyn Vfs> = Arc::new(
+            LayeredVfs::from_entries(
+                base.clone(),
+                dir.path(),
+                &entries,
+                LoadOrderPolicy::default(),
+            )
+            .unwrap(),
+        );
+        let served = |vfs: &dyn Vfs, path: &str| vfs.read_with_layer(path, 64).unwrap();
+        assert_eq!(
+            served(&*layered, "A.TXT"),
+            (b"a.txt".to_vec(), Some("mods/one".into()))
+        );
+        assert_eq!(served(&*layered, "b.txt"), (b"b.txt".to_vec(), None));
+        assert_eq!(
+            served(&*layered, "c.txt"),
+            (b"c.txt".to_vec(), Some("mods/two".into()))
+        );
+        assert!(matches!(
+            layered.read_with_layer("d.txt", 64),
+            Err(VfsError::NotFound(_))
+        ));
+        // A plain provider, and a prefix mount's own directory, are base data.
+        assert_eq!(served(&*base, "a.txt").1, None);
+        let music = LocalDirProvider::mount(dir.path().join("music")).unwrap();
+        let mount = PrefixMount::new(layered, "sound/music", music).unwrap();
+        assert_eq!(served(&mount, "sound/music/track.acm").1, None);
+        assert_eq!(served(&mount, "a.txt").1.as_deref(), Some("mods/one"));
     }
 }

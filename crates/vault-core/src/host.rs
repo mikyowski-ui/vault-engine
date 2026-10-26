@@ -1066,6 +1066,12 @@ impl<A: WorldAssets> WorldHost<A> {
                     if let Some(script) = self.world.scripts.get_mut(&instance.id) {
                         script.source = 0;
                     }
+                    // A mod script the on-load check refused takes the same
+                    // path without a diagnostic per request: the assets
+                    // gave its one diagnostic.
+                    if matches!(error, WorldError::ScriptRefused(_)) {
+                        return Ok(DispatchResult::default());
+                    }
                     return Err(error);
                 }
             }

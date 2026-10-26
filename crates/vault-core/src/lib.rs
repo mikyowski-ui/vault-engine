@@ -78,6 +78,11 @@ pub enum WorldError {
     Invalid(String),
     #[error("world arithmetic exceeds defined range")]
     Arithmetic,
+    /// A script a mod layer supplies that the on-load stack check refused
+    /// (the assets diagnose it once): it takes SPEC-006 §3.7's path for a
+    /// script that cannot be loaded.
+    #[error("{0}: refused by the mod-script check")]
+    ScriptRefused(String),
 }
 impl From<vault_formats::ParseError> for WorldError {
     fn from(error: vault_formats::ParseError) -> Self {
@@ -145,6 +150,8 @@ mod host_sound_tests;
 mod items_tests;
 #[cfg(test)]
 mod lighting_tests;
+#[cfg(test)]
+mod mod_script_tests;
 #[cfg(test)]
 mod motion_tests;
 #[cfg(test)]
