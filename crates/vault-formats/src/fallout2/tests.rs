@@ -664,6 +664,46 @@ fn spec018_revision2_entrances_and_party_records() {
     assert!(messages[1].contains("level_pids: \"-1\" dropped"));
 }
 
+/// SPEC-018 Revision 3 (R16): an entrance of exactly 8 items is read from
+/// its first seven, with a diagnostic; 9 items is still invalid.
+#[test]
+fn spec018_revision3_eight_item_entrances() {
+    let maps = maps();
+    let world = worldmap().world_size();
+    let mut notes = Diagnostics::default();
+    let city = CityTable::parse(
+        b"[Area 0]\nworld_pos=1,1\nentrance_0=On,10,20,Temple,0,-1,-1,0\n\
+          entrance_1=On,10,20,Temple,0,-1,-1,0,0\nentrance_2=Off,5,6,Temple,1,12345,3\n",
+        &maps,
+        world,
+        &mut notes,
+    )
+    .unwrap();
+    let area = city.get(0).unwrap();
+    let first = area.entrances[0].unwrap();
+    assert_eq!(
+        (
+            first.known,
+            first.marker,
+            first.map,
+            first.elevation,
+            first.tile,
+            first.orientation
+        ),
+        (true, Some([10, 20]), 2, 0, -1, -1)
+    );
+    assert!(area.entrances[1].is_none(), "nine items stay invalid");
+    assert_eq!(area.entrances[2].unwrap().orientation, 3);
+    let messages: Vec<&str> = notes.0.iter().map(|note| note.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "[Area 0] entrance_0 has 8 items; read from the first seven",
+            "[Area 0] entrance_1 is invalid; dropped",
+        ]
+    );
+}
+
 #[test]
 fn spec018_party_table() {
     let table = PartyTable::parse(fixture::PARTY.as_bytes(), &mut Diagnostics::default()).unwrap();

@@ -1090,6 +1090,21 @@ impl WorldState {
         script.flags |= party_marks::BOTH;
         Ok(sid)
     }
+    /// SPEC-018 §6.5 (Revision 3): the player's record `sid` gets a local
+    /// slice of `count` values: `values` when given, else zeros allocated on
+    /// first use.
+    pub(crate) fn set_player_locals(&mut self, sid: u32, count: usize, values: Option<Vec<i32>>) {
+        let base = self.lvars.len();
+        let Some(script) = self.scripts.get_mut(&sid) else {
+            return;
+        };
+        script.local_count = count;
+        script.local_base = -1;
+        if let Some(values) = values.filter(|values| values.len() == count) {
+            script.local_base = base as i32;
+            self.lvars.extend(values);
+        }
+    }
     /// Tests about other critter records leave the player's out of the
     /// critter stream and the cycle.
     #[cfg(test)]
@@ -1219,16 +1234,36 @@ impl WorldState {
     /// object bound it) and every record owned by the player (the one the
     /// reset created and the map load recovered) are removed, with their
     /// script timers, and the player gets a newly created record.
-    pub(crate) fn replace_player_script(&mut self, saved: i32) -> Result<u32, WorldError> {
+    ///
+    /// Under Fallout 2, `player_locals` is `scripts.lst` entry 0's declared
+    /// count (SPEC-018 §6.5, Revision 3): the new record has a slice of that
+    /// size, holding the saved map copy's values when it has a slice of that
+    /// size, and zeros otherwise.
+    pub(crate) fn replace_player_script(
+        &mut self,
+        saved: i32,
+        player_locals: Option<usize>,
+    ) -> Result<u32, WorldError> {
         let player = self.player;
         let player_id = self.get(player).map_or(-1, |object| object.raw.id as i32);
-        let copies = self
+        let copies: Vec<u32> = self
             .record_objects
             .iter()
             .filter(|(sid, object)| {
                 *object == player_id && self.scripts.get(sid).is_some_and(|s| s.owner == 0)
             })
-            .map(|(sid, _)| *sid);
+            .map(|(sid, _)| *sid)
+            .collect();
+        let kept = player_locals.and_then(|count| {
+            copies.iter().find_map(|sid| {
+                let copy = self.scripts.get(sid)?;
+                let base = usize::try_from(copy.local_base).ok()?;
+                (copy.local_count == count)
+                    .then(|| self.lvars.get(base..base.checked_add(count)?))
+                    .flatten()
+                    .map(<[i32]>::to_vec)
+            })
+        });
         let mut old: Vec<u32> = self
             .scripts
             .values()
@@ -1245,6 +1280,9 @@ impl WorldState {
         old.dedup();
         // Created first, so the new identifier differs from the old ones.
         let sid = self.create_player_script()?;
+        if let Some(count) = player_locals {
+            self.set_player_locals(sid, count, kept);
+        }
         for id in &old {
             self.remove_script(*id);
         }

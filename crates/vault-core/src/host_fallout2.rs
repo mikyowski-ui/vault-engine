@@ -90,6 +90,12 @@ impl<A: WorldAssets> WorldHost<A> {
             AutomapDb::fallout2(|map| tables.maps.excluded(map as i32));
         self.world.persistence.campaign_status = 0;
         self.world.fallout2 = Some(Box::new(Fallout2World::new_game(tables, start)));
+        // §6.5 (Revision 3): the player's record gets the slice that
+        // `scripts.lst` entry 0 declares, all 0.
+        let count = self.assets.local_count(crate::world::PLAYER_SCRIPT_FILE);
+        if let Some(sid) = self.world.script_for(self.world.player) {
+            self.world.set_player_locals(sid, count, None);
+        }
         self.note_world_table_overrides();
     }
     /// §4.8: a present Fallout 1 world-table override gets a diagnostic;

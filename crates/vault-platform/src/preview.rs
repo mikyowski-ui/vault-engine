@@ -1080,6 +1080,13 @@ mod tests {
             "{reads:?}"
         );
         assert_eq!(host.world.gvars.as_ref().unwrap()[3], 2241);
+        // SPEC-018 §6.5 (Revision 3): the player's record has the slice
+        // `scripts.lst` entry 0 declares (4 in the synthetic list), all 0.
+        let player_record = |host: &vault_core::WorldHost<_>| {
+            let sid = host.world.script_for(host.world.player).unwrap();
+            host.world.scripts[&sid].local_count
+        };
+        assert_eq!(player_record(host), 4);
         assert!(
             host.programs
                 .values()
@@ -1208,6 +1215,11 @@ mod tests {
         assert!(working.contains_key("ARTEMPLE.SAV"));
         let before = world.host.world.fallout2.as_deref().unwrap().clone();
         let ticks = world.host.world.clock.ticks;
+        // The player's locals travel with it and are saved: one set now
+        // reads back after the load.
+        let sid = world.host.world.script_for(world.host.world.player);
+        assert_eq!(world.host.world.local(sid, 3), 0);
+        assert!(world.host.world.set_local(sid, 3, 77));
         // Save and load round-trip.
         world.host.save_game(root, 2, &SaveInfo::default()).unwrap();
         world.host.world.clock.set(ticks + 1000);
@@ -1218,6 +1230,9 @@ mod tests {
         let after = world.host.world.fallout2.as_deref().unwrap();
         assert_eq!(after.save(), before.save());
         assert_eq!(after.position, before.position);
+        let sid = world.host.world.script_for(world.host.world.player);
+        assert_eq!(player_record(&world.host), 4);
+        assert_eq!(world.host.world.local(sid, 3), 77);
         // The load printed no notice.
         let effects: Vec<_> = world.host.world.effects.iter().cloned().collect();
         assert!(!effects.iter().any(|effect| matches!(effect,
@@ -1237,6 +1252,9 @@ mod tests {
         // under Fallout 1.
         let mut fallout1 =
             crate::map_preview::test_support::load(corpus.path(), "maps/testvil.map");
+        // Fallout 1 is unchanged: the player record has no slice, whatever
+        // entry 0 declares (SPEC-006 §3.5).
+        assert_eq!(player_record(&fallout1.host), 0);
         fallout1
             .host
             .save_game(root, 3, &SaveInfo::default())

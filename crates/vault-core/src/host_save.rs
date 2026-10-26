@@ -745,6 +745,12 @@ impl<A: WorldAssets> WorldHost<A> {
         let map_file = save_map_file(&save);
         self.load_map(&format!("maps/{map_file}"))?;
         self.restore_player(&save)?;
+        // SPEC-018 §6.5 (Revision 3): a Fallout 2 player record's locals.
+        let player_locals = self
+            .world
+            .fallout2
+            .is_some()
+            .then(|| self.assets.local_count(crate::world::PLAYER_SCRIPT_FILE));
         let world = &mut self.world;
         // SPEC-014 §3.44 / §3.36: the restored player record is a placement
         // on its hex: it is reinserted there, and the roof tracking moves
@@ -804,7 +810,7 @@ impl<A: WorldAssets> WorldHost<A> {
         // not restored; the player gets a newly created one, and the saved
         // party list's records get both marks again.
         let saved_script = save.player.script_id;
-        world.replace_player_script(saved_script)?;
+        world.replace_player_script(saved_script, player_locals)?;
         world.set_party_marks(true);
         // No AI state refers to objects from before the load.
         self.world.ai.snapshot.clear();

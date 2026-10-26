@@ -136,6 +136,18 @@ impl CityTable {
             };
             let mut entrances: Vec<Option<Entrance>> = Vec::new();
             for (slot, value) in section.indexed("entrance", 0..=(MAX_ENTRANCES as u32 - 1)) {
+                // Revision 3 (R16): an eighth item is ignored, with a
+                // diagnostic.
+                if text::list(&value.text).len() == 8 {
+                    notes.push(
+                        file,
+                        value.line,
+                        format!(
+                            "[{}] entrance_{slot} has 8 items; read from the first seven",
+                            section.name
+                        ),
+                    );
+                }
                 match entrance(&value.text, maps) {
                     Some(entrance) => {
                         let slot = slot as usize;
@@ -228,10 +240,12 @@ impl CityTable {
     }
 }
 
-/// The seven entrance items.
+/// The seven entrance items; of eight, the first seven (Revision 3, R16).
 fn entrance(value: &str, maps: &MapsTable) -> Option<Entrance> {
     let items = text::list(value);
-    let [known, x, y, name, elevation, tile, orientation] = items.as_slice() else {
+    let ([known, x, y, name, elevation, tile, orientation]
+    | [known, x, y, name, elevation, tile, orientation, _]) = items.as_slice()
+    else {
         return None;
     };
     // Revision 2 (R12): -1, -1 is an entrance with no marker; only one of
