@@ -83,7 +83,7 @@ The phrase "the spec must define" marks what this document does not assume.
 |---|---|---|
 | SPEC-015 | Archive version 2: footer, tree, entries, zlib members | **Approved and implemented** (2026-10-25) |
 | SPEC-016 | MAP version 20 and prototype deltas, with round-trip vectors | **Approved and implemented** (2026-10-25) |
-| SPEC-017 | Host words `0x8156`-`0x8183` and VM deltas from SPEC-004 | Approved (Team A); word numbers provisional, scripts gated by its §8 audit |
+| SPEC-017 | Host words `0x8156`-`0x8183` and VM deltas from SPEC-004 | Approved (Team A) and implemented; word numbers provisional; Revision 3 records the retail §8 audit and opens the script gate |
 | SPEC-018 | Saves, world map, party and the other data tables | Approved (Team A; §1 owner decision) |
 | SPEC-019 | Interface, party control, car and game-flow deltas | Approved (Team A) and implemented; checked against synthetic art only (no Fallout 2 corpus here) |
 
@@ -120,8 +120,14 @@ under `AGENTS.md`'s rule, then implemented by a separate agent.
 folder, and the required members), and Play starts a new game on
 `maps/artemple.map` from the `data/*.txt` tables (`vault_formats::fallout2`,
 `vault_core::fallout2`). Saves use the version 1.2 layout. Fallout 2 scripts
-stay gated (SPEC-017 §8.5, `vault_core::fallout2::SCRIPT_GATE_OPEN`): no
-`.INT` loads, and the monitor and launcher say so.
+run: SPEC-017 Revision 3 opened the §8.5 gate
+(`vault_core::fallout2::SCRIPT_GATE_OPEN`), so every `.INT` loads with the
+Fallout 2 word set. A save made while the gate was closed carries the gated
+mark and is refused (§7.2). Revision 2's retail corrections are in: the
+`worldmap.txt` condition fields, count-less groups, `FIGHTING Player`, item
+and scenery encounter types, per-type `Distance`, `Player(Perception)`,
+`team_num`, `{Wielded}`, entrances with no marker, the non-critter trunk
+record and `level_pids=-1`.
 - `vault_vm::WordSet` replaces the fixed `0x8000..=0x8155` test. Fallout 1's
   set is unchanged word for word.
 
@@ -133,9 +139,11 @@ Fallout 2 rules and `metarule3` 100-111 (`vault_core` `host_fallout2_words`);
 `push_p_proc` and the other lifecycle names 24-27; and the §8 audit as
 `asset-audit --report-script-stack [--fallout2-dir]`. Under §8's Revision 2
 model its §8.4 model check passes on the Fallout 1 corpus, with one recorded
-exception (see the README). The gate stays closed until a Fallout 2 audit is
-recorded. Scripts of a Fallout 2 game parse with
-the Fallout 2 set, so opening the gate is the one switch.
+exception (see the README). Revision 3 adds `0x8109` (three operands, I 0,
+no effect, one diagnostic per program) and records the retail audit (1248
+scripts, 0 findings), which opened the gate. `asset-audit
+--report-fallout2-install` repeats the retail checks and a new-game smoke
+run.
 
 **SPEC-019** is implemented under the Fallout 2 profile, every change gated
 on a Fallout 2 game, so Fallout 1 is unchanged:
@@ -158,16 +166,17 @@ on a Fallout 2 game, so Fallout 1 is unchanged:
   and Kills folders, the dialogue panel's Combat Control button with the
   control and custom panels, trading with party members, Take All, the
   weight line with the carry limit, the old-version save state, the
-  `endgame.txt` slideshow, and `elevators.txt` elevators;
+  `endgame.txt` slideshow, and `elevators.txt` elevators; the custom panel
+  is a window the size of its background (Revision 2: at (0, 290) with the
+  retail 640-by-190 `custom.frm`);
 - `asset-audit --report-fallout2-art --fallout2-dir` lists which §2.2 art
   names an install's `intrface.lst` lacks (D-2).
 
-There is no Fallout 2 corpus here, so the screens are checked for layout,
-geometry and state with synthetic art; the §2.2 candidate names are Team
-A's and untested against real art. With scripts gated, nothing makes an
-area known or adds a party member, so a game can travel, enter its known
-start areas, drop to terrain, meet encounters, fight, save and load, but
-the campaign does not advance.
+The tests check the screens for layout, geometry and state with synthetic
+art. SPEC-019 Revision 2 records the retail art audit: all 12 §2.2 roles
+resolve. With scripts running, the campaign's script effects (areas made
+known, party members joining) are exercised by Play; their host effects
+stay provisional until confirmed in play (SPEC-017 Decision 38).
 
 ## Part 2: "Better Than Et Tu" enhanced QoL for Fallout 1
 

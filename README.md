@@ -136,12 +136,13 @@ looked for beside the executable and then in the working directory. Keys:
 data is read in Fallout 2's formats:
 - SPEC-015 archives, mounted as SPEC-018 §1 says: an optional
   `patch000.dat` over `MASTER.DAT`, and `CRITTER.DAT` for critter art;
-- SPEC-016 version 20 maps and 416-byte critter prototypes.
+- SPEC-016 version 20 maps (with Fallout 2's two-word ladder records) and
+  416-byte critter prototypes (412-byte ones are read with damage type 0).
 
 `--game-profile fallout2 --preview-map MAP` previews a Fallout 2 map. Under
 `fallout2`, Play validates the install and starts a new game from its SPEC-018
-tables on `maps/artemple.map`, with Fallout 2 scripts gated (SPEC-017 §8.5),
-in SPEC-019's interface: its main menu, world and town maps, Pip-Boy,
+tables on `maps/artemple.map`, with its scripts running (SPEC-017 Revision 3
+recorded the §8 audit and opened the §8.5 gate), in SPEC-019's interface: its main menu, world and town maps, Pip-Boy,
 character folders, party control panels, the car and the endgame. See the
 [Fallout 2 and QoL roadmap](docs/fallout2-and-qol-roadmap.md), and the
 `--game-profile` flag), `preset` (`vanilla` or `enhanced`), `scaling`,
@@ -654,7 +655,7 @@ pass, with 26 warnings for `JUNKDEMO.MAP`'s missing scripts.
 every `.int` that `scripts.lst` names, with SPEC-005's host-word table, and
 with `--fallout2-dir` also over a Fallout 2 install's scripts with SPEC-017's
 table. It prints findings by kind, the consistent pop/push signatures of the
-host words involved (and of SPEC-017's ten words under Fallout 2) and
+host words involved (and of SPEC-017's eleven words under Fallout 2) and
 operand-type evidence; no script byte. Host results that statement calls
 leave on the stack are absorbed where branches rejoin (Revision 2), and the
 units where that happened are counted. Recorded exceptions print on their
@@ -663,8 +664,23 @@ own line and are not findings; a stale one is. The report ends with
 category, and never fails the run. On the local corpus the model check
 passes: 884 scripts (62 listed ones absent), 16148 units, 0 findings, 487
 units with leaked results, and the one recorded exception, `gatedemo.int`'s
-underflow at `start_gdialog` (`0x80de`). Fallout 2 scripts stay gated until
-a Fallout 2 audit is recorded (SPEC-017 §8.5).
+underflow at `start_gdialog` (`0x80de`). On the owner's retail Fallout 2
+install the `fallout2` table gives 1248 scripts (40 listed ones absent),
+29956 units and 0 findings; that audit is recorded in SPEC-017 Revision 3,
+which opens the §8.5 gate, so Fallout 2 scripts run.
+
+`--report-fallout2-install --fallout2-dir <install>` checks a Fallout 2
+install over SPEC-018 §1's mount (its loose `data` folder as the data root):
+the required members, the `data/*.txt` tables' load with their diagnostics
+grouped by kind, every `.map` (with the prototype catalog), `.pro`,
+`.frm`/`.fr0`-`.fr5`, `.msg`, `.pal`, `.lst` and `.int` (with
+`WordSet::FALLOUT2`) parsed under the `fallout2` profile, the map and
+prototype writers' round trips, and a headless smoke run: SPEC-018 §6's
+new-game hand-off onto `artemple` with its scripts running for 60 seconds of
+world time, listing VM errors by script, procedure and word and the
+diagnostics by kind. Only counts, names, PIDs, word and line numbers and
+lengths are printed. It is a report, not a category, and never fails the
+run; it ends with `Fallout 2 install check: passed` or `failed`.
 
 `--validate-exits` checks every distinct exit grid destination of each map
 (map 0 and -1 open the world and town maps and need no tile) and every
