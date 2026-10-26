@@ -161,6 +161,14 @@ fn spec019_control_and_custom_panels() {
         Rect::new(150, 100, 15, 16)
     );
     assert_eq!(custom::button(5), [150, 130]);
+    // Revision 2: the window takes its background's size.
+    assert_eq!(custom::window(None), Rect::new(170, 145, 300, 190));
+    assert_eq!(custom::window(Some([300, 190])), custom::window(None));
+    assert_eq!(
+        custom::window(Some([640, 190])),
+        Rect::new(0, 290, 640, 190)
+    );
+    assert_eq!(custom::FULL_ORIGIN, [0, 290]);
     assert_eq!(custom::value(0), [170, 20]);
     assert_eq!(text::hp(12, 40), "HP 12/40");
     assert_eq!(text::ac(5), "AC 5");

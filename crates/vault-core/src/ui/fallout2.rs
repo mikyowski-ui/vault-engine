@@ -540,11 +540,28 @@ pub mod control {
         Rect::new(at[0], at[1], w, h)
     }
 }
-/// §3.15.3 the custom panel, a modal window at screen (170, 145), 300 by
-/// 190.
+/// §3.15.3 the custom panel, a modal window the size of its background
+/// (Revision 2). Its rows and Done are window-relative.
 pub mod custom {
+    use super::Rect;
+    /// The stand-in's window: screen (170, 145), 300 by 190.
     pub const ORIGIN: [i32; 2] = [170, 145];
     pub const SIZE: [i32; 2] = [300, 190];
+    /// The retail `custom.frm`'s window: 640 by 190 at screen (0, 290), in
+    /// the control panel's place.
+    pub const FULL_ORIGIN: [i32; 2] = [0, 290];
+    /// The window for a background of `size` (`None` for the stand-in). A
+    /// background as wide as the 640-pixel screen takes the control
+    /// panel's place, its bottom on the screen's; any other is centred on
+    /// the 640 by 480 screen, as the stand-in is.
+    pub fn window(size: Option<[i32; 2]>) -> Rect {
+        let [w, h] = size.unwrap_or(SIZE);
+        if w >= 640 {
+            Rect::new(0, 480 - h, w, h)
+        } else {
+            Rect::new((640 - w) / 2, (480 - h) / 2, w, h)
+        }
+    }
     pub const DONE_BUTTON: [i32; 2] = [110, 160];
     pub const DONE_CAPTION: [i32; 2] = [130, 160];
     /// Row j's label, red button and value text.

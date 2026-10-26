@@ -3,7 +3,9 @@
 //! the combat control panel that replaces the dialogue panel at screen
 //! (0, 290) with the member's name, stats, weapon and armor, the five
 //! disposition rows, Use Best Weapon, Custom and Talk; and the modal custom
-//! panel at (170, 145) with its six cycling rows and Done. The rules are
+//! panel, a window the size of its background (at (0, 290) with the
+//! retail 640-by-190 art, at (170, 145) with the stand-in) with its six
+//! cycling rows and Done. The rules are
 //! `vault_core::fallout2_party`'s; the host applies them
 //! (`choose_disposition`, `cycle_control`, `use_best_weapon`).
 use super::{MapPreview, talk::TalkWindow};
@@ -81,11 +83,25 @@ impl MapPreview {
             }));
         }
     }
+    /// §3.15.3 (Revision 2) the custom panel's window: the size of
+    /// `custom.frm`'s first frame, or the stand-in's.
+    pub(crate) fn custom_window(&self) -> Rect {
+        let painter = Painter {
+            assets: &self.host.assets,
+            palette: &self.palette,
+        };
+        let size = painter.role(&ui2::CUSTOM_PANEL).and_then(|(_, art)| {
+            art.frame(0, 0)
+                .map(|frame| [i32::from(frame.width), i32::from(frame.height)])
+        });
+        custom::window(size)
+    }
     /// The buttons that act now: the custom panel's while it is open (it
     /// is modal), else the control panel's enabled ones.
     pub(crate) fn control_buttons(&self, panel: &ControlPanel) -> Vec<(ControlButton, Rect)> {
         if panel.custom {
-            let origin = custom::ORIGIN;
+            let window = self.custom_window();
+            let origin = [window.x, window.y];
             return (0..6)
                 .map(|j| (ControlButton::Row(j), screen(origin, custom::button(j))))
                 .chain([(ControlButton::Done, screen(origin, custom::DONE_BUTTON))])
@@ -365,12 +381,13 @@ impl MapPreview {
     }
     /// §3.15.3 the custom panel.
     fn draw_custom(&self, painter: &Painter, image: &mut IndexedImage, member: ObjectRef) {
-        let origin = custom::ORIGIN;
+        let window = self.custom_window();
+        let origin = [window.x, window.y];
         let at = |p: [i32; 2]| [origin[0] + p[0], origin[1] + p[1]];
         if painter.role(&ui2::CUSTOM_PANEL).is_some() {
             painter.blit_role(image, &ui2::CUSTOM_PANEL, origin);
         } else {
-            let [w, h] = custom::SIZE;
+            let [w, h] = [window.w, window.h];
             image.fill_rect([origin[0], origin[1], w, h], painter.color(ColorKey::GREEN));
             image.fill_rect(
                 [origin[0] + 1, origin[1] + 1, w - 2, h - 2],

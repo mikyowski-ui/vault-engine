@@ -279,7 +279,21 @@ fn spec019_pipboy_status_holodisks_automaps_archives_and_availability() {
 /// dispositions are custom, defensive and aggressive and distances
 /// stay_close, on_your_own and charge (§4.10's member).
 fn party_talk() -> (tempfile::TempDir, MapPreview, vault_core::ObjectRef) {
+    party_talk_with(&[])
+}
+/// [`party_talk`] with interface `art` written first and listed in
+/// `intrface.lst`.
+fn party_talk_with(
+    art: &[(&str, u16, u16, u8)],
+) -> (tempfile::TempDir, MapPreview, vault_core::ObjectRef) {
     let dir = corpus();
+    write_art(dir.path(), art);
+    let list = dir.path().join("art/intrface/intrface.lst");
+    let mut rows = std::fs::read(&list).unwrap();
+    for (name, ..) in art {
+        rows.extend(format!("{name}\n").bytes());
+    }
+    std::fs::write(&list, rows).unwrap();
     std::fs::create_dir_all(dir.path().join("text/english/dialog")).unwrap();
     std::fs::write(
         dir.path().join("text/english/dialog/synthetic.msg"),
@@ -325,6 +339,68 @@ fn party_talk() -> (tempfile::TempDir, MapPreview, vault_core::ObjectRef) {
         .control
         .insert(18000, record);
     (dir, preview, member)
+}
+
+/// SPEC-019 §3.15.3 (Revision 2): the custom panel is a window the size of
+/// its background, with window-relative rows and Done: a synthetic
+/// 640-by-190 `custom.frm` sits at (0, 290), a 300-by-190 one where the
+/// stand-in does, at (170, 145).
+#[test]
+fn spec019_revision2_the_custom_panel_takes_its_art_size() {
+    use super::super::talk::TalkWindow;
+    use vault_core::{
+        fallout2_party::distance,
+        ui::{fallout2 as ui2, talk},
+    };
+    use vault_formats::fallout2::party::ControlField;
+    for ([width, height], origin) in [([640, 190], [0, 290]), ([300, 190], [170, 145])] {
+        let (_dir, mut preview, member) = party_talk_with(&[("custom.frm", width, height, 91)]);
+        preview.image().unwrap();
+        let rect = talk::panel_button(ui2::COMBAT_CONTROL_BUTTON);
+        assert!(preview.tap([rect.x + 7, rect.y + 7]));
+        // Defensive: Distance is stay_close, and a row press makes it charge.
+        assert!(preview.step(KeyCode::Digit3));
+        let [ox, oy] = ui2::control::ORIGIN;
+        let [cx, cy] = ui2::control::CUSTOM_BUTTON;
+        assert!(preview.tap([ox + cx + 5, oy + cy + 5]));
+        assert!(matches!(
+            preview.talk,
+            Some(TalkWindow::Control(ref panel)) if panel.custom
+        ));
+        let window = preview.custom_window();
+        assert_eq!(
+            [window.x, window.y, window.w, window.h],
+            [origin[0], origin[1], i32::from(width), i32::from(height)]
+        );
+        // The art fills the window from its origin; the row's button is at
+        // its window-relative place.
+        let image = preview.image().unwrap();
+        assert_eq!(pixel(&image, origin), 91);
+        assert_eq!(
+            pixel(&image, [origin[0] + i32::from(width) - 1, origin[1] + 2]),
+            91
+        );
+        let [rx, ry] = ui2::custom::button(3);
+        assert!(preview.tap([origin[0] + rx + 5, origin[1] + ry + 5]));
+        assert_eq!(
+            preview.host.control_of(member).unwrap().fields[ControlField::Distance as usize],
+            distance::CHARGE,
+            "{width} by {height}"
+        );
+        let [dx, dy] = ui2::custom::DONE_BUTTON;
+        assert!(preview.tap([origin[0] + dx + 5, origin[1] + dy + 5]));
+        assert!(matches!(
+            preview.talk,
+            Some(TalkWindow::Control(ref panel)) if !panel.custom
+        ));
+    }
+    // Without the art, the stand-in's window.
+    let (_dir, preview, _) = party_talk();
+    let window = preview.custom_window();
+    assert_eq!(
+        [window.x, window.y, window.w, window.h],
+        [170, 145, 300, 190]
+    );
 }
 
 #[test]
