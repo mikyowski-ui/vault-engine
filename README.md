@@ -146,7 +146,7 @@ recorded the §8 audit and opened the §8.5 gate), in SPEC-019's interface: its 
 character folders, party control panels, the car and the endgame. See the
 [Fallout 2 and QoL roadmap](docs/fallout2-and-qol-roadmap.md), and the
 `--game-profile` flag), `preset` (`vanilla` or `enhanced`), `scaling`,
-`fullscreen`, `debug` and
+`fullscreen`, `touch_ui` (see [Touch UI](#touch-ui)), `debug` and
 `audio` (`false` keeps the audio device closed, as `--no-audio` does), plus
 the enhanced preset's `viewport_mode`, `default_zoom`, `smooth_camera`,
 `roof_peek` and `ui_scale` (see
@@ -186,8 +186,8 @@ opens when:
   to parse (the error shows in the status line, and Save replaces the file),
   or names game data that does not validate; or
 - `--launcher` is given. Display flags given with it (`--scaling`,
-  `--fullscreen`, `--preset`, `--viewport`, `--zoom`, `--no-audio`) pre-set its
-  choices.
+  `--fullscreen`, `--touch-ui`, `--preset`, `--viewport`, `--zoom`,
+  `--no-audio`) pre-set its choices.
 
 Replays (`--replay-inputs`), `--smoke-test`, `--game` and the `--preview-*`
 and `--play-movie` flags never show it, and `--launcher` conflicts with them.
@@ -216,7 +216,8 @@ It has three tabs and a bottom bar:
     the same, showing the launcher with what it found). Save and Play write
     both profiles.
 - **Display & audio**: scaling (`aspect_fit` or `integer`), fullscreen,
-  preset (`vanilla` or `enhanced`), audio on or off, and the debug overlay.
+  the touch UI, preset (`vanilla` or `enhanced`), audio on or off, and the
+  debug overlay.
   With the enhanced preset selected, five more rows follow (hidden, and out
   of the focus order, under Vanilla): the viewport, the default zoom (a
   stepper over 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5 and 3), smooth camera, the
@@ -283,6 +284,65 @@ either a list of paths or the path of a `load_order.toml` (`layers = [...]`, or
 `[[layer]]` tables with `path`, `master_dat`, `critter_dat` and an optional `enabled = false`). A load order's
 layers must lie inside its own directory. A mounted mod layer also enables the
 table overrides.
+
+### Touch UI
+
+A touch layer for phones and tablets, testable on a desktop touch screen
+(or with a mouse, for the on-screen buttons). It is off by default; turn it
+on with `--touch-ui`, `touch_ui = true` in `vault-engine.toml`, or the
+**Touch UI** row of the launcher's Display & audio tab. The flag wins over
+the file, as `--fullscreen` does. It works under both presets; the camera
+gestures need the enhanced unlocked viewport.
+
+Gestures (thresholds: a 10-logical-pixel slop, a 500 ms long press):
+
+| Gesture | Becomes |
+|---|---|
+| One-finger tap | The pointer moves where the finger lands; a left click when it lifts |
+| One-finger drag past the slop | Enhanced unlocked view: a middle-button drag from where the finger landed, the camera's own pan. Elsewhere: the pointer follows, nothing is clicked |
+| Two-finger pinch | Enhanced unlocked view, over the world: wheel lines `ln(d / d_last) / ln(1.15)` at the fingers' midpoint, so the zoom follows the spread about that point and clamps to 0.5-3.0. Elsewhere nothing |
+| Two-finger tap, or a long press within the slop | A right click (the cursor-mode toggle) |
+
+A gesture is over once it has acted or been cancelled: the other fingers do
+nothing until all have lifted, and a third finger is ignored. A cancelled
+drag ends its pan, a cancelled button press is released outside the window
+(so it does not act), and anything else cancelled does nothing. While a
+finger is down, mouse events (which some platforms derive from touches) are
+dropped.
+
+Every gesture is logged and replayed as the mouse records it becomes
+(`pointer_moved`, `pointer_left`, `pointer_button`, `wheel`), through the
+mouse's own handlers; touches are not logged themselves. A touch UI session
+logs one more record after `surface`, `scaling` and `enhanced`, so a replay
+draws the pill bar and its buttons take the logged presses:
+
+```json
+{"command_id":4,"kind":"touch_ui","enabled":true}
+```
+
+A log without it replays without the bar, as before.
+
+**Pill bar.** On the map screen a row of amber-and-black buttons, 60×40
+frame pixels and 6 apart, sits in the interface frame's top-right corner,
+right-aligned to x 636 at y 12. It clears the party pills (top left), the
+bar and the indicator boxes, and the enhanced view's edge-scrolling band.
+It shows outside conversations, dialog boxes and the Set Timer and
+called-shot windows, hides while the F9 overlay's panel is open, and every
+full window covers it. A finger landing on a button presses it at once (it
+draws black on amber while held); the button acts when released over it,
+through its key's own press and release, so it does exactly what the
+keyboard does, the combat lock's held keys included:
+
+| Button | Acts as |
+|---|---|
+| `MODE` | A right click: the cursor-mode toggle |
+| `PEEK` | Alt+R, the roof peek's cycle (enhanced unlocked view only; hidden elsewhere) |
+| `TURN` | Space, ending the turn; held 500 ms or longer, Enter, ending combat (timed on the logged frame clock) |
+| `INV` | I, the inventory |
+| `PIP` | P, the Pip-Boy |
+| `ESC` | Escape, the menu |
+
+In the launcher a tap hovers and presses as a click does.
 
 ### Enhanced viewport & camera
 
@@ -597,7 +657,7 @@ An unregistered copied script therefore runs only where a map or list row
 already names it.
 
 With `--record-inputs FILE` (`-` for stdout), keyboard, pointer, wheel,
-focus, modifier, resize, display-scaling, enhanced-presentation, vault-debug and quit observations are
+focus, modifier, resize, display-scaling, enhanced-presentation, touch-UI, vault-debug and quit observations are
 written as JSON Lines; without it nothing is logged. Command IDs begin at 1 in
 each session:
 

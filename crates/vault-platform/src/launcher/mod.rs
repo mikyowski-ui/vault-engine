@@ -105,6 +105,8 @@ pub enum Widget {
     Game,
     Scaling,
     Fullscreen,
+    /// The touch UI: gestures and the on-screen pill bar (`touch_ui`).
+    TouchUi,
     Preset,
     Audio,
     Debug,
@@ -601,6 +603,7 @@ impl Launcher {
                 });
             }
             Widget::Fullscreen => config.fullscreen = Some(!config.fullscreen.unwrap_or(false)),
+            Widget::TouchUi => config.touch_ui = Some(!config.touch_ui.unwrap_or(false)),
             Widget::Audio => config.audio = Some(!config.audio.unwrap_or(true)),
             Widget::Debug => config.debug = Some(!config.debug.unwrap_or(false)),
             Widget::Viewport

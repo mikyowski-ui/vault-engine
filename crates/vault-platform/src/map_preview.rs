@@ -71,6 +71,7 @@ mod saveload;
 mod skilldex;
 mod talk;
 mod timer;
+mod touchbar;
 mod world;
 mod world2;
 
@@ -271,6 +272,8 @@ pub struct MapPreview {
     /// The `enhanced` preset's presentation (camera, dual-layer frame and
     /// roof peeking); `None` is Vanilla, the default.
     enhanced: Option<Box<enhanced::Enhanced>>,
+    /// The touch UI's action pill bar (`--touch-ui`); off by default.
+    touch: touchbar::TouchBar,
 }
 
 /// The map's sprites by tile index or object art. Each art file is read and
@@ -627,6 +630,7 @@ impl MapPreview {
             character_memory: character::Remembered::default(),
             menu_preferences: false,
             enhanced: None,
+            touch: touchbar::TouchBar::default(),
         })
     }
     /// SPEC-014 §3.29 the keyboard for the engine key repeat: no input is
@@ -706,6 +710,7 @@ impl MapPreview {
         self.pressed = None;
         self.pointer.held = None;
         self.pointer.menu = None;
+        self.touch.pressed = None;
     }
     /// The last game fade ended: the pointer's move during it applies.
     fn fade_ended(&mut self) {
@@ -823,6 +828,10 @@ impl MapPreview {
                 self.drop_presses();
             }
             return true;
+        }
+        // A press on the touch UI's pill bar acts on its release.
+        if !right && self.touch_bar_held() {
+            return self.touch_bar_release(point);
         }
         // A left release ends the held button's down art.
         let (held, bar) = if right {
@@ -1758,6 +1767,12 @@ impl MapPreview {
             return true;
         }
         if self.dialog_click(point) || self.timer_click(point) || self.called_click(point, right) {
+            return true;
+        }
+        // The touch UI's pill bar (`touchbar`): its buttons act as their
+        // keys do, so they come before the counter roll and the combat
+        // lock, which the keys' own path handles.
+        if !right && self.touch_bar_press(point) {
             return true;
         }
         // SPEC-014 §3.21, §3.25: while a counter rolls or the combat panel

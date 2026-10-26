@@ -28,6 +28,10 @@ pub struct PreviewArgs {
     /// in a replay, which applies the logged ones.
     #[arg(skip)]
     pub enhanced: Option<EnhancedSettings>,
+    /// The touch UI's gestures and pill bar (`--touch-ui`, `touch_ui`);
+    /// off in a replay, which applies a logged `touch_ui` record.
+    #[arg(skip)]
+    pub touch_ui: bool,
     /// Where the F9 overlay exports the current setup as a mod (`None`: it
     /// does not, as in a replay).
     #[arg(skip)]
@@ -472,6 +476,31 @@ impl AssetPreview {
             _ => false,
         }
     }
+    /// Whether wheel lines at `at` zoom the camera (a pinch zooms only
+    /// there).
+    pub fn enhanced_zoomable(&mut self, at: PointerAt) -> bool {
+        crate::replay::interactive_world(self).is_some_and(|world| world.enhanced_zoomable(at))
+    }
+    /// Show the touch UI's pill bar or not. The game keeps the choice for
+    /// every world it creates next, and gives it to the current one.
+    pub fn set_touch_ui(&mut self, on: bool) {
+        match self {
+            Self::Map(preview) => preview.set_touch_ui(on),
+            Self::Game(game) => {
+                game.touch_ui = on;
+                if let Some(world) = game.world() {
+                    world.set_touch_ui(on);
+                }
+            }
+            _ => {}
+        }
+    }
+    /// Whether the touch UI's pill bar has a button at frame pixel
+    /// `pixel` (a touch landing there presses at once).
+    pub fn touch_button_at(&mut self, pixel: [i32; 2]) -> bool {
+        crate::replay::interactive_world(self)
+            .is_some_and(|world| world.touch_button_at(pixel).is_some())
+    }
     /// Wheel lines (positive away from the user); returns whether the
     /// frame changed.
     pub fn enhanced_wheel(&mut self, at: PointerAt, lines: f64) -> bool {
@@ -648,6 +677,7 @@ impl PreviewArgs {
             game.debug = self.debug;
             game.preset = self.preset;
             game.enhanced = self.enhanced;
+            game.touch_ui = self.touch_ui;
             game.mod_export = self.mod_export.clone();
             // G-09: the preview and debug keys work in the game only with
             // the explicit flag.
@@ -676,6 +706,7 @@ impl PreviewArgs {
             }
             map.set_debug(self.debug);
             map.set_enhanced(self.enhanced);
+            map.set_touch_ui(self.touch_ui);
             map.mod_export = self.mod_export.clone();
             map.debug_session = self.debug;
             return Ok(Some(AssetPreview::Map(Box::new(map))));

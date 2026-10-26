@@ -146,6 +146,8 @@ pub struct Game {
     /// The `enhanced` presentation every world starts with (`None`:
     /// Vanilla); Alt+V changes it through `AssetPreview::set_enhanced`.
     pub enhanced: Option<crate::enhanced::EnhancedSettings>,
+    /// The touch UI's pill bar shows in every world (`--touch-ui`).
+    pub touch_ui: bool,
     /// Where each world's F9 overlay exports the current setup as a mod.
     pub mod_export: Option<PathBuf>,
     sounds: crate::map_preview::SoundBank,
@@ -262,6 +264,7 @@ impl Game {
             debug_keys: false,
             preset: vault_core::EnginePreset::Vanilla,
             enhanced: None,
+            touch_ui: false,
             mod_export: None,
             sounds: Default::default(),
             finished: false,
@@ -610,6 +613,7 @@ impl Game {
         world.preview_keys = self.debug_keys;
         world.roof_key = false;
         world.set_enhanced(self.enhanced);
+        world.set_touch_ui(self.touch_ui);
         world.mod_export = self.mod_export.clone();
         world.debug_session = self.debug_keys;
         Ok(world)
