@@ -549,6 +549,14 @@ impl MapPreview {
             None => false,
         }
     }
+    /// The enhanced view's extras run: the roof peek, the zoom keys, the
+    /// Shift item highlight and Take All. Every enhanced view but the
+    /// touch UI's navigation-only one (Vanilla), which only pans and zooms.
+    pub(crate) fn enhanced_extras(&self) -> bool {
+        self.enhanced
+            .as_deref()
+            .is_some_and(|enhanced| !enhanced.settings.navigation_only)
+    }
     /// The enhanced state in the unlocked viewport.
     pub(crate) fn unlocked(&self) -> Option<&Enhanced> {
         self.enhanced
@@ -614,7 +622,7 @@ impl MapPreview {
     /// the demo's peek, while the pointer is on the canvas and roofs draw.
     /// Canvas coordinates.
     fn peek_cutaway(&self) -> Option<RoofCutaway> {
-        let enhanced = self.unlocked()?;
+        let enhanced = self.unlocked().filter(|_| self.enhanced_extras())?;
         let peeking = enhanced.settings.roof_peek == RoofPeek::CursorXray
             || self.hud.modifiers[2]
             || enhanced.peek_until.is_some_and(|until| self.clock < until);
@@ -821,8 +829,9 @@ impl MapPreview {
     }
     /// The unlocked map screen's camera and roof keys: `=`, `-` and `0`
     /// zoom about the pointer (Ctrl keeps them as brightness), Alt+R
-    /// cycles the roof peek, and held arrow keys pan. Returns whether the
-    /// key was taken.
+    /// cycles the roof peek, and held arrow keys pan. The touch UI's
+    /// navigation-only view takes the arrows only. Returns whether the key
+    /// was taken.
     pub(crate) fn enhanced_key(&mut self, key: KeyCode) -> bool {
         if self.unlocked().is_none() || !matches!(self.screen, Screen::Map) {
             return false;
@@ -845,6 +854,9 @@ impl MapPreview {
                 enhanced.arrows[arrow] = true;
             }
             return true;
+        }
+        if !self.enhanced_extras() {
+            return false;
         }
         match key {
             KeyCode::KeyR if alt => {

@@ -101,6 +101,10 @@ pub struct EnhancedRecord {
     pub roof_peek: LoggedRoofPeek,
     /// `None`: fit the window's height (`auto`).
     pub ui_scale: Option<f32>,
+    /// The touch UI's navigation-only view (Vanilla preset): written only
+    /// when set, so other logs are unchanged and read as `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub navigation_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +138,7 @@ impl From<EnhancedSettings> for EnhancedRecord {
                 RoofPeek::Hidden => LoggedRoofPeek::Hidden,
             },
             ui_scale: settings.ui_scale,
+            navigation_only: settings.navigation_only,
         }
     }
 }
@@ -153,6 +158,7 @@ impl From<EnhancedRecord> for EnhancedSettings {
                 LoggedRoofPeek::Hidden => RoofPeek::Hidden,
             },
             ui_scale: record.ui_scale,
+            navigation_only: record.navigation_only,
         }
     }
 }
@@ -708,6 +714,7 @@ mod tests {
             smooth_camera: false,
             roof_peek: RoofPeek::CursorXray,
             ui_scale: Some(2.0),
+            navigation_only: false,
         };
         let command = InputCommand::Enhanced {
             settings: settings.into(),
@@ -739,6 +746,23 @@ mod tests {
                 ..EnhancedSettings::default()
             }
         );
+        // The touch UI's navigation-only view writes its flag, and only it.
+        let navigation = EnhancedSettings {
+            navigation_only: true,
+            ..EnhancedSettings::default()
+        };
+        let mut output = Vec::new();
+        let command = InputCommand::Enhanced {
+            settings: navigation.into(),
+        };
+        write_command(&mut output, &mut ids, &command).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains(",\"navigation_only\":true}}"), "{text}");
+        let logged: LoggedCommand = serde_json::from_str(text.trim()).unwrap();
+        let InputCommand::Enhanced { settings: record } = logged.command else {
+            unreachable!()
+        };
+        assert_eq!(EnhancedSettings::from(record), navigation);
     }
 
     #[test]

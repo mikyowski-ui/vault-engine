@@ -5,22 +5,15 @@
 [![Rust: 1.88+](https://img.shields.io/badge/Rust-1.88%2B-orange.svg)](Cargo.toml)
 
 **Vault Engine** is a cross-platform, clean-room game engine written in safe
-Rust that runs the original 1997 *Fallout* campaign from its retail
-`MASTER.DAT` and `CRITTER.DAT` archives. It builds and is tested on Linux,
-macOS and Windows, and the workspace forbids `unsafe` code.
+Rust. One binary runs both retail **_Fallout_ (1997)** and **_Fallout 2_
+(1998)** from your own copy of each game: their `MASTER.DAT` and
+`CRITTER.DAT` archives, plus Fallout 2's `patch000.dat`. It builds and is
+tested on Linux, macOS and Windows, and the workspace forbids `unsafe` code.
 
-Every behaviour is implemented from written specifications produced by a
-two-team clean-room process: one team studies the original and writes
-sanitized specs, and the other builds only from those specs (see
-[`PROVENANCE.md`](PROVENANCE.md)). The engine covers:
-
-- **Binary decoders** for the game's archives and formats: DAT and LZSS,
-  palettes, FRM art, maps, prototypes, messages, fonts and saves.
-- **A two-stack `.INT` script VM** with the full host opcode set.
-- **An isometric hex world** with pathfinding, lighting, roofs and animation.
-- **Turn-based combat and combat AI.**
-- **`.MVE` cutscenes** with subtitles, and **`.ACM` audio** for music, speech
-  and effects.
+Every behaviour is implemented from written specifications, `SPEC-001`
+through `SPEC-019`, produced by a two-team clean-room process: one team
+studies the original and writes sanitized specs, and the other builds only
+from those specs (see [`PROVENANCE.md`](PROVENANCE.md)).
 
 > **No game assets are included.** This repository contains no proprietary
 > *Fallout* data. To play, point the engine at your own copy of the game.
@@ -35,13 +28,137 @@ sanitized specs, and the other builds only from those specs (see
 its built-in font and palette from synthetic test archives; no retail data
 was used.</sub></p>
 
+## Highlights
+
+- **Both games in one binary.** Fallout 1 (`SPEC-001` to `SPEC-014`) and
+  Fallout 2 (`SPEC-015` to `SPEC-019`: version 2 archives with zlib members,
+  version 20 maps and prototypes, Fallout 2's host words, saves and tables,
+  and its interface, party control, car and endgame).
+  - **Install discovery.** The first start looks for each game in its usual
+    places (`../local-corpus` and `~/games/fallout1` for Fallout 1,
+    `~/games/fallout2` for Fallout 2, and Steam and GOG for both). It takes
+    a folder only when its archives are in that game's format.
+  - **One-click switching.** The launcher's **Game** row swaps between the
+    two games' validated ✓ archives with one click, and each game keeps its
+    own paths in `vault-engine.toml`.
+  - [Launcher](#launcher) has the details.
+- **Unlocked widescreen and a tactical camera** (`preset = "enhanced"`).
+  - The world fills a widescreen window under the 640×480 interface, and
+    **Alt+V** switches between that and the original frame.
+  - **0.5×–3.0× zoom** with the mouse wheel or `-`/`=`.
+  - A smooth follow camera.
+  - A **cursor X-ray roof peek**: hold **Alt** to see under the roofs
+    around the cursor, and **Alt+R** to cycle its modes.
+  - [Enhanced viewport & camera](#enhanced-viewport--camera) has the
+    details.
+- **"Better-than-Et-Tu" quality of life**, natively in both games
+  (`preset = "enhanced"`).
+  - **TAKE ALL** in the loot window.
+  - **Shift** to highlight items lying on the ground.
+  - **PUSH** to move a companion standing in a doorway.
+  - **Companion HUD status pills**: name, HP and distance mode, with a
+    click to open the companion's gear.
+  - **WIELD** to cycle a companion's weapon, kept in sync with its art.
+  - **Auto-opening of unlocked doors** on your route.
+  - [Quality of life](#quality-of-life) has the details.
+- **Additive mods (`vault-mod.toml`).** A mod layer registers new
+  `[[scripts]]` rows, `[[maps]]` and record `[[patches]]` without editing
+  the base tables.
+  - Two mods that collide stop the load, naming both.
+  - Every mod script is checked by the SPEC-017 §8 stack model before it
+    runs.
+  - The running setup exports as a mod folder from the **F9** debug
+    overlay's Camera page in one click, or with `cargo xtask export-mod`.
+  - [Mod manifests and exporting a setup](#mod-manifests-and-exporting-a-setup)
+    has the details.
+- **Touch UI mode (`--touch-ui`).**
+  - Gestures: **pinch** to zoom, **drag** to pan, **hold** for the native
+    action menu (slide and lift to pick), and a **two-finger tap** to cycle
+    the cursor.
+  - An on-screen Vault-Tec **pill bar** has `MODE`, `PEEK`, `TURN`, `INV`,
+    `PIP` and `ESC`.
+  - Panning and zooming work under the Vanilla rules too.
+  - It can be tested on a desktop today. [Touch UI](#touch-ui) has the
+    details.
+- **The full original engine underneath.**
+  - Binary decoders for every archive and format.
+  - A two-stack `.INT` script VM with the full host opcode sets.
+  - An isometric hex world with pathfinding, lighting, roofs and animation.
+  - Turn-based combat and combat AI.
+  - `.MVE` cutscenes with subtitles, and `.ACM` music, speech and effects.
+  - Deterministic input logs and replays, and a headless debugger.
+
+## Quick start
+
+You need Rust 1.88 or newer (see [Build and verify](#build-and-verify) for
+the platform libraries) and your own copy of *Fallout*, *Fallout 2*, or both.
+
+```sh
+git clone https://github.com/mikyowski-ui/vault-engine.git
+cd vault-engine
+cargo run -p vault-platform --release
+```
+
+1. **First start.** The engine looks for both games (above) and writes what
+   it finds to `vault-engine.toml`. If it finds nothing that validates, the
+   **launcher** opens instead.
+2. **Launcher.** Point it at your installs: type a path, use **Browse**, or
+   drop `MASTER.DAT` or the game folder on the window. The **Game** row
+   toggles `fallout1` and `fallout2`, and the Display & audio tab sets the
+   preset, the viewport, the zoom and the Touch UI. **Play** saves and
+   starts. To open it again later, run:
+
+   ```sh
+   cargo run -p vault-platform --release -- --launcher
+   ```
+3. **From the command line.** Flags win over the settings file:
+
+   ```sh
+   # Fallout 2, with the enhanced widescreen camera and quality of life:
+   cargo run -p vault-platform --release -- --game-profile fallout2 --preset enhanced
+   # The touch UI (pan, zoom, hold menus and the pill bar):
+   cargo run -p vault-platform --release -- --touch-ui
+   ```
+
+The default preset, `vanilla`, keeps the original rules, interface and
+frame.
+
 `AGENTS.md` is the repository's implementation policy. `PROVENANCE.md` records
 the two-team clean-room process, and `CONTRIBUTING.md` the clean-room
 certification every contribution requires. Format behavior follows
 `specs/approved/SPEC-001-pal-frm-lst.md` through
-`SPEC-014-game-flow-and-ui.md`.
-No original game
-data is needed to build, test, or run the synthetic shell and preview fixtures.
+`SPEC-019-fallout2-interface-party-and-car.md`. No original game data is
+needed to build, test, or run the synthetic shell and preview fixtures.
+
+<details>
+<summary><b>Specification index</b> (<code>specs/approved/</code>)</summary>
+
+| Spec | Scope |
+| --- | --- |
+| `SPEC-001` | Palettes, FRM sprites and LST index files |
+| `SPEC-002` | Bitmap fonts and message text |
+| `SPEC-003` | Prototypes, map streams and isometric geometry |
+| `SPEC-004` | Compiled script files and the core virtual machine |
+| `SPEC-005` | Interpreter-library and game host opcodes |
+| `SPEC-006` | World variables, character statistics, map events and dialogue |
+| `SPEC-007` | Critter art, hex routing and combat resolution |
+| `SPEC-008` | Archives, save slots, world travel and Pip-Boy state |
+| `SPEC-009` | Combat AI packets, threat selection and NPC turns |
+| `SPEC-010` | Sound effect names and ACM audio decoding |
+| `SPEC-011` | Items, drugs, barter and character progression |
+| `SPEC-012` | Movies (`.MVE`), movie fades and subtitles (`.SVE`) |
+| `SPEC-013` | Active skills, loot and barter windows, poison and radiation, elevation transitions |
+| `SPEC-014` | Game flow and interface: main menu, character creation, save/load, options, interface bar, cursors, endgame |
+| `SPEC-015` | Fallout 2 archives (DAT version 2) and zlib members |
+| `SPEC-016` | Map version 20 and Fallout 2 prototypes |
+| `SPEC-017` | Fallout 2 host words and VM deltas |
+| `SPEC-018` | Fallout 2 mounting, saves and data tables |
+| `SPEC-019` | Fallout 2 interface, party control, the car and game-flow deltas |
+
+The per-spec reference sections further down are collapsed; open the one
+you need.
+
+</details>
 
 ## Workspace
 
@@ -132,8 +249,14 @@ that fits a smaller monitor.
 With no arguments the game starts from the data named in `vault-engine.toml`,
 looked for beside the executable and then in the working directory. Keys:
 `master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
-`game` (`fallout1`, the default, or `fallout2`). Under `fallout2` the
-data is read in Fallout 2's formats:
+`game` (`fallout1`, the default, or `fallout2`; the `--game-profile` flag),
+`preset` (`vanilla` or `enhanced`), `scaling`, `fullscreen`, `touch_ui`
+(see [Touch UI](#touch-ui)), `debug` and `audio` (`false` keeps the audio
+device closed, as `--no-audio` does), plus the enhanced preset's
+`viewport_mode`, `default_zoom`, `smooth_camera`, `roof_peek` and
+`ui_scale` (see [Enhanced viewport & camera](#enhanced-viewport--camera)).
+
+Under `fallout2` the data is read in Fallout 2's formats:
 - SPEC-015 archives, mounted as SPEC-018 §1 says: an optional
   `patch000.dat` over `MASTER.DAT`, and `CRITTER.DAT` for critter art;
 - SPEC-016 version 20 maps (with Fallout 2's two-word ladder records) and
@@ -142,15 +265,12 @@ data is read in Fallout 2's formats:
 `--game-profile fallout2 --preview-map MAP` previews a Fallout 2 map. Under
 `fallout2`, Play validates the install and starts a new game from its SPEC-018
 tables on `maps/artemple.map`, with its scripts running (SPEC-017 Revision 3
-recorded the §8 audit and opened the §8.5 gate), in SPEC-019's interface: its main menu, world and town maps, Pip-Boy,
-character folders, party control panels, the car and the endgame. See the
-[Fallout 2 and QoL roadmap](docs/fallout2-and-qol-roadmap.md), and the
-`--game-profile` flag), `preset` (`vanilla` or `enhanced`), `scaling`,
-`fullscreen`, `touch_ui` (see [Touch UI](#touch-ui)), `debug` and
-`audio` (`false` keeps the audio device closed, as `--no-audio` does), plus
-the enhanced preset's `viewport_mode`, `default_zoom`, `smooth_camera`,
-`roof_peek` and `ui_scale` (see
-[Enhanced viewport & camera](#enhanced-viewport--camera)). Values are quoted
+recorded the §8 audit and opened the §8.5 gate), in SPEC-019's interface: its
+main menu, world and town maps, Pip-Boy, character folders, party control
+panels, the car and the endgame. See the
+[Fallout 2 and QoL roadmap](docs/fallout2-and-qol-roadmap.md).
+
+Settings values are quoted
 strings, `true`/`false`, decimal numbers (`2`, `1.25`, `5e-1`, `1_000`) or
 one-line string arrays; a bad value or an out-of-range number fails with
 `line N:` and the reason.
@@ -291,24 +411,36 @@ A touch layer for phones and tablets, testable on a desktop touch screen
 (or with a mouse, for the on-screen buttons). It is off by default; turn it
 on with `--touch-ui`, `touch_ui = true` in `vault-engine.toml`, or the
 **Touch UI** row of the launcher's Display & audio tab. The flag wins over
-the file, as `--fullscreen` does. It works under both presets; the camera
-gestures need the enhanced unlocked viewport.
+the file, as `--fullscreen` does.
 
-Gestures (thresholds: a 10-logical-pixel slop, a 500 ms long press):
+It works under both presets, and panning and zooming do too. Under
+`preset = "vanilla"` the touch UI brings a **navigation-only** unlocked view:
+the widescreen world with the camera (a drag pans, a pinch zooms 0.5× to
+3×), and nothing else from the enhanced view. The gameplay rules stay
+Vanilla's, and so do the keys: `-`, `=` and `0` remain the brightness keys,
+and there is no roof peek (Alt, Alt+R, `PEEK`), no Shift item highlight and
+no Take All. The fixed 640×480 view (`viewport_mode = "fixed_640x480"`
+under the enhanced preset) has no camera, so there a drag only moves the
+pointer and a pinch does nothing.
+
+Gestures (thresholds: a 10-logical-pixel slop; a hold presses after 250 ms,
+so the action menu opens at 500 ms):
 
 | Gesture | Becomes |
 |---|---|
 | One-finger tap | The pointer moves where the finger lands; a left click when it lifts |
-| One-finger drag past the slop | Enhanced unlocked view: a middle-button drag from where the finger landed, the camera's own pan. Elsewhere: the pointer follows, nothing is clicked |
-| Two-finger pinch | Enhanced unlocked view, over the world: wheel lines `ln(d / d_last) / ln(1.15)` at the fingers' midpoint, so the zoom follows the spread about that point and clamps to 0.5-3.0. Elsewhere nothing |
-| Two-finger tap, or a long press within the slop | A right click (the cursor-mode toggle) |
+| One-finger drag past the slop | Unlocked view (either preset): a middle-button drag from where the finger landed, the camera's own pan. Fixed view: the pointer follows, nothing is clicked |
+| One-finger hold (still for 250 ms) | The left button goes down and stays down, the mouse's press and hold. The game's own held-button pulse (SPEC-014 §3.28, 250 ms) opens the action menu over a critter, door or item at 500 ms (Talk, Look, Use, Push, Gear, Backpack, Skilldex, as that object offers), or a window's item menu. The pointer follows the finger, so sliding moves the highlight, and lifting picks the entry. Lifted before a menu opens, it is a click. While no menu is open, sliding past the slop or a second finger withdraws the press without acting, and the touch pans or becomes a two-finger gesture instead |
+| Two-finger pinch | Unlocked view (either preset), over the world: wheel lines `ln(d / d_last) / ln(1.15)` at the fingers' midpoint, so the zoom follows the spread about that point and clamps to 0.5-3.0. Fixed view: nothing |
+| Two-finger tap | A right click (the cursor-mode toggle), as the pill bar's `MODE` is |
 
 A gesture is over once it has acted or been cancelled: the other fingers do
 nothing until all have lifted, and a third finger is ignored. A cancelled
-drag ends its pan, a cancelled button press is released outside the window
-(so it does not act), and anything else cancelled does nothing. While a
-finger is down, mouse events (which some platforms derive from touches) are
-dropped.
+drag ends its pan, and a cancelled button press or hold is released outside
+the window, so it does not act (an action menu already open still takes its
+highlighted entry, as a mouse release would). Anything else cancelled does
+nothing. While a finger is down, mouse events (which some platforms derive
+from touches) are dropped.
 
 Every gesture is logged and replayed as the mouse records it becomes
 (`pointer_moved`, `pointer_left`, `pointer_button`, `wheel`), through the
@@ -320,7 +452,9 @@ draws the pill bar and its buttons take the logged presses:
 {"command_id":4,"kind":"touch_ui","enabled":true}
 ```
 
-A log without it replays without the bar, as before.
+A log without it replays without the bar, as before. The navigation-only
+view's `enhanced` record carries `"navigation_only":true`. Other records
+leave the key out, so earlier logs read and write unchanged.
 
 **Pill bar.** On the map screen a row of amber-and-black buttons, 60×40
 frame pixels and 6 apart, sits in the interface frame's top-right corner,
@@ -336,7 +470,7 @@ keyboard does, the combat lock's held keys included:
 | Button | Acts as |
 |---|---|
 | `MODE` | A right click: the cursor-mode toggle |
-| `PEEK` | Alt+R, the roof peek's cycle (enhanced unlocked view only; hidden elsewhere) |
+| `PEEK` | Alt+R, the roof peek's cycle (enhanced unlocked view only; hidden elsewhere, the Vanilla navigation-only view included) |
 | `TURN` | Space, ending the turn; held 500 ms or longer, Enter, ending combat (timed on the logged frame clock) |
 | `INV` | I, the inventory |
 | `PIP` | P, the Pip-Boy |
@@ -348,7 +482,9 @@ In the launcher a tap hovers and presses as a click does.
 
 The enhanced preset also changes the presentation; Vanilla (the default) is
 untouched by everything here. Its shell, settings, launcher defaults, input
-logs and replay digests are what they were.
+logs and replay digests are what they were. The one exception is the touch
+UI's navigation-only view under Vanilla (see [Touch UI](#touch-ui)), which
+takes this section's viewport and camera only.
 
 - **Dual-layer viewport.** With `viewport_mode = "unlocked_widescreen"` (the
   default) the world is drawn across the whole window at an aspect-matched
@@ -697,6 +833,9 @@ the desktop map preview plays them and waits (`MoviePolicy::WaitUntilFinished`).
 
 ## Loose-directory VFS and corpus audit
 
+<details>
+<summary>The <code>asset-audit</code> commands, spec by spec</summary>
+
 ```sh
 cargo run -p asset-audit -- --corpus-dir /path/to/unpacked/game
 # Committed synthetic example:
@@ -973,6 +1112,8 @@ contents require an unchanged corpus.
 
 Keep local proprietary data outside the repository or in ignored `corpus/`.
 
+</details>
+
 ## Sprite, font, and message preview
 
 ```sh
@@ -999,6 +1140,9 @@ missing/invalid assets or message IDs produce an error. Text remains raw bytes
 mapped to font glyphs; the viewer does not assume UTF-8 or change languages.
 
 ## Desktop game shell (SPEC-008 to SPEC-012 integration)
+
+<details>
+<summary>How the shell runs the game: SPEC-008 to SPEC-012</summary>
 
 ```sh
 # Loose files, or the SPEC-008 databases with an optional loose patch root:
@@ -1211,7 +1355,12 @@ On the local map, **I** opens the inventory and **C** the character screen
   or Escape returns the tables and the hidden equipment, then resumes the
   dialogue (closing a session that already ended).
 
+</details>
+
 ## Game flow and interface (SPEC-013, SPEC-014)
+
+<details>
+<summary>SPEC-013 and SPEC-014 in the engine</summary>
 
 ```sh
 cargo run -p vault-platform -- --master-dat /path/to/MASTER.DAT --critter-dat /path/to/CRITTER.DAT \
@@ -1355,6 +1504,8 @@ by map object id) that the shell logs as a `debug` record and then applies, so
 a replay applies the same commands at the same points, exactly once. Without
 debug mode the window title is the product name, "Fallout — Vault Engine".
 
+</details>
+
 ## Map preview
 
 ```sh
@@ -1435,6 +1586,9 @@ replace the display palette.
 
 ## Format safety and compatibility
 
+<details>
+<summary>Parser limits and compatibility rules</summary>
+
 All parsers forbid unsafe code and accept at most 64 MiB per asset. Audit/preview
 reads enforce this limit before allocation and during reads. Font metrics are
 limited to 4096 pixels, FON directories to 256 byte codes, and text tables to
@@ -1496,7 +1650,12 @@ synthetic fixtures; original corpus data is not included in tests.
 AAF blends read each destination pixel just before writing it (SPEC-002
 §3.2): the shadow pass and earlier glyphs are part of the destination.
 
+</details>
+
 ## Prototypes, maps, and geometry
+
+<details>
+<summary>SPEC-003 in the engine</summary>
 
 `Prototype` dispatches all six categories from the PID's full high byte. Items
 and scenery have unaligned subtype payloads, and tile/miscellaneous prefixes have
@@ -1538,7 +1697,12 @@ the reference's walk (`angular_walk`) agrees wherever it stays on the grid and
 leaves it for pairs such as `(0,199)`. Only the explicit `-1` sentinel gives 9999.
 Multi-step movement with an orientation outside 0-5 returns the starting hex.
 
+</details>
+
 ## Core VM
+
+<details>
+<summary>SPEC-004 and SPEC-005 in the engine</summary>
 
 `IntProgram` validates the 42-byte executable bootstrap region, procedure records,
 identifier/literal records and terminators, and complete instruction boundaries.
@@ -1591,7 +1755,12 @@ real VM/host and can have side effects; no pure-procedure flag is invented.
 Timed deadlines use strict unsigned comparison, condition flags take precedence,
 and firing/canceling clears the specified metadata words.
 
+</details>
+
 ## World state and host extensions
+
+<details>
+<summary>SPEC-006 in the engine</summary>
 
 `GamFile` applies the exact 16-byte section comparisons and 257-byte translated
 chunks. Names do not affect indices, only column-zero `//` is a comment, and later
@@ -1687,7 +1856,12 @@ item/medical defaults are typed host presentation/action requests. The map previ
 implements world interaction, GDialog rendering, sound, and movies, not a full
 combat/medical subsystem.
 
+</details>
+
 ## Art identifiers, routing, and combat (SPEC-007)
+
+<details>
+<summary>SPEC-007 in the engine</summary>
 
 `Fid` packs base/weapon/animation/category/selector fields; `ArtCatalog` parses the
 category lists and implements the exact critter suffix table (weapon codes 0-10
@@ -1762,7 +1936,12 @@ active.
   `reg_anim_*` moves are unlimited, because those opcodes run only outside
   combat.
 
+</details>
+
 ## Archives, saves, world travel, and Pip-Boy (SPEC-008)
+
+<details>
+<summary>SPEC-008 in the engine</summary>
 
 `DatArchive` reads the byte-zero root and per-directory tables (one-byte name
 lengths, big-endian words, `data_size` of at least 16) and extracts members by
@@ -1897,7 +2076,12 @@ Where SPEC-008 leaves details open, this engine makes these choices:
 - Map-exit script request failures are diagnostics, like map-entry failures,
   so a missing compiled map script cannot trap transitions.
 
+</details>
+
 ## Combat AI (SPEC-009)
+
+<details>
+<summary>SPEC-009 in the engine</summary>
 
 `vault_formats::ai` reads `data/ai.txt` with the configuration grammar: 255-byte
 line chunks, `;` truncation anywhere, `[...]` headers that end the line, the
@@ -1971,7 +2155,12 @@ Where SPEC-009 leaves details open, this engine makes these choices:
 - Fixture H lists R2's rating as 22. By the §3.4 rule it is `max(2, 20) + 0 = 20`.
   Either value keeps Q.
 
+</details>
+
 ## Sound effects and ACM audio (SPEC-010)
+
+<details>
+<summary>SPEC-010 in the engine</summary>
 
 `vault_formats::acm` reads the 14-byte little-endian header, then decodes the
 LSB-first bitstream with zero bytes supplied past EOF (look-ahead included).
@@ -2017,7 +2206,12 @@ Where SPEC-010 leaves details open, this engine makes these choices:
   one, and plays each effect at its owner's `WorldState::effect_volume` (see
   "Desktop game shell").
 
+</details>
+
 ## Items, drugs, barter, and progression (SPEC-011)
+
+<details>
+<summary>SPEC-011 in the engine</summary>
 
 `vault_core::drugs` holds the pure rules: the fixed addiction table, stage slots
 (the -2 range form draws once at the first processed slot, and a skipped slot
@@ -2089,7 +2283,12 @@ these choices:
   and `trait.msg` (SPEC-014 §3.8); only the level and experience captions stay
   built-in English (see "Known gaps").
 
+</details>
+
 ## Movies and subtitles (SPEC-012)
+
+<details>
+<summary>SPEC-012 in the engine</summary>
 
 `vault_formats::mve` validates the 26-byte little-endian header (all twenty
 signature bytes, header size 26, version 256, `version + check = 0x1233`). It
@@ -2168,7 +2367,12 @@ these choices:
 - Movies play modally, so `play_gmovie`'s suspension of dialogue background
   processing is the modal wait itself.
 
+</details>
+
 ## SPEC-001 to SPEC-008 safe rules
+
+<details>
+<summary>The safe rules, spec by spec</summary>
 
 The audited SPEC-001 to SPEC-008 revisions tag every quirk `[Must-match]` or
 `[May-improve]`. The engine applies the stated `[May-improve]` safe rules,
@@ -2246,6 +2450,8 @@ Deliberate exceptions and gaps:
   the rule above is this engine's choice.
 - The SPEC-003 mapper inventory-repair mode is omitted, as the safe rule allows.
 
+</details>
+
 ## Development history
 
 A Rust clean-room engine workspace. Phase 0 establishes the crate boundaries,
@@ -2291,6 +2497,9 @@ SPEC-014 R1-rev12 answered all but one (see "Open spec questions for the
 research vault").
 
 ## Spec completion notes
+
+<details>
+<summary>Completion notes for each spec</summary>
 
 These close behaviors that the earlier phases left open:
 
@@ -2387,6 +2596,8 @@ These close behaviors that the earlier phases left open:
   restores on the elevation where the group was hidden. The renderer skips
   hidden roofs, and every non-blank roof is bound whatever its hide bit, so a
   restored roof reappears.
+
+</details>
 
 ## Core contracts
 

@@ -47,6 +47,12 @@ pub struct EnhancedSettings {
     pub roof_peek: RoofPeek,
     /// Surface pixels per interface pixel; `None` fits the window's height.
     pub ui_scale: Option<f32>,
+    /// The touch UI's camera alone, under the Vanilla preset: the unlocked
+    /// view pans and zooms (a drag, a pinch, the wheel), and none of the
+    /// enhanced extras run: no roof peek (Alt, Alt+R, the PEEK button), no
+    /// `-`/`=`/`0` zoom keys (they stay the brightness keys), no Shift
+    /// item highlight and no Take All.
+    pub navigation_only: bool,
 }
 
 impl Default for EnhancedSettings {
@@ -57,6 +63,7 @@ impl Default for EnhancedSettings {
             smooth_camera: true,
             roof_peek: RoofPeek::Vanilla,
             ui_scale: None,
+            navigation_only: false,
         }
     }
 }

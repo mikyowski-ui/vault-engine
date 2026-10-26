@@ -103,9 +103,10 @@ struct Args {
     #[arg(long)]
     fullscreen: bool,
     /// Turn on the touch UI: taps click, a drag pans and a pinch zooms the
-    /// enhanced camera, a long press or a two-finger tap right-clicks, and
-    /// an on-screen pill bar has MODE, PEEK, TURN, INV, PIP and ESC.
-    /// Default: the settings file's `touch_ui`, else off.
+    /// camera (under Vanilla too), a hold opens the action menu, a
+    /// two-finger tap right-clicks, and an on-screen pill bar has MODE,
+    /// PEEK, TURN, INV, PIP and ESC. Default: the settings file's
+    /// `touch_ui`, else off.
     #[arg(long)]
     touch_ui: bool,
     /// The engine preset: `vanilla` or `enhanced`. Default: the settings
@@ -225,21 +226,32 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
     }
     args.preview.debug |= config.debug.unwrap_or(false);
     let preset = args.preset.or(config.preset).unwrap_or_default();
-    let enhanced = (preset == config::Preset::Enhanced).then(|| {
-        let settings = config.enhanced_settings();
-        enhanced::EnhancedSettings {
+    let touch_ui = args.touch_ui || config.touch_ui.unwrap_or(false);
+    let settings = config.enhanced_settings();
+    let enhanced = match preset {
+        config::Preset::Enhanced => Some(enhanced::EnhancedSettings {
             viewport: args.viewport.unwrap_or(settings.viewport),
             default_zoom: args.zoom.unwrap_or(settings.default_zoom),
             ..settings
-        }
-    });
+        }),
+        // The touch UI pans and zooms under Vanilla too: the unlocked view
+        // with its camera only, the Vanilla rules and interface otherwise.
+        config::Preset::Vanilla if touch_ui => Some(enhanced::EnhancedSettings {
+            viewport: enhanced::ViewportMode::Unlocked,
+            default_zoom: args.zoom.unwrap_or(settings.default_zoom),
+            roof_peek: enhanced::RoofPeek::Vanilla,
+            navigation_only: true,
+            ..settings
+        }),
+        config::Preset::Vanilla => None,
+    };
     Launch {
         scaling: args
             .scaling
             .or(config.scaling)
             .unwrap_or(ScalingMode::AspectFit),
         fullscreen: args.fullscreen || config.fullscreen.unwrap_or(false),
-        touch_ui: args.touch_ui || config.touch_ui.unwrap_or(false),
+        touch_ui,
         game,
         preset,
         enhanced,
@@ -1306,6 +1318,10 @@ impl Shell {
         let context = touch::TouchContext {
             camera: self.enhanced_layout(window).is_some(),
             button: touch.phase == TouchPhase::Started && self.touch_button_at(window, point),
+            menu: self
+                .preview
+                .as_mut()
+                .is_some_and(|preview| preview.held_menu_open()),
         };
         let now = self.now();
         let actions = self.touch.feed(touch.phase, touch.id, point, now, context);
@@ -2479,6 +2495,36 @@ mod tests {
         let mut args = play_args(&shown, false);
         assert!(!args.touch_ui);
         assert!(!resolve_launch(&mut args, Some(&off)).touch_ui);
+        // Under Vanilla the touch UI brings the navigation-only unlocked
+        // view (pan and zoom, the Vanilla interface otherwise); without it
+        // Vanilla has no enhanced view, and the enhanced preset keeps its
+        // full one.
+        let vanilla = |touch: bool| config::Config {
+            preset: Some(config::Preset::Vanilla),
+            viewport_mode: Some(enhanced::ViewportMode::Fixed),
+            roof_peek: Some(enhanced::RoofPeek::Hidden),
+            default_zoom: Some(1.5),
+            touch_ui: Some(touch),
+            ..installed()
+        };
+        let navigation = resolve_launch(&mut parse(&[]), Some(&vanilla(true)));
+        assert_eq!(navigation.preset, config::Preset::Vanilla);
+        assert_eq!(
+            navigation.enhanced,
+            Some(enhanced::EnhancedSettings {
+                viewport: enhanced::ViewportMode::Unlocked,
+                default_zoom: 1.5,
+                roof_peek: enhanced::RoofPeek::Vanilla,
+                navigation_only: true,
+                ..enhanced::EnhancedSettings::default()
+            })
+        );
+        assert_eq!(
+            resolve_launch(&mut parse(&[]), Some(&vanilla(false))).enhanced,
+            None
+        );
+        let full = resolve_launch(&mut parse(&[]), Some(&on)).enhanced.unwrap();
+        assert!(!full.navigation_only);
     }
 
     fn image(width: u32, height: u32, pixels: impl IntoIterator<Item = u8>) -> IndexedImage {

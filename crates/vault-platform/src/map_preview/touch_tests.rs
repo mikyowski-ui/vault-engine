@@ -258,3 +258,61 @@ fn peek_cycles_the_roof_peek_as_alt_r_does_in_the_unlocked_view() {
     }));
     assert_eq!(tapped.touch_bar(), super::layout(false));
 }
+
+/// The touch UI under the Vanilla preset: the navigation-only unlocked
+/// view pans (a middle drag, a finger's drag) and zooms (wheel lines, a
+/// pinch) within 0.5-3.0, and none of the enhanced extras run.
+#[test]
+fn vanilla_touch_navigation_pans_and_zooms_without_the_enhanced_extras() {
+    let dir = synthetic_corpus();
+    let mut preview = interactive(dir.path());
+    assert_eq!(preview.host.preset(), vault_core::EnginePreset::Vanilla);
+    preview.set_enhanced(Some(EnhancedSettings {
+        smooth_camera: false,
+        navigation_only: true,
+        ..Default::default()
+    }));
+    preview.set_touch_ui(true);
+    preview.tick(16).unwrap();
+    assert!(preview.unlocked().is_some());
+    assert!(!preview.enhanced_extras());
+    // No PEEK on the bar.
+    assert_eq!(preview.touch_bar(), super::layout(false));
+    let layout = EnhancedLayout::compute([1280, 960], None, preview.enhanced_zoom()).unwrap();
+    preview.enhanced_frame(&layout).unwrap().unwrap();
+    let at = |point: [f64; 2]| PointerAt {
+        ui: layout.ui_pixel(point),
+        world: layout.world_point(point),
+        side: layout.in_side_panel(point),
+    };
+    let middle = at([640.0, 300.0]);
+    assert!(preview.enhanced_zoomable(middle));
+    // A pinch's wheel lines zoom, clamped to the camera's range.
+    preview.enhanced_pointer(middle);
+    preview.enhanced_wheel(middle, 40.0);
+    preview.tick(400).unwrap();
+    assert_eq!(preview.enhanced_zoom(), 3.0);
+    preview.enhanced_wheel(middle, -80.0);
+    preview.tick(800).unwrap();
+    assert_eq!(preview.enhanced_zoom(), 0.5);
+    // A drag pans.
+    let before = preview.enhanced_view().unwrap().grid.origin;
+    assert!(preview.enhanced_button(middle, PointerButton::Middle, true));
+    preview.enhanced_pointer(at([740.0, 360.0]));
+    preview.enhanced_button(at([740.0, 360.0]), PointerButton::Middle, false);
+    preview.tick(816).unwrap();
+    assert_ne!(preview.enhanced_view().unwrap().grid.origin, before);
+    // The keys stay Vanilla's: `-`, `=` and `0` are not zoom keys (they
+    // remain the brightness keys), and Alt+R cycles no roof peek.
+    for key in [KeyCode::Minus, KeyCode::Equal, KeyCode::Digit0] {
+        assert!(!preview.enhanced_key(key), "{key:?}");
+    }
+    preview.set_modifiers([false, false, true]);
+    assert!(!preview.enhanced_key(KeyCode::KeyR));
+    preview.set_modifiers([false; 3]);
+    assert_eq!(preview.enhanced().unwrap().roof_peek, RoofPeek::Vanilla);
+    // The full enhanced view keeps its extras.
+    preview.set_enhanced(Some(EnhancedSettings::default()));
+    assert!(preview.enhanced_extras());
+    assert_eq!(preview.touch_bar(), super::layout(true));
+}

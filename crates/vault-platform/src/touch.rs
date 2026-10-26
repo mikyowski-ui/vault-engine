@@ -10,41 +10,58 @@
 //! `--replay-inputs` see a touch session as a mouse session and nothing new
 //! enters the log.
 //!
-//! - **Tap** (one finger, lifted within [`LONG_PRESS_MS`] and never past the
+//! - **Tap** (one finger, lifted within [`HOLD_PRESS_MS`] and never past the
 //!   slop): the pointer moves to the finger when it lands, and a left press
 //!   and release follow when it lifts.
 //! - **Drag** (one finger past the slop): the pointer follows the finger.
-//!   With the camera available (the enhanced unlocked view) the drag is a
+//!   With the camera available (the unlocked view, the touch UI's
+//!   navigation-only view under Vanilla included) the drag is a
 //!   middle-button drag from where the finger landed, the camera's own pan.
 //!   Elsewhere it only moves the pointer.
-//! - **Long press** (one finger held [`LONG_PRESS_MS`] within the slop): a
-//!   right press and release where it rests (the cursor-mode toggle). The
-//!   rest of that touch does nothing.
+//! - **Hold** (one finger still for [`HOLD_PRESS_MS`]): the left button
+//!   goes down where it rests and stays down, the mouse's press and hold:
+//!   the game's own held-button pulse (SPEC-014 §3.28, `MENU_HOLD_MS`
+//!   later) opens the action menu over a critter, door or item at
+//!   [`LONG_PRESS_MS`], or a window's item menu. The pointer then follows
+//!   the finger, so sliding moves the highlight, and the lift releases the
+//!   button, picking the entry. Lifted before a menu opens, the hold is a
+//!   click. While no menu is open, sliding past the slop or a second
+//!   finger withdraws the press (a `pointer_left` before the release, so
+//!   it does not act) and the touch drags, or becomes a two-finger
+//!   gesture, instead; with a menu open neither interrupts it.
 //! - **Two-finger tap** (a second finger lands and the first of the two
 //!   lifts within [`LONG_PRESS_MS`] of it, neither past the slop): a right
-//!   press and release at the pointer.
+//!   press and release at the pointer, the cursor-mode toggle (as is the
+//!   pill bar's `MODE`).
 //! - **Pinch** (two fingers whose distance changes past the slop): with the
 //!   camera available, the pointer moves to their midpoint and each change
 //!   becomes wheel lines `ln(d / d_last) / ln(1.15)`, the camera's zoom step,
 //!   so the zoom follows the fingers' spread about the midpoint and the
-//!   camera clamps it to 0.5-3.0. Without the camera nothing happens.
+//!   camera clamps it to 0.5-3.0. Without the camera (the fixed 640x480
+//!   view) nothing happens.
 //! - **Button** (one finger landing on an on-screen button, see
 //!   [`TouchContext::button`]): the left press is sent at once, so the
 //!   button shows pressed, and the release when the finger lifts.
 //! - **Cancel** (the system took the touch): a drag ends its middle button;
-//!   a held button gets its release with the pointer outside the window
-//!   (a `pointer_left` first), so it does not act; nothing else is sent.
+//!   a held button or hold gets its release with the pointer outside the
+//!   window (a `pointer_left` first), so it does not act (an open action
+//!   menu still takes its highlighted entry, as a mouse release would);
+//!   nothing else is sent.
 //!
 //! A gesture that has ended or been cancelled ignores every finger until
 //! all of them have lifted. A third finger is ignored.
 use crate::input::{InputCommand, WheelUnit};
+use vault_core::ui::cursor::MENU_HOLD_MS;
 use winit::event::TouchPhase;
 
 /// How far a finger may move, in logical pixels, and still tap or press.
 pub const SLOP: f64 = 10.0;
-/// A finger held this long within the slop is a long press (and a TURN
-/// button held this long sends Enter).
+/// A finger held this long within the slop opens the action menu (and a
+/// TURN button held this long sends Enter).
 pub const LONG_PRESS_MS: u64 = 500;
+/// A finger still this long gets its left press, so the game's held-button
+/// pulse, [`MENU_HOLD_MS`] later, opens the menu at [`LONG_PRESS_MS`].
+pub const HOLD_PRESS_MS: u64 = LONG_PRESS_MS - MENU_HOLD_MS;
 /// The camera's zoom step per wheel line (`map_preview::camera::ZOOM_STEP`).
 const ZOOM_STEP: f64 = 1.15;
 
@@ -105,6 +122,10 @@ pub struct TouchContext {
     /// The touch landed on an on-screen button (the touch UI's pill bar):
     /// it presses at once. Read for a first finger landing only.
     pub button: bool,
+    /// A held-button menu is open (the map's action menu, or a window's
+    /// item menu): a hold slides through it, and neither a slide past the
+    /// slop nor a second finger withdraws its press.
+    pub menu: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -119,6 +140,9 @@ enum State {
     },
     /// One finger on an on-screen button, its left press sent.
     Holding { id: u64 },
+    /// One finger held still past [`HOLD_PRESS_MS`]: its left press sent
+    /// where it landed, the pointer following it.
+    Pressed { id: u64, start: [f64; 2] },
     /// One finger dragging; `panning` when it holds the middle button.
     Dragging { id: u64, panning: bool },
     /// Two fingers: a tap so far, or a pinch.
@@ -162,6 +186,17 @@ fn midpoint(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
 fn click(button: TouchButton) -> [TouchAction; 2] {
     [true, false].map(|pressed| TouchAction::Button { button, pressed })
 }
+/// A hold's left press withdrawn: released with the pointer outside the
+/// window, so it does not act.
+fn withdraw() -> [TouchAction; 2] {
+    [
+        TouchAction::Leave,
+        TouchAction::Button {
+            button: TouchButton::Left,
+            pressed: false,
+        },
+    ]
+}
 
 impl TouchGestures {
     pub fn new(slop: f64) -> Self {
@@ -197,12 +232,15 @@ impl TouchGestures {
             TouchPhase::Cancelled => self.lifted(id, at, now, true),
         }
     }
-    /// The frame at shell time `now`: a long press comes due.
+    /// The frame at shell time `now`: a hold's press comes due.
     pub fn poll(&mut self, now: u64) -> Vec<TouchAction> {
         match self.state {
-            State::Pending { since, .. } if now.saturating_sub(since) >= LONG_PRESS_MS => {
-                self.state = State::Done;
-                click(TouchButton::Right).to_vec()
+            State::Pending { id, start, since } if now.saturating_sub(since) >= HOLD_PRESS_MS => {
+                self.state = State::Pressed { id, start };
+                vec![TouchAction::Button {
+                    button: TouchButton::Left,
+                    pressed: true,
+                }]
             }
             _ => Vec::new(),
         }
@@ -240,6 +278,14 @@ impl TouchGestures {
             State::Pending {
                 id: first, start, ..
             } => self.two(first, start, id, at, now),
+            // A hold with no menu open yet gives way to the two fingers,
+            // the pointer back where the first rests.
+            State::Pressed { id: first, .. } if !context.menu => {
+                out.extend(withdraw());
+                let start = self.position(first).unwrap_or(at);
+                out.push(TouchAction::Pointer(start));
+                self.two(first, start, id, at, now)
+            }
             State::Dragging { id: first, panning } => {
                 if panning {
                     out.push(TouchAction::Button {
@@ -299,6 +345,27 @@ impl TouchGestures {
                     vec![TouchAction::Pointer(at)]
                 }
             }
+            State::Pressed { id: finger, start } if *finger == id => {
+                if distance(*start, at) <= slop || context.menu {
+                    return vec![TouchAction::Pointer(at)];
+                }
+                // No menu opened: the press is withdrawn and the finger
+                // drags from where it landed.
+                let (start, panning) = (*start, context.camera);
+                self.state = State::Dragging { id, panning };
+                let mut out = withdraw().to_vec();
+                if panning {
+                    out.extend([
+                        TouchAction::Pointer(start),
+                        TouchAction::Button {
+                            button: TouchButton::Middle,
+                            pressed: true,
+                        },
+                    ]);
+                }
+                out.push(TouchAction::Pointer(at));
+                out
+            }
             State::Dragging { id: finger, .. } | State::Holding { id: finger } if *finger == id => {
                 vec![TouchAction::Pointer(at)]
             }
@@ -348,20 +415,14 @@ impl TouchGestures {
         self.touches.remove(index);
         let mut out = Vec::new();
         match self.state {
-            State::Pending {
-                id: finger, since, ..
-            } if finger == id => {
+            // A tap, or a hold the frames did not see in time: a click.
+            State::Pending { id: finger, .. } if finger == id => {
                 if !cancelled {
-                    if now.saturating_sub(since) >= LONG_PRESS_MS {
-                        // A long press the frames did not see in time.
-                        out.extend(click(TouchButton::Right));
-                    } else {
-                        out.extend(click(TouchButton::Left));
-                    }
+                    out.extend(click(TouchButton::Left));
                 }
                 self.state = State::Done;
             }
-            State::Holding { id: finger } if finger == id => {
+            State::Holding { id: finger } | State::Pressed { id: finger, .. } if finger == id => {
                 if cancelled {
                     out.push(TouchAction::Leave);
                 } else {
@@ -414,14 +475,23 @@ mod tests {
     const MAP: TouchContext = TouchContext {
         camera: false,
         button: false,
+        menu: false,
     };
     const CAMERA: TouchContext = TouchContext {
         camera: true,
         button: false,
+        menu: false,
     };
     const BUTTON: TouchContext = TouchContext {
         camera: true,
         button: true,
+        menu: false,
+    };
+    /// The camera view with a held-button menu open.
+    const MENU: TouchContext = TouchContext {
+        camera: true,
+        button: false,
+        menu: true,
     };
     fn press(button: TouchButton) -> TouchAction {
         TouchAction::Button {
@@ -502,29 +572,124 @@ mod tests {
     }
 
     #[test]
-    fn a_long_press_right_clicks_once_and_its_lift_does_nothing() {
+    fn a_hold_presses_the_left_button_for_the_action_menu_and_the_lift_picks() {
+        assert_eq!(HOLD_PRESS_MS + MENU_HOLD_MS, LONG_PRESS_MS);
         let mut touch = TouchGestures::default();
         touch.feed(Started, 3, [200.0, 200.0], 1000, CAMERA);
-        assert!(touch.poll(1499).is_empty());
-        assert_eq!(touch.poll(1500), [press(Right), release(Right)]);
+        assert!(touch.poll(1000 + HOLD_PRESS_MS - 1).is_empty());
+        // Still for HOLD_PRESS_MS: the left button goes down and stays
+        // down, so the game's held-button pulse opens the menu by
+        // LONG_PRESS_MS.
+        assert_eq!(touch.poll(1000 + HOLD_PRESS_MS), [press(Left)]);
         assert!(touch.poll(1600).is_empty());
-        // Moving and lifting afterwards sends nothing.
+        // With the menu open the finger slides through its entries, past
+        // the slop too, and the lift releases there (the pick).
+        for y in [230.0, 290.0] {
+            assert_eq!(
+                touch.feed(Moved, 3, [201.0, y], 1700, MENU),
+                [TouchAction::Pointer([201.0, y])]
+            );
+        }
+        // A second finger does not interrupt the open menu.
         assert!(
             touch
-                .feed(Moved, 3, [300.0, 200.0], 1700, CAMERA)
+                .feed(Started, 4, [400.0, 200.0], 1750, MENU)
                 .is_empty()
         );
-        assert!(
-            touch
-                .feed(Ended, 3, [300.0, 200.0], 1800, CAMERA)
-                .is_empty()
-        );
-        // A lift the frames did not poll in time still long-presses.
-        touch.feed(Started, 4, [200.0, 200.0], 3000, CAMERA);
+        assert!(touch.feed(Ended, 4, [400.0, 200.0], 1760, MENU).is_empty());
         assert_eq!(
-            touch.feed(Ended, 4, [200.0, 200.0], 3600, CAMERA),
+            touch.feed(Ended, 3, [201.0, 290.0], 1800, MENU),
+            [TouchAction::Pointer([201.0, 290.0]), release(Left)]
+        );
+        assert!(!touch.active());
+        // Lifted before any menu (nothing under it): the hold is a click.
+        touch.feed(Started, 5, [50.0, 50.0], 2000, CAMERA);
+        assert_eq!(touch.poll(2300), [press(Left)]);
+        assert_eq!(
+            touch.feed(Ended, 5, [52.0, 50.0], 2400, CAMERA),
+            [TouchAction::Pointer([52.0, 50.0]), release(Left)]
+        );
+        // A lift the frames did not poll in time is a click.
+        touch.feed(Started, 6, [200.0, 200.0], 3000, CAMERA);
+        assert_eq!(
+            touch.feed(Ended, 6, [200.0, 200.0], 3600, CAMERA),
+            [press(Left), release(Left)]
+        );
+        // A long press is never a right click any more.
+        touch.feed(Started, 7, [200.0, 200.0], 4000, MAP);
+        for now in (4000..5000).step_by(16) {
+            assert!(
+                touch
+                    .poll(now)
+                    .iter()
+                    .all(|action| !matches!(action, TouchAction::Button { button: Right, .. }))
+            );
+        }
+        touch.feed(Ended, 7, [200.0, 200.0], 5000, MAP);
+    }
+
+    #[test]
+    fn a_hold_without_a_menu_gives_way_to_a_drag_or_two_fingers() {
+        // Held, then slid past the slop with no menu open (empty floor):
+        // the press is withdrawn, released outside so it does not act, and
+        // the camera pans from where the finger landed.
+        let mut touch = TouchGestures::default();
+        touch.feed(Started, 1, [100.0, 100.0], 0, CAMERA);
+        assert_eq!(touch.poll(HOLD_PRESS_MS), [press(Left)]);
+        assert_eq!(
+            touch.feed(Moved, 1, [104.0, 100.0], 260, CAMERA),
+            [TouchAction::Pointer([104.0, 100.0])]
+        );
+        assert_eq!(
+            touch.feed(Moved, 1, [140.0, 100.0], 270, CAMERA),
+            [
+                TouchAction::Leave,
+                release(Left),
+                TouchAction::Pointer([100.0, 100.0]),
+                press(Middle),
+                TouchAction::Pointer([140.0, 100.0]),
+            ]
+        );
+        assert_eq!(
+            touch.feed(Ended, 1, [140.0, 100.0], 400, CAMERA),
+            [release(Middle)]
+        );
+        // Without the camera the slide only moves the pointer.
+        touch.feed(Started, 1, [100.0, 100.0], 1000, MAP);
+        touch.poll(1000 + HOLD_PRESS_MS);
+        assert_eq!(
+            touch.feed(Moved, 1, [100.0, 140.0], 1300, MAP),
+            [
+                TouchAction::Leave,
+                release(Left),
+                TouchAction::Pointer([100.0, 140.0])
+            ]
+        );
+        assert!(touch.feed(Ended, 1, [100.0, 140.0], 1400, MAP).is_empty());
+        // A second finger withdraws the press too, and can still tap.
+        touch.feed(Started, 1, [100.0, 100.0], 2000, CAMERA);
+        touch.poll(2000 + HOLD_PRESS_MS);
+        assert_eq!(
+            touch.feed(Started, 2, [200.0, 100.0], 2300, CAMERA),
+            [
+                TouchAction::Leave,
+                release(Left),
+                TouchAction::Pointer([100.0, 100.0])
+            ]
+        );
+        assert_eq!(
+            touch.feed(Ended, 2, [200.0, 100.0], 2350, CAMERA),
             [press(Right), release(Right)]
         );
+        touch.feed(Ended, 1, [100.0, 100.0], 2360, CAMERA);
+        // Cancelled: released outside the window.
+        touch.feed(Started, 1, [100.0, 100.0], 3000, CAMERA);
+        touch.poll(3000 + HOLD_PRESS_MS);
+        assert_eq!(
+            touch.feed(Cancelled, 1, [100.0, 100.0], 3300, CAMERA),
+            [TouchAction::Leave, release(Left)]
+        );
+        assert!(!touch.active());
     }
 
     #[test]

@@ -739,15 +739,24 @@ mod tests {
         ids: vault_core::SequenceIds,
         touch: crate::touch::TouchGestures,
         now: u64,
+        /// The context's camera and held-menu flags, as the shell would
+        /// read them from the world.
+        camera: bool,
+        menu: bool,
     }
     impl TouchLog {
-        fn new(touch_ui: bool) -> Self {
-            let mut log = Self {
+        fn empty(camera: bool) -> Self {
+            Self {
                 out: Vec::new(),
                 ids: Default::default(),
                 touch: Default::default(),
                 now: 0,
-            };
+                camera,
+                menu: false,
+            }
+        }
+        fn new(touch_ui: bool) -> Self {
+            let mut log = Self::empty(true);
             log.push(InputCommand::Surface {
                 width: 1920,
                 height: 1080,
@@ -778,8 +787,9 @@ mod tests {
         }
         fn feed(&mut self, phase: winit::event::TouchPhase, id: u64, at: [f64; 2], button: bool) {
             let context = crate::touch::TouchContext {
-                camera: true,
+                camera: self.camera,
                 button,
+                menu: self.menu,
             };
             for action in self.touch.feed(phase, id, at, self.now, context) {
                 self.push(action.command());
@@ -789,6 +799,72 @@ mod tests {
         fn take(&mut self) -> String {
             String::from_utf8(std::mem::take(&mut self.out)).unwrap()
         }
+    }
+
+    /// A one-finger hold is the mouse's press and hold, in the Vanilla
+    /// frame: still for `HOLD_PRESS_MS` the left button goes down, the
+    /// game's own held-button pulse opens the action menu by
+    /// `LONG_PRESS_MS`, the finger slides through it, and the lift picks
+    /// an entry, closing it. (The mouse's hold over the same spot is the
+    /// action-menu test below.)
+    #[test]
+    fn a_touch_hold_opens_the_action_menu_and_the_lift_picks() {
+        use crate::touch::LONG_PRESS_MS;
+        use winit::event::TouchPhase::{Ended, Moved, Started};
+        let dir = synthetic_corpus();
+        let mut log = TouchLog::empty(false);
+        log.push(InputCommand::Surface {
+            width: 1920,
+            height: 1280,
+        });
+        log.push(InputCommand::TouchUi { enabled: true });
+        log.tick();
+        // The arrow cursor first (a right click on the window): the action
+        // menu opens in arrow mode.
+        let at = [993.0, 501.0];
+        log.push(InputCommand::PointerMoved { x: at[0], y: at[1] });
+        log.tick();
+        for pressed in [true, false] {
+            log.push(InputCommand::PointerButton {
+                button: "Right".into(),
+                pressed,
+            });
+        }
+        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let open =
+            |replay: &mut Replay| interactive_world(&mut replay.preview).unwrap().menu_open();
+        log.feed(Started, 1, at, false);
+        let landed = log.now;
+        // The press goes out at the frame `HOLD_PRESS_MS` after the
+        // landing, and the menu opens within a frame of `LONG_PRESS_MS`.
+        while log.now < landed + LONG_PRESS_MS - 64 {
+            log.tick();
+        }
+        replay.run(log.take().as_bytes()).unwrap();
+        assert!(!open(&mut replay), "not before the hold's time");
+        while log.now < landed + LONG_PRESS_MS + 16 {
+            log.tick();
+        }
+        replay.run(log.take().as_bytes()).unwrap();
+        assert_eq!(replay.pixel(), Some([336, 170]));
+        assert!(open(&mut replay), "the hold opens the action menu");
+        // Sliding through the entries keeps it open; the lift picks.
+        log.menu = true;
+        log.feed(Moved, 1, [993.0, 541.0], false);
+        replay.run(log.take().as_bytes()).unwrap();
+        assert!(open(&mut replay));
+        log.feed(Ended, 1, [993.0, 541.0], false);
+        replay.run(log.take().as_bytes()).unwrap();
+        assert!(!open(&mut replay), "the lift picks an entry");
+        // A quick tap at the same spot is a click, no menu.
+        log.menu = false;
+        log.feed(Started, 2, at, false);
+        log.feed(Ended, 2, at, false);
+        for _ in 0..40 {
+            log.tick();
+        }
+        replay.run(log.take().as_bytes()).unwrap();
+        assert!(!open(&mut replay));
     }
 
     /// Drag, pinch, two-finger tap and a bar button, replayed: the drag

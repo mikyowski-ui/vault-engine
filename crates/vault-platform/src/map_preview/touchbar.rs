@@ -21,8 +21,9 @@
 //! so it does exactly what the key does, the combat lock's held keys
 //! included:
 //! - `MODE`: a right click at the button (the cursor-mode toggle);
-//! - `PEEK`: Alt+R, the roof peek's cycle (the enhanced unlocked view only;
-//!   hidden elsewhere, where Alt+R does nothing);
+//! - `PEEK`: Alt+R, the roof peek's cycle (the enhanced unlocked view
+//!   only; hidden elsewhere, the touch UI's navigation-only view under
+//!   Vanilla included, where Alt+R does nothing);
 //! - `TURN`: Space (end the turn); held [`LONG_PRESS_MS`] or longer, Enter
 //!   (end combat), timed on the logged frame clock;
 //! - `INV`: I, the inventory; `PIP`: P, the Pip-Boy; `ESC`: Escape, the
@@ -127,7 +128,7 @@ impl MapPreview {
         if !shown {
             return Vec::new();
         }
-        layout(self.unlocked().is_some())
+        layout(self.unlocked().is_some() && self.enhanced_extras())
     }
     /// The button under a frame pixel.
     pub(crate) fn touch_button_at(&self, point: [i32; 2]) -> Option<BarButton> {

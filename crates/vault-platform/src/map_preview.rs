@@ -688,7 +688,7 @@ impl MapPreview {
     pub fn set_modifiers(&mut self, modifiers: [bool; 3]) {
         // Holding Alt peeks under the roofs, and holding Shift highlights
         // the ground items, in the `enhanced` world.
-        if self.enhanced.is_some()
+        if self.enhanced_extras()
             && (modifiers[2] != self.hud.modifiers[2] || modifiers[0] != self.hud.modifiers[0])
         {
             self.pointer.redraw = true;
@@ -1300,10 +1300,9 @@ impl MapPreview {
         // SPEC-014 §3.46: the floating texts, the layer after the outlines.
         let floating = self.floating_sprites();
         // The `enhanced` ground-item highlight while Shift is held on the map.
-        let highlight = (self.enhanced.is_some()
-            && self.hud.modifiers[0]
-            && matches!(self.screen, Screen::Map))
-        .then_some(vault_formats::map::outline::ITEM);
+        let highlight =
+            (self.enhanced_extras() && self.hud.modifiers[0] && matches!(self.screen, Screen::Map))
+                .then_some(vault_formats::map::outline::ITEM);
         let ring = cursor
             .and_then(|cursor| cursor.ring.as_ref())
             .and_then(|(art, origin)| Some((art.frame(0, 0)?, *origin)));

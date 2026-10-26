@@ -1074,6 +1074,7 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
             smooth_camera: false,
             roof_peek: RoofPeek::Hidden,
             ui_scale: Some(3.0),
+            navigation_only: false,
         }
     );
     // Back to Vanilla, the rows hide again (their keys stay saved).

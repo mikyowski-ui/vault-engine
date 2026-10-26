@@ -682,6 +682,7 @@ impl Config {
             smooth_camera: self.smooth_camera.unwrap_or(default.smooth_camera),
             roof_peek: self.roof_peek.unwrap_or(default.roof_peek),
             ui_scale: self.ui_scale.map_or(default.ui_scale, UiScale::factor),
+            navigation_only: false,
         }
     }
 
@@ -1353,6 +1354,7 @@ future_float = 5e-1
                 smooth_camera: false,
                 roof_peek: RoofPeek::CursorXray,
                 ui_scale: Some(2.0),
+                navigation_only: false,
             }
         );
         // The writer keeps every key, numbers as numbers (floats with a

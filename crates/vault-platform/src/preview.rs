@@ -501,6 +501,10 @@ impl AssetPreview {
         crate::replay::interactive_world(self)
             .is_some_and(|world| world.touch_button_at(pixel).is_some())
     }
+    /// Whether a held-button menu (an action or item menu) is open.
+    pub fn held_menu_open(&mut self) -> bool {
+        crate::replay::interactive_world(self).is_some_and(|world| world.held_menu_open())
+    }
     /// Wheel lines (positive away from the user); returns whether the
     /// frame changed.
     pub fn enhanced_wheel(&mut self, at: PointerAt, lines: f64) -> bool {

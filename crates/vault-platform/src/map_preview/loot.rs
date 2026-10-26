@@ -757,9 +757,10 @@ impl MapPreview {
         );
     }
     /// The `enhanced` window shows its Take All button outside steal
-    /// sessions (Vanilla has Shift+A only).
+    /// sessions (Vanilla, the touch UI's navigation-only view included,
+    /// has Shift+A only).
     fn take_all_shown(&self, screen: &LootScreen) -> bool {
-        (self.enhanced().is_some() || self.host.world.fallout2.is_some()) && !screen.session.steal
+        (self.enhanced_extras() || self.host.world.fallout2.is_some()) && !screen.session.steal
     }
     /// The Take All button's window rectangle: the enhanced one, or under
     /// Fallout 2 its art's size at the same place.

@@ -1167,6 +1167,21 @@ fn draw_engine_icon(
     painter.centered(image, 101, text, label, [x + 3, y + 16], 34);
 }
 
+impl MapPreview {
+    /// Whether a held-button menu is open: the map's action menu, or the
+    /// inventory, loot or barter window's item menu (the touch UI's hold
+    /// slides through it).
+    pub(crate) fn held_menu_open(&self) -> bool {
+        self.pointer.menu.is_some()
+            || match &self.screen {
+                Screen::Inventory(screen) => screen.menu.is_some(),
+                Screen::Loot(screen) => screen.menu.is_some(),
+                Screen::Barter(screen) => screen.menu.is_some(),
+                _ => false,
+            }
+    }
+}
+
 #[cfg(test)]
 impl MapPreview {
     /// A left press and release at one point (a click on the map acts on
