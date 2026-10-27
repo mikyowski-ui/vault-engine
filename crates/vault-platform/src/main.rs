@@ -2,6 +2,7 @@ mod audio;
 mod config;
 mod editor_screen;
 mod enhanced;
+mod gallery;
 mod game;
 mod input;
 mod interface;
@@ -84,6 +85,19 @@ struct Args {
         conflicts_with_all = ["replay_inputs", "smoke_test", "launcher", "preview_asset"]
     )]
     export_mod: Option<String>,
+    /// Write the documentation gallery into DIR and exit (`cargo xtask
+    /// capture-gallery` runs this, with the inputs it stages).
+    #[arg(
+        long,
+        hide = true,
+        value_name = "DIR",
+        requires = "capture_stage",
+        conflicts_with_all = ["replay_inputs", "smoke_test", "launcher", "export_mod"]
+    )]
+    capture_gallery: Option<PathBuf>,
+    /// The folder `--capture-gallery` reads its synthetic inputs from.
+    #[arg(long, hide = true, value_name = "DIR", requires = "capture_gallery")]
+    capture_stage: Option<PathBuf>,
     /// The folder `--export-mod` writes; it must not exist or be empty.
     /// Default: mods/NAME beside the load order, else in the working
     /// directory.
@@ -2066,6 +2080,9 @@ impl ApplicationHandler for Shell {
 }
 
 fn run(mut args: Args) -> AppResult<()> {
+    if let (Some(output), Some(stage)) = (&args.capture_gallery, &args.capture_stage) {
+        return gallery::capture(output, stage);
+    }
     if let Some(name) = &args.export_mod {
         // Only a settings file already there: an export never discovers
         // data or writes settings.

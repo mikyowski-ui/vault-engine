@@ -16,6 +16,12 @@ All files here were authored for Vault Engine. None contain original game assets
   `worldmap.txt`, `party.txt`, the line tables and `elevators.txt`), the
   grammar sample of §8.2, and a builder that adds them and a synthetic
   `maps/artemple.map` to the synthetic corpus for a Fallout 2 install.
+- `gallery/`: the documentation gallery's showcase (`cargo xtask
+  capture-gallery`): procedural tile, wall, critter, item and scenery art
+  drawn in code over the synthetic corpus, and a showcase map made from the
+  camera demo's map without its script.
+- `archive/`: SPEC-008 and SPEC-015 archive builders, and placeholder game
+  folders the launcher accepts; see its README.
 - `movie/`: SPEC-012 header, chunk-walk, subtitle, and fade vectors; the
   synthetic movies of Fixture H are read from `oracle/SPEC-012/synthetic/`.
 - `loose/`: plain-text markers with mixed-case game-style paths and extensions.
@@ -36,7 +42,7 @@ Tests copy loose fixtures into temporary directories when exercising namespace
 changes, collisions, or symlink attacks. The committed fixture directory is never
 modified by tests.
 
-The `support.rs` builders under `fallout2/`, `formats/`, `movie/`, `sound/`,
+The `support.rs` builders under `fallout2/`, `formats/`, `gallery/`, `movie/`, `sound/`,
 `state/`, `vm/` and `world/` need only `std`, so they are compiled once as the `vault-fixtures`
 crate (`crates/vault-fixtures`), a dev-dependency of the crates that use them
 and a dependency of `cargo xtask fixtures`. `items/support.rs` implements

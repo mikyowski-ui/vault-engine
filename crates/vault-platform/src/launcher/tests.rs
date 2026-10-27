@@ -2,57 +2,7 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::fs;
 
-/// An archive member: its name and bytes.
-type Member<'a> = (&'a str, &'a [u8]);
-
-/// A raw (uncompressed) synthetic DAT archive: directories with members.
-fn archive(directories: &[(&str, &[Member])]) -> Vec<u8> {
-    let count = directories.len() as u32;
-    let mut tables: Vec<u8> = [count, count, 0, 0]
-        .iter()
-        .flat_map(|word| word.to_be_bytes())
-        .collect();
-    for (name, _) in directories {
-        tables.push(name.len() as u8);
-        tables.extend(name.as_bytes());
-    }
-    let table_len = tables.len()
-        + directories
-            .iter()
-            .map(|(_, files)| 16 + files.iter().map(|(name, _)| 17 + name.len()).sum::<usize>())
-            .sum::<usize>();
-    let mut offset = table_len as u32;
-    let mut payload: Vec<u8> = Vec::new();
-    for (_, files) in directories {
-        let count = files.len() as u32;
-        for word in [count, count, 16, 0] {
-            tables.extend(word.to_be_bytes());
-        }
-        for (name, body) in *files {
-            tables.push(name.len() as u8);
-            tables.extend(name.as_bytes());
-            for word in [0x20, offset, body.len() as u32, body.len() as u32] {
-                tables.extend(word.to_be_bytes());
-            }
-            offset += body.len() as u32;
-            payload.extend(*body);
-        }
-    }
-    tables.extend(payload);
-    tables
-}
-
-fn master_archive() -> Vec<u8> {
-    archive(&[
-        (".", &[("COLOR.PAL", b"pal")]),
-        ("DATA", &[("VAULT13.GAM", b"gam")]),
-        ("MAPS", &[("V13ENT.MAP", b"map")]),
-    ])
-}
-
-fn critter_archive() -> Vec<u8> {
-    archive(&[("ART\\CRITTERS", &[("HERO.FRM", b"frm")])])
-}
+use vault_fixtures::dat::{archive, critter_archive};
 
 /// The SPEC-008 synthetic archive fixture: two text members only.
 fn fixture_archive() -> Vec<u8> {
@@ -61,10 +11,9 @@ fn fixture_archive() -> Vec<u8> {
     ))
 }
 
-/// A game folder with both databases (and the given extra files).
+/// A game folder with both databases.
 fn install(dir: &Path) {
-    fs::write(dir.join("MASTER.DAT"), master_archive()).unwrap();
-    fs::write(dir.join("CRITTER.DAT"), critter_archive()).unwrap();
+    vault_fixtures::dat::fallout1_install(dir);
 }
 
 fn setup(dir: &Path, config: Config) -> Setup {
@@ -688,20 +637,7 @@ fn the_game_row_reads_each_games_archives() {
 /// A Fallout 2 install whose MASTER.DAT holds every SPEC-018 §2.2
 /// required member (SPEC-015 archives).
 fn fallout2_install(dir: &Path) {
-    use vault_fixtures::dat2::{Member, archive, zlib_vector};
-    let members: Vec<Member> = vault_formats::fallout2::REQUIRED_MEMBERS
-        .iter()
-        .map(|path| Member::stored(&path.to_ascii_uppercase().replace('/', "\\"), b"x"))
-        .collect();
-    fs::write(dir.join("master.dat"), archive(&members)).unwrap();
-    fs::write(
-        dir.join("critter.dat"),
-        archive(&[Member::zlib(
-            "ART\\CRITTERS\\HERO.FRM",
-            &zlib_vector("repeat"),
-        )]),
-    )
-    .unwrap();
+    vault_fixtures::dat2::launcher_install(dir, &vault_formats::fallout2::REQUIRED_MEMBERS);
 }
 
 #[test]

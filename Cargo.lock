@@ -3368,6 +3368,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "vault-fixtures",
+ "vault-formats",
 ]
 
 [[package]]

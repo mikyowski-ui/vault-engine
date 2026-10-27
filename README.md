@@ -28,7 +28,28 @@ from those specs (see [`PROVENANCE.md`](PROVENANCE.md)).
 its built-in font and palette from synthetic test archives; no retail data
 was used.</sub></p>
 
-## Highlights
+## Highlights & Capabilities
+
+<p align="center">
+  <img src="docs/assets/compare-viewport.png" width="100%"
+       alt="Side by side: a synthetic brick building in Vanilla's 640x480 frame, its sides cut off, and in the enhanced widescreen view, where the whole building fits">
+</p>
+<p align="center"><sub>Vanilla 4:3 beside the enhanced widescreen view of a 16:9
+window as tall, at the same zoom: the 640-pixel frame cuts the building's
+sides, the widescreen view holds it.</sub></p>
+
+<p align="center">
+  <img src="docs/assets/roof-xray-peek.gif" width="640"
+       alt="Animated: holding Alt opens a round cutaway in a corrugated roof around the cursor, its edge dissolving through an ordered dither, revealing the figure inside the building">
+</p>
+<p align="center"><sub>The cursor X-ray roof peek (hold <b>Alt</b>): the
+cutaway's ring dissolves the roof through a 4×4 ordered dither and reveals
+the figure inside.</sub></p>
+
+<p align="center"><sub>Every picture here is rendered headlessly by
+<code>cargo xtask capture-gallery</code> from synthetic fixtures and
+procedural art; no game data is used (see
+<a href="#documentation-gallery">Documentation gallery</a>).</sub></p>
 
 - **Both games in one binary.** Fallout 1 (`SPEC-001` to `SPEC-014`) and
   Fallout 2 (`SPEC-015` to `SPEC-019`: version 2 archives with zlib members,
@@ -177,7 +198,7 @@ you need.
 | `vault-debug` | Headless VM stepper and instruction trace, GVAR/MVAR/LVAR watches, and map object/critter inspectors with tick diffs and text rendering |
 | `vault-platform` | Desktop shell, asset preview, input command logging |
 | `vault-fixtures` | Dev-only synthetic test fixture builders, compiled once and shared by the crates' tests and `xtask` |
-| `xtask` | Engineering gate runner, synthetic fixture writer and mod exporter (`export-mod`) |
+| `xtask` | Engineering gate runner, synthetic fixture writer, mod exporter (`export-mod`) and documentation gallery renderer (`capture-gallery`) |
 | `asset-audit` | Loose-corpus counts and format validation |
 
 ## Build and verify
@@ -222,6 +243,42 @@ window-system libraries (including libxkbcommon), and a Vulkan or OpenGL driver.
 Building its default `audio` feature also needs the ALSA development package
 (`libasound2-dev` / `alsa-lib-devel`); `--no-default-features` builds it without
 audio output. Windows and macOS use winit/wgpu/cpal's native backends.
+
+### Documentation gallery
+
+```sh
+cargo xtask capture-gallery
+```
+
+This renders the pictures in `docs/assets/` from synthetic data only, so they
+are clean-room safe:
+- `compare-viewport.png`
+- `launcher-overview.png`
+- `roof-xray-peek.gif`
+- `tactical-zoom.gif`
+
+How it works:
+- **Staging.** It stages its inputs in `target/gallery` (`--stage`,
+  emptied each run; a folder it did not create is refused):
+  - the synthetic corpus, restyled by `vault_fixtures::gallery` with
+    procedural art (sand, paving, a corrugated roof, brick walls, figures, a
+    crate and a barrel) and a showcase map (the camera demo's walled,
+    roofed building with a figure inside, without its script);
+  - placeholder Fallout 1 and Fallout 2 installs the launcher accepts.
+- **Rendering.** It then runs the shell's hidden `--capture-gallery`
+  headlessly, as a release build, from the stage.
+- **Sessions.** Each picture comes from a map session on a fixed 30
+  frames-a-second clock, composed on the CPU as the desktop composes its
+  layers. The scripted camera moves go through the camera opcodes'
+  `WorldEffect::Camera` path, and the roof peek holds Alt.
+- **Encoders.** The files are written by zero-dependency encoders in the
+  shell:
+  - indexed PNGs (fixed-Huffman DEFLATE with LZ77);
+  - looping GIF89a files with one global palette, 3/100 s, 3/100 s and
+    4/100 s delays for 30 frames a second, each frame stored as only the
+    rectangle that changed.
+- **Determinism.** The same sources give the same files byte for byte.
+- **Output.** `--output` chooses another folder than `docs/assets`.
 
 ## Desktop shell
 
@@ -302,6 +359,13 @@ win over the file. When that still names no game data that validates, the
 launcher opens instead (below).
 
 ### Launcher
+
+<p align="center">
+  <img src="docs/assets/launcher-overview.png" width="100%"
+       alt="The launcher's Game data tab twice: the Fallout 1 profile with checked MASTER.DAT and CRITTER.DAT, and after one click on Game the Fallout 2 profile with its own checked archives">
+</p>
+<p align="center"><sub>Each game's profile, one click on <b>Game</b> apart
+(synthetic placeholder installs).</sub></p>
 
 The launcher is a native pre-game window. It is drawn into the same 640×480
 indexed frame as the game, with its own 5×8 bitmap font (ASCII 32-126 plus
@@ -616,6 +680,13 @@ are read only with the enhanced preset. `--viewport MODE` and `--zoom ZOOM`
 override the first two from the command line (and pre-set the launcher).
 
 #### Camera opcodes and the camera demo
+
+<p align="center">
+  <img src="docs/assets/tactical-zoom.gif" width="640"
+       alt="Animated: the camera zooms out to 0.5x over the synthetic building, pans to the figure at its door, zooms smoothly in to 3x, shakes, and resets to 1x">
+</p>
+<p align="center"><sub>Scripted camera requests: zoom to 0.5×, a pan, a
+smooth zoom in to 3.0×, a shake, and the reset.</sub></p>
 
 Under `preset = "enhanced"` scripts can drive the view with four words of the
 versioned range. Operands are integers, pushed in the order written and popped

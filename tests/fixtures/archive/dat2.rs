@@ -201,3 +201,27 @@ pub fn fallout2_install(
     std::fs::write(&critter_path, archive(&critter)).unwrap();
     (master_path, critter_path)
 }
+
+/// A Fallout 2 game folder the launcher's checks accept: `master.dat` with
+/// each of `required` (SPEC-018 §2.2's members, passed in by the caller) as
+/// a one-byte stored member, and `critter.dat` with one zlib member under
+/// `art/critters/`.
+pub fn launcher_install(dir: &std::path::Path, required: &[&str]) {
+    let names: Vec<String> = required
+        .iter()
+        .map(|path| path.to_ascii_uppercase().replace('/', "\\"))
+        .collect();
+    let members: Vec<Member> = names
+        .iter()
+        .map(|name| Member::stored(name, b"x"))
+        .collect();
+    std::fs::write(dir.join("master.dat"), archive(&members)).unwrap();
+    std::fs::write(
+        dir.join("critter.dat"),
+        archive(&[Member::zlib(
+            "ART\\CRITTERS\\HERO.FRM",
+            &zlib_vector("repeat"),
+        )]),
+    )
+    .unwrap();
+}

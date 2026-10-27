@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 clap.workspace = true
 vault-fixtures.workspace = true
+vault-formats.workspace = true
 
 [lints]
 workspace = true

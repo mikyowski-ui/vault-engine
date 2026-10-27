@@ -15,7 +15,7 @@
 //!
 //! This is engine infrastructure, not part of any specification.
 mod browse;
-mod font;
+pub(crate) mod font;
 mod validate;
 mod view;
 mod widgets;
@@ -32,6 +32,7 @@ use validate::{Check, State};
 use vault_core::GameProfile;
 use vault_formats::{LayerEntry, LoadOrderPolicy};
 use vault_render::{IndexedImage, ScalingMode};
+pub(crate) use view::color;
 pub use view::palette;
 use widgets::{List, TextField};
 use winit::keyboard::KeyCode;
@@ -331,6 +332,14 @@ impl Launcher {
 
     pub fn title(&self) -> String {
         "Vault Engine — Launcher".into()
+    }
+
+    /// Make `game` the active game, as the Game row does (the gallery's
+    /// launcher picture).
+    pub(crate) fn select_game(&mut self, game: GameProfile) {
+        if self.config.active_game() != game {
+            self.switch_game(game);
+        }
     }
 
     /// Whether the start found the game data on disk: the launcher shows

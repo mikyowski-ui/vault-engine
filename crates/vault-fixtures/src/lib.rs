@@ -5,12 +5,16 @@
 //! `tests/fixtures/items/support.rs` is not part of it: it implements
 //! `vault-core` types, so `vault-core` includes that file as its own module.
 
+#[path = "../../../tests/fixtures/archive/dat.rs"]
+pub mod dat;
 #[path = "../../../tests/fixtures/archive/dat2.rs"]
 pub mod dat2;
 #[path = "../../../tests/fixtures/fallout2/support.rs"]
 pub mod fallout2;
 #[path = "../../../tests/fixtures/formats/support.rs"]
 pub mod formats;
+#[path = "../../../tests/fixtures/gallery/support.rs"]
+pub mod gallery;
 #[path = "../../../tests/fixtures/movie/support.rs"]
 pub mod movie;
 #[path = "../../../tests/fixtures/sound/support.rs"]
