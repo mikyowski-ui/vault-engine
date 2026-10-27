@@ -17,10 +17,11 @@ pub struct GcdFile {
     pub body: i32,
     pub experience_reward: i32,
     pub kill_category: i32,
-    /// The Fallout 2 sheet's damage-type word at `0x170` (SPEC-018 §6.3,
-    /// Revision 4); `None` for SPEC-006's 428-byte sheet, which has none.
-    /// It also chooses the layout [`GcdFile::write`] produces.
-    pub damage_type: Option<i32>,
+    /// The Fallout 2 sheet's extra critter word at `0x170` (SPEC-018 §6.3,
+    /// Revision 4): read, written back and given no effect, its meaning
+    /// not established. `None` for SPEC-006's 428-byte sheet, which has
+    /// none. It also chooses the layout [`GcdFile::write`] produces.
+    pub extra_word: Option<i32>,
     pub name: [u8; 32],
     pub tags: [i32; 4],
     pub traits: [i32; 2],
@@ -50,7 +51,7 @@ impl GcdFile {
         let body = r.be_i32()?;
         let experience_reward = r.be_i32()?;
         let kill_category = r.be_i32()?;
-        let damage_type = if fallout2 { Some(r.be_i32()?) } else { None };
+        let extra_word = if fallout2 { Some(r.be_i32()?) } else { None };
         let name: [u8; 32] = r.take(32)?.try_into().expect("fixed name");
         let tags: [i32; 4] = r.words()?;
         let traits: [i32; 2] = r.words()?;
@@ -83,7 +84,7 @@ impl GcdFile {
             body,
             experience_reward,
             kill_category,
-            damage_type,
+            extra_word,
             name,
             tags,
             traits,
@@ -99,7 +100,7 @@ impl GcdFile {
         result
     }
     /// The big-endian sheet (SPEC-014 §3.43 writes it in binary mode): 428
-    /// bytes, or the 432-byte Fallout 2 sheet when it has a damage type.
+    /// bytes, or the 432-byte Fallout 2 sheet when it has the extra word.
     pub fn write(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(GCD2_LEN);
         bytes.extend(self.flags.to_be_bytes());
@@ -109,7 +110,7 @@ impl GcdFile {
             .chain(&self.bonus)
             .chain(&self.skills)
             .chain([&self.body, &self.experience_reward, &self.kill_category])
-            .chain(&self.damage_type);
+            .chain(&self.extra_word);
         for word in words {
             bytes.extend(word.to_be_bytes());
         }

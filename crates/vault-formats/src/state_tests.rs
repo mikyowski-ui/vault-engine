@@ -127,41 +127,51 @@ fn spec006_gcd_fields_normalization_and_bounds() {
     bad[0x190..0x194].copy_from_slice(&18_i32.to_be_bytes());
     assert!(GcdFile::parse(&bad).is_err());
 }
+/// SPEC-018 §8.15 (Revision 4, Team A): S428 is SPEC-006 §4.2's sheet with
+/// tags (3, 8, 12, -1) and traits (1, 9); S432 is S428 with the extra word
+/// 3 inserted at `0x170`.
 #[test]
-fn spec018_fallout2_gcd_has_a_damage_type_word_before_the_name() {
+fn spec018_fallout2_gcd_has_an_extra_word_before_the_name() {
     use vault_fixtures::state::sheet_gcd;
-    let (tags, traits) = ([4, 0, 5, -1], [6, 15]);
-    // SPEC-006's 428 bytes: no damage type.
-    let one = sheet_gcd(b"Fixture Fighter", tags, traits, None);
-    assert_eq!(one.len(), crate::gcd::GCD_LEN);
-    let read = GcdFile::parse(&one).unwrap();
-    assert_eq!(read.damage_type, None);
+    let (tags, traits) = ([3, 8, 12, -1], [1, 9]);
+    let s428 = sheet_gcd(b"Fixture Six", tags, traits, None);
+    assert_eq!(s428.len(), crate::gcd::GCD_LEN);
+    assert_eq!(&s428[0x190..0x194], &3_i32.to_be_bytes());
+    assert_eq!(&s428[0x1A0..0x1A4], &1_i32.to_be_bytes());
+    let read = GcdFile::parse(&s428).unwrap();
+    assert_eq!(read.extra_word, None);
     assert_eq!((read.tags, read.traits), (tags, traits));
-    // SPEC-018 §6.3 (Revision 4): 432 bytes, the word at 0x170 and the
-    // player portion 4 bytes further on. Read with the 428-byte layout,
-    // the first three tags would be [0, 4, 0]: Small Guns twice.
-    let two = sheet_gcd(b"Fixture Fighter", tags, traits, Some(3));
-    assert_eq!(two.len(), crate::gcd::GCD2_LEN);
-    assert_eq!(&two[0x174..0x183], b"Fixture Fighter");
-    assert_eq!(&two[0x194..0x198], &4_i32.to_be_bytes());
-    let read = GcdFile::parse(&two).unwrap();
-    assert_eq!(read.damage_type, Some(3));
-    assert_eq!(read.name_bytes(), b"Fixture Fighter");
+    let s432 = sheet_gcd(b"Fixture Six", tags, traits, Some(3));
+    assert_eq!(s432.len(), crate::gcd::GCD2_LEN);
+    assert_eq!(&s432[0x170..0x174], &[0, 0, 0, 3]);
+    assert_eq!(&s432[0x174..0x17F], b"Fixture Six");
+    assert_eq!(s432[0x17F], 0);
+    let read = GcdFile::parse(&s432).unwrap();
+    assert_eq!(read.extra_word, Some(3));
+    assert_eq!(read.name_bytes(), b"Fixture Six");
     assert_eq!((read.tags, read.traits), (tags, traits));
     assert_eq!(read.remaining_points, 0);
-    assert_eq!(read.base, GcdFile::parse(&one).unwrap().base);
+    assert_eq!(read.base, GcdFile::parse(&s428).unwrap().base);
+    // The defect ruled out: S432 read at the 428-byte offsets would give
+    // an empty name, tags (0, 3, 8, 12), traits (-1, 1) and 9 points.
+    let word = |at: usize| i32::from_be_bytes(s432[at..at + 4].try_into().unwrap());
+    assert_eq!(s432[0x170], 0);
+    assert_eq!([0x190, 0x194, 0x198, 0x19C].map(word), [0, 3, 8, 12]);
+    assert_eq!([0x1A0, 0x1A4].map(word), [-1, 1]);
+    assert_eq!(word(0x1A8), 9);
+    assert_ne!((read.tags, read.remaining_points), ([0, 3, 8, 12], 9));
     // Each layout writes back byte for byte.
-    assert_eq!(GcdFile::parse(&one).unwrap().write(), one);
-    assert_eq!(read.write(), two);
-    // Any other length is refused, including a 428-byte sheet with
-    // trailing bytes and every prefix of the 432-byte one but 428.
-    let mut longer = one.clone();
-    longer.extend([0; 2]);
-    assert!(GcdFile::parse(&longer).is_err());
-    for end in (0..two.len()).filter(|end| *end != 428) {
-        assert!(GcdFile::parse(&two[..end]).is_err());
+    assert_eq!(GcdFile::parse(&s428).unwrap().write(), s428);
+    assert_eq!(read.write(), s432);
+    // Refused: 430 bytes, 433 bytes, and every prefix of S432 but its
+    // 428-byte one (which SPEC-006 §2.3's rules judge).
+    let mut s430 = s428.clone();
+    s430.extend([0; 2]);
+    assert!(GcdFile::parse(&s430).is_err());
+    let mut s433 = s432.clone();
+    s433.push(0);
+    assert!(GcdFile::parse(&s433).is_err());
+    for end in (0..s432.len()).filter(|end| *end != 428) {
+        assert!(GcdFile::parse(&s432[..end]).is_err());
     }
-    let mut extra = two;
-    extra.push(0);
-    assert!(GcdFile::parse(&extra).is_err());
 }

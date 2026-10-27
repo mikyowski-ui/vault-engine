@@ -311,7 +311,7 @@ pub fn sheet_gcd(sheet: &CharacterSheet, game: crate::GameProfile) -> GcdFile {
         body: 0,
         experience_reward: 0,
         kill_category: 0,
-        damage_type: (game == crate::GameProfile::Fallout2).then_some(0),
+        extra_word: (game == crate::GameProfile::Fallout2).then_some(0),
         name,
         tags: sheet.tags,
         traits: sheet.traits,
@@ -706,7 +706,7 @@ mod tests {
             assert_eq!((read.tags, read.traits), (sheet.tags, sheet.traits));
             assert_eq!(read.remaining_points, 2);
             assert_eq!(read.base, sheet.base);
-            assert_eq!(read.damage_type, (length == 432).then_some(0));
+            assert_eq!(read.extra_word, (length == 432).then_some(0));
         }
     }
 

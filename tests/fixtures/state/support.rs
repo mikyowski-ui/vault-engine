@@ -5,14 +5,14 @@ pub fn gcd() -> Vec<u8> {
     assets::sparse(include_str!("player.gcd.hex"))
 }
 
-/// [`gcd`] with another name, tags and traits. With `damage_type`, it is
+/// [`gcd`] with another name, tags and traits. With `extra_word`, it is
 /// SPEC-018 §6.3's 432-byte Fallout 2 sheet (Revision 4): that word goes in
 /// at `0x170`, and the name, tags, traits and points move down 4 bytes.
 pub fn sheet_gcd(
     name: &[u8],
     tags: [i32; 4],
     traits: [i32; 2],
-    damage_type: Option<i32>,
+    extra_word: Option<i32>,
 ) -> Vec<u8> {
     let mut bytes = gcd();
     bytes[0x170..0x190].fill(0);
@@ -20,8 +20,8 @@ pub fn sheet_gcd(
     for (index, word) in tags.iter().chain(&traits).enumerate() {
         world::word(&mut bytes, 0x190 + 4 * index, *word);
     }
-    if let Some(damage_type) = damage_type {
-        bytes.splice(0x170..0x170, damage_type.to_be_bytes());
+    if let Some(extra_word) = extra_word {
+        bytes.splice(0x170..0x170, extra_word.to_be_bytes());
     }
     bytes
 }
@@ -69,7 +69,7 @@ pub fn premade_files(fallout2: bool) -> Vec<(String, Vec<u8>)> {
     )];
     let entries = ["combat", "stealth", "diplomat"];
     for (index, (entry, premade)) in entries.iter().zip(&PREMADES).enumerate() {
-        let (size, damage_type) = match (fallout2, index) {
+        let (size, extra_word) = match (fallout2, index) {
             (false, _) => ((212, 187), None),
             (true, 2) => ((640, 300), Some(2)),
             (true, _) => ((592, 260), Some(2)),
@@ -80,7 +80,7 @@ pub fn premade_files(fallout2: bool) -> Vec<(String, Vec<u8>)> {
         ));
         files.push((
             format!("premade/{entry}.gcd"),
-            sheet_gcd(premade.name, premade.tags, premade.traits, damage_type),
+            sheet_gcd(premade.name, premade.tags, premade.traits, extra_word),
         ));
         files.push((
             format!("premade/{entry}.bio"),
