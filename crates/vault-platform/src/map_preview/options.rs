@@ -259,8 +259,10 @@ impl MapPreview {
         // §3.17: before the pause window opens, every pixel of the map
         // window (rows 0-380) is converted through the grey lookup table.
         // The bar (and the indicator boxes) are separate windows drawn on
-        // top unconverted, so screen rows 0-378 show grey.
-        if matches!(self.screen, Screen::Options(OptionsScreen::Pause)) {
+        // top unconverted, so screen rows 0-378 show grey. (The `enhanced`
+        // backdrop's flat view stays flat: its world is greyed instead.)
+        if matches!(self.screen, Screen::Options(OptionsScreen::Pause)) && self.view_fill.is_none()
+        {
             let rows = view.height().min(MAP_WINDOW_ROWS) as usize;
             let width = view.width() as usize;
             for pixel in &mut view.pixels_mut()[..width * rows] {

@@ -343,6 +343,68 @@ pub fn draw_shroud(image: &mut IndexedImage, grid: HexGrid, field: &ShroudField,
     }
 }
 
+/// The darkening vignette over the world canvas behind a centered window
+/// (the backdrop of the inventory, loot, barter, Skilldex, elevator and
+/// options windows in the unlocked view): darker toward the window, lighter
+/// toward the canvas's edges, through a ramp of darkening tables.
+///
+/// A pixel at `[dx, dy]` from `center` has the elliptical distance
+/// `q = dx²/rx² + dy²/ry²` (capped at 1) and the ramp position
+/// `p = near − (near − far) q`, in sixteenths of a ramp step. It takes
+/// table `floor(p / 16)`, or the next darker one where
+/// `bayer(world) < p mod 16`: the standard 4x4 ordered dither anchored to
+/// world pixels, as the shroud's. All integer arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Vignette {
+    /// The window's center, in canvas pixels.
+    pub center: [i64; 2],
+    /// The distances from the center, per axis in canvas pixels, at which
+    /// the dimming is lightest (at least 1).
+    pub radii: [i64; 2],
+    /// The ramp position at the center and from the radii on, in
+    /// sixteenths of a step (`near >= far`).
+    pub near: u32,
+    pub far: u32,
+}
+
+impl Vignette {
+    /// The ramp table a pixel at canvas pixel `point` takes (before the
+    /// last table caps it), the world pixel under it choosing the dither.
+    pub fn level(self, grid: HexGrid, point: [i64; 2]) -> usize {
+        let [rx, ry] = self.radii.map(|radius| radius.clamp(1, 1 << 20));
+        let [dx, dy] =
+            [0, 1].map(|axis| (point[axis] - self.center[axis]).clamp(-(1 << 20), 1 << 20));
+        let denominator = rx * rx * ry * ry;
+        let q = (dx * dx * ry * ry + dy * dy * rx * rx).min(denominator);
+        let span = i64::from(self.near.saturating_sub(self.far));
+        let position = i64::from(self.near) - span * q / denominator;
+        let step = position / 16;
+        let darker = i64::from(bayer(world(grid, point))) < position % 16;
+        (step + i64::from(darker)) as usize
+    }
+}
+
+/// Dim `image` (a canvas whose grid is `grid`) through `ramp`, lightest
+/// table first, by `vignette`; levels past the ramp's end take its last
+/// (darkest) table. An empty ramp leaves the image as it is.
+pub fn draw_vignette(
+    image: &mut IndexedImage,
+    grid: HexGrid,
+    vignette: Vignette,
+    ramp: &[[u8; 256]],
+) {
+    let Some(last) = ramp.len().checked_sub(1) else {
+        return;
+    };
+    let width = image.width() as usize;
+    for (y, row) in image.pixels_mut().chunks_exact_mut(width).enumerate() {
+        for (x, pixel) in row.iter_mut().enumerate() {
+            let level = vignette.level(grid, [x as i64, y as i64]).min(last);
+            *pixel = ramp[level][usize::from(*pixel)];
+        }
+    }
+}
+
 thread_local! {
     /// The last shroud field built, with the allowed set it was built for.
     static FIELD: RefCell<Option<(Vec<bool>, Rc<ShroudField>)>> = const { RefCell::new(None) };

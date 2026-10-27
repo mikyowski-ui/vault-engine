@@ -285,13 +285,27 @@ impl EnhancedLayout {
     /// The world canvas's surface rectangle (it may overhang the world's
     /// area by up to one world pixel, from the rounding up).
     pub fn world_layer_rect(&self) -> [f32; 4] {
+        self.canvas_rect(self.world_size)
+    }
+    /// The surface rectangle of a `size` world canvas drawn from the world
+    /// area's top-left corner at this zoom: [`Self::world_layer_rect`] for
+    /// the layout's own canvas, and further down for a taller one (the
+    /// backdrop behind a window that also covers the bar rows).
+    pub fn canvas_rect(&self, size: [u32; 2]) -> [f32; 4] {
         let per_world = self.ui_scale * self.zoom;
         [
             self.world_rect[0],
             self.world_rect[1],
-            self.world_size[0] as f32 * per_world,
-            self.world_size[1] as f32 * per_world,
+            size[0] as f32 * per_world,
+            size[1] as f32 * per_world,
         ]
+    }
+    /// The world canvas height that covers the whole surface height, the
+    /// bar rows included (at least the layout's own canvas height).
+    pub fn full_canvas_height(&self) -> u32 {
+        let per_world = f64::from(self.ui_scale * self.zoom);
+        let full = (f64::from(self.surface[1]) / per_world).ceil().max(1.0) as u32;
+        full.clamp(self.world_size[1], Self::MAX_WORLD)
     }
 }
 
