@@ -751,12 +751,14 @@ impl Game {
     }
     fn selection_action(&mut self, action: SelectionAction) {
         let context = StatContext::default();
-        // SPEC-014 §3.43: the sheet files live in the master patch root.
+        // SPEC-014 §3.43: the sheet files live in the master patch root,
+        // in the game's sheet layout (SPEC-018 §6.3).
         let files = || {
             crate::editor_screen::SheetFiles::new(
                 self.vfs.clone(),
                 &self.language,
                 self.save_root.clone(),
+                self.game_profile,
             )
         };
         match action {
@@ -1406,17 +1408,19 @@ impl Game {
     fn draw_selection(&self, painter: &Painter, image: &mut IndexedImage, held: Option<Rect>) {
         painter.blit_opaque(image, flow::SELECTION_BACKGROUND, 0, [0, 0]);
         let premade = flow::PREMADES[self.selection];
-        // The portrait with every odd row left out (the scan-line effect).
+        // The portrait with every odd row left out (the scan-line effect),
+        // clipped to the monitor window (SPEC-019 §3.3 places Fallout 2's).
         if let Some(art) = painter.art(premade.portrait)
             && let Some(frame) = art.frame(0, 0)
         {
             let (w, h) = (i32::from(frame.width), i32::from(frame.height));
-            let [x, y] = flow::portrait_origin(w, h);
+            let fallout2 = self.game_profile == vault_core::GameProfile::Fallout2;
+            let ([x, y], window) = flow::portrait_placement(fallout2, w, h);
             for row in (0..h).step_by(2) {
                 for column in 0..w {
                     let color = frame.pixels()[(row * w + column) as usize];
                     let (dx, dy) = (x + column, y + row);
-                    if color != 0 && (0..640).contains(&dx) && (0..480).contains(&dy) {
+                    if color != 0 && window.contains([dx, dy]) {
                         image.pixels_mut()[(dy * 640 + dx) as usize] = color;
                     }
                 }
@@ -2131,6 +2135,189 @@ mod tests {
         game.headless = true;
         game.game_profile = vault_core::GameProfile::Fallout2;
         (corpus, install, game)
+    }
+
+    /// Each premade's selection screen, with the sheet it loaded.
+    fn selection_screens(game: &mut Game) -> Vec<(IndexedImage, CharacterSheet)> {
+        (0..flow::PREMADES.len())
+            .map(|index| {
+                game.stage = Stage::Selection;
+                game.selection = index;
+                game.sheet = game.premade(index);
+                (game.image().unwrap(), game.sheet.clone())
+            })
+            .collect()
+    }
+    /// The premades of `vault_fixtures::state::premade_files`: each
+    /// portrait drawn from its own art at `portrait` (the rectangle its
+    /// drawn rows cover), every odd row and everything outside left to the
+    /// background, and each sheet's name and three distinct tags.
+    fn check_selection(game: &mut Game, portraits: [Rect; 3]) {
+        use vault_fixtures::state::{PICKCHAR_COLOR, PREMADES};
+        for (index, (image, sheet)) in selection_screens(game).into_iter().enumerate() {
+            let (premade, rect) = (&PREMADES[index], portraits[index]);
+            let at = |x: i32, y: i32| image.pixels()[(y * 640 + x) as usize];
+            let (right, bottom) = (rect.x + rect.w - 1, rect.y + (rect.h - 1) / 2 * 2);
+            for [x, y] in [
+                [rect.x, rect.y],
+                [right, rect.y],
+                [rect.x, bottom],
+                [right, bottom],
+            ] {
+                assert_eq!(at(x, y), premade.color, "premade {index}: ({x}, {y})");
+            }
+            for [x, y] in [
+                [0, 0],
+                [rect.x, rect.y + 1],
+                [rect.x - 1, rect.y],
+                [right + 1, rect.y],
+                [rect.x, rect.y - 1],
+                [rect.x, bottom + 2],
+            ] {
+                assert_eq!(at(x, y), PICKCHAR_COLOR, "premade {index}: ({x}, {y})");
+            }
+            assert_eq!(sheet.name, premade.name);
+            assert_eq!(sheet.tags, premade.tags);
+            assert_eq!(sheet.traits, premade.traits);
+            let [a, b, c, _] = sheet.tags;
+            assert!(
+                a != b && b != c && a != c,
+                "premade {index}: {:?}",
+                sheet.tags
+            );
+        }
+    }
+
+    #[test]
+    fn spec014_fallout1_premade_portraits_sit_on_the_monitor_with_three_tags() {
+        let dir = synthetic_corpus();
+        for (path, bytes) in vault_fixtures::state::premade_files(false) {
+            std::fs::write(dir.path().join(path), bytes).unwrap();
+        }
+        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+        let mut game = Game::new(vfs, "english", 1, dir.path().join("saves"), None).unwrap();
+        game.headless = true;
+        // §3.7: 212 by 187 at (150 - 106, 240 - 187) = (44, 53).
+        check_selection(&mut game, [Rect::new(44, 53, 212, 187); 3]);
+    }
+
+    #[test]
+    fn spec019_fallout2_premade_portraits_fill_the_monitor_with_three_tags() {
+        let files = vault_fixtures::state::premade_files(true);
+        let extra: Vec<(&str, Vec<u8>)> = files
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.clone()))
+            .collect();
+        let (_corpus, _install, mut game) = fallout2_game(&extra);
+        // §3.3 (Revision 3): at the monitor window's (27, 23), never at
+        // (0, 0) nor at Fallout 1's (150 - 296, 240 - 260) = (-146, -20);
+        // the third, 640 by 300, is clipped to the 592-by-260 window. The
+        // sheets are 432 bytes (SPEC-018 §6.3, Revision 4).
+        let screen = ui2::SELECTION_SCREEN;
+        assert_eq!(screen, Rect::new(27, 23, 592, 260));
+        check_selection(&mut game, [screen; 3]);
+    }
+
+    /// The retail premades: each portrait is its own art, `size`, drawn at
+    /// `origin` (its first `columns` columns compared, which no text
+    /// covers) with odd rows left to the background; outside the monitor
+    /// (`outside`) and above the buttons (y < 300) the screen is the
+    /// background alone; each sheet has a name and three distinct tags.
+    fn check_retail_selection(
+        game: &mut Game,
+        size: [i32; 2],
+        origin: [i32; 2],
+        columns: i32,
+        outside: impl Fn(i32, i32) -> bool,
+    ) {
+        for (index, (image, sheet)) in selection_screens(game).into_iter().enumerate() {
+            let premade = flow::PREMADES[index];
+            let painter = Painter {
+                assets: &game.assets,
+                palette: &game.palette,
+            };
+            let art = painter.art(premade.portrait).expect("the portrait loads");
+            let frame = art.frame(0, 0).unwrap();
+            let (w, h) = (i32::from(frame.width), i32::from(frame.height));
+            assert_eq!([w, h], size, "{}", premade.portrait);
+            let background = painter.art(flow::SELECTION_BACKGROUND).unwrap();
+            let background = background.frame(0, 0).unwrap().pixels().to_vec();
+            let at = |x: i32, y: i32| image.pixels()[(y * 640 + x) as usize];
+            let behind = |x: i32, y: i32| background[(y * 640 + x) as usize];
+            for row in 0..h {
+                for column in 0..columns {
+                    let (x, y) = (origin[0] + column, origin[1] + row);
+                    let color = frame.pixels()[(row * w + column) as usize];
+                    let expected = if row % 2 == 0 && color != 0 {
+                        color
+                    } else {
+                        behind(x, y)
+                    };
+                    assert_eq!(at(x, y), expected, "{}: ({x}, {y})", premade.portrait);
+                }
+            }
+            for y in 0..300 {
+                for x in (0..640).filter(|x| outside(*x, y)) {
+                    assert_eq!(at(x, y), behind(x, y), "{}: ({x}, {y})", premade.portrait);
+                }
+            }
+            let name = String::from_utf8_lossy(&sheet.name).into_owned();
+            let [a, b, c, _] = sheet.tags;
+            eprintln!(
+                "{}: {name}, {} {w}x{h} at {origin:?}, tags {:?}, traits {:?}",
+                premade.sheet, premade.portrait, sheet.tags, sheet.traits
+            );
+            assert!(!name.is_empty(), "{}", premade.sheet);
+            assert!(
+                a >= 0 && b >= 0 && c >= 0 && a != b && b != c && a != c,
+                "{}: {:?}",
+                premade.sheet,
+                sheet.tags
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "needs the local corpus"]
+    fn retail_fallout1_premade_portraits_and_three_distinct_tags() {
+        let Some(vfs) = crate::map_preview::test_support::local_corpus() else {
+            return;
+        };
+        let saves = tempfile::tempdir().unwrap();
+        let mut game = Game::new(vfs, "english", 1, saves.path().to_path_buf(), None).unwrap();
+        game.headless = true;
+        // SPEC-014 §3.7: 212 by 187 at (44, 53), inside the monitor area.
+        let monitor = flow::SELECTION_MONITOR;
+        check_retail_selection(&mut game, [212, 187], [44, 53], 212, |x, y| {
+            !monitor.contains([x, y])
+        });
+    }
+
+    #[test]
+    #[ignore = "needs a Fallout 2 install"]
+    fn retail_fallout2_premade_portraits_and_three_distinct_tags() {
+        let folder = std::env::var_os("VAULT_FALLOUT2")
+            .map(PathBuf::from)
+            .or_else(|| crate::config::home_dir().map(|home| home.join("games/fallout2")));
+        let Some(install) = folder
+            .and_then(|folder| vault_formats::fallout2::Fallout2Install::discover(&folder).ok())
+        else {
+            eprintln!("skipping: no Fallout 2 install (set VAULT_FALLOUT2)");
+            return;
+        };
+        let vfs: Arc<dyn Vfs> = Arc::new(install.open().unwrap().provider(None));
+        let saves = tempfile::tempdir().unwrap();
+        let mut game = Game::new(vfs, "english", 1, saves.path().to_path_buf(), None).unwrap();
+        game.headless = true;
+        game.game_profile = vault_core::GameProfile::Fallout2;
+        // SPEC-019 §3.3 (Revision 3): 592 by 260 at the monitor window's
+        // (27, 23). Its left 200 columns, the face, carry no text; the
+        // bio may run past the window's right edge, so only the left, top
+        // and bottom margins are compared.
+        let screen = ui2::SELECTION_SCREEN;
+        check_retail_selection(&mut game, [592, 260], [27, 23], 200, |x, y| {
+            x < screen.x || y < screen.y || y >= screen.y + screen.h
+        });
     }
 
     #[test]

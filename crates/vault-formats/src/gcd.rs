@@ -1,5 +1,12 @@
-//! SPEC-006 428-byte sheet. Decoding and player-only normalization are distinct.
+//! SPEC-006 428-byte sheet, and SPEC-018 §6.3's 432-byte Fallout 2 sheet
+//! (Revision 4). Decoding and player-only normalization are distinct.
 use crate::{ParseError, binary::Reader};
+
+/// SPEC-006 §2.2: the Fallout 1 sheet.
+pub const GCD_LEN: usize = 428;
+/// SPEC-018 §6.3 (Revision 4): the Fallout 2 sheet, with a damage-type word
+/// after the 368-byte critter-stat portion.
+pub const GCD2_LEN: usize = 432;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcdFile {
@@ -10,6 +17,10 @@ pub struct GcdFile {
     pub body: i32,
     pub experience_reward: i32,
     pub kill_category: i32,
+    /// The Fallout 2 sheet's damage-type word at `0x170` (SPEC-018 §6.3,
+    /// Revision 4); `None` for SPEC-006's 428-byte sheet, which has none.
+    /// It also chooses the layout [`GcdFile::write`] produces.
+    pub damage_type: Option<i32>,
     pub name: [u8; 32],
     pub tags: [i32; 4],
     pub traits: [i32; 2],
@@ -18,6 +29,20 @@ pub struct GcdFile {
 impl GcdFile {
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         let mut r = Reader::new(bytes, "GCD")?;
+        // The exact length chooses the layout (SPEC-018 §6.3, Revision 4):
+        // 428 bytes is SPEC-006's sheet, 432 the Fallout 2 sheet. Any other
+        // length is refused (SPEC-006 §2.3's safe rule). Reading a 432-byte
+        // sheet with the 428-byte layout would shift its name, tags, traits
+        // and points by one word.
+        let fallout2 = match bytes.len() {
+            GCD_LEN => false,
+            GCD2_LEN => true,
+            length => {
+                return Err(r.error(format!(
+                    "a sheet is {GCD_LEN} bytes (Fallout 1) or {GCD2_LEN} (Fallout 2), not {length}"
+                )));
+            }
+        };
         let flags = r.word()?;
         let base = r.words()?;
         let bonus = r.words()?;
@@ -25,6 +50,7 @@ impl GcdFile {
         let body = r.be_i32()?;
         let experience_reward = r.be_i32()?;
         let kill_category = r.be_i32()?;
+        let damage_type = if fallout2 { Some(r.be_i32()?) } else { None };
         let name: [u8; 32] = r.take(32)?.try_into().expect("fixed name");
         let tags: [i32; 4] = r.words()?;
         let traits: [i32; 2] = r.words()?;
@@ -57,6 +83,7 @@ impl GcdFile {
             body,
             experience_reward,
             kill_category,
+            damage_type,
             name,
             tags,
             traits,
@@ -71,17 +98,18 @@ impl GcdFile {
         result.kill_category = 0;
         result
     }
-    /// The 428-byte big-endian sheet (SPEC-014 §3.43 writes it in binary
-    /// mode).
+    /// The big-endian sheet (SPEC-014 §3.43 writes it in binary mode): 428
+    /// bytes, or the 432-byte Fallout 2 sheet when it has a damage type.
     pub fn write(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(428);
+        let mut bytes = Vec::with_capacity(GCD2_LEN);
         bytes.extend(self.flags.to_be_bytes());
         let words = self
             .base
             .iter()
             .chain(&self.bonus)
             .chain(&self.skills)
-            .chain([&self.body, &self.experience_reward, &self.kill_category]);
+            .chain([&self.body, &self.experience_reward, &self.kill_category])
+            .chain(&self.damage_type);
         for word in words {
             bytes.extend(word.to_be_bytes());
         }

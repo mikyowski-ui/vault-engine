@@ -179,6 +179,11 @@ pub const MENU_HOTKEYS: [char; 6] = ['i', 'n', 'l', 'o', 'c', 'e'];
 pub const MENU_VERSION: &str = "FALLOUT II 1.02d";
 /// The copyright line is `misc.msg` 20.
 pub const MENU_COPYRIGHT_ID: i32 = 20;
+
+/// §3.3 (Revision 3) the premade selection screen's monitor window: the
+/// portrait's top-left is its top-left, and the portrait is clipped to it.
+/// The retail portraits are 592 by 260 and fill it, bezel edge included.
+pub const SELECTION_SCREEN: Rect = Rect::new(27, 23, 592, 260);
 /// Button i's rectangle.
 pub fn menu_button(i: usize) -> Rect {
     Rect::new(30, 19 + 41 * i as i32, 26, 26)

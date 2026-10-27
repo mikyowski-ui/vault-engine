@@ -1,6 +1,6 @@
 # SPEC-019: Fallout 2 Interface, Party Control, the Car, and Game-Flow Deltas
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail art audit; scripts run) by the coordinator, 2026-10-25.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail art audit; scripts run) by the coordinator, 2026-10-25. Revision 3 (premade portraits) by the coordinator, 2026-10-26.
 
 **Provenance:** written by Team A (the Spec-Author sub-agent) on 2026-10-25 from
 the coordinator's brief of the same day. Source categories:
@@ -31,6 +31,22 @@ three things:
   opens the script gate.
 
 No game art is reproduced.
+
+**Revision 3 (premade portraits), 2026-10-26.** The coordinator wrote this
+revision after the owner reported the premade selection screen drawing a
+portrait over the monitor's top-left bezel. It comes from the frame sizes of
+the owner's retail install and from comparing the portraits' border pixels
+with `pickchar.frm`'s, which were read locally and are not reproduced. The
+retail portraits are 592 by 260, not SPEC-014's 212 by 187, so SPEC-014's
+placement formula puts them at (-146, -20), mostly off the monitor. It
+changes two things:
+
+- section 2.2 records the sizes of the selection screen's art;
+- section 3.3 places the portrait in the monitor window and clips it there
+  (decision D-32).
+
+The sheets' name, tags and traits are moved by Fallout 2's longer sheet,
+which SPEC-018 Revision 4 (section 6.3) records.
 
 ## 1. Overview & Scope
 
@@ -103,6 +119,8 @@ is the area number. A city's display name is its `area_name`.
   D-27 to D-31): no campaign-global writes, no carry amount, gated Play,
   SPEC-018's data and save fields referenced by section, and the terrain
   schedule and entrance placement corrected to SPEC-018's rules.
+- **Revision 3 (2026-10-26).** Premade portraits: their retail size
+  (section 2.2) and their place in the monitor window (section 3.3, D-32).
 
 ## 2. Data, Constants and State
 
@@ -168,6 +186,17 @@ use:
 The candidate order of the table above is kept, so an install that has the
 first candidate still uses it. The custom panel is the one size that differs
 from this spec's stand-in. Section 3.15.3 follows the art (Revision 2).
+
+**Premade selection art (Revision 3).** The names are SPEC-014 §3.7's, read
+by file name under `art/intrface/`:
+
+| Role | Name used | Size | Frames | Notes |
+| --- | --- | --- | --- | --- |
+| Selection background | `pickchar.frm` | 640 by 480 | 1 | As Fallout 1 |
+| Premade portraits | `combat.frm`, `stealth.frm`, `diplomat.frm` | **592 by 260** each | 1 | No index-0 pixel. Each is the whole monitor picture, the edge of its bezel included: its border matches `pickchar.frm`'s bezel when its top-left is at screen (27, 23), and at no other offset nearby |
+
+There are no other portrait files: the premades have no separate headshot
+art.
 
 ### 2.3 Messages and Engine Strings
 
@@ -370,6 +399,18 @@ entries in the same order (`premade/combat.gcd`, `stealth.gcd`,
 `stealth.frm`, `diplomat.frm`), and the same keys. The one difference: **no ID
 text** is drawn (the SPEC-014 "ID text" column and its y = 252 line).
 `[Team A default]`
+
+**Portrait (Revision 3).** The portrait is not placed by SPEC-014's
+`(150 - trunc(w / 2), 240 - h)`, which suits only Fallout 1's 212-by-187 art.
+Its top-left is the top-left of the **monitor window**, screen (27, 23),
+592 by 260, and it is clipped to that window: no pixel is drawn outside it,
+whatever the art's size. The scan-line effect and index-0 transparency are
+SPEC-014's, unchanged: odd rows of the art are not drawn and show the
+background. The name, SPECIAL, derived-stat, tag, trait and bio lines are
+drawn at SPEC-014's positions, over the portrait. `[Safe rule]` (D-32)
+
+The sheet is loaded with SPEC-018 §6.3's Fallout 2 layout (Revision 4), so
+the three tag lines show the sheet's first three tags.
 
 **Editor.** As SPEC-014 §3.8-§3.11. The trait, skill, perk and stat names
 come from the Fallout 2 message files. Their rules are SPEC-006's and
@@ -1377,6 +1418,17 @@ still `endB`), (global 9 = 0, pan -1, `dp`). With global 5 = 2 and global 9 = 0:
 `endB` as a still slide, then `dp` panned right to left. No global is written
 afterwards.
 
+### 4.18 Vector R: Premade Portraits (Revision 3)
+
+A one-color `pickchar.frm` (640 by 480, index 9) and three one-color
+portraits (indices 40, 41, 42), the first two 592 by 260 and the third 640 by
+300. Each premade's screen shows its own color at (27, 23), (618, 23),
+(27, 281) and (618, 281), and the background at (0, 0), (27, 24) (an odd
+row), (26, 23), (619, 23), (27, 22) and (27, 283). The third portrait is
+clipped at the window's right and bottom edges. Under Fallout 1 the same
+check holds for 212-by-187 portraits at (44, 53), (255, 53), (44, 239) and
+(255, 239).
+
 ## 5. Decisions
 
 Every point the brief and the public documentation leave open is resolved
@@ -1487,6 +1539,13 @@ touch, and are listed in SPEC-018 §10 as R1-R6.
   `pipboy_active=No` disables the Pip-Boy. Kill types 0-18 are named from
   `proto.msg` 1450 + t, with engine-string fallbacks. The town-list offset
   is not saved.
+- **D-32 (coordinator, Revision 3, 2026-10-26, measured).** The premade
+  portrait's top-left is the monitor window's, screen (27, 23), and the
+  portrait is clipped to that 592-by-260 window (section 3.3). The window is
+  where the retail portraits' bezel edge coincides with `pickchar.frm`'s,
+  measured on the owner's install; no reference program was run or read. The
+  scan-line effect is kept from SPEC-014 §3.7, because nothing measured says
+  Fallout 2 drops it.
 
 ## 6. Coordination With SPEC-017 and SPEC-018
 
@@ -1545,4 +1604,6 @@ The first revision's requests were answered in the reconciliation pass of
   `[Team A default]`, and every Team A default listed in section 5.
 - [x] Test vectors use synthetic data only.
 - [x] No decompilation, disassembly, re-implementation source or game asset
-  was consulted (Provenance).
+  was consulted (Provenance). Revisions 2 and 3 read frame sizes, and
+  Revision 3 compared border pixels, on the owner's retail install; no art
+  is reproduced.
