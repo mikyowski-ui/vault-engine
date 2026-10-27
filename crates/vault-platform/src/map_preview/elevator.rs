@@ -3,7 +3,7 @@
 //! press and reports on the release over it; a chosen level plays the
 //! travel sound and moves the player (or requests the map change); Esc
 //! cancels and, under the safe rule, changes nothing.
-use super::{MapPreview, Screen};
+use super::{MapPreview, Screen, modal_kit::at};
 use crate::{
     AppResult,
     input::{key_digit, key_text},
@@ -51,7 +51,7 @@ const BUTTON: [i32; 2] = [48, 50];
 /// Level button `i`'s screen rectangle in the window at `origin`.
 fn elevator_button(origin: [i32; 2], i: usize) -> Rect {
     let [x, y] = skills::elevator_button(i);
-    Rect::new(origin[0] + x, origin[1] + y, BUTTON[0], BUTTON[1])
+    at(origin, Rect::new(x, y, BUTTON[0], BUTTON[1]))
 }
 
 impl MapPreview {
@@ -73,6 +73,12 @@ impl MapPreview {
             .map_or_else(|| "el_mil1.frm".to_owned(), |e| e.background);
         skills::elevator_origin(painter.size(&background).unwrap_or([230, 284]))
     }
+    /// The level buttons' screen rectangles, in level order.
+    fn elevator_buttons(&self, kind: i32) -> Vec<Rect> {
+        let origin = self.elevator_origin(&self.painter(), kind);
+        let buttons = self.host.elevator_view(kind).map_or(0, |e| e.buttons());
+        (0..buttons).map(|i| elevator_button(origin, i)).collect()
+    }
     pub(crate) fn elevator_image(&mut self) -> AppResult<IndexedImage> {
         let Screen::Elevator(screen) = &self.screen else {
             return Err("no elevator".into());
@@ -85,10 +91,7 @@ impl MapPreview {
         let elevator = self.host.elevator_view(kind).ok_or("invalid elevator")?;
         let view = self.map_view_image()?;
         let mut image = self.compose_world(view);
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         let origin = self.elevator_origin(&painter, kind);
         painter.blit_opaque(&mut image, &elevator.background, 0, origin);
         if let Some(panel) = &elevator.panel {
@@ -103,8 +106,7 @@ impl MapPreview {
         }
         for i in 0..elevator.buttons() {
             let rect = elevator_button(origin, i);
-            let art = self.button_art(rect, "ebut_out.frm", "ebut_in.frm");
-            painter.blit(&mut image, art, 0, [rect.x, rect.y]);
+            self.draw_button(&painter, &mut image, rect, ("ebut_out.frm", "ebut_in.frm"));
         }
         let (gauge, [gx, gy], [w, h]) = skills::GAUGE;
         let cell = moving.unwrap_or_else(|| elevator.gauge_cell(start));
@@ -189,15 +191,9 @@ impl MapPreview {
         if self.elevator_moving() {
             return true;
         }
-        let kind = screen.kind;
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
-        let origin = self.elevator_origin(&painter, kind);
-        let buttons = self.host.elevator_view(kind).map_or(0, |e| e.buttons());
-        if let Some(rect) = (0..buttons)
-            .map(|i| elevator_button(origin, i))
+        if let Some(rect) = self
+            .elevator_buttons(screen.kind)
+            .into_iter()
             .find(|rect| rect.contains(point))
         {
             self.held = Some(rect);
@@ -213,14 +209,8 @@ impl MapPreview {
         if self.elevator_moving() {
             return true;
         }
-        let kind = screen.kind;
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
-        let origin = self.elevator_origin(&painter, kind);
-        let buttons = self.host.elevator_view(kind).map_or(0, |e| e.buttons());
-        let Some(level) = (0..buttons).find(|i| over == Some(elevator_button(origin, *i))) else {
+        let buttons = self.elevator_buttons(screen.kind);
+        let Some(level) = buttons.iter().position(|rect| over == Some(*rect)) else {
             return false;
         };
         self.choose_level(Some(level));

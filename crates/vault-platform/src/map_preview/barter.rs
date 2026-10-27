@@ -19,18 +19,16 @@
 //! open it without a conversation (leaving then returns to the map).
 use super::{
     MapPreview, Screen,
-    counter::{CounterInput, counter_click, counter_key, draw_counter},
-    inventory::{ArrowPress, ItemMenu},
+    counter::{CounterInput, counter_click, counter_key},
+    modal_kit::{self, ArrowPress, ItemMenu, at},
 };
-use crate::{AppResult, interface::Painter};
+use crate::AppResult;
 use vault_core::{
-    ObjectAction, ObjectRef, WorldEffect,
-    assets::WorldAssets,
+    ObjectAction, ObjectRef,
     barter::{BarterSession, Trade},
     skills::{self, Counter, ItemEntry},
-    ui::{BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect, cursor, inventory as layout},
+    ui::{ColorKey, ERROR_SOUND, Rect, inventory as layout},
 };
-use vault_formats::pro::{ItemData, PrototypeData};
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
@@ -41,10 +39,9 @@ pub(crate) struct BarterScreen {
     offsets: [usize; 4],
     /// The lifted entry: its column, item and quantity.
     held: Option<(usize, ObjectRef, i32)>,
-    /// The counter for the lifted stack's drop, or for a menu Drop.
-    counter: Option<Counter>,
-    /// The item a menu Drop counts, while the counter is open for it.
-    dropping: Option<ObjectRef>,
+    /// The counter for the lifted stack's drop, or for a menu Drop of the
+    /// item it names.
+    counter: Option<(Counter, Option<ObjectRef>)>,
     /// The last trade or move message, shown in the conversation's reply
     /// area (the barter window covers the message monitor).
     pub reply: Option<Vec<u8>>,
@@ -70,7 +67,6 @@ impl BarterScreen {
             offsets: [0; 4],
             held: None,
             counter: None,
-            dropping: None,
             reply: None,
             arrow: false,
             press: None,
@@ -181,10 +177,6 @@ const PORTRAITS: [(bool, Rect); 2] = [
     (false, Rect::new(15, 25, 60, 100)),
     (true, Rect::new(560, 25, 60, 100)),
 ];
-/// A rectangle relative to `origin` on the screen.
-fn at(origin: [i32; 2], rect: Rect) -> Rect {
-    Rect::new(origin[0] + rect.x, origin[1] + rect.y, rect.w, rect.h)
-}
 /// Drop rectangles span screen y 310-454.
 const DROP_Y: std::ops::RangeInclusive<i32> = 310..=454;
 
@@ -214,11 +206,9 @@ pub(crate) fn trade_targets() -> Vec<Rect> {
 
 fn slot_rect(column: usize, row: usize) -> Rect {
     let [x, y] = SLOTS[column];
-    Rect::new(
-        SUBWINDOW[0] + x,
-        SUBWINDOW[1] + y + 48 * row as i32,
-        SLOT[0],
-        SLOT[1],
+    at(
+        SUBWINDOW,
+        Rect::new(x, y + 48 * row as i32, SLOT[0], SLOT[1]),
     )
 }
 
@@ -312,24 +302,7 @@ impl MapPreview {
     /// The text an action on `item` prints, shown in the reply area (the
     /// barter window covers the message monitor).
     fn barter_text(&mut self, item: ObjectRef, action: ObjectAction) {
-        let player = self.host.world.player;
-        let start = self.host.world.effects.len();
-        if let Err(error) = self.host.action(player, item, action) {
-            self.status = error.to_string().into_bytes();
-        }
-        let emitted: Vec<_> = self.host.world.effects.drain(start..).collect();
-        let mut text = Vec::new();
-        for effect in emitted {
-            match effect {
-                WorldEffect::Message(line) => {
-                    if !text.is_empty() {
-                        text.push(b' ');
-                    }
-                    text.extend(line);
-                }
-                other => self.host.world.effects.push_back(other),
-            }
-        }
+        let text = self.action_text(item, action);
         if !text.is_empty() {
             self.barter_reply(text);
         }
@@ -342,11 +315,8 @@ impl MapPreview {
         let Screen::Barter(screen) = &mut self.screen else {
             return;
         };
-        if !screen.arrow || screen.held.is_some() || screen.hovered == entry {
-            return;
-        }
-        screen.hovered = entry;
-        if let Some(item) = entry {
+        let dragging = screen.held.is_some();
+        if let Some(item) = modal_kit::hover(screen.arrow, dragging, &mut screen.hovered, entry) {
             self.barter_text(item, ObjectAction::LookAt);
         }
     }
@@ -395,13 +365,7 @@ impl MapPreview {
         };
         let counts = owners.map(|owner| self.barter_entries(owner).len());
         if let Screen::Barter(screen) = &mut self.screen {
-            for (offset, count) in screen.offsets.iter_mut().zip(counts) {
-                let limit = count.saturating_sub(ROWS);
-                if *offset > limit {
-                    *offset = limit;
-                    changed = true;
-                }
-            }
+            changed |= modal_kit::clamp_offsets(&mut screen.offsets, counts, ROWS);
         }
         changed
     }
@@ -420,7 +384,9 @@ impl MapPreview {
             return false;
         };
         screen.press = None;
-        let entries = self.barter_menu(column, press.item);
+        // SPEC-013 §3.18: only the player's inventory column holds the
+        // player's own items (table entries are not).
+        let entries = self.window_item_menu(press.item, column == 0);
         let origin = at.unwrap_or(SUBWINDOW);
         if let Screen::Barter(screen) = &mut self.screen {
             screen.menu = Some((
@@ -428,24 +394,8 @@ impl MapPreview {
                 ItemMenu::new(press.item, entries, origin, layout::BARTER_EDGES),
             ));
         }
-        self.play_effect(cursor::MENU_OPEN_SOUND.as_bytes(), None);
+        self.menu_open_cue();
         true
-    }
-    /// SPEC-013 §3.16 the menu; only the player's inventory column holds
-    /// the player's own items (table entries are not, §3.18).
-    fn barter_menu(&self, column: usize, item: ObjectRef) -> Vec<ItemEntry> {
-        let data =
-            self.host
-                .world
-                .get(item)
-                .and_then(|object| match &object.prototype.as_deref()?.data {
-                    PrototypeData::Item(item) => Some(&item.data),
-                    _ => None,
-                });
-        let unloadable = matches!(data, Some(ItemData::Weapon(gun)) if gun.capacity > 0)
-            && self.host.world.loaded(item).0 > 0;
-        let container = matches!(data, Some(ItemData::Container { .. }));
-        skills::item_menu(column == 0, unloadable, container)
     }
     /// An action menu entry, as in the loot window: Look shows the full
     /// examine text, Unload gives the ammunition, forced, to the item's
@@ -475,22 +425,14 @@ impl MapPreview {
                     .map_or(1, |(_, quantity)| *quantity);
                 if quantity > 1 {
                     if let Screen::Barter(screen) = &mut self.screen {
-                        screen.counter = Some(Counter::new(quantity));
-                        screen.dropping = Some(item);
+                        screen.counter = Some((Counter::new(quantity), Some(item)));
                     }
                 } else {
-                    self.barter_drop_ground(item, 1);
+                    self.drop_units(item, 1);
                 }
             }
             ItemEntry::Cancel => {}
         }
-    }
-    fn barter_drop_ground(&mut self, item: ObjectRef, quantity: i32) {
-        let player = self.host.world.player;
-        if let Err(error) = self.host.world.drop_item(player, item, quantity) {
-            self.status = error.to_string().into_bytes();
-        }
-        self.drain_effects();
     }
     fn barter_entries(&self, owner: ObjectRef) -> Vec<(ObjectRef, i32)> {
         self.host
@@ -575,23 +517,16 @@ impl MapPreview {
         let Screen::Barter(screen) = &mut self.screen else {
             return;
         };
-        let offset = &mut screen.offsets[column];
-        if up {
-            *offset = offset.saturating_sub(1);
-        } else if *offset + ROWS < count {
-            *offset += 1;
-        }
+        modal_kit::scroll(&mut screen.offsets[column], up, ROWS, count);
     }
     /// Keys: `m` offers, `t` and Esc leave; the scroll keys move one row.
     pub(crate) fn barter_key(&mut self, key: KeyCode) -> bool {
         let Screen::Barter(screen) = &mut self.screen else {
             return false;
         };
-        if let Some(counter) = &mut screen.counter {
+        if let Some((counter, _)) = &mut screen.counter {
             let input = counter_key(counter, key);
-            if matches!(input, CounterInput::Accept(_)) {
-                self.play_effect(BUTTON_PRESS.as_bytes(), None);
-            }
+            let input = self.counter_key_cue(input);
             return self.barter_counter(input);
         }
         // G-25 / SPEC-014 §3.34: all other input is ignored during a drag,
@@ -620,13 +555,11 @@ impl MapPreview {
             return false;
         };
         if screen.counter.is_some() {
-            if let Some(rect) = super::counter::counter_button(point) {
-                self.press_button(rect);
-            }
+            self.press_counter_button(point);
             let Screen::Barter(screen) = &mut self.screen else {
                 return false;
             };
-            let Some(counter) = &mut screen.counter else {
+            let Some((counter, _)) = &mut screen.counter else {
                 return true;
             };
             let input = counter_click(counter, point);
@@ -645,7 +578,7 @@ impl MapPreview {
             screen.hovered = None;
             return true;
         }
-        let window = [point[0] - WINDOW[0], point[1] - WINDOW[1]];
+        let window = modal_kit::local(point, WINDOW);
         if OFFER.contains(window) {
             self.press_button_cue(b"ib2p1xx1", b"ib2lu1x1", at(WINDOW, OFFER));
             self.attempt_barter();
@@ -667,7 +600,7 @@ impl MapPreview {
             self.drain_effects();
             return true;
         }
-        let local = [point[0] - SUBWINDOW[0], point[1] - SUBWINDOW[1]];
+        let local = modal_kit::local(point, SUBWINDOW);
         if let Some((column, up, rect, ..)) =
             SCROLL.iter().find(|(_, _, rect, ..)| rect.contains(local))
         {
@@ -742,7 +675,7 @@ impl MapPreview {
         if !dropped {
             screen.held = None;
         } else if quantity > 1 {
-            screen.counter = Some(Counter::new(quantity));
+            screen.counter = Some((Counter::new(quantity), None));
         }
         self.play_effect(b"iputdown", None);
         if dropped && quantity == 1 {
@@ -755,18 +688,17 @@ impl MapPreview {
             return false;
         };
         match input {
-            CounterInput::Accept(quantity) => match screen.dropping.take() {
-                Some(item) => {
+            CounterInput::Accept(quantity) => match screen.counter {
+                Some((_, Some(item))) => {
                     screen.counter = None;
-                    self.barter_drop_ground(item, quantity);
+                    self.drop_units(item, quantity);
                 }
-                None => self.barter_drop(quantity),
+                _ => self.barter_drop(quantity),
             },
             CounterInput::Refused => self.play_effect(ERROR_SOUND.as_bytes(), None),
             CounterInput::Cancel => {
                 screen.counter = None;
                 screen.held = None;
-                screen.dropping = None;
             }
             CounterInput::Changed => {}
             CounterInput::Ignored => return false,
@@ -827,26 +759,7 @@ impl MapPreview {
                 false,
             ),
         };
-        let Some(art) = fid.and_then(|fid| self.host.assets.object_art(fid).ok()) else {
-            return;
-        };
-        let index = if last {
-            art.frame_count().saturating_sub(1)
-        } else {
-            0
-        };
-        let Some(frame) = art.frame(direction, index).or_else(|| art.frame(0, index)) else {
-            return;
-        };
-        let origin = [
-            i64::from(rect.x + (rect.w - i32::from(frame.width)) / 2),
-            i64::from(rect.y + (rect.h - i32::from(frame.height)) / 2),
-        ];
-        image.blit_within(
-            frame,
-            origin,
-            [rect.x, rect.y, rect.w, rect.h].map(i64::from),
-        );
+        self.draw_portrait(image, fid, (direction, last), rect);
     }
     pub(crate) fn barter_image(&mut self) -> AppResult<IndexedImage> {
         let Some(owners) = self.barter_owners() else {
@@ -875,48 +788,25 @@ impl MapPreview {
         let Screen::Barter(screen) = &self.screen else {
             return Ok(image);
         };
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         painter.blit_opaque(&mut image, "barter.frm", 0, WINDOW);
         for (column, owner) in owners.iter().enumerate() {
             let entries = self.barter_entries(*owner);
-            let ([ix, iy], size) = ICONS[column];
-            for (row, (item, quantity)) in entries
+            let ([ix, iy], [w, h]) = ICONS[column];
+            for (row, entry) in entries
                 .iter()
                 .skip(screen.offsets[column])
                 .take(ROWS)
                 .enumerate()
             {
-                let lifted = screen.held.is_some_and(|(_, held, _)| held == *item);
-                let shown = if lifted { quantity - 1 } else { *quantity };
-                let origin = [SUBWINDOW[0] + ix, SUBWINDOW[1] + iy + 48 * row as i32];
-                if shown > 0
-                    && let Some(icon) = self.item_icon(*item)
-                    && let Some(frame) = icon.frame(0, 0)
-                {
-                    image.draw_frame(
-                        frame,
-                        [origin[0] as u32, origin[1] as u32],
-                        [size[0] as u32, size[1] as u32],
-                    );
-                }
                 // G-19: ammunition counts rounds (SPEC-013 §3.16).
-                let ammo = self.ammo_label(*item, lifted);
-                if let Some(label) = skills::quantity_label(shown, ammo) {
-                    painter.text(&mut image, 101, ColorKey::WHITE, &label, origin, 80);
-                }
+                let lifted = screen.held.is_some_and(|(_, held, _)| held == entry.0);
+                let rect = at(SUBWINDOW, Rect::new(ix, iy + 48 * row as i32, w, h));
+                self.draw_entry(&painter, &mut image, rect, *entry, lifted);
             }
         }
         for (_, _, rect, up, down) in SCROLL {
-            let art = self.button_art(at(SUBWINDOW, rect), up, down);
-            painter.blit(
-                &mut image,
-                art,
-                0,
-                [SUBWINDOW[0] + rect.x, SUBWINDOW[1] + rect.y],
-            );
+            self.draw_button(&painter, &mut image, at(SUBWINDOW, rect), (up, down));
         }
         for (merchant, rect) in PORTRAITS {
             self.draw_barter_portrait(&mut image, screen, merchant, at(WINDOW, rect));
@@ -925,18 +815,19 @@ impl MapPreview {
             (format!("${}", self.barter_offer_value()), 169),
             (format!("${price}"), 254),
         ] {
+            let origin = modal_kit::offset(SUBWINDOW, [x, 168]);
             painter.text(
                 &mut image,
                 101,
                 ColorKey::WHITE,
                 text.as_bytes(),
-                [SUBWINDOW[0] + x, SUBWINDOW[1] + 168],
+                origin,
                 80,
             );
         }
         for rect in [OFFER, TALK] {
-            let art = self.button_art(at(WINDOW, rect), "di_rdbt2.frm", "di_rdbt1.frm");
-            painter.blit(&mut image, art, 0, [WINDOW[0] + rect.x, WINDOW[1] + rect.y]);
+            let art = ("di_rdbt2.frm", "di_rdbt1.frm");
+            self.draw_button(&painter, &mut image, at(WINDOW, rect), art);
         }
         if self.trade_wield_shown(screen) {
             let weapon = self.host.barter_held_weapon(&screen.session);
@@ -946,18 +837,9 @@ impl MapPreview {
         if let Some((_, menu)) = &screen.menu {
             self.draw_item_menu(&painter, &mut image, menu);
         }
-        if let Some(counter) = &screen.counter {
-            let icon = screen
-                .dropping
-                .or(screen.held.map(|(_, item, _)| item))
-                .and_then(|item| self.item_icon(item));
-            draw_counter(
-                &painter,
-                &mut image,
-                counter,
-                icon.as_ref().and_then(|icon| icon.frame(0, 0)),
-                self.held_button(),
-            );
+        if let Some((counter, dropping)) = &screen.counter {
+            let item = dropping.or(screen.held.map(|(_, item, _)| item));
+            self.draw_item_counter(&painter, &mut image, counter, item);
         }
         Ok(image)
     }

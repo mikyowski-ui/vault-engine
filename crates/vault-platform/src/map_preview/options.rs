@@ -2,7 +2,10 @@
 //! quit confirmation and the preferences screen (knobs, switches, sliders,
 //! the speed-up checkbox, Default, Done and Cancel), with preferences applied
 //! to the world and written to `fallout.cfg` when a path is configured.
-use super::{MapPreview, Screen};
+use super::{
+    MapPreview, Screen,
+    modal_kit::{self, at, red_button},
+};
 use crate::{AppResult, audio::Volumes, input::key_text, interface::Painter};
 use vault_core::ui::{
     BUTTON_PRESS, ColorKey, Rect,
@@ -103,6 +106,11 @@ const PREFERENCE_BUTTONS: [([i32; 2], [i32; 2], i32, &str); 3] = [
 ];
 const CHECKBOX: Rect = Rect::new(383, 68, 18, 18);
 
+/// An `options.msg` label's width in font 101 (the knob and switch hot
+/// regions follow their labels).
+fn label_width(painter: &Painter, id: i32) -> i32 {
+    painter.width(101, &painter.message("options.msg", id))
+}
 fn menu_key(key: KeyCode, control: bool) -> Option<MenuKey> {
     Some(match key {
         KeyCode::Escape => MenuKey::Escape,
@@ -273,19 +281,15 @@ impl MapPreview {
         let Screen::Options(screen) = &self.screen else {
             return Ok(image);
         };
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         match screen {
             OptionsScreen::Menu => {
-                let [ox, oy] = options::OPTIONS_ORIGIN;
-                painter.blit_opaque(&mut image, "opbase.frm", 0, [ox, oy]);
+                let origin = options::OPTIONS_ORIGIN;
+                painter.blit_opaque(&mut image, "opbase.frm", 0, origin);
                 for i in 0..5 {
-                    let rect = options::options_button(i);
-                    let rect = Rect::new(ox + rect.x, oy + rect.y, rect.w, rect.h);
-                    let art = self.button_art(rect, "opbtnoff.frm", "opbtnon.frm");
-                    painter.blit_opaque(&mut image, art, 0, [rect.x, rect.y]);
+                    let rect = at(origin, options::options_button(i));
+                    let art = ("opbtnoff.frm", "opbtnon.frm");
+                    let art = self.draw_button_opaque(&painter, &mut image, rect, art);
                     let key = if art == "opbtnon.frm" {
                         ColorKey::LABEL_PRESSED
                     } else {
@@ -297,40 +301,16 @@ impl MapPreview {
             }
             OptionsScreen::Pause => draw_pause(&painter, &mut image, options::PAUSE_ORIGIN),
             OptionsScreen::Quit => {
-                let [ox, oy] = options::QUIT_ORIGIN;
-                let (art, [width, _]) = flow::DialogSize::Large.art();
-                painter.blit_opaque(&mut image, art, 0, [ox, oy]);
+                // §3.17 the large Yes/No box with `misc.msg` 0 in key 32328.
                 let title = painter.message("misc.msg", 0);
-                painter.centered(
+                self.draw_dialog_box(
+                    &painter,
                     &mut image,
-                    101,
+                    options::QUIT_ORIGIN,
+                    (&title, &[]),
                     ColorKey::ERROR,
-                    &title,
-                    [ox, oy + flow::dialog_title_y(0)],
-                    width,
+                    true,
                 );
-                for button in flow::dialog_buttons(true) {
-                    let [bx, by] = button.box_origin;
-                    if button.transparent_box {
-                        painter.blit(&mut image, flow::DONE_BOX.0, 0, [ox + bx, oy + by]);
-                    } else {
-                        painter.blit_opaque(&mut image, flow::DONE_BOX.0, 0, [ox + bx, oy + by]);
-                    }
-                    let caption = painter.message("dbox.msg", button.caption);
-                    let [cx, cy] = button.caption_origin;
-                    painter.text(
-                        &mut image,
-                        103,
-                        ColorKey::LABEL,
-                        &caption,
-                        [ox + cx, oy + cy],
-                        60,
-                    );
-                    let [rx, ry] = button.button;
-                    let rect = Rect::new(ox + rx, oy + ry, 15, 16);
-                    let art = self.button_art(rect, "lilredup.frm", "lilreddn.frm");
-                    painter.blit(&mut image, art, 0, [rect.x, rect.y]);
-                }
             }
             OptionsScreen::Preferences(state) => {
                 self.draw_preferences(&painter, &mut image, state);
@@ -425,15 +405,8 @@ impl MapPreview {
             painter.blit_opaque(image, "prefcvr.frm", 0, [0, 356]);
         }
         for (button, caption, id, file) in PREFERENCE_BUTTONS {
-            let rect = Rect::new(button[0], button[1], 15, 16);
-            painter.blit(
-                image,
-                self.button_art(rect, "lilredup.frm", "lilreddn.frm"),
-                0,
-                button,
-            );
-            let text = painter.message(file, id);
-            painter.text(image, 103, ColorKey::LABEL, &text, caption, 100);
+            let rect = red_button(button);
+            self.draw_captioned_red_button(painter, image, rect, (file, id), caption, 100);
         }
     }
     /// A slider drag is under way, or a knob or switch change blocks.
@@ -452,7 +425,7 @@ impl MapPreview {
             assets: &self.host.assets,
             palette: &self.palette,
         };
-        let width = |id: i32| painter.width(101, &painter.message("options.msg", id));
+        let width = |id: i32| label_width(&painter, id);
         let Screen::Options(OptionsScreen::Preferences(state)) = &mut self.screen else {
             return false;
         };
@@ -733,29 +706,21 @@ impl MapPreview {
         };
         match screen {
             OptionsScreen::Menu => {
-                let [ox, oy] = options::OPTIONS_ORIGIN;
-                let local = [point[0] - ox, point[1] - oy];
+                let origin = options::OPTIONS_ORIGIN;
+                let local = modal_kit::local(point, origin);
                 if let Some(i) = (0..5).find(|i| options::options_button(*i).contains(local)) {
-                    let rect = options::options_button(i);
-                    self.press_button_cue(
-                        b"ib3p1xx1",
-                        b"ib3lu1x1",
-                        Rect::new(ox + rect.x, oy + rect.y, rect.w, rect.h),
-                    );
+                    let rect = at(origin, options::options_button(i));
+                    self.press_button_cue(b"ib3p1xx1", b"ib3lu1x1", rect);
                     self.options_action(options::OPTIONS_BUTTONS[i]);
                 }
             }
             OptionsScreen::Pause => self.screen = Screen::Map,
             OptionsScreen::Quit => {
-                let [ox, oy] = options::QUIT_ORIGIN;
-                for button in flow::dialog_buttons(true) {
-                    let [rx, ry] = button.button;
-                    let rect = Rect::new(ox + rx, oy + ry, 15, 16);
-                    if rect.contains(point) {
-                        self.press_button(rect);
-                        self.answer_quit(button.caption == 101);
-                        break;
-                    }
+                if let Some((button, rect)) =
+                    modal_kit::dialog_button_at(options::QUIT_ORIGIN, true, point)
+                {
+                    self.press_button(rect);
+                    self.answer_quit(button.caption == 101);
                 }
             }
             OptionsScreen::Preferences(_) => self.preferences_click(point),
@@ -789,29 +754,22 @@ impl MapPreview {
     }
     fn preferences_click(&mut self, point: [i32; 2]) {
         let covered = self.preferences_covered();
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         let knob_widths: Vec<Vec<i32>> = options::KNOBS
             .iter()
             .map(|knob| {
                 knob.labels
                     .iter()
-                    .map(|id| painter.width(101, &painter.message("options.msg", *id)))
+                    .map(|id| label_width(&painter, *id))
                     .collect()
             })
             .collect();
         let switch_widths: Vec<[i32; 2]> = options::SWITCHES
             .iter()
-            .map(|switch| {
-                switch
-                    .labels
-                    .map(|id| painter.width(101, &painter.message("options.msg", id)))
-            })
+            .map(|switch| switch.labels.map(|id| label_width(&painter, id)))
             .collect();
         for (index, (button, ..)) in PREFERENCE_BUTTONS.iter().enumerate() {
-            let rect = Rect::new(button[0], button[1], 15, 16);
+            let rect = red_button(*button);
             if rect.contains(point) {
                 self.press_button(rect);
                 match index {

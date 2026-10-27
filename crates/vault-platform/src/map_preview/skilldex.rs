@@ -3,8 +3,8 @@
 //! open `trunc(1000 / 9)` ms; then Sneak toggles, another row enters that
 //! skill's targeting mode, or, opened from the action menu's Skill entry
 //! (SPEC-014 §3.28), uses the skill on that target.
-use super::{MapPreview, Screen};
-use crate::{AppResult, interface::Painter};
+use super::{MapPreview, Screen, modal_kit::at};
+use crate::AppResult;
 use vault_core::{
     ObjectRef, skills,
     ui::{BUTTON_PRESS, ColorKey, Rect},
@@ -28,13 +28,11 @@ const CLOSE_DELAY_MS: u64 = 1000 / 9;
 /// Row button `row`'s screen rectangle.
 fn row_rect(row: usize) -> Rect {
     let [x, y] = skills::skilldex_button(row);
-    let [ox, oy] = skills::SKILLDEX_ORIGIN;
-    Rect::new(ox + x, oy + y, ROW[0], ROW[1])
+    at(skills::SKILLDEX_ORIGIN, Rect::new(x, y, ROW[0], ROW[1]))
 }
 /// Cancel's screen rectangle.
-fn cancel_rect() -> Rect {
-    let [ox, oy] = skills::SKILLDEX_ORIGIN;
-    Rect::new(ox + CANCEL.x, oy + CANCEL.y, CANCEL.w, CANCEL.h)
+const fn cancel_rect() -> Rect {
+    at(skills::SKILLDEX_ORIGIN, CANCEL)
 }
 
 impl MapPreview {
@@ -52,10 +50,7 @@ impl MapPreview {
     pub(crate) fn skilldex_image(&mut self) -> AppResult<IndexedImage> {
         let view = self.map_view_image()?;
         let mut image = self.compose_world(view);
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         let [ox, oy] = skills::SKILLDEX_ORIGIN;
         painter.blit_opaque(&mut image, "skldxbox.frm", 0, [ox, oy]);
         let title = painter.message("skilldex.msg", 100);
@@ -72,8 +67,8 @@ impl MapPreview {
         let font_height = painter.line_height(103);
         for (row, skill) in skills::SKILLDEX_SKILLS.iter().enumerate() {
             let rect = row_rect(row);
-            let art = self.button_art(rect, "skldxoff.frm", "skldxon.frm");
-            painter.blit_opaque(&mut image, art, 0, [rect.x, rect.y]);
+            let art = ("skldxoff.frm", "skldxon.frm");
+            let art = self.draw_button_opaque(&painter, &mut image, rect, art);
             // The label is (18, 17, 3) on the up image, (14, 12, 3) down.
             let key = if art == "skldxon.frm" {
                 ColorKey::LABEL_PRESSED
@@ -113,9 +108,7 @@ impl MapPreview {
             [ox + 72, oy + 337],
             80,
         );
-        let cancel = cancel_rect();
-        let art = self.button_art(cancel, "lilredup.frm", "lilreddn.frm");
-        painter.blit(&mut image, art, 0, [cancel.x, cancel.y]);
+        self.draw_red_button(&painter, &mut image, cancel_rect());
         Ok(image)
     }
     fn close_skilldex(&mut self, skill: Option<i32>) {

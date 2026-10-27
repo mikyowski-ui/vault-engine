@@ -258,10 +258,7 @@ impl MapPreview {
         }
         self.play_effect(BUTTON_PRESS.as_bytes(), None);
         self.host.open_pipboy();
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         if self.pipboy_messages().is_none()
             || pipboy::ART.iter().any(|name| painter.art(name).is_none())
         {
@@ -751,10 +748,7 @@ impl MapPreview {
         let Screen::PipBoy(pipboy) = &self.screen else {
             return Err("Pip-Boy is not open".into());
         };
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         let mut image = IndexedImage::new(640, 480)?;
         painter.blit_opaque(&mut image, pipboy::BACKGROUND, 0, [0, 0]);
         // The vault-water note, then the date and time.
@@ -777,14 +771,7 @@ impl MapPreview {
         }
         painter.blit_region(&mut image, pipboy::MONTHS, month.source, month.at, true);
         for button in Button::ALL {
-            let (up, down) = button.art();
-            let rect = button.rect();
-            painter.blit(
-                &mut image,
-                self.button_art(rect, up, down),
-                0,
-                [rect.x, rect.y],
-            );
+            self.draw_button(&painter, &mut image, button.rect(), button.art());
         }
         let pen = Pen {
             font: painter.font(vault_core::ui::FONT_SMALL),
@@ -1013,10 +1000,7 @@ impl MapPreview {
         let Some((_, Some(raster))) = &pipboy.raster else {
             return;
         };
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         for row in 0..200 {
             for column in 0..200 {
                 let Some(key) =

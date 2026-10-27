@@ -12,12 +12,15 @@
 //! DONE submits the typed text, whose answer shows in the reply area with
 //! its speech; Esc or CANCEL stops speech and closes it, restoring the
 //! saved reply and its page (safe rule).
-use super::MapPreview;
+use super::{
+    MapPreview,
+    modal_kit::{offset, red_button},
+};
 use crate::{input::key_text, interface::Painter};
 use vault_core::{
     assets::WorldAssets,
     host_talk::{ReviewText, TellMeAbout},
-    ui::{self, BUTTON_PRESS, BUTTON_RELEASE, RED_BUTTON, Rect, talk},
+    ui::{self, BUTTON_PRESS, BUTTON_RELEASE, Rect, talk},
 };
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
@@ -52,9 +55,7 @@ type Cues = (&'static [u8], &'static [u8]);
 
 /// The Ask About red buttons' screen rectangles: DONE, CANCEL.
 fn ask_buttons() -> [Rect; 2] {
-    let [ox, oy] = talk::ASK_ORIGIN;
-    let [w, h] = RED_BUTTON.2;
-    [talk::ASK_DONE, talk::ASK_CANCEL].map(|[x, y]| Rect::new(ox + x, oy + y, w, h))
+    [talk::ASK_DONE, talk::ASK_CANCEL].map(|button| red_button(offset(talk::ASK_ORIGIN, button)))
 }
 
 impl MapPreview {
@@ -325,10 +326,7 @@ impl MapPreview {
             name(self.host.world.dialogue.target),
             name(self.host.world.player),
         );
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         let shown = self.panel_buttons();
         for (rect, (normal, pressed), opaque) in [
             (talk::BARTER, talk::SMALL_ART, false),
@@ -341,11 +339,10 @@ impl MapPreview {
             if !shown.iter().any(|(button, _)| *button == rect) {
                 continue;
             }
-            let art = self.button_art(rect, normal, pressed);
             if opaque {
-                painter.blit_opaque(image, art, 0, [rect.x, rect.y]);
+                self.draw_button_opaque(&painter, image, rect, (normal, pressed));
             } else {
-                painter.blit(image, art, 0, [rect.x, rect.y]);
+                self.draw_button(&painter, image, rect, (normal, pressed));
             }
         }
         match (&self.talk, review, entries) {
@@ -385,9 +382,8 @@ impl MapPreview {
                 line.limit,
             );
         }
-        for (rect, (normal, pressed)) in [talk::SCROLL_UP, talk::SCROLL_DOWN, talk::DONE] {
-            let art = self.button_art(rect, normal, pressed);
-            painter.blit(image, art, 0, [rect.x, rect.y]);
+        for (rect, art) in [talk::SCROLL_UP, talk::SCROLL_DOWN, talk::DONE] {
+            self.draw_button(painter, image, rect, art);
         }
     }
     /// The Ask About window: `lsgbox.frm`, its title and button labels, the
@@ -418,8 +414,7 @@ impl MapPreview {
             );
         }
         for rect in ask_buttons() {
-            let art = self.button_art(rect, RED_BUTTON.0, RED_BUTTON.1);
-            painter.blit(image, art, 0, [rect.x, rect.y]);
+            self.draw_red_button(painter, image, rect);
         }
         let field = talk::FIELD;
         image.fill_rect(

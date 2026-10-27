@@ -2,8 +2,12 @@
 //! states, previews, the info box, the overwrite question and description
 //! box), committing through the SPEC-008 slot writer and reader, and quick
 //! save/load. Slots live below the configured save root.
-use super::{MapPreview, Screen, dialog::Dialog};
-use crate::{AppResult, input::key_text, interface::Painter};
+use super::{
+    MapPreview, Screen,
+    dialog::Dialog,
+    modal_kit::{self, red_button},
+};
+use crate::{AppResult, input::key_text};
 use vault_core::{
     host_save::{SaveInfo, slot_directory},
     ui::{
@@ -41,8 +45,8 @@ impl SaveLoadScreen {
 }
 
 /// §3.15 the description box's Done and Cancel red buttons (screen).
-const DESCRIPTION_DONE: Rect = Rect::new(169 + 34, 116 + 58, 15, 16);
-const DESCRIPTION_CANCEL: Rect = Rect::new(169 + 160, 116 + 58, 15, 16);
+const DESCRIPTION_DONE: Rect = red_button([169 + 34, 116 + 58]);
+const DESCRIPTION_CANCEL: Rect = red_button([169 + 160, 116 + 58]);
 
 /// Read every slot header below `root`, in `game`'s layout (SPEC-018
 /// §2.3: slots belong to one game, so the other game's slots do not read).
@@ -160,10 +164,7 @@ impl MapPreview {
             return Err("no save screen".into());
         };
         let mut image = IndexedImage::new(640, 480)?;
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         painter.blit_opaque(&mut image, saveload::BACKGROUND, 0, [0, 0]);
         let title = painter.message("lsgame.msg", screen.mode.title());
         painter.text(
@@ -282,22 +283,15 @@ impl MapPreview {
             .into_iter()
             .zip([104, 105])
         {
-            let rect = vault_core::ui::Rect::new(button[0], button[1], 15, 16);
-            let art = self.button_art(rect, "lilredup.frm", "lilreddn.frm");
-            painter.blit(&mut image, art, 0, button);
-            let text = painter.message("lsgame.msg", id);
-            painter.text(&mut image, 103, ColorKey::LABEL, &text, caption, 80);
+            let message = ("lsgame.msg", id);
+            let rect = red_button(button);
+            self.draw_captioned_red_button(&painter, &mut image, rect, message, caption, 80);
         }
-        for (rect, up, down) in [
-            (saveload::ARROW_UP, "uparwoff.frm", "uparwon.frm"),
-            (saveload::ARROW_DOWN, "dnarwoff.frm", "dnarwon.frm"),
+        for (rect, art) in [
+            (saveload::ARROW_UP, ("uparwoff.frm", "uparwon.frm")),
+            (saveload::ARROW_DOWN, ("dnarwoff.frm", "dnarwon.frm")),
         ] {
-            painter.blit(
-                &mut image,
-                self.button_art(rect, up, down),
-                0,
-                [rect.x, rect.y],
-            );
+            self.draw_button(&painter, &mut image, rect, art);
         }
         if let Some(description) = &screen.description {
             // §3.15 the description box: DONE (104) and CANCEL (105)
@@ -312,10 +306,8 @@ impl MapPreview {
                 (DESCRIPTION_DONE, [ox + 56, oy + 57], 104),
                 (DESCRIPTION_CANCEL, [ox + 181, oy + 57], 105),
             ] {
-                let art = self.button_art(rect, "lilredup.frm", "lilreddn.frm");
-                painter.blit(&mut image, art, 0, [rect.x, rect.y]);
-                let text = painter.message("lsgame.msg", id);
-                painter.text(&mut image, 103, ColorKey::LABEL, &text, caption, 80);
+                let message = ("lsgame.msg", id);
+                self.draw_captioned_red_button(&painter, &mut image, rect, message, caption, 80);
             }
             let mut text = description.text.clone();
             text.push(b' ');
@@ -519,13 +511,13 @@ impl MapPreview {
             }
             return true;
         }
-        let red = |origin: [i32; 2]| Rect::new(origin[0], origin[1], 15, 16);
-        if red(saveload::DONE.0).contains(point) {
-            self.held = Some(red(saveload::DONE.0));
+        let (done, cancel) = (red_button(saveload::DONE.0), red_button(saveload::CANCEL.0));
+        if done.contains(point) {
+            self.held = Some(done);
             self.play_effect(BUTTON_PRESS.as_bytes(), None);
             self.commit_slot();
-        } else if red(saveload::CANCEL.0).contains(point) {
-            self.press_button(red(saveload::CANCEL.0));
+        } else if cancel.contains(point) {
+            self.press_button(cancel);
             self.cancel_save_screen();
         } else if let Some((rect, key)) = [
             (saveload::ARROW_UP, ListKey::Up),
@@ -609,14 +601,10 @@ impl MapPreview {
         let blink = (now / (3 * FRAME_MS)).is_multiple_of(2);
         let mut changed =
             std::mem::replace(&mut screen.blink, blink) != blink && screen.description.is_some();
-        if let Some((key, rect, repeat)) = &mut screen.arrow {
-            if held != Some(*rect) {
-                screen.arrow = None;
-            } else if repeat.poll(now) {
-                let key = *key;
-                self.slot_list.key(key);
-                changed = true;
-            }
+        if let Some(key) = modal_kit::poll_repeat(&mut screen.arrow, now, |rect| held == Some(rect))
+        {
+            self.slot_list.key(key);
+            changed = true;
         }
         changed
     }

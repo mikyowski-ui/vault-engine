@@ -9,18 +9,16 @@
 //! container in its pane; the portrait hot zones go back up a level.
 use super::{
     MapPreview, Screen,
-    counter::{CounterInput, counter_click, counter_key, draw_counter},
-    inventory::{ArrowPress, ItemMenu},
+    counter::{CounterInput, counter_click, counter_key},
+    modal_kit::{self, ArrowPress, ItemMenu, at},
 };
 use crate::{AppResult, interface::Painter};
 use vault_core::{
     ObjectRef,
-    assets::WorldAssets,
     loot::{LootMove, LootSession},
     skills::{self, Counter, ItemEntry},
-    ui::{BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect, cursor, fallout2 as ui2, inventory as layout},
+    ui::{ERROR_SOUND, Rect, fallout2 as ui2, inventory as layout},
 };
-use vault_formats::pro::{ItemData, PrototypeData};
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
@@ -147,36 +145,18 @@ impl MapPreview {
         }
         self.drain_effects();
     }
-    pub(crate) fn item_icon(
-        &self,
-        item: ObjectRef,
-    ) -> Option<std::sync::Arc<vault_formats::FrmArchive>> {
-        let fid = self.host.world.get(item).and_then(|object| {
-            object
-                .prototype
-                .as_ref()
-                .and_then(|prototype| match &prototype.data {
-                    PrototypeData::Item(data) => Some(data.inventory_art),
-                    _ => None,
-                })
-        })?;
-        self.host.assets.object_art(fid).ok()
-    }
     pub(crate) fn loot_image(&mut self) -> AppResult<IndexedImage> {
         let view = self.map_view_image()?;
         let mut image = self.compose_world(view);
         let Screen::Loot(screen) = &self.screen else {
             return Ok(image);
         };
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         let [ox, oy] = skills::LOOT_ORIGIN;
         painter.blit_opaque(&mut image, "loot.frm", 0, [ox, oy]);
         for (index, target) in [false, true].into_iter().enumerate() {
             let entries = self.host.loot_items(&screen.session, target);
-            for (row, (item, quantity)) in entries
+            for (row, entry) in entries
                 .iter()
                 .skip(screen.offsets[index])
                 .take(skills::LOOT_ROWS)
@@ -187,48 +167,30 @@ impl MapPreview {
                 } else {
                     skills::loot_player_icon(row)
                 };
-                let lifted = screen.held.is_some_and(|(_, held, _)| held == *item);
-                let shown = if lifted { quantity - 1 } else { *quantity };
-                if shown > 0
-                    && let Some(icon) = self.item_icon(*item)
-                    && let Some(frame) = icon.frame(0, 0)
-                {
-                    image.draw_frame(frame, [(ox + x) as u32, (oy + y) as u32], [56, 40]);
-                }
                 // G-19: ammunition counts rounds, pack size × (quantity - 1)
                 // plus the front pack (omitted while lifted).
-                let ammo = self.ammo_label(*item, lifted);
-                if let Some(label) = skills::quantity_label(shown, ammo) {
-                    painter.text(
-                        &mut image,
-                        101,
-                        ColorKey::WHITE,
-                        &label,
-                        [ox + x, oy + y],
-                        80,
-                    );
-                }
+                let lifted = screen.held.is_some_and(|(_, held, _)| held == entry.0);
+                let rect = Rect::new(ox + x, oy + y, 56, 40);
+                self.draw_entry(&painter, &mut image, rect, *entry, lifted);
             }
         }
         for target in [false, true] {
-            self.draw_portrait(&mut image, screen, target);
+            self.draw_loot_portrait(&mut image, screen, target);
         }
         for (_, up, rect) in SCROLL {
             let art = if up {
-                self.button_art(on_screen(rect), "invupout.frm", "invupin.frm")
+                ("invupout.frm", "invupin.frm")
             } else {
-                self.button_art(on_screen(rect), "invdnout.frm", "invdnin.frm")
+                ("invdnout.frm", "invdnin.frm")
             };
-            painter.blit(&mut image, art, 0, [ox + rect.x, oy + rect.y]);
+            self.draw_button(&painter, &mut image, on_screen(rect), art);
         }
         if screen.session.bodies.len() > 1 {
             for (rect, _, up, down) in CYCLE {
-                let art = self.button_art(on_screen(rect), up, down);
-                painter.blit(&mut image, art, 0, [ox + rect.x, oy + rect.y]);
+                self.draw_button(&painter, &mut image, on_screen(rect), (up, down));
             }
         }
-        let done = self.button_art(on_screen(DONE), "lilredup.frm", "lilreddn.frm");
-        painter.blit(&mut image, done, 0, [ox + DONE.x, oy + DONE.y]);
+        self.draw_red_button(&painter, &mut image, on_screen(DONE));
         if self.take_all_shown(screen) {
             // SPEC-019 §3.7: Fallout 2's Take All pair at the enhanced
             // button's place, with the art's own size.
@@ -262,14 +224,7 @@ impl MapPreview {
                 LootCount::Drop(item) => Some(*item),
                 LootCount::Move(_) => screen.held.map(|(_, item, _)| item),
             };
-            let icon = item.and_then(|item| self.item_icon(item));
-            draw_counter(
-                &painter,
-                &mut image,
-                counter,
-                icon.as_ref().and_then(|icon| icon.frame(0, 0)),
-                self.held_button(),
-            );
+            self.draw_item_counter(&painter, &mut image, counter, item);
         }
         Ok(image)
     }
@@ -277,7 +232,7 @@ impl MapPreview {
     /// to it: the player's figure with the active hand's weapon code facing
     /// southwest (3), frame 0; the target's art at its facing, last frame;
     /// an open container's own world art.
-    fn draw_portrait(&self, image: &mut IndexedImage, screen: &LootScreen, target: bool) {
+    fn draw_loot_portrait(&self, image: &mut IndexedImage, screen: &LootScreen, target: bool) {
         let session = &screen.session;
         let shown = session.shown(target);
         let world = &self.host.world;
@@ -294,27 +249,8 @@ impl MapPreview {
         } else {
             (self.host.figure_art(shown, self.active_item(), 3), 3, false)
         };
-        let Some(art) = fid.and_then(|fid| self.host.assets.object_art(fid).ok()) else {
-            return;
-        };
-        let index = if last {
-            art.frame_count().saturating_sub(1)
-        } else {
-            0
-        };
-        let Some(frame) = art.frame(direction, index).or_else(|| art.frame(0, index)) else {
-            return;
-        };
         let rect = on_screen(PORTRAITS[usize::from(target)].1);
-        let origin = [
-            i64::from(rect.x + (rect.w - i32::from(frame.width)) / 2),
-            i64::from(rect.y + (rect.h - i32::from(frame.height)) / 2),
-        ];
-        image.blit_within(
-            frame,
-            origin,
-            [rect.x, rect.y, rect.w, rect.h].map(i64::from),
-        );
+        self.draw_portrait(image, fid, (direction, last), rect);
     }
     pub(super) fn close_loot_screen(&mut self) {
         let Screen::Loot(screen) = std::mem::replace(&mut self.screen, Screen::Map) else {
@@ -337,8 +273,7 @@ impl MapPreview {
         let Screen::Loot(screen) = &self.screen else {
             return None;
         };
-        let [ox, oy] = skills::LOOT_ORIGIN;
-        let local = [point[0] - ox, point[1] - oy];
+        let local = modal_kit::local(point, skills::LOOT_ORIGIN);
         [false, true].into_iter().find_map(|target| {
             let row = (0..skills::LOOT_ROWS).find(|row| slot(target, *row).contains(local))?;
             let entries = self.host.loot_items(&screen.session, target);
@@ -364,11 +299,8 @@ impl MapPreview {
         let Screen::Loot(screen) = &mut self.screen else {
             return;
         };
-        if !screen.arrow || screen.held.is_some() || screen.hovered == entry {
-            return;
-        }
-        screen.hovered = entry;
-        if let Some(item) = entry {
+        let dragging = screen.held.is_some();
+        if let Some(item) = modal_kit::hover(screen.arrow, dragging, &mut screen.hovered, entry) {
             self.look_line(item);
         }
     }
@@ -383,15 +315,7 @@ impl MapPreview {
         let Screen::Loot(screen) = &mut self.screen else {
             return false;
         };
-        let mut changed = false;
-        for (offset, count) in screen.offsets.iter_mut().zip(counts) {
-            let limit = count.saturating_sub(skills::LOOT_ROWS);
-            if *offset > limit {
-                *offset = limit;
-                changed = true;
-            }
-        }
-        changed
+        modal_kit::clamp_offsets(&mut screen.offsets, counts, skills::LOOT_ROWS)
     }
     pub(crate) fn loot_tick(&mut self) -> bool {
         let clamped = self.clamp_loot_offsets();
@@ -407,7 +331,7 @@ impl MapPreview {
             return false;
         };
         screen.press = None;
-        let entries = self.loot_menu(target, press.item);
+        let entries = self.window_item_menu(press.item, !target);
         let origin = at.unwrap_or(skills::LOOT_ORIGIN);
         if let Screen::Loot(screen) = &mut self.screen {
             screen.menu = Some((
@@ -415,24 +339,8 @@ impl MapPreview {
                 ItemMenu::new(press.item, entries, origin, layout::LOOT_EDGES),
             ));
         }
-        self.play_effect(cursor::MENU_OPEN_SOUND.as_bytes(), None);
+        self.menu_open_cue();
         true
-    }
-    /// §3.16 the menu: Look, then Unload for a weapon holding ammunition or
-    /// Use for a container, Drop for the player's own items, and Cancel.
-    fn loot_menu(&self, target: bool, item: ObjectRef) -> Vec<ItemEntry> {
-        let data =
-            self.host
-                .world
-                .get(item)
-                .and_then(|object| match &object.prototype.as_deref()?.data {
-                    PrototypeData::Item(item) => Some(&item.data),
-                    _ => None,
-                });
-        let unloadable = matches!(data, Some(ItemData::Weapon(gun)) if gun.capacity > 0)
-            && self.host.world.loaded(item).0 > 0;
-        let container = matches!(data, Some(ItemData::Container { .. }));
-        skills::item_menu(!target, unloadable, container)
     }
     /// §3.16 an action menu entry: Look prints the full examine text; Unload
     /// adds the ammunition, forced, to the item's owner; Use opens a
@@ -460,18 +368,11 @@ impl MapPreview {
                         screen.counter = Some((Counter::new(quantity), LootCount::Drop(item)));
                     }
                 } else {
-                    self.loot_drop_ground(item, 1);
+                    self.drop_units(item, 1);
                 }
             }
             ItemEntry::Cancel => {}
         }
-    }
-    fn loot_drop_ground(&mut self, item: ObjectRef, quantity: i32) {
-        let player = self.host.world.player;
-        if let Err(error) = self.host.world.drop_item(player, item, quantity) {
-            self.status = error.to_string().into_bytes();
-        }
-        self.drain_effects();
     }
     /// Move the lifted entry's `quantity` into the other pane.
     fn loot_drop(&mut self, quantity: i32) {
@@ -504,9 +405,7 @@ impl MapPreview {
             return false;
         };
         if screen.counter.is_some() {
-            if let Some(rect) = super::counter::counter_button(point) {
-                self.press_button(rect);
-            }
+            self.press_counter_button(point);
             let Screen::Loot(screen) = &mut self.screen else {
                 return false;
             };
@@ -528,8 +427,7 @@ impl MapPreview {
             screen.hovered = None;
             return true;
         }
-        let [ox, oy] = skills::LOOT_ORIGIN;
-        let local = [point[0] - ox, point[1] - oy];
+        let local = modal_kit::local(point, skills::LOOT_ORIGIN);
         if DONE.contains(local) {
             self.press_button(on_screen(DONE));
             self.close_loot_screen();
@@ -560,12 +458,7 @@ impl MapPreview {
         if let Some((target, up, rect)) = SCROLL.iter().find(|(_, _, rect)| rect.contains(local)) {
             let index = usize::from(*target);
             let count = self.host.loot_items(&screen.session, *target).len();
-            let offset = &mut screen.offsets[index];
-            if *up {
-                *offset = offset.saturating_sub(1);
-            } else if *offset + skills::LOOT_ROWS < count {
-                *offset += 1;
-            }
+            modal_kit::scroll(&mut screen.offsets[index], *up, skills::LOOT_ROWS, count);
             self.press_button(on_screen(*rect));
             return true;
         }
@@ -603,7 +496,7 @@ impl MapPreview {
         };
         match input {
             CounterInput::Accept(quantity) => match screen.counter.take() {
-                Some((_, LootCount::Drop(item))) => self.loot_drop_ground(item, quantity),
+                Some((_, LootCount::Drop(item))) => self.drop_units(item, quantity),
                 _ => self.loot_drop(quantity),
             },
             CounterInput::Refused => self.play_effect(ERROR_SOUND.as_bytes(), None),
@@ -661,12 +554,9 @@ impl MapPreview {
             return false;
         };
         if let Some((counter, _)) = &mut screen.counter {
+            // Only Enter accepts, after `ib1p1xx1`.
             let input = counter_key(counter, key);
-            if matches!(key, KeyCode::Enter | KeyCode::NumpadEnter)
-                && matches!(input, CounterInput::Accept(_))
-            {
-                self.play_effect(BUTTON_PRESS.as_bytes(), None);
-            }
+            let input = self.counter_key_cue(input);
             return self.loot_counter(input);
         }
         // SPEC-014 §3.34: all other input is ignored during a drag, and the
@@ -688,11 +578,7 @@ impl MapPreview {
                 let target = control;
                 let count = self.host.loot_items(&screen.session, target).len();
                 let offset = &mut screen.offsets[usize::from(target)];
-                if key == KeyCode::ArrowUp {
-                    *offset = offset.saturating_sub(1);
-                } else if *offset + skills::LOOT_ROWS < count {
-                    *offset += 1;
-                }
+                modal_kit::scroll(offset, key == KeyCode::ArrowUp, skills::LOOT_ROWS, count);
             }
             KeyCode::PageUp | KeyCode::PageDown => {
                 screen.session.cycle(key == KeyCode::PageDown);
@@ -710,52 +596,6 @@ impl MapPreview {
     fn engine_button(&self, painter: &Painter, image: &mut IndexedImage, rect: Rect, label: &[u8]) {
         self.engine_button_at(painter, image, on_screen(rect), label);
     }
-    /// An engine-drawn button at screen `rect`: an amber frame, the label
-    /// amber on black, the colors swapped while pressed.
-    pub(crate) fn engine_button_at(
-        &self,
-        painter: &Painter,
-        image: &mut IndexedImage,
-        rect: Rect,
-        label: &[u8],
-    ) {
-        let pressed = self.held == Some(rect);
-        let (fill, text) = if pressed {
-            (ColorKey::AMBER, ColorKey::BLACK)
-        } else {
-            (ColorKey::BLACK, ColorKey::AMBER)
-        };
-        let Rect { x, y, w, h } = rect;
-        image.fill_rect([x, y, w, h], painter.color(ColorKey::AMBER));
-        image.fill_rect([x + 1, y + 1, w - 2, h - 2], painter.color(fill));
-        painter.centered(image, 101, text, label, [x, y + (h - 8) / 2], w);
-    }
-    /// The WIELD button and its label plate at screen rectangles: the held
-    /// weapon's name, or "Unarmed", amber on black and clipped to the
-    /// plate.
-    pub(crate) fn draw_wield(
-        &self,
-        painter: &Painter,
-        image: &mut IndexedImage,
-        [button, label]: [Rect; 2],
-        weapon: Option<ObjectRef>,
-    ) {
-        self.engine_button_at(painter, image, button, b"WIELD");
-        let name = weapon
-            .and_then(|item| self.host.world.get(item))
-            .map_or_else(|| b"Unarmed".to_vec(), |object| object.name.clone());
-        let Rect { x, y, w, h } = label;
-        image.fill_rect([x, y, w, h], painter.color(ColorKey::BLACK));
-        let width = painter.width(101, &name).min(w - 4);
-        painter.text(
-            image,
-            101,
-            ColorKey::AMBER,
-            &name,
-            [x + (w - width) / 2, y + (h - 8) / 2],
-            w - 4,
-        );
-    }
     /// The `enhanced` window shows its Take All button outside steal
     /// sessions (Vanilla, the touch UI's navigation-only view included,
     /// has Shift+A only).
@@ -765,10 +605,7 @@ impl MapPreview {
     /// The Take All button's window rectangle: the enhanced one, or under
     /// Fallout 2 its art's size at the same place.
     fn take_all_rect(&self) -> Rect {
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         self.host
             .world
             .fallout2
@@ -793,7 +630,6 @@ impl MapPreview {
 }
 
 /// A window-relative rectangle on the screen.
-fn on_screen(rect: Rect) -> Rect {
-    let [ox, oy] = skills::LOOT_ORIGIN;
-    Rect::new(ox + rect.x, oy + rect.y, rect.w, rect.h)
+const fn on_screen(rect: Rect) -> Rect {
+    at(skills::LOOT_ORIGIN, rect)
 }

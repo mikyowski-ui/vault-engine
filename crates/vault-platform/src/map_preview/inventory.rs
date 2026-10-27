@@ -28,25 +28,23 @@
 //! invisible button) goes up one level.
 use super::{
     MapPreview, Screen,
-    counter::{CounterInput, counter_click, counter_key, draw_counter},
+    counter::{CounterInput, counter_click, counter_key},
+    modal_kit::{self, red_button_sized},
 };
 use crate::{AppResult, interface::Painter};
+pub(crate) use modal_kit::{ArrowPress, ItemMenu};
 use vault_core::{
     ObjectAction, ObjectRef, WorldEffect,
     assets::WorldAssets,
     items::EQUIPPED,
     skills::{self, Counter, ItemEntry},
     ui::{
-        BUTTON_PRESS, ColorKey, ERROR_SOUND, Rect,
+        ColorKey, ERROR_SOUND, Rect,
         automap::MOTION_SENSOR,
-        cursor::{self, MenuTracker},
         inventory::{self as layout, DropTarget},
     },
 };
-use vault_formats::{
-    map::{ObjectDetail, ObjectState},
-    pro::{BasicFlags, ItemData, PrototypeData},
-};
+use vault_formats::pro::{BasicFlags, ItemData};
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
@@ -81,66 +79,6 @@ pub(crate) enum Count {
     },
     /// `item` dropped on the player's hex.
     Drop { item: ObjectRef },
-}
-
-/// An arrow-cursor press on an item (in the inventory, use-on, loot or
-/// barter window), waiting for its release or the 250 ms hold pulse.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ArrowPress {
-    pub item: ObjectRef,
-    next_pulse: u64,
-}
-impl ArrowPress {
-    pub(crate) fn new(item: ObjectRef, clock: u64) -> Self {
-        Self {
-            item,
-            next_pulse: clock + cursor::MENU_HOLD_MS,
-        }
-    }
-    /// The hold pulse is due: strictly more than 250 ms after the press.
-    pub(crate) fn due(&self, clock: u64) -> bool {
-        clock > self.next_pulse
-    }
-}
-
-/// The arrow cursor's item menu.
-#[derive(Debug, Clone)]
-pub(crate) struct ItemMenu {
-    pub item: ObjectRef,
-    pub entries: Vec<ItemEntry>,
-    pub tracker: MenuTracker,
-    /// The pointer when it opened, where the release returns it.
-    pub origin: [i32; 2],
-    /// The menu's top after any upward shift, and whether it is flipped.
-    pub top: i32,
-    pub flipped: bool,
-}
-impl ItemMenu {
-    /// §3.34 a menu of `entries` for `item`, opened with the pointer at
-    /// `origin` in a window with the given edges.
-    pub(crate) fn new(
-        item: ObjectRef,
-        entries: Vec<ItemEntry>,
-        origin: [i32; 2],
-        edges: [i32; 2],
-    ) -> Self {
-        let (top, flipped) = layout::menu_place(origin, entries.len(), edges);
-        Self {
-            item,
-            tracker: MenuTracker::new(origin[1], entries.len()),
-            entries,
-            origin,
-            top,
-            flipped,
-        }
-    }
-    /// The highlighted entry, run on the release.
-    pub(crate) fn chosen(&self) -> ItemEntry {
-        self.entries
-            .get(self.tracker.highlight)
-            .copied()
-            .unwrap_or(ItemEntry::Cancel)
-    }
 }
 
 /// §3.34 the stats panel's examine text: the item's name, its examine text
@@ -258,12 +196,6 @@ impl MapPreview {
             .iter()
             .find_map(|(item, _)| (world.get(*item)?.raw.flags.0 & flag != 0).then_some(*item))
     }
-    fn item_kind(&self, item: ObjectRef) -> Option<&ItemData> {
-        match &self.host.world.get(item)?.prototype.as_deref()?.data {
-            PrototypeData::Item(data) => Some(&data.data),
-            _ => None,
-        }
-    }
     /// The quantity of `item`'s entry in its owner's inventory.
     fn entry_quantity(&self, item: ObjectRef) -> i32 {
         let world = &self.host.world;
@@ -359,13 +291,7 @@ impl MapPreview {
     }
     /// The red button at `origin`, sized by its art.
     fn red_button(&self, origin: [i32; 2]) -> Rect {
-        let [w, h] = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        }
-        .size(layout::RED_BUTTON.0)
-        .unwrap_or([15, 16]);
-        Rect::new(origin[0], origin[1], w, h)
+        red_button_sized(&self.painter(), origin)
     }
     pub(crate) fn inventory_key(&mut self, key: KeyCode) -> bool {
         let count = self.list_entries().len();
@@ -374,9 +300,7 @@ impl MapPreview {
         };
         if let Some((counter, _)) = &mut screen.counter {
             let input = counter_key(counter, key);
-            if matches!(input, CounterInput::Accept(_)) {
-                self.play_effect(BUTTON_PRESS.as_bytes(), None);
-            }
+            let input = self.counter_key_cue(input);
             return self.inventory_counter(input);
         }
         // All other input is ignored during a drag or with the menu open.
@@ -390,17 +314,10 @@ impl MapPreview {
         let control = self.hud.modifiers[1];
         match key {
             KeyCode::Escape => self.close_inventory(),
-            KeyCode::ArrowUp => screen.offset = screen.offset.saturating_sub(1),
-            KeyCode::ArrowDown if screen.offset + rows < count => screen.offset += 1,
-            KeyCode::ArrowDown => {}
-            KeyCode::KeyQ | KeyCode::KeyX if control => {
-                let title = self.message("misc.msg", 0);
-                self.show_dialog(super::dialog::Dialog::quit_confirmation(
-                    [169, 117],
-                    title,
-                    ColorKey::ERROR,
-                ));
+            KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                modal_kit::scroll(&mut screen.offset, key == KeyCode::ArrowUp, rows, count);
             }
+            KeyCode::KeyQ | KeyCode::KeyX if control => self.confirm_quit(),
             KeyCode::Home if use_on => screen.offset = 0,
             KeyCode::End if use_on => screen.offset = count.saturating_sub(rows),
             KeyCode::PageUp if use_on => screen.offset = screen.offset.saturating_sub(rows),
@@ -421,9 +338,7 @@ impl MapPreview {
             return false;
         };
         if screen.counter.is_some() {
-            if let Some(rect) = super::counter::counter_button(point) {
-                self.press_button(rect);
-            }
+            self.press_counter_button(point);
             let Screen::Inventory(screen) = &mut self.screen else {
                 return false;
             };
@@ -467,11 +382,7 @@ impl MapPreview {
             if rect.contains(point) {
                 self.press_button(rect);
                 if let Screen::Inventory(screen) = &mut self.screen {
-                    if down && screen.offset + layout::ROWS < count {
-                        screen.offset += 1;
-                    } else if !down {
-                        screen.offset = screen.offset.saturating_sub(1);
-                    }
+                    modal_kit::scroll(&mut screen.offset, !down, layout::ROWS, count);
                 }
                 return true;
             }
@@ -602,7 +513,7 @@ impl MapPreview {
         if let Screen::Inventory(screen) = &mut self.screen {
             screen.menu = Some(ItemMenu::new(item, entries, origin, edges));
         }
-        self.play_effect(cursor::MENU_OPEN_SOUND.as_bytes(), None);
+        self.menu_open_cue();
         true
     }
     /// The pointer moved over a window: an open item menu tracks the
@@ -691,24 +602,7 @@ impl MapPreview {
             self.examine_line(item);
             return;
         }
-        let player = self.host.world.player;
-        let start = self.host.world.effects.len();
-        if let Err(error) = self.host.action(player, item, ObjectAction::Description) {
-            self.status = error.to_string().into_bytes();
-        }
-        let emitted: Vec<_> = self.host.world.effects.drain(start..).collect();
-        let mut text = Vec::new();
-        for effect in emitted {
-            match effect {
-                WorldEffect::Message(line) => {
-                    if !text.is_empty() {
-                        text.push(b' ');
-                    }
-                    text.extend(line);
-                }
-                other => self.host.world.effects.push_back(other),
-            }
-        }
+        let text = self.action_text(item, ObjectAction::Description);
         let world = &self.host.world;
         let examine = Examine {
             name: world.get(item).map(|o| o.name.clone()).unwrap_or_default(),
@@ -767,13 +661,6 @@ impl MapPreview {
             self.host.action(player, item, ObjectAction::Use)
         };
         if let Err(error) = result {
-            self.status = error.to_string().into_bytes();
-        }
-        self.drain_effects();
-    }
-    fn drop_units(&mut self, item: ObjectRef, quantity: i32) {
-        let player = self.host.world.player;
-        if let Err(error) = self.host.world.drop_item(player, item, quantity) {
             self.status = error.to_string().into_bytes();
         }
         self.drain_effects();
@@ -1033,10 +920,7 @@ impl MapPreview {
         let Screen::Inventory(screen) = &self.screen else {
             return Err("inventory is not open".into());
         };
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         let use_on = screen.target.is_some();
         let art = if use_on {
             layout::USE_ON_ART
@@ -1052,39 +936,15 @@ impl MapPreview {
             let Some((item, quantity)) = entries.get(screen.offset + row).copied() else {
                 continue;
             };
-            let rect = layout::icon_rect(row);
             let dragged = lifted == Some((Slot::List, item));
-            let shown = if dragged { quantity - 1 } else { quantity };
-            if shown > 0 {
-                self.draw_icon(&mut image, item, rect);
-            }
-            if let Some(label) = skills::quantity_label(shown, self.ammo_label(item, dragged)) {
-                painter.text(
-                    &mut image,
-                    101,
-                    ColorKey::WHITE,
-                    &label,
-                    [rect.x, rect.y],
-                    80,
-                );
-            }
+            let rect = layout::icon_rect(row);
+            self.draw_entry(&painter, &mut image, rect, (item, quantity), dragged);
         }
         for (rect, up, down) in [layout::SCROLL_UP, layout::SCROLL_DOWN] {
-            painter.blit(
-                &mut image,
-                self.button_art(rect, up, down),
-                0,
-                [rect.x, rect.y],
-            );
+            self.draw_button(&painter, &mut image, rect, (up, down));
         }
         let red = self.red_button(if use_on { layout::CANCEL } else { layout::DONE });
-        let (up, down) = layout::RED_BUTTON;
-        painter.blit(
-            &mut image,
-            self.button_art(red, up, down),
-            0,
-            [red.x, red.y],
-        );
+        self.draw_button(&painter, &mut image, red, layout::RED_BUTTON);
         self.draw_figure(&mut image);
         if !use_on {
             self.draw_slots(&mut image, lifted);
@@ -1101,44 +961,9 @@ impl MapPreview {
                 Count::Reload { ammo, .. } => *ammo,
                 Count::Into { item, .. } | Count::Drop { item } => *item,
             };
-            let icon = self.item_icon(item);
-            draw_counter(
-                &painter,
-                &mut image,
-                counter,
-                icon.as_ref().and_then(|icon| icon.frame(0, 0)),
-                self.held_button(),
-            );
+            self.draw_item_counter(&painter, &mut image, counter, Some(item));
         }
         Ok(image)
-    }
-    /// An item's inventory art scaled into `rect`.
-    fn draw_icon(&self, image: &mut IndexedImage, item: ObjectRef, rect: Rect) {
-        if let Some(art) = self.item_icon(item)
-            && let Some(frame) = art.frame(0, 0)
-        {
-            image.draw_frame(
-                frame,
-                [rect.x as u32, rect.y as u32],
-                [rect.w as u32, rect.h as u32],
-            );
-        }
-    }
-    /// The ammunition terms of a quantity label: the pack size and the
-    /// front pack's rounds, which a dragged entry leaves out (SPEC-013
-    /// §3.16).
-    pub(super) fn ammo_label(&self, item: ObjectRef, dragged: bool) -> Option<(i32, i32)> {
-        let Some(ItemData::Ammunition { quantity: pack, .. }) = self.item_kind(item) else {
-            return None;
-        };
-        let front = match &self.host.world.get(item)?.raw.state {
-            ObjectState::Other {
-                detail: ObjectDetail::Ammunition(rounds),
-                ..
-            } if !dragged => *rounds,
-            _ => *pack,
-        };
-        Some((*pack, front))
     }
     /// §3.34 the rotating figure, centered in its 60-by-100 box, clipped to
     /// it and drawn transparently over the window art (the safe rule's
@@ -1146,25 +971,9 @@ impl MapPreview {
     fn draw_figure(&self, image: &mut IndexedImage) {
         let player = self.host.world.player;
         let facing = self.figure.0;
-        let Some(fid) = self.host.figure_art(player, self.active_item(), facing) else {
-            return;
-        };
-        let Ok(art) = self.host.assets.object_art(fid) else {
-            return;
-        };
-        let Some(frame) = art
-            .frame(usize::from(facing), 0)
-            .or_else(|| art.frame(0, 0))
-        else {
-            return;
-        };
-        let rect = layout::FIGURE_BOX;
-        let origin = [
-            i64::from(rect.x + (rect.w - i32::from(frame.width)) / 2),
-            i64::from(rect.y + (rect.h - i32::from(frame.height)) / 2),
-        ];
-        let clip = [rect.x, rect.y, rect.w, rect.h].map(i64::from);
-        image.blit_within(frame, origin, clip);
+        let fid = self.host.figure_art(player, self.active_item(), facing);
+        let direction = (usize::from(facing), false);
+        self.draw_portrait(image, fid, direction, layout::FIGURE_BOX);
     }
     /// The hands and the armor, each scaled into its slot; a lifted slot
     /// shows empty. An item held in both hands is drawn once into the
@@ -1350,33 +1159,6 @@ impl MapPreview {
         }
         for (n, text) in (3..=17).zip(&lines) {
             line(image, n, text);
-        }
-    }
-    /// §3.34 the item menu at its placement (the pointer hidden): the arrow
-    /// at the menu's top-left, or `actarrom.frm` at its top-right when
-    /// flipped, then the 40-by-40 icons, the highlighted entry in its `h`
-    /// art.
-    pub(crate) fn draw_item_menu(
-        &self,
-        painter: &Painter,
-        image: &mut IndexedImage,
-        menu: &ItemMenu,
-    ) {
-        let x = menu.origin[0];
-        let (arrow, arrow_x, icons_x) = if menu.flipped {
-            ("actarrom.frm", x - 28, x - 68)
-        } else {
-            (layout::ARROW_CURSOR, x, x + 29)
-        };
-        painter.blit(image, arrow, 0, [arrow_x, menu.top]);
-        for (index, entry) in menu.entries.iter().enumerate() {
-            let (normal, lit) = layout::entry_icons(*entry);
-            let art = if index == menu.tracker.highlight {
-                lit
-            } else {
-                normal
-            };
-            painter.blit(image, art, 0, [icons_x, menu.top + 40 * index as i32]);
         }
     }
 }

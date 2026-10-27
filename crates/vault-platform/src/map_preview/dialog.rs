@@ -9,9 +9,8 @@
 //! than 168 pixels. Text is font 101 in one color key, centered, the title
 //! at `y0 = 27 + 30 - trunc((body lines + 1) * 10 / 2)` and body lines
 //! (wrapped at 276 pixels) every 10 pixels below it.
-use super::{MapPreview, Screen};
-use crate::interface::Painter;
-use vault_core::ui::{BUTTON_PRESS, ColorKey, Rect, flow};
+use super::{MapPreview, Screen, modal_kit};
+use vault_core::ui::{BUTTON_PRESS, ColorKey, flow};
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
@@ -130,41 +129,17 @@ impl MapPreview {
         let Some(dialog) = &self.dialog else {
             return;
         };
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
-        let [ox, oy] = dialog.origin;
-        let (art, [width, _]) = flow::DialogSize::Large.art();
-        painter.blit_opaque(image, art, 0, [ox, oy]);
+        let painter = self.painter();
         let body = wrap(&dialog.body, |line| painter.width(101, line));
-        let mut y = oy + flow::dialog_title_y(body.len());
-        for line in std::iter::once(&dialog.title).chain(&body) {
-            painter.centered(image, 101, dialog.key, line, [ox, y], width);
-            y += 10;
-        }
-        for button in flow::dialog_buttons(dialog.yes_no) {
-            let [bx, by] = button.box_origin;
-            if button.transparent_box {
-                painter.blit(image, flow::DONE_BOX.0, 0, [ox + bx, oy + by]);
-            } else {
-                painter.blit_opaque(image, flow::DONE_BOX.0, 0, [ox + bx, oy + by]);
-            }
-            let caption = painter.message("dbox.msg", button.caption);
-            let [cx, cy] = button.caption_origin;
-            painter.text(
-                image,
-                103,
-                ColorKey::LABEL,
-                &caption,
-                [ox + cx, oy + cy],
-                60,
-            );
-            let [rx, ry] = button.button;
-            let rect = Rect::new(ox + rx, oy + ry, 15, 16);
-            let art = self.button_art(rect, "lilredup.frm", "lilreddn.frm");
-            painter.blit(image, art, 0, [rect.x, rect.y]);
-        }
+        let text = (dialog.title.as_slice(), body.as_slice());
+        self.draw_dialog_box(
+            &painter,
+            image,
+            dialog.origin,
+            text,
+            dialog.key,
+            dialog.yes_no,
+        );
     }
     /// Enter means OK/yes (with `ib1p1xx1`), Esc no/cancel; `y` and `n`
     /// work in Yes/No boxes only. A pending quit request forces yes. Other
@@ -203,14 +178,7 @@ impl MapPreview {
             Screen::World2(world) => world.swallow_release(),
             _ => {}
         }
-        let [ox, oy] = dialog.origin;
-        let pressed = flow::dialog_buttons(dialog.yes_no)
-            .into_iter()
-            .map(|button| {
-                let [rx, ry] = button.button;
-                (button, Rect::new(ox + rx, oy + ry, 15, 16))
-            })
-            .find(|(_, rect)| rect.contains(point));
+        let pressed = modal_kit::dialog_button_at(dialog.origin, dialog.yes_no, point);
         if let Some((button, rect)) = pressed {
             self.press_button(rect);
             // `dbox.msg` 100 is Done, 101 Yes, 102 No.

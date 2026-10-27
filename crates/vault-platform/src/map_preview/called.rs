@@ -4,14 +4,17 @@
 //! color, Cancel, and the window's input. Map background processing keeps
 //! running while it is open (unlike the action menu); the in-world cursor
 //! is hidden and the system cursor is the arrow.
-use super::MapPreview;
+use super::{
+    MapPreview,
+    modal_kit::{at, red_button_sized},
+};
 use crate::{input::key_text, interface::Painter};
 use vault_core::{
     ObjectRef,
     assets::WorldAssets,
     critical::location,
     ui::{
-        ColorKey, Rect,
+        ColorKey, RED_BUTTON, Rect,
         called::{self, Part},
     },
 };
@@ -20,7 +23,7 @@ use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
 /// The Cancel red button's art.
-const CANCEL_ART: (&str, &str) = ("lilredup.frm", "lilreddn.frm");
+const CANCEL_ART: (&str, &str) = (RED_BUTTON.0, RED_BUTTON.1);
 
 /// The open window: its target and hit mode, what it showed when it
 /// opened (the chances are computed once), and the part button pressed and
@@ -50,15 +53,12 @@ impl CalledShot {
 }
 
 /// A window rectangle in screen pixels.
-fn screen(rect: Rect) -> Rect {
-    let [x, y] = called::ORIGIN;
-    Rect::new(x + rect.x, y + rect.y, rect.w, rect.h)
+const fn screen(rect: Rect) -> Rect {
+    at(called::ORIGIN, rect)
 }
 /// The Cancel button's screen rectangle (the up art's size).
 fn cancel_rect(painter: &Painter) -> Rect {
-    let [w, h] = painter.size(CANCEL_ART.0).unwrap_or([15, 16]);
-    let [x, y] = called::CANCEL;
-    screen(Rect::new(x, y, w, h))
+    screen(red_button_sized(painter, called::CANCEL))
 }
 
 impl MapPreview {
@@ -82,10 +82,7 @@ impl MapPreview {
                 return;
             }
         };
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         if [called::BACKGROUND, CANCEL_ART.0, CANCEL_ART.1]
             .iter()
             .any(|name| painter.art(name).is_none())
@@ -131,10 +128,7 @@ impl MapPreview {
         let Some(window) = &self.hud.called else {
             return;
         };
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         let [ox, oy] = called::ORIGIN;
         painter.blit_opaque(image, called::BACKGROUND, 0, [ox, oy]);
         self.draw_called_picture(image, window.picture);
@@ -161,9 +155,7 @@ impl MapPreview {
                 painter.text(image, 101, key, text, [ox + lx, oy + ly], *width + 1);
             }
         }
-        let rect = cancel_rect(&painter);
-        let art = self.button_art(rect, CANCEL_ART.0, CANCEL_ART.1);
-        painter.blit(image, art, 0, [rect.x, rect.y]);
+        self.draw_button(&painter, image, cancel_rect(&painter), CANCEL_ART);
     }
     /// The `na` picture's frame 0, copied opaquely (index 0 included) at
     /// (128, 31). The reference copies 170 by 225 with a 170-pixel stride
@@ -207,10 +199,7 @@ impl MapPreview {
         if right {
             return true;
         }
-        let cancel = cancel_rect(&Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        });
+        let cancel = cancel_rect(&self.painter());
         if cancel.contains(point) {
             self.press_button(cancel);
             return true;
@@ -228,10 +217,7 @@ impl MapPreview {
             return false;
         };
         let pressed = window.pressed.take();
-        let cancel = cancel_rect(&Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        });
+        let cancel = cancel_rect(&self.painter());
         if over == Some(cancel) {
             self.close_called();
             return true;

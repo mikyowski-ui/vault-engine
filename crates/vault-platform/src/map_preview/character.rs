@@ -16,7 +16,10 @@
 //! ignores Done; Mutate! puts the new trait in the first empty slot; the
 //! printed sheet applies its four safe rules. Cancelling Tag! or Mutate!
 //! still consumes the pick (SPEC-011 §3.21).
-use super::{MapPreview, Screen};
+use super::{
+    MapPreview, Screen,
+    modal_kit::{at, offset, poll_repeat},
+};
 use crate::{
     AppResult,
     editor_screen::{
@@ -186,9 +189,6 @@ pub(crate) struct CharacterScreen {
     roll: Option<(i32, i32, u64)>,
 }
 
-fn shifted(rect: Rect, origin: [i32; 2]) -> Rect {
-    Rect::new(rect.x + origin[0], rect.y + origin[1], rect.w, rect.h)
-}
 /// The slider's plus and minus buttons on cursor row `c`.
 fn slider_buttons(c: usize) -> [Rect; 2] {
     let y = 11 * c as i32;
@@ -354,11 +354,7 @@ impl MapPreview {
     /// fallback.
     pub(crate) fn kill_name(&self, kind: usize) -> Vec<u8> {
         let (name, _) = vault_core::ui::fallout2::kill_messages(kind);
-        Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        }
-        .message_or(
+        self.painter().message_or(
             "proto.msg",
             name,
             vault_core::ui::fallout2::KILL_FALLBACKS
@@ -378,10 +374,7 @@ impl MapPreview {
     /// The card's picture and title text, compared for its sound.
     fn card_key(&self) -> Option<(i32, Vec<u8>)> {
         let card = self.current_card()?;
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         Some((card.picture, editor_screen::card_title(&painter, &card)))
     }
     /// §3.42: a press selects an info line; a change of picture or title
@@ -528,10 +521,7 @@ impl MapPreview {
     /// The chooser's card changes with the selection: `isdxxxx1` except for
     /// the first card of each list.
     fn chooser_moved(&mut self) {
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         let key = match &self.character().and_then(|s| s.modal.as_ref()) {
             Some(Modal::Chooser(chooser)) => chooser.list.selected().map(|entry| {
                 let (picture, title, _) = chooser.step.card(chooser.entries[entry].0);
@@ -694,8 +684,8 @@ impl MapPreview {
     }
     fn chooser_press(&mut self, point: [i32; 2]) -> bool {
         let clock = self.clock;
-        let at = |rect| shifted(rect, CHOOSER_ORIGIN);
-        for (rect, up) in [(at(CHOOSER_UP), true), (at(CHOOSER_DOWN), false)] {
+        let window = |rect| at(CHOOSER_ORIGIN, rect);
+        for (rect, up) in [(window(CHOOSER_UP), true), (window(CHOOSER_DOWN), false)] {
             if rect.contains(point) {
                 self.play_effect(BUTTON_PRESS.as_bytes(), None);
                 self.held = Some(rect);
@@ -713,8 +703,8 @@ impl MapPreview {
             }
         }
         for (rect, press) in [
-            (at(CHOOSER_DONE), ChooserPress::Done),
-            (at(CHOOSER_CANCEL), ChooserPress::Cancel),
+            (window(CHOOSER_DONE), ChooserPress::Done),
+            (window(CHOOSER_CANCEL), ChooserPress::Cancel),
         ] {
             if rect.contains(point) {
                 self.press_button(rect);
@@ -725,7 +715,7 @@ impl MapPreview {
             }
         }
         if let Some(chooser) = self.chooser_mut() {
-            chooser.pressed = at(CHOOSER_LIST)
+            chooser.pressed = window(CHOOSER_LIST)
                 .contains(point)
                 .then_some(ChooserPress::List);
         }
@@ -740,7 +730,7 @@ impl MapPreview {
             Some(ChooserPress::Done) if over => self.chooser_choose(),
             Some(ChooserPress::Cancel) if over => self.chooser_cancel(),
             Some(ChooserPress::List) => {
-                let list = shifted(CHOOSER_LIST, CHOOSER_ORIGIN);
+                let list = at(CHOOSER_ORIGIN, CHOOSER_LIST);
                 let Some(point) = point.filter(|point| list.contains(*point)) else {
                     return true;
                 };
@@ -999,10 +989,7 @@ impl MapPreview {
                 return true;
             }
         }
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         if editor_screen::masked(&painter, "fldrmask.frm", character::FOLDER_TABS, point) {
             if let Some(screen) = self.character_mut() {
                 screen.pressed = Some(Press::Tabs);
@@ -1094,17 +1081,13 @@ impl MapPreview {
         let mut changed = screen
             .roll
             .is_some_and(|(_, _, start)| now.saturating_sub(start) <= 2 * ROLL_MS);
-        if let Some((plus, rect, repeat)) = &mut screen.repeat {
-            let plus = *plus;
-            if !pointer.is_some_and(|point| rect.contains(point)) {
+        let over = |rect: Rect| pointer.is_some_and(|point| rect.contains(point));
+        if let Some(plus) = poll_repeat(&mut screen.repeat, now, over) {
+            changed = true;
+            if !self.skill_step(plus)
+                && let Some(screen) = self.character_mut()
+            {
                 screen.repeat = None;
-            } else if repeat.poll(now) {
-                changed = true;
-                if !self.skill_step(plus)
-                    && let Some(screen) = self.character_mut()
-                {
-                    screen.repeat = None;
-                }
             }
         }
         let Some(screen) = self.character_mut() else {
@@ -1113,19 +1096,14 @@ impl MapPreview {
         match &mut screen.modal {
             Some(Modal::Chooser(chooser)) => {
                 chooser.list.idle(now);
-                if let Some((up, rect, repeat)) = &mut chooser.repeat {
-                    let up = *up;
-                    if !pointer.is_some_and(|point| rect.contains(point)) {
-                        chooser.repeat = None;
-                    } else if repeat.poll(now) {
-                        if up {
-                            chooser.list.up();
-                        } else {
-                            chooser.list.down();
-                        }
-                        self.chooser_moved();
-                        changed = true;
+                if let Some(up) = poll_repeat(&mut chooser.repeat, now, over) {
+                    if up {
+                        chooser.list.up();
+                    } else {
+                        chooser.list.down();
                     }
+                    self.chooser_moved();
+                    changed = true;
                 }
             }
             Some(Modal::Print(dialog)) => {
@@ -1147,10 +1125,7 @@ impl MapPreview {
         let Some(sheet) = world.player_sheet() else {
             return Ok(image);
         };
-        let painter = Painter {
-            assets: &self.host.assets,
-            palette: &self.palette,
-        };
+        let painter = self.painter();
         painter.blit_opaque(&mut image, character::BACKGROUND, 0, [0, 0]);
         // Name, age and sex: the "off" images with their captions, not
         // buttons.
@@ -1176,12 +1151,11 @@ impl MapPreview {
         let c = screen.cursor;
         painter.blit(&mut image, "slider.frm", 0, [592, 16 + 11 * c as i32]);
         let [plus, minus] = slider_buttons(c);
-        for (rect, up, down) in [
-            (plus, "splsoff.frm", "splson.frm"),
-            (minus, "snegoff.frm", "snegon.frm"),
+        for (rect, art) in [
+            (plus, ("splsoff.frm", "splson.frm")),
+            (minus, ("snegoff.frm", "snegon.frm")),
         ] {
-            let art = self.button_art(rect, up, down);
-            painter.blit(&mut image, art, 0, [rect.x, rect.y]);
+            self.draw_button(&painter, &mut image, rect, art);
         }
         // SKILL POINTS and the unspent points (two digits, "99" above 99).
         let caption = painter.message("editor.msg", 112);
@@ -1213,10 +1187,8 @@ impl MapPreview {
             &character::info_card(screen.selected, Some(&folders)),
         );
         for (rect, caption, id) in CAPTIONS {
-            let art = self.button_art(rect, "lilredup.frm", "lilreddn.frm");
-            painter.blit(&mut image, art, 0, [rect.x, rect.y]);
-            let text = painter.message("editor.msg", id);
-            painter.text(&mut image, 103, ColorKey::LABEL, &text, caption, 80);
+            let message = ("editor.msg", id);
+            self.draw_captioned_red_button(&painter, &mut image, rect, message, caption, 80);
         }
         let held = self.held_button();
         match &screen.modal {
@@ -1342,34 +1314,23 @@ impl MapPreview {
     /// Cancel, and the selected entry's card.
     fn draw_chooser(&self, painter: &Painter, image: &mut IndexedImage, chooser: &Chooser) {
         let origin = CHOOSER_ORIGIN;
-        let at = |x: i32, y: i32| [origin[0] + x, origin[1] + y];
+        let point = |x: i32, y: i32| offset(origin, [x, y]);
         painter.blit_opaque(image, "perkwin.frm", 0, origin);
         let heading = painter.message("editor.msg", chooser.step.heading());
-        painter.text(image, 103, ColorKey::LABEL, &heading, at(49, 16), 206);
+        painter.text(image, 103, ColorKey::LABEL, &heading, point(49, 16), 206);
         for (rect, caption, id) in [
             (CHOOSER_DONE, [69, 186], 100),
             (CHOOSER_CANCEL, [171, 186], 102),
         ] {
-            let rect = shifted(rect, origin);
-            let art = self.button_art(rect, "lilredup.frm", "lilreddn.frm");
-            painter.blit(image, art, 0, [rect.x, rect.y]);
-            let text = painter.message("editor.msg", id);
-            painter.text(
-                image,
-                103,
-                ColorKey::LABEL,
-                &text,
-                at(caption[0], caption[1]),
-                80,
-            );
+            let (rect, caption) = (at(origin, rect), offset(origin, caption));
+            let message = ("editor.msg", id);
+            self.draw_captioned_red_button(painter, image, rect, message, caption, 80);
         }
-        for (rect, up, down) in [
-            (CHOOSER_UP, "uparwoff.frm", "uparwon.frm"),
-            (CHOOSER_DOWN, "dnarwoff.frm", "dnarwon.frm"),
+        for (rect, art) in [
+            (CHOOSER_UP, ("uparwoff.frm", "uparwon.frm")),
+            (CHOOSER_DOWN, ("dnarwoff.frm", "dnarwon.frm")),
         ] {
-            let rect = shifted(rect, origin);
-            let art = self.button_art(rect, up, down);
-            painter.blit(image, art, 0, [rect.x, rect.y]);
+            self.draw_button(painter, image, at(origin, rect), art);
         }
         let sheet = self.host.world.player_sheet();
         let rank = |index: i32| {
@@ -1386,10 +1347,10 @@ impl MapPreview {
             };
             let key = line_key(row == list.row);
             let y = 43 + 12 * row as i32;
-            painter.text(image, 101, key, name, at(45, y), 160);
+            painter.text(image, 101, key, name, point(45, y), 160);
             if rank(*index) > 0 {
                 let text = format!("({})", rank(*index));
-                painter.text(image, 101, key, text.as_bytes(), at(207, y), 30);
+                painter.text(image, 101, key, text.as_bytes(), point(207, y), 30);
             }
         }
         let Some(entry) = list.selected() else {
@@ -1402,10 +1363,10 @@ impl MapPreview {
             .as_deref()
             .map_or(0, |path| editor_screen::dark_column(painter, path));
         if let Some(path) = &path {
-            painter.blit(image, path, 0, at(413, 64));
+            painter.blit(image, path, 0, point(413, 64));
         }
         let title = painter.message(title.0, title.1);
-        let width = painter.text(image, 102, ColorKey::BLACK, &title, at(280, 27), 280);
+        let width = painter.text(image, 102, ColorKey::BLACK, &title, point(280, 27), 280);
         if rank(index) > 0 {
             let text = format!("({})", rank(index));
             painter.text(
@@ -1413,11 +1374,11 @@ impl MapPreview {
                 101,
                 ColorKey::BLACK,
                 text.as_bytes(),
-                at(288 + width, 41),
+                point(288 + width, 41),
                 40,
             );
         }
-        let [rx, ry] = at(280, 55);
+        let [rx, ry] = point(280, 55);
         image.fill_rect([rx, ry, 266, 2], painter.color(ColorKey::BLACK));
         let text = painter.message(description.0, description.1);
         let limit = character::chooser_wrap(column);
@@ -1430,7 +1391,7 @@ impl MapPreview {
                 101,
                 ColorKey::BLACK,
                 line,
-                at(280, 70 + 11 * k as i32),
+                point(280, 70 + 11 * k as i32),
                 limit,
             );
         }
