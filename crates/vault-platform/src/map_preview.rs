@@ -62,6 +62,7 @@ mod help;
 mod hud;
 mod inventory;
 pub(crate) mod loot;
+mod modal_kit;
 mod movies;
 mod options;
 pub(crate) mod party;
@@ -75,6 +76,7 @@ mod timer;
 pub(crate) mod touchbar;
 mod world;
 mod world2;
+mod world_kit;
 
 /// Fixed interface button cues (small red button press/release).
 const BUTTON_PRESS: &[u8] = b"ib1p1xx1";
