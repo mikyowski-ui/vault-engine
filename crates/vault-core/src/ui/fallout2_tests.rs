@@ -265,3 +265,113 @@ fn spec019_kill_names() {
     assert_eq!(KILL_FALLBACKS[15], "Gecko");
     assert_eq!(KILL_FALLBACKS[18], "Big Bad Boss");
 }
+
+/// SPEC-020 §2.1: the combat control panels', the world map side panel's
+/// and the town map entrances' layouts and dispatch.
+mod modal {
+    use super::*;
+
+    #[test]
+    fn control_panel_layout_and_dispatch() {
+        // Disposition 0 is also the custom value, so allowing it shows
+        // Custom.
+        let all = control_layout(&[0, 1, 2]);
+        assert_eq!(
+            all.rect(ControlButton::Disposition(0)),
+            Some(Rect::new(380, 310, 15, 16))
+        );
+        assert_eq!(
+            all.rect(ControlButton::Disposition(1)),
+            Some(Rect::new(380, 332, 15, 16))
+        );
+        assert!(!all.contains(ControlButton::Disposition(3)));
+        assert_eq!(
+            all.rect(ControlButton::Custom),
+            Some(Rect::new(380, 424, 15, 16))
+        );
+        assert_eq!(
+            all.rect(ControlButton::Best),
+            Some(Rect::new(150, 390, 15, 16))
+        );
+        assert_eq!(
+            all.rect(ControlButton::Talk),
+            Some(Rect::new(584, 452, 14, 14))
+        );
+        let stand_in = custom_layout(None);
+        assert_eq!(
+            stand_in.rect(ControlButton::Row(0)),
+            Some(Rect::new(320, 165, 15, 16))
+        );
+        assert_eq!(
+            stand_in.rect(ControlButton::Done),
+            Some(Rect::new(280, 305, 15, 16))
+        );
+        assert_eq!(stand_in.len(), 7);
+        let retail = custom_layout(Some([640, 190]));
+        assert_eq!(
+            retail.rect(ControlButton::Row(0)),
+            Some(Rect::new(150, 310, 15, 16))
+        );
+        assert_eq!(ControlButton::Talk.sounds(), control::TALK_SOUNDS);
+
+        let mut panel = ControlPanelWindow::new(vec![1, 2], None);
+        assert_eq!(panel.press([381, 333]), Some(ControlButton::Disposition(1)));
+        assert_eq!(
+            panel.release(Some([381, 333])),
+            ControlOutcome::Disposition(1)
+        );
+        assert_eq!(panel.press([381, 425]), None, "Custom is not allowed");
+        assert_eq!(
+            panel.dispatch(ControlButton::Custom),
+            ControlOutcome::Custom(true)
+        );
+        assert!(panel.custom);
+        // The custom panel is modal: its rows cycle their fields.
+        assert_eq!(panel.press([321, 210]), Some(ControlButton::Row(2)));
+        assert_eq!(
+            panel.release(Some([321, 210])),
+            ControlOutcome::Cycle(ControlField::BestWeapon)
+        );
+        assert_eq!(panel.key(ControlKey::Best), ControlOutcome::None);
+        assert_eq!(panel.key(ControlKey::Escape), ControlOutcome::Custom(false));
+        assert!(!panel.custom);
+        assert_eq!(
+            panel.key(ControlKey::Digit(4)),
+            ControlOutcome::Disposition(4)
+        );
+        assert_eq!(panel.key(ControlKey::Digit(7)), ControlOutcome::None);
+        assert_eq!(panel.key(ControlKey::Best), ControlOutcome::BestWeapon);
+        assert_eq!(panel.key(ControlKey::Talk), ControlOutcome::Talk);
+        assert_eq!(panel.key(ControlKey::Quit), ControlOutcome::QuitConfirm);
+        panel.press([585, 453]);
+        assert_eq!(panel.release(Some([585, 453])), ControlOutcome::Talk);
+    }
+
+    #[test]
+    fn world_panel_and_entrances() {
+        let list = TownList { offset: 0 };
+        let layout = world_panel_layout(list, 3);
+        assert_eq!(
+            layout.rect(WorldPanelControl::Row(0)),
+            Some(Rect::new(508, 138, 15, 15))
+        );
+        assert_eq!(
+            layout.rect(WorldPanelControl::Row(2)),
+            Some(Rect::new(508, 192, 15, 15))
+        );
+        assert!(!layout.contains(WorldPanelControl::Row(3)));
+        assert_eq!(layout.rect(WorldPanelControl::ListUp), Some(panel::LIST_UP));
+        assert_eq!(
+            layout.rect(WorldPanelControl::TownWorld),
+            Some(panel::TOWN_WORLD)
+        );
+        assert_eq!(
+            world_panel_layout(TownList { offset: 2 }, 9).len(),
+            3 + panel::ROWS
+        );
+        let entrances = entrance_layout(&[[100, 100], [300, 200]]);
+        assert_eq!(entrances.hit([50, 100]), Some(0));
+        assert_eq!(entrances.rect(1), Some(Rect::new(243, 194, 164, 25)));
+        assert_eq!(entrances.hit([0, 0]), None);
+    }
+}

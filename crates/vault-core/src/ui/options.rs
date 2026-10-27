@@ -2,7 +2,7 @@
 //! `fallout.cfg` keys and the SPEC-008 save words), the options menu, the
 //! pause window, the quit confirmation, and the preferences screen's knobs,
 //! switches, sliders and brightness steps.
-use super::Rect;
+use super::{Layout, Rect};
 use vault_formats::cfg::ConfigFile;
 
 /// Every preference value, at its §2.3 default.
@@ -508,3 +508,575 @@ pub fn slider_rect(ky: i32) -> Rect {
 }
 /// Global 603 at 0 covers the fifth knob row with `prefcvr.frm`.
 pub const COVER_GLOBAL: usize = 603;
+
+// SPEC-020 §2.1: the options windows' layouts and dispatch. Rectangles are
+// frame (screen) pixels.
+
+/// §3.17 the options menu's buttons play `ib3p1xx1` and `ib3lu1x1`.
+pub const OPTIONS_SOUNDS: (&str, &str) = ("ib3p1xx1", "ib3lu1x1");
+/// §3.17 the options menu's five buttons on screen, in order.
+pub fn options_layout() -> Layout<OptionsAction> {
+    OPTIONS_BUTTONS
+        .into_iter()
+        .enumerate()
+        .map(|(i, action)| (action, options_button(i).offset(OPTIONS_ORIGIN)))
+        .collect()
+}
+/// §3.17 the pause window's red button (screen), at (26, 46) in the window.
+pub fn pause_button(origin: [i32; 2]) -> Rect {
+    super::red_button([26, 46]).offset(origin)
+}
+
+/// Which options window is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionsPage {
+    Menu,
+    Pause,
+    /// The quit confirmation at `QUIT_ORIGIN`.
+    Quit,
+    /// The preferences screen (its state is a [`PreferencesScreen`]).
+    Preferences,
+}
+/// What an options input leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionsOutcome {
+    /// Nothing changed (the input is swallowed: the window is modal).
+    None,
+    /// The page changed (Preferences or the quit confirmation opened).
+    Page(OptionsPage),
+    /// Close the options and open the save screen, or the load screen;
+    /// its cancel returns to the menu.
+    Save,
+    Load,
+    /// Close the window back to the map.
+    Close,
+    /// The quit confirmation's answer; the window closes either way.
+    Quit(bool),
+}
+/// §3.17 the options menu, the pause window and the quit confirmation.
+/// Their controls act on the press; the presentation layer plays the press
+/// sound of the control under the pointer and its release sound on release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptionsWindow {
+    pub page: OptionsPage,
+}
+impl OptionsWindow {
+    pub fn new(page: OptionsPage) -> Self {
+        Self { page }
+    }
+    /// The quit confirmation box.
+    pub fn quit_box() -> super::flow::DialogBox {
+        super::flow::DialogBox::new(QUIT_ORIGIN, true)
+    }
+    /// The page's buttons: the menu's five, the pause window's red button
+    /// (as Done), or the quit box's Yes and No (as `ExitGame` and `Done`).
+    /// The preferences have their own layout.
+    pub fn layout(&self) -> Layout<OptionsAction> {
+        match self.page {
+            OptionsPage::Menu => options_layout(),
+            OptionsPage::Pause => {
+                Layout::new().with(OptionsAction::Done, pause_button(PAUSE_ORIGIN))
+            }
+            OptionsPage::Quit => Self::quit_box()
+                .layout()
+                .controls()
+                .iter()
+                .map(|(yes, rect)| {
+                    let action = if *yes {
+                        OptionsAction::ExitGame
+                    } else {
+                        OptionsAction::Done
+                    };
+                    (action, *rect)
+                })
+                .collect(),
+            OptionsPage::Preferences => Layout::new(),
+        }
+    }
+    /// A left press: a menu button acts at once; any press closes the
+    /// pause window; a quit-box button answers.
+    pub fn click(&mut self, point: [i32; 2]) -> OptionsOutcome {
+        match self.page {
+            OptionsPage::Menu => match options_layout().hit(point) {
+                Some(action) => self.dispatch(action),
+                None => OptionsOutcome::None,
+            },
+            OptionsPage::Pause => OptionsOutcome::Close,
+            OptionsPage::Quit => match Self::quit_box().click(point) {
+                Some(yes) => OptionsOutcome::Quit(yes),
+                None => OptionsOutcome::None,
+            },
+            OptionsPage::Preferences => OptionsOutcome::None,
+        }
+    }
+    /// A key: the menu's `options_key` (with whether `ib1p1xx1` plays
+    /// first), any key closes the pause window, and the quit box's
+    /// `dialog_answer`.
+    pub fn key(&mut self, key: MenuKey) -> (OptionsOutcome, bool) {
+        match self.page {
+            OptionsPage::Menu => match options_key(key) {
+                Some((action, sound)) => (self.dispatch(action), sound),
+                None => (OptionsOutcome::None, false),
+            },
+            OptionsPage::Pause => (OptionsOutcome::Close, false),
+            OptionsPage::Quit => {
+                let answer = match key {
+                    MenuKey::Enter => Some(true),
+                    MenuKey::Escape => Some(false),
+                    MenuKey::Char(c) => Self::quit_box().key(super::flow::DialogKey::Char(c)),
+                    _ => None,
+                };
+                (
+                    answer.map_or(OptionsOutcome::None, OptionsOutcome::Quit),
+                    false,
+                )
+            }
+            OptionsPage::Preferences => (OptionsOutcome::None, false),
+        }
+    }
+    /// A menu action: Save and Load leave for the save screen,
+    /// Preferences and Exit Game change the page, Done closes.
+    pub fn dispatch(&mut self, action: OptionsAction) -> OptionsOutcome {
+        match action {
+            OptionsAction::SaveGame => OptionsOutcome::Save,
+            OptionsAction::LoadGame => OptionsOutcome::Load,
+            OptionsAction::Preferences => {
+                self.page = OptionsPage::Preferences;
+                OptionsOutcome::Page(self.page)
+            }
+            OptionsAction::ExitGame => {
+                self.page = OptionsPage::Quit;
+                OptionsOutcome::Page(self.page)
+            }
+            OptionsAction::Done => OptionsOutcome::Close,
+        }
+    }
+}
+
+/// §3.18 the preferences screen's red buttons: Default, Done and Cancel,
+/// each with its caption's origin and `options.msg` ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreferenceButton {
+    Default,
+    Done,
+    Cancel,
+}
+pub const PREFERENCE_BUTTONS: [(PreferenceButton, [i32; 2], [i32; 2], i32); 3] = [
+    (PreferenceButton::Default, [23, 450], [43, 449], 120),
+    (PreferenceButton::Done, [148, 450], [169, 449], 4),
+    (PreferenceButton::Cancel, [263, 450], [283, 449], 121),
+];
+/// §3.18 the player speed-up checkbox.
+pub const CHECKBOX: Rect = Rect::new(383, 68, 18, 18);
+/// One slider drag iteration lasts at least this long.
+pub const DRAG_ITERATION_MS: u64 = 35;
+/// A knob or switch's release cue follows its press cue after this long,
+/// and the screen blocks meanwhile.
+pub const CONTROL_CUE_MS: u64 = 70;
+/// The effects slider samples its sound on the first and every 8th drag
+/// iteration, the speech slider on the first and every 41st.
+pub const EFFECTS_SAMPLE_EVERY: u32 = 8;
+pub const SPEECH_SAMPLE_EVERY: u32 = 41;
+/// The checkbox's cues (the safe rule's release cue).
+pub const CHECKBOX_SOUNDS: (&str, &str) = ("ib2p1xx1", "ib2lu1x1");
+/// A knob's and a switch's change cues.
+pub const KNOB_SOUNDS: (&str, &str) = ("ib3p1xx1", "ib3lu1x1");
+pub const SWITCH_SOUNDS: (&str, &str) = ("ib2p1xx1", "ib2lu1x1");
+
+/// A control of the preferences screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreferenceControl {
+    Button(PreferenceButton),
+    Knob(usize),
+    Switch(usize),
+    /// A slider by its caption order (0 combat speed, 1 text delay, 2-5
+    /// the volumes, 6 brightness, 7 mouse sensitivity).
+    Slider(usize),
+    Checkbox,
+}
+/// The label widths (font 101) the knob and switch rectangles depend on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelWidths {
+    pub knobs: [Vec<i32>; 5],
+    pub switches: [[i32; 2]; 6],
+}
+impl LabelWidths {
+    /// The widths of every label, from its `options.msg` ID.
+    pub fn measure(width: impl Fn(i32) -> i32) -> Self {
+        Self {
+            knobs: std::array::from_fn(|k| KNOBS[k].labels.iter().map(|id| width(*id)).collect()),
+            switches: std::array::from_fn(|s| SWITCHES[s].labels.map(&width)),
+        }
+    }
+}
+/// A slider's value with its range: (value, min, max).
+pub fn slider_reading(values: &Preferences, index: usize) -> (f64, f64, f64) {
+    match index {
+        0 => (f64::from(values.combat_speed), 0.0, 50.0),
+        1 => (values.text_base_delay, 1.0, 6.0),
+        2 => (f64::from(values.master_volume), 0.0, 32767.0),
+        3 => (f64::from(values.music_volume), 0.0, 32767.0),
+        4 => (f64::from(values.sndfx_volume), 0.0, 32767.0),
+        5 => (f64::from(values.speech_volume), 0.0, 32767.0),
+        6 => (values.brightness, BRIGHTNESS_MIN, BRIGHTNESS_MAX),
+        _ => (values.mouse_sensitivity, 1.0, 2.5),
+    }
+}
+/// Store a slider's value (the line delay follows the base delay).
+pub fn set_slider(values: &mut Preferences, index: usize, value: f64) {
+    match index {
+        0 => values.combat_speed = value as i32,
+        1 => {
+            values.text_base_delay = value.clamp(1.0, 6.0);
+            values.text_line_delay = line_delay(values.text_base_delay);
+        }
+        2 => values.master_volume = value as i32,
+        3 => values.music_volume = value as i32,
+        4 => values.sndfx_volume = value as i32,
+        5 => values.speech_volume = value as i32,
+        6 => values.brightness = value.clamp(BRIGHTNESS_MIN, BRIGHTNESS_MAX),
+        _ => values.mouse_sensitivity = value.clamp(1.0, 2.5),
+    }
+}
+/// A slider knob's left edge for the stored value.
+pub fn slider_knob(values: &Preferences, index: usize) -> i32 {
+    let (value, min, max) = slider_reading(values, index);
+    if index == 1 {
+        delay_position(value)
+    } else {
+        slider_position(value, min, max)
+    }
+}
+fn knob_value(values: &mut Preferences, index: usize) -> &mut i32 {
+    match index {
+        0 => &mut values.game_difficulty,
+        1 => &mut values.combat_difficulty,
+        2 => &mut values.violence_level,
+        3 => &mut values.target_highlight,
+        _ => &mut values.running_burning_guy,
+    }
+}
+fn switch_value(values: &mut Preferences, index: usize) -> &mut i32 {
+    match index {
+        0 => &mut values.combat_messages,
+        1 => &mut values.combat_taunts,
+        2 => &mut values.language_filter,
+        3 => &mut values.running,
+        4 => &mut values.subtitles,
+        _ => &mut values.item_highlight,
+    }
+}
+/// A slider's modal drag loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SliderDrag {
+    pub index: usize,
+    /// The knob's left edge.
+    pub position: i32,
+    /// Iterations run so far.
+    pub iteration: u32,
+    next: u64,
+    released: bool,
+}
+/// One slider drag iteration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragStep {
+    /// The knob followed the pointer: the iteration's number (for the
+    /// samples) and whether the value changed. Brightness and the volumes
+    /// take effect now, the text delay is stored as it changes.
+    Moved {
+        index: usize,
+        iteration: u32,
+        moved: bool,
+    },
+    /// The release was seen: the drag ended (`ib1lu1x1`; mouse
+    /// sensitivity takes effect now).
+    Ended { index: usize },
+}
+/// What a preferences input leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreferenceOutcome {
+    /// Nothing (a busy screen swallows its input).
+    None,
+    /// A knob or switch is armed for its release.
+    Armed(PreferenceControl),
+    /// Default reset every value (they preview at once).
+    Defaults,
+    /// Close: keep the values (Done) or restore the backup (Cancel).
+    Close { keep: bool },
+    /// A slider drag began (`ib1p1xx1`).
+    DragStarted(usize),
+    /// The checkbox toggled (its cues are `CHECKBOX_SOUNDS`).
+    Toggled,
+    /// A knob or switch changed: play the press cue now, the release cue
+    /// `CONTROL_CUE_MS` later; input is blocked until then.
+    Changed { cues: (&'static str, &'static str) },
+    /// F10, Ctrl+Q or Ctrl+X: the quit confirmation, whose Yes cancels.
+    QuitConfirm,
+}
+/// A key on the preferences screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreferenceKey {
+    Escape,
+    /// Enter or `p`: Done, after `ib1p1xx1`.
+    Done,
+    CtrlQ,
+    CtrlX,
+    F10,
+}
+/// §3.18 the preferences screen's state: the edited values, the backup
+/// Cancel restores, the knobs' ping-pong directions, the armed knob or
+/// switch, a slider drag and the cue block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreferencesScreen {
+    pub values: Preferences,
+    pub backup: Preferences,
+    pub changed: bool,
+    /// The five knobs' ping-pong directions (true is up).
+    pub knob_up: [bool; 5],
+    armed: Option<PreferenceControl>,
+    pub drag: Option<SliderDrag>,
+    pub blocked_until: u64,
+}
+impl PreferencesScreen {
+    pub fn open(values: Preferences) -> Self {
+        Self {
+            backup: values.clone(),
+            values,
+            changed: false,
+            knob_up: [true; 5],
+            armed: None,
+            drag: None,
+            blocked_until: 0,
+        }
+    }
+    /// The controls in their press order: the red buttons, the knobs (the
+    /// fifth left out while `covered`), the switches, the sliders and the
+    /// checkbox.
+    pub fn layout(&self, widths: &LabelWidths, covered: bool) -> Layout<PreferenceControl> {
+        let buttons = PREFERENCE_BUTTONS
+            .iter()
+            .map(|(button, at, ..)| (PreferenceControl::Button(*button), super::red_button(*at)));
+        let knobs = KNOBS
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !(*index == 4 && covered))
+            .map(|(index, knob)| {
+                (
+                    PreferenceControl::Knob(index),
+                    knob.rect(&widths.knobs[index]),
+                )
+            });
+        let switches = SWITCHES.iter().enumerate().map(|(index, switch)| {
+            (
+                PreferenceControl::Switch(index),
+                switch.rect(widths.switches[index]),
+            )
+        });
+        let sliders = SLIDER_KNOB_Y
+            .iter()
+            .enumerate()
+            .map(|(index, ky)| (PreferenceControl::Slider(index), slider_rect(*ky)));
+        buttons
+            .chain(knobs)
+            .chain(switches)
+            .chain(sliders)
+            .chain([(PreferenceControl::Checkbox, CHECKBOX)])
+            .collect()
+    }
+    /// A drag runs or a change's cues are still playing: input is
+    /// swallowed.
+    pub fn busy(&self, now: u64) -> bool {
+        self.drag.is_some() || now < self.blocked_until
+    }
+    /// The armed knob or switch.
+    pub fn armed(&self) -> Option<PreferenceControl> {
+        self.armed
+    }
+    /// A left press: a red button acts at once; a knob or switch arms for
+    /// its release; a slider starts its drag (the first iteration on the
+    /// next tick); the checkbox toggles.
+    pub fn press(
+        &mut self,
+        point: [i32; 2],
+        widths: &LabelWidths,
+        covered: bool,
+        now: u64,
+    ) -> PreferenceOutcome {
+        if self.busy(now) {
+            return PreferenceOutcome::None;
+        }
+        match self.layout(widths, covered).hit(point) {
+            Some(PreferenceControl::Button(button)) => self.button(button),
+            Some(control @ (PreferenceControl::Knob(_) | PreferenceControl::Switch(_))) => {
+                self.armed = Some(control);
+                PreferenceOutcome::Armed(control)
+            }
+            Some(PreferenceControl::Slider(index)) => {
+                self.armed = None;
+                self.drag = Some(SliderDrag {
+                    index,
+                    position: slider_knob(&self.values, index),
+                    iteration: 0,
+                    next: now,
+                    released: false,
+                });
+                PreferenceOutcome::DragStarted(index)
+            }
+            Some(PreferenceControl::Checkbox) => {
+                self.armed = None;
+                self.values.player_speedup ^= 1;
+                self.changed = true;
+                PreferenceOutcome::Toggled
+            }
+            None => {
+                self.armed = None;
+                PreferenceOutcome::None
+            }
+        }
+    }
+    /// A red button: Default resets every value (game difficulty
+    /// included); Done and Cancel close.
+    pub fn button(&mut self, button: PreferenceButton) -> PreferenceOutcome {
+        match button {
+            PreferenceButton::Default => {
+                self.defaults();
+                PreferenceOutcome::Defaults
+            }
+            PreferenceButton::Done => PreferenceOutcome::Close { keep: true },
+            PreferenceButton::Cancel => PreferenceOutcome::Close { keep: false },
+        }
+    }
+    /// §3.18 DEFAULT: the default values, the line delay derived from the
+    /// base delay; marks the screen changed.
+    pub fn defaults(&mut self) {
+        let defaults = Preferences::default();
+        self.values = Preferences {
+            text_line_delay: line_delay(defaults.text_base_delay),
+            ..defaults
+        };
+        self.changed = true;
+    }
+    /// A left release: a drag notes it for its next iteration; the armed
+    /// knob or switch acts when the release is in its rectangle (any
+    /// release there marks the screen changed, even in a dead zone).
+    pub fn release(
+        &mut self,
+        point: Option<[i32; 2]>,
+        widths: &LabelWidths,
+        now: u64,
+    ) -> PreferenceOutcome {
+        if let Some(drag) = &mut self.drag {
+            drag.released = true;
+            return PreferenceOutcome::None;
+        }
+        if now < self.blocked_until {
+            return PreferenceOutcome::None;
+        }
+        let (Some(control), Some(point)) = (self.armed.take(), point) else {
+            return PreferenceOutcome::None;
+        };
+        let cues = match control {
+            PreferenceControl::Knob(index) => {
+                let knob = &KNOBS[index];
+                let value = *knob_value(&mut self.values, index);
+                let Some((new, up)) = knob_click(
+                    knob,
+                    &widths.knobs[index],
+                    point,
+                    value,
+                    self.knob_up[index],
+                ) else {
+                    return PreferenceOutcome::None;
+                };
+                self.changed = true;
+                self.knob_up[index] = up;
+                if new == value {
+                    return PreferenceOutcome::None;
+                }
+                *knob_value(&mut self.values, index) = new;
+                KNOB_SOUNDS
+            }
+            PreferenceControl::Switch(index) => {
+                let switch = &SWITCHES[index];
+                let value = *switch_value(&mut self.values, index);
+                let Some(new) = switch_click(switch, widths.switches[index], point, value) else {
+                    return PreferenceOutcome::None;
+                };
+                self.changed = true;
+                if new == value {
+                    return PreferenceOutcome::None;
+                }
+                *switch_value(&mut self.values, index) = new;
+                SWITCH_SOUNDS
+            }
+            _ => return PreferenceOutcome::None,
+        };
+        self.blocked_until = now + CONTROL_CUE_MS;
+        PreferenceOutcome::Changed { cues }
+    }
+    /// One tick of a slider drag, at most one iteration per
+    /// `DRAG_ITERATION_MS`. The release is tested first; otherwise the
+    /// knob follows the pointer's x with `slider_drag`'s hysteresis and
+    /// the value follows the knob.
+    pub fn drag_tick(&mut self, now: u64, pointer_x: Option<i32>) -> Option<DragStep> {
+        let drag = self.drag.as_mut()?;
+        if now < drag.next {
+            return None;
+        }
+        if drag.released {
+            let index = drag.index;
+            self.drag = None;
+            return Some(DragStep::Ended { index });
+        }
+        drag.next = now + DRAG_ITERATION_MS;
+        let iteration = drag.iteration;
+        drag.iteration += 1;
+        if let Some(x) = pointer_x {
+            drag.position = slider_drag(drag.position, x);
+        }
+        let (index, position) = (drag.index, drag.position);
+        let (old, min, max) = slider_reading(&self.values, index);
+        let value = if index == 1 {
+            delay_value(position)
+        } else {
+            slider_value(position, min, max)
+        };
+        set_slider(&mut self.values, index, value);
+        let moved = slider_reading(&self.values, index).0 != old;
+        self.changed |= moved;
+        Some(DragStep::Moved {
+            index,
+            iteration,
+            moved,
+        })
+    }
+    /// A brightness hotkey inside the screen: the slider follows and the
+    /// change joins the cancellable state.
+    pub fn brightness(&mut self, value: f64) {
+        self.values.brightness = value;
+        self.changed = true;
+    }
+    /// A key (ignored while busy).
+    pub fn key(&mut self, key: PreferenceKey, now: u64) -> PreferenceOutcome {
+        if self.busy(now) {
+            return PreferenceOutcome::None;
+        }
+        match key {
+            PreferenceKey::Escape => PreferenceOutcome::Close { keep: false },
+            PreferenceKey::Done => PreferenceOutcome::Close { keep: true },
+            PreferenceKey::CtrlQ | PreferenceKey::CtrlX | PreferenceKey::F10 => {
+                PreferenceOutcome::QuitConfirm
+            }
+        }
+    }
+    /// Closing: the values kept (Done) or the backup (Cancel), and whether
+    /// they must be applied (a kept change, or any cancel).
+    pub fn close(self, keep: bool) -> (Preferences, bool) {
+        if keep {
+            let apply = self.changed;
+            (self.values, apply)
+        } else {
+            (self.backup, true)
+        }
+    }
+}

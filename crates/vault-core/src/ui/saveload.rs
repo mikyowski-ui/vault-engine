@@ -1,7 +1,7 @@
 //! SPEC-014 §3.14-3.16: the save/load slot screen (captions, slot states,
 //! navigation, clicks, previews, the thumbnail scaler, the info box), the
 //! description box, and quick save/load.
-use super::{ColorKey, Rect};
+use super::{ColorKey, Layout, Rect};
 
 pub const SLOTS: usize = 10;
 pub const BACKGROUND: &str = "lsgame.frm";
@@ -380,5 +380,275 @@ impl QuickSlot {
     /// A pick-quick-slot screen completed successfully.
     pub fn picked(&mut self) {
         self.known = true;
+    }
+}
+
+// SPEC-020 §2.1: the save/load screen's layout and dispatch. Rectangles are
+// frame (screen) pixels.
+
+/// §3.15 the description box's Done and Cancel red buttons (screen).
+pub const DESCRIPTION_DONE: Rect = super::red_button([169 + 34, 116 + 58]);
+pub const DESCRIPTION_CANCEL: Rect = super::red_button([169 + 160, 116 + 58]);
+/// §3.15 the overwrite question (a large Yes/No box, `lsgame.msg` 131, key
+/// 32328) and the §3.14 notices (a large Done box, key 32328).
+pub const OVERWRITE_ORIGIN: [i32; 2] = [169, 131];
+pub const NOTICE_ORIGIN: [i32; 2] = [169, 116];
+
+/// A control of the save/load screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveLoadControl {
+    Done,
+    Cancel,
+    ArrowUp,
+    ArrowDown,
+    /// The slot list area.
+    List,
+    DescriptionDone,
+    DescriptionCancel,
+}
+/// The screen's controls: with the description box open only its Done and
+/// Cancel; otherwise Done, Cancel, the arrows and the list.
+pub fn layout(description: bool) -> Layout<SaveLoadControl> {
+    if description {
+        return Layout::new()
+            .with(SaveLoadControl::DescriptionDone, DESCRIPTION_DONE)
+            .with(SaveLoadControl::DescriptionCancel, DESCRIPTION_CANCEL);
+    }
+    Layout::new()
+        .with(SaveLoadControl::Done, super::red_button(DONE.0))
+        .with(SaveLoadControl::Cancel, super::red_button(CANCEL.0))
+        .with(SaveLoadControl::ArrowUp, ARROW_UP)
+        .with(SaveLoadControl::ArrowDown, ARROW_DOWN)
+        .with(SaveLoadControl::List, LIST_AREA)
+}
+/// What a save/load input leads to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveLoadOutcome {
+    /// Nothing changed (the input is still swallowed).
+    None,
+    /// The selection or the description text changed.
+    Changed,
+    /// Saving over an occupied slot: ask first (a Yes/No box at
+    /// `OVERWRITE_ORIGIN`); Yes calls [`SaveLoadScreen::overwrite_accepted`].
+    AskOverwrite(usize),
+    /// The description box opened.
+    DescriptionOpened,
+    /// `iisxxxx1` and the `lsgame.msg` notice at `NOTICE_ORIGIN`.
+    Notice { title: i32, body: i32 },
+    /// Load this zero-based slot.
+    Load(usize),
+    /// Write this zero-based slot with the description.
+    Save { slot: usize, description: Vec<u8> },
+    /// Esc or Cancel: back to the options menu when it opened the screen,
+    /// else to the map.
+    Cancel { to_options: bool },
+    /// A brightness hotkey step.
+    Brightness(bool),
+    /// Ctrl+Q, Ctrl+X or F10: the quit confirmation, whose Yes closes the
+    /// screen as cancelled.
+    QuitConfirm,
+}
+/// A key on the save/load screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveLoadKey {
+    List(ListKey),
+    Enter,
+    Escape,
+    Backspace,
+    /// A description character.
+    Char(u8),
+    Brightness(bool),
+    Quit,
+}
+/// §3.14-3.15 the save/load screen's state: its mode, the slot states read
+/// from disk, the selection (which persists for the program run: take it
+/// with [`SaveLoadScreen::into_list`]), the description box, a held scroll
+/// arrow, and whether the options menu opened it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveLoadScreen {
+    pub mode: Mode,
+    pub slots: Vec<SlotState>,
+    pub list: SlotList,
+    pub description: Option<Description>,
+    arrow: Option<(ListKey, super::HoldRepeat)>,
+    pub from_options: bool,
+}
+impl SaveLoadScreen {
+    pub fn open(mode: Mode, slots: Vec<SlotState>, list: SlotList) -> Self {
+        Self {
+            mode,
+            slots,
+            list,
+            description: None,
+            arrow: None,
+            from_options: false,
+        }
+    }
+    /// The selection to keep for the next opening.
+    pub fn into_list(self) -> SlotList {
+        self.list
+    }
+    pub fn layout(&self) -> Layout<SaveLoadControl> {
+        layout(self.description.is_some())
+    }
+    /// The selected slot's state (a missing slot reads as empty).
+    pub fn selected_state(&self) -> &SlotState {
+        self.slots
+            .get(self.list.selected)
+            .unwrap_or(&SlotState::Empty)
+    }
+    /// The held scroll arrow's control, while one repeats.
+    pub fn arrow_held(&self) -> Option<SaveLoadControl> {
+        self.arrow.map(|(key, _)| match key {
+            ListKey::Up => SaveLoadControl::ArrowUp,
+            _ => SaveLoadControl::ArrowDown,
+        })
+    }
+    /// A left press (the controls act on the press). While an arrow is
+    /// held every input is swallowed. The description box's buttons
+    /// finish it; Done commits; Cancel cancels; an arrow steps and starts
+    /// its repeat (§3.14 "Held arrows"); the list selects, and a second
+    /// click on the remembered slot commits.
+    pub fn press(&mut self, point: [i32; 2], now: u64) -> SaveLoadOutcome {
+        if self.arrow.is_some() {
+            return SaveLoadOutcome::None;
+        }
+        match self.layout().hit(point) {
+            Some(SaveLoadControl::DescriptionDone) => self.finish_description(true),
+            Some(SaveLoadControl::DescriptionCancel) => self.finish_description(false),
+            Some(SaveLoadControl::Done) => self.commit(),
+            Some(SaveLoadControl::Cancel) => self.cancel(),
+            Some(control @ (SaveLoadControl::ArrowUp | SaveLoadControl::ArrowDown)) => {
+                let key = if control == SaveLoadControl::ArrowUp {
+                    ListKey::Up
+                } else {
+                    ListKey::Down
+                };
+                self.list.key(key);
+                self.arrow = Some((key, super::HoldRepeat::new(now, ARROW_IDLE_FRAMES)));
+                SaveLoadOutcome::Changed
+            }
+            Some(SaveLoadControl::List) => match self.list.click(point[1]) {
+                Click::Done(_) => self.commit(),
+                Click::Select(_) => SaveLoadOutcome::Changed,
+            },
+            None => SaveLoadOutcome::None,
+        }
+    }
+    /// A key. While an arrow is held every key, Esc included, is
+    /// swallowed; the description box takes Enter, Esc, Backspace and
+    /// characters.
+    pub fn key(&mut self, key: SaveLoadKey) -> SaveLoadOutcome {
+        if self.arrow.is_some() {
+            return SaveLoadOutcome::None;
+        }
+        if let Some(description) = &mut self.description {
+            return match key {
+                SaveLoadKey::Enter => self.finish_description(true),
+                SaveLoadKey::Escape => self.finish_description(false),
+                SaveLoadKey::Backspace => {
+                    description.backspace();
+                    SaveLoadOutcome::Changed
+                }
+                SaveLoadKey::Char(code) => {
+                    description.key(code);
+                    SaveLoadOutcome::Changed
+                }
+                _ => SaveLoadOutcome::None,
+            };
+        }
+        match key {
+            SaveLoadKey::List(key) => {
+                self.list.key(key);
+                SaveLoadOutcome::Changed
+            }
+            SaveLoadKey::Enter => self.commit(),
+            SaveLoadKey::Escape => self.cancel(),
+            SaveLoadKey::Brightness(up) => SaveLoadOutcome::Brightness(up),
+            SaveLoadKey::Quit => SaveLoadOutcome::QuitConfirm,
+            SaveLoadKey::Backspace | SaveLoadKey::Char(_) => SaveLoadOutcome::None,
+        }
+    }
+    /// Done, Enter or a double click on the selected slot. Saving asks
+    /// before overwriting an occupied slot, else opens an empty
+    /// description. Loading does nothing on an empty slot, refuses a
+    /// corrupt one (`lsgame.msg` 134 and, under the safe rule, 135) or an
+    /// old version (SPEC-019 §3.11: 134 and 136), and loads an occupied one.
+    pub fn commit(&mut self) -> SaveLoadOutcome {
+        let slot = self.list.selected;
+        if self.mode.saving() {
+            if matches!(self.selected_state(), SlotState::Occupied(_)) {
+                return SaveLoadOutcome::AskOverwrite(slot);
+            }
+            self.description = Some(Description::open(b""));
+            return SaveLoadOutcome::DescriptionOpened;
+        }
+        match self.selected_state() {
+            SlotState::Empty => SaveLoadOutcome::None,
+            SlotState::Corrupt => SaveLoadOutcome::Notice {
+                title: 134,
+                body: 135,
+            },
+            SlotState::OldVersion => SaveLoadOutcome::Notice {
+                title: 134,
+                body: 136,
+            },
+            SlotState::Occupied(_) => SaveLoadOutcome::Load(slot),
+        }
+    }
+    /// Yes to the overwrite question: the description box, prefilled with
+    /// the slot's description.
+    pub fn overwrite_accepted(&mut self) -> SaveLoadOutcome {
+        match self.selected_state() {
+            SlotState::Occupied(info) => {
+                self.description = Some(Description::open(&info.description));
+                SaveLoadOutcome::DescriptionOpened
+            }
+            _ => SaveLoadOutcome::None,
+        }
+    }
+    /// The description box closes; accepted, the slot is written.
+    pub fn finish_description(&mut self, accept: bool) -> SaveLoadOutcome {
+        match self.description.take() {
+            Some(description) if accept => SaveLoadOutcome::Save {
+                slot: self.list.selected,
+                description: description.text,
+            },
+            Some(_) => SaveLoadOutcome::Changed,
+            None => SaveLoadOutcome::None,
+        }
+    }
+    /// Esc or Cancel.
+    pub fn cancel(&mut self) -> SaveLoadOutcome {
+        SaveLoadOutcome::Cancel {
+            to_options: self.from_options,
+        }
+    }
+    /// A failed save rescans: new slot states, the screen stays open.
+    pub fn rescan(&mut self, slots: Vec<SlotState>) {
+        self.slots = slots;
+    }
+    /// The left button came up: a held arrow stops.
+    pub fn release(&mut self) {
+        self.arrow = None;
+    }
+    /// One modal frame: the double-click window runs down, and a held
+    /// arrow repeats while the pointer stays on it (`on_arrow`), else it
+    /// stops. Returns whether the selection moved.
+    pub fn frame(&mut self, now: u64, on_arrow: bool) -> bool {
+        self.list.frame();
+        let Some((key, repeat)) = &mut self.arrow else {
+            return false;
+        };
+        if !on_arrow {
+            self.arrow = None;
+            return false;
+        }
+        if repeat.poll(now) {
+            let key = *key;
+            self.list.key(key);
+            return true;
+        }
+        false
     }
 }

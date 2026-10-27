@@ -1,7 +1,7 @@
 //! SPEC-014 §3.43 character sheet save, load and print: the file list, the
 //! load and save dialogs' list paging and name field, the written file
 //! names, the `.GCD` sheet of a player, and the printed sheet.
-use super::character::grouped;
+use super::{Layout, Rect, character::grouped};
 use crate::CharacterSheet;
 use vault_formats::GcdFile;
 
@@ -576,6 +576,271 @@ pub fn print_sheet(sheet: &PrintedSheet, message: impl Fn(i32) -> Vec<u8>, safe:
         text.extend(b"\r\n");
     }
     text
+}
+
+// SPEC-020 §2.1: the §3.43 load and save file dialogs' layout and state.
+// Rectangles are frame (screen) pixels.
+
+/// The file dialogs' parts (window-relative, the window at
+/// `DIALOG_ORIGIN`): the list area and its arrows; the arrows repeat from
+/// the 15th frame.
+pub const FILE_LIST: Rect = Rect::new(55, 49, 190, 124);
+pub const FILE_UP: Rect = Rect::new(36, 44, 11, 14);
+pub const FILE_DOWN: Rect = Rect::new(36, 58, 11, 14);
+pub const ARROW_IDLE_FRAMES: u32 = 15;
+/// A control of a file dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileControl {
+    Up,
+    Down,
+    Done,
+    Cancel,
+    List,
+}
+/// A dialog's controls on screen, in press order: the arrows, Done and
+/// Cancel (at y = 214 in the save dialog, 187 in the load dialog), and the
+/// list.
+pub fn file_layout(kind: DialogKind) -> Layout<FileControl> {
+    let y = if kind == DialogKind::Save { 214 } else { 187 };
+    Layout::new()
+        .with(FileControl::Up, FILE_UP)
+        .with(FileControl::Down, FILE_DOWN)
+        .with(FileControl::Done, super::red_button([58, y]))
+        .with(FileControl::Cancel, super::red_button([163, y]))
+        .with(FileControl::List, FILE_LIST)
+        .offset(DIALOG_ORIGIN)
+}
+/// What a file-dialog input led to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileEvent {
+    None,
+    /// The load dialog's listed name, or the save dialog's name.
+    Chosen(Vec<u8>),
+    Cancel,
+}
+/// A key in a file dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKey {
+    Up,
+    Down,
+    Home,
+    End,
+    Escape,
+    Enter,
+    /// Backspace or Delete.
+    Erase,
+    /// A typed character.
+    Char(u8),
+    Other,
+}
+/// §3.43 the load or save file dialog: the listed names, the list, the save
+/// dialog's name field, the held control and arrow repeat, the idle-frame
+/// count, and the sounds to play (drained by the caller).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SheetDialog {
+    pub names: Vec<Vec<u8>>,
+    pub list: FileList,
+    pub field: Option<NameField>,
+    armed: super::Armed<FileControl>,
+    repeat: Option<(bool, super::HoldRepeat)>,
+    opened: u64,
+    frames: u64,
+    pub sounds: Vec<&'static str>,
+}
+impl SheetDialog {
+    /// `default` is the save dialog's initial name; the load dialog has no
+    /// field. The list keeps the `[May-improve]` safe rule (M = n - 12).
+    pub fn new(kind: DialogKind, names: Vec<Vec<u8>>, default: Option<&[u8]>, now: u64) -> Self {
+        Self {
+            list: FileList::new(kind, names.len(), true),
+            names,
+            field: (kind == DialogKind::Save).then(|| NameField::open(default.unwrap_or_default())),
+            armed: super::Armed::new(),
+            repeat: None,
+            opened: now,
+            frames: 0,
+            sounds: Vec::new(),
+        }
+    }
+    fn save(&self) -> bool {
+        self.list.kind == DialogKind::Save
+    }
+    pub fn layout(&self) -> Layout<FileControl> {
+        file_layout(self.list.kind)
+    }
+    /// The held arrow, Done or Cancel (drawn down).
+    pub fn pressed(&self) -> Option<FileControl> {
+        self.repeat
+            .map(|(up, _)| {
+                if up {
+                    FileControl::Up
+                } else {
+                    FileControl::Down
+                }
+            })
+            .or(self.armed.pressed())
+            .filter(|control| *control != FileControl::List)
+    }
+    /// Done or Return: the load dialog's selected name (Cancel with no
+    /// files), the save dialog's field (Cancel when empty).
+    fn accept(&self) -> FileEvent {
+        let chosen = match &self.field {
+            Some(field) => field.accept(),
+            None => self
+                .list
+                .selected()
+                .and_then(|entry| self.names.get(entry).cloned()),
+        };
+        chosen.map_or(FileEvent::Cancel, FileEvent::Chosen)
+    }
+    fn step(&mut self, up: bool) {
+        if up {
+            self.list.up();
+        } else {
+            self.list.down_arrow();
+        }
+    }
+    /// Keys: Up, Down, Home and End move; Esc cancels; in the save dialog
+    /// Return accepts (with `ib1p1xx1`), Backspace and Delete erase, and
+    /// other keys type. Return does nothing in the load dialog.
+    pub fn key(&mut self, key: FileKey) -> FileEvent {
+        match key {
+            FileKey::Up => self.list.up(),
+            FileKey::Down => self.list.down_key(),
+            FileKey::Home => self.list.home(),
+            FileKey::End => self.list.end(),
+            FileKey::Escape => return FileEvent::Cancel,
+            FileKey::Enter if self.save() => {
+                self.sounds.push(super::BUTTON_PRESS);
+                return self.accept();
+            }
+            FileKey::Erase => {
+                if let Some(field) = &mut self.field {
+                    field.backspace();
+                }
+            }
+            FileKey::Char(code) => {
+                if let Some(field) = &mut self.field {
+                    field.key(code);
+                }
+            }
+            FileKey::Enter | FileKey::Other => {}
+        }
+        FileEvent::None
+    }
+    /// A press: an arrow steps at once (with `ib1p1xx1`) and repeats while
+    /// held; Done and Cancel press; the list acts on release. Returns the
+    /// held control's rectangle (for its down art and release cue).
+    pub fn press(&mut self, point: [i32; 2], now: u64) -> Option<Rect> {
+        self.repeat = None;
+        self.armed.clear();
+        let layout = self.layout();
+        match layout.hit(point) {
+            Some(control @ (FileControl::Up | FileControl::Down)) => {
+                let up = control == FileControl::Up;
+                self.sounds.push(super::BUTTON_PRESS);
+                self.step(up);
+                self.repeat = Some((up, super::HoldRepeat::new(now, ARROW_IDLE_FRAMES)));
+                layout.rect(control)
+            }
+            Some(control @ (FileControl::Done | FileControl::Cancel)) => {
+                self.sounds.push(super::BUTTON_PRESS);
+                self.armed.press(Some(control));
+                layout.rect(control)
+            }
+            Some(FileControl::List) => {
+                self.armed.press(Some(FileControl::List));
+                None
+            }
+            None => None,
+        }
+    }
+    /// A release at `point`: a held red button acts over itself; a list
+    /// click selects the row, and a second click on it chooses the file
+    /// (with `ib1p1xx1`). In the save dialog a single click copies the
+    /// file's base name into the field.
+    pub fn release(&mut self, point: Option<[i32; 2]>) -> FileEvent {
+        self.repeat = None;
+        let Some(pressed) = self.armed.pressed() else {
+            return FileEvent::None;
+        };
+        self.armed.clear();
+        let layout = self.layout();
+        let over = |control: FileControl| {
+            point.is_some_and(|point| {
+                layout
+                    .rect(control)
+                    .is_some_and(|rect| rect.contains(point))
+            })
+        };
+        match pressed {
+            FileControl::Done | FileControl::Cancel => {
+                self.sounds.push(super::BUTTON_RELEASE);
+                if !over(pressed) {
+                    FileEvent::None
+                } else if pressed == FileControl::Done {
+                    self.accept()
+                } else {
+                    FileEvent::Cancel
+                }
+            }
+            FileControl::List => {
+                let Some([_, y]) = point.filter(|_| over(FileControl::List)) else {
+                    return FileEvent::None;
+                };
+                let chosen = self.list.click(y);
+                let Some(name) = self
+                    .list
+                    .selected()
+                    .and_then(|i| self.names.get(i))
+                    .cloned()
+                else {
+                    return FileEvent::None;
+                };
+                if chosen {
+                    self.sounds.push(super::BUTTON_PRESS);
+                    return FileEvent::Chosen(if self.save() { base_name(&name) } else { name });
+                }
+                if let Some(field) = &mut self.field {
+                    field.take(&name);
+                }
+                FileEvent::None
+            }
+            FileControl::Up | FileControl::Down => FileEvent::None,
+        }
+    }
+    /// One frame: a held arrow repeats while the pointer stays on it; the
+    /// idle-frame counter runs; the field cursor blinks every 3 frames.
+    /// Returns whether the dialog changed.
+    pub fn tick(&mut self, now: u64, pointer: Option<[i32; 2]>) -> bool {
+        let mut changed = false;
+        let layout = self.layout();
+        if let Some((up, repeat)) = &mut self.repeat {
+            let up = *up;
+            let control = if up {
+                FileControl::Up
+            } else {
+                FileControl::Down
+            };
+            let rect = layout.rect(control);
+            if !pointer.is_some_and(|point| rect.is_some_and(|rect| rect.contains(point))) {
+                self.repeat = None;
+            } else if repeat.poll(now) {
+                self.step(up);
+                changed = true;
+            }
+        }
+        let frames = now.saturating_sub(self.opened) / super::FRAME_MS;
+        let elapsed = frames.saturating_sub(self.frames);
+        for _ in 0..elapsed.min(IDLE_FRAMES) {
+            self.list.idle_frame();
+        }
+        if self.field.is_some() && frames / 3 != self.frames / 3 {
+            changed = true;
+        }
+        self.frames = frames;
+        changed
+    }
 }
 
 #[cfg(test)]

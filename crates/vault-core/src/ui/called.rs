@@ -5,7 +5,7 @@
 //! alias, the invisible part buttons and the input codes. The presentation
 //! layer draws it and drives its input; SPEC-007 §3.5 supplies the chances
 //! and §3.6 the attack. Coordinates are window-relative.
-use super::Rect;
+use super::{Armed, Layout, Rect};
 use crate::{
     Refusal, WorldError,
     combat::Attack,
@@ -186,6 +186,114 @@ pub fn key_code(letter: Option<char>, control: bool, backspace: bool) -> Option<
 /// (`[May-improve]`): it is ignored and the window stays open.
 pub fn choice(code: u8) -> Option<Part> {
     Part::of(code)
+}
+
+// SPEC-020 §2.1: the called-shot window's layout and dispatch. Rectangles
+// are frame (screen) pixels.
+
+/// A control of the called-shot window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalledControl {
+    Cancel,
+    /// A body part by its selection code 0-7.
+    Part(u8),
+}
+/// A window rectangle on screen.
+pub fn on_screen(rect: Rect) -> Rect {
+    rect.offset(ORIGIN)
+}
+/// The window's controls on screen: Cancel (sized by its up art, else the
+/// red button's 15 by 16) first, then the part buttons in drawing order,
+/// each from its label's width (`widths` by hit location; `None`: no
+/// label).
+pub fn layout(widths: &[Option<i32>; 8], cancel_size: Option<[i32; 2]>) -> Layout<CalledControl> {
+    let cancel = Rect::at(CANCEL, cancel_size.unwrap_or(super::RED_BUTTON.2));
+    std::iter::once((CalledControl::Cancel, on_screen(cancel)))
+        .chain(parts().map(|part| {
+            let width = widths[usize::from(part.location)];
+            (
+                CalledControl::Part(part.code),
+                on_screen(part.button(width)),
+            )
+        }))
+        .collect()
+}
+/// What a called-shot input leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalledOutcome {
+    None,
+    /// Esc, by key or Cancel: the window closes and nothing else happens.
+    Cancel,
+    /// A part is chosen: the window closes, `CHOSEN_SOUND` plays and the
+    /// aimed attack runs at its location.
+    Choose(Part),
+}
+/// A key in the called-shot window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalledKey {
+    Escape,
+    /// Any other key: its letter (physical, either case), whether Control
+    /// is held, and whether it is Backspace.
+    Code {
+        letter: Option<char>,
+        control: bool,
+        backspace: bool,
+    },
+}
+/// §3.38 the open window's controls: the label widths its part buttons
+/// follow, Cancel's size, and the held control. Right presses are
+/// discarded by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalledShotWindow {
+    pub widths: [Option<i32>; 8],
+    pub cancel_size: Option<[i32; 2]>,
+    armed: Armed<CalledControl>,
+}
+impl CalledShotWindow {
+    pub fn new(widths: [Option<i32>; 8], cancel_size: Option<[i32; 2]>) -> Self {
+        Self {
+            widths,
+            cancel_size,
+            armed: Armed::new(),
+        }
+    }
+    pub fn layout(&self) -> Layout<CalledControl> {
+        layout(&self.widths, self.cancel_size)
+    }
+    pub fn pressed(&self) -> Option<CalledControl> {
+        self.armed.pressed()
+    }
+    /// A left press holds Cancel (with the red-button sounds) or a part's
+    /// button.
+    pub fn press(&mut self, point: [i32; 2]) -> Option<CalledControl> {
+        self.armed.press(self.layout().hit(point))
+    }
+    /// A left release: Cancel's returns Esc; a part pressed and released
+    /// on its own button is chosen.
+    pub fn release(&mut self, point: Option<[i32; 2]>) -> CalledOutcome {
+        let over = point.and_then(|point| self.layout().hit(point));
+        match self.armed.release(over) {
+            Some(CalledControl::Cancel) => CalledOutcome::Cancel,
+            Some(CalledControl::Part(code)) => {
+                choice(code).map_or(CalledOutcome::None, CalledOutcome::Choose)
+            }
+            None => CalledOutcome::None,
+        }
+    }
+    /// Keys: Esc cancels; Ctrl+A-G choose by selection code; code 8
+    /// (Backspace, Ctrl+H) and every other key do nothing.
+    pub fn key(&self, key: CalledKey) -> CalledOutcome {
+        match key {
+            CalledKey::Escape => CalledOutcome::Cancel,
+            CalledKey::Code {
+                letter,
+                control,
+                backspace,
+            } => key_code(letter, control, backspace)
+                .and_then(choice)
+                .map_or(CalledOutcome::None, CalledOutcome::Choose),
+        }
+    }
 }
 
 #[cfg(test)]

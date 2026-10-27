@@ -140,3 +140,151 @@ fn spec014_fixture_r_ask_about_input() {
     assert!(full.text.is_empty());
     assert_eq!(full.submit(), None);
 }
+
+/// SPEC-020 §2.1: the panel's, Review's and Ask About's layouts and
+/// dispatch.
+mod modal {
+    use super::*;
+
+    #[test]
+    fn panel_layout_and_keys() {
+        let fallout1 = panel_layout(false, false);
+        assert_eq!(
+            fallout1.rect(PanelControl::Barter),
+            Some(Rect::new(593, 331, 14, 14))
+        );
+        assert_eq!(
+            fallout1.rect(PanelControl::TellMeAbout),
+            Some(Rect::new(593, 406, 14, 14))
+        );
+        assert_eq!(
+            fallout1.rect(PanelControl::Review),
+            Some(Rect::new(13, 444, 51, 29))
+        );
+        let member = panel_layout(true, true);
+        assert_eq!(
+            member.rect(PanelControl::CombatControl),
+            Some(Rect::new(593, 406, 14, 14))
+        );
+        assert!(!member.contains(PanelControl::TellMeAbout));
+        assert_eq!(panel_layout(true, false).len(), 2);
+        assert_eq!(
+            panel_key('a', false, false),
+            Some(PanelControl::TellMeAbout)
+        );
+        assert_eq!(panel_key('a', true, true), None);
+        assert_eq!(
+            panel_key('c', true, true),
+            Some(PanelControl::CombatControl)
+        );
+        assert_eq!(panel_key('c', true, false), None);
+        assert_eq!(panel_key('B', false, false), Some(PanelControl::Barter));
+        assert_eq!(panel_key('r', false, false), None);
+        assert_eq!(PanelControl::Barter.sounds(), (SMALL_PRESS, SMALL_RELEASE));
+        assert_eq!(
+            PanelControl::Review.sounds(),
+            (crate::ui::BUTTON_PRESS, crate::ui::BUTTON_RELEASE)
+        );
+        let mut panel = Panel::new(false, false);
+        assert_eq!(panel.press([14, 445]), Some(PanelControl::Review));
+        assert_eq!(panel.pressed(), Some(PanelControl::Review));
+        assert_eq!(panel.release(Some([594, 332])), None);
+        panel.press([594, 332]);
+        assert_eq!(panel.release(Some([594, 332])), Some(PanelControl::Barter));
+    }
+
+    #[test]
+    fn review_window_scrolls_and_closes() {
+        let layout = review_layout();
+        assert_eq!(
+            layout.rect(ReviewControl::ScrollUp),
+            Some(Rect::new(475, 152, 35, 35))
+        );
+        assert_eq!(
+            layout.rect(ReviewControl::Done),
+            Some(Rect::new(499, 398, 82, 46))
+        );
+        let mut review = ReviewWindow::new();
+        assert_eq!(review.top, 0);
+        assert_eq!(review.key(ReviewKey::Up, 3), ReviewOutcome::None);
+        assert_eq!(review.key(ReviewKey::Down, 3), ReviewOutcome::Scrolled(1));
+        assert_eq!(review.press([480, 195]), Some(ReviewControl::ScrollDown));
+        assert_eq!(
+            review.release(Some([480, 195]), 3),
+            ReviewOutcome::Scrolled(2)
+        );
+        assert_eq!(
+            review.key(ReviewKey::Down, 3),
+            ReviewOutcome::None,
+            "stops at the last entry"
+        );
+        review.press([480, 160]);
+        assert_eq!(review.release(Some([0, 0]), 3), ReviewOutcome::None);
+        assert_eq!(review.top, 2);
+        review.press([500, 400]);
+        assert_eq!(review.release(Some([500, 400]), 3), ReviewOutcome::Close);
+        assert_eq!(review.key(ReviewKey::Escape, 3), ReviewOutcome::Close);
+        assert_eq!(review.key(ReviewKey::Other, 3), ReviewOutcome::None);
+        assert_eq!(
+            ReviewControl::ScrollUp.sounds(),
+            (SMALL_PRESS, SMALL_RELEASE)
+        );
+    }
+
+    #[test]
+    fn ask_about_window_opens_types_and_submits() {
+        let layout = ask_layout();
+        assert_eq!(
+            layout.rect(AskControl::Done),
+            Some(Rect::new(209, 414, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(AskControl::Cancel),
+            Some(Rect::new(335, 414, 15, 16))
+        );
+        let glyph = |_: u8| 6;
+        let mut ask = AskAboutWindow::new(0);
+        assert_eq!(ask.hides(), (true, true));
+        // Opening: input waits for the next tick.
+        assert_eq!(ask.press([210, 415]), None);
+        assert_eq!(ask.key(AskKey::Code(86), measure, glyph), AskOutcome::None);
+        assert!(ask.tick(0));
+        assert!(!ask.opening);
+        assert_eq!(
+            ask.key(AskKey::Code(86), measure, glyph),
+            AskOutcome::Changed
+        );
+        assert_eq!(ask.key(AskKey::Code(7), measure, glyph), AskOutcome::None);
+        assert_eq!(
+            ask.key(AskKey::Enter, measure, glyph),
+            AskOutcome::Submit(b"V".to_vec())
+        );
+        assert_eq!(
+            ask.key(AskKey::Enter, measure, glyph),
+            AskOutcome::None,
+            "empty field"
+        );
+        ask.answer_shown();
+        assert_eq!(ask.hides(), (false, true));
+        ask.key(AskKey::Code(87), measure, glyph);
+        assert_eq!(
+            ask.key(AskKey::Backspace, measure, glyph),
+            AskOutcome::Changed
+        );
+        assert!(ask.field.text.is_empty());
+        ask.key(AskKey::Code(87), measure, glyph);
+        assert_eq!(ask.press([210, 415]), Some(AskControl::Done));
+        assert_eq!(
+            ask.release(Some([210, 415])),
+            AskOutcome::Submit(b"W".to_vec())
+        );
+        ask.press([336, 415]);
+        assert_eq!(ask.release(Some([210, 415])), AskOutcome::None);
+        ask.press([336, 415]);
+        assert_eq!(ask.release(Some([336, 415])), AskOutcome::Cancel);
+        assert_eq!(ask.key(AskKey::Escape, measure, glyph), AskOutcome::Cancel);
+        // The cursor blinks after 333 ms.
+        assert!(!ask.tick(333));
+        assert!(ask.tick(334));
+    }
+}

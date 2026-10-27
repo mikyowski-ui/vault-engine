@@ -5,7 +5,7 @@
 //! holidays, the `pipboy.msg` IDs and the screen saver. Coordinates are
 //! window coordinates, which equal screen coordinates (the window is at
 //! (0, 0), 640 by 480).
-use super::{ColorKey, Rect};
+use super::{ColorKey, Layout, Rect};
 use crate::host_rest::RestRequest;
 
 /// All art is under `art/intrface/`; there is no `pipboy.frm`.
@@ -516,6 +516,495 @@ impl ScreenSaver {
             }
         }
         cells
+    }
+}
+
+// SPEC-020 §2.1: the Pip-Boy's layout and page state machine. Rectangles
+// are frame (screen) pixels; the window is at (0, 0).
+
+/// An accepted row shows yellow this long before it acts.
+pub const FLASH_MS: u64 = 200;
+
+/// The pages, by the button that shows them (`z` opens on the Alarm Clock).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Status,
+    Automaps,
+    Archives,
+    Alarm,
+}
+/// The Status page's views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusView {
+    List,
+    /// A location's quests, by the presentation layer's location key.
+    Detail(usize),
+    /// A holodisk being read: its key, the page shown and the last page.
+    Reading {
+        disk: usize,
+        page: usize,
+        last_page: usize,
+    },
+}
+/// The Automaps page's views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomapView {
+    List,
+    /// An area's elevation list: the area's index in the area list, and
+    /// the selected entry (from 0).
+    Elevations {
+        area: usize,
+        entry: usize,
+    },
+}
+/// The page shown (none on the start screen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Status(StatusView),
+    Automaps(AutomapView),
+    Archives,
+    Alarm,
+}
+impl Page {
+    pub fn tab(&self) -> Tab {
+        match self {
+            Self::Status(_) => Tab::Status,
+            Self::Automaps(_) => Tab::Automaps,
+            Self::Archives => Tab::Archives,
+            Self::Alarm => Tab::Alarm,
+        }
+    }
+}
+/// A row zone, or the Back zone on line 40.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zone {
+    Row(i32),
+    Back,
+}
+/// What shows yellow while a flash waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Highlight {
+    None,
+    Location(usize),
+    Disk(usize),
+    Back,
+}
+/// What a flash does when it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deferred {
+    Detail(usize),
+    Reading { disk: usize, last_page: usize },
+    StatusList,
+    Page(ReadingAction),
+}
+/// A selected row's yellow flash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Flash {
+    pub until: u64,
+    pub highlight: Highlight,
+    pub then: Deferred,
+}
+/// The list lengths the current page's zones depend on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PageCounts {
+    pub locations: usize,
+    pub disks: usize,
+    pub areas: usize,
+    /// The shown area's elevation entries.
+    pub entries: usize,
+    pub archives: usize,
+}
+/// A control of the Pip-Boy window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipBoyControl {
+    Button(Button),
+    Zone(Zone),
+}
+/// A key in the Pip-Boy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipBoyKey {
+    /// Esc (it also stops a rest).
+    Escape,
+    /// Enter or `p`.
+    Close,
+    /// Ctrl+Q, Ctrl+X or F10.
+    Quit,
+    F12,
+    PageDown,
+    PageUp,
+    Other,
+}
+/// What a Pip-Boy input leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipBoyOutcome {
+    /// Nothing changed (the input is still swallowed).
+    None,
+    /// The window changed (a page shown, the screen saver ended).
+    Redraw,
+    /// A window button is held: play its `Button::sounds`.
+    Pressed(Button),
+    /// Close the Pip-Boy (the map-update scripts run).
+    Close,
+    /// The quit confirmation; the Pip-Boy closes after it, whatever the
+    /// answer.
+    QuitConfirm,
+    Screenshot,
+    /// The Alarm Clock: test the SPEC-008 §3.9 rest eligibility, then call
+    /// [`PipBoyModal::show_alarm`] or show the refusal at `REST_DIALOG`.
+    AlarmRequested,
+    /// The r-th location (from 1) was chosen: flash it, then its detail
+    /// ([`PipBoyModal::flash`] with `Highlight::Location(r)` and
+    /// `Deferred::Detail(key)`).
+    Location(usize),
+    /// The r-th holodisk (from 1) was chosen: read it, then flash it with
+    /// `Highlight::Disk(r)` and `Deferred::Reading`.
+    Disk(usize),
+    /// A flash began (`ib1p1xx1`).
+    Flashing,
+    /// An automap area or entry was selected (`ib1p1xx1`).
+    Selected,
+    /// Play archive row r (from 1), after `ib1p1xx1`.
+    Archive(i32),
+    /// Rest with Alarm Clock option j; on success call
+    /// [`PipBoyModal::begin_rest`].
+    Rest(usize),
+    /// Esc during a rest: it stops.
+    StopRest,
+}
+/// The screen saver's run: its bombs, the cells drawn last and the last
+/// pass's time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SaverRun {
+    pub state: ScreenSaver,
+    pub cells: Vec<Cell>,
+    pub last_pass: u64,
+}
+/// §3.41 the Pip-Boy's modal state: the page, the held button or zone, a
+/// row's flash, a rest's option, the idle timer and the screen saver.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PipBoyModal {
+    /// No page is current on the start screen.
+    pub page: Option<Page>,
+    pub flash: Option<Flash>,
+    /// The Alarm Clock option of the running rest.
+    pub resting: Option<usize>,
+    pressed: Option<Button>,
+    zone: Option<Zone>,
+    pub idle_since: u64,
+    /// The quit confirmation closes the Pip-Boy whatever the answer.
+    pub close_after_dialog: bool,
+    pub saver: Option<SaverRun>,
+    last_step: u64,
+}
+impl PipBoyModal {
+    /// Opened at `now` on the start screen.
+    pub fn open(now: u64) -> Self {
+        Self {
+            page: None,
+            flash: None,
+            resting: None,
+            pressed: None,
+            zone: None,
+            idle_since: now,
+            close_after_dialog: false,
+            saver: None,
+            last_step: 0,
+        }
+    }
+    /// The held window button (drawn with its down art).
+    pub fn pressed(&self) -> Option<Button> {
+        self.pressed
+    }
+    /// The current page's zones: (first line, count, Back zone).
+    pub fn zone_layout(&self, counts: &PageCounts) -> (i32, usize, bool) {
+        match &self.page {
+            None => (0, 0, false),
+            Some(Page::Status(StatusView::List)) => {
+                (2, status_zone_count(counts.locations, counts.disks), false)
+            }
+            Some(Page::Status(_)) => (0, 0, true),
+            Some(Page::Automaps(AutomapView::List)) => (2, counts.areas, false),
+            Some(Page::Automaps(AutomapView::Elevations { .. })) => (0, counts.entries + 2, true),
+            Some(Page::Archives) => (2, counts.archives, false),
+            Some(Page::Alarm) => (OPTION_LINE, ALARM_OPTIONS.len(), false),
+        }
+    }
+    /// The zone under `point` on the current page.
+    pub fn zone_at(&self, point: [i32; 2], counts: &PageCounts) -> Option<Zone> {
+        let (first, count, back) = self.zone_layout(counts);
+        if back && BACK_ZONE.contains(point) {
+            return Some(Zone::Back);
+        }
+        zone_row(first, count, point).map(Zone::Row)
+    }
+    /// The window buttons, then the current page's Back zone and row
+    /// zones.
+    pub fn layout(&self, counts: &PageCounts) -> Layout<PipBoyControl> {
+        let (first, count, back) = self.zone_layout(counts);
+        let mut layout: Layout<PipBoyControl> = Button::ALL
+            .into_iter()
+            .map(|button| (PipBoyControl::Button(button), button.rect()))
+            .collect();
+        if back {
+            layout.push(PipBoyControl::Zone(Zone::Back), BACK_ZONE);
+        }
+        layout.extend(
+            zones(first, count)
+                .into_iter()
+                .map(|(rect, row)| (PipBoyControl::Zone(Zone::Row(row)), rect)),
+        );
+        layout
+    }
+    /// Any input or pointer movement restarts the idle timer; one that
+    /// ends the screen saver is consumed (`true`).
+    pub fn input(&mut self, now: u64) -> bool {
+        self.idle_since = now;
+        self.saver.take().is_some()
+    }
+    /// A left press: a window button is held; a row zone waits for its
+    /// release. Nothing is taken during a rest or a flash.
+    pub fn press(&mut self, point: [i32; 2], counts: &PageCounts, now: u64) -> PipBoyOutcome {
+        if self.input(now) {
+            return PipBoyOutcome::Redraw;
+        }
+        if self.resting.is_some() || self.flash.is_some() {
+            return PipBoyOutcome::None;
+        }
+        if let Some(button) = Button::at(point) {
+            self.pressed = Some(button);
+            return PipBoyOutcome::Pressed(button);
+        }
+        self.zone = self.zone_at(point, counts);
+        PipBoyOutcome::None
+    }
+    /// A left release: over the held button it acts; over the held zone
+    /// its row acts.
+    pub fn release(
+        &mut self,
+        point: Option<[i32; 2]>,
+        counts: &PageCounts,
+        now: u64,
+    ) -> PipBoyOutcome {
+        let zone = point.and_then(|point| self.zone_at(point, counts));
+        let (button, pressed_zone) = (self.pressed.take(), self.zone.take());
+        let Some(point) = point else {
+            return PipBoyOutcome::None;
+        };
+        if let Some(button) = button {
+            if !button.rect().contains(point) {
+                return PipBoyOutcome::None;
+            }
+            return match button {
+                Button::Status => self.show_tab(Tab::Status),
+                Button::Automaps => self.show_tab(Tab::Automaps),
+                Button::Archives => self.show_tab(Tab::Archives),
+                Button::Close => PipBoyOutcome::Close,
+                Button::Alarm => self.show_tab(Tab::Alarm),
+            };
+        }
+        match (pressed_zone, zone) {
+            (Some(pressed), Some(zone)) if pressed == zone => {
+                self.zone_release(zone, point[0], counts, now)
+            }
+            _ => PipBoyOutcome::None,
+        }
+    }
+    /// A page button: its page from the initial state (also when it is
+    /// already shown). The Alarm Clock needs the eligibility test first.
+    pub fn show_tab(&mut self, tab: Tab) -> PipBoyOutcome {
+        self.page = Some(match tab {
+            Tab::Status => Page::Status(StatusView::List),
+            Tab::Automaps => Page::Automaps(AutomapView::List),
+            Tab::Archives => Page::Archives,
+            Tab::Alarm => return PipBoyOutcome::AlarmRequested,
+        });
+        PipBoyOutcome::Redraw
+    }
+    /// Resting is allowed: the Alarm Clock page.
+    pub fn show_alarm(&mut self) {
+        self.page = Some(Page::Alarm);
+    }
+    /// A released row zone on the current page.
+    pub fn zone_release(
+        &mut self,
+        zone: Zone,
+        x: i32,
+        counts: &PageCounts,
+        now: u64,
+    ) -> PipBoyOutcome {
+        match (self.page, zone) {
+            (Some(Page::Status(StatusView::List)), Zone::Row(row)) => {
+                match status_click(x, row, counts.locations, counts.disks) {
+                    Some(StatusClick::Location(row)) => PipBoyOutcome::Location(row),
+                    Some(StatusClick::Disk(row)) => PipBoyOutcome::Disk(row),
+                    None => PipBoyOutcome::None,
+                }
+            }
+            (Some(Page::Status(StatusView::Detail(_))), Zone::Back) => {
+                self.flash(now, Highlight::Back, Deferred::StatusList)
+            }
+            (Some(Page::Status(StatusView::Reading { .. })), Zone::Back) => {
+                self.reading_input(ReadingInput::Release(x), now)
+            }
+            (Some(Page::Automaps(AutomapView::List)), Zone::Row(row)) => {
+                match usize::try_from(row - 1)
+                    .ok()
+                    .filter(|area| *area < counts.areas)
+                {
+                    Some(area) => {
+                        self.page =
+                            Some(Page::Automaps(AutomapView::Elevations { area, entry: 0 }));
+                        PipBoyOutcome::Selected
+                    }
+                    None => PipBoyOutcome::None,
+                }
+            }
+            (Some(Page::Automaps(AutomapView::Elevations { area, .. })), zone) => match zone {
+                Zone::Back | Zone::Row(-1) => {
+                    self.page = Some(Page::Automaps(AutomapView::List));
+                    PipBoyOutcome::Selected
+                }
+                Zone::Row(row) if row >= 1 => {
+                    let entry = row as usize - 1;
+                    self.page = Some(Page::Automaps(AutomapView::Elevations { area, entry }));
+                    PipBoyOutcome::Selected
+                }
+                Zone::Row(_) => PipBoyOutcome::None,
+            },
+            (Some(Page::Archives), Zone::Row(row)) if row >= 1 => PipBoyOutcome::Archive(row),
+            (Some(Page::Alarm), Zone::Row(row)) => {
+                alarm_option(row).map_or(PipBoyOutcome::None, PipBoyOutcome::Rest)
+            }
+            _ => PipBoyOutcome::None,
+        }
+    }
+    /// The reading view's line-40 controls and page keys; elsewhere page
+    /// keys do nothing.
+    pub fn reading_input(&mut self, input: ReadingInput, now: u64) -> PipBoyOutcome {
+        let Some(Page::Status(StatusView::Reading {
+            page, last_page, ..
+        })) = self.page
+        else {
+            return PipBoyOutcome::None;
+        };
+        match reading_action(input, page, last_page) {
+            Some(action) => self.flash(now, Highlight::None, Deferred::Page(action)),
+            None => PipBoyOutcome::None,
+        }
+    }
+    /// Show `highlight` for `FLASH_MS`, then do `then`.
+    pub fn flash(&mut self, now: u64, highlight: Highlight, then: Deferred) -> PipBoyOutcome {
+        self.flash = Some(Flash {
+            until: now + FLASH_MS,
+            highlight,
+            then,
+        });
+        PipBoyOutcome::Flashing
+    }
+    /// A flash's deferred step.
+    pub fn apply(&mut self, then: Deferred) {
+        let view = match then {
+            Deferred::Detail(key) => StatusView::Detail(key),
+            Deferred::Reading { disk, last_page } => StatusView::Reading {
+                disk,
+                page: 0,
+                last_page,
+            },
+            Deferred::StatusList | Deferred::Page(ReadingAction::List) => StatusView::List,
+            Deferred::Page(action) => {
+                if let Some(Page::Status(StatusView::Reading { page, .. })) = &mut self.page {
+                    *page = match action {
+                        ReadingAction::Next => *page + 1,
+                        _ => page.saturating_sub(1),
+                    };
+                }
+                return;
+            }
+        };
+        self.page = Some(Page::Status(view));
+    }
+    /// A key. One that ends the screen saver is consumed; during a rest
+    /// only Esc acts (it stops the rest); a flash swallows keys.
+    pub fn key(&mut self, key: PipBoyKey, now: u64) -> PipBoyOutcome {
+        if self.input(now) {
+            return PipBoyOutcome::Redraw;
+        }
+        if self.resting.is_some() {
+            return if key == PipBoyKey::Escape {
+                PipBoyOutcome::StopRest
+            } else {
+                PipBoyOutcome::None
+            };
+        }
+        if self.flash.is_some() {
+            return PipBoyOutcome::None;
+        }
+        match key {
+            PipBoyKey::Escape | PipBoyKey::Close => PipBoyOutcome::Close,
+            PipBoyKey::Quit => {
+                self.close_after_dialog = true;
+                PipBoyOutcome::QuitConfirm
+            }
+            PipBoyKey::F12 => PipBoyOutcome::Screenshot,
+            PipBoyKey::PageDown => self.reading_input(ReadingInput::PageDown, now),
+            PipBoyKey::PageUp => self.reading_input(ReadingInput::PageUp, now),
+            PipBoyKey::Other => PipBoyOutcome::None,
+        }
+    }
+    /// One loop pass: a due flash ends and its step applies (`true`).
+    pub fn tick(&mut self, now: u64) -> bool {
+        match self.flash.take_if(|flash| now >= flash.until) {
+            Some(flash) => {
+                self.apply(flash.then);
+                true
+            }
+            None => false,
+        }
+    }
+    /// A rest began with Alarm Clock option `option`.
+    pub fn begin_rest(&mut self, option: usize) {
+        self.resting = Some(option);
+        self.last_step = 0;
+    }
+    /// The rest ended.
+    pub fn end_rest(&mut self) {
+        self.resting = None;
+    }
+    /// Whether a rest step is due (at least `SAVER_PASS_MS` apart); a due
+    /// step is taken.
+    pub fn rest_due(&mut self, now: u64) -> bool {
+        if self.resting.is_none() || now.saturating_sub(self.last_step) < SAVER_PASS_MS {
+            return false;
+        }
+        self.last_step = now;
+        true
+    }
+    /// Whether a screen-saver pass is due: the next pass of a running
+    /// saver, or the start after more than `IDLE_MS` idle with no dialog
+    /// or flash up.
+    pub fn saver_due(&self, now: u64, dialog: bool) -> bool {
+        match &self.saver {
+            Some(saver) => now.saturating_sub(saver.last_pass) >= SAVER_PASS_MS,
+            None => {
+                now.saturating_sub(self.idle_since) > IDLE_MS && !dialog && self.flash.is_none()
+            }
+        }
+    }
+    /// One screen-saver pass with game random draws in 0-32767; starting
+    /// runs the warm-up passes, which draw nothing, first.
+    pub fn saver_pass(&mut self, now: u64, mut draw: impl FnMut() -> i32) {
+        let saver = self.saver.get_or_insert_with(|| SaverRun {
+            state: ScreenSaver::default(),
+            cells: Vec::new(),
+            last_pass: now,
+        });
+        loop {
+            if let Some(cells) = saver.state.pass(&mut draw) {
+                saver.cells = cells;
+                saver.last_pass = now;
+                return;
+            }
+        }
     }
 }
 

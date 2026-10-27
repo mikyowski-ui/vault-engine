@@ -1,7 +1,7 @@
 //! SPEC-014 §3.19-3.25: the interface bar (window, buttons, hotkeys), the
 //! message monitor, HP/AC counters, AP pips, the active item slot, the
 //! indicator boxes and the combat panel.
-use super::{ColorKey, Rect};
+use super::{ColorKey, Layout, Rect};
 
 /// The bar window: screen (0, 379), 640 by 100, over `iface.frm`.
 pub const BAR_ORIGIN: [i32; 2] = [0, 379];
@@ -699,4 +699,81 @@ pub const LIGHTS: [(&str, &str); 2] = [("endltgrn.frm", "icombat2"), ("endltred.
 pub fn panel_frame(elapsed: u64, opening: bool) -> u8 {
     let step = (elapsed / PANEL_FRAME_MS).min(4) as u8;
     if opening { step } else { 4 - step }
+}
+
+// SPEC-020 §2.1: the interface bar's layout. Rectangles are frame (screen)
+// pixels.
+
+/// The bar's buttons on screen (the bar at `BAR_ORIGIN`), in the
+/// `BAR_BUTTONS` order; End Turn and End Combat exist only while the
+/// combat panel shows its buttons (`combat_buttons`).
+pub fn bar_layout(combat_buttons: bool) -> Layout<BarButton> {
+    BAR_BUTTONS
+        .iter()
+        .filter(|(button, ..)| {
+            combat_buttons || !matches!(button, BarButton::EndTurn | BarButton::EndCombat)
+        })
+        .map(|(button, rect, ..)| (*button, rect.offset(BAR_ORIGIN)))
+        .collect()
+}
+/// §3.20 the message monitor's scroll areas on screen: `Some(true)` the
+/// upper half (one line older), `Some(false)` the lower (newer).
+pub fn monitor_area(point: [i32; 2]) -> Option<bool> {
+    if MONITOR_OLDER.offset(BAR_ORIGIN).contains(point) {
+        Some(true)
+    } else if MONITOR_NEWER.offset(BAR_ORIGIN).contains(point) {
+        Some(false)
+    } else {
+        None
+    }
+}
+impl BarButton {
+    /// The key the button's release sends.
+    pub fn key(self) -> Key {
+        BAR_BUTTONS
+            .iter()
+            .find(|(button, ..)| *button == self)
+            .map(|(.., key)| *key)
+            .unwrap_or(Key::Escape)
+    }
+    /// Press and release sounds: the item slot's large pair, else the
+    /// buttons'.
+    pub fn sounds(self) -> (&'static str, &'static str) {
+        if self == Self::ItemSlot {
+            SLOT_SOUNDS
+        } else {
+            BUTTON_SOUNDS
+        }
+    }
+}
+/// The bar's buttons, held from press to release: the release over the
+/// held button sends its key. The caller refuses presses on disabled
+/// buttons (the red light, a disabled item slot, a script-disabled bar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BarButtons {
+    pub combat_buttons: bool,
+    armed: super::Armed<BarButton>,
+}
+impl BarButtons {
+    pub fn new(combat_buttons: bool) -> Self {
+        Self {
+            combat_buttons,
+            armed: super::Armed::new(),
+        }
+    }
+    pub fn layout(&self) -> Layout<BarButton> {
+        bar_layout(self.combat_buttons)
+    }
+    pub fn pressed(&self) -> Option<BarButton> {
+        self.armed.pressed()
+    }
+    /// A left press holds the button under the pointer.
+    pub fn press(&mut self, point: [i32; 2]) -> Option<BarButton> {
+        self.armed.press(self.layout().hit(point))
+    }
+    /// The key the release sends, if it is over the held button.
+    pub fn release(&mut self, point: Option<[i32; 2]>) -> Option<Key> {
+        let over = point.and_then(|point| self.layout().hit(point));
+        self.armed.release(over).map(BarButton::key)
+    }
 }

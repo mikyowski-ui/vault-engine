@@ -7,7 +7,7 @@
 //! the Pip-Boy's Video Archives (§3.10), the kill-type names (§3.9) and
 //! the endgame slides (§3.20). Coordinates are window-relative unless
 //! named "screen".
-use super::{ColorKey, Rect, flow::MenuChoice};
+use super::{Armed, ColorKey, Layout, Rect, flow::MenuChoice};
 use vault_formats::fallout2::{
     lines::{EndgameSlide, SlideArt},
     party::ControlField,
@@ -708,6 +708,227 @@ pub fn endgame_slides(
 /// §3.8: under Fallout 2 there is no Tell Me About button and `a` does
 /// nothing in the reply loop.
 pub const TELL_ME_ABOUT: bool = false;
+
+// SPEC-020 §2.1: the Fallout 2 panels' layouts and dispatch. Rectangles
+// are frame (screen) pixels.
+
+/// A control of the combat control panel (§3.15.2) and of the custom panel
+/// over it (§3.15.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlButton {
+    /// Disposition row k (0-4).
+    Disposition(usize),
+    Custom,
+    Best,
+    Talk,
+    /// A custom-panel row (0-5).
+    Row(usize),
+    Done,
+}
+impl ControlButton {
+    /// Talk's own sounds; the red buttons'.
+    pub fn sounds(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Talk => control::TALK_SOUNDS,
+            _ => (super::BUTTON_PRESS, super::BUTTON_RELEASE),
+        }
+    }
+}
+/// The control panel's enabled buttons on screen: the allowed disposition
+/// rows (`allowed` holds the member's allowed disposition values, the
+/// custom one being `fallout2_party::disposition::CUSTOM`), Custom when
+/// allowed, Use Best Weapon and Talk.
+pub fn control_layout(allowed: &[i32]) -> Layout<ControlButton> {
+    let origin = control::ORIGIN;
+    let mut layout: Layout<ControlButton> = (0..5)
+        .filter(|k| allowed.contains(&(*k as i32)))
+        .map(|k| {
+            (
+                ControlButton::Disposition(k),
+                control::button_rect(control::disposition_button(k)).offset(origin),
+            )
+        })
+        .collect();
+    if allowed.contains(&crate::fallout2_party::disposition::CUSTOM) {
+        layout.push(
+            ControlButton::Custom,
+            control::button_rect(control::CUSTOM_BUTTON).offset(origin),
+        );
+    }
+    layout.push(
+        ControlButton::Best,
+        control::button_rect(control::BEST_BUTTON).offset(origin),
+    );
+    layout.with(ControlButton::Talk, control::TALK.offset(origin))
+}
+/// The custom panel's buttons on screen, for a background of `background`
+/// (`None`: the stand-in): its six rows, then Done.
+pub fn custom_layout(background: Option<[i32; 2]>) -> Layout<ControlButton> {
+    let window = custom::window(background);
+    let origin = [window.x, window.y];
+    (0..CUSTOM_FIELDS.len())
+        .map(|j| {
+            (
+                ControlButton::Row(j),
+                control::button_rect(custom::button(j)).offset(origin),
+            )
+        })
+        .chain([(
+            ControlButton::Done,
+            control::button_rect(custom::DONE_BUTTON).offset(origin),
+        )])
+        .collect()
+}
+/// What a combat-control input leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlOutcome {
+    None,
+    /// Choose disposition k for the member (the host refuses a value it
+    /// does not allow).
+    Disposition(usize),
+    /// Use Best Weapon (`iisxxxx1` when it does nothing).
+    BestWeapon,
+    /// Cycle a custom field's value.
+    Cycle(ControlField),
+    /// The custom panel opened or closed.
+    Custom(bool),
+    /// Talk, `t` or Esc: back to the dialogue.
+    Talk,
+    QuitConfirm,
+    Screenshot,
+}
+/// A key over the combat control panels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlKey {
+    /// `t`.
+    Talk,
+    Escape,
+    Enter,
+    /// `u`.
+    Best,
+    /// `1`-`5` as 0-4.
+    Digit(usize),
+    Quit,
+    F12,
+    Other,
+}
+/// §3.15 the combat control panel over a conversation with a party
+/// member, and its modal custom panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlPanelWindow {
+    /// The custom panel is open over it.
+    pub custom: bool,
+    /// The member's allowed disposition values.
+    pub allowed: Vec<i32>,
+    /// The custom panel's background size (`None`: the stand-in).
+    pub background: Option<[i32; 2]>,
+    armed: Armed<ControlButton>,
+}
+impl ControlPanelWindow {
+    pub fn new(allowed: Vec<i32>, background: Option<[i32; 2]>) -> Self {
+        Self {
+            custom: false,
+            allowed,
+            background,
+            armed: Armed::new(),
+        }
+    }
+    /// The buttons that act now: the custom panel's while it is open (it is
+    /// modal), else the control panel's enabled ones.
+    pub fn layout(&self) -> Layout<ControlButton> {
+        if self.custom {
+            custom_layout(self.background)
+        } else {
+            control_layout(&self.allowed)
+        }
+    }
+    pub fn pressed(&self) -> Option<ControlButton> {
+        self.armed.pressed()
+    }
+    /// A press holds the button under the pointer (its `sounds`).
+    pub fn press(&mut self, point: [i32; 2]) -> Option<ControlButton> {
+        self.armed.press(self.layout().hit(point))
+    }
+    /// A release over the held button acts.
+    pub fn release(&mut self, point: Option<[i32; 2]>) -> ControlOutcome {
+        let over = point.and_then(|point| self.layout().hit(point));
+        match self.armed.release(over) {
+            Some(button) => self.dispatch(button),
+            None => ControlOutcome::None,
+        }
+    }
+    /// §3.15.2 keys: `t` and Esc return to dialogue, `1`-`5` choose
+    /// disposition rows, `u` is Use Best Weapon, the quit keys ask to
+    /// quit, F12 takes a screenshot. §3.15.3: Enter and Esc close the
+    /// custom panel, which ignores every other key.
+    pub fn key(&mut self, key: ControlKey) -> ControlOutcome {
+        if self.custom {
+            return match key {
+                ControlKey::Enter | ControlKey::Escape => self.dispatch(ControlButton::Done),
+                _ => ControlOutcome::None,
+            };
+        }
+        match key {
+            ControlKey::Talk | ControlKey::Escape => ControlOutcome::Talk,
+            ControlKey::Best => self.dispatch(ControlButton::Best),
+            ControlKey::Digit(k) if k < 5 => self.dispatch(ControlButton::Disposition(k)),
+            ControlKey::Quit => ControlOutcome::QuitConfirm,
+            ControlKey::F12 => ControlOutcome::Screenshot,
+            _ => ControlOutcome::None,
+        }
+    }
+    pub fn dispatch(&mut self, button: ControlButton) -> ControlOutcome {
+        match button {
+            ControlButton::Disposition(k) => ControlOutcome::Disposition(k),
+            ControlButton::Custom => {
+                self.custom = true;
+                ControlOutcome::Custom(true)
+            }
+            ControlButton::Done => {
+                self.custom = false;
+                ControlOutcome::Custom(false)
+            }
+            ControlButton::Talk => ControlOutcome::Talk,
+            ControlButton::Row(j) => CUSTOM_FIELDS
+                .get(j)
+                .map_or(ControlOutcome::None, |field| ControlOutcome::Cycle(*field)),
+            ControlButton::Best => ControlOutcome::BestWeapon,
+        }
+    }
+}
+
+/// A control of the world map's side panel (§3.12.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldPanelControl {
+    ListUp,
+    ListDown,
+    /// The town/world button.
+    TownWorld,
+    /// Town-list row k (0-6) that shows an entry.
+    Row(usize),
+}
+/// The side panel's buttons on screen (the world map window is at (0, 0)):
+/// the list arrows, the rows showing an entry of `count`, and Town/World.
+pub fn world_panel_layout(list: TownList, count: usize) -> Layout<WorldPanelControl> {
+    let mut layout = Layout::new()
+        .with(WorldPanelControl::ListUp, panel::LIST_UP)
+        .with(WorldPanelControl::ListDown, panel::LIST_DOWN);
+    layout.extend(
+        (0..panel::ROWS)
+            .filter(|k| list.entry(*k, count).is_some())
+            .map(|k| (WorldPanelControl::Row(k), panel::row_button(k))),
+    );
+    layout.with(WorldPanelControl::TownWorld, panel::TOWN_WORLD)
+}
+/// §3.13 the town map's entrance buttons by entrance index, for their
+/// anchors.
+pub fn entrance_layout(anchors: &[[i32; 2]]) -> Layout<usize> {
+    anchors
+        .iter()
+        .enumerate()
+        .map(|(i, anchor)| (i, entrance_button(*anchor)))
+        .collect()
+}
 
 #[cfg(test)]
 #[path = "fallout2_tests.rs"]

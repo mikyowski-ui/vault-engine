@@ -4,7 +4,7 @@
 //! modes), skill spending with its refusals, and the perk chooser's list
 //! (which Tag! and Mutate! reuse).
 use super::{
-    Rect,
+    Layout, Rect,
     editor::{self, InfoLine},
 };
 use crate::{CharacterSheet, Perk, StatContext, progression};
@@ -655,6 +655,403 @@ pub fn chooser_wrap(column: i32) -> i32 {
 /// `136 + max(0, min(150, c) - 8)`.
 pub fn card_wrap(column: i32) -> i32 {
     136 + (column.min(150) - 8).max(0)
+}
+
+// SPEC-020 §2.1: the character screen's and the perk chooser's layouts and
+// dispatch. Rectangles are frame (screen) pixels.
+
+/// The bottom red buttons, shared with the creation-mode editor (§3.8):
+/// PRINT (OPTIONS in creation), DONE and CANCEL, with their captions'
+/// origins and `editor.msg` IDs (103, 100, 102).
+pub const PRINT_BUTTON: Rect = super::red_button(editor::OPTIONS_BUTTONS[0]);
+pub const DONE_BUTTON: Rect = super::red_button(editor::OPTIONS_BUTTONS[1]);
+pub const CANCEL_BUTTON: Rect = super::red_button(editor::OPTIONS_BUTTONS[2]);
+pub const BUTTON_CAPTIONS: [(Rect, [i32; 2], i32); 3] = [
+    (PRINT_BUTTON, [363, 454], 103),
+    (DONE_BUTTON, [475, 454], 100),
+    (CANCEL_BUTTON, [571, 454], 102),
+];
+/// A change of info card plays this; the folder tabs play `TAB_SOUND` on
+/// release.
+pub const CARD_SOUND: &str = "isdxxxx1";
+pub const TAB_SOUND: &str = "ib3p1xx1";
+/// The slider buttons repeat as the SPECIAL buttons, from the 20th frame.
+pub const SLIDER_IDLE_FRAMES: u32 = 20;
+/// The skill slider's plus and minus buttons on cursor row `cursor`.
+pub fn slider_buttons(cursor: usize) -> [Rect; 2] {
+    let y = 11 * cursor as i32;
+    [
+        Rect::new(614, 20 + y, 16, 12),
+        Rect::new(614, 31 + y, 17, 12),
+    ]
+}
+/// A control of the character screen (outside creation mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharacterControl {
+    Done,
+    Cancel,
+    Print,
+    SliderPlus,
+    SliderMinus,
+    /// The folder tabs (`fldrmask.frm`'s nonzero pixels).
+    Tabs,
+    /// The skill rows (the slider cursor).
+    SkillRows,
+}
+/// The screen's buttons in press order for the skill cursor's row: the
+/// red buttons, the slider's plus and minus, the folder tabs and the skill
+/// rows. The info hot regions are [`game_info_hit`]'s.
+pub fn character_layout(cursor: usize) -> Layout<CharacterControl> {
+    let [plus, minus] = slider_buttons(cursor);
+    Layout::new()
+        .with(CharacterControl::Done, DONE_BUTTON)
+        .with(CharacterControl::Cancel, CANCEL_BUTTON)
+        .with(CharacterControl::Print, PRINT_BUTTON)
+        .with(CharacterControl::SliderPlus, plus)
+        .with(CharacterControl::SliderMinus, minus)
+        .with(CharacterControl::Tabs, FOLDER_TABS)
+        .with(CharacterControl::SkillRows, SKILL_ROWS)
+}
+/// What a character-screen input leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharacterOutcome {
+    None,
+    /// Done keeps the edits; Cancel restores the opening snapshot.
+    Close {
+        keep: bool,
+    },
+    /// PRINT: the save file dialog over `*.TXT`.
+    Print,
+    /// The info card shows this line (`CARD_SOUND` when it changes).
+    Select(InfoLine),
+    /// A folder tab was released: the folder and its general card.
+    Folder(Folder),
+    /// One skill-slider step (`skill_plus` or `skill_minus`); a press that
+    /// steps starts the repeat with [`CharacterScreen::hold_slider`].
+    SkillStep {
+        plus: bool,
+    },
+    QuitConfirm,
+    Screenshot,
+}
+/// A key on the character screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharacterKey {
+    /// Enter, `d` or `D`: Done after `ib1p1xx1`.
+    Done,
+    Escape,
+    Quit,
+    F12,
+    /// `p`.
+    Print,
+    /// Keypad plus, Right, `+` or `N`.
+    Plus,
+    /// Minus, keypad minus, Left or `J`.
+    Minus,
+}
+/// §3.42 the character screen's modal state: the selected info line, the
+/// folder, the skill cursor (all three persist between openings), the held
+/// button and the slider's repeat. Progression, the snapshot and the
+/// windows over it (chooser, refusals, print) are the caller's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterScreen {
+    pub selected: InfoLine,
+    pub folder: Folder,
+    pub cursor: usize,
+    armed: super::Armed<CharacterControl>,
+    repeat: Option<(bool, super::HoldRepeat)>,
+}
+impl Default for CharacterScreen {
+    fn default() -> Self {
+        Self::new(InfoLine::Special(0), Folder::Perks, 0)
+    }
+}
+impl CharacterScreen {
+    pub fn new(selected: InfoLine, folder: Folder, cursor: usize) -> Self {
+        Self {
+            selected,
+            folder,
+            cursor: cursor.min(17),
+            armed: super::Armed::new(),
+            repeat: None,
+        }
+    }
+    pub fn layout(&self) -> Layout<CharacterControl> {
+        character_layout(self.cursor)
+    }
+    /// The held red button or the tabs.
+    pub fn pressed(&self) -> Option<CharacterControl> {
+        self.armed.pressed()
+    }
+    /// The held slider button's direction, while it repeats.
+    pub fn slider_held(&self) -> Option<bool> {
+        self.repeat.map(|(plus, _)| plus)
+    }
+    /// A left press: a red button is held; a slider button steps at once
+    /// (`ib1p1xx1`); the tabs are held when `tab_mask` accepts the point;
+    /// the skill rows move the cursor; elsewhere the info hot regions
+    /// select their line.
+    pub fn press(
+        &mut self,
+        point: [i32; 2],
+        tab_mask: impl Fn([i32; 2]) -> bool,
+    ) -> CharacterOutcome {
+        self.armed.clear();
+        self.repeat = None;
+        let control = self
+            .layout()
+            .controls()
+            .iter()
+            .find(|(control, rect)| {
+                rect.contains(point) && (*control != CharacterControl::Tabs || tab_mask(point))
+            })
+            .map(|(control, _)| *control);
+        match control {
+            Some(
+                control @ (CharacterControl::Done
+                | CharacterControl::Cancel
+                | CharacterControl::Print
+                | CharacterControl::Tabs),
+            ) => {
+                self.armed.press(Some(control));
+                CharacterOutcome::None
+            }
+            Some(CharacterControl::SliderPlus) => CharacterOutcome::SkillStep { plus: true },
+            Some(CharacterControl::SliderMinus) => CharacterOutcome::SkillStep { plus: false },
+            Some(CharacterControl::SkillRows) => {
+                self.cursor = skill_row(point[1]);
+                self.select(InfoLine::Skill(self.cursor))
+            }
+            None => match game_info_hit(point, self.folder, true) {
+                Some(line) => self.select(line),
+                None => CharacterOutcome::None,
+            },
+        }
+    }
+    /// A slider press stepped: it repeats while held, from the 20th frame.
+    pub fn hold_slider(&mut self, plus: bool, now: u64) {
+        self.repeat = Some((plus, super::HoldRepeat::new(now, SLIDER_IDLE_FRAMES)));
+    }
+    /// A refused repeated step stops the repeat.
+    pub fn stop_slider(&mut self) {
+        self.repeat = None;
+    }
+    /// A left release: a red button acts over itself; the tabs act on a
+    /// release over them, choosing the folder by x.
+    pub fn release(&mut self, point: Option<[i32; 2]>) -> CharacterOutcome {
+        self.repeat = None;
+        let Some(pressed) = self.armed.pressed() else {
+            return CharacterOutcome::None;
+        };
+        self.armed.clear();
+        let over = |rect: Rect| point.is_some_and(|point| rect.contains(point));
+        match pressed {
+            CharacterControl::Done if over(DONE_BUTTON) => CharacterOutcome::Close { keep: true },
+            CharacterControl::Cancel if over(CANCEL_BUTTON) => {
+                CharacterOutcome::Close { keep: false }
+            }
+            CharacterControl::Print if over(PRINT_BUTTON) => CharacterOutcome::Print,
+            CharacterControl::Tabs => match point.filter(|point| FOLDER_TABS.contains(*point)) {
+                Some([x, _]) => {
+                    self.folder = Folder::at(x);
+                    self.selected = self.folder.general_line();
+                    CharacterOutcome::Folder(self.folder)
+                }
+                None => CharacterOutcome::None,
+            },
+            _ => CharacterOutcome::None,
+        }
+    }
+    /// A key.
+    pub fn key(&mut self, key: CharacterKey) -> CharacterOutcome {
+        match key {
+            CharacterKey::Done => CharacterOutcome::Close { keep: true },
+            CharacterKey::Escape => CharacterOutcome::Close { keep: false },
+            CharacterKey::Quit => CharacterOutcome::QuitConfirm,
+            CharacterKey::F12 => CharacterOutcome::Screenshot,
+            CharacterKey::Print => CharacterOutcome::Print,
+            CharacterKey::Plus => CharacterOutcome::SkillStep { plus: true },
+            CharacterKey::Minus => CharacterOutcome::SkillStep { plus: false },
+        }
+    }
+    /// Select an info line.
+    pub fn select(&mut self, line: InfoLine) -> CharacterOutcome {
+        self.selected = line;
+        CharacterOutcome::Select(line)
+    }
+    /// One frame: a held slider button repeats while the pointer stays on
+    /// it. Returns the direction of a due step.
+    pub fn tick(&mut self, now: u64, pointer: Option<[i32; 2]>) -> Option<bool> {
+        let (plus, repeat) = self.repeat.as_mut()?;
+        let plus = *plus;
+        let rect = slider_buttons(self.cursor)[usize::from(!plus)];
+        if !pointer.is_some_and(|point| rect.contains(point)) {
+            self.repeat = None;
+            return None;
+        }
+        repeat.poll(now).then_some(plus)
+    }
+}
+
+/// §3.42 the perk chooser window (window-relative parts): its origin, the
+/// list area, the arrows, Done and Cancel; the arrows repeat from the 15th
+/// frame.
+pub const CHOOSER_ORIGIN: [i32; 2] = [33, 91];
+pub const CHOOSER_LIST: Rect = Rect::new(45, 43, 192, 129);
+pub const CHOOSER_UP: Rect = Rect::new(25, 46, 11, 14);
+pub const CHOOSER_DOWN: Rect = Rect::new(25, 61, 11, 14);
+pub const CHOOSER_DONE: Rect = Rect::new(48, 186, 15, 16);
+pub const CHOOSER_CANCEL: Rect = Rect::new(153, 186, 15, 16);
+pub const CHOOSER_IDLE_FRAMES: u32 = 15;
+/// A control of the perk chooser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChooserControl {
+    Up,
+    Down,
+    Done,
+    Cancel,
+    List,
+}
+/// The chooser's controls on screen, in press order.
+pub fn chooser_layout() -> Layout<ChooserControl> {
+    Layout::new()
+        .with(ChooserControl::Up, CHOOSER_UP)
+        .with(ChooserControl::Down, CHOOSER_DOWN)
+        .with(ChooserControl::Done, CHOOSER_DONE)
+        .with(ChooserControl::Cancel, CHOOSER_CANCEL)
+        .with(ChooserControl::List, CHOOSER_LIST)
+        .offset(CHOOSER_ORIGIN)
+}
+/// What a chooser input leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChooserOutcome {
+    None,
+    /// The selection moved (the card follows).
+    Moved,
+    /// Done, Enter or a second click: the selected entry is chosen.
+    Choose,
+    /// Esc or Cancel.
+    Cancel,
+}
+/// A key in the chooser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChooserKey {
+    Up,
+    Down,
+    Home,
+    End,
+    Enter,
+    Escape,
+    Other,
+}
+/// §3.42 the perk chooser's list and controls (also Tag! and Mutate!).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerkChooser {
+    pub list: PickList,
+    armed: super::Armed<ChooserControl>,
+    repeat: Option<(bool, super::HoldRepeat)>,
+}
+impl PerkChooser {
+    /// A chooser over `n` entries, opened at `now`.
+    pub fn new(n: usize, now: u64) -> Self {
+        Self {
+            list: PickList::new(n, now),
+            armed: super::Armed::new(),
+            repeat: None,
+        }
+    }
+    pub fn layout(&self) -> Layout<ChooserControl> {
+        chooser_layout()
+    }
+    /// The held Done, Cancel or arrow.
+    pub fn pressed(&self) -> Option<ChooserControl> {
+        self.repeat
+            .map(|(up, _)| {
+                if up {
+                    ChooserControl::Up
+                } else {
+                    ChooserControl::Down
+                }
+            })
+            .or(self.armed.pressed())
+            .filter(|control| *control != ChooserControl::List)
+    }
+    /// A left press: an arrow steps at once (`ib1p1xx1`) and repeats while
+    /// held; Done, Cancel and the list are held for the release.
+    pub fn press(&mut self, point: [i32; 2], now: u64) -> ChooserOutcome {
+        match self.layout().hit(point) {
+            Some(control @ (ChooserControl::Up | ChooserControl::Down)) => {
+                self.armed.clear();
+                let up = control == ChooserControl::Up;
+                self.step(up);
+                self.repeat = Some((up, super::HoldRepeat::new(now, CHOOSER_IDLE_FRAMES)));
+                ChooserOutcome::Moved
+            }
+            hit => {
+                self.armed.press(hit);
+                ChooserOutcome::None
+            }
+        }
+    }
+    /// A left release: Done and Cancel act over themselves; a list click
+    /// selects its row, and a second click on it chooses.
+    pub fn release(&mut self, point: Option<[i32; 2]>) -> ChooserOutcome {
+        self.repeat = None;
+        let over = point.and_then(|point| self.layout().hit(point));
+        let pressed = self.armed.pressed();
+        self.armed.clear();
+        match pressed {
+            Some(ChooserControl::Done) if over == pressed => ChooserOutcome::Choose,
+            Some(ChooserControl::Cancel) if over == pressed => ChooserOutcome::Cancel,
+            Some(ChooserControl::List) => {
+                let list = CHOOSER_LIST.offset(CHOOSER_ORIGIN);
+                match point.filter(|point| list.contains(*point)) {
+                    Some([_, y]) if self.list.click(y) => ChooserOutcome::Choose,
+                    Some(_) => ChooserOutcome::Moved,
+                    None => ChooserOutcome::None,
+                }
+            }
+            _ => ChooserOutcome::None,
+        }
+    }
+    pub fn key(&mut self, key: ChooserKey) -> ChooserOutcome {
+        match key {
+            ChooserKey::Up => self.list.up(),
+            ChooserKey::Down => self.list.down(),
+            ChooserKey::Home => self.list.home(),
+            ChooserKey::End => self.list.end(),
+            ChooserKey::Enter => return ChooserOutcome::Choose,
+            ChooserKey::Escape => return ChooserOutcome::Cancel,
+            ChooserKey::Other => return ChooserOutcome::None,
+        }
+        ChooserOutcome::Moved
+    }
+    fn step(&mut self, up: bool) {
+        if up {
+            self.list.up();
+        } else {
+            self.list.down();
+        }
+    }
+    /// One frame: the idle timer runs, and a held arrow repeats while the
+    /// pointer stays on it. Returns whether the selection moved.
+    pub fn tick(&mut self, now: u64, pointer: Option<[i32; 2]>) -> bool {
+        self.list.idle(now);
+        let Some((up, repeat)) = &mut self.repeat else {
+            return false;
+        };
+        let up = *up;
+        let rect = if up { CHOOSER_UP } else { CHOOSER_DOWN }.offset(CHOOSER_ORIGIN);
+        if !pointer.is_some_and(|point| rect.contains(point)) {
+            self.repeat = None;
+            return false;
+        }
+        if repeat.poll(now) {
+            self.step(up);
+            return true;
+        }
+        false
+    }
 }
 
 #[cfg(test)]

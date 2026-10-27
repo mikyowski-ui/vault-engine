@@ -284,3 +284,251 @@ fn spec014_fixture_j_screen_saver() {
     assert!(saver.pass(|| 32767).unwrap().is_empty());
     assert!(saver.bombs[3].is_none());
 }
+
+/// SPEC-020 §2.1: the Pip-Boy's layout and page state machine.
+mod modal {
+    use super::*;
+
+    fn counts() -> PageCounts {
+        PageCounts {
+            locations: 2,
+            disks: 1,
+            areas: 3,
+            entries: 2,
+            archives: 2,
+        }
+    }
+    /// A press and release at one point.
+    fn click(pipboy: &mut PipBoyModal, point: [i32; 2], now: u64) -> PipBoyOutcome {
+        pipboy.press(point, &counts(), now);
+        pipboy.release(Some(point), &counts(), now)
+    }
+
+    #[test]
+    fn buttons_and_zones_layout() {
+        let pipboy = PipBoyModal::open(0);
+        // The start screen has the window buttons only.
+        let start = pipboy.layout(&counts());
+        assert_eq!(start.len(), 5);
+        assert_eq!(
+            start.rect(PipBoyControl::Button(Button::Status)),
+            Some(Rect::new(53, 341, 15, 16))
+        );
+        assert_eq!(
+            start.rect(PipBoyControl::Button(Button::Alarm)),
+            Some(Rect::new(124, 13, 28, 24))
+        );
+        let mut status = pipboy.clone();
+        status.show_tab(Tab::Status);
+        assert_eq!(status.zone_layout(&counts()), (2, 4, false));
+        let layout = status.layout(&counts());
+        assert_eq!(layout.len(), 9);
+        assert_eq!(
+            layout.rect(PipBoyControl::Zone(Zone::Row(1))),
+            Some(Rect::new(254, 66, 350, 10))
+        );
+        assert_eq!(
+            layout.rect(PipBoyControl::Zone(Zone::Row(4))),
+            Some(Rect::new(254, 126, 350, 10))
+        );
+        assert_eq!(layout.hit([300, 76]), None, "lines between zones");
+        let mut detail = pipboy;
+        detail.page = Some(Page::Status(StatusView::Detail(7)));
+        assert_eq!(
+            detail
+                .layout(&counts())
+                .rect(PipBoyControl::Zone(Zone::Back)),
+            Some(BACK_ZONE)
+        );
+        assert_eq!(detail.zone_at([300, 450], &counts()), Some(Zone::Back));
+    }
+
+    #[test]
+    fn page_buttons_act_on_release_over_themselves() {
+        let mut pipboy = PipBoyModal::open(0);
+        assert_eq!(
+            pipboy.press([54, 342], &counts(), 0),
+            PipBoyOutcome::Pressed(Button::Status)
+        );
+        assert_eq!(pipboy.pressed(), Some(Button::Status));
+        assert_eq!(
+            pipboy.release(Some([0, 0]), &counts(), 0),
+            PipBoyOutcome::None
+        );
+        assert_eq!((pipboy.page, pipboy.pressed()), (None, None));
+        assert_eq!(click(&mut pipboy, [54, 342], 0), PipBoyOutcome::Redraw);
+        assert_eq!(pipboy.page.map(|page| page.tab()), Some(Tab::Status));
+        assert_eq!(click(&mut pipboy, [54, 396], 0), PipBoyOutcome::Redraw);
+        assert_eq!(pipboy.page, Some(Page::Automaps(AutomapView::List)));
+        assert_eq!(click(&mut pipboy, [54, 450], 0), PipBoyOutcome::Close);
+        // The Alarm Clock waits for the eligibility test.
+        assert_eq!(
+            click(&mut pipboy, [125, 14], 0),
+            PipBoyOutcome::AlarmRequested
+        );
+        assert_eq!(pipboy.page, Some(Page::Automaps(AutomapView::List)));
+        pipboy.show_alarm();
+        assert_eq!(pipboy.page, Some(Page::Alarm));
+    }
+
+    #[test]
+    fn status_rows_flash_then_act() {
+        let mut pipboy = PipBoyModal::open(0);
+        pipboy.show_tab(Tab::Status);
+        // A location row (left of x = 429) reports its row.
+        assert_eq!(click(&mut pipboy, [300, 67], 0), PipBoyOutcome::Location(1));
+        // A press and a release on different zones do nothing.
+        pipboy.press([300, 67], &counts(), 0);
+        assert_eq!(
+            pipboy.release(Some([300, 87]), &counts(), 0),
+            PipBoyOutcome::None
+        );
+        assert_eq!(
+            pipboy.flash(1000, Highlight::Location(1), Deferred::Detail(7)),
+            PipBoyOutcome::Flashing
+        );
+        // Input waits during the flash.
+        assert_eq!(pipboy.key(PipBoyKey::Escape, 1100), PipBoyOutcome::None);
+        assert_eq!(
+            pipboy.press([54, 342], &counts(), 1100),
+            PipBoyOutcome::None
+        );
+        assert!(!pipboy.tick(1199));
+        assert!(pipboy.tick(1200));
+        assert_eq!(pipboy.page, Some(Page::Status(StatusView::Detail(7))));
+        // Back from the detail flashes, then returns to the list.
+        assert_eq!(
+            click(&mut pipboy, [300, 450], 2000),
+            PipBoyOutcome::Flashing
+        );
+        assert_eq!(
+            pipboy.flash.map(|flash| flash.highlight),
+            Some(Highlight::Back)
+        );
+        assert!(pipboy.tick(2200));
+        assert_eq!(pipboy.page, Some(Page::Status(StatusView::List)));
+        // A holodisk row (right of x = 429), then its reading view.
+        assert_eq!(click(&mut pipboy, [500, 67], 3000), PipBoyOutcome::Disk(1));
+        pipboy.flash(
+            3000,
+            Highlight::Disk(1),
+            Deferred::Reading {
+                disk: 3,
+                last_page: 1,
+            },
+        );
+        pipboy.tick(3200);
+        assert_eq!(
+            pipboy.page,
+            Some(Page::Status(StatusView::Reading {
+                disk: 3,
+                page: 0,
+                last_page: 1
+            }))
+        );
+        assert_eq!(
+            pipboy.key(PipBoyKey::PageDown, 4000),
+            PipBoyOutcome::Flashing
+        );
+        pipboy.tick(4200);
+        assert!(matches!(
+            pipboy.page,
+            Some(Page::Status(StatusView::Reading { page: 1, .. }))
+        ));
+        // PageDown on the last page does nothing; MORE there returns to
+        // the list.
+        assert_eq!(pipboy.key(PipBoyKey::PageDown, 5000), PipBoyOutcome::None);
+        assert_eq!(
+            click(&mut pipboy, [470, 450], 5000),
+            PipBoyOutcome::Flashing
+        );
+        pipboy.tick(5200);
+        assert_eq!(pipboy.page, Some(Page::Status(StatusView::List)));
+        // Page keys outside a holodisk do nothing.
+        assert_eq!(pipboy.key(PipBoyKey::PageUp, 6000), PipBoyOutcome::None);
+    }
+
+    #[test]
+    fn automaps_archives_and_rest() {
+        let mut pipboy = PipBoyModal::open(0);
+        pipboy.show_tab(Tab::Automaps);
+        assert_eq!(click(&mut pipboy, [300, 67], 0), PipBoyOutcome::Selected);
+        assert_eq!(
+            pipboy.page,
+            Some(Page::Automaps(AutomapView::Elevations {
+                area: 0,
+                entry: 0
+            }))
+        );
+        assert_eq!(pipboy.zone_layout(&counts()), (0, 4, true));
+        assert_eq!(click(&mut pipboy, [300, 107], 0), PipBoyOutcome::Selected);
+        assert_eq!(
+            pipboy.page,
+            Some(Page::Automaps(AutomapView::Elevations {
+                area: 0,
+                entry: 1
+            }))
+        );
+        // The title row (-1) goes back to the area list.
+        assert_eq!(click(&mut pipboy, [300, 47], 0), PipBoyOutcome::Selected);
+        assert_eq!(pipboy.page, Some(Page::Automaps(AutomapView::List)));
+        // A row past the last area does nothing.
+        let few = PageCounts {
+            areas: 1,
+            ..counts()
+        };
+        pipboy.press([300, 87], &few, 0);
+        assert_eq!(
+            pipboy.release(Some([300, 87]), &few, 0),
+            PipBoyOutcome::None
+        );
+        pipboy.show_tab(Tab::Archives);
+        assert_eq!(click(&mut pipboy, [300, 67], 0), PipBoyOutcome::Archive(1));
+        // The Alarm Clock's first option is on line 5 and reports row 4.
+        pipboy.show_alarm();
+        assert_eq!(pipboy.zone_layout(&counts()), (OPTION_LINE, 13, false));
+        assert_eq!(click(&mut pipboy, [300, 97], 0), PipBoyOutcome::Rest(0));
+        pipboy.begin_rest(0);
+        assert_eq!(pipboy.press([54, 342], &counts(), 0), PipBoyOutcome::None);
+        assert_eq!(pipboy.key(PipBoyKey::Close, 0), PipBoyOutcome::None);
+        assert!(!pipboy.rest_due(49));
+        assert!(pipboy.rest_due(50));
+        assert!(!pipboy.rest_due(60));
+        assert!(pipboy.rest_due(100));
+        assert_eq!(pipboy.key(PipBoyKey::Escape, 120), PipBoyOutcome::StopRest);
+        pipboy.end_rest();
+        assert!(!pipboy.rest_due(1000));
+        assert_eq!(
+            pipboy.key(PipBoyKey::Quit, 2000),
+            PipBoyOutcome::QuitConfirm
+        );
+        assert!(pipboy.close_after_dialog);
+        assert_eq!(pipboy.key(PipBoyKey::Escape, 2000), PipBoyOutcome::Close);
+        assert_eq!(pipboy.key(PipBoyKey::F12, 2000), PipBoyOutcome::Screenshot);
+    }
+
+    #[test]
+    fn screen_saver_starts_idle_and_input_ends_it() {
+        let mut pipboy = PipBoyModal::open(0);
+        assert!(!pipboy.saver_due(IDLE_MS, false));
+        assert!(pipboy.saver_due(IDLE_MS + 1, false));
+        assert!(!pipboy.saver_due(IDLE_MS + 1, true), "not under a dialog");
+        pipboy.saver_pass(IDLE_MS + 1, || 32767);
+        let saver = pipboy.saver.as_ref().unwrap();
+        assert_eq!((saver.state.warm_up, saver.last_pass), (0, IDLE_MS + 1));
+        assert!(!pipboy.saver_due(IDLE_MS + 50, false));
+        assert!(pipboy.saver_due(IDLE_MS + 51, false));
+        // The input that ends the saver is consumed.
+        let now = IDLE_MS + 60;
+        assert_eq!(
+            pipboy.press([54, 342], &counts(), now),
+            PipBoyOutcome::Redraw
+        );
+        assert!(pipboy.saver.is_none() && pipboy.pressed().is_none());
+        assert_eq!(pipboy.idle_since, now);
+        assert_eq!(
+            pipboy.press([54, 342], &counts(), now),
+            PipBoyOutcome::Pressed(Button::Status)
+        );
+    }
+}

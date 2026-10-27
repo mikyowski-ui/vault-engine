@@ -2,7 +2,7 @@
 //! points, SPECIAL steps, tag and trait picks, validation, the name, age and
 //! sex dialogs, the info hot regions, big numbers and the options dialog's
 //! erase defaults.
-use super::{ColorKey, Rect};
+use super::{ColorKey, Layout, Rect};
 use crate::stats::{CharacterSheet, StatContext};
 
 pub const BACKGROUND: &str = "edtrcrte.frm";
@@ -443,4 +443,242 @@ pub fn age_step(age: i32, up: bool) -> i32 {
 /// `n` (0-based) of the repeat.
 pub fn repeat_delay(step: u32) -> u64 {
     1000 / u64::from((5 + step).min(24))
+}
+
+// SPEC-020 §2.1: the creation-mode editor's layout and dispatch. Rectangles
+// are frame (screen) pixels.
+
+/// §3.8 the name, age and sex buttons (each tested through its mask art)
+/// and the press sound they share (no release sound).
+pub const TOP_BUTTONS: [(EditorControl, Rect, &str, &str, &str); 3] = [
+    (
+        EditorControl::Name,
+        Rect::new(9, 0, 145, 35),
+        "nameoff.frm",
+        "nameon.frm",
+        "namemsk.frm",
+    ),
+    (
+        EditorControl::Age,
+        Rect::new(154, 0, 81, 32),
+        "ageoff.frm",
+        "ageon.frm",
+        "agemask.frm",
+    ),
+    (
+        EditorControl::Sex,
+        Rect::new(235, 0, 80, 32),
+        "sexoff.frm",
+        "sexon.frm",
+        "sexmask.frm",
+    ),
+];
+pub const TOP_SOUND: &str = "ib3p1xx1";
+/// §3.9 the SPECIAL plus and minus repeat from the 20th frame, §3.10 the
+/// age arrows from the 15th.
+pub const SPECIAL_IDLE_FRAMES: u32 = 20;
+pub const AGE_IDLE_FRAMES: u32 = 15;
+/// §3.10 the dialog windows' x (at screen y = 0), the age arrows and the
+/// sex buttons (window-relative).
+pub const NAME_X: i32 = 17;
+pub const AGE_X: i32 = 154;
+pub const SEX_X: i32 = 235;
+pub const AGE_LEFT: Rect = Rect::new(19, 13, 20, 18);
+pub const AGE_RIGHT: Rect = Rect::new(105, 13, 20, 18);
+pub const MALE: Rect = Rect::new(22, 2, 45, 43);
+pub const FEMALE: Rect = Rect::new(71, 3, 45, 42);
+/// §3.11 the options window and its five buttons (`editor.msg` 600-604):
+/// Save, Load, Print, Erase, Done.
+pub const OPTIONS_ORIGIN: [i32; 2] = [238, 90];
+pub fn options_button(i: usize) -> Rect {
+    Rect::new(13, 17 + 37 * i as i32, 137, 34).offset(OPTIONS_ORIGIN)
+}
+/// The Erase question's Yes/No box.
+pub const ERASE_ORIGIN: [i32; 2] = [169, 126];
+/// SPECIAL row `stat`'s plus and minus buttons.
+pub fn special_buttons(stat: usize) -> [Rect; 2] {
+    let y = SPECIAL_Y[stat.min(6)];
+    [Rect::new(149, y, 16, 12), Rect::new(149, y + 11, 17, 12)]
+}
+/// Skill `k`'s tag button.
+pub fn tag_button(k: usize) -> Rect {
+    Rect::new(347, 26 + 11 * k as i32, 17, 11)
+}
+/// Trait `k`'s button: 0-7 in the left column, 8-15 in the right.
+pub fn trait_button(k: usize) -> Rect {
+    let (x, row) = if k < 8 { (23, k) } else { (298, k - 8) };
+    Rect::new(x, 352 + 13 * row as i32, 17, 11)
+}
+/// A dialog window's Done button: (26, 44), or (28, 48) in the sex dialog.
+pub fn dialog_done(x: i32, sex: bool) -> Rect {
+    if sex {
+        super::red_button([x + 28, 48])
+    } else {
+        super::red_button([x + 26, 44])
+    }
+}
+/// A control of the creation-mode editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorControl {
+    Done,
+    Cancel,
+    Options,
+    Name,
+    Age,
+    Sex,
+    SpecialPlus(usize),
+    SpecialMinus(usize),
+    Tag(usize),
+    Trait(usize),
+}
+/// The editor's controls in press order: the red buttons, the name, age
+/// and sex buttons, the SPECIAL plus and minus, the tag buttons and the
+/// trait buttons. The info hot regions are [`info_hit`]'s.
+pub fn editor_layout() -> Layout<EditorControl> {
+    let mut layout = Layout::new()
+        .with(EditorControl::Done, super::red_button(OPTIONS_BUTTONS[1]))
+        .with(EditorControl::Cancel, super::red_button(OPTIONS_BUTTONS[2]))
+        .with(
+            EditorControl::Options,
+            super::red_button(OPTIONS_BUTTONS[0]),
+        );
+    layout.extend(
+        TOP_BUTTONS
+            .iter()
+            .map(|(control, rect, ..)| (*control, *rect)),
+    );
+    for stat in 0..7 {
+        let [plus, minus] = special_buttons(stat);
+        layout.push(EditorControl::SpecialPlus(stat), plus);
+        layout.push(EditorControl::SpecialMinus(stat), minus);
+    }
+    layout.extend((0..18).map(|k| (EditorControl::Tag(k), tag_button(k))));
+    layout.extend((0..16).map(|k| (EditorControl::Trait(k), trait_button(k))));
+    layout
+}
+/// The control under a press: the top buttons only where `mask` accepts
+/// the point (their mask art's nonzero pixels).
+pub fn editor_hit(
+    point: [i32; 2],
+    mask: impl Fn(EditorControl, [i32; 2]) -> bool,
+) -> Option<EditorControl> {
+    editor_layout()
+        .controls()
+        .iter()
+        .find(|(control, rect)| {
+            rect.contains(point)
+                && (!matches!(
+                    control,
+                    EditorControl::Name | EditorControl::Age | EditorControl::Sex
+                ) || mask(*control, point))
+        })
+        .map(|(control, _)| *control)
+}
+/// A dialog control of the creation-mode editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorDialogControl {
+    Done,
+    AgeDown,
+    AgeUp,
+    Male,
+    Female,
+    /// An options-window button 0-4.
+    Option(usize),
+    EraseYes,
+    EraseNo,
+}
+/// Which editor dialog is up, for its layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorDialogKind {
+    Name,
+    Age,
+    Sex,
+    Options,
+    Erase,
+}
+/// A dialog's controls on screen, in press order.
+pub fn editor_dialog_layout(kind: EditorDialogKind) -> Layout<EditorDialogControl> {
+    match kind {
+        EditorDialogKind::Name => {
+            Layout::new().with(EditorDialogControl::Done, dialog_done(NAME_X, false))
+        }
+        EditorDialogKind::Age => Layout::new()
+            .with(EditorDialogControl::AgeDown, AGE_LEFT.offset([AGE_X, 0]))
+            .with(EditorDialogControl::AgeUp, AGE_RIGHT.offset([AGE_X, 0]))
+            .with(EditorDialogControl::Done, dialog_done(AGE_X, false)),
+        EditorDialogKind::Sex => Layout::new()
+            .with(EditorDialogControl::Male, MALE.offset([SEX_X, 0]))
+            .with(EditorDialogControl::Female, FEMALE.offset([SEX_X, 0]))
+            .with(EditorDialogControl::Done, dialog_done(SEX_X, true)),
+        EditorDialogKind::Options => (0..5)
+            .map(|i| (EditorDialogControl::Option(i), options_button(i)))
+            .collect(),
+        EditorDialogKind::Erase => super::flow::DialogBox::new(ERASE_ORIGIN, true)
+            .layout()
+            .controls()
+            .iter()
+            .map(|(yes, rect)| {
+                let control = if *yes {
+                    EditorDialogControl::EraseYes
+                } else {
+                    EditorDialogControl::EraseNo
+                };
+                (control, *rect)
+            })
+            .collect(),
+    }
+}
+/// What an editor control did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditorOutcome {
+    /// A SPECIAL step happened (it repeats while held) or was refused.
+    Stepped(bool),
+    /// A tag or trait toggled.
+    Toggled,
+    /// A pick was refused: the error box with `iisxxxx1`.
+    Refused(Refusal),
+    /// Done passed validation: the finished sheet.
+    Finished(Box<CharacterSheet>),
+    Cancel,
+    /// Open the options window, or the name, age or sex dialog.
+    Open(EditorDialogKind),
+}
+impl Editor {
+    /// Act on a control: the SPECIAL steps, tag and trait toggles and Done
+    /// change the sheet; the rest open their windows.
+    pub fn dispatch(&mut self, control: EditorControl) -> EditorOutcome {
+        match control {
+            EditorControl::SpecialPlus(stat) => EditorOutcome::Stepped(self.increment(stat)),
+            EditorControl::SpecialMinus(stat) => EditorOutcome::Stepped(self.decrement(stat)),
+            EditorControl::Tag(k) => match self.toggle_tag(k as i32) {
+                Ok(()) => EditorOutcome::Toggled,
+                Err(refusal) => EditorOutcome::Refused(refusal),
+            },
+            EditorControl::Trait(k) => match self.toggle_trait(k as i32) {
+                Ok(()) => EditorOutcome::Toggled,
+                Err(refusal) => EditorOutcome::Refused(refusal),
+            },
+            EditorControl::Done => match self.done() {
+                Ok(sheet) => EditorOutcome::Finished(Box::new(sheet)),
+                Err(refusal) => EditorOutcome::Refused(refusal),
+            },
+            EditorControl::Cancel => EditorOutcome::Cancel,
+            EditorControl::Options => EditorOutcome::Open(EditorDialogKind::Options),
+            EditorControl::Name => EditorOutcome::Open(EditorDialogKind::Name),
+            EditorControl::Age => EditorOutcome::Open(EditorDialogKind::Age),
+            EditorControl::Sex => EditorOutcome::Open(EditorDialogKind::Sex),
+        }
+    }
+    /// The age dialog's arrow: one step within 16-35 (`true` when it
+    /// moved, so a held arrow keeps repeating).
+    pub fn step_age(&mut self, up: bool) -> bool {
+        let age = self.sheet.base[33];
+        let next = age_step(age, up);
+        self.sheet.base[33] = next;
+        next != age
+    }
+    /// The sex dialog's buttons apply on the press.
+    pub fn set_female(&mut self, female: bool) {
+        self.sheet.base[34] = i32::from(female);
+    }
 }

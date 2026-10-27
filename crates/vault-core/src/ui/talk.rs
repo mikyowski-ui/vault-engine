@@ -5,7 +5,7 @@
 //! entry rules). SPEC-006 §3.9 owns the review history and the Ask About
 //! lookup (`host_talk`); SPEC-013 §3.18 owns barter. Coordinates are
 //! window-relative unless named "screen".
-use super::{ColorKey, Rect};
+use super::{Armed, ColorKey, Layout, Rect};
 use crate::host_talk::ReviewText;
 
 /// The control panel `di_talk.frm` (list index 99, 640 by 190) at screen
@@ -292,6 +292,322 @@ impl AskField {
         }
         self.text.push(byte);
         true
+    }
+}
+
+// SPEC-020 §2.1: the dialogue panel's and its windows' layouts and
+// dispatch. Rectangles are frame (screen) pixels.
+
+/// A control of the dialogue control panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelControl {
+    Barter,
+    /// Fallout 1's Tell Me About.
+    TellMeAbout,
+    /// SPEC-019 §3.8 Fallout 2's Combat Control, in Tell Me About's place,
+    /// for a party member with a control record.
+    CombatControl,
+    Review,
+}
+impl PanelControl {
+    /// Press and release sounds: the small buttons' or Review's.
+    pub fn sounds(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Review => (super::BUTTON_PRESS, super::BUTTON_RELEASE),
+            _ => (SMALL_PRESS, SMALL_RELEASE),
+        }
+    }
+}
+/// The panel's buttons on screen: Barter, then Tell Me About (Fallout 1)
+/// or Combat Control (a Fallout 2 party member's; none for anyone else),
+/// then Review.
+pub fn panel_layout(fallout2: bool, control_member: bool) -> Layout<PanelControl> {
+    let mut layout = Layout::new().with(PanelControl::Barter, panel_button(BARTER));
+    if !fallout2 {
+        layout.push(PanelControl::TellMeAbout, panel_button(TELL_ME_ABOUT));
+    } else if control_member {
+        layout.push(
+            PanelControl::CombatControl,
+            panel_button(super::fallout2::COMBAT_CONTROL_BUTTON),
+        );
+    }
+    layout.with(PanelControl::Review, panel_button(REVIEW))
+}
+/// The panel's keys in the reply/choice loop: `a` asks about (Fallout 1
+/// only), `b` barters, `c` opens Combat Control for a Fallout 2 party
+/// member with a control record; no key opens Review.
+pub fn panel_key(key: char, fallout2: bool, control_member: bool) -> Option<PanelControl> {
+    match key.to_ascii_lowercase() {
+        'a' if !fallout2 => Some(PanelControl::TellMeAbout),
+        'c' if control_member => Some(PanelControl::CombatControl),
+        'b' => Some(PanelControl::Barter),
+        _ => None,
+    }
+}
+/// The panel's controls, held from press to release: a release over the
+/// held button acts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Panel {
+    pub fallout2: bool,
+    pub control_member: bool,
+    armed: Armed<PanelControl>,
+}
+impl Panel {
+    pub fn new(fallout2: bool, control_member: bool) -> Self {
+        Self {
+            fallout2,
+            control_member,
+            armed: Armed::new(),
+        }
+    }
+    pub fn layout(&self) -> Layout<PanelControl> {
+        panel_layout(self.fallout2, self.control_member)
+    }
+    pub fn pressed(&self) -> Option<PanelControl> {
+        self.armed.pressed()
+    }
+    pub fn press(&mut self, point: [i32; 2]) -> Option<PanelControl> {
+        self.armed.press(self.layout().hit(point))
+    }
+    pub fn release(&mut self, point: Option<[i32; 2]>) -> Option<PanelControl> {
+        let over = point.and_then(|point| self.layout().hit(point));
+        self.armed.release(over)
+    }
+}
+
+/// A control of the Review window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewControl {
+    ScrollUp,
+    ScrollDown,
+    Done,
+}
+impl ReviewControl {
+    /// The arrows use the small buttons' sounds, Done the red button's.
+    pub fn sounds(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Done => (super::BUTTON_PRESS, super::BUTTON_RELEASE),
+            _ => (SMALL_PRESS, SMALL_RELEASE),
+        }
+    }
+}
+/// The Review window's buttons (the window is at (0, 0)).
+pub fn review_layout() -> Layout<ReviewControl> {
+    Layout::new()
+        .with(ReviewControl::ScrollUp, SCROLL_UP.0)
+        .with(ReviewControl::ScrollDown, SCROLL_DOWN.0)
+        .with(ReviewControl::Done, DONE.0)
+}
+/// What a Review input leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewOutcome {
+    None,
+    /// The top entry moved.
+    Scrolled(usize),
+    /// Esc or Done: the window closes (the head updater resumes).
+    Close,
+}
+/// A key in the Review window: Esc, Up and Down act; every other key
+/// (Ctrl+Q and F10 included) is ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewKey {
+    Escape,
+    Up,
+    Down,
+    Other,
+}
+/// §3.45 the Review window: the entry at the top of the transcript and the
+/// held button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReviewWindow {
+    pub top: usize,
+    armed: Armed<ReviewControl>,
+}
+impl ReviewWindow {
+    /// Opened with the oldest entry at the top.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn layout(&self) -> Layout<ReviewControl> {
+        review_layout()
+    }
+    pub fn pressed(&self) -> Option<ReviewControl> {
+        self.armed.pressed()
+    }
+    /// A press holds the button under the pointer (every press is taken:
+    /// the window is modal).
+    pub fn press(&mut self, point: [i32; 2]) -> Option<ReviewControl> {
+        self.armed.press(self.layout().hit(point))
+    }
+    /// A release over the held button acts, over `entries` history entries.
+    pub fn release(&mut self, point: Option<[i32; 2]>, entries: usize) -> ReviewOutcome {
+        let over = point.and_then(|point| self.layout().hit(point));
+        match self.armed.release(over) {
+            Some(control) => self.dispatch(control, entries),
+            None => ReviewOutcome::None,
+        }
+    }
+    pub fn key(&mut self, key: ReviewKey, entries: usize) -> ReviewOutcome {
+        match key {
+            ReviewKey::Escape => self.dispatch(ReviewControl::Done, entries),
+            ReviewKey::Up => self.dispatch(ReviewControl::ScrollUp, entries),
+            ReviewKey::Down => self.dispatch(ReviewControl::ScrollDown, entries),
+            ReviewKey::Other => ReviewOutcome::None,
+        }
+    }
+    /// Act: the arrows move the top by one whole entry (`scroll`), Done
+    /// closes.
+    pub fn dispatch(&mut self, control: ReviewControl, entries: usize) -> ReviewOutcome {
+        let down = match control {
+            ReviewControl::Done => return ReviewOutcome::Close,
+            ReviewControl::ScrollUp => false,
+            ReviewControl::ScrollDown => true,
+        };
+        match scroll(self.top, entries, down) {
+            Some(top) => {
+                self.top = top;
+                ReviewOutcome::Scrolled(top)
+            }
+            None => ReviewOutcome::None,
+        }
+    }
+}
+
+/// The Ask About window's red buttons on screen: DONE sends Enter, CANCEL
+/// Esc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskControl {
+    Done,
+    Cancel,
+}
+pub fn ask_layout() -> Layout<AskControl> {
+    Layout::new()
+        .with(
+            AskControl::Done,
+            super::red_button(ASK_DONE).offset(ASK_ORIGIN),
+        )
+        .with(
+            AskControl::Cancel,
+            super::red_button(ASK_CANCEL).offset(ASK_ORIGIN),
+        )
+}
+/// What an Ask About input leads to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskOutcome {
+    None,
+    /// The field changed (redraw).
+    Changed,
+    /// Look this text up (the field cleared; the window stays open).
+    Submit(Vec<u8>),
+    /// Esc or CANCEL: speech stops and the window closes, restoring the
+    /// saved reply.
+    Cancel,
+}
+/// A key in the Ask About window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskKey {
+    Enter,
+    Escape,
+    Backspace,
+    /// A typed input code.
+    Code(i32),
+}
+/// §3.45 the Ask About window: its field, whether it is still opening (the
+/// reply and option windows are hidden and it opens on the next tick),
+/// whether an answer shows, and the held button.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskAboutWindow {
+    pub field: AskField,
+    pub opening: bool,
+    pub answered: bool,
+    armed: Armed<AskControl>,
+}
+impl AskAboutWindow {
+    /// Tell Me About passed its tests at `now`.
+    pub fn new(now: u64) -> Self {
+        Self {
+            field: AskField::new(now),
+            opening: true,
+            answered: false,
+            armed: Armed::new(),
+        }
+    }
+    pub fn layout(&self) -> Layout<AskControl> {
+        ask_layout()
+    }
+    pub fn pressed(&self) -> Option<AskControl> {
+        self.armed.pressed()
+    }
+    /// Which of the reply and option windows it hides: the reply until an
+    /// answer shows, the options while it is open.
+    pub fn hides(&self) -> (bool, bool) {
+        (self.opening || !self.answered, true)
+    }
+    /// A press holds a red button (nothing while opening).
+    pub fn press(&mut self, point: [i32; 2]) -> Option<AskControl> {
+        if self.opening {
+            return None;
+        }
+        self.armed.press(self.layout().hit(point))
+    }
+    /// A release over the held button acts.
+    pub fn release(&mut self, point: Option<[i32; 2]>) -> AskOutcome {
+        let over = point.and_then(|point| self.layout().hit(point));
+        match self.armed.release(over) {
+            Some(control) if !self.opening => self.dispatch(control),
+            _ => AskOutcome::None,
+        }
+    }
+    /// A key (nothing while opening); typed codes follow
+    /// `AskField::type_code`.
+    pub fn key(
+        &mut self,
+        key: AskKey,
+        measure: impl Fn(&[u8]) -> i32,
+        glyph: impl Fn(u8) -> i32,
+    ) -> AskOutcome {
+        if self.opening {
+            return AskOutcome::None;
+        }
+        match key {
+            AskKey::Enter => self.dispatch(AskControl::Done),
+            AskKey::Escape => self.dispatch(AskControl::Cancel),
+            AskKey::Backspace => {
+                self.field.backspace();
+                AskOutcome::Changed
+            }
+            AskKey::Code(code) => {
+                if self.field.type_code(code, measure, glyph) {
+                    AskOutcome::Changed
+                } else {
+                    AskOutcome::None
+                }
+            }
+        }
+    }
+    /// DONE submits the typed text (an empty field submits nothing);
+    /// CANCEL closes.
+    pub fn dispatch(&mut self, control: AskControl) -> AskOutcome {
+        match control {
+            AskControl::Done => self
+                .field
+                .submit()
+                .map_or(AskOutcome::None, AskOutcome::Submit),
+            AskControl::Cancel => AskOutcome::Cancel,
+        }
+    }
+    /// The lookup found an answer: the reply window shows again.
+    pub fn answer_shown(&mut self) {
+        self.answered = true;
+    }
+    /// An input poll at `now`: the window finishes opening, else the
+    /// cursor blinks. Returns whether it redraws.
+    pub fn tick(&mut self, now: u64) -> bool {
+        if self.opening {
+            self.opening = false;
+            return true;
+        }
+        self.field.blink(now)
     }
 }
 

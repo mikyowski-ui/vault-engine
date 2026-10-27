@@ -1228,3 +1228,1221 @@ fn fixture_s_date_line_and_dialog_done_boxes() {
         .collect();
     assert_eq!(boxes, [[37, 98], [169, 98]]);
 }
+
+/// SPEC-020 §2.1: the modal layout and dispatch API, screen by screen.
+mod modal_api {
+    use crate::stats::StatContext;
+    use crate::ui::{
+        Armed, FRAME_SIZE, Layout, Pointer, Rect, automap, bar, called, character, editor,
+        flow::{self, MainMenuInput, MenuChoice, SelectionAction, SelectionKey, SelectionOutcome},
+        frame_point, inventory, options, red_button, saveload, sheet,
+    };
+
+    #[test]
+    fn rects_layouts_and_arming() {
+        assert_eq!(Rect::at([1, 2], [3, 4]), Rect::new(1, 2, 3, 4));
+        assert_eq!(
+            Rect::new(1, 2, 3, 4).offset([10, 20]),
+            Rect::new(11, 22, 3, 4)
+        );
+        assert_eq!(Rect::new(1, 2, 3, 4).origin(), [1, 2]);
+        assert_eq!(red_button([10, 20]), Rect::new(10, 20, 15, 16));
+        // A 640-wide frame placed 160 pixels in on a wider surface.
+        assert_eq!(FRAME_SIZE, [640, 480]);
+        assert_eq!(frame_point([700, 100], [160, 0]), Some([540, 100]));
+        assert_eq!(frame_point([799, 479], [160, 0]), Some([639, 479]));
+        assert_eq!(frame_point([800, 0], [160, 0]), None);
+        assert_eq!(frame_point([100, 0], [160, 0]), None);
+        // The first control holding a point wins.
+        let layout = Layout::new()
+            .with('a', Rect::new(0, 0, 10, 10))
+            .with('b', Rect::new(5, 5, 10, 10));
+        assert_eq!(layout.hit([6, 6]), Some('a'));
+        assert_eq!(layout.hit([12, 12]), Some('b'));
+        assert_eq!(layout.hit([20, 20]), None);
+        assert_eq!(layout.rect('b'), Some(Rect::new(5, 5, 10, 10)));
+        assert!(layout.contains('a') && !layout.contains('c'));
+        assert_eq!(layout.len(), 2);
+        let moved = layout.clone().offset([100, 0]);
+        assert_eq!(moved.hit([106, 6]), Some('a'));
+        assert_eq!(moved.hit([6, 6]), None);
+        let collected: Layout<char> = layout.controls().iter().copied().collect();
+        assert_eq!(collected, layout);
+        // Press then release over the same control fires it; any release
+        // disarms.
+        let mut armed = Armed::new();
+        assert_eq!(armed.release(Some('a')), None);
+        assert_eq!(armed.press(Some('a')), Some('a'));
+        assert_eq!(armed.pressed(), Some('a'));
+        assert_eq!(armed.release(Some('b')), None);
+        assert_eq!(armed.pressed(), None);
+        armed.press(Some('a'));
+        assert_eq!(armed.release(Some('a')), Some('a'));
+        armed.press(Some('a'));
+        assert_eq!(armed.release(None), None);
+        assert_eq!(armed.press(None), None);
+        assert_eq!(armed.pressed(), None);
+    }
+
+    #[test]
+    fn main_menu_press_release_and_keys() {
+        let layout = flow::menu_layout();
+        assert_eq!(
+            layout.rect(flow::MenuButton::Intro),
+            Some(Rect::new(425, 45, 26, 26))
+        );
+        assert_eq!(
+            flow::MenuButton::at([430, 170]),
+            Some(flow::MenuButton::Credits)
+        );
+        assert_eq!(flow::MenuButton::at([400, 170]), None);
+        let mut menu = flow::MainMenu::new(false);
+        assert_eq!(menu.layout().rect(4), Some(Rect::new(425, 209, 26, 26)));
+        let opaque = |_: usize, _: [i32; 2]| true;
+        // A press sounds `nmselec0` and holds; the release selects.
+        let press = MainMenuInput::Pointer(Pointer::Press([430, 50]));
+        let poll = menu.poll(press, false, 0, opaque);
+        assert_eq!((poll.choice, poll.sounds), (None, vec!["nmselec0"]));
+        assert_eq!(menu.pressed(), Some(0));
+        let release = MainMenuInput::Pointer(Pointer::Release(Some([430, 50])));
+        let poll = menu.poll(release, false, 0, opaque);
+        assert_eq!(
+            (poll.choice, poll.sounds),
+            (Some(MenuChoice::Intro), vec!["nmselec1"])
+        );
+        assert_eq!(menu.pressed(), None);
+        // The pixel mask refuses a press; a release elsewhere selects
+        // nothing.
+        let poll = menu.poll(press, false, 0, |_, _| false);
+        assert!(poll.sounds.is_empty() && menu.pressed().is_none());
+        menu.poll(
+            MainMenuInput::Pointer(Pointer::Press([430, 170])),
+            false,
+            0,
+            opaque,
+        );
+        let off = MainMenuInput::Pointer(Pointer::Release(Some([430, 210])));
+        assert_eq!(menu.poll(off, false, 0, opaque).choice, None);
+        // Shift+Credits is Quotes; keys and the timeout as `menu_poll`.
+        menu.poll(
+            MainMenuInput::Pointer(Pointer::Press([430, 170])),
+            true,
+            0,
+            opaque,
+        );
+        let credits = MainMenuInput::Pointer(Pointer::Release(Some([430, 170])));
+        assert_eq!(
+            menu.poll(credits, true, 0, opaque).choice,
+            Some(MenuChoice::Quotes)
+        );
+        assert_eq!(
+            menu.poll(MainMenuInput::Key('n'), false, 0, opaque).choice,
+            Some(MenuChoice::NewGame)
+        );
+        assert_eq!(
+            menu.poll(MainMenuInput::None, false, 120_000, opaque)
+                .choice,
+            Some(MenuChoice::Timeout)
+        );
+        // Fallout 2's six buttons: Options is button 3.
+        let mut menu2 = flow::MainMenu::new(true);
+        assert_eq!(menu2.layout().len(), 6);
+        assert_eq!(menu2.layout().rect(3), Some(Rect::new(30, 142, 26, 26)));
+        menu2.poll(
+            MainMenuInput::Pointer(Pointer::Press([31, 143])),
+            false,
+            0,
+            opaque,
+        );
+        let options = MainMenuInput::Pointer(Pointer::Release(Some([31, 143])));
+        assert_eq!(
+            menu2.poll(options, false, 0, opaque).choice,
+            Some(MenuChoice::Options)
+        );
+        assert_eq!(
+            menu2.poll(MainMenuInput::Escape, false, 0, opaque).choice,
+            Some(MenuChoice::Exit)
+        );
+    }
+
+    #[test]
+    fn selection_layout_and_transitions() {
+        let layout = flow::selection_layout();
+        assert_eq!(
+            layout.rect(SelectionAction::Take),
+            Some(Rect::new(81, 323, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(SelectionAction::Back),
+            Some(Rect::new(461, 425, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(SelectionAction::Next),
+            Some(Rect::new(318, 320, 20, 18))
+        );
+        assert_eq!(layout.len(), 6);
+        assert_eq!(
+            flow::selection_sounds(SelectionAction::Next),
+            ("ib2p1xx1", "ib2lu1x1")
+        );
+        assert_eq!(
+            flow::selection_sounds(SelectionAction::Take),
+            ("ib1p1xx1", "ib1lu1x1")
+        );
+        let mut screen = flow::SelectionScreen::new(0);
+        assert_eq!(screen.press([320, 325]), Some(SelectionAction::Next));
+        assert_eq!(screen.pressed(), Some(SelectionAction::Next));
+        assert_eq!(
+            screen.release(Some([320, 325])),
+            Some(SelectionOutcome::Moved(1))
+        );
+        assert_eq!(screen.index, 1);
+        // A release away from the held arrow does nothing.
+        screen.press([300, 325]);
+        assert_eq!(screen.release(Some([0, 0])), None);
+        assert_eq!(screen.index, 1);
+        // The arrows' keys wrap through the three premades.
+        assert_eq!(
+            screen.key(SelectionKey::Left),
+            Some(SelectionOutcome::Moved(0))
+        );
+        assert_eq!(
+            screen.key(SelectionKey::Left),
+            Some(SelectionOutcome::Moved(2))
+        );
+        screen.press([82, 324]);
+        assert_eq!(
+            screen.release(Some([82, 324])),
+            Some(SelectionOutcome::Take(2))
+        );
+        assert_eq!(
+            screen.key(SelectionKey::Char('m')),
+            Some(SelectionOutcome::Modify(2))
+        );
+        assert_eq!(
+            screen.key(SelectionKey::Escape),
+            Some(SelectionOutcome::Back)
+        );
+        assert_eq!(
+            screen.key(SelectionKey::F10),
+            Some(SelectionOutcome::QuitConfirm)
+        );
+        assert_eq!(screen.key(SelectionKey::Char('x')), None);
+        assert_eq!(flow::SelectionScreen::new(4).index, 1);
+    }
+
+    #[test]
+    fn dialog_box_buttons_and_answers() {
+        // The quit confirmation at (169, 117): its No button at (351, 219).
+        let mut quit = flow::DialogBox::new([169, 117], true);
+        let layout = quit.layout();
+        assert_eq!(layout.rect(true), Some(Rect::new(219, 219, 15, 16)));
+        assert_eq!(layout.rect(false), Some(Rect::new(351, 219, 15, 16)));
+        assert_eq!(quit.click([352, 220]), Some(false));
+        assert_eq!(quit.click([0, 0]), None);
+        assert_eq!(quit.press([220, 220]), Some(true));
+        assert_eq!(quit.pressed(), Some(true));
+        assert_eq!(quit.release(Some([352, 220])), None);
+        quit.press([220, 220]);
+        assert_eq!(quit.release(Some([220, 220])), Some(true));
+        assert_eq!(quit.key(flow::DialogKey::Char('y')), Some(true));
+        // A Yes/No box is always large; a medium Done box centres its button.
+        assert_eq!(
+            flow::DialogBox::sized([0, 0], true, flow::DialogSize::Medium).size,
+            flow::DialogSize::Large
+        );
+        let done = flow::DialogBox::sized([0, 0], false, flow::DialogSize::Medium);
+        assert_eq!(done.layout().rect(true), Some(Rect::new(66, 85, 15, 16)));
+        assert_eq!(done.layout().len(), 1);
+        assert_eq!(done.key(flow::DialogKey::Char('y')), None);
+        assert_eq!(done.key(flow::DialogKey::Enter), Some(true));
+    }
+
+    #[test]
+    fn options_menu_pause_and_quit() {
+        use options::{MenuKey, OptionsAction, OptionsOutcome, OptionsPage, OptionsWindow};
+        let layout = options::options_layout();
+        assert_eq!(
+            layout.rect(OptionsAction::SaveGame),
+            Some(Rect::new(251, 88, 137, 34))
+        );
+        assert_eq!(
+            layout.rect(OptionsAction::Done),
+            Some(Rect::new(251, 236, 137, 34))
+        );
+        assert_eq!(
+            options::pause_button(options::PAUSE_ORIGIN),
+            Rect::new(276, 196, 15, 16)
+        );
+        let mut window = OptionsWindow::new(OptionsPage::Menu);
+        assert_eq!(window.click([260, 90]), OptionsOutcome::Save);
+        assert_eq!(window.click([260, 125]), OptionsOutcome::Load);
+        assert_eq!(window.click([0, 0]), OptionsOutcome::None);
+        assert_eq!(
+            window.click([260, 200]),
+            OptionsOutcome::Page(OptionsPage::Quit)
+        );
+        assert_eq!(window.page, OptionsPage::Quit);
+        assert_eq!(
+            window.layout().rect(OptionsAction::Done),
+            Some(Rect::new(351, 219, 15, 16))
+        );
+        assert_eq!(window.click([352, 220]), OptionsOutcome::Quit(false));
+        assert_eq!(
+            window.key(MenuKey::Char('y')),
+            (OptionsOutcome::Quit(true), false)
+        );
+        assert_eq!(window.key(MenuKey::F10), (OptionsOutcome::None, false));
+        let mut menu = OptionsWindow::new(OptionsPage::Menu);
+        assert_eq!(menu.key(MenuKey::Escape), (OptionsOutcome::Close, false));
+        assert_eq!(menu.key(MenuKey::Enter), (OptionsOutcome::Close, true));
+        assert_eq!(
+            menu.key(MenuKey::Char('p')),
+            (OptionsOutcome::Page(OptionsPage::Preferences), true)
+        );
+        assert_eq!(menu.page, OptionsPage::Preferences);
+        assert!(menu.layout().is_empty());
+        let mut pause = OptionsWindow::new(OptionsPage::Pause);
+        assert_eq!(pause.click([0, 0]), OptionsOutcome::Close);
+        assert_eq!(
+            pause.key(MenuKey::Char('q')),
+            (OptionsOutcome::Close, false)
+        );
+    }
+
+    #[test]
+    fn preferences_controls_drag_and_close() {
+        use options::{
+            DragStep, LabelWidths, PreferenceButton, PreferenceControl, PreferenceKey,
+            PreferenceOutcome, Preferences, PreferencesScreen,
+        };
+        let widths = LabelWidths::measure(|_| 20);
+        let mut screen = PreferencesScreen::open(Preferences::default());
+        let layout = screen.layout(&widths, false);
+        assert_eq!(
+            layout.rect(PreferenceControl::Button(PreferenceButton::Default)),
+            Some(Rect::new(23, 450, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(PreferenceControl::Knob(0)),
+            Some(Rect::new(58, 67, 84, 48))
+        );
+        assert_eq!(
+            layout.rect(PreferenceControl::Switch(0)),
+            Some(Rect::new(283, 69, 57, 28))
+        );
+        assert_eq!(
+            layout.rect(PreferenceControl::Slider(2)),
+            Some(Rect::new(384, 184, 240, 23))
+        );
+        assert_eq!(
+            layout.rect(PreferenceControl::Checkbox),
+            Some(options::CHECKBOX)
+        );
+        assert!(
+            !screen
+                .layout(&widths, true)
+                .contains(PreferenceControl::Knob(4))
+        );
+        // A knob arms on the press and acts on the release: its centre
+        // steps game difficulty 1 up to 2, then blocks for the cues.
+        assert_eq!(
+            screen.press([99, 92], &widths, false, 0),
+            PreferenceOutcome::Armed(PreferenceControl::Knob(0))
+        );
+        assert_eq!(
+            screen.release(Some([99, 92]), &widths, 0),
+            PreferenceOutcome::Changed {
+                cues: options::KNOB_SOUNDS
+            }
+        );
+        assert_eq!(
+            (screen.values.game_difficulty, screen.knob_up[0]),
+            (2, false)
+        );
+        assert!(screen.changed && screen.busy(69) && !screen.busy(70));
+        assert_eq!(
+            screen.press([99, 92], &widths, false, 10),
+            PreferenceOutcome::None
+        );
+        // A switch's centre flips combat messages.
+        screen.press([310, 86], &widths, false, 100);
+        assert_eq!(
+            screen.release(Some([310, 86]), &widths, 100),
+            PreferenceOutcome::Changed {
+                cues: options::SWITCH_SOUNDS
+            }
+        );
+        assert_eq!(screen.values.combat_messages, 0);
+        // A slider press starts the drag; the knob follows the pointer
+        // once per 35 ms, and the noted release ends it.
+        assert_eq!(
+            screen.press([500, 190], &widths, false, 200),
+            PreferenceOutcome::DragStarted(2)
+        );
+        assert_eq!(screen.drag.map(|drag| drag.position), Some(532));
+        assert_eq!(
+            screen.drag_tick(200, Some(600)),
+            Some(DragStep::Moved {
+                index: 2,
+                iteration: 0,
+                moved: true
+            })
+        );
+        assert_eq!(screen.values.master_volume, 31420);
+        assert_eq!(screen.drag_tick(210, Some(600)), None);
+        assert_eq!(
+            screen.release(Some([600, 190]), &widths, 220),
+            PreferenceOutcome::None
+        );
+        assert_eq!(
+            screen.drag_tick(235, None),
+            Some(DragStep::Ended { index: 2 })
+        );
+        assert!(screen.drag.is_none());
+        // The checkbox toggles on the press.
+        assert_eq!(
+            screen.press([390, 75], &widths, false, 300),
+            PreferenceOutcome::Toggled
+        );
+        assert_eq!(screen.values.player_speedup, 1);
+        // Default, Done and Cancel; keys.
+        assert_eq!(
+            screen.press([24, 451], &widths, false, 300),
+            PreferenceOutcome::Defaults
+        );
+        assert_eq!(screen.values.game_difficulty, 1);
+        assert_eq!(
+            screen.press([149, 451], &widths, false, 300),
+            PreferenceOutcome::Close { keep: true }
+        );
+        assert_eq!(
+            screen.press([264, 451], &widths, false, 300),
+            PreferenceOutcome::Close { keep: false }
+        );
+        assert_eq!(
+            screen.key(PreferenceKey::F10, 300),
+            PreferenceOutcome::QuitConfirm
+        );
+        assert_eq!(
+            screen.key(PreferenceKey::Escape, 300),
+            PreferenceOutcome::Close { keep: false }
+        );
+        let backup = screen.backup.clone();
+        assert_eq!(screen.clone().close(false), (backup, true));
+        let (kept, apply) = screen.close(true);
+        assert!(apply && kept.player_speedup == 0);
+        let untouched = PreferencesScreen::open(Preferences::default());
+        assert!(!untouched.close(true).1);
+    }
+
+    fn slots() -> Vec<saveload::SlotState> {
+        use saveload::{SlotInfo, SlotState};
+        let mut slots = vec![SlotState::Empty; saveload::SLOTS];
+        slots[0] = SlotState::Occupied(SlotInfo {
+            description: b"OLD".to_vec(),
+            ..SlotInfo::default()
+        });
+        slots[2] = SlotState::Corrupt;
+        slots[3] = SlotState::OldVersion;
+        slots
+    }
+
+    #[test]
+    fn save_screen_commit_description_and_arrows() {
+        use saveload::{ListKey, Mode, SaveLoadControl, SaveLoadKey, SaveLoadOutcome, SlotList};
+        let layout = saveload::layout(false);
+        assert_eq!(
+            layout.rect(SaveLoadControl::Done),
+            Some(Rect::new(391, 349, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(SaveLoadControl::Cancel),
+            Some(Rect::new(495, 349, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(SaveLoadControl::List),
+            Some(saveload::LIST_AREA)
+        );
+        let description = saveload::layout(true);
+        assert_eq!(description.len(), 2);
+        assert_eq!(
+            description.rect(SaveLoadControl::DescriptionDone),
+            Some(Rect::new(203, 174, 15, 16))
+        );
+        assert_eq!(
+            description.rect(SaveLoadControl::DescriptionCancel),
+            Some(Rect::new(329, 174, 15, 16))
+        );
+        let mut screen = saveload::SaveLoadScreen::open(Mode::Save, slots(), SlotList::default());
+        // Saving over an occupied slot asks; Yes prefills the description.
+        assert_eq!(
+            screen.press([392, 350], 0),
+            SaveLoadOutcome::AskOverwrite(0)
+        );
+        assert_eq!(
+            screen.overwrite_accepted(),
+            SaveLoadOutcome::DescriptionOpened
+        );
+        assert_eq!(screen.layout().len(), 2);
+        assert_eq!(
+            screen.key(SaveLoadKey::Char(b'X')),
+            SaveLoadOutcome::Changed
+        );
+        assert_eq!(
+            screen.key(SaveLoadKey::Enter),
+            SaveLoadOutcome::Save {
+                slot: 0,
+                description: b"OLDX".to_vec()
+            }
+        );
+        assert!(screen.description.is_none());
+        // An empty slot opens an empty description; its Cancel closes it.
+        assert_eq!(
+            screen.key(SaveLoadKey::List(ListKey::Down)),
+            SaveLoadOutcome::Changed
+        );
+        assert_eq!(
+            screen.press([392, 350], 0),
+            SaveLoadOutcome::DescriptionOpened
+        );
+        assert_eq!(screen.press([330, 175], 0), SaveLoadOutcome::Changed);
+        assert!(screen.description.is_none());
+        // A held arrow steps, repeats after 13 idle frames, and swallows
+        // every other input until it stops.
+        assert_eq!(screen.press([36, 73], 0), SaveLoadOutcome::Changed);
+        assert_eq!(screen.list.selected, 2);
+        assert_eq!(screen.arrow_held(), Some(SaveLoadControl::ArrowDown));
+        assert_eq!(screen.key(SaveLoadKey::Escape), SaveLoadOutcome::None);
+        assert_eq!(screen.press([392, 350], 0), SaveLoadOutcome::None);
+        assert!(!screen.frame(532, true));
+        assert!(screen.frame(533, true));
+        assert_eq!(screen.list.selected, 3);
+        assert!(!screen.frame(600, false));
+        assert_eq!(screen.arrow_held(), None);
+        // A second click on the remembered slot commits it.
+        assert_eq!(screen.press([60, 228], 0), SaveLoadOutcome::Changed);
+        assert_eq!(screen.list.selected, 4);
+        assert_eq!(
+            screen.press([60, 228], 0),
+            SaveLoadOutcome::DescriptionOpened
+        );
+        assert_eq!(screen.key(SaveLoadKey::Escape), SaveLoadOutcome::Changed);
+        assert_eq!(
+            screen.key(SaveLoadKey::Escape),
+            SaveLoadOutcome::Cancel { to_options: false }
+        );
+        assert_eq!(
+            screen.key(SaveLoadKey::Brightness(true)),
+            SaveLoadOutcome::Brightness(true)
+        );
+        assert_eq!(screen.key(SaveLoadKey::Quit), SaveLoadOutcome::QuitConfirm);
+        assert_eq!(screen.into_list().selected, 4);
+    }
+
+    #[test]
+    fn load_screen_commits_by_slot_state() {
+        use saveload::{ListKey, Mode, SaveLoadKey, SaveLoadOutcome, SlotList};
+        let mut screen =
+            saveload::SaveLoadScreen::open(Mode::LoadInGame, slots(), SlotList::default());
+        assert_eq!(screen.key(SaveLoadKey::Enter), SaveLoadOutcome::Load(0));
+        screen.key(SaveLoadKey::List(ListKey::Down));
+        assert_eq!(screen.key(SaveLoadKey::Enter), SaveLoadOutcome::None);
+        screen.key(SaveLoadKey::List(ListKey::Down));
+        assert_eq!(
+            screen.key(SaveLoadKey::Enter),
+            SaveLoadOutcome::Notice {
+                title: 134,
+                body: 135
+            }
+        );
+        screen.key(SaveLoadKey::List(ListKey::Down));
+        assert_eq!(
+            screen.commit(),
+            SaveLoadOutcome::Notice {
+                title: 134,
+                body: 136
+            }
+        );
+        // Description keys do nothing outside the box; Cancel returns to
+        // the options menu that opened the screen.
+        assert_eq!(screen.key(SaveLoadKey::Char(b'a')), SaveLoadOutcome::None);
+        screen.from_options = true;
+        assert_eq!(
+            screen.press([496, 350], 0),
+            SaveLoadOutcome::Cancel { to_options: true }
+        );
+        // A failed save's rescan replaces the states.
+        screen.rescan(vec![saveload::SlotState::Empty; saveload::SLOTS]);
+        assert_eq!(screen.selected_state(), &saveload::SlotState::Empty);
+        assert_eq!(screen.overwrite_accepted(), SaveLoadOutcome::None);
+    }
+
+    #[test]
+    fn inventory_window_layout_and_list() {
+        use inventory::{
+            InventoryControl, InventoryKey, InventoryOutcome, InventoryWindow, ListStep,
+        };
+        let layout = inventory::inventory_layout(false, None);
+        assert_eq!(
+            layout.rect(InventoryControl::Close),
+            Some(Rect::new(517, 329, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(InventoryControl::ScrollUp),
+            Some(Rect::new(208, 39, 22, 23))
+        );
+        assert_eq!(
+            layout.rect(InventoryControl::Row(0)),
+            Some(Rect::new(124, 35, 64, 48))
+        );
+        assert_eq!(
+            layout.rect(InventoryControl::Row(5)),
+            Some(Rect::new(124, 275, 64, 48))
+        );
+        assert_eq!(
+            layout.rect(InventoryControl::LeftHand),
+            Some(inventory::LEFT_HAND)
+        );
+        assert_eq!(
+            layout.rect(InventoryControl::Figure),
+            Some(inventory::FIGURE)
+        );
+        let use_on = inventory::inventory_layout(true, Some([16, 17]));
+        assert_eq!(
+            use_on.rect(InventoryControl::Close),
+            Some(Rect::new(313, 328, 16, 17))
+        );
+        assert!(!use_on.contains(InventoryControl::LeftHand));
+        let mut window = InventoryWindow::new(false);
+        assert_eq!(
+            window.press([130, 40], 10, None),
+            InventoryOutcome::Entry(0)
+        );
+        assert_eq!(
+            window.press([210, 65], 10, None),
+            InventoryOutcome::Scrolled(1)
+        );
+        assert_eq!(
+            window.press([130, 40], 10, None),
+            InventoryOutcome::Entry(1)
+        );
+        assert_eq!(
+            window.press([210, 65], 7, None),
+            InventoryOutcome::Scrolled(1)
+        );
+        assert_eq!(window.press([130, 280], 6, None), InventoryOutcome::None);
+        assert_eq!(
+            window.press([240, 290], 10, None),
+            InventoryOutcome::Slot(InventoryControl::LeftHand)
+        );
+        assert_eq!(window.press([260, 40], 10, None), InventoryOutcome::UpLevel);
+        assert_eq!(window.right_press(), InventoryOutcome::Cursor(true));
+        assert_eq!(window.press([260, 40], 10, None), InventoryOutcome::None);
+        assert_eq!(window.press([518, 330], 10, None), InventoryOutcome::Close);
+        assert_eq!(
+            window.key(InventoryKey::Step(ListStep::End), 10),
+            InventoryOutcome::None
+        );
+        assert_eq!(
+            window.key(InventoryKey::Quit, 10),
+            InventoryOutcome::QuitConfirm
+        );
+        let mut use_on = InventoryWindow::new(true);
+        assert_eq!(use_on.press([240, 290], 10, None), InventoryOutcome::None);
+        assert_eq!(
+            use_on.key(InventoryKey::Step(ListStep::End), 10),
+            InventoryOutcome::Scrolled(4)
+        );
+        assert_eq!(
+            use_on.key(InventoryKey::Step(ListStep::Up), 10),
+            InventoryOutcome::Scrolled(3)
+        );
+        assert_eq!(
+            use_on.key(InventoryKey::Escape, 10),
+            InventoryOutcome::Close
+        );
+        // The shared scroll rules.
+        assert_eq!(inventory::list_step(0, ListStep::PageDown, 20, 6), 6);
+        assert_eq!(inventory::list_step(10, ListStep::PageDown, 20, 6), 14);
+        assert_eq!(inventory::list_step(3, ListStep::PageUp, 20, 6), 0);
+        assert_eq!(inventory::list_step(0, ListStep::Up, 20, 6), 0);
+        let mut offset = 0;
+        assert!(!inventory::scroll_list(&mut offset, true, 9, 6));
+        assert!(inventory::scroll_list(&mut offset, false, 9, 6));
+        assert_eq!(offset, 1);
+    }
+
+    #[test]
+    fn loot_and_barter_layouts() {
+        use inventory::{BarterControl, BarterView, LootControl, LootView};
+        let view = LootView {
+            bodies: 1,
+            counts: [3, 0],
+            ..LootView::default()
+        };
+        let layout = inventory::loot_layout(&view);
+        assert_eq!(
+            layout.rect(LootControl::Done),
+            Some(Rect::new(368, 328, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(LootControl::Slot {
+                target: false,
+                row: 0
+            }),
+            Some(Rect::new(124, 35, 64, 48))
+        );
+        assert_eq!(
+            layout.rect(LootControl::Scroll {
+                target: true,
+                up: true
+            }),
+            Some(Rect::new(459, 39, 22, 23))
+        );
+        assert_eq!(
+            layout.rect(LootControl::Portrait { target: true }),
+            Some(Rect::new(377, 37, 60, 100))
+        );
+        assert_eq!(
+            layout.hit([130, 40]),
+            Some(LootControl::Slot {
+                target: false,
+                row: 0
+            })
+        );
+        assert_eq!(layout.hit([130, 185]), None, "row 3 holds no entry");
+        assert!(!layout.contains(LootControl::Distance));
+        assert!(!layout.contains(LootControl::TakeAll));
+        assert!(!layout.contains(LootControl::Cycle { forward: true }));
+        let full = inventory::loot_layout(&LootView {
+            companion: true,
+            take_all: Some(Some([90, 25])),
+            bodies: 2,
+            counts: [0, 8],
+            offsets: [0, 4],
+        });
+        assert_eq!(
+            full.rect(LootControl::Distance),
+            Some(Rect::new(294, 210, 108, 20))
+        );
+        assert_eq!(
+            full.rect(LootControl::TakeAll),
+            Some(Rect::new(294, 236, 90, 25))
+        );
+        assert_eq!(
+            full.rect(LootControl::Cycle { forward: true }),
+            Some(Rect::new(536, 162, 20, 18))
+        );
+        assert!(full.contains(LootControl::Slot {
+            target: true,
+            row: 3
+        }));
+        assert!(!full.contains(LootControl::Slot {
+            target: true,
+            row: 4
+        }));
+        let default_take_all = inventory::loot_layout(&LootView {
+            take_all: Some(None),
+            ..LootView::default()
+        });
+        assert_eq!(
+            default_take_all.rect(LootControl::TakeAll),
+            Some(Rect::new(294, 236, 108, 20))
+        );
+
+        let barter = inventory::barter_layout(&BarterView {
+            wield: true,
+            counts: [4, 1, 0, 2],
+            offsets: [1, 0, 0, 0],
+        });
+        assert_eq!(
+            barter.rect(BarterControl::Offer),
+            Some(Rect::new(41, 452, 14, 14))
+        );
+        assert_eq!(
+            barter.rect(BarterControl::Talk),
+            Some(Rect::new(584, 451, 14, 14))
+        );
+        assert_eq!(
+            barter.rect(BarterControl::TradeWield),
+            Some(Rect::new(332, 293, 66, 15))
+        );
+        assert_eq!(
+            barter.rect(BarterControl::Scroll {
+                column: 0,
+                up: true
+            }),
+            Some(Rect::new(189, 346, 23, 24))
+        );
+        assert_eq!(
+            barter.rect(BarterControl::Slot { column: 0, row: 0 }),
+            Some(Rect::new(109, 325, 64, 48))
+        );
+        assert!(barter.contains(BarterControl::Slot { column: 0, row: 2 }));
+        assert!(!barter.contains(BarterControl::Slot { column: 2, row: 0 }));
+        assert!(barter.contains(BarterControl::Slot { column: 3, row: 1 }));
+        assert_eq!(
+            barter.rect(BarterControl::Portrait { merchant: true }),
+            Some(Rect::new(560, 314, 60, 100))
+        );
+        assert_eq!(
+            barter.hit([110, 326]),
+            Some(BarterControl::Slot { column: 0, row: 0 })
+        );
+        assert!(
+            !inventory::barter_layout(&BarterView::default()).contains(BarterControl::TradeWield)
+        );
+        // Drag routes: a player item drops on the player table, and back.
+        assert_eq!(inventory::barter_drop(0, [250, 320]), Some(1));
+        assert_eq!(inventory::barter_drop(0, [250, 300]), None);
+        assert_eq!(inventory::barter_drop(1, [120, 400]), Some(0));
+        assert_eq!(inventory::barter_drop(2, [480, 400]), Some(3));
+        assert_eq!(inventory::barter_drop(3, [400, 400]), None);
+        assert_eq!(inventory::barter_route(3).2, 25);
+    }
+
+    #[test]
+    fn character_screen_controls_and_folders() {
+        use character::{
+            CharacterControl, CharacterKey, CharacterOutcome, CharacterScreen, Folder,
+        };
+        use editor::InfoLine;
+        let layout = character::character_layout(2);
+        assert_eq!(
+            layout.rect(CharacterControl::Done),
+            Some(Rect::new(455, 454, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(CharacterControl::Cancel),
+            Some(Rect::new(552, 454, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(CharacterControl::Print),
+            Some(Rect::new(343, 454, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(CharacterControl::SliderPlus),
+            Some(Rect::new(614, 42, 16, 12))
+        );
+        assert_eq!(
+            layout.rect(CharacterControl::SliderMinus),
+            Some(Rect::new(614, 53, 17, 12))
+        );
+        assert_eq!(
+            layout.rect(CharacterControl::Tabs),
+            Some(character::FOLDER_TABS)
+        );
+        let mut screen = CharacterScreen::default();
+        let mask = |_: [i32; 2]| true;
+        assert_eq!(screen.press([456, 455], mask), CharacterOutcome::None);
+        assert_eq!(screen.pressed(), Some(CharacterControl::Done));
+        assert_eq!(
+            screen.release(Some([456, 455])),
+            CharacterOutcome::Close { keep: true }
+        );
+        screen.press([553, 455], mask);
+        assert_eq!(screen.release(Some([456, 455])), CharacterOutcome::None);
+        screen.press([344, 455], mask);
+        assert_eq!(screen.release(Some([344, 455])), CharacterOutcome::Print);
+        // The tabs act on the release by its x; the mask refuses a press.
+        screen.press([150, 340], mask);
+        assert_eq!(
+            screen.release(Some([250, 340])),
+            CharacterOutcome::Folder(Folder::Kills)
+        );
+        assert_eq!(
+            (screen.folder, screen.selected),
+            (Folder::Kills, InfoLine::Folder(31))
+        );
+        assert_eq!(screen.press([150, 340], |_| false), CharacterOutcome::None);
+        assert_eq!(screen.pressed(), None);
+        // The slider steps on the press and repeats from the 20th frame
+        // while the pointer stays on it.
+        screen.cursor = 2;
+        assert_eq!(
+            screen.press([615, 43], mask),
+            CharacterOutcome::SkillStep { plus: true }
+        );
+        screen.hold_slider(true, 0);
+        assert_eq!(screen.slider_held(), Some(true));
+        assert_eq!(screen.tick(819, Some([615, 43])), None);
+        assert_eq!(screen.tick(820, Some([615, 43])), Some(true));
+        assert_eq!(screen.tick(900, Some([0, 0])), None);
+        assert_eq!(screen.slider_held(), None);
+        // The skill rows move the cursor; the info regions select.
+        assert_eq!(
+            screen.press([400, 84], mask),
+            CharacterOutcome::Select(InfoLine::Skill(5))
+        );
+        assert_eq!(screen.cursor, 5);
+        assert_eq!(
+            screen.layout().rect(CharacterControl::SliderPlus),
+            Some(Rect::new(614, 75, 16, 12))
+        );
+        assert_eq!(
+            screen.press([20, 40], mask),
+            CharacterOutcome::Select(InfoLine::Special(0))
+        );
+        assert_eq!(
+            screen.key(CharacterKey::Minus),
+            CharacterOutcome::SkillStep { plus: false }
+        );
+        assert_eq!(
+            screen.key(CharacterKey::Escape),
+            CharacterOutcome::Close { keep: false }
+        );
+        assert_eq!(
+            screen.key(CharacterKey::Done),
+            CharacterOutcome::Close { keep: true }
+        );
+    }
+
+    #[test]
+    fn perk_chooser_controls() {
+        use character::{ChooserControl, ChooserKey, ChooserOutcome, PerkChooser};
+        let layout = character::chooser_layout();
+        assert_eq!(
+            layout.rect(ChooserControl::Up),
+            Some(Rect::new(58, 137, 11, 14))
+        );
+        assert_eq!(
+            layout.rect(ChooserControl::Down),
+            Some(Rect::new(58, 152, 11, 14))
+        );
+        assert_eq!(
+            layout.rect(ChooserControl::Done),
+            Some(Rect::new(81, 277, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(ChooserControl::Cancel),
+            Some(Rect::new(186, 277, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(ChooserControl::List),
+            Some(Rect::new(78, 134, 192, 129))
+        );
+        let mut chooser = PerkChooser::new(20, 0);
+        assert_eq!(chooser.press([60, 155], 0), ChooserOutcome::Moved);
+        assert_eq!(chooser.list.selected(), Some(1));
+        assert_eq!(chooser.pressed(), Some(ChooserControl::Down));
+        assert!(!chooser.tick(614, Some([60, 155])));
+        assert!(chooser.tick(615, Some([60, 155])));
+        assert_eq!(chooser.list.selected(), Some(2));
+        assert!(!chooser.tick(700, Some([0, 0])));
+        assert_eq!(chooser.pressed(), None);
+        assert_eq!(chooser.release(Some([60, 155])), ChooserOutcome::None);
+        chooser.press([82, 278], 0);
+        assert_eq!(chooser.pressed(), Some(ChooserControl::Done));
+        assert_eq!(chooser.release(Some([82, 278])), ChooserOutcome::Choose);
+        chooser.press([187, 278], 0);
+        assert_eq!(chooser.release(Some([82, 278])), ChooserOutcome::None);
+        chooser.press([187, 278], 0);
+        assert_eq!(chooser.release(Some([187, 278])), ChooserOutcome::Cancel);
+        assert_eq!(chooser.key(ChooserKey::Home), ChooserOutcome::Moved);
+        assert_eq!(chooser.list.selected(), Some(0));
+        chooser.press([100, 140], 0);
+        assert_eq!(chooser.release(Some([100, 140])), ChooserOutcome::Moved);
+        chooser.press([100, 140], 0);
+        assert_eq!(chooser.release(Some([100, 140])), ChooserOutcome::Choose);
+        assert_eq!(chooser.key(ChooserKey::Escape), ChooserOutcome::Cancel);
+        assert_eq!(chooser.key(ChooserKey::Enter), ChooserOutcome::Choose);
+        assert_eq!(chooser.key(ChooserKey::Other), ChooserOutcome::None);
+    }
+
+    #[test]
+    fn editor_layout_and_dispatch() {
+        use editor::{EditorControl, EditorDialogControl, EditorDialogKind, EditorOutcome};
+        let layout = editor::editor_layout();
+        assert_eq!(
+            layout.rect(EditorControl::Done),
+            Some(Rect::new(455, 454, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(EditorControl::Options),
+            Some(Rect::new(343, 454, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(EditorControl::SpecialPlus(0)),
+            Some(Rect::new(149, 37, 16, 12))
+        );
+        assert_eq!(
+            layout.rect(EditorControl::SpecialMinus(6)),
+            Some(Rect::new(149, 246, 17, 12))
+        );
+        assert_eq!(
+            layout.rect(EditorControl::Tag(17)),
+            Some(Rect::new(347, 213, 17, 11))
+        );
+        assert_eq!(
+            layout.rect(EditorControl::Trait(15)),
+            Some(Rect::new(298, 443, 17, 11))
+        );
+        assert_eq!(editor::editor_hit([10, 1], |_, _| false), None);
+        assert_eq!(
+            editor::editor_hit([10, 1], |_, _| true),
+            Some(EditorControl::Name)
+        );
+        assert_eq!(
+            editor::editor_hit([150, 38], |_, _| false),
+            Some(EditorControl::SpecialPlus(0))
+        );
+        let context = StatContext::default();
+        let mut editor = editor::Editor::open(editor::blank_sheet(context), true, context);
+        assert_eq!(
+            editor.dispatch(EditorControl::SpecialPlus(0)),
+            EditorOutcome::Stepped(true)
+        );
+        assert_eq!(editor.character_points, 4);
+        assert_eq!(
+            editor.dispatch(EditorControl::Tag(3)),
+            EditorOutcome::Toggled
+        );
+        assert_eq!(
+            editor.dispatch(EditorControl::Done),
+            EditorOutcome::Refused(editor::Refusal {
+                title: 118,
+                body: 119
+            })
+        );
+        assert_eq!(
+            editor.dispatch(EditorControl::Options),
+            EditorOutcome::Open(EditorDialogKind::Options)
+        );
+        assert_eq!(
+            editor.dispatch(EditorControl::Cancel),
+            EditorOutcome::Cancel
+        );
+        assert!(editor.step_age(true));
+        assert_eq!(editor.sheet.base[33], 26);
+        editor.sheet.base[33] = 35;
+        assert!(!editor.step_age(true));
+        editor.set_female(true);
+        assert_eq!(editor.sheet.base[34], 1);
+        let age = editor::editor_dialog_layout(EditorDialogKind::Age);
+        assert_eq!(
+            age.rect(EditorDialogControl::AgeDown),
+            Some(Rect::new(173, 13, 20, 18))
+        );
+        assert_eq!(
+            age.rect(EditorDialogControl::Done),
+            Some(Rect::new(180, 44, 15, 16))
+        );
+        let sex = editor::editor_dialog_layout(EditorDialogKind::Sex);
+        assert_eq!(
+            sex.rect(EditorDialogControl::Done),
+            Some(Rect::new(263, 48, 15, 16))
+        );
+        let options = editor::editor_dialog_layout(EditorDialogKind::Options);
+        assert_eq!(
+            options.rect(EditorDialogControl::Option(0)),
+            Some(Rect::new(251, 107, 137, 34))
+        );
+        let erase = editor::editor_dialog_layout(EditorDialogKind::Erase);
+        assert_eq!(
+            erase.rect(EditorDialogControl::EraseYes),
+            Some(Rect::new(219, 228, 15, 16))
+        );
+        assert_eq!(
+            erase.rect(EditorDialogControl::EraseNo),
+            Some(Rect::new(351, 228, 15, 16))
+        );
+    }
+
+    #[test]
+    fn automap_and_bar_controls() {
+        use automap::{AutomapControl, AutomapKey, AutomapOutcome, AutomapWindow};
+        let layout = automap::layout();
+        assert_eq!(
+            layout.rect(AutomapControl::Switch),
+            Some(Rect::new(532, 340, 42, 74))
+        );
+        assert_eq!(
+            layout.rect(AutomapControl::Scanner),
+            Some(Rect::new(186, 454, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(AutomapControl::Cancel),
+            Some(Rect::new(352, 454, 15, 16))
+        );
+        let mut window = AutomapWindow::open(false);
+        assert_eq!(
+            window.press([533, 341], false),
+            AutomapOutcome::Detail(true)
+        );
+        assert_eq!(
+            window.press([533, 341], true),
+            AutomapOutcome::Detail(false)
+        );
+        assert_eq!(
+            window.press([187, 455], false),
+            AutomapOutcome::Pressed(AutomapControl::Scanner)
+        );
+        assert_eq!(window.pressed(), Some(AutomapControl::Scanner));
+        assert_eq!(window.release(Some([187, 455])), AutomapOutcome::Scanner);
+        window.scanner_on();
+        assert_eq!(window.key(AutomapKey::Scanner), AutomapOutcome::None);
+        window.press([353, 455], false);
+        assert_eq!(window.release(Some([0, 0])), AutomapOutcome::None);
+        window.press([353, 455], false);
+        assert_eq!(window.release(Some([353, 455])), AutomapOutcome::Close);
+        assert_eq!(window.key(AutomapKey::Low), AutomapOutcome::Detail(false));
+        assert_eq!(window.key(AutomapKey::Quit), AutomapOutcome::QuitConfirm);
+
+        let quiet = bar::bar_layout(false);
+        assert_eq!(
+            quiet.rect(bar::BarButton::Inventory),
+            Some(Rect::new(211, 420, 32, 21))
+        );
+        assert!(!quiet.contains(bar::BarButton::EndTurn));
+        let combat = bar::bar_layout(true);
+        assert_eq!(
+            combat.rect(bar::BarButton::EndTurn),
+            Some(Rect::new(590, 422, 38, 22))
+        );
+        let mut buttons = bar::BarButtons::new(false);
+        assert_eq!(buttons.press([212, 421]), Some(bar::BarButton::Inventory));
+        assert_eq!(buttons.release(Some([212, 421])), Some(bar::Key::Char('i')));
+        buttons.press([527, 420]);
+        assert_eq!(buttons.pressed(), Some(bar::BarButton::Map));
+        assert_eq!(buttons.release(Some([530, 425])), Some(bar::Key::Tab));
+        buttons.press([527, 420]);
+        assert_eq!(buttons.release(Some([212, 421])), None);
+        assert_eq!(
+            buttons.press([595, 430]),
+            None,
+            "no End Turn outside combat"
+        );
+        assert_eq!(bar::BarButton::ItemSlot.sounds(), bar::SLOT_SOUNDS);
+        assert_eq!(bar::BarButton::EndCombat.key(), bar::Key::Enter);
+        assert_eq!(bar::monitor_area([30, 410]), Some(true));
+        assert_eq!(bar::monitor_area([30, 440]), Some(false));
+        assert_eq!(bar::monitor_area([10, 410]), None);
+    }
+
+    #[test]
+    fn sheet_file_dialogs() {
+        use sheet::{DialogKind, FileControl, FileEvent, FileKey, SheetDialog};
+        let save = sheet::file_layout(DialogKind::Save);
+        assert_eq!(
+            save.rect(FileControl::Up),
+            Some(Rect::new(204, 124, 11, 14))
+        );
+        assert_eq!(
+            save.rect(FileControl::Done),
+            Some(Rect::new(226, 294, 15, 16))
+        );
+        assert_eq!(
+            save.rect(FileControl::Cancel),
+            Some(Rect::new(331, 294, 15, 16))
+        );
+        assert_eq!(
+            save.rect(FileControl::List),
+            Some(Rect::new(223, 129, 190, 124))
+        );
+        let load = sheet::file_layout(DialogKind::Load);
+        assert_eq!(
+            load.rect(FileControl::Done),
+            Some(Rect::new(226, 267, 15, 16))
+        );
+        let names = vec![b"A.GCD".to_vec(), b"B.GCD".to_vec(), b"C.GCD".to_vec()];
+        // Load: a second click on a row chooses its file.
+        let mut dialog = SheetDialog::new(DialogKind::Load, names.clone(), None, 0);
+        assert_eq!(dialog.press([230, 130], 0), None);
+        assert_eq!(dialog.release(Some([230, 130])), FileEvent::None);
+        dialog.press([230, 130], 0);
+        assert_eq!(
+            dialog.release(Some([230, 130])),
+            FileEvent::Chosen(b"A.GCD".to_vec())
+        );
+        assert_eq!(dialog.sounds, ["ib1p1xx1"]);
+        assert_eq!(
+            dialog.key(FileKey::Enter),
+            FileEvent::None,
+            "Return does nothing in the load dialog"
+        );
+        // An arrow steps on the press and repeats from the 15th frame.
+        dialog.sounds.clear();
+        assert_eq!(
+            dialog.press([205, 139], 0),
+            Some(Rect::new(204, 138, 11, 14))
+        );
+        assert_eq!(dialog.pressed(), Some(FileControl::Down));
+        assert_eq!(dialog.list.selected(), Some(1));
+        assert!(dialog.tick(615, Some([205, 139])));
+        assert_eq!(dialog.list.selected(), Some(2));
+        assert_eq!(dialog.release(None), FileEvent::None);
+        assert_eq!(dialog.key(FileKey::Escape), FileEvent::Cancel);
+        // Save: a single click copies the base name; typing and Return.
+        let mut save = SheetDialog::new(DialogKind::Save, names, Some(b"PLAYER"), 0);
+        save.press([230, 130], 0);
+        save.release(Some([230, 130]));
+        assert_eq!(
+            save.field.as_ref().map(|field| field.text.clone()),
+            Some(b"A".to_vec())
+        );
+        assert_eq!(save.key(FileKey::Char(b'X')), FileEvent::None);
+        assert_eq!(save.press([227, 295], 0), Some(Rect::new(226, 294, 15, 16)));
+        assert_eq!(
+            save.release(Some([227, 295])),
+            FileEvent::Chosen(b"AX".to_vec())
+        );
+        save.press([332, 295], 0);
+        assert_eq!(save.release(Some([0, 0])), FileEvent::None);
+        save.key(FileKey::Erase);
+        save.key(FileKey::Erase);
+        assert_eq!(
+            save.key(FileKey::Enter),
+            FileEvent::Cancel,
+            "an empty name cancels"
+        );
+    }
+
+    #[test]
+    fn called_shot_window() {
+        use crate::critical::location;
+        use called::{CalledControl, CalledKey, CalledOutcome, CalledShotWindow};
+        let widths = [Some(78); 8];
+        let layout = called::layout(&widths, None);
+        assert_eq!(
+            layout.rect(CalledControl::Cancel),
+            Some(Rect::new(278, 288, 15, 16))
+        );
+        assert_eq!(
+            layout.rect(CalledControl::Part(0)),
+            Some(Rect::new(141, 60, 88, 10))
+        );
+        assert_eq!(
+            layout.rect(CalledControl::Part(4)),
+            Some(Rect::new(381, 60, 88, 10))
+        );
+        assert_eq!(layout.controls()[0].0, CalledControl::Cancel);
+        assert_eq!(
+            called::layout(&widths, Some([20, 20])).rect(CalledControl::Cancel),
+            Some(Rect::new(278, 288, 20, 20))
+        );
+        let mut window = CalledShotWindow::new(widths, None);
+        assert_eq!(window.press([145, 62]), Some(CalledControl::Part(0)));
+        match window.release(Some([145, 62])) {
+            CalledOutcome::Choose(part) => assert_eq!(part.location, location::HEAD),
+            other => panic!("expected the head, got {other:?}"),
+        }
+        window.press([145, 62]);
+        assert_eq!(window.release(Some([385, 62])), CalledOutcome::None);
+        window.press([279, 289]);
+        assert_eq!(window.release(Some([279, 289])), CalledOutcome::Cancel);
+        assert_eq!(window.key(CalledKey::Escape), CalledOutcome::Cancel);
+        let torso = window.key(CalledKey::Code {
+            letter: Some('d'),
+            control: true,
+            backspace: false,
+        });
+        assert!(matches!(torso, CalledOutcome::Choose(part) if part.location == location::TORSO));
+        let ignored = window.key(CalledKey::Code {
+            letter: Some('h'),
+            control: true,
+            backspace: false,
+        });
+        assert_eq!(ignored, CalledOutcome::None);
+    }
+}

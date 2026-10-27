@@ -1,7 +1,7 @@
 //! SPEC-014 §3.1-3.7 and §3.12-3.13: startup, splash choice, palette fades,
 //! the main menu and its loop, attract mode, the death scene, premade
 //! selection, the new-game hand-off and the generic dialog box.
-use super::{ColorKey, Rect};
+use super::{Armed, ColorKey, Layout, Pointer, Rect};
 
 /// §3.1 step 7: the splash names tried from the configured `splash` value.
 /// Up to 10 names; after each miss s grows by 1 and wraps to 0 on reaching
@@ -472,5 +472,281 @@ pub fn dialog_answer(key: DialogKey, yes_no: bool) -> Option<bool> {
         DialogKey::Char('y' | 'Y') if yes_no => Some(true),
         DialogKey::Char('n' | 'N') if yes_no => Some(false),
         DialogKey::Char(_) => None,
+    }
+}
+
+// SPEC-020 §2.1: the flow screens' layouts and dispatch. Rectangles are
+// frame (screen) pixels.
+
+impl MenuButton {
+    /// The button whose rectangle holds `point` (before the up art's pixel
+    /// mask, which the art holder applies).
+    pub fn at(point: [i32; 2]) -> Option<Self> {
+        MENU_BUTTONS
+            .into_iter()
+            .find(|button| button.rect().contains(point))
+    }
+}
+/// §3.3 the Fallout 1 main menu's buttons, in order.
+pub fn menu_layout() -> Layout<MenuButton> {
+    MENU_BUTTONS
+        .into_iter()
+        .map(|button| (button, button.rect()))
+        .collect()
+}
+
+/// One input the main menu screen receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainMenuInput {
+    None,
+    Key(char),
+    Escape,
+    CtrlR,
+    Pointer(Pointer),
+}
+/// §3.3-3.4 (and SPEC-019 §3.2 under Fallout 2) the main menu screen:
+/// which button a press holds, and the loop poll it leads to. Buttons are
+/// numbered in drawing order: 0-4 under Fallout 1 (`MENU_BUTTONS`), 0-5
+/// under Fallout 2 (`fallout2::MENU_CHOICES`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MainMenu {
+    pub fallout2: bool,
+    armed: Armed<usize>,
+}
+impl MainMenu {
+    pub fn new(fallout2: bool) -> Self {
+        Self {
+            fallout2,
+            armed: Armed::new(),
+        }
+    }
+    /// The buttons, by index, in their profile's places.
+    pub fn layout(&self) -> Layout<usize> {
+        if self.fallout2 {
+            (0..super::fallout2::MENU_CHOICES.len())
+                .map(|i| (i, super::fallout2::menu_button(i)))
+                .collect()
+        } else {
+            MENU_BUTTONS
+                .into_iter()
+                .enumerate()
+                .map(|(i, button)| (i, button.rect()))
+                .collect()
+        }
+    }
+    /// The held button (drawn down), if any.
+    pub fn pressed(&self) -> Option<usize> {
+        self.armed.pressed()
+    }
+    /// One poll of the menu loop. A press arms the button under it when
+    /// `opaque(index, point)` accepts the point (the §3.3 rule that only
+    /// the up image's nonzero pixels are clickable; the art holder tests
+    /// it) and plays `nmselec0`; a release over the armed button selects
+    /// it. Keys, Escape and the timeout are `flow::menu_poll`'s (or
+    /// `fallout2::menu_poll`'s).
+    pub fn poll(
+        &mut self,
+        input: MainMenuInput,
+        shift_held: bool,
+        elapsed_ms: u64,
+        opaque: impl Fn(usize, [i32; 2]) -> bool,
+    ) -> MenuPoll {
+        let button = match input {
+            MainMenuInput::Pointer(Pointer::Press(point)) => {
+                let hit = self
+                    .layout()
+                    .hit(point)
+                    .filter(|index| opaque(*index, point));
+                self.armed.press(hit).map(ButtonEvent::Press)
+            }
+            MainMenuInput::Pointer(Pointer::Release(point)) => {
+                let over = point.and_then(|point| self.layout().hit(point));
+                self.armed.release(over).map(ButtonEvent::Release)
+            }
+            _ => None,
+        };
+        if self.fallout2 {
+            use super::fallout2::MenuInput as Input2;
+            let input = match (input, button) {
+                (_, Some(ButtonEvent::Press(i))) => Input2::Press(i),
+                (_, Some(ButtonEvent::Release(i))) => Input2::Release(i),
+                (MainMenuInput::Key(key), _) => Input2::Key(key),
+                (MainMenuInput::Escape, _) => Input2::Escape,
+                (MainMenuInput::CtrlR, _) => Input2::CtrlR,
+                _ => Input2::None,
+            };
+            super::fallout2::menu_poll(input, shift_held, elapsed_ms)
+        } else {
+            let input = match (input, button) {
+                (_, Some(ButtonEvent::Press(i))) => MenuInput::Press(MENU_BUTTONS[i]),
+                (_, Some(ButtonEvent::Release(i))) => MenuInput::Release(MENU_BUTTONS[i]),
+                (MainMenuInput::Key(key), _) => MenuInput::Key(key),
+                (MainMenuInput::Escape, _) => MenuInput::Escape,
+                (MainMenuInput::CtrlR, _) => MenuInput::CtrlR,
+                _ => MenuInput::None,
+            };
+            menu_poll(input, shift_held, elapsed_ms)
+        }
+    }
+}
+#[derive(Debug, Clone, Copy)]
+enum ButtonEvent {
+    Press(usize),
+    Release(usize),
+}
+
+/// §3.7 the selection screen's controls: the Take, Modify, Create and Back
+/// red buttons, then the previous and next arrows.
+pub fn selection_layout() -> Layout<SelectionAction> {
+    [
+        SelectionAction::Take,
+        SelectionAction::Modify,
+        SelectionAction::Create,
+        SelectionAction::Back,
+    ]
+    .into_iter()
+    .zip(SELECTION_BUTTONS.map(super::red_button))
+    .chain([
+        (SelectionAction::Previous, SELECTION_PREVIOUS),
+        (SelectionAction::Next, SELECTION_NEXT),
+    ])
+    .collect()
+}
+/// A selection control's press and release sounds: the red buttons'
+/// (`ib1p1xx1` / `ib1lu1x1`) or the arrows' (`ib2p1xx1` / `ib2lu1x1`).
+pub fn selection_sounds(action: SelectionAction) -> (&'static str, &'static str) {
+    match action {
+        SelectionAction::Previous | SelectionAction::Next => ("ib2p1xx1", "ib2lu1x1"),
+        _ => (super::BUTTON_PRESS, super::BUTTON_RELEASE),
+    }
+}
+/// What a selection action leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionOutcome {
+    /// Start the game with premade `index`.
+    Take(usize),
+    /// Open the editor on premade `index`.
+    Modify(usize),
+    /// Open the editor on a blank sheet.
+    Create,
+    /// Back to the main menu.
+    Back,
+    /// F10: the quit confirmation (here, back to the main menu).
+    QuitConfirm,
+    Brightness(i32),
+    /// The shown premade changed to `index`.
+    Moved(usize),
+}
+/// §3.7 the premade selection screen: the shown premade and the held
+/// control. Controls press and act on their release over themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SelectionScreen {
+    pub index: usize,
+    armed: Armed<SelectionAction>,
+}
+impl SelectionScreen {
+    pub fn new(index: usize) -> Self {
+        Self {
+            index: index % PREMADES.len(),
+            armed: Armed::new(),
+        }
+    }
+    pub fn layout(&self) -> Layout<SelectionAction> {
+        selection_layout()
+    }
+    pub fn pressed(&self) -> Option<SelectionAction> {
+        self.armed.pressed()
+    }
+    /// A press: the control under the pointer is held (its press sound is
+    /// [`selection_sounds`]).
+    pub fn press(&mut self, point: [i32; 2]) -> Option<SelectionAction> {
+        self.armed.press(self.layout().hit(point))
+    }
+    /// A release: the held control acts when the release is over it.
+    pub fn release(&mut self, point: Option<[i32; 2]>) -> Option<SelectionOutcome> {
+        let over = point.and_then(|point| self.layout().hit(point));
+        let action = self.armed.release(over)?;
+        Some(self.dispatch(action))
+    }
+    /// A key: `selection_key`'s action, dispatched.
+    pub fn key(&mut self, key: SelectionKey) -> Option<SelectionOutcome> {
+        selection_key(key).map(|action| self.dispatch(action))
+    }
+    /// Act: the arrows cycle the premade; the rest report their outcome.
+    pub fn dispatch(&mut self, action: SelectionAction) -> SelectionOutcome {
+        match action {
+            SelectionAction::Take => SelectionOutcome::Take(self.index),
+            SelectionAction::Modify => SelectionOutcome::Modify(self.index),
+            SelectionAction::Create => SelectionOutcome::Create,
+            SelectionAction::Back => SelectionOutcome::Back,
+            SelectionAction::QuitConfirm => SelectionOutcome::QuitConfirm,
+            SelectionAction::Brightness(step) => SelectionOutcome::Brightness(step),
+            SelectionAction::Previous | SelectionAction::Next => {
+                let step = if action == SelectionAction::Next {
+                    1
+                } else {
+                    -1
+                };
+                self.index = cycle(self.index, step, PREMADES.len());
+                SelectionOutcome::Moved(self.index)
+            }
+        }
+    }
+}
+
+/// §3.13 a dialog box on screen at `origin`: its red buttons by answer
+/// (`true` for Done or Yes, `false` for No), and its keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DialogBox {
+    pub origin: [i32; 2],
+    pub yes_no: bool,
+    pub size: DialogSize,
+    armed: Armed<bool>,
+}
+impl DialogBox {
+    /// A large box (a Yes/No box always is).
+    pub fn new(origin: [i32; 2], yes_no: bool) -> Self {
+        Self::sized(origin, yes_no, DialogSize::Large)
+    }
+    pub fn sized(origin: [i32; 2], yes_no: bool, size: DialogSize) -> Self {
+        Self {
+            origin,
+            yes_no,
+            size: if yes_no { DialogSize::Large } else { size },
+            armed: Armed::new(),
+        }
+    }
+    /// The red buttons in screen pixels: Done, or Yes then No.
+    pub fn layout(&self) -> Layout<bool> {
+        dialog_buttons_for(self.yes_no, self.size)
+            .into_iter()
+            .map(|button| {
+                (
+                    button.caption != 102,
+                    super::red_button(button.button).offset(self.origin),
+                )
+            })
+            .collect()
+    }
+    /// A press that answers at once (the in-game boxes): the answer of the
+    /// button under the pointer.
+    pub fn click(&self, point: [i32; 2]) -> Option<bool> {
+        self.layout().hit(point)
+    }
+    /// A press that holds the button under the pointer.
+    pub fn press(&mut self, point: [i32; 2]) -> Option<bool> {
+        self.armed.press(self.layout().hit(point))
+    }
+    /// A release over the held button answers.
+    pub fn release(&mut self, point: Option<[i32; 2]>) -> Option<bool> {
+        let over = point.and_then(|point| self.layout().hit(point));
+        self.armed.release(over)
+    }
+    pub fn pressed(&self) -> Option<bool> {
+        self.armed.pressed()
+    }
+    /// A key's answer: `dialog_answer`.
+    pub fn key(&self, key: DialogKey) -> Option<bool> {
+        dialog_answer(key, self.yes_no)
     }
 }

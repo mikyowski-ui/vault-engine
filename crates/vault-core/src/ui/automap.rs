@@ -1,7 +1,7 @@
 //! SPEC-014 §3.33 the automap window: its geometry and controls, the
 //! object color rule, the mirrored hex-to-pixel mapping, and the Pip-Boy
 //! automap page's cell mapping.
-use super::{ColorKey, Rect};
+use super::{Armed, ColorKey, Layout, Rect};
 
 /// The window's screen origin and size; `automap.frm` (list index 171)
 /// covers it.
@@ -106,5 +106,123 @@ pub fn pipboy_color(cell: u8) -> Option<ColorKey> {
         1 => Some(BRIGHT_GREEN),
         2 => Some(DARK_GREEN),
         _ => None,
+    }
+}
+
+// SPEC-020 §2.1: the automap window's layout and dispatch. Rectangles are
+// frame (screen) pixels.
+
+/// A window rectangle on screen.
+pub fn on_screen(rect: Rect) -> Rect {
+    rect.offset(WINDOW)
+}
+/// The quit confirmation's screen position.
+pub const QUIT_ORIGIN: [i32; 2] = [169, 117];
+/// A control of the automap window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomapControl {
+    /// The detail switch: toggles on its press (`SWITCH_SOUND`).
+    Switch,
+    /// The Scanner red button: sends `s` on its release.
+    Scanner,
+    /// The Cancel red button: sends Esc on its release.
+    Cancel,
+}
+/// The window's controls on screen, in press order.
+pub fn layout() -> Layout<AutomapControl> {
+    Layout::new()
+        .with(AutomapControl::Switch, on_screen(SWITCH))
+        .with(AutomapControl::Scanner, on_screen(SCANNER))
+        .with(AutomapControl::Cancel, on_screen(CANCEL))
+}
+/// What an automap input leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomapOutcome {
+    None,
+    /// A red button is held (`ib1p1xx1`).
+    Pressed(AutomapControl),
+    /// Set the saved detail flag: high or low.
+    Detail(bool),
+    /// `s` or Scanner: with the scanner off, the Motion Sensor test (a
+    /// held sensor with charges spends one and turns the scanner on; else
+    /// `iisxxxx1` and the refusal at `SCANNER_DIALOG`).
+    Scanner,
+    Close,
+    /// Ctrl+Q, Alt+X or F10: the quit confirmation, whose Yes closes it.
+    QuitConfirm,
+    Screenshot,
+}
+/// A key in the automap window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomapKey {
+    /// Tab, Esc or `a`.
+    Close,
+    /// `h` and `l`.
+    High,
+    Low,
+    /// `s`.
+    Scanner,
+    Quit,
+    F12,
+    Other,
+}
+/// §3.33 the open window: the scanner state (cleared at every opening
+/// unless a Motion Sensor opened it) and the held red button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutomapWindow {
+    pub scanner: bool,
+    armed: Armed<AutomapControl>,
+}
+impl AutomapWindow {
+    pub fn open(scanner: bool) -> Self {
+        Self {
+            scanner,
+            armed: Armed::new(),
+        }
+    }
+    pub fn layout(&self) -> Layout<AutomapControl> {
+        layout()
+    }
+    /// The held red button.
+    pub fn pressed(&self) -> Option<AutomapControl> {
+        self.armed.pressed()
+    }
+    /// A press: the switch toggles the detail at once (`high` is the
+    /// current setting); a red button is held.
+    pub fn press(&mut self, point: [i32; 2], high: bool) -> AutomapOutcome {
+        match self.layout().hit(point) {
+            Some(AutomapControl::Switch) => AutomapOutcome::Detail(!high),
+            Some(control) => {
+                self.armed.press(Some(control));
+                AutomapOutcome::Pressed(control)
+            }
+            None => AutomapOutcome::None,
+        }
+    }
+    /// A release over the held red button sends its key (`ib1lu1x1` plays
+    /// whenever a held button is released).
+    pub fn release(&mut self, point: Option<[i32; 2]>) -> AutomapOutcome {
+        let over = point.and_then(|point| self.layout().hit(point));
+        match self.armed.release(over) {
+            Some(AutomapControl::Scanner) => self.key(AutomapKey::Scanner),
+            Some(AutomapControl::Cancel) => AutomapOutcome::Close,
+            _ => AutomapOutcome::None,
+        }
+    }
+    pub fn key(&mut self, key: AutomapKey) -> AutomapOutcome {
+        match key {
+            AutomapKey::Close => AutomapOutcome::Close,
+            AutomapKey::High => AutomapOutcome::Detail(true),
+            AutomapKey::Low => AutomapOutcome::Detail(false),
+            AutomapKey::Scanner if self.scanner => AutomapOutcome::None,
+            AutomapKey::Scanner => AutomapOutcome::Scanner,
+            AutomapKey::Quit => AutomapOutcome::QuitConfirm,
+            AutomapKey::F12 => AutomapOutcome::Screenshot,
+            AutomapKey::Other => AutomapOutcome::None,
+        }
+    }
+    /// The Motion Sensor test passed.
+    pub fn scanner_on(&mut self) {
+        self.scanner = true;
     }
 }
