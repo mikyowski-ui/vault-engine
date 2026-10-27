@@ -1,6 +1,6 @@
 # SPEC-018: Fallout 2 Mounting, Saves and Data Tables
 
-**Status:** approved. Section 1 is an owner decision of 2026-10-25; the rest by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail corpus audit) and Revision 3 (AI packets, player locals) by the coordinator, 2026-10-25.
+**Status:** approved. Section 1 is an owner decision of 2026-10-25; the rest by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail corpus audit) and Revision 3 (AI packets, player locals) by the coordinator, 2026-10-25. Revision 4 (the Fallout 2 character sheet) by the coordinator, 2026-10-26.
 
 **Provenance:** Team A (the Spec-Author sub-agent), 2026-10-25, from the
 coordinator's brief of the same day and the owner's archive-role decision
@@ -53,6 +53,16 @@ same retail install, which found three more discrepancies:
 - two city entrances have 8 items.
 
 The changes are marked "(Revision 3)", with Decisions R14 to R16.
+
+**Revision 4 (the Fallout 2 character sheet), 2026-10-26.** This revision
+also comes from the coordinator. The owner reported a premade whose bio
+listed one tag skill twice. The retail premade sheets (`premade/*.gcd`, and
+`blank.gcd`, `demo.gcd` and `player.gcd` beside them) are **432 bytes**, not
+SPEC-006's 428. Read with the 428-byte layout, every field after the
+critter-stat portion is one word early: the name reads empty, the tags read
+as (0, first, second, third), the traits as (-1, first) and the character
+points as the second trait. Section 6.3 now gives the 432-byte layout (R17).
+Only field offsets and lengths were measured; no sheet bytes are reproduced.
 
 ## 1. Archive roles and mounting `[Must-match: owner decision, 2026-10-25]`
 
@@ -1044,11 +1054,35 @@ silent, SPEC-014's Fallout 1 flow applies with the data below. (D23-D27)
   cyclic order: `premade/combat.gcd` and `.bio`, `premade/stealth.gcd` and
   `.bio`, `premade/diplomat.gcd` and `.bio`. Portraits, ID text and the
   screen are SPEC-019 §3.3's. (D25)
-- A `.gcd` sheet is the 428-byte layout of SPEC-006 §2.2, with its loading
-  rules and safe rule (SPEC-006 §2.3), unchanged. The trait indices keep
-  their positions 0-15; their names come from `trait.msg`. Index 13 is
-  Sex Appeal under Fallout 2, not Night Person. Trait and perk effects
-  under Fallout 2 belong to a later specification. `[Must-match]` (D25)
+- (Revision 4) A Fallout 2 `.gcd` sheet is **432 bytes** (`0x1B0`). It is
+  SPEC-006 §2.2's sheet with one more word after the 368-byte critter-stat
+  portion: the critter's damage type, as SPEC-016 adds to the critter
+  prototype. Every later field moves down 4 bytes. All words are signed
+  32-bit big-endian. `[Must-match]` (R17)
+
+  | Offset | Bytes | Field |
+  | --- | ---: | --- |
+  | `0x0000`-`0x016F` | 368 | As SPEC-006 §2.2: flags, 35 base and 35 bonus stats, 18 skills, body, experience reward, kill category |
+  | `0x0170` | 4 | Damage type (SPEC-016 §3.1's `damage_type`, read here as a signed word); 0 in the retail premades |
+  | `0x0174` | 32 | Player name |
+  | `0x0194` | 16 | Four tagged-skill indices; -1 means unused |
+  | `0x01A4` | 8 | Two trait indices; -1 means unused |
+  | `0x01AC` | 4 | Unspent character-creation points |
+
+  Loading, its normalization and its safe rule are SPEC-006 §2.3's,
+  unchanged; the damage-type word is not part of the player's state.
+  (Revision 4)
+- (Revision 4) **Which layout.** A sheet is read by its exact length, under
+  either profile: 428 bytes is SPEC-006's layout and 432 bytes this one. A
+  sheet of any other length is refused, before any player state changes,
+  as SPEC-006 §2.3's safe rule says; in particular, the trailing word of a
+  432-byte sheet is never ignored. The character editor's SAVE (SPEC-014
+  §3.43) writes 432 bytes, with damage type 0, under Fallout 2, and 428
+  bytes under Fallout 1. `[Safe rule]` (R17)
+- The trait indices keep their positions 0-15; their names come from
+  `trait.msg`. Index 13 is Sex Appeal under Fallout 2, not Night Person.
+  Trait and perk effects under Fallout 2 belong to a later specification.
+  `[Must-match]` (D25)
 - "Create character" starts from the same blank defaults as SPEC-014 §3.7.
 - Initial player state is as SPEC-014 §3.12: level 1, experience 0, no
   unspent skill points, reputation and karma 0, HP at maximum, and no
@@ -1740,6 +1774,17 @@ Records: (global 5 = 1, art row 327, `nar_a1`, still); (global 5 = 2, art
 `art/intrface/endslid2.frm` with `endslid2.pal`, `nar_a2`, pan right to
 left). The third line is dropped (direction 2).
 
+### 8.15 Character sheet (Revision 4)
+
+Take SPEC-006's 428-byte synthetic sheet with name `Fixture Fighter`, tags
+(4, 0, 5, -1) and traits (6, 15), and insert the word `00 00 00 03` at
+`0x170`. The 432-byte result reads damage type 3, name `Fixture Fighter`
+(bytes `0x174`-`0x182`), tags (4, 0, 5, -1), traits (6, 15) and points 0,
+and writes back byte for byte. The 428-byte original reads the same
+player with no damage type. Refused: the 428-byte sheet with 2 bytes
+appended, the 432-byte sheet with 1 byte appended, and every prefix of the
+432-byte sheet except its 428-byte one.
+
 ## 9. Coordination
 
 **SPEC-016** (maps and prototypes). This specification relies on SPEC-016 for
@@ -1821,7 +1866,7 @@ AGENTS.md requires for open points.
 | D22 | Rest permission by `can_rest_here`, the last-attacker test, and the team test only outside areas; aging without the Fallout 1 special case, with the remains prototype kept provisionally | Team A default |
 | D23 | New game on `maps/artemple.map` at its header entrance; the start-area rule; the initial world state; the order of the hand-off | Team A default |
 | D24 | Reset tick 264600; calendar day 0 is 25 July 2241 | Team A default |
-| D25 | The premade files and order; the 428-byte sheet unchanged; trait 13 named Sex Appeal | Team A default |
+| D25 | The premade files and order; the 428-byte sheet unchanged (revised by R17: the Fallout 2 sheet is 432 bytes); trait 13 named Sex Appeal | Team A default |
 | D26 | The 17-entry movie table; startup `iplogo` and `intro`; `elder.mve` at a new game | Team A default |
 | D27 | No campaign global has a fixed engine meaning here; the Fallout 1 water, world-map and Pip-Boy globals are switched off | Team A default |
 | D28 | Save version 1.2, the layout tag and G in the reserved bytes, the read checks, and no claim of interoperability with original slots | Team A default |
@@ -1852,6 +1897,7 @@ written the same way into every spec it touches.
 | R14 | The retail `ai.txt` has 187 packets. None has `last_msg`; 43 have no `hurt_too_much`; all 187 have the twelve `*_end` keys, each at or above its start | Section 4.7.1: Fallout 2 required keys, optional `hurt_too_much`, and explicit range ends. Without it, combat AI did not load at all | Coordinator, Revision 3, measured |
 | R15 | The retail player script, `scripts.lst` entry 0, declares 5 local variables; SPEC-006 §3.5 says the Fallout 1 entry declares none | Under Fallout 2 the player's script record gets a local slice of the entry's declared count, all 0 at a new game, kept and saved like any party member's (section 6.5) | Coordinator, Revision 3, measured |
 | R16 | Two retail entrances (areas 30 and 31) have 8 items, and area 30's only entrance was dropped | An 8-item entrance is read from its first seven items. Both retail lines have -1 for the hex however they are read, so both take the header's default entrance | Coordinator, Revision 3, measured |
+| R17 | All 6 retail `premade/*.gcd` sheets are 432 bytes. The name sits at `0x174`, the tags at `0x194`, the traits at `0x1A4`, and `0x170` holds 0 in all 6. Read as SPEC-006's 428 bytes, a premade showed an empty name, its first tag twice, a lost trait, and its second trait as character points | Section 6.3: the 432-byte layout with a damage-type word at `0x170`, chosen by exact length; any other length refused; SAVE writes the game's layout | Coordinator, Revision 4, measured |
 | R6 | Other contradictions | Script-directed travel is SPEC-019's direct move. Encounter suppression uses SPEC-019's area circles. This spec defines dropping to terrain, the map known/visited flags, the saved area positions, the `metarule3` 104 entrance match, the world-map music, display and location names, and the `genrep.txt`, `karmavar.txt` and `endgame.txt` grammars. SPEC-011's progression tables apply provisionally. The Fallout 2 `ai.txt` keys and town reputations are not read | Team A default, reconciliation 2026-10-25 |
 
 ## 11. Verification notes

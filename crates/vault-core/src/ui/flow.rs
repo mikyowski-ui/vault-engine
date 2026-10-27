@@ -305,6 +305,17 @@ pub fn cycle(index: usize, step: i32, len: usize) -> usize {
 pub fn portrait_origin(w: i32, h: i32) -> [i32; 2] {
     [150 - w / 2, 240 - h]
 }
+/// The portrait's top-left and the monitor window it is clipped to: §3.7's
+/// under Fallout 1, SPEC-019 §3.3's (Revision 3) under Fallout 2, whose
+/// full-screen portraits the Fallout 1 formula would put off the monitor.
+pub fn portrait_placement(fallout2: bool, w: i32, h: i32) -> ([i32; 2], Rect) {
+    if fallout2 {
+        let screen = super::fallout2::SELECTION_SCREEN;
+        ([screen.x, screen.y], screen)
+    } else {
+        (portrait_origin(w, h), SELECTION_MONITOR)
+    }
+}
 /// Bio lines: from y = 40, 10 apart, while y is below 260.
 pub const BIO_ORIGIN: [i32; 2] = [420, 40];
 pub const BIO_WIDTH: i32 = 220;

@@ -4,6 +4,91 @@ pub use crate::world;
 pub fn gcd() -> Vec<u8> {
     assets::sparse(include_str!("player.gcd.hex"))
 }
+
+/// [`gcd`] with another name, tags and traits. With `damage_type`, it is
+/// SPEC-018 §6.3's 432-byte Fallout 2 sheet (Revision 4): that word goes in
+/// at `0x170`, and the name, tags, traits and points move down 4 bytes.
+pub fn sheet_gcd(
+    name: &[u8],
+    tags: [i32; 4],
+    traits: [i32; 2],
+    damage_type: Option<i32>,
+) -> Vec<u8> {
+    let mut bytes = gcd();
+    bytes[0x170..0x190].fill(0);
+    bytes[0x170..0x170 + name.len()].copy_from_slice(name);
+    for (index, word) in tags.iter().chain(&traits).enumerate() {
+        world::word(&mut bytes, 0x190 + 4 * index, *word);
+    }
+    if let Some(damage_type) = damage_type {
+        bytes.splice(0x170..0x170, damage_type.to_be_bytes());
+    }
+    bytes
+}
+
+/// A synthetic premade, in SPEC-014 §3.7's entry order: its name, three
+/// distinct tags, its traits and its portrait's one color.
+pub struct SyntheticPremade {
+    pub name: &'static [u8],
+    pub tags: [i32; 4],
+    pub traits: [i32; 2],
+    pub color: u8,
+}
+pub const PREMADES: [SyntheticPremade; 3] = [
+    SyntheticPremade {
+        name: b"Fixture Fighter",
+        tags: [1, 11, 17, -1],
+        traits: [3, 9],
+        color: 40,
+    },
+    SyntheticPremade {
+        name: b"Fixture Sneak",
+        tags: [2, 12, 16, -1],
+        traits: [5, -1],
+        color: 41,
+    },
+    SyntheticPremade {
+        name: b"Fixture Talker",
+        tags: [7, 13, 0, -1],
+        traits: [-1, -1],
+        color: 42,
+    },
+];
+/// The selection background's one color.
+pub const PICKCHAR_COLOR: u8 = 9;
+/// The premade selection screen's files (SPEC-014 §3.7, SPEC-019 §3.3):
+/// `pickchar.frm`, and for each of [`PREMADES`] its sheet, a one-line bio
+/// and a one-color portrait. Fallout 1's portraits are 212 by 187 in
+/// 428-byte sheets. Fallout 2's are 592 by 260, the size of its monitor
+/// window, in 432-byte sheets, except the third, which is 640 by 300 so
+/// that a test sees it clipped.
+pub fn premade_files(fallout2: bool) -> Vec<(String, Vec<u8>)> {
+    let mut files = vec![(
+        "art/intrface/pickchar.frm".to_owned(),
+        world::frm(640, 480, PICKCHAR_COLOR),
+    )];
+    let entries = ["combat", "stealth", "diplomat"];
+    for (index, (entry, premade)) in entries.iter().zip(&PREMADES).enumerate() {
+        let (size, damage_type) = match (fallout2, index) {
+            (false, _) => ((212, 187), None),
+            (true, 2) => ((640, 300), Some(2)),
+            (true, _) => ((592, 260), Some(2)),
+        };
+        files.push((
+            format!("art/intrface/{entry}.frm"),
+            world::frm(size.0, size.1, premade.color),
+        ));
+        files.push((
+            format!("premade/{entry}.gcd"),
+            sheet_gcd(premade.name, premade.tags, premade.traits, damage_type),
+        ));
+        files.push((
+            format!("premade/{entry}.bio"),
+            b"A synthetic bio.\n".to_vec(),
+        ));
+    }
+    files
+}
 pub fn instruction(op: u16) -> Vec<u8> {
     op.to_be_bytes().to_vec()
 }

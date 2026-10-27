@@ -297,8 +297,9 @@ pub fn written_name<'a>(file: &[u8], existing: impl IntoIterator<Item = &'a [u8]
 /// The SPEC-006 §2.2 sheet of a player: its flags, base and bonus
 /// statistics, invested skill points, name (NUL-terminated, at most 31
 /// bytes), tags, traits and character points; the critter-only words are
-/// zero.
-pub fn sheet_gcd(sheet: &CharacterSheet) -> GcdFile {
+/// zero. Under Fallout 2 it is SPEC-018 §6.3's 432-byte sheet (Revision 4),
+/// whose damage-type word is 0 (normal).
+pub fn sheet_gcd(sheet: &CharacterSheet, game: crate::GameProfile) -> GcdFile {
     let mut name = [0; 32];
     let length = sheet.name.len().min(31);
     name[..length].copy_from_slice(&sheet.name[..length]);
@@ -310,6 +311,7 @@ pub fn sheet_gcd(sheet: &CharacterSheet) -> GcdFile {
         body: 0,
         experience_reward: 0,
         kill_category: 0,
+        damage_type: (game == crate::GameProfile::Fallout2).then_some(0),
         name,
         tags: sheet.tags,
         traits: sheet.traits,
@@ -691,13 +693,21 @@ mod tests {
         };
         sheet.tags = [0, 3, 8, -1];
         sheet.traits = [8, -1];
-        let bytes = sheet_gcd(&sheet).write();
-        assert_eq!(bytes.len(), 428);
-        let read = GcdFile::parse(&bytes).unwrap();
-        assert_eq!(read.name_bytes(), b"Alex");
-        assert_eq!((read.tags, read.traits), (sheet.tags, sheet.traits));
-        assert_eq!(read.remaining_points, 2);
-        assert_eq!(read.base, sheet.base);
+        // Fallout 1 writes SPEC-006's 428 bytes, Fallout 2 SPEC-018 §6.3's
+        // 432 (Revision 4); each reads back the same player.
+        for (game, length) in [
+            (crate::GameProfile::Fallout1, 428),
+            (crate::GameProfile::Fallout2, 432),
+        ] {
+            let bytes = sheet_gcd(&sheet, game).write();
+            assert_eq!(bytes.len(), length);
+            let read = GcdFile::parse(&bytes).unwrap();
+            assert_eq!(read.name_bytes(), b"Alex");
+            assert_eq!((read.tags, read.traits), (sheet.tags, sheet.traits));
+            assert_eq!(read.remaining_points, 2);
+            assert_eq!(read.base, sheet.base);
+            assert_eq!(read.damage_type, (length == 432).then_some(0));
+        }
     }
 
     /// The English corpus `editor.msg` texts Fixture P prints.

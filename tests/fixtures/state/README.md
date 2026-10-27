@@ -6,6 +6,12 @@
 - `player.gcd.hex` specifies every byte of the 428-byte section 4.2 sheet. Its
   zero ranges are explicit. Tests cover every truncated prefix, invalid names/
   indices, raw fields, player-only normalization, and the HP-base mutation.
+- `sheet_gcd` rewrites that sheet's name, tags and traits and, given a damage
+  type, inserts it at `0x170` to make SPEC-018 §6.3's 432-byte Fallout 2 sheet
+  (Revision 4, vector 8.15). `premade_files` writes the selection screen's
+  synthetic files for either game (SPEC-014 §3.7, SPEC-019 §3.3 and its
+  vector R): `pickchar.frm`, and three premades, each with a sheet that has
+  three distinct tags, a bio, and a one-color portrait.
 - `support.rs` builds independent synthetic programs, readable bitmap/AAF fonts,
   head/background/interface art, and interactive maps. It references the existing
   world/format fixture helpers through one shared module per test binary.

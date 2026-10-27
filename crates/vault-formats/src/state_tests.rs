@@ -127,3 +127,41 @@ fn spec006_gcd_fields_normalization_and_bounds() {
     bad[0x190..0x194].copy_from_slice(&18_i32.to_be_bytes());
     assert!(GcdFile::parse(&bad).is_err());
 }
+#[test]
+fn spec018_fallout2_gcd_has_a_damage_type_word_before_the_name() {
+    use vault_fixtures::state::sheet_gcd;
+    let (tags, traits) = ([4, 0, 5, -1], [6, 15]);
+    // SPEC-006's 428 bytes: no damage type.
+    let one = sheet_gcd(b"Fixture Fighter", tags, traits, None);
+    assert_eq!(one.len(), crate::gcd::GCD_LEN);
+    let read = GcdFile::parse(&one).unwrap();
+    assert_eq!(read.damage_type, None);
+    assert_eq!((read.tags, read.traits), (tags, traits));
+    // SPEC-018 §6.3 (Revision 4): 432 bytes, the word at 0x170 and the
+    // player portion 4 bytes further on. Read with the 428-byte layout,
+    // the first three tags would be [0, 4, 0]: Small Guns twice.
+    let two = sheet_gcd(b"Fixture Fighter", tags, traits, Some(3));
+    assert_eq!(two.len(), crate::gcd::GCD2_LEN);
+    assert_eq!(&two[0x174..0x183], b"Fixture Fighter");
+    assert_eq!(&two[0x194..0x198], &4_i32.to_be_bytes());
+    let read = GcdFile::parse(&two).unwrap();
+    assert_eq!(read.damage_type, Some(3));
+    assert_eq!(read.name_bytes(), b"Fixture Fighter");
+    assert_eq!((read.tags, read.traits), (tags, traits));
+    assert_eq!(read.remaining_points, 0);
+    assert_eq!(read.base, GcdFile::parse(&one).unwrap().base);
+    // Each layout writes back byte for byte.
+    assert_eq!(GcdFile::parse(&one).unwrap().write(), one);
+    assert_eq!(read.write(), two);
+    // Any other length is refused, including a 428-byte sheet with
+    // trailing bytes and every prefix of the 432-byte one but 428.
+    let mut longer = one.clone();
+    longer.extend([0; 2]);
+    assert!(GcdFile::parse(&longer).is_err());
+    for end in (0..two.len()).filter(|end| *end != 428) {
+        assert!(GcdFile::parse(&two[..end]).is_err());
+    }
+    let mut extra = two;
+    extra.push(0);
+    assert!(GcdFile::parse(&extra).is_err());
+}

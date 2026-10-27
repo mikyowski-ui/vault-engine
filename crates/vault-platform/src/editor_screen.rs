@@ -301,16 +301,17 @@ impl EditorStage {
         }
         self.write_sheet(op, &file);
     }
-    /// SAVE writes the 428-byte sheet; PRINT TO FILE the printed sheet. A
-    /// failure plays `iisxxxx1` before its box. SAVE's failure shows
-    /// "Error saving NAME!" (the §3.11 `[May-improve]` safe rule for the
-    /// reference's "NAMEError saving !") and keeps the options dialog.
+    /// SAVE writes the game's sheet (428 bytes, or SPEC-018 §6.3's 432
+    /// under Fallout 2); PRINT TO FILE the printed sheet. A failure plays
+    /// `iisxxxx1` before its box. SAVE's failure shows "Error saving NAME!"
+    /// (the §3.11 `[May-improve]` safe rule for the reference's
+    /// "NAMEError saving !") and keeps the options dialog.
     fn write_sheet(&mut self, op: SheetOp, file: &[u8]) {
         let Some(files) = &self.files else {
             return;
         };
         let bytes = if op == SheetOp::Save {
-            sheet::sheet_gcd(&self.editor.sheet).write()
+            sheet::sheet_gcd(&self.editor.sheet, files.assets.game_profile()).write()
         } else {
             let context = self.editor.context();
             let shown = printed_sheet(
@@ -1815,13 +1816,20 @@ pub(crate) fn typed_char(key: KeyCode, shift: bool) -> Option<u8> {
 /// §3.43 the sheet files: the master patch root (`fallout.cfg`
 /// `master_patches`, where every file is written as a loose file) and the
 /// archive, with `editor.msg` and the other game messages for the texts.
+/// The assets carry the game, whose sheet layout SAVE writes.
 pub(crate) struct SheetFiles {
     pub root: PathBuf,
     pub assets: VfsWorldAssets,
 }
 impl SheetFiles {
-    pub fn new(vfs: Arc<dyn Vfs>, language: &str, root: PathBuf) -> Option<Self> {
+    pub fn new(
+        vfs: Arc<dyn Vfs>,
+        language: &str,
+        root: PathBuf,
+        game: vault_core::GameProfile,
+    ) -> Option<Self> {
         let assets = VfsWorldAssets::new(vfs, language).ok()?;
+        assets.set_game_profile(game);
         Some(Self { root, assets })
     }
     /// An `editor.msg` text; a missing message reads `Error` (SPEC-002).
@@ -2039,7 +2047,12 @@ mod tests {
         )
         .unwrap();
         let vfs: Arc<dyn Vfs> = Arc::new(vault_formats::LocalDirProvider::mount(dir).unwrap());
-        stage().with_files(SheetFiles::new(vfs, "english", dir.to_path_buf()))
+        stage().with_files(SheetFiles::new(
+            vfs,
+            "english",
+            dir.to_path_buf(),
+            vault_core::GameProfile::Fallout1,
+        ))
     }
     fn notice(stage: &EditorStage) -> Vec<Vec<u8>> {
         stage
