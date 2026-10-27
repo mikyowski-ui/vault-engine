@@ -256,6 +256,10 @@ pub struct MapPreview {
     /// P-02: the world is frozen behind a modal window, so its view is
     /// rendered once and reused until input or a world change.
     frozen_view: Option<IndexedImage>,
+    /// The `enhanced` backdrop composes a window over a flat map view of
+    /// this index (twice, with two indices, to find the pixels the map
+    /// shows through); `None` draws the real view.
+    pub(crate) view_fill: Option<u8>,
     /// SPEC-014 §3.37 the see-through cutout mask, `egg.frm`
     /// (`intrface.lst` index 2), loaded on first use; `Some(None)` when it
     /// cannot load.
@@ -625,6 +629,7 @@ impl MapPreview {
             volumes: Volumes::default(),
             volume_source: None,
             frozen_view: None,
+            view_fill: None,
             egg: None,
             interrupt_walk: true,
             character_memory: character::Remembered::default(),
@@ -1245,6 +1250,11 @@ impl MapPreview {
     /// and reused (P-02: an animated window such as the inventory figure
     /// does not re-render the map) until `thaw_view`.
     pub(crate) fn map_view_image(&mut self) -> AppResult<IndexedImage> {
+        if let Some(fill) = self.view_fill {
+            let mut view = IndexedImage::new(640, 380)?;
+            view.fill_rect([0, 0, 640, 380], fill);
+            return Ok(view);
+        }
         let modal = !matches!(self.screen, Screen::Map);
         if modal && let Some(view) = &self.frozen_view {
             return Ok(view.clone());

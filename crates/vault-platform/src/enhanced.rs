@@ -70,15 +70,22 @@ impl Default for EnhancedSettings {
 
 /// One enhanced frame: the layers the shell draws, back to front.
 pub struct EnhancedFrame {
-    /// The world canvas at the layout's `world_size`.
+    /// The world canvas at the layout's `world_size`; behind a window
+    /// without the interface bar it is taller, down to the surface's
+    /// bottom (`EnhancedLayout::full_canvas_height`), and drawn from the
+    /// same corner.
     pub world: IndexedImage,
     /// The 640x480 interface frame.
     pub ui: IndexedImage,
     /// The interface frame's see-through index over the world (the map
-    /// screen), or `None` for an opaque full-screen window.
+    /// screen, and the map rows around a window centered over it), or
+    /// `None` for an opaque full-screen window.
     pub ui_transparent: Option<u8>,
     /// The side-panel tile drawn left and right of the bar, if any.
     pub side_panel: Option<IndexedImage>,
+    /// A full-screen window: the shell draws the procedural bezel
+    /// (`vault_render::bezel`) around the frame in place of the world.
+    pub bezel: bool,
     /// The pointer art and its hotspot, drawn at the pointer at interface
     /// scale (index 0 transparent).
     pub cursor: Option<(IndexedImage, [i32; 2])>,

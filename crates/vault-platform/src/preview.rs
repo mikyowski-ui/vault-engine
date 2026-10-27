@@ -447,6 +447,25 @@ impl AssetPreview {
             _ => 1.0,
         }
     }
+    /// The least zoom a frame laid out as `layout` may show of the
+    /// world's map (the enhanced auto-fit floor).
+    pub fn enhanced_floor(&mut self, layout: &vault_render::EnhancedLayout) -> f32 {
+        crate::replay::interactive_world(self)
+            .map_or(vault_render::EnhancedLayout::MIN_ZOOM, |world| {
+                world.enhanced_floor(layout)
+            })
+    }
+    /// Whether the single 640x480 frame shown now is a full-screen game
+    /// screen the widescreen bezel surrounds (the main menu, character
+    /// selection and editor, credits, the death scene and the endgame
+    /// slides): not a movie, and not a world, whose unlocked view draws
+    /// its own layers.
+    pub fn bezel_screen(&mut self) -> bool {
+        match self {
+            Self::Game(game) => game.bezel_stage(),
+            _ => false,
+        }
+    }
     /// The enhanced frame for `layout`, or `None` for the Vanilla frame.
     pub fn enhanced_frame(
         &mut self,

@@ -131,6 +131,9 @@ pub(crate) struct Camera {
     /// Interpolate moves (else they snap).
     pub smooth: bool,
     pub default_zoom: f64,
+    /// The least zoom the view may show ([`Camera::set_floor`]): the
+    /// unlocked view's auto-fit floor, at least [`MIN_ZOOM`].
+    pub floor: f64,
     pan: Option<Pan>,
     zoom_anim: Option<Zoom>,
     shake: Option<Shake>,
@@ -163,6 +166,7 @@ impl Camera {
             follow: true,
             smooth,
             default_zoom: zoom,
+            floor: MIN_ZOOM,
             pan: None,
             zoom_anim: None,
             shake: None,
@@ -206,11 +210,12 @@ impl Camera {
         });
         self.update_pan(now);
     }
-    /// Zoom to `zoom` (clamped) over `duration` milliseconds, keeping the
-    /// world point `anchor` in its place on screen (`None`: the center).
-    /// An anchor away from the center stops following.
+    /// Zoom to `zoom` (clamped to the floor and [`MAX_ZOOM`]) over
+    /// `duration` milliseconds, keeping the world point `anchor` in its
+    /// place on screen (`None`: the center). An anchor away from the
+    /// center stops following.
     pub fn zoom_to(&mut self, zoom: f64, anchor: Option<[f64; 2]>, now: u64, duration: u64) {
-        let to = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        let to = zoom.clamp(self.floor, MAX_ZOOM);
         let anchor = anchor.filter(|anchor| {
             (anchor[0] - self.center[0]).abs() > 0.5 || (anchor[1] - self.center[1]).abs() > 0.5
         });
@@ -247,6 +252,20 @@ impl Camera {
             zoom.to = zoom.to.max(floor);
         }
     }
+    /// The least zoom from now on (clamped to [`MIN_ZOOM`]-[`MAX_ZOOM`]):
+    /// every zoom request clamps to it, and a zoom below it (or heading
+    /// below it) is raised. A lower floor lowers nothing. Returns whether
+    /// the zoom changed.
+    pub fn set_floor(&mut self, floor: f64) -> bool {
+        self.floor = if floor.is_nan() {
+            MIN_ZOOM
+        } else {
+            floor.clamp(MIN_ZOOM, MAX_ZOOM)
+        };
+        let before = self.zoom;
+        self.raise_zoom(self.floor);
+        self.zoom != before
+    }
     /// Shake by up to `intensity` pixels, decaying over `duration`.
     pub fn shake(&mut self, intensity: f64, now: u64, duration: u64) {
         self.shake = (intensity > 0.0 && duration > 0).then_some(Shake {
@@ -269,7 +288,7 @@ impl Camera {
         });
         self.zoom_anim = Some(Zoom {
             from: self.zoom,
-            to: self.default_zoom,
+            to: self.default_zoom.max(self.floor),
             center0: self.center,
             anchor: None,
             start: now,

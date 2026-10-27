@@ -26,10 +26,19 @@
 //! - **Roof peek.** The cursor X-ray cuts roofs away within 96 world pixels
 //!   of the pointer, dissolving over a further 48, both divided by the zoom
 //!   so the hole keeps one size on screen (96 and 48 interface pixels).
+//! - **Backdrops.** A window centered over the map (inventory, loot,
+//!   barter, Skilldex, elevator, options, automap, a conversation) keeps
+//!   the world canvas drawn behind it at the camera's view, dimmed by an
+//!   ordered-dither vignette that darkens toward the window
+//!   ([`Backdrop::Dimmed`]); a full-screen window has the shell's bezel
+//!   around it ([`Backdrop::Bezel`]); a movie has black.
+//! - **Auto-fit floor.** The least zoom rises so the view, wherever the
+//!   camera may rest, stays on the drawn map ([`fit_zoom`]).
 use super::{
     MapPreview, Screen,
     camera::{self, Camera, TickInput},
-    pointer::{Edge, map_bottom},
+    options::OptionsScreen,
+    pointer::{CursorObjects, Edge, map_bottom},
 };
 use crate::AppResult;
 use crate::enhanced::{
@@ -45,10 +54,13 @@ use vault_core::{
 use vault_formats::{HexGrid, Palette};
 use vault_render::{
     EnhancedLayout, IndexedImage,
-    map::{MapView, RoofCutaway, Shroud},
+    map::{MapView, RoofCutaway, Shroud, Vignette, draw_vignette},
 };
 use winit::keyboard::KeyCode;
 
+#[cfg(test)]
+#[path = "enhanced_backdrop_tests.rs"]
+mod backdrop_tests;
 #[cfg(test)]
 #[path = "enhanced_tests.rs"]
 mod tests;
@@ -72,6 +84,39 @@ const CYCLING: u8 = 229;
 const DEMO_ZOOM_AT: u64 = 1500;
 const DEMO_SHAKE_AT: u64 = 2500;
 const DEMO_RESET_AT: u64 = 4300;
+/// The dimmed backdrop's darkening tables: each one's brightness in
+/// percent, lightest first.
+const DIM_LEVELS: [u32; 6] = [88, 78, 69, 61, 54, 48];
+/// The vignette's ramp positions, in sixteenths of a table step: at the
+/// window's center (54%), and from the canvas's edges on (halfway from
+/// 88% to 78%).
+const DIM_NEAR: u32 = 16 * 4;
+const DIM_FAR: u32 = 8;
+
+/// What the unlocked view shows behind and around a screen's 640-by-480
+/// interface frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Backdrop {
+    /// The map screen: the live world under the see-through frame.
+    Map,
+    /// A window centered over the map: the world canvas at the camera's
+    /// view, dimmed by the vignette (greyed first under the pause
+    /// window, as Vanilla greys its map), under the frame's see-through
+    /// map rows and beside it. `bar`: the interface bar shows, and the
+    /// side panels continue it; without it (a conversation, barter, the
+    /// preferences) the canvas runs down to the surface's bottom.
+    Dimmed { bar: bool, grey: bool },
+    /// A full-screen window: the shell's procedural bezel around it.
+    Bezel,
+    /// A movie: black around it.
+    Black,
+}
+
+/// The cached backdrop's key: the layout, the canvas's grid origin (the
+/// camera's drawn center) and height, and the grey.
+type FrozenKey = (EnhancedLayout, [i64; 2], u32, bool);
+/// The dimmed backdrop's darkening tables, lightest first.
+type DimRamp = Arc<[[u8; 256]]>;
 
 /// A camera demo step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,12 +183,18 @@ pub(crate) struct Enhanced {
     /// The keys being read are held keys read again, not new presses.
     replaying: bool,
     drag: Option<(DragButton, [f64; 2])>,
-    /// The world behind a full-screen window, kept until input or a world
-    /// change thaws it.
-    pub(crate) frozen: Option<IndexedImage>,
-    /// The last frame's world, interface and see-through index, held while
-    /// a game fade freezes the screen.
-    last: Option<(IndexedImage, IndexedImage, Option<u8>)>,
+    /// The dimmed world behind a window, kept until input or a world
+    /// change thaws it, with what it was drawn for.
+    pub(crate) frozen: Option<(FrozenKey, IndexedImage)>,
+    /// The darkening tables of the dimmed backdrop, with the palette
+    /// (6-bit entries) they were made for.
+    dim_ramp: Option<(Vec<[u8; 3]>, DimRamp)>,
+    /// The bounding box of the current elevation's drawn floor squares
+    /// (default-grid pixels), if any square draws ([`floor_extent`]).
+    floor_area: Option<[f64; 4]>,
+    /// The last frame's world, interface, see-through index and backdrop,
+    /// held while a game fade freezes the screen.
+    last: Option<(IndexedImage, IndexedImage, Option<u8>, Backdrop)>,
 }
 
 impl Enhanced {
@@ -172,12 +223,158 @@ impl Enhanced {
         }
         // The region bounds a hex's reference (cell corner); the camera
         // works with hex centers, 16 and 8 pixels further.
-        let [x0, y0, x1, y1] = self.region.bounds.map(|value| value as f64);
+        let [x0, y0, x1, y1] = self.rest_box()?;
         let size = self.world_size();
         let [sx, sy] =
             [0, 1].map(|axis| ((f64::from(TILE[axis]) - f64::from(size[axis])) / 2.0).max(0.0));
-        Some([x0 + 16.0 - sx, y0 + 8.0 - sy, x1 + 16.0 + sx, y1 + 8.0 + sy])
+        Some([x0 - sx, y0 - sy, x1 + sx, y1 + sy])
     }
+    /// The camera center's bounds for a view at least 640 by 380: the
+    /// region's hexes as centers. `None` for the free camera.
+    fn rest_box(&self) -> Option<[f64; 4]> {
+        if self.free_camera {
+            return None;
+        }
+        // The region bounds a hex's reference (cell corner); the camera
+        // works with hex centers, 16 and 8 pixels further.
+        let [x0, y0, x1, y1] = self.region.bounds.map(|value| value as f64);
+        Some([x0 + 16.0, y0 + 8.0, x1 + 16.0, y1 + 8.0])
+    }
+    /// The auto-fit floor for `layout` ([`fit_zoom`] over the drawn map
+    /// area); [`camera::MIN_ZOOM`] for the free camera, which rests
+    /// anywhere.
+    fn fit_floor(&self, layout: &EnhancedLayout) -> f64 {
+        self.rest_box().map_or(camera::MIN_ZOOM, |rest| {
+            fit_zoom(rest, drawn_area(self.floor_area, rest), layout)
+        })
+    }
+}
+
+/// The 200-by-200 grid's drawn extent in default-grid pixels,
+/// `[min_x, min_y, max_x, max_y]` (max exclusive): where both the hex
+/// cells (32 by 16 from each hex's reference) and the floor squares (80
+/// by 36 from each square's corner) lie, that is `[0, -1188, 7984,
+/// 2404]`. Both grids are parallelograms; this is the intersection of
+/// their bounding boxes.
+pub(crate) fn grid_area() -> [f64; 4] {
+    let grid = HexGrid::default();
+    let mut hexes = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+    for hex in [0, 199, 39800, 39999] {
+        if let Ok([x, y]) = grid.hex_reference(hex) {
+            let [x, y] = [x as f64, y as f64];
+            hexes = [
+                hexes[0].min(x),
+                hexes[1].min(y),
+                hexes[2].max(x + 32.0),
+                hexes[3].max(y + 16.0),
+            ];
+        }
+    }
+    let mut squares = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+    for square in [0, 99, 9900, 9999] {
+        if let Some([x, y]) = grid.square_corner(square, false) {
+            let [x, y] = [x as f64, y as f64];
+            squares = [
+                squares[0].min(x),
+                squares[1].min(y),
+                squares[2].max(x + 80.0),
+                squares[3].max(y + 36.0),
+            ];
+        }
+    }
+    [
+        hexes[0].max(squares[0]),
+        hexes[1].max(squares[1]),
+        hexes[2].min(squares[2]),
+        hexes[3].min(squares[3]),
+    ]
+}
+
+/// The bounding box (default-grid pixels, max exclusive) of the floor
+/// squares on `elevation` that draw something: not hidden, and not the
+/// blank floor (art index 1, the ordinary empty tile). `None` when none
+/// does.
+pub(crate) fn floor_extent(map: &vault_formats::MapFile, elevation: usize) -> Option<[f64; 4]> {
+    let grid = HexGrid::default();
+    let mut extent: Option<[f64; 4]> = None;
+    for square in 0..10000 {
+        let Some(tile) = map.tile(elevation, square) else {
+            continue;
+        };
+        if tile.floor_hidden() || tile.floor() == 1 {
+            continue;
+        }
+        let Some([x, y]) = grid.square_corner(square as i32, false) else {
+            continue;
+        };
+        let [x, y] = [x as f64, y as f64];
+        let box_ = [x, y, x + 80.0, y + 36.0];
+        extent = Some(extent.map_or(box_, |old| {
+            [
+                old[0].min(box_[0]),
+                old[1].min(box_[1]),
+                old[2].max(box_[2]),
+                old[3].max(box_[3]),
+            ]
+        }));
+    }
+    extent
+}
+
+/// The drawn map area the auto-fit floor keeps the view on, for a camera
+/// resting in `rest` (hex centers): the drawn floor's bounding box within
+/// the grid's extent ([`grid_area`]), when that floor frames the map,
+/// that is when it holds the 640-by-380 view centered anywhere in `rest`
+/// (the view the map's scroll blockers were placed for). Otherwise (no
+/// floor drawn, or a floor that leaves Vanilla's own view showing past
+/// it, as on maps drawn by their scenery) the grid's extent.
+pub(crate) fn drawn_area(floor: Option<[f64; 4]>, rest: [f64; 4]) -> [f64; 4] {
+    let grid = grid_area();
+    let Some(floor) = floor else {
+        return grid;
+    };
+    let floor = [
+        floor[0].max(grid[0]),
+        floor[1].max(grid[1]),
+        floor[2].min(grid[2]),
+        floor[3].min(grid[3]),
+    ];
+    let half = TILE.map(|side| f64::from(side) / 2.0);
+    let frames = rest[0] - half[0] >= floor[0]
+        && rest[1] - half[1] >= floor[1]
+        && rest[2] + half[0] <= floor[2]
+        && rest[3] + half[1] <= floor[3];
+    if frames { floor } else { grid }
+}
+
+/// The auto-fit floor: the least zoom (from [`camera::MIN_ZOOM`], at most
+/// [`camera::MAX_ZOOM`]) at which `layout`'s view, centered anywhere in
+/// the camera's soft bounds, stays inside `area`.
+///
+/// The soft bounds are `rest` widened, on an axis where the view is
+/// smaller than 640 by 380, by half the difference (see
+/// [`Enhanced::bounds`]), so the views reach `rest` ± max(view, tile) / 2
+/// on each axis: a view smaller than the tile reaches as far as the tile
+/// does whatever its zoom. With `margin` the least room between `rest` and
+/// `area` on an axis, the view fits when `max(view, tile) / 2 <= margin`.
+/// When `margin` is under half the tile no zoom fits, and the floor is
+/// [`camera::MAX_ZOOM`] (the off-grid shroud covers what remains);
+/// otherwise the view, `world_rect / (ui_scale z)` canvas pixels (rounded
+/// up a pixel, its center rounded half a pixel), fits when it is at most
+/// `2 margin - 2`, that is from `z = world_rect / (ui_scale (2 margin -
+/// 2))`.
+pub(crate) fn fit_zoom(rest: [f64; 4], area: [f64; 4], layout: &EnhancedLayout) -> f64 {
+    let mut floor = camera::MIN_ZOOM;
+    for axis in 0..2 {
+        let margin = (rest[axis] - area[axis]).min(area[axis + 2] - rest[axis + 2]);
+        if margin.is_nan() || margin < f64::from(TILE[axis]) / 2.0 {
+            return camera::MAX_ZOOM;
+        }
+        let side = f64::from(layout.world_rect[axis + 2]);
+        let zoom = side / (f64::from(layout.ui_scale) * (2.0 * margin - 2.0));
+        floor = floor.max(zoom);
+    }
+    floor.min(camera::MAX_ZOOM)
 }
 
 /// Every hex of the 200-by-200 grid: the shroud darkens only what lies
@@ -227,6 +424,66 @@ fn nearest(palette: &Palette, rgb: [u8; 3]) -> u8 {
         (1..CYCLING)
             .min_by_key(|index| (distance(*index), *index))
             .unwrap_or(1)
+    })
+}
+
+/// `image` with the pixels that differ from `other` (the same frame
+/// composed over another map view) set to the see-through index, the
+/// lowest index neither leaves in place; `None` when all 256 are in use.
+/// Also whether any pixel differs.
+fn see_through(
+    mut image: IndexedImage,
+    other: &IndexedImage,
+) -> ((IndexedImage, Option<u8>), bool) {
+    let mut used = [false; 256];
+    let mut differs = false;
+    for (first, second) in image.pixels().iter().zip(other.pixels()) {
+        if first == second {
+            used[usize::from(*first)] = true;
+        } else {
+            differs = true;
+        }
+    }
+    let Some(clear) = (0..=255).find(|index| !used[usize::from(*index)]) else {
+        return ((image, None), differs);
+    };
+    for (pixel, second) in image.pixels_mut().iter_mut().zip(other.pixels()) {
+        if pixel != second {
+            *pixel = clear;
+        }
+    }
+    ((image, Some(clear)), differs)
+}
+
+/// The table taking each palette index to the mapped entry below the
+/// cycling range nearest its color at `percent` brightness (the lowest
+/// index on a tie; index 0 may be one, the canvas being opaque), or to
+/// itself when that entry would be brighter (a coarse palette's nearest
+/// may be): the dimming never lightens a pixel.
+fn darker(palette: &Palette, percent: u32) -> [u8; 256] {
+    let sum = |index: u8| {
+        palette
+            .rgb6(index)
+            .iter()
+            .map(|c| u32::from(*c))
+            .sum::<u32>()
+    };
+    std::array::from_fn(|index| {
+        let index = index as u8;
+        let target = palette
+            .rgb6(index)
+            .map(|channel| (u32::from(channel) * percent / 100) as i32);
+        let distance = |candidate: u8| {
+            let color = palette.rgb6(candidate).map(i32::from);
+            (0..3)
+                .map(|axis| (color[axis] - target[axis]).pow(2))
+                .sum::<i32>()
+        };
+        let best = (0..CYCLING)
+            .filter(|candidate| palette.is_mapped(*candidate))
+            .min_by_key(|candidate| (distance(*candidate), *candidate))
+            .unwrap_or(index);
+        if sum(best) <= sum(index) { best } else { index }
     })
 }
 
@@ -326,6 +583,8 @@ impl MapPreview {
             replaying: false,
             drag: None,
             frozen: None,
+            dim_ramp: None,
+            floor_area: None,
             last: None,
         }));
         self.enhanced_sync_map();
@@ -343,17 +602,33 @@ impl MapPreview {
     /// The enhanced frame for `layout`, or `None` to show the Vanilla
     /// frame (Vanilla preset, or the fixed viewport).
     pub fn enhanced_frame(&mut self, layout: &EnhancedLayout) -> Option<AppResult<EnhancedFrame>> {
+        self.unlocked()?;
+        self.enhanced_sync_map();
         let enhanced = self.unlocked_mut()?;
         let old = enhanced.layout.replace(*layout);
         // The layout may raise the zoom to keep the canvas within its
-        // largest size. Only that floor binds the camera: the layout's own
-        // zoom is the one it was asked for, and as a floor it would pin a
-        // zoom-out (or any zoom from a limit) where it stands.
-        enhanced.camera.raise_zoom(f64::from(layout.min_zoom()));
+        // largest size, and the auto-fit floor keeps the view on the map.
+        // Only those floors bind the camera: the layout's own zoom is the
+        // one it was asked for, and as a floor it would pin a zoom-out (or
+        // any zoom from a limit) where it stands.
+        let floor = enhanced.fit_floor(layout);
+        enhanced
+            .camera
+            .set_floor(floor.max(f64::from(layout.min_zoom())));
         if let Some(old) = old.filter(|old| old != layout) {
             self.enhanced_relayout(&old, layout);
         }
         Some(self.compose_enhanced())
+    }
+    /// The least zoom `layout`'s surface and interface scale may show of
+    /// the current map: the auto-fit floor (see [`fit_zoom`]) and the
+    /// layout's canvas floor. The shell lays a frame out at this zoom at
+    /// least, so the frame the camera is raised for is the one drawn.
+    pub fn enhanced_floor(&self, layout: &EnhancedLayout) -> f32 {
+        self.unlocked()
+            .map_or(EnhancedLayout::MIN_ZOOM, |enhanced| {
+                (enhanced.fit_floor(layout) as f32).max(layout.min_zoom())
+            })
     }
     /// The pointer moved; returns whether the frame changed.
     pub fn enhanced_pointer(&mut self, at: PointerAt) -> bool {
@@ -1090,6 +1365,7 @@ impl MapPreview {
         let region = Arc::new(CameraRegion::compute(&self.host.world));
         let player = self.player_point();
         let camera_hex = self.host.world.camera_hex;
+        let floor = floor_extent(&self.host.world.map, self.host.world.elevation as usize);
         let Some(enhanced) = self.unlocked_mut() else {
             return false;
         };
@@ -1098,6 +1374,7 @@ impl MapPreview {
             .is_none_or(|old| (old.0, old.1, old.2) != (key.0, key.1, key.2));
         enhanced.region = region;
         enhanced.region_key = Some(key);
+        enhanced.floor_area = floor;
         if moved {
             if let Some(player) = player {
                 enhanced.camera.snap(player);
@@ -1249,6 +1526,46 @@ impl MapPreview {
         Some(changed)
     }
 
+    /// What the unlocked view shows behind and around the current screen
+    /// (see [`Backdrop`]).
+    pub(crate) fn backdrop(&self) -> Backdrop {
+        match &self.screen {
+            Screen::Map if self.host.world.dialogue.open => Backdrop::Dimmed {
+                bar: false,
+                grey: false,
+            },
+            Screen::Map => Backdrop::Map,
+            Screen::Barter(_) => Backdrop::Dimmed {
+                bar: false,
+                grey: false,
+            },
+            Screen::Inventory(_)
+            | Screen::Loot(_)
+            | Screen::Skilldex(_)
+            | Screen::Elevator(_)
+            | Screen::Automap(_) => Backdrop::Dimmed {
+                bar: true,
+                grey: false,
+            },
+            Screen::Options(OptionsScreen::Preferences(_)) => Backdrop::Dimmed {
+                bar: false,
+                grey: false,
+            },
+            Screen::Options(screen) => Backdrop::Dimmed {
+                bar: true,
+                grey: matches!(screen, OptionsScreen::Pause),
+            },
+            Screen::Movie(_) => Backdrop::Black,
+            Screen::World(_)
+            | Screen::Town(_)
+            | Screen::World2(_)
+            | Screen::Town2(_)
+            | Screen::PipBoy(_)
+            | Screen::Character(_)
+            | Screen::SaveLoad(_)
+            | Screen::Help(_) => Backdrop::Bezel,
+        }
+    }
     /// One enhanced frame.
     fn compose_enhanced(&mut self) -> AppResult<EnhancedFrame> {
         self.drain_effects();
@@ -1256,41 +1573,59 @@ impl MapPreview {
         // SPEC-014 §3.2: a game fade to black holds the frame on screen.
         if self.fade_blocks()
             && self.fades.freezes()
-            && let Some((world, ui, ui_transparent)) =
+            && let Some((world, ui, ui_transparent, backdrop)) =
                 self.unlocked().and_then(|enhanced| enhanced.last.clone())
         {
-            return Ok(EnhancedFrame {
-                world,
-                ui,
-                ui_transparent,
-                side_panel: Some(self.side_panel()),
-                cursor: self.enhanced_cursor(),
-            });
+            return Ok(self.enhanced_frame_of(world, ui, ui_transparent, backdrop));
         }
         self.check_barter();
         self.check_loot();
         self.cursor_in_frame = false;
-        let map = matches!(self.screen, Screen::Map) && !self.host.world.dialogue.open;
-        let (world, ui, ui_transparent) = if map {
-            let world = self.enhanced_world()?;
-            let (ui, transparent) = self.enhanced_map_ui()?;
-            (world, ui, transparent)
-        } else {
-            let ui = self.screen_image()?;
-            (self.enhanced_backdrop()?, ui, None)
+        let backdrop = self.backdrop();
+        let (world, ui, ui_transparent) = match backdrop {
+            Backdrop::Map => {
+                let world = self.enhanced_world()?;
+                let (ui, transparent) = self.enhanced_map_ui()?;
+                (world, ui, transparent)
+            }
+            Backdrop::Dimmed { bar, grey } => {
+                let (ui, transparent) = self.enhanced_window_ui()?;
+                (self.dimmed_world(bar, grey)?, ui, transparent)
+            }
+            Backdrop::Bezel | Backdrop::Black => {
+                let ui = self.screen_image()?;
+                let [width, height] = self
+                    .unlocked()
+                    .map_or([1, 1], |enhanced| enhanced.world_size());
+                (IndexedImage::new(width, height)?, ui, None)
+            }
         };
         self.held_shown = self.held_button().is_some();
         self.frame = Some(ui.clone());
         if let Some(enhanced) = self.unlocked_mut() {
-            enhanced.last = Some((world.clone(), ui.clone(), ui_transparent));
+            enhanced.last = Some((world.clone(), ui.clone(), ui_transparent, backdrop));
         }
-        Ok(EnhancedFrame {
+        Ok(self.enhanced_frame_of(world, ui, ui_transparent, backdrop))
+    }
+    /// The frame of these layers over `backdrop`: the side panels continue
+    /// the interface bar where it shows, and a full-screen window asks for
+    /// the bezel.
+    fn enhanced_frame_of(
+        &self,
+        world: IndexedImage,
+        ui: IndexedImage,
+        ui_transparent: Option<u8>,
+        backdrop: Backdrop,
+    ) -> EnhancedFrame {
+        let bar = matches!(backdrop, Backdrop::Map | Backdrop::Dimmed { bar: true, .. });
+        EnhancedFrame {
             world,
             ui,
             ui_transparent,
-            side_panel: Some(self.side_panel()),
+            side_panel: bar.then(|| self.side_panel()),
+            bezel: backdrop == Backdrop::Bezel,
             cursor: self.enhanced_cursor(),
-        })
+        }
     }
     /// The world canvas: every tile drawn as one map refresh, with the
     /// in-world cursor (while the pointer is on the canvas), the roof
@@ -1303,6 +1638,15 @@ impl MapPreview {
             None
         };
         let cutaway = self.peek_cutaway();
+        self.draw_canvas(view, cursor.as_ref(), cutaway)
+    }
+    /// The canvas of `view`, tile by tile, with the shroud past the grid.
+    fn draw_canvas(
+        &mut self,
+        view: MapView,
+        cursor: Option<&CursorObjects>,
+        cutaway: Option<RoofCutaway>,
+    ) -> AppResult<IndexedImage> {
         let dark = nearest(self.game_palette(), [0, 0, 0]);
         let shroud = self.unlocked().map(|_| Shroud {
             allowed: &WHOLE_GRID,
@@ -1310,42 +1654,84 @@ impl MapPreview {
         });
         let tiles = tiles(view);
         // The tiles overscan: a sprite crossing a seam draws in both.
-        let images = self.render_scenes(&tiles, cursor.as_ref(), cutaway, shroud, true)?;
+        let images = self.render_scenes(&tiles, cursor, cutaway, shroud, true)?;
         let mut canvas = IndexedImage::new(view.width, view.height)?;
         for ((_, [x, y]), image) in tiles.iter().zip(&images) {
             canvas.copy_image(image, [*x as i32, *y as i32]);
         }
         Ok(canvas)
     }
-    /// The world behind a full-screen window: black over the world and
-    /// town maps and movies, else the map frozen until input or a world
-    /// change.
-    fn enhanced_backdrop(&mut self) -> AppResult<IndexedImage> {
-        let [width, height] = self
+    /// The world behind a window centered over the map
+    /// ([`Backdrop::Dimmed`]): the canvas at the camera's view (no
+    /// in-world cursor or roof peek: the pointer is the window's), greyed
+    /// under the pause window, dimmed by the vignette toward the window's
+    /// middle. Without the bar it runs down to the surface's bottom. A
+    /// window that pauses the world keeps its canvas until input or a
+    /// world change thaws it, or the camera or the layout moves; a
+    /// conversation's world runs on, so it is drawn every frame.
+    fn dimmed_world(&mut self, bar: bool, grey: bool) -> AppResult<IndexedImage> {
+        let layout = self
             .unlocked()
-            .map_or([1, 1], |enhanced| enhanced.world_size());
-        if matches!(
-            self.screen,
-            Screen::World(_)
-                | Screen::Town(_)
-                | Screen::World2(_)
-                | Screen::Town2(_)
-                | Screen::Movie(_)
-        ) {
-            return Ok(IndexedImage::new(width, height)?);
+            .and_then(|enhanced| enhanced.layout)
+            .ok_or("no enhanced layout")?;
+        let mut view = self.enhanced_view().ok_or("no enhanced view")?;
+        if !bar {
+            view.height = layout.full_canvas_height();
         }
-        if let Some(frozen) = self
-            .unlocked()
-            .and_then(|enhanced| enhanced.frozen.as_ref())
-            && [frozen.width(), frozen.height()] == [width, height]
+        let key: FrozenKey = (layout, view.grid.origin, view.height, grey);
+        let paused = !matches!(self.screen, Screen::Map);
+        if paused
+            && let Some((_, frozen)) = self
+                .unlocked()
+                .and_then(|enhanced| enhanced.frozen.as_ref())
+                .filter(|(frozen, _)| *frozen == key)
         {
             return Ok(frozen.clone());
         }
-        let world = self.enhanced_world()?;
-        if let Some(enhanced) = self.unlocked_mut() {
-            enhanced.frozen = Some(world.clone());
+        let mut canvas = self.draw_canvas(view, None, None)?;
+        if grey {
+            for pixel in canvas.pixels_mut() {
+                *pixel = self.grey[usize::from(*pixel)];
+            }
         }
-        Ok(world)
+        // The window's middle: the map rows' middle with the bar, the
+        // frame's without it.
+        let middle = ui_to_world(&layout, if bar { [320, 190] } else { [320, 240] })
+            .map(|value| value.round() as i64);
+        let size = [i64::from(view.width), i64::from(view.height)];
+        let vignette = Vignette {
+            center: middle,
+            radii: [0, 1].map(|axis| middle[axis].max(size[axis] - middle[axis]).max(1)),
+            near: DIM_NEAR,
+            far: DIM_FAR,
+        };
+        let ramp = self.dim_ramp();
+        draw_vignette(&mut canvas, view.grid, vignette, &ramp);
+        if paused && let Some(enhanced) = self.unlocked_mut() {
+            enhanced.frozen = Some((key, canvas.clone()));
+        }
+        Ok(canvas)
+    }
+    /// The dimmed backdrop's darkening tables for the game palette (see
+    /// [`DIM_LEVELS`]), made once per palette.
+    fn dim_ramp(&mut self) -> DimRamp {
+        let palette = self.game_palette();
+        let entries: Vec<[u8; 3]> = (0..=255).map(|index| palette.rgb6(index)).collect();
+        if let Some((made, ramp)) = self
+            .unlocked()
+            .and_then(|enhanced| enhanced.dim_ramp.as_ref())
+            && *made == entries
+        {
+            return ramp.clone();
+        }
+        let ramp: DimRamp = DIM_LEVELS
+            .iter()
+            .map(|percent| darker(palette, *percent))
+            .collect();
+        if let Some(enhanced) = self.unlocked_mut() {
+            enhanced.dim_ramp = Some((entries, ramp.clone()));
+        }
+        ramp
     }
     /// The map screen's 640-by-480 frame over a `fill` map view.
     fn map_ui_over(&mut self, fill: u8) -> AppResult<IndexedImage> {
@@ -1363,23 +1749,23 @@ impl MapPreview {
     /// shows the map.
     fn enhanced_map_ui(&mut self) -> AppResult<(IndexedImage, Option<u8>)> {
         self.choices.clear();
-        let mut ui = self.map_ui_over(0)?;
+        let ui = self.map_ui_over(0)?;
         let other = self.map_ui_over(255)?;
-        let mut used = [false; 256];
-        for (first, second) in ui.pixels().iter().zip(other.pixels()) {
-            if first == second {
-                used[usize::from(*first)] = true;
-            }
-        }
-        let Some(clear) = (0..=255).find(|index| !used[usize::from(*index)]) else {
-            return Ok((ui, None));
-        };
-        for (pixel, second) in ui.pixels_mut().iter_mut().zip(other.pixels()) {
-            if pixel != second {
-                *pixel = clear;
-            }
-        }
-        Ok((ui, Some(clear)))
+        Ok(see_through(ui, &other).0)
+    }
+    /// A window's interface frame over the map ([`Backdrop::Dimmed`]),
+    /// see-through where the Vanilla frame would show the map view, as
+    /// [`Self::enhanced_map_ui`] finds it: the screen composed over two
+    /// flat map views. A frame the map never shows through is opaque.
+    fn enhanced_window_ui(&mut self) -> AppResult<(IndexedImage, Option<u8>)> {
+        self.view_fill = Some(0);
+        let first = self.screen_image();
+        self.view_fill = Some(255);
+        let second = self.screen_image();
+        self.view_fill = None;
+        let (first, second) = (first?, second?);
+        let ((ui, clear), shows) = see_through(first, &second);
+        Ok((ui, clear.filter(|_| shows)))
     }
     /// The pointer art `draw_cursor` would draw and its hotspot: drawn
     /// apart with the pointer at the image's middle, then cropped. Over a

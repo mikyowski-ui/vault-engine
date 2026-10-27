@@ -375,3 +375,41 @@ fn the_trade_wield_fits_fallout2s_barter_art() {
     // The frame the Trade window's layout (and the test above) assumes.
     assert_eq!((frame.width, frame.height), (640, 191));
 }
+
+#[test]
+fn the_gear_window_shows_the_world_dimmed_in_widescreen() {
+    use super::super::enhanced::Backdrop;
+    use vault_render::EnhancedLayout;
+    let dir = synthetic_corpus();
+    let mut preview = interactive(dir.path());
+    preview.host.set_preset(EnginePreset::Enhanced);
+    preview.set_enhanced(Some(EnhancedSettings {
+        smooth_camera: false,
+        ..Default::default()
+    }));
+    preview.tick(16).unwrap();
+    let (member, _) = join(&mut preview);
+    let layout = EnhancedLayout::compute([1920, 1080], None, preview.enhanced_zoom()).unwrap();
+    let map = preview.enhanced_frame(&layout).unwrap().unwrap();
+    // Companion Gear is the loot window on the companion: the world stays
+    // drawn behind it, dimmed, the bar and its side panels in front.
+    preview.open_companion_gear(member);
+    let Screen::Loot(screen) = &preview.screen else {
+        panic!("the Gear window");
+    };
+    assert!(screen.session.companion);
+    assert_eq!(
+        preview.backdrop(),
+        Backdrop::Dimmed {
+            bar: true,
+            grey: false
+        }
+    );
+    let gear = preview.enhanced_frame(&layout).unwrap().unwrap();
+    assert!(gear.ui_transparent.is_some() && gear.side_panel.is_some() && !gear.bezel);
+    assert_eq!(
+        [gear.world.width(), gear.world.height()],
+        [map.world.width(), map.world.height()]
+    );
+    assert_ne!(gear.world.pixels(), map.world.pixels(), "dimmed");
+}

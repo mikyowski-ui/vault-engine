@@ -13,7 +13,9 @@ use vault_formats::{
 };
 
 mod enhanced;
-pub use enhanced::{BAYER, ShroudCell, ShroudField, bayer, draw_shroud, roof_hides};
+pub use enhanced::{
+    BAYER, ShroudCell, ShroudField, Vignette, bayer, draw_shroud, draw_vignette, roof_hides,
+};
 
 pub trait MapArt {
     fn frame(

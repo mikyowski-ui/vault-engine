@@ -1818,6 +1818,14 @@ impl Game {
             _ => held.is_some(),
         }
     }
+    /// Whether the stage is a full-screen 640x480 screen the `enhanced`
+    /// widescreen bezel surrounds: anything but a movie and a world.
+    pub fn bezel_stage(&self) -> bool {
+        !matches!(
+            self.stage,
+            Stage::Movie { .. } | Stage::World(_) | Stage::Load(_)
+        )
+    }
     /// SPEC-012 §3.12: during a movie every mouse button counts, wherever
     /// it is pressed (the letterbox around the frame too). Returns whether
     /// a movie took the button.
@@ -2311,5 +2319,29 @@ mod tests {
         game.stage = Stage::Selection;
         game.image().unwrap();
         assert_eq!(game.bio.as_ref().map(|(index, _)| *index), Some(0));
+    }
+
+    #[test]
+    fn the_widescreen_bezel_surrounds_the_menus_but_not_a_world() {
+        let dir = synthetic_corpus();
+        let root = dir.path();
+        let map = std::fs::read(root.join("maps/synthetic.map")).unwrap();
+        std::fs::write(root.join("maps/v13ent.map"), &map).unwrap();
+        let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(root).unwrap());
+        let mut game = Game::new(vfs, "english", 1, root.join("saves"), None).unwrap();
+        assert!(matches!(game.stage, Stage::Menu { .. }));
+        assert!(game.bezel_stage(), "the main menu");
+        assert!(game.step(KeyCode::KeyN));
+        assert!(game.step(KeyCode::KeyT));
+        assert!(game.world().is_some());
+        assert!(!game.bezel_stage(), "a world draws its own layers");
+        game.stage = Stage::Selection;
+        assert!(game.bezel_stage(), "character selection");
+        game.stage = Stage::Splash {
+            image: IndexedImage::new(640, 480).unwrap(),
+            palette: black(),
+            since: 0,
+        };
+        assert!(game.bezel_stage(), "a splash");
     }
 }

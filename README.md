@@ -492,11 +492,58 @@ takes this section's viewport and camera only.
   scale, anchored bottom-center. The map screen's interface is see-through
   over the world, and side panels continue the interface bar to the window's
   edges. `fixed_640x480` keeps the Vanilla frame. **Alt+V** toggles the two
-  in play (a shell key, like Alt+S; V is no game key).
+  in play, on any screen (a shell key, like Alt+S; V is no game key).
+- **Windows over the map.** The inventory, loot (Companion Gear included),
+  barter and conversation, Skilldex, elevator, automap and options (pause
+  and preferences included) windows keep the whole world canvas drawn
+  behind them, at the camera's current position and zoom, under the frame's
+  see-through map rows and beside it. The world is dimmed by a vignette
+  darker toward the window: a ramp of six darkening tables (88% down to 48%
+  brightness, the palette's nearest entries below the cycling range, never
+  lighter than the pixel), chosen by the pixel's elliptical distance from
+  the window's middle (about 54% there, 83% at the canvas's edges) and
+  dissolved between tables by the 4×4 Bayer dither anchored to world
+  pixels. Under the pause window the world is greyed first, as Vanilla
+  greys its map. The simulation is untouched: a window that pauses the
+  world keeps its canvas until input, a world change or a camera move
+  redraws it; a conversation's world is drawn every frame. Without the bar
+  (a conversation, barter, preferences) the canvas runs down to the
+  window's bottom edge and no side panels show.
+- **Bezel.** Full-screen windows (the main menu, splash, character
+  selection and editor, credits, death scene and endgame slides, the
+  Pip-Boy, the character screen, save and load, help, the world and town
+  maps) are framed by an engine-drawn bezel in place of the world and side
+  panels (`vault_render::bezel`): brushed dark steel, lighter toward the
+  top, with a thin amber inner edge, a bevelled steel lip, amber corner
+  brackets, and bevelled panel seams and rivets on a lattice anchored to
+  the frame's corners. It is drawn in frame pixels (scaled with the frame
+  at any window size and `ui_scale`), from integer hash noise with fixed
+  seeds, in the display palette's nearest entries outside index 0 and the
+  cycling range, so it is the same every frame. Outside a world it fills
+  the letterbox around the single 640×480 frame without changing its
+  viewport or the pointer mapping. Movies keep black around them, and
+  Vanilla and the fixed view keep the plain clear colour.
 - **Zoom.** The mouse wheel and `-`/`=` zoom the world (0.5× to 3×), and `0`
   goes back to `default_zoom`. On the enhanced map screen this takes `-` and
   `=` from Vanilla's brightness keys: **Ctrl+`-`/`=`** adjust the brightness
   there instead.
+- **Auto-fit floor.** The least zoom rises above 0.5 when a wider view
+  would show past the map. The floor is the least zoom at which the view,
+  centred anywhere in the camera's soft bounds, stays inside the drawn map
+  area, capped at 3.0. The drawn map area is the bounding box of the
+  elevation's drawn floor squares (80×36 each, neither hidden nor the
+  blank floor, art index 1), cut to the grid's extent (the intersection of
+  the hex cells' and floor squares' bounding boxes, `[0, -1188, 7984,
+  2404]` in default-grid pixels). A floor that does not hold the 640×380
+  view everywhere the camera rests (no floor, a few squares, or floor that
+  ends at the blockers) does not frame the map, and the grid's extent is
+  used instead. Views smaller than 640×380 reach as far as that view does
+  (see Camera bounds), so with `margin` the least room between the rest
+  bounds and the area on an axis, the floor is `world_rect / (ui_scale ×
+  (2 margin − 2))` on each axis; under 320 or 190 pixels of room it is
+  3.0, and the shroud covers what remains. It follows the window size,
+  `ui_scale` and the map, and binds the wheel (and a pinch's lines), the
+  zoom keys, a scripted `SetZoom` and `default_zoom`.
 - **Panning.** Dragging with the middle button pans the camera. Holding
   **Space** and dragging does too, out of combat only, because Space ends the
   turn in combat. `smooth_camera = false` makes camera moves snap instead of
@@ -598,10 +645,14 @@ An enhanced session's input log has one more record after `surface` and
 A replay applies it to the world. While the world shows the unlocked
 viewport, the replay routes pointer moves, buttons (the middle one included)
 and the wheel through the same layout for the logged surface as the desktop
-does. The digest then covers the enhanced frame, that is the world canvas,
-the interface frame, its see-through index and the side-panel tile, in place
-of the Vanilla frame, and `--replay-frame` writes the world canvas. A log
-without an `enhanced` record replays exactly as before.
+does, laid out at the auto-fit floor at least, as the desktop lays it out.
+The digest then covers the enhanced frame, that is the world canvas (the
+dimmed one behind a window, black behind a full-screen one), the interface
+frame, its see-through index, the side-panel tile if any, and a `bezel`
+marker when the frame asks for the bezel (the bezel itself is drawn by the
+shell in the display palette), in place of the Vanilla frame, and
+`--replay-frame` writes the world canvas. A log without an `enhanced` record
+replays exactly as before.
 
 #### Quality of life
 

@@ -616,3 +616,52 @@ fn the_overscan_draws_and_picks_a_sprite_reaching_in_from_beyond_the_window() {
     far.grid.origin[0] += 2000;
     assert!(overscan_hexes(far, &objects.elevations[0], &art).is_empty());
 }
+
+#[test]
+fn the_vignette_darkens_toward_its_center_through_an_anchored_dither() {
+    // A ramp whose table k paints index k, over a uniform canvas: each
+    // pixel shows the table it took.
+    let ramp: Vec<[u8; 256]> = (0..6).map(|level| [level as u8; 256]).collect();
+    let vignette = Vignette {
+        center: [200, 100],
+        radii: [200, 100],
+        near: 64,
+        far: 8,
+    };
+    let grid = HexGrid { origin: [3, 7] };
+    let mut image = IndexedImage::new(400, 200).unwrap();
+    draw_vignette(&mut image, grid, vignette, &ramp);
+    let at = |x: usize, y: usize| image.pixels()[y * 400 + x];
+    // The center takes table 4 (64 sixteenths); the corner, past the
+    // radii, 8 sixteenths: table 0, or table 1 where the Bayer threshold
+    // is under 8 (half the pixels of every 4x4 cell).
+    assert_eq!(at(200, 100), 4);
+    let edge: Vec<u8> = (0..4)
+        .flat_map(|y| (0..4).map(move |x| (x, y)))
+        .map(|(x, y)| at(x, y))
+        .collect();
+    assert!(edge.iter().all(|level| *level <= 1), "{edge:?}");
+    assert_eq!(edge.iter().filter(|level| **level == 1).count(), 8);
+    // The mean level falls from the center outward along the middle row.
+    let mean = |x0: usize| (x0..x0 + 8).map(|x| u32::from(at(x, 100))).sum::<u32>();
+    let samples: Vec<u32> = [192, 150, 100, 50, 0].iter().map(|x| mean(*x)).collect();
+    assert!(
+        samples.windows(2).all(|pair| pair[0] >= pair[1]),
+        "{samples:?}"
+    );
+    // The dither follows world pixels: the grid and the center moved by a
+    // whole 4-pixel cell draw the same pattern, moved with them.
+    let mut moved = IndexedImage::new(400, 200).unwrap();
+    let shifted = Vignette {
+        center: [204, 104],
+        ..vignette
+    };
+    draw_vignette(&mut moved, HexGrid { origin: [7, 11] }, shifted, &ramp);
+    for (x, y) in [(10, 10), (57, 33), (200, 100), (300, 150)] {
+        assert_eq!(moved.pixels()[(y + 4) * 400 + x + 4], at(x, y), "{x},{y}");
+    }
+    // An empty ramp leaves the canvas as it is.
+    let mut untouched = IndexedImage::new(4, 4).unwrap();
+    draw_vignette(&mut untouched, grid, vignette, &[]);
+    assert!(untouched.pixels().iter().all(|pixel| *pixel == 0));
+}

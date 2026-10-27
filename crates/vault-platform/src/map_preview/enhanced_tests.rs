@@ -7,7 +7,7 @@ use vault_core::{WorldEffect, ui::cursor::Mode};
 use vault_render::map::{pick_candidates, pick_candidates_cut};
 
 /// The synthetic world in the unlocked view, without smoothing.
-fn unlocked(dir: &std::path::Path) -> MapPreview {
+pub(super) fn unlocked(dir: &std::path::Path) -> MapPreview {
     let mut preview = interactive(dir);
     preview.set_enhanced(Some(EnhancedSettings {
         smooth_camera: false,
@@ -17,13 +17,16 @@ fn unlocked(dir: &std::path::Path) -> MapPreview {
     preview
 }
 /// The layout for `surface` at the preview's zoom, and its frame.
-fn frame(preview: &mut MapPreview, surface: [u32; 2]) -> (EnhancedLayout, EnhancedFrame) {
+pub(super) fn frame(
+    preview: &mut MapPreview,
+    surface: [u32; 2],
+) -> (EnhancedLayout, EnhancedFrame) {
     let layout = EnhancedLayout::compute(surface, None, preview.enhanced_zoom()).unwrap();
     let frame = preview.enhanced_frame(&layout).unwrap().unwrap();
     (layout, frame)
 }
 /// The pointer at surface point `point`, as the shell reports it.
-fn at(layout: &EnhancedLayout, point: [f64; 2]) -> PointerAt {
+pub(super) fn at(layout: &EnhancedLayout, point: [f64; 2]) -> PointerAt {
     PointerAt {
         ui: layout.ui_pixel(point),
         world: layout.world_point(point),
@@ -129,14 +132,28 @@ fn enhanced_frames_fit_their_layouts() {
             assert_eq!([panel.width(), panel.height()], [32, 100]);
         }
     }
-    // A full-screen window is opaque over the world it froze.
+    // A window centered over the map shows the world around it: the map
+    // rows see through to the (dimmed) canvas, the bar does not.
     assert!(preview.step(KeyCode::KeyI));
-    let (layout, frame) = frame(&mut preview, [1920, 1080]);
-    assert!(frame.ui_transparent.is_none());
+    let (layout, window) = frame(&mut preview, [1920, 1080]);
+    let clear = window.ui_transparent.expect("the map rows see through");
+    assert_eq!(window.ui.pixels()[10 * 640 + 5], clear);
+    assert!(
+        window.ui.pixels()[440 * 640..]
+            .iter()
+            .all(|pixel| *pixel != clear)
+    );
     assert_eq!(
-        [frame.world.width(), frame.world.height()],
+        [window.world.width(), window.world.height()],
         layout.world_size
     );
+    assert!(!window.bezel);
+    // A full-screen window is opaque, with the bezel around it.
+    assert!(preview.step(KeyCode::Escape));
+    assert!(preview.step(KeyCode::KeyP));
+    let (_, full) = frame(&mut preview, [1920, 1080]);
+    assert!(full.ui_transparent.is_none());
+    assert!(full.bezel && full.side_panel.is_none());
 }
 
 #[test]
@@ -794,7 +811,7 @@ fn a_registered_mod_layer_runs_the_camera_demo() {
 
 /// The synthetic world's first item, given to a dead `npc`, and a
 /// non-steal loot window on that corpse.
-fn loot_corpse(preview: &mut MapPreview) -> vault_core::ObjectRef {
+pub(super) fn loot_corpse(preview: &mut MapPreview) -> vault_core::ObjectRef {
     use vault_core::LootRequest;
     use vault_formats::map::ObjectState;
     let player = preview.host.world.player;

@@ -583,6 +583,14 @@ struct Shell {
     shown: Option<EnhancedShown>,
     /// The world changed since `shown` was built.
     enhanced_dirty: bool,
+    /// What the single-image path's bezel backdrop was last made for: the
+    /// frame's viewport, the surface and the bezel's colors (`None`: no
+    /// bezel).
+    backdrop_key: Option<(
+        vault_render::Viewport,
+        [u32; 2],
+        vault_render::bezel::BezelInks,
+    )>,
     /// The touch UI is on: touches are read (else ignored) and the game's
     /// worlds show the pill bar.
     touch_ui: bool,
@@ -590,11 +598,25 @@ struct Shell {
     touch: touch::TouchGestures,
 }
 
-/// An enhanced frame, its layout and its side panels tiled to that layout.
+/// An enhanced frame, its layout, its side panels tiled to that layout,
+/// and the bezel around a full-screen window, if it shows one.
 struct EnhancedShown {
     layout: EnhancedLayout,
     frame: enhanced::EnhancedFrame,
     sides: Vec<(IndexedImage, [f32; 4])>,
+    bezel: Option<(IndexedImage, [f32; 4])>,
+}
+
+/// The widescreen bezel's layer around a 640x480 frame drawn into
+/// `frame_rect` on a `surface`-sized window, in the display palette's
+/// nearest colors (`vault_render::bezel`).
+fn bezel_layer(
+    surface: [u32; 2],
+    frame_rect: [f32; 4],
+    palette: &[[u8; 4]; 256],
+) -> Option<(IndexedImage, [f32; 4])> {
+    let inks = vault_render::bezel::BezelInks::nearest(palette);
+    vault_render::bezel::bezel_layer(surface, frame_rect, inks)
 }
 
 /// The side panels' images and surface rectangles: `panel` tiled to each
@@ -632,21 +654,31 @@ fn side_tiles(layout: &EnhancedLayout, panel: &IndexedImage) -> Vec<(IndexedImag
     out
 }
 
-/// The enhanced layers back to front: the world (opaque), the side
-/// panels, the interface frame (see-through where it says), then the
-/// pointer art at the pointer, its hotspot and size at interface scale
-/// (index 0 see-through).
+/// The enhanced layers back to front: the world (opaque; from the world
+/// area's corner, at its own size), or the bezel in its place around a
+/// full-screen window, the side panels, the interface frame (see-through
+/// where it says), then the pointer art at the pointer, its hotspot and
+/// size at interface scale (index 0 see-through).
 fn enhanced_layers<'a>(shown: &'a EnhancedShown, pointer: Option<[f64; 2]>) -> Vec<Layer<'a>> {
     let EnhancedShown {
         layout,
         frame,
         sides,
+        bezel,
     } = shown;
-    let mut layers = vec![Layer {
-        image: &frame.world,
-        rect: layout.world_layer_rect(),
-        transparent: None,
-        sharp: true,
+    let mut layers = vec![match bezel {
+        Some((image, rect)) => Layer {
+            image,
+            rect: *rect,
+            transparent: None,
+            sharp: true,
+        },
+        None => Layer {
+            image: &frame.world,
+            rect: layout.canvas_rect([frame.world.width(), frame.world.height()]),
+            transparent: None,
+            sharp: true,
+        },
     }];
     layers.extend(sides.iter().map(|(image, rect)| Layer {
         image,
@@ -869,10 +901,16 @@ impl Shell {
                         .as_ref()
                         .map(|panel| side_tiles(&layout, panel))
                         .unwrap_or_default();
+                    let bezel = if frame.bezel {
+                        bezel_layer(layout.surface, layout.ui_rect, &self.palette())
+                    } else {
+                        None
+                    };
                     self.shown = Some(EnhancedShown {
                         layout,
                         frame,
                         sides,
+                        bezel,
                     });
                     self.enhanced_dirty = false;
                 }
@@ -906,6 +944,60 @@ impl Shell {
         // The frame draws its own pointer art: the OS pointer hides then.
         window.set_cursor_visible(shown.frame.cursor.is_none() && preview.system_cursor());
         true
+    }
+    /// The widescreen bezel under the single 640x480 frame of a
+    /// full-screen game screen (the main menu, character selection and
+    /// editor; `AssetPreview::bezel_screen`) while the session shows the
+    /// unlocked widescreen view (the enhanced preset's, or the touch UI's
+    /// navigation-only view). The frame's viewport, and with it every
+    /// pointer mapping, stays as it is: the bezel only fills the
+    /// letterbox. Vanilla, the fixed 640x480 view, the launcher and movies
+    /// keep the plain clear color.
+    fn present_backdrop(&mut self) {
+        let widescreen = self
+            .enhanced
+            .is_some_and(|settings| settings.viewport == enhanced::ViewportMode::Unlocked);
+        let wanted = widescreen
+            && self.launcher.is_none()
+            && self
+                .preview
+                .as_mut()
+                .is_some_and(preview::AssetPreview::bezel_screen);
+        let palette = self.palette();
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        let viewport = renderer
+            .viewport()
+            .filter(|viewport| wanted && viewport.image == vault_render::bezel::FRAME);
+        let key = viewport
+            .zip(renderer.surface_size())
+            .map(|(viewport, surface)| {
+                (
+                    viewport,
+                    surface,
+                    vault_render::bezel::BezelInks::nearest(&palette),
+                )
+            });
+        if key == self.backdrop_key {
+            return;
+        }
+        self.backdrop_key = key;
+        let layer = key.and_then(|(viewport, surface, _)| {
+            let rect = [
+                viewport.left as f32,
+                viewport.top as f32,
+                viewport.width as f32,
+                viewport.height as f32,
+            ];
+            bezel_layer(surface, rect, &palette)
+        });
+        renderer.set_backdrop(layer.as_ref().map(|(image, rect)| Layer {
+            image,
+            rect: *rect,
+            transparent: None,
+            sharp: true,
+        }));
     }
     /// The display palette the frame is drawn through.
     fn palette(&self) -> [[u8; 4]; 256] {
@@ -1888,6 +1980,9 @@ impl ApplicationHandler for Shell {
                 if std::mem::take(&mut self.pointer_moved) && !enhanced {
                     self.present_pointer();
                 }
+                if !enhanced {
+                    self.present_backdrop();
+                }
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
@@ -2571,6 +2666,7 @@ mod tests {
             ui: IndexedImage::new(640, 480).unwrap(),
             ui_transparent: Some(0),
             side_panel: Some(image(2, 1, [9, 9])),
+            bezel: false,
             cursor: Some((image(3, 2, [0; 6]), [1, 2])),
         };
         let sides = side_tiles(&layout, frame.side_panel.as_ref().unwrap());
@@ -2578,6 +2674,7 @@ mod tests {
             layout,
             frame,
             sides,
+            bezel: None,
         };
         let layers = enhanced_layers(&shown, Some([700.0, 300.0]));
         let rects: Vec<[f32; 4]> = layers.iter().map(|layer| layer.rect).collect();
@@ -2601,5 +2698,54 @@ mod tests {
         let shown = EnhancedShown { layout, ..shown };
         let layers = enhanced_layers(&shown, Some([700.0, 300.0]));
         assert_eq!(layers.last().unwrap().rect, [698.0, 296.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn a_full_screen_window_draws_the_bezel_in_place_of_the_world() {
+        // 1920x1080 at the auto interface scale (2.25): the frame spans
+        // the height, 240 surface pixels each side.
+        let layout = EnhancedLayout::compute([1920, 1080], None, 1.0).unwrap();
+        let mut palette = [[128, 128, 128, 255]; 256];
+        for (index, entry) in palette.iter_mut().enumerate() {
+            let value = index as u8;
+            *entry = [value, value, value / 2, 255];
+        }
+        let (bezel, rect) = bezel_layer(layout.surface, layout.ui_rect, &palette).unwrap();
+        // The same layout and palette draw the same bezel.
+        let (again, _) = bezel_layer(layout.surface, layout.ui_rect, &palette).unwrap();
+        assert_eq!(bezel.pixels(), again.pixels());
+        // It covers the surface, the frame's corner on a bezel pixel's.
+        assert!(rect[0] <= 0.0 && rect[0] + rect[2] >= 1920.0);
+        assert!(rect[1] <= 0.0 && rect[1] + rect[3] >= 1080.0);
+        let per = rect[2] / bezel.width() as f32;
+        assert!((per - layout.ui_scale).abs() < 1e-4);
+        let hole = (layout.ui_rect[0] - rect[0]) / per;
+        assert!((hole - hole.round()).abs() < 1e-3);
+        // Never the cycling range or index 0.
+        assert!(bezel.pixels().iter().all(|index| (1..229).contains(index)));
+        let frame = enhanced::EnhancedFrame {
+            world: IndexedImage::new(layout.world_size[0], layout.world_size[1]).unwrap(),
+            ui: IndexedImage::new(640, 480).unwrap(),
+            ui_transparent: None,
+            side_panel: None,
+            bezel: true,
+            cursor: None,
+        };
+        let shown = EnhancedShown {
+            layout,
+            frame,
+            sides: Vec::new(),
+            bezel: Some((bezel, rect)),
+        };
+        let layers = enhanced_layers(&shown, None);
+        let rects: Vec<[f32; 4]> = layers.iter().map(|layer| layer.rect).collect();
+        assert_eq!(rects, [rect, layout.ui_rect]);
+        // Composed, the frame (index 0 here) shows over it, and the bezel
+        // all around it.
+        let surface = vault_render::compose_layers(&layers, [1920, 1080], 0).unwrap();
+        for (index, pixel) in surface.pixels().iter().enumerate() {
+            let x = index % 1920;
+            assert_eq!(*pixel == 0, (240..1680).contains(&x), "{x}");
+        }
     }
 }

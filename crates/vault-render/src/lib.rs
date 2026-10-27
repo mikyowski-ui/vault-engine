@@ -1,5 +1,6 @@
 //! Minimal indexed-color rendering, independent of the windowing/event loop.
 
+pub mod bezel;
 pub mod dialogue;
 pub mod floating;
 pub mod image;
@@ -86,6 +87,9 @@ pub struct Renderer {
     layer_pipeline: wgpu::RenderPipeline,
     layer_slots: Vec<LayerSlot>,
     layer_count: usize,
+    /// A layer drawn across the surface under the single image (the
+    /// `enhanced` widescreen bezel), if any; [`Renderer::set_backdrop`].
+    backdrop: Option<LayerSlot>,
     /// What [`Renderer::render`] draws: whichever of the single image and
     /// the layers was set last.
     presenting: Presenting,
@@ -221,6 +225,7 @@ impl Renderer {
             layer_pipeline,
             layer_slots: Vec::new(),
             layer_count: 0,
+            backdrop: None,
             presenting: Presenting::Image,
         };
         write_indices(&renderer.queue, &renderer.sprite, image);
@@ -384,11 +389,42 @@ impl Renderer {
         self.presenting = Presenting::Layers;
     }
 
-    /// Write each filled layer slot's parameters for the current surface
-    /// size, when they changed.
+    /// A layer drawn across the surface under the single image, outside
+    /// its viewport (the `enhanced` widescreen bezel), or `None` for the
+    /// plain clear color. It changes neither the image's viewport nor any
+    /// pointer mapping, and the layer list ([`Self::set_layers`]) never
+    /// shows it. Its texture is kept and rewritten in place while its size
+    /// stays the same.
+    pub fn set_backdrop(&mut self, backdrop: Option<Layer<'_>>) {
+        let Some(layer) = backdrop else {
+            self.backdrop = None;
+            return;
+        };
+        let size = [layer.image.width(), layer.image.height()];
+        if self.backdrop.as_ref().is_none_or(|slot| slot.size != size) {
+            self.backdrop = Some(LayerSlot::new(
+                &self.device,
+                &self.layer_pipeline,
+                &self.palette,
+                size,
+            ));
+        }
+        if let Some(slot) = &mut self.backdrop {
+            slot.layer = (layer.rect, layer.transparent, layer.sharp);
+            write_indices(&self.queue, &slot.texture, layer.image);
+        }
+        self.write_layer_params();
+    }
+
+    /// Write each filled layer slot's parameters (and the backdrop's) for
+    /// the current surface size, when they changed.
     fn write_layer_params(&mut self) {
         let surface = [self.config.width, self.config.height];
-        for slot in &mut self.layer_slots[..self.layer_count] {
+        let backdrop = self.backdrop.iter_mut();
+        for slot in self.layer_slots[..self.layer_count]
+            .iter_mut()
+            .chain(backdrop)
+        {
             let (rect, transparent, sharp) = slot.layer;
             let params = LayerParams::new(slot.size, rect, transparent, sharp, surface);
             if slot.written != Some(params) {
@@ -469,6 +505,12 @@ impl Renderer {
                 ..Default::default()
             });
             if let Some(viewport) = viewport {
+                // The backdrop first, across the whole surface.
+                if let Some(slot) = &self.backdrop {
+                    pass.set_pipeline(&self.layer_pipeline);
+                    pass.set_bind_group(0, &slot.bind_group, &[]);
+                    pass.draw(0..6, 0..1);
+                }
                 pass.set_viewport(
                     viewport.left as f32,
                     viewport.top as f32,

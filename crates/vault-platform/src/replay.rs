@@ -83,7 +83,15 @@ pub fn enhanced_layout(preview: &mut AssetPreview, surface: [u32; 2]) -> Option<
     let settings = preview
         .enhanced_settings()
         .filter(|settings| settings.viewport == ViewportMode::Unlocked)?;
-    EnhancedLayout::compute(surface, settings.ui_scale, preview.enhanced_zoom())
+    let layout = EnhancedLayout::compute(surface, settings.ui_scale, preview.enhanced_zoom())?;
+    // The auto-fit floor: a zoom below it is laid out at it, as the frame
+    // raises the camera to it.
+    let floor = preview.enhanced_floor(&layout);
+    if layout.zoom < floor {
+        EnhancedLayout::compute(surface, settings.ui_scale, floor)
+    } else {
+        Some(layout)
+    }
 }
 
 /// Where a surface point is in both layers (nowhere without a pointer).
@@ -538,6 +546,9 @@ impl Replay {
                 match &frame.side_panel {
                     Some(panel) => image_parts(&mut part, panel),
                     None => part(&[]),
+                }
+                if frame.bezel {
+                    part(b"bezel");
                 }
                 frame.world
             }
