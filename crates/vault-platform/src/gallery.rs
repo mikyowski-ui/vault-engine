@@ -427,6 +427,7 @@ mod tests {
         let corpus = stage.path().join("corpus");
         std::fs::create_dir_all(&corpus).unwrap();
         vault_fixtures::state::write_corpus(&corpus);
+        vault_fixtures::gallery::write_hud(&corpus);
         vault_fixtures::gallery::write_showcase(&corpus);
         stage
     }
@@ -460,6 +461,36 @@ mod tests {
                 other => panic!("block {other:#04x} at {at}"),
             }
         }
+    }
+
+    /// The fixture bar's art draws through the engine's bar: the steel
+    /// chassis fills the bar window, the message monitor has its green
+    /// edge (index 56, the cube's green), and the counters show digits.
+    #[test]
+    fn the_fixture_interface_bar_draws_through_the_engine() {
+        let stage = stage();
+        let mut preview = world(&stage.path().join("corpus"), EnginePreset::Vanilla).unwrap();
+        let frame = preview.image().unwrap();
+        let pixel = |[x, y]: [u32; 2]| frame.pixels()[(y * frame.width() + x) as usize];
+        let bar = &frame.pixels()[379 * 640..];
+        let painted = bar.iter().filter(|index| **index != 0).count();
+        assert!(painted > bar.len() * 3 / 4, "{painted} of {}", bar.len());
+        assert_eq!(pixel([60, 379 + 20]), 56);
+        // The HP counter's cells (SPEC-014 §3.21, at 473, 40): lit segments.
+        let lit = (0..33)
+            .flat_map(|x| (0..17).map(move |y| [473 + x, 379 + 40 + y]))
+            .filter(|at| pixel(*at) != 0)
+            .count();
+        assert!(lit > 20, "{lit} lit counter pixels");
+        // Without the art the bar window stays black, as the tests'
+        // corpus keeps it.
+        let plain = tempfile::tempdir().unwrap();
+        vault_fixtures::state::write_corpus(plain.path());
+        vault_fixtures::gallery::write_showcase(plain.path());
+        let mut blank = world(plain.path(), EnginePreset::Vanilla).unwrap();
+        let frame = blank.image().unwrap();
+        let bar = &frame.pixels()[379 * 640..];
+        assert!(bar.iter().filter(|index| **index != 0).count() < bar.len() / 10);
     }
 
     #[test]

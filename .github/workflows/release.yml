@@ -1,0 +1,105 @@
+name: Release
+
+# A version tag (v2.0.0, ...) builds, packages and publishes the release
+# archives; a manual run builds and packages them as workflow artifacts
+# only.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# The build jobs only read the repository; the publish job alone may write
+# releases.
+permissions:
+  contents: read
+
+# Third-party actions are pinned by version tag, not by commit SHA: the
+# repository's clean-room ingestion tooling rejects 40-character hashes.
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.archive }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: vault-engine-linux-x86_64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: vault-engine-windows-x86_64.zip
+          # The macOS runners are Apple Silicon.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: vault-engine-macos-arm64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      # The desktop's default `audio` feature links ALSA through cpal on
+      # Linux; Windows (WASAPI) and macOS (CoreAudio) need nothing extra.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # A release ships only what passes the workspace's tests.
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked --target ${{ matrix.target }} --package vault-platform
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=""
+          if [ "$RUNNER_OS" = Windows ]; then exe=".exe"; fi
+          stage="dist/vault-engine"
+          mkdir -p "$stage/mods" dist/out
+          cp "target/${{ matrix.target }}/release/vault-platform$exe" "$stage/vault-engine$exe"
+          cp README.md LICENSE PROVENANCE.md "$stage/"
+          cp -R mods/tactical-camera "$stage/mods/"
+          case "${{ matrix.archive }}" in
+            *.zip) (cd dist && 7z a -tzip "out/${{ matrix.archive }}" vault-engine) ;;
+            *) tar -C dist -czf "dist/out/${{ matrix.archive }}" vault-engine ;;
+          esac
+          ls -l dist/out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: dist/out/${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish the GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum vault-engine-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+      # The runner's GitHub CLI: create the tag's release with generated
+      # notes, or, on a re-run, replace its archives.
+      - name: Attach the archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+              --title "Vault Engine $TAG" --generate-notes --verify-tag
+          fi

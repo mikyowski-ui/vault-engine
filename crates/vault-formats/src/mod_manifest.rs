@@ -786,6 +786,31 @@ pub fn write_mod_folder(
 mod tests {
     use super::*;
 
+    /// The example layer every release archive ships
+    /// (`mods/tactical-camera/`, written by `cargo xtask export-mod`) stays
+    /// a valid settings-only manifest.
+    #[test]
+    fn the_shipped_tactical_camera_example_parses() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../mods/tactical-camera/vault-mod.toml"
+        );
+        let manifest = ModManifest::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(manifest.name, "tactical-camera");
+        assert_eq!(
+            manifest.enhanced,
+            Some(EnhancedOverrides {
+                preset: Some("enhanced".into()),
+                viewport_mode: Some("unlocked_widescreen".into()),
+                default_zoom: Some(1.25),
+                smooth_camera: Some(true),
+                roof_peek: Some("cursor_xray".into()),
+            })
+        );
+        assert!(manifest.scripts.is_empty() && manifest.maps.is_empty());
+        assert!(manifest.patches.is_empty());
+    }
+
     fn full() -> ModManifest {
         ModManifest {
             name: "Tactical \"camera\"".into(),

@@ -116,8 +116,25 @@ procedural art; no game data is used (see
 
 ## Quick start
 
-You need Rust 1.88 or newer (see [Build and verify](#build-and-verify) for
-the platform libraries) and your own copy of *Fallout*, *Fallout 2*, or both.
+**Prebuilt archives.** Each version tag publishes ready-to-run archives on
+the GitHub Releases page:
+- `vault-engine-linux-x86_64.tar.gz`
+- `vault-engine-windows-x86_64.zip`
+- `vault-engine-macos-arm64.tar.gz`
+
+Each holds the `vault-engine` binary, this README, `LICENSE`,
+`PROVENANCE.md` and the example mod layer `mods/tactical-camera/`, the
+enhanced widescreen camera at 1.25× with the cursor X-ray. Add it in the
+launcher's Mods tab. Unpack the archive anywhere and run `vault-engine`;
+the launcher opens to find your games.
+- **Linux** needs ALSA (`libasound2`) and a Wayland or X11 session at
+  run time.
+- **macOS** builds are unsigned. Right-click and choose Open the first
+  time.
+
+**From source.** You need Rust 1.88 or newer (see
+[Build and verify](#build-and-verify) for the platform libraries) and your
+own copy of *Fallout*, *Fallout 2*, or both.
 
 ```sh
 git clone https://github.com/mikyowski-ui/vault-engine.git
@@ -233,6 +250,15 @@ Cargo command `--locked`) runs these jobs on each push and pull request:
 - `macos`: build and test.
 - `supply-chain`: `cargo audit` and `cargo deny check` (policy in `deny.toml`)
   over both `Cargo.lock` and `fuzz/Cargo.lock`.
+
+The release workflow (`.github/workflows/release.yml`) runs on a `v*` tag,
+or by hand. For Linux x86_64, Windows x86_64 and macOS arm64, it runs the
+workspace tests, builds `vault-platform` in release, and packages the
+binary (as `vault-engine`), `README.md`, `LICENSE`, `PROVENANCE.md` and
+`mods/tactical-camera/` into the archives above. On a tag it attaches them,
+with a `SHA256SUMS.txt`, to that tag's GitHub Release through the runner's
+`gh` CLI. Only that job may write; a re-run replaces the archives. A
+manual run keeps them as workflow artifacts.
 
 A scheduled nightly workflow (`fuzz.yml`) builds the `fuzz/` targets with
 nightly and runs each for 60 seconds on synthetic seeds (see

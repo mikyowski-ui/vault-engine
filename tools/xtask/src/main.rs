@@ -195,6 +195,7 @@ fn capture_gallery(output: &Path, stage: &Path) -> Result<(), Box<dyn Error>> {
     }
     std::fs::write(stage.join(STAGE_MARK), "cargo xtask capture-gallery\n")?;
     state::write_corpus(&corpus);
+    gallery::write_hud(&corpus);
     gallery::write_showcase(&corpus);
     dat::fallout1_install(&fallout1);
     // SPEC-018 §2.2's required members, as the launcher checks them.
@@ -248,6 +249,8 @@ fn materialize(output: &Path) -> Result<(), Box<dyn Error>> {
     for directory in [output, &demo] {
         std::fs::create_dir_all(directory)?;
         state::write_corpus(directory);
+        // The interface bar's art, so interactive previews show the bar.
+        gallery::write_hud(directory);
         std::fs::write(directory.join("scripts/core-fixture.int"), vm::program())?;
     }
     // `maps/cam_demo.map` and its map script, appended to `scripts.lst`.

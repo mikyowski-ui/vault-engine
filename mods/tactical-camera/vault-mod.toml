@@ -1,0 +1,11 @@
+# A Vault Engine mod layer's manifest (see README.txt).
+name = "tactical-camera"
+version = "1.0.0"
+description = "Enhanced viewport, camera and roof-peek settings (with any table overrides and enhanced scripts in use), exported with cargo xtask export-mod."
+
+[enhanced]
+preset = "enhanced"
+viewport_mode = "unlocked_widescreen"
+roof_peek = "cursor_xray"
+default_zoom = 1.25
+smooth_camera = true
