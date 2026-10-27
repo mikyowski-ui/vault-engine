@@ -11,6 +11,7 @@
 //! `Fallout/` (MASTER.DAT and CRITTER.DAT) and `Fallout 2/` (master.dat
 //! and critter.dat). Each session runs on a fixed clock, so the same
 //! sources give the same files byte for byte.
+mod demos;
 mod encode;
 
 use crate::{
@@ -61,11 +62,22 @@ pub fn capture(output: &Path, stage: &Path) -> AppResult<()> {
     }
     std::fs::create_dir_all(&output)?;
     let corpus = stage.join("corpus");
-    let files: [(&str, Vec<u8>); 4] = [
+    let files: [(&str, Vec<u8>); 8] = [
         ("compare-viewport.png", compare_viewport(&corpus)?),
         ("launcher-overview.png", launcher_overview()?),
         ("roof-xray-peek.gif", roof_peek(&corpus)?),
         ("tactical-zoom.gif", tactical_zoom(&corpus)?),
+        ("combat-overlay.gif", movie(&corpus, demos::combat_overlay)?),
+        (
+            "widescreen-modals-qol.gif",
+            movie(&corpus, demos::widescreen_modals)?,
+        ),
+        // The export lands in the stage, named relative to it.
+        (
+            "f9-live-debugger.gif",
+            movie(&corpus, |corpus| demos::debugger(corpus, Path::new("mods")))?,
+        ),
+        ("touch-ui-menu.gif", movie(&corpus, demos::touch_menu)?),
     ];
     for (name, bytes) in files {
         let path = output.join(name);
@@ -73,6 +85,17 @@ pub fn capture(output: &Path, stage: &Path) -> AppResult<()> {
         println!("{name}: {} bytes", bytes.len());
     }
     Ok(())
+}
+
+/// A demonstration's frames as a looping GIF under the showcase's
+/// palette.
+fn movie(corpus: &Path, scene: impl Fn(&Path) -> AppResult<demos::Frames>) -> AppResult<Vec<u8>> {
+    let frames = scene(corpus)?;
+    let preview = world(corpus, EnginePreset::Enhanced)?;
+    Ok(encode::gif(
+        &frames,
+        &display(preview.palette(), preview.brightness()),
+    ))
 }
 
 /// The showcase map (`vault_fixtures::gallery`) with the synthetic player,
@@ -524,5 +547,30 @@ mod tests {
             assert_eq!(total, frames / 3 * 10);
             assert!(delays.len() > 10, "{} stored frames", delays.len());
         }
+    }
+
+    /// The demonstrations of play: each a looping animation of the movie
+    /// size with many changes, the debugger's export written to the stage.
+    #[test]
+    fn the_demonstrations_render_as_looping_animations() {
+        let stage = stage();
+        let corpus = stage.path().join("corpus");
+        let export = stage.path().join("mods");
+        let files = [
+            ("combat", movie(&corpus, demos::combat_overlay)),
+            ("windows", movie(&corpus, demos::widescreen_modals)),
+            (
+                "debugger",
+                movie(&corpus, |corpus| demos::debugger(corpus, &export)),
+            ),
+            ("touch", movie(&corpus, demos::touch_menu)),
+        ];
+        for (name, file) in files {
+            let (size, delays, loops) = gif_frames(&file.unwrap());
+            assert_eq!(size, MOVIE.map(|side| side as u16), "{name}");
+            assert!(loops, "{name}");
+            assert!(delays.len() > 15, "{name}: {} stored frames", delays.len());
+        }
+        assert!(export.join("enhanced-setup/vault-mod.toml").is_file());
     }
 }

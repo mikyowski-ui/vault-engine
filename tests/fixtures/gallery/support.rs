@@ -109,6 +109,43 @@ fn crate_art() -> Vec<u8> {
     })
 }
 
+/// The crate's inventory icon, 48 by 36.
+fn crate_icon() -> Vec<u8> {
+    let (plank, edge) = (rgb(5, 3, 1), rgb(3, 2, 0));
+    picture(48, 36, |x, y| {
+        let inside = (6..42).contains(&x) && (6..30).contains(&y);
+        if !inside {
+            0
+        } else if x == 6 || y == 6 || x == 41 || y == 29 || x == y + 6 || y % 6 == 0 {
+            edge
+        } else {
+            plank
+        }
+    })
+}
+
+/// A blade's inventory icon, 56 by 24: a steel blade `length` pixels long
+/// and `width` wide on a brown haft.
+fn blade_icon(length: i32, width: i32) -> Vec<u8> {
+    let (steel, edge, haft) = (rgb(5, 5, 2), rgb(3, 3, 2), rgb(4, 2, 0));
+    picture(56, 24, |x, y| {
+        let (x, y) = (x as i32, y as i32);
+        let middle = 12;
+        let blade_start = 54 - length;
+        if x >= blade_start && x < 54 && (y - middle).abs() <= width / 2 + (54 - x) / 8 {
+            if (y - middle).abs() == width / 2 {
+                edge
+            } else {
+                steel
+            }
+        } else if (4..blade_start).contains(&x) && (y - middle).abs() <= 1 {
+            haft
+        } else {
+            0
+        }
+    })
+}
+
 /// A green barrel with metal bands, 18 by 26.
 fn barrel() -> Vec<u8> {
     let (body, band, shade) = (rgb(1, 4, 0), rgb(3, 4, 1), rgb(0, 3, 0));
@@ -161,11 +198,49 @@ pub fn write_showcase(root: &std::path::Path) {
         b"plaza.frm\nblank.frm\nroof.frm\nsand.frm\n".to_vec(),
     );
     art("art/walls/sample.frm", wall());
-    for animation in ["aa", "ak", "al"] {
+    // Every unarmed animation (SPEC-007's suffixes: stand, walk, the
+    // actions, punch and kick, hits and dodges, falls and deaths) as the
+    // standing figure, so attacks and hits find their art.
+    let mut suffixes: Vec<String> = (b'a'..=b't').map(|c| format!("a{}", c as char)).collect();
+    suffixes.extend((b'a'..=b'p').map(|c| format!("b{}", c as char)));
+    suffixes.extend((b'a'..=b'p').map(|c| format!("r{}", c as char)));
+    suffixes.extend(["ch", "cj", "na"].map(String::from));
+    for animation in suffixes {
         art(&format!("art/critters/sample{animation}.frm"), figure());
     }
     art("art/items/sample.frm", crate_art());
     art("art/scenery/sample.frm", barrel());
+    // Inventory icons (`art/inven/`), the box's prototype pointed at the
+    // crate's, and two weapons the inventories can hold: a knife and a
+    // spear (`proto/items` rows 2 and 3, animation codes 1 and 4).
+    std::fs::create_dir_all(root.join("art/inven")).unwrap();
+    art(
+        "art/inven/inven.lst",
+        b"crate.frm\nknife.frm\nspear.frm\n".to_vec(),
+    );
+    art("art/inven/crate.frm", crate_icon());
+    art("art/inven/knife.frm", blade_icon(14, 4));
+    art("art/inven/spear.frm", blade_icon(28, 2));
+    let mut container = std::fs::read(root.join("proto/items/synthetic.pro")).unwrap();
+    world::word(&mut container, 52, 0x0700_0000);
+    art("proto/items/synthetic.pro", container);
+    for (row, name, code, text) in [(2, "knife", 1, 200), (3, "spear", 4, 300)] {
+        let mut weapon = world::prototype(0, 3);
+        world::word(&mut weapon, 0, row);
+        world::word(&mut weapon, 4, text);
+        world::word(&mut weapon, 52, 0x0700_0000 + row - 1);
+        world::word(&mut weapon, 57, code);
+        art(&format!("proto/items/{name}.pro"), weapon);
+    }
+    art(
+        "proto/items/items.lst",
+        b"synthetic.pro\nknife.pro\nspear.pro\n".to_vec(),
+    );
+    let messages = root.join("text/english/game/pro_item.msg");
+    let mut text = std::fs::read_to_string(&messages).unwrap();
+    text.push_str("{200}{}{Knife}\n{201}{}{A plain knife.}\n");
+    text.push_str("{300}{}{Spear}\n{301}{}{A long spear.}\n");
+    std::fs::write(messages, text).unwrap();
     // The camera demo's map without a script, renamed, its open ground
     // (floor 1) sand. Its tile words follow the 236-byte header (no
     // variables, elevation 0 only).
@@ -257,12 +332,21 @@ impl Canvas {
 fn glyph(c: char) -> [u8; 5] {
     match c {
         'A' => [2, 5, 7, 5, 5],
+        'B' => [6, 5, 6, 5, 6],
         'C' => [3, 4, 4, 4, 3],
+        'E' => [7, 4, 6, 4, 7],
         'H' => [5, 5, 7, 5, 5],
         'I' => [7, 2, 2, 2, 7],
+        'K' => [5, 5, 6, 5, 5],
+        'L' => [4, 4, 4, 4, 7],
         'M' => [5, 7, 7, 5, 5],
         'N' => [6, 5, 5, 5, 5],
+        'O' => [2, 5, 5, 5, 2],
         'P' => [6, 5, 6, 4, 4],
+        'R' => [6, 5, 6, 5, 5],
+        'S' => [3, 4, 2, 1, 6],
+        'T' => [7, 2, 2, 2, 2],
+        'U' => [5, 5, 5, 5, 7],
         'V' => [5, 5, 5, 5, 2],
         _ => [0; 5],
     }
@@ -420,19 +504,22 @@ fn numbers() -> Vec<u8> {
     art.frm()
 }
 
-/// The interface bar's art (SPEC-014 §3.19-3.22) over a corpus
-/// [`state::write_corpus`] wrote: `iface.frm`, the counters'
-/// `numbers.frm` (replacing the Pip-Boy fixture's flat one with digits),
-/// and the up and down art of the inventory, options, Skilldex,
-/// swap-hands, map, character and Pip-Boy buttons and the item slot, all
-/// drawn here. `cargo xtask fixtures` and `capture-gallery` add it; the
-/// tests' corpus keeps its blank bar, which the recorded Vanilla replay
-/// digests cover.
+/// The interface's art over a corpus [`state::write_corpus`] wrote, all
+/// drawn here: the bar (SPEC-014 §3.19-3.25: `iface.frm`, its buttons, the
+/// counters' `numbers.frm` with digits in place of the Pip-Boy fixture's
+/// flat one, the AP pips and the combat panel), the cursors and the action
+/// menu's icons (§3.26-3.28), the loot window and its arrows (SPEC-013
+/// §3.16), and `font1.aaf` (the synthetic preview font) for the interface's
+/// text. `cargo xtask fixtures` and `capture-gallery` add it; the tests'
+/// corpus keeps its blank bar, which the recorded Vanilla replay digests
+/// cover.
 pub fn write_hud(root: &std::path::Path) {
     let dir = root.join("art/intrface");
     std::fs::create_dir_all(&dir).unwrap();
     let art = |name: &str, bytes: Vec<u8>| std::fs::write(dir.join(name), bytes).unwrap();
     art("iface.frm", iface().frm());
+    // The interface's text font (101: the monitor, the to-hit text).
+    std::fs::write(root.join("font1.aaf"), state::preview_aaf()).unwrap();
     art("numbers.frm", numbers());
     for ((up, down), [up_art, down_art]) in [
         (("invbutup.frm", "invbutdn.frm"), button(32, 21, "INV")),
@@ -453,4 +540,309 @@ pub fn write_hud(root: &std::path::Path) {
         art(down, down_art);
     }
     art("saturbup.frm", button(188, 67, "")[1].clone());
+    // The pointers (SPEC-014 §3.26-3.27): the screen arrow, the in-world
+    // arrow, crosshair, movement hex and use crosshair, and the action
+    // pick art.
+    // A cursor's hotspot is the frame's bottom middle less its shift
+    // (SPEC-001's per-direction shift), so each art sets its own: the
+    // arrows' tips, the crosshairs' centers, the hex outline on its cell.
+    art("stdarrow.frm", shifted(arrow(18), [9, 17]));
+    art("actarrow.frm", shifted(arrow(18), [9, 17]));
+    art("actpick.frm", shifted(arrow(18), [9, 17]));
+    art("actarrom.frm", shifted(arrow(18), [9, 17]));
+    art(
+        "acrshair.frm",
+        shifted(crosshair(21, (6 << 5) | (1 << 2)), [0, 10]),
+    );
+    art(
+        "crsshair.frm",
+        shifted(crosshair(21, (6 << 5) | (1 << 2)), [0, 10]),
+    );
+    art("crossuse.frm", shifted(crosshair(21, AMBER), [0, 10]));
+    art(
+        "acttohit.frm",
+        shifted(crosshair(21, (6 << 5) | (1 << 2)), [0, 10]),
+    );
+    art("msef003.frm", shifted(hex_outline(), [0, 7]));
+    // The AP pips (SPEC-014 §3.22): 8 by 5, nine pixels apart.
+    art("hlgrn.frm", pip((1 << 5) | (6 << 2)));
+    art("hlred.frm", pip(6 << 5));
+    // The combat panel (§3.25): `endanim.frm`'s five frames slide its
+    // shutter open, the lights sit over it, and the End Turn and End
+    // Combat buttons go in it.
+    art("endanim.frm", panel_frames());
+    art("endltgrn.frm", light((1 << 5) | (7 << 2)));
+    art("endltred.frm", light(7 << 5));
+    for ((up, down), label) in [
+        (("endturnu.frm", "endturnd.frm"), "TURN"),
+        (("endcmbtu.frm", "endcmbtd.frm"), "CMBT"),
+    ] {
+        let [up_art, down_art] = button(38, 22, label);
+        art(up, up_art);
+        art(down, down_art);
+    }
+    // The loot window (SPEC-013 §3.16, 537 by 376) and its scroll and
+    // body-cycling arrows.
+    art("loot.frm", loot_window().frm());
+    for ((up, down), direction) in [
+        (("invupout.frm", "invupin.frm"), Arrow::Up),
+        (("invdnout.frm", "invdnin.frm"), Arrow::Down),
+    ] {
+        let [up_art, down_art] = arrow_button(22, 23, direction);
+        art(up, up_art);
+        art(down, down_art);
+    }
+    for ((up, down), direction) in [
+        (("slu.frm", "sld.frm"), Arrow::Left),
+        (("sru.frm", "srd.frm"), Arrow::Right),
+    ] {
+        let [up_art, down_art] = arrow_button(20, 18, direction);
+        art(up, up_art);
+        art(down, down_art);
+    }
+    // The watch the combat lock shows (one frame stands for each).
+    for name in ["wait.frm", "wait2.frm", "watch.frm"] {
+        art(name, shifted(watch(), [0, 7]));
+    }
+    // The action menu's icons (§3.28), 40 by 40, normal and highlighted.
+    for (stem, label) in [
+        ("useget", "USE"),
+        ("look", "LOOK"),
+        ("inven", "INV"),
+        ("skill", "SKIL"),
+        ("rotate", "ROT"),
+        ("talk", "TALK"),
+        ("cancel", "CANC"),
+    ] {
+        let [normal, lit] = icon(label);
+        art(&format!("{stem}n.frm"), normal);
+        art(&format!("{stem}h.frm"), lit);
+    }
+}
+
+/// `frm` with its first direction's shift set to `[x, y]` (SPEC-001: the
+/// six x shifts at 10, the six y shifts at 22, big-endian words).
+fn shifted(mut frm: Vec<u8>, [x, y]: [i16; 2]) -> Vec<u8> {
+    frm[10..12].copy_from_slice(&x.to_be_bytes());
+    frm[22..24].copy_from_slice(&y.to_be_bytes());
+    frm
+}
+
+/// An FRM of several frames, each `width` by `height` from `frames`
+/// (SPEC-001: one direction, the frames one after another).
+fn sequence(width: u16, height: u16, frames: &[Vec<u8>]) -> Vec<u8> {
+    let mut bytes = world::frm(width, height, 0);
+    bytes.truncate(62);
+    bytes[8..10].copy_from_slice(&(frames.len() as u16).to_be_bytes());
+    let each = 12 + u32::from(width) * u32::from(height);
+    bytes[58..62].copy_from_slice(&(each * frames.len() as u32).to_be_bytes());
+    for pixels in frames {
+        let frame = world::frm(width, height, 0);
+        let header = frame.len() - pixels.len();
+        bytes.extend_from_slice(&frame[62..header]);
+        bytes.extend_from_slice(pixels);
+    }
+    bytes
+}
+
+/// The loot window, 537 by 376: a riveted steel panel with the two
+/// six-slot columns' wells (the looter's at x 44, the target's at x 422),
+/// the two portraits' wells (176 and 297, y 37), and the Done button's
+/// well under them, at SPEC-013's places.
+fn loot_window() -> Canvas {
+    let mut window = Canvas::new(537, 376, STEEL);
+    for y in 0..376 {
+        for x in 0..537 {
+            if noise(x as u32 / 24, y as u32, 13).is_multiple_of(13) {
+                window.set(x, y, STEEL_LIGHT);
+            }
+        }
+    }
+    window.bevel([0, 0, 537, 376], STEEL_SHINE, STEEL_SHADOW);
+    window.bevel([1, 1, 535, 374], STEEL_LIGHT, STEEL_DARK);
+    for (x, y) in [(8, 8), (528, 8), (8, 367), (528, 367)] {
+        window.rivet(x, y);
+    }
+    for x in [40, 418] {
+        window.well([x, 31, 72, 296], RECESS);
+        for row in 1..6 {
+            window.fill([x + 2, 31 + 48 * row, 68, 1], STEEL_DARK);
+        }
+    }
+    for x in [172, 293] {
+        window.well([x, 33, 68, 108], 0);
+    }
+    window.well([126, 37, 26, 50], RECESS);
+    window.well([377, 37, 26, 50], RECESS);
+    window.well([432, 158, 48, 26], RECESS);
+    window.well([284, 324, 23, 24], RECESS);
+    window
+}
+
+/// Which way an arrow button points.
+#[derive(Clone, Copy)]
+enum Arrow {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// An arrow button's up and down art: a steel face with an amber triangle
+/// pointing `direction`; pressed, darker with the bevel inverted.
+fn arrow_button(width: u32, height: u32, direction: Arrow) -> [Vec<u8>; 2] {
+    [false, true].map(|down| {
+        let face = if down { STEEL_DARK } else { STEEL_LIGHT };
+        let mut art = Canvas::new(width, height, face);
+        let (w, h) = (width as i32, height as i32);
+        if down {
+            art.bevel([0, 0, w, h], STEEL_SHADOW, STEEL);
+        } else {
+            art.bevel([0, 0, w, h], STEEL_SHINE, STEEL_SHADOW);
+        }
+        let (cx, cy) = (w / 2, h / 2 + i32::from(down));
+        for step in 0..5 {
+            let (along, across) = (step - 2, step);
+            for spread in -across..=across {
+                let (x, y) = match direction {
+                    Arrow::Up => (cx + spread, cy + along),
+                    Arrow::Down => (cx + spread, cy - along),
+                    Arrow::Left => (cx + along, cy + spread),
+                    Arrow::Right => (cx - along, cy + spread),
+                };
+                art.set(x, y, AMBER);
+            }
+        }
+        art.frm()
+    })
+}
+
+/// An AP pip in `ink`, 8 by 5, its corners cut.
+fn pip(ink: u8) -> Vec<u8> {
+    picture(8, 5, |x, y| {
+        let corner = (x == 0 || x == 7) && (y == 0 || y == 4);
+        if corner { 0 } else { ink }
+    })
+}
+
+/// The combat panel's five frames, 57 by 58: a steel shutter sliding up to
+/// show the dark well the buttons sit in.
+fn panel_frames() -> Vec<u8> {
+    let frames: Vec<Vec<u8>> = (0..5)
+        .map(|frame| {
+            let mut art = Canvas::new(57, 58, RECESS);
+            let shutter = 58 - 58 * frame / 4;
+            art.fill([0, 0, 57, shutter], STEEL_LIGHT);
+            for y in (3..shutter).step_by(6) {
+                art.fill([2, y, 53, 1], STEEL_SHADOW);
+            }
+            art.bevel([0, 0, 57, 58], STEEL_SHADOW, STEEL_LIGHT);
+            art.pixels
+        })
+        .collect();
+    sequence(57, 58, &frames)
+}
+
+/// The combat panel's light, a lamp at its top in `ink` (57 by 58, the rest
+/// transparent).
+fn light(ink: u8) -> Vec<u8> {
+    let mut art = Canvas::new(57, 58, 0);
+    for y in 0..5_i32 {
+        for x in 0..9_i32 {
+            if (2 * x - 8).pow(2) + (2 * y - 4).pow(2) <= 20 {
+                art.set(24 + x, 1 + y, ink);
+            }
+        }
+    }
+    art.frm()
+}
+
+/// A small pocket watch, 12 by 15.
+fn watch() -> Vec<u8> {
+    let (case, face, hand) = (AMBER, (6 << 5) | (6 << 2) | 3, STEEL_SHADOW);
+    let mut art = Canvas::new(12, 15, 0);
+    art.fill([5, 0, 2, 2], case);
+    for y in 2..15_i32 {
+        for x in 0..12_i32 {
+            let d2 = (2 * x - 11).pow(2) + (2 * y - 17).pow(2);
+            if d2 <= 121 {
+                art.set(x, y, if d2 > 81 { case } else { face });
+            }
+        }
+    }
+    art.fill([5, 5, 1, 4], hand);
+    art.fill([6, 8, 2, 1], hand);
+    art.frm()
+}
+
+/// An arrow pointer `size` pixels high, its tip at the top-left (white
+/// with a black edge; outside it transparent).
+fn arrow(size: i32) -> Vec<u8> {
+    let (fill, edge) = ((6 << 5) | (6 << 2) | 3, (1 << 5) | (1 << 2) | 1);
+    let mut art = Canvas::new(size as u32, size as u32, 0);
+    for y in 0..size {
+        let width = (y * 2 / 3).min(size - 1) + 1;
+        for x in 0..width {
+            let inside = x > 0 && x < width - 1 && y < size - 1;
+            art.set(x, y, if inside { fill } else { edge });
+        }
+    }
+    art.frm()
+}
+
+/// A ring with cross hairs, `size` pixels across, in `ink`.
+fn crosshair(size: i32, ink: u8) -> Vec<u8> {
+    let mut art = Canvas::new(size as u32, size as u32, 0);
+    let c = size / 2;
+    for y in 0..size {
+        for x in 0..size {
+            let d2 = (x - c).pow(2) + (y - c).pow(2);
+            let ring = ((c - 2).pow(2)..=c.pow(2)).contains(&d2);
+            let hair = (x == c || y == c) && (d2 <= (c - 4).pow(2)) && d2 > 4;
+            if ring || hair {
+                art.set(x, y, ink);
+            }
+        }
+    }
+    art.frm()
+}
+
+/// The movement cursor: a hex cell's outline (32 by 16) in green.
+fn hex_outline() -> Vec<u8> {
+    let ink = (1 << 5) | (6 << 2);
+    let mut art = Canvas::new(32, 16, 0);
+    for y in 0..16 {
+        let half = if y < 4 {
+            4 + 4 * y
+        } else if y > 11 {
+            4 + 4 * (15 - y)
+        } else {
+            16
+        };
+        let half = half.min(16);
+        let (left, right) = (16 - half, 15 + half);
+        art.set(left, y, ink);
+        art.set(right.min(31), y, ink);
+        if y == 0 || y == 15 {
+            art.fill([left, y, right - left + 1, 1], ink);
+        }
+    }
+    art.frm()
+}
+
+/// An action-menu icon, 40 by 40: a bevelled steel tile with `label`, and
+/// highlighted, amber with the label in black.
+fn icon(label: &str) -> [Vec<u8>; 2] {
+    [false, true].map(|lit| {
+        let (face, ink) = if lit {
+            (AMBER, STEEL_SHADOW)
+        } else {
+            (STEEL, AMBER)
+        };
+        let mut art = Canvas::new(40, 40, face);
+        art.bevel([0, 0, 40, 40], STEEL_SHINE, STEEL_SHADOW);
+        art.bevel([1, 1, 38, 38], STEEL_LIGHT, STEEL_DARK);
+        art.text((40 - Canvas::width(label)) / 2, 17, label, ink);
+        art.frm()
+    })
 }

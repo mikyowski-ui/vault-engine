@@ -60,9 +60,10 @@ jobs:
           exe=""
           if [ "$RUNNER_OS" = Windows ]; then exe=".exe"; fi
           stage="dist/vault-engine"
-          mkdir -p "$stage/mods" dist/out
+          mkdir -p "$stage/mods" "$stage/docs" dist/out
           cp "target/${{ matrix.target }}/release/vault-platform$exe" "$stage/vault-engine$exe"
           cp README.md LICENSE PROVENANCE.md "$stage/"
+          cp docs/REFERENCE.md "$stage/docs/"
           cp -R mods/tactical-camera "$stage/mods/"
           case "${{ matrix.archive }}" in
             *.zip) (cd dist && 7z a -tzip "out/${{ matrix.archive }}" vault-engine) ;;
