@@ -966,6 +966,7 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
         Widget::SmoothCamera,
         Widget::RoofPeek,
         Widget::UiScale,
+        Widget::GameSpeed,
     ];
     // Vanilla: hidden, out of the focus order, and the tab draws as before.
     launcher.focus = Widget::Preset;
@@ -983,8 +984,8 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
         .iter()
         .position(|widget| *widget == Widget::Debug)
         .unwrap();
-    assert_eq!(&order[debug + 1..debug + 6], &enhanced);
-    assert_eq!(order[debug + 6], Widget::Save);
+    assert_eq!(&order[debug + 1..debug + 7], &enhanced);
+    assert_eq!(order[debug + 7], Widget::Save);
     launcher.focus = Widget::Debug;
     for widget in enhanced {
         key(&mut launcher, KeyCode::Tab);
@@ -1048,6 +1049,26 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
     );
     key(&mut launcher, KeyCode::ArrowLeft);
     assert_eq!(launcher.config.ui_scale, Some(UiScale::Scale(3.0)));
+    // The game speed cycles 1.0, 1.5, 2.0 both ways, as Alt+F does.
+    use crate::enhanced::GameSpeed;
+    launcher.focus = Widget::GameSpeed;
+    assert_eq!(launcher.config.game_speed(), GameSpeed::Normal);
+    let mut speeds = Vec::new();
+    for _ in 0..3 {
+        key(&mut launcher, KeyCode::ArrowRight);
+        speeds.push(launcher.config.game_speed.unwrap());
+    }
+    assert_eq!(
+        speeds,
+        [GameSpeed::Fast, GameSpeed::Faster, GameSpeed::Normal]
+    );
+    key(&mut launcher, KeyCode::ArrowLeft);
+    assert_eq!(launcher.config.game_speed, Some(GameSpeed::Faster));
+    key(&mut launcher, KeyCode::Enter);
+    assert_eq!(launcher.config.game_speed, Some(GameSpeed::Normal));
+    let rect = launcher.rect(Widget::GameSpeed).unwrap();
+    launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
+    assert_eq!(launcher.config.game_speed, Some(GameSpeed::Fast));
     // A click on a row steps it too.
     let rect = launcher.rect(Widget::Zoom).unwrap();
     launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
@@ -1062,10 +1083,15 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
         "smooth_camera = false\n",
         "roof_peek = \"hidden\"\n",
         "ui_scale = 3.0\n",
+        "game_speed = 1.5\n",
     ] {
         assert!(text.contains(line), "{line}: {text}");
     }
     let saved = Config::parse(&text).unwrap();
+    assert_eq!(saved.game_speed(), GameSpeed::Fast);
+    // A launcher from the saved file shows it again.
+    let reloaded = Launcher::new(setup(dir, saved.clone()));
+    assert_eq!(reloaded.config.game_speed(), GameSpeed::Fast);
     assert_eq!(
         saved.enhanced_settings(),
         crate::enhanced::EnhancedSettings {
@@ -1222,6 +1248,7 @@ fn the_touch_ui_row_follows_fullscreen_toggles_and_saves() {
         Widget::SmoothCamera,
         Widget::RoofPeek,
         Widget::UiScale,
+        Widget::GameSpeed,
     ]
     .into_iter()
     .map(|widget| launcher.rect(widget).unwrap())

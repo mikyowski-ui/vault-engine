@@ -148,6 +148,9 @@ pub struct Game {
     pub enhanced: Option<crate::enhanced::EnhancedSettings>,
     /// The touch UI's pill bar shows in every world (`--touch-ui`).
     pub touch_ui: bool,
+    /// The `enhanced` preset's game speed every world runs at (Alt+F
+    /// changes it through `AssetPreview::set_game_speed`).
+    pub game_speed: crate::enhanced::GameSpeed,
     /// Where each world's F9 overlay exports the current setup as a mod.
     pub mod_export: Option<PathBuf>,
     sounds: crate::map_preview::SoundBank,
@@ -265,6 +268,7 @@ impl Game {
             preset: vault_core::EnginePreset::Vanilla,
             enhanced: None,
             touch_ui: false,
+            game_speed: Default::default(),
             mod_export: None,
             sounds: Default::default(),
             finished: false,
@@ -614,9 +618,17 @@ impl Game {
         world.roof_key = false;
         world.set_enhanced(self.enhanced);
         world.set_touch_ui(self.touch_ui);
+        world.init_game_speed(self.game_speed);
         world.mod_export = self.mod_export.clone();
         world.debug_session = self.debug_keys;
         Ok(world)
+    }
+    /// The game speed for this world and the next ones.
+    pub fn set_game_speed(&mut self, speed: crate::enhanced::GameSpeed) {
+        self.game_speed = speed;
+        if let Some(world) = self.world() {
+            world.set_game_speed(speed);
+        }
     }
     fn premade(&self, index: usize) -> CharacterSheet {
         self.assets

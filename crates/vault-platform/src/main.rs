@@ -45,7 +45,7 @@ type AppResult<T> = Result<T, AppError>;
 #[derive(Parser, Clone)]
 #[command(
     about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives",
-    long_about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives.\n\nWithout arguments the game starts from the data named in vault-engine.toml (beside the executable, else in the working directory). Without that file, MASTER.DAT and CRITTER.DAT are looked for in the working directory, beside the executable, in ../local-corpus and in the usual Steam and GOG install directories, and what is found is saved to vault-engine.toml. Command-line flags always win over the file.\n\nF11 or Alt+Enter toggles borderless fullscreen; Alt+S toggles aspect-fit and integer scaling; with the enhanced preset, Alt+V toggles the fixed and unlocked viewports."
+    long_about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives.\n\nWithout arguments the game starts from the data named in vault-engine.toml (beside the executable, else in the working directory). Without that file, MASTER.DAT and CRITTER.DAT are looked for in the working directory, beside the executable, in ../local-corpus and in the usual Steam and GOG install directories, and what is found is saved to vault-engine.toml. Command-line flags always win over the file.\n\nF11 or Alt+Enter toggles borderless fullscreen; Alt+S toggles aspect-fit and integer scaling; with the enhanced preset, Alt+V toggles the fixed and unlocked viewports and Alt+F cycles the game speed (1.0x, 1.5x, 2.0x)."
 )]
 struct Args {
     /// Present one frame and exit successfully (requires a desktop and GPU backend).
@@ -261,6 +261,16 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
     }
 }
 
+/// The game speed a launch runs at: the settings' `game_speed` under the
+/// enhanced preset, none under Vanilla.
+fn launch_game_speed(
+    launch: &Launch,
+    config: Option<&config::Config>,
+) -> Option<enhanced::GameSpeed> {
+    (launch.preset == config::Preset::Enhanced)
+        .then(|| config.map_or_else(Default::default, config::Config::game_speed))
+}
+
 /// The settings with the enabled mod layers' `vault-mod.toml` `[enhanced]`
 /// settings over them ([`mods::with_mods`]), which [`resolve_launch`]
 /// then puts under the command line's flags. `None` for a replay, which
@@ -469,6 +479,15 @@ enum ShellHotkey {
     /// Alt+V, with the enhanced preset only: the fixed or unlocked
     /// viewport.
     Viewport,
+    /// Alt+F, with the enhanced preset only: the next game speed.
+    GameSpeed,
+}
+
+/// The `enhanced` preset's shell hotkey `key` is with Alt held or not:
+/// Alt+F cycles the game speed (`qol`: an enhanced-preset session). F is
+/// no game key with Alt, and under Vanilla it stays the game's.
+fn qol_hotkey(key: KeyCode, alt: bool, qol: bool) -> Option<ShellHotkey> {
+    (key == KeyCode::KeyF && alt && qol).then_some(ShellHotkey::GameSpeed)
 }
 
 /// The shell hotkey `key` is with Alt held or not, in an `enhanced`
@@ -588,6 +607,9 @@ struct Shell {
     touch_ui: bool,
     /// The touch gestures, which become pointer, button and wheel input.
     touch: touch::TouchGestures,
+    /// The `enhanced` preset's game speed (`None` under Vanilla): logged
+    /// when the game starts at another speed than 1.0, and on every Alt+F.
+    game_speed: Option<enhanced::GameSpeed>,
 }
 
 /// An enhanced frame, its layout and its side panels tiled to that layout.
@@ -723,6 +745,30 @@ impl Shell {
     fn log_touch_ui(&mut self, event_loop: &ActiveEventLoop) {
         if self.touch_ui {
             self.log(event_loop, InputCommand::TouchUi { enabled: true });
+        }
+    }
+    /// The session's game speed, when it is not 1.0: logged after the
+    /// other session records, then applied, as a replay applies it; 1.0
+    /// (and Vanilla) logs nothing here.
+    fn start_game_speed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(speed) = self
+            .game_speed
+            .filter(|speed| *speed != enhanced::GameSpeed::Normal)
+        {
+            self.apply_game_speed(event_loop, speed);
+        }
+    }
+    /// Log the game speed, then give it to the preview.
+    fn apply_game_speed(&mut self, event_loop: &ActiveEventLoop, speed: enhanced::GameSpeed) {
+        self.game_speed = Some(speed);
+        self.log(
+            event_loop,
+            InputCommand::GameSpeed {
+                speed: speed.factor(),
+            },
+        );
+        if let Some(preview) = &mut self.preview {
+            preview.set_game_speed(speed);
         }
     }
     /// The F9 overlay's committed commands: each is logged, then applied,
@@ -1099,7 +1145,9 @@ impl Shell {
         if repeat {
             return self.shell_keys.contains(&key);
         }
-        let Some(hotkey) = shell_hotkey(key, self.alt, self.enhanced.is_some()) else {
+        let Some(hotkey) = shell_hotkey(key, self.alt, self.enhanced.is_some())
+            .or_else(|| qol_hotkey(key, self.alt, self.game_speed.is_some()))
+        else {
             return false;
         };
         if !self.shell_keys.contains(&key) {
@@ -1123,6 +1171,12 @@ impl Shell {
                 self.log_scaling(event_loop);
             }
             ShellHotkey::Viewport => self.toggle_viewport(event_loop, window),
+            ShellHotkey::GameSpeed => {
+                let speed = self.game_speed.unwrap_or_default().next();
+                tracing::info!(speed = speed.label(), "game speed changed");
+                self.apply_game_speed(event_loop, speed);
+                self.refresh_preview(event_loop, window);
+            }
         }
         self.viewport_changed(event_loop, window);
         true
@@ -1539,6 +1593,7 @@ impl Shell {
         self.scaling = launch.scaling;
         self.enhanced = launch.enhanced;
         self.touch_ui = launch.touch_ui;
+        self.game_speed = launch_game_speed(&launch, Some(&config));
         if let Some(renderer) = &mut self.renderer {
             renderer.set_scaling(self.scaling);
         }
@@ -1557,6 +1612,7 @@ impl Shell {
         self.log_scaling(event_loop);
         self.log_enhanced(event_loop);
         self.log_touch_ui(event_loop);
+        self.start_game_speed(event_loop);
         self.refresh_preview(event_loop, window);
     }
 }
@@ -1637,6 +1693,7 @@ impl ApplicationHandler for Shell {
                 self.log_scaling(event_loop);
                 self.log_enhanced(event_loop);
                 self.log_touch_ui(event_loop);
+                self.start_game_speed(event_loop);
             }
             Err(error) => {
                 self.fail(event_loop, error);
@@ -1988,6 +2045,7 @@ fn run(mut args: Args) -> AppResult<()> {
         shell.enhanced = launch.enhanced;
         shell.fullscreen = launch.fullscreen;
         shell.touch_ui = launch.touch_ui;
+        shell.game_speed = launch_game_speed(&launch, config.as_ref());
         shell._audio = audio;
         shell.display = preview
             .as_ref()
@@ -2283,6 +2341,53 @@ mod tests {
         assert_eq!(initial_window_size(Some([1366, 768])), [640, 480]);
         assert_eq!(initial_window_size(Some([1279, 1024])), [640, 480]);
         assert_eq!(initial_window_size(Some([800, 400])), [640, 480]);
+    }
+
+    #[test]
+    fn alt_f_cycles_the_game_speed_under_the_enhanced_preset_only() {
+        use enhanced::GameSpeed;
+        assert_eq!(
+            qol_hotkey(KeyCode::KeyF, true, true),
+            Some(ShellHotkey::GameSpeed)
+        );
+        // Plain F, and Alt+F under Vanilla, stay the game's.
+        assert_eq!(qol_hotkey(KeyCode::KeyF, false, true), None);
+        assert_eq!(qol_hotkey(KeyCode::KeyF, true, false), None);
+        // Alt+H is the world's own (the overlay), never the shell's.
+        assert_eq!(qol_hotkey(KeyCode::KeyH, true, true), None);
+        assert_eq!(shell_hotkey(KeyCode::KeyH, true, true), None);
+        // The cycle: 1.0, 1.5, 2.0, then 1.0 again.
+        let mut speed = GameSpeed::Normal;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            speed = speed.next();
+            seen.push(speed.label());
+        }
+        assert_eq!(seen, ["1.5x", "2.0x", "1.0x"]);
+    }
+
+    #[test]
+    fn the_settings_game_speed_runs_under_the_enhanced_preset_only() {
+        use enhanced::GameSpeed;
+        let settings = config::Config {
+            game_speed: Some(GameSpeed::Faster),
+            ..installed()
+        };
+        let mut args = parse(&["--preset", "enhanced"]);
+        let launch = resolve_launch(&mut args, Some(&settings));
+        assert_eq!(
+            launch_game_speed(&launch, Some(&settings)),
+            Some(GameSpeed::Faster)
+        );
+        // Without the key, 1.0x.
+        assert_eq!(
+            launch_game_speed(&launch, Some(&installed())),
+            Some(GameSpeed::Normal)
+        );
+        // Vanilla has none (Alt+F is off and nothing is logged).
+        let mut args = parse(&["--preset", "vanilla"]);
+        let launch = resolve_launch(&mut args, Some(&settings));
+        assert_eq!(launch_game_speed(&launch, Some(&settings)), None);
     }
 
     #[test]

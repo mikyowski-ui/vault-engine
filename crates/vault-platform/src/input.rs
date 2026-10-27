@@ -90,6 +90,13 @@ pub enum InputCommand {
     TouchUi {
         enabled: bool,
     },
+    /// The `enhanced` preset's game speed (1.0, 1.5 or 2.0): logged after
+    /// the surface, scaling, enhanced and touch UI records when a session
+    /// starts at another speed than 1.0, and on every Alt+F. A replay
+    /// applies it as the desktop did; a log without one keeps 1.0.
+    GameSpeed {
+        speed: f32,
+    },
 }
 
 /// The logged form of [`EnhancedSettings`], named as in `vault-engine.toml`.
@@ -778,6 +785,24 @@ mod tests {
         );
         let logged: LoggedCommand = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(logged.command, command);
+    }
+
+    #[test]
+    fn game_speed_records_round_trip() {
+        let mut output = Vec::new();
+        let mut ids = SequenceIds::default();
+        let command = InputCommand::GameSpeed { speed: 1.5 };
+        write_command(&mut output, &mut ids, &command).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(
+            text,
+            "{\"command_id\":1,\"kind\":\"game_speed\",\"speed\":1.5}\n"
+        );
+        let logged: LoggedCommand = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(logged.command, command);
+        let whole: LoggedCommand =
+            serde_json::from_str(r#"{"command_id":2,"kind":"game_speed","speed":2}"#).unwrap();
+        assert_eq!(whole.command, InputCommand::GameSpeed { speed: 2.0 });
     }
 
     #[test]

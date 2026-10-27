@@ -60,6 +60,11 @@ was used.</sub></p>
     click to open the companion's gear.
   - **WIELD** to cycle a companion's weapon, kept in sync with its art.
   - **Auto-opening of unlocked doors** on your route.
+  - **Game speed** 1.0x, 1.5x or 2.0x (**Alt+F**) for long walks and big
+    fights.
+  - A **combat tactical overlay** (**Alt+H**): HP bars over injured
+    critters and the to-hit chance beside the crosshair at once.
+  - **One-key quick save and load** (**F6**/**F7**) to a dedicated slot.
   - [Quality of life](#quality-of-life) has the details.
 - **Additive mods (`vault-mod.toml`).** A mod layer registers new
   `[[scripts]]` rows, `[[maps]]` and record `[[patches]]` without editing
@@ -242,9 +247,10 @@ the palette-resolved colours only in a thin band at each texel edge, so pixels
 stay crisp while scrolling. `integer` keeps whole-pixel scaling with a border.
 Pointer mapping, the cursor warp and replay all use the same integer-snapped
 viewport. **F11** or **Alt+Enter** toggles borderless fullscreen. The shell
-keeps these keys, and F10 stays the game's quit confirmation (SPEC-014
-§3.17). The window opens at 1280×960, or at the largest multiple of 640×480
-that fits a smaller monitor.
+keeps these keys (and, under `preset = "enhanced"`, **Alt+V** and
+**Alt+F**), and F10 stays the game's quit confirmation (SPEC-014 §3.17).
+The window opens at 1280×960, or at the largest multiple of 640×480 that
+fits a smaller monitor.
 
 With no arguments the game starts from the data named in `vault-engine.toml`,
 looked for beside the executable and then in the working directory. Keys:
@@ -254,7 +260,9 @@ looked for beside the executable and then in the working directory. Keys:
 (see [Touch UI](#touch-ui)), `debug` and `audio` (`false` keeps the audio
 device closed, as `--no-audio` does), plus the enhanced preset's
 `viewport_mode`, `default_zoom`, `smooth_camera`, `roof_peek` and
-`ui_scale` (see [Enhanced viewport & camera](#enhanced-viewport--camera)).
+`ui_scale` (see [Enhanced viewport & camera](#enhanced-viewport--camera))
+and `game_speed` (`1.0`, the default, `1.5` or `2.0`; see
+[Quality of life](#quality-of-life)).
 
 Under `fallout2` the data is read in Fallout 2's formats:
 - SPEC-015 archives, mounted as SPEC-018 §1 says: an optional
@@ -338,11 +346,12 @@ It has three tabs and a bottom bar:
 - **Display & audio**: scaling (`aspect_fit` or `integer`), fullscreen,
   the touch UI, preset (`vanilla` or `enhanced`), audio on or off, and the
   debug overlay.
-  With the enhanced preset selected, five more rows follow (hidden, and out
+  With the enhanced preset selected, six more rows follow (hidden, and out
   of the focus order, under Vanilla): the viewport, the default zoom (a
   stepper over 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5 and 3), smooth camera, the
-  roof peek mode and the interface scale (auto, 1, 1.5, 2, 2.5 or 3). Left
-  and Right step them back and forth; Save writes them.
+  roof peek mode, the interface scale (auto, 1, 1.5, 2, 2.5 or 3) and the
+  game speed (1.0x, 1.5x or 2.0x). Left and Right step them back and
+  forth; Save writes them.
 - **Mods**: the `load_order.toml` layers, lowest first, with their per-layer
   check (each layer is mounted on its own over an empty base) and the whole
   stack's check. Layers can be added (typed, browsed or dropped while the tab
@@ -455,6 +464,17 @@ draws the pill bar and its buttons take the logged presses:
 A log without it replays without the bar, as before. The navigation-only
 view's `enhanced` record carries `"navigation_only":true`. Other records
 leave the key out, so earlier logs read and write unchanged.
+
+An enhanced-preset session that starts at another speed than 1.0 logs a
+`game_speed` record after those, and every **Alt+F** logs one where it
+happened (Alt+F itself, a shell key, is not logged as a key). A replay
+applies each where it stands, so the world's clock follows the same steps;
+replay with `--preset enhanced`, as Vanilla worlds ignore the record. A log
+without one runs at 1.0x, as before:
+
+```json
+{"command_id":5,"kind":"game_speed","speed":1.5}
+```
 
 **Pill bar.** On the map screen a row of amber-and-black buttons, 60×40
 frame pixels and 6 apart, sits in the interface frame's top-right corner,
@@ -669,6 +689,50 @@ unchanged.
   (within talking distance), and clicking the mode cycles the distance.
   Out of combat only; otherwise the status line says so. No companion, no
   pills.
+- **Game speed.** `game_speed = 1.5` or `2.0` in `vault-engine.toml`, the
+  launcher's **Game speed** row, or **Alt+F** in play (a shell key, like
+  Alt+V: it cycles 1.0x, 1.5x, 2.0x and back, and the HUD names the new
+  speed) speeds up the world. The world runs on its own clock, which
+  advances by each frame's shell-clock delta times the speed, counted in
+  exact half milliseconds, so it stays a pure function of the logged frame
+  times. That clock times everything the world does: walking and running,
+  animations and attack shows, combat turns, scripts, the game clock and
+  floating texts. These keep the shell clock and their own pace: the
+  interface (the action menu's hold, hover rests, fades, counters, panel
+  animations, key repeat, the camera), movies, audio (no pitch change) and
+  world-map travel. An open conversation runs at 1.0x. At 1.0x the world's
+  clock is the shell clock itself, so every specification timing is
+  unchanged.
+- **Tactical overlay.** **Alt+H** toggles it; it starts on. In combat, on
+  the map:
+  - **HP bars.** A compact bar sits above each injured critter (current
+    HP below its maximum; the dead have none). It fills green above half,
+    amber above a quarter and red below, in the palette's own colours
+    (below the cycling range), with a black frame. It is drawn on the
+    world canvas in the widescreen view and on the frame in the fixed
+    view, and at zoom below 0.75 its pixels double so it stays readable.
+  - **To-hit.** The crosshair shows the to-hit chance beside it while it
+    is over a target, at once. The number is the one the Vanilla hover
+    shows after its 250 ms rest (the uncalled SPEC-007 chance, or a red
+    `X` when the attack is refused), and that text takes over when it
+    appears. No formula changes.
+
+  Alt+H is presentation only: it is logged and replayed as the key it is.
+- **Quick save and quick load.** **F6** saves at once and **F7** loads at
+  once, with no pick screen and no prompt, to a dedicated slot,
+  `SAVEGAME/QUICKSAV` beside `SLOT01`-`SLOT10`. The SPEC-014 §3.14 screen
+  lists only the ten numbered slots, so it never shows the quick slot, and
+  a quick save never touches a numbered one. The slot holds the same files
+  as any other (SPEC-008's `SAVE.DAT`, the saved maps and `AUTOMAP.SAV`,
+  in the running game's layout), written through the same staged save
+  path, with the `VAULTENG.TOML` sidecar as any enhanced save keeps it.
+  The HUD says `Quick Saved.` or `Quick Loaded.`, or in red `Quick save
+  failed.`, `Quick load failed.` or `No quick save to load.` Under Vanilla
+  F6 and F7 keep SPEC-014 §3.16 exactly: the first press opens the pick
+  screen, later ones save or load the picked slot.
+- **HUD messages.** The QoL messages above show in an amber plate near the
+  top of the interface frame for 2 s, then dissolve through a 4×4 ordered
+  dither over 0.5 s (shell time).
 
 Fallout 1 has no art for the new buttons and menu entries, so they are
 drawn by the engine in the palette's amber and black.
@@ -793,7 +857,7 @@ An unregistered copied script therefore runs only where a map or list row
 already names it.
 
 With `--record-inputs FILE` (`-` for stdout), keyboard, pointer, wheel,
-focus, modifier, resize, display-scaling, enhanced-presentation, touch-UI, vault-debug and quit observations are
+focus, modifier, resize, display-scaling, enhanced-presentation, touch-UI, game-speed, vault-debug and quit observations are
 written as JSON Lines; without it nothing is logged. Command IDs begin at 1 in
 each session:
 

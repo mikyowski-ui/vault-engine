@@ -129,7 +129,7 @@ impl MapPreview {
         )
     }
     /// The current view scaled to a 224-by-133 thumbnail.
-    fn capture_thumbnail(&mut self) -> Vec<u8> {
+    pub(crate) fn capture_thumbnail(&mut self) -> Vec<u8> {
         match self.map_view_image() {
             Ok(view) => saveload::thumbnail(view.pixels(), view.width() as usize),
             Err(_) => vec![0; saveload::THUMBNAIL[0] * saveload::THUMBNAIL[1]],
@@ -551,7 +551,11 @@ impl MapPreview {
         true
     }
     /// F6: the pick screen, or a direct save keeping the description.
+    /// Under the `enhanced` preset, a direct save to the quick-save slot.
     pub(crate) fn quick_save(&mut self) {
+        if self.qol() {
+            return self.enhanced_quick_save();
+        }
         match self.quick.f6() {
             Quick::Pick(mode) => self.open_save_screen(mode),
             _ => {
@@ -569,7 +573,11 @@ impl MapPreview {
         }
     }
     /// F7: the pick screen, or a direct load of the selected slot.
+    /// Under the `enhanced` preset, a direct load of the quick-save slot.
     pub(crate) fn quick_load(&mut self) {
+        if self.qol() {
+            return self.enhanced_quick_load();
+        }
         match self.quick.f7() {
             Quick::Pick(mode) => self.open_save_screen(mode),
             _ => match self

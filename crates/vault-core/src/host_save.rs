@@ -51,6 +51,15 @@ pub fn slot_directory(root: &Path, slot: u8) -> Result<PathBuf, WorldError> {
     Ok(root.join("SAVEGAME").join(format!("SLOT{slot:02}")))
 }
 
+/// The `enhanced` preset's quick-save slot: `SAVEGAME/QUICKSAV` below the
+/// save root, beside the ten numbered slots. The SPEC-014 §3.14 screen
+/// lists `SLOT01`-`SLOT10` only, so it never shows this slot and a quick
+/// save never touches a numbered one. It holds the same files as any slot
+/// (SPEC-008 §3.3), the enhanced sidecar included.
+pub fn quick_slot_directory(root: &Path) -> PathBuf {
+    root.join("SAVEGAME").join("QUICKSAV")
+}
+
 /// SPEC-014 §3.1 step 8 sets the clock to tick 264600, 07:21 on 5 December
 /// 2161, so tick 0 is midnight on 5 December 2161, day 338 of the fixed
 /// non-leap calendar (SPEC-005 §3.5); the SPEC-008 save fixture's tick
@@ -429,7 +438,12 @@ impl<A: WorldAssets> WorldHost<A> {
     /// into place (restoring the backups if that fails), and the backups are
     /// removed.
     pub fn save_game(&mut self, root: &Path, slot: u8, info: &SaveInfo) -> Result<(), WorldError> {
-        let dir = slot_directory(root, slot)?;
+        self.save_game_in(&slot_directory(root, slot)?, info)
+    }
+    /// [`Self::save_game`] into the slot directory `dir` (a numbered slot's,
+    /// or [`quick_slot_directory`]).
+    pub fn save_game_in(&mut self, dir: &Path, info: &SaveInfo) -> Result<(), WorldError> {
+        let dir = dir.to_path_buf();
         let save = self.build_save(info)?;
         let mut files = vec![(CENTRAL_FILE.to_string(), save.write()?)];
         for (name, bytes) in &self.world.persistence.maps {
@@ -519,7 +533,12 @@ impl<A: WorldAssets> WorldHost<A> {
     /// companions, and the automap byte length) before changing any state,
     /// then restore it.
     pub fn load_game(&mut self, root: &Path, slot: u8) -> Result<(), WorldError> {
-        let dir = slot_directory(root, slot)?;
+        self.load_game_from(&slot_directory(root, slot)?)
+    }
+    /// [`Self::load_game`] from the slot directory `dir` (a numbered
+    /// slot's, or [`quick_slot_directory`]).
+    pub fn load_game_from(&mut self, dir: &Path) -> Result<(), WorldError> {
+        let dir = dir.to_path_buf();
         let central_path = slot_file(&dir, CENTRAL_FILE)?;
         let central = fs::read(&central_path).map_err(|error| io(&central_path, error))?;
         // SPEC-018 §2.3, §7.2: slots belong to one game; a Fallout 2 game

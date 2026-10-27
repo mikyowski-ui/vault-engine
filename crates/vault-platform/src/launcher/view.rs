@@ -85,12 +85,13 @@ const DISPLAY: [Widget; 6] = [
     Widget::Debug,
 ];
 /// The enhanced preset's rows, below the others, shown with it only.
-const ENHANCED: [Widget; 5] = [
+const ENHANCED: [Widget; 6] = [
     Widget::Viewport,
     Widget::Zoom,
     Widget::SmoothCamera,
     Widget::RoofPeek,
     Widget::UiScale,
+    Widget::GameSpeed,
 ];
 fn enhanced_top(row: i32) -> i32 {
     254 + row * 24
@@ -406,7 +407,7 @@ fn draw_display(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, re
     }
     let note = if enhanced_shown(launcher) {
         draw_enhanced(image, launcher, look, rect);
-        384
+        400
     } else {
         260
     };
@@ -432,7 +433,8 @@ fn draw_enhanced(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, r
         None => "< auto >".to_owned(),
         Some(scale) => format!("< {scale}x >"),
     };
-    let rows: [(Widget, &str, String, &str); 5] = [
+    let speed = launcher.config.game_speed();
+    let rows: [(Widget, &str, String, &str); 6] = [
         (
             Widget::Viewport,
             "Viewport",
@@ -469,6 +471,12 @@ fn draw_enhanced(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, r
             "Interface scale",
             scale,
             "auto fits the interface to the height",
+        ),
+        (
+            Widget::GameSpeed,
+            "Game speed",
+            format!("< {} >", speed.label()),
+            "world animations and combat; Alt+F",
         ),
     ];
     for (row, (widget, label, value, hint)) in (0..).zip(rows) {
