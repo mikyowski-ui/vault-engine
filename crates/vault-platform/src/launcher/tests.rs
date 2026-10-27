@@ -718,16 +718,19 @@ fn each_game_keeps_its_own_paths_through_the_toggle_and_the_file() {
         (GameProfile::Fallout1, &fo1, GameProfile::Fallout2, &fo2),
     ] {
         let text = fs::read_to_string(&path).unwrap();
+        // A path as the settings file writes it: the platform's own
+        // separators, a backslash escaped as TOML's basic strings need.
+        let toml = |path: &Path| path.display().to_string().replace('\\', "\\\\");
         for (name, master) in [
-            ("fallout1", "fo1/MASTER.DAT"),
-            ("fallout2", "fo2/master.dat"),
+            ("fallout1", Path::new("fo1").join("MASTER.DAT")),
+            ("fallout2", Path::new("fo2").join("master.dat")),
         ] {
-            let table = format!("[profiles.{name}]\nmaster_dat = \"{master}\"\n");
+            let table = format!("[profiles.{name}]\nmaster_dat = \"{}\"\n", toml(&master));
             assert!(text.contains(&table), "{text}");
         }
         let top = format!(
             "master_dat = \"{}\"\n",
-            paths[0].strip_prefix(dir).unwrap().display()
+            toml(paths[0].strip_prefix(dir).unwrap())
         );
         assert!(
             text.starts_with(&format!("# Vault Engine launcher settings.\n{top}")),

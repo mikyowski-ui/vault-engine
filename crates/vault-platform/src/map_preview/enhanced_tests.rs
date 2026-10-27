@@ -712,7 +712,7 @@ fn the_camera_page_exports_the_setup_as_a_mod() {
     let pointer = at(&layout, point);
     assert_eq!(pointer.ui, Some(ui));
     assert!(preview.enhanced_button(pointer, PointerButton::Left, true));
-    let folder = out.path().join("mods/enhanced-setup");
+    let folder = out.path().join("mods").join("enhanced-setup");
     assert_eq!(note(&preview), format!("exported to {}", folder.display()));
     let manifest =
         ModManifest::parse(&std::fs::read_to_string(folder.join(MANIFEST)).unwrap()).unwrap();

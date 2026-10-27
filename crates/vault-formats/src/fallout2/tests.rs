@@ -83,13 +83,19 @@ fn spec018_install_discovery_and_validation() {
     let install = validate(dir.path(), None).unwrap();
     assert_eq!(install.patch, Some(dir.path().join("PATCH000.DAT")));
     assert_eq!(install.master, dir.path().join("master.dat"));
-    // Two entries that differ only in case refuse, naming both.
+    // Two entries that differ only in case refuse, naming both. A
+    // case-insensitive file system (macOS's and Windows's defaults) keeps
+    // one file for the two names, so there is nothing ambiguous to refuse.
     let dir = case(&["MASTER.DAT", "CRITTER.DAT", "patch000.dat", "PATCH000.DAT"]);
-    let error = validate(dir.path(), None).unwrap_err();
-    assert!(
-        error.contains("PATCH000.DAT") && error.contains("patch000.dat"),
-        "{error}"
-    );
+    if std::fs::read_dir(dir.path()).unwrap().count() == 4 {
+        let error = validate(dir.path(), None).unwrap_err();
+        assert!(
+            error.contains("PATCH000.DAT") && error.contains("patch000.dat"),
+            "{error}"
+        );
+    } else {
+        assert!(validate(dir.path(), None).unwrap().patch.is_some());
+    }
     // A folder named patch000.dat is skipped.
     let dir = case(&["MASTER.DAT", "CRITTER.DAT"]);
     std::fs::create_dir(dir.path().join("patch000.dat")).unwrap();

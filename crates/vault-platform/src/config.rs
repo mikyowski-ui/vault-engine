@@ -1289,12 +1289,22 @@ future_list = []
         assert_eq!(config.audio, Some(false));
         assert_eq!(config.master_dat, Some(temp.path().join("MASTER.DAT")));
         config.audio = Some(true);
-        config.data_root = Some("/elsewhere/data".into());
+        // An absolute path outside the file's folder (on Windows a
+        // root-relative one would take the file's drive on reading).
+        let (elsewhere, written) = if cfg!(windows) {
+            (r"C:\elsewhere\data", r"C:\\elsewhere\\data")
+        } else {
+            ("/elsewhere/data", "/elsewhere/data")
+        };
+        config.data_root = Some(elsewhere.into());
         config.mod_list = Some(ModList::File(temp.path().join("load_order.toml")));
         config.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("master_dat = \"MASTER.DAT\"\n"), "{text}");
-        assert!(text.contains("data_root = \"/elsewhere/data\"\n"), "{text}");
+        assert!(
+            text.contains(&format!("data_root = \"{written}\"\n")),
+            "{text}"
+        );
         assert!(text.contains("mod_list = \"load_order.toml\"\n"), "{text}");
         assert!(text.contains("audio = true\nnew = [\"x\"]\n"), "{text}");
         assert_eq!(Config::load(&path).unwrap(), config);
