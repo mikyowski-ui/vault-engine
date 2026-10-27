@@ -430,6 +430,16 @@ impl AssetPreview {
             _ => {}
         }
     }
+    /// The `enhanced` preset's game speed (Alt+F, or its logged record):
+    /// the game keeps it for every world it creates next, and gives it to
+    /// the current one. Worlds under Vanilla ignore it.
+    pub fn set_game_speed(&mut self, speed: crate::enhanced::GameSpeed) {
+        match self {
+            Self::Map(preview) => preview.set_game_speed(speed),
+            Self::Game(game) => game.set_game_speed(speed),
+            _ => {}
+        }
+    }
     /// The world's enhanced settings, when it shows the enhanced
     /// presentation.
     pub fn enhanced_settings(&mut self) -> Option<EnhancedSettings> {

@@ -13,6 +13,10 @@ use vault_formats::{Vfs, fallout2::Fallout2Install};
 /// step 3's hand-off to the start map `maps/artemple.map`, as the Play
 /// shell makes it, with movies and attacks completing at once.
 fn new_game(vfs: Arc<dyn Vfs>, sheet: &str) -> MapPreview {
+    new_game_with(vfs, sheet, EnginePreset::Vanilla)
+}
+/// [`new_game`] under `preset`.
+pub(super) fn new_game_with(vfs: Arc<dyn Vfs>, sheet: &str, preset: EnginePreset) -> MapPreview {
     let open = || {
         let assets = VfsWorldAssets::new(vfs.clone(), "english").unwrap();
         assets.set_game_profile(vault_core::GameProfile::Fallout2);
@@ -31,7 +35,7 @@ fn new_game(vfs: Arc<dyn Vfs>, sheet: &str) -> MapPreview {
         vault_core::fallout2::START_MAP,
         sheet,
         1,
-        EnginePreset::Vanilla,
+        preset,
         |host| host.begin_fallout2_game(tables),
     )
     .unwrap();
@@ -142,14 +146,14 @@ fn hostile_script() -> Vec<u8> {
     })
 }
 /// A heartbeat that does nothing.
-fn passive_script() -> Vec<u8> {
+pub(super) fn passive_script() -> Vec<u8> {
     critter_script(|_| Vec::new())
 }
 
 /// A synthetic Fallout 2 install (SPEC-018 §8) over the synthetic corpus:
 /// its critter runs `script`, the start map has no map script, `ai.txt`
 /// holds [`ai_txt`]. The directory must outlive the returned databases.
-fn synthetic_install(script: Vec<u8>) -> (tempfile::TempDir, Arc<dyn Vfs>) {
+pub(super) fn synthetic_install(script: Vec<u8>) -> (tempfile::TempDir, Arc<dyn Vfs>) {
     let corpus = super::test_support::synthetic_corpus();
     let root = corpus.path();
     vault_fixtures::fallout2::write_tables(root);

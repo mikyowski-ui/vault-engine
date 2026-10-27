@@ -835,7 +835,7 @@ impl MapPreview {
     /// in an aimed mode, or `None` when the preflight refuses it (SPEC-007
     /// §3.2) or the slot reports no attack, as in reload mode (§3.23). The
     /// item slot's aiming still counts in the AP the attack needs.
-    fn hover_hit_chance(&self, target: ObjectRef) -> Option<i32> {
+    pub(crate) fn hover_hit_chance(&self, target: ObjectRef) -> Option<i32> {
         let player = self.host.world.player;
         let world = &self.host.world;
         let (mode, aimed) = self.slot_attack()?;

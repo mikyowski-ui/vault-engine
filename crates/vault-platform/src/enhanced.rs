@@ -102,3 +102,58 @@ pub enum PointerButton {
     Right,
     Middle,
 }
+
+/// `game_speed`: how fast world time runs against the shell clock, under
+/// the `enhanced` preset only (Alt+F cycles it in play). The world's
+/// animations, movement, combat turns, scripts and game clock see world
+/// time; the interface (holds, fades, counters, the camera), movies and
+/// audio keep the shell clock. 1.0x is the specification's timing exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GameSpeed {
+    #[default]
+    Normal,
+    Fast,
+    Faster,
+}
+
+impl GameSpeed {
+    pub const ALL: [Self; 3] = [Self::Normal, Self::Fast, Self::Faster];
+    /// The multiplier: 1.0, 1.5 or 2.0.
+    pub fn factor(self) -> f32 {
+        match self {
+            Self::Normal => 1.0,
+            Self::Fast => 1.5,
+            Self::Faster => 2.0,
+        }
+    }
+    /// The multiplier in halves (2, 3 or 4), for exact integer time.
+    pub fn halves(self) -> u64 {
+        match self {
+            Self::Normal => 2,
+            Self::Fast => 3,
+            Self::Faster => 4,
+        }
+    }
+    /// The speed whose multiplier is exactly `factor`.
+    pub fn from_factor(factor: f64) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|speed| f64::from(speed.factor()) == factor)
+    }
+    /// The next speed in the Alt+F cycle: 1.0, 1.5, 2.0, then 1.0 again.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Normal => Self::Fast,
+            Self::Fast => Self::Faster,
+            Self::Faster => Self::Normal,
+        }
+    }
+    /// The speed as shown: `1.0x`, `1.5x` or `2.0x`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "1.0x",
+            Self::Fast => "1.5x",
+            Self::Faster => "2.0x",
+        }
+    }
+}

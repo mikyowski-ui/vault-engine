@@ -116,6 +116,8 @@ pub enum Widget {
     SmoothCamera,
     RoofPeek,
     UiScale,
+    /// The game speed (`game_speed`), with the enhanced preset only.
+    GameSpeed,
     Layers,
     LayerUp,
     LayerDown,
@@ -430,7 +432,9 @@ impl Launcher {
                 Widget::Game | Widget::Scaling | Widget::Preset | Widget::Viewport => {
                     return self.activate(focus);
                 }
-                Widget::Zoom | Widget::RoofPeek | Widget::UiScale => self.choose(focus, delta),
+                Widget::Zoom | Widget::RoofPeek | Widget::UiScale | Widget::GameSpeed => {
+                    self.choose(focus, delta)
+                }
                 _ => self.move_focus(delta),
             },
             KeyCode::ArrowUp | KeyCode::ArrowDown => self.move_focus(delta),
@@ -610,7 +614,8 @@ impl Launcher {
             | Widget::Zoom
             | Widget::SmoothCamera
             | Widget::RoofPeek
-            | Widget::UiScale => self.choose(widget, 1),
+            | Widget::UiScale
+            | Widget::GameSpeed => self.choose(widget, 1),
             Widget::Layers | Widget::LayerToggle => self.edit_layers(Edit::Toggle),
             Widget::LayerUp => self.move_layer(-1),
             Widget::LayerDown => self.move_layer(1),
@@ -645,7 +650,8 @@ impl Launcher {
     /// The next (`delta` 1) or previous (-1) choice of an enhanced
     /// presentation widget, wrapping: the viewport and camera smoothing
     /// toggle, the zoom steps through [`ZOOM_STEPS`], the roof peek cycles
-    /// as Alt+R does, and the interface scale steps through [`UI_SCALES`].
+    /// as Alt+R does, the interface scale steps through [`UI_SCALES`], and
+    /// the game speed through 1.0, 1.5 and 2.0 as Alt+F does.
     /// A value from the file between two steps moves from the nearest.
     fn choose(&mut self, widget: Widget, delta: isize) {
         let settings = self.config.enhanced_settings();
@@ -687,6 +693,14 @@ impl Launcher {
                 };
                 let next = UI_SCALES[step(at, UI_SCALES.len())];
                 config.ui_scale = Some(config::UiScale::from_factor(next));
+            }
+            Widget::GameSpeed => {
+                let speeds = crate::enhanced::GameSpeed::ALL;
+                let at = speeds
+                    .iter()
+                    .position(|speed| *speed == config.game_speed())
+                    .unwrap_or(0);
+                config.game_speed = Some(speeds[step(at, speeds.len())]);
             }
             _ => {}
         }

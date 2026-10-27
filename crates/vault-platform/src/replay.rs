@@ -23,7 +23,9 @@
 //! log without one replays the Vanilla presentation exactly as before.
 use crate::{
     AppResult,
-    enhanced::{EnhancedFrame, EnhancedSettings, PointerAt, PointerButton, ViewportMode},
+    enhanced::{
+        EnhancedFrame, EnhancedSettings, GameSpeed, PointerAt, PointerButton, ViewportMode,
+    },
     input::{InputCommand, KeyRepeat, LoggedCommand, WheelUnit},
     map_preview::MapPreview,
     preview::AssetPreview,
@@ -455,6 +457,14 @@ impl Replay {
             // The desktop showed the touch UI's pill bar from the start.
             InputCommand::TouchUi { enabled } => {
                 self.preview.set_touch_ui(enabled);
+                self.present()?;
+            }
+            // The desktop applied the session's speed or an Alt+F change,
+            // then drew the frame.
+            InputCommand::GameSpeed { speed } => {
+                let speed = GameSpeed::from_factor(f64::from(speed))
+                    .ok_or_else(|| format!("game speed {speed} is not 1.0, 1.5 or 2.0"))?;
+                self.preview.set_game_speed(speed);
                 self.present()?;
             }
             InputCommand::Modifiers {
@@ -969,6 +979,122 @@ mod tests {
         };
         assert_eq!(whole(true), whole(true));
         assert_ne!(whole(true).state_sha256, whole(false).state_sha256);
+    }
+
+    /// A timed session as the desktop logs it, with an Alt+F change to
+    /// `speed` after the second frame when it names one: a movement click
+    /// a few hexes from the player, frames every 16 ms for a while (the
+    /// walk under way), then one at 30 s.
+    fn speed_log(speed: Option<&str>) -> String {
+        let mut lines = vec![
+            r#"{"command_id":1,"kind":"surface","width":960,"height":640}"#.to_owned(),
+            r#"{"command_id":2,"kind":"tick","now_ms":16}"#.to_owned(),
+            r#"{"command_id":3,"kind":"tick","now_ms":32}"#.to_owned(),
+        ];
+        if let Some(speed) = speed {
+            lines.push(format!(
+                r#"{{"command_id":4,"kind":"game_speed","speed":{speed}}}"#
+            ));
+        }
+        lines.extend([
+            r#"{"command_id":5,"kind":"pointer_moved","x":600.5,"y":330.5}"#.to_owned(),
+            r#"{"command_id":6,"kind":"tick","now_ms":48}"#.to_owned(),
+            r#"{"command_id":7,"kind":"pointer_button","button":"Left","pressed":true}"#.to_owned(),
+            r#"{"command_id":8,"kind":"pointer_button","button":"Left","pressed":false}"#
+                .to_owned(),
+        ]);
+        let mut id = 9;
+        for now in (64..=1200).step_by(16) {
+            lines.push(format!(
+                r#"{{"command_id":{id},"kind":"tick","now_ms":{now}}}"#
+            ));
+            id += 1;
+        }
+        lines.push(format!(
+            r#"{{"command_id":{id},"kind":"tick","now_ms":30000}}"#
+        ));
+        lines.join("\n") + "\n"
+    }
+    /// Where the player stands after replaying `log` up to its 240 ms
+    /// frame, the walk under way.
+    fn player_hex_midway(
+        root: &std::path::Path,
+        preset: vault_core::EnginePreset,
+        log: &str,
+    ) -> Option<i32> {
+        let midway: String = log
+            .lines()
+            .take_while(|line| !line.contains(r#""now_ms":256}"#))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let mut replay = Replay::new(speed_args(root, preset).load().unwrap().unwrap()).unwrap();
+        replay.run(midway.as_bytes()).unwrap();
+        let world = interactive_world(&mut replay.preview).unwrap();
+        world.host.world.get(world.host.world.player)?.raw.hex
+    }
+    fn speed_args(root: &std::path::Path, preset: vault_core::EnginePreset) -> PreviewArgs {
+        PreviewArgs {
+            preset,
+            ..args(root)
+        }
+    }
+    /// The world's clock and the digest after replaying `log`.
+    fn speed_replay(
+        root: &std::path::Path,
+        preset: vault_core::EnginePreset,
+        log: &str,
+    ) -> (u64, ReplayReport) {
+        let mut replay = Replay::new(speed_args(root, preset).load().unwrap().unwrap()).unwrap();
+        replay.run(log.as_bytes()).unwrap();
+        let world = interactive_world(&mut replay.preview).unwrap();
+        let elapsed = world.host.world.elapsed_ms;
+        (elapsed, replay.finish(None).unwrap())
+    }
+
+    /// The enhanced preset's logged Alt+F change applies where the desktop
+    /// made it: the world runs at 2.0x from there, the same way on every
+    /// replay, and the state differs from the log without the change.
+    /// Under Vanilla the record changes nothing.
+    #[test]
+    fn logged_game_speed_changes_replay_deterministically() {
+        use vault_core::EnginePreset::{Enhanced, Vanilla};
+        let dir = synthetic_corpus();
+        let root = dir.path();
+        let (elapsed, first) = speed_replay(root, Enhanced, &speed_log(Some("2.0")));
+        // 32 ms at 1.0x, then 29968 ms at 2.0x.
+        assert_eq!(elapsed, 32 + 2 * (30000 - 32));
+        assert_eq!(first.elapsed_ms, 30000, "the shell clock");
+        assert_eq!(
+            first,
+            speed_replay(root, Enhanced, &speed_log(Some("2.0"))).1,
+            "same log, same digest"
+        );
+        let (normal, plain) = speed_replay(root, Enhanced, &speed_log(None));
+        assert_eq!(normal, 30000);
+        // Midway the faster walk is further along; both end on the hex
+        // clicked, and both digests repeat.
+        let fast_midway = player_hex_midway(root, Enhanced, &speed_log(Some("2.0")));
+        let slow_midway = player_hex_midway(root, Enhanced, &speed_log(None));
+        assert_ne!(fast_midway, slow_midway, "the 2.0x walk is ahead at 240 ms");
+        assert_eq!(plain, speed_replay(root, Enhanced, &speed_log(None)).1);
+        // 1.5x, written as a whole or a fraction.
+        let (fast, _) = speed_replay(root, Enhanced, &speed_log(Some("1.5")));
+        assert_eq!(fast, 32 + 3 * (30000 - 32) / 2);
+        // Vanilla: the shell clock, and the digest of the log without it.
+        let (vanilla, ignored) = speed_replay(root, Vanilla, &speed_log(Some("2.0")));
+        assert_eq!(vanilla, 30000);
+        assert_eq!(
+            ignored.state_sha256,
+            speed_replay(root, Vanilla, &speed_log(None)).1.state_sha256
+        );
+        assert_eq!(
+            player_hex_midway(root, Vanilla, &speed_log(Some("2.0"))),
+            player_hex_midway(root, Vanilla, &speed_log(None))
+        );
+        // A speed the shell never logs is refused.
+        let mut replay = Replay::new(speed_args(root, Enhanced).load().unwrap().unwrap()).unwrap();
+        let error = replay.run(speed_log(Some("3")).as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("game speed 3"), "{error}");
     }
 
     #[test]

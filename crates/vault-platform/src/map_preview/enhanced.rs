@@ -1315,6 +1315,8 @@ impl MapPreview {
         for ((_, [x, y]), image) in tiles.iter().zip(&images) {
             canvas.copy_image(image, [*x as i32, *y as i32]);
         }
+        let scale = super::qol::overlay_scale(self.enhanced_zoom());
+        self.draw_tactical(&mut canvas, view, scale);
         Ok(canvas)
     }
     /// The world behind a full-screen window: black over the world and

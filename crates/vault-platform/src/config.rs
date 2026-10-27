@@ -17,7 +17,7 @@
 //!
 //! This is engine infrastructure, not part of any specification: it only
 //! decides which game data and display options the shell starts with.
-use crate::enhanced::{EnhancedSettings, RoofPeek, ViewportMode};
+use crate::enhanced::{EnhancedSettings, GameSpeed, RoofPeek, ViewportMode};
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -265,6 +265,9 @@ pub struct Config {
     pub smooth_camera: Option<bool>,
     pub roof_peek: Option<RoofPeek>,
     pub ui_scale: Option<UiScale>,
+    /// The `enhanced` preset's game speed (1.0, 1.5 or 2.0; unused under
+    /// Vanilla).
+    pub game_speed: Option<GameSpeed>,
     /// Keys this engine does not know, in file order: ignored, but kept
     /// so that a rewrite does not lose them.
     pub unknown: Vec<(String, Value)>,
@@ -485,6 +488,14 @@ impl Config {
                     }
                 });
             }
+            "game_speed" => {
+                let expects = "`game_speed` is 1.0, 1.5 or 2.0";
+                let factor = value.number().ok_or_else(|| expects.to_owned())?;
+                self.game_speed = Some(
+                    GameSpeed::from_factor(factor)
+                        .ok_or_else(|| format!("{expects}, not {factor}"))?,
+                );
+            }
             _ => self.unknown.push((key.to_owned(), value)),
         }
         Ok(())
@@ -578,6 +589,9 @@ impl Config {
             Some(UiScale::Auto) => line("ui_scale", quote("auto")),
             Some(UiScale::Scale(scale)) => line("ui_scale", float(f64::from(scale))),
             None => {}
+        }
+        if let Some(speed) = self.game_speed {
+            line("game_speed", float(f64::from(speed.factor())));
         }
         for (key, value) in &self.unknown {
             line(
@@ -686,6 +700,11 @@ impl Config {
         }
     }
 
+    /// The `enhanced` preset's game speed; missing, 1.0x.
+    pub fn game_speed(&self) -> GameSpeed {
+        self.game_speed.unwrap_or_default()
+    }
+
     /// Whether the settings name game data: both databases, or a loose
     /// data directory.
     pub fn has_game_data(&self) -> bool {
@@ -759,7 +778,7 @@ impl Config {
     }
 }
 
-const KNOWN: [&str; 17] = [
+const KNOWN: [&str; 18] = [
     "master_dat",
     "critter_dat",
     "data_root",
@@ -776,6 +795,7 @@ const KNOWN: [&str; 17] = [
     "smooth_camera",
     "roof_peek",
     "ui_scale",
+    "game_speed",
     "load_order",
 ];
 
@@ -1405,6 +1425,53 @@ future_float = 5e-1
             vanilla.to_toml().unwrap(),
             "# Vault Engine launcher settings.\npreset = \"vanilla\"\n"
         );
+    }
+
+    #[test]
+    fn the_game_speed_parses_writes_round_trips_and_names_bad_values() {
+        // Numbers, whole or not; missing is 1.0x.
+        assert_eq!(Config::default().game_speed(), GameSpeed::Normal);
+        for (text, speed) in [
+            ("game_speed = 1", GameSpeed::Normal),
+            ("game_speed = 1.0", GameSpeed::Normal),
+            ("game_speed = 1.5", GameSpeed::Fast),
+            ("game_speed = 15e-1", GameSpeed::Fast),
+            ("game_speed = 2", GameSpeed::Faster),
+        ] {
+            let config = Config::parse(text).unwrap();
+            assert_eq!(config.game_speed, Some(speed), "{text}");
+            assert_eq!(config.game_speed(), speed);
+            // Written as a float, and read back the same.
+            let written = config.to_toml().unwrap();
+            let line = format!("game_speed = {}\n", float(f64::from(speed.factor())));
+            assert!(written.contains(&line), "{written}");
+            assert_eq!(Config::parse(&written).unwrap(), config);
+        }
+        let written = Config::parse("preset = \"enhanced\"\ngame_speed = 1.5\n")
+            .unwrap()
+            .to_toml()
+            .unwrap();
+        assert!(written.contains("game_speed = 1.5\n"), "{written}");
+        // A known key: not kept as unknown, and only once.
+        assert!(Config::parse("game_speed = 2").unwrap().unknown.is_empty());
+        assert_eq!(
+            Config::parse("game_speed = 2\ngame_speed = 1")
+                .unwrap_err()
+                .to_string(),
+            "line 2: duplicate key `game_speed`"
+        );
+        // Anything else names its line and the choices.
+        for (text, message) in [
+            ("game_speed = 3", "`game_speed` is 1.0, 1.5 or 2.0, not 3"),
+            ("game_speed = 1.25", "not 1.25"),
+            ("game_speed = 0", "not 0"),
+            ("game_speed = \"2x\"", "`game_speed` is 1.0, 1.5 or 2.0"),
+            ("game_speed = true", "`game_speed` is 1.0, 1.5 or 2.0"),
+        ] {
+            let error = Config::parse(&format!("audio = true\n{text}")).unwrap_err();
+            assert_eq!(error.line, 2, "{text}");
+            assert!(error.to_string().contains(message), "{text}: {error}");
+        }
     }
 
     #[test]

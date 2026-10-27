@@ -67,6 +67,7 @@ mod options;
 mod party;
 mod pipboy;
 mod pointer;
+mod qol;
 mod saveload;
 mod skilldex;
 mod talk;
@@ -274,6 +275,9 @@ pub struct MapPreview {
     enhanced: Option<Box<enhanced::Enhanced>>,
     /// The touch UI's action pill bar (`--touch-ui`); off by default.
     touch: touchbar::TouchBar,
+    /// The `enhanced` preset's game speed, tactical overlay and HUD
+    /// message (`qol`); inert under Vanilla.
+    qol_state: qol::Qol,
 }
 
 /// The map's sprites by tile index or object art. Each art file is read and
@@ -631,6 +635,7 @@ impl MapPreview {
             menu_preferences: false,
             enhanced: None,
             touch: touchbar::TouchBar::default(),
+            qol_state: qol::Qol::default(),
         })
     }
     /// SPEC-014 §3.29 the keyboard for the engine key repeat: no input is
@@ -1453,6 +1458,8 @@ impl MapPreview {
             return Ok(image);
         }
         self.choices.clear();
+        let mut image = image;
+        self.draw_tactical(&mut image, self.view, 1);
         Ok(self.compose_world(image))
     }
     /// The window title: the plain game name, or with the vault-debug
@@ -1574,6 +1581,12 @@ impl MapPreview {
             return true;
         }
         if self.debug_key(key) {
+            return true;
+        }
+        // The `enhanced` tactical overlay's toggle, Alt+H (presentation
+        // only, so the combat lock does not hold it).
+        if key == KeyCode::KeyH && self.hud.modifiers[2] && self.qol() {
+            self.toggle_tactical();
             return true;
         }
         // SPEC-014 §3.27: while combat locks the keyboard no key is read,
@@ -1882,6 +1895,9 @@ impl MapPreview {
     }
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
         self.clock = now;
+        // The world's own clock: the shell clock, run ahead by the
+        // `enhanced` game speed (exactly the shell clock at 1.0x).
+        let world_now = self.world_time(now);
         self.sync_volumes();
         // SPEC-014 §3.2: a game fade blocks completely: no world update,
         // animation, game clock, hover or background task runs until it
@@ -1894,7 +1910,7 @@ impl MapPreview {
         );
         if self.fade_blocks() {
             if local_map {
-                self.host.pause_background(now);
+                self.host.pause_background(world_now);
             }
             let game = self.host.library.palette.clone();
             let changed = self
@@ -1926,8 +1942,8 @@ impl MapPreview {
             // before the scripts may create new ones.
             Screen::Map => {
                 world_ticked = true;
-                let removed = self.floating_tick(now);
-                self.host.tick(now).map(|changed| changed | removed)
+                let removed = self.floating_tick(world_now);
+                self.host.tick(world_now).map(|changed| changed | removed)
             }
             Screen::World(_) | Screen::Town(_) => self
                 .world_tick(now)
@@ -1953,7 +1969,7 @@ impl MapPreview {
             Screen::SaveLoad(_) => Ok(self.saveload_frame(now)),
         };
         if local_map && !world_ticked {
-            self.host.pause_background(now);
+            self.host.pause_background(world_now);
         }
         let mut changed = match screen {
             Ok(changed) => changed | crosshair,
@@ -1996,6 +2012,7 @@ impl MapPreview {
         changed |= self.replay_attack();
         self.cues_tick(now);
         changed |= self.debug_tick();
+        changed |= self.qol_tick(now);
         Ok(changed)
     }
     /// The pointer moved over the frame; returns the map hover once per hex

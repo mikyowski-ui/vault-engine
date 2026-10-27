@@ -314,6 +314,7 @@ impl MapPreview {
         self.draw_bar(&painter, &mut image);
         self.draw_party_pills(&painter, &mut image);
         self.draw_touch_bar(&painter, &mut image);
+        self.draw_message(&painter, &mut image);
         image
     }
     /// SPEC-019 §3.5.1 the bar's geometry from `iface.frm`'s height,
