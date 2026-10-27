@@ -6,7 +6,7 @@ use super::font::{self, CHECK, CROSS};
 use super::validate::{Check, State};
 use super::widgets::{self, Look, Rect, Row};
 use super::{Field, Launcher, Tab, Widget};
-use crate::config::{Preset, game_name, roof_peek_name, scaling_name, viewport_name};
+use crate::config::{Preset, game_name, roof_peek_name, scaling_name};
 use crate::enhanced::{RoofPeek, ViewportMode};
 use vault_core::GameProfile;
 use vault_formats::{LayerEntry, ModManifest};
@@ -73,8 +73,23 @@ const GAME_TOP: i32 = 302;
 fn field_top(field: Field) -> i32 {
     72 + field.index() as i32 * 84
 }
+/// The Display & audio tab: two columns of evenly spaced rows under their
+/// titles (the general rows on the left, the enhanced preset's on the
+/// right), then one help line for the focused or hovered row, and the note.
+const COLUMN_TITLE_TOP: i32 = 72;
+const COLUMNS: [(i32, i32, i32); 2] = [
+    // Label x, toggle x and toggle width.
+    (28, 136, 150),
+    (330, 440, 172),
+];
+const HELP_TOP: i32 = 330;
+const NOTE_TOP: i32 = 380;
 fn display_top(row: i32) -> i32 {
-    76 + row * 28
+    96 + row * 36
+}
+fn display_rect(column: usize, row: i32) -> Rect {
+    let (_, x, w) = COLUMNS[column];
+    Rect::new(x, display_top(row), w, 18)
 }
 const DISPLAY: [Widget; 6] = [
     Widget::Scaling,
@@ -84,7 +99,7 @@ const DISPLAY: [Widget; 6] = [
     Widget::Audio,
     Widget::Debug,
 ];
-/// The enhanced preset's rows, below the others, shown with it only.
+/// The enhanced preset's rows, in the right-hand column, shown with it only.
 const ENHANCED: [Widget; 6] = [
     Widget::Viewport,
     Widget::Zoom,
@@ -93,9 +108,6 @@ const ENHANCED: [Widget; 6] = [
     Widget::UiScale,
     Widget::GameSpeed,
 ];
-fn enhanced_top(row: i32) -> i32 {
-    254 + row * 24
-}
 fn enhanced_shown(launcher: &Launcher) -> bool {
     launcher.config.preset == Some(Preset::Enhanced)
 }
@@ -128,11 +140,11 @@ pub fn layout(launcher: &Launcher) -> Vec<(Widget, Rect)> {
         }
         Tab::Display => {
             for (row, widget) in (0..).zip(DISPLAY) {
-                out.push((widget, Rect::new(160, display_top(row), 150, 18)));
+                out.push((widget, display_rect(0, row)));
             }
             if enhanced_shown(launcher) {
                 for (row, widget) in (0..).zip(ENHANCED) {
-                    out.push((widget, Rect::new(160, enhanced_top(row), 150, 18)));
+                    out.push((widget, display_rect(1, row)));
                 }
             }
         }
@@ -373,7 +385,7 @@ fn draw_display(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, re
             Widget::TouchUi,
             "Touch UI",
             on_off(config.touch_ui.unwrap_or(false)).into(),
-            "tap, drag, pinch; on-screen buttons",
+            "tap, drag, pinch, hold; on-screen buttons",
         ),
         (
             Widget::Preset,
@@ -397,37 +409,91 @@ fn draw_display(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, re
             "the vault-debug inspector; F9 toggles",
         ),
     ];
-    for (row, (widget, label, value, hint)) in (0..).zip(rows) {
-        let y = display_top(row);
-        font::draw(image, [28, y + 5], label, color::TEXT);
-        if let Some(r) = rect(widget) {
-            widgets::toggle(image, r, &value, look(widget));
-        }
-        font::draw(image, [322, y + 5], hint, color::DIM);
-    }
-    let note = if enhanced_shown(launcher) {
-        draw_enhanced(image, launcher, look, rect);
-        400
-    } else {
-        260
-    };
     font::draw(
         image,
-        [28, note],
+        [COLUMNS[0].0, COLUMN_TITLE_TOP],
+        "Display & audio",
+        color::ACCENT,
+    );
+    let mut hints = Vec::new();
+    draw_rows(image, 0, rows, look, rect, &mut hints);
+    font::draw(
+        image,
+        [COLUMNS[1].0, COLUMN_TITLE_TOP],
+        "Enhanced preset",
+        color::ACCENT,
+    );
+    if enhanced_shown(launcher) {
+        draw_enhanced(image, launcher, look, rect, &mut hints);
+    } else {
+        for (line, text) in (0..).zip([
+            "Widescreen, zoom, roof peek, game",
+            "speed and the quality-of-life extras:",
+            "set Preset to enhanced to show them.",
+        ]) {
+            font::draw(
+                image,
+                [COLUMNS[1].0, display_top(0) + 5 + line * 14],
+                text,
+                color::DIM,
+            );
+        }
+    }
+    // The focused row's help, else the hovered one's.
+    let shown = [Some(launcher.focus), launcher.hover]
+        .into_iter()
+        .flatten()
+        .find_map(|widget| hints.iter().find(|(row, _)| *row == widget));
+    image.fill_rect([20, HELP_TOP - 8, 600, 1], color::BORDER);
+    if let Some((_, text)) = shown {
+        font::draw(
+            image,
+            [28, HELP_TOP],
+            &font::clip_end(text, 96),
+            color::TEXT,
+        );
+    }
+    font::draw(
+        image,
+        [28, NOTE_TOP],
         "Written to vault-engine.toml on Save or Play. Command-line flags still win.",
         color::DIM,
     );
 }
 
-/// The enhanced preset's presentation rows.
-fn draw_enhanced(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, rect: &RectFn) {
+/// One column's rows: each label, then its value in a toggle; the rows'
+/// help texts are collected for the help line.
+fn draw_rows<const N: usize>(
+    image: &mut IndexedImage,
+    column: usize,
+    rows: [(Widget, &str, String, &str); N],
+    look: &LookFn,
+    rect: &RectFn,
+    hints: &mut Vec<(Widget, String)>,
+) {
+    for (row, (widget, label, value, hint)) in (0..).zip(rows) {
+        font::draw(
+            image,
+            [COLUMNS[column].0, display_top(row) + 5],
+            label,
+            color::TEXT,
+        );
+        if let Some(r) = rect(widget) {
+            widgets::toggle(image, r, &value, look(widget));
+        }
+        hints.push((widget, format!("{label}: {hint}")));
+    }
+}
+
+/// The enhanced preset's rows.
+fn draw_enhanced(
+    image: &mut IndexedImage,
+    launcher: &Launcher,
+    look: &LookFn,
+    rect: &RectFn,
+    hints: &mut Vec<(Widget, String)>,
+) {
     let settings = launcher.config.enhanced_settings();
-    font::draw(
-        image,
-        [28, 238],
-        "Enhanced viewport & camera",
-        color::ACCENT,
-    );
     let zoom = format!("< {}x >", settings.default_zoom);
     let scale = match settings.ui_scale {
         None => "< auto >".to_owned(),
@@ -437,11 +503,15 @@ fn draw_enhanced(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, r
     let rows: [(Widget, &str, String, &str); 6] = [
         (
             Widget::Viewport,
-            "Viewport",
-            format!("< {} >", viewport_name(settings.viewport)),
+            "Widescreen",
             match settings.viewport {
-                ViewportMode::Fixed => "the 640x480 frame; Alt+V toggles",
-                ViewportMode::Unlocked => "the world fills the window; Alt+V",
+                ViewportMode::Fixed => "< Off (4:3 Classic) >",
+                ViewportMode::Unlocked => "< On >",
+            }
+            .to_owned(),
+            match settings.viewport {
+                ViewportMode::Fixed => "the classic 640x480 frame; Alt+V toggles in play",
+                ViewportMode::Unlocked => "the world fills the window; Alt+V toggles in play",
             },
         ),
         (
@@ -479,14 +549,7 @@ fn draw_enhanced(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, r
             "world animations and combat; Alt+F",
         ),
     ];
-    for (row, (widget, label, value, hint)) in (0..).zip(rows) {
-        let y = enhanced_top(row);
-        font::draw(image, [28, y + 5], label, color::TEXT);
-        if let Some(r) = rect(widget) {
-            widgets::toggle(image, r, &value, look(widget));
-        }
-        font::draw(image, [322, y + 5], hint, color::DIM);
-    }
+    draw_rows(image, 1, rows, look, rect, hints);
 }
 
 /// A mod layer's list text: its path, or with a `vault-mod.toml` the mod's

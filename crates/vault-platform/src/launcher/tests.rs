@@ -1233,30 +1233,39 @@ fn the_touch_ui_row_follows_fullscreen_toggles_and_saves() {
     key(&mut launcher, KeyCode::Space);
     assert_eq!(launcher.config.touch_ui, Some(true));
     assert_ne!(launcher.image().pixels(), off.pixels());
-    // With the enhanced rows shown too, no two rows overlap, and the
-    // display rows end above the enhanced section's title (y 238).
+    // With the enhanced rows shown too: two columns, the general rows on
+    // the left and the enhanced ones on the right, evenly spaced with room
+    // between them, side by side, and all above the help line.
     launcher.config.preset = Some(Preset::Enhanced);
-    let rows: Vec<_> = [
+    let column = |widgets: [Widget; 6]| widgets.map(|widget| launcher.rect(widget).unwrap());
+    let general = column([
         Widget::Scaling,
         Widget::Fullscreen,
         Widget::TouchUi,
         Widget::Preset,
         Widget::Audio,
         Widget::Debug,
+    ]);
+    let enhanced = column([
         Widget::Viewport,
         Widget::Zoom,
         Widget::SmoothCamera,
         Widget::RoofPeek,
         Widget::UiScale,
         Widget::GameSpeed,
-    ]
-    .into_iter()
-    .map(|widget| launcher.rect(widget).unwrap())
-    .collect();
-    for pair in rows.windows(2) {
-        assert!(pair[0].y + pair[0].h < pair[1].y, "{pair:?}");
+    ]);
+    for rows in [general, enhanced] {
+        for pair in rows.windows(2) {
+            assert_eq!(pair[1].y - pair[0].y, 36, "{pair:?}");
+            assert!(pair[1].y - (pair[0].y + pair[0].h) >= 16, "{pair:?}");
+        }
+        assert!(rows[5].y + rows[5].h + 16 <= 330, "{rows:?}");
     }
-    assert!(rows[5].y + rows[5].h < 238);
+    for (left, right) in general.iter().zip(&enhanced) {
+        assert_eq!(left.y, right.y);
+        assert!(left.x + left.w + 100 < right.x, "{left:?} {right:?}");
+        assert!(right.x + right.w <= 620);
+    }
     // Save writes it, and a launcher from the file shows it.
     assert_eq!(launcher.save(), Ok(dir.join(config::FILE_NAME)));
     let text = fs::read_to_string(dir.join(config::FILE_NAME)).unwrap();

@@ -343,15 +343,24 @@ It has three tabs and a bottom bar:
     its data discovered as above (and a start whose active game has none does
     the same, showing the launcher with what it found). Save and Play write
     both profiles.
-- **Display & audio**: scaling (`aspect_fit` or `integer`), fullscreen,
-  the touch UI, preset (`vanilla` or `enhanced`), audio on or off, and the
-  debug overlay.
-  With the enhanced preset selected, six more rows follow (hidden, and out
-  of the focus order, under Vanilla): the viewport, the default zoom (a
-  stepper over 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5 and 3), smooth camera, the
-  roof peek mode, the interface scale (auto, 1, 1.5, 2, 2.5 or 3) and the
-  game speed (1.0x, 1.5x or 2.0x). Left and Right step them back and
-  forth; Save writes them.
+- **Display & audio**: two columns of evenly spaced rows, with one help
+  line below them for the focused (else hovered) row.
+  - **Left column:** scaling (`aspect_fit` or `integer`), fullscreen, the
+    touch UI, preset (`vanilla` or `enhanced`), audio on or off, and the
+    debug overlay.
+  - **Right column, enhanced preset only:** these rows are hidden, and out
+    of the focus order, under Vanilla, where the column says how to show
+    them.
+    - **Widescreen:** `On`, or `Off (4:3 Classic)`, the
+      `viewport_mode`; Alt+V toggles it in play too.
+    - **Default zoom:** a stepper over 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5
+      and 3.
+    - **Smooth camera.**
+    - **Roof peek mode.**
+    - **Interface scale:** auto, 1, 1.5, 2, 2.5 or 3.
+    - **Game speed:** 1.0x, 1.5x or 2.0x.
+
+  Left and Right step the rows back and forth; Save writes them.
 - **Mods**: the `load_order.toml` layers, lowest first, with their per-layer
   check (each layer is mounted on its own over an empty base) and the whole
   stack's check. Layers can be added (typed, browsed or dropped while the tab
