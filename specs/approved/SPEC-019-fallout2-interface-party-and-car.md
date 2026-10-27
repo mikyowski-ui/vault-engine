@@ -1,6 +1,6 @@
 # SPEC-019: Fallout 2 Interface, Party Control, the Car, and Game-Flow Deltas
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail art audit; scripts run) by the coordinator, 2026-10-25. Revision 3 (premade portraits) by the coordinator, 2026-10-26.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail art audit; scripts run) by the coordinator, 2026-10-25. Revision 3 (premade portraits) by the Spec-Author sub-agent (Team A), 2026-10-26, verified against the owner's retail install.
 
 **Provenance:** written by Team A (the Spec-Author sub-agent) on 2026-10-25 from
 the coordinator's brief of the same day. Source categories:
@@ -32,18 +32,35 @@ three things:
 
 No game art is reproduced.
 
-**Revision 3 (premade portraits), 2026-10-26.** The coordinator wrote this
-revision after the owner reported the premade selection screen drawing a
-portrait over the monitor's top-left bezel. It comes from the frame sizes of
-the owner's retail install and from comparing the portraits' border pixels
-with `pickchar.frm`'s, which were read locally and are not reproduced. The
-retail portraits are 592 by 260, not SPEC-014's 212 by 187, so SPEC-014's
-placement formula puts them at (-146, -20), mostly off the monitor. It
-changes two things:
+**Revision 3 (premade portraits), 2026-10-26.** By the Spec-Author sub-agent
+(Team A), 2026-10-26, verified against the owner's retail install.
 
-- section 2.2 records the sizes of the selection screen's art;
+- **Origin.** The owner reported the premade selection screen drawing a
+  portrait over the monitor's top-left bezel. The coordinator drafted this
+  revision with the fix. Team A then re-measured it independently and took
+  it over.
+- **Method.** Team A's own throwaway scripts were written from SPEC-015
+  (archives) and SPEC-001 (FRM). They read the frame sizes and compared the
+  portraits' border pixels with `pickchar.frm`'s. Team A did not read the
+  engine's code. The pixels were read locally and are not reproduced.
+
+The retail portraits are 592 by 260, not SPEC-014's 212 by 187, so
+SPEC-014's placement formula puts them at (-146, -20), mostly off the
+monitor. The revision changes two things:
+
+- section 2.2 records the sizes of the selection screen's art, and how the
+  fit was measured;
 - section 3.3 places the portrait in the monitor window and clips it there
   (decision D-32).
+
+Team A's clarifications to the coordinator's draft:
+
+- **The fit.** It is stated with its numbers, as decisive about the offset
+  but not an exact identity.
+- **The tags.** The placement is a measured `[Team A default]` and the clip
+  a `[Safe rule]`.
+- **Fallout 1.** It is stated to be unchanged.
+- **Vector R.** It now names every point it checks, including Fallout 1's.
 
 The sheets' name, tags and traits are moved by Fallout 2's longer sheet,
 which SPEC-018 Revision 4 (section 6.3) records.
@@ -121,6 +138,7 @@ is the area number. A city's display name is its `area_name`.
   schedule and entrance placement corrected to SPEC-018's rules.
 - **Revision 3 (2026-10-26).** Premade portraits: their retail size
   (section 2.2) and their place in the monitor window (section 3.3, D-32).
+  Drafted by the coordinator; re-measured and approved by Team A.
 
 ## 2. Data, Constants and State
 
@@ -193,10 +211,35 @@ by file name under `art/intrface/`:
 | Role | Name used | Size | Frames | Notes |
 | --- | --- | --- | --- | --- |
 | Selection background | `pickchar.frm` | 640 by 480 | 1 | As Fallout 1 |
-| Premade portraits | `combat.frm`, `stealth.frm`, `diplomat.frm` | **592 by 260** each | 1 | No index-0 pixel. Each is the whole monitor picture, the edge of its bezel included: its border matches `pickchar.frm`'s bezel when its top-left is at screen (27, 23), and at no other offset nearby |
+| Premade portraits | `combat.frm`, `stealth.frm`, `diplomat.frm` | **592 by 260** each | 1 | No index-0 pixel. Each is the whole monitor picture, the edge of its bezel included. Its border best fits `pickchar.frm`'s bezel with its top-left at screen (27, 23) (see below) |
 
-There are no other portrait files: the premades have no separate headshot
-art.
+All four files come from `master.dat`; `patch000.dat` overrides none of them.
+No other `art/intrface/` frame in `master.dat` is 592 by 260. Fallout 1's
+portraits of the same names are 212 by 187.
+
+**How the fit was measured.** Each portrait was laid over `pickchar.frm` at
+every top-left within 40 pixels of (27, 23), 81 by 81 offsets in all. At each
+offset, the portrait's border ring was compared with the background beneath
+it: by identical palette indices, and by mean RGB distance in `color.pal`'s
+6-bit units. Ring widths of 1, 2, 4 and 8 pixels were tried.
+
+- **The result.** For all three portraits and every ring width, the best
+  offset by both measures is (27, 23), and the runner-up is always one
+  pixel away.
+- **The 2-pixel ring.**
+  - At (27, 23), 67.1 to 68.1 per cent of the 3392 ring pixels are
+    identical, with a mean distance of 2.80 to 2.86.
+  - At the best one-pixel neighbours, the figures are 40.5 to 41.4 per
+    cent and 5.99 to 6.05.
+  - At (27, 24) and (27, 22), they are 38 to 40 per cent and 6.2 to 7.0.
+- **The 1-pixel edges at (27, 23).** The left and right edges are about 75
+  per cent identical, the bottom edge 67 to 71 per cent, and the top edge
+  55 per cent.
+- **How decisive.** The fit is decisive about the offset: it beats the
+  runner-up by 23 to 29 percentage points, for every portrait and every
+  ring width. It is not a pixel-for-pixel identity. About a third of the
+  border pixels differ slightly in color, which suggests the portraits'
+  bezel was drawn separately from the background's, not cut from it.
 
 ### 2.3 Messages and Engine Strings
 
@@ -402,12 +445,26 @@ text** is drawn (the SPEC-014 "ID text" column and its y = 252 line).
 
 **Portrait (Revision 3).** The portrait is not placed by SPEC-014's
 `(150 - trunc(w / 2), 240 - h)`, which suits only Fallout 1's 212-by-187 art.
-Its top-left is the top-left of the **monitor window**, screen (27, 23),
-592 by 260, and it is clipped to that window: no pixel is drawn outside it,
-whatever the art's size. The scan-line effect and index-0 transparency are
-SPEC-014's, unchanged: odd rows of the art are not drawn and show the
-background. The name, SPECIAL, derived-stat, tag, trait and bio lines are
-drawn at SPEC-014's positions, over the portrait. `[Safe rule]` (D-32)
+
+- **Placement.** The **monitor window** is the screen rectangle 592 by 260
+  whose top-left is (27, 23): x 27 to 618 and y 23 to 282, inclusive. The
+  portrait's top-left is drawn at the window's top-left, (27, 23).
+  `[Team A default]` (D-32, measured)
+- **Clipping.** The portrait is clipped to the monitor window: no pixel is
+  drawn outside it, whatever the art's size. `[Safe rule]` (D-32)
+- **Drawing.** The scan-line effect and index-0 transparency are SPEC-014's,
+  unchanged: odd rows of the art (rows 1, 3, 5 and so on, counted from the
+  art's own top) are not drawn and show the background. The retail
+  portraits have no index-0 pixel. Nothing measured shows whether Fallout 2
+  keeps the scan lines, so they are kept from SPEC-014. `[Team A default]`
+  (D-32)
+- **Text.** The name, SPECIAL, derived-stat, tag, trait and bio lines are
+  drawn at SPEC-014's positions, over the portrait. `[Team A default]`
+
+Under Fallout 1 nothing changes. SPEC-014 §3.7's formula places the 212 by
+187 portraits at (44, 53), and they end at (255, 239), inside SPEC-014's
+monitor area. An engine may clip them to that area, which has no visible
+effect.
 
 The sheet is loaded with SPEC-018 §6.3's Fallout 2 layout (Revision 4), so
 the three tag lines show the sheet's first three tags.
@@ -1422,12 +1479,26 @@ afterwards.
 
 A one-color `pickchar.frm` (640 by 480, index 9) and three one-color
 portraits (indices 40, 41, 42), the first two 592 by 260 and the third 640 by
-300. Each premade's screen shows its own color at (27, 23), (618, 23),
-(27, 281) and (618, 281), and the background at (0, 0), (27, 24) (an odd
-row), (26, 23), (619, 23), (27, 22) and (27, 283). The third portrait is
-clipped at the window's right and bottom edges. Under Fallout 1 the same
-check holds for 212-by-187 portraits at (44, 53), (255, 53), (44, 239) and
-(255, 239).
+300. Each premade's screen shows:
+
+- its own color at (27, 23), (618, 23), (27, 281) and (618, 281). These are
+  art rows 0 and 258, both even;
+- the background at:
+  - (0, 0);
+  - (27, 24) and (27, 282), art rows 1 and 259, which are odd;
+  - (26, 23), (619, 23), (27, 22) and (27, 283), just outside the window.
+
+The third portrait is clipped at the window's right and bottom edges. Its
+art reaches (619, 23) and (27, 283), at column 592 and row 260, the first
+column and row outside the window. A drawing without the clip would color
+both.
+
+Under Fallout 1, with three one-color 212-by-187 portraits, each screen
+shows:
+
+- its own color at (44, 53), (255, 53), (44, 239) and (255, 239);
+- the background at (44, 54), an odd row, and at (43, 53), (256, 53),
+  (44, 52) and (44, 240).
 
 ## 5. Decisions
 
@@ -1539,13 +1610,21 @@ touch, and are listed in SPEC-018 §10 as R1-R6.
   `pipboy_active=No` disables the Pip-Boy. Kill types 0-18 are named from
   `proto.msg` 1450 + t, with engine-string fallbacks. The town-list offset
   is not saved.
-- **D-32 (coordinator, Revision 3, 2026-10-26, measured).** The premade
-  portrait's top-left is the monitor window's, screen (27, 23), and the
-  portrait is clipped to that 592-by-260 window (section 3.3). The window is
-  where the retail portraits' bezel edge coincides with `pickchar.frm`'s,
-  measured on the owner's install; no reference program was run or read. The
-  scan-line effect is kept from SPEC-014 §3.7, because nothing measured says
-  Fallout 2 drops it.
+- **D-32 (Team A, Revision 3, 2026-10-26, measured).** This decision was
+  drafted by the coordinator. Team A re-measured it independently and took
+  it over.
+  - **Placement.** The premade portrait's top-left is the monitor window's,
+    screen (27, 23). The window is where the retail portraits' bezel edge
+    best fits `pickchar.frm`'s, measured on the owner's install (section
+    2.2). The fit is unique within 40 pixels and is decisive about the
+    offset, but it is not a pixel-for-pixel identity.
+  - **Not observed.** No reference program was run or read, so the
+    original program's placement was not observed. The placement is
+    therefore a measured Team A default, not `[Must-match]`.
+  - **Clipping.** The portrait is clipped to the 592-by-260 window
+    (section 3.3), as a safe rule.
+  - **Scan lines.** The scan-line effect is kept from SPEC-014 §3.7,
+    because nothing measured says Fallout 2 drops it.
 
 ## 6. Coordination With SPEC-017 and SPEC-018
 
@@ -1607,3 +1686,10 @@ The first revision's requests were answered in the reconciliation pass of
   was consulted (Provenance). Revisions 2 and 3 read frame sizes, and
   Revision 3 compared border pixels, on the owner's retail install; no art
   is reproduced.
+- [x] Revision 3 was re-measured by Team A on 2026-10-26, independently of
+  the coordinator's draft and without reading the engine's code. The
+  sizes, the fit search of section 2.2, and Fallout 1's 212-by-187
+  portraits are Team A's own measurements. Vector R's points were checked
+  by hand against the window bounds and the odd-row rule. The ingestion
+  patterns were rechecked by search: no source-tree path, no 40-character hex
+  string and no code listing.
