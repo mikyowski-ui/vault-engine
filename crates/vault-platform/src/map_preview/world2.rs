@@ -13,39 +13,33 @@
 //! encounter flash, the pause window) follows the Fallout 1 screen
 //! (`world.rs`), with the same `[May-improve]` choices: markers and labels
 //! clipped to the view, the whole frame drawn on every pass, and a town map
-//! that fails leaving the world map open.
+//! that fails leaving the world map open. SPEC-020 §2.2: that shared path
+//! is `world_kit`'s, run with this module's Fallout 2 hooks
+//! ([`WorldEdition`]).
 use super::{
     MapPreview, Screen,
-    world::{TownOrigin, VIEW_CLIP},
+    world::TownOrigin,
+    world_kit::{
+        Bounds, Hold, Leg, TownPress, VIEW_CLIP, WorldEdition, WorldView, red_button, triangle_art,
+    },
 };
 use crate::{AppResult, interface::Painter};
+use std::ops::{Deref, DerefMut};
 use vault_core::{
     Fallout2Travel,
     fallout2::{self, Fallout2World, Selected},
     ui::{
-        ColorKey, ERROR_SOUND, Rect, cursor,
+        ColorKey, ERROR_SOUND, Rect,
         fallout2::{self as ui2, TownList, panel, view},
     },
-    worldmap::{
-        VIEWPORT_ORIGIN, VIEWPORT_SIZE,
-        screen::{self, Marker},
-    },
+    worldmap::{VIEWPORT_ORIGIN, VIEWPORT_SIZE, screen},
 };
 use vault_formats::fallout2::worldmap::TILE_SIZE;
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
 const FRAME_ART: &str = "wmapbox.frm";
-const PLUS_ART: &str = "wmaploc.frm";
-const TARGET_ART: &str = "wmaptarg.frm";
-const DARK_TARGET_ART: &str = "wmaptrg2.frm";
-const BOLT_ART: [&str; 2] = ["wmapfgt0.frm", "wmapfgt1.frm"];
-const TRIANGLE_ART: &str = "hotspot1.frm";
-const PRESSED_TRIANGLE_ART: &str = "hotspot2.frm";
-const BUTTON_UP_ART: &str = "lilredup.frm";
 const BUTTON_DOWN_ART: &str = "lilreddn.frm";
-const ENTER_SOUND: &[u8] = b"ib2p1xx1";
-const CLICK_SOUND: &[u8] = b"ib1p1xx1";
 /// SPEC-019 §3.12.2 "Unknown" and the terrain-name fallback.
 const UNKNOWN: i32 = 1004;
 
@@ -86,30 +80,29 @@ pub(crate) enum Pending2 {
 }
 
 pub(crate) struct World2Screen {
-    pub view: [i32; 2],
-    pub follow: bool,
-    pub paused: bool,
-    pub grey: Option<([i32; 2], bool, bool)>,
-    pub hover: bool,
-    /// Travel dots by world pixel.
-    dots: Vec<u64>,
-    width: i32,
-    /// The city a journey chosen on a town map heads for.
-    pub journey: Option<usize>,
+    /// The view state both editions share.
+    kit: WorldView<PanelButton, Pending2>,
     /// SPEC-019 §2.4 the town-list scroll offset (not saved).
     pub list: TownList,
-    last_pass: Option<u64>,
-    held: Option<PanelButton>,
-    swallow: bool,
-    pub pending: Option<Pending2>,
+}
+impl Deref for World2Screen {
+    type Target = WorldView<PanelButton, Pending2>;
+    fn deref(&self) -> &Self::Target {
+        &self.kit
+    }
+}
+impl DerefMut for World2Screen {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.kit
+    }
 }
 pub(crate) struct Town2Screen {
     pub city: usize,
     pub origin: TownOrigin,
     /// The entrance slots with markers, and their anchors.
     pub markers: Vec<(usize, [i32; 2])>,
-    pressed: Option<usize>,
-    held: Option<PanelButton>,
+    /// The marker pressed and the side-panel button held down.
+    press: TownPress<PanelButton>,
     list: TownList,
     world: Option<Box<World2Screen>>,
 }
@@ -117,43 +110,182 @@ pub(crate) struct Town2Screen {
 impl World2Screen {
     fn new(state: &Fallout2World) -> Self {
         let size = state.world_size();
-        let pixels = (size[0].max(1) as usize) * (size[1].max(1) as usize);
         Self {
-            view: view::centered(state.position, size),
-            follow: true,
-            paused: false,
-            grey: None,
-            hover: false,
-            dots: vec![0; pixels / 64 + 1],
-            width: size[0].max(1),
-            journey: None,
+            kit: WorldView::new(view::centered(state.position, size), size),
             list: TownList::default(),
-            last_pass: None,
-            held: None,
-            swallow: false,
-            pending: None,
         }
     }
-    fn dot_index(&self, pixel: [i32; 2]) -> Option<usize> {
-        let height = (self.dots.len() * 64) as i32 / self.width;
-        ((0..self.width).contains(&pixel[0]) && (0..height).contains(&pixel[1]))
-            .then(|| (pixel[1] * self.width + pixel[0]) as usize)
-            .filter(|index| *index / 64 < self.dots.len())
-    }
-    fn mark(&mut self, pixel: [i32; 2]) {
-        if let Some(index) = self.dot_index(pixel) {
-            self.dots[index / 64] |= 1 << (index % 64);
+}
+
+/// The Fallout 2 world and town map screens, for the shared path.
+struct Fallout2;
+impl WorldEdition for Fallout2 {
+    type Button = PanelButton;
+    type Pending = Pending2;
+    type Encounter = Selected;
+    type Screen = World2Screen;
+    type Town = Town2Screen;
+
+    fn screen(preview: &MapPreview) -> Option<&World2Screen> {
+        match &preview.screen {
+            Screen::World2(world) => Some(world),
+            _ => None,
         }
     }
-    pub fn marked(&self, pixel: [i32; 2]) -> bool {
-        self.dot_index(pixel)
-            .is_some_and(|index| self.dots[index / 64] & (1 << (index % 64)) != 0)
+    fn screen_mut(preview: &mut MapPreview) -> Option<&mut World2Screen> {
+        match &mut preview.screen {
+            Screen::World2(world) => Some(world),
+            _ => None,
+        }
     }
-    fn clear_dots(&mut self) {
-        self.dots.fill(0);
+    fn town(preview: &MapPreview) -> Option<&Town2Screen> {
+        match &preview.screen {
+            Screen::Town2(town) => Some(town),
+            _ => None,
+        }
     }
-    pub fn swallow_release(&mut self) {
-        self.swallow = true;
+    fn town_mut(preview: &mut MapPreview) -> Option<&mut Town2Screen> {
+        match &mut preview.screen {
+            Screen::Town2(town) => Some(town),
+            _ => None,
+        }
+    }
+    fn town_press(town: &mut Town2Screen) -> &mut TownPress<PanelButton> {
+        &mut town.press
+    }
+    fn bounds(preview: &MapPreview) -> Option<Bounds> {
+        preview.state2().map(|state| Bounds::Fallout2 {
+            world: state.world_size(),
+        })
+    }
+    fn position(preview: &MapPreview) -> Option<[i32; 2]> {
+        preview.state2().map(|state| state.position)
+    }
+    fn destination(preview: &MapPreview) -> Option<[i32; 2]> {
+        preview
+            .state2()
+            .and_then(|state| state.travel)
+            .map(|travel| travel.destination)
+    }
+    fn party_place(preview: &MapPreview) -> Option<usize> {
+        preview.party_city()
+    }
+    fn party_in(preview: &MapPreview, city: usize) -> bool {
+        preview.party_city() == Some(city)
+    }
+    fn hold(pending: Pending2) -> Hold<Selected> {
+        match pending {
+            Pending2::Enter { until, city } => Hold::Enter { until, place: city },
+            Pending2::Flash { start, selected } => Hold::Flash {
+                start,
+                encounter: selected,
+            },
+        }
+    }
+    fn entering(until: u64, city: Option<usize>) -> Pending2 {
+        Pending2::Enter { until, city }
+    }
+    fn flashing(start: u64, selected: Selected) -> Pending2 {
+        Pending2::Flash { start, selected }
+    }
+    fn special(selected: Selected) -> bool {
+        selected.special
+    }
+    fn button_at(point: [i32; 2]) -> Option<PanelButton> {
+        PanelButton::at(point)
+    }
+    fn button_contains(button: PanelButton, point: [i32; 2]) -> bool {
+        button.rect().contains(point)
+    }
+    fn world_button(preview: &mut MapPreview, button: PanelButton) {
+        preview.world2_panel_button(button);
+    }
+    fn town_button(preview: &mut MapPreview, button: PanelButton) {
+        preview.town2_panel_button(button);
+    }
+    fn town_choice(preview: &mut MapPreview, index: usize) {
+        preview.town2_choice(index);
+    }
+    fn marker_at(preview: &MapPreview, town: &Town2Screen, point: [i32; 2]) -> Option<usize> {
+        preview.marker2_at(town, point)
+    }
+    /// §3.12.2: a locked city cannot be entered (the sound plays).
+    fn party_click(preview: &mut MapPreview) {
+        if preview
+            .party_city()
+            .is_some_and(|city| preview.city_locked(city))
+        {
+            return;
+        }
+        preview.world_map_entry::<Self>(screen::ENTER_MS);
+    }
+    fn stop_travel(preview: &mut MapPreview) {
+        if let Some(state) = preview.host.world.fallout2.as_deref_mut() {
+            state.travel = None;
+        }
+    }
+    fn travel_to(preview: &mut MapPreview, target: [i32; 2]) {
+        if let Err(error) = preview.host.fallout2_travel_to(target) {
+            preview.status = error.to_string().into_bytes();
+        }
+    }
+    fn travel_to_place(preview: &mut MapPreview, city: usize) -> bool {
+        preview.travel_to_city(city)
+    }
+    fn travel_iteration(preview: &mut MapPreview) -> AppResult<Leg<Selected>> {
+        Ok(match preview.host.fallout2_travel_iteration()? {
+            Fallout2Travel::Idle => Leg::Idle,
+            Fallout2Travel::Moving => Leg::Moving,
+            Fallout2Travel::Arrived | Fallout2Travel::Blocked => Leg::Stopped,
+            Fallout2Travel::OutOfFuel => Leg::OutOfFuel,
+            Fallout2Travel::Interrupted(_) => Leg::Interrupted,
+            Fallout2Travel::Encounter(selected) => Leg::Encounter(selected),
+        })
+    }
+    fn travel_mark(preview: &MapPreview) -> Option<[i32; 2]> {
+        preview.state2().and_then(|state| state.mark)
+    }
+    fn enter_location(preview: &mut MapPreview, city: Option<usize>) {
+        preview.enter_location2(city);
+    }
+    fn enter_encounter(preview: &mut MapPreview, selected: Selected) {
+        let entered = preview.host.fallout2_enter_encounter(selected);
+        preview.leave_world2(entered);
+    }
+    fn out_of_fuel(preview: &mut MapPreview) {
+        preview.out_of_fuel();
+    }
+    /// The town list keeps within the known cities.
+    fn settle(preview: &mut MapPreview) {
+        let count = preview.known_cities().len();
+        if let Screen::World2(world) = &mut preview.screen {
+            world.list.clamp(count);
+        }
+    }
+    fn draw_terrain(
+        preview: &MapPreview,
+        painter: &Painter,
+        image: &mut IndexedImage,
+        view: [i32; 2],
+    ) {
+        preview.draw_world2_view(painter, image, view);
+        preview.draw_cities(painter, image, view);
+    }
+    fn draw_hover_label(
+        preview: &MapPreview,
+        painter: &Painter,
+        image: &mut IndexedImage,
+        party: [i32; 2],
+    ) {
+        preview.draw_hover_label2(painter, image, party);
+    }
+    fn draw_panel(
+        preview: &MapPreview,
+        painter: &Painter,
+        image: &mut IndexedImage,
+        screen: &World2Screen,
+    ) {
+        preview.draw_panel2(painter, image, screen.list, screen.held());
     }
 }
 
@@ -202,12 +334,8 @@ impl MapPreview {
         if let Err(error) = self.host.fallout2_build_world_map(opening) {
             self.status = error.to_string().into_bytes();
         }
-        world.clear_dots();
+        world.rebuild();
         world.list.clamp(self.known_cities().len());
-        world.last_pass = None;
-        world.held = None;
-        world.pending = None;
-        world.hover = false;
         self.screen = Screen::World2(Box::new(world));
     }
     fn close_world2_to_map(&mut self) {
@@ -243,8 +371,7 @@ impl MapPreview {
             city,
             origin,
             markers,
-            pressed: None,
-            held: None,
+            press: TownPress::default(),
             list,
             world,
         })
@@ -330,17 +457,6 @@ impl MapPreview {
             Err(error) => self.status = error.to_string().into_bytes(),
         }
     }
-    fn begin_entry2(&mut self, wait: u64) {
-        let city = self.party_city();
-        let until = self.clock + wait;
-        if let Some(state) = self.host.world.fallout2.as_deref_mut() {
-            state.travel = None;
-        }
-        if let Screen::World2(world) = &mut self.screen {
-            world.clear_dots();
-            world.pending = Some(Pending2::Enter { until, city });
-        }
-    }
     /// §3.12.3 travel toward a city's jittered position.
     fn travel_to_city(&mut self, city: usize) -> bool {
         let Some(position) = self
@@ -379,20 +495,25 @@ impl MapPreview {
             return;
         }
         let travelling = self.state2().and_then(|state| state.travel);
-        if self.party_city() != Some(city) {
-            if self.travel_to_city(city)
-                && let Screen::World2(world) = &mut self.screen
-            {
-                world.follow = travelling.is_none();
-                world.journey = None;
+        self.world_map_head_for::<Fallout2>(city, travelling.is_some());
+    }
+    /// A world-map side-panel button released over it.
+    fn world2_panel_button(&mut self, button: PanelButton) {
+        let count = self.known_cities().len();
+        match button {
+            PanelButton::Up => {
+                if let Screen::World2(world) = &mut self.screen {
+                    world.list.up();
+                }
             }
-            return;
+            PanelButton::Down => {
+                if let Screen::World2(world) = &mut self.screen {
+                    world.list.down(count);
+                }
+            }
+            PanelButton::TownWorld => self.world2_town_world(),
+            PanelButton::Row(k) => self.world2_row(k),
         }
-        self.begin_entry2(if travelling.is_some() {
-            screen::ENTER_TRAVELLING_MS
-        } else {
-            screen::ENTER_MS
-        });
     }
     /// The Town/World button: the journey stops, and the town map of the
     /// journey's city (or the current city) opens.
@@ -420,134 +541,13 @@ impl MapPreview {
         }
     }
     pub(crate) fn world2_key(&mut self, key: KeyCode) -> bool {
-        let [_, control, _] = self.hud.modifiers;
-        let Some(size) = self.state2().map(Fallout2World::world_size) else {
-            return false;
-        };
-        let position = self.state2().map_or([0, 0], |state| state.position);
-        let Screen::World2(world) = &mut self.screen else {
-            return false;
-        };
-        if world.paused {
-            match key {
-                KeyCode::Equal | KeyCode::NumpadAdd => self.brightness_step(true),
-                KeyCode::Minus | KeyCode::NumpadSubtract => self.brightness_step(false),
-                _ => world.paused = false,
-            }
-            return true;
-        }
-        if world.pending.is_some() {
-            return true;
-        }
-        match key {
-            KeyCode::KeyP => {
-                world.paused = true;
-                world.grey = Some((world.view, world.follow, world.hover));
-            }
-            KeyCode::KeyA => world.follow = !world.follow,
-            KeyCode::KeyC => world.view = view::centered(position, size),
-            KeyCode::ArrowLeft | KeyCode::ArrowRight | KeyCode::ArrowUp | KeyCode::ArrowDown => {
-                let direction = match key {
-                    KeyCode::ArrowLeft => [-1, 0],
-                    KeyCode::ArrowRight => [1, 0],
-                    KeyCode::ArrowUp => [0, -1],
-                    _ => [0, 1],
-                };
-                let (next, blocked) = view::scroll(world.view, direction, size);
-                if !blocked {
-                    world.follow = false;
-                    world.view = next;
-                }
-            }
-            KeyCode::Home => {
-                world.follow = false;
-                world.view = view::home(position, size);
-            }
-            KeyCode::End => {
-                world.follow = false;
-                world.view = view::end(world.view, size);
-            }
-            KeyCode::KeyQ | KeyCode::KeyX if control => self.confirm_quit(),
-            KeyCode::F10 => self.confirm_quit(),
-            KeyCode::F12 => self.screenshot(),
-            KeyCode::Equal | KeyCode::NumpadAdd => self.brightness_step(true),
-            KeyCode::Minus | KeyCode::NumpadSubtract => self.brightness_step(false),
-            // No key closes the world map.
-            _ => {}
-        }
-        true
+        self.world_map_key::<Fallout2>(key)
     }
     pub(crate) fn world2_click(&mut self, point: [i32; 2], right: bool) -> bool {
-        let Screen::World2(world) = &mut self.screen else {
-            return false;
-        };
-        if world.paused {
-            world.paused = false;
-            world.swallow = !right;
-            return true;
-        }
-        if !right {
-            world.swallow = false;
-        }
-        if right || world.pending.is_some() {
-            return true;
-        }
-        if let Some(button) = PanelButton::at(point) {
-            world.held = Some(button);
-            self.press();
-        }
-        true
+        self.world_map_click::<Fallout2>(point, right)
     }
     pub(crate) fn world2_release(&mut self, point: Option<[i32; 2]>) -> bool {
-        let count = self.known_cities().len();
-        let Screen::World2(world) = &mut self.screen else {
-            return false;
-        };
-        if std::mem::take(&mut world.swallow) || world.paused || world.pending.is_some() {
-            return true;
-        }
-        if let Some(button) = world.held.take() {
-            if point.is_some_and(|point| button.rect().contains(point)) {
-                match button {
-                    PanelButton::Up => {
-                        world.list.up();
-                    }
-                    PanelButton::Down => {
-                        world.list.down(count);
-                    }
-                    PanelButton::TownWorld => self.world2_town_world(),
-                    PanelButton::Row(k) => self.world2_row(k),
-                }
-            }
-            return true;
-        }
-        let Some(point) = point.filter(|point| screen::view_click(*point)) else {
-            return false;
-        };
-        let view = world.view;
-        let Some(state) = self.state2() else {
-            return true;
-        };
-        let travelling = state.travel.is_some();
-        let party = screen::window(state.position, view);
-        if !travelling && screen::hovers(point, party) {
-            self.play_effect(ENTER_SOUND, None);
-            // §3.12.2: a locked city cannot be entered (the sound plays).
-            if self.party_city().is_some_and(|city| self.city_locked(city)) {
-                return true;
-            }
-            self.begin_entry2(screen::ENTER_MS);
-            return true;
-        }
-        self.play_effect(CLICK_SOUND, None);
-        if let Err(error) = self.host.fallout2_travel_to(screen::world_at(point, view)) {
-            self.status = error.to_string().into_bytes();
-        }
-        if let Screen::World2(world) = &mut self.screen {
-            world.follow = !travelling;
-            world.journey = None;
-        }
-        true
+        self.world_map_release::<Fallout2>(point)
     }
     /// SPEC-019 §3.19.3 the tank ran dry: a large Done box at (169, 116)
     /// with E-fuel-out in key 32328, and `iisxxxx1`.
@@ -565,133 +565,10 @@ impl MapPreview {
     /// iterations, follow mode and the hover state; a pending entry or
     /// encounter flash holds the screen until it ends.
     pub(crate) fn world2_tick(&mut self, now: u64) -> AppResult<bool> {
-        let Some(size) = self.state2().map(Fallout2World::world_size) else {
-            return Ok(false);
-        };
-        let Screen::World2(world) = &mut self.screen else {
-            return Ok(false);
-        };
-        match world.pending {
-            Some(Pending2::Enter { until, city }) => {
-                if now >= until {
-                    world.pending = None;
-                    self.enter_location2(city);
-                }
-                return Ok(true);
-            }
-            Some(Pending2::Flash { start, selected }) => {
-                if now >= start + screen::FLASH_IMAGES * screen::FLASH_MS {
-                    world.pending = None;
-                    let entered = self.host.fallout2_enter_encounter(selected);
-                    self.leave_world2(entered);
-                }
-                return Ok(true);
-            }
-            None => {}
-        }
-        if world.paused
-            || world
-                .last_pass
-                .is_some_and(|last| now < last + screen::PASS_MS)
-        {
-            return Ok(false);
-        }
-        world.last_pass = Some(now);
-        if let Some(at) = self.pointer.at.filter(|_| !self.pointer.outside) {
-            let direction = screen::edge(at);
-            if direction != [0, 0] {
-                world.follow = false;
-                world.view = view::scroll(world.view, direction, size).0;
-            }
-        }
-        let mut travelled = false;
-        for _ in 0..2 {
-            let outcome = self.host.fallout2_travel_iteration()?;
-            let mark = self.state2().and_then(|state| state.mark);
-            let Screen::World2(world) = &mut self.screen else {
-                return Ok(true);
-            };
-            if let Some(pixel) = mark {
-                world.mark(pixel);
-            }
-            travelled |= outcome != Fallout2Travel::Idle;
-            match outcome {
-                Fallout2Travel::Moving => continue,
-                Fallout2Travel::Idle => break,
-                Fallout2Travel::Arrived | Fallout2Travel::Blocked => {
-                    world.clear_dots();
-                    world.journey = None;
-                    break;
-                }
-                Fallout2Travel::OutOfFuel => {
-                    world.clear_dots();
-                    world.journey = None;
-                    self.out_of_fuel();
-                    break;
-                }
-                Fallout2Travel::Interrupted(_) => {
-                    world.clear_dots();
-                    let city = self.party_city();
-                    self.enter_location2(city);
-                    return Ok(true);
-                }
-                Fallout2Travel::Encounter(selected) => {
-                    world.clear_dots();
-                    world.journey = None;
-                    let position = self.state2().map_or([0, 0], |state| state.position);
-                    if let Screen::World2(world) = &mut self.screen {
-                        world.view = view::centered(position, size);
-                        world.pending = Some(Pending2::Flash {
-                            start: now,
-                            selected,
-                        });
-                    }
-                    return Ok(true);
-                }
-            }
-        }
-        let Some(state) = self.state2() else {
-            return Ok(true);
-        };
-        let (position, at_rest) = (state.position, state.travel.is_none());
-        let pointer = self.pointer.at;
-        let count = self.known_cities().len();
-        let Screen::World2(world) = &mut self.screen else {
-            return Ok(true);
-        };
-        world.list.clamp(count);
-        if world.follow {
-            world.view = view::centered(position, size);
-        }
-        let party = screen::window(position, world.view);
-        world.hover = at_rest && pointer.is_some_and(|at| screen::hovers(at, party));
-        if let Some((view, follow, hover)) = world.grey
-            && (world.follow
-                || travelled
-                || view != world.view
-                || follow != world.follow
-                || hover != world.hover)
-        {
-            world.grey = None;
-        }
-        Ok(true)
+        self.world_map_tick::<Fallout2>(now)
     }
     pub(crate) fn world2_cursor(&self, at: [i32; 2]) -> &'static str {
-        let (Screen::World2(world), Some(state)) = (&self.screen, self.state2()) else {
-            return cursor::ARROW.art;
-        };
-        if world.pending.is_some() || world.paused {
-            return cursor::ARROW.art;
-        }
-        let direction = screen::edge(at);
-        let Some(index) = screen::cursor_index(direction) else {
-            return cursor::ARROW.art;
-        };
-        if view::scroll(world.view, direction, state.world_size()).1 {
-            cursor::SCROLL_BLOCKED[index].art
-        } else {
-            cursor::SCROLL[index].art
-        }
+        self.world_map_cursor::<Fallout2>(at)
     }
 
     /// §3.12.1 the tiles under the view, each its own art (a missing tile
@@ -737,37 +614,9 @@ impl MapPreview {
                 );
             }
         }
-        let black = painter.color(ColorKey::BLACK);
-        let dim: Vec<u8> = (0..=255_u8)
-            .map(|index| {
-                if index == 0 || index >= 229 {
-                    index
-                } else {
-                    self.palette.intensity(index, 64)
-                }
-            })
-            .collect();
-        let stride = image.width() as i32;
-        for row in 0..rows {
-            for column in 0..columns {
-                let Some(rect) = screen::cell_rect([column, row], view) else {
-                    continue;
-                };
-                match state.discovery([column, row]) {
-                    0 => image.fill_rect(rect, black),
-                    1 => {
-                        let pixels = image.pixels_mut();
-                        for y in rect[1]..rect[1] + rect[3] {
-                            for x in rect[0]..rect[0] + rect[2] {
-                                let pixel = &mut pixels[(y * stride + x) as usize];
-                                *pixel = dim[usize::from(*pixel)];
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        self.darken_cells(painter, image, view, [columns, rows], |cell| {
+            state.discovery(cell)
+        });
     }
     /// §3.12.2 every known city: its circle outline in key 992 and its
     /// display name below it, both clipped to the view.
@@ -822,12 +671,7 @@ impl MapPreview {
                 .map(|terrain| terrain.name.clone().into_bytes())
                 .unwrap_or_default(),
         };
-        let width = painter.width(screen::LABEL_FONT, &text);
-        let origin = screen::label_origin(party, width);
-        if width <= 0 || !screen::label_shown(origin, width) {
-            return;
-        }
-        self.draw_label(painter, image, &text, origin, width, VIEW_CLIP);
+        self.draw_party_label(painter, image, &text, party);
     }
     /// §3.12.3 the side panel: the date, the dial, the town list and its
     /// arrows, the fuel gauge while driving, and the Town/World button.
@@ -854,17 +698,11 @@ impl MapPreview {
         let cities = self.known_cities();
         for k in 0..panel::ROWS {
             let rect = panel::row_button(k);
-            let art = if down(PanelButton::Row(k)) {
-                BUTTON_DOWN_ART
-            } else {
-                BUTTON_UP_ART
-            };
-            painter.blit_region(
+            red_button(
+                painter,
                 image,
-                art,
-                Rect::new(0, 0, rect.w, rect.h),
-                [rect.x, rect.y],
-                false,
+                [rect.x, rect.y, rect.w, rect.h],
+                down(PanelButton::Row(k)),
             );
             let Some(city) = list.entry(k, cities.len()).map(|entry| cities[entry]) else {
                 continue;
@@ -893,17 +731,11 @@ impl MapPreview {
             painter.blit_role(image, role, [rect.x, rect.y]);
         }
         let rect = panel::TOWN_WORLD;
-        let art = if down(PanelButton::TownWorld) {
-            BUTTON_DOWN_ART
-        } else {
-            BUTTON_UP_ART
-        };
-        painter.blit_region(
+        red_button(
+            painter,
             image,
-            art,
-            Rect::new(0, 0, rect.w, rect.h),
-            [rect.x, rect.y],
-            false,
+            [rect.x, rect.y, rect.w, rect.h],
+            down(PanelButton::TownWorld),
         );
         // §3.19.4 the fuel gauge while the party drives.
         if let Some(state) = self.state2().filter(|state| state.driving) {
@@ -920,181 +752,52 @@ impl MapPreview {
         }
     }
     pub(crate) fn world2_image(&self) -> AppResult<IndexedImage> {
-        let (Screen::World2(world), Some(state)) = (&self.screen, self.state2()) else {
-            return Err("world map screen is not open".into());
-        };
-        let painter = self.painter();
-        let mut image = IndexedImage::new(640, 480)?;
-        image.fill_rect([0, 0, 640, 480], painter.color(ColorKey::BLACK));
-        let position = state.position;
-        let size = state.world_size();
-        let view = match world.pending {
-            Some(Pending2::Flash { .. }) => view::centered(position, size),
-            _ => world.view,
-        };
-        self.draw_world2_view(&painter, &mut image, view);
-        self.draw_cities(&painter, &mut image, view);
-        let party = screen::window(position, view);
-        match world.pending {
-            None => {
-                if let Some(travel) = state.travel {
-                    self.draw_marker(&painter, &mut image, PLUS_ART, Marker::Plus, party);
-                    let target = screen::window(travel.destination, view);
-                    self.draw_marker(&painter, &mut image, TARGET_ART, Marker::Crosshair, target);
-                    let dot = painter.color(ColorKey(screen::DOT_KEY));
-                    let stride = image.width() as i32;
-                    let pixels = image.pixels_mut();
-                    for y in 0..VIEWPORT_SIZE[1] {
-                        for x in 0..VIEWPORT_SIZE[0] {
-                            if world.marked([view[0] + x, view[1] + y]) {
-                                let at = (VIEWPORT_ORIGIN[1] + y) * stride + VIEWPORT_ORIGIN[0] + x;
-                                pixels[at as usize] = dot;
-                            }
-                        }
-                    }
-                } else {
-                    self.draw_marker(&painter, &mut image, TRIANGLE_ART, Marker::Triangle, party);
-                    if world.hover {
-                        self.draw_hover_label2(&painter, &mut image, party);
-                    }
-                }
-            }
-            Some(Pending2::Enter { .. }) => {
-                self.draw_marker(
-                    &painter,
-                    &mut image,
-                    PRESSED_TRIANGLE_ART,
-                    Marker::Triangle,
-                    party,
-                );
-                if self.pointer.at.is_some_and(|at| screen::hovers(at, party)) {
-                    self.draw_hover_label2(&painter, &mut image, party);
-                }
-            }
-            Some(Pending2::Flash { start, selected }) => {
-                let second = (self.clock.saturating_sub(start) / screen::FLASH_MS) % 2 == 1;
-                if selected.special {
-                    let art = if second { TARGET_ART } else { DARK_TARGET_ART };
-                    self.draw_marker(&painter, &mut image, art, Marker::Crosshair, party);
-                } else {
-                    let art = BOLT_ART[usize::from(second)];
-                    self.draw_marker(&painter, &mut image, art, Marker::Bolt, party);
-                }
-            }
-        }
-        painter.blit(&mut image, FRAME_ART, 0, [0, 0]);
-        self.draw_panel2(&painter, &mut image, world.list, world.held);
-        if world.paused || world.grey.is_some() {
-            let [x, y] = VIEWPORT_ORIGIN;
-            let [w, h] = VIEWPORT_SIZE;
-            let stride = image.width() as i32;
-            for row in y..y + h {
-                for column in x..x + w {
-                    if let Some(pixel) =
-                        image.pixels_mut().get_mut((row * stride + column) as usize)
-                    {
-                        *pixel = self.grey[usize::from(*pixel)];
-                    }
-                }
-            }
-        }
-        if world.paused {
-            super::options::draw_pause(
-                &painter,
-                &mut image,
-                vault_core::ui::options::PAUSE_WORLD_ORIGIN,
-            );
-        }
-        Ok(image)
+        self.world_map_image::<Fallout2>()
     }
 
     /// The town-map marker whose triangle is under `point` (the opaque
     /// pixels of `hotspot1.frm`, or its whole 25-by-13 box without art).
     fn marker2_at(&self, town: &Town2Screen, point: [i32; 2]) -> Option<usize> {
-        let art = self.painter().art(TRIANGLE_ART);
-        let frame = art.as_ref().and_then(|art| art.frame(0, 0));
-        town.markers.iter().position(|(_, anchor)| {
-            let [x, y] = ui2::entrance_triangle(*anchor);
-            let local = [point[0] - x, point[1] - y];
-            let [w, h] = screen::MARKER_SIZE;
-            if !(0..w).contains(&local[0]) || !(0..h).contains(&local[1]) {
-                return false;
-            }
-            frame.is_none_or(|frame| {
-                let width = i32::from(frame.width);
-                local[0] < width
-                    && local[1] < i32::from(frame.height)
-                    && frame.pixels()[(local[1] * width + local[0]) as usize] != 0
-            })
-        })
+        self.triangle_at(
+            town.markers
+                .iter()
+                .map(|(_, anchor)| ui2::entrance_triangle(*anchor)),
+            point,
+        )
     }
     pub(crate) fn town2_key(&mut self, key: KeyCode) -> bool {
         self.town_key(key)
     }
     pub(crate) fn town2_click(&mut self, point: [i32; 2], right: bool) -> bool {
-        let Screen::Town2(town) = &self.screen else {
-            return false;
-        };
-        if right {
-            return true;
-        }
-        if let Some(index) = self.marker2_at(town, point) {
-            if let Screen::Town2(town) = &mut self.screen {
-                town.pressed = Some(index);
-            }
-            self.play_effect(ENTER_SOUND, None);
-            return true;
-        }
-        if let Some(button) = PanelButton::at(point) {
-            if let Screen::Town2(town) = &mut self.screen {
-                town.held = Some(button);
-            }
-            self.press();
-        }
-        true
+        self.town_map_click::<Fallout2>(point, right)
     }
     pub(crate) fn town2_release(&mut self, point: Option<[i32; 2]>) -> bool {
+        self.town_map_release::<Fallout2>(point)
+    }
+    /// A town map's side-panel button released over it.
+    fn town2_panel_button(&mut self, button: PanelButton) {
         let count = self.known_cities().len();
-        let Screen::Town2(town) = &mut self.screen else {
-            return false;
-        };
-        let (pressed, held) = (town.pressed.take(), town.held.take());
-        let Some(point) = point else {
-            return pressed.is_some() || held.is_some();
-        };
-        if let Some(index) = pressed {
-            let over = match &self.screen {
-                Screen::Town2(town) => self.marker2_at(town, point) == Some(index),
-                _ => false,
-            };
-            if over {
-                self.town2_choice(index);
-            }
-            return true;
-        }
-        let Some(button) = held else {
-            return false;
-        };
-        if !button.rect().contains(point) {
-            return true;
-        }
         match button {
             PanelButton::Up => {
-                town.list.up();
+                if let Screen::Town2(town) = &mut self.screen {
+                    town.list.up();
+                }
             }
             PanelButton::Down => {
-                town.list.down(count);
+                if let Screen::Town2(town) = &mut self.screen {
+                    town.list.down(count);
+                }
             }
             PanelButton::TownWorld => self.town2_world_button(),
             PanelButton::Row(k) => {
                 // A known city's button shows its picture and markers.
                 let cities = self.known_cities();
                 let Screen::Town2(town) = std::mem::replace(&mut self.screen, Screen::Map) else {
-                    return true;
+                    return;
                 };
                 let Some(city) = town.list.entry(k, cities.len()).map(|entry| cities[entry]) else {
                     self.screen = Screen::Town2(town);
-                    return true;
+                    return;
                 };
                 let Town2Screen {
                     origin,
@@ -1113,7 +816,6 @@ impl MapPreview {
                 }
             }
         }
-        true
     }
     /// The town map's Town/World button: the world map, at rest.
     fn town2_world_button(&mut self) {
@@ -1187,16 +889,12 @@ impl MapPreview {
             painter.blit_region(&mut image, &picture, hole, ui2::TOWN_PICTURE, true);
         }
         painter.blit(&mut image, FRAME_ART, 0, [0, 0]);
-        self.draw_panel2(&painter, &mut image, town.list, town.held);
+        self.draw_panel2(&painter, &mut image, town.list, town.press.held());
         let hovered = self.pointer.at.and_then(|at| self.marker2_at(town, at));
         for (index, (slot, anchor)) in town.markers.iter().enumerate() {
-            let pressed = town.pressed == Some(index) && hovered == Some(index);
-            let art = if pressed {
-                PRESSED_TRIANGLE_ART
-            } else {
-                TRIANGLE_ART
-            };
-            painter.blit(&mut image, art, 0, ui2::entrance_triangle(*anchor));
+            let pressed = town.press.pressed() == Some(index) && hovered == Some(index);
+            let origin = ui2::entrance_triangle(*anchor);
+            painter.blit(&mut image, triangle_art(pressed), 0, origin);
             if hovered != Some(index) {
                 continue;
             }
@@ -1211,21 +909,9 @@ impl MapPreview {
                     .clone()
             });
             if let Some(text) = label {
-                let text = text.into_bytes();
-                let width = painter.width(screen::LABEL_FONT, &text);
                 let button = ui2::entrance_button(*anchor);
-                if width > 0 {
-                    let origin = [button.x + screen::marker_label_x(width), button.y];
-                    let clip = [button.x, button.y, button.w, button.h].map(i64::from);
-                    self.draw_label(
-                        &painter,
-                        &mut image,
-                        &text,
-                        origin,
-                        width.min(button.w),
-                        clip,
-                    );
-                }
+                let rect = [button.x, button.y, button.w, button.h];
+                self.draw_marker_label(&painter, &mut image, text.as_bytes(), rect);
             }
         }
         Ok(image)

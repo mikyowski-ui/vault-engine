@@ -2,7 +2,7 @@
 //! the 640-by-380 map view (message monitor, HP/AC counters, AP pips, the
 //! active item slot, buttons and the combat panel), the indicator boxes,
 //! the in-world cursor modes and their clicks, and the game-loop hotkeys.
-use super::MapPreview;
+use super::{MapPreview, world_kit::draw_indicator_box};
 use crate::{input::key_text, interface::Painter};
 use std::collections::VecDeque;
 use vault_core::{
@@ -353,31 +353,10 @@ impl MapPreview {
             flags & 1 != 0,
             flags & progression::LEVEL_UP_FLAG != 0,
         );
-        let [ox, oy] = bar::INDICATOR_ORIGIN;
         for (k, indicator) in boxes.iter().enumerate() {
-            let x = ox + bar::indicator_x(k);
-            if k == 0 {
-                painter.blit_region(
-                    image,
-                    bar::INDICATOR_BOX.0,
-                    Rect::new(3, 0, 127, 21),
-                    [x, oy],
-                    true,
-                );
-            } else {
-                painter.blit_opaque(image, bar::INDICATOR_BOX.0, 0, [x, oy]);
-            }
             let (id, key) = indicator.label();
             let label = painter.message("intrface.msg", id);
-            let width = if k == 0 { 127 } else { 130 };
-            painter.centered(
-                image,
-                101,
-                key,
-                &label,
-                [x, oy + bar::INDICATOR_LABEL_Y],
-                width,
-            );
+            draw_indicator_box(painter, image, k, bar::INDICATOR_ORIGIN, &label, key);
         }
     }
     /// SPEC-019 §3.5.2 the five indicator boxes: ADDICT, SNEAK, LEVEL,
@@ -396,31 +375,11 @@ impl MapPreview {
         let Some(geometry) = self.bar_geometry() else {
             return;
         };
-        let [ox, oy] = geometry.indicator_origin();
+        let origin = geometry.indicator_origin();
         for (k, indicator) in boxes.iter().enumerate() {
-            let x = ox + bar::indicator_x(k);
-            if k == 0 {
-                painter.blit_region(
-                    image,
-                    bar::INDICATOR_BOX.0,
-                    Rect::new(3, 0, 127, 21),
-                    [x, oy],
-                    true,
-                );
-            } else {
-                painter.blit_opaque(image, bar::INDICATOR_BOX.0, 0, [x, oy]);
-            }
             let (id, fallback, key) = indicator.label();
             let label = painter.message_or("intrface.msg", id, fallback);
-            let width = if k == 0 { 127 } else { 130 };
-            painter.centered(
-                image,
-                101,
-                key,
-                &label,
-                [x, oy + bar::INDICATOR_LABEL_Y],
-                width,
-            );
+            draw_indicator_box(painter, image, k, origin, &label, key);
         }
     }
     fn draw_bar(&self, painter: &Painter, image: &mut IndexedImage) {
