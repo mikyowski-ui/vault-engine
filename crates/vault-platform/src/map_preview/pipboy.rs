@@ -31,8 +31,8 @@ use vault_core::{
     ui::{
         BUTTON_PRESS, ColorKey, ERROR_SOUND, automap,
         pipboy::{
-            self, ALARM_OPTIONS, Align, Button, Cell, ReadingAction, ReadingInput, ScreenSaver,
-            StatusClick, msg,
+            self, ALARM_OPTIONS, Align, Button, Deferred, Highlight, PageCounts, PipBoyKey,
+            PipBoyModal, PipBoyOutcome, msg,
         },
         saveload::MAP_SHORT_NAMES,
     },
@@ -42,114 +42,61 @@ use vault_guidance::{DiskLine, Holodisk, QuestState, automaps};
 use vault_render::{IndexedImage, TextStyle};
 use winit::keyboard::KeyCode;
 
-/// The 200 ms a selected row shows yellow before it acts.
-const FLASH_MS: u64 = 200;
+pub(crate) use vault_core::ui::pipboy::{AutomapView, Page, StatusView, Tab};
 
-/// The pages, by the button that shows them (`z` opens on the Alarm Clock).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Tab {
-    Status,
-    Automaps,
-    Archives,
-    Alarm,
-}
-
-enum Page {
-    Status(StatusView),
-    Automaps(AutomapView),
-    Archives,
-    Alarm,
-}
-enum StatusView {
-    List,
-    Detail(usize),
-    Reading { disk: Holodisk, page: usize },
-}
-#[derive(Clone, Copy)]
-enum AutomapView {
-    List,
-    /// Area map and the selected entry (from 0).
-    Elevations {
-        area: usize,
-        entry: usize,
-    },
-}
-/// A row zone, or the Back zone on line 40.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Zone {
-    Row(i32),
-    Back,
-}
-/// What shows yellow while a flash waits.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Highlight {
-    None,
-    Location(usize),
-    Disk(usize),
-    Back,
-}
-enum Deferred {
-    Detail(usize),
-    Reading(Holodisk),
-    StatusList,
-    Page(ReadingAction),
-}
-struct Flash {
-    until: u64,
-    highlight: Highlight,
-    then: Deferred,
-}
+/// A running rest: its host session and when it began (the watch cursor
+/// counts from there). Its Alarm Clock option is the core modal's.
 pub(crate) struct Resting {
     pub session: RestSession,
-    option: usize,
     since: u64,
 }
-struct Saver {
-    state: ScreenSaver,
-    cells: Vec<Cell>,
-    last_pass: u64,
-}
 
+/// The open Pip-Boy: the core modal (SPEC-020 §2.1: the page, the held
+/// button or zone, a row's flash, the rest's option, the idle timer, the
+/// screen saver and the quit-close flag) and what only this layer keeps.
 pub(crate) struct PipBoy {
-    /// No page is current on the start screen.
-    page: Option<Page>,
+    modal: PipBoyModal,
     pub rest: Option<Resting>,
-    last_step: u64,
-    flash: Option<Flash>,
-    pressed: Option<Button>,
-    zone: Option<Zone>,
-    idle_since: u64,
+    /// The holodisk the reading view's key names (ordinal and pages),
+    /// read when it was chosen.
+    disk: Option<(usize, Holodisk)>,
+    /// The pointer seen last; a movement restarts the idle timer.
     pointer: Option<[i32; 2]>,
-    saver: Option<Saver>,
-    /// The quit confirmation closes the Pip-Boy whatever the answer.
-    close_after_dialog: bool,
     /// An archive movie played: the idle timer restarts on return.
     movie_played: bool,
     /// P-02: the automap raster decoded for (map, elevation), kept while
     /// the Pip-Boy is open; a rest step, which can change it, drops it.
     raster: Option<AutomapRaster>,
 }
+impl std::ops::Deref for PipBoy {
+    type Target = PipBoyModal;
+    fn deref(&self) -> &PipBoyModal {
+        &self.modal
+    }
+}
 type AutomapRaster = ((usize, usize), Option<Vec<u8>>);
+impl PipBoy {
+    /// The holodisk being read and its page.
+    fn reading(&self) -> Option<(&Holodisk, usize)> {
+        let Some(Page::Status(StatusView::Reading { disk, page, .. })) = self.modal.page else {
+            return None;
+        };
+        let (_, holodisk) = self.disk.as_ref().filter(|(ordinal, _)| *ordinal == disk)?;
+        Some((holodisk, page))
+    }
+}
 #[cfg(test)]
 impl PipBoy {
     /// The page shown, if any.
     pub fn tab(&self) -> Option<Tab> {
-        self.page.as_ref().map(|page| match page {
-            Page::Status(_) => Tab::Status,
-            Page::Automaps(_) => Tab::Automaps,
-            Page::Archives => Tab::Archives,
-            Page::Alarm => Tab::Alarm,
-        })
+        self.modal.page.as_ref().map(Page::tab)
     }
     /// The open holodisk and its page.
     pub fn disk(&self) -> Option<(&Holodisk, usize)> {
-        match &self.page {
-            Some(Page::Status(StatusView::Reading { disk, page })) => Some((disk, *page)),
-            _ => None,
-        }
+        self.reading()
     }
     pub fn saver_running(&self) -> bool {
-        self.saver.is_some()
+        self.modal.saver.is_some()
     }
 }
 
@@ -266,16 +213,10 @@ impl MapPreview {
             return;
         }
         self.screen = Screen::PipBoy(Box::new(PipBoy {
-            page: None,
+            modal: PipBoyModal::open(self.clock),
             rest: None,
-            last_step: 0,
-            flash: None,
-            pressed: None,
-            zone: None,
-            idle_since: self.clock,
+            disk: None,
             pointer: self.pointer.at,
-            saver: None,
-            close_after_dialog: false,
             movie_played: false,
             raster: None,
         }));
@@ -295,37 +236,14 @@ impl MapPreview {
         }
         self.return_to_map();
     }
-    /// Any input or pointer movement restarts the idle timer; one that
-    /// ends the screen saver is consumed.
-    fn pipboy_input(&mut self) -> bool {
-        let now = self.clock;
-        let Some(pipboy) = self.pipboy() else {
-            return false;
-        };
-        pipboy.idle_since = now;
-        pipboy.saver.take().is_some()
-    }
-    /// A page button: its page from the initial state (also when it is
-    /// already shown).
-    fn show_tab(&mut self, tab: Tab) {
-        match tab {
-            Tab::Status => self.show_page(Page::Status(StatusView::List)),
-            Tab::Automaps => self.show_page(Page::Automaps(AutomapView::List)),
-            Tab::Archives => self.show_page(Page::Archives),
-            Tab::Alarm => self.pipboy_alarm(),
-        }
-    }
-    fn show_page(&mut self, page: Page) {
-        if let Some(pipboy) = self.pipboy() {
-            pipboy.page = Some(page);
-        }
-    }
     /// The Alarm Clock button (or the rest intent): the SPEC-008 §3.9
     /// eligibility test, then the page or the refusal box. Safe rule: a
     /// refusal keeps the previous page current.
     fn pipboy_alarm(&mut self) {
         if self.host.rest_allowed() {
-            self.show_page(Page::Alarm);
+            if let Some(pipboy) = self.pipboy() {
+                pipboy.modal.show_alarm();
+            }
             return;
         }
         self.play_effect(ERROR_SOUND.as_bytes(), None);
@@ -337,201 +255,135 @@ impl MapPreview {
             ColorKey::ERROR,
         ));
     }
+    /// The list lengths the current page's zones depend on (only the
+    /// current page's are counted).
+    fn pipboy_counts(&self) -> PageCounts {
+        let Screen::PipBoy(pipboy) = &self.screen else {
+            return PageCounts::default();
+        };
+        let mut counts = PageCounts::default();
+        match pipboy.modal.page {
+            Some(Page::Status(StatusView::List)) => {
+                counts.locations = self.status_locations().len();
+                counts.disks = self.status_disks().len();
+            }
+            Some(Page::Automaps(AutomapView::List)) => {
+                counts.areas = self.automap_areas().len();
+            }
+            Some(Page::Automaps(AutomapView::Elevations { area, .. })) => {
+                let areas = self.automap_areas();
+                counts.areas = areas.len();
+                counts.entries = areas
+                    .get(area)
+                    .map_or(0, |key| self.automap_entries(*key).len());
+            }
+            Some(Page::Archives) => counts.archives = self.archive_list().len(),
+            _ => {}
+        }
+        counts
+    }
+    /// The current page's zones: (first line, count, Back zone).
+    #[cfg(test)]
+    pub(super) fn zone_layout(&self) -> (i32, usize, bool) {
+        let counts = self.pipboy_counts();
+        match &self.screen {
+            Screen::PipBoy(pipboy) => pipboy.modal.zone_layout(&counts),
+            _ => (0, 0, false),
+        }
+    }
     /// Esc, Enter and `p` close; Ctrl+Q, Ctrl+X and F10 ask to quit (the
     /// Pip-Boy closes whatever the answer); F12 takes a screenshot;
     /// PageDown and PageUp go to a holodisk reading view. Every other key
     /// does nothing. During a rest only Esc acts: it stops the rest.
     pub(crate) fn pipboy_key(&mut self, key: KeyCode) -> bool {
-        if self.pipboy_input() {
-            return true;
-        }
         let [_, control, _] = self.hud.modifiers;
+        let now = self.clock;
+        let input = match key {
+            KeyCode::Escape => PipBoyKey::Escape,
+            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::KeyP => PipBoyKey::Close,
+            KeyCode::KeyQ | KeyCode::KeyX if control => PipBoyKey::Quit,
+            KeyCode::F10 => PipBoyKey::Quit,
+            KeyCode::F12 => PipBoyKey::F12,
+            KeyCode::PageDown => PipBoyKey::PageDown,
+            KeyCode::PageUp => PipBoyKey::PageUp,
+            _ => PipBoyKey::Other,
+        };
         let Some(pipboy) = self.pipboy() else {
             return false;
         };
-        if pipboy.rest.is_some() {
-            if key == KeyCode::Escape {
-                self.finish_rest(RestOutcome::Cancelled);
-            }
-            return true;
-        }
-        if pipboy.flash.is_some() {
-            return true;
-        }
-        match key {
-            KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::KeyP => {
-                self.close_pipboy();
-            }
-            KeyCode::KeyQ | KeyCode::KeyX if control => self.pipboy_quit(),
-            KeyCode::F10 => self.pipboy_quit(),
-            KeyCode::F12 => self.screenshot(),
-            KeyCode::PageDown => self.reading_input(ReadingInput::PageDown),
-            KeyCode::PageUp => self.reading_input(ReadingInput::PageUp),
-            _ => {}
-        }
+        let outcome = pipboy.modal.key(input, now);
+        self.pipboy_outcome(outcome);
         true
-    }
-    fn pipboy_quit(&mut self) {
-        self.confirm_quit();
-        if let Some(pipboy) = self.pipboy() {
-            pipboy.close_after_dialog = true;
-        }
     }
     /// A press: a window button shows its down art and plays its press
     /// sound; a row zone waits for the release over it.
     pub(crate) fn pipboy_click(&mut self, point: [i32; 2]) -> bool {
-        if self.pipboy_input() {
-            return true;
-        }
-        let zone = self.pipboy_zone(point);
+        let counts = self.pipboy_counts();
+        let now = self.clock;
         let Some(pipboy) = self.pipboy() else {
             return false;
         };
-        if pipboy.rest.is_some() || pipboy.flash.is_some() {
-            return true;
-        }
-        if let Some(button) = Button::at(point) {
-            pipboy.pressed = Some(button);
-            let (press, release) = button.sounds();
-            self.press_button_cue(press.as_bytes(), release.as_bytes(), button.rect());
-            return true;
-        }
-        pipboy.zone = zone;
+        let outcome = pipboy.modal.press(point, &counts, now);
+        self.pipboy_outcome(outcome);
         true
     }
     /// A release over the control pressed acts.
     pub(crate) fn pipboy_release(&mut self, point: Option<[i32; 2]>) -> bool {
-        let zone = point.and_then(|point| self.pipboy_zone(point));
+        let counts = self.pipboy_counts();
+        let now = self.clock;
         let Some(pipboy) = self.pipboy() else {
             return false;
         };
-        let (button, pressed_zone) = (pipboy.pressed.take(), pipboy.zone.take());
-        let Some(point) = point else {
-            return button.is_some();
-        };
-        if let Some(button) = button {
-            if button.rect().contains(point) {
-                match button {
-                    Button::Status => self.show_tab(Tab::Status),
-                    Button::Automaps => self.show_tab(Tab::Automaps),
-                    Button::Archives => self.show_tab(Tab::Archives),
-                    Button::Close => self.close_pipboy(),
-                    Button::Alarm => self.show_tab(Tab::Alarm),
-                }
-            }
-            return true;
-        }
-        match (pressed_zone, zone) {
-            (Some(pressed), Some(zone)) if pressed == zone => {
-                self.zone_release(zone, point[0]);
-                true
-            }
-            _ => false,
-        }
+        let button = pipboy.modal.pressed().is_some();
+        let outcome = pipboy.modal.release(point, &counts, now);
+        let acted = outcome != PipBoyOutcome::None;
+        self.pipboy_outcome(outcome);
+        button || acted
     }
-    /// The current page's zones: (first line, count, Back zone).
-    fn zone_layout(&self) -> (i32, usize, bool) {
-        let Screen::PipBoy(pipboy) = &self.screen else {
-            return (0, 0, false);
-        };
-        match &pipboy.page {
-            None => (0, 0, false),
-            Some(Page::Status(StatusView::List)) => {
-                let locations = self.status_locations().len();
-                let disks = self.status_disks().len();
-                (2, pipboy::status_zone_count(locations, disks), false)
+    /// Act on the core modal's outcome (SPEC-020 §2.1 rule 4).
+    fn pipboy_outcome(&mut self, outcome: PipBoyOutcome) {
+        match outcome {
+            PipBoyOutcome::None | PipBoyOutcome::Redraw => {}
+            PipBoyOutcome::Pressed(button) => {
+                let (press, release) = button.sounds();
+                self.press_button_cue(press.as_bytes(), release.as_bytes(), button.rect());
             }
-            Some(Page::Status(_)) => (0, 0, true),
-            Some(Page::Automaps(AutomapView::List)) => (2, self.automap_areas().len(), false),
-            Some(Page::Automaps(AutomapView::Elevations { area, .. })) => {
-                (0, self.automap_entries(*area).len() + 2, true)
+            PipBoyOutcome::Close => self.close_pipboy(),
+            PipBoyOutcome::QuitConfirm => self.confirm_quit(),
+            PipBoyOutcome::Screenshot => self.screenshot(),
+            PipBoyOutcome::AlarmRequested => self.pipboy_alarm(),
+            PipBoyOutcome::Location(row) => {
+                let Some((town, _)) = self.status_locations().into_iter().nth(row - 1) else {
+                    return;
+                };
+                self.pipboy_flash(Highlight::Location(row), Deferred::Detail(town));
             }
-            Some(Page::Archives) => (2, self.archive_list().len(), false),
-            Some(Page::Alarm) => (pipboy::OPTION_LINE, ALARM_OPTIONS.len(), false),
-        }
-    }
-    fn pipboy_zone(&self, point: [i32; 2]) -> Option<Zone> {
-        let (first, count, back) = self.zone_layout();
-        if back && pipboy::BACK_ZONE.contains(point) {
-            return Some(Zone::Back);
-        }
-        pipboy::zone_row(first, count, point).map(Zone::Row)
-    }
-    /// Show `highlight` for 200 ms, then do `then`, after `ib1p1xx1`.
-    fn flash(&mut self, highlight: Highlight, then: Deferred) {
-        self.play_effect(BUTTON_PRESS.as_bytes(), None);
-        let until = self.clock + FLASH_MS;
-        if let Some(pipboy) = self.pipboy() {
-            pipboy.flash = Some(Flash {
-                until,
-                highlight,
-                then,
-            });
-        }
-    }
-    fn zone_release(&mut self, zone: Zone, x: i32) {
-        let Screen::PipBoy(pipboy) = &self.screen else {
-            return;
-        };
-        match (&pipboy.page, zone) {
-            (Some(Page::Status(StatusView::List)), Zone::Row(row)) => {
-                let locations = self.status_locations();
-                let disks = self.status_disks();
-                match pipboy::status_click(x, row, locations.len(), disks.len()) {
-                    Some(StatusClick::Location(row)) => {
-                        let town = locations[row - 1].0;
-                        self.flash(Highlight::Location(row), Deferred::Detail(town));
-                    }
-                    Some(StatusClick::Disk(row)) => {
-                        let Some((ordinal, _)) = disks.get(row - 1) else {
-                            return;
-                        };
-                        match self.read_disk(*ordinal) {
-                            Ok(disk) => {
-                                for diagnostic in &disk.diagnostics {
-                                    tracing::warn!(%diagnostic, "holodisk diagnostic");
-                                }
-                                self.flash(Highlight::Disk(row), Deferred::Reading(disk));
-                            }
-                            Err(error) => self.status = error.into_bytes(),
+            PipBoyOutcome::Disk(row) => {
+                let Some((ordinal, _)) = self.status_disks().into_iter().nth(row - 1) else {
+                    return;
+                };
+                match self.read_disk(ordinal) {
+                    Ok(disk) => {
+                        for diagnostic in &disk.diagnostics {
+                            tracing::warn!(%diagnostic, "holodisk diagnostic");
                         }
+                        let then = Deferred::Reading {
+                            disk: ordinal,
+                            last_page: disk.last_page,
+                        };
+                        if let Some(pipboy) = self.pipboy() {
+                            pipboy.disk = Some((ordinal, disk));
+                        }
+                        self.pipboy_flash(Highlight::Disk(row), then);
                     }
-                    None => {}
+                    Err(error) => self.status = error.into_bytes(),
                 }
             }
-            (Some(Page::Status(StatusView::Detail(_))), Zone::Back) => {
-                self.flash(Highlight::Back, Deferred::StatusList);
+            // A flash began, or an automap area or entry was selected.
+            PipBoyOutcome::Flashing | PipBoyOutcome::Selected => {
+                self.play_effect(BUTTON_PRESS.as_bytes(), None);
             }
-            (Some(Page::Status(StatusView::Reading { .. })), Zone::Back) => {
-                self.reading_input(ReadingInput::Release(x));
-            }
-            (Some(Page::Automaps(AutomapView::List)), Zone::Row(row)) => {
-                let areas = self.automap_areas();
-                if let Some(area) = usize::try_from(row - 1).ok().and_then(|i| areas.get(i)) {
-                    self.play_effect(BUTTON_PRESS.as_bytes(), None);
-                    let view = AutomapView::Elevations {
-                        area: *area,
-                        entry: 0,
-                    };
-                    self.show_page(Page::Automaps(view));
-                }
-            }
-            (Some(Page::Automaps(AutomapView::Elevations { area, .. })), zone) => {
-                let area = *area;
-                match zone {
-                    Zone::Back | Zone::Row(-1) => {
-                        self.show_page(Page::Automaps(AutomapView::List));
-                        self.play_effect(BUTTON_PRESS.as_bytes(), None);
-                    }
-                    Zone::Row(row) if row >= 1 => {
-                        self.play_effect(BUTTON_PRESS.as_bytes(), None);
-                        let entry = row as usize - 1;
-                        self.show_page(Page::Automaps(AutomapView::Elevations { area, entry }));
-                    }
-                    Zone::Row(_) => {}
-                }
-            }
-            (Some(Page::Archives), Zone::Row(row)) if row >= 1 => {
+            PipBoyOutcome::Archive(row) => {
                 self.play_effect(BUTTON_PRESS.as_bytes(), None);
                 if self.host.play_archive_movie(row) {
                     if let Some(pipboy) = self.pipboy() {
@@ -540,46 +392,17 @@ impl MapPreview {
                     self.drain_effects();
                 }
             }
-            (Some(Page::Alarm), Zone::Row(row)) => {
-                if let Some(option) = pipboy::alarm_option(row) {
-                    self.begin_pipboy_rest(option);
-                }
-            }
-            _ => {}
+            PipBoyOutcome::Rest(option) => self.begin_pipboy_rest(option),
+            PipBoyOutcome::StopRest => self.finish_rest(RestOutcome::Cancelled),
         }
     }
-    /// The reading view's line-40 controls and page keys; elsewhere page
-    /// keys do nothing.
-    fn reading_input(&mut self, input: ReadingInput) {
-        let Screen::PipBoy(pipboy) = &self.screen else {
-            return;
-        };
-        let Some(Page::Status(StatusView::Reading { disk, page })) = &pipboy.page else {
-            return;
-        };
-        if let Some(action) = pipboy::reading_action(input, *page, disk.last_page) {
-            self.flash(Highlight::None, Deferred::Page(action));
+    /// Show `highlight` for 200 ms, then do `then`, after `ib1p1xx1`.
+    fn pipboy_flash(&mut self, highlight: Highlight, then: Deferred) {
+        self.play_effect(BUTTON_PRESS.as_bytes(), None);
+        let now = self.clock;
+        if let Some(pipboy) = self.pipboy() {
+            pipboy.modal.flash(now, highlight, then);
         }
-    }
-    fn apply_deferred(&mut self, then: Deferred) {
-        let Some(pipboy) = self.pipboy() else {
-            return;
-        };
-        let view = match then {
-            Deferred::Detail(town) => StatusView::Detail(town),
-            Deferred::Reading(disk) => StatusView::Reading { disk, page: 0 },
-            Deferred::StatusList | Deferred::Page(ReadingAction::List) => StatusView::List,
-            Deferred::Page(action) => {
-                if let Some(Page::Status(StatusView::Reading { page, .. })) = &mut pipboy.page {
-                    *page = match action {
-                        ReadingAction::Next => *page + 1,
-                        _ => page.saturating_sub(1),
-                    };
-                }
-                return;
-            }
-        };
-        pipboy.page = Some(Page::Status(view));
     }
     /// Choosing an Alarm Clock option: `ib1p1xx1`, the option in yellow
     /// under the watch cursor, and the rest in UI steps.
@@ -589,12 +412,8 @@ impl MapPreview {
         match self.host.begin_rest(ALARM_OPTIONS[option].1) {
             Ok(session) => {
                 if let Some(pipboy) = self.pipboy() {
-                    pipboy.rest = Some(Resting {
-                        session,
-                        option,
-                        since,
-                    });
-                    pipboy.last_step = 0;
+                    pipboy.modal.begin_rest(option);
+                    pipboy.rest = Some(Resting { session, since });
                     pipboy.raster = None;
                 }
             }
@@ -605,6 +424,7 @@ impl MapPreview {
     /// event that stopped it closes the Pip-Boy.
     fn finish_rest(&mut self, outcome: RestOutcome) {
         if let Some(pipboy) = self.pipboy() {
+            pipboy.modal.end_rest();
             pipboy.rest = None;
         }
         self.play_effect(pipboy::ALARM_RELEASE.as_bytes(), None);
@@ -625,19 +445,18 @@ impl MapPreview {
         };
         let mut changed = false;
         if std::mem::take(&mut pipboy.movie_played) {
-            pipboy.idle_since = now;
+            pipboy.modal.idle_since = now;
         }
         if pipboy.pointer != at {
             pipboy.pointer = at;
-            pipboy.idle_since = now;
-            changed |= pipboy.saver.take().is_some();
+            changed |= pipboy.modal.input(now);
         }
-        if (pipboy.close_after_dialog && !dialog) || (quit && pipboy.rest.is_none()) {
+        if (pipboy.modal.close_after_dialog && !dialog) || (quit && pipboy.modal.resting.is_none())
+        {
             self.close_pipboy();
             return Ok(true);
         }
-        if let Some(flash) = pipboy.flash.take_if(|flash| now >= flash.until) {
-            self.apply_deferred(flash.then);
+        if pipboy.modal.tick(now) {
             return Ok(true);
         }
         if let Some(resting) = &mut pipboy.rest {
@@ -647,10 +466,9 @@ impl MapPreview {
                 self.finish_rest(RestOutcome::Cancelled);
                 return Ok(true);
             }
-            if now.saturating_sub(pipboy.last_step) < pipboy::SAVER_PASS_MS {
+            if !pipboy.modal.rest_due(now) {
                 return Ok(changed);
             }
-            pipboy.last_step = now;
             pipboy.raster = None;
             match self.host.advance_rest(&mut resting.session) {
                 Ok(None) => {}
@@ -662,37 +480,16 @@ impl MapPreview {
             }
             return Ok(true);
         }
-        let idle = now.saturating_sub(pipboy.idle_since) > pipboy::IDLE_MS;
-        let due = match &pipboy.saver {
-            Some(saver) => now.saturating_sub(saver.last_pass) >= pipboy::SAVER_PASS_MS,
-            None => idle && !dialog && pipboy.flash.is_none(),
-        };
-        if due {
-            self.saver_pass(now);
+        if pipboy.modal.saver_due(now, dialog) {
+            // One screen-saver pass; starting runs the 50 warm-up passes,
+            // which draw nothing and do not wait, first.
+            let rng = &mut self.host.world.rng;
+            pipboy
+                .modal
+                .saver_pass(now, || rng.range(0, 32767).unwrap_or(32767));
             changed = true;
         }
         Ok(changed)
-    }
-    /// One screen-saver pass; starting runs the 50 warm-up passes, which
-    /// draw nothing and do not wait, first.
-    fn saver_pass(&mut self, now: u64) {
-        let Screen::PipBoy(pipboy) = &mut self.screen else {
-            return;
-        };
-        let rng = &mut self.host.world.rng;
-        let saver = pipboy.saver.get_or_insert_with(|| Saver {
-            state: ScreenSaver::default(),
-            cells: Vec::new(),
-            last_pass: now,
-        });
-        let mut draw = || rng.range(0, 32767).unwrap_or(32767);
-        loop {
-            if let Some(cells) = saver.state.pass(&mut draw) {
-                saver.cells = cells;
-                saver.last_pass = now;
-                return;
-            }
-        }
     }
     /// The areas of the automap database, sorted by short name bytes.
     fn automap_areas(&self) -> Vec<usize> {
@@ -722,7 +519,11 @@ impl MapPreview {
         let Screen::PipBoy(pipboy) = &self.screen else {
             return;
         };
-        let Some(Page::Automaps(AutomapView::Elevations { area, entry })) = pipboy.page else {
+        let Some(Page::Automaps(AutomapView::Elevations { area, entry })) = pipboy.modal.page
+        else {
+            return;
+        };
+        let Some(area) = self.automap_areas().get(area).copied() else {
             return;
         };
         let Some(key) = self.automap_entries(area).get(entry).copied() else {
@@ -777,7 +578,7 @@ impl MapPreview {
             font: painter.font(vault_core::ui::FONT_SMALL),
             painter,
         };
-        if let Some(saver) = &pipboy.saver {
+        if let Some(saver) = &pipboy.modal.saver {
             for cell in &saver.cells {
                 pen.painter
                     .blit_region(&mut image, pipboy::BOMB, cell.source, cell.at, false);
@@ -785,6 +586,7 @@ impl MapPreview {
             return Ok(image);
         }
         let highlight = pipboy
+            .modal
             .flash
             .as_ref()
             .map_or(Highlight::None, |flash| flash.highlight);
@@ -795,7 +597,7 @@ impl MapPreview {
                 pipboy::TEXT
             }
         };
-        match &pipboy.page {
+        match &pipboy.modal.page {
             None => {
                 pen.painter
                     .blit(&mut image, pipboy::LOGO, 0, pipboy::LOGO_AT);
@@ -879,8 +681,11 @@ impl MapPreview {
                 let selected = highlight == Highlight::Back;
                 pen.line(&mut image, &back, Align::Centered, 40, key(selected), false);
             }
-            Some(Page::Status(StatusView::Reading { disk, page })) => {
-                if *page == 0 {
+            Some(Page::Status(StatusView::Reading { .. })) => {
+                let Some((disk, page)) = pipboy.reading() else {
+                    return Ok(image);
+                };
+                if page == 0 {
                     pen.line(
                         &mut image,
                         &disk.title,
@@ -901,7 +706,7 @@ impl MapPreview {
                     let at = [pipboy::counter_x(pen.width(&of)), pipboy::COUNTER_Y];
                     pen.draw(&mut image, &counter, at, pipboy::TEXT, false);
                 }
-                for (index, record) in disk.page(*page).iter().enumerate() {
+                for (index, record) in disk.page(page).iter().enumerate() {
                     if let DiskLine::Text(text) = record {
                         let line = pipboy::RECORD_LINE + index as i32;
                         pen.line(&mut image, text, Align::NoIndent, line, pipboy::TEXT, false);
@@ -916,7 +721,7 @@ impl MapPreview {
                     pipboy::TEXT,
                     false,
                 );
-                let next = self.pip_text(if *page >= disk.last_page {
+                let next = self.pip_text(if page >= disk.last_page {
                     msg::DONE
                 } else {
                     msg::MORE
@@ -942,6 +747,9 @@ impl MapPreview {
                         }
                     }
                     AutomapView::Elevations { area, entry } => {
+                        let Some(area) = self.automap_areas().get(area).copied() else {
+                            return Ok(image);
+                        };
                         let text = self.automap_title(area);
                         pen.line(&mut image, &text, Align::Centered, 2, pipboy::TEXT, false);
                         for (index, (map, elevation)) in
@@ -978,7 +786,7 @@ impl MapPreview {
                 ]
                 .concat();
                 pen.line(&mut image, &line, Align::Centered, 2, pipboy::TEXT, false);
-                let resting = pipboy.rest.as_ref().map(|resting| resting.option);
+                let resting = pipboy.modal.resting;
                 for (option, (id, _)) in ALARM_OPTIONS.iter().enumerate() {
                     let text = self.pip_text(*id);
                     let line = pipboy::OPTION_LINE + 2 * option as i32;

@@ -12,15 +12,18 @@
 //! DONE submits the typed text, whose answer shows in the reply area with
 //! its speech; Esc or CANCEL stops speech and closes it, restoring the
 //! saved reply and its page (safe rule).
-use super::{
-    MapPreview,
-    modal_kit::{offset, red_button},
-};
+use super::MapPreview;
 use crate::{input::key_text, interface::Painter};
 use vault_core::{
     assets::WorldAssets,
     host_talk::{ReviewText, TellMeAbout},
-    ui::{self, BUTTON_PRESS, BUTTON_RELEASE, Rect, talk},
+    ui::{
+        self, BUTTON_PRESS, BUTTON_RELEASE, Rect,
+        talk::{
+            self, AskAboutWindow, AskKey, AskOutcome, PanelControl, ReviewKey, ReviewOutcome,
+            ReviewWindow,
+        },
+    },
 };
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
@@ -32,30 +35,36 @@ pub(crate) enum TalkWindow {
     /// SPEC-019 §3.15 the combat control panel (and its custom panel).
     Control(super::control::ControlPanel),
 }
+/// The Review window: the core window (SPEC-020 §2.1: the top entry and
+/// the held button) and the head updater's state before the window
+/// suspended it.
 pub(crate) struct Review {
-    /// The entry at the top of the transcript.
-    pub top: usize,
-    /// The head updater's state before the window suspended it.
+    window: ReviewWindow,
     updater: bool,
 }
+impl std::ops::Deref for Review {
+    type Target = ReviewWindow;
+    fn deref(&self) -> &ReviewWindow {
+        &self.window
+    }
+}
+/// The Ask About window: the core window (its field, whether it is still
+/// opening, whether an answer shows, and the held button) and the reply
+/// text, page and remembered pages when it opened.
 pub(crate) struct AskAbout {
-    pub field: talk::AskField,
-    /// Tell Me About was pressed and the reply and option windows are
-    /// hidden; the window itself opens on the next head-updater tick, from
-    /// the reply/choice loop's next input pass (SPEC-014 §3.45).
-    pub opening: bool,
-    /// An answer is shown, so the reply window is visible again.
-    pub answered: bool,
-    /// The reply text, page and remembered pages when the window opened.
+    window: AskAboutWindow,
     saved: (Vec<u8>, usize, Vec<usize>),
 }
+impl std::ops::Deref for AskAbout {
+    type Target = AskAboutWindow;
+    fn deref(&self) -> &AskAboutWindow {
+        &self.window
+    }
+}
 
-/// A button's press and release sounds.
-type Cues = (&'static [u8], &'static [u8]);
-
-/// The Ask About red buttons' screen rectangles: DONE, CANCEL.
-fn ask_buttons() -> [Rect; 2] {
-    [talk::ASK_DONE, talk::ASK_CANCEL].map(|button| red_button(offset(talk::ASK_ORIGIN, button)))
+/// A sound pair as the effect player takes it.
+fn cues((press, release): (&'static str, &'static str)) -> (&'static [u8], &'static [u8]) {
+    (press.as_bytes(), release.as_bytes())
 }
 
 impl MapPreview {
@@ -63,7 +72,7 @@ impl MapPreview {
     /// the reply until an answer shows, the options while it is open.
     pub(crate) fn talk_hides(&self) -> (bool, bool) {
         match &self.talk {
-            Some(TalkWindow::AskAbout(ask)) => (ask.opening || !ask.answered, true),
+            Some(TalkWindow::AskAbout(ask)) => ask.hides(),
             _ => (false, false),
         }
     }
@@ -79,138 +88,161 @@ impl MapPreview {
         if !self.panel_ready() {
             return false;
         }
-        let fallout2 = self.host.world.fallout2.is_some();
-        match key {
-            KeyCode::KeyA if !fallout2 => self.tell_me_about(),
-            KeyCode::KeyC if self.control_member().is_some() => self.open_control(),
-            KeyCode::KeyB => self.barter_button(),
+        let letter = match key {
+            KeyCode::KeyA => 'a',
+            KeyCode::KeyB => 'b',
+            KeyCode::KeyC => 'c',
             _ => return false,
+        };
+        let panel = self.panel();
+        match talk::panel_key(letter, panel.fallout2, panel.control_member) {
+            Some(control) => self.panel_action(control),
+            None => return false,
         }
         true
     }
-    /// The panel's buttons and their cues: Barter, then Tell Me About
-    /// (Fallout 1) or Combat Control (a Fallout 2 party member's), then
-    /// Review.
-    fn panel_buttons(&self) -> Vec<(Rect, Cues)> {
-        let small = (talk::SMALL_PRESS.as_bytes(), talk::SMALL_RELEASE.as_bytes());
-        let review = (BUTTON_PRESS.as_bytes(), BUTTON_RELEASE.as_bytes());
-        let mut buttons = vec![(talk::panel_button(talk::BARTER), small)];
-        if self.host.world.fallout2.is_none() {
-            buttons.push((talk::panel_button(talk::TELL_ME_ABOUT), small));
-        } else if self.control_member().is_some() {
-            let rect = vault_core::ui::fallout2::COMBAT_CONTROL_BUTTON;
-            buttons.push((talk::panel_button(rect), small));
+    /// The panel's controls: Barter, then Tell Me About (Fallout 1) or
+    /// Combat Control (a Fallout 2 party member's), then Review.
+    fn panel(&self) -> talk::Panel {
+        talk::Panel::new(
+            self.host.world.fallout2.is_some(),
+            self.control_member().is_some(),
+        )
+    }
+    /// A panel control acts.
+    fn panel_action(&mut self, control: PanelControl) {
+        match control {
+            PanelControl::Barter => self.barter_button(),
+            PanelControl::TellMeAbout => self.tell_me_about(),
+            PanelControl::CombatControl => self.open_control(),
+            PanelControl::Review => self.open_review(),
         }
-        buttons.push((talk::panel_button(talk::REVIEW), review));
-        buttons
     }
     /// A left press on a panel button, or in a window (modal: every press
-    /// there is taken).
+    /// there is taken). The held control shows its down art and plays its
+    /// press cue; its release cue follows on the release.
     pub(crate) fn talk_click(&mut self, point: [i32; 2]) -> bool {
-        let (small, review) = (
-            (talk::SMALL_PRESS.as_bytes(), talk::SMALL_RELEASE.as_bytes()),
-            (BUTTON_PRESS.as_bytes(), BUTTON_RELEASE.as_bytes()),
-        );
-        let buttons: Vec<(Rect, Cues)> = match &self.talk {
-            Some(TalkWindow::Review(_)) => vec![
-                (talk::SCROLL_UP.0, small),
-                (talk::SCROLL_DOWN.0, small),
-                (talk::DONE.0, review),
-            ],
-            Some(TalkWindow::AskAbout(ask)) if ask.opening => return true,
-            Some(TalkWindow::AskAbout(_)) => ask_buttons()
-                .into_iter()
-                .map(|rect| (rect, review))
-                .collect(),
+        let panel = (self.talk.is_none() && self.panel_ready()).then(|| self.panel());
+        let held = match &mut self.talk {
+            Some(TalkWindow::Review(review)) => {
+                let control = review.window.press(point);
+                control.and_then(|control| {
+                    let rect = review.layout().rect(control)?;
+                    Some((rect, control.sounds()))
+                })
+            }
+            Some(TalkWindow::AskAbout(ask)) => {
+                let control = ask.window.press(point);
+                control.and_then(|control| {
+                    let rect = ask.layout().rect(control)?;
+                    Some((rect, (BUTTON_PRESS, BUTTON_RELEASE)))
+                })
+            }
             Some(TalkWindow::Control(_)) => return self.control_click(point),
-            None if self.panel_ready() => self.panel_buttons(),
+            None if let Some(panel) = panel => {
+                let layout = panel.layout();
+                let control = layout.hit(point);
+                control.and_then(|control| Some((layout.rect(control)?, control.sounds())))
+            }
             None => return false,
         };
-        if let Some((rect, (press, release))) =
-            buttons.into_iter().find(|(rect, _)| rect.contains(point))
-        {
+        if let Some((rect, sounds)) = held {
+            let (press, release) = cues(sounds);
             self.press_button_cue(press, release, rect);
             return true;
         }
         self.talk.is_some()
     }
-    /// A left release over the held button (`over`) acts on it.
-    pub(crate) fn talk_release(&mut self, over: Option<Rect>) -> bool {
+    /// A left release: a window's held button acts when the release is
+    /// over it; a panel button acts when the release is over the held
+    /// button (`over`).
+    pub(crate) fn talk_release(&mut self, point: Option<[i32; 2]>, over: Option<Rect>) -> bool {
         if !self.host.world.dialogue.open {
             return false;
         }
-        let Some(over) = over else {
-            return self.talk.is_some();
-        };
-        match &self.talk {
-            Some(TalkWindow::Review(_)) => {
-                if over == talk::SCROLL_UP.0 {
-                    self.scroll_review(false);
-                } else if over == talk::SCROLL_DOWN.0 {
-                    self.scroll_review(true);
-                } else if over == talk::DONE.0 {
+        let entries = self.host.world.dialogue.review.len();
+        match &mut self.talk {
+            Some(TalkWindow::Review(review)) => {
+                if review.window.release(point, entries) == ReviewOutcome::Close {
                     self.close_review();
                 }
             }
-            Some(TalkWindow::AskAbout(ask)) if ask.opening => {}
-            Some(TalkWindow::AskAbout(_)) => {
-                let [done, cancel] = ask_buttons();
-                if over == done {
-                    self.submit_ask();
-                } else if over == cancel {
-                    self.cancel_ask();
+            Some(TalkWindow::AskAbout(ask)) => {
+                let outcome = ask.window.release(point);
+                self.ask_outcome(outcome);
+            }
+            Some(TalkWindow::Control(_)) => return self.control_release(over),
+            None => {
+                let Some(over) = over else {
+                    return false;
+                };
+                let control = self
+                    .panel()
+                    .layout()
+                    .controls()
+                    .iter()
+                    .find(|(_, rect)| *rect == over)
+                    .map(|(control, _)| *control);
+                match control {
+                    Some(control) => self.panel_action(control),
+                    None => return false,
                 }
             }
-            Some(TalkWindow::Control(_)) => return self.control_release(Some(over)),
-            None if !self.panel_buttons().iter().any(|(rect, _)| *rect == over) => return false,
-            None if over == talk::panel_button(talk::BARTER) => self.barter_button(),
-            // Fallout 2's Combat Control sits where Tell Me About was.
-            None if over == talk::panel_button(talk::TELL_ME_ABOUT)
-                && self.host.world.fallout2.is_some() =>
-            {
-                self.open_control();
-            }
-            None if over == talk::panel_button(talk::TELL_ME_ABOUT) => self.tell_me_about(),
-            None if over == talk::panel_button(talk::REVIEW) => self.open_review(),
-            None => return false,
         }
         true
     }
     /// Keys in a window: Review reads Esc, Up and Down and ignores every
     /// other key (Ctrl+Q and F10 included); Ask About handles no quit key.
     pub(crate) fn talk_key(&mut self, key: KeyCode) -> bool {
+        let entries = self.host.world.dialogue.review.len();
+        let shift = self.hud.modifiers[0];
         match &mut self.talk {
-            Some(TalkWindow::Review(_)) => match key {
-                KeyCode::Escape => self.close_review(),
-                KeyCode::ArrowUp => self.scroll_review(false),
-                KeyCode::ArrowDown => self.scroll_review(true),
-                _ => {}
-            },
-            Some(TalkWindow::AskAbout(ask)) if ask.opening => {}
-            Some(TalkWindow::AskAbout(ask)) => match key {
-                KeyCode::Backspace => ask.field.backspace(),
-                KeyCode::Enter | KeyCode::NumpadEnter => self.submit_ask(),
-                KeyCode::Escape => self.cancel_ask(),
-                _ => {
-                    let font = self.host.assets.font_number(talk::FIELD_FONT);
-                    let measure = |text: &[u8]| {
-                        font.as_ref()
-                            .map_or(0, |font| font.text_width(text, false) as i32)
-                    };
-                    let glyph = |code: u8| {
-                        font.as_ref()
-                            .and_then(|font| font.character_width(code))
-                            .map_or(0, |width| width as i32)
-                    };
-                    if let Some(code) = key_text(key, self.hud.modifiers[0]) {
-                        ask.field.type_code(i32::from(code), measure, glyph);
-                    }
+            Some(TalkWindow::Review(review)) => {
+                let input = match key {
+                    KeyCode::Escape => ReviewKey::Escape,
+                    KeyCode::ArrowUp => ReviewKey::Up,
+                    KeyCode::ArrowDown => ReviewKey::Down,
+                    _ => ReviewKey::Other,
+                };
+                if review.window.key(input, entries) == ReviewOutcome::Close {
+                    self.close_review();
                 }
-            },
+            }
+            Some(TalkWindow::AskAbout(ask)) => {
+                let input = match key {
+                    KeyCode::Backspace => AskKey::Backspace,
+                    KeyCode::Enter | KeyCode::NumpadEnter => AskKey::Enter,
+                    KeyCode::Escape => AskKey::Escape,
+                    _ => match key_text(key, shift) {
+                        Some(code) => AskKey::Code(i32::from(code)),
+                        None => return true,
+                    },
+                };
+                let font = self.host.assets.font_number(talk::FIELD_FONT);
+                let measure = |text: &[u8]| {
+                    font.as_ref()
+                        .map_or(0, |font| font.text_width(text, false) as i32)
+                };
+                let glyph = |code: u8| {
+                    font.as_ref()
+                        .and_then(|font| font.character_width(code))
+                        .map_or(0, |width| width as i32)
+                };
+                let outcome = ask.window.key(input, measure, glyph);
+                self.ask_outcome(outcome);
+            }
             Some(TalkWindow::Control(_)) => return self.control_key(key),
             None => return false,
         }
         true
+    }
+    /// Act on the Ask About window's outcome (SPEC-020 §2.1 rule 4).
+    fn ask_outcome(&mut self, outcome: AskOutcome) {
+        match outcome {
+            AskOutcome::None | AskOutcome::Changed => {}
+            AskOutcome::Submit(text) => self.submit_ask(&text),
+            AskOutcome::Cancel => self.cancel_ask(),
+        }
     }
     /// The Barter button or `b`: the SPEC-013 §3.18 merchant test, keeping
     /// the script modifier; a refusal shows `proto.msg` 903.
@@ -223,9 +255,7 @@ impl MapPreview {
         if self.host.tell_me_about() == TellMeAbout::Open {
             let dialogue = &self.host.world.dialogue;
             self.talk = Some(TalkWindow::AskAbout(Box::new(AskAbout {
-                field: talk::AskField::new(self.clock),
-                opening: true,
-                answered: false,
+                window: AskAboutWindow::new(self.clock),
                 saved: (
                     dialogue.resolved_reply.clone(),
                     dialogue.page,
@@ -235,17 +265,14 @@ impl MapPreview {
         }
         self.drain_effects();
     }
-    /// Enter or DONE: the field's text goes to the lookup and the field
-    /// clears; the window stays open.
-    fn submit_ask(&mut self) {
+    /// Enter or DONE: the field's text goes to the lookup (the field has
+    /// cleared); the window stays open.
+    fn submit_ask(&mut self, text: &[u8]) {
         let Some(TalkWindow::AskAbout(ask)) = &mut self.talk else {
             return;
         };
-        let Some(text) = ask.field.submit() else {
-            return;
-        };
-        match self.host.ask_about(&text) {
-            Ok(true) => ask.answered = true,
+        match self.host.ask_about(text) {
+            Ok(true) => ask.window.answer_shown(),
             Ok(false) => {}
             Err(error) => self.status = error.to_string().into_bytes(),
         }
@@ -273,7 +300,10 @@ impl MapPreview {
     fn open_review(&mut self) {
         self.host.stop_speech();
         let updater = std::mem::replace(&mut self.host.world.dialogue.updater, false);
-        self.talk = Some(TalkWindow::Review(Review { top: 0, updater }));
+        self.talk = Some(TalkWindow::Review(Review {
+            window: ReviewWindow::new(),
+            updater,
+        }));
         self.drain_effects();
     }
     /// Review closes: the head updater resumes and the reply/choice loop
@@ -281,15 +311,6 @@ impl MapPreview {
     fn close_review(&mut self) {
         if let Some(TalkWindow::Review(review)) = self.talk.take() {
             self.host.world.dialogue.updater = review.updater;
-        }
-    }
-    /// Up or Down by one whole entry.
-    fn scroll_review(&mut self, down: bool) {
-        let entries = self.host.world.dialogue.review.len();
-        if let Some(TalkWindow::Review(review)) = &mut self.talk
-            && let Some(top) = talk::scroll(review.top, entries, down)
-        {
-            review.top = top;
         }
     }
     /// An input poll: the Ask About cursor blinks. A window left over a
@@ -300,11 +321,7 @@ impl MapPreview {
             return true;
         }
         match &mut self.talk {
-            Some(TalkWindow::AskAbout(ask)) if ask.opening => {
-                ask.opening = false;
-                true
-            }
-            Some(TalkWindow::AskAbout(ask)) => ask.field.blink(now),
+            Some(TalkWindow::AskAbout(ask)) => ask.window.tick(now),
             _ => false,
         }
     }
@@ -327,7 +344,7 @@ impl MapPreview {
             name(self.host.world.player),
         );
         let painter = self.painter();
-        let shown = self.panel_buttons();
+        let shown = self.panel().layout();
         for (rect, (normal, pressed), opaque) in [
             (talk::BARTER, talk::SMALL_ART, false),
             (talk::TELL_ME_ABOUT, talk::SMALL_ART, false),
@@ -336,7 +353,7 @@ impl MapPreview {
             let rect = talk::panel_button(rect);
             // SPEC-019 §3.8: no Tell Me About under Fallout 2; the Combat
             // Control button takes its place for a party member.
-            if !shown.iter().any(|(button, _)| *button == rect) {
+            if !shown.controls().iter().any(|(_, button)| *button == rect) {
                 continue;
             }
             if opaque {
@@ -382,8 +399,15 @@ impl MapPreview {
                 line.limit,
             );
         }
-        for (rect, art) in [talk::SCROLL_UP, talk::SCROLL_DOWN, talk::DONE] {
-            self.draw_button(painter, image, rect, art);
+        let layout = talk::review_layout();
+        for (control, (_, art)) in [
+            (talk::ReviewControl::ScrollUp, talk::SCROLL_UP),
+            (talk::ReviewControl::ScrollDown, talk::SCROLL_DOWN),
+            (talk::ReviewControl::Done, talk::DONE),
+        ] {
+            if let Some(rect) = layout.rect(control) {
+                self.draw_button(painter, image, rect, art);
+            }
         }
     }
     /// The Ask About window: `lsgbox.frm`, its title and button labels, the
@@ -413,8 +437,8 @@ impl MapPreview {
                 width - x,
             );
         }
-        for rect in ask_buttons() {
-            self.draw_red_button(painter, image, rect);
+        for (_, rect) in ask.layout().controls() {
+            self.draw_red_button(painter, image, *rect);
         }
         let field = talk::FIELD;
         image.fill_rect(

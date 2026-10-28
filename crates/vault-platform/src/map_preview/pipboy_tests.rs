@@ -294,12 +294,14 @@ fn spec014_fixture_j_automaps_and_archives() {
     assert_eq!(preview.automap_areas(), [36, 3, 6]);
     preview.image().unwrap();
     assert!(preview.tap([300, 70]));
+    // The core view keys an area by its index in the sorted area list.
+    let area = preview.automap_areas().iter().position(|area| *area == 36);
     assert!(matches!(
         pipboy(&preview).page,
         Some(Page::Automaps(AutomapView::Elevations {
-            area: 36,
+            area: index,
             entry: 0
-        }))
+        })) if Some(index) == area
     ));
     assert_eq!(preview.automap_entries(36), [(36, 0)], "safe rule");
     preview.image().unwrap();
@@ -315,12 +317,14 @@ fn spec014_fixture_j_automaps_and_archives() {
     // The description line (row 0) does nothing; row 2 selects elevation 1.
     assert!(preview.tap([300, 70]));
     assert!(preview.tap([300, 110]));
+    // The core view keys an area by its index in the sorted area list.
+    let area = preview.automap_areas().iter().position(|area| *area == 6);
     assert!(matches!(
         pipboy(&preview).page,
         Some(Page::Automaps(AutomapView::Elevations {
-            area: 6,
+            area: index,
             entry: 1
-        }))
+        })) if Some(index) == area
     ));
     // Its wall cell paints (238, 105) and (239, 105) but not row 106.
     let color = automap::BRIGHT_GREEN.resolve(&preview.palette);

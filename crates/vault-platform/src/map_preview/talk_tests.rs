@@ -1,6 +1,6 @@
 //! SPEC-014 §3.45 the dialogue panel, Review and Ask About windows over a
 //! synthetic conversation.
-use super::{TalkWindow, ask_buttons};
+use super::TalkWindow;
 use crate::map_preview::{
     MapPreview, Screen,
     test_support::{interactive, synthetic_corpus},
@@ -149,7 +149,7 @@ fn spec014_tell_me_about_and_ask_about_window() {
     // return. Ask About replies are not in the review history.
     preview.host.world.dialogue.speech = Some(b"voice".to_vec());
     preview.host.world.effects.clear();
-    let [_, cancel] = ask_buttons();
+    let cancel = talk::ask_layout().rect(talk::AskControl::Cancel).unwrap();
     press(&mut preview, cancel);
     assert!(preview.talk.is_none());
     assert!(preview.host.world.dialogue.speech.is_none());

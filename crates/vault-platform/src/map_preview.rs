@@ -874,7 +874,7 @@ impl MapPreview {
             && (self.timer_release(over)
                 || match self.screen {
                     Screen::Map => {
-                        self.talk_release(over)
+                        self.talk_release(point, over)
                             || self.called_release(point)
                             || self.map_release(point)
                             || self.bar_release(bar, over)
