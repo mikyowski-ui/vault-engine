@@ -1,6 +1,6 @@
 # SPEC-021: Deterministic State Hash, Combat Sub-Hash, and Trace Oracles
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 1.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (Team A, 2026-10-27); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -36,6 +36,42 @@ named here only by the names the brief gives (`WorldState`, the combat state,
 the RNG). Team A's general knowledge comes from model training data whose
 sources cannot be audited (see `PROVENANCE.md`, "In-session spec authoring").
 This spec defines an engine-side determinism oracle; it adds no game rule.
+
+**Provenance of revision 2.** Author: the Spec-Author sub-agent (Team A),
+2026-10-27, on the coordinator's request relaying the implementer's open items
+4 and 5. Sources: the implementer's report as relayed by the coordinator (the
+engine stores every inventory item as an entity with its own handle; its
+extraction test built handles `1:1`, `2:3` and an item `3:1`; the synthetic
+combat map is `maps/synthetic.map`; the synthetic corpus has no `data/ai.txt`,
+so the NPC's turns took no action); SPEC-009 sections 2.2 to 2.4, 3.1, 3.5,
+3.6, 3.8, 3.12, 3.14, 3.17 and 3.19 (the `ai.txt` grammar, packet keys and
+NPC turn); SPEC-007 sections 3.3 and 3.5 (combat start, turn order and hit
+chance); SPEC-002 sections 2.5 and 3.5 (`.MSG` records); SPEC-014 section 3.1
+(the default language); SPEC-020 section 3.4 (the re-recording rule). No
+engine Rust code was read for this revision either.
+Every revision 2 vector was recomputed from the spec, and then checked a
+second time from the written fixture bytes alone (section 7).
+
+### Revision history
+
+- **Revision 1 (2026-10-27).** First approved text.
+- **Revision 2 (2026-10-27).** Resolves the implementer's two open items.
+  - **Open item 4: W0 held an item that had no entity.** The engine keeps
+    every inventory item as an entity, so no world could produce W0. W0 now
+    also holds the item as entity `3:1`, with no position (section 5.2). W1 to
+    W4, the mutation rows and the combat trace example are rebased on the new
+    W0. Their combat streams do not change, because the item is not a combat
+    participant. The revision 2 vectors are in `tests/fixtures/spec021/rev2/`
+    (section 3.9). Section 2.4 states how a held item appears, and sections
+    2.4 and 3.2 add an order for two entity records with the same handle.
+  - **Open item 5: the seeded combat golden had no AI.** `rev2/ai.txt` is a
+    one-packet SPEC-009 file that makes the NPC fight on its turns, and
+    `rev2/combatai.msg` is a one-line taunt catalog (section 5.7). The combat
+    trace setup now installs both in the corpus (section 3.7), the dump refuses
+    to run when the AI does not initialize, and T11 checks that the NPC acts.
+    The seeded golden must be re-recorded with the AI loaded (section 3.9).
+  - The stream format, the magic `VSH1`/`VCH1`, the trace formats and every
+    revision 1 hash of a combat stream are unchanged.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -204,6 +240,25 @@ the entity store holds that container as an entity, through its own record
 (Decision D-14). An entity with an empty inventory, or none, writes count 0.
 `[Must-match]`
 
+**Held items (revision 2).** When the store keeps an inventory item as an
+entity of its own, as this engine does for every item, that item is covered
+twice: once as an entry (item PID, quantity) in its holder's inventory, and
+once as its own entity record. The record has the item's handle and PID, its
+position is absent (`00`), its orientation is written as stored, its HP and AP
+are absent (its PID type is not 1), and it lists its own direct inventory
+(count 0 unless it is a container holding items). A stack of N units held as
+one entity is one record, and the holder's entry carries quantity N. The
+record carries no owner field; the holder's entry links the two only by PID.
+`[Must-match]` Section 5.2's W0 shows a held item.
+
+**Equal handles.** A live store never holds two entities with the same handle,
+but a snapshot built from plain data can (T4's single-bit flips build some).
+Two entity records with the same slot index and generation are ordered by the
+rest of their encoded bytes (from record offset `+0x08` on), compared as
+unsigned bytes, with a shorter record that is a prefix of the other first.
+Records with equal bytes are identical, so their order does not matter. This
+makes the stream independent of the supply order in every case. `[Safe rule]`
+
 ### 2.5 RNG Record
 
 The random generator of SPEC-006 section 3.4, as 34 i32 values, 136 bytes.
@@ -314,7 +369,9 @@ addresses. `[Must-match]`
 
 1. **Sorted collections**, sorted ascending by a stable key before encoding.
    The encoder sorts them itself, so a caller may supply them in any order:
-   - entity records: by slot index, then by generation (both as u32);
+   - entity records: by slot index, then by generation (both as u32), then,
+     for equal handles only, by the rest of the record's bytes (section 2.4,
+     "Equal handles");
    - inventory entries: by item PID, then by quantity (both as u32); equal
      entries are byte-identical, so their relative order does not matter;
    - LVAR slice records: by script identifier as u32; two records with the
@@ -505,6 +562,12 @@ asset-audit --corpus-dir DIR --dump-combat-trace MAP [--seed S] [--max-rounds R]
    default language, and seed S (default 1), exactly as `vault-platform
    --seed S` seeds a new game. Run the map-entry sequence (SPEC-006 section
    3.5) to completion. No player input is given.
+   **Revision 2:** the combat AI (SPEC-009 section 3.1) must be initialized
+   with a nonempty packet table. If loading `combatai.msg` or `data/ai.txt`
+   fails, or the table is empty, print a diagnostic naming the failure on
+   stderr and exit 1 without writing a trace. `[Safe rule]` The dump never
+   runs NPC turns without packets, so a golden cannot be recorded without the
+   AI by mistake.
 2. Choose the defender: among live entities whose PID is a critter's, that
    are not the player, are on the player's elevation and are not dead, the
    one with the smallest handle (slot index, then generation). If there is
@@ -518,6 +581,23 @@ asset-audit --corpus-dir DIR --dump-combat-trace MAP [--seed S] [--max-rounds R]
    (SPEC-020 section 2.3), writing each row of section 3.6 at its moment.
 6. Stop after the `end` row, or once R complete rounds (default 10) have
    been traced; in the second case no `end` row is written. Exit 0.
+
+**The AI fixture (revision 2).** The command reads the corpus as it is and
+installs nothing itself. Every run that produces or checks a seeded combat
+golden (test T11, and the recording of section 3.9) first prepares the corpus
+directory it traces, after `cargo xtask fixtures` has written it: `[Must-match]`
+
+| Copy from `tests/fixtures/spec021/` | To, under the traced corpus directory |
+| --- | --- |
+| `rev2/ai.txt` | `data/ai.txt` |
+| `rev2/combatai.msg` | `text/english/game/combatai.msg` |
+
+Each copy replaces any file already at that path; directories are created as
+needed. `english` is the default language (SPEC-014 section 3.1), which step 1
+uses. The copies go into the test's own corpus directory, never into the
+committed fixture tree. `cargo xtask fixtures` itself is not changed by this
+revision, so every other test sees the corpus as before. Section 5.7 explains
+why this packet makes the NPC fight.
 
 ### 3.8 Golden Files and Re-Recording
 
@@ -538,6 +618,59 @@ Goldens and vectors for this spec live in `tests/fixtures/spec021/`, never in
   justifies the change. A change to the stream's coverage needs a new magic
   (section 2.3) and a spec revision.
 
+### 3.9 Revision 2 Files, Supersession, and the Implementer's Follow-Up
+
+Revision 2 adds the folder `tests/fixtures/spec021/rev2/`. The revision 1
+files stay where they are until the implementer adopts revision 2, because the
+merged tests read them. Team A did not edit them. `[Must-match]`
+
+| File | Status in revision 2 |
+| --- | --- |
+| `fnv1a64.tsv` | Current, unchanged |
+| `w1.combat.hex`, `w4.combat.hex` | Current, unchanged: the item entity is not a combat participant, so the combat streams and every `combat_hash` stay the same |
+| `vm-trace-program.tsv`, `vm-trace-program-branch.tsv` | Current, unchanged |
+| `w0.stream.hex` to `w4.stream.hex` | **Superseded** by `rev2/w0.stream.hex` to `rev2/w4.stream.hex` |
+| `hashes.tsv` | **Superseded** by `rev2/hashes.tsv` |
+| `combat-trace-example.tsv` | **Superseded** by `rev2/combat-trace-example.tsv` (only the `state_hash` column differs) |
+| `combat-trace-synthetic-seed1.tsv` | **To be re-recorded** with the AI fixture installed (below) |
+| `rev2/ai.txt`, `rev2/combatai.msg` | New: the AI fixture of sections 3.7 and 5.7 |
+| `rev2/README.md` | New: describes the folder |
+
+The superseded files hold revision 1's W0, whose item has no entity. They
+become superseded when the implementer's follow-up commit adopts revision 2.
+From then on no test reads them, and that commit deletes them. Until then they
+are still the merged tests' inputs and must not be edited.
+
+**What the implementer changes.** One follow-up commit by the implementer
+(not Team A) does all of this: `[Must-match]`
+
+1. **T2, T3, T4, T6 and T5's direct check** use the revision 2 W0 to W4 of
+   section 5 and read `rev2/w0.stream.hex` to `rev2/w4.stream.hex` and
+   `rev2/hashes.tsv`. They keep reading `w1.combat.hex`, `w4.combat.hex` and
+   `fnv1a64.tsv` from the top folder. T4's flip counts become 1800 for W0 and
+   1864 for W1. T6's RNG record moves to stream offsets `0x7D` to `0x104`.
+   T5 checks W0's hash directly with handles `1:1`, `2:3` and the item `3:1`.
+2. **T10** reads `rev2/combat-trace-example.tsv`.
+3. **The encoder** orders entity records with equal handles by the rest of
+   their bytes (sections 2.4 and 3.2). No real world and no section 5 vector
+   has equal handles. T4 builds two flips that do (bit 1 of the index of
+   `1:1` gives `3:1`, and bit 1 of the index of `3:1` gives `1:1`). Team A
+   checked that every T4 flip is distinct with and without the rule.
+4. **The combat trace dump** refuses to run without a loaded, nonempty packet
+   table (section 3.7, step 1).
+5. **T11** installs the AI fixture in its corpus directory (section 3.7) and
+   asserts that the NPC acts (section 4, T11).
+6. **The seeded golden** `tests/fixtures/spec021/combat-trace-synthetic-seed1.tsv`
+   is re-recorded at the same path, with the AI fixture installed, by the
+   T11 run, and reviewed. This is a re-recording under SPEC-020 section 3.4's
+   rule: the commit names the file and cites this section and section 3.7 of
+   SPEC-021 revision 2 as the approved rule that justifies it. The line in
+   `tests/fixtures/spec021/README.md` that describes the golden is updated to
+   say that the AI fixture was installed, and the sentence saying the NPC's
+   turns run without AI actions is removed.
+7. The superseded files of the table above are deleted, and
+   `tests/fixtures/spec021/README.md` points to `rev2/`.
+
 ## 4. Required Tests
 
 The implementer writes at least these tests. They use synthetic data only.
@@ -546,12 +679,12 @@ The implementer writes at least these tests. They use synthetic data only.
 - **T1. FNV-1a known answers.** `fnv1a64` reproduces every row of
   `fnv1a64.tsv`, and the step table of section 5.1.
 - **T2. Encoder vectors.** Build the snapshots W0 to W4 of section 5 from
-  plain data. Their `canonical_bytes` equal `w0.stream.hex` to
-  `w4.stream.hex` byte for byte; `canonical_combat_bytes` of W1 and W4 equal
-  `w1.combat.hex` and `w4.combat.hex`; every hash equals its row in
-  `hashes.tsv`, including the mutation rows.
+  plain data. Their `canonical_bytes` equal `rev2/w0.stream.hex` to
+  `rev2/w4.stream.hex` byte for byte; `canonical_combat_bytes` of W1 and W4
+  equal `w1.combat.hex` and `w4.combat.hex`; every hash equals its row in
+  `rev2/hashes.tsv`, including the mutation rows.
 - **T3. Order independence.** W2 is supplied with its entities and LVAR
-  slices out of order and still encodes as `w2.stream.hex`. Also fill the
+  slices out of order and still encodes as `rev2/w2.stream.hex`. Also fill the
   LVAR slices (and any other keyed collection the snapshot builder reads from
   a map type) in at least two different insertion orders: the hash is the
   same.
@@ -562,20 +695,26 @@ The implementer writes at least these tests. They use synthetic data only.
   AP, each inventory PID and quantity, the RNG state, selector and all 32
   entries, the GVAR value, and in W1 the round counter and current turn. Each
   flip gives a state hash different from the base and from every other flip
-  (Team A checked all 1680 flips of W0 and 1744 of W1). Each flip of a
-  combat field, and of a participant's HP, AP, elevation, hex or orientation,
-  also changes the combat hash. Also toggle each opt field once (present to
-  absent, or the reverse) and check that the hash changes.
+  (Team A checked all 1800 flips of W0 and 1864 of W1; revision 1's W0,
+  without the item entity, had 1680 and 1744). The item entity `3:1` adds its
+  handle index and generation, PID bits 0-23 and orientation. Two of the
+  flips give two records the same handle, which section 2.4 orders. Each flip
+  of a combat field, and of a participant's HP, AP, elevation, hex or
+  orientation, also changes the combat hash. Also toggle each opt field once
+  (present to absent, or the reverse) and check that the hash changes.
 - **T5. Extraction.** Build a `WorldState` through the engine's ordinary API
   with two critters (one holding a stack of an item), one GVAR, map
   variables, and two scripts with local variables. `state_snapshot` returns
   exactly the values set, with the handles the store actually allocated, and
   `state_hash` equals the hash of the snapshot built by hand from those
-  values. Where the allocator can produce handles `1:1` and `2:3`, also check
-  W0's hash directly.
+  values. The held stack appears as the holder's inventory entry and as its
+  own entity record with no position (section 2.4, "Held items"). Where the
+  allocator produces the critters as `1:1` and `2:3` and the item as `3:1`,
+  with the item's orientation 0, also check W0's hash directly.
 - **T6. RNG extraction.** A generator with a zeroed shuffle array, seeded
   with 1 by SPEC-006 section 3.4 and before any draw, snapshots to the RNG
-  record of W0 (stream offsets `0x66` to `0xED`); after one draw, to W3's.
+  record of W0 (stream offsets `0x7D` to `0x104`; revision 1's W0 had it at
+  `0x66` to `0xED`); after one draw, to W3's.
 - **T7. Seeded determinism.** Build two worlds from the same synthetic corpus
   with the same seed and drive both through the combat trace of section 3.7
   (in-process, not through the binary) for at least 5 rounds or until combat
@@ -596,17 +735,24 @@ The implementer writes at least these tests. They use synthetic data only.
   gives `vm-trace-program-branch.tsv`. At least one test runs the
   `asset-audit` binary on the `.hex` fixture and checks exit status 0.
 - **T10. Combat trace format.** Writing rows for the snapshots S0 to S3 of
-  section 5.6 gives `combat-trace-example.tsv` byte for byte, and a reader of
+  section 5.6 gives `rev2/combat-trace-example.tsv` byte for byte, and a reader of
   the format reads it back to the same rows.
 - **T11. Seeded combat golden.** Generate the synthetic corpus with `cargo
-  xtask fixtures --output DIR` and run the section 3.7 combat trace with seed
-  1 and `--max-rounds 5` on the first of these maps that has a defender:
+  xtask fixtures --output DIR`, install the AI fixture of section 3.7 in the
+  directory that holds the map, and run the section 3.7 combat trace with
+  seed 1 and `--max-rounds 5` on the first of these maps that has a defender:
   `maps/synthetic.map` in DIR, then `maps/cam_demo.map` in `DIR-cam-demo`.
   The output equals `combat-trace-synthetic-seed1.tsv`, which the
   implementer records on the first passing run, together with a line in
-  `tests/fixtures/spec021/README.md` naming the map used. If neither map has
-  a defender, or the trace has no NPC `turn` row, the implementer stops and
-  asks for a spec revision instead of inventing a scenario.
+  `tests/fixtures/spec021/README.md` naming the map used. Revision 2: the
+  same test, run in process, also asserts that the NPC acts. At the end of at
+  least one of the defender's traced turns, its current AP is below its
+  effective maximum AP, because it moved or attacked (SPEC-009 section 3.12).
+  If neither map has a defender, the trace has no NPC `turn` row, or the NPC
+  spends no AP in any traced turn with the AI fixture installed, the
+  implementer stops and asks for a spec revision instead of inventing a
+  scenario. In the last case the report names the SPEC-009 step that ended
+  the NPC's turn without an action.
 - **T12. No unstable hashing.** The module that builds the stream uses no
   `std::hash` item, no `HashMap` or `HashSet` iteration, and no `usize` in
   the stream. Enforcing this with clippy's `disallowed_types` and
@@ -617,8 +763,8 @@ The implementer writes at least these tests. They use synthetic data only.
 All values here are synthetic: the PIDs, handles, script identifiers and
 variable values were chosen for this spec. The RNG values follow from
 SPEC-006 section 3.4 with seed 1, and the VM traces from SPEC-004 section
-4.1's synthetic program. Every file named here is in
-`tests/fixtures/spec021/`.
+4.1's synthetic program. Files are in `tests/fixtures/spec021/`; the vectors
+that revision 2 changed or added are in its `rev2/` folder (section 3.9).
 
 ### 5.1 FNV-1a Step Table
 
@@ -641,17 +787,24 @@ multiplication.
 
 So `combat_hash` with no combat active is `03A3252340D67E8D`.
 
-### 5.2 The Tiny World W0
+### 5.2 The Tiny World W0 (Revision 2)
 
 | Item | Value |
 | --- | --- |
 | Entity `1:1` | PID `0x01000001` (a critter); elevation 0, hex 20100; orientation 2; HP 30; AP 8; inventory: one entry, item PID `0x00000004`, quantity 3 |
 | Entity `2:3` | PID `0x01000002` (a critter); elevation 0, hex 20102; orientation 5; HP 12; AP 6; empty inventory |
+| Entity `3:1` | PID `0x00000004` (an item, type 0): the stack of 3 that `1:1` holds; no position; orientation 0; no HP or AP; empty inventory |
 | RNG | A zeroed generator seeded with 1 (SPEC-006 section 3.4), before any draw: state 784575628, selector 0, entries below |
 | Combat | None |
 | GVAR | One variable: [7] |
 | MVAR | Absent (no map loaded) |
 | LVAR | No slices |
+
+Revision 1's W0 had no entity `3:1`: its item existed only as `1:1`'s
+inventory entry, which the engine cannot represent (open item 4). Revision 2
+adds the item as its own entity, in the form section 2.4 ("Held items")
+describes. The handle `3:1` is the one the engine's allocator gives the item
+after the two critters, so T5 can build this world through the API.
 
 RNG entries 0 to 31, decimal: 0, 784575628, 2128236580, 1624379149,
 1358580979, 704877633, 1580723810, 101929267, 563613512, 1636807826,
@@ -662,26 +815,28 @@ RNG entries 0 to 31, decimal: 0, 784575628, 2128236580, 1624379149,
 SPEC-006 section 4.4's raw outputs 0, 812987216, 1817129560, ..., which checks
 the values.
 
-The complete 269-byte stream (`w0.stream.hex`):
+The complete 292-byte stream (`rev2/w0.stream.hex`):
 
 ```text
-0000: 56 53 48 31 45 4E 54 53 02 00 00 00 01 00 00 00
+0000: 56 53 48 31 45 4E 54 53 03 00 00 00 01 00 00 00
 0010: 01 00 00 00 01 00 00 01 01 00 00 00 00 84 4E 00
 0020: 00 02 00 00 00 01 1E 00 00 00 01 08 00 00 00 01
 0030: 00 00 00 04 00 00 00 03 00 00 00 02 00 00 00 03
 0040: 00 00 00 02 00 00 01 01 00 00 00 00 86 4E 00 00
 0050: 05 00 00 00 01 0C 00 00 00 01 06 00 00 00 00 00
-0060: 00 00 52 4E 47 53 8C AC C3 2E 00 00 00 00 00 00
-0070: 00 00 8C AC C3 2E 24 50 DA 7E 0D 0F D2 60 F3 4C
-0080: FA 50 41 94 03 2A 62 EE 37 5E 33 51 13 06 48 0F
-0090: 98 21 92 B4 8F 61 99 64 85 74 07 9D C0 59 88 77
-00A0: 3F 35 D6 9D B3 53 6B 81 C5 0B F5 66 72 43 58 32
-00B0: 4F 6C 05 8B 18 77 2D 96 63 4B 11 2B E8 57 2F 2E
-00C0: 70 35 54 49 8E 08 98 C3 13 31 11 41 FC 00 17 39
-00D0: E8 55 47 37 CD 43 B3 D4 D7 06 E2 DB 6C 04 8C 12
-00E0: 5D 6A 55 3C 7C 42 98 98 16 31 4D 04 A4 77 43 4D
-00F0: 42 54 00 47 56 41 52 01 01 00 00 00 07 00 00 00
-0100: 4D 56 41 52 00 4C 56 41 52 00 00 00 00
+0060: 00 00 03 00 00 00 01 00 00 00 04 00 00 00 00 00
+0070: 00 00 00 00 00 00 00 00 00 52 4E 47 53 8C AC C3
+0080: 2E 00 00 00 00 00 00 00 00 8C AC C3 2E 24 50 DA
+0090: 7E 0D 0F D2 60 F3 4C FA 50 41 94 03 2A 62 EE 37
+00A0: 5E 33 51 13 06 48 0F 98 21 92 B4 8F 61 99 64 85
+00B0: 74 07 9D C0 59 88 77 3F 35 D6 9D B3 53 6B 81 C5
+00C0: 0B F5 66 72 43 58 32 4F 6C 05 8B 18 77 2D 96 63
+00D0: 4B 11 2B E8 57 2F 2E 70 35 54 49 8E 08 98 C3 13
+00E0: 31 11 41 FC 00 17 39 E8 55 47 37 CD 43 B3 D4 D7
+00F0: 06 E2 DB 6C 04 8C 12 5D 6A 55 3C 7C 42 98 98 16
+0100: 31 4D 04 A4 77 43 4D 42 54 00 47 56 41 52 01 01
+0110: 00 00 00 07 00 00 00 4D 56 41 52 00 4C 56 41 52
+0120: 00 00 00 00
 ```
 
 Field by field:
@@ -690,7 +845,7 @@ Field by field:
 | --- | --- | --- |
 | `0x000` | `56 53 48 31` | Magic `VSH1` |
 | `0x004` | `45 4E 54 53` | Tag `ENTS` |
-| `0x008` | `02 00 00 00` | Two entity records |
+| `0x008` | `03 00 00 00` | Three entity records |
 | `0x00C` | `01 00 00 00` `01 00 00 00` | Handle `1:1` |
 | `0x014` | `01 00 00 01` | PID `0x01000001` |
 | `0x018` | `01` `00 00 00 00` `84 4E 00 00` | Position present: elevation 0, hex 20100 (`0x4E84`) |
@@ -706,29 +861,42 @@ Field by field:
 | `0x054` | `01` `0C 00 00 00` | HP present: 12 |
 | `0x059` | `01` `06 00 00 00` | AP present: 6 |
 | `0x05E` | `00 00 00 00` | Empty inventory |
-| `0x062` | `52 4E 47 53` | Tag `RNGS` |
-| `0x066` | `8C AC C3 2E` | State 784575628 (`0x2EC3AC8C`) |
-| `0x06A` | `00 00 00 00` | Selector 0 |
-| `0x06E` | 128 bytes | Entries 0 to 31; entry 1 at `0x072` is `8C AC C3 2E`, entry 31 at `0x0EA` is `4D 04 A4 77` (2007237709) |
-| `0x0EE` | `43 4D 42 54` | Tag `CMBT` |
-| `0x0F2` | `00` | No combat |
-| `0x0F3` | `47 56 41 52` | Tag `GVAR` |
-| `0x0F7` | `01` `01 00 00 00` `07 00 00 00` | GVAR present: one element, 7 |
-| `0x100` | `4D 56 41 52` | Tag `MVAR` |
-| `0x104` | `00` | MVAR absent |
-| `0x105` | `4C 56 41 52` | Tag `LVAR` |
-| `0x109` | `00 00 00 00` | No LVAR slices |
+| `0x062` | `03 00 00 00` `01 00 00 00` | Handle `3:1` (the held item) |
+| `0x06A` | `04 00 00 00` | PID `0x00000004` (type 0, an item) |
+| `0x06E` | `00` | Position absent: held in an inventory |
+| `0x06F` | `00 00 00 00` | Orientation 0 |
+| `0x073` | `00` | HP absent (not a critter) |
+| `0x074` | `00` | AP absent (not a critter) |
+| `0x075` | `00 00 00 00` | Empty inventory |
+| `0x079` | `52 4E 47 53` | Tag `RNGS` |
+| `0x07D` | `8C AC C3 2E` | State 784575628 (`0x2EC3AC8C`) |
+| `0x081` | `00 00 00 00` | Selector 0 |
+| `0x085` | 128 bytes | Entries 0 to 31; entry 1 at `0x089` is `8C AC C3 2E`, entry 31 at `0x101` is `4D 04 A4 77` (2007237709) |
+| `0x105` | `43 4D 42 54` | Tag `CMBT` |
+| `0x109` | `00` | No combat |
+| `0x10A` | `47 56 41 52` | Tag `GVAR` |
+| `0x10E` | `01` `01 00 00 00` `07 00 00 00` | GVAR present: one element, 7 |
+| `0x117` | `4D 56 41 52` | Tag `MVAR` |
+| `0x11B` | `00` | MVAR absent |
+| `0x11C` | `4C 56 41 52` | Tag `LVAR` |
+| `0x120` | `00 00 00 00` | No LVAR slices |
 
-**`state_hash(W0) = FB51804ECBBC1AB5`.** `combat_hash(W0) = 03A3252340D67E8D`.
+The stream is revision 1's 269-byte W0 with the entity count at `0x008`
+raised from 2 to 3 and the 23-byte record of `3:1` inserted at `0x062`.
+
+**`state_hash(W0) = 0258CFED4EA8A13E`.** `combat_hash(W0) = 03A3252340D67E8D`.
+Revision 1's W0 hash, `FB51804ECBBC1AB5`, is superseded (section 3.9).
 
 ### 5.3 W1: W0 in Combat
 
 W1 is W0 with a combat record: round 0, current turn 0, active list
-[`1:1`, `2:3`], empty waiting list. Its 346-byte stream (`w1.stream.hex`)
-equals W0's up to `0x0F1`; then `0x0F2` holds `01` and the 77 further bytes
-of the combat record, and W0's GVAR, MVAR and LVAR parts follow from `0x140`.
+[`1:1`, `2:3`], empty waiting list. Its 369-byte stream
+(`rev2/w1.stream.hex`) equals W0's up to `0x108`; then `0x109` holds `01` and
+the 77 further bytes of the combat record, and W0's GVAR, MVAR and LVAR parts
+follow from `0x157`.
 
-The 86-byte combat stream (`w1.combat.hex`):
+The item `3:1` is not a participant, so the combat stream is the same as in
+revision 1. The 86-byte combat stream (`w1.combat.hex`, unchanged):
 
 ```text
 0000: 56 43 48 31 43 4D 42 54 01 00 00 00 00 01 00 00
@@ -754,43 +922,47 @@ The 86-byte combat stream (`w1.combat.hex`):
 | `0x45` | `01` `00 00 00 00` `86 4E 00 00` `05 00 00 00` | Position present: 0, 20102; orientation 5 |
 | `0x52` | `00 00 00 00` | Empty waiting list |
 
-**`state_hash(W1) = 37A28B6A1AC6B49F`, `combat_hash(W1) = CDC183838522E1A7`.**
+**`state_hash(W1) = 121BBD7C8E51E03E`, `combat_hash(W1) = CDC183838522E1A7`.**
 
 ### 5.4 W2, W3 and W4
 
 - **W2** is W0 with MVAR [1, -1] and two LVAR slices, supplied out of order:
   script `0x04000002` with [5], then script `0x01000007` with [0, 9]; its
-  entities are also supplied as [`2:3`, `1:1`]. The encoder writes the
+  entities are also supplied as [`3:1`, `2:3`, `1:1`]. The encoder writes the
   entities as in W0 and the slices as `0x01000007` first. The MVAR part is
   `4D 56 41 52 01 02 00 00 00 01 00 00 00 FF FF FF FF`; the LVAR part is
   `4C 56 41 52 02 00 00 00`, then `07 00 00 01 02 00 00 00 00 00 00 00 09 00
-  00 00`, then `02 00 00 04 01 00 00 00 05 00 00 00`. 309 bytes
-  (`w2.stream.hex`); **`state_hash(W2) = 6A1A807C74A9974E`**.
+  00 00`, then `02 00 00 04 01 00 00 00 05 00 00 00`. 332 bytes
+  (`rev2/w2.stream.hex`); **`state_hash(W2) = 7AE39E9C0B29866D`**.
 - **W3** is W0 after one draw from its generator: state 812987216
   (`0x30753350`), selector 0 (the output U was entry 0, which held 0), entry 0
-  now 812987216; all other entries unchanged. 269 bytes (`w3.stream.hex`);
-  **`state_hash(W3) = 3EADE868D3626462`**.
+  now 812987216; all other entries unchanged. 292 bytes
+  (`rev2/w3.stream.hex`); **`state_hash(W3) = 04A0AD69522C3565`**.
 - **W4** is W1 at round 1 with no current actor and a waiting list holding
   the stale handle `5:1`, which no entity has. The stale participant is the
-  nine bytes `05 00 00 00 01 00 00 00 00`. 351 bytes (`w4.stream.hex`;
-  combat stream `w4.combat.hex`, 91 bytes); **`state_hash(W4) =
-  31E8C1134EAB9112`, `combat_hash(W4) = A8475FA8866A8966`**.
+  nine bytes `05 00 00 00 01 00 00 00 00`. 374 bytes (`rev2/w4.stream.hex`;
+  combat stream `w4.combat.hex`, 91 bytes, unchanged); **`state_hash(W4) =
+  02A2EFB95101DA7D`, `combat_hash(W4) = A8475FA8866A8966`**.
 
 ### 5.5 Single-Field Mutations
 
 Each row changes one field of its base; the stream length does not change.
-The same rows are in `hashes.tsv`.
+The same rows are in `rev2/hashes.tsv`. The `combat_hash` column is the same
+as in revision 1.
 
 | Vector | Base | Change | `state_hash` | `combat_hash` |
 | --- | --- | --- | --- | --- |
-| M-gvar | W0 | GVAR 0: 7 to 6 | `B804FBC1FA53EF3E` | `03A3252340D67E8D` |
-| M-gen | W0 | Handle `2:3` to `2:2` | `4B4C1716EC13AF74` | `03A3252340D67E8D` |
-| M-hp | W0 | Entity `1:1` HP 30 to 31 | `2F76659C79D20ED6` | `03A3252340D67E8D` |
-| M-hex | W0 | Entity `1:1` hex 20100 to 20101 | `5147D55035CD0DA8` | `03A3252340D67E8D` |
-| M-inv | W0 | Entity `1:1` quantity 3 to 2 | `1B9781F3097B6B14` | `03A3252340D67E8D` |
-| M-rng | W0 | RNG entry 0: 0 to 1 | `69F602BDA9CD72DE` | `03A3252340D67E8D` |
-| M-turn | W1 | Current turn 0 to 1 | `E02B7E4ED61CA2AA` | `C25648C507DC28BE` |
-| M-order | W1 | Active list reversed to [`2:3`, `1:1`] | `E89BE7C095562E87` | `201A03C86DDF92BF` |
+| M-gvar | W0 | GVAR 0: 7 to 6 | `45A5547A2010CCB5` | `03A3252340D67E8D` |
+| M-gen | W0 | Handle `2:3` to `2:2` | `5869818B802DD34D` | `03A3252340D67E8D` |
+| M-hp | W0 | Entity `1:1` HP 30 to 31 | `E18ED4C360E852DB` | `03A3252340D67E8D` |
+| M-hex | W0 | Entity `1:1` hex 20100 to 20101 | `39996D585A8710C9` | `03A3252340D67E8D` |
+| M-inv | W0 | Entity `1:1` quantity 3 to 2 | `C954F4CCFFB267ED` | `03A3252340D67E8D` |
+| M-rng | W0 | RNG entry 0: 0 to 1 | `5C0C6CC2E2B7A215` | `03A3252340D67E8D` |
+| M-turn | W1 | Current turn 0 to 1 | `1FF653DEE3A223B3` | `C25648C507DC28BE` |
+| M-order | W1 | Active list reversed to [`2:3`, `1:1`] | `08EBD88C824628F6` | `201A03C86DDF92BF` |
+
+M-inv changes only the holder's inventory entry. The item entity `3:1` has no
+quantity field, so its record does not change.
 
 M-order shows that turn order is state (section 3.2), not a sorted set.
 
@@ -825,8 +997,9 @@ and again in the helper at step 19; the add at step 24 leaves `C001:0000000C`
 leaves 0, the branch at step 34 goes to `0x00E8`, and the program ends at
 step 41 with global slot 0 holding `FF FF FF FF C0 01`.
 
-**Combat trace example.** `combat-trace-example.tsv` is a format example
-built from four snapshots, not from a combat run:
+**Combat trace example.** `rev2/combat-trace-example.tsv` is a format
+example built from four snapshots of the revision 2 worlds, not from a combat
+run:
 
 | Snapshot | Definition |
 | --- | --- |
@@ -837,14 +1010,87 @@ built from four snapshots, not from a combat run:
 
 ```text
 seq	event	round	turn	actor	combat_hash	state_hash
-0	start	0	-	-	A27F1ECCE54073B8	9F8EBE86E3C8A90C
-1	turn	0	0	1:1	8CE41A4BD1A0B4BD	815EA5E6E9F87377
-2	turn	0	1	2:3	98A9D307A01B8F76	DBB3DDD81E8E9133
-3	end	-	-	-	03A3252340D67E8D	A90FE875AFB5A4CA
+0	start	0	-	-	A27F1ECCE54073B8	8FFF0E4AD482A9C1
+1	turn	0	0	1:1	8CE41A4BD1A0B4BD	72093C17B0E94812
+2	turn	0	1	2:3	98A9D307A01B8F76	04C6CFD75DBFB7C6
+3	end	-	-	-	03A3252340D67E8D	866BE03FF440F079
 ```
 
+Only the `state_hash` column differs from revision 1's
+`combat-trace-example.tsv`, because every snapshot now holds the item entity.
+
 **Seeded combat golden.** `combat-trace-synthetic-seed1.tsv` is recorded by
-the implementer (section 3.8, test T11).
+the implementer (section 3.8, test T11). Revision 2 requires it to be
+re-recorded with the AI fixture of section 5.7 installed (section 3.9).
+
+### 5.7 The Combat AI Fixture (Revision 2)
+
+`rev2/ai.txt` is a complete SPEC-009 `ai.txt` with one packet. It is ASCII
+with LF line ends (SPEC-009 section 2.2 trims the CR of a CRLF file the same
+way), and no line is longer than 255 bytes. The full file:
+
+```text
+; SPEC-021 revision 2: synthetic combat AI packet for the seeded combat golden.
+; Written for Vault Engine by Team A. Not game data. See SPEC-021 section 5.7.
+[Synthetic Brawler]
+packet_num=0
+max_dist=500
+min_to_hit=-1000
+min_hp=0
+aggression=100
+hurt_too_much=
+secondary_freq=1000
+called_freq=1000
+font=101
+color=0
+outline_color=-1
+chance=0
+run_start=13
+move_start=12
+attack_start=11
+miss_start=10
+hit_head_start=9
+hit_left_arm_start=8
+hit_right_arm_start=7
+hit_torso_start=6
+hit_right_leg_start=5
+hit_left_leg_start=4
+hit_eyes_start=3
+hit_groin_start=2
+last_msg=1
+```
+
+It parses to one packet, `Synthetic Brawler`, holding all 25 keys of
+SPEC-009 section 2.3, so initialization succeeds (section 3.1). The two
+comment lines start with `;` and are empty after truncation (section 2.2).
+`hurt_too_much=` has an empty value, which yields mask 0 with no diagnostic
+(section 2.4).
+
+`rev2/combatai.msg` is the one-record SPEC-002 catalog `{1}{}{Synthetic
+taunt.}` followed by LF (bytes `7B 31 7D 7B 7D 7B 53 79 6E 74 68 65 74 69 63
+20 74 61 75 6E 74 2E 7D 0A`). It exists only because AI initialization loads
+`combatai.msg` first and fails without it (SPEC-009 section 3.1). This packet
+never looks a line up in it (below).
+
+**Why the NPC fights.** The NPC defender's turn follows SPEC-009 section 3.6:
+
+| Value | Rule it controls | Effect in the trace |
+| --- | --- | --- |
+| One packet only | Packet resolution, section 3.1 | Every critter resolves to this packet: packet number 0 matches `packet_num=0`, and any other number falls back to table entry 0, which is this packet, with a diagnostic. No critter field needs changing |
+| `min_hp=0`, `hurt_too_much=` (mask 0) | Forced flee, section 3.6 step 1 | Never taken. A living critter has HP of at least 1, so HP below 0 never holds, and flags AND 0 is 0. Combat start keeps only alert bit `0x01` (SPEC-007 section 3.3), so the fleeing bit is clear |
+| (no packet value) | Section 3.6 step 2 and danger source, section 3.5 | The trace's request comes from the driver, not a script, and its first turn is the player's (SPEC-007 section 3.3: attacker first). So the NPC has no requested target. It heals only if it carries a stimpak, which uses no draw. Combat start made the player and the NPC each other's last attacker, through the setter (SPEC-009 section 3.4, first row). The player is alive, so `danger(self)` returns the player at once, with no perception test. The NPC then runs the attack loop against the player |
+| `min_to_hit=-1000` | Weapon usability, section 3.9; the attack loop, section 3.12 | The hit chance has no lower cap (SPEC-007 section 3.5, step 10), so a threshold of 0 could still make a weak NPC flee or refuse to attack. The loop compares only the range-aware chance of an attack already in range, and the no-range chance, which has no distance term. For stats in their legal ranges, neither comes near -1000. So every comparison with `min_to_hit` passes. In range (preflight 0) the NPC **attacks**; out of range (preflight 2) the no-range test cannot send it fleeing, so it **approaches**, after a weapon switch when it holds no weapon. The skill test of weapon usability always passes |
+| `max_dist=500` | Max-distance stop, section 3.6 step 4; flee, section 3.8 step 1 | Never reached: 500 is more than any hex distance on SPEC-003's 200 by 200 grid, so the NPC never sets the stop bit for distance |
+| `chance=0` | Taunts, section 3.17 step 4 | The 1-100 chance draw is still made at each request site (section 3.19), but it always exceeds 0, so no taunt is shown and `combatai.msg` is never read for a line |
+| Range keys from 13 down to 1 | Taunt ranges, section 3.17 steps 5 and 6 | Every range ends one below its start, so it is empty even if `chance` is edited. No line draw is ever made |
+| `secondary_freq=1000`, `called_freq=1000` | Sections 3.10 and 3.11 | Secondary modes and called shots are possible but rare: each gate makes its one draw and passes only on a 1. The draws are part of the golden |
+| `aggression=100`, `font=101`, `color=0`, `outline_color=-1` | Required keys only | `aggression` is never consulted, and the font and colors are used only for a taunt, which never shows |
+
+Once the NPC has spent AP, it no longer wants to stop (SPEC-009 section 3.14,
+step 3). Combat ends only by SPEC-007 section 3.3's automatic end or a death.
+Whether a punch lands, and for how much, depends on SPEC-007's rolls, so Team
+A cannot predict the trace rows. That is why the golden is recorded (D-24). T11
+checks only that the NPC acts (section 4).
 
 ## 6. Decisions
 
@@ -938,6 +1184,40 @@ Every open point of the brief is settled here.
 - **D-27 (Team A default).** Hash values in traces and tables are 16
   uppercase hexadecimal digits, without a prefix.
 
+Revision 2 adds these decisions. The coordinator relayed the two open items
+and the implementer's findings; the choices below are Team A's.
+
+- **D-28 (Team A default).** Open item 4 is resolved by adding the held item
+  to W0 as entity `3:1`, with no position, rather than by dropping W0's
+  inventory entry. The stream format already covered held items; only the
+  vector was unrepresentable. The format and the magic therefore stay `VSH1`
+  (section 2.3 requires a new magic only for a change of coverage or
+  encoding). The handle `3:1` is the one the implementer's allocator gives
+  the item, so T5 can check W0 directly.
+- **D-29 (Team A default).** W1 to W4, the mutation rows and the combat trace
+  example are rebased on the new W0, so that no revision 2 vector holds an
+  item without an entity. The mutation rows keep their revision 1 changes, so
+  the two sets can be compared row by row.
+- **D-30 (Team A default).** Revision 2 files go to the new folder
+  `tests/fixtures/spec021/rev2/`. The merged revision 1 tests read the top
+  folder, and Team A does not change code, so editing the files in place
+  would break the build until the follow-up lands. The implementer's
+  follow-up switches the tests and deletes the superseded files (section 3.9).
+- **D-31 (Team A default).** Entity records with equal handles are ordered by
+  their remaining bytes. Revision 2's W0 is the first vector where T4's flips
+  can make two handles equal, and without a rule the stream would depend on
+  supply order, which section 3.2 forbids.
+- **D-32 (Team A default).** Open item 5 is resolved with a single-packet
+  `ai.txt` and a one-line `combatai.msg`, installed by the combat trace's
+  test setup rather than by `cargo xtask fixtures`, so the shared synthetic
+  corpus and every other test that reads it stay unchanged. Packet values are
+  chosen so that every SPEC-009 gate that could make the NPC flee, stop or
+  stay idle is closed (section 5.7). Taunts are turned off with `chance=0`
+  and empty ranges, so the trace does not depend on the catalog's text.
+- **D-33 (Team A default).** The combat trace dump refuses to run without a
+  loaded packet table, and T11 asserts that the NPC spends AP. Together they
+  stop a golden from being recorded with an idle NPC again.
+
 ## 7. Clean-Room Verification Checklist
 
 - [x] Zero C/C++ code snippets or struct definitions included.
@@ -952,4 +1232,18 @@ Every open point of the brief is settled here.
 - [x] Team A computed every vector in section 5 from this spec with a
   throwaway script that is not committed, and checked the RNG values against
   SPEC-006 section 4.4 and the VM traces against SPEC-004 section 4.1.
+- [x] Revision 2: the throwaway encoder first reproduced every revision 1
+  file byte for byte, then wrote the `rev2/` vectors. A second, separate
+  script then read only the written `rev2/` files. It checked the hex dump
+  offsets, recomputed every FNV-1a 64 value from those bytes, and checked
+  each revision 2 stream against its revision 1 stream with the count raised
+  and the 23-byte item record inserted. It also checked the mutation rows and
+  the trace snapshots by patching single fields in the written bytes. It
+  re-ran all 1800 and 1864 T4 flips (distinct with and without the D-31
+  rule, and from both supply orders), and parsed `rev2/ai.txt` by SPEC-009
+  section 2.2's grammar (one packet, all 25 keys).
+- [x] Revision 2 keeps the ingestion rule: no implementation-source path, no
+  40-character hexadecimal string, and no code listing. No engine Rust code
+  was read; a search of file names only confirmed that no build script
+  parses this spec.
 - [x] Decisions separate owner instructions from Team A defaults.

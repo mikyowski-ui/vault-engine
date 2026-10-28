@@ -1,0 +1,28 @@
+; SPEC-021 revision 2: synthetic combat AI packet for the seeded combat golden.
+; Written for Vault Engine by Team A. Not game data. See SPEC-021 section 5.7.
+[Synthetic Brawler]
+packet_num=0
+max_dist=500
+min_to_hit=-1000
+min_hp=0
+aggression=100
+hurt_too_much=
+secondary_freq=1000
+called_freq=1000
+font=101
+color=0
+outline_color=-1
+chance=0
+run_start=13
+move_start=12
+attack_start=11
+miss_start=10
+hit_head_start=9
+hit_left_arm_start=8
+hit_right_arm_start=7
+hit_torso_start=6
+hit_right_leg_start=5
+hit_left_leg_start=4
+hit_eyes_start=3
+hit_groin_start=2
+last_msg=1
