@@ -1,6 +1,6 @@
 # SPEC-021: Deterministic State Hash, Combat Sub-Hash, and Trace Oracles
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (Team A, 2026-10-27); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 3 (Team A, 2026-10-27); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -52,6 +52,31 @@ engine Rust code was read for this revision either.
 Every revision 2 vector was recomputed from the spec, and then checked a
 second time from the written fixture bytes alone (section 7).
 
+**Provenance of revision 3.** Author: the Spec-Author sub-agent (Team A),
+2026-10-27, on the coordinator's request relaying the implementer's Wave 4
+finding on section 3.9. Sources:
+
+- the implementer's report as relayed by the coordinator, recorded in section
+  5.8 as measured fact;
+- SPEC-001 sections 2.2, 2.3, 3.3 and 3.4 (the FRM header, frame records,
+  direction sequences and timing);
+- SPEC-007 sections 2.1 to 2.3 (the art identifier, critter suffixes and
+  directional fallback), 3.3 (turns and stand-up), 3.4 (attack AP debit), 3.6
+  (punch-to-kick substitution and critical-failure table 0), 3.8 (death and
+  fall choice) and 3.10 (attack sequences, the start rule, registration
+  failure and reactions);
+- SPEC-009 sections 3.9 and 3.12 (weapon switching, the unarmed upgrade and
+  the attack step);
+- a listing of the files that `cargo xtask fixtures` writes under
+  `art/critters/` and `proto/critters/` in its synthetic corpus. Team A read
+  the one-row critter list `sample,0`, the three critter FRM headers, and the
+  art identifier word of the corpus's only critter prototype (`0x01000000`).
+  No fixture-builder code was read.
+
+No engine Rust code, decompilation or game asset was used. The new art files
+were written from SPEC-001 and checked a second time by a separate parse of
+the written bytes (section 7).
+
 ### Revision history
 
 - **Revision 1 (2026-10-27).** First approved text.
@@ -72,6 +97,23 @@ second time from the written fixture bytes alone (section 7).
     The seeded golden must be re-recorded with the AI loaded (section 3.9).
   - The stream format, the magic `VSH1`/`VCH1`, the trace formats and every
     revision 1 hash of a combat stream are unchanged.
+- **Revision 3 (2026-10-27).** Fixes the blocker the implementer hit in Wave 4
+  while carrying out section 3.9.
+  - **The finding.** With the AI fixture installed, the NPC still spent no AP
+    in the seeded trace. Its attack request was refused because the attack's
+    animation sequence could not register: the corpus has no punch art for the
+    NPC's art base `sample` (section 5.8).
+  - **The fix.** Four synthetic 75-byte critter FRMs for base `sample` go in
+    `tests/fixtures/spec021/rev2/`: punch (`sampleaq.frm`), hit flinch
+    (`sampleao.frm`), fall back (`sampleba.frm`) and stand up
+    (`samplecj.frm`). T11's setup installs them under `art/critters/` next to
+    the AI fixture (section 3.7). The punch alone is not enough: a punch that
+    hits also registers the defender's reaction, and each reaction animation's
+    art must load too (sections 5.7 and 5.8).
+  - Sections 3.7, 3.9, 4 (T11), 5.6, 5.7, 6 and 7 are updated, and section
+    5.8 is new. No byte of any revision 2 vector changes, because animation
+    and art are not covered by the hash (section 3.1). The shared synthetic
+    corpus and `cargo xtask fixtures` are unchanged.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -587,17 +629,24 @@ installs nothing itself. Every run that produces or checks a seeded combat
 golden (test T11, and the recording of section 3.9) first prepares the corpus
 directory it traces, after `cargo xtask fixtures` has written it: `[Must-match]`
 
-| Copy from `tests/fixtures/spec021/` | To, under the traced corpus directory |
-| --- | --- |
-| `rev2/ai.txt` | `data/ai.txt` |
-| `rev2/combatai.msg` | `text/english/game/combatai.msg` |
+| Copy from `tests/fixtures/spec021/` | To, under the traced corpus directory | Since |
+| --- | --- | --- |
+| `rev2/ai.txt` | `data/ai.txt` | Revision 2 |
+| `rev2/combatai.msg` | `text/english/game/combatai.msg` | Revision 2 |
+| `rev2/sampleaq.frm` | `art/critters/sampleaq.frm` | Revision 3 |
+| `rev2/sampleao.frm` | `art/critters/sampleao.frm` | Revision 3 |
+| `rev2/sampleba.frm` | `art/critters/sampleba.frm` | Revision 3 |
+| `rev2/samplecj.frm` | `art/critters/samplecj.frm` | Revision 3 |
 
-Each copy replaces any file already at that path; directories are created as
-needed. `english` is the default language (SPEC-014 section 3.1), which step 1
-uses. The copies go into the test's own corpus directory, never into the
-committed fixture tree. `cargo xtask fixtures` itself is not changed by this
-revision, so every other test sees the corpus as before. Section 5.7 explains
-why this packet makes the NPC fight.
+Each copy is a plain byte-for-byte file copy. It replaces any file already at
+that path; directories are created as needed. The destination names are
+lowercase, like the corpus's own `art/critters/sampleaa.frm`. `english` is
+the default language (SPEC-014 section 3.1), which step 1 uses. The copies go
+into the test's own corpus directory, never into the committed fixture tree.
+`cargo xtask fixtures` itself is not changed by revisions 2 or 3, so every
+other test sees the corpus as before. Section 5.7 explains why this packet
+makes the NPC fight, and section 5.8 why its attack needs the four art files
+(revision 3).
 
 ### 3.8 Golden Files and Re-Recording
 
@@ -618,13 +667,13 @@ Goldens and vectors for this spec live in `tests/fixtures/spec021/`, never in
   justifies the change. A change to the stream's coverage needs a new magic
   (section 2.3) and a spec revision.
 
-### 3.9 Revision 2 Files, Supersession, and the Implementer's Follow-Up
+### 3.9 Revision 2 and 3 Files, Supersession, and the Implementer's Follow-Up
 
 Revision 2 adds the folder `tests/fixtures/spec021/rev2/`. The revision 1
 files stay where they are until the implementer adopts revision 2, because the
 merged tests read them. Team A did not edit them. `[Must-match]`
 
-| File | Status in revision 2 |
+| File | Status in revision 3 |
 | --- | --- |
 | `fnv1a64.tsv` | Current, unchanged |
 | `w1.combat.hex`, `w4.combat.hex` | Current, unchanged: the item entity is not a combat participant, so the combat streams and every `combat_hash` stay the same |
@@ -632,9 +681,14 @@ merged tests read them. Team A did not edit them. `[Must-match]`
 | `w0.stream.hex` to `w4.stream.hex` | **Superseded** by `rev2/w0.stream.hex` to `rev2/w4.stream.hex` |
 | `hashes.tsv` | **Superseded** by `rev2/hashes.tsv` |
 | `combat-trace-example.tsv` | **Superseded** by `rev2/combat-trace-example.tsv` (only the `state_hash` column differs) |
-| `combat-trace-synthetic-seed1.tsv` | **To be re-recorded** with the AI fixture installed (below) |
-| `rev2/ai.txt`, `rev2/combatai.msg` | New: the AI fixture of sections 3.7 and 5.7 |
-| `rev2/README.md` | New: describes the folder |
+| `combat-trace-synthetic-seed1.tsv` | **To be re-recorded** with the AI fixture and the art fixture installed (below) |
+| `rev2/ai.txt`, `rev2/combatai.msg` | New in revision 2: the AI fixture of sections 3.7 and 5.7 |
+| `rev2/sampleaq.frm`, `rev2/sampleao.frm`, `rev2/sampleba.frm`, `rev2/samplecj.frm` | New in revision 3: the art fixture of sections 3.7 and 5.8 |
+| `rev2/README.md` | New in revision 2: describes the folder. Revision 3 adds the four art files to it |
+
+Revision 3 puts its files in `rev2/` too, so that everything T11 installs
+comes from one folder (Decision D-38). It changes no revision 2 file other
+than `rev2/README.md`.
 
 The superseded files hold revision 1's W0, whose item has no entity. They
 become superseded when the implementer's follow-up commit adopts revision 2.
@@ -658,18 +712,30 @@ are still the merged tests' inputs and must not be edited.
    checked that every T4 flip is distinct with and without the rule.
 4. **The combat trace dump** refuses to run without a loaded, nonempty packet
    table (section 3.7, step 1).
-5. **T11** installs the AI fixture in its corpus directory (section 3.7) and
-   asserts that the NPC acts (section 4, T11).
+5. **T11** installs the AI fixture and, since revision 3, the art fixture in
+   its corpus directory: all six rows of section 3.7's table. It asserts that
+   the NPC acts (section 4, T11).
 6. **The seeded golden** `tests/fixtures/spec021/combat-trace-synthetic-seed1.tsv`
-   is re-recorded at the same path, with the AI fixture installed, by the
-   T11 run, and reviewed. This is a re-recording under SPEC-020 section 3.4's
-   rule: the commit names the file and cites this section and section 3.7 of
-   SPEC-021 revision 2 as the approved rule that justifies it. The line in
-   `tests/fixtures/spec021/README.md` that describes the golden is updated to
-   say that the AI fixture was installed, and the sentence saying the NPC's
-   turns run without AI actions is removed.
+   is re-recorded at the same path, with the AI fixture and the art fixture
+   installed, by the T11 run, and reviewed. This is a re-recording under
+   SPEC-020 section 3.4's rule: the commit names the file and cites this
+   section and section 3.7 of SPEC-021 revision 3 as the approved rule that
+   justifies it. The line in `tests/fixtures/spec021/README.md` that
+   describes the golden is updated to say that the AI fixture and the art
+   fixture were installed, and the sentence saying the NPC's turns run without
+   AI actions is removed.
 7. The superseded files of the table above are deleted, and
    `tests/fixtures/spec021/README.md` points to `rev2/`.
+
+**Revision 3: where the follow-up stopped, and what changes.** The
+implementer began this follow-up in Wave 4 and stopped at step 5, as T11's
+stop rule requires (section 4): with the AI fixture installed, the NPC still
+spent no AP. Section 5.8 records the measured finding. Revision 3 changes
+only steps 5 and 6 above: T11 also copies the four art files, and the golden
+is recorded with them. Steps 1 to 4 and 7 are unchanged; work already done
+for them stands. The golden must not be committed from a run that lacks the
+art fixture, because a run without it records an NPC that never acts.
+`[Must-match]`
 
 ## 4. Required Tests
 
@@ -738,8 +804,9 @@ The implementer writes at least these tests. They use synthetic data only.
   section 5.6 gives `rev2/combat-trace-example.tsv` byte for byte, and a reader of
   the format reads it back to the same rows.
 - **T11. Seeded combat golden.** Generate the synthetic corpus with `cargo
-  xtask fixtures --output DIR`, install the AI fixture of section 3.7 in the
-  directory that holds the map, and run the section 3.7 combat trace with
+  xtask fixtures --output DIR`, install the AI fixture and the art fixture of
+  section 3.7 (all six rows of its table) in the directory that holds the
+  map, and run the section 3.7 combat trace with
   seed 1 and `--max-rounds 5` on the first of these maps that has a defender:
   `maps/synthetic.map` in DIR, then `maps/cam_demo.map` in `DIR-cam-demo`.
   The output equals `combat-trace-synthetic-seed1.tsv`, which the
@@ -749,10 +816,15 @@ The implementer writes at least these tests. They use synthetic data only.
   least one of the defender's traced turns, its current AP is below its
   effective maximum AP, because it moved or attacked (SPEC-009 section 3.12).
   If neither map has a defender, the trace has no NPC `turn` row, or the NPC
-  spends no AP in any traced turn with the AI fixture installed, the
-  implementer stops and asks for a spec revision instead of inventing a
-  scenario. In the last case the report names the SPEC-009 step that ended
-  the NPC's turn without an action.
+  spends no AP in any traced turn with the AI fixture and the art fixture
+  installed, the implementer stops and asks for a spec revision instead of
+  inventing a scenario. In the last case the report names the SPEC-009 step
+  that ended the NPC's turn without an action, and, when a request or an
+  animation sequence was refused, the SPEC-007 rule and the missing resource
+  (as the Wave 4 report did, section 5.8). Revision 3: the art fixture names
+  the art base `sample`, the only row of the corpus's critter list. If the
+  traced defender's art identifier names another base, or the list is no
+  longer the one-row `sample,0`, the implementer stops in the same way.
 - **T12. No unstable hashing.** The module that builds the stream uses no
   `std::hash` item, no `HashMap` or `HashSet` iteration, and no `usize` in
   the stream. Enforcing this with clippy's `disallowed_types` and
@@ -764,7 +836,8 @@ All values here are synthetic: the PIDs, handles, script identifiers and
 variable values were chosen for this spec. The RNG values follow from
 SPEC-006 section 3.4 with seed 1, and the VM traces from SPEC-004 section
 4.1's synthetic program. Files are in `tests/fixtures/spec021/`; the vectors
-that revision 2 changed or added are in its `rev2/` folder (section 3.9).
+that revision 2 changed or added, and revision 3's art fixture, are in its
+`rev2/` folder (section 3.9).
 
 ### 5.1 FNV-1a Step Table
 
@@ -1021,7 +1094,8 @@ Only the `state_hash` column differs from revision 1's
 
 **Seeded combat golden.** `combat-trace-synthetic-seed1.tsv` is recorded by
 the implementer (section 3.8, test T11). Revision 2 requires it to be
-re-recorded with the AI fixture of section 5.7 installed (section 3.9).
+re-recorded with the AI fixture of section 5.7 installed, and revision 3 adds
+the art fixture of section 5.8 (section 3.9).
 
 ### 5.7 The Combat AI Fixture (Revision 2)
 
@@ -1085,12 +1159,166 @@ never looks a line up in it (below).
 | Range keys from 13 down to 1 | Taunt ranges, section 3.17 steps 5 and 6 | Every range ends one below its start, so it is empty even if `chance` is edited. No line draw is ever made |
 | `secondary_freq=1000`, `called_freq=1000` | Sections 3.10 and 3.11 | Secondary modes and called shots are possible but rare: each gate makes its one draw and passes only on a 1. The draws are part of the golden |
 | `aggression=100`, `font=101`, `color=0`, `outline_color=-1` | Required keys only | `aggression` is never consulted, and the font and colors are used only for a taunt, which never shows |
+| (no packet value; revision 3) | Unarmed upgrade, SPEC-009 section 3.12 step 3; the attack step, section 3.12 "Attack" sub-step 4 | The NPC holds no weapon, so it punches. The punch is an attack only if the SPEC-007 attack request succeeds, and the request succeeds only if the attack's animation sequence registers (SPEC-007 section 3.10.1). That needs the punch art and the art of every reaction the sequence holds. The art fixture of section 5.8 supplies them. With the punch art present, step 3's art test passes, so no weapon switch runs on that ground |
+
+Revision 2 checked every packet gate but not the art the attack sequence
+loads; the Wave 4 run stopped there (section 5.8). With both fixtures
+installed, the NPC's first turn starts at distance 1 from the player, with
+preflight 0 and a hit chance that passes `min_to_hit`. Each punch whose
+sequence registers debits 3 AP (SPEC-007 section 3.4). Team A expects the NPC
+to punch while its AP covers the cost: AP 7 before the first punch, 4 after
+it, and 1 after the second, when nothing interrupts. But the golden records
+what happens; it is not predicted here.
 
 Once the NPC has spent AP, it no longer wants to stop (SPEC-009 section 3.14,
 step 3). Combat ends only by SPEC-007 section 3.3's automatic end or a death.
 Whether a punch lands, and for how much, depends on SPEC-007's rolls, so Team
 A cannot predict the trace rows. That is why the golden is recorded (D-24). T11
 checks only that the NPC acts (section 4).
+
+### 5.8 The Critter Art Fixture (Revision 3)
+
+**The Wave 4 finding, recorded as measured fact.** The implementer reported
+this run, relayed by the coordinator. Team A did not re-run it.
+
+- With `rev2/ai.txt` and `rev2/combatai.msg` installed, the seeded combat
+  trace on `maps/synthetic.map` with seed 1 still had the defender `3:1`
+  spend no AP. T11's "NPC acts" assertion failed, as section 3.9 step 5's
+  stop rule anticipated.
+- Everything before the attack worked. The packet loaded. Section 3.6 step 1
+  of SPEC-009 forced no flee, and `danger()` returned the player. The
+  preflight was 0, and the hit chance of 58 passed `min_to_hit=-1000`. The
+  defender had AP 7 of 7, at distance 1 from the player.
+- SPEC-009 section 3.12 step 3 ran weapon switching, because the punch art
+  was missing. The NPC owns no weapon, so the punch mode stayed.
+- The blocking step was SPEC-009 section 3.12, "Attack" sub-step 4. The
+  SPEC-007 attack request was refused because the attack's animation sequence
+  could not register (SPEC-007 section 3.10.1). The art identifier
+  `0x01100000` was missing: category 1 (critter), animation 16 (punch),
+  weapon code 0, base index 0, file selector 0.
+- The refusal comes before the AP debit, so AP stayed at its maximum.
+- For base `sample` the corpus has only `art/critters/sampleaa.frm` (stand),
+  `sampleak.frm` and `sampleal.frm` (animations 10 and 11), and no punch.
+
+Team A's own listing of the corpus agrees: `art/critters/critters.lst` is
+the single row `sample,0`, so base index 0 is `sample` and no other base
+exists. The only critter prototype stores art identifier `0x01000000`. So
+the player's art also names `sample`, the base this fixture supplies. A
+critter whose base index is past the end of the list names no file at all
+(SPEC-007 section 2.1).
+
+**Why one punch file is not enough.** A punch registers one sequence
+(SPEC-007 section 3.10.3). On a hit, or when the critical bit is set, it
+holds the attack animation and then the reactions of section 3.10.6. Each
+reaction is an animate entry whose art must load, or the whole sequence is
+discarded (section 3.10.1, "Failure"). With a hit chance of 58, most punches
+hit. So the punch file alone would only move the failure from the attack
+animation to the defender's reaction. The table lists every reaction row
+that a bare punch between two `sample` critters can reach. A punch does
+normal damage, so no fire row applies. `[Must-match]`
+
+| SPEC-007 section 3.10.6 row | Animations it registers | Covered by |
+| --- | --- | --- |
+| R prone when the sequence is built | Blood only, and only when its art exists; none does | Nothing needed |
+| Dead, fire dance 33 | Not reachable: 33 needs fire damage (section 3.8) | Nothing needed |
+| Dead, knockback, death animation 20 or 21 | 20 or 21 in the knockback executor; blood only when its art exists | `sampleba.frm`: fall-front without art falls back to fall-back (section 3.8) |
+| Dead, otherwise | The death animation of section 3.8, then the fall choice | `sampleba.frm`: a severe choice without art falls back to 20 on a front hit, and to 21 on a rear hit (the reference's inverted fallback). The reaction's fall choice then replaces the missing fall-front 21 with 20 |
+| Knocked out or knocked down | 20 or 21 after the fall choice; the critter stands up on its own turn | `sampleba.frm`, then `samplecj.frm` for the stand-up (37 after 20; SPEC-007 section 3.3) |
+| On fire, with art for 33 | Not reachable: no art for 33, and a punch sets no fire | Nothing needed |
+| Knockback (k not 0) | 20 or 21 and the knockback executor, then 37 after 20 | `sampleba.frm`, `samplecj.frm` |
+| Otherwise (hit flinch) | 14, or 15 when the hit is not from the front and art for 15 exists | `sampleao.frm`; there is no art for 15, so it is always 14 |
+
+The other entries need nothing new:
+
+- **Critical failures.** An unarmed attacker uses critical-failure table 0
+  (SPEC-007 section 2.4). Its masks are 0, `8000` (lose turn), `80002`
+  (self injury, knocked down) and `200000` (random cripple). The attacker's
+  own reaction is then the hit flinch or the knockdown row: `sampleao.frm` or
+  `sampleba.frm`. No mask of table 0 explodes a weapon, so no set-art entry
+  is registered.
+- **Misses.** `sample` has no dodge art (animation 13, `an`). So a miss
+  registers no attack animation in the reference, or the punch under its
+  `[May-improve]` (section 3.10.3). Either way the sequence registers.
+- **Turn and standing reset.** The turn entry and the standing reset at the
+  end of a sequence use the standing art `sampleaa.frm`, which the corpus
+  has.
+
+**File names.** Each name follows from SPEC-007 sections 2.1 to 2.3, with base
+index 0 (`sample`) and file selector 0. The suffixes of animations 14, 16, 20
+and 37 do not depend on the weapon code (section 2.2), so the same file serves
+a critter with any weapon code. None of these codes is aliased (aliases apply
+only to 27, 29, 30, 33, 55, 57, 58 and 64). `[Must-match]`
+
+| Animation | Use | Art identifier (weapon code 0) | Suffix | Installed at |
+| ---: | --- | --- | --- | --- |
+| 16 punch | The NPC's attack animation (section 3.10.2) | `0x01100000` | `aq` | `art/critters/sampleaq.frm` |
+| 14 hit from front | Hit flinch | `0x010E0000` | `ao` | `art/critters/sampleao.frm` |
+| 20 fall back | Knockdown, knockout, knockback and death falls | `0x01140000` | `ba` | `art/critters/sampleba.frm` |
+| 37 back to standing | Stand-up after a fall back | `0x01250000` | `cj` | `art/critters/samplecj.frm` |
+
+Animations 14, 16 and 37 encode selector 0 at once (section 2.3 rule 1).
+Animation 20 first probes the directional files (rules 2 and 3). The probes
+find no `sampleba.fr0` to `sampleba.fr5`, so it encodes selector 0 and names
+`sampleba.frm`.
+
+**The bytes.** The four files are byte-identical, 75 bytes each, built by
+SPEC-001 sections 2.2 and 2.3. Every multi-byte field is big-endian.
+
+```text
+0000: 00 00 00 04 00 0A 00 00 00 01 00 00 00 00 00 00
+0010: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0020: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0030: 00 00 00 00 00 00 00 00 00 00 00 00 00 0D 00 01
+0040: 00 01 00 00 00 01 00 00 00 00 10
+```
+
+| Offset | Bytes | Meaning |
+| --- | --- | --- |
+| `0x00` | `00 00 00 04` | Version word 4 |
+| `0x04` | `00 0A` | 10 frames per second: a frame step every 100 ms (SPEC-001 section 3.4) |
+| `0x06` | `00 00` | Action frame 0 |
+| `0x08` | `00 01` | One frame in each direction sequence |
+| `0x0A` | 12 x `00` | Six X shifts, all 0 |
+| `0x16` | 12 x `00` | Six Y shifts, all 0 |
+| `0x22` | 24 x `00` | Six direction offsets, all 0: all six directions share one sequence (SPEC-001 section 3.3) |
+| `0x3A` | `00 00 00 0D` | Frame area 13 bytes: one 12-byte record header and one pixel |
+| `0x3E` | `00 01` `00 01` | Frame 0: width 1, height 1 |
+| `0x42` | `00 00 00 01` | Pixel-data length 1 (width times height) |
+| `0x46` | `00 00` `00 00` | Frame displacement (0, 0) |
+| `0x4A` | `10` | The pixel: palette index `0x10`, the index the corpus's own critter art uses; not the transparent index 0 (SPEC-001 section 3.1) |
+
+The file passes SPEC-001 section 3.3's `[May-improve]` checks: direction 0's
+offset is 0, every later offset equals the one before it, the frame count is
+positive, and the payload equals width times height and ends at the end of
+the file.
+
+What follows from the bytes (SPEC-007 section 3.10):
+
+- An animate entry with this art takes two frame steps: one shows frame 0,
+  the next finishes the entry.
+- The punch's action frame A is 0. So its contact sound and the reactions
+  start in the same examination as the attack animation.
+- The pixels and the timing change no covered value (section 3.1). They do
+  change when the trace's turns end, and the golden records that.
+
+**Deliberately absent.** Each file below is left out on purpose. `[Must-match]`
+
+- **`sampleap.frm` (15, hit from back).** Without it, every flinch is 14.
+- **`samplebb.frm` (21, fall front).** Without it, every fall resolves to
+  20, so every stand-up is 37. That is also why `samplech.frm` (36) is not
+  needed.
+- **`samplean.frm` (13, dodge).** Without it, a miss takes the "no dodge
+  art" branch.
+- **`samplear.frm` (17, kick).** The punch-to-kick draw is still made, one
+  draw per punch request (SPEC-007 section 3.6). Its probe for the kick art
+  finds nothing, so the hit mode stays punch.
+- **`sampleab.frm` (1, walk).** The defender starts adjacent to the player,
+  so its first turn attacks without moving. A walk needs frames with
+  displacements for SPEC-007 section 3.11.1's hex-crossing rule, so a
+  one-frame walk would not be a meaningful fixture. A later approach is needed
+  only after a knockback, which takes at least 10 total punch damage
+  (section 3.8). That approach then fails as SPEC-009 section 3.12 says, the
+  same way on every run, and the golden records it.
 
 ## 6. Decisions
 
@@ -1218,6 +1446,47 @@ and the implementer's findings; the choices below are Team A's.
   loaded packet table, and T11 asserts that the NPC spends AP. Together they
   stop a golden from being recorded with an idle NPC again.
 
+Revision 3 adds these decisions. The coordinator relayed the implementer's
+Wave 4 finding and asked for the smallest fix inside SPEC-021's own fixtures;
+the choices below are Team A's.
+
+- **D-34 (Team A default).** The Wave 4 finding (section 5.8) is recorded as
+  measured fact, from the implementer's report. Team A did not re-run the
+  trace. It only listed the corpus's critter art files, its critter list and
+  its prototype's art identifier, to confirm that the base is `sample` for
+  both combatants.
+- **D-35 (Team A default, on the coordinator's preferred option).** The
+  blocker is fixed with synthetic critter art that T11's setup installs, like
+  the AI fixture (D-32). `cargo xtask fixtures` and the shared synthetic
+  corpus do not change, so no other test or audit count moves. The dump
+  command still reads the corpus as it is. It does not check for the art,
+  because T11's assertion and stop rule already catch a missing install.
+- **D-36 (Team A default).** Four files, not one: the punch (16), the hit
+  flinch (14), the fall back (20) and the stand-up (37). The punch alone
+  would only move the registration failure to the defender's reaction,
+  because every reaction animation's art must load too (SPEC-007 section
+  3.10.1). These four cover every reaction row that a bare punch between two
+  `sample` critters can reach, including critical failures from table 0, as
+  section 5.8 shows. The stand-up file covers the turn after a knockdown.
+- **D-37 (Team A default).** Art that would widen the scenario is left out on
+  purpose: fall front, hit from back, dodge, kick and walk (section 5.8,
+  "Deliberately absent"). Without fall front, every fall resolves to 20 and
+  every stand-up to 37. Without kick, the hit mode stays punch. The walk is
+  not needed for the first NPC turn, and a one-frame walk could not show the
+  hex-crossing rule.
+- **D-38 (Team A default).** The four files are byte-identical, 75 bytes:
+  one 1-by-1 frame of palette index `0x10`, all six directions sharing it,
+  10 fps and action frame 0. They are stored as raw `.frm` files in
+  `tests/fixtures/spec021/rev2/`, beside the AI fixture, because T11 copies
+  them byte for byte. Section 5.8 dumps every byte. No revision 2 vector
+  changes: art and animation are not covered by the hash (section 3.1), so
+  every stream and hash of section 5 stands. Only `rev2/README.md` gains
+  their description.
+- **D-39 (Team A default).** The seeded golden is recorded only with both
+  fixtures installed (section 3.9). T11's stop rule now also asks the report
+  to name the SPEC-007 rule and the missing resource, and it covers a
+  defender whose art names a base other than `sample`.
+
 ## 7. Clean-Room Verification Checklist
 
 - [x] Zero C/C++ code snippets or struct definitions included.
@@ -1247,3 +1516,18 @@ and the implementer's findings; the choices below are Team A's.
   was read; a search of file names only confirmed that no build script
   parses this spec.
 - [x] Decisions separate owner instructions from Team A defaults.
+- [x] Revision 3: the four art files were written by a throwaway script from
+  SPEC-001 section 2.2's header layout and section 2.3's frame record. A
+  second, separate script read only the written files. It decoded each by
+  SPEC-001 (version 4, 10 fps, action frame 0, one frame, zero shifts, six
+  zero offsets, area 13, a 1-by-1 frame with payload 1 and pixel `0x10`). It
+  checked that each file is 75 bytes, that the file ends where the frame
+  ends, and that the four files are identical. It also decoded the art
+  identifiers `0x01100000`, `0x010E0000`, `0x01140000` and `0x01250000`, and
+  the corpus's `0x01000000`, `0x010A0000` and `0x010B0000`, to file names by
+  SPEC-007 sections 2.1 to 2.3. That reproduced `sampleaq.frm`,
+  `sampleao.frm`, `sampleba.frm`, `samplecj.frm` and the corpus's own
+  `sampleaa.frm`, `sampleak.frm` and `sampleal.frm`.
+- [x] Revision 3 keeps the ingestion rule: no implementation-source path, no
+  40-character hexadecimal string, and no code listing. No engine Rust code
+  and no fixture-builder code was read.
