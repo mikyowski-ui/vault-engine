@@ -3,14 +3,17 @@
 //! through a snapshot copy, every value read with `textureLoad` at
 //! integer coordinates (`instanced.wgsl`).
 //!
-//! `[May-improve]` choices: one atlas texture per refresh (shelf-packed,
-//! holding the sprite, ring, text and level images the plan draws), the
-//! lookup tables in one texture re-uploaded only when they change, and the
-//! canvas uploaded before and read back after each refresh, so the
-//! display stage stays the shared CPU one.
+//! `[May-improve]` choices: one atlas page (shelf-packed each refresh
+//! with the sprite, ring, text and level images the plan draws), the
+//! lookup tables in one texture re-uploaded only when they change, and a
+//! canvas kept on the GPU between refreshes: only what differs from it is
+//! uploaded (a uniform base fill is a clear pass), and only the pixels the
+//! refresh can write are read back, so the display stage stays the shared
+//! CPU one. Every texture and buffer is kept and rewritten in place, and
+//! only when its bytes change.
 use super::instanced::{
-    BatchKind, BatchPlan, FrameInputs, HEXES, InstanceError, LayerUniforms, LookupTables, Rect,
-    SpriteInstance, intersect,
+    BatchKind, BatchPlan, FrameInputs, HEXES, InstanceError, LookupTables, Rect, SpriteInstance,
+    intersect,
 };
 use crate::IndexedImage;
 use std::{
@@ -19,7 +22,7 @@ use std::{
     pin::pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll, Waker},
     time::{Duration, Instant},
@@ -148,10 +151,105 @@ pub struct GpuCounts {
     pub snapshots: usize,
 }
 
+/// Cumulative GPU resource and transfer counts of an executor, for
+/// measuring its canvas retention (`[May-improve]`, SPEC-022 §3.7 and
+/// §3.9 step 5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuStats {
+    /// Refreshes that reached the GPU (drawn or failed).
+    pub refreshes: u64,
+    /// Textures created.
+    pub textures: u64,
+    /// Buffers created.
+    pub buffers: u64,
+    /// Bind groups created.
+    pub bind_groups: u64,
+    /// Bytes written into the canvas texture.
+    pub canvas_upload_bytes: u64,
+    /// Canvas refreshes whose uniform base was set by a clear pass instead
+    /// of an upload.
+    pub canvas_clears: u64,
+    /// Every byte written to a texture or buffer, the canvas included.
+    pub upload_bytes: u64,
+    /// Bytes copied back from the canvas (the readback buffer's rows).
+    pub readback_bytes: u64,
+}
+
+/// [`GpuStats`] as counters an executor updates through `&self`.
+#[derive(Default)]
+struct Counters([AtomicU64; 8]);
+
+impl Counters {
+    const REFRESHES: usize = 0;
+    const TEXTURES: usize = 1;
+    const BUFFERS: usize = 2;
+    const BIND_GROUPS: usize = 3;
+    const CANVAS_UPLOAD: usize = 4;
+    const CANVAS_CLEARS: usize = 5;
+    const UPLOAD: usize = 6;
+    const READBACK: usize = 7;
+    fn add(&self, counter: usize, value: u64) {
+        self.0[counter].fetch_add(value, Ordering::Relaxed);
+    }
+    fn get(&self) -> GpuStats {
+        let at = |counter: usize| self.0[counter].load(Ordering::Relaxed);
+        GpuStats {
+            refreshes: at(Self::REFRESHES),
+            textures: at(Self::TEXTURES),
+            buffers: at(Self::BUFFERS),
+            bind_groups: at(Self::BIND_GROUPS),
+            canvas_upload_bytes: at(Self::CANVAS_UPLOAD),
+            canvas_clears: at(Self::CANVAS_CLEARS),
+            upload_bytes: at(Self::UPLOAD),
+            readback_bytes: at(Self::READBACK),
+        }
+    }
+}
+
 /// The table texture's rows: intensity, mix, blends, gray levels.
 const TABLE_ROWS: u32 = 256 + 256 + 40 + 2;
 /// Words per instance record.
 const RECORD_WORDS: usize = 12;
+
+/// The canvas kept on the GPU between refreshes (§3.2), with its snapshot
+/// texture and readback buffer.
+struct CanvasTarget {
+    size: [u32; 2],
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    snapshot: wgpu::Texture,
+    /// Room for the whole canvas at the copy row alignment.
+    readback: wgpu::Buffer,
+    /// What the canvas texture holds, valid only when `known` is set: it
+    /// is cleared while a refresh is in flight and after any failure.
+    held: Vec<u8>,
+    known: bool,
+}
+
+/// The canvas pixels read back after a refresh: a rectangle and its rows.
+type Readback = (Rect, Vec<u8>);
+
+/// How a refresh brings the GPU canvas to the CPU canvas it starts from.
+enum CanvasUpload {
+    /// The GPU canvas already holds it.
+    Held,
+    /// Every pixel is this index: a clear pass, no upload.
+    Clear(u8),
+    /// Upload these rows (half-open).
+    Rows(u32, u32),
+}
+
+/// A texture kept across refreshes with the bytes it holds.
+struct Kept<T> {
+    key: T,
+    texture: wgpu::Texture,
+}
+
+/// A buffer kept across refreshes, its capacity and the bytes it holds.
+struct KeptBuffer {
+    bytes: Vec<u8>,
+    buffer: wgpu::Buffer,
+}
 
 /// The GPU executor: its pipeline and the resources kept across
 /// refreshes.
@@ -163,6 +261,17 @@ pub struct GpuExecutor {
     tables: Option<(Box<LookupTables>, wgpu::Texture)>,
     /// The hex light texture and the values it holds.
     light: Option<(Vec<u32>, wgpu::Texture)>,
+    canvas: Option<CanvasTarget>,
+    /// The atlas page: its row capacity, and the pixels of its used part.
+    atlas: Option<Kept<([u32; 2], Vec<u8>)>>,
+    /// The cutout mask texture, its size and pixels.
+    mask: Option<Kept<([u32; 2], Vec<u8>)>>,
+    uniforms: Option<KeptBuffer>,
+    records: Option<KeptBuffer>,
+    /// The bind group over the kept resources; dropped whenever one of
+    /// them is created again.
+    bind_group: Option<wgpu::BindGroup>,
+    counters: Counters,
 }
 
 impl GpuExecutor {
@@ -248,6 +357,13 @@ impl GpuExecutor {
             pipeline,
             tables: None,
             light: None,
+            canvas: None,
+            atlas: None,
+            mask: None,
+            uniforms: None,
+            records: None,
+            bind_group: None,
+            counters: Counters::default(),
         }
     }
 
@@ -256,11 +372,27 @@ impl GpuExecutor {
         &self.gpu
     }
 
+    /// The resource and transfer counts so far.
+    pub fn stats(&self) -> GpuStats {
+        self.counters.get()
+    }
+
     fn max_side(&self) -> u32 {
         self.gpu.device.limits().max_texture_dimension_2d
     }
 
     fn texture(&self, label: &str, size: [u32; 2], format: wgpu::TextureFormat) -> wgpu::Texture {
+        self.texture_with(label, size, format, wgpu::TextureUsages::empty())
+    }
+
+    fn texture_with(
+        &self,
+        label: &str,
+        size: [u32; 2],
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> wgpu::Texture {
+        self.counters.add(Counters::TEXTURES, 1);
         self.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: extent(size),
@@ -268,17 +400,37 @@ impl GpuExecutor {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | usage,
             view_formats: &[],
         })
     }
 
-    fn write(&self, texture: &wgpu::Texture, size: [u32; 2], bytes_per_texel: u32, data: &[u8]) {
+    fn buffer(&self, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        self.counters.add(Counters::BUFFERS, 1);
+        self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Write `data`, `size` texels of `bytes_per_texel`, at row `top` of
+    /// `texture`.
+    fn write(
+        &self,
+        texture: &wgpu::Texture,
+        top: u32,
+        size: [u32; 2],
+        bytes_per_texel: u32,
+        data: &[u8],
+    ) {
+        self.counters.add(Counters::UPLOAD, data.len() as u64);
         self.gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d { x: 0, y: top, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
             data,
@@ -291,7 +443,21 @@ impl GpuExecutor {
         );
     }
 
-    /// Upload the tables when they differ from the last ones.
+    /// Drop every kept resource, after a failure that may have left one
+    /// of them wrong: the next refresh uploads everything again.
+    fn forget(&mut self) {
+        self.tables = None;
+        self.light = None;
+        self.canvas = None;
+        self.atlas = None;
+        self.mask = None;
+        self.uniforms = None;
+        self.records = None;
+        self.bind_group = None;
+    }
+
+    /// Upload the tables when they differ from the last ones, into the
+    /// kept texture.
     fn upload_tables(&mut self, tables: &LookupTables) {
         if self
             .tables
@@ -310,33 +476,169 @@ impl GpuExecutor {
         }
         bytes.extend_from_slice(&tables.gray[0]);
         bytes.extend_from_slice(&tables.gray[1]);
-        let texture = self.texture(
-            "lookup tables",
-            [256, TABLE_ROWS],
-            wgpu::TextureFormat::R8Uint,
-        );
-        self.write(&texture, [256, TABLE_ROWS], 1, &bytes);
+        let texture = match self.tables.take() {
+            Some((_, texture)) => texture,
+            None => {
+                self.bind_group = None;
+                self.texture(
+                    "lookup tables",
+                    [256, TABLE_ROWS],
+                    wgpu::TextureFormat::R8Uint,
+                )
+            }
+        };
+        self.write(&texture, 0, [256, TABLE_ROWS], 1, &bytes);
         self.tables = Some((Box::new(tables.clone()), texture));
     }
 
     /// Upload the hex light buffer when it differs from the last one
-    /// (§3.8 step 4).
+    /// (§3.8 step 4), into the kept texture.
     fn upload_light(&mut self, values: &[u32]) {
         if self.light.as_ref().is_some_and(|(held, _)| held == values) {
             return;
         }
-        let texture = self.texture("hex light", [200, 200], wgpu::TextureFormat::R32Uint);
+        let texture = match self.light.take() {
+            Some((_, texture)) => texture,
+            None => {
+                self.bind_group = None;
+                self.texture("hex light", [200, 200], wgpu::TextureFormat::R32Uint)
+            }
+        };
         let bytes: Vec<u8> = values
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect();
-        self.write(&texture, [200, 200], 4, &bytes);
+        self.write(&texture, 0, [200, 200], 4, &bytes);
         self.light = Some((values.to_vec(), texture));
+    }
+
+    /// The atlas page, grown (by doubling its rows) only when the packed
+    /// images do not fit, and written only when they changed.
+    fn upload_atlas(&mut self, atlas: &Atlas) {
+        let [width, height] = atlas.size;
+        let fits = self.atlas.as_ref().is_some_and(|kept| {
+            let capacity = kept.key.0;
+            capacity[0] == width && capacity[1] >= height
+        });
+        if !fits {
+            let rows = height.next_power_of_two().min(self.max_side()).max(height);
+            let texture = self.texture("sprite atlas", [width, rows], wgpu::TextureFormat::R8Uint);
+            self.bind_group = None;
+            self.atlas = Some(Kept {
+                key: ([width, rows], Vec::new()),
+                texture,
+            });
+        }
+        let kept = self.atlas.as_mut().expect("kept");
+        if kept.key.1 == atlas.pixels {
+            return;
+        }
+        kept.key.1.clone_from(&atlas.pixels);
+        let kept = self.atlas.as_ref().expect("kept");
+        self.write(&kept.texture, 0, atlas.size, 1, &atlas.pixels);
+    }
+
+    /// The cutout mask texture (1 by 1 when not bound), written only when
+    /// it changed.
+    fn upload_mask(&mut self, size: [u32; 2], pixels: &[u8]) {
+        if self.mask.as_ref().is_some_and(|kept| kept.key.0 == size) {
+            if self.mask.as_ref().is_some_and(|kept| kept.key.1 == pixels) {
+                return;
+            }
+        } else {
+            let texture = self.texture("cutout mask", size, wgpu::TextureFormat::R8Uint);
+            self.bind_group = None;
+            self.mask = Some(Kept {
+                key: (size, Vec::new()),
+                texture,
+            });
+        }
+        let kept = self.mask.as_mut().expect("kept");
+        kept.key.1.clear();
+        kept.key.1.extend_from_slice(pixels);
+        let kept = self.mask.as_ref().expect("kept");
+        self.write(&kept.texture, 0, size, 1, pixels);
+    }
+
+    /// Write `bytes` into the kept buffer `slot` (created, or grown to the
+    /// next power of two, as needed), unless it already holds them.
+    fn upload_buffer(
+        &mut self,
+        slot: fn(&mut Self) -> &mut Option<KeptBuffer>,
+        label: &str,
+        usage: wgpu::BufferUsages,
+        bytes: &[u8],
+    ) {
+        let size = bytes.len() as u64;
+        let fits = slot(self)
+            .as_ref()
+            .is_some_and(|kept| kept.buffer.size() >= size);
+        if !fits {
+            let capacity = size.next_power_of_two();
+            let buffer = self.buffer(label, capacity, usage | wgpu::BufferUsages::COPY_DST);
+            self.bind_group = None;
+            *slot(self) = Some(KeptBuffer {
+                bytes: Vec::new(),
+                buffer,
+            });
+        }
+        let kept = slot(self).as_mut().expect("kept");
+        if kept.bytes == bytes {
+            return;
+        }
+        kept.bytes.clear();
+        kept.bytes.extend_from_slice(bytes);
+        let buffer = kept.buffer.clone();
+        self.gpu.queue.write_buffer(&buffer, 0, bytes);
+        self.counters.add(Counters::UPLOAD, size);
+    }
+
+    /// The kept canvas of `size`, created (with its snapshot and readback
+    /// buffer) when there is none of that size.
+    fn canvas_target(&mut self, size: [u32; 2]) {
+        if self
+            .canvas
+            .as_ref()
+            .is_some_and(|canvas| canvas.size == size)
+        {
+            return;
+        }
+        self.canvas = None;
+        let texture = self.texture_with(
+            "instanced canvas",
+            size,
+            wgpu::TextureFormat::R8Uint,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let snapshot = self.texture("canvas snapshot", size, wgpu::TextureFormat::R8Uint);
+        let readback = self.buffer(
+            "canvas readback",
+            u64::from(copy_row(size[0])) * u64::from(size[1]),
+            wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        );
+        self.bind_group = None;
+        self.canvas = Some(CanvasTarget {
+            size,
+            view: texture.create_view(&Default::default()),
+            texture,
+            snapshot,
+            readback,
+            held: Vec::new(),
+            known: false,
+        });
     }
 
     /// Draw `plan` over `canvas` on the GPU: the same canvas as
     /// [`super::execute_plan`]. A refused refresh leaves `canvas` as it
     /// was.
+    ///
+    /// `[May-improve]` retention: the canvas stays on the GPU between
+    /// refreshes. A canvas the GPU already holds is not uploaded, a
+    /// uniform one (a base fill) is set by a clear pass, and otherwise
+    /// only the rows that differ from the held canvas are uploaded. Only
+    /// the bounding box of the pixels the plan can write is read back.
+    /// The atlas, mask, uniform and record resources are kept too, and
+    /// written only when their bytes change.
     pub fn execute(
         &mut self,
         canvas: &mut IndexedImage,
@@ -357,104 +659,140 @@ impl GpuExecutor {
             return Err(InstanceError::TextureLimit(size[0], size[1]));
         }
         let atlas = Atlas::pack(plan, instances, inputs, max)?;
+        let (mask_size, mask_pixels) = match inputs.mask {
+            Some(mask) => ([mask.width, mask.height], &mask.pixels[..]),
+            None => ([1, 1], &[0_u8][..]),
+        };
+        if mask_size.iter().any(|side| *side > max) {
+            return Err(InstanceError::TextureLimit(mask_size[0], mask_size[1]));
+        }
+        let records = record_bytes(plan, instances, &atlas)?;
+        let written = written_rect(plan, instances, size);
         let device = self.gpu.device.clone();
         device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         device.push_error_scope(wgpu::ErrorFilter::Validation);
+        self.counters.add(Counters::REFRESHES, 1);
         self.upload_tables(inputs.tables);
         self.upload_light(inputs.light.values());
-        let result = self.draw(canvas, instances, plan, inputs, &atlas);
+        self.upload_atlas(&atlas);
+        self.upload_mask(mask_size, mask_pixels);
+        self.upload_buffer(
+            |executor| &mut executor.uniforms,
+            "layer uniforms",
+            wgpu::BufferUsages::UNIFORM,
+            &inputs.uniforms.to_bytes(),
+        );
+        self.upload_buffer(
+            |executor| &mut executor.records,
+            "instance records",
+            wgpu::BufferUsages::STORAGE,
+            &records,
+        );
+        self.canvas_target(size);
+        let result = self.draw(canvas, plan, written);
         let validation = block_on(device.pop_error_scope()).flatten();
         let memory = block_on(device.pop_error_scope()).flatten();
         if let Some(error) = validation.or(memory) {
-            // The cached uploads may be the cause: drop them.
-            self.tables = None;
-            self.light = None;
+            // A kept resource may be the cause: drop them all.
+            self.forget();
             return Err(InstanceError::Upload(error.to_string()));
         }
         if self.gpu.is_lost() {
             return Err(InstanceError::DeviceLost);
         }
-        let (counts, pixels) = result?;
-        canvas.pixels_mut().copy_from_slice(&pixels);
+        let (counts, region) = result?;
+        if let Some((rect, pixels)) = region {
+            let width = size[0] as usize;
+            let row = (rect[2] - rect[0]) as usize;
+            let target = canvas.pixels_mut();
+            for (line, y) in (rect[1]..rect[3]).enumerate() {
+                let start = y as usize * width + rect[0] as usize;
+                target[start..start + row].copy_from_slice(&pixels[line * row..][..row]);
+            }
+        }
+        let kept = self.canvas.as_mut().expect("kept");
+        kept.held.clear();
+        kept.held.extend_from_slice(canvas.pixels());
+        kept.known = true;
         Ok(counts)
     }
 
-    fn draw(
-        &self,
-        canvas: &IndexedImage,
-        instances: &[SpriteInstance],
-        plan: &BatchPlan,
-        inputs: &FrameInputs,
-        atlas: &Atlas,
-    ) -> Result<(GpuCounts, Vec<u8>), InstanceError> {
-        let device = &self.gpu.device;
-        let size = [canvas.width(), canvas.height()];
-        let canvas_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("instanced canvas"),
-            size: extent(size),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Uint,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.write(&canvas_texture, size, 1, canvas.pixels());
-        let snapshot = self.texture("canvas snapshot", size, wgpu::TextureFormat::R8Uint);
-        let atlas_texture = self.texture("sprite atlas", atlas.size, wgpu::TextureFormat::R8Uint);
-        self.write(&atlas_texture, atlas.size, 1, &atlas.pixels);
-        let (mask_size, mask_pixels) = match inputs.mask {
-            Some(mask) => ([mask.width, mask.height], &mask.pixels[..]),
-            None => ([1, 1], &[0_u8][..]),
-        };
-        if mask_size.iter().any(|side| *side > self.max_side()) {
-            return Err(InstanceError::TextureLimit(mask_size[0], mask_size[1]));
+    /// How the kept canvas is brought to `pixels`; marks it unknown until
+    /// the refresh succeeds.
+    fn canvas_upload(&mut self, pixels: &[u8]) -> CanvasUpload {
+        let kept = self.canvas.as_mut().expect("kept");
+        let known = std::mem::replace(&mut kept.known, false);
+        if known && kept.held == pixels {
+            return CanvasUpload::Held;
         }
-        let mask = self.texture("cutout mask", mask_size, wgpu::TextureFormat::R8Uint);
-        self.write(&mask, mask_size, 1, mask_pixels);
-        let uniforms = uniform_buffer(device, &self.gpu.queue, &inputs.uniforms);
-        let records = record_buffer(device, &self.gpu.queue, plan, instances, atlas)?;
-        let view = |texture: &wgpu::Texture| texture.create_view(&Default::default());
-        let (tables, light) = (
-            &self.tables.as_ref().expect("uploaded").1,
-            &self.light.as_ref().expect("uploaded").1,
-        );
-        let views = [
-            view(&atlas_texture),
-            view(tables),
-            view(light),
-            view(&mask),
-            view(&snapshot),
-        ];
-        let mut entries = vec![
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: records.as_entire_binding(),
-            },
-        ];
-        entries.extend(
-            views
-                .iter()
-                .enumerate()
-                .map(|(index, view)| wgpu::BindGroupEntry {
-                    binding: 2 + index as u32,
-                    resource: wgpu::BindingResource::TextureView(view),
-                }),
-        );
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("instanced canvas bind group"),
-            layout: &self.layout,
-            entries: &entries,
-        });
-        let target = view(&canvas_texture);
+        if let Some((first, rest)) = pixels.split_first()
+            && rest.iter().all(|pixel| pixel == first)
+        {
+            return CanvasUpload::Clear(*first);
+        }
+        let [width, height] = kept.size;
+        if !known {
+            return CanvasUpload::Rows(0, height);
+        }
+        let differs = |y: &u32| {
+            let row = *y as usize * width as usize..(*y as usize + 1) * width as usize;
+            kept.held[row.clone()] != pixels[row]
+        };
+        let first = (0..height).find(differs).unwrap_or(0);
+        let last = (first..height).rev().find(differs).map_or(first, |y| y + 1);
+        CanvasUpload::Rows(first, last)
+    }
+
+    fn draw(
+        &mut self,
+        canvas: &IndexedImage,
+        plan: &BatchPlan,
+        written: Option<Rect>,
+    ) -> Result<(GpuCounts, Option<Readback>), InstanceError> {
+        let size = [canvas.width(), canvas.height()];
+        let upload = self.canvas_upload(canvas.pixels());
+        if let CanvasUpload::Rows(top, bottom) = upload
+            && top < bottom
+        {
+            let row = size[0] as usize;
+            let data = &canvas.pixels()[top as usize * row..bottom as usize * row];
+            let texture = &self.canvas.as_ref().expect("kept").texture;
+            self.write(texture, top, [size[0], bottom - top], 1, data);
+            self.counters
+                .add(Counters::CANVAS_UPLOAD, data.len() as u64);
+        }
+        if self.bind_group.is_none() {
+            self.bind_group = Some(self.bind_group());
+        }
+        let device = &self.gpu.device;
+        let target = self.canvas.as_ref().expect("kept");
+        let bind_group = self.bind_group.as_ref().expect("bound");
         let bounds: Rect = [0, 0, size[0] as i32, size[1] as i32];
         let mut encoder = device.create_command_encoder(&Default::default());
+        if let CanvasUpload::Clear(index) = upload {
+            self.counters.add(Counters::CANVAS_CLEARS, 1);
+            // An integer target clears to the integer value of `r`.
+            drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("instanced canvas base fill"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: f64::from(index),
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            }));
+        }
         let mut counts = GpuCounts::default();
         for batch in &plan.batches {
             let Some(clip) = intersect(batch.clip, bounds) else {
@@ -475,8 +813,8 @@ impl GpuExecutor {
                         aspect: wgpu::TextureAspect::All,
                     };
                     encoder.copy_texture_to_texture(
-                        copy(&canvas_texture),
-                        copy(&snapshot),
+                        copy(&target.texture),
+                        copy(&target.snapshot),
                         extent([(rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32]),
                     );
                     counts.snapshots += 1;
@@ -485,7 +823,7 @@ impl GpuExecutor {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("instanced canvas batch"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target,
+                    view: &target.view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -498,7 +836,7 @@ impl GpuExecutor {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, bind_group, &[]);
             pass.set_scissor_rect(
                 clip[0] as u32,
                 clip[1] as u32,
@@ -508,34 +846,38 @@ impl GpuExecutor {
             pass.draw(0..6, batch.range.start as u32..batch.range.end as u32);
             counts.draws += 1;
         }
-        // Read the canvas back.
-        let row = size[0].div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("canvas readback"),
-            size: u64::from(row) * u64::from(size[1]),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let Some(rect) = written else {
+            // Nothing can change: the canvas is the one uploaded.
+            self.gpu.queue.submit([encoder.finish()]);
+            return Ok((counts, None));
+        };
+        // Read back the pixels the plan can write.
+        let [width, height] = [(rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32];
+        let row = copy_row(width);
+        let bytes = u64::from(row) * u64::from(height);
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &canvas_texture,
+                texture: &target.texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d {
+                    x: rect[0] as u32,
+                    y: rect[1] as u32,
+                    z: 0,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
+                buffer: &target.readback,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(row),
-                    rows_per_image: Some(size[1]),
+                    rows_per_image: Some(height),
                 },
             },
-            extent(size),
+            extent([width, height]),
         );
         self.gpu.queue.submit([encoder.finish()]);
-        let slice = readback.slice(..);
+        let slice = target.readback.slice(..bytes);
         let mapped = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
         let (done, error) = (Arc::clone(&mapped), Arc::clone(&failed));
@@ -545,25 +887,109 @@ impl GpuExecutor {
             }
             done.store(true, Ordering::SeqCst);
         });
-        device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: Some(WAIT),
-            })
-            .map_err(|error| InstanceError::Upload(error.to_string()))?;
+        let polled = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(WAIT),
+        });
+        if let Err(error) = polled {
+            // The map may still be pending: the buffer cannot be reused.
+            self.canvas = None;
+            return Err(InstanceError::Upload(error.to_string()));
+        }
         if !mapped.load(Ordering::SeqCst) || failed.load(Ordering::SeqCst) {
+            self.canvas = None;
             return Err(InstanceError::Upload("canvas readback".into()));
         }
         let data = slice.get_mapped_range();
-        let mut pixels = Vec::with_capacity((size[0] * size[1]) as usize);
-        for y in 0..size[1] as usize {
+        self.counters.add(Counters::READBACK, data.len() as u64);
+        let mut pixels = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height as usize {
             let start = y * row as usize;
-            pixels.extend_from_slice(&data[start..start + size[0] as usize]);
+            pixels.extend_from_slice(&data[start..start + width as usize]);
         }
         drop(data);
-        readback.unmap();
-        Ok((counts, pixels))
+        target.readback.unmap();
+        Ok((counts, Some((rect, pixels))))
     }
+
+    /// The bind group over the kept resources.
+    fn bind_group(&self) -> wgpu::BindGroup {
+        self.counters.add(Counters::BIND_GROUPS, 1);
+        let view = |texture: &wgpu::Texture| texture.create_view(&Default::default());
+        let views = [
+            view(&self.atlas.as_ref().expect("uploaded").texture),
+            view(&self.tables.as_ref().expect("uploaded").1),
+            view(&self.light.as_ref().expect("uploaded").1),
+            view(&self.mask.as_ref().expect("uploaded").texture),
+            view(&self.canvas.as_ref().expect("kept").snapshot),
+        ];
+        fn buffer(kept: &Option<KeptBuffer>) -> wgpu::BindingResource<'_> {
+            kept.as_ref().expect("uploaded").buffer.as_entire_binding()
+        }
+        let mut entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer(&self.uniforms),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buffer(&self.records),
+            },
+        ];
+        entries.extend(
+            views
+                .iter()
+                .enumerate()
+                .map(|(index, view)| wgpu::BindGroupEntry {
+                    binding: 2 + index as u32,
+                    resource: wgpu::BindingResource::TextureView(view),
+                }),
+        );
+        self.gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("instanced canvas bind group"),
+                layout: &self.layout,
+                entries: &entries,
+            })
+    }
+}
+
+/// A canvas row's bytes at the texture-to-buffer copy alignment.
+fn copy_row(width: u32) -> u32 {
+    width.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+}
+
+/// The bounding box of every pixel `plan` can write on a canvas of
+/// `size`: each drawn instance's rectangle within its batch's scissor.
+/// `None` when no batch can write a pixel.
+fn written_rect(plan: &BatchPlan, instances: &[SpriteInstance], size: [u32; 2]) -> Option<Rect> {
+    let bounds: Rect = [0, 0, size[0] as i32, size[1] as i32];
+    let mut written: Option<Rect> = None;
+    for batch in &plan.batches {
+        let Some(clip) = intersect(batch.clip, bounds) else {
+            continue;
+        };
+        for position in batch.range.clone() {
+            // A position or index outside the plan: the whole scissor.
+            let rect = plan
+                .order
+                .get(position)
+                .and_then(|index| instances.get(*index))
+                .map_or(Some(clip), |instance| intersect(instance.rect(), clip));
+            if let Some(rect) = rect {
+                written = Some(written.map_or(rect, |was| {
+                    [
+                        was[0].min(rect[0]),
+                        was[1].min(rect[1]),
+                        was[2].max(rect[2]),
+                        was[3].max(rect[3]),
+                    ]
+                }));
+            }
+        }
+    }
+    written
 }
 
 fn extent([width, height]: [u32; 2]) -> wgpu::Extent3d {
@@ -574,29 +1000,12 @@ fn extent([width, height]: [u32; 2]) -> wgpu::Extent3d {
     }
 }
 
-fn uniform_buffer(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    uniforms: &LayerUniforms,
-) -> wgpu::Buffer {
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("layer uniforms"),
-        size: LayerUniforms::SIZE as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&buffer, 0, &uniforms.to_bytes());
-    buffer
-}
-
 /// §2.2 the recommended 48-byte records, in plan order.
-fn record_buffer(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+fn record_bytes(
     plan: &BatchPlan,
     instances: &[SpriteInstance],
     atlas: &Atlas,
-) -> Result<wgpu::Buffer, InstanceError> {
+) -> Result<Vec<u8>, InstanceError> {
     let mut words: Vec<u32> = Vec::with_capacity(plan.order.len().max(1) * RECORD_WORDS);
     let pair = |low: u32, high: u32| -> Result<u32, InstanceError> {
         if low > 0xffff || high > 0xffff {
@@ -633,15 +1042,7 @@ fn record_buffer(
     if words.is_empty() {
         words.resize(RECORD_WORDS, 0);
     }
-    let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("instance records"),
-        size: bytes.len() as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&buffer, 0, &bytes);
-    Ok(buffer)
+    Ok(words.iter().flat_map(|word| word.to_le_bytes()).collect())
 }
 
 /// One atlas page: the images a plan draws, shelf-packed.

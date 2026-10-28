@@ -47,6 +47,14 @@ pub fn blend_table(palette: &Palette, key: u16) -> Box<BlendTable> {
     }))
 }
 
+/// The blend-table row of gray level `gray`. A palette's gray levels are
+/// 0 to 7 (SPEC-014 §3.44, over five-bit components), but a hand-built
+/// [`OutlineInk`] or gray table may hold more: `[May-improve]` safe bound,
+/// a level above 7 uses row 7 instead of indexing past the table.
+pub(crate) fn blend_row(gray: u8) -> usize {
+    usize::from(gray.min(7))
+}
+
 /// How an outline paints each ring pixel.
 #[derive(Clone, Copy)]
 pub enum OutlineInk<'a> {
@@ -229,7 +237,7 @@ pub fn draw_outline(
         *pixel = match (opaque_paint(ink, frame, row), ink) {
             (Some(index), _) => index,
             (None, OutlineInk::Translucent { gray, blend }) => {
-                blend[usize::from(gray)][usize::from(*pixel)]
+                blend[blend_row(gray)][usize::from(*pixel)]
             }
             (None, _) => *pixel,
         };
@@ -394,6 +402,46 @@ mod tests {
             inks.ink(3 | outline::TRANSLUCENT),
             Some(OutlineInk::Opaque(_))
         ));
+    }
+
+    /// The outline inks' gray levels stay in the blend tables' 8 rows even
+    /// for the brightest palette, and a hand-built translucent ink with a
+    /// gray level above 7 (only reachable through the public
+    /// [`OutlineInk`]) is bounded to row 7 instead of indexing past the
+    /// table (`[May-improve]` safe bound).
+    #[test]
+    fn translucent_outline_gray_levels_stay_in_the_blend_rows() {
+        let mut bytes = vec![63_u8; 768];
+        for packed in 0..32768_u32 {
+            bytes.push((packed % 255 + 1) as u8);
+        }
+        let white = Palette::parse(&bytes).unwrap();
+        let inks = OutlineInks::new(&white);
+        assert_eq!(inks.gray, [7; 3]);
+        for kind in [outline::RED, outline::GREY, outline::ITEM] {
+            let Some(OutlineInk::Translucent { gray, .. }) = inks.ink(kind | outline::TRANSLUCENT)
+            else {
+                panic!("{kind}: translucent ink");
+            };
+            assert_eq!(gray, 7);
+        }
+        let archive = frame(3, 2, &[0, 5, 0, 5, 5, 5]);
+        let frame = archive.frame(0, 0).unwrap();
+        let blend = blend_table(&palette(), RED_KEY);
+        let draw = |gray: u8| {
+            let mut image = IndexedImage::from_pixels(20, 20, vec![3; 400]).unwrap();
+            let ink = OutlineInk::Translucent {
+                gray,
+                blend: &blend,
+            };
+            draw_outline(&mut image, frame, [5, 5], ink, [0, 0, 20, 20], [20, 20]);
+            image
+        };
+        let row7 = draw(7);
+        assert_ne!(row7.pixels(), &[3; 400][..], "the ring blends");
+        for gray in [8, 15, u8::MAX] {
+            assert_eq!(draw(gray).pixels(), row7.pixels(), "gray {gray}");
+        }
     }
 
     /// Clipping: only paints whose scanned pixel lies in the refreshed

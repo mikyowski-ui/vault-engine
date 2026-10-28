@@ -30,8 +30,9 @@ fn pattern(width: u16, height: u16, color: impl Fn(u16, u16) -> u8) -> FrmArchiv
     FrmArchive::parse(&bytes).unwrap()
 }
 
-/// A palette whose six-bit channels stay below 32, so every gray level
-/// is 0-7 (the blend tables' rows), with a scrambled RGB555 lookup.
+/// A palette whose six-bit channels stay below 32, with a scrambled
+/// RGB555 lookup. (Every palette's gray levels are 0-7, the blend tables'
+/// rows: they are taken over the five-bit components.)
 fn palette() -> Palette {
     let mut bytes = Vec::with_capacity(0x8300);
     for index in 0..256_u32 {
@@ -1277,4 +1278,75 @@ fn t13_refreshes_change_no_world_state_on_either_path() {
         digests.windows(2).all(|pair| pair[0] == pair[1]),
         "{digests:?}"
     );
+}
+
+/// The GPU canvas retention (`[May-improve]`): a fixed loop of whole
+/// refreshes of the full scene on one executor stays byte-identical to
+/// the reference canvas, and reports its per-refresh resource and
+/// transfer counts and wall time (`--nocapture`).
+#[test]
+fn gpu_refresh_loop_keeps_parity_and_reports_its_transfers() {
+    let _gpu = gpu::test_lock();
+    let Some(mut executor) = gpu_executor() else {
+        return;
+    };
+    const REFRESHES: u64 = 20;
+    let fixture = Fixture::new();
+    let cutout = fixture.cutout();
+    let view = view_at(20100, [640, 380]);
+    let scene = scene_of(&fixture, &cutout, view, Options::FULL);
+    let reference =
+        render_map_scene(&fixture.map, &fixture.objects, view, &fixture.art, scene).unwrap();
+    let tables = LookupTables::from_palette(&fixture.palette);
+    let frame = gather_map_frame(
+        &fixture.map,
+        &fixture.objects,
+        view,
+        &fixture.art,
+        scene,
+        Some(&tables),
+    )
+    .unwrap();
+    let plan = BatchPlan::new(&frame.instances).unwrap();
+    let inputs = frame.inputs(&tables);
+    // The first refresh creates the resources; the loop measures the rest.
+    let mut canvas = frame.base_canvas().unwrap();
+    executor
+        .execute(&mut canvas, &frame.instances, &plan, &inputs)
+        .unwrap();
+    assert_canvas("first", &canvas, &reference);
+    let first = executor.stats();
+    let start = std::time::Instant::now();
+    for refresh in 0..REFRESHES {
+        let mut canvas = frame.base_canvas().unwrap();
+        executor
+            .execute(&mut canvas, &frame.instances, &plan, &inputs)
+            .unwrap();
+        assert_canvas(&format!("refresh {refresh}"), &canvas, &reference);
+    }
+    let elapsed = start.elapsed();
+    let stats = executor.stats();
+    let per = |total: u64, before: u64| (total - before) as f64 / REFRESHES as f64;
+    println!(
+        "first refresh: {first:?}\nper refresh over {REFRESHES}: textures {}, buffers {}, \
+         bind groups {}, canvas upload {} B, all uploads {} B, readback {} B, wall {:?}",
+        per(stats.textures, first.textures),
+        per(stats.buffers, first.buffers),
+        per(stats.bind_groups, first.bind_groups),
+        per(stats.canvas_upload_bytes, first.canvas_upload_bytes),
+        per(stats.upload_bytes, first.upload_bytes),
+        per(stats.readback_bytes, first.readback_bytes),
+        elapsed / REFRESHES as u32,
+    );
+    assert_eq!(stats.refreshes, REFRESHES + 1);
+    // Kept between refreshes: no texture, buffer or bind group is created
+    // again, the zero base fill is a clear pass, nothing equal is
+    // uploaded again, and at most the whole canvas is read back.
+    assert_eq!(
+        [stats.textures, stats.buffers, stats.bind_groups],
+        [first.textures, first.buffers, first.bind_groups]
+    );
+    assert_eq!(stats.canvas_clears, REFRESHES + 1);
+    assert_eq!(stats.upload_bytes, first.upload_bytes);
+    assert!(stats.readback_bytes - first.readback_bytes <= REFRESHES * first.readback_bytes);
 }

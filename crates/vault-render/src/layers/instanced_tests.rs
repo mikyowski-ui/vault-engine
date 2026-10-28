@@ -588,6 +588,142 @@ fn t6_gpu_executor_draws_the_fixture_canvas() {
     assert_eq!(again.pixels(), scene_expected().as_slice());
 }
 
+/// The canvas the CPU executor draws over `start` (the reference for the
+/// GPU executor's canvas).
+fn cpu_canvas(
+    start: &IndexedImage,
+    instances: &[SpriteInstance],
+    plan: &BatchPlan,
+    inputs: &FrameInputs,
+) -> IndexedImage {
+    let mut canvas = start.clone();
+    execute_plan(&mut CanvasView::of(&mut canvas), instances, plan, inputs).unwrap();
+    canvas
+}
+
+/// The GPU canvas kept between refreshes (`[May-improve]` retention):
+/// every way of bringing it to the CPU canvas (held, a clear, a band of
+/// rows, a whole upload, a new size) and every readback (a box, none)
+/// gives the CPU executor's canvas byte for byte.
+#[test]
+fn gpu_kept_canvas_matches_the_cpu_executor_on_every_upload_path() {
+    let _gpu = gpu::test_lock();
+    let Some(device) = gpu::test_device() else {
+        return;
+    };
+    let scene = scene();
+    let inputs = scene.inputs();
+    let mut executor = gpu::GpuExecutor::new(device);
+    let run = |label: &str,
+               executor: &mut gpu::GpuExecutor,
+               start: &IndexedImage,
+               instances: &[SpriteInstance],
+               inputs: &FrameInputs| {
+        let plan = BatchPlan::new(instances).unwrap();
+        let want = cpu_canvas(start, instances, &plan, inputs);
+        let mut got = start.clone();
+        let before = executor.stats();
+        executor
+            .execute(&mut got, instances, &plan, inputs)
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert_eq!(got.pixels(), want.pixels(), "{label}");
+        let after = executor.stats();
+        (
+            got,
+            after.canvas_upload_bytes - before.canvas_upload_bytes,
+            after.canvas_clears - before.canvas_clears,
+            after.readback_bytes - before.readback_bytes,
+        )
+    };
+    // A uniform base fill is a clear, not an upload.
+    let (first, upload, clears, _) = run(
+        "base",
+        &mut executor,
+        &scene_canvas(),
+        &scene.instances,
+        &inputs,
+    );
+    assert_eq!(first.pixels(), scene_expected().as_slice());
+    assert_eq!((upload, clears), (0, 1));
+    // The canvas the GPU holds is not uploaded again; the plan draws over
+    // its own result.
+    let (_, upload, clears, _) = run("held", &mut executor, &first, &scene.instances, &inputs);
+    assert_eq!((upload, clears), (0, 0));
+    // A canvas that differs from the held one in rows 3 and 5 uploads
+    // rows 3 to 5 only.
+    let (held, ..) = run(
+        "held again",
+        &mut executor,
+        &first,
+        &scene.instances,
+        &inputs,
+    );
+    let mut edited = held.clone();
+    edited.pixels_mut()[3 * 24 + 7] ^= 0x55;
+    edited.pixels_mut()[5 * 24 + 20] ^= 0x0f;
+    let (_, upload, clears, _) = run("rows", &mut executor, &edited, &scene.instances, &inputs);
+    assert_eq!((upload, clears), (3 * 24, 0));
+    // A wholly different canvas uploads every row that differs.
+    let pattern: Vec<u8> = (0..24 * 16).map(|i| (i * 37 % 251) as u8).collect();
+    let pattern = IndexedImage::from_pixels(24, 16, pattern).unwrap();
+    let (_, upload, ..) = run(
+        "pattern",
+        &mut executor,
+        &pattern,
+        &scene.instances,
+        &inputs,
+    );
+    assert!(upload > 0 && upload <= 24 * 16, "{upload}");
+    // One small instance reads back only its box, at the row alignment.
+    let text = scene.ids.iter().position(|id| id == "text").unwrap();
+    let one = [scene.instances[text].clone()];
+    let rect = intersect(one[0].rect(), one[0].clip).unwrap();
+    let (_, _, _, readback) = run("one instance", &mut executor, &pattern, &one, &inputs);
+    let rows = (rect[3] - rect[1]) as u64;
+    assert_eq!(
+        readback,
+        u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * rows
+    );
+    // No instance: nothing is read back and the canvas stays as it was.
+    let (unchanged, _, _, readback) = run("empty", &mut executor, &pattern, &[], &inputs);
+    assert_eq!((unchanged.pixels(), readback), (pattern.pixels(), 0));
+    // A larger canvas replaces the kept one; the uniform block says so.
+    let mut wide = inputs;
+    wide.uniforms.canvas = [40, 20];
+    let large = IndexedImage::from_pixels(40, 20, vec![0x40; 800]).unwrap();
+    let textures = executor.stats().textures;
+    run("larger", &mut executor, &large, &scene.instances, &wide);
+    assert_eq!(
+        executor.stats().textures,
+        textures + 2,
+        "canvas and snapshot"
+    );
+    // And back: the original canvas size draws the fixture again.
+    let (again, ..) = run(
+        "back",
+        &mut executor,
+        &scene_canvas(),
+        &scene.instances,
+        &inputs,
+    );
+    assert_eq!(again.pixels(), scene_expected().as_slice());
+    // A refusal (a canvas the uniform block does not describe) changes
+    // neither the canvas nor the kept one.
+    let plan = BatchPlan::new(&scene.instances).unwrap();
+    let mut refused = large.clone();
+    let error = executor.execute(&mut refused, &scene.instances, &plan, &inputs);
+    assert!(error.is_err());
+    assert_eq!(refused.pixels(), large.pixels());
+    let (_, upload, clears, _) = run(
+        "after refusal",
+        &mut executor,
+        &again,
+        &scene.instances,
+        &inputs,
+    );
+    assert_eq!((upload, clears), (0, 0));
+}
+
 #[test]
 fn t7_light_packing_levels_and_digests() {
     for row in tsv(fixture!("light-pack.tsv")) {

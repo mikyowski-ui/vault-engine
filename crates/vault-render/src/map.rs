@@ -1,7 +1,7 @@
 use crate::{
     ImageError, IndexedImage,
     floating::FloatingSprite,
-    outline::{BlendTable, OutlineInks, blend_table, draw_outline},
+    outline::{BlendTable, OutlineInks, blend_row, blend_table, draw_outline},
 };
 use std::sync::OnceLock;
 use vault_formats::{
@@ -478,7 +478,7 @@ impl<'a> Pens<'a> {
         let level = usize::from(if full { 128 } else { level });
         let intensity = self.intensity;
         blit_with(image, frame, origin, |source, destination, _| {
-            let mixed = blend[usize::from(gray[usize::from(source)])][usize::from(destination)];
+            let mixed = blend[blend_row(gray[usize::from(source)])][usize::from(destination)];
             intensity[usize::from(mixed) * 256 + level]
         });
     }
@@ -2055,6 +2055,62 @@ mod tests {
         draw_map_scene(&mut image, &map, &scene(vec![item]), view, &art, lit).unwrap();
         let [x, y] = view.grid.hex_center(20100).unwrap();
         image.pixels()[(y - 3) as usize * 640 + x as usize]
+    }
+
+    /// The Wave 3 report: a bright color's gray level reaches 15 and
+    /// overruns the 8-row blend tables. Refuted: SPEC-014 §3.44 computes
+    /// the gray level over the five-bit components (six-bit channel / 2),
+    /// so the brightest entry, six-bit (63, 63, 63), has
+    /// `trunc(trunc(310 / 10) / 4) = 7` in both gray tables; only six-bit
+    /// channels would give `trunc(630 / 10 / 4) = 15`.
+    #[test]
+    fn spec014_bright_colors_stay_in_the_blend_tables_rows() {
+        let palette_of = |channel: &dyn Fn(u32) -> [u8; 3]| {
+            let mut bytes = Vec::with_capacity(0x8300);
+            for index in 0..256 {
+                bytes.extend(channel(index));
+            }
+            bytes.resize(0x8300, 1);
+            Palette::parse(&bytes).unwrap()
+        };
+        let palettes = [
+            grey_palette(),
+            palette_of(&|_| [63; 3]),
+            palette_of(&|i| [(i % 64) as u8, (i * 7 % 64) as u8, (i * 13 % 64) as u8]),
+            // Channels above 63 leave the entry unmapped (gray level 0).
+            palette_of(&|i| [i as u8, 255 - i as u8, 63]),
+        ];
+        for (number, palette) in palettes.iter().enumerate() {
+            for glass in [false, true] {
+                let levels: Vec<u8> = (0..=255).map(|i| palette.gray_level(i, glass)).collect();
+                assert!(levels.iter().all(|level| *level <= 7), "palette {number}");
+            }
+        }
+        assert_eq!(grey_palette().rgb6(255), [63; 3]);
+        assert_eq!(grey_palette().gray_level(255, false), 7);
+        assert_eq!(grey_palette().gray_level(255, true), 7);
+        // The translucent draws of the brightest indexes, over the darkest
+        // and the brightest floor, at full light: blend_F[7][D] relit at 128.
+        let palette = grey_palette();
+        let tiles = vec![65536; 40000];
+        let light = MapLight {
+            palette: &palette,
+            ambient: 65536,
+            tiles: &tiles,
+        };
+        for (bit, key, ..) in TRANSLUCENT {
+            let blend = crate::outline::blend_table(&palette, key);
+            for color in 252..=255 {
+                for floor in [1, 128, 255] {
+                    let want = palette.intensity(blend[7][usize::from(floor)], 128);
+                    assert_eq!(
+                        lit_pixel(color, floor, bit, light),
+                        want,
+                        "{bit:#x} {color}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
