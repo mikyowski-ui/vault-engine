@@ -1,6 +1,6 @@
 //! M-I6 preferences (SPEC-014 §3.17-§3.18, §3.46), and the H12 worn-armor
 //! guard and elevator keypad over the synthetic corpus.
-use super::{AppliedPreferences, OptionsScreen, set_slider};
+use super::{AppliedPreferences, OptionsScreen};
 use crate::map_preview::{
     MapPreview, Screen, fixture,
     test_support::{interactive, synthetic_corpus},
@@ -8,7 +8,7 @@ use crate::map_preview::{
 use std::sync::Arc;
 use vault_core::{
     WorldEffect,
-    ui::options::{self, DEFAULT_VOLUME, OptionsAction, Preferences},
+    ui::options::{self, DEFAULT_VOLUME, OptionsAction, OptionsPage, Preferences, set_slider},
 };
 use vault_formats::pro::BasicFlags;
 use winit::keyboard::KeyCode;
@@ -115,7 +115,9 @@ fn spec014_3_17_save_and_load_from_options_return_there_on_cancel() {
     assert!(preview.step(KeyCode::Escape));
     assert!(matches!(
         preview.screen,
-        Screen::Options(OptionsScreen::Menu)
+        Screen::Options(OptionsScreen::Window(options::OptionsWindow {
+            page: OptionsPage::Menu
+        }))
     ));
     preview.options_action(OptionsAction::LoadGame);
     assert!(matches!(preview.screen, Screen::SaveLoad(_)));
@@ -125,7 +127,9 @@ fn spec014_3_17_save_and_load_from_options_return_there_on_cancel() {
     preview.release(Some([x + 2, y + 2]), false);
     assert!(matches!(
         preview.screen,
-        Screen::Options(OptionsScreen::Menu)
+        Screen::Options(OptionsScreen::Window(options::OptionsWindow {
+            page: OptionsPage::Menu
+        }))
     ));
     // Opened from the map, Esc returns to the map.
     preview.options_action(OptionsAction::Done);

@@ -3436,9 +3436,7 @@ fn spec014_called_shot_window_opens_in_an_aimed_mode_and_chooses_a_part() {
         .unwrap();
     assert_eq!(window.chances, called::chances(&attack).unwrap());
     assert_eq!(
-        window.labels[usize::from(location::LEFT_LEG)]
-            .as_ref()
-            .map(|(text, _)| text.as_slice()),
+        window.labels[usize::from(location::LEFT_LEG)].as_deref(),
         Some(b"the part 5".as_slice())
     );
     assert!(preview.host.world.rng == before);
@@ -3724,14 +3722,12 @@ fn m_p2_h3_edge_scrolling_under_the_lock_but_not_in_the_letterbox_or_panel_anima
 
 #[test]
 fn spec014_holding_ctrl_never_closes_the_pause_window() {
-    use super::options::OptionsScreen;
     use crate::input::{KeyRepeat, Keyboard};
     let dir = corpus();
     let mut preview = world(dir.path());
     preview.tick(16).unwrap();
     preview.image().unwrap();
-    let paused =
-        |preview: &MapPreview| matches!(preview.screen, Screen::Options(OptionsScreen::Pause));
+    let paused = |preview: &MapPreview| matches!(&preview.screen, Screen::Options(screen) if screen.paused());
     let on = Keyboard::default();
     let mut repeat = KeyRepeat::default();
     // SPEC-014 §3.29: Ctrl goes down (an event with no key code), then P:

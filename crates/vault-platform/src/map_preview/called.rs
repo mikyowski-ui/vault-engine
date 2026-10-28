@@ -4,18 +4,15 @@
 //! color, Cancel, and the window's input. Map background processing keeps
 //! running while it is open (unlike the action menu); the in-world cursor
 //! is hidden and the system cursor is the arrow.
-use super::{
-    MapPreview,
-    modal_kit::{at, red_button_sized},
-};
-use crate::{input::key_text, interface::Painter};
+use super::MapPreview;
+use crate::input::key_text;
 use vault_core::{
     ObjectRef,
     assets::WorldAssets,
     critical::location,
     ui::{
         ColorKey, RED_BUTTON, Rect,
-        called::{self, Part},
+        called::{self, CalledControl, CalledKey, CalledOutcome, CalledShotWindow, Part},
     },
 };
 use vault_formats::Fid;
@@ -26,39 +23,28 @@ use winit::keyboard::KeyCode;
 const CANCEL_ART: (&str, &str) = (RED_BUTTON.0, RED_BUTTON.1);
 
 /// The open window: its target and hit mode, what it showed when it
-/// opened (the chances are computed once), and the part button pressed and
-/// not yet released.
+/// opened (the chances are computed once), and the core window that owns
+/// its layout and held control (SPEC-020 §2.1).
 pub(crate) struct CalledShot {
     pub target: ObjectRef,
     pub hit_mode: u8,
     /// The chance at each location 0-7.
     pub chances: [i32; 8],
-    /// Each location's label and its width in font 101; `None` when the
-    /// message is missing.
-    pub labels: [Option<(Vec<u8>, i32)>; 8],
+    /// Each location's label; `None` when the message is missing. Its
+    /// width in font 101 is the window's `widths` entry.
+    pub labels: [Option<Vec<u8>>; 8],
     /// The `na` picture's identifier.
     pub picture: u32,
-    pub pressed: Option<u8>,
+    pub window: CalledShotWindow,
 }
 impl CalledShot {
-    /// A part's button in screen pixels.
-    fn button(&self, part: Part) -> Rect {
-        let label = self.labels[usize::from(part.location)].as_ref();
-        screen(part.button(label.map(|(_, width)| *width)))
-    }
     /// The part whose button holds a screen pixel.
-    fn part_at(&self, point: [i32; 2]) -> Option<Part> {
-        called::parts().find(|part| self.button(*part).contains(point))
+    fn part_at(&self, point: [i32; 2]) -> Option<u8> {
+        match self.window.layout().hit(point) {
+            Some(CalledControl::Part(code)) => Some(code),
+            _ => None,
+        }
     }
-}
-
-/// A window rectangle in screen pixels.
-const fn screen(rect: Rect) -> Rect {
-    at(called::ORIGIN, rect)
-}
-/// The Cancel button's screen rectangle (the up art's size).
-fn cancel_rect(painter: &Painter) -> Rect {
-    screen(red_button_sized(painter, called::CANCEL))
 }
 
 impl MapPreview {
@@ -101,13 +87,17 @@ impl MapPreview {
             .art_catalog()
             .ok()
             .and_then(|catalog| catalog.critter_alias(base));
-        let labels = std::array::from_fn(|location| {
+        let labels: [Option<Vec<u8>>; 8] = std::array::from_fn(|location| {
             let id = called::label_message(alias?, location as u8)?;
             let catalog = self.host.assets.game_messages("combat.msg").ok()?;
-            let text = catalog.get(id)?.text.clone();
-            let width = painter.width(101, &text);
-            Some((text, width))
+            Some(catalog.get(id)?.text.clone())
         });
+        let widths = std::array::from_fn(|location| {
+            labels[location]
+                .as_ref()
+                .map(|text| painter.width(101, text))
+        });
+        let window = CalledShotWindow::new(widths, painter.size(RED_BUTTON.0));
         let picture = Fid::new(1, base, called::PICTURE_ANIMATION, 0, 0).0;
         self.hud.called = Some(CalledShot {
             target,
@@ -115,7 +105,7 @@ impl MapPreview {
             chances,
             labels,
             picture,
-            pressed: None,
+            window,
         });
         self.pointer_feedback_off();
     }
@@ -132,6 +122,7 @@ impl MapPreview {
         let [ox, oy] = called::ORIGIN;
         painter.blit_opaque(image, called::BACKGROUND, 0, [ox, oy]);
         self.draw_called_picture(image, window.picture);
+        let layout = window.window.layout();
         let hovered = self.pointer.at.and_then(|at| window.part_at(at));
         for part in called::parts() {
             let [cx, cy] = part.chance_origin();
@@ -145,17 +136,22 @@ impl MapPreview {
                     true,
                 );
             }
-            if let Some((text, width)) = &window.labels[usize::from(part.location)] {
-                let [lx, ly] = part.label_origin(*width);
-                let key = if hovered == Some(part) {
+            let location = usize::from(part.location);
+            if let (Some(text), Some(width)) =
+                (&window.labels[location], window.window.widths[location])
+            {
+                let [lx, ly] = part.label_origin(width);
+                let key = if hovered == Some(part.code) {
                     ColorKey::RED
                 } else {
                     ColorKey::GREEN
                 };
-                painter.text(image, 101, key, text, [ox + lx, oy + ly], *width + 1);
+                painter.text(image, 101, key, text, [ox + lx, oy + ly], width + 1);
             }
         }
-        self.draw_button(&painter, image, cancel_rect(&painter), CANCEL_ART);
+        if let Some(cancel) = layout.rect(CalledControl::Cancel) {
+            self.draw_button(&painter, image, cancel, CANCEL_ART);
+        }
     }
     /// The `na` picture's frame 0, copied opaquely (index 0 included) at
     /// (128, 31). The reference copies 170 by 225 with a 170-pixel stride
@@ -169,7 +165,7 @@ impl MapPreview {
         let Some(frame) = art.frame(0, 0) else {
             return;
         };
-        let area = screen(called::PICTURE);
+        let area = called::on_screen(called::PICTURE);
         let (width, height) = (i32::from(frame.width), i32::from(frame.height));
         let stride = image.width() as i32;
         let rows = image.height() as i32;
@@ -193,43 +189,37 @@ impl MapPreview {
     /// with its sounds; a left press on a part's button waits for its
     /// release; right clicks and every other press are discarded.
     pub(crate) fn called_click(&mut self, point: [i32; 2], right: bool) -> bool {
-        let Some(window) = &self.hud.called else {
+        let Some(shot) = &mut self.hud.called else {
             return false;
         };
         if right {
             return true;
         }
-        let cancel = cancel_rect(&self.painter());
-        if cancel.contains(point) {
-            self.press_button(cancel);
-            return true;
-        }
-        let pressed = window.part_at(point).map(|part| part.code);
-        if let Some(window) = &mut self.hud.called {
-            window.pressed = pressed;
+        if shot.window.press(point) == Some(CalledControl::Cancel) {
+            let cancel = shot.window.layout().rect(CalledControl::Cancel);
+            if let Some(cancel) = cancel {
+                self.press_button(cancel);
+            }
         }
         true
     }
     /// A left release while the window is open: Cancel's release returns
     /// Esc; a part pressed and released on its own button is chosen.
-    pub(crate) fn called_release(&mut self, point: Option<[i32; 2]>, over: Option<Rect>) -> bool {
-        let Some(window) = &mut self.hud.called else {
+    pub(crate) fn called_release(&mut self, point: Option<[i32; 2]>) -> bool {
+        let Some(shot) = &mut self.hud.called else {
             return false;
         };
-        let pressed = window.pressed.take();
-        let cancel = cancel_rect(&self.painter());
-        if over == Some(cancel) {
-            self.close_called();
-            return true;
-        }
-        let Some(window) = &self.hud.called else {
-            return true;
-        };
-        let released = point.and_then(|point| window.part_at(point));
-        if let Some(part) = released.filter(|part| Some(part.code) == pressed) {
-            self.choose_called(part);
-        }
+        let outcome = shot.window.release(point);
+        self.called_outcome(outcome);
         true
+    }
+    /// Act on the core window's outcome.
+    fn called_outcome(&mut self, outcome: CalledOutcome) {
+        match outcome {
+            CalledOutcome::None => {}
+            CalledOutcome::Cancel => self.close_called(),
+            CalledOutcome::Choose(part) => self.choose_called(part),
+        }
     }
     /// Keys while the window is open: Esc closes it; Ctrl+A-G choose by
     /// selection code (by physical letter); Backspace and Ctrl+H make code
@@ -240,20 +230,26 @@ impl MapPreview {
         if self.hud.called.is_none() {
             return false;
         }
-        match key {
-            KeyCode::Escape => self.close_called(),
-            KeyCode::F12 => self.screenshot(),
-            _ => {
-                let letter = key_text(key, true)
-                    .filter(u8::is_ascii_uppercase)
-                    .map(char::from);
-                let code =
-                    called::key_code(letter, self.hud.modifiers[1], key == KeyCode::Backspace);
-                if let Some(part) = code.and_then(called::choice) {
-                    self.choose_called(part);
-                }
+        let input = match key {
+            KeyCode::F12 => {
+                self.screenshot();
+                return true;
             }
-        }
+            KeyCode::Escape => CalledKey::Escape,
+            _ => CalledKey::Code {
+                letter: key_text(key, true)
+                    .filter(u8::is_ascii_uppercase)
+                    .map(char::from),
+                control: self.hud.modifiers[1],
+                backspace: key == KeyCode::Backspace,
+            },
+        };
+        let outcome = self
+            .hud
+            .called
+            .as_ref()
+            .map_or(CalledOutcome::None, |shot| shot.window.key(input));
+        self.called_outcome(outcome);
         true
     }
     /// Esc, by key or Cancel: the window closes and nothing else happens:

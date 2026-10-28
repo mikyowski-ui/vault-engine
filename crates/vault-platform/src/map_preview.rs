@@ -686,7 +686,7 @@ impl MapPreview {
         vault_core::ui::saveload::SlotList,
         vault_core::ui::saveload::QuickSlot,
     ) {
-        (self.slot_list.clone(), self.quick)
+        (self.slot_selection().clone(), self.quick)
     }
     pub fn set_slot_session(
         &mut self,
@@ -772,7 +772,11 @@ impl MapPreview {
                     | Screen::Town(_)
                     | Screen::World2(_)
                     | Screen::Town2(_)
-                    | Screen::Options(options::OptionsScreen::Pause)
+                    | Screen::Options(options::OptionsScreen::Window(
+                        vault_core::ui::options::OptionsWindow {
+                            page: vault_core::ui::options::OptionsPage::Pause
+                        }
+                    ))
                     | Screen::SaveLoad(_)
                     | Screen::Help(_)
                     | Screen::Character(_)
@@ -871,7 +875,7 @@ impl MapPreview {
                 || match self.screen {
                     Screen::Map => {
                         self.talk_release(over)
-                            || self.called_release(point, over)
+                            || self.called_release(point)
                             || self.map_release(point)
                             || self.bar_release(bar, over)
                     }
@@ -887,6 +891,7 @@ impl MapPreview {
                     Screen::World2(_) => self.world2_release(point),
                     Screen::Town2(_) => self.town2_release(point),
                     Screen::Character(_) => self.character_release(point, over.is_some()),
+                    Screen::SaveLoad(_) => self.saveload_release(),
                     _ => false,
                 });
         if let Some(cue) = self.pressed.take() {

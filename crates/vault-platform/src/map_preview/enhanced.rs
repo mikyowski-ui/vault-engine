@@ -1553,7 +1553,7 @@ impl MapPreview {
             },
             Screen::Options(screen) => Backdrop::Dimmed {
                 bar: true,
-                grey: matches!(screen, OptionsScreen::Pause),
+                grey: screen.paused(),
             },
             Screen::Movie(_) => Backdrop::Black,
             Screen::World(_)

@@ -2,38 +2,43 @@
 //! states, previews, the info box, the overwrite question and description
 //! box), committing through the SPEC-008 slot writer and reader, and quick
 //! save/load. Slots live below the configured save root.
-use super::{
-    MapPreview, Screen,
-    dialog::Dialog,
-    modal_kit::{self, red_button},
-};
+use super::{MapPreview, Screen, dialog::Dialog};
 use crate::{AppResult, input::key_text};
 use vault_core::{
     host_save::{SaveInfo, slot_directory},
     ui::{
-        BUTTON_PRESS, ColorKey, ERROR_SOUND, FRAME_MS, HoldRepeat, Rect,
-        saveload::{self, Click, Description, ListKey, Mode, Preview, Quick, SlotInfo, SlotState},
+        BUTTON_PRESS, ColorKey, ERROR_SOUND, FRAME_MS, red_button,
+        saveload::{
+            self, ListKey, Mode, Preview, Quick, SaveLoadControl, SaveLoadKey, SaveLoadOutcome,
+            SlotInfo, SlotState,
+        },
     },
 };
 use vault_formats::savegame::{HEADER_LEN, SaveHeader};
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
+/// The open screen: the core screen (SPEC-020 §2.1: its mode, slot
+/// states, selection, description box, held arrow and whether the options
+/// menu opened it) and what only this layer draws.
 pub(crate) struct SaveLoadScreen {
-    pub mode: Mode,
-    slots: Vec<SlotState>,
+    core: saveload::SaveLoadScreen,
     thumbnails: Vec<Option<Vec<u8>>>,
     /// The current game's capture, for save previews.
     capture: Vec<u8>,
-    description: Option<Description>,
-    /// §3.14 a held scroll arrow: its direction, button and repeat. While
-    /// it is held every other input is discarded.
-    arrow: Option<(ListKey, Rect, HoldRepeat)>,
     /// The description cursor's blink phase (on for 3 frames, off for 3).
     blink: bool,
-    /// SPEC-014 §3.17: opened from the options menu, so a cancel returns
-    /// there (a save or load that happened closes options too).
-    pub from_options: bool,
+}
+impl std::ops::Deref for SaveLoadScreen {
+    type Target = saveload::SaveLoadScreen;
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+impl std::ops::DerefMut for SaveLoadScreen {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
 }
 
 impl SaveLoadScreen {
@@ -44,9 +49,36 @@ impl SaveLoadScreen {
     }
 }
 
-/// §3.15 the description box's Done and Cancel red buttons (screen).
-const DESCRIPTION_DONE: Rect = red_button([169 + 34, 116 + 58]);
-const DESCRIPTION_CANCEL: Rect = red_button([169 + 160, 116 + 58]);
+/// A key on the screen: the description box takes Enter, Esc, Backspace
+/// (or Delete) and its characters; the list takes the brightness and quit
+/// keys, the arrows, Home, End, Enter and Esc.
+fn saveload_input(
+    key: KeyCode,
+    [shift, control]: [bool; 2],
+    description: bool,
+) -> Option<SaveLoadKey> {
+    if description {
+        return Some(match key {
+            KeyCode::Enter | KeyCode::NumpadEnter => SaveLoadKey::Enter,
+            KeyCode::Escape => SaveLoadKey::Escape,
+            KeyCode::Backspace | KeyCode::Delete => SaveLoadKey::Backspace,
+            _ => SaveLoadKey::Char(text_key(key, shift)?),
+        });
+    }
+    Some(match key {
+        KeyCode::Equal | KeyCode::NumpadAdd => SaveLoadKey::Brightness(true),
+        KeyCode::Minus | KeyCode::NumpadSubtract => SaveLoadKey::Brightness(false),
+        KeyCode::KeyQ | KeyCode::KeyX if control => SaveLoadKey::Quit,
+        KeyCode::F10 => SaveLoadKey::Quit,
+        KeyCode::ArrowUp => SaveLoadKey::List(ListKey::Up),
+        KeyCode::ArrowDown => SaveLoadKey::List(ListKey::Down),
+        KeyCode::Home => SaveLoadKey::List(ListKey::Home),
+        KeyCode::End => SaveLoadKey::List(ListKey::End),
+        KeyCode::Enter | KeyCode::NumpadEnter => SaveLoadKey::Enter,
+        KeyCode::Escape => SaveLoadKey::Escape,
+        _ => return None,
+    })
+}
 
 /// Read every slot header below `root`, in `game`'s layout (SPEC-018
 /// §2.3: slots belong to one game, so the other game's slots do not read).
@@ -148,16 +180,28 @@ impl MapPreview {
         }
         let capture = self.capture_thumbnail();
         let (slots, thumbnails) = self.scan_slots();
+        let list = self.slot_list.clone();
         self.screen = Screen::SaveLoad(Box::new(SaveLoadScreen {
-            mode,
-            slots,
+            core: saveload::SaveLoadScreen::open(mode, slots, list),
             thumbnails,
             capture,
-            description: None,
-            arrow: None,
             blink: true,
-            from_options: false,
         }));
+    }
+    /// The slot selection: the open screen's, else the one kept for the
+    /// next opening (it lasts for the program run).
+    pub(crate) fn slot_selection(&self) -> &saveload::SlotList {
+        match &self.screen {
+            Screen::SaveLoad(screen) => &screen.list,
+            _ => &self.slot_list,
+        }
+    }
+    /// Close the screen to `next`, keeping its selection for the next
+    /// opening.
+    fn leave_save_screen(&mut self, next: Screen) {
+        if let Screen::SaveLoad(screen) = std::mem::replace(&mut self.screen, next) {
+            self.slot_list = screen.core.into_list();
+        }
     }
     pub(crate) fn saveload_image(&mut self) -> AppResult<IndexedImage> {
         let Screen::SaveLoad(screen) = &self.screen else {
@@ -176,7 +220,7 @@ impl MapPreview {
             300,
         );
         let caption = painter.message("lsgame.msg", screen.mode.caption());
-        let selected = self.slot_list.selected;
+        let selected = screen.list.selected;
         for (slot, state) in screen.slots.iter().enumerate() {
             let color = saveload::caption_color(slot == selected);
             painter.text(
@@ -199,8 +243,8 @@ impl MapPreview {
                 230,
             );
         }
-        let state = &screen.slots[selected];
-        let thumbnail = screen.thumbnails[selected].as_ref();
+        let state = screen.selected_state();
+        let thumbnail = screen.thumbnails.get(selected).and_then(Option::as_ref);
         let preview = saveload::preview(
             screen.mode,
             state,
@@ -303,8 +347,8 @@ impl MapPreview {
             let title = painter.message("lsgame.msg", 130);
             painter.centered(&mut image, 103, ColorKey::LABEL, &title, [ox, oy + 7], 290);
             for (rect, caption, id) in [
-                (DESCRIPTION_DONE, [ox + 56, oy + 57], 104),
-                (DESCRIPTION_CANCEL, [ox + 181, oy + 57], 105),
+                (saveload::DESCRIPTION_DONE, [ox + 56, oy + 57], 104),
+                (saveload::DESCRIPTION_CANCEL, [ox + 181, oy + 57], 105),
             ] {
                 let message = ("lsgame.msg", id);
                 self.draw_captioned_red_button(&painter, &mut image, rect, message, caption, 80);
@@ -328,84 +372,87 @@ impl MapPreview {
         }
         Ok(image)
     }
-    fn close_save_screen(&mut self) {
-        self.screen = Screen::Map;
+    pub(super) fn close_save_screen(&mut self) {
+        self.leave_save_screen(Screen::Map);
     }
     /// Esc or Cancel: back to the options menu when it opened the screen,
     /// else to the map.
-    fn cancel_save_screen(&mut self) {
-        let from_options = matches!(&self.screen, Screen::SaveLoad(screen) if screen.from_options);
-        self.screen = if from_options {
-            Screen::Options(super::options::OptionsScreen::Menu)
+    fn cancel_save_screen(&mut self, to_options: bool) {
+        self.leave_save_screen(if to_options {
+            Screen::Options(super::options::OptionsScreen::page(
+                vault_core::ui::options::OptionsPage::Menu,
+            ))
         } else {
             Screen::Map
-        };
+        });
     }
-    /// Done, Enter or a double click on the selected slot.
-    fn commit_slot(&mut self) {
-        let slot = self.slot_list.selected;
-        let Screen::SaveLoad(screen) = &mut self.screen else {
+    /// Act on the core screen's outcome (SPEC-020 §2.1 rule 4).
+    fn saveload_outcome(&mut self, outcome: SaveLoadOutcome) {
+        match outcome {
+            SaveLoadOutcome::None | SaveLoadOutcome::Changed => {}
+            SaveLoadOutcome::DescriptionOpened => {}
+            // §3.15 step 1: an occupied slot asks first (lsgame.msg 131,
+            // a large Yes/No box at (169, 131) in key 32328).
+            SaveLoadOutcome::AskOverwrite(_) => {
+                let title = self.message("lsgame.msg", 131);
+                self.show_dialog(Dialog::overwrite(
+                    saveload::OVERWRITE_ORIGIN,
+                    title,
+                    ColorKey::ERROR,
+                ));
+            }
+            // A corrupt slot: the reference's body is 136 ("older
+            // version"); under the safe rule 135. SPEC-019 §3.11 an old
+            // version: `iisxxxx1`, title 134 and body 136.
+            SaveLoadOutcome::Notice { title, body } => self.show_notice(title, body, false),
+            SaveLoadOutcome::Load(slot) => self.load_slot(slot),
+            SaveLoadOutcome::Save { slot, description } => self.finish_save(slot, description),
+            SaveLoadOutcome::Cancel { to_options } => self.cancel_save_screen(to_options),
+            // G-31 / §3.14: brightness, and the quit confirmation (whose
+            // Yes closes the screen as cancelled).
+            SaveLoadOutcome::Brightness(up) => self.brightness_step(up),
+            SaveLoadOutcome::QuitConfirm => self.confirm_quit(),
+        }
+    }
+    /// Load an occupied slot from the screen.
+    fn load_slot(&mut self, slot: usize) {
+        let Screen::SaveLoad(screen) = &self.screen else {
             return;
         };
-        let state = screen.slots[slot].clone();
-        if screen.mode.saving() {
-            match state {
-                // §3.15 step 1: an occupied slot asks first (lsgame.msg 131,
-                // a large Yes/No box at (169, 131) in key 32328).
-                SlotState::Occupied(_) => {
-                    let title = self.message("lsgame.msg", 131);
-                    self.show_dialog(Dialog::overwrite([169, 131], title, ColorKey::ERROR));
+        let mode = screen.mode;
+        match self.host.load_game(&self.save_root, slot as u8 + 1) {
+            Ok(()) => {
+                self.close_save_screen();
+                self.return_to_map();
+                self.settle_panel();
+                self.loaded = true;
+                let text = self.message("lsgame.msg", 141);
+                self.notify(text);
+                if mode == Mode::PickQuickLoad {
+                    self.quick.picked();
+                    let text = self.message("misc.msg", 4);
+                    self.notify(text);
                 }
-                _ => screen.description = Some(Description::open(b"")),
             }
-            return;
-        }
-        match state {
-            SlotState::Empty => {}
-            // The reference's body is 136 ("older version"); under the safe
-            // rule a corrupt slot uses 135.
-            SlotState::Corrupt => self.show_notice(134, 135, false),
-            // SPEC-019 §3.11: `iisxxxx1`, title 134 and body 136.
-            SlotState::OldVersion => self.show_notice(134, 136, false),
-            SlotState::Occupied(_) => {
-                let mode = screen.mode;
-                match self.host.load_game(&self.save_root, slot as u8 + 1) {
-                    Ok(()) => {
-                        self.close_save_screen();
-                        self.return_to_map();
-                        self.settle_panel();
-                        self.loaded = true;
-                        let text = self.message("lsgame.msg", 141);
-                        self.notify(text);
-                        if mode == Mode::PickQuickLoad {
-                            self.quick.picked();
-                            let text = self.message("misc.msg", 4);
-                            self.notify(text);
-                        }
-                    }
-                    Err(error) => {
-                        self.status = error.to_string().into_bytes();
-                        self.show_notice(134, 135, true);
-                    }
-                }
+            Err(error) => {
+                self.status = error.to_string().into_bytes();
+                self.show_notice(134, 135, true);
             }
         }
     }
     /// Yes to the overwrite question: the description box, prefilled with
     /// the slot's description.
     pub(crate) fn overwrite_accepted(&mut self) {
-        let slot = self.slot_list.selected;
         let Screen::SaveLoad(screen) = &mut self.screen else {
             return;
         };
-        if let SlotState::Occupied(info) = &screen.slots[slot] {
-            screen.description = Some(Description::open(&info.description));
+        if screen.overwrite_accepted() == SaveLoadOutcome::DescriptionOpened {
             screen.blink = true;
         }
     }
-    /// Write the selected slot with `description`.
-    fn save_slot(&mut self, description: Vec<u8>) -> bool {
-        let slot = self.slot_list.selected as u8 + 1;
+    /// Write zero-based `slot` with `description`.
+    fn save_slot(&mut self, slot: usize, description: Vec<u8>) -> bool {
+        let slot = slot as u8 + 1;
         let thumbnail = match &self.screen {
             Screen::SaveLoad(screen) => screen.capture.clone(),
             _ => self.capture_thumbnail(),
@@ -425,18 +472,14 @@ impl MapPreview {
             }
         }
     }
-    fn finish_description(&mut self, accept: bool) {
-        let Screen::SaveLoad(screen) = &mut self.screen else {
+    /// The description box was accepted: write the slot and close, or
+    /// rescan the slots and stay open after a failure.
+    fn finish_save(&mut self, slot: usize, description: Vec<u8>) {
+        let Screen::SaveLoad(screen) = &self.screen else {
             return;
         };
-        let Some(description) = screen.description.take() else {
-            return;
-        };
-        if !accept {
-            return;
-        }
         let mode = screen.mode;
-        if self.save_slot(description.text) {
+        if self.save_slot(slot, description) {
             self.close_save_screen();
             let text = self.message("lsgame.msg", 140);
             self.notify(text);
@@ -446,101 +489,68 @@ impl MapPreview {
                 self.notify(text);
             }
         } else {
-            let scanned = self.scan_slots();
+            let (slots, thumbnails) = self.scan_slots();
             if let Screen::SaveLoad(screen) = &mut self.screen {
                 // A failed save rescans the slots and stays open.
-                (screen.slots, screen.thumbnails) = scanned;
+                screen.rescan(slots);
+                screen.thumbnails = thumbnails;
             }
         }
     }
+    /// §3.14: while a scroll arrow is held every key, Esc included, is
+    /// discarded.
     pub(crate) fn saveload_key(&mut self, key: KeyCode) -> bool {
         let [shift, control, _] = self.hud.modifiers;
         let Screen::SaveLoad(screen) = &mut self.screen else {
             return false;
         };
-        // §3.14: while a scroll arrow is held all other input, Esc
-        // included, is discarded.
-        if screen.arrow.is_some() {
-            return true;
-        }
-        if let Some(description) = &mut screen.description {
-            match key {
-                KeyCode::Enter | KeyCode::NumpadEnter => self.finish_description(true),
-                KeyCode::Escape => self.finish_description(false),
-                KeyCode::Backspace | KeyCode::Delete => description.backspace(),
-                _ => match text_key(key, shift) {
-                    Some(code) => description.key(code),
-                    None => return false,
-                },
-            }
-            return true;
-        }
-        match key {
-            // G-31 / §3.14: brightness, and the quit confirmation (whose Yes
-            // closes the screen as cancelled).
-            KeyCode::Equal | KeyCode::NumpadAdd => self.brightness_step(true),
-            KeyCode::Minus | KeyCode::NumpadSubtract => self.brightness_step(false),
-            KeyCode::KeyQ | KeyCode::KeyX if control => self.confirm_quit(),
-            KeyCode::F10 => self.confirm_quit(),
-            KeyCode::ArrowUp => self.slot_list.key(ListKey::Up),
-            KeyCode::ArrowDown => self.slot_list.key(ListKey::Down),
-            KeyCode::Home => self.slot_list.key(ListKey::Home),
-            KeyCode::End => self.slot_list.key(ListKey::End),
-            KeyCode::Enter | KeyCode::NumpadEnter => self.commit_slot(),
-            KeyCode::Escape => self.cancel_save_screen(),
-            _ => return false,
-        }
+        let description = screen.description.is_some();
+        let Some(input) = saveload_input(key, [shift, control], description) else {
+            return screen.arrow_held().is_some();
+        };
+        let outcome = screen.key(input);
+        self.saveload_outcome(outcome);
         true
     }
+    /// A press: the controls act on it. G-21 / §3.15 the description
+    /// box's Done and Cancel play the red-button sounds (the reference
+    /// leaves them silent, `[May-improve]`); Done plays its press; the
+    /// arrows use the red-button sounds and repeat while held (§3.14 "Held
+    /// arrows"); a double click on the list commits with the press sound.
     pub(crate) fn saveload_click(&mut self, point: [i32; 2]) -> bool {
-        let Screen::SaveLoad(screen) = &self.screen else {
+        let now = self.clock;
+        let Screen::SaveLoad(screen) = &mut self.screen else {
             return false;
         };
-        if screen.arrow.is_some() {
-            return true;
-        }
-        // G-21 / §3.15 the description box's Done and Cancel. The reference
-        // leaves them silent; `[May-improve]`: the red-button sounds.
-        if screen.description.is_some() {
-            if DESCRIPTION_DONE.contains(point) {
-                self.press_button(DESCRIPTION_DONE);
-                self.finish_description(true);
-            } else if DESCRIPTION_CANCEL.contains(point) {
-                self.press_button(DESCRIPTION_CANCEL);
-                self.finish_description(false);
+        let layout = screen.layout();
+        let control = match screen.arrow_held() {
+            Some(_) => None,
+            None => layout.hit(point),
+        };
+        let outcome = screen.press(point, now);
+        let rect = control.and_then(|control| layout.rect(control));
+        match (control, rect) {
+            (Some(SaveLoadControl::Done), Some(rect)) => {
+                self.held = Some(rect);
+                self.play_effect(BUTTON_PRESS.as_bytes(), None);
             }
-            return true;
-        }
-        let (done, cancel) = (red_button(saveload::DONE.0), red_button(saveload::CANCEL.0));
-        if done.contains(point) {
-            self.held = Some(done);
-            self.play_effect(BUTTON_PRESS.as_bytes(), None);
-            self.commit_slot();
-        } else if cancel.contains(point) {
-            self.press_button(cancel);
-            self.cancel_save_screen();
-        } else if let Some((rect, key)) = [
-            (saveload::ARROW_UP, ListKey::Up),
-            (saveload::ARROW_DOWN, ListKey::Down),
-        ]
-        .into_iter()
-        .find(|(rect, _)| rect.contains(point))
-        {
-            // The arrows use the red-button sounds; a held arrow repeats
-            // (§3.14 "Held arrows").
-            self.press_button(rect);
-            self.slot_list.key(key);
-            let repeat = HoldRepeat::new(self.clock, saveload::ARROW_IDLE_FRAMES);
-            if let Screen::SaveLoad(screen) = &mut self.screen {
-                screen.arrow = Some((key, rect, repeat));
+            (Some(SaveLoadControl::List), _) => {
+                if outcome != SaveLoadOutcome::Changed {
+                    self.play_effect(BUTTON_PRESS.as_bytes(), None);
+                }
             }
-        } else if saveload::LIST_AREA.contains(point)
-            && let Click::Done(_) = self.slot_list.click(point[1])
-        {
-            self.play_effect(BUTTON_PRESS.as_bytes(), None);
-            self.commit_slot();
+            (Some(_), Some(rect)) => self.press_button(rect),
+            _ => {}
         }
+        self.saveload_outcome(outcome);
         true
+    }
+    /// The left button came up: a held arrow stops.
+    pub(crate) fn saveload_release(&mut self) -> bool {
+        if let Screen::SaveLoad(screen) = &mut self.screen {
+            screen.release();
+        }
+        false
     }
     /// F6: the pick screen, or a direct save keeping the description.
     /// Under the `enhanced` preset, a direct save to the quick-save slot.
@@ -557,7 +567,7 @@ impl MapPreview {
                     SlotState::Occupied(info) => info.description.clone(),
                     _ => Vec::new(),
                 };
-                if self.save_slot(description) {
+                if self.save_slot(slot, description) {
                     let text = self.message("misc.msg", 5);
                     self.notify(text);
                 }
@@ -593,20 +603,18 @@ impl MapPreview {
     /// repeats until its release or until the pointer leaves it, and the
     /// description cursor blinks. Returns whether the screen changed.
     pub(crate) fn saveload_frame(&mut self, now: u64) -> bool {
-        self.slot_list.frame();
         let held = self.held_button();
         let Screen::SaveLoad(screen) = &mut self.screen else {
             return false;
         };
         let blink = (now / (3 * FRAME_MS)).is_multiple_of(2);
-        let mut changed =
+        let changed =
             std::mem::replace(&mut screen.blink, blink) != blink && screen.description.is_some();
-        if let Some(key) = modal_kit::poll_repeat(&mut screen.arrow, now, |rect| held == Some(rect))
-        {
-            self.slot_list.key(key);
-            changed = true;
-        }
-        changed
+        let arrow = screen
+            .arrow_held()
+            .and_then(|arrow| screen.layout().rect(arrow));
+        let on_arrow = arrow.is_some_and(|rect| held == Some(rect));
+        screen.frame(now, on_arrow) || changed
     }
 }
 impl MapPreview {

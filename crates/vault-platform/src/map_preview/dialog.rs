@@ -9,17 +9,21 @@
 //! than 168 pixels. Text is font 101 in one color key, centered, the title
 //! at `y0 = 27 + 30 - trunc((body lines + 1) * 10 / 2)` and body lines
 //! (wrapped at 276 pixels) every 10 pixels below it.
-use super::{MapPreview, Screen, modal_kit};
-use vault_core::ui::{BUTTON_PRESS, ColorKey, flow};
+use super::{MapPreview, Screen};
+use vault_core::ui::{
+    BUTTON_PRESS, ColorKey,
+    flow::{self, DialogBox, DialogKey},
+};
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
 pub(crate) struct Dialog {
-    origin: [i32; 2],
+    /// SPEC-020 §2.1: the core box owns the origin, the Yes/No kind and
+    /// the red buttons' hit-testing.
+    dialog: DialogBox,
     title: Vec<u8>,
     body: Vec<u8>,
     key: ColorKey,
-    yes_no: bool,
     /// The OK (Done) or Yes answer closes the screen and requests the
     /// return to the main menu (a failed load, a confirmed quit).
     quits: bool,
@@ -30,11 +34,10 @@ impl Dialog {
     /// A Done box with a title, an optional body, in `key`.
     pub fn done(origin: [i32; 2], title: Vec<u8>, body: Vec<u8>, key: ColorKey) -> Self {
         Self {
-            origin,
+            dialog: DialogBox::new(origin, false),
             title,
             body,
             key,
-            yes_no: false,
             quits: false,
             overwrite: false,
         }
@@ -43,7 +46,7 @@ impl Dialog {
     /// the title only.
     pub fn overwrite(origin: [i32; 2], title: Vec<u8>, key: ColorKey) -> Self {
         Self {
-            yes_no: true,
+            dialog: DialogBox::new(origin, true),
             overwrite: true,
             ..Self::done(origin, title, Vec::new(), key)
         }
@@ -51,7 +54,7 @@ impl Dialog {
     /// A Yes/No box whose Yes requests the return to the main menu.
     pub fn quit_confirmation(origin: [i32; 2], title: Vec<u8>, key: ColorKey) -> Self {
         Self {
-            yes_no: true,
+            dialog: DialogBox::new(origin, true),
             quits: true,
             ..Self::done(origin, title, Vec::new(), key)
         }
@@ -104,7 +107,7 @@ impl MapPreview {
             }
             return;
         }
-        if dialog.quits && (yes || !dialog.yes_no) {
+        if dialog.quits && (yes || !dialog.dialog.yes_no) {
             self.leave_for_quit();
             self.quit_requested = true;
         }
@@ -121,6 +124,9 @@ impl MapPreview {
             Screen::PipBoy(_) => self.close_pipboy(),
             // SPEC-014 §3.42: Yes cancels the character screen.
             Screen::Character(_) => self.close_character(false),
+            // The save/load screen closes as cancelled, keeping its
+            // selection.
+            Screen::SaveLoad(_) => self.close_save_screen(),
             _ => {}
         }
         self.screen = Screen::Map;
@@ -135,29 +141,30 @@ impl MapPreview {
         self.draw_dialog_box(
             &painter,
             image,
-            dialog.origin,
+            dialog.dialog.origin,
             text,
             dialog.key,
-            dialog.yes_no,
+            dialog.dialog.yes_no,
         );
     }
     /// Enter means OK/yes (with `ib1p1xx1`), Esc no/cancel; `y` and `n`
     /// work in Yes/No boxes only. A pending quit request forces yes. Other
     /// keys are swallowed.
     pub(crate) fn dialog_key(&mut self, key: KeyCode) -> bool {
-        let Some(dialog) = &self.dialog else {
+        let Some(dialog) = self.dialog.as_ref().map(|dialog| dialog.dialog) else {
             return false;
         };
-        let answer = match key {
+        let input = match key {
             KeyCode::Enter | KeyCode::NumpadEnter => {
                 self.play_effect(BUTTON_PRESS.as_bytes(), None);
-                Some(true)
+                Some(DialogKey::Enter)
             }
-            KeyCode::Escape => Some(false),
-            KeyCode::KeyY if dialog.yes_no => Some(true),
-            KeyCode::KeyN if dialog.yes_no => Some(false),
+            KeyCode::Escape => Some(DialogKey::Escape),
+            KeyCode::KeyY => Some(DialogKey::Char('y')),
+            KeyCode::KeyN => Some(DialogKey::Char('n')),
             _ => None,
         };
+        let answer = input.and_then(|input| dialog.key(input));
         if let Some(yes) = answer {
             let forced = self.quit_requested;
             self.answer_dialog(yes || forced);
@@ -170,7 +177,7 @@ impl MapPreview {
     /// No button at (351, 219) lies inside the view) never reaches the
     /// screen below as a view click.
     pub(crate) fn dialog_click(&mut self, point: [i32; 2]) -> bool {
-        let Some(dialog) = &self.dialog else {
+        let Some(dialog) = self.dialog.as_ref().map(|dialog| dialog.dialog) else {
             return false;
         };
         match &mut self.screen {
@@ -178,11 +185,12 @@ impl MapPreview {
             Screen::World2(world) => world.swallow_release(),
             _ => {}
         }
-        let pressed = modal_kit::dialog_button_at(dialog.origin, dialog.yes_no, point);
-        if let Some((button, rect)) = pressed {
-            self.press_button(rect);
-            // `dbox.msg` 100 is Done, 101 Yes, 102 No.
-            self.answer_dialog(button.caption != 102);
+        let layout = dialog.layout();
+        if let Some(yes) = dialog.click(point) {
+            if let Some(rect) = layout.rect(yes) {
+                self.press_button(rect);
+            }
+            self.answer_dialog(yes);
         }
         true
     }

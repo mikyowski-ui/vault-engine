@@ -74,17 +74,6 @@ pub(crate) fn dialog_buttons(origin: [i32; 2], yes_no: bool) -> Vec<(DialogButto
         .collect()
 }
 
-/// The large dialog box's red button under a screen point.
-pub(crate) fn dialog_button_at(
-    origin: [i32; 2],
-    yes_no: bool,
-    point: [i32; 2],
-) -> Option<(DialogButton, Rect)> {
-    dialog_buttons(origin, yes_no)
-        .into_iter()
-        .find(|(_, rect)| rect.contains(point))
-}
-
 impl MapPreview {
     /// A two-state button at screen `rect`, drawn transparently at its
     /// top-left: `down` while it is held with the pointer over it, else
