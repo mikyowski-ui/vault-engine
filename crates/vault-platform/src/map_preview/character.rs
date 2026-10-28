@@ -18,22 +18,24 @@
 //! still consumes the pick (SPEC-011 §3.21).
 use super::{
     MapPreview, Screen,
-    modal_kit::{at, offset, poll_repeat},
+    modal_kit::{at, offset},
 };
 use crate::{
     AppResult,
-    editor_screen::{
-        self, ARROW_IDLE_FRAMES, EDITOR_CANCEL, EDITOR_DONE, EDITOR_OPTIONS, FileDialog, FileEvent,
-        Notice, PrintWorld, SheetView, game_text,
-    },
+    editor_screen::{self, FileDialog, FileEvent, Notice, PrintWorld, SheetView, game_text},
     interface::Painter,
 };
 use vault_core::{
     CharacterSheet, Perk,
     progression::{LEVEL_UP_FLAG, PerkChoice},
     ui::{
-        BUTTON_PRESS, ColorKey, ERROR_SOUND, HoldRepeat, Rect,
-        character::{self, Card, Folder, FolderView, PickList, SkillFloor, SkillRefusal},
+        BUTTON_PRESS, ColorKey, ERROR_SOUND,
+        character::{
+            self, BUTTON_CAPTIONS, CHOOSER_CANCEL, CHOOSER_DONE, CHOOSER_DOWN, CHOOSER_ORIGIN,
+            CHOOSER_UP, Card, CharacterControl, CharacterKey, CharacterOutcome, ChooserControl,
+            ChooserKey, ChooserOutcome, Folder, FolderView, PerkChooser, SkillFloor, SkillRefusal,
+            slider_buttons,
+        },
         editor::{self, InfoLine},
         flow::DialogSize,
         sheet::{self, DialogKind, SheetFile},
@@ -44,45 +46,15 @@ use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
 /// SPEC-014 §3.8: a change of info card plays this.
-const CARD_SOUND: &[u8] = b"isdxxxx1";
+const CARD_SOUND: &[u8] = character::CARD_SOUND.as_bytes();
 /// The folder tabs play this on release.
-const TAB_SOUND: &[u8] = b"ib3p1xx1";
-/// The slider buttons repeat as the SPECIAL buttons, from the 20th frame.
-const SLIDER_IDLE_FRAMES: u32 = 20;
+const TAB_SOUND: &[u8] = character::TAB_SOUND.as_bytes();
 /// The rolling big-number frame lasts this long per digit.
 const ROLL_MS: u64 = editor::ROLL_MS;
-/// The red buttons' captions: PRINT (`editor.msg` 103), DONE (100) and
-/// CANCEL (102).
-const CAPTIONS: [(Rect, [i32; 2], i32); 3] = [
-    (EDITOR_OPTIONS, [363, 454], 103),
-    (EDITOR_DONE, [475, 454], 100),
-    (EDITOR_CANCEL, [571, 454], 102),
-];
-/// The perk chooser window and its parts, window-relative.
-const CHOOSER_ORIGIN: [i32; 2] = [33, 91];
-const CHOOSER_LIST: Rect = Rect::new(45, 43, 192, 129);
-const CHOOSER_UP: Rect = Rect::new(25, 46, 11, 14);
-const CHOOSER_DOWN: Rect = Rect::new(25, 61, 11, 14);
-const CHOOSER_DONE: Rect = Rect::new(48, 186, 15, 16);
-const CHOOSER_CANCEL: Rect = Rect::new(153, 186, 15, 16);
 
-/// What persists from one opening to the next: the selected info line, the
-/// folder and the skill cursor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Remembered {
-    pub selected: InfoLine,
-    pub folder: Folder,
-    pub cursor: usize,
-}
-impl Default for Remembered {
-    fn default() -> Self {
-        Self {
-            selected: InfoLine::Special(0),
-            folder: Folder::Perks,
-            cursor: 0,
-        }
-    }
-}
+/// What persists from one opening to the next: the core screen's selected
+/// info line, folder and skill cursor.
+pub(crate) type Remembered = character::CharacterScreen;
 
 /// The chooser's step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,24 +99,22 @@ impl Step {
     }
 }
 
-/// A chooser button held until its release.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChooserPress {
-    Done,
-    Cancel,
-    List,
-}
-
-/// §3.42 the perk chooser window, also running Tag! and Mutate!.
+/// §3.42 the perk chooser window, also running Tag! and Mutate!: the core
+/// chooser (SPEC-020 §2.1: its list, held control and arrow repeat; `list`
+/// reads through it) and the entries it lists.
 pub(crate) struct Chooser {
     pub step: Step,
     /// Perk, skill or trait index with its display name, sorted by name.
     pub entries: Vec<(i32, Vec<u8>)>,
-    pub list: PickList,
+    window: PerkChooser,
     /// The card shown last, for its change sound (none: the list's first).
     card: Option<(i32, Vec<u8>)>,
-    repeat: Option<(bool, Rect, HoldRepeat)>,
-    pressed: Option<ChooserPress>,
+}
+impl std::ops::Deref for Chooser {
+    type Target = PerkChooser;
+    fn deref(&self) -> &PerkChooser {
+        &self.window
+    }
 }
 
 /// A window over the screen.
@@ -158,16 +128,12 @@ pub(crate) enum Modal {
     Notice(Notice, Option<Vec<u8>>),
 }
 
-/// A screen button held until its release.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Press {
-    Done,
-    Cancel,
-    Print,
-    Tabs,
-}
-
+/// The open screen: the core screen (SPEC-020 §2.1: the selected info
+/// line, the folder, the skill cursor, the held button and the slider's
+/// repeat; `selected`, `folder` and `cursor` read through it), and the
+/// progression state and windows only this layer holds.
 pub(crate) struct CharacterScreen {
+    ui: character::CharacterScreen,
     /// The sheet on opening, restored by Cancel.
     saved: Option<CharacterSheet>,
     /// The skill values and invested points on opening.
@@ -176,26 +142,17 @@ pub(crate) struct CharacterScreen {
     tags_before: [i32; 4],
     traits_at_open: [i32; 2],
     pub modal: Option<Modal>,
-    pub selected: InfoLine,
-    pub folder: Folder,
-    /// The skill cursor (the slider's row).
-    pub cursor: usize,
-    /// The held slider button: plus, its rectangle and repeat.
-    repeat: Option<(bool, Rect, HoldRepeat)>,
-    pressed: Option<Press>,
     /// The card shown last, for its change sound.
     card: Option<(i32, Vec<u8>)>,
     /// The unspent-points number rolling from a value since a time.
     roll: Option<(i32, i32, u64)>,
 }
 
-/// The slider's plus and minus buttons on cursor row `c`.
-fn slider_buttons(c: usize) -> [Rect; 2] {
-    let y = 11 * c as i32;
-    [
-        Rect::new(614, 20 + y, 16, 12),
-        Rect::new(614, 31 + y, 17, 12),
-    ]
+impl std::ops::Deref for CharacterScreen {
+    type Target = character::CharacterScreen;
+    fn deref(&self) -> &character::CharacterScreen {
+        &self.ui
+    }
 }
 /// §3.8 big numbers rolling from `from` to `to`: cell 11 in the ones for
 /// 123 ms, then the new ones; then the same for the tens if they changed.
@@ -240,23 +197,19 @@ impl MapPreview {
         self.status.clear();
         let memory = self.character_memory;
         self.screen = Screen::Character(Box::new(CharacterScreen {
+            ui: character::CharacterScreen::new(memory.selected, memory.folder, memory.cursor),
             floor: SkillFloor::of(&saved, context),
             tags_before: saved.tags,
             traits_at_open: saved.traits,
             saved: Some(saved),
             modal: None,
-            selected: memory.selected,
-            folder: memory.folder,
-            cursor: memory.cursor.min(17),
-            repeat: None,
-            pressed: None,
             card: None,
             roll: None,
         }));
         if pending {
             let chooser = self.chooser(Step::Perk);
             if let Some(screen) = self.character_mut() {
-                screen.folder = Folder::Perks;
+                screen.ui.folder = Folder::Perks;
                 screen.modal = Some(Modal::Chooser(Box::new(chooser)));
             }
         }
@@ -274,17 +227,14 @@ impl MapPreview {
         let Screen::Character(screen) = std::mem::replace(&mut self.screen, Screen::Map) else {
             return;
         };
+        self.character_memory =
+            character::CharacterScreen::new(screen.selected, screen.folder, screen.cursor);
         if let Some(sheet) = self.host.world.player_sheet_mut() {
             if !keep && let Some(saved) = screen.saved {
                 *sheet = saved;
             }
             sheet.flags &= !LEVEL_UP_FLAG;
         }
-        self.character_memory = Remembered {
-            selected: screen.selected,
-            folder: screen.folder,
-            cursor: screen.cursor,
-        };
         let player = self.host.world.player;
         self.host.world.sync_hit_points(player);
         self.return_to_map();
@@ -381,7 +331,7 @@ impl MapPreview {
     /// plays `isdxxxx1`.
     fn select_line(&mut self, line: InfoLine) {
         if let Some(screen) = self.character_mut() {
-            screen.selected = line;
+            screen.ui.select(line);
         }
         self.card_changed();
     }
@@ -456,7 +406,7 @@ impl MapPreview {
             false,
         );
         if let Some(screen) = self.character_mut() {
-            screen.repeat = None;
+            screen.ui.stop_slider();
             screen.modal = Some(Modal::Refusal(notice));
         }
     }
@@ -505,11 +455,9 @@ impl MapPreview {
         entries.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
         Chooser {
             step,
-            list: PickList::new(entries.len(), self.clock),
+            window: PerkChooser::new(entries.len(), self.clock),
             entries,
             card: None,
-            repeat: None,
-            pressed: None,
         }
     }
     fn chooser_mut(&mut self) -> Option<&mut Chooser> {
@@ -660,89 +608,72 @@ impl MapPreview {
         self.close_chooser();
     }
     fn chooser_key(&mut self, key: KeyCode) -> bool {
+        let input = match key {
+            KeyCode::ArrowUp => ChooserKey::Up,
+            KeyCode::ArrowDown => ChooserKey::Down,
+            KeyCode::Home => ChooserKey::Home,
+            KeyCode::End => ChooserKey::End,
+            KeyCode::Enter | KeyCode::NumpadEnter => ChooserKey::Enter,
+            KeyCode::Escape => ChooserKey::Escape,
+            _ => ChooserKey::Other,
+        };
         let Some(chooser) = self.chooser_mut() else {
             return false;
         };
-        match key {
-            KeyCode::ArrowUp => chooser.list.up(),
-            KeyCode::ArrowDown => chooser.list.down(),
-            KeyCode::Home => chooser.list.home(),
-            KeyCode::End => chooser.list.end(),
-            KeyCode::Enter | KeyCode::NumpadEnter => {
-                self.play_effect(BUTTON_PRESS.as_bytes(), None);
-                self.chooser_choose();
-                return true;
-            }
-            KeyCode::Escape => {
-                self.chooser_cancel();
-                return true;
-            }
-            _ => return true,
-        }
-        self.chooser_moved();
+        let outcome = chooser.window.key(input);
+        // Return chooses after `ib1p1xx1`.
+        self.chooser_outcome(outcome, true);
         true
     }
+    /// Act on the core chooser's outcome (SPEC-020 §2.1 rule 4); `sound`
+    /// plays `ib1p1xx1` before a choice made without a held Done button.
+    fn chooser_outcome(&mut self, outcome: ChooserOutcome, sound: bool) {
+        match outcome {
+            ChooserOutcome::None => {}
+            ChooserOutcome::Moved => self.chooser_moved(),
+            ChooserOutcome::Choose => {
+                if sound {
+                    self.play_effect(BUTTON_PRESS.as_bytes(), None);
+                }
+                self.chooser_choose();
+            }
+            ChooserOutcome::Cancel => self.chooser_cancel(),
+        }
+    }
+    /// A press: an arrow steps at once with `ib1p1xx1` and repeats while
+    /// held; Done and Cancel show their down art; the list waits for its
+    /// release.
     fn chooser_press(&mut self, point: [i32; 2]) -> bool {
         let clock = self.clock;
-        let window = |rect| at(CHOOSER_ORIGIN, rect);
-        for (rect, up) in [(window(CHOOSER_UP), true), (window(CHOOSER_DOWN), false)] {
-            if rect.contains(point) {
-                self.play_effect(BUTTON_PRESS.as_bytes(), None);
-                self.held = Some(rect);
-                if let Some(chooser) = self.chooser_mut() {
-                    chooser.pressed = None;
-                    if up {
-                        chooser.list.up();
-                    } else {
-                        chooser.list.down();
-                    }
-                    chooser.repeat = Some((up, rect, HoldRepeat::new(clock, ARROW_IDLE_FRAMES)));
-                }
-                self.chooser_moved();
-                return true;
-            }
-        }
-        for (rect, press) in [
-            (window(CHOOSER_DONE), ChooserPress::Done),
-            (window(CHOOSER_CANCEL), ChooserPress::Cancel),
-        ] {
-            if rect.contains(point) {
-                self.press_button(rect);
-                if let Some(chooser) = self.chooser_mut() {
-                    chooser.pressed = Some(press);
-                }
-                return true;
-            }
-        }
-        if let Some(chooser) = self.chooser_mut() {
-            chooser.pressed = window(CHOOSER_LIST)
-                .contains(point)
-                .then_some(ChooserPress::List);
-        }
-        true
-    }
-    fn chooser_release(&mut self, point: Option<[i32; 2]>, over: bool) -> bool {
         let Some(chooser) = self.chooser_mut() else {
             return false;
         };
-        chooser.repeat = None;
-        match chooser.pressed.take() {
-            Some(ChooserPress::Done) if over => self.chooser_choose(),
-            Some(ChooserPress::Cancel) if over => self.chooser_cancel(),
-            Some(ChooserPress::List) => {
-                let list = at(CHOOSER_ORIGIN, CHOOSER_LIST);
-                let Some(point) = point.filter(|point| list.contains(*point)) else {
-                    return true;
-                };
-                if chooser.list.click(point[1]) {
-                    self.play_effect(BUTTON_PRESS.as_bytes(), None);
-                    self.chooser_choose();
-                } else {
-                    self.chooser_moved();
-                }
+        let layout = chooser.layout();
+        let control = layout.hit(point);
+        let outcome = chooser.window.press(point, clock);
+        let rect = control.and_then(|control| layout.rect(control));
+        match (control, rect) {
+            (Some(ChooserControl::Up | ChooserControl::Down), Some(rect)) => {
+                self.play_effect(BUTTON_PRESS.as_bytes(), None);
+                self.held = Some(rect);
+            }
+            (Some(ChooserControl::Done | ChooserControl::Cancel), Some(rect)) => {
+                self.press_button(rect);
             }
             _ => {}
         }
+        self.chooser_outcome(outcome, false);
+        true
+    }
+    /// A release: Done and Cancel act over themselves; a list click
+    /// selects its row, and a second click on it chooses with `ib1p1xx1`.
+    fn chooser_release(&mut self, point: Option<[i32; 2]>) -> bool {
+        let Some(chooser) = self.chooser_mut() else {
+            return false;
+        };
+        let done = chooser.pressed() == Some(ChooserControl::Done);
+        let outcome = chooser.window.release(point);
+        self.chooser_outcome(outcome, !done);
         true
     }
     /// §3.43 PRINT: the save file dialog over `*.TXT` titled PRINT TO FILE
@@ -911,32 +842,51 @@ impl MapPreview {
             }
             None => {}
         }
-        match key {
+        let input = match key {
             // Return, `d` and `D` act as Done after `ib1p1xx1`.
-            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::KeyD => {
-                self.play_effect(BUTTON_PRESS.as_bytes(), None);
-                self.close_character(true);
-            }
-            KeyCode::Escape => self.close_character(false),
-            KeyCode::KeyQ | KeyCode::KeyX if control => self.confirm_quit(),
-            KeyCode::F10 => self.confirm_quit(),
-            KeyCode::F12 => self.screenshot(),
-            KeyCode::KeyP => self.open_print(),
-            KeyCode::NumpadAdd | KeyCode::ArrowRight => {
-                self.skill_step(true);
-            }
-            KeyCode::Equal | KeyCode::KeyN if shift => {
-                self.skill_step(true);
-            }
-            KeyCode::Minus | KeyCode::NumpadSubtract | KeyCode::ArrowLeft => {
-                self.skill_step(false);
-            }
-            KeyCode::KeyJ if shift => {
-                self.skill_step(false);
-            }
+            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::KeyD => CharacterKey::Done,
+            KeyCode::Escape => CharacterKey::Escape,
+            KeyCode::KeyQ | KeyCode::KeyX if control => CharacterKey::Quit,
+            KeyCode::F10 => CharacterKey::Quit,
+            KeyCode::F12 => CharacterKey::F12,
+            KeyCode::KeyP => CharacterKey::Print,
+            KeyCode::NumpadAdd | KeyCode::ArrowRight => CharacterKey::Plus,
+            KeyCode::Equal | KeyCode::KeyN if shift => CharacterKey::Plus,
+            KeyCode::Minus | KeyCode::NumpadSubtract | KeyCode::ArrowLeft => CharacterKey::Minus,
+            KeyCode::KeyJ if shift => CharacterKey::Minus,
             _ => return false,
+        };
+        if input == CharacterKey::Done {
+            self.play_effect(BUTTON_PRESS.as_bytes(), None);
         }
+        let Some(screen) = self.character_mut() else {
+            return false;
+        };
+        let outcome = screen.ui.key(input);
+        self.character_outcome(outcome);
         true
+    }
+    /// Act on the core screen's outcome (SPEC-020 §2.1 rule 4). Returns
+    /// whether a skill step happened.
+    fn character_outcome(&mut self, outcome: CharacterOutcome) -> bool {
+        match outcome {
+            CharacterOutcome::None => {}
+            CharacterOutcome::Close { keep } => self.close_character(keep),
+            CharacterOutcome::Print => self.open_print(),
+            // The info card follows the selected line.
+            CharacterOutcome::Select(_) => self.card_changed(),
+            // The tabs act on release with `ib3p1xx1`: the folder by the
+            // pointer's screen x and its general card, redrawn even when
+            // already selected.
+            CharacterOutcome::Folder(_) => {
+                self.play_effect(TAB_SOUND, None);
+                self.card_changed();
+            }
+            CharacterOutcome::SkillStep { plus } => return self.skill_step(plus),
+            CharacterOutcome::QuitConfirm => self.confirm_quit(),
+            CharacterOutcome::Screenshot => self.screenshot(),
+        }
+        false
     }
     /// A left press on the screen.
     pub(crate) fn character_click(&mut self, point: [i32; 2]) -> bool {
@@ -958,60 +908,58 @@ impl MapPreview {
             }
             None => {}
         }
-        screen.pressed = None;
-        screen.repeat = None;
-        let cursor = screen.cursor;
-        let folder = screen.folder;
-        for (rect, press) in [
-            (EDITOR_DONE, Press::Done),
-            (EDITOR_CANCEL, Press::Cancel),
-            (EDITOR_OPTIONS, Press::Print),
-        ] {
-            if rect.contains(point) {
-                self.press_button(rect);
-                if let Some(screen) = self.character_mut() {
-                    screen.pressed = Some(press);
+        let painter = Painter {
+            assets: &self.host.assets,
+            palette: &self.palette,
+        };
+        let Screen::Character(screen) = &mut self.screen else {
+            return false;
+        };
+        let tab_mask =
+            |point| editor_screen::masked(&painter, "fldrmask.frm", character::FOLDER_TABS, point);
+        let layout = screen.ui.layout();
+        let outcome = screen.ui.press(point, tab_mask);
+        let pressed = screen.ui.pressed();
+        match (pressed, outcome) {
+            // The red buttons show their down art until the release.
+            (
+                Some(
+                    control @ (CharacterControl::Done
+                    | CharacterControl::Cancel
+                    | CharacterControl::Print),
+                ),
+                _,
+            ) => {
+                if let Some(rect) = layout.rect(control) {
+                    self.press_button(rect);
                 }
-                return true;
             }
-        }
-        // The slider's buttons: `ib1p1xx1` on press (no release sound), one
-        // step, and the SPECIAL buttons' repeat while held.
-        for (rect, plus) in slider_buttons(cursor).into_iter().zip([true, false]) {
-            if rect.contains(point) {
+            // The slider's buttons: `ib1p1xx1` on press (no release
+            // sound), one step, and the SPECIAL buttons' repeat while held.
+            (_, CharacterOutcome::SkillStep { plus }) => {
+                let control = if plus {
+                    CharacterControl::SliderPlus
+                } else {
+                    CharacterControl::SliderMinus
+                };
                 self.play_effect(BUTTON_PRESS.as_bytes(), None);
-                self.held = Some(rect);
-                if self.skill_step(plus)
+                self.held = layout.rect(control);
+                if self.character_outcome(outcome)
                     && let Some(screen) = self.character_mut()
                 {
-                    screen.repeat = Some((plus, rect, HoldRepeat::new(clock, SLIDER_IDLE_FRAMES)));
+                    screen.ui.hold_slider(plus, clock);
                 }
                 return true;
             }
-        }
-        let painter = self.painter();
-        if editor_screen::masked(&painter, "fldrmask.frm", character::FOLDER_TABS, point) {
-            if let Some(screen) = self.character_mut() {
-                screen.pressed = Some(Press::Tabs);
+            // A press in the skill rows moves the cursor (and the slider);
+            // elsewhere the info hot regions select their line.
+            (_, CharacterOutcome::Select(_)) => {
+                self.character_outcome(outcome);
             }
-            return true;
+            (Some(CharacterControl::Tabs), _) => {}
+            _ => return false,
         }
-        // A press in the skill rows moves the cursor (and the slider).
-        if character::SKILL_ROWS.contains(point) {
-            let row = character::skill_row(point[1]);
-            if let Some(screen) = self.character_mut() {
-                screen.cursor = row;
-            }
-            self.select_line(InfoLine::Skill(row));
-            return true;
-        }
-        match character::game_info_hit(point, folder, true) {
-            Some(line) => {
-                self.select_line(line);
-                true
-            }
-            None => false,
-        }
+        true
     }
     /// A left release; `over` tells whether it is over the held button.
     pub(crate) fn character_release(&mut self, point: Option<[i32; 2]>, over: bool) -> bool {
@@ -1019,7 +967,7 @@ impl MapPreview {
             return false;
         };
         match &mut screen.modal {
-            Some(Modal::Chooser(_)) => return self.chooser_release(point, over),
+            Some(Modal::Chooser(_)) => return self.chooser_release(point),
             Some(Modal::Refusal(notice)) => {
                 if notice.release(over).is_some() {
                     self.modal_sounds();
@@ -1046,28 +994,12 @@ impl MapPreview {
             }
             None => {}
         }
-        screen.repeat = None;
-        match screen.pressed.take() {
-            Some(Press::Done) if over => self.close_character(true),
-            Some(Press::Cancel) if over => self.close_character(false),
-            Some(Press::Print) if over => self.open_print(),
-            // The tabs act on release with `ib3p1xx1`: the folder by the
-            // pointer's screen x and its general card, redrawn even when
-            // already selected.
-            Some(Press::Tabs) => {
-                let Some(point) = point.filter(|point| character::FOLDER_TABS.contains(*point))
-                else {
-                    return true;
-                };
-                self.play_effect(TAB_SOUND, None);
-                let folder = Folder::at(point[0]);
-                if let Some(screen) = self.character_mut() {
-                    screen.folder = folder;
-                }
-                self.select_line(folder.general_line());
-            }
-            _ => return false,
+        let tabs = screen.ui.pressed() == Some(CharacterControl::Tabs);
+        let outcome = screen.ui.release(point);
+        if outcome == CharacterOutcome::None {
+            return tabs;
         }
+        self.character_outcome(outcome);
         true
     }
     /// One frame: a held slider or chooser arrow repeats while the pointer
@@ -1081,13 +1013,12 @@ impl MapPreview {
         let mut changed = screen
             .roll
             .is_some_and(|(_, _, start)| now.saturating_sub(start) <= 2 * ROLL_MS);
-        let over = |rect: Rect| pointer.is_some_and(|point| rect.contains(point));
-        if let Some(plus) = poll_repeat(&mut screen.repeat, now, over) {
+        if let Some(plus) = screen.ui.tick(now, pointer) {
             changed = true;
             if !self.skill_step(plus)
                 && let Some(screen) = self.character_mut()
             {
-                screen.repeat = None;
+                screen.ui.stop_slider();
             }
         }
         let Some(screen) = self.character_mut() else {
@@ -1095,13 +1026,7 @@ impl MapPreview {
         };
         match &mut screen.modal {
             Some(Modal::Chooser(chooser)) => {
-                chooser.list.idle(now);
-                if let Some(up) = poll_repeat(&mut chooser.repeat, now, over) {
-                    if up {
-                        chooser.list.up();
-                    } else {
-                        chooser.list.down();
-                    }
+                if chooser.window.tick(now, pointer) {
                     self.chooser_moved();
                     changed = true;
                 }
@@ -1186,7 +1111,7 @@ impl MapPreview {
             &mut image,
             &character::info_card(screen.selected, Some(&folders)),
         );
-        for (rect, caption, id) in CAPTIONS {
+        for (rect, caption, id) in BUTTON_CAPTIONS {
             let message = ("editor.msg", id);
             self.draw_captioned_red_button(&painter, &mut image, rect, message, caption, 80);
         }
@@ -1414,6 +1339,7 @@ mod tests {
         test_support::{interactive, local_corpus},
     };
     use super::*;
+    use vault_core::ui::Rect;
 
     const EDITOR: &[u8] = b"{132}{}{At maximum level.}\n{133}{}{Unable to increment it.}\n\
         {134}{}{At minimum level.}\n{135}{}{Unable to decrement it.}\n\

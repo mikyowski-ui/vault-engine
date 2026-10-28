@@ -29,7 +29,7 @@
 use super::{
     MapPreview, Screen,
     counter::{CounterInput, counter_click, counter_key},
-    modal_kit::{self, red_button_sized},
+    modal_kit,
 };
 use crate::{AppResult, interface::Painter};
 pub(crate) use modal_kit::{ArrowPress, ItemMenu};
@@ -39,9 +39,12 @@ use vault_core::{
     items::EQUIPPED,
     skills::{self, Counter, ItemEntry},
     ui::{
-        ColorKey, ERROR_SOUND, Rect,
+        ColorKey, ERROR_SOUND, RED_BUTTON,
         automap::MOTION_SENSOR,
-        inventory::{self as layout, DropTarget},
+        inventory::{
+            self as layout, DropTarget, InventoryControl, InventoryKey, InventoryOutcome,
+            InventoryWindow, ListStep,
+        },
     },
 };
 use vault_formats::pro::{BasicFlags, ItemData};
@@ -90,15 +93,15 @@ struct Examine {
     weight: i64,
 }
 
+/// The open window: the core window (SPEC-020 §2.1: the list's scroll
+/// offset and the hand or arrow cursor; `offset` and `arrow` read through
+/// it), and the world objects only this layer holds.
 pub(crate) struct InventoryScreen {
+    window: InventoryWindow,
     /// The world action menu's target: the use-on window.
     pub target: Option<ObjectRef>,
     /// The open containers, outermost first; empty shows the player's list.
     pub path: Vec<ObjectRef>,
-    /// The list's scroll offset.
-    pub offset: usize,
-    /// The arrow cursor (else the hand).
-    pub arrow: bool,
     /// The lifted item and its source slot.
     pub held: Option<(Slot, ObjectRef)>,
     press: Option<ArrowPress>,
@@ -106,6 +109,17 @@ pub(crate) struct InventoryScreen {
     pub counter: Option<(Counter, Count)>,
     /// The stats panel's examine text, until the hand cursor returns.
     examine: Option<Examine>,
+}
+impl std::ops::Deref for InventoryScreen {
+    type Target = InventoryWindow;
+    fn deref(&self) -> &InventoryWindow {
+        &self.window
+    }
+}
+impl std::ops::DerefMut for InventoryScreen {
+    fn deref_mut(&mut self) -> &mut InventoryWindow {
+        &mut self.window
+    }
 }
 impl InventoryScreen {
     /// The item a drag holds (the counter shows the arrow instead).
@@ -140,10 +154,9 @@ impl MapPreview {
     pub(crate) fn open_inventory_on(&mut self, target: Option<ObjectRef>) {
         if self.host.open_inventory() {
             self.screen = Screen::Inventory(InventoryScreen {
+                window: InventoryWindow::new(target.is_some()),
                 target,
                 path: Vec::new(),
-                offset: 0,
-                arrow: false,
                 held: None,
                 press: None,
                 menu: None,
@@ -259,27 +272,6 @@ impl MapPreview {
         }
         closed
     }
-    /// The filled slot under a point: a list row (at the scroll offset), a
-    /// hand or the armor.
-    fn slot_at(&self, point: [i32; 2]) -> Option<(Slot, ObjectRef)> {
-        let Screen::Inventory(screen) = &self.screen else {
-            return None;
-        };
-        if let Some(row) = (0..layout::ROWS).find(|row| layout::row_rect(*row).contains(point)) {
-            let entries = self.list_entries();
-            return entries
-                .get(screen.offset + row)
-                .map(|(item, _)| (Slot::List, *item));
-        }
-        [
-            (Slot::LeftHand, layout::LEFT_HAND),
-            (Slot::RightHand, layout::RIGHT_HAND),
-            (Slot::Armor, layout::ARMOR),
-        ]
-        .into_iter()
-        .find(|(_, rect)| rect.contains(point))
-        .and_then(|(slot, _)| Some((slot, self.slot_item(slot)?)))
-    }
     /// SPEC-005 §3.8 closing the window: the inventory window (not use-on)
     /// gives the player its figure art, so armor changes made in it show.
     pub(super) fn close_inventory(&mut self) {
@@ -289,9 +281,10 @@ impl MapPreview {
         }
         self.return_to_map();
     }
-    /// The red button at `origin`, sized by its art.
-    fn red_button(&self, origin: [i32; 2]) -> Rect {
-        red_button_sized(&self.painter(), origin)
+    /// The red button's size: its up art's (the fixed size when the art is
+    /// missing).
+    fn red_size(&self) -> Option<[i32; 2]> {
+        self.painter().size(RED_BUTTON.0)
     }
     pub(crate) fn inventory_key(&mut self, key: KeyCode) -> bool {
         let count = self.list_entries().len();
@@ -309,27 +302,23 @@ impl MapPreview {
         }
         // §3.34 keys: Esc, Up, Down and Ctrl+Q / Ctrl+X in both windows;
         // the use-on window adds Home, End, PgUp and PgDn (6 rows).
-        let rows = layout::ROWS;
-        let use_on = screen.target.is_some();
         let control = self.hud.modifiers[1];
-        match key {
-            KeyCode::Escape => self.close_inventory(),
-            KeyCode::ArrowUp | KeyCode::ArrowDown => {
-                modal_kit::scroll(&mut screen.offset, key == KeyCode::ArrowUp, rows, count);
-            }
-            KeyCode::KeyQ | KeyCode::KeyX if control => self.confirm_quit(),
-            KeyCode::Home if use_on => screen.offset = 0,
-            KeyCode::End if use_on => screen.offset = count.saturating_sub(rows),
-            KeyCode::PageUp if use_on => screen.offset = screen.offset.saturating_sub(rows),
-            KeyCode::PageDown if use_on => {
-                let next = screen.offset + rows;
-                screen.offset = if next + rows >= count {
-                    count.saturating_sub(rows)
-                } else {
-                    next
-                };
-            }
+        let input = match key {
+            KeyCode::Escape => InventoryKey::Escape,
+            KeyCode::ArrowUp => InventoryKey::Step(ListStep::Up),
+            KeyCode::ArrowDown => InventoryKey::Step(ListStep::Down),
+            KeyCode::KeyQ | KeyCode::KeyX if control => InventoryKey::Quit,
+            KeyCode::Home => InventoryKey::Step(ListStep::Home),
+            KeyCode::End => InventoryKey::Step(ListStep::End),
+            KeyCode::PageUp => InventoryKey::Step(ListStep::PageUp),
+            KeyCode::PageDown => InventoryKey::Step(ListStep::PageDown),
             _ => return false,
+        };
+        match screen.window.key(input, count) {
+            InventoryOutcome::None => return false,
+            InventoryOutcome::Close => self.close_inventory(),
+            InventoryOutcome::QuitConfirm => self.confirm_quit(),
+            _ => {}
         }
         true
     }
@@ -355,56 +344,65 @@ impl MapPreview {
         // A right press switches the cursor (only on the press, safe rule);
         // returning to the hand redraws the stats panel.
         if right {
-            screen.arrow = !screen.arrow;
+            let outcome = screen.window.right_press();
             screen.press = None;
-            if !screen.arrow {
+            if outcome == InventoryOutcome::Cursor(false) {
                 screen.examine = None;
             }
             return true;
         }
-        // Done (inventory) or Cancel (use-on): a red button sending Esc.
-        let (arrow, target) = (screen.arrow, screen.target);
-        let red = if target.is_some() {
-            layout::CANCEL
-        } else {
-            layout::DONE
+        let entries = self.list_entries();
+        let red_size = self.red_size();
+        let Screen::Inventory(screen) = &mut self.screen else {
+            return false;
         };
-        let red = self.red_button(red);
-        if red.contains(point) {
-            self.press_button(red);
-            self.close_inventory();
-            return true;
-        }
-        // The scroll buttons move one row: up from a positive offset, down
-        // while offset + 6 is below the entry count.
-        let count = self.list_entries().len();
-        for (rect, down) in [(layout::SCROLL_UP.0, false), (layout::SCROLL_DOWN.0, true)] {
-            if rect.contains(point) {
-                self.press_button(rect);
-                if let Screen::Inventory(screen) = &mut self.screen {
-                    modal_kit::scroll(&mut screen.offset, !down, layout::ROWS, count);
+        let (arrow, target) = (screen.arrow, screen.target);
+        let layout = screen.window.layout(red_size);
+        let held = layout.hit(point).and_then(|control| layout.rect(control));
+        let (slot, item) = match screen.window.press(point, entries.len(), red_size) {
+            // Done (inventory) or Cancel (use-on): a red button sending Esc.
+            InventoryOutcome::Close => {
+                if let Some(rect) = held {
+                    self.press_button(rect);
+                }
+                self.close_inventory();
+                return true;
+            }
+            // The scroll buttons move one row: up from a positive offset,
+            // down while offset + 6 is below the entry count.
+            InventoryOutcome::Scrolled(_) => {
+                if let Some(rect) = held {
+                    self.press_button(rect);
                 }
                 return true;
             }
-        }
-        let Some((slot, item)) = self.slot_at(point) else {
             // The figure goes up one container level.
-            if !arrow && layout::FIGURE.contains(point) {
+            InventoryOutcome::UpLevel => {
                 self.close_container();
+                return true;
             }
-            return true;
+            InventoryOutcome::Entry(index) => (Slot::List, entries[index].0),
+            InventoryOutcome::Slot(control) => {
+                let slot = match control {
+                    InventoryControl::LeftHand => Slot::LeftHand,
+                    InventoryControl::RightHand => Slot::RightHand,
+                    _ => Slot::Armor,
+                };
+                let Some(item) = self.slot_item(slot) else {
+                    return true;
+                };
+                (slot, item)
+            }
+            _ => return true,
         };
         // The use-on window has only the list: the hand cursor uses the
         // pressed row's item on the target, the arrow cursor examines it
         // or opens its menu.
-        if let Some(target) = target {
-            if !arrow && slot == Slot::List {
-                self.use_on_target(item, target);
-                return true;
-            }
-            if slot != Slot::List {
-                return true;
-            }
+        if let Some(target) = target
+            && !arrow
+        {
+            self.use_on_target(item, target);
+            return true;
         }
         let clock = self.clock;
         let has_art = self.item_icon(item).is_some();
@@ -943,8 +941,13 @@ impl MapPreview {
         for (rect, up, down) in [layout::SCROLL_UP, layout::SCROLL_DOWN] {
             self.draw_button(&painter, &mut image, rect, (up, down));
         }
-        let red = self.red_button(if use_on { layout::CANCEL } else { layout::DONE });
-        self.draw_button(&painter, &mut image, red, layout::RED_BUTTON);
+        if let Some(red) = screen
+            .window
+            .layout(self.red_size())
+            .rect(InventoryControl::Close)
+        {
+            self.draw_button(&painter, &mut image, red, layout::RED_BUTTON);
+        }
         self.draw_figure(&mut image);
         if !use_on {
             self.draw_slots(&mut image, lifted);

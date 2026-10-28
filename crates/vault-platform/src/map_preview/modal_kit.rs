@@ -3,24 +3,26 @@
 //! The modal screens over the map (inventory, loot, barter, character,
 //! Pip-Boy, save/load, options, Skilldex, elevator, called shot, dialog
 //! boxes and the conversation's windows) share their window-relative
-//! rectangle math, their red and two-state buttons, the SPEC-014 §3.13
-//! large dialog box and the held-button repeat here. The item windows'
-//! shared parts (the arrow cursor's press and menu, the entry grid, the
-//! portraits, the counter and the engine-drawn buttons) are in `items`.
+//! rectangle math, their red and two-state buttons and the SPEC-014 §3.13
+//! large dialog box's drawing here. The item windows' shared parts (the
+//! arrow cursor's press and menu, the entry grid, the portraits, the
+//! counter and the engine-drawn buttons) are in `items`.
 //!
-//! Everything here draws or hit-tests exactly as the screens did on their
-//! own; only where the code lives changed.
+//! SPEC-020 §2.1: the screens' modal state, hit boxes and held-button
+//! repeats are `vault_core::ui`'s; what is here only draws, or adapts a
+//! core rectangle to the screen.
 use super::MapPreview;
 use crate::interface::Painter;
 use vault_core::ui::{
-    ColorKey, HoldRepeat, RED_BUTTON, Rect,
+    ColorKey, RED_BUTTON, Rect,
     flow::{self, DialogButton},
+    red_button,
 };
 use vault_render::IndexedImage;
 
 mod items;
 
-pub(crate) use items::{ArrowPress, ItemMenu, clamp_offsets, hover, scroll};
+pub(crate) use items::{ArrowPress, ItemMenu, clamp_offsets, hover};
 
 /// A window-relative rectangle on the screen, for the window at `origin`.
 pub(crate) const fn at(origin: [i32; 2], rect: Rect) -> Rect {
@@ -30,39 +32,6 @@ pub(crate) const fn at(origin: [i32; 2], rect: Rect) -> Rect {
 /// A window-relative point on the screen, for the window at `origin`.
 pub(crate) const fn offset(origin: [i32; 2], point: [i32; 2]) -> [i32; 2] {
     [origin[0] + point[0], origin[1] + point[1]]
-}
-
-/// A screen point relative to the window at `origin`.
-pub(crate) const fn local(point: [i32; 2], origin: [i32; 2]) -> [i32; 2] {
-    [point[0] - origin[0], point[1] - origin[1]]
-}
-
-/// The red button's fixed 15-by-16 rectangle with its top-left at `origin`.
-pub(crate) const fn red_button(origin: [i32; 2]) -> Rect {
-    Rect::new(origin[0], origin[1], RED_BUTTON.2[0], RED_BUTTON.2[1])
-}
-
-/// The red button at `origin`, sized by its up art (the fixed size when
-/// the art is missing).
-pub(crate) fn red_button_sized(painter: &Painter, origin: [i32; 2]) -> Rect {
-    let [w, h] = painter.size(RED_BUTTON.0).unwrap_or(RED_BUTTON.2);
-    Rect::new(origin[0], origin[1], w, h)
-}
-
-/// One frame of a held, repeating button: the repeat ends when `over`
-/// says the pointer has left its rectangle, else its action comes back
-/// when the repeat fires.
-pub(crate) fn poll_repeat<K: Copy>(
-    held: &mut Option<(K, Rect, HoldRepeat)>,
-    now: u64,
-    over: impl FnOnce(Rect) -> bool,
-) -> Option<K> {
-    let (action, rect, repeat) = held.as_mut()?;
-    if !over(*rect) {
-        *held = None;
-        return None;
-    }
-    repeat.poll(now).then_some(*action)
 }
 
 /// A large dialog box's red buttons on the screen, for the box at

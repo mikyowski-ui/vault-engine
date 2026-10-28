@@ -20,18 +20,36 @@
 use super::{
     MapPreview, Screen,
     counter::{CounterInput, counter_click, counter_key},
-    modal_kit::{self, ArrowPress, ItemMenu, at},
+    modal_kit::{self, ArrowPress, ItemMenu},
 };
 use crate::AppResult;
+/// The `enhanced` party Trade window's engine-drawn WIELD button and the
+/// plate naming the member's held weapon (barter-window coordinates), side
+/// by side along the middle panel's top edge, above the two tables' slots.
+/// Fallout 2's `barter.frm` is the same frame as Fallout 1's, so they
+/// clear its native buttons, slots and portraits in both games.
+pub(crate) use vault_core::ui::inventory::{TRADE_WIELD, TRADE_WIELD_LABEL};
 use vault_core::{
     ObjectAction, ObjectRef,
     barter::{BarterSession, Trade},
     skills::{self, Counter, ItemEntry},
-    ui::{ColorKey, ERROR_SOUND, Rect, inventory as layout},
+    ui::{
+        ColorKey, ERROR_SOUND, Rect,
+        inventory::{
+            self as layout, BARTER_BUTTON_SOUNDS, BARTER_ICONS, BARTER_OFFER, BARTER_PORTRAITS,
+            BARTER_ROWS as ROWS, BARTER_SCROLL, BARTER_SUBWINDOW as SUBWINDOW, BARTER_TALK,
+            BARTER_WINDOW as WINDOW, BarterControl, BarterView, scroll_list,
+        },
+    },
 };
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
+/// The open window. SPEC-020 §2.1: its hit boxes are the core's
+/// [`layout::barter_layout`] over a [`BarterView`] filled from this state,
+/// and its drops follow [`layout::barter_drop`]; the trade rules are
+/// `vault_core::barter`'s. The core keeps no barter window state, so the
+/// offsets and the cursor are the caller's with the world objects.
 pub(crate) struct BarterScreen {
     pub session: BarterSession,
     /// Scroll offsets by column: player inventory, player table, merchant
@@ -88,128 +106,17 @@ impl BarterScreen {
     }
 }
 
-const WINDOW: [i32; 2] = [0, 289];
-const SUBWINDOW: [i32; 2] = [80, 290];
-const ROWS: usize = 3;
-/// Per column (subwindow coordinates): the slot buttons and icon boxes.
-const SLOTS: [[i32; 2]; 4] = [[29, 35], [165, 20], [250, 20], [395, 35]];
-const ICONS: [([i32; 2], [i32; 2]); 4] = [
-    ([26, 39], [59, 40]),
-    ([169, 24], [56, 40]),
-    ([254, 24], [56, 40]),
-    ([397, 39], [56, 40]),
-];
-const SLOT: [i32; 2] = [64, 48];
-/// Scroll buttons (subwindow coordinates): column, up, rectangle, and the
-/// up and down art.
-const SCROLL: [(usize, bool, Rect, &str, &str); 8] = [
-    (
-        0,
-        true,
-        Rect::new(109, 56, 23, 24),
-        "di_up1.frm",
-        "di_up2.frm",
-    ),
-    (
-        0,
-        false,
-        Rect::new(109, 82, 24, 25),
-        "di_down1.frm",
-        "di_down2.frm",
-    ),
-    (
-        3,
-        true,
-        Rect::new(342, 56, 23, 24),
-        "di_up1.frm",
-        "di_up2.frm",
-    ),
-    (
-        3,
-        false,
-        Rect::new(342, 82, 24, 25),
-        "di_down1.frm",
-        "di_down2.frm",
-    ),
-    (
-        1,
-        true,
-        Rect::new(128, 113, 22, 23),
-        "invupout.frm",
-        "invupin.frm",
-    ),
-    (
-        1,
-        false,
-        Rect::new(128, 136, 22, 23),
-        "invdnout.frm",
-        "invdnin.frm",
-    ),
-    (
-        2,
-        true,
-        Rect::new(333, 113, 22, 23),
-        "invupout.frm",
-        "invupin.frm",
-    ),
-    (
-        2,
-        false,
-        Rect::new(333, 136, 22, 23),
-        "invdnout.frm",
-        "invdnin.frm",
-    ),
-];
-/// Offer and Talk (barter-window coordinates): up `di_rdbt2.frm`, down
-/// `di_rdbt1.frm`.
-const OFFER: Rect = Rect::new(41, 163, 14, 14);
-const TALK: Rect = Rect::new(584, 162, 14, 14);
-/// The `enhanced` party Trade window's engine-drawn WIELD button and the
-/// plate naming the member's held weapon (barter-window coordinates), side
-/// by side along the middle panel's top edge, above the two tables' slots.
-/// Fallout 2's `barter.frm` is the same frame as Fallout 1's, so they
-/// clear its native buttons, slots and portraits in both games.
-pub(crate) const TRADE_WIELD: Rect = Rect::new(332, 4, 66, 15);
-pub(crate) const TRADE_WIELD_LABEL: Rect = Rect::new(240, 4, 88, 15);
-/// The portraits (barter-window coordinates), the player's and the
-/// merchant's; their invisible buttons go up one container level.
-const PORTRAITS: [(bool, Rect); 2] = [
-    (false, Rect::new(15, 25, 60, 100)),
-    (true, Rect::new(560, 25, 60, 100)),
-];
-/// Drop rectangles span screen y 310-454.
-const DROP_Y: std::ops::RangeInclusive<i32> = 310..=454;
-
-/// The route from a column: the destination column, its drop ranges in
-/// screen x, and the failure message. The player-table return also takes
-/// the visible player column (screen x 109-172) under the safe rule.
-fn route(column: usize) -> (usize, &'static [(i32, i32)], i32) {
-    match column {
-        0 => (1, &[(245, 309)], 26),
-        1 => (0, &[(80, 144), (109, 172)], 26),
-        2 => (3, &[(475, 539)], 25),
-        _ => (2, &[(330, 394)], 25),
-    }
-}
-
 /// The barter window's click targets (screen coordinates): the four
 /// columns' slots, the scroll buttons, the portraits, Offer and Talk.
 #[cfg(test)]
 pub(crate) fn trade_targets() -> Vec<Rect> {
-    let slots = (0..4).flat_map(|column| (0..ROWS).map(move |row| slot_rect(column, row)));
+    let slots =
+        (0..4).flat_map(|column| (0..ROWS).map(move |row| layout::barter_slot(column, row)));
     slots
-        .chain(SCROLL.map(|(_, _, rect, ..)| at(SUBWINDOW, rect)))
-        .chain(PORTRAITS.map(|(_, rect)| at(WINDOW, rect)))
-        .chain([OFFER, TALK].map(|rect| at(WINDOW, rect)))
+        .chain(BARTER_SCROLL.map(|(_, _, rect, ..)| rect.offset(SUBWINDOW)))
+        .chain(BARTER_PORTRAITS.map(|(_, rect)| rect.offset(WINDOW)))
+        .chain([BARTER_OFFER, BARTER_TALK].map(|rect| rect.offset(WINDOW)))
         .collect()
-}
-
-fn slot_rect(column: usize, row: usize) -> Rect {
-    let [x, y] = SLOTS[column];
-    at(
-        SUBWINDOW,
-        Rect::new(x, y + 48 * row as i32, SLOT[0], SLOT[1]),
-    )
 }
 
 impl MapPreview {
@@ -280,20 +187,40 @@ impl MapPreview {
                 .unwrap_or(roots[column])
         }))
     }
+    /// What the window shows, for the core layout.
+    fn barter_view(&self, screen: &BarterScreen) -> BarterView {
+        let counts = self.barter_owners().map_or([0; 4], |owners| {
+            owners.map(|owner| self.barter_entries(owner).len())
+        });
+        BarterView {
+            wield: self.trade_wield_shown(screen),
+            counts,
+            offsets: screen.offsets,
+        }
+    }
+    /// The control under a screen point, with its rectangle.
+    fn barter_control_at(&self, point: [i32; 2]) -> Option<(BarterControl, Rect)> {
+        let Screen::Barter(screen) = &self.screen else {
+            return None;
+        };
+        let layout = layout::barter_layout(&self.barter_view(screen));
+        let control = layout.hit(point)?;
+        Some((control, layout.rect(control)?))
+    }
     /// The filled entry at a screen point, and its column.
     fn barter_entry_at(&self, point: [i32; 2]) -> Option<(usize, ObjectRef, i32)> {
         let owners = self.barter_owners()?;
         let Screen::Barter(screen) = &self.screen else {
             return None;
         };
-        owners.iter().enumerate().find_map(|(column, owner)| {
-            let row = (0..ROWS).find(|row| slot_rect(column, *row).contains(point))?;
-            let (item, quantity) = self
-                .barter_entries(*owner)
-                .get(screen.offsets[column] + row)
-                .copied()?;
-            Some((column, item, quantity))
-        })
+        let Some((BarterControl::Slot { column, row }, _)) = self.barter_control_at(point) else {
+            return None;
+        };
+        let (item, quantity) = self
+            .barter_entries(owners[column])
+            .get(screen.offsets[column] + row)
+            .copied()?;
+        Some((column, item, quantity))
     }
     /// Whether a filled entry is under a screen point.
     pub(crate) fn barter_entry_at_point(&self, point: [i32; 2]) -> bool {
@@ -517,7 +444,7 @@ impl MapPreview {
         let Screen::Barter(screen) = &mut self.screen else {
             return;
         };
-        modal_kit::scroll(&mut screen.offsets[column], up, ROWS, count);
+        scroll_list(&mut screen.offsets[column], up, count, ROWS);
     }
     /// Keys: `m` offers, `t` and Esc leave; the scroll keys move one row.
     pub(crate) fn barter_key(&mut self, key: KeyCode) -> bool {
@@ -549,8 +476,6 @@ impl MapPreview {
         true
     }
     pub(crate) fn barter_click(&mut self, point: [i32; 2], right: bool) -> bool {
-        let wield =
-            matches!(&self.screen, Screen::Barter(screen) if self.trade_wield_shown(screen));
         let Screen::Barter(screen) = &mut self.screen else {
             return false;
         };
@@ -578,66 +503,65 @@ impl MapPreview {
             screen.hovered = None;
             return true;
         }
-        let window = modal_kit::local(point, WINDOW);
-        if OFFER.contains(window) {
-            self.press_button_cue(b"ib2p1xx1", b"ib2lu1x1", at(WINDOW, OFFER));
-            self.attempt_barter();
+        let Some((control, rect)) = self.barter_control_at(point) else {
             return true;
-        }
-        if TALK.contains(window) {
-            self.press_button_cue(b"ib2p1xx1", b"ib2lu1x1", at(WINDOW, TALK));
-            self.end_barter_screen();
-            return true;
-        }
-        if TRADE_WIELD.contains(window) && wield {
-            self.press_button(at(WINDOW, TRADE_WIELD));
-            let Screen::Barter(screen) = &mut self.screen else {
-                return true;
-            };
-            if let Err(error) = self.host.barter_wield(&mut screen.session) {
-                self.status = error.to_string().into_bytes();
+        };
+        let (press, release) = BARTER_BUTTON_SOUNDS;
+        match control {
+            BarterControl::Offer => {
+                self.press_button_cue(press.as_bytes(), release.as_bytes(), rect);
+                self.attempt_barter();
             }
-            self.drain_effects();
-            return true;
-        }
-        let local = modal_kit::local(point, SUBWINDOW);
-        if let Some((column, up, rect, ..)) =
-            SCROLL.iter().find(|(_, _, rect, ..)| rect.contains(local))
-        {
-            self.press_button(at(SUBWINDOW, *rect));
-            self.scroll_barter(*column, *up);
-            return true;
-        }
-        // A press on a filled slot: the hand lifts the entry (row + offset
-        // must stay below the column's length), the arrow waits for the
-        // release or the hold pulse.
-        let clock = self.clock;
-        if let Some((column, item, quantity)) = self.barter_entry_at(point) {
-            let Screen::Barter(screen) = &mut self.screen else {
-                return false;
-            };
-            if screen.arrow {
-                screen.press = Some((column, ArrowPress::new(item, clock)));
-            } else {
-                screen.held = Some((column, item, quantity));
-                self.play_effect(b"ipickup1", None);
+            BarterControl::Talk => {
+                self.press_button_cue(press.as_bytes(), release.as_bytes(), rect);
+                self.end_barter_screen();
             }
-            return true;
-        }
-        // The portraits go up one container level: the inventory column,
-        // else the side's table.
-        if let Some((merchant, _)) = PORTRAITS
-            .iter()
-            .find(|(_, rect)| at(WINDOW, *rect).contains(point))
-            && let Screen::Barter(screen) = &mut self.screen
-        {
-            let columns = if *merchant { [3, 2] } else { [0, 1] };
-            if let Some(column) = columns
-                .into_iter()
-                .find(|column| !screen.views[*column].is_empty())
-            {
-                screen.views[column].pop();
-                screen.offsets[column] = 0;
+            BarterControl::TradeWield => {
+                self.press_button(rect);
+                let Screen::Barter(screen) = &mut self.screen else {
+                    return true;
+                };
+                if let Err(error) = self.host.barter_wield(&mut screen.session) {
+                    self.status = error.to_string().into_bytes();
+                }
+                self.drain_effects();
+            }
+            BarterControl::Scroll { column, up } => {
+                self.press_button(rect);
+                self.scroll_barter(column, up);
+            }
+            // A press on a filled slot: the hand lifts the entry (row +
+            // offset must stay below the column's length), the arrow waits
+            // for the release or the hold pulse.
+            BarterControl::Slot { .. } => {
+                let clock = self.clock;
+                let Some((column, item, quantity)) = self.barter_entry_at(point) else {
+                    return true;
+                };
+                let Screen::Barter(screen) = &mut self.screen else {
+                    return false;
+                };
+                if screen.arrow {
+                    screen.press = Some((column, ArrowPress::new(item, clock)));
+                } else {
+                    screen.held = Some((column, item, quantity));
+                    self.play_effect(b"ipickup1", None);
+                }
+            }
+            // The portraits go up one container level: the inventory
+            // column, else the side's table.
+            BarterControl::Portrait { merchant } => {
+                let Screen::Barter(screen) = &mut self.screen else {
+                    return true;
+                };
+                let columns = if merchant { [3, 2] } else { [0, 1] };
+                if let Some(column) = columns
+                    .into_iter()
+                    .find(|column| !screen.views[*column].is_empty())
+                {
+                    screen.views[column].pop();
+                    screen.offsets[column] = 0;
+                }
             }
         }
         true
@@ -665,13 +589,7 @@ impl MapPreview {
         let Some((column, _, quantity)) = screen.held else {
             return false;
         };
-        let (_, ranges, _) = route(column);
-        let dropped = point.is_some_and(|[x, y]| {
-            DROP_Y.contains(&y)
-                && ranges
-                    .iter()
-                    .any(|(left, right)| (*left..=*right).contains(&x))
-        });
+        let dropped = point.is_some_and(|point| layout::barter_drop(column, point).is_some());
         if !dropped {
             screen.held = None;
         } else if quantity > 1 {
@@ -718,7 +636,7 @@ impl MapPreview {
         let Some((column, item, _)) = screen.held.take() else {
             return;
         };
-        let (to, _, failure) = route(column);
+        let (to, _, failure) = layout::barter_route(column);
         if let Err(error) = self
             .host
             .barter_move(owners[column], owners[to], item, quantity)
@@ -792,7 +710,7 @@ impl MapPreview {
         painter.blit_opaque(&mut image, "barter.frm", 0, WINDOW);
         for (column, owner) in owners.iter().enumerate() {
             let entries = self.barter_entries(*owner);
-            let ([ix, iy], [w, h]) = ICONS[column];
+            let ([ix, iy], [w, h]) = BARTER_ICONS[column];
             for (row, entry) in entries
                 .iter()
                 .skip(screen.offsets[column])
@@ -801,15 +719,15 @@ impl MapPreview {
             {
                 // G-19: ammunition counts rounds (SPEC-013 §3.16).
                 let lifted = screen.held.is_some_and(|(_, held, _)| held == entry.0);
-                let rect = at(SUBWINDOW, Rect::new(ix, iy + 48 * row as i32, w, h));
+                let rect = Rect::new(ix, iy + 48 * row as i32, w, h).offset(SUBWINDOW);
                 self.draw_entry(&painter, &mut image, rect, *entry, lifted);
             }
         }
-        for (_, _, rect, up, down) in SCROLL {
-            self.draw_button(&painter, &mut image, at(SUBWINDOW, rect), (up, down));
+        for (_, _, rect, up, down) in BARTER_SCROLL {
+            self.draw_button(&painter, &mut image, rect.offset(SUBWINDOW), (up, down));
         }
-        for (merchant, rect) in PORTRAITS {
-            self.draw_barter_portrait(&mut image, screen, merchant, at(WINDOW, rect));
+        for (merchant, rect) in BARTER_PORTRAITS {
+            self.draw_barter_portrait(&mut image, screen, merchant, rect.offset(WINDOW));
         }
         for (text, x) in [
             (format!("${}", self.barter_offer_value()), 169),
@@ -825,13 +743,13 @@ impl MapPreview {
                 80,
             );
         }
-        for rect in [OFFER, TALK] {
+        for rect in [BARTER_OFFER, BARTER_TALK] {
             let art = ("di_rdbt2.frm", "di_rdbt1.frm");
-            self.draw_button(&painter, &mut image, at(WINDOW, rect), art);
+            self.draw_button(&painter, &mut image, rect.offset(WINDOW), art);
         }
         if self.trade_wield_shown(screen) {
             let weapon = self.host.barter_held_weapon(&screen.session);
-            let rects = [at(WINDOW, TRADE_WIELD), at(WINDOW, TRADE_WIELD_LABEL)];
+            let rects = [TRADE_WIELD, TRADE_WIELD_LABEL].map(|rect| rect.offset(WINDOW));
             self.draw_wield(&painter, &mut image, rects, weapon);
         }
         if let Some((_, menu)) = &screen.menu {

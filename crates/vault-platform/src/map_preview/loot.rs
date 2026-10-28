@@ -10,18 +10,34 @@
 use super::{
     MapPreview, Screen,
     counter::{CounterInput, counter_click, counter_key},
-    modal_kit::{self, ArrowPress, ItemMenu, at},
+    modal_kit::{self, ArrowPress, ItemMenu},
 };
 use crate::{AppResult, interface::Painter};
+/// The engine-drawn Take All, Distance and WIELD buttons and the WIELD
+/// label (window-relative), as the core lays them out.
+pub(crate) use vault_core::ui::inventory::{
+    LOOT_DISTANCE as DISTANCE, LOOT_TAKE_ALL as TAKE_ALL, LOOT_WIELD as WIELD,
+    LOOT_WIELD_LABEL as WIELD_LABEL,
+};
 use vault_core::{
     ObjectRef,
     loot::{LootMove, LootSession},
     skills::{self, Counter, ItemEntry},
-    ui::{ERROR_SOUND, Rect, fallout2 as ui2, inventory as layout},
+    ui::{
+        ERROR_SOUND, Rect, fallout2 as ui2,
+        inventory::{
+            self as layout, LOOT_CYCLE, LOOT_DONE, LOOT_PORTRAITS, LOOT_SCROLL, LootControl,
+            LootView, scroll_list,
+        },
+    },
 };
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
+/// The open window. SPEC-020 §2.1: its hit boxes are the core's
+/// [`layout::loot_layout`] over a [`LootView`] filled from this state; the
+/// core keeps no loot window state, so the offsets and the cursor are the
+/// caller's with the world objects.
 pub(crate) struct LootScreen {
     pub session: LootSession,
     /// Scroll offsets: player pane, target pane.
@@ -50,58 +66,19 @@ pub(crate) enum LootCount {
     Drop(ObjectRef),
 }
 
-const DONE: Rect = Rect::new(288, 328, 15, 16);
-/// The `enhanced` window's engine-drawn Take All button, centered over the
-/// middle panel above its emblem (the window's art has no such button).
-pub(crate) const TAKE_ALL: Rect = Rect::new(214, 236, 108, 20);
-/// The companion gear window's engine-drawn Distance toggle, above Take
-/// All.
-pub(crate) const DISTANCE: Rect = Rect::new(214, 210, 108, 20);
-/// The companion gear window's engine-drawn WIELD button, above Distance,
-/// and the label naming the held weapon above it.
-pub(crate) const WIELD: Rect = Rect::new(214, 184, 108, 20);
-pub(crate) const WIELD_LABEL: Rect = Rect::new(214, 168, 108, 12);
-/// Body cycling (sending PgUp and PgDn) with its up and down art.
-const CYCLE: [(Rect, bool, &str, &str); 2] = [
-    (Rect::new(436, 162, 20, 18), false, "slu.frm", "sld.frm"),
-    (Rect::new(456, 162, 20, 18), true, "sru.frm", "srd.frm"),
-];
-/// The portrait boxes and their hot zones, which go up one container
-/// level: the player's (under the safe rule over the drawn portrait at
-/// (176, 37), with item slots winning) and the target's.
-const PORTRAITS: [(bool, Rect); 2] = [
-    (false, Rect::new(176, 37, 60, 100)),
-    (true, Rect::new(297, 37, 60, 100)),
-];
-const SLOT: [i32; 2] = [64, 48];
-const SCROLL: [(bool, bool, Rect); 4] = [
-    (false, true, Rect::new(128, 39, 22, 23)),
-    (false, false, Rect::new(128, 62, 22, 23)),
-    (true, true, Rect::new(379, 39, 22, 23)),
-    (true, false, Rect::new(379, 62, 22, 23)),
-];
-
 /// The Gear window's click targets other than WIELD (window
 /// coordinates): the item slots, scroll and body-cycling buttons, the
 /// portraits, Done, and the engine-drawn Take All and Distance.
 #[cfg(test)]
 pub(crate) fn gear_targets() -> Vec<Rect> {
-    let slots = (0..skills::LOOT_ROWS).flat_map(|row| [slot(false, row), slot(true, row)]);
+    let slots = (0..skills::LOOT_ROWS)
+        .flat_map(|row| [layout::loot_slot(false, row), layout::loot_slot(true, row)]);
     slots
-        .chain(SCROLL.map(|(_, _, rect)| rect))
-        .chain(CYCLE.map(|(rect, ..)| rect))
-        .chain(PORTRAITS.map(|(_, rect)| rect))
-        .chain([DONE, TAKE_ALL, DISTANCE])
+        .chain(LOOT_SCROLL.map(|(_, _, rect)| rect))
+        .chain(LOOT_CYCLE.map(|(rect, ..)| rect))
+        .chain(LOOT_PORTRAITS.map(|(_, rect)| rect))
+        .chain([LOOT_DONE, TAKE_ALL, DISTANCE])
         .collect()
-}
-
-fn slot(target: bool, row: usize) -> Rect {
-    let [x, y] = if target {
-        skills::loot_target_slot(row)
-    } else {
-        skills::loot_player_slot(row)
-    };
-    Rect::new(x, y, SLOT[0], SLOT[1])
 }
 
 impl MapPreview {
@@ -177,7 +154,7 @@ impl MapPreview {
         for target in [false, true] {
             self.draw_loot_portrait(&mut image, screen, target);
         }
-        for (_, up, rect) in SCROLL {
+        for (_, up, rect) in LOOT_SCROLL {
             let art = if up {
                 ("invupout.frm", "invupin.frm")
             } else {
@@ -186,15 +163,18 @@ impl MapPreview {
             self.draw_button(&painter, &mut image, on_screen(rect), art);
         }
         if screen.session.bodies.len() > 1 {
-            for (rect, _, up, down) in CYCLE {
+            for (rect, _, up, down) in LOOT_CYCLE {
                 self.draw_button(&painter, &mut image, on_screen(rect), (up, down));
             }
         }
-        self.draw_red_button(&painter, &mut image, on_screen(DONE));
+        self.draw_red_button(&painter, &mut image, on_screen(LOOT_DONE));
         if self.take_all_shown(screen) {
             // SPEC-019 §3.7: Fallout 2's Take All pair at the enhanced
             // button's place, with the art's own size.
-            let pressed = self.held == Some(on_screen(self.take_all_rect()));
+            let take_all = self
+                .take_all_size()
+                .map_or(TAKE_ALL, |size| Rect::at(TAKE_ALL.origin(), size));
+            let pressed = self.held == Some(on_screen(take_all));
             let art = self
                 .host
                 .world
@@ -249,7 +229,7 @@ impl MapPreview {
         } else {
             (self.host.figure_art(shown, self.active_item(), 3), 3, false)
         };
-        let rect = on_screen(PORTRAITS[usize::from(target)].1);
+        let rect = on_screen(LOOT_PORTRAITS[usize::from(target)].1);
         self.draw_portrait(image, fid, (direction, last), rect);
     }
     pub(super) fn close_loot_screen(&mut self) {
@@ -268,20 +248,38 @@ impl MapPreview {
             _ => Vec::new(),
         }
     }
+    /// What the window shows, for the core layout.
+    fn loot_view(&self, screen: &LootScreen) -> LootView {
+        LootView {
+            companion: screen.session.companion,
+            take_all: self.take_all_shown(screen).then(|| self.take_all_size()),
+            bodies: screen.session.bodies.len(),
+            counts: [false, true].map(|target| self.host.loot_items(&screen.session, target).len()),
+            offsets: screen.offsets,
+        }
+    }
+    /// The control under a screen point, with its rectangle.
+    fn loot_control_at(&self, point: [i32; 2]) -> Option<(LootControl, Rect)> {
+        let Screen::Loot(screen) = &self.screen else {
+            return None;
+        };
+        let layout = layout::loot_layout(&self.loot_view(screen));
+        let control = layout.hit(point)?;
+        Some((control, layout.rect(control)?))
+    }
     /// The filled entry at a screen point, and its pane.
     fn loot_entry_at(&self, point: [i32; 2]) -> Option<(bool, ObjectRef, i32)> {
         let Screen::Loot(screen) = &self.screen else {
             return None;
         };
-        let local = modal_kit::local(point, skills::LOOT_ORIGIN);
-        [false, true].into_iter().find_map(|target| {
-            let row = (0..skills::LOOT_ROWS).find(|row| slot(target, *row).contains(local))?;
-            let entries = self.host.loot_items(&screen.session, target);
-            let (item, quantity) = entries
-                .get(screen.offsets[usize::from(target)] + row)
-                .copied()?;
-            Some((target, item, quantity))
-        })
+        let Some((LootControl::Slot { target, row }, _)) = self.loot_control_at(point) else {
+            return None;
+        };
+        let entries = self.host.loot_items(&screen.session, target);
+        let (item, quantity) = entries
+            .get(screen.offsets[usize::from(target)] + row)
+            .copied()?;
+        Some((target, item, quantity))
     }
     /// Whether a filled loot or barter entry is under a screen point (for
     /// the pick cursor).
@@ -395,12 +393,8 @@ impl MapPreview {
     }
     pub(crate) fn loot_click(&mut self, point: [i32; 2], right: bool) -> bool {
         let clock = self.clock;
+        let control = self.loot_control_at(point);
         let entry = self.loot_entry_at(point);
-        let take_all = self.take_all_rect();
-        let take_all_shown = match &self.screen {
-            Screen::Loot(screen) => self.take_all_shown(screen),
-            _ => false,
-        };
         let Screen::Loot(screen) = &mut self.screen else {
             return false;
         };
@@ -427,65 +421,63 @@ impl MapPreview {
             screen.hovered = None;
             return true;
         }
-        let local = modal_kit::local(point, skills::LOOT_ORIGIN);
-        if DONE.contains(local) {
-            self.press_button(on_screen(DONE));
-            self.close_loot_screen();
+        let Some((control, rect)) = control else {
             return true;
-        }
-        if DISTANCE.contains(local) && screen.session.companion {
-            let companion = screen.session.root;
-            self.press_button(on_screen(DISTANCE));
-            self.host.cycle_companion_distance(companion);
-            return true;
-        }
-        if WIELD.contains(local) && screen.session.companion {
-            self.press_button(on_screen(WIELD));
-            let Screen::Loot(screen) = &mut self.screen else {
-                return true;
-            };
-            if let Err(error) = self.host.loot_wield(&mut screen.session) {
-                self.status = error.to_string().into_bytes();
+        };
+        match control {
+            LootControl::Done => {
+                self.press_button(rect);
+                self.close_loot_screen();
             }
-            self.drain_effects();
-            return true;
-        }
-        if take_all.contains(local) && take_all_shown {
-            self.press_button(on_screen(take_all));
-            self.loot_take_all();
-            return true;
-        }
-        if let Some((target, up, rect)) = SCROLL.iter().find(|(_, _, rect)| rect.contains(local)) {
-            let index = usize::from(*target);
-            let count = self.host.loot_items(&screen.session, *target).len();
-            modal_kit::scroll(&mut screen.offsets[index], *up, skills::LOOT_ROWS, count);
-            self.press_button(on_screen(*rect));
-            return true;
-        }
-        if screen.session.bodies.len() > 1
-            && let Some((rect, forward, ..)) = CYCLE.iter().find(|(rect, ..)| rect.contains(local))
-        {
-            screen.session.cycle(*forward);
-            screen.offsets[1] = 0;
-            self.press_button(on_screen(*rect));
-            return true;
-        }
-        // A press on a filled entry: the hand lifts it, the arrow waits for
-        // the release or the hold pulse.
-        if let Some((target, item, quantity)) = entry {
-            if screen.arrow {
-                screen.press = Some((target, ArrowPress::new(item, clock)));
-                return true;
+            LootControl::Distance => {
+                let companion = screen.session.root;
+                self.press_button(rect);
+                self.host.cycle_companion_distance(companion);
             }
-            screen.session.press();
-            screen.held = Some((target, item, quantity));
-            self.play_effect(b"ipickup1", None);
-            return true;
-        }
-        // The portrait hot zones go up one container level.
-        if let Some((target, _)) = PORTRAITS.iter().find(|(_, rect)| rect.contains(local)) {
-            screen.session.up(*target);
-            screen.offsets[usize::from(*target)] = 0;
+            LootControl::Wield => {
+                self.press_button(rect);
+                let Screen::Loot(screen) = &mut self.screen else {
+                    return true;
+                };
+                if let Err(error) = self.host.loot_wield(&mut screen.session) {
+                    self.status = error.to_string().into_bytes();
+                }
+                self.drain_effects();
+            }
+            LootControl::TakeAll => {
+                self.press_button(rect);
+                self.loot_take_all();
+            }
+            LootControl::Scroll { target, up } => {
+                let count = self.host.loot_items(&screen.session, target).len();
+                let offset = &mut screen.offsets[usize::from(target)];
+                scroll_list(offset, up, count, skills::LOOT_ROWS);
+                self.press_button(rect);
+            }
+            LootControl::Cycle { forward } => {
+                screen.session.cycle(forward);
+                screen.offsets[1] = 0;
+                self.press_button(rect);
+            }
+            // A press on a filled entry: the hand lifts it, the arrow waits
+            // for the release or the hold pulse.
+            LootControl::Slot { .. } => {
+                let Some((target, item, quantity)) = entry else {
+                    return true;
+                };
+                if screen.arrow {
+                    screen.press = Some((target, ArrowPress::new(item, clock)));
+                    return true;
+                }
+                screen.session.press();
+                screen.held = Some((target, item, quantity));
+                self.play_effect(b"ipickup1", None);
+            }
+            // The portrait hot zones go up one container level.
+            LootControl::Portrait { target } => {
+                screen.session.up(target);
+                screen.offsets[usize::from(target)] = 0;
+            }
         }
         true
     }
@@ -578,7 +570,7 @@ impl MapPreview {
                 let target = control;
                 let count = self.host.loot_items(&screen.session, target).len();
                 let offset = &mut screen.offsets[usize::from(target)];
-                modal_kit::scroll(offset, key == KeyCode::ArrowUp, skills::LOOT_ROWS, count);
+                scroll_list(offset, key == KeyCode::ArrowUp, count, skills::LOOT_ROWS);
             }
             KeyCode::PageUp | KeyCode::PageDown => {
                 screen.session.cycle(key == KeyCode::PageDown);
@@ -602,9 +594,9 @@ impl MapPreview {
     fn take_all_shown(&self, screen: &LootScreen) -> bool {
         (self.enhanced_extras() || self.host.world.fallout2.is_some()) && !screen.session.steal
     }
-    /// The Take All button's window rectangle: the enhanced one, or under
-    /// Fallout 2 its art's size at the same place.
-    fn take_all_rect(&self) -> Rect {
+    /// Fallout 2's Take All art size (the button sits at the enhanced
+    /// one's place); `None` keeps the enhanced button's size.
+    fn take_all_size(&self) -> Option<[i32; 2]> {
         let painter = self.painter();
         self.host
             .world
@@ -612,9 +604,7 @@ impl MapPreview {
             .as_ref()
             .and_then(|_| painter.role(&ui2::TAKE_ALL[0]))
             .and_then(|(_, art)| art.frame(0, 0).map(|frame| (frame.width, frame.height)))
-            .map_or(TAKE_ALL, |(w, h)| {
-                Rect::new(TAKE_ALL.x, TAKE_ALL.y, i32::from(w), i32::from(h))
-            })
+            .map(|(w, h)| [i32::from(w), i32::from(h)])
     }
     /// G-20 Take All (Shift+A, or the enhanced button): refused silently
     /// in steal sessions by the host.
@@ -631,5 +621,5 @@ impl MapPreview {
 
 /// A window-relative rectangle on the screen.
 const fn on_screen(rect: Rect) -> Rect {
-    at(skills::LOOT_ORIGIN, rect)
+    rect.offset(skills::LOOT_ORIGIN)
 }

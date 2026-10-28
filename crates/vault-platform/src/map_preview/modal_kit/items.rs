@@ -85,16 +85,6 @@ impl ItemMenu {
     }
 }
 
-/// One row of scrolling: up from a positive offset, down while `offset +
-/// rows` is below the entry count.
-pub(crate) fn scroll(offset: &mut usize, up: bool, rows: usize, count: usize) {
-    if up {
-        *offset = offset.saturating_sub(1);
-    } else if *offset + rows < count {
-        *offset += 1;
-    }
-}
-
 /// Each scroll offset stays within its list's entries (a move, a trade or
 /// a container change can shorten a list under a scrolled view). Returns
 /// whether any offset changed.
