@@ -1499,4 +1499,163 @@ mod tests {
         assert!(!map.movie_active());
         assert!(map.host.world.clock.ticks > ticks);
     }
+
+    /// A replay of `log` from `args` whose worlds draw through `renderer`:
+    /// after each record, the composed frame (the enhanced frame's world
+    /// canvas and interface while the world shows one, else the Vanilla
+    /// frame), then the final report.
+    fn render_path_replay(
+        args: PreviewArgs,
+        renderer: crate::map_preview::SharedRenderer,
+        log: &str,
+    ) -> (Vec<Vec<u8>>, ReplayReport) {
+        let mut session = session(args);
+        interactive_world(&mut session)
+            .unwrap()
+            .set_scene_renderer(renderer);
+        let mut replay = Replay::new(session).unwrap();
+        let mut frames = Vec::new();
+        for line in log.lines() {
+            replay.run(format!("{line}\n").as_bytes()).unwrap();
+            let frame = match replay.enhanced_frame().unwrap() {
+                Some(frame) => [frame.world.pixels(), frame.ui.pixels()].concat(),
+                None => replay.session.image().unwrap().pixels().to_vec(),
+            };
+            frames.push(frame);
+        }
+        (frames, replay.finish(None).unwrap())
+    }
+
+    /// SPEC-022 §3.13 rule 2 and §4 T13: a log replays to the same frames
+    /// and the same digest on both render paths. The instanced path (here
+    /// on `instanced`) drew the supported frames itself, and the frames it
+    /// refused were drawn by the reference path, so they are equal too.
+    /// Returns the instanced session's refreshes and refusal causes.
+    fn assert_replays_match(
+        args: &PreviewArgs,
+        log: &str,
+        instanced: crate::map_preview::SharedRenderer,
+    ) -> (vault_debug::FrameRender, Vec<&'static str>) {
+        let reference = crate::map_preview::SharedRenderer::default();
+        let (expected, expected_report) = render_path_replay(args.clone(), reference.clone(), log);
+        let (frames, report) = render_path_replay(args.clone(), instanced.clone(), log);
+        assert_eq!(expected.len(), frames.len());
+        for (index, (expected, frame)) in expected.iter().zip(&frames).enumerate() {
+            assert!(
+                expected == frame,
+                "record {} differs between the paths",
+                index + 1
+            );
+        }
+        assert_eq!(report, expected_report);
+        // A plain replay (no extra compositions) also ends in that digest.
+        let plain = |renderer: crate::map_preview::SharedRenderer| {
+            let mut session = session(args.clone());
+            interactive_world(&mut session)
+                .unwrap()
+                .set_scene_renderer(renderer);
+            replay(session, log.as_bytes(), None).unwrap()
+        };
+        assert_eq!(plain(instanced.clone()), plain(reference.clone()));
+        let totals = reference.session_totals();
+        assert_eq!(totals.refreshes(), totals.reference, "{totals:?}");
+        assert!(reference.logged_causes().is_empty());
+        (instanced.session_totals(), instanced.logged_causes())
+    }
+
+    /// The Vanilla dialogue log: every refresh is supported (no shroud, no
+    /// roof peek) and drawn by the instanced path, on the CPU executor.
+    #[test]
+    fn a_vanilla_replay_is_the_same_on_both_render_paths() {
+        let dir = synthetic_corpus();
+        let renderer = crate::map_preview::test_support::cpu_renderer();
+        let (totals, causes) = assert_replays_match(&args(dir.path()), DIALOGUE_LOG, renderer);
+        assert!(totals.instanced > 0, "{totals:?}");
+        assert_eq!(totals.refused, 0, "{totals:?} {causes:?}");
+        assert_eq!(totals.reference, 0, "{totals:?}");
+        assert!(totals.draws < totals.instances, "{totals:?}");
+    }
+
+    /// The enhanced log: its unlocked world canvas has the shroud past the
+    /// grid, which no draw mode expresses (SPEC-022 §3.2), so the
+    /// instanced path refuses those refreshes and the reference path draws
+    /// them; the frames and the digest are still the reference's, and the
+    /// cause is counted for every refused refresh.
+    #[test]
+    fn an_enhanced_replay_falls_back_where_refused_and_matches() {
+        let dir = synthetic_corpus();
+        let args = PreviewArgs {
+            preset: vault_core::EnginePreset::Enhanced,
+            ..args(dir.path())
+        };
+        let renderer = crate::map_preview::test_support::cpu_renderer();
+        let (totals, causes) = assert_replays_match(&args, &enhanced_log(true), renderer.clone());
+        assert!(totals.refused > 0, "{totals:?}");
+        assert!(causes.contains(&"unexpressible draw"), "{causes:?}");
+        let counted: usize = causes.iter().map(|cause| renderer.refusals(cause)).sum();
+        assert_eq!(counted, totals.refused, "{causes:?}");
+        // The record without the enhanced presentation: Vanilla frames,
+        // drawn instanced.
+        let renderer = crate::map_preview::test_support::cpu_renderer();
+        let (totals, _) = assert_replays_match(&args, &enhanced_log(false), renderer);
+        assert!(totals.instanced > 0, "{totals:?}");
+    }
+
+    /// SPEC-022 §4 T11/T13 on the GPU: both logs replay to the reference's
+    /// frames and digests (a GPU test: it skips without an adapter unless
+    /// `VAULT_REQUIRE_GPU=1`).
+    #[test]
+    fn replays_on_the_gpu_match_the_reference() {
+        use crate::map_preview::{SharedRenderer, test_support};
+        let _gpu = test_support::gpu_lock();
+        let Some(gpu) = test_support::gpu_renderer() else {
+            return;
+        };
+        let renderer = SharedRenderer::from_renderer(gpu);
+        let dir = synthetic_corpus();
+        let (vanilla, causes) =
+            assert_replays_match(&args(dir.path()), DIALOGUE_LOG, renderer.clone());
+        if causes.is_empty() {
+            assert!(vanilla.instanced > 0 && vanilla.refused == 0, "{vanilla:?}");
+        }
+        let enhanced = PreviewArgs {
+            preset: vault_core::EnginePreset::Enhanced,
+            ..args(dir.path())
+        };
+        let (totals, causes) = assert_replays_match(&enhanced, &enhanced_log(true), renderer);
+        println!("GPU replays: {vanilla:?} then {totals:?}, fallbacks {causes:?}");
+        assert!(totals.refused > 0, "{totals:?}");
+    }
+
+    /// `--render-path instanced` as the shell passes it (`PreviewArgs`):
+    /// the replay's worlds draw on the instanced path (on the GPU, or on
+    /// the reference after a "no device" refusal without one), and the
+    /// digest is the reference path's. The setting adds no log record.
+    #[test]
+    fn the_render_path_setting_reaches_the_replayed_world() {
+        let _gpu = crate::map_preview::test_support::gpu_lock();
+        let dir = synthetic_corpus();
+        let instanced = PreviewArgs {
+            render_path: vault_render::RenderPath::Instanced,
+            ..args(dir.path())
+        };
+        let mut started = session(instanced.clone());
+        let world = interactive_world(&mut started).unwrap();
+        assert_eq!(
+            world.scene_renderer().path(),
+            vault_render::RenderPath::Instanced
+        );
+        drop(started);
+        let report = replay(session(instanced), DIALOGUE_LOG.as_bytes(), None).unwrap();
+        assert_eq!(report, replay_log(dir.path(), DIALOGUE_LOG));
+        assert_eq!(report.commands, 11);
+        let mut default = session(args(dir.path()));
+        assert_eq!(
+            interactive_world(&mut default)
+                .unwrap()
+                .scene_renderer()
+                .path(),
+            vault_render::RenderPath::Reference
+        );
+    }
 }

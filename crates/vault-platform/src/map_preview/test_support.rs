@@ -48,3 +48,40 @@ pub(crate) fn local_corpus() -> Option<Arc<dyn Vfs>> {
     }
     Some(Arc::new(LocalDirProvider::mount(dir).unwrap()))
 }
+
+/// The lock every SPEC-022 GPU test of this crate holds while it creates,
+/// uses and drops a device: some drivers (the software Vulkan one among
+/// them) crash when test threads create and destroy devices at once, as
+/// `vault_render`'s own GPU tests found.
+pub(crate) fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The instanced path on a GPU device, for a GPU test (SPEC-022 §4): `None`,
+/// after printing `skipped: no GPU adapter`, when no device can be
+/// created, unless `VAULT_REQUIRE_GPU` is `1`, when the test fails. The
+/// caller holds [`gpu_lock`] until the renderer is dropped.
+pub(crate) fn gpu_renderer() -> Option<vault_render::SceneRenderer> {
+    match vault_render::layers::gpu::GpuDevice::new() {
+        Ok(device) => {
+            println!("GPU adapter: {}", device.adapter());
+            Some(vault_render::SceneRenderer::with_device(device))
+        }
+        Err(error) => {
+            assert!(
+                std::env::var("VAULT_REQUIRE_GPU").as_deref() != Ok("1"),
+                "VAULT_REQUIRE_GPU=1 but {error}"
+            );
+            println!("skipped: no GPU adapter");
+            None
+        }
+    }
+}
+
+/// The instanced path on the CPU executor: the same canvases as the GPU
+/// executor, on any host.
+pub(crate) fn cpu_renderer() -> super::SharedRenderer {
+    super::SharedRenderer::from_renderer(vault_render::SceneRenderer::cpu())
+}

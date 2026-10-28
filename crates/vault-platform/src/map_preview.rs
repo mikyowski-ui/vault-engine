@@ -24,7 +24,6 @@ use vault_render::{
     dialogue::{self, ChoiceHit},
     map::{
         Cutout, MapArt, MapHover, MapLight, MapScene, MapView, RoofCutaway, SceneCursor, Shroud,
-        draw_map_scene, render_floor_lit,
     },
     outline::OutlineInks,
 };
@@ -70,6 +69,8 @@ mod pipboy;
 mod pointer;
 mod qol;
 mod saveload;
+pub(crate) mod scene_render;
+pub(crate) use scene_render::SharedRenderer;
 mod skilldex;
 mod talk;
 mod timer;
@@ -285,6 +286,11 @@ pub struct MapPreview {
     /// The `enhanced` preset's game speed, tactical overlay and HUD
     /// message (`qol`); inert under Vanilla.
     qol_state: qol::Qol,
+    /// SPEC-022 the session's world-canvas renderer (`render_path`): the
+    /// reference path unless the session asks for the instanced one.
+    scene_renderer: SharedRenderer,
+    /// How the last frame's refreshes were drawn (the F9 renderer page).
+    render_frame: vault_debug::FrameRender,
 }
 
 /// The map's sprites by tile index or object art. Each art file is read and
@@ -644,6 +650,8 @@ impl MapPreview {
             enhanced: None,
             touch: touchbar::TouchBar::default(),
             qol_state: qol::Qol::default(),
+            scene_renderer: SharedRenderer::default(),
+            render_frame: Default::default(),
         })
     }
     /// SPEC-014 §3.29 the keyboard for the engine key repeat: no input is
@@ -1330,6 +1338,9 @@ impl MapPreview {
             .and_then(|cursor| cursor.ring.as_ref())
             .and_then(|(art, origin)| Some((art.frame(0, 0)?, *origin)));
         let order = cursor.map_or(0, |cursor| self.cursor_order(&objects, cursor.hex));
+        // SPEC-022: each view is one refresh on the session's render path.
+        let shared = self.scene_renderer.clone();
+        let mut refreshes = scene_render::FrameRefreshes::new(&shared);
         let mut images = Vec::with_capacity(views.len());
         for &(view, [ox, oy]) in views {
             // SPEC-014 §3.44: floor tiles are lit per pixel from ten hex
@@ -1341,7 +1352,6 @@ impl MapPreview {
                 ambient,
                 tiles,
             };
-            let mut image = render_floor_lit(map, view, &self.art, light)?;
             let scene_cursor = cursor.map(|cursor| SceneCursor {
                 hex: cursor.hex,
                 order,
@@ -1369,9 +1379,10 @@ impl MapPreview {
                 overscan,
                 highlight,
             };
-            draw_map_scene(&mut image, map, &objects, view, &self.art, scene)?;
-            images.push(image);
+            // The floor, lit per pixel, then the scene's layers.
+            images.push(refreshes.render(map, &objects, view, &self.art, scene)?);
         }
+        self.render_frame = refreshes.counts;
         Ok(images)
     }
     /// SPEC-014 §3.27 / §3.44 the in-world cursor's place in the view

@@ -37,6 +37,11 @@ pub struct PreviewArgs {
     /// does not, as in a replay).
     #[arg(skip)]
     pub mod_export: Option<PathBuf>,
+    /// SPEC-022 §3.1 the world canvas's render path (`--render-path`, the
+    /// settings' `render_path`): the reference path unless one is named.
+    /// It changes no output, and is neither logged nor saved.
+    #[arg(skip)]
+    pub render_path: vault_render::RenderPath,
     /// Mount a loose directory: the whole asset source, or with DAT
     /// archives the loose patch root both databases consult first.
     #[arg(long, requires = "preview_asset", value_name = "PATH")]
@@ -698,6 +703,8 @@ impl PreviewArgs {
     pub fn load(&self) -> AppResult<Option<AssetPreview>> {
         let language = self.language.as_deref().unwrap_or("english");
         let save_root = self.save_dir.clone().unwrap_or_else(|| PathBuf::from("."));
+        // One world-canvas renderer for the session's worlds.
+        let renderer = crate::map_preview::SharedRenderer::new(self.render_path);
         if self.game {
             let mut game = crate::game::Game::new(
                 self.source()?,
@@ -714,6 +721,7 @@ impl PreviewArgs {
             game.enhanced = self.enhanced;
             game.touch_ui = self.touch_ui;
             game.mod_export = self.mod_export.clone();
+            game.renderer = renderer;
             // G-09: the preview and debug keys work in the game only with
             // the explicit flag.
             game.debug_keys = self.debug;
@@ -740,6 +748,7 @@ impl PreviewArgs {
                 touch_ui: self.touch_ui,
                 mod_export: self.mod_export.clone(),
                 debug_session: self.debug,
+                renderer,
             }
             .apply(&mut map, |map| {
                 if self.startup_movies {

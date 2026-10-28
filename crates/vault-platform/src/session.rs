@@ -367,6 +367,8 @@ pub(crate) struct WorldOptions {
     pub mod_export: Option<PathBuf>,
     /// A `--debug` session (debug-only world actions).
     pub debug_session: bool,
+    /// SPEC-022 the session's world-canvas renderer, shared by its worlds.
+    pub renderer: crate::map_preview::SharedRenderer,
 }
 
 impl WorldOptions {
@@ -383,6 +385,7 @@ impl WorldOptions {
         world.set_touch_ui(self.touch_ui);
         world.mod_export = self.mod_export;
         world.debug_session = self.debug_session;
+        world.set_scene_renderer(self.renderer);
     }
 }
 

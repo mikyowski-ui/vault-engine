@@ -143,6 +143,15 @@ struct Args {
     /// Default: the settings file's `default_zoom`, else 1.0.
     #[arg(long, value_name = "ZOOM", value_parser = zoom_arg)]
     zoom: Option<f32>,
+    /// How the world canvas is drawn (SPEC-022): `reference`, the CPU
+    /// compositor, or `instanced`, GPU-instanced sprite batches that draw
+    /// the same pixels and fall back to the reference for any refresh they
+    /// cannot draw exactly (or for the whole run without a GPU). Any preset
+    /// and game, replays and `--capture-gallery` included; never logged or
+    /// saved. Default: the settings file's `render_path`, else reference.
+    /// The F9 overlay's renderer page shows the path and its counts.
+    #[arg(long, value_name = "PATH", value_parser = render_path_arg)]
+    render_path: Option<vault_render::RenderPath>,
     /// Open the launcher (game data, display, audio and mod settings, then
     /// Play) even when the settings are complete. A start naming nothing
     /// opens it anyway while the settings name no valid game data.
@@ -164,6 +173,9 @@ fn preset_arg(text: &str) -> Result<config::Preset, String> {
 fn viewport_arg(text: &str) -> Result<enhanced::ViewportMode, String> {
     config::parse_viewport(text)
         .ok_or_else(|| "expected fixed_640x480 or unlocked_widescreen".into())
+}
+fn render_path_arg(text: &str) -> Result<vault_render::RenderPath, String> {
+    vault_render::RenderPath::parse(text).ok_or_else(|| "expected reference or instanced".into())
 }
 fn zoom_arg(text: &str) -> Result<f32, String> {
     config::parse_zoom(text).ok_or_else(|| "expected a number from 0.5 to 3.0".into())
@@ -286,6 +298,16 @@ fn launch_game_speed(
         .then(|| config.map_or_else(Default::default, config::Config::game_speed))
 }
 
+/// SPEC-022 §3.1 the render path a launch draws the world canvas with:
+/// `--render-path`, else the settings' `render_path`, else the reference
+/// path. A replay takes only the flag (it reads no settings).
+fn launch_render_path(args: &Args, config: Option<&config::Config>) -> vault_render::RenderPath {
+    let config = config.filter(|_| args.replay_inputs.is_none());
+    args.render_path
+        .or(config.and_then(|config| config.render_path))
+        .unwrap_or_default()
+}
+
 /// The settings with the enabled mod layers' `vault-mod.toml` `[enhanced]`
 /// settings over them ([`mods::with_mods`]), which [`resolve_launch`]
 /// then puts under the command line's flags. `None` for a replay, which
@@ -333,6 +355,7 @@ fn start(
     args.preview.enhanced = launch.enhanced;
     args.preview.touch_ui = launch.touch_ui;
     args.preview.mod_export = Some(mods::export_root(launch.mod_list.as_ref()));
+    args.preview.render_path = launch_render_path(args, config);
     let mut session =
         session::SessionRuntime::start(session::SessionConfig::new(origin, args.preview.clone()))?;
     // Audio serves an interactive world or a movie; sprites need none.
@@ -2069,7 +2092,7 @@ impl ApplicationHandler for Shell {
 
 fn run(mut args: Args) -> AppResult<()> {
     if let (Some(output), Some(stage)) = (&args.capture_gallery, &args.capture_stage) {
-        return gallery::capture(output, stage);
+        return gallery::capture(output, stage, args.render_path.unwrap_or_default());
     }
     if let Some(name) = &args.export_mod {
         // Only a settings file already there: an export never discovers
@@ -2097,6 +2120,7 @@ fn run(mut args: Args) -> AppResult<()> {
         // A replay takes nothing from the settings, but the command line's
         // game profile chooses the data's formats (SPEC-015/016).
         args.preview.game_profile = args.game_profile.unwrap_or_default();
+        args.preview.render_path = launch_render_path(&args, None);
         let session =
             session::SessionRuntime::start(session::SessionConfig::replay(args.preview.clone()))?
                 .ok_or("--replay-inputs requires a preview asset")?;
@@ -2676,6 +2700,52 @@ mod tests {
         let shown = parse(&["--launcher", "--viewport", "fixed_640x480", "--zoom", "3"]);
         let args = play_args(&shown, false);
         assert_eq!((args.viewport, args.zoom), (None, None));
+    }
+
+    /// SPEC-022 §3.1: `--render-path` wins over the settings' `render_path`,
+    /// which wins over the reference default; a replay takes the flag only;
+    /// Play keeps the flag (the launcher never saves it); anything else is
+    /// refused. The flag changes nothing else about the launch.
+    #[test]
+    fn the_render_path_flag_wins_over_the_settings_and_defaults_to_reference() {
+        use vault_render::RenderPath::{Instanced, Reference};
+        let file = config::Config {
+            render_path: Some(Instanced),
+            ..installed()
+        };
+        assert_eq!(launch_render_path(&parse(&[]), None), Reference);
+        assert_eq!(
+            launch_render_path(&parse(&[]), Some(&installed())),
+            Reference
+        );
+        assert_eq!(launch_render_path(&parse(&[]), Some(&file)), Instanced);
+        let flagged = parse(&["--render-path", "reference"]);
+        assert_eq!(launch_render_path(&flagged, Some(&file)), Reference);
+        let flagged = parse(&["--render-path", "instanced"]);
+        assert_eq!(flagged.render_path, Some(Instanced));
+        assert_eq!(launch_render_path(&flagged, None), Instanced);
+        // A replay reads no settings.
+        let replay = parse(&["--replay-inputs", "log.jsonl", "--preview-map", "m.map"]);
+        assert_eq!(launch_render_path(&replay, Some(&file)), Reference);
+        let replay = parse(&[
+            "--replay-inputs",
+            "log.jsonl",
+            "--preview-map",
+            "m.map",
+            "--render-path",
+            "instanced",
+        ]);
+        assert_eq!(launch_render_path(&replay, Some(&file)), Instanced);
+        // The rest of the launch is the same with or without it.
+        let plain = resolve_launch(&mut parse(&[]), Some(&installed()));
+        let instanced = resolve_launch(&mut parse(&["--render-path", "instanced"]), Some(&file));
+        assert_eq!(plain, instanced);
+        // Play keeps the flag; bad values are refused.
+        let shown = parse(&["--launcher", "--render-path", "instanced"]);
+        assert_eq!(play_args(&shown, false).render_path, Some(Instanced));
+        for bad in ["gpu", "Instanced", ""] {
+            assert!(Args::try_parse_from(["vault-platform", "--render-path", bad]).is_err());
+        }
     }
 
     #[test]

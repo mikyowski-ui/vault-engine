@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use vault_core::GameProfile;
-use vault_render::ScalingMode;
+use vault_render::{RenderPath, ScalingMode};
 
 /// The settings file's name, looked up beside the executable first and
 /// then in the working directory.
@@ -268,6 +268,11 @@ pub struct Config {
     /// The `enhanced` preset's game speed (1.0, 1.5 or 2.0; unused under
     /// Vanilla).
     pub game_speed: Option<GameSpeed>,
+    /// SPEC-022 §3.1 the world canvas's render path, `reference` or
+    /// `instanced`, under every preset and game. The engine only reads it:
+    /// a rewrite keeps the file's own line, and nothing the engine chose
+    /// (such as `--render-path`) is ever written here, logged or saved.
+    pub render_path: Option<RenderPath>,
     /// Keys this engine does not know, in file order: ignored, but kept
     /// so that a rewrite does not lose them.
     pub unknown: Vec<(String, Value)>,
@@ -488,6 +493,12 @@ impl Config {
                     }
                 });
             }
+            "render_path" => {
+                let text = string(value)?;
+                self.render_path = Some(RenderPath::parse(&text).ok_or_else(|| {
+                    format!("`render_path` is \"reference\" or \"instanced\", not \"{text}\"")
+                })?);
+            }
             "game_speed" => {
                 let expects = "`game_speed` is 1.0, 1.5 or 2.0";
                 let factor = value.number().ok_or_else(|| expects.to_owned())?;
@@ -592,6 +603,9 @@ impl Config {
         }
         if let Some(speed) = self.game_speed {
             line("game_speed", float(f64::from(speed.factor())));
+        }
+        if let Some(path) = self.render_path {
+            line("render_path", quote(path.name()));
         }
         for (key, value) in &self.unknown {
             line(
@@ -778,7 +792,7 @@ impl Config {
     }
 }
 
-const KNOWN: [&str; 18] = [
+const KNOWN: [&str; 19] = [
     "master_dat",
     "critter_dat",
     "data_root",
@@ -796,6 +810,7 @@ const KNOWN: [&str; 18] = [
     "roof_peek",
     "ui_scale",
     "game_speed",
+    "render_path",
     "load_order",
 ];
 
@@ -1477,6 +1492,50 @@ future_float = 5e-1
             ("game_speed = 0", "not 0"),
             ("game_speed = \"2x\"", "`game_speed` is 1.0, 1.5 or 2.0"),
             ("game_speed = true", "`game_speed` is 1.0, 1.5 or 2.0"),
+        ] {
+            let error = Config::parse(&format!("audio = true\n{text}")).unwrap_err();
+            assert_eq!(error.line, 2, "{text}");
+            assert!(error.to_string().contains(message), "{text}: {error}");
+        }
+    }
+
+    /// SPEC-022 §3.1 `render_path`: either path parses, the file's own
+    /// line survives a rewrite, a file without one gets none, and anything
+    /// else names its line.
+    #[test]
+    fn the_render_path_parses_round_trips_and_names_bad_values() {
+        assert_eq!(Config::default().render_path, None);
+        for (text, path) in [
+            ("render_path = \"reference\"", RenderPath::Reference),
+            ("render_path = 'instanced'", RenderPath::Instanced),
+        ] {
+            let config = Config::parse(text).unwrap();
+            assert_eq!(config.render_path, Some(path), "{text}");
+            assert!(config.unknown.is_empty());
+            let written = config.to_toml().unwrap();
+            assert!(
+                written.contains(&format!("render_path = \"{}\"\n", path.name())),
+                "{written}"
+            );
+            assert_eq!(Config::parse(&written).unwrap(), config);
+        }
+        let written = Config::parse("preset = \"enhanced\"\n")
+            .unwrap()
+            .to_toml()
+            .unwrap();
+        assert!(!written.contains("render_path"), "{written}");
+        assert_eq!(
+            Config::parse("render_path = \"reference\"\nrender_path = \"instanced\"")
+                .unwrap_err()
+                .to_string(),
+            "line 2: duplicate key `render_path`"
+        );
+        for (text, message) in [
+            (
+                "render_path = \"gpu\"",
+                "`render_path` is \"reference\" or \"instanced\", not \"gpu\"",
+            ),
+            ("render_path = true", "`render_path` expects a string"),
         ] {
             let error = Config::parse(&format!("audio = true\n{text}")).unwrap_err();
             assert_eq!(error.line, 2, "{text}");

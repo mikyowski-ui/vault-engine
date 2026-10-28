@@ -260,7 +260,8 @@ device closed, as `--no-audio` does), plus the enhanced preset's
 `viewport_mode`, `default_zoom`, `smooth_camera`, `roof_peek` and
 `ui_scale` (see [Enhanced viewport & camera](#enhanced-viewport--camera))
 and `game_speed` (`1.0`, the default, `1.5` or `2.0`; see
-[Quality of life](#quality-of-life)).
+[Quality of life](#quality-of-life)), and `render_path` (`reference`, the
+default, or `instanced`; see [Render path](#render-path)).
 
 Under `fallout2` the data is read in Fallout 2's formats:
 - SPEC-015 archives, mounted as SPEC-018 §1 says: an optional
@@ -298,6 +299,48 @@ format. What is found is written to a new `vault-engine.toml`, the game named
 by `--game-profile` (else the first found) active. Command-line flags always
 win over the file. When that still names no game data that validates, the
 launcher opens instead (below).
+
+### Render path
+
+SPEC-022 gives the world canvas two render paths. Both draw the same 8-bit
+indexed canvas, byte for byte; the display stage after it (palette, cycling,
+brightness, scaling, the interface frame) is shared.
+
+```sh
+cargo run -p vault-platform -- --render-path instanced
+```
+
+- **`reference`** (the default everywhere: the desktop shell, replays and
+  the documentation gallery) is the CPU compositor of `vault_render::map`.
+- **`instanced`** draws each refresh with GPU-instanced sprite batches
+  (`vault_render::SceneRenderer`): one draw call per batch, and a snapshot
+  copy per batch of canvas-reading draws (translucency, the player cutout,
+  translucent outlines). Its GPU device is created on the first refresh and
+  shared by every world of the session.
+- **Fallback.** A refresh the instanced path cannot draw exactly is drawn by
+  the reference path, and its cause is logged once per session. Refused
+  today, besides SPEC-022 §3.12's error states: the `enhanced` unlocked
+  view's shroud past the grid (so every unlocked widescreen refresh falls
+  back), the cursor roof peek, and a cutout drawn without a light. Without a
+  GPU adapter or device, or after a lost device, the reference path draws
+  the rest of the session.
+- **Selection.** `--render-path reference|instanced`, else the settings'
+  `render_path`, else `reference`. It is read under every preset and game,
+  since it changes no output. A replay takes only the flag, and the
+  shell's hidden `--capture-gallery` honors it too.
+- **Never recorded.** The setting writes no input-log record, changes no
+  replay record or digest, and is never written to a save. The launcher
+  does not save the flag, and a rewrite of `vault-engine.toml` keeps the
+  file's own `render_path` line as it was.
+- **Metrics.** The F9 overlay's Renderer page shows the path and its counts
+  (see [Game flow and interface](#game-flow-and-interface-spec-013-spec-014)).
+
+The vault-platform tests check the parity: the map view over a short play
+session, the Vanilla and enhanced replay logs (frame by frame and by
+digest), and every world file of the gallery, each on the reference path
+and on the instanced path. The CPU executor runs everywhere. The GPU
+variants skip with `skipped: no GPU adapter` unless `VAULT_REQUIRE_GPU=1`,
+and one lock serialises their device creation.
 
 ### Launcher
 
@@ -604,7 +647,7 @@ takes this section's viewport and camera only.
   off the 200×200 grid is shrouded, in a flat dark colour rather than
   drawn as empty space.
 - **Debug camera.** On the **F9** overlay, **F8** reaches a Camera page in
-  the unlocked view; the Vanilla page cycle is unchanged.
+  the unlocked view, between the Spawn and Renderer pages.
   - **F** toggles the "unbounded free-cam and roof cutaway": no bounds, no
     clamp and no roofs.
   - **C** runs a camera demo: a pan, a 2× zoom, a shake with an X-ray peek,
@@ -962,7 +1005,8 @@ with the same engine key repeats (SPEC-014 §3.29). A log without a leading
 simulated 16 ms frame on a 960 x 640 surface. Command identifiers must increase; replay stops at `quit` or an unconsumed
 Escape. The digest covers the central save (or its encoding error), every
 working saved map, the automap (for a map preview or the game's world), and the
-presented frame with its palette.
+presented frame with its palette. `--render-path instanced` replays on the
+instanced path, and the digest is the same as on the reference path.
 Replays, like every headless `WorldHost`, complete movies immediately
 (`MoviePolicy::CompleteImmediately`), so a script's `playmovie` never waits;
 the desktop map preview plays them and waits (`MoviePolicy::WaitUntilFinished`).
@@ -1686,9 +1730,23 @@ the map view shows the newest changes (also logged at debug level, target
 click on the map selects an object instead of acting, showing its id, PID,
 FID, script, AI packet, team, HP/AP, flags and LVARs, with LVAR edits and
 **H** for a full heal), GVAR and MVAR editors, Map jump (any numbered map, an
-elevation and an optional tile) and Spawn (PID and quantity). Up/Down choose a
-row, digits and Minus type, Backspace deletes and Enter commits. The overlay
-never changes the world itself: each commit becomes a
+elevation and an optional tile), Spawn (PID and quantity), the unlocked
+view's Camera page, and Renderer. Up/Down choose a row, digits and Minus
+type, Backspace deletes and Enter commits.
+
+The Renderer page is read-only, so every key but F8 and F9 passes through to
+the world. It shows the world canvas's [render path](#render-path) metrics
+(`vault_debug::RenderMetrics`):
+- the path, and on `instanced` its executor: `GPU` and the adapter's name,
+  or `no GPU device: reference` after a device failure;
+- the last frame's refreshes, one for the map view or one per tile of the
+  unlocked canvas, split into instanced ones and fallbacks;
+- the instanced refreshes' sprite instances, draw calls (one per batch) and
+  snapshot copies (one per canvas-reading batch);
+- the session's refreshes and fallbacks, and each fallback cause with its
+  count.
+
+The overlay never changes the world itself: each commit becomes a
 `vault_core::debug::DebugCommand` (`SetGlobalVar`, `SetMapVar`,
 `SetObjectLocalVar`, `TeleportMap`, `SpawnItem`, `HealCritter`, objects named
 by map object id) that the shell logs as a `debug` record and then applies, so

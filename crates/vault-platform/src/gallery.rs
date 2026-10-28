@@ -11,6 +11,11 @@
 //! `Fallout/` (MASTER.DAT and CRITTER.DAT) and `Fallout 2/` (master.dat
 //! and critter.dat). Each session runs on a fixed clock, so the same
 //! sources give the same files byte for byte.
+//!
+//! Every showcase session draws its world canvas through one SPEC-022
+//! renderer: the reference path by default, or the path `--render-path`
+//! names. The instanced path draws the same canvases, so the files are
+//! the same on both paths.
 mod demos;
 mod encode;
 
@@ -20,17 +25,20 @@ use crate::{
     enhanced::EnhancedSettings,
     enhanced_layers,
     launcher::{self, Launcher, Setup, color, font},
-    map_preview::MapPreview,
+    map_preview::{MapPreview, SharedRenderer},
     preview::{AssetPreview, PreviewArgs},
     replay::{enhanced_layout, interactive_world, pointer_at},
     session::{SessionConfig, SessionOrigin, SessionRuntime},
     side_tiles,
 };
 use encode::Indexed;
-use std::path::{Path, PathBuf};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+};
 use vault_core::{EnginePreset, GameProfile, WorldEffect, camera::CameraCommand};
 use vault_formats::{HexGrid, Palette, pro::Category};
-use vault_render::IndexedImage;
+use vault_render::{IndexedImage, RenderPath};
 
 /// The GIFs' frame rate: delays alternate 3, 3 and 4 hundredths.
 const FPS: u64 = 30;
@@ -44,11 +52,39 @@ const WIDE: [u32; 2] = [854, 480];
 const BAND: u32 = 28;
 const DIVIDER: u32 = 4;
 
-/// Write the gallery into `output` from the inputs staged in `stage`. The
-/// launcher's picture names the staged installs by paths relative to
-/// `stage`, as a user's settings would, so the process must run there
-/// (`cargo xtask capture-gallery` starts it there).
-pub fn capture(output: &Path, stage: &Path) -> AppResult<()> {
+thread_local! {
+    /// SPEC-022 the renderer every showcase session started on this thread
+    /// draws its world canvas with ([`with_renderer`]): the reference path
+    /// unless a capture names another.
+    static RENDERER: RefCell<SharedRenderer> = RefCell::new(SharedRenderer::default());
+}
+
+/// Run `capture` with every showcase session it starts drawing through
+/// `renderer`, one renderer (and GPU device) for them all; the renderer
+/// before it is back afterwards, even after a panic.
+fn with_renderer<T>(renderer: SharedRenderer, capture: impl FnOnce() -> T) -> T {
+    struct Restore(Option<SharedRenderer>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                RENDERER.with(|slot| slot.replace(previous));
+            }
+        }
+    }
+    let _restore = Restore(Some(RENDERER.with(|slot| slot.replace(renderer))));
+    capture()
+}
+
+/// Write the gallery into `output` from the inputs staged in `stage`, the
+/// world canvases drawn on `path` (SPEC-022: the files are the same on
+/// either). The launcher's picture names the staged installs by paths
+/// relative to `stage`, as a user's settings would, so the process must
+/// run there (`cargo xtask capture-gallery` starts it there).
+pub fn capture(output: &Path, stage: &Path, path: RenderPath) -> AppResult<()> {
+    with_renderer(SharedRenderer::new(path), || capture_files(output, stage))
+}
+
+fn capture_files(output: &Path, stage: &Path) -> AppResult<()> {
     let output = std::path::absolute(output)?;
     let stage = std::path::absolute(stage)?;
     if std::env::current_dir()? != stage {
@@ -60,29 +96,35 @@ pub fn capture(output: &Path, stage: &Path) -> AppResult<()> {
     }
     std::fs::create_dir_all(&output)?;
     let corpus = stage.join("corpus");
-    let files: [(&str, Vec<u8>); 8] = [
-        ("compare-viewport.png", compare_viewport(&corpus)?),
-        ("launcher-overview.png", launcher_overview()?),
-        ("roof-xray-peek.gif", roof_peek(&corpus)?),
-        ("tactical-zoom.gif", tactical_zoom(&corpus)?),
-        ("combat-overlay.gif", movie(&corpus, demos::combat_overlay)?),
-        (
-            "widescreen-modals-qol.gif",
-            movie(&corpus, demos::widescreen_modals)?,
-        ),
-        // The export lands in the stage, named relative to it.
-        (
-            "f9-live-debugger.gif",
-            movie(&corpus, |corpus| demos::debugger(corpus, Path::new("mods")))?,
-        ),
-        ("touch-ui-menu.gif", movie(&corpus, demos::touch_menu)?),
-    ];
+    // The export lands in the stage, named relative to it.
+    let mut files = world_files(&corpus, Path::new("mods"))?;
+    files.insert(1, ("launcher-overview.png", launcher_overview()?));
     for (name, bytes) in files {
         let path = output.join(name);
         std::fs::write(&path, &bytes).map_err(|error| format!("{}: {error}", path.display()))?;
         println!("{name}: {} bytes", bytes.len());
     }
     Ok(())
+}
+
+/// The gallery's files that show the world, in capture order (every file
+/// but the launcher's): the debugger's export is written to `export`.
+fn world_files(corpus: &Path, export: &Path) -> AppResult<Vec<(&'static str, Vec<u8>)>> {
+    Ok(vec![
+        ("compare-viewport.png", compare_viewport(corpus)?),
+        ("roof-xray-peek.gif", roof_peek(corpus)?),
+        ("tactical-zoom.gif", tactical_zoom(corpus)?),
+        ("combat-overlay.gif", movie(corpus, demos::combat_overlay)?),
+        (
+            "widescreen-modals-qol.gif",
+            movie(corpus, demos::widescreen_modals)?,
+        ),
+        (
+            "f9-live-debugger.gif",
+            movie(corpus, |corpus| demos::debugger(corpus, export))?,
+        ),
+        ("touch-ui-menu.gif", movie(corpus, demos::touch_menu)?),
+    ])
 }
 
 /// A demonstration's frames as a looping GIF under the showcase's
@@ -121,6 +163,7 @@ fn showcase(corpus: &Path, preset: EnginePreset) -> SessionConfig {
 fn world(corpus: &Path, preset: EnginePreset) -> AppResult<SessionRuntime> {
     let mut preview = SessionRuntime::start(showcase(corpus, preset))?
         .ok_or("the showcase configuration names no map")?;
+    map(&mut preview).set_scene_renderer(RENDERER.with(|renderer| renderer.borrow().clone()));
     // The player at the building's door, the view over the building.
     let world = &mut map(&mut preview).host.world;
     let player = world.player;
@@ -581,5 +624,73 @@ mod tests {
             assert!(delays.len() > 15, "{name}: {} stored frames", delays.len());
         }
         assert!(export.join("enhanced-setup/vault-mod.toml").is_file());
+    }
+
+    /// The gallery's world files drawn through `renderer`. The debugger's
+    /// export goes to `mods` in `stage`, emptied first: its note names the
+    /// folder, so both runs export to the same one.
+    fn files_on(stage: &Path, renderer: SharedRenderer) -> Vec<(&'static str, Vec<u8>)> {
+        let export = stage.join("mods");
+        if export.exists() {
+            std::fs::remove_dir_all(&export).unwrap();
+        }
+        with_renderer(renderer, || {
+            world_files(&stage.join("corpus"), &export).unwrap()
+        })
+    }
+
+    /// The files are byte for byte the same on both paths; the instanced
+    /// session drew some refreshes itself and the rest (refused, such as
+    /// the unlocked view's shroud) by the reference path.
+    /// Returns its refreshes and refusal causes.
+    fn assert_gallery_matches(
+        instanced: SharedRenderer,
+    ) -> (vault_debug::FrameRender, Vec<&'static str>) {
+        let stage = stage();
+        let reference = SharedRenderer::default();
+        let expected = files_on(stage.path(), reference.clone());
+        let files = files_on(stage.path(), instanced.clone());
+        assert_eq!(expected.len(), 7);
+        for ((name, expected), (other, file)) in expected.iter().zip(&files) {
+            assert_eq!(name, other);
+            assert!(expected == file, "{name} differs between the render paths");
+        }
+        // The instanced session repeats every refresh of the reference one.
+        let drawn = reference.session_totals();
+        assert_eq!(drawn.refreshes(), drawn.reference, "{drawn:?}");
+        let totals = instanced.session_totals();
+        assert_eq!(totals.refreshes(), drawn.reference, "{totals:?}");
+        let causes = instanced.logged_causes();
+        let counted: usize = causes.iter().map(|cause| instanced.refusals(cause)).sum();
+        assert_eq!(counted, totals.refused, "{causes:?}");
+        (totals, causes)
+    }
+
+    /// The gallery comparison run on the CPU executor (any host): the same
+    /// files on both paths. The Vanilla picture of the comparison is drawn
+    /// instanced; the unlocked widescreen canvas has the shroud past the
+    /// grid, which the instanced path refuses, so it falls back.
+    #[test]
+    fn the_gallery_is_the_same_on_both_render_paths() {
+        let (totals, causes) =
+            assert_gallery_matches(crate::map_preview::test_support::cpu_renderer());
+        println!("gallery on the CPU executor: {totals:?}, fallbacks {causes:?}");
+        assert!(totals.instanced > 0, "{totals:?}");
+        assert!(totals.refused > 0, "{totals:?}");
+        assert_eq!(totals.reference, 0, "{totals:?}");
+        assert!(causes.contains(&"unexpressible draw"), "{causes:?}");
+    }
+
+    /// The same run on the GPU (a GPU test: it skips without an adapter
+    /// unless `VAULT_REQUIRE_GPU=1`).
+    #[test]
+    fn the_gallery_on_the_gpu_is_the_same_as_the_reference() {
+        let _gpu = crate::map_preview::test_support::gpu_lock();
+        let Some(gpu) = crate::map_preview::test_support::gpu_renderer() else {
+            return;
+        };
+        let (totals, causes) = assert_gallery_matches(SharedRenderer::from_renderer(gpu));
+        println!("gallery on the GPU: {totals:?}, fallbacks {causes:?}");
+        assert!(totals.refused > 0, "{totals:?}");
     }
 }

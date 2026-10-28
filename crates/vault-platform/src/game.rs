@@ -154,6 +154,9 @@ pub struct Game {
     pub game_speed: crate::enhanced::GameSpeed,
     /// Where each world's F9 overlay exports the current setup as a mod.
     pub mod_export: Option<PathBuf>,
+    /// SPEC-022 the session's world-canvas renderer, shared by every world
+    /// (the reference path unless `--render-path` names another).
+    pub renderer: crate::map_preview::SharedRenderer,
     sounds: crate::map_preview::SoundBank,
     finished: bool,
     /// SPEC-014 §3.2 a fade outside the world, and the six-bit levels shown
@@ -272,6 +275,7 @@ impl Game {
             touch_ui: false,
             game_speed: Default::default(),
             mod_export: None,
+            renderer: Default::default(),
             sounds: Default::default(),
             finished: false,
             fade: None,
@@ -622,6 +626,7 @@ impl Game {
             touch_ui: self.touch_ui,
             mod_export: self.mod_export.clone(),
             debug_session: self.debug_keys,
+            renderer: self.renderer.clone(),
         }
         .apply(&mut world, |_| {});
         world.init_game_speed(self.game_speed);

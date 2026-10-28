@@ -9,6 +9,8 @@
 //! - [`objects`]: map object and critter snapshots, filters, and diffs.
 //! - [`live`]: a live trace of a world's script execution, attached to its
 //!   host as the vault-core `VmObserver`.
+//! - [`render`]: the world-canvas renderer's metrics (SPEC-022 render path,
+//!   instance, draw and fallback counts) as overlay lines.
 //!
 //! Nothing here mutates world state; stepping drives the VM only through
 //! `Vm::run`. A frontend owns one [`Inspector`] and calls
@@ -27,6 +29,7 @@
 pub mod decode;
 pub mod live;
 pub mod objects;
+pub mod render;
 pub mod stepper;
 pub mod trace;
 pub mod watch;
@@ -34,6 +37,7 @@ pub mod watch;
 pub use decode::{DecodeError, Instruction, OpcodeClass};
 pub use live::LiveTrace;
 pub use objects::{CritterSnapshot, ObjectChange, ObjectFilter, ObjectSnapshot, ObjectTracker};
+pub use render::{FrameRender, RenderMetrics};
 pub use stepper::{RunStop, Stepper, StopReason, VmSnapshot};
 pub use trace::{StepOutcome, TraceEntry, TraceRing};
 pub use watch::{VarAddress, VarChange, VarScope, VarSnapshot, WatchList, Watcher};

@@ -13,7 +13,10 @@
 //! MVAR editors, the map jump and the item spawner, and in the unlocked
 //! `enhanced` view a camera page (F: the unbounded free camera with the
 //! roofs cut away; C: the camera demo), whose presentation actions are not
-//! debug commands and never reach the world. Editing is keyboard
+//! debug commands and never reach the world. The last page, the renderer,
+//! shows the SPEC-022 render path, the last frame's refreshes with their
+//! instance, draw-call and snapshot counts, and the session's fallbacks to
+//! the reference path ([`MapPreview::render_metrics`]). Editing is keyboard
 //! driven: Up/Down (PageUp/PageDown by 10) choose a row, digits and Minus
 //! type a value, Backspace deletes, Enter commits, H fully heals the
 //! inspected critter. The overlay never changes the world itself: each
@@ -58,6 +61,9 @@ pub(crate) enum Page {
     /// The `enhanced` camera's presentation tools (after the spawner, only
     /// in the unlocked enhanced view): the free camera and the camera demo.
     Camera,
+    /// Read-only: the world canvas's render path and its metrics
+    /// (SPEC-022 §3.7, §3.12), after the spawner and the camera page.
+    Renderer,
 }
 impl Page {
     fn next(self) -> Self {
@@ -67,7 +73,8 @@ impl Page {
             Self::Globals => Self::MapVars,
             Self::MapVars => Self::MapJump,
             Self::MapJump => Self::Spawn,
-            Self::Spawn | Self::Camera => Self::Watch,
+            Self::Spawn | Self::Camera => Self::Renderer,
+            Self::Renderer => Self::Watch,
         }
     }
     fn title(self) -> &'static str {
@@ -79,6 +86,7 @@ impl Page {
             Self::MapJump => "map jump",
             Self::Spawn => "item spawner",
             Self::Camera => "enhanced camera",
+            Self::Renderer => "renderer",
         }
     }
     /// The first row a page's cursor starts on.
@@ -313,7 +321,8 @@ impl MapPreview {
             self.thaw_view();
             return true;
         }
-        if page == Page::Watch {
+        // The read-only pages pass every other key through.
+        if matches!(page, Page::Watch | Page::Renderer) {
             return false;
         }
         // The camera page's presentation actions (not debug commands: the
@@ -385,7 +394,7 @@ impl MapPreview {
                 let index = overlay.cursor;
                 let typed = "type a number first";
                 let command = match page {
-                    Page::Watch | Page::Camera => Err(typed),
+                    Page::Watch | Page::Camera | Page::Renderer => Err(typed),
                     Page::Inspect => match (selected, overlay.value()) {
                         (None, _) => Err("no object selected"),
                         (Some(object), value) => value
@@ -443,7 +452,7 @@ impl MapPreview {
     fn debug_rows(&self, page: Page) -> usize {
         let world = &self.host.world;
         match page {
-            Page::Watch | Page::Camera => 0,
+            Page::Watch | Page::Camera | Page::Renderer => 0,
             Page::Inspect => self
                 .debug
                 .as_ref()
@@ -665,6 +674,12 @@ impl MapPreview {
                 );
                 for _ in lines.len()..6 {
                     line(image, "", ColorKey::WHITE);
+                }
+            }
+            Page::Renderer => {
+                line(image, "-- world canvas (SPEC-022) --", ColorKey::AMBER);
+                for text in self.render_metrics().lines() {
+                    line(image, &text, ColorKey::GREEN);
                 }
             }
             Page::Spawn => {
@@ -937,9 +952,74 @@ mod tests {
                 .is_err()
         );
         assert!(preview.debug.as_ref().unwrap().note.starts_with("refused"));
-        // F8 wraps to the watch view, which passes keys through again.
+        // F8 reaches the read-only renderer page, which passes keys
+        // through and shows the reference path (the default) ...
+        press(&mut preview, &[KeyCode::F8]);
+        assert_eq!(page(&preview), Page::Renderer);
+        assert!(!preview.debug_key(KeyCode::Enter));
+        assert!(!preview.debug_key(KeyCode::Digit1));
+        assert!(preview.take_debug_commands().is_empty());
+        let metrics = preview.render_metrics();
+        assert_eq!(metrics.path, "reference");
+        assert_eq!(metrics.executor, None);
+        assert!(metrics.refusals.is_empty());
+        preview.image().unwrap();
+        assert_eq!(
+            preview.last_frame_render(),
+            vault_debug::FrameRender {
+                reference: 1,
+                ..Default::default()
+            }
+        );
+        // ... and wraps to the watch view, which passes keys through again.
         press(&mut preview, &[KeyCode::F8]);
         assert_eq!(page(&preview), Page::Watch);
         assert!(!preview.debug_key(KeyCode::Enter));
+    }
+
+    /// The renderer page shows the metrics' lines: the reference path, then
+    /// the instanced path with its executor, the last frame's counts and
+    /// the session's; the map view left of the panel is the same on both.
+    #[test]
+    fn the_renderer_page_shows_the_render_path_and_its_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preview = world(dir.path());
+        preview.set_debug(true);
+        while page(&preview) != Page::Renderer {
+            press(&mut preview, &[KeyCode::F8]);
+        }
+        let reference = preview.image().unwrap();
+        let lines = preview.render_metrics().lines();
+        assert_eq!(lines[0], "render path: reference");
+        assert_eq!(lines[1], "last frame: 1 refresh, 0 instanced, 0 fell back");
+        preview.set_scene_renderer(crate::map_preview::test_support::cpu_renderer());
+        let instanced = preview.image().unwrap();
+        let metrics = preview.render_metrics();
+        assert_eq!(metrics.path, "instanced");
+        assert_eq!(metrics.executor.as_deref(), Some("CPU executor"));
+        let frame = metrics.frame;
+        assert_eq!((frame.refreshes(), frame.instanced), (1, 1), "{frame:?}");
+        assert!(frame.instances > 0 && frame.draws > 0, "{frame:?}");
+        assert_eq!(metrics.session, frame);
+        let lines = metrics.lines();
+        assert_eq!(lines[0], "render path: instanced (CPU executor)");
+        assert_eq!(lines[1], "last frame: 1 refresh, 1 instanced, 0 fell back");
+        assert_eq!(
+            lines[2],
+            format!(
+                "instances {}  draws {}  snapshots {}",
+                frame.instances, frame.draws, frame.snapshots
+            )
+        );
+        assert_eq!(lines.last().map(String::as_str), Some("fallbacks: none"));
+        let view = |image: &IndexedImage| -> Vec<u8> {
+            (0..380)
+                .flat_map(|y| {
+                    let row = (y * image.width()) as usize;
+                    image.pixels()[row..row + PANEL[0] as usize].to_vec()
+                })
+                .collect()
+        };
+        assert!(view(&reference) == view(&instanced), "the map views differ");
     }
 }
