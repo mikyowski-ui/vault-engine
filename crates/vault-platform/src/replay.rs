@@ -29,6 +29,7 @@ use crate::{
     input::{InputCommand, KeyRepeat, LoggedCommand, WheelUnit},
     map_preview::MapPreview,
     preview::AssetPreview,
+    session::{Advance, KeyPress, SessionRuntime},
 };
 use sha2::{Digest, Sha256};
 use std::io::BufRead;
@@ -154,7 +155,7 @@ pub struct ReplayReport {
 }
 
 pub struct Replay {
-    preview: AssetPreview,
+    session: SessionRuntime,
     surface: [u32; 2],
     image: [u32; 2],
     pointer: Option<[f64; 2]>,
@@ -172,14 +173,14 @@ pub struct Replay {
 }
 
 impl Replay {
-    /// Start from a loaded preview, presented once as the desktop does when
-    /// its window opens. A world never waits on movies here.
-    pub fn new(mut preview: AssetPreview) -> AppResult<Self> {
-        if let AssetPreview::Map(map) = &mut preview {
+    /// Start from a started session, presented once as the desktop does
+    /// when its window opens. A world never waits on movies here.
+    pub fn new(mut session: SessionRuntime) -> AppResult<Self> {
+        if let AssetPreview::Map(map) = &mut *session {
             map.host.movie_policy = MoviePolicy::CompleteImmediately;
         }
         let mut replay = Self {
-            preview,
+            session,
             surface: INITIAL_SURFACE,
             scaling: vault_render::ScalingMode::Integer,
             image: [0; 2],
@@ -243,7 +244,7 @@ impl Replay {
             // The replayed input may have committed overlay commands; the
             // desktop logged and applied those as their own `debug`
             // records, which this replay applies when it reaches them.
-            if let Some(world) = interactive_world(&mut self.preview) {
+            if let Some(world) = interactive_world(&mut self.session) {
                 world.take_debug_commands();
             }
         }
@@ -256,23 +257,26 @@ impl Replay {
     /// its simulated frames always had.
     fn frame(&mut self, now: u64, timed: bool) -> AppResult<()> {
         self.now = now;
-        let changed = self.preview.tick(now)?;
         if !timed {
+            let changed = self.session.tick(now)?;
             if changed {
                 self.present()?;
             }
-            self.stopped |= self.preview.finished();
+            self.stopped |= self.session.finished();
             return Ok(());
         }
-        if self.preview.finished() {
-            self.stopped = true;
-            return Ok(());
-        }
-        for key in self.repeat.poll(now, self.preview.keyboard()) {
-            self.press_key(key, self.preview.escape_exits())?;
-        }
-        if changed {
-            self.present()?;
+        // The desktop's frame step, shared through the session.
+        match self.session.advance(now, &mut self.repeat)? {
+            Advance::Finished => self.stopped = true,
+            Advance::Running { changed, due } => {
+                for key in due {
+                    let exits = self.session.escape_exits();
+                    self.press_key(key, exits)?;
+                }
+                if changed {
+                    self.present()?;
+                }
+            }
         }
         Ok(())
     }
@@ -281,10 +285,10 @@ impl Replay {
     /// the replay when `exits` (the desktop's standalone previews, or any
     /// preview for an older desktop).
     fn press_key(&mut self, key: KeyCode, exits: bool) -> AppResult<()> {
-        if self.preview.step(key) {
-            self.present()?;
-        } else if key == KeyCode::Escape && exits {
-            self.stopped = true;
+        match self.session.press_key(key, exits) {
+            KeyPress::Changed => self.present()?,
+            KeyPress::Exit => self.stopped = true,
+            KeyPress::Ignored => {}
         }
         Ok(())
     }
@@ -301,21 +305,21 @@ impl Replay {
         if self.enhanced_frame()?.is_some() {
             return Ok(());
         }
-        let image = self.preview.image()?;
+        let image = self.session.image()?;
         self.image = [image.width(), image.height()];
         Ok(())
     }
     /// The enhanced layout for the logged surface, while the world shows
     /// the unlocked viewport.
     fn layout(&mut self) -> Option<EnhancedLayout> {
-        enhanced_layout(&mut self.preview, self.surface)
+        enhanced_layout(&mut self.session, self.surface)
     }
     /// The enhanced frame for the logged surface, if the world shows one.
     fn enhanced_frame(&mut self) -> AppResult<Option<EnhancedFrame>> {
         let Some(layout) = self.layout() else {
             return Ok(None);
         };
-        self.preview.enhanced_frame(&layout).transpose()
+        self.session.enhanced_frame(&layout).transpose()
     }
     /// The pointer in both layers, with the layout, in enhanced routing.
     fn enhanced_pointer(&mut self) -> Option<PointerAt> {
@@ -341,7 +345,7 @@ impl Replay {
     /// composed again.
     fn hover(&mut self) -> AppResult<()> {
         if let Some(at) = self.enhanced_pointer() {
-            if self.pointer.is_some() && self.preview.enhanced_pointer(at) {
+            if self.pointer.is_some() && self.session.enhanced_pointer(at) {
                 self.compose()?;
             }
             return Ok(());
@@ -349,7 +353,7 @@ impl Replay {
         if let Some(point) = self.pointer.and_then(|point| {
             vault_render::frame_point_with(self.surface, self.image, self.scaling, point)
         }) {
-            self.preview.pointer_moved(point);
+            self.session.pointer_moved(point);
         }
         Ok(())
     }
@@ -377,11 +381,11 @@ impl Replay {
                     }
                 } else if !pressed {
                     self.repeat.release(key);
-                    self.preview.key_up(key);
+                    self.session.key_up(key);
                 } else if !repeat {
                     // The desktop ignores the OS repeats; the engine repeats.
-                    self.repeat.press(key, self.preview.keyboard());
-                    self.press_key(key, self.preview.escape_exits())?;
+                    self.repeat.press(key, self.session.keyboard());
+                    self.press_key(key, self.session.escape_exits())?;
                 }
             }
             InputCommand::Tick { now_ms } => self.frame(now_ms, timed)?,
@@ -396,7 +400,7 @@ impl Replay {
             }
             InputCommand::Focus { focused: false } => {
                 self.repeat.clear();
-                self.preview.focus_lost();
+                self.session.focus_lost();
             }
             InputCommand::PointerMoved { x, y } => {
                 self.pointer = Some([x, y]);
@@ -404,7 +408,7 @@ impl Replay {
             }
             InputCommand::PointerLeft => {
                 self.pointer = None;
-                self.preview.pointer_left();
+                self.session.pointer_left();
             }
             // The desktop's enhanced routing: a movie takes any button,
             // else the world takes the left, right and middle ones.
@@ -413,8 +417,8 @@ impl Replay {
                     return Ok(());
                 };
                 let at = self.enhanced_pointer();
-                if self.preview.movie_button(pressed)
-                    || at.is_some_and(|at| self.preview.enhanced_button(at, button, pressed))
+                if self.session.movie_button(pressed)
+                    || at.is_some_and(|at| self.session.enhanced_button(at, button, pressed))
                 {
                     self.present()?;
                 }
@@ -425,20 +429,21 @@ impl Replay {
                     "Right" => true,
                     _ => return Ok(()),
                 };
-                if !pressed && self.preview.release(self.pixel(), right) {
+                let pixel = self.pixel();
+                if !pressed && self.session.release(pixel, right) {
                     self.present()?;
                 }
                 if pressed
                     && let Some(pixel) = self.pixel()
-                    && self.preview.click(pixel, right)
+                    && self.session.click(pixel, right)
                 {
                     self.present()?;
                 }
             }
             InputCommand::Wheel { y, unit, .. } => {
                 let changed = match self.enhanced_pointer() {
-                    Some(at) => self.preview.enhanced_wheel(at, wheel_lines(y, unit)),
-                    None => self.preview.scroll(y),
+                    Some(at) => self.session.enhanced_wheel(at, wheel_lines(y, unit)),
+                    None => self.session.scroll(y),
                 };
                 if changed {
                     self.present()?;
@@ -459,12 +464,12 @@ impl Replay {
             }
             // The desktop applied the settings, then drew the frame.
             InputCommand::Enhanced { settings } => {
-                self.preview.set_enhanced(Some(settings.into()));
+                self.session.set_enhanced(Some(settings.into()));
                 self.present()?;
             }
             // The desktop showed the touch UI's pill bar from the start.
             InputCommand::TouchUi { enabled } => {
-                self.preview.set_touch_ui(enabled);
+                self.session.set_touch_ui(enabled);
                 self.present()?;
             }
             // The desktop applied the session's speed or an Alt+F change,
@@ -472,7 +477,7 @@ impl Replay {
             InputCommand::GameSpeed { speed } => {
                 let speed = GameSpeed::from_factor(f64::from(speed))
                     .ok_or_else(|| format!("game speed {speed} is not 1.0, 1.5 or 2.0"))?;
-                self.preview.set_game_speed(speed);
+                self.session.set_game_speed(speed);
                 self.present()?;
             }
             InputCommand::Modifiers {
@@ -480,12 +485,12 @@ impl Replay {
                 control,
                 alt,
                 ..
-            } => self.preview.set_modifiers([shift, control, alt]),
+            } => self.session.set_modifiers([shift, control, alt]),
             InputCommand::Quit => self.stopped = true,
             // The desktop applied the command right after logging it, then
             // drew the frame.
             InputCommand::Debug { command } => {
-                if let Some(world) = interactive_world(&mut self.preview) {
+                if let Some(world) = interactive_world(&mut self.session) {
                     world.take_debug_commands();
                     if world.apply_debug(&command).is_ok() || world.debug_enabled() {
                         self.compose()?;
@@ -517,7 +522,7 @@ impl Replay {
             digest.update((bytes.len() as u64).to_le_bytes());
             digest.update(bytes);
         };
-        let world = match &mut self.preview {
+        let world = match &mut *self.session {
             AssetPreview::Map(map) => Some(&mut **map),
             AssetPreview::Game(game) => game.world(),
             _ => None,
@@ -563,15 +568,15 @@ impl Replay {
                 frame.world
             }
             None => {
-                let image = self.preview.image()?;
+                let image = self.session.image()?;
                 image_parts(&mut part, &image);
                 image
             }
         };
         let palette = self
-            .preview
+            .session
             .display_override()
-            .unwrap_or_else(|| self.preview.palette().rgba8());
+            .unwrap_or_else(|| self.session.palette().rgba8());
         part(palette.as_flattened());
         if let Some(path) = frame {
             let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
@@ -600,13 +605,13 @@ fn image_parts(part: &mut impl FnMut(&[u8]), image: &vault_render::IndexedImage)
     part(image.pixels());
 }
 
-/// Replay `log` against `preview` and report the final digest.
+/// Replay `log` against `session` and report the final digest.
 pub fn replay(
-    preview: AssetPreview,
+    session: SessionRuntime,
     log: impl BufRead,
     frame: Option<&std::path::Path>,
 ) -> AppResult<ReplayReport> {
-    let mut replay = Replay::new(preview)?;
+    let mut replay = Replay::new(session)?;
     replay.run(log)?;
     replay.finish(frame)
 }
@@ -634,6 +639,13 @@ mod tests {
 {"command_id":11,"kind":"quit"}
 {"command_id":12,"kind":"key","physical_key":"Digit1","pressed":true,"repeat":false}
 "#;
+
+    /// A replay's session, started as `--replay-inputs` starts it.
+    fn session(args: PreviewArgs) -> SessionRuntime {
+        SessionRuntime::start(crate::session::SessionConfig::replay(args))
+            .unwrap()
+            .unwrap()
+    }
 
     fn args(root: &std::path::Path) -> PreviewArgs {
         PreviewArgs {
@@ -723,19 +735,19 @@ mod tests {
         let vanilla = replay_log(dir.path(), &enhanced_log(false));
         assert_eq!(vanilla.commands, 19);
         assert_eq!(vanilla, replay_log(dir.path(), &enhanced_log(false)));
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         replay.run(enhanced_log(false).as_bytes()).unwrap();
         assert!(replay.layout().is_none(), "no record: Vanilla routing");
         assert_eq!(replay.pixel(), Some([382, 209]));
         assert!(
-            interactive_world(&mut replay.preview)
+            interactive_world(&mut replay.session)
                 .unwrap()
                 .enhanced()
                 .is_none()
         );
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         replay.run(enhanced_log(true).as_bytes()).unwrap();
-        let selected = interactive_world(&mut replay.preview).unwrap().enhanced();
+        let selected = interactive_world(&mut replay.session).unwrap().enhanced();
         match selected {
             // The world presents the enhanced frame: the routing and the
             // digest follow it, so the digest is not the Vanilla one.
@@ -851,9 +863,9 @@ mod tests {
                 pressed,
             });
         }
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         let open =
-            |replay: &mut Replay| interactive_world(&mut replay.preview).unwrap().menu_open();
+            |replay: &mut Replay| interactive_world(&mut replay.session).unwrap().menu_open();
         log.feed(Started, 1, at, false);
         let landed = log.now;
         // The press goes out at the frame `HOLD_PRESS_MS` after the
@@ -897,10 +909,10 @@ mod tests {
         use winit::event::TouchPhase::{Ended, Moved, Started};
         let dir = synthetic_corpus();
         fn world(replay: &mut Replay) -> &mut MapPreview {
-            interactive_world(&mut replay.preview).unwrap()
+            interactive_world(&mut replay.session).unwrap()
         }
         let mut log = TouchLog::new(true);
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         replay.run(log.take().as_bytes()).unwrap();
         let layout = replay.layout().expect("the unlocked viewport");
         let origin = |replay: &mut Replay| world(replay).enhanced_view().unwrap().grid.origin;
@@ -935,7 +947,7 @@ mod tests {
         log.feed(Started, 2, [1000.0, 500.0], false);
         log.feed(Moved, 2, [1400.0, 500.0], false);
         replay.run(log.take().as_bytes()).unwrap();
-        assert!((replay.preview.enhanced_zoom() - 3.0).abs() < 1e-4);
+        assert!((replay.session.enhanced_zoom() - 3.0).abs() < 1e-4);
         let moved = grid_point(&mut replay);
         for axis in 0..2 {
             assert!(
@@ -945,14 +957,14 @@ mod tests {
         }
         log.feed(Moved, 1, [400.0, 500.0], false);
         replay.run(log.take().as_bytes()).unwrap();
-        assert_eq!(replay.preview.enhanced_zoom(), 3.0);
+        assert_eq!(replay.session.enhanced_zoom(), 3.0);
         // Halving the spread from there halves the zoom: the excess was
         // never stored.
         log.feed(Moved, 2, [900.0, 500.0], false);
         log.feed(Ended, 1, [400.0, 500.0], false);
         log.feed(Ended, 2, [900.0, 500.0], false);
         replay.run(log.take().as_bytes()).unwrap();
-        assert!((replay.preview.enhanced_zoom() - 1.5).abs() < 1e-4);
+        assert!((replay.session.enhanced_zoom() - 1.5).abs() < 1e-4);
         // A two-finger tap is a right click: the cursor mode cycles.
         let mode = world(&mut replay).mode_name();
         log.feed(Started, 1, [900.0, 500.0], false);
@@ -1038,9 +1050,9 @@ mod tests {
             .take_while(|line| !line.contains(r#""now_ms":256}"#))
             .map(|line| format!("{line}\n"))
             .collect();
-        let mut replay = Replay::new(speed_args(root, preset).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(speed_args(root, preset))).unwrap();
         replay.run(midway.as_bytes()).unwrap();
-        let world = interactive_world(&mut replay.preview).unwrap();
+        let world = interactive_world(&mut replay.session).unwrap();
         world.host.world.get(world.host.world.player)?.raw.hex
     }
     fn speed_args(root: &std::path::Path, preset: vault_core::EnginePreset) -> PreviewArgs {
@@ -1055,9 +1067,9 @@ mod tests {
         preset: vault_core::EnginePreset,
         log: &str,
     ) -> (u64, ReplayReport) {
-        let mut replay = Replay::new(speed_args(root, preset).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(speed_args(root, preset))).unwrap();
         replay.run(log.as_bytes()).unwrap();
-        let world = interactive_world(&mut replay.preview).unwrap();
+        let world = interactive_world(&mut replay.session).unwrap();
         let elapsed = world.host.world.elapsed_ms;
         (elapsed, replay.finish(None).unwrap())
     }
@@ -1103,7 +1115,7 @@ mod tests {
             player_hex_midway(root, Vanilla, &speed_log(None))
         );
         // A speed the shell never logs is refused.
-        let mut replay = Replay::new(speed_args(root, Enhanced).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(speed_args(root, Enhanced))).unwrap();
         let error = replay.run(speed_log(Some("3")).as_bytes()).unwrap_err();
         assert!(error.to_string().contains("game speed 3"), "{error}");
     }
@@ -1153,12 +1165,12 @@ mod tests {
                  {{\"command_id\":3,\"kind\":\"pointer_moved\",\"x\":250.5,\"y\":10.5}}\n"
             )
         };
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         replay
             .run(log("{\"command_id\":2,\"kind\":\"scaling\",\"aspect_fit\":true}\n").as_bytes())
             .unwrap();
         assert_eq!(replay.pixel(), Some([4, 4]));
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         replay.run(log("").as_bytes()).unwrap();
         assert_eq!(replay.pixel(), Some([0, 0]));
     }
@@ -1166,9 +1178,9 @@ mod tests {
     #[test]
     fn replays_a_dialogue_log_deterministically_and_stops_at_quit() {
         let dir = synthetic_corpus();
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         replay.run(DIALOGUE_LOG.as_bytes()).unwrap();
-        let AssetPreview::Map(map) = &replay.preview else {
+        let AssetPreview::Map(map) = &*replay.session else {
             panic!("map preview expected");
         };
         // The arrow click opened the conversation; the choices closed it.
@@ -1189,7 +1201,7 @@ mod tests {
     }
 
     fn replay_log(root: &std::path::Path, log: &str) -> ReplayReport {
-        replay(args(root).load().unwrap().unwrap(), log.as_bytes(), None).unwrap()
+        replay(session(args(root)), log.as_bytes(), None).unwrap()
     }
 
     /// The fixture's item prototype (a container).
@@ -1237,15 +1249,10 @@ mod tests {
         }
     }
     fn debug_replay(root: &std::path::Path, log: &str) -> ReplayReport {
-        replay(
-            debug_args(root).load().unwrap().unwrap(),
-            log.as_bytes(),
-            None,
-        )
-        .unwrap()
+        replay(session(debug_args(root)), log.as_bytes(), None).unwrap()
     }
     fn carried(replay: &mut Replay) -> i32 {
-        let world = interactive_world(&mut replay.preview).unwrap();
+        let world = interactive_world(&mut replay.session).unwrap();
         let player = world.host.world.player;
         world.host.world.inventory_count(player, ITEM_PID)
     }
@@ -1254,16 +1261,16 @@ mod tests {
     fn logged_debug_commands_apply_once_and_replay_identically() {
         let dir = debug_corpus();
         let start = {
-            let mut replay = Replay::new(debug_args(dir.path()).load().unwrap().unwrap()).unwrap();
+            let mut replay = Replay::new(session(debug_args(dir.path()))).unwrap();
             carried(&mut replay)
         };
         // The overlay's own commit in a replay is discarded; only the
         // logged record applies, so the item is created exactly once.
-        let mut replay = Replay::new(debug_args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(debug_args(dir.path()))).unwrap();
         replay.run(spawn_log(true).as_bytes()).unwrap();
         assert_eq!(carried(&mut replay), start + 1);
         assert!(
-            interactive_world(&mut replay.preview)
+            interactive_world(&mut replay.session)
                 .unwrap()
                 .take_debug_commands()
                 .is_empty()
@@ -1271,7 +1278,7 @@ mod tests {
         let first = replay.finish(None).unwrap();
         assert_eq!(first, debug_replay(dir.path(), &spawn_log(true)));
         // Without the record nothing is created, and the digest differs.
-        let mut replay = Replay::new(debug_args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(debug_args(dir.path()))).unwrap();
         replay.run(spawn_log(false).as_bytes()).unwrap();
         assert_eq!(carried(&mut replay), start);
         assert_ne!(
@@ -1287,10 +1294,10 @@ mod tests {
             r#"{"command_id":3,"kind":"debug","command":{"op":"spawn_item","pid":1,"quantity":2}}"#,
         ]
         .join("\n");
-        let mut replay = Replay::new(debug_args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(debug_args(dir.path()))).unwrap();
         replay.run(log.as_bytes()).unwrap();
         assert_eq!(carried(&mut replay), start + 2);
-        let world = interactive_world(&mut replay.preview).unwrap();
+        let world = interactive_world(&mut replay.session).unwrap();
         assert_eq!(world.host.world.gvars.as_ref().unwrap()[0], 4242);
         assert!(!world.debug_enabled());
         let once = replay.finish(None).unwrap();
@@ -1347,9 +1354,9 @@ mod tests {
         let world = interactive_world(&mut desktop).unwrap();
         assert_eq!(world.host.world.gvars.as_ref().unwrap()[0], 7);
         assert!(world.take_debug_commands().is_empty(), "drained");
-        let mut replay = Replay::new(debug_args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(debug_args(dir.path()))).unwrap();
         replay.run(text.as_bytes()).unwrap();
-        let world = interactive_world(&mut replay.preview).unwrap();
+        let world = interactive_world(&mut replay.session).unwrap();
         assert_eq!(world.host.world.gvars.as_ref().unwrap()[0], 7);
         assert!(world.debug_enabled());
     }
@@ -1365,10 +1372,10 @@ mod tests {
 {"command_id":4,"kind":"pointer_button","button":"Left","pressed":true}
 {"command_id":5,"kind":"pointer_button","button":"Left","pressed":false}
 "#;
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         replay.run(log.as_bytes()).unwrap();
         assert_eq!(replay.pixel(), Some([336, 170]));
-        let AssetPreview::Map(map) = &replay.preview else {
+        let AssetPreview::Map(map) = &*replay.session else {
             panic!("map preview expected");
         };
         assert!(map.selected.is_some());
@@ -1376,14 +1383,14 @@ mod tests {
         // hover does.
         replay.pointer = Some([10.0, 1270.0]);
         assert_eq!(replay.pixel(), Some([0, 479]));
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         // Identifiers must increase: a repeated one is a merged or edited log.
         let repeated = r#"{"command_id":2,"kind":"focus","focused":true}
 {"command_id":2,"kind":"focus","focused":false}
 "#;
         let error = replay.run(repeated.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("line 2"), "{error}");
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         assert!(
             replay
                 .run(&b"{\"command_id\":1,\"kind\":\"jump\"}\n"[..])
@@ -1413,11 +1420,11 @@ mod tests {
             )
         };
         let menu = |last: u64| {
-            let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+            let mut replay = Replay::new(session(args(dir.path()))).unwrap();
             replay.run(hold(last).as_bytes()).unwrap();
             assert_eq!(replay.pixel(), Some([336, 170]));
             assert_eq!((replay.now, replay.commands), (last, 7));
-            let AssetPreview::Map(map) = &replay.preview else {
+            let AssetPreview::Map(map) = &*replay.session else {
                 panic!("map preview expected");
             };
             map.menu_open()
@@ -1438,9 +1445,9 @@ mod tests {
 {"command_id":9,"kind":"key","physical_key":"ArrowRight","pressed":false,"repeat":false}
 {"command_id":10,"kind":"tick","now_ms":2000}
 "#;
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         replay.run(keys.as_bytes()).unwrap();
-        let AssetPreview::Map(map) = &replay.preview else {
+        let AssetPreview::Map(map) = &*replay.session else {
             panic!("map preview expected");
         };
         let Some(AssetPreview::Map(mut desktop)) = args(dir.path()).load().unwrap() else {
@@ -1455,7 +1462,7 @@ mod tests {
         assert_eq!(map.host.world.camera_hex, desktop.host.world.camera_hex);
         assert_eq!(replay.now, 2000);
         // Frame times must not go back.
-        let mut replay = Replay::new(args(dir.path()).load().unwrap().unwrap()).unwrap();
+        let mut replay = Replay::new(session(args(dir.path()))).unwrap();
         let back = r#"{"command_id":1,"kind":"surface","width":960,"height":640}
 {"command_id":2,"kind":"tick","now_ms":50}
 {"command_id":3,"kind":"tick","now_ms":40}

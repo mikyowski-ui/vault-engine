@@ -129,8 +129,8 @@ struct Args {
     #[arg(long, value_name = "PRESET", value_parser = preset_arg)]
     preset: Option<config::Preset>,
     /// The game whose data this is: `fallout1` or `fallout2`. Default: the
-    /// settings file's `game`, else fallout1. Fallout 2 is refused until
-    /// its specifications are approved (docs/fallout2-and-qol-roadmap.md).
+    /// settings file's `game`, else fallout1. Any other name is refused, and
+    /// so is a session whose MASTER.DAT is the other game's archive.
     #[arg(long, value_name = "GAME", value_parser = game_arg)]
     game_profile: Option<vault_core::GameProfile>,
     /// With the enhanced preset, the viewport: `fixed_640x480` or
@@ -156,7 +156,7 @@ fn scaling_arg(text: &str) -> Result<ScalingMode, String> {
     config::parse_scaling(text).ok_or_else(|| "expected aspect_fit or integer".into())
 }
 fn game_arg(text: &str) -> Result<vault_core::GameProfile, String> {
-    config::parse_game(text).ok_or_else(|| "expected fallout1 or fallout2".into())
+    session::parse_edition(text).map_err(|error| error.to_string())
 }
 fn preset_arg(text: &str) -> Result<config::Preset, String> {
     config::Preset::parse(text).ok_or_else(|| "expected vanilla or enhanced".into())
@@ -306,12 +306,19 @@ fn with_mod_settings(
     Ok(Some(merged))
 }
 
-/// Merge the settings into the command line, load what it names, and open
-/// the audio output a world or a movie plays through.
+/// Merge the settings into the command line, start the session it names
+/// (SPEC-020 §2.3: from the command line or the launcher's Play, which
+/// differ only in `origin` and the settings), and open the audio output a
+/// world or a movie plays through.
 fn start(
     args: &mut Args,
     config: Option<&config::Config>,
-) -> AppResult<(Launch, Option<preview::AssetPreview>, Option<audio::Audio>)> {
+    origin: session::SessionOrigin,
+) -> AppResult<(
+    Launch,
+    Option<session::SessionRuntime>,
+    Option<audio::Audio>,
+)> {
     let modded = with_mod_settings(args, config)?;
     let launch = resolve_launch(args, modded.as_ref().or(config));
     if launch.zero_arg_game {
@@ -326,34 +333,13 @@ fn start(
     args.preview.enhanced = launch.enhanced;
     args.preview.touch_ui = launch.touch_ui;
     args.preview.mod_export = Some(mods::export_root(launch.mod_list.as_ref()));
-    let mut preview = args.preview.load()?;
+    let mut session =
+        session::SessionRuntime::start(session::SessionConfig::new(origin, args.preview.clone()))?;
     // Audio serves an interactive world or a movie; sprites need none.
-    let output = || {
-        if launch.audio {
-            audio::Audio::open()
-        } else {
-            audio::Audio::silent()
-        }
-    };
-    let audio = match &mut preview {
-        Some(preview::AssetPreview::Map(map)) => {
-            let audio = output();
-            map.audio = audio.handle();
-            Some(audio)
-        }
-        Some(preview::AssetPreview::Movie(movie)) => {
-            let audio = output();
-            movie.player.audio = audio.handle();
-            Some(audio)
-        }
-        Some(preview::AssetPreview::Game(game)) => {
-            let audio = output();
-            game.set_audio(audio.handle());
-            Some(audio)
-        }
-        _ => None,
-    };
-    Ok((launch, preview, audio))
+    let audio = session
+        .as_mut()
+        .and_then(|session| session.open_audio(launch.audio));
+    Ok((launch, session, audio))
 }
 
 /// The command line the launcher's Play starts from: the one it was shown
@@ -573,7 +559,8 @@ struct Shell {
     smoke_test: bool,
     frame_presented: bool,
     failure: Option<AppError>,
-    preview: Option<preview::AssetPreview>,
+    /// The running session (SPEC-020 §2.3), once started.
+    session: Option<session::SessionRuntime>,
     pointer: Option<[f64; 2]>,
     /// The OS pointer and the game's pointer, which `mouse_sensitivity`
     /// scales while the software cursor is drawn.
@@ -814,14 +801,14 @@ impl Shell {
                 speed: speed.factor(),
             },
         );
-        if let Some(preview) = &mut self.preview {
+        if let Some(preview) = &mut self.session {
             preview.set_game_speed(speed);
         }
     }
     /// The F9 overlay's committed commands: each is logged, then applied,
     /// so a replay of the log applies it at the same point, exactly once.
     fn drain_debug(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(preview) = self.preview.as_mut() else {
+        let Some(preview) = self.session.as_mut() else {
             return;
         };
         let (log, ids) = (&mut self.input_log, &mut self.ids);
@@ -856,34 +843,29 @@ impl Shell {
     /// sprite or map preview, or the bare color test, exits on an Escape it
     /// does not consume; the game never exits on a key (G-01).
     fn press_key(&mut self, event_loop: &ActiveEventLoop, window: &Window, key: KeyCode) {
-        let handled = self.preview_key(event_loop, window, key);
-        if !handled
-            && key == KeyCode::Escape
-            && self
-                .preview
-                .as_ref()
-                .is_none_or(preview::AssetPreview::escape_exits)
-        {
-            self.log(event_loop, InputCommand::Quit);
-            event_loop.exit();
-        }
-    }
-    fn preview_key(&mut self, event_loop: &ActiveEventLoop, window: &Window, key: KeyCode) -> bool {
-        let Some(preview) = &mut self.preview else {
-            return false;
+        let pressed = match &mut self.session {
+            Some(session) => {
+                let exits = session.escape_exits();
+                session.press_key(key, exits)
+            }
+            None if key == KeyCode::Escape => session::KeyPress::Exit,
+            None => session::KeyPress::Ignored,
         };
-        if !preview.step(key) {
-            return false;
+        match pressed {
+            session::KeyPress::Changed => self.refresh_preview(event_loop, window),
+            session::KeyPress::Exit => {
+                self.log(event_loop, InputCommand::Quit);
+                event_loop.exit();
+            }
+            session::KeyPress::Ignored => {}
         }
-        self.refresh_preview(event_loop, window);
-        true
     }
     fn refresh_preview(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
         if self.enhanced_layout(window).is_some() {
             return self.refresh_enhanced(event_loop, window);
         }
         self.shown = None;
-        let Some(preview) = &mut self.preview else {
+        let Some(preview) = &mut self.session else {
             return;
         };
         match preview.image() {
@@ -916,7 +898,7 @@ impl Shell {
     /// frame for the window's layout then; the title and the pointer
     /// follow as in [`Shell::refresh_preview`].
     fn refresh_enhanced(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
-        let Some(preview) = &mut self.preview else {
+        let Some(preview) = &mut self.session else {
             return;
         };
         self.enhanced_dirty = true;
@@ -936,7 +918,7 @@ impl Shell {
     /// resizes, DPI and fullscreen changes and zooms all lay it out anew).
     fn enhanced_layout(&mut self, window: &Window) -> Option<EnhancedLayout> {
         let size = window.inner_size();
-        replay::enhanced_layout(self.preview.as_mut()?, [size.width, size.height])
+        replay::enhanced_layout(self.session.as_mut()?, [size.width, size.height])
     }
     /// Present the enhanced layers for this redraw, building the frame
     /// again when the world or the layout changed; returns whether the
@@ -952,7 +934,7 @@ impl Shell {
                 .as_ref()
                 .is_none_or(|shown| shown.layout != layout);
         if stale {
-            let Some(preview) = &mut self.preview else {
+            let Some(preview) = &mut self.session else {
                 return false;
             };
             match preview.enhanced_frame(&layout) {
@@ -995,7 +977,7 @@ impl Shell {
                 }
             }
         }
-        let (Some(shown), Some(preview)) = (&self.shown, &self.preview) else {
+        let (Some(shown), Some(preview)) = (&self.shown, &self.session) else {
             return false;
         };
         let palette = self.palette();
@@ -1021,9 +1003,9 @@ impl Shell {
         let wanted = widescreen
             && self.launcher.is_none()
             && self
-                .preview
+                .session
                 .as_mut()
-                .is_some_and(preview::AssetPreview::bezel_screen);
+                .is_some_and(|session| session.bezel_screen());
         let palette = self.palette();
         let Some(renderer) = &mut self.renderer else {
             return;
@@ -1062,7 +1044,7 @@ impl Shell {
     }
     /// The display palette the frame is drawn through.
     fn palette(&self) -> [[u8; 4]; 256] {
-        let Some(preview) = &self.preview else {
+        let Some(preview) = &self.session else {
             return [[0, 0, 0, 255]; 256];
         };
         preview.display_override().unwrap_or_else(|| {
@@ -1086,7 +1068,7 @@ impl Shell {
             return false;
         };
         let at = replay::pointer_at(&layout, self.pointer);
-        let Some(preview) = &mut self.preview else {
+        let Some(preview) = &mut self.session else {
             return true;
         };
         let button = match button {
@@ -1114,9 +1096,9 @@ impl Shell {
             return;
         };
         let current = self
-            .preview
+            .session
             .as_mut()
-            .and_then(preview::AssetPreview::enhanced_settings)
+            .and_then(|session| session.enhanced_settings())
             .unwrap_or(session);
         let settings = replay::toggled_viewport(current);
         tracing::info!(
@@ -1130,7 +1112,7 @@ impl Shell {
                 settings: settings.into(),
             },
         );
-        if let Some(preview) = &mut self.preview {
+        if let Some(preview) = &mut self.session {
             preview.set_enhanced(Some(settings));
         }
         self.refresh_preview(event_loop, window);
@@ -1138,7 +1120,7 @@ impl Shell {
     /// The drawn cursor moved: the next redraw presents it.
     fn refresh_pointer(&mut self, window: &Window) {
         if self
-            .preview
+            .session
             .as_ref()
             .is_some_and(|preview| !preview.system_cursor())
         {
@@ -1148,7 +1130,7 @@ impl Shell {
     }
     /// Present the drawn cursor's move without composing the scene again.
     fn present_pointer(&mut self) {
-        let Some(preview) = &mut self.preview else {
+        let Some(preview) = &mut self.session else {
             return;
         };
         let Some(image) = preview.pointer_frame() else {
@@ -1167,9 +1149,9 @@ impl Shell {
     /// pointer to the frame pixel the preview asks for (where supported).
     fn warp_pointer(&mut self, window: &Window) {
         let Some(pixel) = self
-            .preview
+            .session
             .as_mut()
-            .and_then(preview::AssetPreview::take_warp)
+            .and_then(|session| session.take_warp())
         else {
             return;
         };
@@ -1206,7 +1188,7 @@ impl Shell {
     /// hidden OS pointer is warped after it, so it cannot reach the window
     /// edge first; where warps are unsupported OS positions stay unscaled.
     fn scaled_pointer(&mut self, window: &Window, os: [f64; 2]) -> [f64; 2] {
-        let (scale, software) = self.preview.as_mut().map_or((1.0, false), |preview| {
+        let (scale, software) = self.session.as_mut().map_or((1.0, false), |preview| {
             (preview.mouse_sensitivity(), !preview.system_cursor())
         });
         let scale = if self.warp_unsupported { 1.0 } else { scale };
@@ -1324,7 +1306,7 @@ impl Shell {
         {
             let at = replay::pointer_at(&layout, Some(point));
             if self
-                .preview
+                .session
                 .as_mut()
                 .is_some_and(|preview| preview.enhanced_pointer(at))
             {
@@ -1337,7 +1319,7 @@ impl Shell {
             .renderer
             .as_ref()
             .and_then(|renderer| renderer.frame_point(point))
-            .and_then(|point| self.preview.as_mut()?.pointer_moved(point));
+            .and_then(|point| self.session.as_mut()?.pointer_moved(point));
         if let Some(hover) = hover {
             self.log(
                 event_loop,
@@ -1369,7 +1351,7 @@ impl Shell {
     fn pointer_leave(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
         self.pointer = None;
         self.virtual_pointer.left();
-        if let Some(preview) = &mut self.preview {
+        if let Some(preview) = &mut self.session {
             preview.pointer_left();
         }
         self.log(event_loop, InputCommand::PointerLeft);
@@ -1402,7 +1384,7 @@ impl Shell {
         let framed = matches!(button, MouseButton::Left | MouseButton::Right);
         if (!framed || pressed && self.pixel().is_none())
             && self
-                .preview
+                .session
                 .as_mut()
                 .is_some_and(|preview| preview.movie_button(pressed))
         {
@@ -1412,7 +1394,7 @@ impl Shell {
         if !pressed
             && framed
             && self
-                .preview
+                .session
                 .as_mut()
                 .is_some_and(|preview| preview.release(pixel, button == MouseButton::Right))
         {
@@ -1423,7 +1405,7 @@ impl Shell {
             && framed
             && let Some(pixel) = pixel
             && self
-                .preview
+                .session
                 .as_mut()
                 .is_some_and(|preview| preview.click(pixel, button == MouseButton::Right))
         {
@@ -1442,7 +1424,7 @@ impl Shell {
         let at = self
             .enhanced_layout(window)
             .map(|layout| replay::pointer_at(&layout, self.pointer));
-        if self.preview.as_mut().is_some_and(|preview| match at {
+        if self.session.as_mut().is_some_and(|preview| match at {
             Some(at) => preview.enhanced_wheel(at, replay::wheel_lines(y, unit)),
             None => preview.scroll(y),
         }) {
@@ -1469,7 +1451,7 @@ impl Shell {
         let Some(pixel) = pixel else {
             return false;
         };
-        self.preview
+        self.session
             .as_mut()
             .is_some_and(|preview| preview.touch_button_at(pixel))
     }
@@ -1480,7 +1462,7 @@ impl Shell {
             camera: self.enhanced_layout(window).is_some(),
             button: touch.phase == TouchPhase::Started && self.touch_button_at(window, point),
             menu: self
-                .preview
+                .session
                 .as_mut()
                 .is_some_and(|preview| preview.held_menu_open()),
         };
@@ -1516,7 +1498,7 @@ impl Shell {
                 InputCommand::Wheel { x, y, unit } => {
                     let zoomable = self.enhanced_layout(window).is_some_and(|layout| {
                         let at = replay::pointer_at(&layout, self.pointer);
-                        self.preview
+                        self.session
                             .as_mut()
                             .is_some_and(|preview| preview.enhanced_zoomable(at))
                     });
@@ -1677,24 +1659,29 @@ impl Shell {
         };
         let config = launcher.launch_config();
         let mut args = play_args(pending, debug);
-        let (launch, preview, audio) = match start(&mut args, Some(&config)) {
-            Ok((launch, Some(preview), audio)) => (launch, preview, audio),
-            Ok((_, None, _)) => {
-                launcher.launch_failed("the settings name no game data");
-                return self.refresh_launcher(window);
-            }
-            Err(error) => {
-                tracing::error!(%error, "the launcher's game did not start");
-                launcher.launch_failed(error);
-                return self.refresh_launcher(window);
-            }
-        };
-        tracing::info!(debug = args.preview.debug, "launcher: starting the game");
+        let (launch, session, audio) =
+            match start(&mut args, Some(&config), session::SessionOrigin::Launcher) {
+                Ok((launch, Some(session), audio)) => (launch, session, audio),
+                Ok((_, None, _)) => {
+                    launcher.launch_failed("the settings name no game data");
+                    return self.refresh_launcher(window);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "the launcher's game did not start");
+                    launcher.launch_failed(error);
+                    return self.refresh_launcher(window);
+                }
+            };
+        tracing::info!(
+            debug = args.preview.debug,
+            game = config::game_name(session.edition()),
+            "launcher: starting the game"
+        );
         self.launcher = None;
         self.pending = None;
         self._audio = audio;
-        self.display = Some(DisplayPalette::new(preview.palette(), preview.brightness()));
-        self.preview = Some(preview);
+        self.display = Some(DisplayPalette::new(session.palette(), session.brightness()));
+        self.session = Some(session);
         // The game's clock starts at its first frame, as in a direct start.
         self.started = Some(Instant::now());
         self.scaling = launch.scaling;
@@ -1735,7 +1722,7 @@ impl ApplicationHandler for Shell {
             .map(|monitor| [monitor.size().width, monitor.size().height]);
         let [width, height] = initial_window_size(monitor);
         let attributes = Window::default_attributes()
-            .with_title(match (&self.preview, &self.launcher) {
+            .with_title(match (&self.session, &self.launcher) {
                 (Some(preview), _) => preview.title(),
                 (None, Some(launcher)) => launcher.title(),
                 (None, None) => "Vault Engine — Indexed Color Test".to_owned(),
@@ -1763,7 +1750,7 @@ impl ApplicationHandler for Shell {
             },
         );
         let renderer = (|| -> AppResult<Renderer> {
-            if let Some(preview) = &mut self.preview {
+            if let Some(preview) = &mut self.session {
                 let image = preview.image()?;
                 let palette = preview.display_override().unwrap_or_else(|| {
                     self.display
@@ -1807,7 +1794,7 @@ impl ApplicationHandler for Shell {
                 return;
             }
         }
-        if let Some(preview) = &self.preview {
+        if let Some(preview) = &self.session {
             window.set_cursor_visible(preview.system_cursor());
         }
         // The gestures' slop is in logical pixels.
@@ -1828,7 +1815,7 @@ impl ApplicationHandler for Shell {
         self.drain_debug(event_loop);
         // The commands logged since the last pass.
         self.flush_log(event_loop);
-        let Some(started) = self.started.filter(|_| self.preview.is_some()) else {
+        let Some(started) = self.started.filter(|_| self.session.is_some()) else {
             return;
         };
         let now = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
@@ -1842,26 +1829,26 @@ impl ApplicationHandler for Shell {
         // D-11: every frame's clock is logged, so a replay ticks the preview
         // at the same times between the same commands.
         self.log(event_loop, InputCommand::Tick { now_ms: now });
-        let Some(preview) = self.preview.as_mut() else {
+        let Some(session) = self.session.as_mut() else {
             return;
         };
-        let changed = match preview.tick(now) {
-            Ok(changed) => changed,
+        // The session's frame step (SPEC-020 §2.3), as a replay runs it;
+        // SPEC-014 §3.29: held keys repeat on the frame clock.
+        let (changed, due) = match session.advance(now, &mut self.repeat) {
+            Ok(session::Advance::Running { changed, due }) => (changed, due),
+            Ok(session::Advance::Finished) => {
+                tracing::info!("movie finished");
+                event_loop.exit();
+                return;
+            }
             Err(error) => return self.fail(event_loop, error),
         };
-        if preview.finished() {
-            tracing::info!("movie finished");
-            event_loop.exit();
-            return;
-        }
-        // SPEC-014 §3.29: held keys repeat on the frame clock.
-        let due = self.repeat.poll(now, preview.keyboard());
         if let Some(window) = self.window.clone() {
             for key in due {
                 self.press_key(event_loop, &window, key);
             }
         }
-        let Some(preview) = self.preview.as_mut() else {
+        let Some(preview) = self.session.as_mut() else {
             return;
         };
         // Each loop pass is one enabled cycling poll; the world can disable it
@@ -1950,11 +1937,11 @@ impl ApplicationHandler for Shell {
                 };
                 if !pressed {
                     self.repeat.release(key);
-                    if let Some(preview) = &mut self.preview {
+                    if let Some(preview) = &mut self.session {
                         preview.key_up(key);
                     }
                 } else if !event.repeat {
-                    if let Some(preview) = &self.preview {
+                    if let Some(preview) = &self.session {
                         self.repeat.press(key, preview.keyboard());
                     }
                     self.press_key(event_loop, &window, key);
@@ -2000,7 +1987,7 @@ impl ApplicationHandler for Shell {
                     // fingers' lifts.
                     self.shell_keys.clear();
                     self.touch = touch::TouchGestures::new(self.touch.slop);
-                    if let Some(preview) = &mut self.preview {
+                    if let Some(preview) = &mut self.session {
                         preview.focus_lost();
                     }
                 }
@@ -2009,7 +1996,7 @@ impl ApplicationHandler for Shell {
             WindowEvent::ModifiersChanged(modifiers) => {
                 let modifiers = modifiers.state();
                 self.alt = modifiers.alt_key();
-                if let Some(preview) = &mut self.preview {
+                if let Some(preview) = &mut self.session {
                     preview.set_modifiers([
                         modifiers.shift_key(),
                         modifiers.control_key(),
@@ -2110,14 +2097,13 @@ fn run(mut args: Args) -> AppResult<()> {
         // A replay takes nothing from the settings, but the command line's
         // game profile chooses the data's formats (SPEC-015/016).
         args.preview.game_profile = args.game_profile.unwrap_or_default();
-        let preview = args
-            .preview
-            .load()?
-            .ok_or("--replay-inputs requires a preview asset")?;
+        let session =
+            session::SessionRuntime::start(session::SessionConfig::replay(args.preview.clone()))?
+                .ok_or("--replay-inputs requires a preview asset")?;
         let log =
             std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
         let report = replay::replay(
-            preview,
+            session,
             std::io::BufReader::new(log),
             args.replay_frame.as_deref(),
         )?;
@@ -2153,17 +2139,21 @@ fn run(mut args: Args) -> AppResult<()> {
         shell.launcher = Some(Box::new(launcher));
         shell.pending = Some(Box::new(args));
     } else {
-        let (launch, preview, audio) = start(&mut args, config.as_ref())?;
+        let (launch, session, audio) = start(
+            &mut args,
+            config.as_ref(),
+            session::SessionOrigin::CommandLine,
+        )?;
         shell.scaling = launch.scaling;
         shell.enhanced = launch.enhanced;
         shell.fullscreen = launch.fullscreen;
         shell.touch_ui = launch.touch_ui;
         shell.game_speed = launch_game_speed(&launch, config.as_ref());
         shell._audio = audio;
-        shell.display = preview
+        shell.display = session
             .as_ref()
-            .map(|preview| DisplayPalette::new(preview.palette(), preview.brightness()));
-        shell.preview = preview;
+            .map(|session| DisplayPalette::new(session.palette(), session.brightness()));
+        shell.session = session;
     }
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);

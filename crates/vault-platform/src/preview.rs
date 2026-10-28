@@ -16,7 +16,8 @@ pub struct PreviewArgs {
     #[arg(skip)]
     pub preset: vault_core::EnginePreset,
     /// The game whose data this is (from the settings or
-    /// `--game-profile`); Fallout 2 is refused before anything is read.
+    /// `--game-profile`); the session refuses data of the other edition
+    /// before anything is loaded (`session::validate_edition`).
     #[arg(skip)]
     pub game_profile: vault_core::GameProfile,
     /// Mod layers stacked over the game data, lowest first (the settings'
@@ -731,17 +732,19 @@ impl PreviewArgs {
             map.host.set_subtitles(self.subtitles);
             map.save_root = save_root;
             map.config_path = self.config.clone();
-            if self.headless {
-                map.host.movie_policy = vault_core::movie::MoviePolicy::CompleteImmediately;
+            crate::session::WorldOptions {
+                headless: self.headless,
+                debug: self.debug,
+                enhanced: self.enhanced,
+                touch_ui: self.touch_ui,
+                mod_export: self.mod_export.clone(),
+                debug_session: self.debug,
             }
-            if self.startup_movies {
-                map.queue_startup_movies();
-            }
-            map.set_debug(self.debug);
-            map.set_enhanced(self.enhanced);
-            map.set_touch_ui(self.touch_ui);
-            map.mod_export = self.mod_export.clone();
-            map.debug_session = self.debug;
+            .apply(&mut map, |map| {
+                if self.startup_movies {
+                    map.queue_startup_movies();
+                }
+            });
             return Ok(Some(AssetPreview::Map(Box::new(map))));
         }
         if let Some(path) = &self.play_movie {

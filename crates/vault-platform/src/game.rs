@@ -608,19 +608,21 @@ impl Game {
         world.set_slot_session(self.slot_list.clone(), self.quick);
         world.host.critter_cycle = self.critter_cycle;
         world.host.world.dialogue.idle = self.head_idle;
-        if self.headless {
-            world.host.movie_policy = vault_core::movie::MoviePolicy::CompleteImmediately;
-        }
-        world.set_debug(self.debug);
         // G-09: the map preview tool's keys need `--debug` here, and no key
         // turns the roofs off in the game (SPEC-014 §3.36).
         world.preview_keys = self.debug_keys;
         world.roof_key = false;
-        world.set_enhanced(self.enhanced);
-        world.set_touch_ui(self.touch_ui);
+        // The session's options, as a map preview takes them.
+        crate::session::WorldOptions {
+            headless: self.headless,
+            debug: self.debug,
+            enhanced: self.enhanced,
+            touch_ui: self.touch_ui,
+            mod_export: self.mod_export.clone(),
+            debug_session: self.debug_keys,
+        }
+        .apply(&mut world, |_| {});
         world.init_game_speed(self.game_speed);
-        world.mod_export = self.mod_export.clone();
-        world.debug_session = self.debug_keys;
         Ok(world)
     }
     /// The game speed for this world and the next ones.
