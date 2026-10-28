@@ -254,6 +254,10 @@ impl<S: Sink> Encoder<'_, S> {
     }
     fn entity(&mut self, entity: &EntityRecord) {
         self.handle(entity.handle);
+        self.entity_tail(entity);
+    }
+    /// An entity record from offset `+0x08` on: everything after the handle.
+    fn entity_tail(&mut self, entity: &EntityRecord) {
         self.u32(entity.pid);
         self.position(entity.position);
         self.u32(entity.orientation);
@@ -308,7 +312,7 @@ impl<S: Sink> Encoder<'_, S> {
         self.tag(&WORLD_MAGIC);
         self.tag(b"ENTS");
         let mut entities: Vec<&EntityRecord> = snapshot.entities.iter().collect();
-        entities.sort_by_key(|entity| entity.handle);
+        entities.sort_by(|a, b| a.handle.cmp(&b.handle).then_with(|| tail(a).cmp(&tail(b))));
         self.count(entities.len());
         for entity in entities {
             self.entity(entity);
@@ -336,6 +340,16 @@ impl<S: Sink> Encoder<'_, S> {
         self.tag(&COMBAT_MAGIC);
         self.combat(combat);
     }
+}
+
+/// An entity record's bytes after its handle. Two records with the same
+/// handle are ordered by these bytes, compared as unsigned bytes with a
+/// shorter prefix first (SPEC-021 revision 2 §2.4 "Equal handles", §3.2).
+/// Only equal handles reach this, so a real world never builds it.
+fn tail(entity: &EntityRecord) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder(&mut bytes).entity_tail(entity);
+    bytes
 }
 
 impl StateSnapshot {

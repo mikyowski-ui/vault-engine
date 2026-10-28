@@ -46,9 +46,8 @@ copies each of the four `sample*.frm` files to `art/critters/` under the same
 name (for example `sampleaq.frm` to `art/critters/sampleaq.frm`). It never
 changes this folder.
 
-Until the implementer's follow-up adopts revision 2, the merged tests still
-read the revision 1 files in the parent folder. That follow-up switches them
-to this folder, deletes the superseded parent files (`w0.stream.hex` to
-`w4.stream.hex`, `hashes.tsv`, `combat-trace-example.tsv`), and re-records
-`../combat-trace-synthetic-seed1.tsv` with the AI fixture and the art
-fixture installed.
+The implementer's follow-up adopted revision 2 (SPEC-021 section 3.9): the
+tests read the world vectors, `hashes.tsv` and `combat-trace-example.tsv`
+from this folder, the superseded revision 1 files in the parent folder were
+deleted, and `../combat-trace-synthetic-seed1.tsv` was re-recorded with the
+AI fixture and the art fixture installed.

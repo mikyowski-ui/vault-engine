@@ -419,22 +419,43 @@ pub fn read_combat_trace(text: &str) -> Result<Vec<CombatTraceRow>, String> {
     lines.map(str::parse).collect()
 }
 
+/// An actor's action points at the moment its `turn` row was written: what
+/// SPEC-021 revision 2 test T11 reads to see that the NPC acted. Not part
+/// of the trace text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnAp {
+    /// The `seq` of the `turn` row.
+    pub seq: u64,
+    pub actor: Handle,
+    /// Current AP at the end of the turn.
+    pub ap: i32,
+    /// Effective maximum AP (the refill at the turn's start).
+    pub maximum: i32,
+}
 /// The rows a host writes while combat events happen (SPEC-021 §3.6 row
 /// moments). Rows are numbered in recording order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CombatTraceRecorder {
     pub rows: Vec<CombatTraceRow>,
+    /// One entry per `turn` row whose actor is still an entity.
+    pub turn_ap: Vec<TurnAp>,
 }
 impl CombatTraceRecorder {
     pub fn record(&mut self, world: &WorldState, event: CombatEvent, actor: Option<ObjectRef>) {
-        let actor = actor.map(|actor| world.state_handle(actor));
-        let row = CombatTraceRow::from_snapshot(
-            self.rows.len() as u64,
-            event,
-            actor,
-            &world.state_snapshot(),
-        );
+        let seq = self.rows.len() as u64;
+        let handle = actor.map(|actor| world.state_handle(actor));
+        let row = CombatTraceRow::from_snapshot(seq, event, handle, &world.state_snapshot());
         self.rows.push(row);
+        if let (CombatEvent::Turn, Some(actor), Some(handle)) = (event, actor, handle)
+            && let Some(state) = world.critter_state(actor)
+        {
+            self.turn_ap.push(TurnAp {
+                seq,
+                actor: handle,
+                ap: state.ap,
+                maximum: world.maximum_ap(actor),
+            });
+        }
     }
 }
 impl<A: WorldAssets> WorldHost<A> {
@@ -462,19 +483,32 @@ pub fn combat_trace_host(
     host.interactive_dialogue = true;
     host.movie_policy = crate::movie::MoviePolicy::CompleteImmediately;
     host.playback = crate::host_choreography::Playback::RealTime;
-    // As the desktop does, a corpus without campaign globals or combat AI
-    // still runs; the missing part is reported.
+    // As the desktop does, a corpus without campaign globals still runs;
+    // the missing part is reported.
     if let Err(error) = host.load_campaign() {
         host.world
             .diagnostic(format!("campaign initializer unavailable: {error}"));
     }
     host.load_language_filter();
-    if let Err(error) = host.load_combat_ai() {
-        host.world
-            .diagnostic(format!("combat AI unavailable: {error}"));
-    }
+    // SPEC-021 revision 2 §3.7 step 1: the combat AI must initialize with a
+    // nonempty packet table, so a golden is never recorded with idle NPCs.
+    host.load_combat_ai()
+        .map_err(|error| WorldError::Invalid(format!("combat AI unavailable: {error}")))?;
+    require_packets(&host.world)?;
     host.load_map(map)?;
     Ok(host)
+}
+/// SPEC-021 revision 2 §3.7 step 1: a loaded, nonempty packet table.
+fn require_packets(world: &WorldState) -> Result<(), WorldError> {
+    match world.ai.packets.as_deref() {
+        Some(packets) if !packets.packets.is_empty() => Ok(()),
+        Some(_) => Err(WorldError::Invalid(
+            "combat AI unavailable: data/ai.txt has no packet".into(),
+        )),
+        None => Err(WorldError::Invalid(
+            "combat AI unavailable: no packet table is loaded".into(),
+        )),
+    }
 }
 /// SPEC-021 §3.7 step 2: the live non-player critter on the player's
 /// elevation, not dead, with the smallest handle.
@@ -511,6 +545,16 @@ pub fn run_combat_trace<A: WorldAssets>(
     host: &mut WorldHost<A>,
     max_rounds: u32,
 ) -> Result<Vec<CombatTraceRow>, WorldError> {
+    run_combat_trace_recorded(host, max_rounds).map(|recorder| recorder.rows)
+}
+/// [`run_combat_trace`], also returning each kept `turn` row's actor AP
+/// (SPEC-021 revision 2 test T11). It refuses to run without a loaded,
+/// nonempty packet table (§3.7 step 1).
+pub fn run_combat_trace_recorded<A: WorldAssets>(
+    host: &mut WorldHost<A>,
+    max_rounds: u32,
+) -> Result<CombatTraceRecorder, WorldError> {
+    require_packets(&host.world)?;
     let defender = trace_defender(&host.world)
         .ok_or_else(|| WorldError::Invalid("no defender for the combat trace".into()))?;
     host.combat_trace = Some(CombatTraceRecorder::default());
@@ -532,7 +576,10 @@ pub fn run_combat_trace<A: WorldAssets>(
             }
             let rows = host.combat_trace.as_ref().map_or(&[][..], |r| &r.rows[..]);
             if let Some(cut) = trace_cut(rows, max_rounds) {
-                return Ok(rows[..cut].to_vec());
+                let mut recorder = host.combat_trace.take().unwrap_or_default();
+                recorder.rows.truncate(cut);
+                recorder.turn_ap.retain(|turn| turn.seq < cut as u64);
+                return Ok(recorder);
             }
         }
         Err(WorldError::Invalid(format!(

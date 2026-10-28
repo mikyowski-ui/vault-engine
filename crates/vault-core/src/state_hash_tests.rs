@@ -1,5 +1,7 @@
 //! SPEC-021 §4 tests T1-T6, T8-T10 and T12 (T7 and T11 run on the
-//! synthetic corpus in `tools/asset-audit/tests/spec021.rs`).
+//! synthetic corpus in `tools/asset-audit/tests/spec021.rs`). The world
+//! vectors are SPEC-021 revision 2's (`rev2/`): W0 holds its item as entity
+//! `3:1`.
 use crate::{
     CharacterSheet, ObjectRef, ParkMiller, WorldState,
     state_hash::{
@@ -22,6 +24,10 @@ fn fixture(name: &str) -> String {
 }
 fn hex_fixture(name: &str) -> Vec<u8> {
     parse_hex_dump(&fixture(name)).unwrap()
+}
+/// A revision 2 vector (SPEC-021 §3.9).
+fn rev2(name: &str) -> String {
+    format!("rev2/{name}")
 }
 fn hex(value: u64) -> String {
     format!("{value:016X}")
@@ -154,6 +160,17 @@ fn w0() -> Model {
                 orientation: 5,
                 hp: 12,
                 ap: 6,
+                inventory: Vec::new(),
+            },
+            // Revision 2: the stack of 3 that `1:1` holds, as its own
+            // entity with no position (SPEC-021 §2.4 "Held items").
+            EntityRecord {
+                handle: Handle::new(3, 1),
+                pid: 0x00000004,
+                position: None,
+                orientation: 0,
+                hp: 0,
+                ap: 0,
                 inventory: Vec::new(),
             },
         ],
@@ -310,7 +327,7 @@ fn the_synthetic_vectors_encode_and_hash_as_recorded() {
         let snapshot = model.snapshot();
         assert_bytes(
             &snapshot.canonical_bytes(),
-            &hex_fixture(&format!("{name}.stream.hex")),
+            &hex_fixture(&rev2(&format!("{name}.stream.hex"))),
             name,
         );
         assert_eq!(
@@ -335,7 +352,7 @@ fn the_synthetic_vectors_encode_and_hash_as_recorded() {
         w0().snapshot().canonical_combat_bytes(),
         [0x56, 0x43, 0x48, 0x31, 0x43, 0x4D, 0x42, 0x54, 0x00]
     );
-    let table = fixture("hashes.tsv");
+    let table = fixture(&rev2("hashes.tsv"));
     let mut lines = table.lines();
     assert_eq!(
         lines.next(),
@@ -365,7 +382,7 @@ fn the_synthetic_vectors_encode_and_hash_as_recorded() {
 /// T3: the encoder sorts entities, inventory entries and LVAR slices.
 #[test]
 fn keyed_collections_encode_in_sorted_order_whatever_the_input_order() {
-    let expected = hex_fixture("w2.stream.hex");
+    let expected = hex_fixture(&rev2("w2.stream.hex"));
     let mut model = w2();
     assert_bytes(&model.snapshot().canonical_bytes(), &expected, "w2");
     model.entities.reverse();
@@ -410,6 +427,28 @@ fn keyed_collections_encode_in_sorted_order_whatever_the_input_order() {
     let first = duplicates.snapshot().canonical_bytes();
     duplicates.lvars.reverse();
     assert_eq!(duplicates.snapshot().canonical_bytes(), first);
+    // Revision 2: records with equal handles are ordered by their bytes
+    // after the handle (§2.4 "Equal handles"), whatever the supply order.
+    let mut equal = w0();
+    equal.entities[0].handle = Handle::new(3, 1);
+    let bytes = equal.snapshot().canonical_bytes();
+    equal.entities.reverse();
+    assert_eq!(equal.snapshot().canonical_bytes(), bytes);
+    equal.entities.rotate_left(1);
+    assert_eq!(equal.snapshot().canonical_bytes(), bytes);
+    // `2:3` (39 bytes) comes first. Of the two `3:1` records the critter's
+    // tail starts `01 00 00 01` (PID `0x01000001`) and the item's
+    // `04 00 00 00` (PID 4), so the critter (47 bytes) comes next.
+    let critter_at = 0x0C + 39;
+    assert_eq!(
+        &bytes[critter_at..critter_at + 12],
+        &[3, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1]
+    );
+    let item_at = critter_at + 47;
+    assert_eq!(
+        &bytes[item_at..item_at + 12],
+        &[3, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0]
+    );
     let tail = &first[first.len() - 44..];
     assert_eq!(
         tail,
@@ -445,6 +484,11 @@ fn flips(base: &Model) -> Vec<Flip> {
     };
     for entity in 0..base.entities.len() {
         let participant = in_combat(base, entity);
+        // A held item (revision 2's `3:1`) has no position, and a
+        // non-critter writes no HP or AP: those fields are not in its
+        // stream, so they have no bits to flip.
+        let placed = base.entities[entity].position.is_some();
+        let critter = base.entities[entity].critter();
         for bit in 0..32 {
             let mut push = |field: &str, combat: bool, change: &dyn Fn(&mut EntityRecord)| {
                 let mut model = base.clone();
@@ -458,17 +502,21 @@ fn flips(base: &Model) -> Vec<Flip> {
             if bit < 24 {
                 push("pid", false, &|e| flip_u32(&mut e.pid, bit));
             }
-            push("elevation", participant, &|e| {
-                flip_u32(&mut e.position.as_mut().unwrap().elevation, bit)
-            });
-            push("hex", participant, &|e| {
-                flip_u32(&mut e.position.as_mut().unwrap().hex, bit)
-            });
+            if placed {
+                push("elevation", participant, &|e| {
+                    flip_u32(&mut e.position.as_mut().unwrap().elevation, bit)
+                });
+                push("hex", participant, &|e| {
+                    flip_u32(&mut e.position.as_mut().unwrap().hex, bit)
+                });
+            }
             push("orientation", participant, &|e| {
                 flip_u32(&mut e.orientation, bit)
             });
-            push("hp", participant, &|e| flip_i32(&mut e.hp, bit));
-            push("ap", participant, &|e| flip_i32(&mut e.ap, bit));
+            if critter {
+                push("hp", participant, &|e| flip_i32(&mut e.hp, bit));
+                push("ap", participant, &|e| flip_i32(&mut e.ap, bit));
+            }
             for item in 0..base.entities[entity].inventory.len() {
                 push(&format!("item {item} pid"), false, &|e| {
                     flip_u32(&mut e.inventory[item].pid, bit)
@@ -516,7 +564,10 @@ fn flips(base: &Model) -> Vec<Flip> {
 /// combat flips change the combat hash; every opt toggle changes the hash.
 #[test]
 fn every_single_bit_flip_of_a_covered_scalar_changes_the_hash() {
-    for (name, base, expected) in [("W0", w0(), 1680), ("W1", w1(), 1744)] {
+    // Revision 2 counts: the item entity `3:1` adds 120 flips to revision
+    // 1's 1680 and 1744. Two of them (bit 1 of the index of `1:1` and of
+    // `3:1`) give two records the same handle.
+    for (name, base, expected) in [("W0", w0(), 1800), ("W1", w1(), 1864)] {
         let snapshot = base.snapshot();
         let (state, combat) = (snapshot.state_hash(), snapshot.combat_hash());
         let flips = flips(&base);
@@ -541,11 +592,19 @@ fn every_single_bit_flip_of_a_covered_scalar_changes_the_hash() {
         let mut toggles: Vec<(String, Model)> = Vec::new();
         for entity in 0..base.entities.len() {
             let mut model = base.clone();
-            model.entities[entity].position = None;
+            let position = &mut model.entities[entity].position;
+            *position = match position {
+                Some(_) => None,
+                None => Some(Position {
+                    elevation: 0,
+                    hex: 0,
+                }),
+            };
             toggles.push((format!("entity {entity} position"), model));
-            // HP and AP are present exactly for critters.
+            // HP and AP are present exactly for critters: type 1 becomes
+            // type 0 (the critters) and type 0 becomes type 1 (the item).
             let mut model = base.clone();
-            model.entities[entity].pid &= 0x00FF_FFFF;
+            model.entities[entity].pid ^= 0x0100_0000;
             toggles.push((format!("entity {entity} critter"), model));
         }
         let mut model = base.clone();
@@ -634,7 +693,12 @@ struct Built {
     held: ObjectRef,
     scripts: [u32; 2],
 }
-fn built() -> Built {
+/// SPEC-021 §5.2's W0 through the engine's API: critters `1:1` and `2:3`
+/// (a spare item takes slot 2 first and is erased, so the second critter
+/// gets generation 3), the first holding three of an item, which the store
+/// keeps as entity `3:1`; GVAR [7]; no map; no scripts. Returns the world
+/// and the critters' and the item's references.
+fn w0_world() -> (WorldState, ObjectRef, ObjectRef, ObjectRef) {
     let mut world = WorldState::empty(1).unwrap();
     let first = world.insert(critter(0x01000001, 20100, 2, 30, 8)).unwrap();
     let spare = world.insert(item(0x00000009)).unwrap();
@@ -644,6 +708,10 @@ fn built() -> Built {
     world.get_mut(held).unwrap().owner = Some(first);
     world.get_mut(first).unwrap().inventory.push((held, 3));
     world.gvars = Some(vec![7]);
+    (world, first, second, held)
+}
+fn built() -> Built {
+    let (mut world, first, second, held) = w0_world();
     world.persistence.current_map = Some("SYNTH.SAV".into());
     world.mvars = vec![1, -1];
     let a = world.add_script(first, 1, 1, 2).unwrap();
@@ -674,17 +742,9 @@ fn the_snapshot_extracts_the_values_set_through_the_engine() {
     assert_eq!(handle(held), Handle::new(3, 1));
     assert_eq!(a, 0x01000001);
     assert_eq!(b, 0x04000001);
+    // W0 already holds the item `3:1` (revision 2).
     let mut expected = w0().snapshot();
     expected.mvars = Some(vec![1, -1]);
-    expected.entities.push(EntityRecord {
-        handle: Handle::new(3, 1),
-        pid: 4,
-        position: None,
-        orientation: 0,
-        hp: 0,
-        ap: 0,
-        inventory: Vec::new(),
-    });
     expected.lvars = vec![
         LvarSlice {
             script: a,
@@ -710,6 +770,45 @@ fn the_snapshot_extracts_the_values_set_through_the_engine() {
     unloaded.persistence.current_map = Some("SYNTH.SAV".into());
     unloaded.unloaded = true;
     assert_eq!(unloaded.state_snapshot().mvars, None);
+}
+/// T5's direct check (revision 2): the allocator gives the critters `1:1`
+/// and `2:3` and the item `3:1`, with the item's orientation 0, so the
+/// engine's own world is §5.2's W0, byte for byte.
+#[test]
+fn the_engine_builds_w0_with_its_held_item_entity() {
+    let (world, first, second, held) = w0_world();
+    let handle = |reference| Handle::of(world.entity_key(reference).unwrap());
+    assert_eq!(handle(first), Handle::new(1, 1));
+    assert_eq!(handle(second), Handle::new(2, 3));
+    assert_eq!(handle(held), Handle::new(3, 1));
+    assert_eq!(world.get(held).unwrap().raw.orientation, 0);
+    assert!(!world.map_loaded());
+    assert_eq!(world.state_snapshot(), w0().snapshot());
+    assert_bytes(
+        &world.state_snapshot().canonical_bytes(),
+        &hex_fixture(&rev2("w0.stream.hex")),
+        "engine W0",
+    );
+    assert_eq!(world.state_hash(), 0x0258_CFED_4EA8_A13E);
+    assert_eq!(hex(world.state_hash()), "0258CFED4EA8A13E");
+    assert_eq!(world.combat_hash(), 0x03A3_2523_40D6_7E8D);
+    // The held item appears twice: as the holder's entry, and as its own
+    // record with no position and no HP or AP.
+    let snapshot = world.state_snapshot();
+    let holder = &snapshot.entities[0];
+    assert_eq!(
+        holder.inventory,
+        vec![InventoryEntry {
+            pid: 4,
+            quantity: 3
+        }]
+    );
+    let item = snapshot
+        .entities
+        .iter()
+        .find(|entity| entity.handle == Handle::new(3, 1))
+        .unwrap();
+    assert_eq!((item.pid, item.position, item.critter()), (4, None, false));
 }
 /// T3: LVAR slices allocated in two different orders hash the same.
 #[test]
@@ -746,20 +845,22 @@ fn script_insertion_order_does_not_change_the_hash() {
 fn a_generator_seeded_with_one_snapshots_to_the_w0_and_w3_records() {
     let mut rng = ParkMiller::seeded(1).unwrap();
     assert_eq!(RngRecord::from(rng.state()), w0_rng());
-    let stream = hex_fixture("w0.stream.hex");
+    let stream = hex_fixture(&rev2("w0.stream.hex"));
     let mut world = WorldState::empty(1).unwrap();
     world.gvars = Some(vec![7]);
     let bytes = world.state_snapshot().canonical_bytes();
     // No entities here: the RNG part starts right after an empty ENTS.
     assert_eq!(&bytes[12..16], b"RNGS");
-    assert_eq!(&bytes[16..16 + 136], &stream[0x66..0xEE]);
+    // Revision 2's W0 holds the RNG record at `0x7D` to `0x104`.
+    assert_eq!(&stream[0x79..0x7D], b"RNGS");
+    assert_eq!(&bytes[16..16 + 136], &stream[0x7D..0x105]);
     assert_eq!(rng.draw(), 0);
     assert_eq!(RngRecord::from(rng.state()), w3_rng());
     world.rng.draw();
     let bytes = world.state_snapshot().canonical_bytes();
     assert_eq!(
         &bytes[16..16 + 136],
-        &hex_fixture("w3.stream.hex")[0x66..0xEE]
+        &hex_fixture(&rev2("w3.stream.hex"))[0x7D..0x105]
     );
 }
 
@@ -940,7 +1041,7 @@ fn the_combat_trace_example_is_written_and_read_back() {
         CombatTraceRow::from_snapshot(3, CombatEvent::End, None, &s3.snapshot()),
     ];
     let text = write_combat_trace(&rows);
-    assert_eq!(text, fixture("combat-trace-example.tsv"));
+    assert_eq!(text, fixture(&rev2("combat-trace-example.tsv")));
     assert_eq!(read_combat_trace(&text).unwrap(), rows);
     assert!(read_combat_trace(text.trim_end()).is_err());
     assert!(read_combat_trace(&text.replace("start", "begin")).is_err());

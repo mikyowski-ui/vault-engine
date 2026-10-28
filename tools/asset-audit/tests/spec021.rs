@@ -6,7 +6,8 @@ use std::{
 };
 
 use vault_core::traces::{
-    CombatEvent, combat_trace_host, read_combat_trace, run_combat_trace, write_combat_trace,
+    CombatEvent, combat_trace_host, read_combat_trace, run_combat_trace, run_combat_trace_recorded,
+    trace_defender, write_combat_trace,
 };
 use vault_fixtures::{gallery, state, vm};
 use vault_formats::LocalDirProvider;
@@ -27,11 +28,35 @@ fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
 /// The first directory `cargo xtask fixtures --output DIR` writes.
-fn corpus() -> tempfile::TempDir {
+fn bare_corpus() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     state::write_corpus(temp.path());
     gallery::write_hud(temp.path());
     std::fs::write(temp.path().join("scripts/core-fixture.int"), vm::program()).unwrap();
+    temp
+}
+/// SPEC-021 §3.7: the AI fixture (revision 2) and the critter art fixture
+/// (revision 3), copied byte for byte into a traced corpus.
+fn install_trace_fixtures(corpus: &Path) {
+    let rev2 = fixtures().join("spec021/rev2");
+    for (from, to) in [
+        ("ai.txt", "data/ai.txt"),
+        ("combatai.msg", "text/english/game/combatai.msg"),
+        ("sampleaq.frm", "art/critters/sampleaq.frm"),
+        ("sampleao.frm", "art/critters/sampleao.frm"),
+        ("sampleba.frm", "art/critters/sampleba.frm"),
+        ("samplecj.frm", "art/critters/samplecj.frm"),
+    ] {
+        let to = corpus.join(to);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(rev2.join(from), &to).unwrap();
+    }
+}
+/// [`bare_corpus`] with all six rows of SPEC-021 §3.7's table installed:
+/// every seeded combat trace runs on this (T7 and T11).
+fn corpus() -> tempfile::TempDir {
+    let temp = bare_corpus();
+    install_trace_fixtures(temp.path());
     temp
 }
 
@@ -147,6 +172,99 @@ fn the_seeded_combat_trace_matches_its_golden() {
     ]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(output.stdout.is_empty());
+}
+
+/// T11, revisions 2 and 3: in process, the NPC acts. At the end of at
+/// least one of the defender's traced turns its AP is below its effective
+/// maximum, because it moved or attacked (SPEC-009 §3.12).
+#[test]
+fn the_defender_spends_action_points_in_the_seeded_trace() {
+    let corpus = corpus();
+    // Revision 3: the art fixture names base `sample`, the only row of the
+    // corpus's critter list.
+    assert_eq!(
+        std::fs::read_to_string(corpus.path().join("art/critters/critters.lst"))
+            .unwrap()
+            .trim_end(),
+        "sample,0"
+    );
+    let vfs = Arc::new(LocalDirProvider::mount(corpus.path()).unwrap());
+    let mut host = combat_trace_host(vfs, "maps/synthetic.map", 1).unwrap();
+    assert!(
+        host.world
+            .ai
+            .packets
+            .as_ref()
+            .is_some_and(|table| !table.packets.is_empty())
+    );
+    let defender = trace_defender(&host.world).unwrap();
+    // Its art identifier names base index 0 (`sample`), as the player's does.
+    for critter in [defender, host.world.player] {
+        assert_eq!(host.world.get(critter).unwrap().raw.art_id & 0xFFF, 0);
+    }
+    let defender = host.world.state_handle(defender);
+    let player = host.world.state_handle(host.world.player);
+    let recorder = run_combat_trace_recorded(&mut host, 5).unwrap();
+    assert_eq!(
+        write_combat_trace(&recorder.rows),
+        golden("combat-trace-synthetic-seed1.tsv")
+    );
+    let turns: Vec<_> = recorder
+        .turn_ap
+        .iter()
+        .filter(|turn| turn.actor == defender)
+        .collect();
+    assert!(!turns.is_empty(), "the trace has no NPC turn row");
+    assert!(
+        recorder
+            .rows
+            .iter()
+            .any(|row| row.event == CombatEvent::Turn && row.actor == Some(defender))
+    );
+    assert!(
+        turns.iter().any(|turn| turn.ap < turn.maximum),
+        "the NPC spent no AP in any traced turn: {turns:?}"
+    );
+    // The player ends every turn at once, so it never spends AP.
+    assert!(
+        recorder
+            .turn_ap
+            .iter()
+            .filter(|turn| turn.actor == player)
+            .all(|turn| turn.ap == turn.maximum)
+    );
+}
+
+/// SPEC-021 revision 2 §3.7 step 1: without `data/ai.txt` (the bare
+/// synthetic corpus), or with a table of no packet, the combat dump
+/// exits 1 with a diagnostic and writes no trace.
+#[test]
+fn the_combat_dump_refuses_to_run_without_combat_ai() {
+    let bare = bare_corpus();
+    let arguments = |dir: &Path| {
+        audit(&[
+            "--corpus-dir".as_ref(),
+            dir.as_os_str(),
+            "--dump-combat-trace".as_ref(),
+            "maps/synthetic.map".as_ref(),
+        ])
+    };
+    let output = arguments(bare.path());
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("combat AI unavailable"), "{stderr}");
+    let vfs = Arc::new(LocalDirProvider::mount(bare.path()).unwrap());
+    assert!(combat_trace_host(vfs, "maps/synthetic.map", 1).is_err());
+
+    // A file with no packet section.
+    install_trace_fixtures(bare.path());
+    std::fs::write(bare.path().join("data/ai.txt"), "; no packet\n").unwrap();
+    let output = arguments(bare.path());
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("combat AI unavailable"), "{stderr}");
 }
 
 /// T7: identical seeds give identical traces, in combat and out of it; a
