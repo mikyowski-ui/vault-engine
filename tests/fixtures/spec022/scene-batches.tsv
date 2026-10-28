@@ -1,0 +1,9 @@
+batch	kind	clip	instances	snapshot
+0	overwrite	0,0,20,16	floor_u,floor_m,flat,obj_a	-
+1	dst_read	0,0,20,16	obj_b,wall_c.0	6,2,15,9
+2	overwrite	0,0,20,16	wall_c.2,wall_c.4,roof_1	-
+3	dst_read	0,0,20,16	roof_2.0	12,0,15,4
+4	overwrite	0,0,20,16	roof_2.4	-
+5	overwrite	0,0,24,16	ring_o	-
+6	dst_read	0,0,24,16	ring_t	5,4,11,10
+7	overwrite	0,0,20,16	text,nohex	-

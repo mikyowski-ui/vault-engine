@@ -1,0 +1,17 @@
+id	key	layer	primary	secondary	mode	flags	light	hex	fixed	dst_x	dst_y	src	src_x	src_y	width	height	clip	aux	levels
+ring_t	8000000000000008	4	0	8	outline_blend	0	none	-	-	5	4	ring_t	0	0	6	6	0,0,24,16	0204	-
+roof_2.4	6000135600000004	3	4950	4	lit	3	ambient	-	-	15	0	roof_2	3	0	3	4	0,0,20,16	0000	-
+obj_b	40004E8500000010	2	20101	16	translucent	0	hex	20101	-	6	5	obj_b	0	0	4	4	0,0,20,16	0001	-
+floor_m	000013BB00000000	0	5051	0	floor_map	0	map	-	-	8	8	floor_m	0	0	8	4	0,0,20,16	0000	lvl_m
+nohex	C000000000000000	6	0	0	lit	1	fixed	-	65536	18	12	nohex	0	0	4	3	0,0,20,16	0000	-
+wall_c.2	40004E8600000002	2	20102	2	lit	1	hex	20102	-	10	5	wall_c	0	3	6	1	0,0,20,16	0000	-
+flat_x	20004E8700000008	1	20103	8	lit	1	hex	20103	-	21	1	flat_x	0	0	2	2	0,0,20,16	0000	-
+roof_1	6000135500000000	3	4949	0	lit	3	ambient	-	-	0	0	roof_1	0	0	9	5	0,0,20,16	0000	-
+text	A000000000000000	5	0	0	plain	0	none	-	-	16	10	text	0	0	6	3	0,0,20,16	0000	-
+obj_a	40004E8500000008	2	20101	8	lit	1	hex	20101	-	4	3	obj_a	0	0	5	6	0,0,20,16	0000	-
+wall_c.0	40004E8600000000	2	20102	0	egg	0	hex	20102	-	10	2	wall_c	0	0	5	3	0,0,20,16	0000	-
+floor_u	000013BA00000000	0	5050	0	lit	1	fixed	-	40000	0	8	floor_u	0	0	8	4	0,0,20,16	0000	-
+ring_o	8000000000000000	4	0	0	plain	0	none	-	-	3	2	ring_o	0	0	7	8	0,0,24,16	0000	-
+roof_2.0	6000135600000000	3	4950	0	egg	2	ambient	-	-	12	0	roof_2	0	0	3	4	0,0,20,16	0000	-
+wall_c.4	40004E8600000004	2	20102	4	lit	1	hex	20102	-	15	2	wall_c	5	0	1	3	0,0,20,16	0000	-
+flat	20004E8700000000	1	20103	0	lit	1	hex	20103	-	2	6	flat	0	0	4	3	0,0,20,16	0000	-

@@ -1,0 +1,99 @@
+# SPEC-022 section 5.4: synthetic sprites, ring images, level image and egg mask.
+# "image NAME WIDTH HEIGHT" starts an image; each following line is one row, as
+# uppercase hexadecimal bytes (level and mask images too). Blank lines and lines
+# starting with "#" are ignored.
+
+image floor_u 8 4
+00 10 20 30 30 20 10 00
+10 20 30 E6 E6 30 20 10
+10 20 30 40 40 30 20 10
+00 10 20 30 30 20 10 00
+
+image floor_m 8 4
+50 50 50 50 50 50 50 50
+50 E8 50 50 50 50 E8 50
+60 60 60 60 60 60 60 60
+00 60 60 60 60 60 60 00
+
+image flat 4 3
+00 70 70 00
+70 F0 F0 70
+00 70 70 00
+
+image flat_x 2 2
+71 71
+71 71
+
+image obj_a 5 6
+00 00 80 00 00
+00 80 81 80 00
+80 81 82 81 80
+00 E9 82 E9 00
+00 80 00 80 00
+00 80 00 80 00
+
+image obj_b 4 4
+09 0A 0B 0C
+0D 00 00 0E
+0F 00 00 10
+11 12 13 14
+
+image wall_c 6 4
+A0 A1 A2 A3 A4 A5
+A1 F5 A3 A4 A5 A6
+A2 A3 00 A5 A6 A7
+A3 A4 A5 A6 A7 A8
+
+image roof_1 9 5
+C0 C1 C2 C3 C4 C5 C6 C7 C8
+C1 C2 C3 C4 C5 C6 C7 C8 C9
+00 00 C3 C4 E5 C6 C7 C8 C9
+00 00 00 C4 C5 C6 C7 00 00
+00 00 00 00 C5 C6 00 00 00
+
+image roof_2 6 4
+D0 D1 D2 D3 D4 D5
+D1 D2 D3 D4 D5 D6
+D2 D3 D4 D5 D6 D7
+00 D4 D5 D6 D7 00
+
+image text 6 3
+00 DC DC DC 00 00
+00 00 DC 00 00 07
+00 00 DC 00 00 07
+
+image nohex 4 3
+21 22 23 F8
+00 24 25 00
+26 00 00 27
+
+image ring_o 7 8
+00 00 00 31 00 00 00
+00 00 31 00 31 00 00
+00 31 00 00 00 31 00
+31 00 00 00 00 00 31
+00 31 00 00 00 31 00
+00 31 00 31 00 31 00
+00 31 00 31 00 31 00
+00 00 31 00 31 00 00
+
+image ring_t 6 6
+00 01 01 01 01 00
+01 00 00 00 00 01
+01 00 02 02 00 01
+01 00 02 02 00 01
+01 00 00 00 00 01
+00 01 01 01 01 00
+
+image lvl_m 8 4
+80 78 70 68 60 58 50 48
+80 78 70 68 60 58 50 48
+40 40 40 40 40 40 40 40
+00 10 20 30 40 50 60 70
+
+image egg 6 5
+00 28 5A 5A 28 00
+1E 01 01 01 01 1E
+3C 01 01 01 01 3C
+1E 01 01 01 01 1E
+00 28 7A 7A 28 00
