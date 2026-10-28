@@ -207,8 +207,11 @@ How it works:
   headlessly, as a release build, from the stage.
 - **Sessions.** Each picture comes from a map session on a fixed 30
   frames-a-second clock, composed on the CPU as the desktop composes its
-  layers. The scripted camera moves go through the camera opcodes'
-  `WorldEffect::Camera` path, and the roof peek holds Alt.
+  layers. The session starts through the same `SessionRuntime` as the
+  desktop's (SPEC-020 §2.3), from a configuration of its own (origin
+  `Gallery`: no window and no audio output). The scripted camera moves go
+  through the camera opcodes' `WorldEffect::Camera` path, and the roof peek
+  holds Alt.
 - **Encoders.** The files are written by zero-dependency encoders in the
   shell:
   - indexed PNGs (fixed-Huffman DEFLATE with LZ77);
@@ -1017,6 +1020,12 @@ cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
 # intrface.lst lists, role by role:
 cargo run --release -p asset-audit -- --corpus-dir /path/to/unpacked/game \
     --report-fallout2-art --fallout2-dir /path/to/fallout2
+# SPEC-021 §3.7: the VM opcode trace of one script (no corpus needed):
+cargo run -p asset-audit -- --dump-vm-trace tests/fixtures/vm/program.int.hex \
+    [--max-steps N] [--trace-out OUT]
+# SPEC-021 §3.7: the seeded combat hash trace of a map:
+cargo run -p asset-audit -- --corpus-dir target/state-corpus \
+    --dump-combat-trace maps/synthetic.map [--seed S] [--max-rounds R] [--trace-out OUT]
 ```
 
 The `--validate-*` flags combine freely. All requested categories share one
@@ -1024,6 +1033,55 @@ mount, and each runs to the end even when an earlier one failed. The run then
 prints `Audit categories: N run, M failed`, lists each failed category on
 stderr, and exits nonzero if any failed. Without a validation flag the tool
 only counts files.
+
+**Trace dumps (SPEC-021 §3.5-§3.7).** `--dump-vm-trace` and
+`--dump-combat-trace` are dump modes, not categories. Each is exclusive: with
+the other dump flag or any `--validate-*` or `--report-*` flag it is a usage
+error. A dump prints no `Audit categories` summary. The trace goes to stdout,
+or with `--trace-out OUT` to OUT (created or replaced). Diagnostics go to
+stderr. Both are ASCII TSV with tab separators and LF line ends, under a fixed
+header line.
+
+| Flag | Mode | Meaning |
+| --- | --- | --- |
+| `--dump-vm-trace FILE` | VM | Trace FILE, one row per executed instruction. A name ending in `.hex` is read as an offset-addressed dump (the format of `tests/fixtures/vm/program.int.hex`); any other name as raw `.INT` bytes. `--corpus-dir` is not needed. |
+| `--dump-combat-trace MAP` | Combat | Start a new game on MAP (a VFS path under `--corpus-dir`, which it requires), then write one row per combat event. |
+| `--max-steps N` | VM only | Write at most N rows (default 100000). Reaching the bound adds no row. |
+| `--max-rounds R` | Combat only | Trace at most R complete rounds (default 10, at least 1). |
+| `--seed S` | Combat only | The game RNG seed, as `vault-platform --seed` takes it (default 1; -1 is an ambient seed). |
+| `--trace-out OUT` | Both | Write the trace to OUT instead of stdout. |
+
+`--max-steps`, `--max-rounds`, `--seed` and `--trace-out` without a dump flag,
+or with the other mode's flag, are usage errors.
+
+The VM trace runs the program from offset 0 with empty stacks, under a
+headless host with an empty world: no map, no objects, no campaign globals,
+and the clock at 0 ms. Its header is
+`step program pc word imm next_pc vsp rsp fp gp top status` (tab-separated).
+The status is one of `ok`, `yield`, `wait`, `blocked`, `stopped`, `ended` or
+`error`. A host word the headless host cannot carry out writes an `error` row
+and ends the trace. It exits 0 when the last row is `ended` or `stopped`, 1 on
+a usage or load error (no trace is written), and 2 when the trace ends on an
+error, on a block, wait or yield with nothing left to resume, or at
+`--max-steps`.
+
+The combat trace mounts the corpus under the Fallout 1 profile with the
+default player sheet and runs the map-entry sequence. It then requests
+combat between the player and the critter with the smallest handle on the
+player's elevation, ends every player turn at once and lets the combat AI play
+the NPCs. Its header is `seq event round turn actor combat_hash state_hash`.
+The rows are one `start`, a `turn` after each turn's end-of-turn steps, and an
+`end` after cleanup. The hashes are `WorldState::combat_hash()` and
+`WorldState::state_hash()` as 16 uppercase hex digits. The trace stops after
+`end`, or after R complete rounds without an `end` row, and exits 0. A map with
+no critter to defend exits 1 without a trace.
+
+The goldens live in `tests/fixtures/spec021/`: `vm-trace-program.tsv` and
+`vm-trace-program-branch.tsv` for SPEC-004 §4.1's program and its branch
+mutation, and `combat-trace-synthetic-seed1.tsv`. The last is
+`--dump-combat-trace maps/synthetic.map --seed 1 --max-rounds 5` over the
+first directory `cargo xtask fixtures --output DIR` writes.
+`tools/asset-audit/tests/spec021.rs` runs the binary against all three.
 
 On the local corpus every category passes. Besides the counts quoted below,
 the full run reports: 17760 assets parsed by `--validate-formats` with 0

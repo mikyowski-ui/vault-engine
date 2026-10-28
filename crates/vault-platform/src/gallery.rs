@@ -21,17 +21,15 @@ use crate::{
     enhanced_layers,
     launcher::{self, Launcher, Setup, color, font},
     map_preview::MapPreview,
-    preview::AssetPreview,
+    preview::{AssetPreview, PreviewArgs},
     replay::{enhanced_layout, interactive_world, pointer_at},
+    session::{SessionConfig, SessionOrigin, SessionRuntime},
     side_tiles,
 };
 use encode::Indexed;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 use vault_core::{EnginePreset, GameProfile, WorldEffect, camera::CameraCommand};
-use vault_formats::{HexGrid, LocalDirProvider, Palette, Vfs, pro::Category};
+use vault_formats::{HexGrid, Palette, pro::Category};
 use vault_render::IndexedImage;
 
 /// The GIFs' frame rate: delays alternate 3, 3 and 4 hundredths.
@@ -98,20 +96,31 @@ fn movie(corpus: &Path, scene: impl Fn(&Path) -> AppResult<demos::Frames>) -> Ap
     ))
 }
 
-/// The showcase map (`vault_fixtures::gallery`) with the synthetic player,
-/// under `preset`.
-fn world(corpus: &Path, preset: EnginePreset) -> AppResult<AssetPreview> {
-    let vfs: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(corpus)?);
-    let preview = MapPreview::load_for_game(
-        vfs,
-        "maps/showcase.map",
-        "english",
-        Some("premade/synthetic.gcd"),
-        1,
-        preset,
-        GameProfile::Fallout1,
-    )?;
-    let mut preview = AssetPreview::Map(Box::new(preview));
+/// The session that films the showcase map (`vault_fixtures::gallery`)
+/// over the loose corpus, with the synthetic player, under `preset`: the
+/// same [`SessionRuntime`] start as the desktop's map preview (SPEC-020
+/// §2.3), from a [`SessionConfig`] of its own.
+fn showcase(corpus: &Path, preset: EnginePreset) -> SessionConfig {
+    SessionConfig::new(
+        SessionOrigin::Gallery,
+        PreviewArgs {
+            preset,
+            game_profile: GameProfile::Fallout1,
+            corpus_dir: Some(corpus.to_path_buf()),
+            preview_map: Some("maps/showcase.map".into()),
+            player_gcd: Some("premade/synthetic.gcd".into()),
+            language: Some("english".into()),
+            seed: Some(1),
+            ..Default::default()
+        },
+    )
+}
+
+/// The showcase session (see [`showcase`]), its player placed and its
+/// first frame run.
+fn world(corpus: &Path, preset: EnginePreset) -> AppResult<SessionRuntime> {
+    let mut preview = SessionRuntime::start(showcase(corpus, preset))?
+        .ok_or("the showcase configuration names no map")?;
     // The player at the building's door, the view over the building.
     let world = &mut map(&mut preview).host.world;
     let player = world.player;

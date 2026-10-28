@@ -12,6 +12,7 @@ use crate::{
     enhanced::{PointerAt, PointerButton},
     preview::AssetPreview,
     replay::{enhanced_layout, pointer_at},
+    session::SessionRuntime,
 };
 use std::{path::Path, sync::Arc};
 use vault_core::{EnginePreset, ObjectRef, WorldEffect, camera::CameraCommand};
@@ -25,7 +26,7 @@ pub(super) type Frames = Vec<(super::encode::Indexed, u16)>;
 /// surface point), the touch gestures and the finger's place (drawn as a
 /// ring), and the frames so far.
 pub(super) struct Film {
-    pub preview: AssetPreview,
+    pub preview: SessionRuntime,
     frame: u64,
     pointer: Option<[f64; 2]>,
     touch: crate::touch::TouchGestures,
@@ -34,7 +35,7 @@ pub(super) struct Film {
 }
 
 impl Film {
-    pub fn new(preview: AssetPreview) -> Self {
+    pub fn new(preview: SessionRuntime) -> Self {
         Self {
             preview,
             frame: 0,
@@ -53,7 +54,8 @@ impl Film {
         // A held finger's press comes due on the frame, as the shell polls.
         let due = self.touch.poll(self.now());
         self.apply(due)?;
-        self.preview.tick(self.now())?;
+        let now = self.now();
+        self.preview.tick(now)?;
         let mut image = enhanced_picture(&mut self.preview, MOVIE, self.pointer)?;
         if let Some(finger) = self.finger {
             ring(&mut image, finger, &self.preview);

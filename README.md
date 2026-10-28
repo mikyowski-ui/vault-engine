@@ -4,11 +4,21 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Rust: 1.88+](https://img.shields.io/badge/Rust-1.88%2B-orange.svg)](Cargo.toml)
 
-**Vault Engine** is a clean-room game engine in safe Rust. One binary runs
-retail ***Fallout* (1997)** and ***Fallout 2* (1998)** from your own `.DAT`
-archives, on Linux, Windows and macOS. Every behaviour is built from written
-specifications (`SPEC-001` to `SPEC-019`) by a two-team clean-room process.
-No game data ships with it.
+**Vault Engine** is a clean-room engine for the classic ***Fallout* (1997)**
+and ***Fallout 2* (1998)**, written in Rust. One native binary runs both
+retail games from your own `.DAT` archives, on Linux, Windows and macOS.
+Every behaviour is built from written specifications in `specs/approved/` by
+a two-team clean-room process. No game data ships with it.
+
+## What sets it apart
+
+| | |
+| --- | --- |
+| **One runtime, both games** | *Fallout* and *Fallout 2* run natively on one engine and one session pipeline, switched in the launcher |
+| **Live debugger** | `F9` opens the script VM trace, variable watches and object inspector while you play |
+| **Deterministic state** | 64-bit world and combat state hashes, with VM and combat trace oracles (`SPEC-021`) |
+| **Clean-room specs** | One team writes specs; another builds only from them ([`PROVENANCE.md`](PROVENANCE.md)) |
+| **Built-in QoL, external mods** | Widescreen, zoom, roof peek and combat info ship in the engine; total conversions and cut-content packs load as external mod layers (`load_order.toml`) |
 
 ## Showcase
 

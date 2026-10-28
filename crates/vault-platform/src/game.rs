@@ -11,6 +11,7 @@ use crate::{
     interface::Painter,
     map_preview::MapPreview,
     movie::{MoviePlayer, SubtitleStyle},
+    session::EditionRules,
 };
 use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 use vault_core::{
@@ -171,7 +172,8 @@ pub struct Game {
     volume_source: Option<Volumes>,
     /// The selected premade's bio text, read once per selection (P-02).
     bio: Option<(usize, Vec<u8>)>,
-    /// The game whose data this is: Fallout 2 follows SPEC-018 §6.
+    /// The game whose data this is: Fallout 2 follows SPEC-018 §6. What
+    /// differs by edition is read from its [`EditionRules`].
     pub game_profile: vault_core::GameProfile,
     /// SPEC-018 §6.6 step 1: the Fallout 2 tables, parsed before the
     /// selection screen (and again for a load from the menu).
@@ -540,14 +542,14 @@ impl Game {
     /// refusal returns to the menu with a message naming the file and line;
     /// nothing has changed then.
     fn prepare_fallout2(&mut self) -> bool {
-        if self.game_profile != vault_core::GameProfile::Fallout2 {
+        if !self.rules().campaign_tables {
             return true;
         }
         let assets = match VfsWorldAssets::new(self.vfs.clone(), &self.language) {
             Ok(assets) => assets,
             Err(error) => return self.refuse(error.to_string()),
         };
-        assets.set_game_profile(vault_core::GameProfile::Fallout2);
+        assets.set_game_profile(self.game_profile);
         let host = vault_core::WorldHost::new(
             match vault_core::WorldState::new(CharacterSheet::default(), self.seed) {
                 Ok(world) => world,
@@ -691,12 +693,14 @@ impl Game {
             },
         }
     }
-    fn fallout2_menu(&self) -> bool {
-        self.game_profile == vault_core::GameProfile::Fallout2
+    /// The session rules of the game's edition (SPEC-020 §2.2 rule 3):
+    /// every edition branch outside the world reads them.
+    pub fn rules(&self) -> EditionRules {
+        EditionRules::of(self.game_profile)
     }
     fn menu_poll(&mut self, input: MenuInput) {
         // SPEC-019 §3.2: Fallout 2's six buttons (keys only reach here).
-        if self.fallout2_menu() {
+        if self.rules().six_button_menu {
             let input = match input {
                 MenuInput::None => ui2::MenuInput::None,
                 MenuInput::Key(key) => ui2::MenuInput::Key(key),
@@ -1336,13 +1340,14 @@ impl Game {
             palette: &self.palette,
         };
         let mut image = IndexedImage::new(640, 480)?;
+        let rules = self.rules();
         match &mut self.stage {
             Stage::Splash { image: splash, .. } => return Ok(splash.clone()),
             Stage::Movie { player, .. } => return Ok(player.image()),
             Stage::World(world) | Stage::Load(world) | Stage::Ending { world, .. } => {
                 return world.image();
             }
-            Stage::Menu { .. } if self.game_profile == vault_core::GameProfile::Fallout2 => {
+            Stage::Menu { .. } if rules.six_button_menu => {
                 draw_menu2(&painter, &mut image, held);
             }
             Stage::Menu { .. } => {
@@ -1428,8 +1433,8 @@ impl Game {
             && let Some(frame) = art.frame(0, 0)
         {
             let (w, h) = (i32::from(frame.width), i32::from(frame.height));
-            let fallout2 = self.game_profile == vault_core::GameProfile::Fallout2;
-            let ([x, y], window) = flow::portrait_placement(fallout2, w, h);
+            let in_screen = self.rules().portrait_in_screen;
+            let ([x, y], window) = flow::portrait_placement(in_screen, w, h);
             for row in (0..h).step_by(2) {
                 for column in 0..w {
                     let color = frame.pixels()[(row * w + column) as usize];
@@ -1442,7 +1447,7 @@ impl Game {
         }
         let green = flow::SELECTION_TEXT;
         // SPEC-019 §3.3: no ID text under Fallout 2.
-        if self.game_profile != vault_core::GameProfile::Fallout2 {
+        if self.rules().premade_id {
             painter.centered(
                 image,
                 101,
@@ -1670,6 +1675,7 @@ impl Game {
         {
             return false;
         }
+        let rules = self.rules();
         match &mut self.stage {
             Stage::World(world) | Stage::Load(world) => world.click(point, right),
             Stage::Movie { player, .. } => {
@@ -1679,7 +1685,7 @@ impl Game {
             // §3.4: a press plays `nmselec0`; the release over the button
             // selects it.
             // §3.3 only the nonzero pixels of the up image are clickable.
-            Stage::Menu { .. } if self.game_profile == vault_core::GameProfile::Fallout2 => {
+            Stage::Menu { .. } if rules.six_button_menu => {
                 let painter = Painter {
                     assets: &self.assets,
                     palette: &self.palette,
@@ -1782,6 +1788,7 @@ impl Game {
         // A left release ends the held button's down art.
         let held = if right { None } else { self.held.take() };
         let over = held.filter(|rect| point.is_some_and(|point| rect.contains(point)));
+        let rules = self.rules();
         match &mut self.stage {
             Stage::World(world) | Stage::Load(world) => world.release(point, right),
             Stage::Movie { player, .. } => {
@@ -1791,7 +1798,7 @@ impl Game {
                 }
                 true
             }
-            Stage::Menu { .. } if self.game_profile == vault_core::GameProfile::Fallout2 => {
+            Stage::Menu { .. } if rules.six_button_menu => {
                 if let Some(i) = (0..6).find(|i| over == Some(ui2::menu_button(*i))) {
                     self.menu_poll2(ui2::MenuInput::Release(i));
                 }

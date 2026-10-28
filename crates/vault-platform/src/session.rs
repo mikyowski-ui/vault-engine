@@ -1,19 +1,23 @@
 //! Unified SessionRuntime facade (SPEC-020 §2.3, Wave 2).
 //!
 //! Every session the desktop runs goes through one [`SessionRuntime`]: a
-//! start from the launcher (`launcher`), from command-line flags (`main`)
-//! and a headless replay (`replay`) differ only in the [`SessionConfig`]
-//! they build (§2.3 rule 2). After that the same steps run in the same
-//! order:
+//! start from the launcher (`launcher`), from command-line flags (`main`),
+//! a headless replay (`replay`) and the documentation gallery (`gallery`)
+//! differ only in the [`SessionConfig`] they build (§2.3 rule 2). After
+//! that the same steps run in the same order:
 //!
 //! 1. [`SessionRuntime::start`] validates the edition (§2.2 rule 3), then
 //!    loads what the configuration names: the game flow (`game`), a map
 //!    preview (`map_preview`), a movie or a sprite (`preview`).
 //! 2. [`SessionRuntime::open_audio`] attaches the output a world or a movie
-//!    plays through (a replay opens none).
+//!    plays through (a replay or the gallery opens none).
 //! 3. Each frame, [`SessionRuntime::advance`] ticks the session, stops a
 //!    finished one and hands back the engine key repeats that came due.
 //! 4. Each key press goes through [`SessionRuntime::press_key`].
+//!
+//! What differs by edition is read from one table, [`EditionRules`]: the
+//! game flow, the data mount and the edition check branch on its fields,
+//! and only [`EditionRules::of`] matches on the profile (§2.2 rule 3).
 //!
 //! Worlds are configured by one step too: [`WorldOptions::apply`] gives a
 //! map preview and each of the game's worlds the session's movie policy,
@@ -44,6 +48,9 @@ pub enum SessionOrigin {
     /// A headless replay of an input log (`--replay-inputs`, and the
     /// replay tests).
     Replay,
+    /// A headless documentation capture (`--capture-gallery`, run by
+    /// `cargo xtask capture-gallery`).
+    Gallery,
 }
 
 /// What a session runs: everything an entry point decides before the
@@ -113,9 +120,74 @@ impl std::error::Error for EditionError {}
 
 /// An edition's name in messages.
 fn edition_title(edition: GameProfile) -> &'static str {
-    match edition {
-        GameProfile::Fallout1 => "Fallout 1",
-        GameProfile::Fallout2 => "Fallout 2",
+    EditionRules::of(edition).title
+}
+
+/// How an edition's data is mounted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Archives {
+    /// SPEC-008: a MASTER.DAT and CRITTER.DAT pair.
+    Dat,
+    /// SPEC-015 and SPEC-018 §1-§2: the Fallout 2 install found in the
+    /// folder that holds MASTER.DAT, with its optional patch000.dat.
+    Dat2Install,
+}
+
+/// The session-level differences between the editions outside the world
+/// (SPEC-020 §2.2 rule 3). [`EditionRules::of`] is the one place the
+/// platform session branches on [`GameProfile`]: the game flow, the data
+/// mount and the edition check read these fields rather than comparing
+/// profiles at each site. Its `match` has no default arm, so a new edition
+/// cannot start without rules of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditionRules {
+    /// The edition these rules are for.
+    pub edition: GameProfile,
+    /// The other edition, whose archives a mismatched install holds.
+    pub other: GameProfile,
+    /// The edition's name in messages.
+    pub title: &'static str,
+    /// How the session mounts the edition's data.
+    pub archives: Archives,
+    /// SPEC-019 §3.2: the main menu is Fallout 2's six buttons
+    /// (`vault_core::ui::fallout2`); otherwise SPEC-014 §3.3-§3.5's.
+    pub six_button_menu: bool,
+    /// SPEC-019 §3.3: the selection portrait fills Fallout 2's selection
+    /// screen window; otherwise SPEC-014's monitor holds it.
+    pub portrait_in_screen: bool,
+    /// SPEC-014: the premade's ID text under the portrait (SPEC-019 §3.3
+    /// shows none).
+    pub premade_id: bool,
+    /// SPEC-018 §6.6 step 1: the campaign tables and initializer are
+    /// parsed before the selection screen, a load or the preferences.
+    pub campaign_tables: bool,
+}
+
+impl EditionRules {
+    /// The rules for `edition`.
+    pub const fn of(edition: GameProfile) -> Self {
+        match edition {
+            GameProfile::Fallout1 => Self {
+                edition,
+                other: GameProfile::Fallout2,
+                title: "Fallout 1",
+                archives: Archives::Dat,
+                six_button_menu: false,
+                portrait_in_screen: false,
+                premade_id: true,
+                campaign_tables: false,
+            },
+            GameProfile::Fallout2 => Self {
+                edition,
+                other: GameProfile::Fallout1,
+                title: "Fallout 2",
+                archives: Archives::Dat2Install,
+                six_button_menu: true,
+                portrait_in_screen: true,
+                premade_id: false,
+                campaign_tables: true,
+            },
+        }
     }
 }
 
@@ -128,9 +200,9 @@ pub fn parse_edition(text: &str) -> Result<GameProfile, EditionError> {
 /// Whether `master` opens as `edition`'s archive format (SPEC-008 for
 /// Fallout 1, SPEC-015 for Fallout 2). Only directory tables are read.
 fn opens_as(master: &Path, edition: GameProfile) -> bool {
-    match edition {
-        GameProfile::Fallout1 => DatArchive::open(master).is_ok(),
-        GameProfile::Fallout2 => Dat2Archive::open(master).is_ok(),
+    match EditionRules::of(edition).archives {
+        Archives::Dat => DatArchive::open(master).is_ok(),
+        Archives::Dat2Install => Dat2Archive::open(master).is_ok(),
     }
 }
 
@@ -144,10 +216,7 @@ pub fn validate_edition(
     edition: GameProfile,
     master: Option<&Path>,
 ) -> Result<GameProfile, EditionError> {
-    let other = match edition {
-        GameProfile::Fallout1 => GameProfile::Fallout2,
-        GameProfile::Fallout2 => GameProfile::Fallout1,
-    };
+    let other = EditionRules::of(edition).other;
     if let Some(master) = master
         && opens_as(master, other)
         && !opens_as(master, edition)
@@ -216,9 +285,9 @@ impl SessionRuntime {
     }
     /// Open the audio output a world or a movie plays through (`device`:
     /// a real output device, else a silent one) and attach it. Sprites need
-    /// none, and neither does a replay.
+    /// none, and neither does a replay or the gallery.
     pub fn open_audio(&mut self, device: bool) -> Option<Audio> {
-        if self.origin == SessionOrigin::Replay {
+        if matches!(self.origin, SessionOrigin::Replay | SessionOrigin::Gallery) {
             return None;
         }
         let output = || {
@@ -346,6 +415,27 @@ mod tests {
             let text = error.to_string();
             assert!(text.contains("unsupported game edition"), "{text}");
             assert!(text.contains("expected fallout1 or fallout2"), "{text}");
+        }
+    }
+
+    #[test]
+    fn each_edition_has_its_own_rules() {
+        let fallout1 = EditionRules::of(Fallout1);
+        let fallout2 = EditionRules::of(Fallout2);
+        assert_eq!((fallout1.edition, fallout1.other), (Fallout1, Fallout2));
+        assert_eq!((fallout2.edition, fallout2.other), (Fallout2, Fallout1));
+        assert_eq!((fallout1.title, fallout2.title), ("Fallout 1", "Fallout 2"));
+        assert_eq!(fallout1.archives, Archives::Dat);
+        assert_eq!(fallout2.archives, Archives::Dat2Install);
+        // SPEC-014's menu, monitor portrait and ID text; SPEC-019's six
+        // buttons, screen portrait and no ID; SPEC-018 §6.6's tables.
+        assert!(!fallout1.six_button_menu && fallout2.six_button_menu);
+        assert!(!fallout1.portrait_in_screen && fallout2.portrait_in_screen);
+        assert!(fallout1.premade_id && !fallout2.premade_id);
+        assert!(!fallout1.campaign_tables && fallout2.campaign_tables);
+        for edition in crate::config::GAMES {
+            let rules = EditionRules::of(edition);
+            assert_eq!(EditionRules::of(rules.other).other, edition);
         }
     }
 

@@ -638,8 +638,9 @@ impl PreviewArgs {
         };
         // SPEC-018 §1-§2: Fallout 2's databases over SPEC-015 archives, found
         // in the install folder that holds MASTER.DAT, with an optional
-        // patch000.dat above MASTER.DAT.
-        if self.game_profile == vault_core::GameProfile::Fallout2 {
+        // patch000.dat above MASTER.DAT (the edition's rules say which).
+        let archives = crate::session::EditionRules::of(self.game_profile).archives;
+        if archives == crate::session::Archives::Dat2Install {
             let _ = critter;
             let folder = vault_formats::fallout2::Fallout2Install::folder_of(master);
             let install = vault_formats::fallout2::Fallout2Install::discover(&folder)?;
