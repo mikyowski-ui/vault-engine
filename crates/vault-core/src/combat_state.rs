@@ -328,6 +328,8 @@ impl<A: WorldAssets> WorldHost<A> {
         // outline is set, disabled.
         self.world.combat_state.highlight = self.world.target_highlight;
         self.world.start_combat_outlines();
+        // SPEC-021 §3.6: initialization is complete, no turn has started.
+        self.record_combat_event(crate::traces::CombatEvent::Start, None);
         Ok(())
     }
     fn combat_script(&mut self, critter: ObjectRef, parameter: i32) -> bool {
@@ -578,6 +580,8 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.combat_state.turn_ended = false;
             self.world.emit(crate::WorldEffect::RollArmorClass);
         }
+        // SPEC-021 §3.6: the turn's end-of-turn steps are done.
+        self.record_combat_event(crate::traces::CombatEvent::Turn, Some(critter));
     }
     /// Whether the player's input loop must stop: input gate clear, accepted
     /// end request, knockout/dead/lose-turn, ordinary AP at most zero (free
@@ -780,6 +784,9 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.world.combat_quit = false;
         self.world.emit(crate::WorldEffect::RollArmorClass);
-        self.map_update()
+        let updated = self.map_update();
+        // SPEC-021 §3.6: combat cleanup is complete.
+        self.record_combat_event(crate::traces::CombatEvent::End, None);
+        updated
     }
 }

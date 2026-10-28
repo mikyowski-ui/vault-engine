@@ -161,6 +161,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// destroyed or killed owner), by instance: the request that ran the
     /// procedure still returns them.
     pub(crate) departed: BTreeMap<u32, (bool, i32)>,
+    /// SPEC-021 §3.6: while attached, every combat start, turn end and
+    /// combat end writes a combat trace row here.
+    pub combat_trace: Option<crate::traces::CombatTraceRecorder>,
 }
 impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn prototype(&self, pid: u32) -> Result<std::sync::Arc<vault_formats::Prototype>, WorldError> {
@@ -335,6 +338,7 @@ impl<A: WorldAssets> WorldHost<A> {
             script_messages: Default::default(),
             host_busy: Vec::new(),
             departed: BTreeMap::new(),
+            combat_trace: None,
         }
     }
     /// SPEC-008 §3.10 a music request: the track is recorded as the last

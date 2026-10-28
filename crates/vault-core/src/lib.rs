@@ -56,8 +56,10 @@ pub mod roof;
 pub mod routing;
 pub mod sequence;
 pub mod skills;
+pub mod state_hash;
 pub mod stats;
 pub mod tables;
+pub mod traces;
 pub mod ui;
 pub mod world;
 pub mod worldmap;
@@ -174,6 +176,8 @@ mod self_stop_tests;
 mod skills_tests;
 #[cfg(test)]
 mod spec017_tests;
+#[cfg(test)]
+mod state_hash_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]

@@ -1398,6 +1398,10 @@ impl WorldState {
     pub fn get(&self, reference: ObjectRef) -> Option<&WorldObject> {
         self.entities.get(*self.references.get(&reference)?)
     }
+    /// The entity-store key a reference names, if it still names one.
+    pub fn entity_key(&self, reference: ObjectRef) -> Option<EntityId> {
+        self.references.get(&reference).copied()
+    }
     pub fn get_mut(&mut self, reference: ObjectRef) -> Option<&mut WorldObject> {
         let key = *self.references.get(&reference)?;
         self.entities.get_mut(key)

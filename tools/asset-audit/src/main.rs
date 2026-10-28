@@ -5,6 +5,7 @@ mod movies;
 mod readiness;
 mod sound;
 mod stack;
+mod trace;
 mod ui;
 
 use std::{collections::BTreeSet, error::Error, path::PathBuf, process::ExitCode, sync::Arc};
@@ -39,8 +40,35 @@ const VALIDATED: [&str; 17] = [
 #[command(about = "Count and optionally validate assets in a loose game directory")]
 struct Args {
     /// Unpacked directory containing art/, data/, color.pal, fonts, etc.
+    /// Required by every mode except `--dump-vm-trace`.
     #[arg(long, value_name = "PATH")]
-    corpus_dir: PathBuf,
+    corpus_dir: Option<PathBuf>,
+    /// SPEC-021 §3.7: write the VM opcode trace (§3.5) of FILE, a `.hex`
+    /// offset-addressed dump or raw `.INT` bytes, run from offset 0 under a
+    /// headless host with an empty world. Exit 0 when the program ends or
+    /// stops, 2 when the trace ends otherwise. Exclusive with the other
+    /// dump flag and every `--validate-*` and `--report-*` flag.
+    #[arg(long, value_name = "FILE")]
+    dump_vm_trace: Option<PathBuf>,
+    /// SPEC-021 §3.7: start a new game on MAP (a VFS path) of
+    /// `--corpus-dir`, request combat between the player and the
+    /// lowest-handle critter, end every player turn at once, and write the
+    /// combat hash trace (§3.6). Exclusive like `--dump-vm-trace`.
+    #[arg(long, value_name = "MAP")]
+    dump_combat_trace: Option<String>,
+    /// Rows `--dump-vm-trace` writes at most (default 100000).
+    #[arg(long, value_name = "N")]
+    max_steps: Option<u64>,
+    /// Complete rounds `--dump-combat-trace` traces at most (default 10).
+    #[arg(long, value_name = "R")]
+    max_rounds: Option<u32>,
+    /// The game RNG seed of `--dump-combat-trace`, as `vault-platform
+    /// --seed` (default 1; -1 is an ambient seed).
+    #[arg(long, value_name = "S", allow_negative_numbers = true)]
+    seed: Option<i32>,
+    /// Write a dump mode's trace to this file instead of stdout.
+    #[arg(long, value_name = "OUT")]
+    trace_out: Option<PathBuf>,
     /// Parse all supported formats, resolving MAP object subtypes through proto/ lists.
     #[arg(long)]
     validate_formats: bool,
@@ -900,8 +928,15 @@ impl Failures {
 }
 
 fn audit(args: Args) -> Result<(), Box<dyn Error>> {
+    if let Some(flag) = trace::stray(&args) {
+        return Err(format!("{flag} applies to a dump mode only").into());
+    }
+    let corpus_dir = args
+        .corpus_dir
+        .clone()
+        .ok_or("the following required argument was not provided: --corpus-dir <PATH>")?;
     // One mount serves every category.
-    let vfs = Arc::new(LocalDirProvider::mount(&args.corpus_dir)?);
+    let vfs = Arc::new(LocalDirProvider::mount(&corpus_dir)?);
     let mut failures = Failures::default();
     if args.validate_acm {
         failures.run("ACM", "ACM check(s)", || {
@@ -948,7 +983,7 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
     }
     if args.validate_dat {
         failures.run("DAT", "archive member check(s)", || {
-            let beside = |name: &str| args.corpus_dir.join("..").join(name);
+            let beside = |name: &str| corpus_dir.join("..").join(name);
             let master = args
                 .master_dat
                 .clone()
@@ -1212,7 +1247,22 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> ExitCode {
-    match audit(Args::parse()) {
+    let args = match Args::try_parse() {
+        Ok(args) => args,
+        Err(error) => {
+            // SPEC-021 §3.7: a dump mode's usage error exits 1.
+            let arguments: Vec<String> = std::env::args().collect();
+            if error.use_stderr() && trace::named(&arguments) {
+                let _ = error.print();
+                return ExitCode::FAILURE;
+            }
+            error.exit();
+        }
+    };
+    if trace::requested(&args) {
+        return trace::dump(&args);
+    }
+    match audit(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("asset-audit: {error}");

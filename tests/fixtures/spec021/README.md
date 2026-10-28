@@ -24,3 +24,13 @@ live here, not in `oracle/`, which is reserved for research-side vectors.
 The implementer adds `combat-trace-synthetic-seed1.tsv`, the seeded combat
 golden of SPEC-021 test T11, and a line here naming the synthetic map it was
 recorded on.
+
+- `combat-trace-synthetic-seed1.tsv`: the seeded combat golden (SPEC-021
+  test T11), recorded by the implementer (Team B) on 2026-10-27 with
+  `asset-audit --dump-combat-trace maps/synthetic.map --seed 1
+  --max-rounds 5` over the `cargo xtask fixtures` corpus (its first
+  directory). Map used: `maps/synthetic.map`, which has a defender (the
+  synthetic critter, handle `3:1`). The corpus has no `data/ai.txt`, so
+  the NPC's turns run without AI actions; every turn still writes its row.
+  The combat does not end on its own, so the trace stops after five
+  complete rounds without an `end` row.
