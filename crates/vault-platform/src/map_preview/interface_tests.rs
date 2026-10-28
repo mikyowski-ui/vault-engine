@@ -465,7 +465,7 @@ fn finish_elevator(preview: &mut MapPreview) {
     let Screen::Elevator(screen) = &preview.screen else {
         panic!("the elevator closed before its travel animation");
     };
-    assert!(screen.travel.is_some());
+    assert!(screen.moving());
     let mut now = preview.clock;
     assert!(preview.step(KeyCode::Escape));
     assert!(matches!(preview.screen, Screen::Elevator(_)));

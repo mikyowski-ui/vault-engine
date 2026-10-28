@@ -2446,3 +2446,146 @@ mod modal_api {
         assert_eq!(ignored, CalledOutcome::None);
     }
 }
+
+/// SPEC-020 §2.1 / SPEC-013 §3.15: the Skilldex layout, the row's wait
+/// and the action the closing window leads to.
+#[test]
+fn spec020_skilldex_layout_wait_and_action() {
+    use super::{
+        Rect,
+        skilldex::{self, SkilldexAction, SkilldexControl, SkilldexKey, SkilldexOutcome},
+    };
+    use crate::skills::{self, skill};
+    let layout = skilldex::layout();
+    assert_eq!(layout.len(), 9);
+    // Row k at (451 + 15, 5 + 45 + 36 k), 86 by 33; Cancel at (499, 343).
+    assert_eq!(
+        layout.rect(SkilldexControl::Row(1)),
+        Some(Rect::new(466, 86, 86, 33))
+    );
+    assert_eq!(
+        layout.rect(SkilldexControl::Cancel),
+        Some(Rect::new(499, 343, 15, 16))
+    );
+    assert_eq!(
+        layout.hit([466 + 85, 50 + 32]),
+        Some(SkilldexControl::Row(0))
+    );
+    assert_eq!(layout.hit([466 + 86, 50]), None);
+    // Opened from the bar: a row press waits trunc(1000 / 9) ms, swallowing
+    // presses and keys, then chooses the skill.
+    let mut window = skilldex::SkilldexWindow::new(None);
+    assert_eq!(window.key(SkilldexKey::Other), SkilldexOutcome::None);
+    assert_eq!(window.press([10, 10], 1000), SkilldexOutcome::Busy);
+    assert_eq!(
+        window.press([470, 90], 1000),
+        SkilldexOutcome::Chosen {
+            row: 1,
+            skill: skill::LOCKPICK
+        }
+    );
+    assert_eq!(window.chosen(), Some(skill::LOCKPICK));
+    assert_eq!(window.press([500, 345], 1001), SkilldexOutcome::Busy);
+    assert_eq!(window.key(SkilldexKey::Escape), SkilldexOutcome::Busy);
+    assert_eq!(window.due(1000 + skills::SKILLDEX_CLOSE_MS - 1), None);
+    assert_eq!(
+        window.due(1111),
+        Some(SkilldexAction::Choose(skill::LOCKPICK))
+    );
+    // Esc, Enter and Cancel close.
+    let mut window = skilldex::SkilldexWindow::new(None);
+    assert_eq!(window.key(SkilldexKey::Escape), SkilldexOutcome::Cancel);
+    assert_eq!(window.key(SkilldexKey::Enter), SkilldexOutcome::Cancel);
+    assert_eq!(window.press([500, 345], 0), SkilldexOutcome::Cancel);
+    assert_eq!(window.chosen(), None);
+    // From the action menu: a skill is used on the target; Sneak toggles.
+    let mut window = skilldex::SkilldexWindow::new(Some(7));
+    window.press([470, 50 + 36 * 4 + 5], 0);
+    assert_eq!(
+        window.due(111),
+        Some(SkilldexAction::UseOn {
+            target: 7,
+            skill: skill::FIRST_AID
+        })
+    );
+    let mut window = skilldex::SkilldexWindow::new(Some(7));
+    window.press([470, 54], 0);
+    assert_eq!(window.due(111), Some(SkilldexAction::Choose(skill::SNEAK)));
+}
+
+/// SPEC-020 §2.1 / SPEC-013 §3.21: the elevator layout, the press-then-
+/// release choice, the keys and the travel animation's pacing.
+#[test]
+fn spec020_elevator_layout_choice_and_travel() {
+    use super::{
+        Rect,
+        elevator::{self, ElevatorKey, ElevatorOutcome, ElevatorWindow},
+    };
+    use crate::skills::{self, ElevatorView};
+    let view = ElevatorView::from(skills::elevator(8).unwrap());
+    // A 230-by-284 background sits at ((640 - 230) / 2, (379 - 284) / 2).
+    let mut window = ElevatorWindow::open(8, view.clone(), 2, None);
+    assert_eq!(window.origin(), [205, 47]);
+    let layout = window.layout();
+    assert_eq!(layout.len(), 3);
+    assert_eq!(layout.rect(1), Some(Rect::new(218, 147, 48, 50)));
+    assert_eq!(
+        elevator::layout([0, 0], 2).hit([13 + 47, 100 + 49]),
+        Some(1)
+    );
+    assert_eq!(
+        ElevatorWindow::open(8, view.clone(), 0, Some([200, 300])).origin(),
+        [220, 39]
+    );
+    // The start level's gauge cell; a press holds, a release elsewhere does
+    // nothing, a release over it chooses.
+    assert_eq!(window.gauge_cell(0), 12);
+    let button = [205 + 13 + 5, 47 + 40 + 5];
+    assert_eq!(window.press([0, 0]), ElevatorOutcome::Busy);
+    assert_eq!(window.press(button), ElevatorOutcome::Pressed(0));
+    assert_eq!(window.pressed(), Some(0));
+    assert_eq!(window.release(Some([0, 0]), 0), ElevatorOutcome::None);
+    assert_eq!(window.pressed(), None);
+    assert_eq!(window.release(Some(button), 0), ElevatorOutcome::None);
+    window.press(button);
+    assert_eq!(
+        window.release(Some(button), 100),
+        ElevatorOutcome::Travel {
+            sound: view.travel_sound(2)
+        }
+    );
+    // Moving: input is swallowed; the gauge steps every 46 ms from 12 down
+    // to 0, then the 200 ms pause ends it.
+    assert!(window.moving());
+    assert_eq!(window.key(ElevatorKey::Escape, 100), ElevatorOutcome::Busy);
+    assert_eq!(window.press(button), ElevatorOutcome::Busy);
+    let cells = view.gauge_path(2, 0);
+    let end = 100 + cells.len() as u64 * view.step_ms() + skills::ELEVATOR_PAUSE_MS;
+    assert_eq!(window.tick(100), ElevatorOutcome::Redraw);
+    assert_eq!(window.tick(101), ElevatorOutcome::None);
+    assert_eq!(window.gauge_cell(100), cells[0]);
+    assert_eq!(window.gauge_cell(end - 1), *cells.last().unwrap());
+    assert_eq!(window.tick(end - 1), ElevatorOutcome::Redraw);
+    assert_eq!(window.tick(end), ElevatorOutcome::Perform(Some(0)));
+    // Keys: Esc cancels; the start level is performed at once; a key
+    // without a button is not taken.
+    let mut window = ElevatorWindow::open(8, view.clone(), 2, None);
+    assert_eq!(window.key(ElevatorKey::Other, 0), ElevatorOutcome::None);
+    assert_eq!(
+        window.key(ElevatorKey::Char(b'9'), 0),
+        ElevatorOutcome::None
+    );
+    assert_eq!(
+        window.key(ElevatorKey::Escape, 0),
+        ElevatorOutcome::Perform(None)
+    );
+    assert_eq!(
+        window.key(ElevatorKey::Char(b'3'), 0),
+        ElevatorOutcome::Perform(Some(2))
+    );
+    assert!(!window.moving());
+    assert!(matches!(
+        window.key(ElevatorKey::Char(b'2'), 0),
+        ElevatorOutcome::Travel { .. }
+    ));
+}

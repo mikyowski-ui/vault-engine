@@ -175,6 +175,23 @@
 //! return [`automap::AutomapOutcome`] (`Detail(high)`, `Scanner`,
 //! `Close`, ...); call `scanner_on()` when the Motion Sensor test passes.
 //!
+//! **Skilldex** ([`skilldex::SkilldexWindow`]). `new(target)` (the
+//! action menu's target, or `None`). `press(point, now)` and
+//! `key(SkilldexKey)` return [`skilldex::SkilldexOutcome`] (`Chosen { row,
+//! skill }` with [`skilldex::ROW_SOUNDS`], `Cancel`, `Busy` while a row
+//! waits, `None` for a key it does not take); each pass `due(now)` gives
+//! the [`skilldex::SkilldexAction`] (`Choose(skill)` or `UseOn { target,
+//! skill }`) once the row's wait is over. [`skilldex::layout`] is the
+//! rows then Cancel on screen.
+//!
+//! **Elevator** ([`elevator::ElevatorWindow`]). `open(kind, view, start,
+//! background_size)`; `press(point)`, `release(point, now)` and
+//! `key(ElevatorKey, now)` return [`elevator::ElevatorOutcome`]
+//! (`Pressed(level)`, `Travel { sound }`, `Perform(choice)`, `Busy`
+//! during the travel animation); each frame `tick(now)` returns `Redraw`
+//! or, once the animation ends, `Perform(Some(level))`. `layout()` is the
+//! level buttons and `gauge_cell(now)` the gauge cell to draw.
+//!
 //! **Interface bar** ([`bar::BarButtons`]). `press(point)` holds a button
 //! (`BarButton::sounds()`); `release(point)` returns the [`bar::Key`] it
 //! sends. Set `combat_buttons` while the combat panel shows End Turn and
@@ -196,6 +213,7 @@ pub mod called;
 pub mod character;
 pub mod cursor;
 pub mod editor;
+pub mod elevator;
 pub mod endgame;
 pub mod fallout2;
 pub mod flow;
@@ -204,6 +222,7 @@ pub mod options;
 pub mod pipboy;
 pub mod saveload;
 pub mod sheet;
+pub mod skilldex;
 pub mod talk;
 
 use vault_formats::Palette;

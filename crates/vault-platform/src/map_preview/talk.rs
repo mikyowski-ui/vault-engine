@@ -171,7 +171,7 @@ impl MapPreview {
                 let outcome = ask.window.release(point);
                 self.ask_outcome(outcome);
             }
-            Some(TalkWindow::Control(_)) => return self.control_release(over),
+            Some(TalkWindow::Control(_)) => return self.control_release(point, over),
             None => {
                 let Some(over) = over else {
                     return false;

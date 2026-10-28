@@ -8,13 +8,19 @@
 //! critter while the scanner is on. The detail setting is the saved
 //! automap display flag (SPEC-008 payload 17, mask `0x02`), low by default;
 //! the scanner is cleared at every opening.
+//!
+//! SPEC-020 §2.1: the window's scanner state, layout and held red button
+//! are `vault_core::ui::automap::AutomapWindow`'s; this draws it, plays its
+//! sounds and applies its outcomes to the world.
 use super::{MapPreview, Screen, dialog::Dialog};
 use crate::{AppResult, interface::Painter};
 use vault_core::{
     ObjectRef,
     ui::{
-        BUTTON_PRESS, BUTTON_RELEASE, ColorKey, ERROR_SOUND, Rect,
-        automap::{self, Mark},
+        BUTTON_PRESS, BUTTON_RELEASE, ColorKey, ERROR_SOUND, RED_BUTTON,
+        automap::{
+            self, AutomapControl, AutomapKey, AutomapOutcome, AutomapWindow, Mark, on_screen,
+        },
         saveload,
     },
 };
@@ -25,24 +31,12 @@ use vault_formats::{
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
-pub(crate) struct AutomapScreen {
-    pub scanner: bool,
-    /// A red button under a press, acting on its release over it.
-    pressed: Option<Rect>,
-}
-
 /// The message with its `%s` replaced by `name`.
 fn substitute(template: &[u8], name: &[u8]) -> Vec<u8> {
     match template.windows(2).position(|pair| pair == b"%s") {
         Some(at) => [&template[..at], name, &template[at + 2..]].concat(),
         None => template.to_vec(),
     }
-}
-
-/// A window rectangle on screen.
-fn on_screen(rect: Rect) -> Rect {
-    let [wx, wy] = automap::WINDOW;
-    Rect::new(wx + rect.x, wy + rect.y, rect.w, rect.h)
 }
 
 impl MapPreview {
@@ -55,10 +49,7 @@ impl MapPreview {
             return;
         }
         self.host.world.process_seen();
-        self.screen = Screen::Automap(AutomapScreen {
-            scanner,
-            pressed: None,
-        });
+        self.screen = Screen::Automap(AutomapWindow::open(scanner));
     }
     /// A Motion Sensor used from the inventory or the item slot: one charge
     /// opens the automap with the scanner on; an empty sensor prints
@@ -126,8 +117,8 @@ impl MapPreview {
             });
         match held {
             Some(sensor) if self.host.world.spend_charge(sensor) => {
-                if let Screen::Automap(screen) = &mut self.screen {
-                    screen.scanner = true;
+                if let Screen::Automap(window) = &mut self.screen {
+                    window.scanner_on();
                 }
             }
             held => {
@@ -142,30 +133,45 @@ impl MapPreview {
             }
         }
     }
+    /// Act on the core window's outcome.
+    fn automap_outcome(&mut self, outcome: AutomapOutcome) {
+        match outcome {
+            AutomapOutcome::None | AutomapOutcome::Pressed(_) => {}
+            AutomapOutcome::Detail(high) => self.set_detail(high),
+            AutomapOutcome::Scanner => self.automap_scanner(),
+            AutomapOutcome::Close => self.close_automap(),
+            AutomapOutcome::QuitConfirm => self.automap_quit(),
+            AutomapOutcome::Screenshot => self.screenshot(),
+        }
+    }
     /// Tab, Esc and `a` close; `h` and `l` set the detail (the switch
     /// follows, under the safe rule); `s` the scanner; Ctrl+Q, Alt+X and
     /// F10 the quit confirmation, whose Yes closes the window. Other keys do
     /// nothing while the window is open.
     pub(crate) fn automap_key(&mut self, key: KeyCode) -> bool {
         let [_, control, alt] = self.hud.modifiers;
-        match key {
-            KeyCode::Tab | KeyCode::Escape | KeyCode::KeyA => self.close_automap(),
-            KeyCode::KeyH => self.set_detail(true),
-            KeyCode::KeyL => self.set_detail(false),
-            KeyCode::KeyS => self.automap_scanner(),
-            KeyCode::KeyQ if control => self.automap_quit(),
-            KeyCode::KeyX if alt => self.automap_quit(),
-            KeyCode::F10 => self.automap_quit(),
+        let input = match key {
+            KeyCode::Tab | KeyCode::Escape | KeyCode::KeyA => AutomapKey::Close,
+            KeyCode::KeyH => AutomapKey::High,
+            KeyCode::KeyL => AutomapKey::Low,
+            KeyCode::KeyS => AutomapKey::Scanner,
+            KeyCode::KeyQ if control => AutomapKey::Quit,
+            KeyCode::KeyX if alt => AutomapKey::Quit,
+            KeyCode::F10 => AutomapKey::Quit,
             // §3.33 F12 takes a screenshot.
-            KeyCode::F12 => self.screenshot(),
-            _ => {}
+            KeyCode::F12 => AutomapKey::F12,
+            _ => AutomapKey::Other,
+        };
+        if let Screen::Automap(window) = &mut self.screen {
+            let outcome = window.key(input);
+            self.automap_outcome(outcome);
         }
         true
     }
     fn automap_quit(&mut self) {
         let title = self.message("misc.msg", 0);
         self.show_dialog(Dialog::quit_confirmation(
-            [169, 117],
+            automap::QUIT_ORIGIN,
             title,
             ColorKey::ERROR,
         ));
@@ -173,46 +179,39 @@ impl MapPreview {
     /// A press: a red button waits for its release; the detail switch
     /// toggles at once (`toggle`), sending `l` switched down, `h` up.
     pub(crate) fn automap_click(&mut self, point: [i32; 2]) -> bool {
-        if on_screen(automap::SWITCH).contains(point) {
-            self.play_effect(automap::SWITCH_SOUND.as_bytes(), None);
-            let high = !self.high_detail();
-            self.set_detail(high);
-            self.pressed = Some(automap::SWITCH_SOUND.as_bytes());
+        let high = self.high_detail();
+        let Screen::Automap(window) = &mut self.screen else {
             return true;
-        }
-        let button = [automap::SCANNER, automap::CANCEL]
-            .into_iter()
-            .find(|rect| on_screen(*rect).contains(point));
-        if let Some(rect) = button {
-            self.play_effect(BUTTON_PRESS.as_bytes(), None);
-            if let Screen::Automap(screen) = &mut self.screen {
-                screen.pressed = Some(rect);
+        };
+        let outcome = window.press(point, high);
+        match outcome {
+            AutomapOutcome::Detail(_) => {
+                self.play_effect(automap::SWITCH_SOUND.as_bytes(), None);
+                self.automap_outcome(outcome);
+                self.pressed = Some(automap::SWITCH_SOUND.as_bytes());
             }
+            AutomapOutcome::Pressed(_) => self.play_effect(BUTTON_PRESS.as_bytes(), None),
+            _ => {}
         }
         true
     }
     /// The release over the pressed red button sends its key.
     pub(crate) fn automap_release(&mut self, point: Option<[i32; 2]>) -> bool {
-        let Screen::Automap(screen) = &mut self.screen else {
+        let Screen::Automap(window) = &mut self.screen else {
             return false;
         };
-        let Some(rect) = screen.pressed.take() else {
+        if window.pressed().is_none() {
             return false;
-        };
-        self.play_effect(BUTTON_RELEASE.as_bytes(), None);
-        if point.is_some_and(|point| on_screen(rect).contains(point)) {
-            if rect == automap::SCANNER {
-                self.automap_scanner();
-            } else {
-                self.close_automap();
-            }
         }
+        let outcome = window.release(point);
+        self.play_effect(BUTTON_RELEASE.as_bytes(), None);
+        self.automap_outcome(outcome);
         true
     }
     pub(crate) fn automap_image(&mut self) -> AppResult<IndexedImage> {
         let view = self.map_view_image()?;
         let mut image = self.compose_world(view);
-        let Screen::Automap(screen) = &self.screen else {
+        let Screen::Automap(window) = &self.screen else {
             return Ok(image);
         };
         let painter = Painter {
@@ -221,13 +220,17 @@ impl MapPreview {
         };
         let [wx, wy] = automap::WINDOW;
         painter.blit_opaque(&mut image, automap::BACKGROUND, 0, [wx, wy]);
-        for rect in [automap::SCANNER, automap::CANCEL] {
-            let art = if screen.pressed == Some(rect) {
-                "lilreddn.frm"
-            } else {
-                "lilredup.frm"
+        let layout = window.layout();
+        for control in [AutomapControl::Scanner, AutomapControl::Cancel] {
+            let Some(rect) = layout.rect(control) else {
+                continue;
             };
-            painter.blit(&mut image, art, 0, [wx + rect.x, wy + rect.y]);
+            let art = if window.pressed() == Some(control) {
+                RED_BUTTON.1
+            } else {
+                RED_BUTTON.0
+            };
+            painter.blit(&mut image, art, 0, rect.origin());
         }
         let high = self.high_detail();
         let switch = if high {
@@ -235,12 +238,7 @@ impl MapPreview {
         } else {
             automap::SWITCH_DOWN
         };
-        painter.blit(
-            &mut image,
-            switch,
-            0,
-            [wx + automap::SWITCH.x, wy + automap::SWITCH.y],
-        );
+        painter.blit(&mut image, switch, 0, on_screen(automap::SWITCH).origin());
         // The objects of the player's elevation, in object-list order.
         let world = &self.host.world;
         let player = world.player;
@@ -282,7 +280,7 @@ impl MapPreview {
                 _ => Mark::Other,
             };
             let seen = object.raw.flags.contains(BasicFlags::SEEN);
-            let Some(key) = automap::color(mark, seen, screen.scanner, high) else {
+            let Some(key) = automap::color(mark, seen, window.scanner, high) else {
                 continue;
             };
             let color = painter.color(key);

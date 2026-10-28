@@ -365,7 +365,7 @@ fn spec019_revision2_the_custom_panel_takes_its_art_size() {
         assert!(preview.tap([ox + cx + 5, oy + cy + 5]));
         assert!(matches!(
             preview.talk,
-            Some(TalkWindow::Control(ref panel)) if panel.custom
+            Some(TalkWindow::Control(ref panel)) if panel.window.custom
         ));
         let window = preview.custom_window();
         assert_eq!(
@@ -391,7 +391,7 @@ fn spec019_revision2_the_custom_panel_takes_its_art_size() {
         assert!(preview.tap([origin[0] + dx + 5, origin[1] + dy + 5]));
         assert!(matches!(
             preview.talk,
-            Some(TalkWindow::Control(ref panel)) if !panel.custom
+            Some(TalkWindow::Control(ref panel)) if !panel.window.custom
         ));
     }
     // Without the art, the stand-in's window.
@@ -446,7 +446,7 @@ fn spec019_vector_j_dialogue_panel_and_combat_control() {
     assert!(preview.tap([ox + cx + 5, oy + cy + 5]));
     assert!(matches!(
         preview.talk,
-        Some(TalkWindow::Control(ref panel)) if panel.custom
+        Some(TalkWindow::Control(ref panel)) if panel.window.custom
     ));
     preview.image().unwrap();
     let [px, py] = ui2::custom::ORIGIN;
@@ -473,7 +473,7 @@ fn spec019_vector_j_dialogue_panel_and_combat_control() {
     assert!(preview.step(KeyCode::Enter));
     assert!(matches!(
         preview.talk,
-        Some(TalkWindow::Control(ref panel)) if !panel.custom
+        Some(TalkWindow::Control(ref panel)) if !panel.window.custom
     ));
     assert!(preview.step(KeyCode::KeyU));
     assert!(preview.step(KeyCode::KeyT));

@@ -3,37 +3,24 @@
 //! open `trunc(1000 / 9)` ms; then Sneak toggles, another row enters that
 //! skill's targeting mode, or, opened from the action menu's Skill entry
 //! (SPEC-014 §3.28), uses the skill on that target.
-use super::{MapPreview, Screen, modal_kit::at};
+//!
+//! SPEC-020 §2.1: the window's layout, the chosen row's wait and the
+//! action it leads to are `vault_core::ui::skilldex`'s; this draws it and
+//! applies the action.
+use super::{MapPreview, Screen};
 use crate::AppResult;
 use vault_core::{
     ObjectRef, skills,
-    ui::{BUTTON_PRESS, ColorKey, Rect},
+    ui::{
+        BUTTON_PRESS, ColorKey,
+        skilldex::{
+            self, ROW_ART, ROW_SIZE, ROW_SOUNDS, SkilldexAction, SkilldexControl, SkilldexKey,
+            SkilldexOutcome, SkilldexWindow,
+        },
+    },
 };
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
-
-pub(crate) struct SkilldexScreen {
-    /// The action menu's target.
-    target: Option<ObjectRef>,
-    /// The chosen skill and the clock at its press: the window closes
-    /// `CLOSE_DELAY_MS` later, discarding input meanwhile.
-    chosen: Option<(i32, u64)>,
-}
-
-const ROW: [i32; 2] = [86, 33];
-const CANCEL: Rect = Rect::new(48, 338, 15, 16);
-/// A row button waits `trunc(1000 / 9)` ms before the window closes.
-const CLOSE_DELAY_MS: u64 = 1000 / 9;
-
-/// Row button `row`'s screen rectangle.
-fn row_rect(row: usize) -> Rect {
-    let [x, y] = skills::skilldex_button(row);
-    at(skills::SKILLDEX_ORIGIN, Rect::new(x, y, ROW[0], ROW[1]))
-}
-/// Cancel's screen rectangle.
-const fn cancel_rect() -> Rect {
-    at(skills::SKILLDEX_ORIGIN, CANCEL)
-}
 
 impl MapPreview {
     pub(crate) fn open_skilldex(&mut self) {
@@ -41,10 +28,7 @@ impl MapPreview {
     }
     pub(crate) fn open_skilldex_on(&mut self, target: Option<ObjectRef>) {
         if matches!(self.screen, Screen::Map) {
-            self.screen = Screen::Skilldex(SkilldexScreen {
-                target,
-                chosen: None,
-            });
+            self.screen = Screen::Skilldex(SkilldexWindow::new(target));
         }
     }
     pub(crate) fn skilldex_image(&mut self) -> AppResult<IndexedImage> {
@@ -65,12 +49,12 @@ impl MapPreview {
         let player = self.host.world.player;
         let context = self.host.world.context(player);
         let font_height = painter.line_height(103);
+        let layout = skilldex::layout();
         for (row, skill) in skills::SKILLDEX_SKILLS.iter().enumerate() {
-            let rect = row_rect(row);
-            let art = ("skldxoff.frm", "skldxon.frm");
-            let art = self.draw_button_opaque(&painter, &mut image, rect, art);
+            let rect = skilldex::row_rect(row);
+            let art = self.draw_button_opaque(&painter, &mut image, rect, ROW_ART);
             // The label is (18, 17, 3) on the up image, (14, 12, 3) down.
-            let key = if art == "skldxon.frm" {
+            let key = if art == ROW_ART.1 {
                 ColorKey::LABEL_PRESSED
             } else {
                 ColorKey::LABEL
@@ -83,7 +67,7 @@ impl MapPreview {
                 key,
                 &label,
                 [rect.x + lx, rect.y + ly],
-                ROW[0],
+                ROW_SIZE[0],
             );
             let value = self
                 .host
@@ -108,75 +92,82 @@ impl MapPreview {
             [ox + 72, oy + 337],
             80,
         );
-        self.draw_red_button(&painter, &mut image, cancel_rect());
+        if let Some(cancel) = layout.rect(SkilldexControl::Cancel) {
+            self.draw_red_button(&painter, &mut image, cancel);
+        }
         Ok(image)
     }
-    fn close_skilldex(&mut self, skill: Option<i32>) {
-        let Screen::Skilldex(screen) = std::mem::replace(&mut self.screen, Screen::Map) else {
+    /// The window closes; a chosen row's action applies.
+    fn close_skilldex(&mut self, action: Option<SkilldexAction>) {
+        if !matches!(self.screen, Screen::Skilldex(_)) {
             return;
-        };
-        let Some(skill) = skill else {
-            return;
-        };
-        match screen.target {
-            Some(target) if skill != skills::skill::SNEAK => {
+        }
+        self.screen = Screen::Map;
+        match action {
+            None => {}
+            Some(SkilldexAction::UseOn { target, skill }) => {
                 let player = self.host.world.player;
                 if let Err(error) = self.host.use_skill_on(player, target, skill) {
                     self.status = error.to_string().into_bytes();
                 }
                 self.drain_effects();
             }
-            _ => self.choose_skill(skill),
+            Some(SkilldexAction::Choose(skill)) => self.choose_skill(skill),
         }
     }
     pub(crate) fn skilldex_click(&mut self, point: [i32; 2]) -> bool {
         let clock = self.clock;
-        let Screen::Skilldex(screen) = &mut self.screen else {
+        let Screen::Skilldex(window) = &mut self.screen else {
             return false;
         };
-        if screen.chosen.is_some() {
-            return true;
-        }
-        if let Some(row) = (0..8).find(|row| row_rect(*row).contains(point)) {
-            screen.chosen = Some((skills::SKILLDEX_SKILLS[row], clock));
-            self.press_button_cue(b"ib3p1xx1", b"ib3lu1x1", row_rect(row));
-            return true;
-        }
-        if cancel_rect().contains(point) {
-            self.press_button(cancel_rect());
-            self.close_skilldex(None);
+        match window.press(point, clock) {
+            SkilldexOutcome::Chosen { row, .. } => {
+                let (press, release) = ROW_SOUNDS;
+                let rect = skilldex::row_rect(row);
+                self.press_button_cue(press.as_bytes(), release.as_bytes(), rect);
+            }
+            SkilldexOutcome::Cancel => {
+                if let Some(cancel) = skilldex::layout().rect(SkilldexControl::Cancel) {
+                    self.press_button(cancel);
+                }
+                self.close_skilldex(None);
+            }
+            SkilldexOutcome::None | SkilldexOutcome::Busy => {}
         }
         true
     }
-    /// The chosen row's wait: the window closes `CLOSE_DELAY_MS` after the
-    /// press.
+    /// The chosen row's wait: the window closes `SKILLDEX_CLOSE_MS` after
+    /// the press.
     pub(crate) fn skilldex_tick(&mut self) -> bool {
-        let Screen::Skilldex(SkilldexScreen {
-            chosen: Some((skill, at)),
-            ..
-        }) = self.screen
-        else {
+        let Screen::Skilldex(window) = &self.screen else {
             return false;
         };
-        if self.clock < at + CLOSE_DELAY_MS {
+        let Some(action) = window.due(self.clock) else {
             return false;
-        }
-        self.close_skilldex(Some(skill));
+        };
+        self.close_skilldex(Some(action));
         true
     }
     /// Esc cancels; Enter also cancels after `ib1p1xx1`.
     pub(crate) fn skilldex_key(&mut self, key: KeyCode) -> bool {
-        if matches!(&self.screen, Screen::Skilldex(screen) if screen.chosen.is_some()) {
-            return true;
-        }
-        match key {
-            KeyCode::Escape => self.close_skilldex(None),
-            KeyCode::Enter | KeyCode::NumpadEnter => {
-                self.play_effect(BUTTON_PRESS.as_bytes(), None);
+        let Screen::Skilldex(window) = &self.screen else {
+            return false;
+        };
+        let input = match key {
+            KeyCode::Escape => SkilldexKey::Escape,
+            KeyCode::Enter | KeyCode::NumpadEnter => SkilldexKey::Enter,
+            _ => SkilldexKey::Other,
+        };
+        match window.key(input) {
+            SkilldexOutcome::None => false,
+            SkilldexOutcome::Cancel => {
+                if input == SkilldexKey::Enter {
+                    self.play_effect(BUTTON_PRESS.as_bytes(), None);
+                }
                 self.close_skilldex(None);
+                true
             }
-            _ => return false,
+            SkilldexOutcome::Busy | SkilldexOutcome::Chosen { .. } => true,
         }
-        true
     }
 }

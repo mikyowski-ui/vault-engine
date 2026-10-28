@@ -100,14 +100,15 @@ pub(crate) enum Screen {
     Barter(Box<barter::BarterScreen>),
     Movie(Box<movies::MovieScreen>),
     /// SPEC-013 windows over the world.
-    Skilldex(skilldex::SkilldexScreen),
-    Elevator(elevator::ElevatorScreen),
+    /// SPEC-020 §2.1: the core windows own their state.
+    Skilldex(vault_core::ui::skilldex::SkilldexWindow),
+    Elevator(Box<vault_core::ui::elevator::ElevatorWindow>),
     Loot(Box<loot::LootScreen>),
     /// SPEC-014 options, pause, quit confirmation and preferences.
     Options(options::OptionsScreen),
     SaveLoad(Box<saveload::SaveLoadScreen>),
     /// The automap overlay.
-    Automap(automap::AutomapScreen),
+    Automap(vault_core::ui::automap::AutomapWindow),
     /// The F1 help screen.
     Help(Box<help::HelpScreen>),
 }
@@ -879,7 +880,7 @@ impl MapPreview {
                             || self.map_release(point)
                             || self.bar_release(bar, over)
                     }
-                    Screen::Elevator(_) => self.elevator_release(over),
+                    Screen::Elevator(_) => self.elevator_release(point, over),
                     Screen::Loot(_) => self.loot_release(point),
                     Screen::Inventory(_) => self.inventory_release(point),
                     Screen::Barter(_) => self.barter_release(point),

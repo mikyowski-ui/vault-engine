@@ -8,41 +8,35 @@
 //! cycling rows and Done. The rules are
 //! `vault_core::fallout2_party`'s; the host applies them
 //! (`choose_disposition`, `cycle_control`, `use_best_weapon`).
+//!
+//! SPEC-020 §2.1: the panels' layouts, the custom panel's open state and
+//! the held button are `vault_core::ui::fallout2::ControlPanelWindow`'s;
+//! this draws them, plays their sounds and applies their outcomes.
 use super::{MapPreview, talk::TalkWindow};
 use crate::interface::Painter;
 use vault_core::{
     ObjectRef, fallout2_party as party,
     ui::{
-        BUTTON_PRESS, BUTTON_RELEASE, ColorKey, ERROR_SOUND, RED_BUTTON, Rect,
-        fallout2::{self as ui2, control, custom, text},
+        ColorKey, ERROR_SOUND, RED_BUTTON, Rect,
+        fallout2::{
+            self as ui2, ControlKey, ControlOutcome, ControlPanelWindow, control, custom, text,
+        },
     },
 };
 use vault_formats::fallout2::party::ControlField;
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
 
-/// The panel over a conversation with a party member.
+/// The panel over a conversation with a party member: the member, and the
+/// core window that owns the panels' state.
 pub(crate) struct ControlPanel {
     pub member: ObjectRef,
-    /// The custom panel is open over it.
-    pub custom: bool,
+    pub window: ControlPanelWindow,
 }
 
-/// A control of the two panels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ControlButton {
-    Disposition(usize),
-    Custom,
-    Best,
-    Talk,
-    /// A custom-panel row (0-5).
-    Row(usize),
-    Done,
-}
-
+/// A red button's screen rectangle at `at` in the window at `origin`.
 fn screen(origin: [i32; 2], at: [i32; 2]) -> Rect {
-    let [w, h] = RED_BUTTON.2;
-    Rect::new(origin[0] + at[0], origin[1] + at[1], w, h)
+    control::button_rect(at).offset(origin)
 }
 
 impl MapPreview {
@@ -77,123 +71,84 @@ impl MapPreview {
     /// The Combat Control button or `c`: the control panel opens.
     pub(crate) fn open_control(&mut self) {
         if let Some(member) = self.control_member() {
-            self.talk = Some(TalkWindow::Control(ControlPanel {
-                member,
-                custom: false,
-            }));
+            let allowed = self
+                .host
+                .party_record_of(member)
+                .map(|record| record.allowed(ControlField::Disposition).to_vec())
+                .unwrap_or_default();
+            let window = ControlPanelWindow::new(allowed, self.custom_background());
+            self.talk = Some(TalkWindow::Control(ControlPanel { member, window }));
         }
     }
-    /// §3.15.3 (Revision 2) the custom panel's window: the size of
-    /// `custom.frm`'s first frame, or the stand-in's.
-    pub(crate) fn custom_window(&self) -> Rect {
+    /// §3.15.3 (Revision 2) the custom panel's background size: the
+    /// first frame of `custom.frm`, `None` for the stand-in.
+    fn custom_background(&self) -> Option<[i32; 2]> {
         let painter = Painter {
             assets: &self.host.assets,
             palette: &self.palette,
         };
-        let size = painter.role(&ui2::CUSTOM_PANEL).and_then(|(_, art)| {
+        painter.role(&ui2::CUSTOM_PANEL).and_then(|(_, art)| {
             art.frame(0, 0)
                 .map(|frame| [i32::from(frame.width), i32::from(frame.height)])
-        });
-        custom::window(size)
+        })
     }
-    /// The buttons that act now: the custom panel's while it is open (it
-    /// is modal), else the control panel's enabled ones.
-    pub(crate) fn control_buttons(&self, panel: &ControlPanel) -> Vec<(ControlButton, Rect)> {
-        if panel.custom {
-            let window = self.custom_window();
-            let origin = [window.x, window.y];
-            return (0..6)
-                .map(|j| (ControlButton::Row(j), screen(origin, custom::button(j))))
-                .chain([(ControlButton::Done, screen(origin, custom::DONE_BUTTON))])
-                .collect();
-        }
-        let origin = control::ORIGIN;
-        let allowed = self
-            .host
-            .party_record_of(panel.member)
-            .map(|member| member.allowed(ControlField::Disposition).to_vec())
-            .unwrap_or_default();
-        let mut buttons: Vec<(ControlButton, Rect)> = (0..5)
-            .filter(|k| allowed.contains(&(*k as i32)))
-            .map(|k| {
-                (
-                    ControlButton::Disposition(k),
-                    screen(origin, control::disposition_button(k)),
-                )
-            })
-            .collect();
-        if allowed.contains(&party::disposition::CUSTOM) {
-            buttons.push((
-                ControlButton::Custom,
-                screen(origin, control::CUSTOM_BUTTON),
-            ));
-        }
-        buttons.push((ControlButton::Best, screen(origin, control::BEST_BUTTON)));
-        let talk = control::TALK;
-        buttons.push((
-            ControlButton::Talk,
-            Rect::new(origin[0] + talk.x, origin[1] + talk.y, talk.w, talk.h),
-        ));
-        buttons
+    /// §3.15.3 (Revision 2) the custom panel's window: the size of
+    /// `custom.frm`'s first frame, or the stand-in's.
+    #[cfg(test)]
+    pub(crate) fn custom_window(&self) -> Rect {
+        custom::window(self.custom_background())
     }
     /// A press on a panel control: its sounds; it acts on release.
     pub(crate) fn control_click(&mut self, point: [i32; 2]) -> bool {
-        let Some(TalkWindow::Control(panel)) = &self.talk else {
+        let Some(TalkWindow::Control(panel)) = &mut self.talk else {
             return false;
         };
-        if let Some((button, rect)) = self
-            .control_buttons(panel)
-            .into_iter()
-            .find(|(_, rect)| rect.contains(point))
-        {
-            let (press, release) = if button == ControlButton::Talk {
-                control::TALK_SOUNDS
-            } else {
-                (BUTTON_PRESS, BUTTON_RELEASE)
-            };
+        let held = panel
+            .window
+            .press(point)
+            .and_then(|button| Some((button, panel.window.layout().rect(button)?)));
+        if let Some((button, rect)) = held {
+            let (press, release) = button.sounds();
             self.press_button_cue(press.as_bytes(), release.as_bytes(), rect);
         }
         true
     }
-    /// A release over the held control acts on it.
-    pub(crate) fn control_release(&mut self, over: Option<Rect>) -> bool {
-        let Some(TalkWindow::Control(panel)) = &self.talk else {
+    /// A left release at `point` over the held control (`over`, the held
+    /// rectangle under the release) acts on it.
+    pub(crate) fn control_release(&mut self, point: Option<[i32; 2]>, over: Option<Rect>) -> bool {
+        let Some(TalkWindow::Control(panel)) = &mut self.talk else {
             return false;
         };
-        let Some(over) = over else {
-            return true;
-        };
-        if let Some((button, _)) = self
-            .control_buttons(panel)
-            .into_iter()
-            .find(|(_, rect)| *rect == over)
-        {
-            self.control_action(button);
+        let outcome = panel.window.release(over.and(point));
+        if outcome != ControlOutcome::None {
+            self.control_outcome(outcome);
+            self.drain_effects();
         }
         true
     }
-    fn control_action(&mut self, button: ControlButton) {
-        let Some(TalkWindow::Control(panel)) = &mut self.talk else {
+    /// Act on the core window's outcome for the panel's member.
+    fn control_outcome(&mut self, outcome: ControlOutcome) {
+        let Some(TalkWindow::Control(panel)) = &self.talk else {
             return;
         };
         let member = panel.member;
-        match button {
-            ControlButton::Disposition(k) => {
+        match outcome {
+            ControlOutcome::None | ControlOutcome::Custom(_) => {}
+            ControlOutcome::Disposition(k) => {
                 self.host.choose_disposition(member, k as i32);
             }
-            ControlButton::Custom => panel.custom = true,
-            ControlButton::Done => panel.custom = false,
-            ControlButton::Talk => self.talk = None,
-            ControlButton::Row(j) => {
-                self.host.cycle_control(member, ui2::CUSTOM_FIELDS[j]);
+            ControlOutcome::Talk => self.talk = None,
+            ControlOutcome::Cycle(field) => {
+                self.host.cycle_control(member, field);
             }
-            ControlButton::Best => match self.host.use_best_weapon(member) {
+            ControlOutcome::BestWeapon => match self.host.use_best_weapon(member) {
                 Ok(true) => {}
                 Ok(false) => self.play_effect(ERROR_SOUND.as_bytes(), None),
                 Err(error) => self.status = error.to_string().into_bytes(),
             },
+            ControlOutcome::QuitConfirm => self.confirm_quit(),
+            ControlOutcome::Screenshot => self.screenshot(),
         }
-        self.drain_effects();
     }
     /// §3.15.2 keys: `t` and Esc return to dialogue, `1`-`5` choose the
     /// disposition rows when allowed, `u` is Use Best Weapon, Ctrl+Q,
@@ -204,31 +159,29 @@ impl MapPreview {
         let Some(TalkWindow::Control(panel)) = &mut self.talk else {
             return false;
         };
-        if panel.custom {
-            if matches!(key, KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Escape) {
-                panel.custom = false;
-            }
-            return true;
-        }
-        let digit = match key {
-            KeyCode::Digit1 => Some(0),
-            KeyCode::Digit2 => Some(1),
-            KeyCode::Digit3 => Some(2),
-            KeyCode::Digit4 => Some(3),
-            KeyCode::Digit5 => Some(4),
-            _ => None,
+        let input = match key {
+            KeyCode::KeyT => ControlKey::Talk,
+            KeyCode::Escape => ControlKey::Escape,
+            KeyCode::Enter | KeyCode::NumpadEnter => ControlKey::Enter,
+            KeyCode::KeyU => ControlKey::Best,
+            KeyCode::Digit1 => ControlKey::Digit(0),
+            KeyCode::Digit2 => ControlKey::Digit(1),
+            KeyCode::Digit3 => ControlKey::Digit(2),
+            KeyCode::Digit4 => ControlKey::Digit(3),
+            KeyCode::Digit5 => ControlKey::Digit(4),
+            KeyCode::KeyQ | KeyCode::KeyX if control_held => ControlKey::Quit,
+            KeyCode::F10 => ControlKey::Quit,
+            KeyCode::F12 => ControlKey::F12,
+            _ => ControlKey::Other,
         };
-        match key {
-            KeyCode::KeyT | KeyCode::Escape => self.talk = None,
-            KeyCode::KeyU => self.control_action(ControlButton::Best),
-            KeyCode::KeyQ | KeyCode::KeyX if control_held => self.confirm_quit(),
-            KeyCode::F10 => self.confirm_quit(),
-            KeyCode::F12 => self.screenshot(),
-            _ => {
-                if let Some(k) = digit {
-                    self.control_action(ControlButton::Disposition(k));
-                }
-            }
+        let outcome = panel.window.key(input);
+        self.control_outcome(outcome);
+        // The panel's own buttons drain the world's effects.
+        if matches!(
+            outcome,
+            ControlOutcome::Disposition(_) | ControlOutcome::BestWeapon
+        ) {
+            self.drain_effects();
         }
         true
     }
@@ -375,13 +328,19 @@ impl MapPreview {
         let rect = Rect::new(origin[0] + talk.x, origin[1] + talk.y, talk.w, talk.h);
         let art = self.button_art(rect, control::TALK_ART.0, control::TALK_ART.1);
         painter.blit(image, art, 0, [rect.x, rect.y]);
-        if panel.custom {
-            self.draw_custom(painter, image, member);
+        if panel.window.custom {
+            self.draw_custom(painter, image, member, panel.window.background);
         }
     }
     /// §3.15.3 the custom panel.
-    fn draw_custom(&self, painter: &Painter, image: &mut IndexedImage, member: ObjectRef) {
-        let window = self.custom_window();
+    fn draw_custom(
+        &self,
+        painter: &Painter,
+        image: &mut IndexedImage,
+        member: ObjectRef,
+        background: Option<[i32; 2]>,
+    ) {
+        let window = custom::window(background);
         let origin = [window.x, window.y];
         let at = |p: [i32; 2]| [origin[0] + p[0], origin[1] + p[1]];
         if painter.role(&ui2::CUSTOM_PANEL).is_some() {

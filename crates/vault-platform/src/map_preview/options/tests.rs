@@ -204,7 +204,7 @@ fn spec013_elevator_keys_accept_the_numeric_keypad() {
         .effects
         .push_back(WorldEffect::Elevator(8));
     preview.image().unwrap();
-    assert!(matches!(&preview.screen, Screen::Elevator(screen) if screen.travel.is_none()));
+    assert!(matches!(&preview.screen, Screen::Elevator(screen) if !screen.moving()));
     assert!(preview.step(KeyCode::Numpad1));
-    assert!(matches!(&preview.screen, Screen::Elevator(screen) if screen.travel.is_some()));
+    assert!(matches!(&preview.screen, Screen::Elevator(screen) if screen.moving()));
 }
