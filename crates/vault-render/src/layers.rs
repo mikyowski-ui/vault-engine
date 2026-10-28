@@ -6,6 +6,10 @@
 
 use crate::{ImageError, IndexedImage};
 
+pub mod gpu;
+mod instanced;
+pub use instanced::*;
+
 /// One indexed image drawn into a surface rectangle through the shared
 /// palette.
 #[derive(Clone, Copy)]

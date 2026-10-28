@@ -665,3 +665,92 @@ fn the_vignette_darkens_toward_its_center_through_an_anchored_dither() {
     draw_vignette(&mut untouched, grid, vignette, &[]);
     assert!(untouched.pixels().iter().all(|pixel| *pixel == 0));
 }
+
+/// The rows of a SPEC-022 TSV fixture after its header, by column name.
+fn spec022_rows(text: &str) -> Vec<std::collections::BTreeMap<&str, &str>> {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    lines
+        .map(|line| header.iter().copied().zip(line.split('\t')).collect())
+        .collect()
+}
+
+/// SPEC-022 §5.4 the scene's peek: center (88, 40), R0 = 32, Wr = 48.
+fn scene_peek() -> RoofPeekParams {
+    RoofPeekParams::new([88, 40], 32, 48)
+}
+
+#[test]
+fn spec022_t8_peek_thresholds_and_scales_give_the_fixture_rows() {
+    let peek = scene_peek();
+    assert_eq!(peek.outer(), 80);
+    let squared = peek.thresholds_squared();
+    let rows = spec022_rows(include_str!(
+        "../../../../tests/fixtures/spec022/peek-thresholds.tsv"
+    ));
+    assert_eq!(rows.len(), 16);
+    for row in rows {
+        let t: usize = row["t"].parse().unwrap();
+        assert_eq!(peek.threshold(t).to_string(), row["threshold_q4"], "t {t}");
+        assert_eq!(squared[t].to_string(), row["threshold_sq"], "t {t}");
+    }
+    for row in spec022_rows(include_str!(
+        "../../../../tests/fixtures/spec022/peek-scale.tsv"
+    )) {
+        let scale: f64 = row["canvas_scale"].parse().unwrap();
+        let peek = RoofPeekParams::at_scale([0.0, 0.0], scale).unwrap();
+        assert_eq!(peek.inner.to_string(), row["inner_q4"], "scale {scale}");
+        assert_eq!(peek.ring.to_string(), row["ring_q4"], "scale {scale}");
+        assert_eq!(peek.outer().to_string(), row["outer_q4"], "scale {scale}");
+        assert_eq!(peek.threshold(0).to_string(), row["threshold_q4_t0"]);
+        assert_eq!(peek.threshold(15).to_string(), row["threshold_q4_t15"]);
+    }
+    // The center of pixel (5, 2) is (88, 40) in 1/16 pixel.
+    let centered = RoofPeekParams::at_scale([5.5, 2.5], 1.0).unwrap();
+    assert_eq!(centered.center, [88, 40]);
+}
+
+#[test]
+fn spec022_t8_peek_test_gives_the_fixture_samples() {
+    let peek = scene_peek();
+    let rows = spec022_rows(include_str!(
+        "../../../../tests/fixtures/spec022/peek-samples.tsv"
+    ));
+    assert_eq!(rows.len(), 14);
+    for row in rows {
+        let (x, y): (i32, i32) = (row["x"].parse().unwrap(), row["y"].parse().unwrap());
+        let label = format!("pixel ({x}, {y})");
+        let world = [i64::from(x) + 4, i64::from(y) - 2];
+        assert_eq!(bayer(world).to_string(), row["t"], "{label}");
+        let (dx, dy) = (16 * x + 8 - 88, 16 * y + 8 - 40);
+        assert_eq!(dx.to_string(), row["dx_q4"], "{label}");
+        assert_eq!(dy.to_string(), row["dy_q4"], "{label}");
+        assert_eq!((dx * dx + dy * dy).to_string(), row["dist_sq"], "{label}");
+        let cut = peek.cuts([x, y], [-4, 2]);
+        assert_eq!(u8::from(cut).to_string(), row["cut"], "{label}");
+    }
+}
+
+#[test]
+fn spec022_t8_peek_safe_rules() {
+    // The outer radius is capped at 16384: R0 first, then Wr.
+    let capped = RoofPeekParams::new([0, 0], 20000, 500);
+    assert_eq!((capped.inner, capped.ring), (16384, 0));
+    let capped = RoofPeekParams::new([0, 0], 16000, 1000);
+    assert_eq!((capped.inner, capped.ring), (16000, 384));
+    // A tiny scale caps; a scale that is not finite and positive refuses.
+    let tiny = RoofPeekParams::at_scale([0.0, 0.0], 1e-9).unwrap();
+    assert_eq!(tiny.outer(), 16384);
+    for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(RoofPeekParams::at_scale([0.0, 0.0], scale).is_none());
+    }
+    assert!(RoofPeekParams::at_scale([f64::NAN, 0.0], 1.0).is_none());
+    // The center is clamped to ±2^24, and the test stays in range there.
+    let far = RoofPeekParams::at_scale([1e12, -1e12], 1.0).unwrap();
+    assert_eq!(far.center, [1 << 24, -(1 << 24)]);
+    assert!(!far.cuts([16383, 0], [0, 0]));
+    // Every threshold is below the outer radius and its square fits.
+    let wide = RoofPeekParams::new([0, 0], 0, 16384);
+    assert!((0..16).all(|t| wide.threshold(t) < wide.outer()));
+    assert!(wide.cuts([0, 0], [i32::MIN, i32::MAX]));
+}

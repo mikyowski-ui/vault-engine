@@ -223,24 +223,34 @@ pub fn draw_outline(
         buffer[0].min(stride),
         buffer[1].min(i64::from(image.height())),
     ];
-    let band = match ink {
-        OutlineInk::Banded { count, .. } => i64::from(frame.height) / i64::from(count.max(1)),
-        _ => 0,
-    };
     let pixels = image.pixels_mut();
     ring(frame, origin, refreshed, buffer, |[x, y], row| {
         let pixel = &mut pixels[(y * stride + x) as usize];
-        *pixel = match ink {
-            OutlineInk::Opaque(index) => index,
-            OutlineInk::Banded { first, .. } if band == 0 => first,
-            OutlineInk::Banded { first, count } => {
-                first + ((row / band + 1) % i64::from(count)) as u8
-            }
-            OutlineInk::Translucent { gray, blend } => {
+        *pixel = match (opaque_paint(ink, frame, row), ink) {
+            (Some(index), _) => index,
+            (None, OutlineInk::Translucent { gray, blend }) => {
                 blend[usize::from(gray)][usize::from(*pixel)]
             }
+            (None, _) => *pixel,
         };
     });
+}
+
+/// The index an opaque or banded ink paints for a paint scanned on frame
+/// row `row` of `frame`; `None` for a translucent ink, which blends.
+pub(crate) fn opaque_paint(ink: OutlineInk, frame: &FrmFrame, row: i64) -> Option<u8> {
+    match ink {
+        OutlineInk::Opaque(index) => Some(index),
+        OutlineInk::Banded { first, count } => {
+            let band = i64::from(frame.height) / i64::from(count.max(1));
+            Some(if band == 0 {
+                first
+            } else {
+                first + ((row / band + 1) % i64::from(count)) as u8
+            })
+        }
+        OutlineInk::Translucent { .. } => None,
+    }
 }
 
 #[cfg(test)]

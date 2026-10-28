@@ -10,7 +10,8 @@ pub mod movie;
 pub mod outline;
 
 pub use image::{ImageError, IndexedImage, TextStyle, compose_preview};
-pub use layers::{EnhancedLayout, Layer, LayerParams, compose_layers};
+pub use layers::{EnhancedLayout, Layer, LayerParams, RenderPath, compose_layers};
+pub use map::SceneRenderer;
 #[cfg(test)]
 pub(crate) use vault_fixtures::formats as fixture_assets;
 

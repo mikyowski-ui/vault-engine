@@ -13,9 +13,13 @@ use vault_formats::{
 };
 
 mod enhanced;
+mod instanced;
+use crate::layers::FrameLayer;
 pub use enhanced::{
-    BAYER, ShroudCell, ShroudField, Vignette, bayer, draw_shroud, draw_vignette, roof_hides,
+    BAYER, RoofPeekParams, ShroudCell, ShroudField, Vignette, bayer, draw_shroud, draw_vignette,
+    roof_hides,
 };
+pub use instanced::{DrawRecord, MapFrame, RefreshReport, SceneRenderer, gather_map_frame};
 
 pub trait MapArt {
     fn frame(
@@ -307,6 +311,16 @@ impl Cutout<'_> {
         let (width, height) = (i64::from(self.mask.width), i64::from(self.mask.height));
         ((0..width).contains(&u) && (0..height).contains(&v))
             .then(|| self.mask.pixels()[(v * width + u) as usize])
+    }
+    /// The mask's rectangle `[x0, y0, x1, y1]` with its top-left at
+    /// `origin`.
+    fn rect(&self, origin: [i64; 2]) -> [i64; 4] {
+        [
+            origin[0],
+            origin[1],
+            origin[0] + i64::from(self.mask.width),
+            origin[1] + i64::from(self.mask.height),
+        ]
     }
     /// The §3.37 orientation table for a wall or scenery object, with or
     /// without the wall-transparency-end exceptions.
@@ -725,9 +739,7 @@ pub fn render_floor(
     view: MapView,
     art: &impl MapArt,
 ) -> Result<IndexedImage, MapRenderError> {
-    floor(map, view, art, |image, frame, corner| {
-        image.blit(frame, corner)
-    })
+    render_floor_recorded(map, view, art, None, None)
 }
 
 /// The floor squares of the view (SPEC-003 §2.8) under the SPEC-014 §3.44
@@ -739,19 +751,39 @@ pub fn render_floor_lit(
     art: &impl MapArt,
     light: MapLight,
 ) -> Result<IndexedImage, MapRenderError> {
-    let mut floor_light = FloorLight::new(light);
-    floor(map, view, art, |image, frame, corner| {
-        floor_light.draw(image, view, frame, corner);
-    })
+    render_floor_recorded(map, view, art, Some(light), None)
 }
 
-/// Each drawn floor square's art at its corner, by `draw`.
-fn floor(
+/// [`render_floor_lit`] (with a light) or [`render_floor`] (without),
+/// logging each drawn square to `record` (SPEC-022 §3.4 order parity).
+fn render_floor_recorded(
     map: &MapFile,
     view: MapView,
     art: &impl MapArt,
-    mut draw: impl FnMut(&mut IndexedImage, &FrmFrame, [i64; 2]),
+    light: Option<MapLight>,
+    mut record: Option<&mut dyn FnMut(DrawRecord)>,
 ) -> Result<IndexedImage, MapRenderError> {
+    check_floor_view(view)?;
+    let mut image = IndexedImage::new(view.width, view.height)?;
+    let mut floor_light = light.map(FloorLight::new);
+    for (rank, frame, corner) in floor_squares(map, view, art) {
+        let drawn = match &mut floor_light {
+            Some(floor_light) => floor_light.draw(&mut image, view, frame, corner),
+            None => {
+                image.blit(frame, corner);
+                true
+            }
+        };
+        if drawn && let Some(record) = record.as_mut() {
+            record(DrawRecord::new(FrameLayer::Floor, rank, 0, 0));
+        }
+    }
+    Ok(image)
+}
+
+/// The checks a floor refresh makes before drawing: the elevation, and a
+/// grid origin within the i32 range.
+fn check_floor_view(view: MapView) -> Result<(), MapRenderError> {
     if view.elevation > 2 {
         return Err(MapRenderError::Elevation);
     }
@@ -763,25 +795,68 @@ fn floor(
     {
         return Err(GeometryError::ProjectionOverflow.into());
     }
-    let mut image = IndexedImage::new(view.width, view.height)?;
+    Ok(())
+}
+
+/// The floor squares a refresh draws, in drawing order: each one's rank
+/// (its position in [`square_order`]), art and corner. A square whose
+/// corner lies past the view, hidden, or without art is skipped.
+fn floor_squares<'a, A: MapArt>(
+    map: &'a MapFile,
+    view: MapView,
+    art: &'a A,
+) -> impl Iterator<Item = (u32, &'a FrmFrame, [i64; 2])> + use<'a, A> {
     let origin = view.grid.origin;
-    for (index, offset) in square_order() {
-        let corner = corner(origin, *offset);
-        if beyond(view, corner) {
-            continue;
-        }
-        let tile = map
-            .tile(view.elevation as usize, *index as usize)
-            .expect("validated map grid");
-        // SPEC-003 §2.8 exempts only roof index 1 from drawing; floor index 1
-        // (the ordinary blank tile) draws its art like any other floor.
-        if !tile.floor_hidden()
-            && let Some((frame, _)) = art.frame(Category::Tile, u32::from(tile.floor()), 0, 0)
-        {
-            draw(&mut image, frame, corner);
-        }
-    }
-    Ok(image)
+    square_order()
+        .iter()
+        .enumerate()
+        .filter_map(move |(rank, (index, offset))| {
+            let corner = corner(origin, *offset);
+            if beyond(view, corner) {
+                return None;
+            }
+            let tile = map
+                .tile(view.elevation as usize, *index as usize)
+                .expect("validated map grid");
+            // SPEC-003 §2.8 exempts only roof index 1 from drawing; floor
+            // index 1 (the ordinary blank tile) draws its art like any
+            // other floor.
+            if tile.floor_hidden() {
+                return None;
+            }
+            let (frame, _) = art.frame(Category::Tile, u32::from(tile.floor()), 0, 0)?;
+            Some((rank as u32, frame, corner))
+        })
+}
+
+/// The roof squares a refresh draws, in drawing order: each one's rank
+/// (its position in [`square_order`]), art and corner (96 pixels above
+/// the floor corner). Roof index 1, hidden roofs, squares past the view
+/// and squares without art are skipped (SPEC-014 §3.36).
+fn roof_squares<'a, A: MapArt>(
+    map: &'a MapFile,
+    view: MapView,
+    art: &'a A,
+) -> impl Iterator<Item = (u32, &'a FrmFrame, [i64; 2])> + use<'a, A> {
+    let origin = view.grid.origin;
+    square_order()
+        .iter()
+        .enumerate()
+        .filter_map(move |(rank, (index, offset))| {
+            let corner = corner(origin, *offset);
+            let corner = [corner[0], corner[1] - 96];
+            if beyond(view, corner) {
+                return None;
+            }
+            let tile = map
+                .tile(view.elevation as usize, *index as usize)
+                .expect("validated map grid");
+            if tile.roof() == 1 || tile.roof_hidden() {
+                return None;
+            }
+            let (frame, _) = art.frame(Category::Tile, u32::from(tile.roof()), 0, 0)?;
+            Some((rank as u32, frame, corner))
+        })
 }
 
 /// SPEC-014 §3.44 the floor light's ten vertices: each one's position in
@@ -953,56 +1028,83 @@ impl<'a> FloorLight<'a> {
             tile.max(ambient)
         })
     }
-    /// Draw one floor tile whose art's top-left is at `corner`.
-    fn draw(
-        &mut self,
-        image: &mut IndexedImage,
-        view: MapView,
-        frame: &FrmFrame,
-        corner: [i64; 2],
-    ) {
+    /// The light of the floor tile whose art's top-left is at `corner`:
+    /// `None` when no hex is under its base point (the tile is not drawn),
+    /// its common vertex light when all ten agree, else the interpolated
+    /// light map, filled into `self.map` for [`Self::level_at`].
+    fn tile(&mut self, view: MapView, corner: [i64; 2]) -> Option<TileLight> {
         let (Ok(x), Ok(y)) = (i32::try_from(corner[0]), i32::try_from(corner[1] + 13)) else {
-            return;
+            return None;
         };
-        let Some(base) = view.grid.pick_hex([x, y]) else {
-            return;
-        };
+        let base = view.grid.pick_hex([x, y])?;
         let lights = self.vertices(base);
-        let intensity = self.intensity;
         if lights.iter().all(|light| *light == lights[0]) {
-            // Uniform: the lit draw, so indexes 229 and up are not lit.
-            let level = MapLight::level(i64::from(lights[0]));
-            blit_with(image, frame, corner, |source, _, _| {
-                if source >= 229 {
-                    source
-                } else {
-                    intensity[usize::from(source) * 256 + usize::from(level)]
-                }
-            });
-            return;
+            return Some(TileLight::Uniform(lights[0]));
         }
         // The map is filled afresh: with the safe rule below no entry is
         // read that this tile's triangles did not write (unless its whole
         // column is unwritten, when it reads 0).
         self.map.fill(0);
         fill_floor_map(&lights, &mut self.map, &mut self.written);
-        let (map, sources) = (&self.map, floor_sources());
-        blit_with(image, frame, corner, |source, _, [px, py]| {
-            // `[May-improve]`: indexes 229-255 stay unlit, as in a uniform
-            // tile (R1 draws them through their unmapped intensity rows,
-            // as index 0).
-            if source >= 229 {
-                return source;
-            }
-            let entry = 160 + 80 * (py - corner[1]) + (px - corner[0]);
-            let light = usize::try_from(entry)
-                .ok()
-                .filter(|entry| *entry < FLOOR_MAP)
-                .map_or(0, |entry| map[usize::from(sources[entry])]);
-            let level = (light / 512).clamp(0, 128) as usize;
-            intensity[usize::from(source) * 256 + level]
-        });
+        Some(TileLight::Interpolated)
     }
+    /// The level (0-128) of tile pixel `[px, py]` (relative to the tile's
+    /// corner) of the interpolated tile [`Self::tile`] last filled.
+    fn level_at(&self, [px, py]: [i64; 2]) -> u8 {
+        let entry = 160 + 80 * py + px;
+        let light = usize::try_from(entry)
+            .ok()
+            .filter(|entry| *entry < FLOOR_MAP)
+            .map_or(0, |entry| self.map[usize::from(floor_sources()[entry])]);
+        (light / 512).clamp(0, 128) as u8
+    }
+    /// Draw one floor tile whose art's top-left is at `corner`; whether
+    /// it was drawn.
+    fn draw(
+        &mut self,
+        image: &mut IndexedImage,
+        view: MapView,
+        frame: &FrmFrame,
+        corner: [i64; 2],
+    ) -> bool {
+        let intensity = self.intensity;
+        match self.tile(view, corner) {
+            None => false,
+            Some(TileLight::Uniform(light)) => {
+                // Uniform: the lit draw, so indexes 229 and up are not lit.
+                let level = MapLight::level(i64::from(light));
+                blit_with(image, frame, corner, |source, _, _| {
+                    if source >= 229 {
+                        source
+                    } else {
+                        intensity[usize::from(source) * 256 + usize::from(level)]
+                    }
+                });
+                true
+            }
+            Some(TileLight::Interpolated) => {
+                blit_with(image, frame, corner, |source, _, [px, py]| {
+                    // `[May-improve]`: indexes 229-255 stay unlit, as in a
+                    // uniform tile (R1 draws them through their unmapped
+                    // intensity rows, as index 0).
+                    if source >= 229 {
+                        return source;
+                    }
+                    let level = self.level_at([px - corner[0], py - corner[1]]);
+                    intensity[usize::from(source) * 256 + usize::from(level)]
+                });
+                true
+            }
+        }
+    }
+}
+
+/// SPEC-014 §3.44 a floor tile's light: uniform (the common vertex light)
+/// or interpolated per pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TileLight {
+    Uniform(i32),
+    Interpolated,
 }
 
 /// A square whose corner lies past the right or bottom edge draws nothing.
@@ -1048,6 +1150,51 @@ pub fn draw_map_scene(
     art: &impl MapArt,
     scene: MapScene,
 ) -> Result<(), MapRenderError> {
+    draw_map_scene_recorded(image, map, objects, view, art, scene, None)
+}
+
+/// SPEC-022 §3.1 one whole refresh of the reference path: the floor (lit
+/// by the scene's light, or unlit without one) and then the scene's
+/// layers ([`draw_map_scene`]), as the map view draws each view.
+pub fn render_map_scene(
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    scene: MapScene,
+) -> Result<IndexedImage, MapRenderError> {
+    render_map_scene_recorded(map, objects, view, art, scene, None)
+}
+
+/// [`render_map_scene`] logging every draw to `record`, as (layer, hex or
+/// square rank, list index, part): SPEC-022 §3.4's draw-recording hook.
+pub(crate) fn render_map_scene_recorded(
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    scene: MapScene,
+    mut record: Option<&mut dyn FnMut(DrawRecord)>,
+) -> Result<IndexedImage, MapRenderError> {
+    let floor_record: Option<&mut dyn FnMut(DrawRecord)> = match record.as_mut() {
+        Some(record) => Some(&mut **record),
+        None => None,
+    };
+    let mut image = render_floor_recorded(map, view, art, scene.light, floor_record)?;
+    draw_map_scene_recorded(&mut image, map, objects, view, art, scene, record)?;
+    Ok(image)
+}
+
+/// [`draw_map_scene`] logging every draw to `record`.
+fn draw_map_scene_recorded(
+    image: &mut IndexedImage,
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    scene: MapScene,
+    mut record: Option<&mut dyn FnMut(DrawRecord)>,
+) -> Result<(), MapRenderError> {
     if view.elevation > 2 {
         return Err(MapRenderError::Elevation);
     }
@@ -1072,12 +1219,18 @@ pub fn draw_map_scene(
     } else {
         Vec::new()
     };
-    let (placed, hexless) = draw_sequence_with(
-        view,
-        objects,
-        cursor.map(|cursor| (cursor.hex, cursor.order)),
-        &extra,
-    );
+    let cursor_place = cursor.map(|cursor| (cursor.hex, cursor.order));
+    let (placed, hexless) = draw_sequence_with(view, objects, cursor_place, &extra);
+    // The list indexes, only when recording.
+    let lists = record
+        .is_some()
+        .then(|| ListIndexes::new(objects, cursor_place));
+    let canvas = [0, 0, i64::from(image.width()), i64::from(image.height())];
+    let mut log = |layer: FrameLayer, primary: i64, index: u32, part: u8| {
+        if let Some(record) = record.as_mut() {
+            record(DrawRecord::new(layer, primary as u32, index, part));
+        }
+    };
     let mut outlines = Vec::new();
     let mut highlights = Vec::new();
     for drawn in placed {
@@ -1088,6 +1241,9 @@ pub fn draw_map_scene(
             (Drawn::Cursor, Some(cursor)) => {
                 let (art, origin) = cursor.art;
                 pens.draw_layer(image, art, origin, level(Some(cursor.hex)));
+                if let Some(lists) = &lists {
+                    log(FrameLayer::Flat, cursor.hex.into(), lists.cursor[0], 0);
+                }
                 if outlines.len() < 100
                     && let Some((frame, origin, word)) = cursor.outline
                     && let Some(ink) = scene.outlines.and_then(|inks| inks.ink(word))
@@ -1099,6 +1255,9 @@ pub fn draw_map_scene(
             (Drawn::CursorText, Some(cursor)) => {
                 if let Some((text, origin)) = cursor.text {
                     pens.draw_layer(image, text, origin, level(Some(cursor.hex)));
+                    if let Some(lists) = &lists {
+                        log(FrameLayer::Upright, cursor.hex.into(), lists.cursor[1], 0);
+                    }
                 }
                 continue;
             }
@@ -1109,11 +1268,27 @@ pub fn draw_map_scene(
             continue;
         };
         let level = level(object.hex);
-        match cutout {
+        let cut = match cutout {
             Some((cut, mask)) if cut.cuts(view, object) => {
                 pens.draw_cut(image, frame, origin, level, cut, mask);
+                Some((cut, mask))
             }
-            _ => pens.draw(image, frame, origin, object.flags.0, level),
+            _ => {
+                pens.draw(image, frame, origin, object.flags.0, level);
+                None
+            }
+        };
+        if let Some(lists) = &lists {
+            let layer = if object.flags.contains(BasicFlags::FLAT) {
+                FrameLayer::Flat
+            } else {
+                FrameLayer::Upright
+            };
+            let hex = object.hex.unwrap_or_default().into();
+            let rect = frame_rect(frame, origin);
+            for (part, ..) in cutout_parts(rect, canvas, cut.map(|(cut, mask)| cut.rect(mask))) {
+                log(layer, hex, lists.objects[index], part);
+            }
         }
         // At most 100 outlined objects per refresh, in drawing order; an
         // object without a hex is never outlined.
@@ -1137,31 +1312,28 @@ pub fn draw_map_scene(
         let ambient = scene
             .light
             .map_or(128, |light| MapLight::level(i64::from(light.ambient)));
-        for (index, offset) in square_order() {
-            let corner = corner(view.grid.origin, *offset);
-            let corner = [corner[0], corner[1] - 96];
-            if beyond(view, corner) {
-                continue;
-            }
-            let tile = map
-                .tile(view.elevation as usize, *index as usize)
-                .expect("validated map grid");
-            if tile.roof() != 1
-                && !tile.roof_hidden()
-                && let Some((frame, _)) = art.frame(Category::Tile, u32::from(tile.roof()), 0, 0)
-            {
-                let size = [i64::from(frame.width), i64::from(frame.height)];
-                // Every drawn roof square goes through the mask; the
-                // `enhanced` cutaway removes the pixels around its center.
-                match (cutout, scene.roof_cutaway) {
-                    (_, Some(cutaway)) if cutaway.touches(corner, size) => {
-                        let keeps = |at| cutaway.keeps(view.grid, at);
-                        pens.draw_roof_peek(image, frame, corner, ambient, cutout, keeps);
-                    }
-                    (Some((cut, mask)), _) => {
-                        pens.draw_cut(image, frame, corner, ambient, cut, mask)
-                    }
-                    (None, _) => pens.draw(image, frame, corner, 0, ambient),
+        for (rank, frame, corner) in roof_squares(map, view, art) {
+            let size = [i64::from(frame.width), i64::from(frame.height)];
+            // Every drawn roof square goes through the mask; the
+            // `enhanced` cutaway removes the pixels around its center.
+            let mask = match (cutout, scene.roof_cutaway) {
+                (_, Some(cutaway)) if cutaway.touches(corner, size) => {
+                    let keeps = |at| cutaway.keeps(view.grid, at);
+                    pens.draw_roof_peek(image, frame, corner, ambient, cutout, keeps);
+                    cutout.map(|(cut, mask)| cut.rect(mask))
+                }
+                (Some((cut, mask)), _) => {
+                    pens.draw_cut(image, frame, corner, ambient, cut, mask);
+                    Some(cut.rect(mask))
+                }
+                (None, _) => {
+                    pens.draw(image, frame, corner, 0, ambient);
+                    None
+                }
+            };
+            if lists.is_some() {
+                for (part, ..) in cutout_parts(frame_rect(frame, corner), canvas, mask) {
+                    log(FrameLayer::Roof, rank.into(), 0, part);
                 }
             }
         }
@@ -1174,7 +1346,7 @@ pub fn draw_map_scene(
     }
     // The refresh covers the whole view, which is the map buffer.
     let (width, height) = (i64::from(image.width()), i64::from(image.height()));
-    for (frame, origin, ink) in outlines.into_iter().chain(highlights) {
+    for (position, (frame, origin, ink)) in outlines.into_iter().chain(highlights).enumerate() {
         draw_outline(
             image,
             frame,
@@ -1183,11 +1355,12 @@ pub fn draw_map_scene(
             [0, 0, width, height],
             [width, height],
         );
+        log(FrameLayer::Outline, 0, position as u32, 0);
     }
     // SPEC-014 §3.46: floating text, in creation order, transparently, at
     // its creation hex's current window position plus its offset; not
     // hidden by roofs and whether or not its owner shows.
-    for text in scene.floating {
+    for (rank, text) in scene.floating.iter().enumerate() {
         let Ok([x, y]) = view.grid.hex_reference(text.hex) else {
             continue;
         };
@@ -1195,14 +1368,109 @@ pub fn draw_map_scene(
             &text.image,
             [x + i64::from(text.offset[0]), y + i64::from(text.offset[1])],
         );
+        log(FrameLayer::FloatingText, 0, rank as u32, 0);
     }
-    for index in hexless {
+    for (rank, index) in hexless.into_iter().enumerate() {
         let object = &objects[index];
         if let Some((frame, origin)) = sprite(object)? {
             pens.draw(image, frame, origin, object.flags.0, 128);
+            log(FrameLayer::NoHex, 0, rank as u32, 0);
         }
     }
     Ok(())
+}
+
+/// A frame's rectangle `[x0, y0, x1, y1]` at `origin`.
+fn frame_rect(frame: &FrmFrame, origin: [i64; 2]) -> [i64; 4] {
+    [
+        origin[0],
+        origin[1],
+        origin[0] + i64::from(frame.width),
+        origin[1] + i64::from(frame.height),
+    ]
+}
+
+/// SPEC-022 §3.5 an item split by the player cutout: its parts (0 to 4),
+/// each with its rectangle and whether it is drawn through the mask. With
+/// no mask, or no overlap between the mask and the item's rectangle
+/// clipped to `refresh`, the item is one part 0 over its whole rectangle,
+/// not through the mask.
+pub(crate) fn cutout_parts(
+    item: [i64; 4],
+    refresh: [i64; 4],
+    mask: Option<[i64; 4]>,
+) -> Vec<(u8, [i64; 4], bool)> {
+    let overlap = |a: [i64; 4], b: [i64; 4]| {
+        let rect = [
+            a[0].max(b[0]),
+            a[1].max(b[1]),
+            a[2].min(b[2]),
+            a[3].min(b[3]),
+        ];
+        (rect[0] < rect[2] && rect[1] < rect[3]).then_some(rect)
+    };
+    let Some((clipped, mask, inner)) = mask.and_then(|mask| {
+        let clipped = overlap(item, refresh)?;
+        Some((clipped, mask, overlap(clipped, mask)?))
+    }) else {
+        return vec![(0, item, false)];
+    };
+    let mut parts = vec![(0, inner, true)];
+    let candidates = [
+        (1, [clipped[0], clipped[1], clipped[2], mask[1]]),
+        (2, [clipped[0], mask[3], clipped[2], clipped[3]]),
+        (3, [clipped[0], inner[1], mask[0], inner[3]]),
+        (4, [mask[2], inner[1], clipped[2], inner[3]]),
+    ];
+    for (part, rect) in candidates {
+        if let Some(rect) = overlap(rect, clipped) {
+            parts.push((part, rect, false));
+        }
+    }
+    parts
+}
+
+/// SPEC-022 §2.1 the list index of each drawn entry: its position in its
+/// hex's object list. The list holds the elevation's objects on that hex
+/// (hidden ones included) in insertion order, with the §3.27 cursor
+/// objects at their place (before the first object listed from their
+/// `order` on). Objects of other elevations are in other lists, so they
+/// never share a hex list here.
+pub(crate) struct ListIndexes {
+    /// By object index; objects without a hex have 0.
+    pub objects: Vec<u32>,
+    /// The cursor's and the AP text's.
+    pub cursor: [u32; 2],
+}
+
+impl ListIndexes {
+    pub fn new(objects: &[MapObject], cursor: Option<(i32, usize)>) -> Self {
+        let mut counts: std::collections::BTreeMap<i32, u32> = Default::default();
+        let mut indexes = vec![0; objects.len()];
+        let mut cursor_index = None;
+        for (index, object) in objects.iter().enumerate() {
+            let Some(hex) = object.hex else {
+                continue;
+            };
+            let count = counts.entry(hex).or_default();
+            if let Some((at, order)) = cursor
+                && at == hex
+                && index >= order
+                && cursor_index.is_none()
+            {
+                cursor_index = Some(*count);
+                *count += 2;
+            }
+            indexes[index] = *count;
+            *count += 1;
+        }
+        let cursor_index = cursor_index
+            .unwrap_or_else(|| cursor.map_or(0, |(hex, _)| counts.get(&hex).copied().unwrap_or(0)));
+        Self {
+            objects: indexes,
+            cursor: [cursor_index, cursor_index + 1],
+        }
+    }
 }
 
 /// Where an object's frame is drawn: its top-left corner and its anchor
@@ -1393,6 +1661,8 @@ fn pick_with(
 use vault_fixtures::world as fixture;
 #[cfg(test)]
 mod enhanced_tests;
+#[cfg(test)]
+mod instanced_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

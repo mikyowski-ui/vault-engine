@@ -71,6 +71,115 @@ impl RoofCutaway {
     }
 }
 
+/// SPEC-022 §3.10 the instanced path's roof peek: a disc around the cursor
+/// in which roof pixels are cut, and a ring beyond it in which they
+/// dissolve through [`BAYER`] anchored to world pixels. Every length is in
+/// 1/16 canvas pixel. Passed to the GPU in the layer uniform block
+/// ([`LayerUniforms`](crate::layers::LayerUniforms)).
+///
+/// This is revision 1's reading of the documented X-ray; the reference
+/// path's X-ray ([`RoofCutaway`]) is a different rule (test T8), so the
+/// instanced path refuses peek refreshes and the reference draws them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoofPeekParams {
+    /// The center, in 1/16 canvas pixel.
+    pub center: [i32; 2],
+    /// The inner radius R0.
+    pub inner: u32,
+    /// The ring width Wr.
+    pub ring: u32,
+}
+
+impl RoofPeekParams {
+    /// The inner radius on screen, in screen pixels (Decision D-16).
+    pub const INNER_SCREEN: f64 = 96.0;
+    /// The ring width on screen.
+    pub const RING_SCREEN: f64 = 48.0;
+    /// The largest outer radius, 16384 (1024 canvas pixels).
+    pub const OUTER_LIMIT: u32 = 16384;
+    /// The center's bound, ±2^24.
+    const CENTER_LIMIT: i64 = 1 << 24;
+
+    /// Parameters from a center, inner radius and ring width in 1/16
+    /// canvas pixel. `[Safe rule]`: the center is clamped to ±2^24, and an
+    /// outer radius above 16384 lowers R0 to at most 16384 and Wr to at
+    /// most 16384 − R0.
+    pub fn new(center: [i64; 2], inner: u64, ring: u64) -> Self {
+        let center =
+            center.map(|value| value.clamp(-Self::CENTER_LIMIT, Self::CENTER_LIMIT) as i32);
+        let limit = u64::from(Self::OUTER_LIMIT);
+        let (inner, ring) = if inner.saturating_add(ring) > limit {
+            let inner = inner.min(limit);
+            (inner, ring.min(limit - inner))
+        } else {
+            (inner, ring)
+        };
+        Self {
+            center,
+            inner: inner as u32,
+            ring: ring as u32,
+        }
+    }
+
+    /// `q(p) = floor(16 p / canvas_scale + 0.5)` in double precision, for
+    /// a finite, positive scale.
+    fn q(pixels: f64, canvas_scale: f64) -> Option<u64> {
+        (canvas_scale.is_finite() && canvas_scale > 0.0)
+            .then(|| (16.0 * pixels / canvas_scale + 0.5).floor() as u64)
+    }
+
+    /// The default peek at `canvas_scale` screen pixels per canvas pixel,
+    /// around the cursor at canvas position `cursor` (pixel (x, y) spans x
+    /// to x + 1). `None` for a scale that is not finite and positive, or a
+    /// cursor that is not finite.
+    pub fn at_scale(cursor: [f64; 2], canvas_scale: f64) -> Option<Self> {
+        let inner = Self::q(Self::INNER_SCREEN, canvas_scale)?;
+        let ring = Self::q(Self::RING_SCREEN, canvas_scale)?;
+        if !cursor.iter().all(|value| value.is_finite()) {
+            return None;
+        }
+        // Saturating float-to-integer casts; the clamp follows in `new`.
+        let center = cursor.map(|value| (16.0 * value + 0.5).floor() as i64);
+        Some(Self::new(center, inner, ring))
+    }
+
+    /// The outer radius R1 = R0 + Wr.
+    pub fn outer(self) -> u32 {
+        self.inner + self.ring
+    }
+
+    /// `T[t] = R0 + trunc(Wr × (2t + 1) / 32)`, for t = 0 to 15.
+    pub fn threshold(self, t: usize) -> u32 {
+        self.inner + (u64::from(self.ring) * (2 * t as u64 + 1) / 32) as u32
+    }
+
+    /// `T[t]²` for t = 0 to 15, as the uniform block holds them.
+    pub fn thresholds_squared(self) -> [u32; 16] {
+        std::array::from_fn(|t| {
+            let threshold = self.threshold(t);
+            threshold * threshold
+        })
+    }
+
+    /// The peek test for canvas pixel `[x, y]` on a canvas whose shared
+    /// translation is `offset` (OX, OY): whether its roof pixel is cut.
+    pub fn cuts(self, [x, y]: [i32; 2], offset: [i32; 2]) -> bool {
+        let world = [
+            i64::from(x) - i64::from(offset[0]),
+            i64::from(y) - i64::from(offset[1]),
+        ];
+        let t = usize::from(bayer(world));
+        let dx = 16 * i64::from(x) + 8 - i64::from(self.center[0]);
+        let dy = 16 * i64::from(y) + 8 - i64::from(self.center[1]);
+        let outer = i64::from(self.outer());
+        if dx.abs() > outer || dy.abs() > outer {
+            return false;
+        }
+        let threshold = i64::from(self.threshold(t));
+        dx * dx + dy * dy < threshold * threshold
+    }
+}
+
 /// Whether some roof square draws a nonzero pixel at `point`: `None` when a
 /// corner leaves the coordinate range (the pick then finds nothing).
 pub(super) fn roof_pixel_at(
