@@ -12,6 +12,7 @@ mod mods;
 mod movie;
 mod preview;
 mod replay;
+mod session;
 mod touch;
 
 #[cfg(test)]
