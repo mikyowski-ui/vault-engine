@@ -1,0 +1,16 @@
+namespace	scope	input	canonical	kv_key
+savegame	fallout1	SLOT01/SAVE.DAT	slot01/save.dat	vault-engine/1/fallout1/savegame/slot01/save.dat
+savegame	fallout2	SLOT01\HUBENT.SAV	slot01/hubent.sav	vault-engine/1/fallout2/savegame/slot01/hubent.sav
+savegame	fallout1	QuickSav/AUTOMAP.SAV	quicksav/automap.sav	vault-engine/1/fallout1/savegame/quicksav/automap.sav
+config	shared	vault-engine.toml	vault-engine.toml	vault-engine/1/shared/config/vault-engine.toml
+config	shared	Load_Order.TOML	load_order.toml	vault-engine/1/shared/config/load_order.toml
+mods	shared	mods/Tactical-Camera/vault-mod.toml	mods/tactical-camera/vault-mod.toml	vault-engine/1/shared/mods/mods/tactical-camera/vault-mod.toml
+mods	shared	old/notes.bak	old/notes.bak	vault-engine/1/shared/mods/old/notes.bak
+savegame	fallout1	SLOT01/SAVE.TMP	ERROR reserved suffix	-
+savegame	fallout1	SLOT01/SAVE.BAK	ERROR reserved suffix	-
+config	shared	vault-engine.toml.bak	ERROR reserved suffix	-
+savegame	fallout1	../SLOT01/SAVE.DAT	ERROR invalid path	-
+savegame	fallout1	/SLOT01/SAVE.DAT	ERROR invalid path	-
+savegame	fallout1	SLOT01//SAVE.DAT	ERROR invalid path	-
+savegame	fallout1	SLOT01/	ERROR invalid path	-
+savegame	fallout1	-	ERROR invalid path	-

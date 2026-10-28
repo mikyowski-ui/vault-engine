@@ -1,0 +1,10 @@
+case	profile	dropped	expected
+1	fallout1	Fallout/MASTER.DAT, Fallout/CRITTER.DAT, Fallout/DATA/MAPS/X.MAP, Fallout/DATA/SAVEGAME/SLOT01/SAVE.DAT, Fallout/FALLOUT.CFG	strip fallout/; master = master.dat; critter = critter.dat; loose = maps/x.map; ignored = data/savegame/slot01/save.dat, fallout.cfg
+2	fallout2	master.dat, critter.dat, patch000.dat	master = master.dat; critter = critter.dat; patch = patch000.dat; loose = (none)
+3	fallout2	MASTER.DAT, master.dat, critter.dat	refused: two entries match master.dat (MASTER.DAT, master.dat)
+4	fallout1	master.dat, critter.dat, Patch000.DAT	master = master.dat; critter = critter.dat; ignored = patch000.dat (not mounted under fallout1)
+5	fallout1	art/items/a.frm, color.pal	no archive: loose = art/items/a.frm, color.pal
+6	fallout2	Fallout2/master.dat	strip fallout2/; refused: critter.dat is missing
+7	fallout1	../evil.dat	refused: invalid path ../evil.dat
+8	fallout1	a/master.dat, b/critter.dat	no common folder, no top-level archive: loose = a/master.dat, b/critter.dat
+9	fallout2	F2/master.dat, F2/critter.dat, F2/data/data/maps.txt	strip f2/; master = master.dat; critter = critter.dat; loose = data/maps.txt

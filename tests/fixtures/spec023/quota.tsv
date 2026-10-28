@@ -1,0 +1,6 @@
+step	op	data	expect	usage_after
+1	commit	put a.toml=12345	ok	11
+2	commit	put b.toml=123456	error QuotaExceeded	11
+3	commit	put a.toml=1;put b.toml=12	ok	15
+4	read	a.toml	1	15
+5	commit	del a.toml;put c.toml=123456	ok	20

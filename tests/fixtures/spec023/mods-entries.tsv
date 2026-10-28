@@ -1,0 +1,7 @@
+key	content
+mods/alpha/vault-mod.toml	name = "Alpha"
+mods/alpha/maps/a.map	A
+mods/beta/data/x.txt	X
+mods/gamma/vault-mod.toml	name = "Gamma"
+other/vault-mod.toml	name = "Other"
+vault-mod.toml	name = "Root"

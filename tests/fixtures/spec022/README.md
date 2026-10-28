@@ -43,3 +43,9 @@ A `-` means "not used".
 - `peek-scale.tsv`: the default peek's radii for five canvas scales.
 - `peek-samples.tsv`: the peek test at 14 pixels of the scene (center
   (88, 40) in 1/16 pixel, OX = -4, OY = 2).
+
+**Revision 2.** SPEC-022 revision 2 adds `rev2/`, with its own README. It
+supersedes `sort-keys.tsv`, `peek-scale.tsv`, `peek-thresholds.tsv`,
+`peek-samples.tsv`, `scene-uniforms.hex` and `scene-expected.hex`; they stay
+here until the implementer's follow-up switches the tests (SPEC-022 section
+3.15).

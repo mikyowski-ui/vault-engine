@@ -1,0 +1,6 @@
+batch	kind	clip	instances	snapshot
+0	overwrite	0,0,12,8	floor2	-
+1	dst_read	0,0,12,8	obj2.0	2,1,6,4
+2	overwrite	0,0,12,8	obj2.1,obj2.2,obj2.3,obj2.4	-
+3	dst_read	0,0,12,8	shroud	0,0,12,8
+4	overwrite	0,0,12,8	ring0,hl	-

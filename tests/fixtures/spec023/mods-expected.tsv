@@ -1,0 +1,6 @@
+query	input	result
+manifests	mods/beta (enabled), mods/alpha (enabled), mods/gamma (disabled)	mods/beta: none; mods/alpha: name = "Alpha"; mods/gamma: name = "Gamma"
+find_layers	-	mods/alpha, mods/gamma, other
+layer_files	mods/alpha	maps/a.map, vault-mod.toml
+layer_files	mods	alpha/maps/a.map, alpha/vault-mod.toml, beta/data/x.txt, gamma/vault-mod.toml
+layer_files	missing	error LayerNotFound

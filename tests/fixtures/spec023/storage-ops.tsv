@@ -1,0 +1,21 @@
+step	op	namespace	key	data	expect
+1	list	savegame	-	-	-
+2	commit	savegame	-	put SLOT01/SAVE.DAT=S1;put SLOT01/HUBENT.SAV=H1;put SLOT01/AUTOMAP.SAV=A1;put SLOT01/VAULTENG.TOML=V1	ok
+3	list	savegame	-	-	slot01/automap.sav,slot01/hubent.sav,slot01/save.dat,slot01/vaulteng.toml
+4	read	savegame	slot01/Save.Dat	-	S1
+5	commit	savegame	-	put SLOT01/SAVE.DAT=S2;put SLOT01/HUBENT.SAV=H2;put SLOT01/AUTOMAP.SAV=A2;del SLOT01/VAULTENG.TOML	ok
+6	read	savegame	SLOT01/VAULTENG.TOML	-	none
+7	read	savegame	SLOT01/SAVE.DAT	-	S2
+8	commit	savegame	-	put SLOT02/SAVE.DAT=X;put SLOT02/BAD.TMP=Y	error InvalidKey
+9	read	savegame	SLOT02/SAVE.DAT	-	none
+10	commit	savegame	-	put SLOT03/SAVE.DAT=T1;put slot03/save.dat=T2	ok
+11	read	savegame	SLOT03/SAVE.DAT	-	T2
+12	commit	savegame	-	del SLOT09/SAVE.DAT	ok
+13	list	savegame	slot03	-	slot03/save.dat
+14	list	savegame	slot0	-	-
+15	commit	savegame	-	put QUICKSAV/SAVE.DAT=Q1;put SLOT11/SAVE.DAT=Z;put SLOT02/AUTOMAP.SAV=A9	ok
+16	slots	savegame	-	-	SLOT01,SLOT03,QUICKSAV
+17	commit	config	-	put vault-engine.toml=preset = "vanilla"	ok
+18	read	config	VAULT-ENGINE.TOML	-	preset = "vanilla"
+19	list	config	-	-	vault-engine.toml
+20	list	savegame	-	-	quicksav/save.dat,slot01/automap.sav,slot01/hubent.sav,slot01/save.dat,slot02/automap.sav,slot03/save.dat,slot11/save.dat
