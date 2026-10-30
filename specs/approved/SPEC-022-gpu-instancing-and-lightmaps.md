@@ -1,6 +1,6 @@
 # SPEC-022: GPU-Instanced Sprite Batching and Hex Lightmaps
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (Team A, 2026-10-27); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 3 (Team A, 2026-10-30); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -71,6 +71,25 @@ revision either. Every revision 2 vector was computed from this text by a
 throwaway script that is not committed, after the same script had reproduced
 every revision 1 vector from the revision 1 text.
 
+**Provenance of revision 3.** Author: the Spec-Author sub-agent (Team A),
+2026-10-30, on the owner's brief of 2026-10-30, "Lifting the 4 Renderer
+Refusals". Sources:
+
+- the owner's brief, which names this work revision 2. Revision 2 was already
+  approved, so this is revision 3 (D-33);
+- `docs/REFERENCE.md`, "Renderer notes for SPEC-022 revision 2", in which the
+  implementer states what the reference path does, as read and measured on
+  2026-10-30, recorded below as **measured by the implementer, 2026-10-30**;
+  and its "Render path" section, which lists the refusals;
+- this spec's revision 2, SPEC-003 section 3.6 and SPEC-014 sections 3.37 and
+  3.44.
+
+No engine Rust code was read for this revision either, and no decompilation,
+disassembly, re-implementation source or game asset was used. Every revision 3
+vector was computed from this text by a throwaway script that is not
+committed, then checked by a second, separate script from the written files
+alone (section 7).
+
 ### Revision history
 
 - **Revision 1 (2026-10-27).** First approved text.
@@ -101,6 +120,31 @@ every revision 1 vector from the revision 1 text.
   - The 64-bit key layout, every revision 1 key, the light buffer, the batch
     rules and the instance record are unchanged. New and changed vectors are
     in `tests/fixtures/spec022/rev2/` (section 3.15).
+- **Revision 3 (2026-10-30).** Closes the gap between revision 2 and the
+  reference path as the implementer measured it, so that the follow-up can
+  lift the four refusals (section 3.16).
+  1. **Numbering.** Two numbers now equal the reference path's draw log. The
+     square rank is the position among all 10000 squares, and a highlight's
+     outline position is `n + k` for a list holding n entries. Neither changes
+     the draw order or a canvas byte (sections 2.1, 3.3 and 3.4; D-34, D-35).
+  2. **Enhanced shroud.** Section 3.3 states the measured rule: one constant
+     dark index, written over D without reading it. The slot and the `remap`
+     mode stay (D-36).
+  3. **Unlit scenes.** Section 3.3 now gives every item of an unlit scene its
+     mode. The translucency bits are ignored, and only the cutout blends.
+  4. **Roof peek.** Section 3.10 adds the tile rule for the center, double
+     precision, and the kept pixel's draw. Its safe bounds, which the
+     reference path does not have, now refuse the refresh when they change a
+     value (D-38).
+  5. **Refreshes and lists.** Each refresh starts from a new canvas of index 0
+     (section 3.2). Hidden objects, the in-world cursor and its AP text count
+     in the list index (section 2.1).
+  6. **Follow-up.** Section 3.16 is the checklist that lifts the four
+     refusals, with the parity test that proves each one.
+  - The 64-bit key layout, the instance record, the draw modes, the light
+    buffer, the uniform block, the batch rules, the peek test and the gray
+    bound are unchanged. New vectors are in `tests/fixtures/spec022/rev3/`.
+    Team A changed no revision 1 or revision 2 file.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -205,23 +249,29 @@ Field domains: `[Must-match]`
   entries of the **current elevation**: the engine keeps a separate list per
   elevation (measured by the implementer, Wave 3; revision 1 counted every
   elevation's entries). The draw order is the same under either count. It is
-  below 2^29.
+  below 2^29. Hidden objects count, though they are not drawn, and the
+  in-world cursor and its AP text take two places, at the cursor's place in
+  the list (measured by the implementer, 2026-10-30).
 - **Hex number** is 0 to 39999. **Square rank** is 0 to 9999.
 - **Shroud.** Primary 10000 is used only by the enhanced shroud (section
   3.3), so every shroud draw follows every roof square. Its secondary is the
   **shroud draw rank**: the position of the draw among the reference path's
-  shroud draws of the refresh, from 0. It is below 2^32.
-- **Outline position** is 0 to 99 for the entries of the outline list, in list
-  order. The k-th ground-item highlight that the reference path draws after
-  the list (k from 0) has position `100 + k` (measured by the implementer,
-  Wave 3: the reference places these highlights after the 100-entry list).
-  A position is below 2^29.
+  shroud draws of the refresh, from 0. It is below 2^32. The reference path
+  makes one shroud draw per refresh, so the rank is 0 in play.
+- **Outline position** is a running number (revision 3). If the outline list
+  holds n entries, n ≤ 100, its entries have positions 0 to n − 1, in list
+  order, and the k-th ground-item highlight (k from 0) has position `n + k`.
+  This is the number the reference path's draw log gives it (measured by the
+  implementer, 2026-10-30). Revision 2's `100 + k` agreed only when the list
+  was full, and is withdrawn (D-35). The key order is the same under either
+  number. A position is below 2^29.
 - **Creation rank** is the text's position among the live floating texts,
   oldest first. **Reference draw rank** is the position in which the
   reference path draws the object among the no-hex objects.
 
 These domains keep the revision 1 key layout and every revision 1 key: the
-shroud and the highlights use values that revision 1 left unused.
+shroud uses a primary that revision 1 left unused, and the highlights use
+positions that the outline list does not hold.
 
 ### 2.2 The Sprite Instance
 
@@ -249,7 +299,7 @@ on the canvas pixel D under the instance pixel. `[Must-match]`
 
 | Code | Mode | Light source | Reads the canvas | Used for |
 | ---: | --- | --- | --- | --- |
-| 0 | `plain` | `none` | No | Opaque outlines, floating text |
+| 0 | `plain` | `none` | No | Opaque outlines, floating text, and every item of an unlit scene that is not drawn through the cutout (revision 3) |
 | 1 | `lit` | `hex`, `ambient` or `fixed` | No | Lit floor squares with one light, objects, roofs, strips |
 | 2 | `floor_map` | `level image` | No | Floor squares lit per pixel |
 | 3 | `translucent` | `hex` or `fixed` | Yes | Objects with exactly one translucency bit |
@@ -362,7 +412,7 @@ zero. When the peek is not active, bit 1 is clear and offsets `0x30` to
 2. The default is `reference`, in the desktop shell, in replays and in
    `cargo xtask capture-gallery`, and `instanced` is opt-in (Decision D-7,
    an owner instruction since revision 2). `[Must-match]`
-3. The instanced path has one lighting mode in revisions 1 and 2, **parity**: its
+3. The instanced path has one lighting mode in revisions 1 to 3, **parity**: its
    canvas is the reference path's, byte for byte. No other mode exists, and
    none may be reached by default (Decision D-20). `[Must-match]`
 4. Parity is defined on the indexed canvas. The display stage after it
@@ -375,24 +425,41 @@ zero. When the peek is not active, bit 1 is clear and offsets `0x30` to
 ### 3.2 The Refresh Pipeline
 
 The reference path draws the canvas in **refreshes**: each refresh redraws
-one rectangle R of the canvas, and the canvas keeps its pixels between
-refreshes. The instanced path runs the same refreshes, with the same
-rectangles, in the same order, on a canvas that it keeps on the GPU between
-refreshes. `[Must-match]`
+one rectangle R of the canvas. The instanced path runs the same refreshes,
+with the same rectangles, in the same order, on a canvas that it keeps on the
+GPU. `[Must-match]`
 
 **Whole-view refreshes (revision 2).** The reference path always redraws the
 whole view: R is the whole canvas of the view (measured by the implementer,
 Wave 3). The enhanced view's canvas tiles are separate views, each with its
-own canvas and its own whole-view refreshes. So in play every refresh has R
-equal to the canvas, and every instance of a refresh has the same clip. The
-rules below still hold for any R, and the synthetic scene of section 5.4
-keeps a partial R to test the executor's clip handling. `[Must-match]`
+own canvas and its own whole-view refreshes, and a sprite that crosses a seam
+draws in both tiles. So in play every refresh has R equal to the canvas, and
+every instance of a refresh has the same clip. The rules below still hold for
+any R, and the synthetic scene of section 5.4 keeps a partial R to test the
+executor's clip handling. `[Must-match]`
+
+**One refresh, in order (revision 3).** The reference path starts each refresh
+from a new canvas of index 0 and keeps no pixel from the last one (measured by
+the implementer, 2026-10-30). It then draws, in this order: `[Must-match]`
+
+| Step | Draw | Layer |
+| ---: | --- | ---: |
+| 1 | A new canvas of index 0 | Base fill |
+| 2 | The floor squares | 0 |
+| 3 | The flat pass, then the upright pass | 1, 2 |
+| 4 | The roof squares | 3 |
+| 5 | The enhanced shroud | 3 |
+| 6 | The outline list, at most 100 entries | 4 |
+| 7 | The ground-item highlights | 4 |
+| 8 | The floating text | 5 |
+| 9 | The objects without a hex | 6 |
 
 For each refresh R:
 
-1. **Base fill.** Fill R exactly as the reference path does before the floor
-   layer, for example with a clear index or the off-grid shroud.
-   `[Must-match]`
+1. **Base fill.** Fill R with index 0, as the reference path's new canvas
+   does (revision 3). The off-grid shroud is not a base fill: it is drawn in
+   layer 3. A synthetic executor test may name another fill, as sections 5.4
+   and 5.6 do. `[Must-match]`
 2. **Gather.** Build the draw items of layers 0 to 6 for R from the same
    world state, view and visibility rules the reference path uses
    (section 3.3). `[Must-match]`
@@ -419,10 +486,15 @@ it. A draw that no mode can express is not guessed. The instanced path is
 refused for views that contain it (section 3.12), and the implementer
 reports it to the coordinator for a spec revision. `[Safe rule]`
 
-Revision 2 gives a slot and a mode to the three draws of this kind that the
-Wave 3 implementer reported: the enhanced shroud (layer 3, mode `remap`),
-ground-item highlights (layer 4, positions from 100), and the cutout of an
-unlit scene (mode `egg`, light source `none`). See section 3.3.
+Revision 2 gave a slot and a mode to the three draws of this kind that the
+Wave 3 implementer reported. Revision 3 restates them with the measured
+numbering, as one rule (section 3.3 gives each in full): `[Must-match]`
+
+| Draw | Layer | Primary | Secondary | Mode | Light source |
+| --- | ---: | ---: | --- | --- | --- |
+| Enhanced shroud | 3 | 10000 | Shroud draw rank (0 in play) | `remap`, one constant row | `none` |
+| Ground-item highlight k, with n list entries | 4 | 0 | 8 × (n + k) + part | As an outline of its ink: `plain` or `outline_blend` | `none` |
+| Player cutout in an unlit scene | The item's: 1, 2 or 3 | The item's | The item's, part 0 | `egg` | `none` |
 
 ### 3.3 Gathering Draw Items
 
@@ -481,22 +553,54 @@ the GPU atlas. `[Must-match]`
     instance of rank 0, recording at each pixel the composition of the
     functions applied there, if the merged instance still needs at most 255
     rows. `[May-improve]`
-  - Whether a pixel's function is a constant index, a darkening through the
-    intensity table, or anything else is the reference painter's choice. The
-    `remap` mode reproduces it exactly in every case, so this spec does not
-    fix the shroud's look.
+  - **The measured rule (revision 3).** The painter writes one constant
+    palette index, the **dark index**, over D. It does not read D, and it does
+    not darken through the intensity table (measured by the implementer,
+    2026-10-30). So the recorder gives one instance covering the whole view,
+    whose table has one row holding the dark index 256 times, and whose image
+    is 1 where the painter writes and 0 elsewhere.
+  - With b the Bayer value of world pixel (wx, wy) (section 3.10), a pixel
+    takes the dark index when any of these holds: its hex is off the grid;
+    its hex is outside the allowed set and has no allowed center within 104
+    world pixels; or its hex is outside the allowed set and `d² ≥ (20 + 4 ×
+    b)²`, with d the pixel's distance from the allowed center nearest to that
+    hex, ties going to the lowest hex number. A pixel over an allowed hex
+    never changes. So the dither band runs from 20 to 80 pixels, and every
+    pixel is dark from 80 on (`rev3/shroud-mask.tsv`).
+  - The shell's dark index is the mapped entry below index 229 nearest to
+    black, and the shell allows the whole grid, so in play only pixels off
+    the grid take it. The in-world cursor's art is drawn in the flat pass, so
+    it is shrouded with the scene. Outlines, floating text and objects
+    without a hex stay above the shroud.
+  - The painter stays the authority: the rule above checks the recorder, and
+    never replaces it. If they differ, the reference path wins and the
+    difference is reported for a revision.
 - **Outline (layer 4).** One instance for each entry of the refresh's
   outline list (at most 100), in list order, then one for each ground-item
-  highlight that the reference path draws after the list, in its order, at
-  positions 100, 101 and on (section 2.1; revision 2). A highlight is drawn
-  exactly like an outline of its type. Its image is the outline's
-  **ring image**: the reference path's outline painter (SPEC-014 section
-  3.44, "Outline geometry"), run with all its clipping and buffer guards,
-  but recording each paint instead of writing the canvas. The ring image
-  covers the frame widened by one pixel on every side. `[Must-match]`
+  highlight, in its order, at the running positions of section 2.1
+  (revision 3). A highlight is drawn exactly like an outline of its type. Its
+  image is the outline's **ring image**: the reference path's outline painter
+  (SPEC-014 section 3.44, "Outline geometry"), run with all its clipping and
+  buffer guards, but recording each paint instead of writing the canvas. The
+  ring image covers the frame widened by one pixel on every side.
+  `[Must-match]`
+  - **Which items are highlighted (revision 3).** While Shift is held on the
+    map, each drawn object that is an item, on a hex, whose own outline word
+    draws nothing, is collected in a second list during the flat and upright
+    passes, in draw order. That list has no size limit. The limit of 100
+    applies only to the outline list, so an item past the first 100 outlined
+    objects is still highlighted, and a highlight never pushes an outline off
+    the list (measured by the implementer, 2026-10-30).
+  - **What a highlight writes (revision 3).** What an outline of its word
+    writes, at each paint of the ring: an opaque ink replaces D with its
+    index, a banded ink with the index of the band for the scanned row, and a
+    translucent ink with `F_t[g][D]`, so a pixel painted twice blends twice.
+    The shell's word is the plain item outline, so in play each paint writes
+    the item color's index.
   - For an opaque outline, the ring pixel is the index of the paint that
     stays (the column pass's when there is one), and 0 where nothing was
-    painted. The instance is mode `plain`.
+    painted. The instance is mode `plain`. A paint of index 0 cannot be told
+    from "not painted", so it refuses the refresh (section 3.12). `[Safe rule]`
   - For a translucent outline, the ring pixel is the number of paints, 1 or
     more, and 0 where nothing was painted. The instance is mode
     `outline_blend`, with the outline color's blend table and its common
@@ -514,13 +618,21 @@ the GPU atlas. `[Must-match]`
 - **No-hex (layer 6).** Each object without a hex that the reference path
   draws, in its order, with the mode chosen as for layers 1 and 2 but light
   source `fixed` at 65536. `[Must-match]`
-- **Unlit scenes (revision 2).** An unlit scene is a refresh that the
-  reference path draws without a light (no light buffer and no ambient). Its
-  cutout still blends, but from the unrelit source pixel (measured by the
-  implementer, Wave 3). The `egg` part of section 3.5 then uses light source
-  `none`, under which the source is not relit (section 3.6). The shell always
-  passes a light, so unlit scenes arise only in tools and tests.
+- **Unlit scenes (revisions 2 and 3).** An unlit scene is a refresh that the
+  reference path draws without a light (no light buffer and no ambient). The
+  shell always passes a light, so unlit scenes arise only in tools and tests.
   `[Must-match]`
+  - Its cutout still blends, but from the unrelit source pixel (measured by
+    the implementer, Wave 3). The `egg` part of section 3.5 uses light source
+    `none`, under which the source is not relit (section 3.6). The cutout runs
+    at its usual places: in the flat and upright passes for the walls and
+    scenery it cuts, and in the roof pass for every roof square.
+  - Every other item that the scene would light draws its source pixel s, as
+    mode `plain`: floor squares, objects, roofs and the strips of section
+    3.5. The translucency bits are ignored too, so a translucent object draws
+    s, not a blend (revision 3, measured by the implementer, 2026-10-30).
+    Outlines, highlights and floating text do not change.
+    `rev3/unlit-modes.tsv` lists every item.
 
 ### 3.4 Sort Order
 
@@ -537,14 +649,20 @@ the GPU atlas. `[Must-match]`
    The key is computed from the list as it stands when the refresh gathers.
    `[Must-match]`
 4. **Squares.** The square rank of a floor or roof square is its position in
-   the order in which the reference path draws the squares of that layer in
-   the refresh. That order sorts the drawn squares by ascending **corner
-   y**, then ascending **corner x**, then ascending square index `column +
-   100 × row` (measured by the implementer, Wave 3; Decision D-10). The
+   the order of **all 10000 squares**, sorted by ascending **corner y**, then
+   ascending **corner x**, then ascending square index `column + 100 × row`
+   (measured by the implementer, Wave 3 and 2026-10-30; Decision D-10). The
    corner is the square's bounding-image corner of SPEC-003 section 3.6: the
-   floor corner for a floor square, the roof corner for a roof square. The
-   rank counts only the squares of that layer that the refresh draws, from 0.
-   `[Must-match]`
+   floor corner for a floor square, the roof corner for a roof square. Each
+   corner is the grid origin plus a fixed offset, so the rank of a square is
+   the same in every view, and a square has one rank on the floor and on the
+   roof. `[Must-match]`
+   - **Skipped squares (revision 3).** The rank is a position among all
+     squares, so squares that are not drawn leave gaps, as they do in the
+     reference path's draw log. The draw skips a square whose corner lies past
+     the view's right or bottom edge, a hidden square, a square without art,
+     and a roof of index 1. Revision 2 counted only the drawn squares from 0,
+     which gave the same order but other numbers (D-34).
    - Revision 1 recorded ascending square index instead. The two orders
      differ: in a row, a step of one column moves the corner 12 pixels down,
      and a step of one row moves it 24 pixels down, so square
@@ -587,9 +705,9 @@ primary and list index. `[Must-match]`
 
 An empty part is not emitted. Without an overlap the item is one part-0
 instance in its normal mode. Each part's src x and src y select the matching
-pixels of the item's frame. The `egg` part sets `EXEMPT` exactly when the
-reference path applies SPEC-014 section 3.37's `[May-improve]` (indexes
-229-255 unlit in the masked draw). When the mask art is missing, or the
+pixels of the item's frame. The `egg` part never sets `EXEMPT`: the reference
+path has no exemption for indexes 229 and up inside the mask (revision 3,
+measured by the implementer, 2026-10-30). When the mask art is missing, or the
 player has no hex, the instanced path follows the reference path's choice
 for SPEC-014 section 3.37 "Failures". `[Must-match]`
 
@@ -788,16 +906,21 @@ positions and zooms 1.0, 1.25 and 2.0. It is withdrawn.
   - ring width `ring = round(48 / zoom)`;
   - outer radius `outer = inner + ring`.
 
-  `round` rounds half away from zero (Rust's `f64::round` and `f32::round`).
-  The division is done in the floating-point type in which the enhanced view
-  keeps its zoom. Every zoom of the fixtures is exact in binary32 and
-  binary64, and none of its quotients lies within 0.001 of a half-integer,
-  so either type gives the fixtures.
+  `round` rounds half away from zero (Rust's `f64::round`). The division is
+  done in double precision (binary64), and a zoom held in binary32 is widened
+  first (revision 3, measured by the implementer, 2026-10-30). Every zoom of
+  the fixtures is exact in binary32 and binary64, and none of its quotients
+  lies within 0.001 of a half-integer.
 - **Center.** The canvas pixel `(cx, cy)` under the cursor:
   `(floor(px), floor(py))` for the cursor's position (px, py) in canvas
   coordinates, pixel (x, y) spanning x to x + 1. Distances are measured from
   that pixel's corner to the tested pixel's corner, so they are whole
-  numbers.
+  numbers, and the disc never moves by less than a pixel.
+- **Tiles (revision 3).** Each tile of the enhanced canvas is its own view
+  (section 3.2), and takes the same center less the tile's corner: a tile
+  with corner (tx, ty) uses `(floor(px) - tx, floor(py) - ty)`. The grid
+  origin moves with the tile, so a world pixel has the same b and d in every
+  tile that draws it (`rev3/peek-center.tsv`, `rev3/peek-seam.tsv`).
 - **Thresholds.** For b = 0 to 15, `Q[b] = (16 × inner + (b + 1) × ring)²`.
   The uniform block holds `Q[b]` (section 2.4).
 
@@ -809,6 +932,13 @@ positions and zooms 1.0, 1.25 and 2.0. It is withdrawn.
 - A zoom that is not finite, or not above 0, gives no parameters: the
   instanced path refuses a refresh with the peek active (section 3.12), so
   the reference path draws it.
+- **These bounds are the instanced path's own (revision 3).** The reference
+  path has no radius cap and no center clamp (measured by the implementer,
+  2026-10-30). The shell's zoom range of 0.5 to 3.0 never reaches the cap,
+  because outer is at most 288 there. So when a cap or a clamp changes a
+  value, the parameters are still computed as above, but the instanced path
+  refuses the refresh, and the reference path draws it (section 3.12, D-38).
+  A pixel is never drawn from a capped radius.
 
 **Dither matrix.** The standard 4-by-4 Bayer matrix, row by row (unchanged
 from revision 1): `[Must-match]`
@@ -838,6 +968,12 @@ So the pixels at distance `inner` or less are always cut, the pixels beyond
 from distance `inner + (b + 1) × ring / 16` outward. A pixel at exactly
 `outer` is kept for every b (with b = 15, `Q[15] = 256 × outer²`). Steps 3 and
 5 are early exits: step 6 alone gives the same answer beyond `outer`.
+
+With `t = (d - inner) / ring`, step 6 says that a ring pixel is kept exactly
+when `b < floor(16 × t)` (`rev3/peek-ring.tsv`). The test in `d²` is the rule,
+because it needs no square root. A cut pixel leaves what lies beneath it. A
+kept pixel draws as it would without the X-ray: through the player cutout
+inside the mask, otherwise the lit draw. Only roofs are cut. `[Must-match]`
 
 Every value fits in an i32. A canvas is at most 16384 pixels wide (section
 3.11), so with the center's clamp |dx| and |dy| stay below 2^21. After step
@@ -894,8 +1030,10 @@ is reported for a spec revision. `[Safe rule]`
    or light source, a level above 128, a texture limit, a full atlas, an
    upload error, a draw no mode can express (section 3.2), a shroud draw
    the `remap` recorder cannot express or a remap source value above its
-   table (section 3.3), a peek zoom that is not finite and positive, or the
-   peek mismatch of section 3.10. The refusal is a typed error. That refresh is
+   table (section 3.3), an opaque ring paint of index 0 (section 3.3), a peek
+   zoom that is not finite and positive, a peek cap or clamp that changed a
+   value, or the peek mismatch of section 3.10. The refusal is a typed error.
+   That refresh is
    then drawn by the reference path as a refresh of the **whole** canvas,
    and the result replaces the GPU canvas. Each cause is logged once per
    session. `[Safe rule]`
@@ -980,6 +1118,90 @@ implementer's follow-up adopts revision 2. `[Must-match]`
    passes on the default path. The gray clamp changes no palette-derived
    output, so no asset is re-recorded for it.
 
+Revision 3 carries this list on in section 3.16. A step above that is already
+done stands.
+
+### 3.16 Revision 3 Files, Supersession, and the Implementer's Follow-Up
+
+Revision 3 adds the folder `tests/fixtures/spec022/rev3/`. Team A changed no
+file of revisions 1 or 2, because the merged tests may still read them, and
+those files stay until the follow-up below adopts revision 3. `[Must-match]`
+
+| File | Status in revision 3 |
+| --- | --- |
+| `rev2/square-order.tsv` | **Superseded** by `rev3/square-rank.tsv`: same order, with the rank among all 10000 squares |
+| `rev2/scene2.tsv`, `rev2/scene2-order.txt` | **Superseded** by the files of the same names in `rev3/`: only `hl`'s key and secondary differ |
+| `rev2/scene2-batches.tsv`, `rev2/scene2-sprites.txt`, `rev2/scene2-uniforms.hex`, `rev2/scene2-expected.hex` | Current: the numbering changes no batch, byte or pixel |
+| `rev2/sort-keys.tsv` | Current. Its highlight rows are the keys of a full outline list |
+| `rev2/peek-scale.tsv`, `rev2/peek-thresholds.tsv`, `rev2/peek-samples.tsv`, `rev2/blend-clamp.tsv`, and the rest of `rev2/` | Current |
+| `rev3/highlight-positions.tsv` | New: highlight keys for lists of any length |
+| `rev3/peek-center.tsv`, `rev3/peek-ring.tsv`, `rev3/peek-seam.tsv` | New: the center, the ring boundary and the tile seam |
+| `rev3/shroud-mask.tsv` | New: the shroud's pixel test |
+| `rev3/unlit-modes.tsv` | New: each item's mode in an unlit scene |
+| `rev3/README.md` | New: describes the folder |
+
+**The four refusals.** These are the refresh states the instanced path refuses
+today, as `docs/REFERENCE.md` lists them, each with the rule that lifts it and
+the test that proves it:
+
+| # | Refused today | Lifted by | Proved by |
+| ---: | --- | --- | --- |
+| 1 | The cursor roof peek: any refresh with the X-ray active | Section 3.10 | T8 |
+| 2 | The enhanced shroud past the grid, so every unlocked widescreen refresh falls back | Section 3.3, layer 3 primary 10000, `remap` | T17 (a), T18, T10, T11 |
+| 3 | A ground-item highlight whose running number is 100 or more | Sections 2.1 and 3.3, position `n + k` | T1, T17 (b) |
+| 4 | A cutout drawn without a light | Section 3.3, `egg` with light source `none`, and `plain` for the rest | T17 (c) |
+
+**What the implementer changes.** One follow-up commit by the implementer (not
+Team A) does all of this. Refusals stay in place until the step that lifts
+them, so the canvas is right at every point. `[Must-match]`
+
+1. **Numbering.** Give the instanced path's floor and roof keys the rank among
+   all 10000 squares. Then the two numbering differences are gone: the keys
+   and the reference path's draw log give the same numbers. The highlights
+   already use the running number. T9 compares the numbers themselves, not
+   only the order, and T15 reads `rev3/square-rank.tsv`.
+2. **Refusal 1, the peek.** Compute the parameters of section 3.10 (whole
+   pixels, double precision, the center less the tile's corner), write them to
+   the uniform block, set `PEEK` on every roof instance, and remove the
+   refusal. Refuse only as section 3.12 says, including a cap or clamp that
+   changed a value. T8 compares against the revision 2 and 3 rule, and no
+   longer against revision 1's.
+3. **Refusal 2, the shroud.** Add the shroud recorder (section 3.3) beside the
+   painter in `vault_render::map::enhanced`, add the `remap` mode, and draw the
+   shroud as one instance at layer 3, primary 10000. Remove the refusal. An
+   unlocked widescreen refresh then stays on the instanced path.
+4. **Refusal 3, highlights.** Draw a highlight at any running number. Remove
+   the refusal from 100 on, and keep the domain of section 2.1.
+5. **Refusal 4, the unlit cutout.** Draw `egg` with light source `none`, and
+   every other item of an unlit scene as `plain`, with the translucency bits
+   ignored. Remove the refusal.
+6. **The gray level.** Section 3.15 step 3 asks for this, and it is not one of
+   the four: clamp the gray level to 0..=7 on the instanced path (section 3.6),
+   and remove its refusal of a level above 7. `[May-improve]`
+7. **Tests.** Switch T5 to `rev3/scene2.tsv` and `rev3/scene2-order.txt`, and
+   add T18 and T19. T10 and T11 cover the first tile and one other tile of an
+   unlocked widescreen view, with the peek active, the shroud on screen and a
+   highlight drawn.
+8. **Files.** Delete the superseded files of the table above, and those of
+   section 3.15 that remain, in the same commit, and point
+   `tests/fixtures/spec022/README.md` to `rev3/`.
+9. **Gallery and documents.** `cargo xtask capture-gallery && git diff
+   --exit-code docs/assets` still passes on the default path. Nothing here
+   changes the reference path, so no asset is re-recorded. With a GPU adapter,
+   `cargo xtask capture-gallery --render-path instanced` also leaves
+   `docs/assets` unchanged, and the pull request records both runs, or says
+   that no adapter was available for the second. Update "Refused today" in
+   `docs/REFERENCE.md`.
+10. **The default stays.** `reference` stays the default render path (D-7).
+    Lifting the refusals does not change that: making `instanced` the default
+    remains the owner's decision, once T11 is recorded on real hardware and
+    the owner's corpus.
+
+If T8, T10 or T11 shows a difference, the implementer changes neither path's
+behavior to make the test pass. The reference path wins, the refusal stays for
+that state, and the difference is reported for a revision (sections 3.2 and
+3.10). `[Safe rule]`
+
 ## 4. Required Tests
 
 The implementer writes at least these tests. They use synthetic data only.
@@ -989,7 +1211,8 @@ adapter` and pass, unless the environment variable `VAULT_REQUIRE_GPU` is
 `[Must-match]`
 
 - **T1. Sort keys.** The key function gives every row of `sort-keys.tsv`
-  (revision 2: `rev2/sort-keys.tsv`). Layer 7, a hex of 40000, a floor rank
+  (revision 2: `rev2/sort-keys.tsv`), and every row of
+  `rev3/highlight-positions.tsv`. Layer 7, a hex of 40000, a floor rank
   of 10000, a roof rank of 10000 given as a roof square (not as the shroud),
   a part of 5 in layers 1 to 3, a part of 1 in layer 0, a part of 2 in layer
   4, a list index of 2^29 and an outline position of 2^29 are each refused
@@ -1009,7 +1232,9 @@ adapter` and pass, unless the environment variable `VAULT_REQUIRE_GPU` is
   `rev2/scene-expected.hex`. A second run that draws the instances one at a
   time, without batches, gives the same canvas. Revision 2: the second scene
   of section 5.6 gives `rev2/scene2-order.txt`, `rev2/scene2-batches.tsv`
-  and `rev2/scene2-expected.hex` in the same two ways.
+  and `rev2/scene2-expected.hex` in the same two ways. Revision 3:
+  `rev3/scene2.tsv` gives `rev3/scene2-order.txt`, with the same batches and
+  the same canvas.
 - **T6. GPU executor.** The GPU path draws the same scene to the same canvas
   (GPU test).
 - **T7. Light buffer.** Packing gives every row of `light-pack.tsv`. For the
@@ -1022,18 +1247,30 @@ adapter` and pass, unless the environment variable `VAULT_REQUIRE_GPU` is
   `0x20000000`, on an otherwise empty elevation) gives the same buffer. If
   it does not, the implementer stops and reports the difference instead of
   changing SPEC-006 behavior.
-- **T8. Roof peek.** The parameter math gives `rev2/peek-scale.tsv` and
-  `rev2/peek-thresholds.tsv`. The peek test gives every row of
-  `rev2/peek-samples.tsv`. A zoom of 0, of -1, and a NaN zoom give no
-  parameters. Then compare the reference path's X-ray with the
-  instanced path's on the gallery's showcase map: the cursor at 3 positions
-  and zooms 1.0, 1.25 and 2.0, roof peek `cursor_xray` held. If they differ,
-  apply the section 3.10 parity rule.
+- **T8. Roof peek (revision 3).** T8 compares against the rule of section
+  3.10, never against revision 1's.
+  1. The parameter math gives `rev2/peek-scale.tsv` and
+     `rev2/peek-thresholds.tsv`, and the center gives
+     `rev3/peek-center.tsv`.
+  2. The peek test gives every row of `rev2/peek-samples.tsv`,
+     `rev3/peek-ring.tsv` and `rev3/peek-seam.tsv`.
+  3. A zoom of 0, of -1, and a NaN zoom give no parameters. A zoom of 0.0625,
+     which the cap changes, gives the row of `rev2/peek-scale.tsv` and refuses
+     the refresh, and the reference path draws it.
+  4. Compare the reference path's X-ray with the instanced path's on the
+     gallery's showcase map, roof peek `cursor_xray` held, at zooms 0.5, 1.0,
+     1.25, 2.0 and 3.0. Use 3 cursor positions, one of them away from a
+     pixel's middle (so a whole-pixel center is tested), and at least one
+     position whose ring crosses a tile seam of the enhanced canvas. The two
+     canvases are equal byte for byte, and the instanced path refuses nothing.
+     If they differ, apply the section 3.10 parity rule.
 - **T9. Order parity.** A draw-recording hook in the reference path logs
   each draw as (layer, hex or square, list index, part). For the synthetic
   maps (`maps/synthetic.map` from `cargo xtask fixtures --output DIR`,
   `maps/cam_demo.map` in `DIR-cam-demo`, and the gallery showcase map), the
-  log equals the instanced path's sorted instance list. Cover at least: a
+  log equals the instanced path's sorted instance list, numbers included:
+  since revision 3 the square ranks and outline positions are the same values
+  on both sides, and no test maps one to the other. Cover at least: a
   walking critter (reinsertion on each frame step), two objects on one hex,
   a flat object, the player under a roof (cutout split), a hidden roof
   group, an outline, a floating text, and an object given each translucency
@@ -1044,7 +1281,8 @@ adapter` and pass, unless the environment variable `VAULT_REQUIRE_GPU` is
   revision 1's partial refresh is covered by the enhanced view's canvas
   tiles: cover the first tile and at least one other tile of an enhanced
   widescreen view, at zoom 1.0 and 2.0, with the enhanced shroud and a
-  ground-item highlight on screen.
+  ground-item highlight on screen, and again with the roof peek active
+  (revision 3). A sprite that crosses the seam draws in both tiles.
 - **T11. Canvas parity (GPU).** The same frames on the GPU path give the
   same canvases (GPU test).
 - **T12. Fallback.** Forcing each refusal cause of section 3.12 (a duplicate
@@ -1058,26 +1296,40 @@ adapter` and pass, unless the environment variable `VAULT_REQUIRE_GPU` is
   `cargo xtask capture-gallery --render-path instanced` also leaves
   `docs/assets` unchanged. The pull request records both runs, or says that
   no adapter was available for the second.
-- **T15. Square order (revision 2).** Ranking the squares of
-  `rev2/square-order.tsv` by section 3.4 item 4, from their floor corners and
-  again from their roof corners, gives the `rank` column. T9's log of a
-  synthetic map shows the reference path's floor and roof squares in that
-  order.
+- **T15. Square order (revisions 2 and 3).** Ranking all 10000 squares by
+  section 3.4 item 4, from their floor corners and again from their roof
+  corners, gives the `rank` column of `rev3/square-rank.tsv`. The ranks do not
+  change with the grid origin. T9's log of a synthetic map shows the reference
+  path's floor and roof squares with those ranks, gaps included.
 - **T16. Gray bound (revision 2).** With the synthetic gray rule of section
   5.7, every row of `rev2/blend-clamp.tsv` holds on both paths. A
   hand-built outline ink with gray level 8, and one with 15, draws with row
   7 on both paths, without a panic or a refusal.
-- **T17. Unslotted draws (revision 2).** On a synthetic map, a view with the
-  enhanced shroud, a view whose outline list is full (100 entries) and that
-  shows a ground-item highlight, and an unlit scene with the player under a roof are
-  each drawn by the instanced path, not refused, and match the reference
-  canvas.
+- **T17. Unslotted draws (revisions 2 and 3).** On a synthetic map, each of
+  these is drawn by the instanced path, not refused, and matches the reference
+  canvas:
+  - (a) an unlocked widescreen view with the enhanced shroud past the grid;
+  - (b) a view whose outline list is full (100 entries) with at least two
+    ground-item highlights, so that their running numbers are 100 and 101; and
+    a view whose list holds 3 entries, with highlights numbered 3 and 4;
+  - (c) an unlit scene with the player under a roof, and an object with one
+    translucency bit in that scene, which draws its source pixels.
+- **T18. Shroud rule (revision 3).** The predicate of section 3.3 gives every
+  row of `rev3/shroud-mask.tsv`. On a synthetic map with an allowed set smaller
+  than the grid, the recorder's image is 1 exactly where the predicate says,
+  and the table's one row holds the dark index 256 times. If the recorder and
+  the predicate differ, the painter wins: the implementer stops and reports
+  the difference.
+- **T19. No lifted refusal remains (revision 3).** With the renderer's refusal
+  counters, the scenarios of T8, T10 and T17 record zero refusals for each of
+  the four causes of section 3.16, and for a gray level above 7. Forcing a
+  state that stays refused (T12, and a peek cap) still falls back.
 
 ## 5. Synthetic Test Fixtures (Hex / Text)
 
 All values here are synthetic. Every file named below is in
-`tests/fixtures/spec022/` or, for revision 2, in its `rev2/` folder; each
-folder has a README. Team A computed every vector
+`tests/fixtures/spec022/` or, for revisions 2 and 3, in its `rev2/` and
+`rev3/` folders; each folder has a README. Team A computed every vector
 from this spec with a throwaway script that is not committed.
 
 ### 5.1 Synthetic Lookup Tables
@@ -1103,7 +1355,8 @@ Worked rows:
 | Upright, hex 20100, list index 1, part 0 | 2 | 20100 | 8 | `40004E8400000008` |
 | Roof rank 5050, part 1 | 3 | 5050 | 1 | `600013BA00000001` |
 | Shroud, draw rank 2 (revision 2) | 3 | 10000 | 2 | `6000271000000002` |
-| Ground-item highlight 0, ring: position 100 (revision 2) | 4 | 0 | 800 | `8000000000000320` |
+| Ground-item highlight 0, ring, with a full list: position 100 (revision 2) | 4 | 0 | 800 | `8000000000000320` |
+| Ground-item highlight 0, ring, with a list of 1: position 1 (revision 3) | 4 | 0 | 8 | `8000000000000008` |
 | Upright, hex 39999, list index 2^29 − 1, part 4 (revision 2) | 2 | 39999 | 4294967292 | `40009C3FFFFFFFFC` |
 
 ### 5.3 Hex Light
@@ -1209,27 +1462,29 @@ zoom 0.0625 the radii 1536 and 768 are capped to inner = 1024 and ring = 0.
 
 ### 5.5 Square Order (revision 2)
 
-`rev2/square-order.tsv` ranks nine floor squares by section 3.4 item 4, with
-SPEC-003 section 3.6's example translation OX = -3680, OY = -430 (square
-5050's floor corner is (256, 180) and its roof corner (256, 84), as SPEC-003
-states). Floor corner `x = OX - 16 + 48s + 32t`, `y = OY - 2 - 12s + 24t`,
-with s = 99 − column and t = row.
+`rev3/square-rank.tsv` ranks nine floor squares and the grid's four corners by
+section 3.4 item 4, with SPEC-003 section 3.6's example translation OX =
+-3680, OY = -430 (square 5050's floor corner is (256, 180) and its roof corner
+(256, 84), as SPEC-003 states). Floor corner `x = OX - 16 + 48s + 32t`, `y =
+OY - 2 - 12s + 24t`, with s = 99 − column and t = row.
 
-| Square | Floor corner | Rank | Ascending-index position (revision 1) |
-| ---: | --- | ---: | ---: |
-| 4950 | (224, 156) | 0 | 0 |
-| 5049 | (304, 168) | 1 | 1 |
-| 5050 | (256, 180) | 2 | 2 |
-| 5051 | (208, 192) | 3 | 3 |
-| 5149 | (336, 192) | 4 | 6 |
-| 5052 | (160, 204) | 5 | 4 |
-| 5150 | (288, 204) | 6 | 7 |
-| 5053 | (112, 216) | 7 | 5 |
-| 5250 | (320, 228) | 8 | 8 |
+| Square | Floor corner | Rank (revision 3) | Among these nine (revision 2) | Ascending-index position (revision 1) |
+| ---: | --- | ---: | ---: | ---: |
+| 4950 | (224, 156) | 4974 | 0 | 0 |
+| 5049 | (304, 168) | 5025 | 1 | 1 |
+| 5050 | (256, 180) | 5074 | 2 | 2 |
+| 5051 | (208, 192) | 5124 | 3 | 3 |
+| 5149 | (336, 192) | 5125 | 4 | 6 |
+| 5052 | (160, 204) | 5173 | 5 | 4 |
+| 5150 | (288, 204) | 5174 | 6 | 7 |
+| 5053 | (112, 216) | 5223 | 7 | 5 |
+| 5250 | (320, 228) | 5274 | 8 | 8 |
 
 5051 and 5149 share corner y 192, and 5052 and 5150 share 204: corner x
 decides. 5149 and 5150 come before 5053, although their indexes are larger.
-The roof corners are 96 pixels higher and give the same ranks.
+The roof corners are 96 pixels higher and give the same ranks. The four corner
+squares have ranks 0 (square 0), 2500 (square 99), 7499 (square 9900) and 9999
+(square 9999).
 
 ### 5.6 The Second Scene (revision 2)
 
@@ -1237,7 +1492,7 @@ A 12-by-8 canvas filled with `0x40`, and a whole-view refresh R = (0, 0, 12,
 8), so every instance has clip R. It stands for an unlit scene: no item is
 lit. `rev2/scene2-uniforms.hex`: OX = OY = 0, ambient 32768, elevation 0,
 flags 1, cutout at (2, 1), 4 by 3 (the mask `egg2`), no peek. The images are
-in `rev2/scene2-sprites.txt`, and the instances in `rev2/scene2.tsv`, out of
+in `rev2/scene2-sprites.txt`, and the instances in `rev3/scene2.tsv`, out of
 key order. For the `remap` instance, the `levels` column names its remap
 table.
 
@@ -1248,7 +1503,7 @@ table.
 | `obj2.1` to `obj2.4` | `4000006400000001` to `...04` | `plain` | The strips around the cutout |
 | `shroud` | `6000271000000000` | `remap`, table `shr_tbl` | Code 1 darkens (`I[D][32]`), code 2 writes index 0 |
 | `ring0` | `8000000000000000` | `plain` | Outline list position 0 |
-| `hl` | `8000000000000320` | `plain` | Ground-item highlight at position 100, drawn over `ring0` |
+| `hl` | `8000000000000008` | `plain` | Ground-item highlight at position 1, because the list holds one entry (`rev3/scene2.tsv`; revision 2 gave it position 100, key `8000000000000320`). Drawn over `ring0` |
 
 **Batches** (`rev2/scene2-batches.tsv`): `[floor2]`, read `[obj2.0]`,
 `[obj2.1, obj2.2, obj2.3, obj2.4]`, read `[shroud]`, `[ring0, hl]`: 5 draw
@@ -1265,7 +1520,7 @@ calls and 2 snapshot copies.
   (`0x27`).
 - (11, 2): the shroud's code 2 writes index `0x00`, which `plain` could not
   write, because a source 0 is transparent.
-- (9, 1): `ring0` paints `0x31`, then `hl` (position 100, a later key)
+- (9, 1): `ring0` paints `0x31`, then `hl` (position 1, a later key)
   paints `0x3A` over it.
 
 ### 5.7 Gray-Level Bound (revision 2)
@@ -1284,6 +1539,45 @@ hand-built ink can (no palette can; section 3.6): the common gray level is
 
 Mode 3 then applies `I[...][L]`; at L = 128 the formula table leaves the
 value unchanged. For mode 5, the clamped level is what aux bits 8-10 hold.
+
+### 5.8 Revision 3 Vectors
+
+**Highlight positions** (`rev3/highlight-positions.tsv`). With n list entries,
+highlight k has position `n + k` and secondary `8 × (n + k) + part`:
+
+| n | k | Part | Position | Key |
+| ---: | ---: | ---: | ---: | --- |
+| 1 | 0 | 0 | 1 | `8000000000000008` |
+| 7 | 2 | 1 | 9 | `8000000000000049` |
+| 100 | 0 | 0 | 100 | `8000000000000320` |
+| 100 | 5 | 1 | 105 | `8000000000000349` |
+
+**Peek center** (`rev3/peek-center.tsv`). A pointer at (10.75, 20.25) gives
+pixel (10, 20): the disc does not move by a fraction of a pixel. A pointer at
+(-0.25, 3.5) gives (-1, 3), because floor rounds down, not toward zero. A
+pointer at (700.5, 490.25) over a tile with corner (640, 480) gives (60, 10).
+
+**Ring boundary** (`rev3/peek-ring.tsv`), at zoom 1.0: inner 96, ring 48. At
+d = 99, `256 × d²` is 2509056, exactly `Q[0]` = 1584², so a pixel of b = 0 is
+kept, and `Q[1]` = 2663424 cuts a pixel of b = 1. Here t = 3 / 48 and
+`floor(16 × t)` = 1, so `b < 1`, as the second form says. At d = 144 every b
+is kept, and `Q[15] = 256 × 144²`.
+
+**Tile seam** (`rev3/peek-seam.tsv`). The view has center pixel (20, 2), inner
+2, ring 4, OX = -4 and OY = 2, and a tile seam at x = 16. View pixel (17, 2)
+is pixel (17, 2) of tile 0 and pixel (1, 2) of tile 1. Tile 1 has center
+(4, 2) and OX = -20. In both, world pixel (21, 0) has b = 8 and d² = 9, and
+2304 < 68² = 4624, so it is cut in both.
+
+**Shroud** (`rev3/shroud-mask.tsv`). World pixel (0, 0) has b = 0 and threshold
+400: at d² = 399 it stays, and at d² = 400 it takes the dark index. World
+pixel (0, 3) has b = 15 and threshold 80² = 6400, the largest. At d² = 10815,
+which is past 80 pixels, it is dark for every b. An allowed hex never changes,
+and an off-grid hex is always dark.
+
+**Unlit scenes** (`rev3/unlit-modes.tsv`). The scene of section 5.6 already
+shows an unlit `egg`. Its strips are `plain`, as the file says. A translucent
+object in that scene would also be `plain`.
 
 ## 6. Decisions
 
@@ -1328,6 +1622,7 @@ Every open point of the brief is settled here.
   x, then square index, with SPEC-003 section 3.6's floor or roof corner.
   Revision 1's Team A default (ascending square index) was wrong and is
   withdrawn. The parity rule did not change: the reference order wins.
+  Revision 3 keeps this order and changes only the numbers (D-34).
 - **D-11 (owner instruction; a Team A default in revision 1, confirmed by the
   owner in the Wave 3 prompt).** The brief's "ambient + point light falloff" is
   read as "both terms, combined by SPEC-006 and SPEC-014's maximum rule", not
@@ -1393,10 +1688,11 @@ Revision 2 adds:
   knowing how the shroud looks. A shroud draw that depends on more than the
   pixel's own index, or needs more than 255 rows, stays a refusal
   (`[Safe rule]`).
-- **D-27 (Team A default).** Ground-item highlights take outline positions
-  `100 + k`, in the reference path's highlight order, so they follow the
-  whole outline list as the reference draws them. The position domain grows
-  to below 2^29, the list index's bound.
+- **D-27 (Team A default; numbering superseded by D-35).** Ground-item
+  highlights take outline positions after the outline list, in the reference
+  path's highlight order, so they follow the whole list as the reference draws
+  them. The position domain grows to below 2^29, the list index's bound.
+  Revision 2 numbered them `100 + k`.
 - **D-28 (Team A default).** The cutout of an unlit scene is the `egg` mode
   with light source `none`, under which `lit(s, L)` is s. No new mode is
   needed, and the cutout's blend formula is unchanged.
@@ -1421,6 +1717,56 @@ Revision 2 adds:
   canvas pixels on a 24-by-16 canvas. `peek-scale.tsv` covers the zoom math
   separately.
 
+Revision 3 adds:
+
+- **D-33 (Team A default).** The owner's brief of 2026-10-30 names this work
+  "Revision 2", but revision 2 was approved on 2026-10-27 and has been built
+  on. It is numbered revision 3, so that the history stays true and no approved
+  text is rewritten. The content is the brief's. Where the brief's items were
+  already in revision 2 (the ring formula, the square order, the object list,
+  whole-view refreshes, the gray clamp), they are kept and completed, not
+  restated as new.
+- **D-34 (owner instruction, relaying the implementer's measurement of
+  2026-10-30; numbering a Team A default).** The brief ranks squares by corner
+  y, corner x and square index. The rank's number is the position among all
+  10000 squares, as in the reference path's draw log, so that T9 compares
+  numbers and not only order. Revision 2 counted drawn squares only. Skipped
+  squares leave gaps, which the key allows.
+- **D-35 (Team A default, adopting the implementer's measurement of
+  2026-10-30).** A highlight's position is the running number `n + k`, as in
+  the reference path's draw log and in the instanced path today. Revision 2's
+  `100 + k` agreed only when the list was full. Keys of a full list do not
+  change. This supersedes D-27's numbering.
+- **D-36 (Team A default).** The shroud stays mode `remap`, although the
+  measured painter does not read D. A new overwrite mode would save one
+  snapshot copy per refresh, but it would change a decided mode table, the
+  batch plan of section 5.6 and its fixtures. The `plain` mode cannot do the
+  job, because the dark index may be 0, which is transparent in `plain`.
+  `remap` with one constant row is exact, and already specified.
+- **D-37 (owner instruction for the cutout, adopting the implementer's
+  measurement of 2026-10-30; `plain` a Team A default).** In an unlit scene the
+  cutout is `egg` with light source `none`, as D-28 says. Every other lit item
+  uses the existing `plain` mode, which draws s, so no new mode is needed. The
+  translucency bits are ignored there, because the reference path ignores
+  them.
+- **D-38 (Team A default).** The peek's safe bounds belong to the instanced
+  path alone, because the reference path has none. Drawing from a capped radius
+  would break parity at a zoom the shell cannot reach, and a guessed pixel is
+  what this spec's `[Safe rule]` forbids. So a cap or clamp that changes a value
+  refuses the refresh. Revision 2's cap values and `rev2/peek-scale.tsv` stand.
+- **D-39 (Team A default).** The brief asks to lift four refusals, and
+  `docs/REFERENCE.md` lists them. The instanced path's refusal of a gray level
+  above 7 is a fifth, which section 3.15 step 3 already asked to remove. The
+  checklist removes it too, as a separate step, and does not count it among
+  the four. The `[May-improve]` tag of D-30 is unchanged.
+- **D-40 (Team A default).** Revision 3's vectors go in
+  `tests/fixtures/spec022/rev3/`, and the superseded revision 2 files stay
+  until the implementer's follow-up, as D-31 did. Team A changed no file of
+  an earlier revision.
+- **D-41 (owner instruction).** Section 3.16 is an explicit checklist with the
+  parity test for each refusal, modeled on SPEC-021 section 3.9. The default
+  render path does not change (D-7).
+
 ## 7. Clean-Room Verification Checklist
 
 - [x] Zero C/C++ code snippets or struct definitions included.
@@ -1437,6 +1783,16 @@ Revision 2 adds:
   throwaway script that first reproduced every revision 1 vector from the
   revision 1 text; the measured findings are labelled "measured by the
   implementer, Wave 3".
+- [x] Revision 3: every `rev3/` vector was computed from this text by a
+  throwaway script. A second, separate script then read only the written files
+  and recomputed them: square ranks by counting rather than sorting, keys from
+  layer, primary and secondary, the peek and shroud tests from their formulas,
+  and the seam from both tiles (79 rows). The two forms of the ring test were
+  also checked to agree for every whole-pixel d² and b at seven radius pairs.
+  The measured findings are labelled "measured by the implementer, 2026-10-30".
+- [x] Revision 3 keeps the ingestion rule: no implementation-source path, no
+  40-character hexadecimal string, and no code listing. No engine Rust code was
+  read.
 - [x] Team A computed every vector in section 5 from this spec with a
   throwaway script that is not committed.
 - [x] Decisions separate owner instructions from Team A defaults.

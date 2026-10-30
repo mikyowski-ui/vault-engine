@@ -1,0 +1,10 @@
+item	lit_scene_mode	lit_scene_light	unlit_scene_mode	unlit_scene_light
+floor square	lit or floor_map	fixed or level image	plain	none
+flat or upright object	lit	hex	plain	none
+object with one translucency bit	translucent	hex or fixed	plain	none
+no-hex object	lit	fixed	plain	none
+roof square	lit	ambient	plain	none
+cutout part 0	egg	hex or ambient	egg	none
+cutout parts 1 to 4	lit	hex or ambient	plain	none
+outline or ground-item highlight	plain or outline_blend	none	plain or outline_blend	none
+floating text	plain	none	plain	none

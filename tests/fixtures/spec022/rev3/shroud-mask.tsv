@@ -1,0 +1,15 @@
+hex_state	nearest_d_sq	wx	wy	b	threshold_sq	dark
+off_grid	-	0	0	0	-	1
+off_grid	-	5	3	7	-	1
+allowed	-	0	0	0	-	0
+allowed	-	7	3	5	-	0
+outside	-	0	0	0	-	1
+outside	399	0	0	0	400	0
+outside	400	0	0	0	400	1
+outside	401	1	0	8	2704	0
+outside	1600	1	0	8	2704	0
+outside	1599	3	1	6	1936	0
+outside	1600	3	1	6	1936	0
+outside	6399	0	3	15	6400	0
+outside	6400	0	3	15	6400	1
+outside	10815	0	3	15	6400	1
