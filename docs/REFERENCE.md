@@ -2848,6 +2848,219 @@ These close behaviors that the earlier phases left open:
 
 </details>
 
+## Renderer notes for SPEC-022 revision 2
+
+These notes are for the spec author (Team A), in plain words and math. They
+state what the reference path does, as read and measured on 2026-10-30.
+SPEC-022 revision 2 already adopts these findings. Two numbering differences
+remain between its text and the reference path (notes 2 and 3). Neither one
+changes a canvas byte, because the draw order is the same.
+
+Terms used below:
+
+- A canvas pixel is a pixel of the view. A world pixel is a canvas pixel
+  minus the grid origin.
+- s is a sprite's source index, and index 0 in a sprite is transparent. D is
+  the canvas index just before a draw.
+- I[a][b] is the intensity table and M[a][b] is the mix table of SPEC-001.
+- b is the 4-by-4 Bayer value at a world pixel (wx, wy): row wy mod 4, column
+  wx mod 4, with a non-negative remainder. The rows are 0, 8, 2, 10, then 12,
+  4, 14, 6, then 3, 11, 1, 9, then 15, 7, 13, 5.
+
+### 1. The roof X-ray
+
+**Scale rule.** zoom is the zoom the canvas is drawn at, in interface pixels
+per canvas pixel. It leaves out the UI scale. The radii are whole canvas
+pixels, computed in double precision and rounded half away from zero:
+
+- inner = round(96 / zoom)
+- ring = round(48 / zoom)
+- outer = inner + ring
+
+So the X-ray keeps a constant size in interface pixels at every zoom.
+
+**Center.** The center (cx, cy) is the canvas pixel under the pointer: the
+floor of the pointer's canvas position. Distances run from that whole pixel
+to the tested whole pixel, so dx = x − cx and dy = y − cy are whole numbers,
+and d² = dx² + dy². Each tile of the enhanced canvas takes the same center
+less the tile's corner.
+
+**Dither anchor.** The pattern is anchored to world pixels, so it stays on
+the map while the camera pans, and it lines up across tile seams.
+
+**Test for a roof pixel.**
+
+1. If d² ≤ inner², the pixel is cut. The inner disc includes its boundary.
+2. If d² > outer², the pixel is kept.
+3. Otherwise the pixel is in the ring. It is kept exactly when
+   256 × d² ≥ (16 × inner + (b + 1) × ring)², and cut otherwise. With
+   t = (d − inner) / ring, that is: kept exactly when b < floor(16 × t).
+
+A cut pixel leaves what lies beneath it. A kept pixel draws as it would
+without the X-ray: through the player cutout inside the mask, otherwise the
+lit draw. Only roofs are cut. The reference path has no radius cap and no
+center clamp. The safe bounds of §3.10 belong to the instanced path, and the
+shell's zoom range of 0.5 to 3.0 never reaches them (outer is at most 288).
+
+**Why revision 1 differed.** T8 on the showcase map, at three cursor positions
+per zoom, measured these differing pixels between the reference X-ray and
+revision 1's §3.10:
+
+- zoom 1.0: 313 to 447;
+- zoom 1.25: 251 to 550;
+- zoom 2.0: 91 to 196.
+
+Each count also depends on how much roof lies under the ring at that cursor
+position, so the counts do not rank the causes. Three parts of the rule
+differed:
+
+- **Threshold position.** Revision 1 set the ring threshold at (t + ½) ring
+  steps from the inner radius. The reference path sets it at (b + 1) ring
+  steps. At zoom 1.0 one ring step is 3 canvas pixels, so every threshold
+  sits 1.5 pixels further out. This is the only difference at zooms 1.0 and
+  2.0 in T8, where both rules have the same radii.
+- **Radius units.** Revision 1 kept the radii in 1/16 canvas pixel without
+  rounding them to whole pixels. At zoom 1.25 it had 76.8125 and 38.375, and
+  the reference path has 77 and 38.
+- **Center units.** Revision 1 took the center in 1/16 pixel and measured
+  between pixel middles, so a cursor away from a pixel's middle moved the
+  disc. T8 placed the cursor on a pixel's middle, so this adds nothing to the
+  counts above, but the reference path never moves the disc by less than a
+  pixel.
+
+The reference path's X-ray defines the gallery, so it stayed as it is.
+Revision 2's §3.10 states the rule above. T8 still compares against the
+revision 1 rule, and the instanced path still refuses a refresh with the
+X-ray active, so the reference path draws it.
+
+### 2. Where the late draws fall in the draw order
+
+One reference refresh draws in this order:
+
+1. a new canvas of index 0;
+2. the floor squares;
+3. the flat pass, then the upright pass;
+4. the roof squares;
+5. the enhanced shroud;
+6. the outline list, at most 100 entries;
+7. the ground-item highlights;
+8. the floating text;
+9. the objects without a hex.
+
+**Enhanced shroud.** It comes after every roof square and before the first
+outline, and it covers the whole view. The in-world cursor's art is drawn in
+the flat pass, so it is shrouded with the scene. Outlines, floating text and
+objects without a hex stay above the shroud.
+
+It writes one constant palette index, the dark index, over D. It does not read
+D, and it does not darken through the intensity table. Any other pixel is left
+alone. The shell's dark index is the mapped entry below index 229 nearest to
+black. A pixel takes the dark index when any of these holds:
+
+- its hex is off the grid;
+- its hex is outside the allowed set and has no allowed center within 104
+  world pixels;
+- its hex is outside the allowed set, and d² ≥ (20 + 4 × b)², where d is the
+  pixel's distance from the allowed center nearest to that hex. Ties go to
+  the lowest hex number.
+
+A pixel over an allowed hex never changes. So the dither band runs from 20 to
+80 pixels, and every pixel is dark from 80 on. The shell allows the whole
+grid, so in play only pixels off the grid take the dark index.
+
+**Ground-item highlights.** While Shift is held on the map, each drawn object
+that is an item, on a hex, whose own outline word draws nothing is collected
+in a second list during the flat and upright passes. That list has no size
+limit. The limit of 100 applies only to the outline list, so an item past the
+first 100 outlined objects is still highlighted, and a highlight never pushes
+an outline off the list. The highlights are painted straight after the outline
+list, in draw order, above the shroud and below the floating text.
+
+A highlight writes what an outline of its word writes, at each paint of the
+ring:
+
+- an opaque ink replaces D with its index;
+- a banded ink replaces D with the index of the band for the scanned row;
+- a translucent ink replaces D with blend[gray][D], so a pixel painted twice
+  blends twice.
+
+The shell's word is the plain item outline, so in play each paint writes the
+item color's index.
+
+**Numbering difference.** The reference path's draw log numbers highlights
+straight after the entries the outline list actually holds. Revision 2's §2.1
+gives the k-th highlight position 100 + k, which agrees only when the list is
+full. The instanced path uses the running number, draws a highlight whose
+number is below 100, and refuses the refresh from 100 on.
+
+**The player cutout in an unlit scene.** An unlit scene has no light at all.
+Only tools and tests draw one, because the shell always passes a light. The
+cutout runs at the usual places: in the flat and upright passes for the walls
+and scenery it cuts, and in the roof pass for every roof square. It reads the
+weight w of the mask at each pixel.
+
+- Inside the mask, for s not 0: if w is 0 the pixel becomes s, otherwise it
+  becomes M[I[s][w]][I[D][128 − w]]. The weight is capped at 128, and s is not
+  relit first.
+- Outside the mask, the pixel becomes s.
+
+A lit scene uses the same blend with I[s][L] in place of s, at the draw's
+light level L, with no exemption for indexes 229 and up inside the mask. In an
+unlit scene the translucency bits are ignored too, so a translucent object
+draws s. The instanced path refuses a cutout drawn without a light today.
+
+### 3. Floor and roof square order
+
+The reference path draws squares by ascending corner y, then ascending corner
+x, then ascending square index (column + 100 × row). The corner is the
+square's floor corner. The roof corner is that corner moved 96 pixels up, so
+floor and roof squares share one order. Each corner is the grid origin plus a
+fixed offset, so the order is the same for every view.
+
+The draw skips a square whose corner lies past the view's right or bottom
+edge, a hidden square, a square without art, and a roof of index 1.
+
+**Numbering difference.** The rank in the reference path's draw log is the
+square's position in the order of all 10000 squares, so skipped squares leave
+gaps. Revision 2's §3.4 counts only the drawn squares from 0.
+
+### 4. Object lists and whole-view refreshes
+
+**Object index.** The engine keeps one object list per elevation, and a
+refresh reads only the current elevation's list. An object's list index is its
+position among that list's entries on the same hex, in insertion order. Hidden
+objects count, though they are not drawn. The in-world cursor and its AP text
+take two places, at the cursor's place in the list. An object without a hex
+has index 0.
+
+**Whole-view refreshes.** The reference path redraws the entire view on every
+refresh. It starts from a new canvas of index 0, draws the floor and every
+layer across the view, and gives the outlines the whole view as their
+rectangle. It never redraws a sub-rectangle, and it keeps no pixel from the
+last refresh. Each tile of the enhanced canvas is a separate view with its own
+whole-view refresh, and a sprite that crosses a seam draws in both tiles.
+Partial rectangles occur only in the synthetic tests of the instanced
+executors.
+
+### 5. The blend gray-level clamp
+
+A blend table has 8 rows. The reference path picks the row as min(gray, 7) for
+translucent object draws and translucent outlines. Levels 0 to 7 keep their
+row, and any level above 7 uses row 7. This is a [May-improve] safe bound.
+
+A palette cannot produce a level above 7. The common gray level is
+floor(floor((b + 3r + 6g) / 10) / 4) and the glass one is
+floor(floor((r + 5g + 4b) / 10) / 4), where r, g and b here are five-bit
+components: the six-bit channel divided by 2. The largest sum is 310 in both,
+which gives 31 and then 7, even for an all-white palette. A level of 15 would
+need six-bit components, which the formula does not use. So the bound changes
+no output that comes from a palette. It guards only a hand-built outline ink,
+which would otherwise index past the table.
+
+The instanced path has no clamp of its own yet. It refuses a gray level above
+7, so the reference path draws that refresh and the canvas is the same.
+Revision 2's §3.15 step 3 asks for a clamp in place of this refusal.
+
 ## Core contracts
 
 `EntityStore<T>` is a `slotmap::SlotMap<EntityId, T>`. Construct it with
