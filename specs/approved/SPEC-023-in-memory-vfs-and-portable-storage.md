@@ -1,6 +1,6 @@
 # SPEC-023: In-Memory VFS Mounting and Portable Storage
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (Team A, 2026-10-30); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-30); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -82,6 +82,19 @@ disassembly, re-implementation source or game asset was used. The new vectors
 were written from this text, then checked by a separate script from the written
 files alone (section 7).
 
+**Provenance of revision 3.** Author: the Spec-Author sub-agent (Team A),
+2026-10-30, on the owner's brief of 2026-10-30, which names this revision.
+Sources:
+
+- the owner's brief;
+- the implementer's report with the storage work of revisions 1 and 2. It says
+  that the save code before this spec removed every `.SAV` of a slot, so the
+  premise of D-18 was wrong;
+- SPEC-024b section 5.8 (the `VAULTSFL.DAT` sidecar).
+
+No engine Rust code was read, and no decompilation, disassembly,
+re-implementation source or game asset was used.
+
 ### Revision history
 
 - **Revision 1 (2026-10-27).** First approved text.
@@ -99,6 +112,17 @@ files alone (section 7).
     3.6 now also makes `cap-std` optional, and forwards `host-fs` through those
     two crates. Revision 1's `host-fs` alone was not enough.
   - Every other rule of revision 1, and every revision 1 fixture, is unchanged.
+- **Revision 3 (2026-10-30).** Restores the stale `.SAV` cleanup.
+  - **The rule.** Saving into a slot also deletes every `.SAV` of that slot that
+    the new image lacks, in the same commit (section 3.11, D-18). Old map files
+    therefore never leak into an overwritten slot, as before this spec.
+  - **What stays.** Every file that is not a `.SAV`, including unknown sidecars
+    such as `VAULTSFL.DAT` (D-38).
+  - **Why.** Revisions 1 and 2 said stale companions stayed "as today". The
+    implementer reported that this was wrong, so the code that followed them
+    changed the behavior.
+  - The new fixture is `slot-saves.tsv`, with test T20. Every other rule and
+    fixture is unchanged.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -232,7 +256,7 @@ A `StorageBackend` holds three namespaces. Each key is a canonical path
 | Namespace | Keys | Content | Desktop root (section 3.10) |
 | --- | --- | --- | --- |
 | `config` | One component ending in `.toml`: `vault-engine.toml`, and the load order file (`load_order.toml` by default) | The settings and load-order text, as bytes | The folder the shell finds or creates `vault-engine.toml` in |
-| `savegame` | Exactly two components, `<slot>/<file>`: `SLOT01` to `SLOT10` and `QUICKSAV` are the slots the engine uses | Slot files: `SAVE.DAT`, the `.SAV` companions, `AUTOMAP.SAV`, `VAULTENG.TOML` (SPEC-008 section 2.4) | The active profile's save root, `SAVEGAME/` in its writable data folder (SPEC-018 section 2.3) |
+| `savegame` | Exactly two components, `<slot>/<file>`: `SLOT01` to `SLOT10` and `QUICKSAV` are the slots the engine uses | Slot files: `SAVE.DAT`, the `.SAV` companions, `AUTOMAP.SAV`, `VAULTENG.TOML` (SPEC-008 section 2.4), `VAULTSFL.DAT` (SPEC-024b section 5.8) | The active profile's save root, `SAVEGAME/` in its writable data folder (SPEC-018 section 2.3) |
 | `mods` | One or more components: `<layer>/<path in the layer>` | Mod layer files, `vault-mod.toml` manifests included | The folder the shell resolves load-order layer paths against |
 
 **Reserved suffixes.** In `config` and `savegame`, a key whose last component
@@ -523,10 +547,25 @@ canonical keys. `[Must-match]`
    enhanced save keeps one). For a load it consumes a slot image read from
    storage. It no longer opens files itself. The bytes of every file are
    unchanged. `[Must-match]`
-2. **Save.** Saving into slot S is one commit: a put of `S/<name>` for every
-   file of the image, and a delete of `S/VAULTENG.TOML` when the image has
-   none, as an overwritten slot loses a stale sidecar today. Other existing
-   files of the slot are left alone. `[Must-match]`
+2. **Save.** Saving into slot S lists the slot's entries, then makes one commit
+   of: `[Must-match]`
+   - a put of `S/<name>` for every file of the image;
+   - a delete of `S/VAULTENG.TOML` when the image has none, as an overwritten
+     slot loses a stale sidecar today;
+   - a delete of every **stale `.SAV`** (revision 3): each listed entry of S
+     whose file name ends in `.SAV` after case folding, and whose canonical key
+     no file of the image has.
+
+   Every other existing file of the slot is left alone, whatever its name. An
+   unknown sidecar such as `VAULTSFL.DAT` is one of these: this rule never
+   deletes it (D-38). The rest of the rule is as follows:
+   - **Names.** The test is on the name alone, not on the loader's stem check, so
+     a stale `OLD MAP.SAV` goes too. `DEN.SAV.OLD` and `DEN.SAVE` do not end in
+     `.SAV`, and stay. `AUTOMAP.SAV` is always in the image, so it is never stale.
+   - **Scope.** Only slot S is touched, on every backend, and `QUICKSAV` is a slot
+     like any other. A folder is not an entry (section 3.9), so it stays.
+   - **Failure.** If the listing or the commit fails, the save fails and the slot
+     is unchanged, stale files included (section 3.8).
 3. **Load.** The loader reads `S/SAVE.DAT`, then the companions the manifest
    names, under today's name check (a plain `[A-Za-z0-9_-]` stem plus
    `.SAV`), `S/AUTOMAP.SAV`, and `S/VAULTENG.TOML` if present. It validates
@@ -771,6 +810,17 @@ The gate fails until section 3.6 is done, so the order matters. `[Must-match]`
 5. **Documents.** Add the fourth step and the CI job to `AGENTS.md` and
    `docs/REFERENCE.md`, which list the gates today.
 
+### 3.19 The Revision 3 Follow-Up
+
+The engine implements revision 2's rule today, so revision 3 needs this work:
+`[Must-match]`
+
+1. `vault_platform::session` lists the slot and adds the deletes of section 3.11
+   rule 2 to the save's commit. So does any helper that commits a slot image.
+2. T20 is added.
+3. `docs/REFERENCE.md`, which says other files of a slot are left alone, gains
+   the rule.
+
 ## 4. Required Tests
 
 The implementer writes at least these tests, on synthetic data only.
@@ -842,6 +892,12 @@ The implementer writes at least these tests, on synthetic data only.
   crates, by name. This needs no installed target (measured by Team A), so it runs
   everywhere and catches a new dependency on a machine that skips the gate.
   `Cargo.lock` is unchanged by this spec's work.
+- **T20. Slot saves (revision 3).** On `MemoryStorage`, `FsStorage` and
+  `KvStorage`, each row of `slot-saves.tsv` (section 5.9) starts from its `before`
+  entries, commits its `image` to its `slot` by section 3.11 rule 2, and gives its
+  `after` entries exactly. On `FsStorage`, a fault injected as in T12 during the
+  commit of `stale-map` leaves all four files of the slot unchanged, and a folder
+  named `OLD.SAV` in a slot survives a save.
 
 ## 5. Synthetic Test Fixtures (Hex / Text)
 
@@ -996,6 +1052,23 @@ crates, as read on 2026-10-30 with `cap-std` removed from the graph. `vault-vm`
 and `vault-formats` have the same six: `thiserror`, and what its derive macro
 pulls in. `vault-core` adds `serde` and `slotmap`.
 
+### 5.9 Slot Saves (Revision 3)
+
+`slot-saves.tsv` lists 10 saves. `before` is a `;`-separated list of
+`KEY=VALUE` entries in the `savegame` namespace, spelled as stored, and `image` a
+`;`-separated list of `NAME=VALUE` files. `removed` lists the canonical keys that
+the save removes, and `after` every `KEY=VALUE` entry afterward, by canonical key,
+both comma-separated. `-` means none.
+
+- `stale-map` is the rule itself: `DEN.SAV` is not in the image, so it goes.
+- `any-case` compares by canonical key. The stored `arroyo.sav` is the image's
+  `ARROYO.SAV`, so it is replaced. The stale `Den.Sav` goes.
+- `sidecars-kept` removes `DEN.SAV` and `VAULTENG.TOML`, and keeps `VAULTSFL.DAT`
+  and `NOTES.TXT`.
+- `near-names` removes nothing: no other name there ends in `.SAV`.
+- `unusual-stem` removes `OLD MAP.SAV`, which the loader's stem check would refuse.
+- `other-slot` leaves `SLOT02/DEN.SAV` in place.
+
 ## 6. Decisions
 
 Every open point of the brief is settled here.
@@ -1060,9 +1133,14 @@ Every open point of the brief is settled here.
   the brief says, and `vault_core` cannot depend on it. The save-slot code
   therefore exchanges slot images, and the session moves them to and from
   storage.
-- **D-18 (Team A default).** A save deletes only `VAULTENG.TOML` when the new
-  image has none, which is the documented behavior. Stale companion files are
-  left as today; the loader reads only the companions the manifest names.
+- **D-18 (owner instruction, revision 3; a Team A default before that).** A save
+  deletes `VAULTENG.TOML` when the new image has none, and every `.SAV` of the
+  slot that the new image lacks, so old map files never leak into an overwritten
+  slot. Every other file of the slot stays. Revisions 1 and 2 said a save deleted
+  only `VAULTENG.TOML`, and that stale companions stayed "as today". That premise
+  was wrong: the save code before this spec removed every `.SAV` of the slot, as
+  the implementer reported. The loader still reads only the companions the
+  manifest names.
 - **D-19 (Team A default).** A layer is missing when it has no file, on every
   backend. A key-value store cannot hold an empty folder, so the desktop's
   empty folder is refused too, a `[May-improve]` change: an empty layer
@@ -1136,6 +1214,23 @@ Revision 2 adds:
   three today, and the implementer updates them, because this spec's author does
   not change those files.
 
+Revision 3 adds these decisions.
+
+- **D-37 (Team A default).** The cleanup goes in the save's own commit, so a
+  failed save restores the stale files with everything else, and in a quota the
+  deletes count toward the batch's net effect. It lists the slot first because
+  `commit` has no wildcard. D-18 says what it does.
+- **D-38 (owner instruction for the sweep; Team A default for the rest).** The
+  sweep touches only `.SAV` names, so unknown sidecars such as `VAULTSFL.DAT` stay.
+  SPEC-024b section 5.8 keeps its own named delete of that one file on a save with
+  sfall mode off. That delete is not part of this sweep. Without it, a slot just
+  saved with sfall mode off would hold an old sidecar, and that spec's loading
+  table would refuse the slot. Until SPEC-024b is implemented, nothing deletes the
+  file.
+- **D-39 (Team A default).** `.SAV` is matched after case folding and by name
+  alone, as the code before this spec matched every `.SAV` of the slot. The
+  loader's stem check is not used, so an unloadable leftover cannot stay forever.
+
 ## 7. Clean-Room Verification Checklist
 
 - [x] Zero C/C++ code snippets or struct definitions included.
@@ -1161,3 +1256,8 @@ Revision 2 adds:
   listing and the one `rustc` measurement, both disclosed in the provenance.
 - [x] Revision 2 changes no revision 1 rule or fixture. Sections 3.6 and 3.17 add
   to them.
+- [x] Revision 3: `slot-saves.tsv` was written from section 3.11 by a throwaway
+  script, and a second, separate script recomputed every row from that rule. No
+  existing fixture changed.
+- [x] Revision 3 keeps the ingestion rule: no implementation-source path, no
+  40-character hexadecimal string, no code listing, and no engine Rust code read.

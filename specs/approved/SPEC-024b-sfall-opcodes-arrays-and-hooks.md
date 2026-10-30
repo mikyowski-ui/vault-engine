@@ -14,6 +14,7 @@
 - **Revision 2 (2026-10-30, Team A).** Approves Decision D-3 as an owner instruction, and makes the amendment it asked for in SPEC-017 (Revision 4).
   - **Section 3.1.** Sfall mode now has a defined manifest key, and a command-line flag for replays (D-28).
   - **Section 3.2.** The shadowing covers every enhanced word in the overlap. Revision 1 named only `0x8200`, but the four camera words `0x8210..=0x8213` are enhanced words too (D-27).
+  - **Section 5.8.** Separates its named delete of `VAULTSFL.DAT` from SPEC-023's stale `.SAV` sweep (D-29). The rule itself does not change.
   - Every other rule, and every oracle file, is unchanged.
 
 ## Clean-Room Rules for Research Agents
@@ -54,7 +55,7 @@ Out of scope: `ddraw.ini` engine patches, shaders, the graphics and sound words,
 
 A `[Must-match]` tag means "matches the published documentation". It does not mean "confirmed against a running sfall" (Decision D-1).
 
-**Invariant.** With sfall mode off, no word, hook, array, file, or hash in this specification exists, and every existing behavior and golden is unchanged. With sfall mode on and no hook registered, every formula in SPEC-007, SPEC-009, SPEC-011, and SPEC-014 gives the same value as with sfall mode off. `[Must-match]`
+**Invariant.** With sfall mode off, no word, hook, array, file, or hash in this specification exists, and every existing behavior and golden is unchanged. The one exception is how a slot's old `VAULTSFL.DAT` is treated (section 5.8). With sfall mode on and no hook registered, every formula in SPEC-007, SPEC-009, SPEC-011, and SPEC-014 gives the same value as with sfall mode off. `[Must-match]`
 
 ## 2. Conventions
 
@@ -552,7 +553,7 @@ This is a vault format, deliberately **not** byte-compatible with sfall's `sfall
 **File.** `VAULTSFL.DAT`, beside the slot's `SAVE.DAT`, through the storage path that SPEC-023 gives other slot files.
 
 - A save under sfall mode **always** writes it, even when empty.
-- A save with sfall mode off removes any old one, as for `VAULTENG.TOML`.
+- A save with sfall mode off removes any old one, as for `VAULTENG.TOML`. This is one named delete in that save's commit. SPEC-023 section 3.11's stale `.SAV` sweep never touches this file (Decision D-29).
 - `SAVE.DAT` itself is unchanged.
 
 | Offset | Bytes | Content |
@@ -984,3 +985,4 @@ Every decision is a research default unless the Class column says otherwise.
 | D-26 | Et Tu and Restoration Project scripts were not audited | Research limit | Neither mod is in the local corpus. The stack check should run on them before these contracts are final |
 | D-27 | The shadowing covers the enhanced camera words `0x8210..=0x8213` as well as `0x8200` | Team A default, applying D-3 | Revision 1 named only `0x8200`, but `docs/REFERENCE.md` defines all five. Their numbers are in the owner's range, and their operand counts differ from the sfall words', so leaving them out would make dispatch ambiguous |
 | D-28 | The manifest key is `sfall` under `[scripting]`, by the `[enhanced]` keys' rules, and `--sfall` turns the mode on from the command line | Team A default | A manifest refuses unknown tables, so the key must be defined for the owner's manifest route to work. A replay reads neither file, so without a flag no replay could run under sfall mode, and section 7.3's test 7 needs one |
+| D-29 | A save with sfall mode off keeps section 5.8's named delete of an old `VAULTSFL.DAT`. SPEC-023's stale `.SAV` sweep leaves the file untouched | Team A default; the sweep's scope is an owner instruction (SPEC-023 D-18, D-38) | Without the delete, a slot just saved with sfall mode off would hold an old sidecar, and section 5.8's loading table would refuse it |

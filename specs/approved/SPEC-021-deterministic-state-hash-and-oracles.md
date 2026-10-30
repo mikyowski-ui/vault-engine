@@ -1,6 +1,6 @@
 # SPEC-021: Deterministic State Hash, Combat Sub-Hash, and Trace Oracles
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 4 (Team A, 2026-10-30); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 4 (Team A, 2026-10-30), with a prose correction of the same day; see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -153,6 +153,9 @@ from the written files alone (section 7).
   - The world and combat streams, the magics `VSH1` and `VCH1`, the coverage of
     section 3.1, the two trace formats and every existing vector and golden are
     unchanged. New files are in `tests/fixtures/spec021/rev3/` (section 3.12).
+- **Prose correction to revision 4 (2026-10-30).** Sections 3.11 and 5.10 now give
+  the measured trip of scenario (b), 138 pixels, arriving at X 963, in place of
+  160 (D-50). No rule, vector, log or golden changes.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -964,9 +967,9 @@ was doing, so the assertions read the session itself. `[Must-match]`
   never enters a town (`docs/REFERENCE.md`). The party's position at step 615
   differs from (825, 75), and travel has finished. The loaded map has not
   changed, so no encounter happened. `state_hash` differs between at least two
-  rows from step 12 to step 615: a trip of 160 pixel steps passes at least one
-  W-iteration check, because W is at most 120, and each check draws three d6
-  (SPEC-008 sections 3.4 and 3.5). Every `combat_hash` is `-`.
+  rows from step 12 to step 615: a trip of 138 pixel steps (section 5.10, D-50)
+  passes at least one W-iteration check, because W is at most 120, and each check
+  draws three d6 (SPEC-008 sections 3.4 and 3.5). Every `combat_hash` is `-`.
 - **(b), uncovered state.** World-map travel state is not covered by the hash
   (section 3.1), so the stream alone sees travel only through those draws. T17
   therefore also writes the party's final position and the final game tick to
@@ -1719,10 +1722,16 @@ are what bind. `[Must-match]` for the log bytes.
 | ---: | --- | --- |
 | 1-5 | None | The map settles |
 | 6-12 | Key `KeyW` | The world map opens, with the party at (825, 75) |
-| 13-615 | Left click at (407, 96) in the world view, 160 pixels east of the party | The party travels, and arrives with no encounter. The final frame is the same at step 615 and 300 steps later |
+| 13-615 | Left click at (407, 96) in the world view, 160 pixels east of the party | The party travels, and arrives 138 pixels east of its start, at (963, 75), with no encounter. The final frame is the same at step 615 and 300 steps later |
 
 The world view is at screen (22, 21) (SPEC-008 section 3.4), with the scroll
 origin at X 600, so world X 825 is screen X 247.
+
+The click is 160 pixels east of the party, but the trip ends 138 pixels east of
+its start, as the implementer measured when recording
+`rev3/scenario-world-travel.final.tsv`, which holds (963, 75). Why the two differ
+is not established. No assertion depends on either number, and 138 is above W's
+limit of 120, so section 3.11's check still follows (D-50).
 
 **Why (c) has no log.** Team A tried one. `KeyA` starts combat, but with no
 attack a first Space ends it, and the frame does not change with the seed. After
@@ -1949,6 +1958,15 @@ Revision 4 adds these decisions.
   compute them by hand. Team A's black-box runs only showed that each scenario
   can run. No output of those runs is committed as a golden. Each assertion of
   section 3.11 is a stated expectation, and the stop rule applies if one fails.
+
+Revision 4's prose correction adds this decision.
+
+- **D-50 (owner instruction, with one Team A correction).** The owner's brief of
+  2026-10-30 asks the documented trip to match the measured 138 pixels, so
+  sections 3.11 and 5.10 now say that. The brief places the note in D-40 and gives
+  the arrival as X 983. The note was in those two sections, and the arrival is
+  X 963: 825 + 138 = 963, and `rev3/scenario-world-travel.final.tsv` holds 963. The
+  text follows that golden.
 
 ## 7. Clean-Room Verification Checklist
 

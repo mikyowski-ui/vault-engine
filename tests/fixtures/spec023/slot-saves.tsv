@@ -1,0 +1,11 @@
+case	slot	before	image	removed	after
+stale-map	SLOT01	SLOT01/SAVE.DAT=S1;SLOT01/ARROYO.SAV=M1;SLOT01/DEN.SAV=M2;SLOT01/AUTOMAP.SAV=A1	SAVE.DAT=S2;ARROYO.SAV=M3;AUTOMAP.SAV=A2	slot01/den.sav	slot01/arroyo.sav=M3,slot01/automap.sav=A2,slot01/save.dat=S2
+no-stale	SLOT01	SLOT01/SAVE.DAT=S1;SLOT01/ARROYO.SAV=M1;SLOT01/AUTOMAP.SAV=A1	SAVE.DAT=S2;ARROYO.SAV=M3;AUTOMAP.SAV=A2	-	slot01/arroyo.sav=M3,slot01/automap.sav=A2,slot01/save.dat=S2
+any-case	SLOT01	SLOT01/SAVE.DAT=S1;SLOT01/arroyo.sav=M1;SLOT01/Den.Sav=M2	SAVE.DAT=S2;ARROYO.SAV=M3;AUTOMAP.SAV=A2	slot01/den.sav	slot01/arroyo.sav=M3,slot01/automap.sav=A2,slot01/save.dat=S2
+sidecars-kept	SLOT01	SLOT01/SAVE.DAT=S1;SLOT01/DEN.SAV=M2;SLOT01/VAULTSFL.DAT=X1;SLOT01/VAULTENG.TOML=V1;SLOT01/NOTES.TXT=N1	SAVE.DAT=S2;AUTOMAP.SAV=A2	slot01/den.sav,slot01/vaulteng.toml	slot01/automap.sav=A2,slot01/notes.txt=N1,slot01/save.dat=S2,slot01/vaultsfl.dat=X1
+enhanced-image	SLOT01	SLOT01/SAVE.DAT=S1;SLOT01/VAULTENG.TOML=V1;SLOT01/DEN.SAV=M2	SAVE.DAT=S2;AUTOMAP.SAV=A2;VAULTENG.TOML=V2	slot01/den.sav	slot01/automap.sav=A2,slot01/save.dat=S2,slot01/vaulteng.toml=V2
+near-names	SLOT01	SLOT01/SAVE.DAT=S1;SLOT01/DEN.SAV.OLD=O1;SLOT01/DENSAV=O2;SLOT01/DEN.SAVE=O3;SLOT01/SAV=O4	SAVE.DAT=S2;AUTOMAP.SAV=A2	-	slot01/automap.sav=A2,slot01/den.sav.old=O1,slot01/den.save=O3,slot01/densav=O2,slot01/sav=O4,slot01/save.dat=S2
+unusual-stem	SLOT01	SLOT01/SAVE.DAT=S1;SLOT01/OLD MAP.SAV=M2	SAVE.DAT=S2;AUTOMAP.SAV=A2	slot01/old map.sav	slot01/automap.sav=A2,slot01/save.dat=S2
+empty-slot	SLOT01	-	SAVE.DAT=S2;AUTOMAP.SAV=A2	-	slot01/automap.sav=A2,slot01/save.dat=S2
+other-slot	SLOT01	SLOT01/SAVE.DAT=S1;SLOT01/DEN.SAV=M2;SLOT02/SAVE.DAT=T1;SLOT02/DEN.SAV=T2	SAVE.DAT=S2;AUTOMAP.SAV=A2	slot01/den.sav	slot01/automap.sav=A2,slot01/save.dat=S2,slot02/den.sav=T2,slot02/save.dat=T1
+quick-save	QUICKSAV	QUICKSAV/SAVE.DAT=S1;QUICKSAV/DEN.SAV=M2;QUICKSAV/VAULTENG.TOML=V1	SAVE.DAT=S2;AUTOMAP.SAV=A2;VAULTENG.TOML=V2	quicksav/den.sav	quicksav/automap.sav=A2,quicksav/save.dat=S2,quicksav/vaulteng.toml=V2

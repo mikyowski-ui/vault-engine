@@ -43,6 +43,10 @@ Storage:
   (usage counts canonical key bytes plus value bytes).
 - `mods-entries.tsv`, `mods-expected.tsv`: entries of the `mods` namespace,
   and the manifest discovery, layer finding and layer mounting results.
+- `slot-saves.tsv` (revision 3, SPEC-023 sections 3.11 and 5.9): 10 saves into a
+  slot that already holds files: the entries before, the slot image, the
+  canonical keys the save removes, and every entry after. `before` and `image`
+  are `;`-separated; `removed` and `after` are comma-separated.
 
 The compile gate (revision 2, SPEC-023 sections 3.17 and 5.8):
 
