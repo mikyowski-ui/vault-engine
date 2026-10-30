@@ -41,7 +41,8 @@ This Cargo workspace consists of 7 core crates plus CLI tools:
 9. `crates/vault-fixtures` (dev-only): the dependency-free synthetic test fixture builders from `tests/fixtures/`, compiled once and shared as a dev-dependency (a normal dependency of `xtask`).
 
 ## Engineering Gates
-Every PR must pass (`cargo xtask check` runs all three):
+Every PR must pass (`cargo xtask check` runs all four):
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - `cargo test --workspace --locked`
+- `cargo xtask wasm-check`: `vault-vm`, `vault-formats`, `vault-guidance` and `vault-core` compile for `wasm32-unknown-unknown` (SPEC-023 §3.17). Where the target is missing it skips with a stated line and checks them on the host; `VAULT_REQUIRE_WASM=1`, set in CI, makes a missing target a failure.

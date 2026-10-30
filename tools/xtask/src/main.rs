@@ -7,6 +7,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use vault_fixtures::{dat, dat2, gallery, state, vm};
 
+mod wasm_check;
+
 #[derive(Parser)]
 #[command(about = "Vault Engine workspace verification")]
 struct Args {
@@ -16,8 +18,14 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Task {
-    /// Run all engineering gates from AGENTS.md (clippy and tests with `--locked`).
+    /// Run all engineering gates from AGENTS.md (clippy and tests with
+    /// `--locked`, then the wasm32 compile gate).
     Check,
+    /// SPEC-023 §3.17: compile the portable crates for
+    /// `wasm32-unknown-unknown`, with no download. Where the target is
+    /// missing it says so and checks them on the host instead;
+    /// `VAULT_REQUIRE_WASM=1` makes a missing target a failure.
+    WasmCheck,
     /// Materialize a complete synthetic map/prototype/art/INT corpus in an empty
     /// directory, and the same corpus with the enhanced camera demo map
     /// `maps/cam_demo.map` in `<PATH>-cam-demo`, also empty.
@@ -106,12 +114,25 @@ fn check() -> Result<(), Box<dyn Error>> {
             return Err(format!("cargo {} failed: {status}", args.join(" ")).into());
         }
     }
-    Ok(())
+    match wasm_check::run(root, &cargo)? {
+        0 => Ok(()),
+        _ => Err("the wasm32 compile gate failed".into()),
+    }
 }
 
 fn main() -> ExitCode {
     let result = match Args::parse().command {
         Task::Check => check(),
+        // Its closing line says how it went, so the status is all that is left.
+        Task::WasmCheck => {
+            return match root().and_then(|root| wasm_check::run(root, &cargo())) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("xtask: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         Task::Fixtures { output } => materialize(&output),
         Task::ExportMod {
             name,

@@ -61,6 +61,22 @@ jobs:
       - run: rustfmt --edition 2024 --check fuzz/fuzz_targets/*.rs
       - run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 
+  # SPEC-023 section 3.17: the portable crates compile for the browser target.
+  # A skip cannot pass here: the job requires the target it installs.
+  wasm-check:
+    runs-on: ubuntu-latest
+    env:
+      VAULT_REQUIRE_WASM: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask wasm-check
+      # SPEC-023 T7: the memory tests with no file-backed code compiled.
+      - run: cargo test -p vault-formats --no-default-features --locked
+
   windows-release:
     runs-on: windows-latest
     steps:

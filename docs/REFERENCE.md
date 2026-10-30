@@ -122,7 +122,9 @@ pins the workspace dependencies. Standard checks need no desktop, GPU, or corpus
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-# Run all three gates:
+# The portable crates compile for the browser target:
+cargo xtask wasm-check
+# Run all four gates:
 cargo xtask check
 ```
 
@@ -135,7 +137,10 @@ speed while the other crates keep full debug builds.
 
 CI (`.github/workflows/ci.yml`, read-only permissions, cached builds, every
 Cargo command `--locked`) runs these jobs on each push and pull request:
-- `check` (Linux): the three gates.
+- `check` (Linux): the first three gates.
+- `wasm-check` (Linux): installs the `wasm32-unknown-unknown` target, runs
+  `cargo xtask wasm-check` with `VAULT_REQUIRE_WASM=1`, so it can never pass by
+  skipping, and runs the memory tests with `--no-default-features`.
 - `msrv`: `cargo check --workspace --all-targets` on the `rust-version` from
   `Cargo.toml` (1.88).
 - `fuzz-check`: rustfmt over `fuzz/fuzz_targets/` and
@@ -2370,6 +2375,20 @@ OS paths needs neither.
 - **Sessions.** `PreviewArgs::data` and `PreviewArgs::storage` hand a session its
   `Vfs` and its backend. A desktop session that names neither mounts its files and
   keeps its slots in `FsStorage`, with the same files and bytes as before.
+
+The compile gate, `cargo xtask wasm-check`, runs `cargo check --target
+wasm32-unknown-unknown --locked --lib --no-default-features` for `vault-vm`,
+`vault-formats`, `vault-guidance` and `vault-core`, one at a time, and stops at
+the first failure. It compiles only, adds no dependency, never installs anything
+and needs no network. It finds the target by the `libcore-*.rlib` in the folder
+`rustc --print target-libdir` names, because a distribution's `rustc` prints that
+path whether or not it exists. A missing target prints `skipped:
+wasm32-unknown-unknown target not installed`, runs the same checks on the host,
+and passes; `VAULT_REQUIRE_WASM=1` makes it fail instead. Gated crates branch on
+`host-fs`, never on the target, so the code it compiles is the code the
+`--no-default-features` tests run. It cannot see what fails only at run time on
+that target, so those crates call no `std::fs`, `std::net`, `std::process`,
+`std::thread::spawn`, `Instant::now` or `SystemTime::now` without `host-fs`.
 
 Other host files stay plain files for now: `fallout.cfg`, screenshots, and the
 character sheet and print files of the character editor.
