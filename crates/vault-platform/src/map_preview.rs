@@ -515,10 +515,12 @@ impl MapPreview {
             seed,
             preset,
             vault_core::GameProfile::Fallout1,
+            false,
         )
     }
     /// [`Self::load_with`] reading `game`'s map and prototype layouts
     /// (SPEC-016) from the first map on.
+    #[allow(clippy::too_many_arguments)]
     pub fn load_for_game(
         vfs: Arc<dyn Vfs>,
         path: &str,
@@ -527,6 +529,7 @@ impl MapPreview {
         seed: i32,
         preset: EnginePreset,
         game: vault_core::GameProfile,
+        sfall: bool,
     ) -> AppResult<Self> {
         let assets = VfsWorldAssets::new(vfs, language)?;
         assets.set_game_profile(game);
@@ -535,24 +538,17 @@ impl MapPreview {
         } else {
             CharacterSheet::default()
         };
-        Self::with_sheet(assets, path, character, seed, preset)
+        Self::with_setup(assets, path, character, seed, preset, |host| {
+            crate::session::start_sfall(host, sfall);
+        })
     }
     /// The world for `path` with a ready player sheet (SPEC-014 §3.12's
     /// new-game hand-off passes the selected or edited character).
     /// `preset` is set before the campaign loads, so its table overrides
-    /// and script parse profile apply from the first map on.
-    pub fn with_sheet(
-        assets: VfsWorldAssets,
-        path: &str,
-        character: CharacterSheet,
-        seed: i32,
-        preset: EnginePreset,
-    ) -> AppResult<Self> {
-        Self::with_setup(assets, path, character, seed, preset, |_| {})
-    }
-    /// [`Self::with_sheet`] with `setup` run on the new host after the
-    /// preset is set and before the campaign and the map load: a Fallout 2
-    /// game installs its world state there (SPEC-018 §6.6 step 3).
+    /// and script parse profile apply from the first map on. `setup` runs on
+    /// the new host after the preset is set and before the campaign and the
+    /// map load: a Fallout 2 game installs its world state there (SPEC-018
+    /// §6.6 step 3).
     pub fn with_setup(
         assets: VfsWorldAssets,
         path: &str,
@@ -1925,7 +1921,39 @@ impl MapPreview {
         }
         true
     }
+    /// One frame. Its Simulation phase ends here, whether the world ticked
+    /// or a modal screen held it (SPEC-024b §5.3).
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
+        self.host.set_sfall_screens(self.sfall_screens());
+        let changed = self.frame(now);
+        self.host.sfall_end_of_step();
+        changed
+    }
+    /// SPEC-024b §4.4: the `get_game_mode` bits of the open screen.
+    fn sfall_screens(&self) -> u32 {
+        use vault_core::host_sfall::game_mode as mode;
+        match &self.screen {
+            Screen::World(_) | Screen::Town(_) | Screen::World2(_) | Screen::Town2(_) => {
+                mode::WORLD_MAP
+            }
+            Screen::PipBoy(_) => mode::PIP_BOY,
+            Screen::Inventory(_) => mode::INVENTORY,
+            Screen::Character(_) => mode::CHARACTER,
+            Screen::Barter(_) => mode::BARTER,
+            Screen::Skilldex(_) => mode::SKILLDEX,
+            Screen::Loot(_) => mode::LOOT,
+            Screen::Options(_) => mode::OPTIONS,
+            Screen::SaveLoad(screen) => match screen.mode {
+                vault_core::ui::saveload::Mode::Save
+                | vault_core::ui::saveload::Mode::PickQuickSave => mode::SAVE,
+                _ => mode::LOAD,
+            },
+            Screen::Automap(_) => mode::AUTOMAP,
+            Screen::Help(_) => mode::HELP,
+            Screen::Map | Screen::Movie(_) | Screen::Elevator(_) => 0,
+        }
+    }
+    fn frame(&mut self, now: u64) -> AppResult<bool> {
         self.clock = now;
         // The world's own clock: the shell clock, run ahead by the
         // `enhanced` game speed (exactly the shell clock at 1.0x).

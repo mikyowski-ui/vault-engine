@@ -89,6 +89,9 @@ pub fn read_manifest(dir: &Path) -> Result<Option<ModManifest>, String> {
 /// `manifest`'s `[enhanced]` settings over `config` (each key it sets
 /// replaces the settings file's).
 pub fn apply(config: &mut Config, manifest: &ModManifest) {
+    if let Some(sfall) = manifest.sfall {
+        config.sfall = Some(sfall);
+    }
     let Some(enhanced) = &manifest.enhanced else {
         return;
     };
@@ -130,7 +133,7 @@ pub fn with_mods(config: &Config) -> Result<(Config, Vec<String>), String> {
     };
     for dir in layer_dirs(mod_list) {
         if let Some(manifest) = read_manifest(&dir)? {
-            if manifest.enhanced.is_some() {
+            if manifest.enhanced.is_some() || manifest.sfall.is_some() {
                 applied.push(manifest.name.clone());
             }
             apply(&mut merged, &manifest);
@@ -460,5 +463,19 @@ mod tests {
         std::fs::create_dir(dir.path().join("setup")).unwrap();
         std::fs::create_dir(dir.path().join("setup-2")).unwrap();
         assert_eq!(free_folder(dir.path(), "setup"), dir.path().join("setup-3"));
+    }
+
+    #[test]
+    fn the_highest_layer_that_sets_sfall_wins_over_the_settings_file() {
+        let mut config = Config::default();
+        let on = ModManifest::parse("name = \"On\"\n[scripting]\nsfall = true").unwrap();
+        let off = ModManifest::parse("name = \"Off\"\n[scripting]\nsfall = false").unwrap();
+        let silent = ModManifest::parse("name = \"Silent\"").unwrap();
+        apply(&mut config, &on);
+        assert_eq!(config.sfall, Some(true));
+        apply(&mut config, &silent);
+        assert_eq!(config.sfall, Some(true));
+        apply(&mut config, &off);
+        assert_eq!(config.sfall, Some(false));
     }
 }

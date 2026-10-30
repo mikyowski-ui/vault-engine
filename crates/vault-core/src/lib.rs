@@ -38,6 +38,8 @@ mod host_movie;
 pub mod host_rest;
 mod host_revisit;
 pub mod host_save;
+pub mod host_sfall;
+mod host_sfall_objects;
 mod host_skills;
 mod host_sound;
 pub mod host_talk;
@@ -56,6 +58,8 @@ pub mod rng;
 pub mod roof;
 pub mod routing;
 pub mod sequence;
+pub mod sfall;
+pub mod sfall_ini;
 pub mod skills;
 pub mod state_hash;
 pub mod stats;
@@ -177,6 +181,8 @@ mod self_stop_tests;
 mod skills_tests;
 #[cfg(test)]
 mod spec017_tests;
+#[cfg(test)]
+mod spec024_tests;
 #[cfg(test)]
 mod state_hash_tests;
 #[cfg(test)]

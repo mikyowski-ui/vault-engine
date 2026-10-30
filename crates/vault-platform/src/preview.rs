@@ -42,6 +42,11 @@ pub struct PreviewArgs {
     /// It changes no output, and is neither logged nor saved.
     #[arg(skip)]
     pub render_path: vault_render::RenderPath,
+    /// SPEC-024b §3.1: opt-in sfall mode, under `fallout2` only. It wins over
+    /// the settings file and mod manifests, and a replay needs it, as a
+    /// replay reads neither.
+    #[arg(long)]
+    pub sfall: bool,
     /// SPEC-023 §3.15: the session's game data, already mounted (a memory
     /// mount, on a host without OS paths); `None`: the files below.
     #[arg(skip)]
@@ -712,6 +717,12 @@ impl PreviewArgs {
             }
         }
     }
+    /// SPEC-024b §4.5: the writable folder `set_ini_setting` uses. A replay
+    /// reads its INI files from the game data alone, and writes nothing.
+    fn sfall_files(&self) -> Option<PathBuf> {
+        (self.sfall && !self.headless)
+            .then(|| self.save_dir.clone().unwrap_or_else(|| PathBuf::from(".")))
+    }
     pub fn load(&self) -> AppResult<Option<AssetPreview>> {
         let language = self.language.as_deref().unwrap_or("english");
         let save_root = self.save_dir.clone().unwrap_or_else(|| PathBuf::from("."));
@@ -733,6 +744,8 @@ impl PreviewArgs {
             game.preset = self.preset;
             game.enhanced = self.enhanced;
             game.touch_ui = self.touch_ui;
+            game.sfall = self.sfall;
+            game.sfall_files = self.sfall_files();
             game.mod_export = self.mod_export.clone();
             game.renderer = renderer;
             // G-09: the preview and debug keys work in the game only with
@@ -750,6 +763,7 @@ impl PreviewArgs {
                 self.resolved_seed(),
                 self.preset,
                 self.game_profile,
+                self.sfall,
             )?;
             map.host.set_subtitles(self.subtitles);
             map.save_root = save_root;
@@ -763,6 +777,7 @@ impl PreviewArgs {
                 mod_export: self.mod_export.clone(),
                 debug_session: self.debug,
                 renderer,
+                sfall_files: self.sfall_files(),
             }
             .apply(&mut map, |map| {
                 if self.startup_movies {

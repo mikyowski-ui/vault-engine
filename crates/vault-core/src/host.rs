@@ -164,6 +164,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// SPEC-021 §3.6: while attached, every combat start, turn end and
     /// combat end writes a combat trace row here.
     pub combat_trace: Option<crate::traces::CombatTraceRecorder>,
+    /// SPEC-024b: sfall mode's host state. `None` with the mode off, when
+    /// nothing of that specification exists.
+    pub sfall: Option<Box<crate::host_sfall::SfallHost>>,
 }
 impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn prototype(&self, pid: u32) -> Result<std::sync::Arc<vault_formats::Prototype>, WorldError> {
@@ -276,6 +279,12 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn set_enhanced_scripts(&self, enabled: bool) {
         (**self).set_enhanced_scripts(enabled)
     }
+    fn set_sfall_scripts(&self, enabled: bool) {
+        (**self).set_sfall_scripts(enabled)
+    }
+    fn replace_prototype(&self, prototype: std::sync::Arc<vault_formats::Prototype>) {
+        (**self).replace_prototype(prototype)
+    }
     fn game_profile(&self) -> crate::GameProfile {
         (**self).game_profile()
     }
@@ -339,6 +348,7 @@ impl<A: WorldAssets> WorldHost<A> {
             host_busy: Vec::new(),
             departed: BTreeMap::new(),
             combat_trace: None,
+            sfall: None,
         }
     }
     /// SPEC-008 §3.10 a music request: the track is recorded as the last
@@ -475,9 +485,13 @@ impl<A: WorldAssets> WorldHost<A> {
         }
     }
     pub(crate) fn sid(&self, vm: &Vm) -> Option<u32> {
-        self.program_scripts.get(&vm.id).copied()
+        self.sfall_script(vm)
+            .or_else(|| self.program_scripts.get(&vm.id).copied())
     }
     pub(crate) fn self_object(&self, vm: &Vm) -> ObjectRef {
+        if let Some(object) = self.sfall_self(vm) {
+            return object;
+        }
         self.sid(vm)
             .and_then(|sid| self.world.scripts.get(&sid))
             .map_or(0, |s| s.owner)
@@ -2483,35 +2497,23 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
         }
         Ok(())
     }
-    /// A host word, with the row of the active profile (SPEC-017 §2.3): a
-    /// reserved Fallout 2 word consumes nothing and is the
-    /// undefined-instruction error.
+    /// A host word, with the row of the active profile (SPEC-017 §2.3).
     fn extension(&mut self, opcode: u16, vm: &mut Vm) -> Result<(), VmError> {
-        let call = extensions::decode_in(vm, &self.word_set(), opcode)?;
-        if self.calls.len() < 100_000 {
-            self.calls.push(CallTrace {
-                opcode,
-                operands: call.args.iter().map(|arg| arg.value).collect(),
-            });
+        if self.sfall.is_none() {
+            return self.host_word(opcode, vm);
         }
-        let result = if opcode <= 0x80a0 {
-            self.library_call(vm, &call)?
+        // SPEC-024b §3.2: under sfall mode its table takes the overlap.
+        let result = if opcode >= vault_vm::sfall::FIRST_WORD {
+            self.sfall_word(opcode, vm)
+        } else if matches!(opcode, 0x80bd | 0x80be) && self.sfall_self(vm).is_some() {
+            // §4.8: `source_obj` and `target_obj` do not work straight after
+            // `set_self`.
+            vm.value_stack.push(Value::integer(0))
         } else {
-            self.game_call(vm, &call)?
+            self.host_word(opcode, vm)
         };
-        if call.spec.push == PushKind::None && result.is_some() {
-            return Err(VmError::Host(
-                "statement unexpectedly returned a value".into(),
-            ));
-        }
-        if let Some(result) = result {
-            let value = match result {
-                ExternalValue::Value(value) => value,
-                ExternalValue::String(text) => vm.intern(&text)?,
-            };
-            vm.value_stack.push(value)?;
-        }
-        Ok(())
+        self.sfall_word_done(vm, opcode);
+        result
     }
     fn program_mut(&mut self, id: u32) -> Result<&mut Vm, VmError> {
         self.programs
@@ -2601,5 +2603,37 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
     }
     fn import_procedure(&mut self, name: &[u8]) -> Result<ExportedProcedure, VmError> {
         self.registry.import_procedure(name)
+    }
+}
+impl<A: WorldAssets> WorldHost<A> {
+    /// A SPEC-005 or SPEC-017 word: its row for the active profile, whose
+    /// reserved words consume nothing and raise the undefined-instruction
+    /// error.
+    fn host_word(&mut self, opcode: u16, vm: &mut Vm) -> Result<(), VmError> {
+        let call = extensions::decode_in(vm, &self.word_set(), opcode)?;
+        if self.calls.len() < 100_000 {
+            self.calls.push(CallTrace {
+                opcode,
+                operands: call.args.iter().map(|arg| arg.value).collect(),
+            });
+        }
+        let result = if opcode <= 0x80a0 {
+            self.library_call(vm, &call)?
+        } else {
+            self.game_call(vm, &call)?
+        };
+        if call.spec.push == PushKind::None && result.is_some() {
+            return Err(VmError::Host(
+                "statement unexpectedly returned a value".into(),
+            ));
+        }
+        if let Some(result) = result {
+            let value = match result {
+                ExternalValue::Value(value) => value,
+                ExternalValue::String(text) => vm.intern(&text)?,
+            };
+            vm.value_stack.push(value)?;
+        }
+        Ok(())
     }
 }

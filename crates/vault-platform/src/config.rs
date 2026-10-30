@@ -273,6 +273,8 @@ pub struct Config {
     /// a rewrite keeps the file's own line, and nothing the engine chose
     /// (such as `--render-path`) is ever written here, logged or saved.
     pub render_path: Option<RenderPath>,
+    /// `sfall` under `[scripting]` (SPEC-024b §3.1): opt-in sfall mode.
+    pub sfall: Option<bool>,
     /// Keys this engine does not know, in file order: ignored, but kept
     /// so that a rewrite does not lose them.
     pub unknown: Vec<(String, Value)>,
@@ -305,6 +307,8 @@ impl Config {
         // The profile table being read, and the tables read.
         let mut table: Option<GameProfile> = None;
         let mut tables: Vec<GameProfile> = Vec::new();
+        let mut scripting = false;
+        let mut in_scripting = false;
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
             let error = |message: String| ConfigError { line, message };
@@ -326,13 +330,23 @@ impl Config {
                     return Err(error(format!("unexpected `{rest}` after the table header")));
                 }
                 let name = name.trim();
+                if name == "scripting" {
+                    if scripting {
+                        return Err(error(format!("duplicate table `[{name}]`")));
+                    }
+                    scripting = true;
+                    in_scripting = true;
+                    table = None;
+                    continue;
+                }
+                in_scripting = false;
                 let game = name
                     .strip_prefix("profiles.")
                     .and_then(parse_game)
                     .ok_or_else(|| {
                         error(format!(
-                            "unsupported table `[{name}]` (only [profiles.fallout1] and \
-                             [profiles.fallout2])"
+                            "unsupported table `[{name}]` (only [profiles.fallout1], \
+                             [profiles.fallout2] and [scripting])"
                         ))
                     })?;
                 if tables.contains(&game) {
@@ -357,6 +371,19 @@ impl Config {
             let rest = rest.trim_start();
             if !(rest.is_empty() || rest.starts_with('#')) {
                 return Err(error(format!("unexpected `{rest}` after the value")));
+            }
+            if in_scripting {
+                if key != "sfall" {
+                    return Err(error(format!("`{key}` is not a scripting setting (sfall)")));
+                }
+                if config.sfall.is_some() {
+                    return Err(error(format!("duplicate key `{key}`")));
+                }
+                match value {
+                    Value::Bool(flag) => config.sfall = Some(flag),
+                    _ => return Err(error("`sfall` expects true or false".into())),
+                }
+                continue;
             }
             if let Some(game) = table {
                 let paths = config.profiles.get_mut(game);
@@ -527,6 +554,9 @@ impl Config {
             })
         };
         let mut tables = String::new();
+        if let Some(sfall) = self.sfall {
+            tables.push_str(&format!("\n[scripting]\nsfall = {sfall}\n"));
+        }
         for game in GAMES {
             let paths = self.profile(game);
             if paths.is_empty() {
@@ -1886,5 +1916,20 @@ future_float = 5e-1
 
     fn found_text(root: &Path) -> String {
         discover(&[root.to_path_buf()]).unwrap().to_toml().unwrap()
+    }
+
+    #[test]
+    fn sfall_sits_in_its_own_table_and_round_trips() {
+        let config = Config::parse("game = \"fallout2\"\n[scripting]\nsfall = true\n").unwrap();
+        assert_eq!(config.sfall, Some(true));
+        assert_eq!(Config::parse("").unwrap().sfall, None);
+        let written = config.to_toml().unwrap();
+        assert!(written.contains("[scripting]\nsfall = true\n"), "{written}");
+        assert_eq!(Config::parse(&written).unwrap().sfall, Some(true));
+        let message = |text: &str| Config::parse(text).unwrap_err().to_string();
+        assert!(message("[scripting]\nsfall = 1").contains("expects true or false"));
+        assert!(message("[scripting]\nother = true").contains("not a scripting setting"));
+        assert!(message("[scripting]\n[scripting]").contains("duplicate table"));
+        assert!(message("[scripting]\nsfall = true\nsfall = false").contains("duplicate key"));
     }
 }

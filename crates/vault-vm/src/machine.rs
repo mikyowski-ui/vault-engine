@@ -608,6 +608,9 @@ impl Vm {
             // Fallout 2 at 0x8183 (SPEC-017 §2.1). The host's table for its
             // profile gives the meaning; a reserved word is its error.
             0x804c..=0x8183 => host.extension(word, self)?,
+            // Sfall mode (SPEC-024b §3.2): the rest of its set is the host's
+            // too, and it wins over the enhanced range below.
+            0x8184..=0x8281 if self.program.words().sfall() => host.extension(word, self)?,
             // The versioned enhanced range exists only when the host turns it
             // on; otherwise it falls through to the unknown-word error below,
             // exactly as SPEC-004 requires for any undefined word.

@@ -49,7 +49,11 @@ impl<A: WorldAssets> WorldHost<A> {
     /// the script, decides a word's meaning.
     pub fn word_set(&self) -> WordSet {
         if self.world.fallout2.is_some() {
-            WordSet::FALLOUT2
+            if self.sfall_mode() {
+                WordSet::FALLOUT2_SFALL
+            } else {
+                WordSet::FALLOUT2
+            }
         } else {
             WordSet::FALLOUT1
         }
@@ -287,7 +291,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// `reg_anim_turn_towards`: outside combat, one entry of the sequence
     /// being registered (SPEC-005 §2.6). In combat the operands are
     /// consumed and nothing happens; a null object only diagnoses.
-    fn fallout2_registration(&mut self, call: &HostCall) {
+    pub(crate) fn fallout2_registration(&mut self, call: &HostCall) {
         let name = call.spec.name;
         let op = call.spec.word;
         if self.world.combat {
@@ -590,6 +594,11 @@ impl<A: WorldAssets> WorldHost<A> {
     /// another tag makes it do nothing, with a diagnostic, and give I 0.
     fn metarule3(&mut self, vm: &Vm, call: &HostCall) -> HostResult {
         let sub = call.int(3);
+        if self.sfall_mode()
+            && let Some(result) = self.sfall_metarule3(vm, sub)
+        {
+            return result;
+        }
         // p1, p2, p3 as integers when their masked tag is I.
         let value = |index: usize| {
             let value = call.args[index].value;

@@ -105,6 +105,8 @@ pub enum EditionError {
         found: GameProfile,
         master: PathBuf,
     },
+    /// Sfall mode was asked for under `fallout1` (SPEC-024b §3.1).
+    SfallProfile,
 }
 
 impl std::fmt::Display for EditionError {
@@ -127,6 +129,9 @@ impl std::fmt::Display for EditionError {
                 edition_title(*edition),
                 crate::config::game_name(*found),
             ),
+            Self::SfallProfile => {
+                write!(f, "sfall mode runs only under the fallout2 profile")
+            }
         }
     }
 }
@@ -329,6 +334,9 @@ impl SessionRuntime {
     pub fn start(config: SessionConfig) -> AppResult<Option<Self>> {
         let SessionConfig { origin, mut args } = config;
         let edition = validate_edition(args.game_profile, args.master_dat.as_deref())?;
+        if args.sfall && edition != GameProfile::Fallout2 {
+            return Err(EditionError::SfallProfile.into());
+        }
         let storage = args
             .storage
             .take()
@@ -438,6 +446,8 @@ pub(crate) struct WorldOptions {
     pub debug_session: bool,
     /// SPEC-022 the session's world-canvas renderer, shared by its worlds.
     pub renderer: crate::map_preview::SharedRenderer,
+    /// SPEC-024b §4.5 the writable folder of a session in sfall mode.
+    pub sfall_files: Option<PathBuf>,
 }
 
 impl WorldOptions {
@@ -455,6 +465,38 @@ impl WorldOptions {
         world.mod_export = self.mod_export;
         world.debug_session = self.debug_session;
         world.set_scene_renderer(self.renderer);
+        if let Some(root) = self.sfall_files {
+            world.host.set_sfall_ini_files(Box::new(FolderIni { root }));
+        }
+    }
+}
+
+/// Sfall mode for a world's host, before its campaign and map load (SPEC-024b
+/// §3.1). The session has refused `fallout1` by then ([`SessionRuntime::start`]).
+pub(crate) fn start_sfall<A: vault_core::assets::WorldAssets>(
+    host: &mut vault_core::WorldHost<A>,
+    sfall: bool,
+) {
+    if sfall && let Err(error) = host.enable_sfall() {
+        host.world.diagnostic(error.to_string());
+    }
+}
+
+/// The INI files of the profile's writable folder (SPEC-024b §4.5).
+struct FolderIni {
+    root: PathBuf,
+}
+
+impl vault_core::sfall_ini::IniFiles for FolderIni {
+    fn read(&self, file: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.root.join(file)).ok()
+    }
+    fn write(&mut self, file: &str, text: &[u8]) -> Result<(), String> {
+        let path = self.root.join(file);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(path, text).map_err(|error| error.to_string())
     }
 }
 
@@ -645,5 +687,23 @@ mod tests {
         ))
         .unwrap();
         assert!(session.is_none());
+    }
+
+    #[test]
+    fn a_session_refuses_sfall_mode_under_fallout1_when_it_is_built() {
+        let corpus = synthetic_corpus();
+        let args = PreviewArgs {
+            sfall: true,
+            game_profile: Fallout1,
+            corpus_dir: Some(corpus.path().to_path_buf()),
+            preview_map: Some(MAP.into()),
+            ..Default::default()
+        };
+        let Err(error) =
+            SessionRuntime::start(SessionConfig::new(SessionOrigin::CommandLine, args))
+        else {
+            panic!("sfall mode needs fallout2");
+        };
+        assert!(error.to_string().contains("fallout2"), "{error}");
     }
 }

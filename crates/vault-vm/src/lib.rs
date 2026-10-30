@@ -4,6 +4,9 @@ pub mod extensions;
 mod host;
 mod machine;
 mod program;
+pub mod sfall;
+mod sfall_math;
+mod sfall_text;
 mod stack;
 pub mod stack_check;
 
@@ -17,5 +20,7 @@ pub use machine::{RunOutcome, Vm, VmStatus};
 pub use program::{IntError, IntProgram, Lifecycle, Procedure, WordSet};
 pub use stack::{Stack, Value, VmError};
 
+#[cfg(test)]
+mod sfall_tests;
 #[cfg(test)]
 mod tests;

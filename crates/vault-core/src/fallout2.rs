@@ -79,6 +79,13 @@ pub fn word_set(game: crate::GameProfile) -> vault_vm::WordSet {
         crate::GameProfile::Fallout2 => vault_vm::WordSet::FALLOUT2,
     }
 }
+/// [`word_set`] with sfall mode, which exists under `fallout2` only.
+pub fn sfall_word_set(game: crate::GameProfile) -> vault_vm::WordSet {
+    match game {
+        crate::GameProfile::Fallout1 => vault_vm::WordSet::FALLOUT1,
+        crate::GameProfile::Fallout2 => vault_vm::WordSet::FALLOUT2_SFALL,
+    }
+}
 
 /// §6.1 month, day and year of a game tick.
 pub fn game_date(ticks: u64) -> [u16; 3] {

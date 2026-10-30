@@ -369,6 +369,14 @@ fn start(
     args.preview.touch_ui = launch.touch_ui;
     args.preview.mod_export = Some(mods::export_root(launch.mod_list.as_ref()));
     args.preview.render_path = launch_render_path(args, config);
+    // SPEC-024b §3.1: `--sfall` wins; a replay reads no settings.
+    if args.replay_inputs.is_none() {
+        args.preview.sfall |= modded
+            .as_ref()
+            .or(config)
+            .and_then(|config| config.sfall)
+            .unwrap_or(false);
+    }
     let mut session =
         session::SessionRuntime::start(session::SessionConfig::new(origin, args.preview.clone()))?;
     // Audio serves an interactive world or a movie; sprites need none.

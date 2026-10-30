@@ -764,6 +764,9 @@ pub struct WorldState {
     pub free_movement: i32,
     /// Player kill counters by kill category 0-14.
     pub kills: [i32; 15],
+    /// SPEC-024b: sfall mode's world state; `None` with the mode off. It is
+    /// outside `state_hash`, which stays `VSH1`.
+    pub sfall: Option<Box<crate::sfall::SfallWorld>>,
     /// Kill experience accumulated during combat, awarded at cleanup.
     pub combat_experience: i32,
     pub combat_state: crate::combat_state::CombatState,
@@ -989,6 +992,7 @@ impl WorldState {
             sneak_working: false,
             free_movement: 0,
             kills: [0; 15],
+            sfall: None,
             combat_experience: 0,
             combat_state: Default::default(),
             world_map: Default::default(),

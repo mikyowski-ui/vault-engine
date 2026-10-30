@@ -107,6 +107,9 @@ pub fn opcode_in(words: &crate::WordSet, word: u16) -> Option<&'static OpcodeSpe
     if !words.words.contains(&word) {
         return None;
     }
+    if words.sfall() && word >= crate::sfall::FIRST_WORD {
+        return crate::sfall::spec(word);
+    }
     if words.fallout2()
         && let Ok(index) = FALLOUT2.binary_search_by_key(&word, |spec| spec.word)
     {

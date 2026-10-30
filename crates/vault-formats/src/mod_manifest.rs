@@ -76,6 +76,7 @@ const MANIFEST_BYTES: usize = 1 << 20;
 enum Section {
     Top,
     Enhanced,
+    Scripting,
     Script,
     Map,
     Patch,
@@ -119,6 +120,8 @@ pub struct ModManifest {
     pub description: Option<String>,
     /// The `[enhanced]` table, when present.
     pub enhanced: Option<EnhancedOverrides>,
+    /// The `[scripting]` table's `sfall` key (SPEC-024b §3.1), when present.
+    pub sfall: Option<bool>,
     pub scripts: Vec<ScriptRegistration>,
     pub maps: Vec<MapRegistration>,
     pub patches: Vec<PatchRegistration>,
@@ -202,6 +205,7 @@ impl ModManifest {
         // Keys seen in the current section (each `[[...]]` entry is one).
         let mut seen: Vec<String> = Vec::new();
         let mut section = Section::Top;
+        let mut section_scripting = false;
         // Where the current array entry began, for its missing-key error.
         let mut entry_line = 0;
         for (index, raw) in text.lines().enumerate() {
@@ -251,16 +255,27 @@ impl ModManifest {
                     .strip_suffix(']')
                     .map(str::trim)
                     .ok_or_else(|| error("expected `[table]`".into()))?;
-                if table != "enhanced" {
-                    return Err(error(format!(
-                        "unknown table `[{table}]` (only `[enhanced]`)"
-                    )));
+                match table {
+                    "enhanced" => {
+                        if manifest.enhanced.is_some() {
+                            return Err(error("duplicate table `[enhanced]`".into()));
+                        }
+                        manifest.enhanced = Some(EnhancedOverrides::default());
+                        section = Section::Enhanced;
+                    }
+                    "scripting" => {
+                        if section_scripting {
+                            return Err(error("duplicate table `[scripting]`".into()));
+                        }
+                        section_scripting = true;
+                        section = Section::Scripting;
+                    }
+                    _ => {
+                        return Err(error(format!(
+                            "unknown table `[{table}]` (only `[enhanced]` and `[scripting]`)"
+                        )));
+                    }
                 }
-                if manifest.enhanced.is_some() {
-                    return Err(error("duplicate table `[enhanced]`".into()));
-                }
-                manifest.enhanced = Some(EnhancedOverrides::default());
-                section = Section::Enhanced;
                 continue;
             }
             let (key, rest) = trimmed
@@ -331,6 +346,15 @@ impl ModManifest {
                 }
             };
             match section {
+                Section::Scripting => match key {
+                    "sfall" => {
+                        let Value::Bool(flag) = value else {
+                            return Err(error("`sfall` expects true or false".into()));
+                        };
+                        manifest.sfall = Some(flag);
+                    }
+                    _ => return Err(error(format!("unknown key `{key}` in `[scripting]`"))),
+                },
                 Section::Enhanced => {
                     let enhanced = manifest.enhanced.as_mut().expect("the table exists");
                     match key {
@@ -434,7 +458,7 @@ impl ModManifest {
             Section::Script => ("scripts", &["file", "index"]),
             Section::Map => ("maps", &["file", "number"]),
             Section::Patch => ("patches", &["table", "file"]),
-            Section::Top | Section::Enhanced => return Ok(()),
+            Section::Top | Section::Enhanced | Section::Scripting => return Ok(()),
         };
         match required
             .iter()
@@ -499,6 +523,9 @@ impl ModManifest {
             if let Some(smooth) = enhanced.smooth_camera {
                 text += &format!("smooth_camera = {smooth}\n");
             }
+        }
+        if let Some(sfall) = self.sfall {
+            text += &format!("\n[scripting]\nsfall = {sfall}\n");
         }
         for script in &self.scripts {
             text += "\n[[scripts]]\n";
@@ -1125,6 +1152,27 @@ mod tests {
             let error = write_mod_folder(&other, &full(), &[(path.into(), vec![])]).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{path}");
             assert!(!other.exists(), "{path}");
+        }
+    }
+
+    #[test]
+    fn the_scripting_table_carries_the_sfall_key_and_round_trips() {
+        let manifest = ModManifest::parse("name = \"a\"\n[scripting]\nsfall = true\n").unwrap();
+        assert_eq!(manifest.sfall, Some(true));
+        assert_eq!(ModManifest::parse("name = \"a\"").unwrap().sfall, None);
+        let again = ModManifest::parse(&manifest.to_toml().unwrap()).unwrap();
+        assert_eq!(again.sfall, Some(true));
+        for (text, wanted) in [
+            (
+                "name = \"a\"\n[scripting]\nsfall = 1",
+                "expects true or false",
+            ),
+            ("name = \"a\"\n[scripting]\nother = true", "unknown key"),
+            ("name = \"a\"\n[scripting]\n[scripting]", "duplicate table"),
+            ("name = \"a\"\n[odd]", "unknown table"),
+        ] {
+            let error = ModManifest::parse(text).unwrap_err().to_string();
+            assert!(error.contains(wanted), "{error}");
         }
     }
 }

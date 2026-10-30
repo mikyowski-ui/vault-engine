@@ -319,6 +319,7 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Some(state) = self.world.critter_state_mut(attacker) {
             state.ap = state.ap.saturating_sub(cost).max(0);
         }
+        self.note_target(attacker, intended);
         // SPEC-009 §3.4: the player's attack debit references the defender
         // named when the attack began.
         if attacker == self.world.player {

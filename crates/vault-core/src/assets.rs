@@ -149,6 +149,12 @@ pub trait WorldAssets {
     /// Parse scripts with the versioned enhanced opcode range accepted
     /// (`IntProgram::parse_enhanced`); the Enhanced preset turns it on.
     fn set_enhanced_scripts(&self, _enabled: bool) {}
+    /// Whether scripts are parsed and checked under sfall mode's word set
+    /// (SPEC-024b §3.2).
+    fn set_sfall_scripts(&self, _enabled: bool) {}
+    /// `prototype` takes the place of its PID's until that reloads
+    /// (SPEC-024b §4.8 `set_proto_data`).
+    fn replace_prototype(&self, _prototype: Arc<Prototype>) {}
     /// The game whose map and prototype layouts are read (SPEC-016).
     fn game_profile(&self) -> crate::GameProfile {
         crate::GameProfile::Fallout1
@@ -214,6 +220,8 @@ pub struct VfsWorldAssets {
     /// Scripts parse with the enhanced opcode range accepted (the
     /// Enhanced preset); off, scripts parse under plain SPEC-004.
     enhanced_scripts: std::cell::Cell<bool>,
+    /// SPEC-024b §3.2: sfall mode's word set, once the session turned it on.
+    sfall_scripts: std::cell::Cell<bool>,
     /// What the mod layers' `vault-mod.toml` manifests register (empty
     /// without mod layers).
     registry: ModRegistry,
@@ -251,6 +259,7 @@ impl VfsWorldAssets {
             fonts: RefCell::new(None),
             diagnostics: RefCell::new(Vec::new()),
             enhanced_scripts: std::cell::Cell::new(false),
+            sfall_scripts: std::cell::Cell::new(false),
             registry: ModRegistry::default(),
             game: std::cell::Cell::new(crate::GameProfile::Fallout1),
             mod_scripts: RefCell::new(BTreeMap::new()),
@@ -323,10 +332,18 @@ impl VfsWorldAssets {
             .read_bounded(path, MAX_ASSET_BYTES)
             .map_err(|error| WorldError::Invalid(format!("{path}: {error}")))
     }
+    /// The word set scripts load under: the profile's, or sfall mode's.
+    fn script_words(&self) -> WordSet {
+        if self.sfall_scripts.get() {
+            crate::fallout2::sfall_word_set(self.game.get())
+        } else {
+            crate::fallout2::word_set(self.game.get())
+        }
+    }
     /// A script, checked against the game profile's word set (SPEC-017
     /// §2.1), with the enhanced range as the preset says.
     fn parse_program(&self, bytes: &[u8]) -> Result<IntProgram, WorldError> {
-        let words = crate::fallout2::word_set(self.game.get());
+        let words = self.script_words();
         Ok(IntProgram::parse_in(
             bytes,
             &words,
@@ -381,7 +398,7 @@ impl VfsWorldAssets {
         layer: &str,
         bytes: &[u8],
     ) -> Result<IntProgram, String> {
-        let words = crate::fallout2::word_set(self.game.get());
+        let words = self.script_words();
         let enhanced = self.enhanced_scripts.get();
         let table = stack_check::Table::with_enhanced(words.clone(), enhanced);
         let profile = match self.game.get() {
@@ -413,8 +430,9 @@ impl VfsWorldAssets {
             }
         };
         Err(format!(
-            "{path}: mod script from layer {layer:?} refused at load ({profile}{} table): \
+            "{path}: mod script from layer {layer:?} refused at load ({profile}{}{} table): \
              {refusal}",
+            if words.sfall() { " + sfall" } else { "" },
             if enhanced { " + enhanced" } else { "" }
         ))
     }
@@ -520,6 +538,15 @@ impl VfsWorldAssets {
 impl WorldAssets for VfsWorldAssets {
     fn take_diagnostics(&self) -> Vec<String> {
         std::mem::take(&mut *self.diagnostics.borrow_mut())
+    }
+    fn replace_prototype(&self, prototype: Arc<Prototype>) {
+        self.prototypes
+            .borrow_mut()
+            .insert(prototype.pid, Ok(prototype));
+    }
+    fn set_sfall_scripts(&self, enabled: bool) {
+        self.sfall_scripts.set(enabled);
+        self.programs.borrow_mut().clear();
     }
     fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
         if let Some(prototype) = self.prototypes.borrow().get(&pid) {

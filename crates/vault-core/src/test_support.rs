@@ -66,6 +66,10 @@ pub(crate) struct TestAssets {
     /// Effect files present, as upper-case stems; without a set every path
     /// is available.
     pub effects: Option<BTreeSet<Vec<u8>>>,
+    /// The game profile these assets report.
+    pub profile: crate::GameProfile,
+    /// `set_proto_data`'s replacements, over `prototypes`.
+    pub replaced: Arc<std::sync::Mutex<BTreeMap<u32, Arc<Prototype>>>>,
 }
 impl TestAssets {
     /// Every art exists but the `missing` animations.
@@ -91,7 +95,27 @@ impl TestAssets {
     }
 }
 impl WorldAssets for TestAssets {
+    fn game_profile(&self) -> crate::GameProfile {
+        self.profile
+    }
+    fn replace_prototype(&self, prototype: Arc<Prototype>) {
+        self.replaced
+            .lock()
+            .unwrap()
+            .insert(prototype.pid, prototype);
+    }
+    fn program_by_name(&self, name: &[u8]) -> Result<(String, IntProgram), WorldError> {
+        let wanted = String::from_utf8_lossy(name).to_ascii_lowercase();
+        self.programs
+            .iter()
+            .find(|(file, _)| file.to_ascii_lowercase() == wanted)
+            .cloned()
+            .ok_or_else(|| WorldError::Invalid(format!("no program {wanted}")))
+    }
     fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
+        if let Some(prototype) = self.replaced.lock().unwrap().get(&pid) {
+            return Ok(prototype.clone());
+        }
         self.prototypes
             .get(&pid)
             .or_else(|| self.by_type.get(&(pid >> 24)))

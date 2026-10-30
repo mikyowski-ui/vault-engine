@@ -128,10 +128,20 @@ impl WordSet {
     pub const FALLOUT2: Self = Self {
         words: 0x8000..=0x8183,
     };
-    /// Whether this is the Fallout 2 set, whose host words are SPEC-005's
-    /// as amended by SPEC-017 ([`crate::extensions::opcode_in`]).
+    /// SPEC-017 §2.1 and SPEC-024b §3.2: `0x8000` to `0x8281`, Fallout 2 with
+    /// sfall mode on. Its table has 642 entries: `0x8156` up are SPEC-024b's
+    /// words, whatever the preset.
+    pub const FALLOUT2_SFALL: Self = Self {
+        words: 0x8000..=0x8281,
+    };
+    /// Whether this is a Fallout 2 set, whose host words are SPEC-005's as
+    /// amended by SPEC-017 ([`crate::extensions::opcode_in`]).
     pub fn fallout2(&self) -> bool {
-        *self == Self::FALLOUT2
+        *self == Self::FALLOUT2 || self.sfall()
+    }
+    /// Whether this is the sfall mode set.
+    pub fn sfall(&self) -> bool {
+        *self == Self::FALLOUT2_SFALL
     }
     /// [`Self::accepts`], plus the versioned enhanced range
     /// ([`crate::extensions::ENHANCED_RANGE`]) when `enhanced` is set.

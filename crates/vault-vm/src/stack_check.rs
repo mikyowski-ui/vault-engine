@@ -111,6 +111,10 @@ impl Table {
     /// The row of a host word: the profile's, or under enhanced the
     /// enhanced table's for a word of that range.
     pub fn row(&self, word: u16) -> Option<&'static extensions::OpcodeSpec> {
+        // SPEC-024b §3.2: under sfall mode the sfall word wins in the overlap.
+        if self.words.words.contains(&word) && self.words.sfall() {
+            return extensions::opcode_in(&self.words, word);
+        }
         if self.enhanced && extensions::ENHANCED_RANGE.contains(&word) {
             return extensions::enhanced_opcode(word);
         }

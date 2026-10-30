@@ -151,6 +151,10 @@ pub struct Game {
     pub enhanced: Option<crate::enhanced::EnhancedSettings>,
     /// The touch UI's pill bar shows in every world (`--touch-ui`).
     pub touch_ui: bool,
+    /// SPEC-024b §3.1: every world of this session runs in sfall mode.
+    pub sfall: bool,
+    /// Where `set_ini_setting` writes (SPEC-024b §4.5).
+    pub sfall_files: Option<PathBuf>,
     /// The `enhanced` preset's game speed every world runs at (Alt+F
     /// changes it through `AssetPreview::set_game_speed`).
     pub game_speed: crate::enhanced::GameSpeed,
@@ -276,6 +280,8 @@ impl Game {
             preset: vault_core::EnginePreset::Vanilla,
             enhanced: None,
             touch_ui: false,
+            sfall: false,
+            sfall_files: None,
             game_speed: Default::default(),
             mod_export: None,
             renderer: Default::default(),
@@ -589,6 +595,7 @@ impl Game {
     fn world_with(&self, sheet: CharacterSheet) -> AppResult<MapPreview> {
         let assets = VfsWorldAssets::new(self.vfs.clone(), &self.language)?;
         let fallout2 = self.fallout2.clone();
+        let sfall = self.sfall;
         let path = if fallout2.is_some() {
             vault_core::fallout2::START_MAP
         } else {
@@ -601,6 +608,7 @@ impl Game {
                 if let Some(tables) = fallout2 {
                     host.begin_fallout2_game(tables);
                 }
+                crate::session::start_sfall(host, sfall);
             })?;
         world.host.world.clock.ticks = flow::START_TICKS;
         world.audio = self.audio.clone();
@@ -631,6 +639,7 @@ impl Game {
             mod_export: self.mod_export.clone(),
             debug_session: self.debug_keys,
             renderer: self.renderer.clone(),
+            sfall_files: self.sfall_files.clone(),
         }
         .apply(&mut world, |_| {});
         world.init_game_speed(self.game_speed);

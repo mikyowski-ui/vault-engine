@@ -79,4 +79,110 @@ fn main() {
         source,
     )
     .unwrap();
+    sfall_catalog();
+}
+fn class(text: &str) -> String {
+    assert!(matches!(
+        text,
+        "I" | "F" | "N" | "S" | "K" | "A" | "O" | "P"
+    ));
+    format!("Class::{text}")
+}
+/// One row of `oracle/SPEC-024/sfall-opcodes.tsv`, as a `SfallRow`.
+fn sfall_row(cells: &[&str]) -> String {
+    let id = cells[1].strip_prefix("0x").map_or_else(
+        || cells[1].parse::<u16>().unwrap_or(0),
+        |word| u16::from_str_radix(word, 16).expect("a word"),
+    );
+    let dispatch = u16::from_str_radix(cells[3].trim_start_matches("0x"), 16).expect("a word");
+    let pops = match cells[4] {
+        "-" => "None".to_owned(),
+        count => format!("Some({})", count.parse::<u8>().expect("a count")),
+    };
+    let args: Vec<String> = cells[6]
+        .split(',')
+        .filter(|class| *class != "-")
+        .map(class)
+        .collect();
+    let ret = match cells[7] {
+        "-" => "None".to_owned(),
+        text => format!("Some({})", class(text)),
+    };
+    format!(
+        "SfallRow {{id:0x{id:04x},name:{:?},dispatch:0x{dispatch:04x},pops:{pops},push:{},\
+         args:&[{}],ret:{ret},tier:Tier::{}}}",
+        cells[2],
+        cells[5] == "1",
+        args.join(","),
+        cells[9],
+    )
+}
+/// SPEC-024b section 3: the oracle table, compiled in and counted, so a word
+/// cannot drift from the published contract. A reserved word has a row with
+/// no pop count, and no `OpcodeSpec` for the stack model.
+fn sfall_catalog() {
+    let table = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+        .join("../../oracle/SPEC-024/sfall-opcodes.tsv");
+    println!("cargo:rerun-if-changed={}", table.display());
+    let text = fs::read_to_string(table).expect("the SPEC-024 oracle must be present");
+    let mut words = BTreeMap::new();
+    let mut specs = Vec::new();
+    let (mut functions, mut metarule3, mut explosions) = (Vec::new(), Vec::new(), Vec::new());
+    for line in text.lines().skip(1) {
+        let cells: Vec<&str> = line.split('\t').collect();
+        assert_eq!(cells.len(), 11, "an oracle row has eleven columns");
+        let row = sfall_row(&cells);
+        match cells[0] {
+            "word" => {
+                let word = u16::from_str_radix(cells[1].trim_start_matches("0x"), 16).unwrap();
+                assert!(words.insert(word, row).is_none(), "duplicate word");
+                if cells[9] != "R" {
+                    let pops: usize = cells[4].parse().expect("a pop count");
+                    specs.push(format!(
+                        "OpcodeSpec {{word:0x{word:04x},name:{:?},operands:&[{}],\
+                         push:PushKind::{},registered:true,variable:false}}",
+                        cells[2],
+                        vec!["Rule::Unchecked"; pops].join(","),
+                        if cells[5] == "1" { "Value" } else { "None" },
+                    ));
+                }
+            }
+            "sfall_func" => functions.push(row),
+            "metarule3" => metarule3.push(row),
+            "metarule2_explosions" => explosions.push(row),
+            kind => panic!("unknown oracle row {kind}"),
+        }
+    }
+    assert_eq!(words.len(), 300, "every word 0x8156..=0x8281");
+    for word in 0x8156..=0x8281 {
+        assert!(words.contains_key(&word), "missing word {word:#06x}");
+    }
+    assert_eq!(specs.len(), 294, "every word but the six reserved");
+    assert_eq!(functions.len(), 133);
+    assert_eq!(metarule3.len(), 7);
+    assert_eq!(explosions.len(), 9);
+    let table = |name: &str, kind: &str, rows: &[String]| {
+        format!(
+            "pub static {name}: [{kind};{}] = [\n{}\n];\n",
+            rows.len(),
+            rows.join(",\n")
+        )
+    };
+    let source = [
+        table(
+            "SFALL_WORDS",
+            "SfallRow",
+            &words.into_values().collect::<Vec<_>>(),
+        ),
+        table("SFALL_SPECS", "OpcodeSpec", &specs),
+        table("SFALL_FUNCTIONS", "SfallRow", &functions),
+        table("SFALL_METARULE3", "SfallRow", &metarule3),
+        table("SFALL_EXPLOSIONS", "SfallRow", &explosions),
+    ]
+    .concat();
+    fs::write(
+        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("sfall_catalog.rs"),
+        source,
+    )
+    .unwrap();
 }
