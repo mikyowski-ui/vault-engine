@@ -67,9 +67,9 @@ fn stored_path(dir: &Path, name: &str) -> PathBuf {
 
 /// Commit `image` to the slot folder `dir` under the SPEC-008 §3.3 safe rule
 /// ([`staged`]): one batch, so a failure leaves the old slot untouched. As
-/// SPEC-023 §3.11 rule 2 says, it holds a put of every file of the image and
-/// a delete of the sidecar when the image has none, and other files of the
-/// slot are left alone.
+/// SPEC-023 §3.11 rule 2 says, it holds a put of every file of the image, a
+/// delete of the sidecar when the image has none, and a delete of every stale
+/// `.SAV` ([`SlotImage::stale`]). Other files of the slot are left alone.
 pub fn write_slot(dir: &Path, image: &SlotImage) -> Result<(), WorldError> {
     let targets: Vec<(PathBuf, &[u8])> = image
         .files()
@@ -84,8 +84,38 @@ pub fn write_slot(dir: &Path, image: &SlotImage) -> Result<(), WorldError> {
     if !image.has_sidecar() {
         ops.push(StagedOp::Delete { target: &sidecar });
     }
+    let stale = stale_files(dir, image)?;
+    ops.extend(stale.iter().map(|target| StagedOp::Delete { target }));
     staged::commit(&ops, StagingNames::Reserved, |_| Ok(()))
         .map_err(|error| WorldError::Invalid(error.to_string()))
+}
+
+/// The stale `.SAV` files of slot folder `dir`. A folder is not an entry
+/// (SPEC-023 §3.9), and a slot that has no folder yet has no files.
+fn stale_files(dir: &Path, image: &SlotImage) -> Result<Vec<PathBuf>, WorldError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io(dir, error)),
+    };
+    let mut stale = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| io(dir, error))?;
+        let path = entry.path();
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| image.stale(name))
+            && entry
+                .file_type()
+                .map_err(|error| io(&path, error))?
+                .is_file()
+        {
+            stale.push(path);
+        }
+    }
+    stale.sort();
+    Ok(stale)
 }
 
 /// A slot's files in the folder that holds them.

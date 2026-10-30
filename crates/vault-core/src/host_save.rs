@@ -67,6 +67,10 @@ pub struct SlotImage {
 }
 
 impl SlotImage {
+    /// An image holding `files`, as a save would produce it.
+    pub fn new(files: Vec<(String, Vec<u8>)>) -> Self {
+        Self { files }
+    }
     pub fn files(&self) -> &[(String, Vec<u8>)] {
         &self.files
     }
@@ -77,6 +81,17 @@ impl SlotImage {
         self.files
             .iter()
             .any(|(name, _)| name == crate::companion::SIDECAR)
+    }
+    /// SPEC-023 §3.11 rule 2: whether a save of this image deletes the slot
+    /// file `name`: a `.SAV` by name alone, after case folding, that no file
+    /// of the image replaces. Anything else in the slot stays, whatever its
+    /// name, `VAULTSFL.DAT` among them.
+    pub fn stale(&self, name: &str) -> bool {
+        name.to_ascii_lowercase().ends_with(".sav")
+            && !self
+                .files
+                .iter()
+                .any(|(file, _)| file.eq_ignore_ascii_case(name))
     }
 }
 

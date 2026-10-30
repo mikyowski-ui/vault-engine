@@ -1857,3 +1857,29 @@ fn enhanced_opened_doors_round_trip_through_the_sidecar() {
     .unwrap();
     assert!(host.load_game(enhanced_root.path(), 1).is_err());
 }
+
+#[test]
+fn a_folder_save_removes_stale_maps_and_keeps_every_other_file() {
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    let slot = slot_directory(root.path(), 1).unwrap();
+    fs::write(slot.join("DEN.SAV"), "stale").unwrap();
+    fs::write(slot.join("old map.sav"), "stale").unwrap();
+    fs::write(slot.join("VAULTSFL.DAT"), "kept").unwrap();
+    fs::write(slot.join("DEN.SAV.OLD"), "kept").unwrap();
+    fs::create_dir(slot.join("FOLDER.SAV")).unwrap();
+
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+
+    assert!(!slot.join("DEN.SAV").exists());
+    assert!(!slot.join("old map.sav").exists());
+    assert_eq!(fs::read(slot.join("VAULTSFL.DAT")).unwrap(), b"kept");
+    assert_eq!(fs::read(slot.join("DEN.SAV.OLD")).unwrap(), b"kept");
+    assert!(slot.join("FOLDER.SAV").is_dir());
+    assert!(slot.join("SAVE.DAT").is_file());
+}

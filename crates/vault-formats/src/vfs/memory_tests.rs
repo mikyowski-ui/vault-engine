@@ -682,3 +682,31 @@ fn a_memory_tree_reads_paths_as_the_loose_provider_does() {
         Err(VfsError::InvalidPath { .. })
     ));
 }
+
+#[test]
+fn a_path_over_1024_bytes_is_refused_by_vfs_path_itself() {
+    // SPEC-023 §2.2 rule 1, at the edge and through a real folder structure.
+    let edge = format!("{}/{}", "a".repeat(511), "b".repeat(512));
+    assert_eq!(edge.len(), 1024);
+    assert_eq!(VfsPath::new(&edge).unwrap().as_str(), edge);
+    assert!(VfsPath::new(&"a".repeat(crate::vfs::MAX_PATH_BYTES)).is_ok());
+    for path in ["a".repeat(1025), format!("{edge}c"), format!("a/{edge}")] {
+        assert!(path.len() > crate::vfs::MAX_PATH_BYTES);
+        let error = VfsPath::new(&path).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                VfsError::InvalidPath {
+                    reason: "longer than 1024 bytes",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+    // A memory folder and a read use the same validator.
+    let long = "a".repeat(1025);
+    assert!(MemoryDir::new(vec![(long.clone(), source(b"x".to_vec()))]).is_err());
+    let dir = MemoryDir::new(vec![("a.txt".to_owned(), source(b"x".to_vec()))]).unwrap();
+    assert!(matches!(dir.read(&long), Err(VfsError::InvalidPath { .. })));
+}

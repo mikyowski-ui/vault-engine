@@ -15,10 +15,14 @@ pub use memory::{
 ///
 /// Both slash styles are accepted on input. Empty components, `.`/`..`,
 /// absolute/drive/UNC paths, control characters, Windows special characters,
-/// device names, and trailing dots/spaces are rejected rather than repaired.
-/// Restricting names to ASCII gives identical case folding on every platform.
+/// device names, trailing dots/spaces, and paths over [`MAX_PATH_BYTES`] are
+/// rejected rather than repaired. Restricting names to ASCII gives identical
+/// case folding on every platform.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VfsPath(String);
+
+/// SPEC-023 §2.2 rule 1: the longest path the validator accepts, in bytes.
+pub const MAX_PATH_BYTES: usize = 1024;
 
 impl VfsPath {
     pub fn new(path: &str) -> Result<Self, VfsError> {
@@ -28,6 +32,9 @@ impl VfsPath {
         };
         if path.is_empty() || !path.is_ascii() {
             return Err(invalid("expected a nonempty ASCII path"));
+        }
+        if path.len() > MAX_PATH_BYTES {
+            return Err(invalid("longer than 1024 bytes"));
         }
         if path
             .bytes()

@@ -2274,8 +2274,12 @@ so its previous local block is not reattached. A save is a slot image
 On the desktop that is `SAVEGAME/SLOTnn/` under the SPEC-008 §3.3 safe rule:
 every file is staged as `<name>.TMP`, and only after all succeed are the old
 files renamed to `.BAK`, the staged files renamed into place (restoring the
-backups if that fails), and the backups removed. Other files of the slot are
-left alone (SPEC-023 §3.11).
+backups if that fails), and the backups removed. The same batch deletes every
+stale `.SAV` of the slot: each file whose name ends in `.SAV`, in any case, and
+that no file of the new image replaces, so a slot never keeps a map the save
+does not list. If the listing or the commit fails, the slot is unchanged, stale
+files included. Every other file of the slot is left alone, `VAULTSFL.DAT`
+among them (SPEC-023 §3.11).
 `load_slot` reads and validates the header, every payload, every companion map
 (parsed in full), and the automap before it changes any state. A companion
 name from the manifest is used only when it is exactly the name

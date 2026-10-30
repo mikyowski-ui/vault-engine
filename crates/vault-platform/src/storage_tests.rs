@@ -2,7 +2,9 @@
 //! The same scripts run on every backend, whose results must be the same at
 //! every step.
 use super::*;
+use crate::session::commit_slot;
 use std::collections::VecDeque;
+use vault_core::host_save::SlotImage;
 
 macro_rules! fixture {
     ($name:literal) => {
@@ -722,4 +724,130 @@ fn a_host_quota_error_refuses_the_commit() {
         storage.read(Namespace::Config, "vault-engine.toml"),
         Ok(None)
     );
+}
+
+/// `KEY=VALUE` entries of `slot-saves.tsv`, `separator`-joined; `-` is none.
+fn entries(text: &str, separator: char) -> Vec<(&str, &str)> {
+    if text == "-" {
+        return Vec::new();
+    }
+    text.split(separator)
+        .map(|entry| entry.split_once('=').expect("KEY=VALUE"))
+        .collect()
+}
+
+fn image_of(text: &str) -> SlotImage {
+    SlotImage::new(
+        entries(text, ';')
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.as_bytes().to_vec()))
+            .collect(),
+    )
+}
+
+fn saved_entries(backend: &dyn StorageBackend) -> Vec<(String, String)> {
+    let keys = backend.list(Namespace::Savegame, None).unwrap();
+    keys.into_iter()
+        .map(|key| {
+            let value = backend.read(Namespace::Savegame, &key).unwrap().unwrap();
+            (key, String::from_utf8(value).unwrap())
+        })
+        .collect()
+}
+
+fn slot_saves(backend: &dyn StorageBackend) {
+    for row in rows(fixture!("slot-saves.tsv")) {
+        let [case, slot, before, image, removed, after] = row[..] else {
+            panic!("{row:?}");
+        };
+        // Each row starts from its own entries.
+        let old: Vec<StorageOp> = backend
+            .list(Namespace::Savegame, None)
+            .unwrap()
+            .into_iter()
+            .map(StorageOp::delete)
+            .collect();
+        backend.commit(Namespace::Savegame, &old).unwrap();
+        let puts: Vec<StorageOp> = entries(before, ';')
+            .into_iter()
+            .map(|(key, value)| StorageOp::put(key, value))
+            .collect();
+        backend.commit(Namespace::Savegame, &puts).unwrap();
+        let kept: Vec<String> = backend.list(Namespace::Savegame, None).unwrap();
+
+        commit_slot(backend, slot, &image_of(image)).unwrap();
+
+        let found = saved_entries(backend);
+        let expected: Vec<(String, String)> = entries(after, ',')
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect();
+        assert_eq!(found, expected, "{case}");
+        let gone: Vec<String> = kept
+            .into_iter()
+            .filter(|key| !found.iter().any(|(other, _)| other == key))
+            .collect();
+        let named: Vec<&str> = if removed == "-" {
+            Vec::new()
+        } else {
+            removed.split(',').collect()
+        };
+        assert_eq!(gone, named, "{case}");
+    }
+}
+
+#[test]
+fn t20_every_slot_save_gives_its_entries_on_every_backend() {
+    assert_eq!(rows(fixture!("slot-saves.tsv")).len(), 10);
+    slot_saves(&MemoryStorage::new());
+    let temp = tempfile::tempdir().unwrap();
+    slot_saves(&FsStorage::at_save_root(temp.path()));
+    slot_saves(&immediate_store());
+}
+
+#[test]
+fn t20_a_fault_during_a_save_keeps_the_stale_files_with_everything_else() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut storage = FsStorage::at_save_root(temp.path());
+    let old = [
+        StorageOp::put("SLOT01/SAVE.DAT", "S1"),
+        StorageOp::put("SLOT01/ARROYO.SAV", "M1"),
+        StorageOp::put("SLOT01/DEN.SAV", "M2"),
+        StorageOp::put("SLOT01/AUTOMAP.SAV", "A1"),
+    ];
+    storage.commit(Namespace::Savegame, &old).unwrap();
+    let before = files_below(temp.path());
+    let image = image_of("SAVE.DAT=S2;ARROYO.SAV=M3;AUTOMAP.SAV=A2");
+
+    storage.fail_staging = Some(1);
+    let error = commit_slot(&storage, "SLOT01", &image).unwrap_err();
+    assert!(error.to_string().contains("injected fault"), "{error}");
+    assert_eq!(files_below(temp.path()), before);
+    for (key, value) in [
+        ("SLOT01/SAVE.DAT", "S1"),
+        ("SLOT01/ARROYO.SAV", "M1"),
+        ("SLOT01/DEN.SAV", "M2"),
+        ("SLOT01/AUTOMAP.SAV", "A1"),
+    ] {
+        let found = storage.read(Namespace::Savegame, key).unwrap().unwrap();
+        assert_eq!(found, value.as_bytes(), "{key}");
+    }
+
+    storage.fail_staging = None;
+    commit_slot(&storage, "SLOT01", &image).unwrap();
+    assert_eq!(
+        storage.read(Namespace::Savegame, "SLOT01/DEN.SAV").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn t20_a_folder_named_like_a_save_survives() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = FsStorage::at_save_root(temp.path());
+    let folder = temp.path().join("SAVEGAME/SLOT01/OLD.SAV");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("KEEP.TXT"), "kept").unwrap();
+    commit_slot(&storage, "SLOT01", &image_of("SAVE.DAT=S2;AUTOMAP.SAV=A2")).unwrap();
+    assert_eq!(std::fs::read(folder.join("KEEP.TXT")).unwrap(), b"kept");
 }

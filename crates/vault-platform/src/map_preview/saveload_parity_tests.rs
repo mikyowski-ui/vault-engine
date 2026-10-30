@@ -178,19 +178,23 @@ fn t14_a_slot_copied_between_backends_loads_to_the_same_state_hash() {
 }
 
 #[test]
-fn a_save_keeps_other_files_and_drops_only_a_stale_sidecar() {
+fn a_save_drops_stale_maps_and_a_stale_sidecar_and_keeps_other_files() {
     let corpus = short_map_corpus();
     let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
     let old = [
-        StorageOp::put("SLOT01/OLDMAP.SAV", "kept"),
+        StorageOp::put("SLOT01/OLDMAP.SAV", "stale"),
+        StorageOp::put("SLOT01/VAULTSFL.DAT", "kept"),
+        StorageOp::put("SLOT01/NOTES.TXT", "kept"),
         StorageOp::put(format!("SLOT01/{SIDECAR}"), "stale"),
     ];
     storage.commit(Namespace::Savegame, &old).unwrap();
     let mut world = world_on(corpus.path(), storage.clone());
     assert!(world.save_slot(0, b"Vanilla".to_vec()));
     let read = |key: &str| storage.read(Namespace::Savegame, key).unwrap();
-    assert_eq!(read("SLOT01/OLDMAP.SAV").unwrap(), b"kept");
+    assert_eq!(read("SLOT01/OLDMAP.SAV"), None);
     assert_eq!(read(&format!("SLOT01/{SIDECAR}")), None);
+    assert_eq!(read("SLOT01/VAULTSFL.DAT").unwrap(), b"kept");
+    assert_eq!(read("SLOT01/NOTES.TXT").unwrap(), b"kept");
     assert!(read("SLOT01/SAVE.DAT").is_some());
 }
 

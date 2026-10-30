@@ -244,9 +244,10 @@ pub fn validate_edition(
     Ok(edition)
 }
 
-/// SPEC-023 §3.11 rule 2: saving into `slot` is one commit, a put of every
-/// file of the image and a delete of the sidecar when the image has none.
-/// Other files of the slot are left alone. A save counts once it is durable.
+/// SPEC-023 §3.11 rule 2: saving into `slot` lists the slot, then makes one
+/// commit: a put of every file of the image, a delete of the sidecar when the
+/// image has none, and a delete of every stale `.SAV`. Other files of the
+/// slot are left alone. A save counts once it is durable.
 pub fn commit_slot(
     storage: &dyn StorageBackend,
     slot: &str,
@@ -259,6 +260,11 @@ pub fn commit_slot(
         .collect();
     if !image.has_sidecar() {
         ops.push(StorageOp::delete(format!("{slot}/{SIDECAR}")));
+    }
+    for key in storage.list(Namespace::Savegame, Some(slot))? {
+        if key.rsplit('/').next().is_some_and(|name| image.stale(name)) {
+            ops.push(StorageOp::delete(key));
+        }
     }
     storage.commit(Namespace::Savegame, &ops)?;
     storage.flush()
