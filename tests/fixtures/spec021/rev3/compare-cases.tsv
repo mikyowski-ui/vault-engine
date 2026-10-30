@@ -1,0 +1,16 @@
+case	change	line	column	value	verdict	report
+same	none	-	-	-	match	checkpoints match: 7 rows
+state	set	5	state_hash	45A5547A2010CCB5	mismatch	checkpoint mismatch at tick 2: state_hash expected 04A0AD69522C3565, actual 45A5547A2010CCB5
+combat-absent	set	6	combat_hash	-	mismatch	checkpoint mismatch at tick 3: combat_hash expected CDC183838522E1A7, actual -
+input	set	4	input_index	3	mismatch	checkpoint mismatch at tick 1: input_index expected 2, actual 3
+first-of-two	set2	5	state_hash	45A5547A2010CCB5	mismatch	checkpoint mismatch at tick 2: state_hash expected 04A0AD69522C3565, actual 45A5547A2010CCB5
+first-column	setboth	6	state_hash	08EBD88C824628F6	mismatch	checkpoint mismatch at tick 3: state_hash expected 121BBD7C8E51E03E, actual 08EBD88C824628F6
+short	truncate	7	-	-	short	checkpoint stream ended early: expected tick 5, actual ended after tick 4
+long	append	-	-	7\t6\t04A0AD69522C3565\t-	long	checkpoint stream too long: unexpected tick 7
+version	line1	-	-	vault-checkpoints\t2\tVSH1\tVCH1	format	checkpoint format mismatch: line 1 expected vault-checkpoints 1 VSH1 VCH1, actual vault-checkpoints 2 VSH1 VCH1
+magic	line1	-	-	vault-checkpoints\t1\tVSH2\tVCH1	format	checkpoint format mismatch: line 1 expected vault-checkpoints 1 VSH1 VCH1, actual vault-checkpoints 1 VSH2 VCH1
+header	line2	-	-	tick\tinput\tstate_hash\tcombat_hash	format	checkpoint format mismatch: line 2 expected tick input_index state_hash combat_hash, actual tick input state_hash combat_hash
+lowercase	set	5	state_hash	04a0ad69522c3565	malformed	checkpoint row malformed: line 5
+tick-gap	set	5	tick	9	malformed	checkpoint row malformed: line 5
+input-back	set	6	input_index	2	malformed	checkpoint row malformed: line 6
+columns	drop	4	combat_hash	-	malformed	checkpoint row malformed: line 4

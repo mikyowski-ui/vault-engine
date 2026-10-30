@@ -1,6 +1,6 @@
 # SPEC-021: Deterministic State Hash, Combat Sub-Hash, and Trace Oracles
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 3 (Team A, 2026-10-27); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 4 (Team A, 2026-10-30); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -77,6 +77,34 @@ No engine Rust code, decompilation or game asset was used. The new art files
 were written from SPEC-001 and checked a second time by a separate parse of
 the written bytes (section 7).
 
+**Provenance of revision 4.** Author: the Spec-Author sub-agent (Team A),
+2026-10-30, on the owner's brief of 2026-10-30, "Tick-by-Tick Replay State-Hash
+Checkpoints". Sources:
+
+- the owner's brief, which names this work revision 3 and the folder
+  `tests/fixtures/spec021/rev3/`. Revision 3 of this spec was already approved,
+  so this is revision 4, and the folder keeps the brief's name (D-40);
+- SPEC-020 section 2.3 (the session façade), SPEC-022 section 3.13 (what
+  drawing never changes), SPEC-008 sections 3.4 and 3.5 (world travel and the
+  encounter check), and this spec's sections 3.1, 3.7 and 3.8;
+- `docs/REFERENCE.md`: the input log, its records and the replay digest, the
+  map preview's controls, the world map's controls, and the combat keys;
+- the fixture READMEs under `tests/fixtures/`, and a listing of the files that
+  `cargo xtask fixtures` writes;
+- **a black-box measurement by Team A on 2026-10-30.** Team A ran the built
+  `vault-platform` binary on that synthetic corpus, in private copies under
+  `target/`, with hand-written input logs, to confirm that each scenario of
+  section 3.11 can run. It read only what a user of the binary sees: the
+  digest line on stdout, the diagnostics on stderr (including the field names
+  in a parse error), and the frames `--replay-frame` writes. Its findings are
+  labelled **measured by Team A** in sections 3.11 and 5.10. The two committed
+  logs are Team A's own input, and no output of those runs is committed (D-49).
+
+No engine Rust code and no fixture-builder code was read, and no decompilation,
+disassembly, re-implementation source or game asset was used. The format
+vectors were computed from this text, then checked by a second, separate script
+from the written files alone (section 7).
+
 ### Revision history
 
 - **Revision 1 (2026-10-27).** First approved text.
@@ -114,6 +142,17 @@ the written bytes (section 7).
     5.8 is new. No byte of any revision 2 vector changes, because animation
     and art are not covered by the hash (section 3.1). The shared synthetic
     corpus and `cargo xtask fixtures` are unchanged.
+- **Revision 4 (2026-10-30).** Adds tick-by-tick replay checkpoints.
+  - **Checkpoints.** One row per headless step, written after the simulation
+    and before rendering (section 3.10).
+  - **The stream.** A versioned TSV of `tick`, `input_index`, `state_hash` and
+    `combat_hash` or `-`, compared row by row, stopping at the first difference.
+    It is the synchronization unit for future lockstep multiplayer (SPEC-025).
+  - **Three replay scenarios** on existing synthetic fixtures: exploration and
+    dialogue, world-map travel, and seeded multi-turn combat (section 3.11).
+  - The world and combat streams, the magics `VSH1` and `VCH1`, the coverage of
+    section 3.1, the two trace formats and every existing vector and golden are
+    unchanged. New files are in `tests/fixtures/spec021/rev3/` (section 3.12).
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -133,7 +172,9 @@ This spec defines:
    and the `asset-audit` commands that write them (sections 3.5 to 3.8);
 5. the tests the implementer must write (section 4);
 6. synthetic vectors and golden traces (section 5, and
-   `tests/fixtures/spec021/`).
+   `tests/fixtures/spec021/`);
+7. a versioned **replay checkpoint stream**, recorded once per headless step,
+   and three replay scenarios that use it (sections 3.10 to 3.12; revision 4).
 
 The hash is a determinism oracle for this engine: it lets a test, a replay or
 a trace show that two runs reached the same covered state. It is not a save
@@ -737,6 +778,258 @@ for them stands. The golden must not be committed from a run that lacks the
 art fixture, because a run without it records an NPC that never acts.
 `[Must-match]`
 
+### 3.10 Replay Checkpoints (Revision 4)
+
+A **checkpoint** is one row that records a run's covered state at the end of
+one step. The rows of a run are its **checkpoint stream**. Two runs with the
+same inputs give the same stream, so a stream shows not only that a replay
+diverged, but at which step.
+
+**The headless step.** Every entry point runs the same steps in the same order
+through `vault_platform::session`'s `SessionRuntime` (SPEC-020 section 2.3).
+One **headless step** is one frame of that pipeline: `[Must-match]`
+
+| Order | Phase | What happens |
+| ---: | --- | --- |
+| 1 | Input | The step takes its input records, in log order |
+| 2 | Simulation | The world advances by the frame's clock: world ticks, scripts, animation, combat turns, and modal state |
+| 3 | **Checkpoint** | The row is written, here and nowhere else |
+| 4 | Presentation | The refresh is drawn on either render path (SPEC-022), and the frame or digest is taken |
+
+The records a step takes: `[Must-match]`
+
+- In a log with a leading `surface` record, a step takes every record up to and
+  including the next `tick`.
+- In a log without one, each command is one step, a simulated 16 ms frame
+  (`docs/REFERENCE.md`).
+- In a driver run (section 3.7), a step takes the driver's commands since the
+  last step: the combat request, and each end of a player turn.
+
+**The rules of a checkpoint.** `[Must-match]`
+
+1. **One row per step.** Every step writes exactly one row. A step under a
+   modal screen that suspends the world still writes its row, and a step that
+   runs more than one world tick (a `game_speed` above 1.0) still writes one.
+2. **The first row.** Row 0 is written once, when the session has been built
+   and before the first step. It has `tick` 0 and `input_index` 0. So a run of
+   N steps has N + 1 rows.
+3. **The moment.** A row is written after the last simulation change of its
+   step and before anything of that step is presented. Rendering draws from the
+   state the row describes. Because drawing never changes the world (SPEC-022
+   section 3.13, rule 1), the stream does not depend on the render path. If a
+   refresh ever did change a covered value, the next row would show it.
+4. **Reading only.** Taking a checkpoint reads the world (section 3.3). It
+   draws no random number, allocates no handle and changes no state.
+5. **What writes no row.** A record that opens no step writes no row: `quit`,
+   and any record after the last `tick`. A replay that stops at an unconsumed
+   Escape, or a driver run that stops at its round limit, writes no row for
+   that unfinished step.
+6. **Off by default.** Without a checkpoint flag no row is computed, and with
+   one the replay's `state_sha256`, its frames and every input-log and replay
+   record are the same as without it.
+7. **The session's own order.** If the session applies a frame's records at
+   another point of the frame than phase 1, the row's moment does not move: it
+   stays the last thing before presentation, and `input_index` counts the
+   records applied by then. The implementer records the actual order in the
+   commit. `[Safe rule]`
+
+**The stream format.** The file rules of section 3.5 apply: ASCII, tab
+separators, LF line ends, a final LF, no comment lines and no blank lines.
+Line 1 is the version line and line 2 the column header, exactly:
+`[Must-match]`
+
+```text
+vault-checkpoints	1	VSH1	VCH1
+tick	input_index	state_hash	combat_hash
+```
+
+| Line 1 field | Content |
+| --- | --- |
+| 1 | The format's name, `vault-checkpoints` |
+| 2 | The format version, decimal, now 1 |
+| 3 | The world stream's magic (section 2.3) |
+| 4 | The combat stream's magic (section 2.7) |
+
+| Column | Content |
+| --- | --- |
+| `tick` | The step number, decimal, 0 for the first row, then rising by exactly 1. It counts headless steps: it is not a clock, and not a world tick |
+| `input_index` | The zero-based index, in the log, of the next record not yet applied, decimal. This is also the number of records applied so far, every line of the log included, and it never falls. In a driver run it counts the driver's commands |
+| `state_hash` | `WorldState::state_hash()`, 16 uppercase hexadecimal digits |
+| `combat_hash` | `WorldState::combat_hash()`, 16 uppercase hexadecimal digits, while a combat is active (section 2.6); otherwise `-`. The constant of section 2.7 is never written |
+
+Fields 3 and 4 of line 1 are taken from the encoder's own magics, so a change
+of coverage changes line 1 by itself. Any change to the columns, to the moment
+of a row or to the rules of this section raises the format version.
+`[Must-match]`
+
+**The comparison rule.** A stream is compared with an expected stream line by
+line, in file order, and the comparison **stops at the first failure and
+reports that one line**. It never goes on to count later differences, because
+every row after a divergence is expected to differ. `[Must-match]`
+
+1. Lines 1 and 2 are compared as bytes. A difference is a format mismatch, and
+   no row is compared: streams of two formats, or of two stream magics, cannot
+   be compared.
+2. Then, for each row line in turn:
+   - if the actual stream has ended, it **ended early**;
+   - if the actual line is not a well-formed row, it is **malformed**. A
+     well-formed row has four columns, decimal numbers with no leading zero and
+     no sign, hashes of 16 uppercase hexadecimal digits (`-` allowed for
+     `combat_hash`), a `tick` one above the last row's (0 on the first row), and
+     an `input_index` not below the last row's (0 on the first row);
+   - if the expected stream has ended, the actual stream is **too long**;
+   - otherwise the columns are compared in order, and the first that differs is
+     a **mismatch**.
+
+The report is one line, with these exact texts (a tab in a quoted line is
+shown as a space): `[Must-match]`
+
+| Verdict | Report |
+| --- | --- |
+| Equal | `checkpoints match: N rows` |
+| Format | `checkpoint format mismatch: line L expected E, actual A` |
+| Mismatch | `checkpoint mismatch at tick T: COLUMN expected E, actual A` |
+| Ended early | `checkpoint stream ended early: expected tick T, actual ended after tick U` |
+| Too long | `checkpoint stream too long: unexpected tick T` |
+| Malformed | `checkpoint row malformed: line L` |
+
+**Commands.** The flag names are a Team A default (D-45).
+
+- `vault-platform --replay-inputs LOG --checkpoints-out FILE` writes the stream
+  (created or replaced). `--checkpoints-expect FILE` compares each row as it is
+  produced. The two may be combined, and both work with every option of a
+  replay.
+- `asset-audit --dump-combat-trace MAP --checkpoints-out FILE` and
+  `--checkpoints-expect FILE` do the same for a driver run. The trace of section
+  3.6 stays as it is.
+- With `--checkpoints-expect`, the run **stops at the step of the first
+  failure**, prints the report on stderr, prints no digest line, and exits with
+  status 2. With a stream that matches to the end, the run exits as it would
+  without the flag. A usage error or an unreadable expected file exits with
+  status 1 before the run starts. If the binary already gives status 2 another
+  meaning, the implementer picks a free status and records it. `[Must-match]`
+
+**The lockstep unit.** This stream is the synchronization unit for future
+lockstep multiplayer (SPEC-025, not yet written). `[Must-match]` for the format;
+the rest of this paragraph binds SPEC-025, not this revision.
+
+- A peer's stream of one session is exactly this format: the same version line,
+  the same columns, one row per step. `tick` is the step both peers agree on,
+  and `input_index` lets a peer see that the other has applied the same inputs.
+- The version line is the handshake: two peers whose lines differ cannot
+  compare hashes, and must not start.
+- A row is at most 56 bytes with its LF, for a `tick` and an `input_index` of up
+  to 10 digits, so a peer can send every row.
+- SPEC-025 defines the transport and what a peer does on a mismatch. It must
+  also deal with two limits of this stream. The hash covers only section 3.1's
+  values, so a difference in an uncovered value (the game clock, the timed
+  queue, world-map travel) shows only once it reaches a covered one; closing
+  that gap means a new magic (section 2.3). And FNV-1a is not collision-resistant
+  against a chosen input (section 2.1), so the stream detects divergence between
+  honest peers, and is no defense against a cheating one.
+
+### 3.11 The Three Replay Scenarios (Revision 4)
+
+Three tests run the checkpoint stream over existing synthetic fixtures. They
+add no fixture to the shared corpus, and `cargo xtask fixtures` is unchanged.
+`[Must-match]`
+
+| | (a) Exploration and dialogue | (b) World-map travel | (c) Seeded multi-turn combat |
+| --- | --- | --- | --- |
+| Test | T16 | T17 | T18 |
+| Corpus | `cargo xtask fixtures --output DIR` | The same | The same, prepared as T11 prepares it: all six rows of section 3.7's table |
+| Map | `maps/synthetic.map` | `maps/synthetic.map` | `maps/synthetic.map` |
+| Seed | 1 | 1 | 1 |
+| Input | `rev3/scenario-explore-talk.jsonl` | `rev3/scenario-world-travel.jsonl` | The driver of section 3.7, `--max-rounds 5` |
+| Steps | 387 | 615 | Whatever the run takes |
+| Golden | `rev3/scenario-explore-talk.checkpoints.tsv` | `rev3/scenario-world-travel.checkpoints.tsv` | `rev3/scenario-seeded-combat.checkpoints.tsv` |
+
+Scenarios (a) and (b) run as `vault-platform --corpus-dir DIR --preview-map
+maps/synthetic.map --seed 1 --replay-inputs LOG`, on the default render path.
+Section 5.10 gives the phases of each log.
+
+**Goldens.** No golden here can be computed by hand, because each depends on
+routing, scripts, dice and animation stepping. The implementer records each one
+once, reviews it against the assertions below, and commits it. From then on it
+is `[Must-match]`, and it may be re-recorded only under section 3.8's rule.
+
+**Assertions.** Each test checks these on the live session while it records,
+and again whenever it replays. A digest of a row cannot show what the session
+was doing, so the assertions read the session itself. `[Must-match]`
+
+- **(a).** The player's hex at step 133 differs from step 10, and `state_hash`
+  differs between those rows. The Guide's conversation is open at step 261 and
+  closed at step 387. Every `combat_hash` is `-`.
+- **(b).** The world map is open at step 12 and still open at step 615: arrival
+  never enters a town (`docs/REFERENCE.md`). The party's position at step 615
+  differs from (825, 75), and travel has finished. The loaded map has not
+  changed, so no encounter happened. `state_hash` differs between at least two
+  rows from step 12 to step 615: a trip of 160 pixel steps passes at least one
+  W-iteration check, because W is at most 120, and each check draws three d6
+  (SPEC-008 sections 3.4 and 3.5). Every `combat_hash` is `-`.
+- **(b), uncovered state.** World-map travel state is not covered by the hash
+  (section 3.1), so the stream alone sees travel only through those draws. T17
+  therefore also writes the party's final position and the final game tick to
+  `rev3/scenario-world-travel.final.tsv`, with the header `x`, `y`, `game_tick`,
+  and compares that row too. The implementer records it with the golden.
+- **(c).** Rows with a `combat_hash` exist, and row 0 has none. The NPC acts, by
+  T11's own assertion. The last row's `input_index` is 1 + the number of player
+  `turn` rows of the trace: the request, and one end of turn for each. The
+  trace of section 3.6 from the same run still equals
+  `combat-trace-synthetic-seed1.tsv` byte for byte, so recording checkpoints
+  changes nothing. A second run with seed 1 gives the same stream, and a run
+  with seed 2 differs in at least one row.
+
+**Stop rule.** If an assertion fails while recording, the implementer stops and
+asks for a spec revision, as T11's stop rule says, and does not change a log or
+invent a scenario. The report names the assertion, the step, and what the
+session was doing. In particular, if an encounter fires in (b), the synthetic
+corpus has no encounter maps (a longer trip at seed 1 asked for
+`maps/mountn1.map`, measured by Team A), so the trip must be replaced by a
+revision. `[Must-match]`
+
+**Expected diagnostics.** The synthetic corpus logs two warnings in these runs,
+and neither is a failure: `combat AI unavailable` in (a) and (b), whose corpus
+has no `combatai.msg`; and, in (b), a world diagnostic about water global 10,
+because the synthetic campaign has fewer globals (measured by Team A). Every
+replay on this corpus also logs `replay digest without a central save`, so its
+`state_sha256` covers the frame and not the central save (measured by Team A).
+That makes the checkpoint stream the stronger oracle on the synthetic corpus.
+
+### 3.12 Revision 4 Files and the Implementer's Follow-Up
+
+Revision 4 adds the folder `tests/fixtures/spec021/rev3/`. It changes no file of
+an earlier revision, and supersedes none. `[Must-match]`
+
+| File | Status in revision 4 |
+| --- | --- |
+| `rev3/checkpoints-example.tsv` | New: the format example of section 5.9 |
+| `rev3/compare-cases.tsv` | New: the comparison cases of section 5.9 |
+| `rev3/scenario-explore-talk.jsonl`, `rev3/scenario-world-travel.jsonl` | New: the logs of scenarios (a) and (b) |
+| `rev3/README.md` | New: describes the folder |
+| `rev3/scenario-explore-talk.checkpoints.tsv`, `rev3/scenario-world-travel.checkpoints.tsv`, `rev3/scenario-seeded-combat.checkpoints.tsv`, `rev3/scenario-world-travel.final.tsv` | To be recorded by the implementer (section 3.11) |
+| Every file of `tests/fixtures/spec021/` and `rev2/` | Current and unchanged |
+
+**What the implementer changes.** One follow-up commit by the implementer (not
+Team A) does all of this: `[Must-match]`
+
+1. **The format.** Add the row writer, the reader and the comparison beside the
+   hash, so that every tool shares one implementation. The module is free, and
+   it holds no platform dependency.
+2. **The step.** Call the writer in `vault_platform::session`'s headless step at
+   the moment of section 3.10, and write row 0 once.
+3. **The driver.** Have the combat trace of section 3.7 write rows at the same
+   moment, with `input_index` counting its commands.
+4. **The commands.** Add the flags of section 3.10.
+5. **The tests.** Add T13 to T15 and T19, which need no golden.
+6. **The goldens.** Record the three streams and the final row of (b), review
+   them against section 3.11's assertions, and commit them with T16 to T18. Add
+   a line to `rev3/README.md` for each golden.
+7. **The documents.** Describe the flags and the stream in `docs/REFERENCE.md`.
+
+No existing golden is re-recorded. The magics, T1 to T12 and the vectors of
+sections 5.1 to 5.8 stay as they are.
+
 ## 4. Required Tests
 
 The implementer writes at least these tests. They use synthetic data only.
@@ -829,6 +1122,39 @@ The implementer writes at least these tests. They use synthetic data only.
   `std::hash` item, no `HashMap` or `HashSet` iteration, and no `usize` in
   the stream. Enforcing this with clippy's `disallowed_types` and
   `disallowed_methods` for that module is recommended. `[May-improve]`
+- **T13. Checkpoint format (revision 4).** Writing the rows of section 5.9
+  gives `rev3/checkpoints-example.tsv` byte for byte, and a reader of the format
+  reads it back to the same rows. The version line's fields 3 and 4 come from
+  the encoder's magics, and a row's `combat_hash` is `-` exactly when no combat
+  is active.
+- **T14. Comparison rule (revision 4).** Applying each row of
+  `rev3/compare-cases.tsv` to a copy of the example, and comparing that copy
+  against the example, gives the row's verdict and its exact report. The
+  comparison stops at the first failure: in case `first-of-two` the report
+  names only tick 2.
+- **T15. The step (revision 4).** In a replay of a synthetic log:
+  - N steps give N + 1 rows, with `tick` from 0 to N, and `input_index` ending
+    at the number of records applied;
+  - a world change made in the simulation phase of step S appears in row S, not
+    in row S + 1;
+  - with a hook on the presentation phase, the world's `state_hash` at the start
+    of presentation equals the row just written;
+  - the run's `state_sha256` is the same with and without `--checkpoints-out`;
+  - `--checkpoints-expect` with a golden holding one changed row stops at that
+    step, prints the report, prints no digest line, and exits with status 2.
+    The run makes no step past that row.
+- **T16. Scenario (a) (revision 4).** Run section 3.11's scenario (a). The
+  stream equals its golden, and section 3.11's assertions hold.
+- **T17. Scenario (b) (revision 4).** Run scenario (b). The stream equals its
+  golden, the final row equals `rev3/scenario-world-travel.final.tsv`, and the
+  assertions hold.
+- **T18. Scenario (c) (revision 4).** Run scenario (c). The stream equals its
+  golden, and the assertions hold, including the second run and the other seed.
+- **T19. Render path (revision 4).** Replaying scenario (a) on
+  `--render-path reference` and `instanced` gives the same stream. Without a GPU
+  adapter the second run prints `skipped: no GPU adapter` and passes, unless
+  `VAULT_REQUIRE_GPU` is `1` (SPEC-022 section 4). A difference fails the test,
+  and is a SPEC-022 section 3.13 defect, not a re-recording.
 
 ## 5. Synthetic Test Fixtures (Hex / Text)
 
@@ -1320,6 +1646,91 @@ What follows from the bytes (SPEC-007 section 3.10):
   (section 3.8). That approach then fails as SPEC-009 section 3.12 says, the
   same way on every run, and the golden records it.
 
+### 5.9 Checkpoint Vectors (Revision 4)
+
+`rev3/checkpoints-example.tsv` is a format example built from the revision 2
+worlds, not from a run. Each hash is in `rev2/hashes.tsv`.
+
+```text
+vault-checkpoints	1	VSH1	VCH1
+tick	input_index	state_hash	combat_hash
+0	0	0258CFED4EA8A13E	-
+1	2	0258CFED4EA8A13E	-
+2	3	04A0AD69522C3565	-
+3	3	121BBD7C8E51E03E	CDC183838522E1A7
+4	4	1FF653DEE3A223B3	C25648C507DC28BE
+5	4	02A2EFB95101DA7D	A8475FA8866A8966
+6	6	04A0AD69522C3565	-
+```
+
+| Row | State | Reading |
+| ---: | --- | --- |
+| 0 | W0 | The first row: no record applied, no combat |
+| 1 | W0 | Two records applied, and nothing covered changed |
+| 2 | W3 | One more record, and one random draw |
+| 3 | W1 | Combat is active, so `combat_hash` is written. No new record |
+| 4 | M-turn | The turn moved: both hashes change |
+| 5 | W4 | Round 1, with a stale waiter |
+| 6 | W3 | Combat is over, so `combat_hash` is `-` again |
+
+Row 6 shows the rule of section 3.10: the constant `03A3252340D67E8D` of section
+2.7 is never written, although it is W3's `combat_hash`.
+
+`rev3/compare-cases.tsv` holds 15 comparisons against that file as the expected
+stream. A row at `tick` t is on line t + 3 of the file.
+
+| Case | Change to the actual copy | Verdict |
+| --- | --- | --- |
+| `same` | None | Match, 7 rows |
+| `state` | Tick 2's `state_hash` is M-gvar's | Mismatch at tick 2 |
+| `combat-absent` | Tick 3's `combat_hash` is `-` | Mismatch at tick 3 |
+| `input` | Tick 1's `input_index` is 3 | Mismatch at tick 1 |
+| `first-of-two` | Ticks 2 and 4 differ | Mismatch at tick 2 only |
+| `first-column` | Two columns of tick 3 differ | Mismatch names `state_hash` |
+| `short` | Ends after tick 4 | Ended early |
+| `long` | A row for tick 7 is added | Too long |
+| `version`, `magic`, `header` | Line 1's version, line 1's `VSH2`, or a renamed column | Format mismatch; no row is read |
+| `lowercase`, `tick-gap`, `input-back`, `columns` | A lowercase hash, a `tick` of 9, a falling `input_index`, or a missing column | Malformed |
+
+### 5.10 The Scenario Logs (Revision 4)
+
+Both logs use only the records `surface`, `tick`, `pointer_moved`,
+`pointer_button`, `key` and `quit`, on a 640-by-480 surface with a 16 ms frame.
+Each starts with `surface` and ends with `quit`. A pointer record is followed by
+a `tick`, and so is each press and each release. These phases are what the logs
+do, as measured by Team A on the binary of 2026-10-30, by the final frame of a
+replay cut off after each phase. The goldens and the assertions of section 3.11
+are what bind. `[Must-match]` for the log bytes.
+
+`rev3/scenario-explore-talk.jsonl`, 403 records and 387 steps:
+
+| Steps | Input | What happens |
+| ---: | --- | --- |
+| 1-10 | None | The map settles |
+| 11-133 | Left click at (288, 205), in movement mode | The player walks, and the view follows it by about (+16, -8) |
+| 134-138 | Key `KeyM` | The cursor mode becomes the arrow |
+| 139-261 | Left click at (352, 161), on the Guide | The Guide's conversation opens |
+| 262-324 | Left click at (130, 340), on the option | The first option is chosen, and the conversation stays open |
+| 325-387 | Left click at (130, 340), on the option | The conversation ends, and the map returns |
+
+`rev3/scenario-world-travel.jsonl`, 622 records and 615 steps:
+
+| Steps | Input | What happens |
+| ---: | --- | --- |
+| 1-5 | None | The map settles |
+| 6-12 | Key `KeyW` | The world map opens, with the party at (825, 75) |
+| 13-615 | Left click at (407, 96) in the world view, 160 pixels east of the party | The party travels, and arrives with no encounter. The final frame is the same at step 615 and 300 steps later |
+
+The world view is at screen (22, 21) (SPEC-008 section 3.4), with the scroll
+origin at X 600, so world X 825 is screen X 247.
+
+**Why (c) has no log.** Team A tried one. `KeyA` starts combat, but with no
+attack a first Space ends it, and the frame does not change with the seed. After
+`KeyA`, `KeyM` twice reaches the crosshair, but a left click on the Guide then
+spends no AP, and the digest does not change over the next 230 steps (measured
+by Team A). T11's driver already makes the NPC punch on each of its turns, as
+the committed golden shows, so scenario (c) uses it (D-48).
+
 ## 6. Decisions
 
 Every open point of the brief is settled here.
@@ -1487,6 +1898,58 @@ the choices below are Team A's.
   to name the SPEC-007 rule and the missing resource, and it covers a
   defender whose art names a base other than `sample`.
 
+Revision 4 adds these decisions.
+
+- **D-40 (Team A default; the folder name is an owner instruction).** The
+  owner's brief of 2026-10-30 names this work "Revision 3". Revision 3 was
+  approved on 2026-10-27 and has been implemented, so this is revision 4, which
+  keeps the history true. The brief's folder `tests/fixtures/spec021/rev3/` is
+  kept as written: it was free, because revision 3 kept its files in `rev2/`
+  (D-38). The folder's README says so.
+- **D-41 (owner instruction).** A checkpoint is recorded in
+  `vault_platform::session`'s headless step (SPEC-020 section 2.3), before
+  rendering (SPEC-022 section 3.13). Placing it after the simulation of its own
+  step is a Team A default: the row then describes the state the frame draws,
+  and a change appears in the row of the step that made it.
+- **D-42 (Team A default).** Row 0 is written before the first step, so that a
+  divergence in session setup (map load, seed, script start) is seen before any
+  input. N steps give N + 1 rows.
+- **D-43 (owner instruction for the columns; Team A default for the rest).**
+  Columns `tick`, input-record index, `state_hash`, and `combat_hash` or `-`.
+  Line 1 carries a format version and both stream magics, so that a change of
+  coverage cannot be compared by mistake. `-` replaces the no-combat constant
+  because it says what the row means, and an active combat can never be mistaken
+  for none.
+- **D-44 (owner instruction for failing at the first differing row; Team A
+  default for the report text and the check order).** The exact report texts are
+  fixed so that a test can compare them. A row after a divergence is expected to
+  differ, so counting differences would say nothing. `--checkpoints-expect`
+  compares while the replay runs, so it stops at the step that diverged.
+- **D-45 (Team A default).** The flags are `--checkpoints-out` and
+  `--checkpoints-expect`, on `vault-platform` for replays and on `asset-audit`
+  for the driver. Status 2 is the status `asset-audit` already gives a failed
+  trace (section 3.7).
+- **D-46 (owner instruction).** This stream is the lockstep synchronization unit
+  for future multiplayer (SPEC-025). The two limits named in section 3.10 are
+  Team A's, so that SPEC-025 does not assume more of this hash than section 2.1
+  and section 3.1 promise.
+- **D-47 (Team A default).** Revision 4 keeps `VSH1` and section 3.1's coverage.
+  Covering world-map travel would need a new magic and would re-record every
+  golden that holds a state hash, which the brief does not ask for. Scenario (b)
+  covers that gap with its own final row instead, and through the encounter
+  draws.
+- **D-48 (Team A default).** Scenarios (a) and (b) are input logs, the replay
+  path the brief names. Scenario (c) uses the section 3.7 driver, because a
+  log-only attack does not start a fight on this corpus (section 5.10), and the
+  driver's combat is the one T11's golden already fixes. A log-driven fight
+  needs a spec revision and a reason why the click spends no AP. `input_index`
+  counts the driver's commands, so that the format stays the same.
+- **D-49 (Team A default).** The three goldens are recorded by the implementer
+  and then frozen, as D-24 did for the seeded combat golden, because Team A cannot
+  compute them by hand. Team A's black-box runs only showed that each scenario
+  can run. No output of those runs is committed as a golden. Each assertion of
+  section 3.11 is a stated expectation, and the stop rule applies if one fails.
+
 ## 7. Clean-Room Verification Checklist
 
 - [x] Zero C/C++ code snippets or struct definitions included.
@@ -1531,3 +1994,17 @@ the choices below are Team A's.
 - [x] Revision 3 keeps the ingestion rule: no implementation-source path, no
   40-character hexadecimal string, and no code listing. No engine Rust code
   and no fixture-builder code was read.
+- [x] Revision 4: a throwaway script wrote `rev3/checkpoints-example.tsv` from
+  `rev2/hashes.tsv`, and `rev3/compare-cases.tsv` and the two logs. A second,
+  separate script read only the written files. It checked the example's bytes
+  and traced every hash back to `rev2/hashes.tsv`. It applied each of the 15
+  changes to a copy and ran its own comparison, which reproduced every verdict
+  and report (the first run of this check found an off-by-one in the cases'
+  line numbers, which was fixed in the generator). It also checked each log's
+  record count, its consecutive command identifiers, its clock and its record
+  kinds. Replaying the committed log bytes gave the same digests as the runs
+  that measured each phase.
+- [x] Revision 4 keeps the ingestion rule: no implementation-source path, no
+  40-character hexadecimal string, and no code listing. No engine Rust code
+  and no fixture-builder code was read. The black-box runs are disclosed in the
+  provenance, and their findings are labelled "measured by Team A".
