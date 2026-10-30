@@ -6,16 +6,15 @@
 //! SPEC-008's version 1 archive ([`crate::DatArchive`]) is unchanged; the
 //! game profile selects which format a data file is read as.
 use crate::{
-    MAX_ASSET_BYTES, ParseError,
+    ByteSource, MAX_ASSET_BYTES, ParseError, ServedBy,
     dat::ArchiveSource,
     inflate::zlib_decompress,
     vfs::{Vfs, VfsError, VfsPath},
 };
 use std::{
     collections::BTreeMap,
-    fs::File,
     io::{Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex, PoisonError},
 };
 
@@ -47,7 +46,7 @@ pub struct Dat2Entry {
 /// Where member bytes come from.
 #[derive(Clone)]
 enum Source {
-    Memory(Arc<Vec<u8>>),
+    Memory(ByteSource),
     Stream(Arc<Mutex<Box<dyn ArchiveSource>>>),
 }
 
@@ -73,21 +72,32 @@ pub struct Dat2Archive {
 impl Dat2Archive {
     /// An archive held in memory.
     pub fn parse(bytes: Vec<u8>) -> Result<Self, ParseError> {
+        let source = ByteSource::new(bytes).map_err(|failure| error(0, failure.to_string()))?;
+        Self::from_bytes(source)
+    }
+    /// SPEC-023 §3.1: an archive over a byte source, reading only its
+    /// footer and tree. Refusals and members match a file of the same
+    /// bytes; the source's length is the file's.
+    pub fn from_bytes(source: ByteSource) -> Result<Self, ParseError> {
+        let bytes = source.as_slice();
         let length = bytes.len() as u64;
         let footer = bytes
             .get(bytes.len().saturating_sub(8)..)
             .filter(|footer| footer.len() == 8)
             .ok_or_else(|| error(0, "shorter than its 8-byte footer"))?;
         let (start, size) = Self::footer(footer, length)?;
-        let tree = &bytes[start as usize..(start + size) as usize];
-        let entries = Self::tree(tree, start)?;
-        Self::new(entries, Source::Memory(Arc::new(bytes)))
+        let tree = source
+            .slice(start, size)
+            .ok_or_else(|| error(start, "the tree ends early"))?;
+        let entries = Self::tree(tree.as_slice(), start)?;
+        Self::new(entries, Source::Memory(source))
     }
     /// Open an archive file, reading only its footer and tree; members are
     /// read on demand.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, ParseError> {
+    #[cfg(feature = "host-fs")]
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, ParseError> {
         let path = path.as_ref();
-        let file = File::open(path)
+        let file = std::fs::File::open(path)
             .map_err(|failure| error(0, format!("{}: {failure}", path.display())))?;
         Self::from_reader(file)
     }
@@ -251,8 +261,9 @@ impl Dat2Archive {
         let size = entry.packed_size as usize;
         let stored = match &self.source {
             Source::Memory(bytes) => bytes
-                .get(at as usize..at as usize + size)
+                .slice(at, u64::from(entry.packed_size))
                 .ok_or_else(|| error(at, "the member lies past the archive"))?
+                .as_slice()
                 .to_vec(),
             // Every read seeks first, so a poisoned lock holds no state that
             // matters.
@@ -316,7 +327,7 @@ impl Vfs for Dat2Archive {
 /// an absent file falls through to the next source.
 #[derive(Debug, Clone)]
 pub struct Dat2Provider {
-    loose: Option<Arc<crate::LocalDirProvider>>,
+    loose: Option<Arc<dyn Vfs>>,
     /// Highest first: `patch000.dat`, then `MASTER.DAT`.
     master: Vec<Arc<Dat2Archive>>,
     critter: Option<Arc<Dat2Archive>>,
@@ -327,7 +338,7 @@ impl Dat2Provider {
     /// The databases: `master` lowest first (`MASTER.DAT`, then an optional
     /// `patch000.dat` above it).
     pub fn new(
-        loose: Option<Arc<crate::LocalDirProvider>>,
+        loose: Option<Arc<dyn Vfs>>,
         master: Vec<Arc<Dat2Archive>>,
         critter: Option<Arc<Dat2Archive>>,
     ) -> Self {
@@ -362,9 +373,10 @@ impl Dat2Provider {
     }
     /// SPEC-018 §1: `patch000.dat` beside `master`, its name compared
     /// case-insensitively.
-    pub fn find_patch(master: &Path) -> Option<PathBuf> {
+    #[cfg(feature = "host-fs")]
+    pub fn find_patch(master: &std::path::Path) -> Option<PathBuf> {
         let dir = master.parent().filter(|dir| !dir.as_os_str().is_empty());
-        let dir = dir.unwrap_or(Path::new("."));
+        let dir = dir.unwrap_or(std::path::Path::new("."));
         std::fs::read_dir(dir)
             .ok()?
             .filter_map(Result::ok)
@@ -377,6 +389,41 @@ impl Dat2Provider {
                         .is_some_and(|name| name.eq_ignore_ascii_case("patch000.dat"))
             })
     }
+    /// A read with the part that served it (SPEC-023 §3.2 rule 5).
+    pub(crate) fn read_served(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<(Vec<u8>, ServedBy), VfsError> {
+        let normalized = VfsPath::new(path)?;
+        if let Some(loose) = &self.loose {
+            match loose.read_bounded(normalized.as_str(), max_bytes) {
+                Err(VfsError::NotFound(_)) => {}
+                result => return result.map(|bytes| (bytes, ServedBy::Loose)),
+            }
+        }
+        let critter = normalized.as_str().starts_with("art/critters/");
+        let sources: Vec<&Arc<Dat2Archive>> = if critter {
+            self.critter.iter().collect()
+        } else {
+            self.master.iter().collect()
+        };
+        let patched = self.master.len() > 1;
+        for (index, archive) in sources.into_iter().enumerate() {
+            match archive.read_bounded(normalized.as_str(), max_bytes) {
+                Err(VfsError::NotFound(_)) => {}
+                result => {
+                    let part = match (critter, patched && index == 0) {
+                        (true, _) => ServedBy::Critter,
+                        (false, true) => ServedBy::Patch,
+                        (false, false) => ServedBy::Master,
+                    };
+                    return result.map(|bytes| (bytes, part));
+                }
+            }
+        }
+        Err(VfsError::NotFound(normalized))
+    }
 }
 
 impl Vfs for Dat2Provider {
@@ -384,33 +431,13 @@ impl Vfs for Dat2Provider {
         self.read_bounded(path, usize::MAX)
     }
     fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
-        let normalized = VfsPath::new(path)?;
-        let absent =
-            |result: &Result<Vec<u8>, VfsError>| matches!(result, Err(VfsError::NotFound(_)));
-        if let Some(loose) = &self.loose {
-            let result = loose.read_bounded(normalized.as_str(), max_bytes);
-            if !absent(&result) {
-                return result;
-            }
-        }
-        let sources: Vec<&Arc<Dat2Archive>> = if normalized.as_str().starts_with("art/critters/") {
-            self.critter.iter().collect()
-        } else {
-            self.master.iter().collect()
-        };
-        for archive in sources {
-            let result = archive.read_bounded(normalized.as_str(), max_bytes);
-            if !absent(&result) {
-                return result;
-            }
-        }
-        Err(VfsError::NotFound(normalized))
+        self.read_served(path, max_bytes).map(|(bytes, _)| bytes)
     }
     fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {
         Box::new(self.files.iter())
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-fs"))]
 #[path = "dat2_tests.rs"]
 mod tests;

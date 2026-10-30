@@ -1,3 +1,5 @@
+#![cfg(feature = "host-fs")]
+
 use std::{fs, path::Path};
 use vault_formats::{LocalDirProvider, Vfs, VfsError, VfsPath};
 

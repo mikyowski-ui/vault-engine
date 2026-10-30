@@ -5,10 +5,13 @@
 //! - [`maps`], [`city`], [`worldmap`], [`party`]: the four required tables
 //!   (§4.2-§4.5);
 //! - [`lines`]: §4.6 the line tables; [`elevators`]: §4.9;
-//! - [`install`]: §2's archive discovery, mounting and required members;
+//! - [`install`]: §2.2's required members; [`folder`]: §2.1's archive
+//!   discovery and mounting;
 //! - [`save`]: §7's world-map and party components.
 pub mod city;
 pub mod elevators;
+#[cfg(feature = "host-fs")]
+pub mod folder;
 pub mod install;
 pub mod lines;
 pub mod maps;
@@ -17,7 +20,9 @@ pub mod save;
 pub mod text;
 pub mod worldmap;
 
-pub use install::{Fallout2Install, OpenedInstall, REQUIRED_MEMBERS, missing_members};
+#[cfg(feature = "host-fs")]
+pub use folder::{Fallout2Install, OpenedInstall};
+pub use install::{REQUIRED_MEMBERS, missing_members};
 pub use text::{Diagnostic, Diagnostics, TableError};
 
 use std::collections::BTreeMap;
@@ -117,5 +122,5 @@ impl Fallout2Tables {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-fs"))]
 mod tests;

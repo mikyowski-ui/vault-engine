@@ -30,6 +30,8 @@ pub mod rix;
 pub mod savegame;
 pub mod screenshot;
 pub mod sfx;
+#[cfg(feature = "host-fs")]
+pub mod staged;
 pub mod sve;
 pub mod vfs;
 
@@ -72,9 +74,12 @@ pub use palette::Palette;
 pub use pro::Prototype;
 pub use pro_catalog::LocalPrototypeCatalog;
 pub use vfs::{
-    LayerEntry, LayeredVfs, LoadOrderPolicy, LocalDirProvider, ModLayer, PrefixMount, Vfs,
-    VfsError, VfsPath, parse_load_order,
+    ByteSource, DropError, DropIgnored, DropReport, LayerEntry, LayeredVfs, LoadOrderPolicy,
+    MemoryDir, MemoryMount, MemoryProvider, ModLayer, ServedBy, Vfs, VfsError, VfsPath,
+    classify_drop, parse_load_order,
 };
+#[cfg(feature = "host-fs")]
+pub use vfs::{LocalDirProvider, PrefixMount};
 
 /// Validate a supported asset. Unknown extensions return `None`.
 /// Unknown LST consumers receive structural line parsing without invented ID rules.
@@ -108,7 +113,7 @@ pub fn validate_asset(path: &VfsPath, bytes: &[u8]) -> Option<Result<(), ParseEr
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-fs"))]
 mod tests;
 
 #[cfg(test)]
@@ -117,13 +122,13 @@ mod acm_tests;
 mod ai_tests;
 #[cfg(test)]
 mod automap_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "host-fs"))]
 mod dat_tests;
 #[cfg(test)]
 mod fid_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "host-fs"))]
 mod filter_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "host-fs"))]
 mod lip_tests;
 #[cfg(test)]
 mod movie_tests;
@@ -135,7 +140,7 @@ mod save_tests;
 mod sfx_tests;
 #[cfg(test)]
 mod state_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "host-fs"))]
 mod world_tests;
 
 #[cfg(test)]

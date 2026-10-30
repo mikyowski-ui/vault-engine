@@ -672,6 +672,7 @@ impl PreviewArgs {
                 DatArchive::open(path).map_err(|error| format!("{}: {error}", path.display()))?,
             ))
         };
+        let loose = loose.map(|root| root as Arc<dyn Vfs>);
         let master = Database {
             loose: loose.clone(),
             archive: Some(archive(master)?),

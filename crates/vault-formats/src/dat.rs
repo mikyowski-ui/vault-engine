@@ -4,13 +4,11 @@
 //! An archive opened from a file or other seekable stream reads only its
 //! directory tables up front; each extraction seeks to one member and reads
 //! just its stored bytes.
-use crate::{MAX_ASSET_BYTES, ParseError, Vfs, VfsError, VfsPath};
+use crate::{ByteSource, MAX_ASSET_BYTES, ParseError, ServedBy, Vfs, VfsError, VfsPath};
 use std::{
     collections::BTreeMap,
     fmt,
-    fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom},
-    path::Path,
     sync::{Arc, Mutex, PoisonError},
 };
 
@@ -80,7 +78,7 @@ impl<T: Read + Seek + Send> ArchiveSource for T {}
 #[derive(Clone)]
 enum Payloads {
     /// The whole archive, already in memory.
-    Memory(Arc<Vec<u8>>),
+    Memory(ByteSource),
     /// A shared stream; extractions seek to one member at a time.
     Stream(Arc<Mutex<Box<dyn ArchiveSource>>>),
 }
@@ -279,7 +277,7 @@ impl DatEntry {
                 Ok(output)
             }
             Storage::Blocks => decode_blocks(body, length).map_err(|mut failure| {
-                failure.offset += start;
+                failure.offset = failure.offset.saturating_add(start);
                 failure
             }),
         }
@@ -289,7 +287,8 @@ impl DatEntry {
     pub fn read_from(&self, archive: &mut (impl Read + Seek)) -> Result<Vec<u8>, ParseError> {
         let start = self.offset as usize;
         let failed = |error: io::Error| ParseError::new("DAT", start, error.to_string());
-        let stored = self.stored_len()?;
+        // In `decode`'s order: a member refused both ways gives one refusal
+        // from a file and from a byte source (SPEC-023 §3.1 rule 2).
         if self.length as usize > MAX_ASSET_BYTES {
             return Err(ParseError::new(
                 "DAT",
@@ -297,6 +296,7 @@ impl DatEntry {
                 "extracted file exceeds 64 MiB limit",
             ));
         }
+        let stored = self.stored_len()?;
         archive
             .seek(SeekFrom::Start(u64::from(self.offset)))
             .map_err(failed)?;
@@ -315,14 +315,23 @@ impl DatArchive {
     /// Archives are not bounded by the 64 MiB per-asset limit, but each
     /// extracted file is.
     pub fn parse(bytes: Vec<u8>) -> Result<Self, ParseError> {
-        let tables = DatTables::read(bytes.as_slice())?;
-        Ok(Self::new(tables, Payloads::Memory(Arc::new(bytes))))
+        let source =
+            ByteSource::new(bytes).map_err(|error| ParseError::new("DAT", 0, error.to_string()))?;
+        Self::from_bytes(source)
+    }
+    /// SPEC-023 §3.1: an archive over a byte source, reading only its
+    /// directory tables. Refusals and members match a file of the same
+    /// bytes; the source's length is the file's.
+    pub fn from_bytes(source: ByteSource) -> Result<Self, ParseError> {
+        let tables = DatTables::read(source.as_slice())?;
+        Ok(Self::new(tables, Payloads::Memory(source)))
     }
     /// Open an archive file, reading only its directory tables. Members are
     /// read and decoded on demand by `extract`.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, ParseError> {
+    #[cfg(feature = "host-fs")]
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, ParseError> {
         let path = path.as_ref();
-        let file = File::open(path)
+        let file = std::fs::File::open(path)
             .map_err(|error| ParseError::new("DAT", 0, format!("{}: {error}", path.display())))?;
         Self::from_reader(file)
     }
@@ -380,9 +389,12 @@ impl DatArchive {
     /// Extract a file's exact logical bytes.
     pub fn extract(&self, entry: &DatEntry) -> Result<Vec<u8>, ParseError> {
         match &self.payloads {
-            Payloads::Memory(bytes) => {
-                entry.decode(bytes.get(entry.offset as usize..).unwrap_or_default())
-            }
+            Payloads::Memory(bytes) => entry.decode(
+                bytes
+                    .as_slice()
+                    .get(entry.offset as usize..)
+                    .unwrap_or_default(),
+            ),
             // Every read seeks first, so a panic mid-read leaves no state
             // that matters and the poisoned lock is safe to reuse.
             Payloads::Stream(source) => {
@@ -511,7 +523,7 @@ pub fn decode_blocks(body: &[u8], length: usize) -> Result<Vec<u8>, ParseError> 
 /// There is no fallback to another database.
 #[derive(Debug, Clone, Default)]
 pub struct Database {
-    pub loose: Option<std::sync::Arc<crate::LocalDirProvider>>,
+    pub loose: Option<Arc<dyn Vfs>>,
     pub archive: Option<std::sync::Arc<DatArchive>>,
 }
 impl Database {
@@ -523,10 +535,15 @@ impl Database {
     /// member is rejected from its table entry's logical length before any
     /// payload is read.
     pub fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
+        self.read_loose_first(path, max_bytes)
+            .map(|(bytes, _)| bytes)
+    }
+    /// [`Self::read_bounded`], and whether the loose root served it.
+    fn read_loose_first(&self, path: &str, max_bytes: usize) -> Result<(Vec<u8>, bool), VfsError> {
         let normalized = VfsPath::new(path)?;
         if let Some(loose) = &self.loose {
             match loose.read_bounded(normalized.as_str(), max_bytes) {
-                Ok(bytes) => return Ok(bytes),
+                Ok(bytes) => return Ok((bytes, true)),
                 // SPEC-008 §3.2: only an absent loose file falls through to
                 // the archive; a collision, link, oversize or I/O failure on
                 // the loose root is reported, not masked by the archive copy.
@@ -550,7 +567,21 @@ impl Database {
         }
         archive
             .extract(entry)
+            .map(|bytes| (bytes, false))
             .map_err(|error| VfsError::Archive(error.to_string()))
+    }
+    /// SPEC-018 §2.2: whether this database as mounted holds `path`.
+    pub fn holds(&self, path: &str) -> bool {
+        let Ok(path) = VfsPath::new(path) else {
+            return false;
+        };
+        let in_loose = |loose: &Arc<dyn Vfs>| loose.files().any(|file| *file == path);
+        let request = path.as_str().replace('/', "\\");
+        self.loose.as_ref().is_some_and(in_loose)
+            || self
+                .archive
+                .as_ref()
+                .is_some_and(|archive| archive.entry(request.as_bytes()).is_some())
     }
 }
 
@@ -590,6 +621,21 @@ impl DatProvider {
     pub fn read_critter(&self, path: &str) -> Result<Vec<u8>, VfsError> {
         self.critter.read(path)
     }
+    /// A read with the part that served it (SPEC-023 §3.2 rule 5).
+    pub(crate) fn read_served(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<(Vec<u8>, ServedBy), VfsError> {
+        let normalized = VfsPath::new(path)?;
+        let (database, archive) = if normalized.as_str().starts_with("art/critters/") {
+            (&self.critter, ServedBy::Critter)
+        } else {
+            (&self.master, ServedBy::Master)
+        };
+        let (bytes, loose) = database.read_loose_first(normalized.as_str(), max_bytes)?;
+        Ok((bytes, if loose { ServedBy::Loose } else { archive }))
+    }
 }
 impl Vfs for DatProvider {
     /// Ordinary opens use the master database only. Critter art (paths under
@@ -598,12 +644,7 @@ impl Vfs for DatProvider {
         self.read_bounded(path, usize::MAX)
     }
     fn read_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VfsError> {
-        let normalized = VfsPath::new(path)?;
-        if normalized.as_str().starts_with("art/critters/") {
-            self.critter.read_bounded(normalized.as_str(), max_bytes)
-        } else {
-            self.master.read_bounded(normalized.as_str(), max_bytes)
-        }
+        self.read_served(path, max_bytes).map(|(bytes, _)| bytes)
     }
     fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {
         Box::new(self.files.iter())

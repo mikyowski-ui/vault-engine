@@ -44,7 +44,9 @@
 //! three array tables. Unknown keys and tables are errors (a misspelt
 //! setting would otherwise do nothing).
 use crate::vfs::{Vfs, VfsError, VfsPath, strip_comment, toml_string};
-use std::{collections::BTreeMap, fmt, io, path::Path};
+#[cfg(feature = "host-fs")]
+use std::io;
+use std::{collections::BTreeMap, fmt};
 
 /// The manifest's file name at a layer's root.
 pub const MANIFEST: &str = "vault-mod.toml";
@@ -742,8 +744,9 @@ pub fn apply_patch(text: &str, patch: &str) -> Result<String, String> {
 /// VFS path, which must be relative and canonical-safe, and its bytes) and
 /// `README.txt`. `output` must not exist or be an empty directory: an
 /// export never overwrites.
+#[cfg(feature = "host-fs")]
 pub fn write_mod_folder(
-    output: &Path,
+    output: &std::path::Path,
     manifest: &ModManifest,
     files: &[(String, Vec<u8>)],
 ) -> io::Result<()> {
@@ -782,7 +785,7 @@ pub fn write_mod_folder(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-fs"))]
 mod tests {
     use super::*;
 

@@ -6,11 +6,17 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+default = ["host-fs"]
+# Save slots in a folder and the file-backed providers (SPEC-023 section 3.6).
+host-fs = ["vault-formats/host-fs"]
+
 [dependencies]
 serde.workspace = true
 slotmap.workspace = true
 thiserror.workspace = true
-vault-formats.workspace = true
+# By path: edition 2024 refuses `default-features = false` over `workspace = true`.
+vault-formats = { path = "../vault-formats", default-features = false }
 vault-vm.workspace = true
 
 [dev-dependencies]
