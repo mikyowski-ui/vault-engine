@@ -1,5 +1,5 @@
 //! SPEC-022 the instanced path's frame model: the frame layers and the
-//! 64-bit sort key (§2.1), the sprite instance and its six draw modes
+//! 64-bit sort key (§2.1), the sprite instance and its seven draw modes
 //! (§2.2, §3.6), the batch plan (§3.7), the hex light buffer (§2.3, §3.8),
 //! the layer uniform block (§2.4), and a CPU executor that draws a plan
 //! exactly as the GPU executor ([`super::gpu`]) does.
@@ -79,8 +79,8 @@ pub const LIST_INDEX_LIMIT: u32 = 1 << 29;
 pub const HEXES: u32 = 40000;
 /// The square positions and ranks, 0 to 9999.
 pub const SQUARES: u32 = 10000;
-/// The outline-list positions, 0 to 99.
-pub const OUTLINES: u32 = 100;
+/// The roof layer's primary after every square rank: the enhanced shroud.
+pub const SHROUD_PRIMARY: u32 = SQUARES;
 
 /// SPEC-022 §2.1 the 64-bit sort key: layer in bits 61-63, primary in
 /// bits 32-60, secondary in bits 0-31. Instances draw in ascending key
@@ -129,10 +129,10 @@ impl SortKey {
                 }
             }
             FrameLayer::Roof => {
-                if primary >= SQUARES {
+                if primary > SHROUD_PRIMARY {
                     return domain("square rank", u64::from(primary));
                 }
-                if secondary > 4 {
+                if primary < SHROUD_PRIMARY && secondary > 4 {
                     return domain("part", u64::from(secondary));
                 }
             }
@@ -142,9 +142,6 @@ impl SortKey {
                 }
                 if part > 1 {
                     return domain("outline part", u64::from(part));
-                }
-                if secondary >> 3 >= OUTLINES {
-                    return domain("outline-list position", u64::from(secondary >> 3));
                 }
             }
             FrameLayer::FloatingText | FrameLayer::NoHex => {
@@ -179,10 +176,21 @@ impl SortKey {
     }
     /// A roof square of rank `rank`, part 0 to 4.
     pub fn roof(rank: u32, part: u8) -> Result<Self, InstanceError> {
+        if rank >= SQUARES {
+            return Err(InstanceError::Domain {
+                field: "square rank",
+                value: u64::from(rank),
+            });
+        }
         Self::new(FrameLayer::Roof as u8, rank, u32::from(part))
     }
-    /// An outline at outline-list position `position`: part 0 the ring,
-    /// part 1 the wrap column.
+    /// The enhanced shroud's draw of rank `rank` in its refresh: after every
+    /// roof square, before every outline.
+    pub fn shroud(rank: u32) -> Result<Self, InstanceError> {
+        Self::new(FrameLayer::Roof as u8, SHROUD_PRIMARY, rank)
+    }
+    /// An outline at running position `position` (a list entry, then the
+    /// ground-item highlights): part 0 the ring, part 1 the wrap column.
     pub fn outline(position: u32, part: u8) -> Result<Self, InstanceError> {
         Self::new(
             FrameLayer::Outline as u8,
@@ -228,11 +236,11 @@ impl SortKey {
     }
 }
 
-/// SPEC-022 §2.2 the six draw modes.
+/// SPEC-022 §2.2 the seven draw modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum DrawMode {
-    /// `s`: opaque outlines, floating text.
+    /// `s`: opaque outlines, floating text, an unlit scene's items.
     Plain = 0,
     /// `lit(s, L)`: objects, roofs, uniform floor squares.
     Lit = 1,
@@ -244,12 +252,17 @@ pub enum DrawMode {
     Egg = 4,
     /// `F_t[g][D]` applied once per paint: translucent outlines.
     OutlineBlend = 5,
+    /// `M[s - 1][D]`, with M the remap table: the enhanced shroud.
+    Remap = 6,
 }
 
 impl DrawMode {
     /// Whether the mode reads the canvas pixel under it (§3.7).
     pub fn reads_canvas(self) -> bool {
-        matches!(self, Self::Translucent | Self::Egg | Self::OutlineBlend)
+        matches!(
+            self,
+            Self::Translucent | Self::Egg | Self::OutlineBlend | Self::Remap
+        )
     }
     /// The mode of a code, if any.
     pub fn from_code(code: u8) -> Result<Self, InstanceError> {
@@ -260,6 +273,7 @@ impl DrawMode {
             3 => Self::Translucent,
             4 => Self::Egg,
             5 => Self::OutlineBlend,
+            6 => Self::Remap,
             _ => return Err(InstanceError::UnknownMode(code)),
         })
     }
@@ -317,8 +331,8 @@ pub enum InstanceError {
     ModeLight { mode: DrawMode, light: LightSource },
     #[error("a level image holds level {0}, above 128")]
     LevelRange(u8),
-    #[error("a gray level {0} is above 7")]
-    GrayRange(u8),
+    #[error("a remap source value {0} is above its table")]
+    RemapRange(u8),
     #[error("blend table {0} is outside 0-4")]
     BlendTable(u8),
     #[error("an instance's rectangle is empty or reads outside its image")]
@@ -333,8 +347,8 @@ pub enum InstanceError {
     Upload(String),
     #[error("no draw mode expresses {0}")]
     Unexpressible(&'static str),
-    #[error("the reference roof peek differs from SPEC-022 §3.10")]
-    PeekMismatch,
+    #[error("a peek cap or clamp changed a value (SPEC-022 §3.10)")]
+    PeekBound,
     #[error("no GPU adapter or device: {0}")]
     NoDevice(String),
     #[error("the GPU device is lost")]
@@ -351,13 +365,13 @@ impl InstanceError {
             Self::UnknownMode(_) => "unknown mode",
             Self::UnknownLightSource(_) | Self::ModeLight { .. } => "unknown light source",
             Self::LevelRange(_) => "level range",
-            Self::GrayRange(_) | Self::BlendTable(_) => "table range",
+            Self::RemapRange(_) | Self::BlendTable(_) => "table range",
             Self::SourceRange | Self::MissingImage(_) => "source range",
             Self::TextureLimit(..) => "texture limit",
             Self::AtlasFull => "atlas full",
             Self::Upload(_) => "upload error",
             Self::Unexpressible(_) => "unexpressible draw",
-            Self::PeekMismatch => "peek mismatch",
+            Self::PeekBound => "peek bound",
             Self::NoDevice(_) => "no device",
             Self::DeviceLost => "device lost",
         }
@@ -365,7 +379,7 @@ impl InstanceError {
 }
 
 /// An 8-bit image an instance reads: a sprite frame, a ring image, a text
-/// box or a level image.
+/// box, a level image, a shroud image or a remap table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpriteImage<'a> {
     pub width: u32,
@@ -437,7 +451,8 @@ pub struct SpriteInstance {
     pub image: usize,
     pub src: [u32; 2],
     /// For [`LightSource::LevelImage`]: the level image and its pixel at
-    /// `dst`.
+    /// `dst`. For [`DrawMode::Remap`]: the remap table and its first row's
+    /// first entry.
     pub level: Option<(usize, [u32; 2])>,
     /// The scissor rectangle.
     pub clip: Rect,
@@ -476,7 +491,7 @@ impl SpriteInstance {
 pub enum BatchKind {
     /// Modes 0-2: one draw, later instances win.
     Overwrite,
-    /// Modes 3-5: D comes from a snapshot; the clipped rectangles are
+    /// Modes 3-6: D comes from a snapshot; the clipped rectangles are
     /// disjoint.
     Read,
 }
@@ -827,7 +842,7 @@ impl FrameInputs<'_> {
         for instance in instances {
             FrameLayer::from_index(instance.key.layer())?;
             let allowed = match instance.mode {
-                DrawMode::Plain | DrawMode::OutlineBlend => {
+                DrawMode::Plain | DrawMode::OutlineBlend | DrawMode::Remap => {
                     matches!(instance.light, LightSource::None)
                 }
                 DrawMode::Lit => matches!(
@@ -838,7 +853,10 @@ impl FrameInputs<'_> {
                 DrawMode::Translucent => {
                     matches!(instance.light, LightSource::Hex | LightSource::Fixed)
                 }
-                DrawMode::Egg => matches!(instance.light, LightSource::Hex | LightSource::Ambient),
+                DrawMode::Egg => matches!(
+                    instance.light,
+                    LightSource::Hex | LightSource::Ambient | LightSource::None
+                ),
             };
             if !allowed {
                 return Err(InstanceError::ModeLight {
@@ -877,19 +895,24 @@ impl FrameInputs<'_> {
                     return Err(InstanceError::LevelRange(high));
                 }
             }
-            if instance.mode == DrawMode::Translucent {
-                // The blend tables have 8 rows: a source whose gray level is
-                // above 7 has no entry, so the refresh is refused.
-                let glass = usize::from(instance.blend_table() == 1);
+            if instance.mode == DrawMode::Remap {
+                let (table, at) = instance.level.ok_or(InstanceError::SourceRange)?;
+                let table = self.image(table)?;
+                if at[0].checked_add(256).is_none_or(|end| end > table.width)
+                    || at[1] > table.height
+                {
+                    return Err(InstanceError::SourceRange);
+                }
+                let rows = table.height - at[1];
                 let source = (0..instance.size[1]).flat_map(|v| {
                     (0..instance.size[0])
                         .map(move |u| image.at(instance.src[0] + u, instance.src[1] + v))
                 });
-                if let Some(gray) = source
-                    .map(|s| self.tables.gray[glass][usize::from(s)])
-                    .find(|gray| *gray > 7)
+                if let Some(high) = source
+                    .into_iter()
+                    .find(|code| u32::from(*code) > rows.min(255))
                 {
-                    return Err(InstanceError::GrayRange(gray));
+                    return Err(InstanceError::RemapRange(high));
                 }
             }
         }
@@ -965,7 +988,7 @@ fn shade(
     let tables = inputs.tables;
     let exempt = instance.flags & EXEMPT != 0;
     let lit = |s: u8, level: u8| {
-        if exempt && s >= 229 {
+        if instance.light == LightSource::None || (exempt && s >= 229) {
             s
         } else {
             tables.intensity(s, level)
@@ -980,7 +1003,7 @@ fn shade(
         }
         DrawMode::Translucent => {
             let t = usize::from(instance.blend_table());
-            let gray = tables.gray[usize::from(t == 1)][usize::from(s)];
+            let gray = tables.gray[usize::from(t == 1)][usize::from(s)].min(7);
             let blended = tables.blends[t][usize::from(gray)][usize::from(destination())];
             tables.intensity(blended, level)
         }
@@ -1012,6 +1035,11 @@ fn shade(
             let table = &tables.blends[usize::from(instance.blend_table())];
             let row = &table[usize::from(instance.gray())];
             (0..s).fold(destination(), |r, _| row[usize::from(r)])
+        }
+        DrawMode::Remap => {
+            let (table, at) = instance.level.expect("validated");
+            let row = at[1] + u32::from(s) - 1;
+            inputs.images[table].at(at[0] + u32::from(destination()), row)
         }
     })
 }

@@ -66,6 +66,10 @@ enum Task {
         /// The scratch folder for the gallery's inputs; it is emptied first.
         #[arg(long, value_name = "PATH", default_value = "target/gallery")]
         stage: PathBuf,
+        /// The world canvas's render path (SPEC-022 §3.1): `reference`, the
+        /// default, or `instanced`.
+        #[arg(long, value_name = "PATH")]
+        render_path: Option<String>,
     },
 }
 
@@ -116,7 +120,11 @@ fn main() -> ExitCode {
             viewport,
             zoom,
         } => export_mod(&name, &output, &from, viewport, zoom),
-        Task::CaptureGallery { output, stage } => capture_gallery(&output, &stage),
+        Task::CaptureGallery {
+            output,
+            stage,
+            render_path,
+        } => capture_gallery(&output, &stage, render_path.as_deref()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -172,7 +180,11 @@ const STAGE_MARK: &str = ".vault-gallery-stage";
 
 /// Stage the gallery's inputs in `stage` (relative paths are the
 /// workspace's), then run the shell's `--capture-gallery` into `output`.
-fn capture_gallery(output: &Path, stage: &Path) -> Result<(), Box<dyn Error>> {
+fn capture_gallery(
+    output: &Path,
+    stage: &Path,
+    render_path: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
     let root = root()?;
     let output = root.join(output);
     let stage = root.join(stage);
@@ -200,7 +212,8 @@ fn capture_gallery(output: &Path, stage: &Path) -> Result<(), Box<dyn Error>> {
     dat::fallout1_install(&fallout1);
     // SPEC-018 §2.2's required members, as the launcher checks them.
     dat2::launcher_install(&fallout2, &vault_formats::fallout2::REQUIRED_MEMBERS);
-    let status = Command::new(cargo())
+    let mut command = Command::new(cargo());
+    command
         .args([
             "run",
             "--quiet",
@@ -215,10 +228,12 @@ fn capture_gallery(output: &Path, stage: &Path) -> Result<(), Box<dyn Error>> {
         .arg("--capture-gallery")
         .arg(&output)
         .arg("--capture-stage")
-        .arg(&stage)
-        // The launcher's picture names the installs relative to the stage.
-        .current_dir(&stage)
-        .status()?;
+        .arg(&stage);
+    if let Some(path) = render_path {
+        command.args(["--render-path", path]);
+    }
+    // The launcher's picture names the installs relative to the stage.
+    let status = command.current_dir(&stage).status()?;
     if !status.success() {
         return Err(format!("the gallery capture failed: {status}").into());
     }

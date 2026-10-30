@@ -129,7 +129,7 @@ fn level_of(item: Instance) -> u32 {
 }
 
 fn lit(item: Instance, s: u32, level: u32) -> u32 {
-    if (item.flags & EXEMPT) != 0u && s >= 229u {
+    if item.light == 0u || ((item.flags & EXEMPT) != 0u && s >= 229u) {
         return s;
     }
     return intensity(s, level);
@@ -140,15 +140,22 @@ fn peek_cuts(pixel: vec2<i32>) -> bool {
     let world = pixel - uniforms.offset;
     let wx = u32(((world.x % 4) + 4) % 4);
     let wy = u32(((world.y % 4) + 4) % 4);
-    let t = BAYER[wy * 4u + wx];
-    let dx = 16 * pixel.x + 8 - uniforms.peek_center.x;
-    let dy = 16 * pixel.y + 8 - uniforms.peek_center.y;
+    let b = BAYER[wy * 4u + wx];
+    let dx = pixel.x - uniforms.peek_center.x;
+    let dy = pixel.y - uniforms.peek_center.y;
     let outer = i32(uniforms.peek_outer);
     if abs(dx) > outer || abs(dy) > outer {
         return false;
     }
-    let threshold = uniforms.thresholds[t / 4u][t % 4u];
-    return u32(dx * dx + dy * dy) < threshold;
+    let d2 = u32(dx * dx + dy * dy);
+    let inner = uniforms.peek_inner;
+    if d2 <= inner * inner {
+        return true;
+    }
+    if d2 > u32(outer) * u32(outer) {
+        return false;
+    }
+    return 256u * d2 < uniforms.thresholds[b / 4u][b % 4u];
 }
 
 @fragment
@@ -185,7 +192,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<u32> {
             if t == 1u {
                 gray_row = 553u;
             }
-            let gray = table(s, gray_row);
+            let gray = min(table(s, gray_row), 7u);
             let d = textureLoad(snapshot, pixel, 0).r;
             let blended = table(d, 512u + 8u * t + gray);
             result = intensity(blended, level);
@@ -217,6 +224,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<u32> {
                 r = table(r, 512u + 8u * t + g);
             }
             result = r;
+        }
+        case 6u: {
+            let d = textureLoad(snapshot, pixel, 0).r;
+            result = textureLoad(atlas, item.level + vec2<i32>(i32(d), i32(s) - 1), 0).r;
         }
         default: {
             discard;

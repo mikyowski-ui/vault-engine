@@ -1577,12 +1577,10 @@ mod tests {
     }
 
     /// The enhanced log: its unlocked world canvas has the shroud past the
-    /// grid, which no draw mode expresses (SPEC-022 §3.2), so the
-    /// instanced path refuses those refreshes and the reference path draws
-    /// them; the frames and the digest are still the reference's, and the
-    /// cause is counted for every refused refresh.
+    /// grid, which the instanced path draws in layer 3 (SPEC-022 §3.3), so
+    /// no refresh falls back; the frames and the digest are the reference's.
     #[test]
-    fn an_enhanced_replay_falls_back_where_refused_and_matches() {
+    fn an_enhanced_replay_draws_instanced_and_matches() {
         let dir = synthetic_corpus();
         let args = PreviewArgs {
             preset: vault_core::EnginePreset::Enhanced,
@@ -1590,10 +1588,9 @@ mod tests {
         };
         let renderer = crate::map_preview::test_support::cpu_renderer();
         let (totals, causes) = assert_replays_match(&args, &enhanced_log(true), renderer.clone());
-        assert!(totals.refused > 0, "{totals:?}");
-        assert!(causes.contains(&"unexpressible draw"), "{causes:?}");
-        let counted: usize = causes.iter().map(|cause| renderer.refusals(cause)).sum();
-        assert_eq!(counted, totals.refused, "{causes:?}");
+        assert!(totals.instanced > 0, "{totals:?}");
+        assert_eq!(totals.refused, 0, "{totals:?} {causes:?}");
+        assert!(causes.is_empty(), "{causes:?}");
         // The record without the enhanced presentation: Vanilla frames,
         // drawn instanced.
         let renderer = crate::map_preview::test_support::cpu_renderer();
@@ -1624,7 +1621,7 @@ mod tests {
         };
         let (totals, causes) = assert_replays_match(&enhanced, &enhanced_log(true), renderer);
         println!("GPU replays: {vanilla:?} then {totals:?}, fallbacks {causes:?}");
-        assert!(totals.refused > 0, "{totals:?}");
+        assert_eq!(totals.refused, 0, "{totals:?} {causes:?}");
     }
 
     /// `--render-path instanced` as the shell passes it (`PreviewArgs`):

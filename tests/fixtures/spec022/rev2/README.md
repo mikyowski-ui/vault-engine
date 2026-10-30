@@ -11,9 +11,6 @@ row, hexadecimal values are uppercase, and `-` means "not used".
 - `sort-keys.tsv`: every revision 1 key (floor and roof rows relabelled as
   ranks), plus the shroud (layer 3, primary 10000), ground-item highlights
   (outline positions 100 and 105) and the largest list index.
-- `square-order.tsv`: nine floor squares, their SPEC-003 section 3.6 floor
-  and roof corners at OX = -3680, OY = -430, and their rank by
-  (corner y, corner x, index).
 - `peek-scale.tsv`: the peek radii and the thresholds Q[0] and Q[15] for
   eight zooms (zoom 0.0625 shows the 1024-pixel cap).
 - `peek-thresholds.tsv`: the revision 2 scene's 16 ring thresholds (inner 2,
@@ -26,21 +23,19 @@ row, hexadecimal values are uppercase, and `-` means "not used".
 - `scene-expected.hex`: the parent folder's scene (`scene.tsv`,
   `scene-sprites.txt`) drawn with the revision 2 peek. It differs from the
   revision 1 canvas at (1, 0) and (0, 1) only.
-- `scene2.tsv`, `scene2-sprites.txt`: the second scene (section 5.6), an
+- `scene2-sprites.txt`: the images of the second scene (section 5.6), an
   unlit 12-by-8 scene with a cutout drawn with light source `none`, the
-  enhanced shroud as a `remap` instance, and a ground-item highlight at
-  outline position 100. For the `remap` row, `levels` names the remap table
-  (`shr_tbl`: 256 entries per row, row c - 1 for code c).
-- `scene2-order.txt`, `scene2-batches.tsv`, `scene2-uniforms.hex`,
-  `scene2-expected.hex`: its key order, batch plan, uniform block and
-  expected canvas (from a canvas filled with `40`).
+  enhanced shroud as a `remap` instance, and a ground-item highlight. Its
+  instances are in `../rev3/scene2.tsv`, where a `remap` row's `levels` names
+  the remap table (`shr_tbl`: 256 entries per row, row c - 1 for code c).
+- `scene2-batches.tsv`, `scene2-uniforms.hex`, `scene2-expected.hex`: its batch
+  plan, uniform block and expected canvas (from a canvas filled with `40`).
 - `blend-clamp.tsv`: the gray-level bound (section 5.7) with a synthetic
   gray rule that exceeds 7, as only a hand-built ink can (palette gray
   levels never exceed 7): `gray_raw` is the unclamped level,
   `gray_used` the clamped one, and `blend` is `F_t[gray_used][D]`.
 
-Until the implementer's follow-up adopts revision 2, the merged tests still
-read the revision 1 files in the parent folder. That follow-up switches them
-to this folder and deletes the superseded parent files: `peek-scale.tsv`,
-`peek-thresholds.tsv`, `peek-samples.tsv`, `scene-uniforms.hex`,
-`scene-expected.hex` and `sort-keys.tsv` (SPEC-022 section 3.15).
+The implementer's follow-up switched the tests to this folder and deleted the
+parent files it superseded (SPEC-022 section 3.15). `square-order.tsv`,
+`scene2.tsv` and `scene2-order.txt` were then superseded by `../rev3/`
+(SPEC-022 section 3.16).

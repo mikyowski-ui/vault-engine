@@ -675,82 +675,255 @@ fn spec022_rows(text: &str) -> Vec<std::collections::BTreeMap<&str, &str>> {
         .collect()
 }
 
-/// SPEC-022 §5.4 the scene's peek: center (88, 40), R0 = 32, Wr = 48.
+/// SPEC-022 §5.4 the scene's peek: center pixel (5, 2), inner 2, ring 4.
 fn scene_peek() -> RoofPeekParams {
-    RoofPeekParams::new([88, 40], 32, 48)
+    RoofPeekParams::new([5, 2], 2, 4)
 }
 
 #[test]
 fn spec022_t8_peek_thresholds_and_scales_give_the_fixture_rows() {
     let peek = scene_peek();
-    assert_eq!(peek.outer(), 80);
+    assert_eq!(peek.outer(), 6);
+    assert!(!peek.bounded);
     let squared = peek.thresholds_squared();
     let rows = spec022_rows(include_str!(
-        "../../../../tests/fixtures/spec022/peek-thresholds.tsv"
+        "../../../../tests/fixtures/spec022/rev2/peek-thresholds.tsv"
     ));
     assert_eq!(rows.len(), 16);
     for row in rows {
-        let t: usize = row["t"].parse().unwrap();
-        assert_eq!(peek.threshold(t).to_string(), row["threshold_q4"], "t {t}");
-        assert_eq!(squared[t].to_string(), row["threshold_sq"], "t {t}");
+        let b: usize = row["b"].parse().unwrap();
+        assert_eq!(peek.threshold(b).to_string(), row["threshold_q4"], "b {b}");
+        assert_eq!(squared[b].to_string(), row["threshold_sq"], "b {b}");
     }
-    for row in spec022_rows(include_str!(
-        "../../../../tests/fixtures/spec022/peek-scale.tsv"
-    )) {
-        let scale: f64 = row["canvas_scale"].parse().unwrap();
-        let peek = RoofPeekParams::at_scale([0.0, 0.0], scale).unwrap();
-        assert_eq!(peek.inner.to_string(), row["inner_q4"], "scale {scale}");
-        assert_eq!(peek.ring.to_string(), row["ring_q4"], "scale {scale}");
-        assert_eq!(peek.outer().to_string(), row["outer_q4"], "scale {scale}");
-        assert_eq!(peek.threshold(0).to_string(), row["threshold_q4_t0"]);
-        assert_eq!(peek.threshold(15).to_string(), row["threshold_q4_t15"]);
+    let rows = spec022_rows(include_str!(
+        "../../../../tests/fixtures/spec022/rev2/peek-scale.tsv"
+    ));
+    assert_eq!(rows.len(), 8);
+    for row in rows {
+        let zoom: f64 = row["zoom"].parse().unwrap();
+        let peek = RoofPeekParams::at_zoom([0.0, 0.0], zoom, [0, 0]).unwrap();
+        let label = format!("zoom {zoom}");
+        assert_eq!(peek.inner.to_string(), row["inner"], "{label}");
+        assert_eq!(peek.ring.to_string(), row["ring"], "{label}");
+        assert_eq!(peek.outer().to_string(), row["outer"], "{label}");
+        let squared = peek.thresholds_squared();
+        assert_eq!(squared[0].to_string(), row["threshold_sq_b0"], "{label}");
+        assert_eq!(squared[15].to_string(), row["threshold_sq_b15"], "{label}");
+        // Only the zoom past the shell's range meets the cap.
+        assert_eq!(peek.bounded, zoom == 0.0625, "{label}");
     }
-    // The center of pixel (5, 2) is (88, 40) in 1/16 pixel.
-    let centered = RoofPeekParams::at_scale([5.5, 2.5], 1.0).unwrap();
-    assert_eq!(centered.center, [88, 40]);
+}
+
+#[test]
+fn spec022_t8_peek_centers_give_the_fixture_rows() {
+    let rows = spec022_rows(include_str!(
+        "../../../../tests/fixtures/spec022/rev3/peek-center.tsv"
+    ));
+    assert_eq!(rows.len(), 8);
+    for row in rows {
+        let number = |column: &str| row[column].parse::<f64>().unwrap();
+        let pointer = [number("pointer_x"), number("pointer_y")];
+        let tile = [
+            row["tile_x"].parse().unwrap(),
+            row["tile_y"].parse().unwrap(),
+        ];
+        let want: [i64; 2] = [row["cx"].parse().unwrap(), row["cy"].parse().unwrap()];
+        assert_eq!(RoofPeekParams::center_of(pointer, tile), want, "{row:?}");
+        let peek = RoofPeekParams::at_zoom(pointer, 1.0, tile).unwrap();
+        assert_eq!(peek.center.map(i64::from), want, "{row:?}");
+    }
 }
 
 #[test]
 fn spec022_t8_peek_test_gives_the_fixture_samples() {
     let peek = scene_peek();
     let rows = spec022_rows(include_str!(
-        "../../../../tests/fixtures/spec022/peek-samples.tsv"
+        "../../../../tests/fixtures/spec022/rev2/peek-samples.tsv"
     ));
-    assert_eq!(rows.len(), 14);
+    assert_eq!(rows.len(), 16);
     for row in rows {
         let (x, y): (i32, i32) = (row["x"].parse().unwrap(), row["y"].parse().unwrap());
         let label = format!("pixel ({x}, {y})");
         let world = [i64::from(x) + 4, i64::from(y) - 2];
-        assert_eq!(bayer(world).to_string(), row["t"], "{label}");
-        let (dx, dy) = (16 * x + 8 - 88, 16 * y + 8 - 40);
-        assert_eq!(dx.to_string(), row["dx_q4"], "{label}");
-        assert_eq!(dy.to_string(), row["dy_q4"], "{label}");
-        assert_eq!((dx * dx + dy * dy).to_string(), row["dist_sq"], "{label}");
+        assert_eq!(bayer(world).to_string(), row["b"], "{label}");
+        let (dx, dy) = (x - 5, y - 2);
+        assert_eq!(dx.to_string(), row["dx"], "{label}");
+        assert_eq!(dy.to_string(), row["dy"], "{label}");
+        assert_eq!((dx * dx + dy * dy).to_string(), row["d_sq"], "{label}");
         let cut = peek.cuts([x, y], [-4, 2]);
         assert_eq!(u8::from(cut).to_string(), row["cut"], "{label}");
     }
 }
 
+/// `peek.cuts` of a pixel at `d` to the right of the center with the Bayer
+/// value `b`, on a translation that gives the pixel that value.
+fn ring_verdict(peek: RoofPeekParams, d: i32, b: u8) -> bool {
+    let offset = (0..4)
+        .flat_map(|y| (0..4).map(move |x| [x, y]))
+        .find(|at| bayer([i64::from(d) - i64::from(at[0]), -i64::from(at[1])]) == b)
+        .unwrap();
+    peek.cuts([d, 0], offset)
+}
+
+#[test]
+fn spec022_t8_peek_ring_gives_the_fixture_rows() {
+    let peek = RoofPeekParams::new([0, 0], 96, 48);
+    let rows = spec022_rows(include_str!(
+        "../../../../tests/fixtures/spec022/rev3/peek-ring.tsv"
+    ));
+    assert_eq!(rows.len(), 13);
+    for row in rows {
+        let d: i32 = row["d"].parse().unwrap();
+        let b: u8 = row["b"].parse().unwrap();
+        let label = format!("d {d}, b {b}");
+        let q = peek.thresholds_squared()[usize::from(b)];
+        assert_eq!(q.to_string(), row["q_b"], "{label}");
+        assert_eq!((256 * d * d).to_string(), row["256_d_sq"], "{label}");
+        let want = row["verdict"] == "cut";
+        assert_eq!(ring_verdict(peek, d, b), want, "{label}");
+        // The second form: kept exactly when b < floor(16 t).
+        let floor_16t = (16 * (d - 96)).div_euclid(48);
+        assert_eq!(floor_16t.to_string(), row["floor_16t"], "{label}");
+        if d > 96 {
+            assert_eq!(i32::from(b) >= floor_16t, want, "{label}");
+        }
+    }
+}
+
+#[test]
+fn spec022_t8_peek_seam_cuts_the_same_in_both_tiles() {
+    // The view: center pixel (20, 2), inner 2, ring 4, OX = -4, OY = 2, and
+    // a seam at x = 16: tile 1 takes the center less its corner.
+    let tile0 = RoofPeekParams::new([20, 2], 2, 4);
+    let tile1 = RoofPeekParams::new([4, 2], 2, 4);
+    let rows = spec022_rows(include_str!(
+        "../../../../tests/fixtures/spec022/rev3/peek-seam.tsv"
+    ));
+    assert_eq!(rows.len(), 12);
+    for row in rows {
+        let number = |column: &str| row[column].parse::<i32>().unwrap();
+        let (x0, x1, y) = (number("tile0_x"), number("tile1_x"), number("view_y"));
+        let want = row["cut"] == "1";
+        assert_eq!(
+            bayer([number("wx").into(), number("wy").into()]).to_string(),
+            row["b"]
+        );
+        assert_eq!(tile0.cuts([x0, y], [-4, 2]), want, "{row:?}");
+        assert_eq!(tile1.cuts([x1, y], [-20, 2]), want, "{row:?}");
+    }
+}
+
+#[test]
+fn spec022_t8_the_peek_test_equals_the_reference_cutaway() {
+    // Every pixel around three cutaways, in every Bayer phase: the §3.10
+    // test cuts exactly what the reference X-ray leaves.
+    for (center, inner, ring) in [([40, 30], 8, 4), ([41, 29], 3, 7), ([38, 33], 5, 0)] {
+        let cutaway = RoofCutaway {
+            center,
+            inner,
+            ring,
+        };
+        let peek = RoofPeekParams::of_cutaway(cutaway);
+        assert!(!peek.bounded);
+        for origin in [[0, 0], [-5, 2], [7, -3]] {
+            let grid = HexGrid { origin };
+            for y in 0..64 {
+                for x in 0..84 {
+                    let offset = origin.map(|value| value as i32);
+                    assert_eq!(
+                        peek.cuts([x, y], offset),
+                        !cutaway.keeps(grid, [i64::from(x), i64::from(y)]),
+                        "({x}, {y}) at {center:?}, {inner}, {ring}, origin {origin:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn spec022_t8_peek_safe_rules() {
-    // The outer radius is capped at 16384: R0 first, then Wr.
-    let capped = RoofPeekParams::new([0, 0], 20000, 500);
-    assert_eq!((capped.inner, capped.ring), (16384, 0));
-    let capped = RoofPeekParams::new([0, 0], 16000, 1000);
-    assert_eq!((capped.inner, capped.ring), (16000, 384));
-    // A tiny scale caps; a scale that is not finite and positive refuses.
-    let tiny = RoofPeekParams::at_scale([0.0, 0.0], 1e-9).unwrap();
-    assert_eq!(tiny.outer(), 16384);
-    for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        assert!(RoofPeekParams::at_scale([0.0, 0.0], scale).is_none());
+    // The outer radius is capped at 1024: inner first, then ring.
+    let capped = RoofPeekParams::new([0, 0], 2000, 500);
+    assert_eq!((capped.inner, capped.ring), (1024, 0));
+    assert!(capped.bounded);
+    let capped = RoofPeekParams::new([0, 0], 1000, 100);
+    assert_eq!((capped.inner, capped.ring), (1000, 24));
+    assert!(capped.bounded);
+    // Exactly at the cap, nothing changes.
+    assert!(!RoofPeekParams::new([0, 0], 1000, 24).bounded);
+    // A zoom that is not finite and positive gives no parameters.
+    for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(RoofPeekParams::at_zoom([0.0, 0.0], zoom, [0, 0]).is_none());
     }
-    assert!(RoofPeekParams::at_scale([f64::NAN, 0.0], 1.0).is_none());
-    // The center is clamped to ±2^24, and the test stays in range there.
-    let far = RoofPeekParams::at_scale([1e12, -1e12], 1.0).unwrap();
-    assert_eq!(far.center, [1 << 24, -(1 << 24)]);
+    assert!(RoofPeekParams::at_zoom([f64::NAN, 0.0], 1.0, [0, 0]).is_none());
+    // The center is clamped to ±2^20, and the test stays in range there.
+    let far = RoofPeekParams::at_zoom([1e12, -1e12], 1.0, [0, 0]).unwrap();
+    assert_eq!(far.center, [1 << 20, -(1 << 20)]);
+    assert!(far.bounded);
     assert!(!far.cuts([16383, 0], [0, 0]));
-    // Every threshold is below the outer radius and its square fits.
-    let wide = RoofPeekParams::new([0, 0], 0, 16384);
-    assert!((0..16).all(|t| wide.threshold(t) < wide.outer()));
+    // Every threshold's square fits at the cap.
+    let wide = RoofPeekParams::new([0, 0], 0, 1024);
+    assert_eq!(wide.thresholds_squared()[15], 1 << 28);
     assert!(wide.cuts([0, 0], [i32::MIN, i32::MAX]));
+}
+
+#[test]
+fn spec022_t18_the_shroud_predicate_gives_the_fixture_rows() {
+    let rows = spec022_rows(include_str!(
+        "../../../../tests/fixtures/spec022/rev3/shroud-mask.tsv"
+    ));
+    assert_eq!(rows.len(), 14);
+    for row in rows {
+        let (wx, wy): (i64, i64) = (row["wx"].parse().unwrap(), row["wy"].parse().unwrap());
+        assert_eq!(bayer([wx, wy]).to_string(), row["b"], "{row:?}");
+        let cell = match (row["hex_state"], row["nearest_d_sq"]) {
+            ("off_grid", _) => None,
+            ("allowed", _) => Some(ShroudCell::Allowed),
+            ("outside", "-") => Some(ShroudCell::Far),
+            ("outside", _) => Some(ShroudCell::Near([0, 0])),
+            (state, _) => panic!("state {state}"),
+        };
+        let d2 = row["nearest_d_sq"].parse().unwrap_or(0);
+        let dark = shroud_dark(cell, d2, row["b"].parse().unwrap());
+        assert_eq!(u8::from(dark).to_string(), row["dark"], "{row:?}");
+    }
+}
+
+#[test]
+fn spec022_t18_the_recorder_writes_where_the_predicate_says() {
+    // Two allowed blocks smaller than the grid: one seen across its edge,
+    // one in the grid's corner, where pixels are off the grid too.
+    let mut allowed = vec![false; 40000];
+    for (first_row, first_column) in [(96, 96), (0, 0)] {
+        for row in first_row..first_row + 8 {
+            for column in first_column..first_column + 8 {
+                allowed[column + 200 * row] = true;
+            }
+        }
+    }
+    let field = ShroudField::new(&allowed);
+    for center in [20100, 0] {
+        let grid = HexGrid::centered(center, 320, 240).unwrap();
+        let recording = record_shroud([320, 240], grid, &field, 7).unwrap();
+        assert_eq!([recording.width, recording.height], [320, 240]);
+        assert_eq!(recording.table, vec![7; 256]);
+        let mut canvas = IndexedImage::new(320, 240).unwrap();
+        canvas.pixels_mut().fill(200);
+        draw_shroud(&mut canvas, grid, &field, 7);
+        let mut darkened = 0;
+        for y in 0..240_usize {
+            for x in 0..320_usize {
+                let code = recording.image[y * 320 + x];
+                let dark = field.darkens(grid, [x as i64, y as i64]);
+                assert_eq!(code == 1, dark, "({x}, {y})");
+                assert!(code <= 1);
+                // The painter is the authority: it agrees pixel for pixel.
+                let painted = canvas.pixels()[y * 320 + x];
+                assert_eq!(painted, if dark { 7 } else { 200 }, "({x}, {y})");
+                darkened += usize::from(dark);
+            }
+        }
+        assert!(darkened > 0 && darkened < 320 * 240, "{center}: {darkened}");
+    }
 }

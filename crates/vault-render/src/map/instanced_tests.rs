@@ -1,13 +1,15 @@
-//! SPEC-022 §4 tests T7-T13 over the map view: the engine's light buffer,
+//! SPEC-022 §4 tests T7-T19 over the map view: the engine's light buffer,
 //! the roof peek against the reference X-ray, order parity with the
 //! reference path's draw log, canvas parity (CPU and GPU), the fallback,
-//! and no state change.
+//! no state change, the square order, the gray bound, the draws revision 3
+//! lifted from the refusals, and the refusals that stay.
 use super::tests::{Keyed, object, preview, scene};
 use super::*;
 use crate::{
     floating::FloatingSprite,
     layers::{
-        BatchPlan, FrameCounts, HexLightBuffer, InstanceError, LookupTables, PEEK, RenderPath,
+        BatchPlan, DrawMode, EXEMPT, FrameCounts, HexLightBuffer, InstanceError, LightSource,
+        LookupTables, PEEK, RenderPath,
         gpu::{self, GpuExecutor},
     },
     outline::OutlineInks,
@@ -382,7 +384,10 @@ fn parity<A: MapArt>(
             .pixels(),
         "{label}: recording"
     );
-    let palette = scene.light.map(|light| light.palette);
+    let palette = scene
+        .light
+        .map(|light| light.palette)
+        .or(scene.cutout.map(|cut| cut.palette));
     let tables = palette.map(LookupTables::from_palette);
     let frame = gather_map_frame(map, objects, view, art, scene, tables.as_ref())
         .unwrap_or_else(|error| panic!("{label}: {error}"));
@@ -405,7 +410,32 @@ fn parity<A: MapArt>(
             .unwrap_or_else(|error| panic!("{label}: GPU {error}"));
         assert_canvas(&format!("{label} (GPU)"), &canvas, &reference);
     }
+    // T19: the renderer draws it, with no refusal counted.
+    let mut renderer = SceneRenderer::cpu();
+    let image = renderer.render(map, objects, view, art, scene).unwrap();
+    assert_canvas(&format!("{label} (renderer)"), &image, &reference);
+    assert_no_refusal(label, &renderer);
     plan.counts()
+}
+
+/// T19: the renderer's last refresh was drawn by the instanced path, and
+/// nothing was refused for any of §3.16's causes or anything else.
+fn assert_no_refusal(label: &str, renderer: &SceneRenderer) {
+    assert!(
+        matches!(renderer.last_refresh(), Some(RefreshReport::Instanced(_))),
+        "{label}: {:?}",
+        renderer.last_refresh()
+    );
+    for cause in [
+        "unexpressible draw",
+        "peek bound",
+        "field domain",
+        "table range",
+        "unknown light source",
+    ] {
+        assert_eq!(renderer.refusals(cause), 0, "{label}: {cause}");
+    }
+    assert_eq!(renderer.logged_causes().count(), 0, "{label}");
 }
 
 /// The tables an unlit scene's executor gets (no instance reads them).
@@ -915,27 +945,40 @@ fn t9_t10_t11_synthetic_corpus_maps_keep_parity() {
 /// `zoom`, as the `enhanced` view builds it (96 and 48 interface pixels
 /// over the zoom, rounded).
 fn reference_cutaway(at: [i64; 2], zoom: f64) -> RoofCutaway {
+    let [inner, ring] = RoofPeekParams::radii(zoom).unwrap();
     RoofCutaway {
         center: at,
-        inner: (96.0 / zoom).round() as u32,
-        ring: (48.0 / zoom).round() as u32,
+        inner: inner as u32,
+        ring: ring as u32,
     }
 }
 
+/// The tile of `canvas` with corner `corner`, as a separate view.
+fn tile_of(canvas: MapView, corner: [i64; 2], size: [u32; 2]) -> MapView {
+    let mut tile = canvas;
+    tile.width = size[0];
+    tile.height = size[1];
+    tile.grid.origin = [
+        canvas.grid.origin[0] - corner[0],
+        canvas.grid.origin[1] - corner[1],
+    ];
+    tile
+}
+
 #[test]
-fn t8_the_reference_xray_differs_from_the_spec_peek_so_peek_refreshes_fall_back() {
-    // SPEC-022 §3.10 parity rule: the showcase map, the cursor at three
-    // positions, zooms 1.0, 1.25 and 2.0. The reference X-ray (cut where
-    // 16 d < 16 inner + (b + 1) ring, d from the pixel's corner, radii
-    // rounded to whole canvas pixels) is not the spec's peek (cut where
-    // 16 d < R0 + trunc(Wr (2t + 1) / 32), d from the pixel's center, radii
-    // in 1/16 pixel), so the instanced path refuses peek refreshes.
+fn t8_the_reference_xray_and_the_spec_peek_draw_the_same_canvas() {
+    // SPEC-022 §3.10 parity rule: the showcase map with `cursor_xray` held,
+    // zooms 0.5, 1.0, 1.25, 2.0 and 3.0, a canvas of two tiles whose seam
+    // runs through the roofed building, and the pointer at three positions:
+    // two over roofs, away from a pixel's middle, and one whose ring
+    // crosses the seam.
+    let _gpu = gpu::test_lock();
+    let mut gpu = gpu_executor();
     let corpus = Corpus::new("peek", true);
     let map = corpus.map(vault_fixtures::gallery::SHOWCASE_MAP);
     let art = corpus.art(&map);
     let palette = corpus.palette();
     let tiles = vec![655_i64; 40000];
-    let tables = LookupTables::from_palette(&palette);
     // The roofed building's interior.
     let entry = vault_fixtures::state::CAM_DEMO_INTERIOR;
     let light = MapLight {
@@ -943,105 +986,140 @@ fn t8_the_reference_xray_differs_from_the_spec_peek_so_peek_refreshes_fall_back(
         ambient: 30000,
         tiles: &tiles,
     };
-    let mut differing = Vec::new();
-    for zoom in [1.0, 1.25, 2.0] {
-        let size = [(640.0 / zoom) as u32, (380.0 / zoom) as u32];
-        let view = MapView {
-            grid: HexGrid::centered(entry, size[0], size[1]).unwrap(),
-            elevation: map.header.entry_elevation,
-            roofs: true,
-            width: size[0],
-            height: size[1],
-        };
-        let lit = MapScene {
-            light: Some(light),
-            ..MapScene::default()
-        };
-        // The cursor over three of the roof squares in view: the first,
-        // the middle and the last one drawn.
-        let unpeeked = render_map_scene(&map, &map.objects, view, &art, lit).unwrap();
-        let roofs: Vec<[i64; 2]> = roof_squares(&map, view, &art)
-            .map(|(_, frame, corner)| {
-                [
-                    corner[0] + i64::from(frame.width / 2),
-                    corner[1] + i64::from(frame.height / 2),
-                ]
-            })
-            .filter(|[x, y]| {
-                (0..i64::from(size[0])).contains(x) && (0..i64::from(size[1])).contains(y)
-            })
-            .collect();
-        assert!(
-            roofs.len() >= 3,
-            "zoom {zoom}: the showcase has roofs in view"
-        );
-        for at in [roofs[0], roofs[roofs.len() / 2], roofs[roofs.len() - 1]] {
-            let scene = MapScene {
-                roof_cutaway: Some(reference_cutaway(at, zoom)),
-                ..lit
-            };
-            let reference = render_map_scene(&map, &map.objects, view, &art, scene).unwrap();
-            assert_ne!(
-                reference.pixels(),
-                unpeeked.pixels(),
-                "zoom {zoom} at {at:?}: the X-ray cuts roofs"
-            );
-            // The instanced path refuses the refresh.
-            assert!(matches!(
-                gather_map_frame(&map, &map.objects, view, &art, scene, Some(&tables)),
-                Err(instanced::GatherError::Refused(InstanceError::PeekMismatch))
-            ));
-            // What it would draw with §3.10's peek: the frame without the
-            // cutaway, every roof instance marked PEEK.
-            let bare = MapScene {
-                roof_cutaway: None,
-                ..scene
-            };
-            let mut frame =
-                gather_map_frame(&map, &map.objects, view, &art, bare, Some(&tables)).unwrap();
-            let cursor = [at[0] as f64 + 0.5, at[1] as f64 + 0.5];
-            frame.uniforms.peek = RoofPeekParams::at_scale(cursor, zoom);
-            for instance in &mut frame.instances {
-                if instance.key.layer() == 3 {
-                    instance.flags |= PEEK;
-                }
-            }
-            let spec = frame.draw_cpu(&tables).unwrap();
-            let count = spec
-                .pixels()
-                .iter()
-                .zip(reference.pixels())
-                .filter(|(a, b)| a != b)
-                .count();
-            differing.push((zoom, at, count));
-        }
-    }
-    println!("reference X-ray vs SPEC-022 peek, differing pixels: {differing:?}");
-    assert!(
-        differing.iter().any(|(.., count)| *count > 0),
-        "the two peeks agree: lift the PeekMismatch refusal (SPEC-022 §3.10)"
-    );
-    // The same refresh through the renderer is the reference canvas.
-    let view = view_at(entry, [640, 380]);
-    let scene = MapScene {
+    let lit = MapScene {
         light: Some(light),
-        roof_cutaway: Some(reference_cutaway([320, 190], 1.0)),
         ..MapScene::default()
     };
-    let mut renderer = SceneRenderer::cpu();
-    let image = renderer
-        .render(&map, &map.objects, view, &art, scene)
-        .unwrap();
-    assert_eq!(
-        image.pixels(),
-        render_map_scene(&map, &map.objects, view, &art, scene)
-            .unwrap()
-            .pixels()
+    let canvas = MapView {
+        grid: HexGrid::centered(entry, 1280, 380).unwrap(),
+        elevation: map.header.entry_elevation,
+        roofs: true,
+        width: 1280,
+        height: 380,
+    };
+    let roofs: Vec<[i64; 2]> = roof_squares(&map, canvas, &art)
+        .map(|(_, frame, corner)| {
+            [
+                corner[0] + i64::from(frame.width / 2),
+                corner[1] + i64::from(frame.height / 2),
+            ]
+        })
+        .filter(|[x, y]| (0..1280).contains(x) && (0..380).contains(y))
+        .collect();
+    assert!(roofs.len() >= 3, "the showcase has roofs in view");
+    let seam_y = roofs[roofs.len() / 2][1] as f64 + 0.25;
+    for zoom in [0.5, 1.0, 1.25, 2.0, 3.0] {
+        let [inner, _] = RoofPeekParams::radii(zoom).unwrap();
+        let pointers = [
+            [roofs[0][0] as f64 + 0.75, roofs[0][1] as f64 + 0.25],
+            [
+                roofs[roofs.len() - 1][0] as f64 + 0.125,
+                roofs[roofs.len() - 1][1] as f64 + 0.875,
+            ],
+            [640.0 + inner as f64 / 2.0 + 0.75, seam_y],
+        ];
+        for pointer in pointers {
+            let mut changed = false;
+            for corner in [[0, 0], [640, 0]] {
+                let tile = tile_of(canvas, corner, [640, 380]);
+                let at = RoofPeekParams::center_of(pointer, corner);
+                let scene = MapScene {
+                    roof_cutaway: Some(reference_cutaway(at, zoom)),
+                    ..lit
+                };
+                let label = format!("zoom {zoom} at {pointer:?} in tile {corner:?}");
+                parity(&label, &map, &map.objects, tile, &art, scene, &mut gpu);
+                let peeked = render_map_scene(&map, &map.objects, tile, &art, scene).unwrap();
+                let bare = render_map_scene(&map, &map.objects, tile, &art, lit).unwrap();
+                changed |= peeked.pixels() != bare.pixels();
+            }
+            assert!(changed, "zoom {zoom} at {pointer:?}: the X-ray cuts roofs");
+        }
+    }
+    // The ring crosses the seam: both tiles lose roof pixels at zoom 1.0.
+    let [inner, _] = RoofPeekParams::radii(1.0).unwrap();
+    let pointer = [640.0 + inner as f64 / 2.0 + 0.75, seam_y];
+    for corner in [[0, 0], [640, 0]] {
+        let tile = tile_of(canvas, corner, [640, 380]);
+        let scene = MapScene {
+            roof_cutaway: Some(reference_cutaway(
+                RoofPeekParams::center_of(pointer, corner),
+                1.0,
+            )),
+            ..lit
+        };
+        assert_ne!(
+            render_map_scene(&map, &map.objects, tile, &art, scene)
+                .unwrap()
+                .pixels(),
+            render_map_scene(&map, &map.objects, tile, &art, lit)
+                .unwrap()
+                .pixels(),
+            "tile {corner:?}"
+        );
+    }
+    // A peek off the roofs' view is drawn the same, and marks the roofs.
+    let tables = LookupTables::from_palette(&palette);
+    let scene = MapScene {
+        roof_cutaway: Some(reference_cutaway([320, 190], 1.0)),
+        ..lit
+    };
+    let view = tile_of(canvas, [0, 0], [640, 380]);
+    let frame = gather_map_frame(&map, &map.objects, view, &art, scene, Some(&tables)).unwrap();
+    let peek = frame.uniforms.peek.unwrap();
+    assert_eq!((peek.center, peek.inner, peek.ring), ([320, 190], 96, 48));
+    assert!(frame.instances.iter().any(|item| item.key.layer() == 3));
+    assert!(
+        frame
+            .instances
+            .iter()
+            .all(|item| (item.key.layer() == 3) == (item.flags & PEEK != 0))
     );
-    assert_eq!(
-        renderer.last_refresh(),
-        Some(&RefreshReport::Refused(InstanceError::PeekMismatch))
-    );
+    // Roofs off in the view: no peek, as the reference draws none.
+    let bare = MapView {
+        roofs: false,
+        ..view
+    };
+    let frame = gather_map_frame(&map, &map.objects, bare, &art, scene, Some(&tables)).unwrap();
+    assert_eq!(frame.uniforms.peek, None);
+}
+
+#[test]
+fn t8_t19_a_peek_a_safe_bound_changes_falls_back() {
+    let fixture = Fixture::new();
+    let cutout = fixture.cutout();
+    let view = view_at(20100, [640, 380]);
+    let base = scene_of(&fixture, &cutout, view, Options::FULL);
+    let (map, objects, art) = (&fixture.map, &fixture.objects, &fixture.art);
+    let tables = LookupTables::from_palette(&fixture.palette);
+    for cutaway in [
+        // Zoom 0.0625: the radii 1536 and 768, capped.
+        reference_cutaway([320, 190], 0.0625),
+        // A center past ±2^20.
+        reference_cutaway([1 << 21, 190], 1.0),
+    ] {
+        let scene = MapScene {
+            roof_cutaway: Some(cutaway),
+            ..base
+        };
+        assert!(matches!(
+            gather_map_frame(map, objects, view, art, scene, Some(&tables)),
+            Err(instanced::GatherError::Refused(InstanceError::PeekBound))
+        ));
+        let mut renderer = SceneRenderer::cpu();
+        let image = renderer.render(map, objects, view, art, scene).unwrap();
+        assert_eq!(
+            image.pixels(),
+            render_map_scene(map, objects, view, art, scene)
+                .unwrap()
+                .pixels()
+        );
+        assert_eq!(
+            renderer.last_refresh(),
+            Some(&RefreshReport::Refused(InstanceError::PeekBound))
+        );
+        assert_eq!(renderer.refusals("peek bound"), 1);
+    }
 }
 
 #[test]
@@ -1090,22 +1168,19 @@ fn t12_each_refusal_draws_the_reference_canvas_and_logs_its_cause_once() {
     let mut renderer = SceneRenderer::cpu();
     renderer.limit_canvas(512);
     twice(&mut renderer, scene, "texture limit");
-    // Draws no mode expresses: the shroud, the peek, a highlight past
-    // outline position 99.
-    let allowed = vec![true; 40000];
-    let shroud = MapScene {
-        shroud: Some(Shroud {
-            allowed: &allowed,
-            dark: 3,
-        }),
+    // A draw no mode expresses: an opaque ring paint of index 0.
+    let zero_inks = OutlineInks::new(&fixture.palette).with_red(0);
+    let zero_ring = MapScene {
+        outlines: Some(&zero_inks),
         ..scene
     };
-    twice(&mut SceneRenderer::cpu(), shroud, "unexpressible draw");
+    twice(&mut SceneRenderer::cpu(), zero_ring, "unexpressible draw");
+    // A peek a safe bound changes.
     let peek = MapScene {
-        roof_cutaway: Some(reference_cutaway([320, 190], 1.0)),
+        roof_cutaway: Some(reference_cutaway([320, 190], 0.0625)),
         ..scene
     };
-    twice(&mut SceneRenderer::cpu(), peek, "peek mismatch");
+    twice(&mut SceneRenderer::cpu(), peek, "peek bound");
     // A refresh the instanced path accepts draws the same canvas.
     let mut renderer = SceneRenderer::cpu();
     let image = renderer.render(map, objects, view, art, scene).unwrap();
@@ -1349,4 +1424,490 @@ fn gpu_refresh_loop_keeps_parity_and_reports_its_transfers() {
     assert_eq!(stats.canvas_clears, REFRESHES + 1);
     assert_eq!(stats.upload_bytes, first.upload_bytes);
     assert!(stats.readback_bytes - first.readback_bytes <= REFRESHES * first.readback_bytes);
+}
+
+/// The fixture's region: a block of hexes around the player, smaller than
+/// the grid, so the shroud's dither shows in the view.
+fn region() -> Vec<bool> {
+    (0..40000)
+        .map(|hex| (92..108).contains(&(hex % 200)) && (96..104).contains(&(hex / 200)))
+        .collect()
+}
+
+#[test]
+fn t10_t11_tiles_with_the_shroud_a_highlight_and_the_peek_keep_parity() {
+    let _gpu = gpu::test_lock();
+    let fixture = Fixture::new();
+    let cutout = fixture.cutout();
+    let mut gpu = gpu_executor();
+    let allowed = region();
+    let enhanced = Options {
+        overscan: true,
+        ..Options::FULL
+    };
+    let shroud = Shroud {
+        allowed: &allowed,
+        dark: 3,
+    };
+    // A canvas two tiles wide and tall; the zoom sets the peek's radii.
+    let size = [1280, 760];
+    for zoom in [1.0, 2.0] {
+        let canvas = view_at(20100, size);
+        let [cx, cy] = canvas.grid.hex_center(20100).unwrap();
+        // The first tile, the tile beside it, and the player's tile.
+        let player = [cx - cx % 640, cy - cy % 380];
+        let tile_size = |corner: [i64; 2]| {
+            [
+                (i64::from(size[0]) - corner[0]).min(640) as u32,
+                (i64::from(size[1]) - corner[1]).min(380) as u32,
+            ]
+        };
+        for corner in [[0, 0], [640, 0], [0, 380], player] {
+            let view = tile_of(canvas, corner, tile_size(corner));
+            let shrouded = MapScene {
+                shroud: Some(shroud),
+                highlight: Some(outline::ITEM),
+                ..scene_of(&fixture, &cutout, view, enhanced)
+            };
+            parity(
+                &format!("zoom {zoom}, tile {corner:?}"),
+                &fixture.map,
+                &fixture.objects,
+                view,
+                &fixture.art,
+                shrouded,
+                &mut gpu,
+            );
+            let [ax, ay] = [cx + 8, cy - 16];
+            let peeked = MapScene {
+                roof_cutaway: Some(reference_cutaway([ax - corner[0], ay - corner[1]], zoom)),
+                ..shrouded
+            };
+            parity(
+                &format!("zoom {zoom}, tile {corner:?}, peek"),
+                &fixture.map,
+                &fixture.objects,
+                view,
+                &fixture.art,
+                peeked,
+                &mut gpu,
+            );
+        }
+        // The tile with the player has a shroud and a highlight to show.
+        let view = tile_of(canvas, player, tile_size(player));
+        let scene = MapScene {
+            shroud: Some(shroud),
+            highlight: Some(outline::ITEM),
+            ..scene_of(&fixture, &cutout, view, enhanced)
+        };
+        let tables = LookupTables::from_palette(&fixture.palette);
+        let frame = gather_map_frame(
+            &fixture.map,
+            &fixture.objects,
+            view,
+            &fixture.art,
+            scene,
+            Some(&tables),
+        )
+        .unwrap();
+        let without = MapScene {
+            highlight: None,
+            ..scene
+        };
+        let plain = gather_map_frame(
+            &fixture.map,
+            &fixture.objects,
+            view,
+            &fixture.art,
+            without,
+            Some(&tables),
+        )
+        .unwrap();
+        let outlines = |frame: &MapFrame| {
+            frame
+                .instances
+                .iter()
+                .filter(|item| item.key.layer() == 4)
+                .count()
+        };
+        assert!(outlines(&frame) > outlines(&plain), "a highlight is drawn");
+        let shroud_draw = frame
+            .instances
+            .iter()
+            .find(|item| item.mode == DrawMode::Remap)
+            .unwrap();
+        let image = &frame.images[shroud_draw.image];
+        assert!(image.pixels.contains(&1) && image.pixels.contains(&0));
+    }
+}
+
+#[test]
+fn t15_square_ranks_give_the_fixture_rows_and_the_reference_log() {
+    let ranked = |roof: bool| -> Vec<i32> {
+        let grid = HexGrid {
+            origin: [-3680, -430],
+        };
+        let mut squares: Vec<(i64, i64, i32)> = (0..10000)
+            .map(|index| {
+                let [x, y] = grid.square_corner(index, roof).unwrap();
+                (y, x, index)
+            })
+            .collect();
+        squares.sort_unstable();
+        squares.into_iter().map(|(.., index)| index).collect()
+    };
+    let (floors, roofs) = (ranked(false), ranked(true));
+    assert_eq!(floors, roofs, "one rank on the floor and on the roof");
+    let order: Vec<i32> = square_order().iter().map(|(index, _)| *index).collect();
+    assert_eq!(floors, order);
+    let text = include_str!("../../../../tests/fixtures/spec022/rev3/square-rank.tsv");
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let column = |name: &str| header.iter().position(|cell| *cell == name).unwrap();
+    let (square, rank) = (column("square"), column("rank"));
+    let mut rows = 0;
+    for line in lines.filter(|line| !line.is_empty()) {
+        let cells: Vec<&str> = line.split('\t').collect();
+        let index: i32 = cells[square].parse().unwrap();
+        let position = order.iter().position(|other| *other == index).unwrap();
+        assert_eq!(position.to_string(), cells[rank], "square {index}");
+        rows += 1;
+    }
+    assert_eq!(rows, 13);
+    // The ranks do not change with the grid origin, and the log has gaps.
+    let fixture = Fixture::new();
+    let view = view_at(20100, [640, 380]);
+    let scene = MapScene::default();
+    let mut log = Vec::new();
+    let mut record = |entry: DrawRecord| log.push(entry);
+    render_map_scene_recorded(
+        &fixture.map,
+        &fixture.objects,
+        view,
+        &fixture.art,
+        scene,
+        Some(&mut record),
+    )
+    .unwrap();
+    let floor: Vec<u32> = log
+        .iter()
+        .filter(|entry| entry.layer == FrameLayer::Floor)
+        .map(|entry| entry.primary)
+        .collect();
+    assert!(floor.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(floor.windows(2).any(|pair| pair[1] - pair[0] > 1));
+    for rank in floor {
+        let corner = view
+            .grid
+            .square_corner(order[rank as usize], false)
+            .unwrap();
+        assert!(corner[0] < 640 && corner[1] < 380, "rank {rank}");
+    }
+}
+
+#[test]
+fn t9_the_list_index_counts_only_the_current_elevation() {
+    // The same hex on two elevations: each elevation's list starts from 0,
+    // hidden entries count though they are not drawn, and the cursor and
+    // its text take two places.
+    let map = map();
+    let mut objects = scene(Vec::new());
+    let mut hidden = object(&map, 1, CRITTER, 20100);
+    hidden.flags.0 |= BasicFlags::HIDDEN.0;
+    objects.elevations[1] = vec![object(&map, 2, CRITTER, 20100); 3];
+    objects.elevations[0] = vec![
+        hidden,
+        object(&map, 3, SCENERY, 20100),
+        object(&map, 4, CRITTER, 20100),
+    ];
+    let lists = ListIndexes::new(&objects.elevations[0], Some((20100, 2)));
+    assert_eq!(lists.objects, [0, 1, 4]);
+    assert_eq!(lists.cursor, [2, 3]);
+    let lists = ListIndexes::new(&objects.elevations[1], None);
+    assert_eq!(lists.objects, [0, 1, 2]);
+    // Both paths give those numbers.
+    let art = art();
+    let view = view_at(20100, [640, 380]);
+    let mut gpu = None;
+    let upright = |scene: MapScene| {
+        let frame = gather_map_frame(&map, &objects, view, &art, scene, None).unwrap();
+        frame
+            .records()
+            .unwrap()
+            .into_iter()
+            .filter(|record| record.layer == FrameLayer::Upright)
+            .map(|record| record.index)
+            .collect::<Vec<u32>>()
+    };
+    parity(
+        "two elevations",
+        &map,
+        &objects,
+        view,
+        &art,
+        MapScene::default(),
+        &mut gpu,
+    );
+    assert_eq!(upright(MapScene::default()), [1, 2]);
+}
+
+#[test]
+fn t16_a_hand_built_outline_gray_draws_with_row_7_on_both_paths() {
+    let _gpu = gpu::test_lock();
+    let fixture = Fixture::new();
+    let cutout = fixture.cutout();
+    let mut gpu = gpu_executor();
+    let view = view_at(20100, [640, 380]);
+    let top = OutlineInks::new(&fixture.palette).with_gray(7);
+    let row_7 = MapScene {
+        outlines: Some(&top),
+        ..scene_of(&fixture, &cutout, view, Options::FULL)
+    };
+    let want = render_map_scene(&fixture.map, &fixture.objects, view, &fixture.art, row_7).unwrap();
+    for gray in [8, 15] {
+        let inks = OutlineInks::new(&fixture.palette).with_gray(gray);
+        let scene = MapScene {
+            outlines: Some(&inks),
+            ..row_7
+        };
+        let label = format!("gray {gray}");
+        parity(
+            &label,
+            &fixture.map,
+            &fixture.objects,
+            view,
+            &fixture.art,
+            scene,
+            &mut gpu,
+        );
+        let got =
+            render_map_scene(&fixture.map, &fixture.objects, view, &fixture.art, scene).unwrap();
+        assert_canvas(&label, &got, &want);
+    }
+}
+
+#[test]
+fn t17_a_the_shroud_past_the_grid_is_drawn_instanced() {
+    let _gpu = gpu::test_lock();
+    let fixture = Fixture::new();
+    let cutout = fixture.cutout();
+    let mut gpu = gpu_executor();
+    let allowed = vec![true; 40000];
+    // The whole grid allowed, as the shell's unlocked view, from the
+    // grid's top edge; and a region smaller than the grid.
+    let edge = view_at(150, [1138, 380]);
+    let scene = MapScene {
+        shroud: Some(Shroud {
+            allowed: &allowed,
+            dark: 3,
+        }),
+        ..scene_of(&fixture, &cutout, edge, Options::FULL)
+    };
+    let counts = parity(
+        "past the grid",
+        &fixture.map,
+        &fixture.objects,
+        edge,
+        &fixture.art,
+        scene,
+        &mut gpu,
+    );
+    assert!(counts.read_batches > 0, "{counts:?}");
+    let reference =
+        render_map_scene(&fixture.map, &fixture.objects, edge, &fixture.art, scene).unwrap();
+    assert!(reference.pixels().contains(&3), "the shroud shows");
+    // The shroud sits after every roof and before the first outline.
+    let tables = LookupTables::from_palette(&fixture.palette);
+    let view = view_at(20100, [640, 380]);
+    let scene = MapScene {
+        shroud: Some(Shroud {
+            allowed: &allowed,
+            dark: 3,
+        }),
+        ..scene_of(&fixture, &cutout, view, Options::FULL)
+    };
+    let frame = gather_map_frame(
+        &fixture.map,
+        &fixture.objects,
+        view,
+        &fixture.art,
+        scene,
+        Some(&tables),
+    )
+    .unwrap();
+    let records = frame.records().unwrap();
+    let at = records
+        .iter()
+        .position(|record| *record == DrawRecord::new(FrameLayer::Roof, 10000, 0, 0))
+        .unwrap();
+    assert!(records[..at].iter().all(|record| record.primary < 40000));
+    assert_eq!(records[at - 1].layer, FrameLayer::Roof);
+    assert_eq!(records[at + 1].layer, FrameLayer::Outline);
+    let shroud = frame
+        .instances
+        .iter()
+        .find(|item| item.mode == DrawMode::Remap)
+        .unwrap();
+    assert_eq!(shroud.light, LightSource::None);
+    assert_eq!(shroud.key.to_string(), "6000271000000000");
+    assert_eq!(shroud.dst, [0, 0]);
+    assert_eq!(shroud.size, [640, 380]);
+    let (table, at) = shroud.level.unwrap();
+    assert_eq!(at, [0, 0]);
+    assert_eq!(frame.images[table].pixels.as_ref(), &[3; 256]);
+    // A dark index of 0 is still written, by the table.
+    let allowed = region();
+    let scene = MapScene {
+        shroud: Some(Shroud {
+            allowed: &allowed,
+            dark: 0,
+        }),
+        ..scene
+    };
+    parity(
+        "dark index 0",
+        &fixture.map,
+        &fixture.objects,
+        view,
+        &fixture.art,
+        scene,
+        &mut gpu,
+    );
+}
+
+/// `outlined` outlined critters and two ground items.
+fn highlight_objects(map: &MapFile, outlined: u32) -> MapObjects {
+    let mut list = Vec::new();
+    for id in 0..outlined {
+        let hex = (95 + id % 10) + 200 * (95 + id / 10);
+        let mut critter = object(map, id + 1, CRITTER, hex as i32);
+        critter.outline = outline::RED;
+        list.push(critter);
+    }
+    list.push(object(map, 900, ITEM, 20308));
+    list.push(object(map, 901, ITEM, 20310));
+    scene(list)
+}
+
+#[test]
+fn t17_b_highlights_are_drawn_at_any_running_number() {
+    let _gpu = gpu::test_lock();
+    let fixture = Fixture::new();
+    let cutout = fixture.cutout();
+    let mut gpu = gpu_executor();
+    let view = view_at(20100, [640, 380]);
+    for (outlined, positions) in [(100, [100, 101]), (101, [100, 101]), (3, [3, 4])] {
+        let objects = highlight_objects(&fixture.map, outlined);
+        let scene = MapScene {
+            highlight: Some(outline::ITEM),
+            ..scene_of(&fixture, &cutout, view, Options::FULL)
+        };
+        let scene = MapScene {
+            cursor: None,
+            ..scene
+        };
+        parity(
+            &format!("{outlined} outlined"),
+            &fixture.map,
+            &objects,
+            view,
+            &fixture.art,
+            scene,
+            &mut gpu,
+        );
+        let tables = LookupTables::from_palette(&fixture.palette);
+        let frame = gather_map_frame(
+            &fixture.map,
+            &objects,
+            view,
+            &fixture.art,
+            scene,
+            Some(&tables),
+        )
+        .unwrap();
+        let listed: Vec<u32> = frame
+            .records()
+            .unwrap()
+            .iter()
+            .filter(|record| record.layer == FrameLayer::Outline)
+            .map(|record| record.index)
+            .collect();
+        let tail = &listed[listed.len() - 2..];
+        assert_eq!(tail, positions, "{outlined} outlined");
+    }
+}
+
+#[test]
+fn t17_c_an_unlit_scene_draws_its_cutout_and_source_pixels() {
+    let _gpu = gpu::test_lock();
+    let fixture = Fixture::new();
+    let cutout = fixture.cutout();
+    let mut gpu = gpu_executor();
+    let view = view_at(20100, [640, 380]);
+    let options = Options {
+        lit: false,
+        ..Options::FULL
+    };
+    let scene = scene_of(&fixture, &cutout, view, options);
+    let counts = parity(
+        "unlit",
+        &fixture.map,
+        &fixture.objects,
+        view,
+        &fixture.art,
+        scene,
+        &mut gpu,
+    );
+    assert!(counts.read_batches > 0, "{counts:?}");
+    let tables = LookupTables::from_palette(&fixture.palette);
+    let frame = gather_map_frame(
+        &fixture.map,
+        &fixture.objects,
+        view,
+        &fixture.art,
+        scene,
+        Some(&tables),
+    )
+    .unwrap();
+    // `rev3/unlit-modes.tsv`: only the cutout blends, without a light.
+    let mut eggs = 0;
+    for instance in &frame.instances {
+        assert_eq!(instance.light, LightSource::None, "{:?}", instance.key);
+        match instance.mode {
+            DrawMode::Egg => eggs += 1,
+            DrawMode::Plain => assert_eq!(instance.flags & EXEMPT, 0),
+            DrawMode::OutlineBlend => assert_eq!(instance.key.layer(), 4),
+            mode => panic!("{mode:?} in an unlit scene"),
+        }
+    }
+    assert!(eggs > 0, "the player is under a roof");
+    // A translucent object draws its source pixels, not a blend.
+    let translucent = Options {
+        cutout: false,
+        cursor: false,
+        outlines: false,
+        ..options
+    };
+    let scene = scene_of(&fixture, &cutout, view, translucent);
+    let mut objects = scene_objects_at(&fixture, 20708);
+    let drawn = render_map_scene(&fixture.map, &objects, view, &fixture.art, scene).unwrap();
+    parity(
+        "translucent bit",
+        &fixture.map,
+        &objects,
+        view,
+        &fixture.art,
+        scene,
+        &mut gpu,
+    );
+    objects.elevations[0][0].flags.0 &= !0x20000;
+    let opaque = render_map_scene(&fixture.map, &objects, view, &fixture.art, scene).unwrap();
+    assert_canvas("translucency ignored", &drawn, &opaque);
+}
+
+/// One object with the glass translucency bit on `hex`.
+fn scene_objects_at(fixture: &Fixture, hex: i32) -> MapObjects {
+    let mut item = object(&fixture.map, 1, SCENERY, hex);
+    item.flags.0 |= 0x20000;
+    scene(vec![item])
 }

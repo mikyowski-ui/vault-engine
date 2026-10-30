@@ -7,8 +7,7 @@ sections 3.16 and 5.8, and decisions D-33 to D-41.
 Formats are those of the parent folder's README: TSV files have one header
 row, hexadecimal values are uppercase, and `-` means "not used".
 
-- `square-rank.tsv`: the nine squares of `../rev2/square-order.tsv` and the
-  four grid corners, at SPEC-003 section 3.6's example translation. `rank` is
+- `square-rank.tsv`: nine floor squares and the four grid corners, at SPEC-003 section 3.6's example translation. `rank` is
   the square's position among all 10000 squares (revision 3), and
   `drawn_rank_rev2` is the rank revision 2 gave it among the nine.
 - `highlight-positions.tsv`: ground-item highlight keys. `list_len` is the
@@ -33,10 +32,7 @@ row, hexadecimal values are uppercase, and `-` means "not used".
 - `unlit-modes.tsv`: the draw mode and light source of each item in a lit
   scene and in an unlit scene.
 
-The files of `../rev2/` not named below stay current. These two are
-superseded by the implementer's follow-up, and until then the merged tests may
-still read them, so they stay where they are (SPEC-022 section 3.16):
-
-- `../rev2/square-order.tsv`, by `square-rank.tsv`;
-- `../rev2/scene2.tsv` and `../rev2/scene2-order.txt`, by the files of the
-  same names here.
+The files of `../rev2/` stay current. The implementer's follow-up deleted the
+three that this folder superseded: `square-order.tsv`, by `square-rank.tsv`, and
+`scene2.tsv` and `scene2-order.txt`, by the files of the same names here
+(SPEC-022 section 3.16).

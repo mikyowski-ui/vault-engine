@@ -315,15 +315,16 @@ cargo run -p vault-platform -- --render-path instanced
 - **`instanced`** draws each refresh with GPU-instanced sprite batches
   (`vault_render::SceneRenderer`): one draw call per batch, and a snapshot
   copy per batch of canvas-reading draws (translucency, the player cutout,
-  translucent outlines). Its GPU device is created on the first refresh and
+  translucent outlines, the enhanced shroud). Its GPU device is created on the first refresh and
   shared by every world of the session.
 - **Fallback.** A refresh the instanced path cannot draw exactly is drawn by
   the reference path, and its cause is logged once per session. Refused
-  today, besides SPEC-022 §3.12's error states: the `enhanced` unlocked
-  view's shroud past the grid (so every unlocked widescreen refresh falls
-  back), the cursor roof peek, and a cutout drawn without a light. Without a
-  GPU adapter or device, or after a lost device, the reference path draws
-  the rest of the session.
+  today: only SPEC-022 §3.12's error states, among them a roof peek whose
+  radius or center a safe bound of §3.10 would change, which the shell's zoom
+  range never reaches. The `enhanced` shroud, the cursor roof peek, every
+  ground-item highlight and a cutout drawn without a light are drawn
+  instanced. Without a GPU adapter or device, or after a lost device, the
+  reference path draws the rest of the session.
 - **Selection.** `--render-path reference|instanced`, else the settings'
   `render_path`, else `reference`. It is read under every preset and game,
   since it changes no output. A replay takes only the flag, and the
@@ -2852,9 +2853,10 @@ These close behaviors that the earlier phases left open:
 
 These notes are for the spec author (Team A), in plain words and math. They
 state what the reference path does, as read and measured on 2026-10-30.
-SPEC-022 revision 2 already adopts these findings. Two numbering differences
-remain between its text and the reference path (notes 2 and 3). Neither one
-changes a canvas byte, because the draw order is the same.
+SPEC-022 revision 2 adopts these findings, and revision 3 the two numbering
+differences that remained (notes 2 and 3). Neither one changed a canvas byte,
+because the draw order is the same. The instanced path now draws every state
+these notes describe.
 
 Terms used below:
 
@@ -2929,9 +2931,8 @@ differed:
   pixel.
 
 The reference path's X-ray defines the gallery, so it stayed as it is.
-Revision 2's §3.10 states the rule above. T8 still compares against the
-revision 1 rule, and the instanced path still refuses a refresh with the
-X-ray active, so the reference path draws it.
+Revision 2's §3.10 states the rule above. T8 compares the two X-rays byte for
+byte, and the instanced path draws a refresh with the X-ray active.
 
 ### 2. Where the late draws fall in the draw order
 
@@ -2987,11 +2988,11 @@ ring:
 The shell's word is the plain item outline, so in play each paint writes the
 item color's index.
 
-**Numbering difference.** The reference path's draw log numbers highlights
-straight after the entries the outline list actually holds. Revision 2's §2.1
-gives the k-th highlight position 100 + k, which agrees only when the list is
-full. The instanced path uses the running number, draws a highlight whose
-number is below 100, and refuses the refresh from 100 on.
+**Numbering.** The reference path's draw log numbers highlights straight after
+the entries the outline list actually holds. Revision 2's §2.1 gave the k-th
+highlight position 100 + k, which agreed only when the list was full. Revision 3
+adopts the running number, and the instanced path draws a highlight at any
+number.
 
 **The player cutout in an unlit scene.** An unlit scene has no light at all.
 Only tools and tests draw one, because the shell always passes a light. The
@@ -3007,7 +3008,8 @@ weight w of the mask at each pixel.
 A lit scene uses the same blend with I[s][L] in place of s, at the draw's
 light level L, with no exemption for indexes 229 and up inside the mask. In an
 unlit scene the translucency bits are ignored too, so a translucent object
-draws s. The instanced path refuses a cutout drawn without a light today.
+draws s. The instanced path draws this as `egg` without a light, and every
+other item of the scene as `plain` (SPEC-022 §3.3).
 
 ### 3. Floor and roof square order
 
@@ -3020,9 +3022,10 @@ fixed offset, so the order is the same for every view.
 The draw skips a square whose corner lies past the view's right or bottom
 edge, a hidden square, a square without art, and a roof of index 1.
 
-**Numbering difference.** The rank in the reference path's draw log is the
-square's position in the order of all 10000 squares, so skipped squares leave
-gaps. Revision 2's §3.4 counts only the drawn squares from 0.
+**Numbering.** The rank in the reference path's draw log is the square's
+position in the order of all 10000 squares, so skipped squares leave gaps.
+Revision 2's §3.4 counted only the drawn squares from 0; revision 3 adopts the
+log's numbers.
 
 ### 4. Object lists and whole-view refreshes
 
@@ -3057,9 +3060,8 @@ need six-bit components, which the formula does not use. So the bound changes
 no output that comes from a palette. It guards only a hand-built outline ink,
 which would otherwise index past the table.
 
-The instanced path has no clamp of its own yet. It refuses a gray level above
-7, so the reference path draws that refresh and the canvas is the same.
-Revision 2's §3.15 step 3 asks for a clamp in place of this refusal.
+The instanced path applies the same clamp, in the translucent draw and in the
+gray level of a translucent outline's ring.
 
 ## Core contracts
 

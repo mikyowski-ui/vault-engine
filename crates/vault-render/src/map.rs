@@ -14,10 +14,10 @@ use vault_formats::{
 
 mod enhanced;
 mod instanced;
-use crate::layers::FrameLayer;
+use crate::layers::{FrameLayer, SHROUD_PRIMARY};
 pub use enhanced::{
-    BAYER, RoofPeekParams, ShroudCell, ShroudField, Vignette, bayer, draw_shroud, draw_vignette,
-    roof_hides,
+    BAYER, RoofPeekParams, ShroudCell, ShroudField, ShroudRecording, Vignette, bayer, draw_shroud,
+    draw_vignette, record_shroud, roof_hides, shroud_dark,
 };
 pub use instanced::{DrawRecord, MapFrame, RefreshReport, SceneRenderer, gather_map_frame};
 
@@ -1343,6 +1343,7 @@ fn draw_map_scene_recorded(
     if let Some(shroud) = scene.shroud {
         let field = enhanced::cached_field(shroud.allowed);
         draw_shroud(image, view.grid, &field, shroud.dark);
+        log(FrameLayer::Roof, SHROUD_PRIMARY.into(), 0, 0);
     }
     // The refresh covers the whole view, which is the map buffer.
     let (width, height) = (i64::from(image.width()), i64::from(image.height()));

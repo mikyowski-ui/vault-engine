@@ -104,10 +104,10 @@ pub(crate) fn falloff_light() -> Vec<i64> {
     tiles
 }
 
-/// The scene's images, by name, in file order.
-pub(crate) fn scene_images() -> Vec<(String, SpriteImage<'static>)> {
+/// A scene's images, by name, in file order.
+pub(crate) fn scene_images(text: &str) -> Vec<(String, SpriteImage<'static>)> {
     let mut images: Vec<(String, u32, u32, Vec<u8>)> = Vec::new();
-    for line in fixture!("scene-sprites.txt").lines() {
+    for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -159,12 +159,16 @@ fn rect(text: &str) -> Rect {
     values.try_into().unwrap()
 }
 
-pub(crate) fn scene() -> Scene {
-    let named = scene_images();
+/// A scene file's rows as instances, with their ids. For a `remap` row,
+/// `levels` names the remap table.
+fn scene_instances(
+    text: &str,
+    named: &[(String, SpriteImage<'static>)],
+) -> (Vec<String>, Vec<SpriteInstance>) {
     let index = |name: &str| named.iter().position(|(other, _)| other == name).unwrap();
     let mut ids = Vec::new();
     let mut instances = Vec::new();
-    for row in tsv(fixture!("scene.tsv")) {
+    for row in tsv(text) {
         let mode = match row["mode"] {
             "plain" => DrawMode::Plain,
             "lit" => DrawMode::Lit,
@@ -172,6 +176,7 @@ pub(crate) fn scene() -> Scene {
             "translucent" => DrawMode::Translucent,
             "egg" => DrawMode::Egg,
             "outline_blend" => DrawMode::OutlineBlend,
+            "remap" => DrawMode::Remap,
             other => panic!("mode {other}"),
         };
         let light = match row["light"] {
@@ -213,6 +218,14 @@ pub(crate) fn scene() -> Scene {
             aux: u16::from_str_radix(row["aux"], 16).unwrap(),
         });
     }
+    (ids, instances)
+}
+
+/// SPEC-022 §5.4 the scene, with the revision 2 peek.
+pub(crate) fn scene() -> Scene {
+    let named = scene_images(fixture!("scene-sprites.txt"));
+    let index = |name: &str| named.iter().position(|(other, _)| other == name).unwrap();
+    let (ids, instances) = scene_instances(fixture!("scene.tsv"), &named);
     let mask = named[index("egg")].1.clone();
     let uniforms = LayerUniforms {
         canvas: [24, 16],
@@ -225,7 +238,7 @@ pub(crate) fn scene() -> Scene {
             width: 6,
             height: 5,
         }),
-        peek: Some(RoofPeekParams::new([88, 40], 32, 48)),
+        peek: Some(RoofPeekParams::new([5, 2], 2, 4)),
     };
     Scene {
         ids,
@@ -235,6 +248,37 @@ pub(crate) fn scene() -> Scene {
         uniforms,
         tables: synthetic_tables(),
         light: HexLightBuffer::pack(&falloff_light()),
+    }
+}
+
+/// SPEC-022 §5.6 the second scene, an unlit one: revision 3's numbering of
+/// the instances, over revision 2's images.
+pub(crate) fn scene2() -> Scene {
+    let named = scene_images(fixture!("rev2/scene2-sprites.txt"));
+    let index = |name: &str| named.iter().position(|(other, _)| other == name).unwrap();
+    let (ids, instances) = scene_instances(fixture!("rev3/scene2.tsv"), &named);
+    let mask = named[index("egg2")].1.clone();
+    let uniforms = LayerUniforms {
+        canvas: [12, 8],
+        offset: [0, 0],
+        ambient: 32768,
+        elevation: 0,
+        cutout: Some(CutoutPlace {
+            left: 2,
+            top: 1,
+            width: 4,
+            height: 3,
+        }),
+        peek: None,
+    };
+    Scene {
+        ids,
+        instances,
+        images: named.into_iter().map(|(_, image)| image).collect(),
+        mask,
+        uniforms,
+        tables: synthetic_tables(),
+        light: HexLightBuffer::default(),
     }
 }
 
@@ -259,15 +303,26 @@ pub(crate) fn scene_canvas() -> IndexedImage {
 }
 
 pub(crate) fn scene_expected() -> Vec<u8> {
-    let bytes = hex_dump(fixture!("scene-expected.hex"));
+    let bytes = hex_dump(fixture!("rev2/scene-expected.hex"));
     assert_eq!(bytes.len(), 24 * 16);
+    bytes
+}
+
+/// The 12-by-8 canvas filled with `0x40`.
+fn scene2_canvas() -> IndexedImage {
+    IndexedImage::from_pixels(12, 8, vec![0x40; 12 * 8]).unwrap()
+}
+
+fn scene2_expected() -> Vec<u8> {
+    let bytes = hex_dump(fixture!("rev2/scene2-expected.hex"));
+    assert_eq!(bytes.len(), 12 * 8);
     bytes
 }
 
 #[test]
 fn t1_sort_keys_give_every_fixture_row() {
-    let rows = tsv(fixture!("sort-keys.tsv"));
-    assert_eq!(rows.len(), 14);
+    let rows = tsv(fixture!("rev2/sort-keys.tsv"));
+    assert_eq!(rows.len(), 19);
     for row in rows {
         let (layer, primary, secondary) = (
             row["layer"].parse().unwrap(),
@@ -315,6 +370,21 @@ fn t1_sort_keys_give_every_fixture_row() {
         "A000000000000000"
     );
     assert_eq!(SortKey::no_hex(7).unwrap().to_string(), "C000000000000007");
+    assert_eq!(SortKey::shroud(2).unwrap().to_string(), "6000271000000002");
+}
+
+#[test]
+fn t1_highlight_positions_give_every_fixture_row() {
+    let rows = tsv(fixture!("rev3/highlight-positions.tsv"));
+    assert_eq!(rows.len(), 10);
+    for row in rows {
+        let number = |column: &str| row[column].parse::<u32>().unwrap();
+        let (list, k, part) = (number("list_len"), number("k"), number("part"));
+        assert_eq!(list + k, number("position"));
+        let key = SortKey::outline(list + k, part as u8).unwrap();
+        assert_eq!(key.to_string(), row["key"], "{list} + {k}");
+        assert_eq!(key.secondary(), number("secondary"), "{list} + {k}");
+    }
 }
 
 #[test]
@@ -334,10 +404,15 @@ fn t1_sort_keys_refuse_fields_outside_their_domains() {
     assert!(SortKey::roof(0, 5).is_err());
     // A part of 1 in layer 0.
     assert!(SortKey::new(0, 0, 1).is_err());
-    // A part of 2 in layer 4, and an outline position of 100.
+    // A roof rank of 10000 as a roof square, not as the shroud, and a
+    // primary past the shroud's.
+    assert!(SortKey::new(3, 10000, 0).is_ok());
+    assert!(SortKey::new(3, 10001, 0).is_err());
+    // A part of 2 in layer 4, and an outline position of 2^29.
     assert!(SortKey::outline(0, 2).is_err());
     assert!(SortKey::new(4, 0, 2).is_err());
-    assert!(SortKey::outline(100, 0).is_err());
+    assert!(SortKey::outline(1 << 29, 0).is_err());
+    assert!(SortKey::outline((1 << 29) - 1, 1).is_ok());
     // A list index of 2^29.
     assert!(SortKey::object(FrameLayer::Upright, 0, 1 << 29, 0).is_err());
     assert!(SortKey::object(FrameLayer::Upright, 0, (1 << 29) - 1, 4).is_ok());
@@ -419,7 +494,14 @@ fn t3_one_clip_of_overwrite_instances_is_one_draw() {
 fn t4_scene_uniforms_pack_into_the_fixture_bytes() {
     let scene = scene();
     let bytes = scene.uniforms.to_bytes();
-    assert_eq!(bytes.to_vec(), hex_dump(fixture!("scene-uniforms.hex")));
+    assert_eq!(
+        bytes.to_vec(),
+        hex_dump(fixture!("rev2/scene-uniforms.hex"))
+    );
+    assert_eq!(
+        scene2().uniforms.to_bytes().to_vec(),
+        hex_dump(fixture!("rev2/scene2-uniforms.hex"))
+    );
     // An inactive cutout and peek leave their bytes zero.
     let bare = LayerUniforms {
         cutout: None,
@@ -464,6 +546,150 @@ fn t5_cpu_executor_draws_the_fixture_canvas_batched_and_one_at_a_time() {
     assert_eq!(at(9, 9), 0xC1);
     assert_eq!(at(5, 2), 0x40);
     assert_eq!(at(6, 2), 0x31);
+    // Revision 2's ring: these two keep the base.
+    assert_eq!(at(1, 0), 0x40);
+    assert_eq!(at(0, 1), 0x40);
+}
+
+#[test]
+fn t5_second_scene_gives_its_order_batches_and_canvas_both_ways() {
+    let scene = scene2();
+    let inputs = scene.inputs();
+    let order = sort_by_key(&scene.instances).unwrap();
+    let sorted: Vec<String> = order
+        .iter()
+        .map(|index| format!("{}\t{}", scene.instances[*index].key, scene.id(*index)))
+        .collect();
+    let expected: Vec<&str> = fixture!("rev3/scene2-order.txt").lines().collect();
+    assert_eq!(sorted, expected);
+    let plan = BatchPlan::new(&scene.instances).unwrap();
+    let rows = tsv(fixture!("rev2/scene2-batches.tsv"));
+    assert_eq!(plan.batches.len(), rows.len());
+    for (batch, row) in plan.batches.iter().zip(&rows) {
+        let kind = match batch.kind {
+            BatchKind::Overwrite => "overwrite",
+            BatchKind::Read => "dst_read",
+        };
+        let ids: Vec<&str> = plan.order[batch.range.clone()]
+            .iter()
+            .map(|index| scene.id(*index))
+            .collect();
+        assert_eq!(kind, row["kind"], "batch {}", row["batch"]);
+        assert_eq!(ids.join(","), row["instances"], "batch {}", row["batch"]);
+        let snapshot = batch.snapshot.map_or("-".to_owned(), |rect| {
+            rect.map(|value| value.to_string()).join(",")
+        });
+        assert_eq!(snapshot, row["snapshot"], "batch {}", row["batch"]);
+    }
+    let expected = scene2_expected();
+    let mut batched = scene2_canvas();
+    execute_plan(
+        &mut CanvasView::of(&mut batched),
+        &scene.instances,
+        &plan,
+        &inputs,
+    )
+    .unwrap();
+    assert_eq!(batched.pixels(), expected.as_slice());
+    let mut single = scene2_canvas();
+    execute_unbatched(&mut CanvasView::of(&mut single), &scene.instances, &inputs).unwrap();
+    assert_eq!(single.pixels(), expected.as_slice());
+    // The worked pixels: the cutout without a relight, the code that
+    // writes index 0, and the highlight over the ring.
+    let at = |x: usize, y: usize| batched.pixels()[y * 12 + x];
+    assert_eq!(at(3, 1), 0x8F);
+    assert_eq!(at(4, 2), 0x27);
+    assert_eq!(at(11, 2), 0x00);
+    assert_eq!(at(9, 1), 0x3A);
+}
+
+#[test]
+fn t16_the_gray_bound_gives_the_fixture_rows() {
+    // §5.7 a gray rule that exceeds 7, as only a hand-built ink can.
+    let mut tables = synthetic_tables();
+    tables.gray = [
+        std::array::from_fn(|s| (s % 16) as u8),
+        std::array::from_fn(|s| (s / 16 % 16) as u8),
+    ];
+    let light = HexLightBuffer::default();
+    for row in tsv(fixture!("rev2/blend-clamp.tsv")) {
+        let table: u16 = row["table"].parse().unwrap();
+        let s = u8::from_str_radix(row["s"], 16).unwrap();
+        let used: usize = row["gray_used"].parse().unwrap();
+        let destination: u8 = row["D"].parse().unwrap();
+        let blend: u8 = row["blend"].parse().unwrap();
+        assert_eq!(
+            usize::from(tables.gray[usize::from(table == 1)][usize::from(s)]).to_string(),
+            row["gray_raw"]
+        );
+        assert_eq!(
+            crate::outline::blend_row(row["gray_raw"].parse().unwrap()),
+            used
+        );
+        assert_eq!(
+            tables.blends[usize::from(table)][used][usize::from(destination)],
+            blend
+        );
+        // Mode 3 at L = 128, which leaves the value unchanged.
+        let image = SpriteImage::new(1, 1, vec![s]);
+        let instance = SpriteInstance {
+            mode: DrawMode::Translucent,
+            flags: 0,
+            light: LightSource::Fixed,
+            fixed: 65536,
+            aux: table,
+            ..hex_instance(0)
+        };
+        let images = [image];
+        let inputs = FrameInputs {
+            tables: &tables,
+            light: &light,
+            uniforms: LayerUniforms {
+                canvas: [1, 1],
+                offset: [0, 0],
+                ambient: 0,
+                elevation: 0,
+                cutout: None,
+                peek: None,
+            },
+            mask: None,
+            images: &images,
+        };
+        let instances = [instance];
+        let plan = BatchPlan::new(&instances).unwrap();
+        let mut canvas = IndexedImage::from_pixels(1, 1, vec![destination]).unwrap();
+        execute_plan(&mut CanvasView::of(&mut canvas), &instances, &plan, &inputs).unwrap();
+        assert_eq!(canvas.pixels()[0], blend, "table {table}, s {s:#04X}");
+    }
+}
+
+#[test]
+fn t5_a_remap_source_above_its_table_refuses_the_refresh() {
+    let scene = scene2();
+    let plan = BatchPlan::new(&scene.instances).unwrap();
+    let shroud = scene
+        .instances
+        .iter()
+        .find(|instance| instance.mode == DrawMode::Remap)
+        .unwrap();
+    let mut images = scene.images.clone();
+    // The table has two rows, and the shroud image reads code 3.
+    let at = usize::try_from(shroud.src[1] * images[shroud.image].width + shroud.src[0]).unwrap();
+    images[shroud.image].pixels.to_mut()[at] = 3;
+    let inputs = FrameInputs {
+        images: &images,
+        ..scene.inputs()
+    };
+    let mut canvas = scene2_canvas();
+    let error = execute_plan(
+        &mut CanvasView::of(&mut canvas),
+        &scene.instances,
+        &plan,
+        &inputs,
+    )
+    .unwrap_err();
+    assert_eq!(error, InstanceError::RemapRange(3));
+    assert!(canvas.pixels().iter().all(|pixel| *pixel == 0x40));
 }
 
 #[test]
@@ -551,7 +777,8 @@ fn t5_executor_refuses_before_drawing() {
         Err(InstanceError::TextureLimit(..))
     ));
     // Unknown codes are refused when decoded.
-    assert_eq!(DrawMode::from_code(6), Err(InstanceError::UnknownMode(6)));
+    assert_eq!(DrawMode::from_code(6), Ok(DrawMode::Remap));
+    assert_eq!(DrawMode::from_code(7), Err(InstanceError::UnknownMode(7)));
     assert_eq!(
         LightSource::from_code(5),
         Err(InstanceError::UnknownLightSource(5))
@@ -586,6 +813,22 @@ fn t6_gpu_executor_draws_the_fixture_canvas() {
         .execute(&mut again, &scene.instances, &plan, &inputs)
         .unwrap();
     assert_eq!(again.pixels(), scene_expected().as_slice());
+    // The second scene: `egg` without a light, and the `remap` mode.
+    let scene = scene2();
+    let inputs = scene.inputs();
+    let plan = BatchPlan::new(&scene.instances).unwrap();
+    let mut canvas = scene2_canvas();
+    let counts = executor
+        .execute(&mut canvas, &scene.instances, &plan, &inputs)
+        .unwrap();
+    assert_eq!(canvas.pixels(), scene2_expected().as_slice());
+    assert_eq!(
+        counts,
+        gpu::GpuCounts {
+            draws: 5,
+            snapshots: 2,
+        }
+    );
 }
 
 /// The canvas the CPU executor draws over `start` (the reference for the

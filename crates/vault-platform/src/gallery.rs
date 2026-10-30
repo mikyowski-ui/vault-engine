@@ -639,9 +639,8 @@ mod tests {
         })
     }
 
-    /// The files are byte for byte the same on both paths; the instanced
-    /// session drew some refreshes itself and the rest (refused, such as
-    /// the unlocked view's shroud) by the reference path.
+    /// The files are byte for byte the same on both paths, and the
+    /// instanced session repeats every refresh of the reference one.
     /// Returns its refreshes and refusal causes.
     fn assert_gallery_matches(
         instanced: SharedRenderer,
@@ -667,18 +666,17 @@ mod tests {
     }
 
     /// The gallery comparison run on the CPU executor (any host): the same
-    /// files on both paths. The Vanilla picture of the comparison is drawn
-    /// instanced; the unlocked widescreen canvas has the shroud past the
-    /// grid, which the instanced path refuses, so it falls back.
+    /// files on both paths, every scene drawn by the instanced path, with
+    /// no refusal (SPEC-022 §3.16).
     #[test]
     fn the_gallery_is_the_same_on_both_render_paths() {
         let (totals, causes) =
             assert_gallery_matches(crate::map_preview::test_support::cpu_renderer());
         println!("gallery on the CPU executor: {totals:?}, fallbacks {causes:?}");
         assert!(totals.instanced > 0, "{totals:?}");
-        assert!(totals.refused > 0, "{totals:?}");
+        assert_eq!(totals.refused, 0, "{totals:?} {causes:?}");
         assert_eq!(totals.reference, 0, "{totals:?}");
-        assert!(causes.contains(&"unexpressible draw"), "{causes:?}");
+        assert!(causes.is_empty(), "{causes:?}");
     }
 
     /// The same run on the GPU (a GPU test: it skips without an adapter
@@ -691,6 +689,8 @@ mod tests {
         };
         let (totals, causes) = assert_gallery_matches(SharedRenderer::from_renderer(gpu));
         println!("gallery on the GPU: {totals:?}, fallbacks {causes:?}");
-        assert!(totals.refused > 0, "{totals:?}");
+        assert!(totals.instanced > 0, "{totals:?}");
+        assert_eq!(totals.refused, 0, "{totals:?} {causes:?}");
+        assert!(causes.is_empty(), "{causes:?}");
     }
 }

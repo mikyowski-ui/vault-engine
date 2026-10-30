@@ -71,92 +71,106 @@ impl RoofCutaway {
     }
 }
 
-/// SPEC-022 §3.10 the instanced path's roof peek: a disc around the cursor
-/// in which roof pixels are cut, and a ring beyond it in which they
-/// dissolve through [`BAYER`] anchored to world pixels. Every length is in
-/// 1/16 canvas pixel. Passed to the GPU in the layer uniform block
-/// ([`LayerUniforms`](crate::layers::LayerUniforms)).
-///
-/// This is revision 1's reading of the documented X-ray; the reference
-/// path's X-ray ([`RoofCutaway`]) is a different rule (test T8), so the
-/// instanced path refuses peek refreshes and the reference draws them.
+/// SPEC-022 §3.10 the instanced path's roof peek: the reference X-ray
+/// ([`RoofCutaway`]) in whole canvas pixels, a disc around the cursor in
+/// which roof pixels are cut and a ring beyond it in which they dissolve
+/// through [`BAYER`] anchored to world pixels. Passed to the GPU in the
+/// layer uniform block ([`LayerUniforms`](crate::layers::LayerUniforms)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoofPeekParams {
-    /// The center, in 1/16 canvas pixel.
+    /// The canvas pixel under the cursor, less the tile's corner.
     pub center: [i32; 2],
-    /// The inner radius R0.
+    /// The inner radius, in whole canvas pixels.
     pub inner: u32,
-    /// The ring width Wr.
+    /// The ring width, in whole canvas pixels.
     pub ring: u32,
+    /// Whether a safe bound changed a value: the reference path has no such
+    /// bound, so such a peek refuses its refresh.
+    pub bounded: bool,
 }
 
 impl RoofPeekParams {
-    /// The inner radius on screen, in screen pixels (Decision D-16).
-    pub const INNER_SCREEN: f64 = 96.0;
-    /// The ring width on screen.
-    pub const RING_SCREEN: f64 = 48.0;
-    /// The largest outer radius, 16384 (1024 canvas pixels).
-    pub const OUTER_LIMIT: u32 = 16384;
-    /// The center's bound, ±2^24.
-    const CENTER_LIMIT: i64 = 1 << 24;
+    /// The inner radius in interface pixels.
+    pub const INNER_INTERFACE: f64 = 96.0;
+    /// The ring width in interface pixels.
+    pub const RING_INTERFACE: f64 = 48.0;
+    /// The largest outer radius, in canvas pixels.
+    pub const OUTER_LIMIT: u64 = 1024;
+    /// The center's bound in each axis.
+    const CENTER_LIMIT: i64 = 1 << 20;
 
-    /// Parameters from a center, inner radius and ring width in 1/16
-    /// canvas pixel. `[Safe rule]`: the center is clamped to ±2^24, and an
-    /// outer radius above 16384 lowers R0 to at most 16384 and Wr to at
-    /// most 16384 − R0.
+    /// Parameters from a center, inner radius and ring width in canvas
+    /// pixels. `[Safe rule]`: the center is clamped to ±2^20, and an outer
+    /// radius above 1024 lowers inner to at most 1024 and ring to at most
+    /// 1024 − inner; either sets [`Self::bounded`].
     pub fn new(center: [i64; 2], inner: u64, ring: u64) -> Self {
-        let center =
+        let clamped =
             center.map(|value| value.clamp(-Self::CENTER_LIMIT, Self::CENTER_LIMIT) as i32);
-        let limit = u64::from(Self::OUTER_LIMIT);
-        let (inner, ring) = if inner.saturating_add(ring) > limit {
-            let inner = inner.min(limit);
-            (inner, ring.min(limit - inner))
+        let limit = Self::OUTER_LIMIT;
+        let capped = inner.saturating_add(ring) > limit;
+        let (kept_inner, kept_ring) = if capped {
+            let kept = inner.min(limit);
+            (kept, ring.min(limit - kept))
         } else {
             (inner, ring)
         };
         Self {
-            center,
-            inner: inner as u32,
-            ring: ring as u32,
+            center: clamped,
+            inner: kept_inner as u32,
+            ring: kept_ring as u32,
+            bounded: capped || clamped.map(i64::from) != center,
         }
     }
 
-    /// `q(p) = floor(16 p / canvas_scale + 0.5)` in double precision, for
-    /// a finite, positive scale.
-    fn q(pixels: f64, canvas_scale: f64) -> Option<u64> {
-        (canvas_scale.is_finite() && canvas_scale > 0.0)
-            .then(|| (16.0 * pixels / canvas_scale + 0.5).floor() as u64)
+    /// The instanced path's peek for the reference path's cutaway.
+    pub fn of_cutaway(cutaway: RoofCutaway) -> Self {
+        Self::new(
+            cutaway.center,
+            u64::from(cutaway.inner),
+            u64::from(cutaway.ring),
+        )
     }
 
-    /// The default peek at `canvas_scale` screen pixels per canvas pixel,
-    /// around the cursor at canvas position `cursor` (pixel (x, y) spans x
-    /// to x + 1). `None` for a scale that is not finite and positive, or a
-    /// cursor that is not finite.
-    pub fn at_scale(cursor: [f64; 2], canvas_scale: f64) -> Option<Self> {
-        let inner = Self::q(Self::INNER_SCREEN, canvas_scale)?;
-        let ring = Self::q(Self::RING_SCREEN, canvas_scale)?;
-        if !cursor.iter().all(|value| value.is_finite()) {
-            return None;
-        }
-        // Saturating float-to-integer casts; the clamp follows in `new`.
-        let center = cursor.map(|value| (16.0 * value + 0.5).floor() as i64);
-        Some(Self::new(center, inner, ring))
+    /// `round(96 / zoom)` and `round(48 / zoom)` in double precision, for
+    /// a finite, positive zoom.
+    pub fn radii(zoom: f64) -> Option<[u64; 2]> {
+        (zoom.is_finite() && zoom > 0.0).then(|| {
+            [Self::INNER_INTERFACE, Self::RING_INTERFACE]
+                .map(|length| (length / zoom).round() as u64)
+        })
     }
 
-    /// The outer radius R1 = R0 + Wr.
+    /// The canvas pixel under the pointer at canvas position `pointer`
+    /// (pixel (x, y) spans x to x + 1), in the tile with corner `tile`.
+    pub fn center_of(pointer: [f64; 2], tile: [i64; 2]) -> [i64; 2] {
+        [0, 1].map(|axis| (pointer[axis].floor() as i64).saturating_sub(tile[axis]))
+    }
+
+    /// The default peek at `zoom` interface pixels per canvas pixel, for
+    /// the tile with corner `tile`. `None` for a zoom that is not finite
+    /// and positive, or a pointer that is not finite.
+    pub fn at_zoom(pointer: [f64; 2], zoom: f64, tile: [i64; 2]) -> Option<Self> {
+        let [inner, ring] = Self::radii(zoom)?;
+        pointer
+            .iter()
+            .all(|value| value.is_finite())
+            .then(|| Self::new(Self::center_of(pointer, tile), inner, ring))
+    }
+
+    /// The outer radius, `inner + ring`.
     pub fn outer(self) -> u32 {
         self.inner + self.ring
     }
 
-    /// `T[t] = R0 + trunc(Wr × (2t + 1) / 32)`, for t = 0 to 15.
-    pub fn threshold(self, t: usize) -> u32 {
-        self.inner + (u64::from(self.ring) * (2 * t as u64 + 1) / 32) as u32
+    /// `16 × inner + (b + 1) × ring`, for b = 0 to 15.
+    pub fn threshold(self, b: usize) -> u32 {
+        16 * self.inner + (b as u32 + 1) * self.ring
     }
 
-    /// `T[t]²` for t = 0 to 15, as the uniform block holds them.
+    /// `Q[b]`, the thresholds' squares, as the uniform block holds them.
     pub fn thresholds_squared(self) -> [u32; 16] {
-        std::array::from_fn(|t| {
-            let threshold = self.threshold(t);
+        std::array::from_fn(|b| {
+            let threshold = self.threshold(b);
             threshold * threshold
         })
     }
@@ -168,15 +182,22 @@ impl RoofPeekParams {
             i64::from(x) - i64::from(offset[0]),
             i64::from(y) - i64::from(offset[1]),
         ];
-        let t = usize::from(bayer(world));
-        let dx = 16 * i64::from(x) + 8 - i64::from(self.center[0]);
-        let dy = 16 * i64::from(y) + 8 - i64::from(self.center[1]);
+        let b = usize::from(bayer(world));
+        let dx = i64::from(x) - i64::from(self.center[0]);
+        let dy = i64::from(y) - i64::from(self.center[1]);
         let outer = i64::from(self.outer());
         if dx.abs() > outer || dy.abs() > outer {
             return false;
         }
-        let threshold = i64::from(self.threshold(t));
-        dx * dx + dy * dy < threshold * threshold
+        let d2 = dx * dx + dy * dy;
+        let inner = i64::from(self.inner);
+        if d2 <= inner * inner {
+            return true;
+        }
+        if d2 > outer * outer {
+            return false;
+        }
+        256 * d2 < i64::from(self.threshold(b)).pow(2)
     }
 }
 
@@ -361,26 +382,36 @@ impl ShroudField {
         self.cells.get(usize::try_from(hex).ok()?).copied()
     }
 
-    /// Whether the shroud darkens view pixel `point`: its hex
-    /// (`grid.pick_hex`) is off the grid or outside the region, and it is
-    /// at least `20 + 4 bayer(world)` pixels from the hex's nearest allowed
-    /// center ([`ShroudCell::Far`] always).
+    /// Whether the shroud darkens view pixel `point` ([`shroud_dark`]):
+    /// its hex (`grid.pick_hex`) is off the grid or outside the region, and
+    /// it is at least `20 + 4 bayer(world)` pixels from the hex's nearest
+    /// allowed center ([`ShroudCell::Far`] always).
     pub fn darkens(&self, grid: HexGrid, point: [i64; 2]) -> bool {
         let (Ok(x), Ok(y)) = (i32::try_from(point[0]), i32::try_from(point[1])) else {
             return true;
         };
         let Some(hex) = grid.pick_hex([x, y]) else {
-            return true;
+            return shroud_dark(None, 0, 0);
         };
-        match self.cells[hex as usize] {
-            ShroudCell::Allowed => false,
-            ShroudCell::Far => true,
-            ShroudCell::Near(center) => {
-                let at = world(grid, point);
-                let d2 = distance_squared(at, center.map(i64::from));
-                d2 >= i128::from(DARK_FROM[usize::from(bayer(at))])
-            }
-        }
+        let cell = self.cells[hex as usize];
+        let at = world(grid, point);
+        let d2 = match cell {
+            ShroudCell::Near(center) => distance_squared(at, center.map(i64::from)),
+            _ => 0,
+        };
+        shroud_dark(Some(cell), d2, bayer(at))
+    }
+}
+
+/// SPEC-022 §3.3 the shroud's pixel test: whether a pixel takes the dark
+/// index, for the cell of its hex (`None` off the grid), its squared
+/// distance from a `Near` cell's center, and its Bayer value `b`. Checks
+/// the recorder; the painter ([`draw_shroud`]) stays the authority.
+pub fn shroud_dark(cell: Option<ShroudCell>, d2: i128, b: u8) -> bool {
+    match cell {
+        None | Some(ShroudCell::Far) => true,
+        Some(ShroudCell::Allowed) => false,
+        Some(ShroudCell::Near(_)) => d2 >= i128::from(DARK_FROM[usize::from(b)]),
     }
 }
 
@@ -450,6 +481,36 @@ pub fn draw_shroud(image: &mut IndexedImage, grid: HexGrid, field: &ShroudField,
             x = next;
         }
     }
+}
+
+/// SPEC-022 §3.3 the shroud's draw as an instance's image and remap table:
+/// the painter run over an empty canvas with all its clipping, writing the
+/// code 1 instead of the canvas. The painter writes one constant index, so
+/// the table has one row, that index 256 times, and a pixel it leaves alone
+/// records 0.
+pub struct ShroudRecording {
+    pub width: u32,
+    pub height: u32,
+    pub image: Vec<u8>,
+    pub table: Vec<u8>,
+}
+
+/// Record the shroud of `field` over a view of `size` pixels whose grid is
+/// `grid`, as [`draw_shroud`] with `dark` would paint it.
+pub fn record_shroud(
+    size: [u32; 2],
+    grid: HexGrid,
+    field: &ShroudField,
+    dark: u8,
+) -> Result<ShroudRecording, crate::ImageError> {
+    let mut image = IndexedImage::new(size[0], size[1])?;
+    draw_shroud(&mut image, grid, field, 1);
+    Ok(ShroudRecording {
+        width: size[0],
+        height: size[1],
+        image: image.pixels().to_vec(),
+        table: vec![dark; 256],
+    })
 }
 
 /// The darkening vignette over the world canvas behind a centered window

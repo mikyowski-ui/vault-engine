@@ -10,14 +10,16 @@
 //! canvas is drawn as separate views.
 use super::{
     Cutout, Drawn, FloorLight, ListIndexes, MapArt, MapLight, MapRenderError, MapScene, MapView,
-    TRANSLUCENT, TileLight, check_floor_view, cutout_parts, draw_sequence_with, floor_squares,
-    frame_rect, overscan_hexes, placement, render_map_scene, roof_squares, translucent_row,
+    TRANSLUCENT, TileLight, check_floor_view, cutout_parts, draw_sequence_with,
+    enhanced::{self, RoofPeekParams},
+    floor_squares, frame_rect, overscan_hexes, placement, render_map_scene, roof_squares,
+    translucent_row,
 };
 use crate::{
     IndexedImage,
     layers::{
         BatchPlan, CanvasView, CutoutPlace, DrawMode, EXEMPT, FrameCounts, FrameInputs, FrameLayer,
-        HexLightBuffer, InstanceError, LayerUniforms, LightSource, LookupTables, RenderPath,
+        HexLightBuffer, InstanceError, LayerUniforms, LightSource, LookupTables, PEEK, RenderPath,
         SortKey, SpriteImage, SpriteInstance, execute_plan,
         gpu::{GpuDevice, GpuExecutor},
     },
@@ -33,8 +35,8 @@ use vault_formats::{
 
 /// SPEC-022 §3.4 one entry of the reference path's draw log, and of the
 /// instanced path's sorted instance list: the layer, the hex or square
-/// rank, the list index (outline position, creation rank or reference
-/// draw rank in layers 4 to 6) and the part.
+/// rank (10000 for the shroud), the list index (outline position, creation
+/// rank or reference draw rank in layers 4 to 6) and the part.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DrawRecord {
     pub layer: FrameLayer,
@@ -174,6 +176,7 @@ impl<'a> Builder<'a> {
         let src = [(rect[0] - origin[0]) as u32, (rect[1] - origin[1]) as u32];
         let (light, hex, fixed, level) = match light {
             Light::None => (LightSource::None, 0, 0, None),
+            Light::Remap(table) => (LightSource::None, 0, 0, Some((table, [0, 0]))),
             Light::Hex(hex) => (LightSource::Hex, hex, 0, None),
             Light::Ambient => (LightSource::Ambient, 0, 0, None),
             Light::Fixed(value) => (LightSource::Fixed, 0, value, None),
@@ -214,6 +217,8 @@ enum Light {
     Fixed(u32),
     /// The level image's index.
     Level(usize),
+    /// No light, and the remap table's index.
+    Remap(usize),
 }
 
 /// The draw mode, light and aux of an object drawn without the cutout
@@ -247,12 +252,10 @@ fn hex_light(hex: i32) -> Light {
 /// the reference path draws. `tables` are the lookup tables of the
 /// scene's light palette (`None` refuses every draw that needs them).
 ///
-/// Refused (a typed [`InstanceError`]): the `enhanced` shroud (it has no
-/// layer in §2.1), the roof peek (the reference X-ray differs from §3.10),
-/// a ground-item highlight (an outline past position 99), a cutout drawn
-/// without a light, an opaque outline of index 0, a translucent outline
-/// whose blend table is not one of the five, and tables that are not the
-/// light palette's.
+/// Refused (a typed [`InstanceError`]): a peek a safe bound of §3.10
+/// changed, an opaque outline of index 0, a translucent outline whose blend
+/// table is not one of the five, and tables that are not the light
+/// palette's (or the cutout's, in a scene without a light).
 pub fn gather_map_frame<'a, A: MapArt>(
     map: &'a MapFile,
     objects: &'a MapObjects,
@@ -269,11 +272,12 @@ pub fn gather_map_frame<'a, A: MapArt>(
             return Err(InstanceError::Upload("stale lookup tables".into()).into());
         }
     }
-    if scene.shroud.is_some() {
-        return Err(InstanceError::Unexpressible("the enhanced shroud").into());
-    }
-    if view.roofs && scene.roof_cutaway.is_some() {
-        return Err(InstanceError::PeekMismatch.into());
+    let peek = scene
+        .roof_cutaway
+        .filter(|_| view.roofs)
+        .map(RoofPeekParams::of_cutaway);
+    if peek.is_some_and(|peek| peek.bounded) {
+        return Err(InstanceError::PeekBound.into());
     }
     let canvas = [0, 0, view.width as i32, view.height as i32];
     let refresh = [0, 0, i64::from(view.width), i64::from(view.height)];
@@ -419,17 +423,14 @@ pub fn gather_map_frame<'a, A: MapArt>(
         let hex = object.hex.unwrap_or_default();
         let image = builder.frame(frame);
         let rect = frame_rect(frame, origin);
-        let light = hex_light(hex);
+        let light = if lit { hex_light(hex) } else { Light::None };
         let cut = cutout.filter(|(cut, _)| cut.cuts(view, object)).is_some();
-        if cut && !lit {
-            return Err(InstanceError::Unexpressible("a cutout without a light").into());
-        }
         let mask = if cut { mask_rect } else { None };
         for (part, part_rect, through) in cutout_parts(rect, refresh, mask) {
             let key = SortKey::object(layer, hex_u32(hex)?, lists.objects[index], part)?;
             let (mode, flags, light, aux) = if through {
                 (DrawMode::Egg, 0, light, 0)
-            } else if cut {
+            } else if cut && lit {
                 (DrawMode::Lit, EXEMPT, light, 0)
             } else {
                 object_mode(object.flags.0, lit, light)
@@ -454,24 +455,49 @@ pub fn gather_map_frame<'a, A: MapArt>(
         }
     }
 
-    // Layer 3: the roofs, at the ambient light, through the cutout.
+    // Layer 3: the roofs, at the ambient light, through the cutout and the
+    // peek.
     if view.roofs {
+        let peeked = if peek.is_some() { PEEK } else { 0 };
         for (rank, frame, corner) in roof_squares(map, view, art) {
             let image = builder.frame(frame);
             let rect = frame_rect(frame, corner);
-            if mask_rect.is_some() && !lit {
-                return Err(InstanceError::Unexpressible("a cutout without a light").into());
-            }
             for (part, part_rect, through) in cutout_parts(rect, refresh, mask_rect) {
                 let key = SortKey::roof(rank, part)?;
                 let (mode, flags, light) = match (lit, through) {
-                    (false, _) => (DrawMode::Plain, 0, Light::None),
-                    (true, true) => (DrawMode::Egg, 0, Light::Ambient),
-                    (true, false) => (DrawMode::Lit, EXEMPT, Light::Ambient),
+                    (false, true) => (DrawMode::Egg, peeked, Light::None),
+                    (false, false) => (DrawMode::Plain, peeked, Light::None),
+                    (true, true) => (DrawMode::Egg, peeked, Light::Ambient),
+                    (true, false) => (DrawMode::Lit, EXEMPT | peeked, Light::Ambient),
                 };
                 builder.push(key, image, corner, part_rect, mode, flags, light, clip);
             }
         }
+    }
+
+    // Layer 3, after every roof square: the enhanced shroud, recorded from
+    // its painter.
+    if let Some(shroud) = scene.shroud {
+        let field = enhanced::cached_field(shroud.allowed);
+        let recording =
+            enhanced::record_shroud([view.width, view.height], view.grid, &field, shroud.dark)
+                .map_err(MapRenderError::from)?;
+        let image = builder.owned(SpriteImage::new(
+            recording.width,
+            recording.height,
+            recording.image,
+        ));
+        let table = builder.owned(SpriteImage::new(256, 1, recording.table));
+        builder.push(
+            SortKey::shroud(0)?,
+            image,
+            [0, 0],
+            refresh,
+            DrawMode::Remap,
+            0,
+            Light::Remap(table),
+            clip,
+        );
     }
 
     // Layer 4: the outlines, as ring images the outline painter records.
@@ -562,7 +588,7 @@ pub fn gather_map_frame<'a, A: MapArt>(
         ambient: scene.light.map_or(0, |light| i64::from(light.ambient)),
         elevation: u32::from(view.elevation),
         cutout: mask.as_ref().map(|(place, _)| *place),
-        peek: None,
+        peek,
     };
     let light = scene.light.map_or_else(HexLightBuffer::default, |light| {
         HexLightBuffer::pack(light.tiles)
@@ -588,16 +614,14 @@ fn hex_u32(hex: i32) -> Result<u32, InstanceError> {
 }
 
 /// The cutout blends with its own palette's intensity and mix tables; the
-/// instanced path draws with the light palette's, so the two must agree.
+/// instanced path draws with the given tables, so the two must agree.
 fn check_cut_palette(
     cut: &Cutout,
     light: Option<MapLight>,
     tables: Option<&LookupTables>,
 ) -> Result<(), InstanceError> {
-    let (Some(light), Some(tables)) = (light, tables) else {
-        return Ok(());
-    };
-    if std::ptr::eq(cut.palette, light.palette) {
+    let tables = tables.ok_or(InstanceError::Upload("lookup tables".into()))?;
+    if light.is_some_and(|light| std::ptr::eq(cut.palette, light.palette)) {
         return Ok(());
     }
     let same = *tables.intensity == *cut.palette.intensity_table()
@@ -649,9 +673,8 @@ fn ring_image<'a>(
     match ink {
         OutlineInk::Translucent { gray, blend } => {
             let tables = tables.ok_or(InstanceError::Upload("lookup tables".into()))?;
-            if gray > 7 {
-                return Err(InstanceError::GrayRange(gray));
-            }
+            // §3.6: a blend table has 8 rows, as the reference path clamps.
+            let gray = gray.min(7);
             // The red table (4) or the wall table (0), as §2.2 lists them.
             let table = [4_u16, 0, 1, 2, 3]
                 .into_iter()

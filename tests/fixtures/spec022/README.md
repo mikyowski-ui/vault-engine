@@ -10,7 +10,6 @@ which is reserved for research-side vectors.
 Text formats: TSV files have one header row. Hexadecimal values are uppercase.
 A `-` means "not used".
 
-- `sort-keys.tsv`: sort keys (section 2.1) from layer, primary and secondary.
 - `scene.tsv`: the 16 instances of the section 5.4 scene, deliberately out of
   key order. `flags` is decimal (bit 0 EXEMPT, bit 1 PEEK). `aux` is 4
   hexadecimal digits (bits 0-2 blend table, bits 8-10 gray level). `clip` is
@@ -25,11 +24,6 @@ A `-` means "not used".
   (final indexes) and `ring_t` (paint counts), the level image `lvl_m`, and
   the synthetic cutout mask `egg`. Each starts with `image NAME WIDTH HEIGHT`,
   followed by one line per row of hexadecimal bytes.
-- `scene-uniforms.hex`: the 128-byte layer uniform block of the scene
-  (section 2.4), as offset-addressed hex.
-- `scene-expected.hex`: the 24-by-16 canvas after the scene, starting from a
-  canvas filled with `40`. Each line is one canvas row, prefixed with the
-  row's byte offset.
 - `light-falloff.tsv`: every hex of the two-light world of section 5.3 whose
   accumulated light differs from 655, and three that do not (hexes 0, 19600
   and 39999). It gives distances, the accumulation, the packed entry, and the
@@ -38,19 +32,9 @@ A `-` means "not used".
 - `light-pack.tsv`: the clamp of an accumulated light to `[0, 65536]`.
 - `light-levels.tsv`: effective light E and level L for each light source,
   using the falloff world's buffer for the `hex` rows.
-- `peek-thresholds.tsv`: the scene's 16 peek thresholds (inner radius 32,
-  ring 48, in 1/16 pixel).
-- `peek-scale.tsv`: the default peek's radii for five canvas scales.
-- `peek-samples.tsv`: the peek test at 14 pixels of the scene (center
-  (88, 40) in 1/16 pixel, OX = -4, OY = 2).
 
-**Revision 3.** SPEC-022 revision 3 adds `rev3/`, with its own README. It
-supersedes `rev2/square-order.tsv`, `rev2/scene2.tsv` and
-`rev2/scene2-order.txt` once the implementer's follow-up adopts it (SPEC-022
-section 3.16).
-
-**Revision 2.** SPEC-022 revision 2 adds `rev2/`, with its own README. It
-supersedes `sort-keys.tsv`, `peek-scale.tsv`, `peek-thresholds.tsv`,
-`peek-samples.tsv`, `scene-uniforms.hex` and `scene-expected.hex`; they stay
-here until the implementer's follow-up switches the tests (SPEC-022 section
-3.15).
+The sort keys, the scene's uniform block and expected canvas, and the peek
+vectors are in `rev2/`; the square ranks, the second scene's numbering and the
+revision 3 vectors are in `rev3/`. Each folder has its own README. The
+implementer's follow-up of SPEC-022 sections 3.15 and 3.16 adopted both, and
+deleted the files they superseded.

@@ -79,6 +79,21 @@ pub struct OutlineInks {
     gray: [u8; 3],
 }
 
+#[cfg(test)]
+impl OutlineInks {
+    /// These inks with `gray` as every gray level, as only a hand-built
+    /// ink can have (SPEC-022 §5.7).
+    pub(crate) fn with_gray(mut self, gray: u8) -> Self {
+        self.gray = [gray; 3];
+        self
+    }
+    /// These inks with `index` as the red ink's index.
+    pub(crate) fn with_red(mut self, index: u8) -> Self {
+        self.red = index;
+        self
+    }
+}
+
 impl OutlineInks {
     pub fn new(palette: &Palette) -> Self {
         let [red, grey, item, other] =
