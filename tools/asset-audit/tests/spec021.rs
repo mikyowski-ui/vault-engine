@@ -5,9 +5,13 @@ use std::{
     sync::Arc,
 };
 
-use vault_core::traces::{
-    CombatEvent, combat_trace_host, read_combat_trace, run_combat_trace, run_combat_trace_recorded,
-    trace_defender, write_combat_trace,
+use vault_core::{
+    checkpoints::{CheckpointStream, read_checkpoints},
+    traces::{
+        CheckpointedTrace, CombatEvent, combat_trace_host, read_combat_trace,
+        run_combat_checkpoints, run_combat_trace, run_combat_trace_recorded, trace_defender,
+        write_combat_trace,
+    },
 };
 use vault_fixtures::{gallery, state, vm};
 use vault_formats::LocalDirProvider;
@@ -307,4 +311,169 @@ fn identical_seeds_trace_identically() {
         assert!(!a.world.combat);
         assert_eq!(a.world.state_hash(), b.world.state_hash(), "frame {frame}");
     }
+}
+
+/// A checkpointed scenario (c) run over `corpus`, through the binary.
+fn combat_checkpoints(corpus: &Path, seed: &str, extra: &[&std::ffi::OsStr]) -> Output {
+    let mut arguments: Vec<&std::ffi::OsStr> = vec![
+        "--corpus-dir".as_ref(),
+        corpus.as_os_str(),
+        "--dump-combat-trace".as_ref(),
+        "maps/synthetic.map".as_ref(),
+        "--seed".as_ref(),
+        seed.as_ref(),
+        "--max-rounds".as_ref(),
+        "5".as_ref(),
+    ];
+    arguments.extend_from_slice(extra);
+    audit(&arguments)
+}
+
+const COMBAT_GOLDEN: &str = "rev3/scenario-seeded-combat.checkpoints.tsv";
+
+/// T18: scenario (c) of SPEC-021 §3.11. The stream equals its golden, and
+/// recording it changes nothing in the trace.
+#[test]
+fn t18_scenario_c_replays_to_its_golden_and_its_assertions_hold() {
+    let corpus = corpus();
+    let temp = tempfile::tempdir().unwrap();
+    let out = temp.path().join("stream.tsv");
+    let output = combat_checkpoints(
+        corpus.path(),
+        "1",
+        &["--checkpoints-out".as_ref(), out.as_os_str()],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(text, golden(COMBAT_GOLDEN));
+    // The trace of the same run, byte for byte.
+    let trace = stdout(&output);
+    assert_eq!(trace, golden("combat-trace-synthetic-seed1.tsv"));
+
+    let rows = read_checkpoints(&text).unwrap();
+    assert!(rows[0].combat_hash.is_none(), "row 0 is before the request");
+    assert!(rows.iter().any(|row| row.combat_hash.is_some()));
+    // The request, and one end of turn for each player `turn` row.
+    let trace = read_combat_trace(&trace).unwrap();
+    let player_turns = trace
+        .iter()
+        .filter(|row| {
+            row.event == CombatEvent::Turn && row.actor.is_some_and(|a| a.to_string() == "1:1")
+        })
+        .count() as u64;
+    assert_eq!(rows.last().unwrap().input_index, 1 + player_turns);
+
+    // A second run with seed 1 gives the same stream, in process too.
+    let vfs = Arc::new(LocalDirProvider::mount(corpus.path()).unwrap());
+    let run = |seed: i32| {
+        let mut host = combat_trace_host(vfs.clone(), "maps/synthetic.map", seed).unwrap();
+        let mut stream = CheckpointStream::new(None);
+        let mut text = String::new();
+        let run = run_combat_checkpoints(&mut host, 5, &mut stream, &mut text).unwrap();
+        // The NPC acts, by T11's assertion.
+        let CheckpointedTrace::Finished(recorder) = run else {
+            panic!("no comparison was asked for");
+        };
+        let defender = recorder
+            .turn_ap
+            .iter()
+            .find(|turn| turn.actor.to_string() != "1:1")
+            .unwrap();
+        assert!(
+            recorder
+                .turn_ap
+                .iter()
+                .any(|turn| turn.actor == defender.actor && turn.ap < turn.maximum)
+        );
+        text
+    };
+    assert_eq!(run(1), text);
+    // Seed 2 differs in at least one row.
+    assert_ne!(run(2), text);
+}
+
+/// `--checkpoints-expect`: a match exits as without it, a changed seed stops
+/// at the first row that differs with status 2 and no trace, and a usage
+/// error or an unreadable file exits 1 before the run.
+#[test]
+fn the_combat_comparison_stops_at_the_first_differing_row() {
+    let corpus = corpus();
+    let temp = tempfile::tempdir().unwrap();
+    let expected = fixtures().join("spec021").join(COMBAT_GOLDEN);
+    let expect = ["--checkpoints-expect".as_ref(), expected.as_os_str()];
+    let output = combat_checkpoints(corpus.path(), "1", &expect);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(stdout(&output), golden("combat-trace-synthetic-seed1.tsv"));
+
+    // The other seed's stream, run in full, says where the first difference is.
+    let full = temp.path().join("seed2.tsv");
+    let output = combat_checkpoints(
+        corpus.path(),
+        "2",
+        &["--checkpoints-out".as_ref(), full.as_os_str()],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let want = read_checkpoints(&golden(COMBAT_GOLDEN)).unwrap();
+    let other = read_checkpoints(&std::fs::read_to_string(&full).unwrap()).unwrap();
+    let tick = want
+        .iter()
+        .zip(&other)
+        .find(|(a, b)| a != b)
+        .map(|(a, _)| a.tick)
+        .unwrap();
+    let out = temp.path().join("stopped.tsv");
+    let output = combat_checkpoints(
+        corpus.path(),
+        "2",
+        &[
+            expect[0],
+            expect[1],
+            "--checkpoints-out".as_ref(),
+            out.as_os_str(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty(), "no trace after a failure");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("checkpoint mismatch at tick {tick}: state_hash")),
+        "{stderr}"
+    );
+    let written = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(read_checkpoints(&written).unwrap().len() as u64, tick + 1);
+
+    // A golden with another format stops before the first step.
+    let other = temp.path().join("other.tsv");
+    std::fs::write(&other, golden(COMBAT_GOLDEN).replace("VSH1", "VSH2")).unwrap();
+    let output = combat_checkpoints(
+        corpus.path(),
+        "1",
+        &["--checkpoints-expect".as_ref(), other.as_os_str()],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("checkpoint format mismatch: line 1"),
+        "{stderr}"
+    );
+
+    // An unreadable file, and flags outside the combat dump.
+    let missing = temp.path().join("missing.tsv");
+    let output = combat_checkpoints(
+        corpus.path(),
+        "1",
+        &["--checkpoints-expect".as_ref(), missing.as_os_str()],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let hex = fixtures().join("vm/program.int.hex");
+    let output = audit(&[
+        "--dump-vm-trace".as_ref(),
+        hex.as_os_str(),
+        "--checkpoints-out".as_ref(),
+        missing.as_os_str(),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let output = audit(&["--checkpoints-out".as_ref()]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
 }

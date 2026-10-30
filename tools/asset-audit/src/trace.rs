@@ -6,9 +6,11 @@ use std::{error::Error, io::Write, path::Path, process::ExitCode, sync::Arc};
 use vault_core::{
     WorldHost, WorldState,
     assets::VfsWorldAssets,
+    checkpoints::{CheckpointStream, ExpectedStream},
     traces::{
-        DEFAULT_MAX_ROUNDS, DEFAULT_MAX_STEPS, combat_trace_host, parse_hex_dump, run_combat_trace,
-        trace_defender, trace_program_name, trace_vm, write_combat_trace,
+        CheckpointedTrace, DEFAULT_MAX_ROUNDS, DEFAULT_MAX_STEPS, combat_trace_host,
+        parse_hex_dump, run_combat_checkpoints, run_combat_trace, trace_defender,
+        trace_program_name, trace_vm, write_combat_trace,
     },
 };
 use vault_formats::LocalDirProvider;
@@ -24,9 +26,14 @@ pub fn requested(args: &Args) -> bool {
 /// stop the parse itself).
 pub fn named(arguments: &[String]) -> bool {
     arguments.iter().any(|argument| {
-        ["--dump-vm-trace", "--dump-combat-trace"]
-            .iter()
-            .any(|flag| argument == flag || argument.starts_with(&format!("{flag}=")))
+        [
+            "--dump-vm-trace",
+            "--dump-combat-trace",
+            "--checkpoints-out",
+            "--checkpoints-expect",
+        ]
+        .iter()
+        .any(|flag| argument == flag || argument.starts_with(&format!("{flag}=")))
     })
 }
 /// The flags that only a dump mode reads.
@@ -36,6 +43,8 @@ pub fn stray(args: &Args) -> Option<&'static str> {
         (args.max_rounds.is_some(), "--max-rounds"),
         (args.seed.is_some(), "--seed"),
         (args.trace_out.is_some(), "--trace-out"),
+        (args.checkpoints_out.is_some(), "--checkpoints-out"),
+        (args.checkpoints_expect.is_some(), "--checkpoints-expect"),
     ]
     .into_iter()
     .find_map(|(given, flag)| given.then_some(flag))
@@ -105,6 +114,8 @@ pub fn dump(args: &Args) -> ExitCode {
         for (given, flag) in [
             (args.max_rounds.is_some(), "--max-rounds"),
             (args.seed.is_some(), "--seed"),
+            (args.checkpoints_out.is_some(), "--checkpoints-out"),
+            (args.checkpoints_expect.is_some(), "--checkpoints-expect"),
         ] {
             if given {
                 return fail(format!("{flag} applies to --dump-combat-trace only"));
@@ -198,12 +209,43 @@ fn dump_combat(args: &Args, map: &str) -> Result<ExitCode, Box<dyn Error>> {
     if max_rounds == 0 {
         return Err("--max-rounds must be at least 1".into());
     }
+    // SPEC-021 §3.10: an unreadable expected file exits 1 before the run.
+    let expected = args
+        .checkpoints_expect
+        .as_deref()
+        .map(|path| {
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            ExpectedStream::parse(&text).map_err(|error| format!("{}: {error}", path.display()))
+        })
+        .transpose()?;
     let vfs = Arc::new(LocalDirProvider::mount(corpus)?);
     let mut host = combat_trace_host(vfs, map, resolved_seed(args.seed))?;
     if trace_defender(&host.world).is_none() {
         return Err(format!("{map}: no critter can defend; no trace written").into());
     }
-    let rows = run_combat_trace(&mut host, max_rounds)?;
-    emit(args.trace_out.as_deref(), &write_combat_trace(&rows))?;
-    Ok(ExitCode::SUCCESS)
+    if args.checkpoints_out.is_none() && expected.is_none() {
+        let rows = run_combat_trace(&mut host, max_rounds)?;
+        emit(args.trace_out.as_deref(), &write_combat_trace(&rows))?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut stream = CheckpointStream::new(expected);
+    let mut text = String::new();
+    let run = run_combat_checkpoints(&mut host, max_rounds, &mut stream, &mut text)?;
+    if let Some(path) = &args.checkpoints_out {
+        std::fs::write(path, &text).map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    match run {
+        CheckpointedTrace::Finished(recorder) => {
+            emit(
+                args.trace_out.as_deref(),
+                &write_combat_trace(&recorder.rows),
+            )?;
+            Ok(ExitCode::SUCCESS)
+        }
+        CheckpointedTrace::Diverged(failure) => {
+            eprintln!("{failure}");
+            Ok(ExitCode::from(2))
+        }
+    }
 }

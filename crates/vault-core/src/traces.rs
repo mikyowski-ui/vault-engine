@@ -13,6 +13,7 @@
 use crate::{
     CharacterSheet, EnginePreset, GameProfile, ObjectRef, WorldError, WorldHost, WorldState,
     assets::{VfsWorldAssets, WorldAssets},
+    checkpoints::{CheckpointFailure, CheckpointStream},
     combat_state::CombatRequest,
     state_hash::{Handle, StateSnapshot},
 };
@@ -525,18 +526,124 @@ pub fn trace_defender(world: &WorldState) -> Option<ObjectRef> {
         .min_by_key(|(reference, _)| world.state_handle(*reference))
         .map(|(reference, _)| reference)
 }
-/// The rows a combat trace keeps: through the first `end` row, or up to
-/// the first row of round `max_rounds` (that many rounds are complete).
-fn trace_cut(rows: &[CombatTraceRow], max_rounds: u32) -> Option<usize> {
-    rows.iter().enumerate().find_map(|(index, row)| {
-        if row.event == CombatEvent::End {
-            Some(index + 1)
-        } else if row.round.is_some_and(|round| round >= max_rounds) {
-            Some(index)
-        } else {
-            None
+/// Where a combat trace stops, if it does.
+#[derive(Clone, Copy)]
+enum TraceCut {
+    /// Through this row count, the last one an `end` row.
+    Ended(usize),
+    /// `max_rounds` complete rounds are traced (SPEC-021 §3.7 step 6): the
+    /// rows of those rounds, this many.
+    RoundLimit(usize),
+}
+/// `round` is the combat state's counter now: it reaches `max_rounds` in
+/// the step that writes the last turn's row of the last complete round.
+fn trace_cut(rows: &[CombatTraceRow], round: u32, max_rounds: u32) -> Option<TraceCut> {
+    rows.iter()
+        .enumerate()
+        .find_map(|(index, row)| {
+            if row.event == CombatEvent::End {
+                Some(TraceCut::Ended(index + 1))
+            } else if row.round.is_some_and(|round| round >= max_rounds) {
+                Some(TraceCut::RoundLimit(index))
+            } else {
+                None
+            }
+        })
+        .or((round >= max_rounds).then_some(TraceCut::RoundLimit(rows.len())))
+}
+/// What one step of the [`CombatDriver`] did.
+#[derive(Debug)]
+pub enum DriverStep {
+    /// The step finished: it writes a checkpoint row, and the run goes on.
+    Running,
+    /// Combat ended in this step, which finished: it writes a row, and the
+    /// run stops with the kept rows.
+    Ended(CombatTraceRecorder),
+    /// The round limit stopped the run in this step, which writes no row
+    /// (SPEC-021 §3.10 rule 5).
+    RoundLimit(CombatTraceRecorder),
+}
+/// SPEC-021 §3.7 steps 2 to 6, one headless step at a time. A step takes the
+/// driver's commands since the last step (§3.10): the combat request first,
+/// then each end of a player turn. Then the world advances one frame.
+#[derive(Debug)]
+pub struct CombatDriver {
+    defender: ObjectRef,
+    max_rounds: u32,
+    now: u64,
+    frames: u64,
+    commands: u64,
+}
+impl CombatDriver {
+    /// A driver for an entered map. It refuses to run without a loaded,
+    /// nonempty packet table (§3.7 step 1) or a defender.
+    pub fn new<A: WorldAssets>(
+        host: &mut WorldHost<A>,
+        max_rounds: u32,
+    ) -> Result<Self, WorldError> {
+        require_packets(&host.world)?;
+        let defender = trace_defender(&host.world)
+            .ok_or_else(|| WorldError::Invalid("no defender for the combat trace".into()))?;
+        host.combat_trace = Some(CombatTraceRecorder::default());
+        Ok(Self {
+            defender,
+            max_rounds,
+            now: host.world.elapsed_ms,
+            frames: 0,
+            commands: 0,
+        })
+    }
+    /// The driver's commands so far: a checkpoint row's `input_index`.
+    pub fn commands(&self) -> u64 {
+        self.commands
+    }
+    /// One headless step, up to the moment a row is written.
+    pub fn step<A: WorldAssets>(
+        &mut self,
+        host: &mut WorldHost<A>,
+    ) -> Result<DriverStep, WorldError> {
+        if self.frames == TRACE_FRAME_LIMIT {
+            host.combat_trace = None;
+            return Err(WorldError::Invalid(format!(
+                "the combat trace did not finish within {TRACE_FRAME_LIMIT} frames"
+            )));
         }
-    })
+        if self.commands == 0 {
+            host.world.pending_combat = Some(CombatRequest {
+                attacker: host.world.player,
+                defender: self.defender,
+                accuracy: 0,
+                damage: [0, i32::MAX],
+                flags: None,
+            });
+            self.commands = 1;
+        } else if host.world.combat
+            && host.world.combat_state.player_turn
+            && !host.player_turn_over()
+        {
+            host.end_player_turn();
+            self.commands += 1;
+        }
+        self.frames += 1;
+        self.now += TRACE_FRAME_MS;
+        if let Err(error) = host.tick(self.now) {
+            host.combat_trace = None;
+            return Err(error);
+        }
+        let rows = host.combat_trace.as_ref().map_or(&[][..], |r| &r.rows[..]);
+        let round = host.world.combat_state.round;
+        let Some(cut) = trace_cut(rows, round, self.max_rounds) else {
+            return Ok(DriverStep::Running);
+        };
+        let (TraceCut::Ended(kept) | TraceCut::RoundLimit(kept)) = cut;
+        let mut recorder = host.combat_trace.take().unwrap_or_default();
+        recorder.rows.truncate(kept);
+        recorder.turn_ap.retain(|turn| turn.seq < kept as u64);
+        Ok(match cut {
+            TraceCut::Ended(_) => DriverStep::Ended(recorder),
+            TraceCut::RoundLimit(_) => DriverStep::RoundLimit(recorder),
+        })
+    }
 }
 /// SPEC-021 §3.7 steps 2 to 6 on an entered map: request combat between
 /// the player and the defender, end every player turn at once, step the
@@ -554,38 +661,80 @@ pub fn run_combat_trace_recorded<A: WorldAssets>(
     host: &mut WorldHost<A>,
     max_rounds: u32,
 ) -> Result<CombatTraceRecorder, WorldError> {
-    require_packets(&host.world)?;
-    let defender = trace_defender(&host.world)
-        .ok_or_else(|| WorldError::Invalid("no defender for the combat trace".into()))?;
-    host.combat_trace = Some(CombatTraceRecorder::default());
-    host.world.pending_combat = Some(CombatRequest {
-        attacker: host.world.player,
-        defender,
-        accuracy: 0,
-        damage: [0, i32::MAX],
-        flags: None,
-    });
-    let mut now = host.world.elapsed_ms;
-    let result = (|| {
-        for _ in 0..TRACE_FRAME_LIMIT {
-            now += TRACE_FRAME_MS;
-            host.tick(now)?;
-            if host.world.combat && host.world.combat_state.player_turn && !host.player_turn_over()
-            {
-                host.end_player_turn();
-            }
-            let rows = host.combat_trace.as_ref().map_or(&[][..], |r| &r.rows[..]);
-            if let Some(cut) = trace_cut(rows, max_rounds) {
-                let mut recorder = host.combat_trace.take().unwrap_or_default();
-                recorder.rows.truncate(cut);
-                recorder.turn_ap.retain(|turn| turn.seq < cut as u64);
-                return Ok(recorder);
-            }
+    let mut driver = CombatDriver::new(host, max_rounds)?;
+    loop {
+        match driver.step(host)? {
+            DriverStep::Running => {}
+            DriverStep::Ended(recorder) | DriverStep::RoundLimit(recorder) => return Ok(recorder),
         }
-        Err(WorldError::Invalid(format!(
-            "the combat trace did not finish within {TRACE_FRAME_LIMIT} frames"
-        )))
-    })();
-    host.combat_trace = None;
-    result
+    }
+}
+/// How a checkpointed combat trace ended.
+#[derive(Debug)]
+pub enum CheckpointedTrace {
+    /// The run finished; the stream matched, if one was expected.
+    Finished(CombatTraceRecorder),
+    /// The run stopped at the step of this comparison failure.
+    Diverged(CheckpointFailure),
+}
+/// One row of `stream` for `world`, appended to `text` even when it is the
+/// row a comparison stops at.
+fn write_row(
+    stream: &mut CheckpointStream,
+    text: &mut String,
+    world: &WorldState,
+    commands: u64,
+) -> Result<(), CheckpointFailure> {
+    match stream.row(world, commands) {
+        Ok(line) => {
+            text.push_str(&line);
+            Ok(())
+        }
+        Err((line, failure)) => {
+            text.push_str(&line);
+            Err(failure)
+        }
+    }
+}
+/// SPEC-021 §3.10 the combat trace with a checkpoint row per step, appended
+/// to `text`: the stream's head and row 0 before the first step, then one
+/// row after each step's simulation. A comparison failure stops the run at
+/// that step.
+pub fn run_combat_checkpoints<A: WorldAssets>(
+    host: &mut WorldHost<A>,
+    max_rounds: u32,
+    stream: &mut CheckpointStream,
+    text: &mut String,
+) -> Result<CheckpointedTrace, WorldError> {
+    // Refused before any row, as the trace itself is.
+    let mut driver = CombatDriver::new(host, max_rounds)?;
+    let diverged = |host: &mut WorldHost<A>, failure| {
+        host.combat_trace = None;
+        Ok(CheckpointedTrace::Diverged(failure))
+    };
+    match stream.head() {
+        Ok(head) => text.push_str(&head),
+        Err(failure) => return diverged(host, failure),
+    }
+    if let Err(failure) = write_row(stream, text, &host.world, driver.commands()) {
+        return diverged(host, failure);
+    }
+    let recorder = loop {
+        let step = driver.step(host)?;
+        let ended = match step {
+            DriverStep::RoundLimit(recorder) => break recorder,
+            DriverStep::Running => None,
+            DriverStep::Ended(recorder) => Some(recorder),
+        };
+        if let Err(failure) = write_row(stream, text, &host.world, driver.commands()) {
+            return diverged(host, failure);
+        }
+        if let Some(recorder) = ended {
+            break recorder;
+        }
+    };
+    Ok(match stream.finish() {
+        Ok(_) => CheckpointedTrace::Finished(recorder),
+        Err(failure) => CheckpointedTrace::Diverged(failure),
+    })
 }

@@ -66,6 +66,14 @@ struct Args {
     /// --seed` (default 1; -1 is an ambient seed).
     #[arg(long, value_name = "S", allow_negative_numbers = true)]
     seed: Option<i32>,
+    /// With `--dump-combat-trace`: write the SPEC-021 §3.10 checkpoint
+    /// stream, one row per step, to this file (created or replaced).
+    #[arg(long, value_name = "FILE")]
+    checkpoints_out: Option<PathBuf>,
+    /// With `--dump-combat-trace`: compare each checkpoint row with this
+    /// stream, stopping at the first failure with status 2.
+    #[arg(long, value_name = "FILE")]
+    checkpoints_expect: Option<PathBuf>,
     /// Write a dump mode's trace to this file instead of stdout.
     #[arg(long, value_name = "OUT")]
     trace_out: Option<PathBuf>,

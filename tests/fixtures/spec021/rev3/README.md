@@ -37,14 +37,24 @@ Both logs were written by a throwaway script. They use only the records
 `surface`, `tick`, `pointer_moved`, `pointer_button`, `key` and `quit`, on a
 640-by-480 surface with a 16 ms frame.
 
-The implementer adds these goldens (SPEC-021 section 3.11), recorded once and
-then frozen:
+The implementer (Team B) recorded these goldens (SPEC-021 section 3.11) on
+2026-10-30, from the built binaries over the `cargo xtask fixtures` corpus
+(its first directory), and reviewed each against section 3.11's assertions.
+They are now frozen:
 
-- `scenario-explore-talk.checkpoints.tsv`
-- `scenario-world-travel.checkpoints.tsv`
-- `scenario-seeded-combat.checkpoints.tsv`
+- `scenario-explore-talk.checkpoints.tsv`: scenario (a), 387 steps, 388 rows,
+  from `vault-platform --corpus-dir DIR --preview-map maps/synthetic.map --seed
+  1 --replay-inputs scenario-explore-talk.jsonl --checkpoints-out FILE`.
+- `scenario-world-travel.checkpoints.tsv`: scenario (b), 615 steps, 616 rows,
+  from the same command with `scenario-world-travel.jsonl`.
+- `scenario-seeded-combat.checkpoints.tsv`: scenario (c), 61 steps, 62 rows,
+  from `asset-audit --corpus-dir DIR --dump-combat-trace maps/synthetic.map
+  --seed 1 --max-rounds 5 --checkpoints-out FILE`, with all six rows of section
+  3.7's table installed in DIR. The driver stops in the step that completes
+  the fifth round, and that step writes no row.
 - `scenario-world-travel.final.tsv`: the party's final position and game tick
-  in scenario (b), which the state hash does not cover.
+  in scenario (b), which the state hash does not cover: (963, 75), a trip of
+  138 pixels.
 
 Scenario (c) has no log. It uses the driver of SPEC-021 section 3.7, over the
 corpus that test T11 prepares.

@@ -69,6 +69,15 @@ struct Args {
     /// With --replay-inputs: also write the final frame as a binary PPM.
     #[arg(long, value_name = "PATH", requires = "replay_inputs")]
     replay_frame: Option<PathBuf>,
+    /// With --replay-inputs: write the SPEC-021 checkpoint stream, one row
+    /// per step, to FILE (created or replaced). Changes no digest.
+    #[arg(long, value_name = "FILE", requires = "replay_inputs")]
+    checkpoints_out: Option<PathBuf>,
+    /// With --replay-inputs: compare each checkpoint row with the stream in
+    /// FILE. The run stops at the first failure, prints the report on
+    /// stderr and no digest, and exits with status 2.
+    #[arg(long, value_name = "FILE", requires = "replay_inputs")]
+    checkpoints_expect: Option<PathBuf>,
     /// Record every input command and frame clock as a JSONL input log to
     /// FILE (`-`: standard output), for --replay-inputs. Without it no
     /// input log is written.
@@ -2121,15 +2130,33 @@ fn run(mut args: Args) -> AppResult<()> {
         // game profile chooses the data's formats (SPEC-015/016).
         args.preview.game_profile = args.game_profile.unwrap_or_default();
         args.preview.render_path = launch_render_path(&args, None);
+        // SPEC-021 §3.10: these fail with status 1, before the run starts.
+        let expected = args
+            .checkpoints_expect
+            .as_deref()
+            .map(|path| -> AppResult<_> {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                Ok(vault_core::checkpoints::ExpectedStream::parse(&text)
+                    .map_err(|error| format!("{}: {error}", path.display()))?)
+            })
+            .transpose()?;
+        if let Some(path) = &args.checkpoints_out {
+            std::fs::File::create(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        }
         let session =
             session::SessionRuntime::start(session::SessionConfig::replay(args.preview.clone()))?
                 .ok_or("--replay-inputs requires a preview asset")?;
         let log =
             std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
-        let report = replay::replay(
+        let report = replay::replay_with_checkpoints(
             session,
             std::io::BufReader::new(log),
             args.replay_frame.as_deref(),
+            replay::CheckpointOptions {
+                out: args.checkpoints_out.clone(),
+                expected,
+            },
         )?;
         tracing::info!(
             commands = report.commands,
@@ -2196,7 +2223,23 @@ fn run(mut args: Args) -> AppResult<()> {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
+    let args = match Args::try_parse() {
+        Ok(args) => args,
+        Err(error) => {
+            // SPEC-021 §3.10: with a checkpoint flag a usage error exits 1,
+            // because 2 means the comparison failed.
+            let checkpoints = std::env::args().any(|argument| {
+                ["--checkpoints-out", "--checkpoints-expect"]
+                    .iter()
+                    .any(|flag| argument.starts_with(flag))
+            });
+            if error.use_stderr() && checkpoints {
+                let _ = error.print();
+                return ExitCode::FAILURE;
+            }
+            error.exit();
+        }
+    };
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(
@@ -2207,6 +2250,10 @@ fn main() -> ExitCode {
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            if let Some(diverged) = error.downcast_ref::<replay::CheckpointsDiverged>() {
+                eprintln!("{diverged}");
+                return ExitCode::from(2);
+            }
             tracing::error!(%error, "exiting");
             ExitCode::FAILURE
         }

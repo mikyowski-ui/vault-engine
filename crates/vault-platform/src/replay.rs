@@ -21,6 +21,14 @@
 //! [`EnhancedLayout`] for the logged surface, as the desktop routes them,
 //! and the digest covers the enhanced frame in place of the Vanilla one. A
 //! log without one replays the Vanilla presentation exactly as before.
+//!
+//! A replay can write and compare the SPEC-021 §3.10 checkpoint stream,
+//! one row per headless step. A step's records apply first, each with the
+//! desktop's redraw on input, as they always have; then the frame's clock
+//! runs the simulation and the held keys' repeats, the row is written, and
+//! the frame is presented. In a log without a leading `surface` record the
+//! simulated frame comes before its record, so the row follows both, and
+//! that step has no presentation after it.
 use crate::{
     AppResult,
     enhanced::{
@@ -32,8 +40,13 @@ use crate::{
     session::{Advance, KeyPress, SessionRuntime},
 };
 use sha2::{Digest, Sha256};
-use std::io::BufRead;
-use vault_core::{CommandId, host_save::SaveInfo, movie::MoviePolicy};
+use std::{io::BufRead, path::PathBuf};
+use vault_core::{
+    CommandId,
+    checkpoints::{CheckpointFailure, CheckpointStream, ExpectedStream},
+    host_save::SaveInfo,
+    movie::MoviePolicy,
+};
 use vault_render::EnhancedLayout;
 use winit::keyboard::KeyCode;
 
@@ -154,6 +167,37 @@ pub struct ReplayReport {
     pub state_sha256: String,
 }
 
+/// SPEC-021 §3.10 what a replay does with its checkpoint stream. Without
+/// either, no row is computed.
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointOptions {
+    /// `--checkpoints-out`: where the stream goes, created or replaced.
+    pub out: Option<PathBuf>,
+    /// `--checkpoints-expect`: the stream each row is compared with.
+    pub expected: Option<ExpectedStream>,
+}
+
+/// A replay stopped by its checkpoint comparison: the report, and status 2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointsDiverged(pub String);
+
+impl std::fmt::Display for CheckpointsDiverged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for CheckpointsDiverged {}
+
+/// A running replay's checkpoint stream.
+struct Checkpoints {
+    stream: CheckpointStream,
+    out: Option<PathBuf>,
+    /// The text so far, written when the run ends.
+    text: String,
+    /// The comparison's failure; the run stopped there.
+    failure: Option<CheckpointFailure>,
+}
+
 pub struct Replay {
     session: SessionRuntime,
     surface: [u32; 2],
@@ -170,15 +214,37 @@ pub struct Replay {
     repeat: KeyRepeat,
     /// The logged display scaling (integer until a `scaling` record).
     scaling: vault_render::ScalingMode,
+    checkpoints: Option<Checkpoints>,
+    /// The `state_hash` at the start of each step's presentation (T15).
+    #[cfg(test)]
+    presented: Vec<u64>,
 }
 
 impl Replay {
     /// Start from a started session, presented once as the desktop does
     /// when its window opens. A world never waits on movies here.
-    pub fn new(mut session: SessionRuntime) -> AppResult<Self> {
+    #[cfg(test)]
+    pub fn new(session: SessionRuntime) -> AppResult<Self> {
+        Self::with_checkpoints(session, CheckpointOptions::default())
+    }
+
+    /// [`Self::new`] with a checkpoint stream, when `options` asks for one.
+    /// Row 0 is written here, once the session is built and before anything
+    /// is presented.
+    pub fn with_checkpoints(
+        mut session: SessionRuntime,
+        options: CheckpointOptions,
+    ) -> AppResult<Self> {
         if let AssetPreview::Map(map) = &mut *session {
             map.host.movie_policy = MoviePolicy::CompleteImmediately;
         }
+        let CheckpointOptions { out, expected } = options;
+        let checkpoints = (out.is_some() || expected.is_some()).then(|| Checkpoints {
+            stream: CheckpointStream::new(expected),
+            out,
+            text: String::new(),
+            failure: None,
+        });
         let mut replay = Self {
             session,
             surface: INITIAL_SURFACE,
@@ -191,9 +257,78 @@ impl Replay {
             stopped: false,
             timed: None,
             repeat: KeyRepeat::default(),
+            checkpoints,
+            #[cfg(test)]
+            presented: Vec::new(),
         };
-        replay.present()?;
+        replay.first_checkpoint()?;
+        if !replay.stopped {
+            replay.present()?;
+        }
         Ok(replay)
+    }
+
+    /// Lines 1 and 2 of the stream, and row 0.
+    fn first_checkpoint(&mut self) -> AppResult<()> {
+        let Some(checkpoints) = &mut self.checkpoints else {
+            return Ok(());
+        };
+        match checkpoints.stream.head() {
+            Ok(head) => checkpoints.text.push_str(&head),
+            Err(failure) => {
+                checkpoints.failure = Some(failure);
+                self.stopped = true;
+                return Ok(());
+            }
+        }
+        self.checkpoint(0)
+    }
+
+    /// SPEC-021 §3.10 the row of a finished step, `applied` records in. A
+    /// comparison failure stops the run here.
+    fn checkpoint(&mut self, applied: u64) -> AppResult<()> {
+        let Some(checkpoints) = &mut self.checkpoints else {
+            return Ok(());
+        };
+        let world = interactive_world(&mut self.session)
+            .ok_or("checkpoints need a session with a world at every step")?;
+        match checkpoints.stream.row(&world.host.world, applied) {
+            Ok(line) => checkpoints.text.push_str(&line),
+            Err((line, failure)) => {
+                checkpoints.text.push_str(&line);
+                checkpoints.failure = Some(failure);
+                self.stopped = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// The comparison stopped the run.
+    fn diverged(&self) -> bool {
+        self.checkpoints
+            .as_ref()
+            .is_some_and(|checkpoints| checkpoints.failure.is_some())
+    }
+
+    /// The run is over: the stream is written where it was asked for, and a
+    /// comparison that failed, or that the run ended short of, is the
+    /// result.
+    fn close_checkpoints(&mut self) -> AppResult<()> {
+        let Some(checkpoints) = &mut self.checkpoints else {
+            return Ok(());
+        };
+        if let Some(path) = &checkpoints.out {
+            std::fs::write(path, &checkpoints.text)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+        let failure = match checkpoints.failure.take() {
+            Some(failure) => Some(failure),
+            None => checkpoints.stream.finish().err(),
+        };
+        match failure {
+            Some(failure) => Err(Box::new(CheckpointsDiverged(failure.to_string()))),
+            None => Ok(()),
+        }
     }
 
     /// Apply every command of a JSONL log (blank lines are skipped), stopping
@@ -240,6 +375,9 @@ impl Replay {
             if !self.stopped {
                 self.apply(logged.command)?;
                 self.commands += 1;
+                if !timed && !self.stopped {
+                    self.checkpoint(self.commands)?;
+                }
             }
             // The replayed input may have committed overlay commands; the
             // desktop logged and applied those as their own `debug`
@@ -252,9 +390,10 @@ impl Replay {
     }
 
     /// One desktop frame at `now`. A timed log follows the desktop's
-    /// order: the preview ticks, a finished one stops, a held key repeats,
-    /// and the changed frame is presented. An untimed log keeps the order
-    /// its simulated frames always had.
+    /// order: the preview ticks, a finished one stops, the held keys repeat,
+    /// the checkpoint row is written, and the frame is presented once if
+    /// any of that changed it, as the desktop redraws. An untimed log keeps
+    /// the order its simulated frames always had.
     fn frame(&mut self, now: u64, timed: bool) -> AppResult<()> {
         self.now = now;
         if !timed {
@@ -269,11 +408,25 @@ impl Replay {
         match self.session.advance(now, &mut self.repeat)? {
             Advance::Finished => self.stopped = true,
             Advance::Running { changed, due } => {
+                let mut redraw = changed;
                 for key in due {
                     let exits = self.session.escape_exits();
-                    self.press_key(key, exits)?;
+                    match self.session.press_key(key, exits) {
+                        KeyPress::Changed => redraw = true,
+                        KeyPress::Exit => self.stopped = true,
+                        KeyPress::Ignored => {}
+                    }
                 }
-                if changed {
+                if !self.stopped {
+                    // The tick being applied counts: it opened this row.
+                    self.checkpoint(self.commands + 1)?;
+                }
+                if redraw && !self.diverged() {
+                    #[cfg(test)]
+                    if let Some(world) = interactive_world(&mut self.session) {
+                        let hash = world.host.world.state_hash();
+                        self.presented.push(hash);
+                    }
                     self.present()?;
                 }
             }
@@ -517,6 +670,7 @@ impl Replay {
     /// same three, or one empty part); the pointer art is not covered. The
     /// PPM is then the world canvas.
     pub fn finish(mut self, frame: Option<&std::path::Path>) -> AppResult<ReplayReport> {
+        self.close_checkpoints()?;
         let mut digest = Sha256::new();
         let mut part = |bytes: &[u8]| {
             digest.update((bytes.len() as u64).to_le_bytes());
@@ -606,15 +760,31 @@ fn image_parts(part: &mut impl FnMut(&[u8]), image: &vault_render::IndexedImage)
 }
 
 /// Replay `log` against `session` and report the final digest.
+#[cfg(test)]
 pub fn replay(
     session: SessionRuntime,
     log: impl BufRead,
     frame: Option<&std::path::Path>,
 ) -> AppResult<ReplayReport> {
-    let mut replay = Replay::new(session)?;
+    replay_with_checkpoints(session, log, frame, CheckpointOptions::default())
+}
+
+/// [`replay`] with the checkpoint stream `options` asks for. A comparison
+/// that fails ends in [`CheckpointsDiverged`], with no report.
+pub fn replay_with_checkpoints(
+    session: SessionRuntime,
+    log: impl BufRead,
+    frame: Option<&std::path::Path>,
+    options: CheckpointOptions,
+) -> AppResult<ReplayReport> {
+    let mut replay = Replay::with_checkpoints(session, options)?;
     replay.run(log)?;
     replay.finish(frame)
 }
+
+#[cfg(test)]
+#[path = "replay_checkpoint_tests.rs"]
+mod checkpoint_tests;
 
 #[cfg(test)]
 mod tests {

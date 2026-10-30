@@ -1070,7 +1070,8 @@ cargo run -p asset-audit -- --dump-vm-trace tests/fixtures/vm/program.int.hex \
     [--max-steps N] [--trace-out OUT]
 # SPEC-021 §3.7: the seeded combat hash trace of a map:
 cargo run -p asset-audit -- --corpus-dir target/state-corpus \
-    --dump-combat-trace maps/synthetic.map [--seed S] [--max-rounds R] [--trace-out OUT]
+    --dump-combat-trace maps/synthetic.map [--seed S] [--max-rounds R] [--trace-out OUT] \
+    [--checkpoints-out FILE] [--checkpoints-expect FILE]
 ```
 
 The `--validate-*` flags combine freely. All requested categories share one
@@ -3062,6 +3063,84 @@ which would otherwise index past the table.
 
 The instanced path applies the same clamp, in the translucent draw and in the
 gray level of a translucent outline's ring.
+
+## Replay checkpoints
+
+SPEC-021 §3.10 records one row per headless step, so that two runs show not
+only that they diverged, but at which step. The stream is the synchronization
+unit planned for lockstep multiplayer (SPEC-025).
+
+```sh
+vault-platform --corpus-dir DIR --preview-map maps/synthetic.map --seed 1 \
+  --replay-inputs LOG --checkpoints-out FILE
+vault-platform --corpus-dir DIR --preview-map maps/synthetic.map --seed 1 \
+  --replay-inputs LOG --checkpoints-expect GOLDEN
+asset-audit --corpus-dir DIR --dump-combat-trace maps/synthetic.map --seed 1 \
+  --max-rounds 5 --checkpoints-out FILE
+```
+
+The two flags can be combined, and work with every option of a replay. Without
+them no row is computed. With or without them, `state_sha256`, the frames and
+the logs are the same.
+
+```text
+vault-checkpoints	1	VSH1	VCH1
+tick	input_index	state_hash	combat_hash
+0	0	6EA7B1E1D5749719	-
+1	2	6EA7B1E1D5749719	-
+```
+
+- **Line 1** names the format, its version and the two hash stream magics.
+  Streams of different formats cannot be compared.
+- **`tick`** is the step number, not a clock. Row 0 is written once the session
+  is built, before the first step, so N steps give N + 1 rows.
+- **`input_index`** counts the records applied so far. For the driver of
+  `--dump-combat-trace` it counts its commands: the combat request, and each
+  end of a player turn.
+- **`combat_hash`** is written while a combat is active, otherwise `-`.
+
+**What a step is.** In a log with a leading `surface` record, a step takes every
+record up to and including the next `tick`. In a log without one, each command
+is a step. In a driver run, a step takes the commands since the last step. A
+`quit`, records after the last `tick`, and a step a run stops in write no row.
+
+**When the row is written.** The row is the last thing before a step's own
+frame is presented:
+
+1. The step's input records apply. Each redraws at once where the desktop
+   would, so these early redraws come before the row.
+2. The frame's clock runs the simulation, and held keys repeat.
+3. The row is written.
+4. The step's frame is presented, once, if the step changed it.
+
+In a log without a `surface` record the simulated frame comes first, then the
+command, then the row, so no presentation follows the row in that step. Drawing
+never changes the world (SPEC-022 §3.13), so none of this affects a row's values.
+
+**Comparing.** `--checkpoints-expect` compares each row as it is produced. The
+run stops at the step of the first failure, prints one report on stderr, prints
+no digest line and no trace, and exits with status 2. A later row is expected
+to differ too, so none is looked at. A stream that matches to the end exits as
+it would without the flag. A usage error or an unreadable expected file exits
+with status 1 before the run starts: `vault-platform` usually exits 2 on a usage
+error, but not when a checkpoint flag is on the command line.
+
+```text
+checkpoints match: 7 rows
+checkpoint format mismatch: line 1 expected vault-checkpoints 1 VSH1 VCH1, actual vault-checkpoints 2 VSH1 VCH1
+checkpoint mismatch at tick 2: state_hash expected 04A0AD69522C3565, actual 45A5547A2010CCB5
+checkpoint stream ended early: expected tick 5, actual ended after tick 4
+checkpoint stream too long: unexpected tick 7
+checkpoint row malformed: line 5
+```
+
+**What it does not see.** The hash covers only SPEC-021 §3.1's values, so a
+difference in the game clock, the timed queue or world-map travel shows only
+once it reaches a covered value, and FNV-1a detects divergence between honest
+runs, not a chosen input. A replay session needs a world at every step, so a
+game log that starts at the main menu stops with an error.
+
+The three committed scenarios are in `tests/fixtures/spec021/rev3/`.
 
 ## Core contracts
 
