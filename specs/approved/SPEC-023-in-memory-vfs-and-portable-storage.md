@@ -1,6 +1,6 @@
 # SPEC-023: In-Memory VFS Mounting and Portable Storage
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 1.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (Team A, 2026-10-30); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -54,6 +54,52 @@ Team A's general knowledge comes from model training data whose sources
 cannot be audited (see `PROVENANCE.md`, "In-session spec authoring"). This
 spec changes where bytes come from and go to. It adds no game rule.
 
+**Provenance of revision 2.** Author: the Spec-Author sub-agent (Team A),
+2026-10-30, on the owner's brief of 2026-10-30, "In-Memory VFS, `StorageBackend`
+& `wasm32` Foundation". Sources:
+
+- the owner's brief. It asks for this spec to be written, but revision 1 was
+  already approved, and no implementation of it exists yet. So this is
+  revision 2 (D-26). Section 6 shows where each item of the brief stands;
+- the project's `AGENTS.md` (the engineering gates, `cargo xtask check`) and
+  `docs/REFERENCE.md` (the CI jobs, and the `skipped: no GPU adapter` rule of
+  SPEC-022 section 4, which the skip rule follows);
+- the project's `.github/workflows/ci.yml`;
+- public Rust documentation: the `wasm32-unknown-unknown` target's platform
+  support page, cargo's `--target`, `--locked`, `--no-default-features` and
+  `tree` commands, and `rustc --print target-libdir`;
+- **a dependency listing.** Team A printed the workspace's dependency graph with
+  `cargo metadata --no-deps` and `cargo tree`: crate names, versions and
+  features only (section 3.17). It opened no manifest and no source file under
+  the crates or tools;
+- **a measurement on the owner's machine, 2026-10-30.** Team A ran
+  `rustc --print target-libdir --target wasm32-unknown-unknown` on Rust 1.98.1
+  from the distribution, which has no `rustup` and no `wasm32` standard library
+  (section 3.17).
+
+No engine Rust code was read for this revision either, and no decompilation,
+disassembly, re-implementation source or game asset was used. The new vectors
+were written from this text, then checked by a separate script from the written
+files alone (section 7).
+
+### Revision history
+
+- **Revision 1 (2026-10-27).** First approved text.
+- **Revision 2 (2026-10-30).** Adds the offline-safe `wasm32-unknown-unknown`
+  compile gate (section 3.17).
+  - **The gate.** `vault-formats`, `vault-vm`, `vault-core` and `vault-guidance`
+    must pass a compile check for that target, in `xtask` and in CI, with zero
+    new dependencies.
+  - **The skip.** When the target is not installed, the gate skips with a stated
+    line, runs a host check in its place, and never reaches for the network. CI
+    cannot skip.
+  - **A blocker the gate exposes.** `vault-formats` has a non-optional `cap-std`
+    dependency, which cannot build for this target, and `vault-core` and
+    `vault-guidance` take `vault-formats` with its default features. So section
+    3.6 now also makes `cap-std` optional, and forwards `host-fs` through those
+    two crates. Revision 1's `host-fs` alone was not enough.
+  - Every other rule of revision 1, and every revision 1 fixture, is unchanged.
+
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
 - DO NOT copy C/C++ code, struct definitions, function names, internal variable names, or implementation-source paths from any inspected implementation.
@@ -82,9 +128,12 @@ ship data inside the application bundle. This spec defines:
    key-value layout that browser and mobile hosts use.
 3. The tests and synthetic vectors (sections 4 and 5, and
    `tests/fixtures/spec023/`).
+4. An offline-safe **`wasm32-unknown-unknown` compile gate** for the portable
+   crates (section 3.17; revision 2).
 
-Out of scope: building for a browser or a phone, binding to a particular
-browser API, caching game archives across sessions, and every game rule.
+Out of scope: building for a browser or a phone (the gate only compiles; it
+links and runs nothing), binding to a particular browser API, caching game
+archives across sessions, and every game rule.
 Game data is never written to a `StorageBackend` (D-11).
 
 **Compatibility tags.** As in SPEC-020 and SPEC-022, the tags compare the
@@ -354,6 +403,21 @@ Team A names the function `vault_formats::vfs::classify_drop` (D-21).
    crate builds and the memory tests (section 4, T1 to T7) pass. Desktop
    builds are unchanged, because the feature is on by default.
    `[Must-match]` for the build, `[May-improve]` for the feature's name.
+3. **`cap-std` (revision 2).** `host-fs` also gates the crate's `cap-std`
+   dependency, which becomes optional. It is `vault-formats`' only dependency
+   that reaches the OS, and it does not build for
+   `wasm32-unknown-unknown`, so the gate of section 3.17 cannot pass while it
+   is unconditional. `[Must-match]`
+4. **Forwarding (revision 2).** `vault-core` and `vault-guidance` take
+   `vault-formats` with its default features off, and each gains its own default
+   `host-fs` feature that turns on `vault-formats/host-fs`. Without this, those
+   crates would turn `cap-std` back on through their dependency. Every other
+   crate of the workspace keeps the file-backed code through its own default
+   features, so desktop builds, `Cargo.lock` and every test are unchanged.
+   `[Must-match]`
+5. **Gated code (revision 2).** Code in `vault-core` and `vault-guidance` that
+   uses a file-backed provider goes behind their `host-fs`, as the save-slot
+   code's move to slot images already requires (section 3.11). `[Must-match]`
 
 ### 3.7 The StorageBackend Trait
 
@@ -573,6 +637,139 @@ Team A names the type `SlotImage` (D-21); it lives beside the save-slot code.
 - `SlotImage` lives beside the save-slot code.
 - The names are Team A's (D-21). An implementer may rename them, and records
   the mapping in the commit.
+- The gate of section 3.17 is `cargo xtask wasm-check`, in the `xtask` tool, as
+  a pure decision function and a thin runner (Team A's names, D-36).
+
+### 3.17 The `wasm32-unknown-unknown` Compile Gate (Revision 2)
+
+The browser build is out of scope, but the crates it needs must not drift away
+from it. This gate keeps them compiling for that target. It is a **compile check
+only**: it links nothing and runs nothing.
+
+**The crates.** Four crates are gated. `[Must-match]`
+
+| Order | Crate | Why it is portable |
+| ---: | --- | --- |
+| 1 | `vault-vm` | The VM has no dependency on the host |
+| 2 | `vault-formats` | Parsers, archives and the memory mount, with `host-fs` off (section 3.6) |
+| 3 | `vault-guidance` | Campaign guidance, from `vault-formats` |
+| 4 | `vault-core` | The deterministic world |
+
+`vault-render`, `vault-debug`, `vault-platform`, `xtask`, `asset-audit` and
+`vault-fixtures` are not gated. They need a GPU, a window, audio or a filesystem,
+and a browser host is a later spec's work.
+
+**The command.** For each crate in that order, one invocation, so that the
+features of one crate cannot unify with another's: `[Must-match]`
+
+`cargo check --target wasm32-unknown-unknown --locked --lib --no-default-features -p CRATE`
+
+The gate stops at the first crate that fails. Only library targets are checked:
+tests and fixtures may use the filesystem.
+
+**Zero new dependencies.** `[Must-match]`
+
+1. This spec adds no crate to `Cargo.lock`, and changes no version in it. Making
+   `cap-std` optional changes no locked package. The gate runs `--locked`, so a
+   changed lock file fails it.
+2. With `host-fs` off, each gated crate's normal dependencies for this target are
+   exactly those of `wasm-graph.tsv`. The list is an allow-list, read from the
+   workspace's graph on 2026-10-30.
+3. Nothing is added for this target. In particular there is no `wasm-bindgen`,
+   `js-sys`, `web-sys`, `getrandom` or panic hook, and no dependency section
+   conditioned on the target.
+4. Every crate on the allow-list is already in the host graph. So a machine that
+   has built the workspace has every crate the gate needs, and the gate needs no
+   download.
+
+**One code path.** A gated crate does not branch on `target_arch` or `target_os`
+for this target. It branches on the `host-fs` feature. So the code the gate
+compiles is the code the host tests run with `--no-default-features` (T7), and
+the gate cannot pass on a stub. `[Must-match]`
+
+**Finding the target.** `[Must-match]`
+
+1. The gate runs `$RUSTC` (or `rustc` when that is unset) with
+   `--print target-libdir --target wasm32-unknown-unknown`.
+2. The target is **installed** exactly when that command exits 0, the path it
+   prints is a directory, and that directory holds a file whose name starts with
+   `libcore-` and ends with `.rlib`.
+
+The directory test is needed: on the owner's machine, Rust 1.98.1 from the
+distribution prints `/usr/lib/rustlib/wasm32-unknown-unknown/lib` and exits 0,
+and that directory does not exist. The exit status alone would call the target
+installed (measured by Team A, 2026-10-30).
+
+**Offline safety.** The gate never installs anything. It never runs `rustup`,
+which a machine may not have, and it makes no network request of its own. A
+machine without the target and without a network stays useful. `[Must-match]`
+
+**Outcomes.** `VAULT_REQUIRE_WASM` follows SPEC-022's `VAULT_REQUIRE_GPU`: only
+the value `1` requires the target. `wasm-gate.tsv` lists these outcomes as
+vectors. The lines are exact. `[Must-match]`
+
+| Target | `VAULT_REQUIRE_WASM` | What runs | Output | Exit |
+| --- | --- | --- | --- | ---: |
+| Not installed | Anything but `1` | The host check below | `skipped: wasm32-unknown-unknown target not installed`, a free-form line saying how to install it, then `host check ok: 4 crates` | 0 |
+| Not installed | `1` | Nothing | `error: wasm32-unknown-unknown target not installed` | 1 |
+| Installed | Any | The four checks | `wasm-check ok: 4 crates` | 0 |
+| Installed | Any | The four checks, until one fails | Cargo's own errors, then `wasm-check failed: CRATE` | 1 |
+
+**The host check.** A skip still checks what it can. It runs the command above
+without `--target`, for the same four crates in the same order. That proves on
+every machine that the `host-fs` gating holds, though not that the target
+compiles. If it fails, the gate prints `wasm-check failed: CRATE` and exits 1,
+because a broken feature gate is a real failure, whatever the target. `[Must-match]`
+
+**A failure is not a skip.** With the target installed, any failure of a check
+fails the gate, a failed download included. Only a missing target skips, so a
+skip always means the same thing. `[Must-match]`
+
+**Where it runs.** `[Must-match]`
+
+- `cargo xtask wasm-check` runs the gate alone.
+- `cargo xtask check` runs it as a fourth step, after the three gates of
+  `AGENTS.md`. A skip does not fail `cargo xtask check`, and its line stays
+  visible in the output.
+- CI gains a job, `wasm-check`, on Linux. It installs the stable toolchain with
+  the target, through the workflow's existing toolchain action, which is pinned
+  by version tag like the others. It sets `VAULT_REQUIRE_WASM=1` and runs
+  `cargo xtask wasm-check`. So CI can never pass by skipping.
+
+**What the gate does not prove.** On this target `std::fs` compiles but every
+call fails at run time, `Instant::now` and `SystemTime::now` panic, and a thread
+cannot start. The gate cannot see that. So with `host-fs` off, a gated crate does
+not call `std::fs`, `std::net`, `std::process`, `std::thread::spawn`,
+`Instant::now` or `SystemTime::now` on any path. A use that exists today goes
+behind `host-fs`, or moves to the platform. Enforcing this with clippy's
+`disallowed_methods` is recommended. `[Must-match]` for the rule; `[May-improve]`
+for the enforcement.
+
+**32-bit sizes.** `usize` is 32 bits on this target. `[Safe rule]`
+
+- Archive and memory-mount arithmetic that adds a 32-bit offset and size is
+  checked, or done in u64, so that an entry near `2^32` is refused the same way
+  on every target. It never wraps.
+- A byte source cannot reach section 2.1's limit of `2^32 - 1` bytes there,
+  because a buffer is limited to `isize::MAX`. Such a buffer never exists, so no
+  extra refusal is needed. A failed allocation is the host's.
+- SPEC-021's streams hold no `usize`, so `state_hash` does not depend on the
+  target's width (SPEC-021 section 2.2).
+
+### 3.18 The Implementer's Order (Revision 2)
+
+The gate fails until section 3.6 is done, so the order matters. `[Must-match]`
+
+1. **Section 3.6 first:** `host-fs` in `vault-formats`, `cap-std` optional,
+   `vault-core` and `vault-guidance` forwarding the feature, and their file-backed
+   code behind it.
+2. **Then the memory path** (sections 3.1 to 3.5), with T1 to T7.
+3. **Then the gate** (section 3.17), with T16 to T19, and the CI job in the same
+   commit. It must not land before step 1: `cargo xtask check` would then fail on
+   every machine that has the target.
+4. **Then storage** (sections 3.7 to 3.15), with T8 to T15.
+5. **Documents.** Add the fourth step and the CI job to `AGENTS.md` and
+   `docs/REFERENCE.md`, which list the gates today.
 
 ## 4. Required Tests
 
@@ -627,6 +824,24 @@ The implementer writes at least these tests, on synthetic data only.
   later shows: reads see a commit at once; transactions reach the store in
   commit order; a failed transaction makes `flush` report it and later
   commits return `Unavailable`.
+- **T16. Gate decisions (revision 2).** The gate's decision function gives
+  every row of `wasm-gate.tsv`. The probe is tested on temporary directories: one
+  missing, one empty, and one holding a file `libcore-0.rlib` (an empty file is
+  enough, because only the name is tested). This test needs no target, and runs
+  everywhere.
+- **T17. The real skip (revision 2).** Run `cargo xtask wasm-check` with `RUSTC`
+  naming a small test wrapper that prints a missing path for `--print
+  target-libdir`, and hands every other call to the real compiler. With
+  `CARGO_NET_OFFLINE=true` the gate prints the skip line, runs the host check, and
+  exits 0. With `VAULT_REQUIRE_WASM=1` it exits 1 and runs no check.
+- **T18. The compile check (revision 2).** With the target installed, the four
+  crates pass, in order. The CI job runs this with `VAULT_REQUIRE_WASM=1`.
+- **T19. The dependency graph (revision 2).** For each row of `wasm-graph.tsv`,
+  `cargo tree -e normal --target wasm32-unknown-unknown --no-default-features -p
+  CRATE --prefix none --locked` lists exactly the row's workspace and allowed
+  crates, by name. This needs no installed target (measured by Team A), so it runs
+  everywhere and catches a new dependency on a machine that skips the gate.
+  `Cargo.lock` is unchanged by this spec's work.
 
 ## 5. Synthetic Test Fixtures (Hex / Text)
 
@@ -757,6 +972,30 @@ discovery returns no manifest for `mods/beta` and the manifests of
 `mods` as a layer serves every file below it, nested layers included, as a
 folder layer would. Mounting `missing` is `LayerNotFound`.
 
+### 5.8 The Compile Gate (Revision 2)
+
+`wasm-gate.tsv` lists 11 gate decisions. Its inputs are `rustc_exit` (the probe's
+exit status), `libdir` (`missing`, `empty` or `present`), `libcore_rlib` (`yes`,
+`no`, or `-` when the directory was not looked in), `require` (the value of
+`VAULT_REQUIRE_WASM`, or `unset`), and the results `wasm_check` and `host_check`
+(`pass`, `fail:CRATE`, or `-` when not run). Its outputs are `outcome`, `exit`,
+`first_line` and `last_line`.
+
+- `dir-missing` is the owner's machine: the probe exits 0 and names a directory
+  that does not exist. The gate skips, the host check passes, and it exits 0.
+- `dir-empty` is a directory with no `libcore-*.rlib`: still not installed.
+- `require-other` shows that only `1` requires the target: a value of `0` skips.
+- `skip-host-fails` skips the target, but the host check fails, so the gate fails.
+  Its first line is still the skip line.
+- `required-missing` is a CI runner that lost its target: it fails, and runs
+  nothing.
+- `crate-fails` stops at `vault-formats`, the first failing crate.
+
+`wasm-graph.tsv` gives each gated crate's workspace dependencies and its allowed
+crates, as read on 2026-10-30 with `cap-std` removed from the graph. `vault-vm`
+and `vault-formats` have the same six: `thiserror`, and what its derive macro
+pulls in. `vault-core` adds `serde` and `slotmap`.
+
 ## 6. Decisions
 
 Every open point of the brief is settled here.
@@ -847,6 +1086,56 @@ Every open point of the brief is settled here.
   spec, and live in `tests/fixtures/spec023/`, not in `oracle/`, which is
   reserved for research-side vectors.
 
+Revision 2 adds:
+
+- **D-26 (Team A default).** The owner's brief of 2026-10-30 asks to author this
+  spec, but revision 1 was approved on 2026-10-27. It is not rewritten, because
+  its rules already meet the brief. This is revision 2. Item by item:
+  - **Byte-buffer archive backend:** revision 1, sections 2.1 to 3.6 (D-1).
+    Version 1 and version 2 archives and loose files mount from byte sources,
+    with no OS path, through the loose provider's path rules and SPEC-008's
+    selected-database layering.
+  - **`StorageBackend`:** revision 1, sections 3.7 to 3.15 (D-2). Settings, save
+    slots and mod discovery; atomic commits (section 3.8); listing (section 3.7);
+    the 64 MiB value limit and a quota (sections 2.4 and 3.8); a closed error type
+    (section 3.7); `FsStorage` and `MemoryStorage` (sections 3.9 and 3.14).
+  - **The compile gate:** new, section 3.17.
+- **D-27 (owner instruction).** `vault-formats`, `vault-vm`, `vault-core` and
+  `vault-guidance` pass a `wasm32-unknown-unknown` compile check in `xtask` and
+  in CI, with zero new dependencies.
+- **D-28 (Team A default).** The dependency listing of 2026-10-30 shows that
+  `cap-std` is unconditional in `vault-formats`, and that `vault-core` and
+  `vault-guidance` take default features. So the gate needs section 3.6's
+  optional dependency and forwarding, which revision 1 did not state. They change
+  no locked package, so they keep the owner's "zero new dependencies".
+- **D-29 (Team A default).** Gated crates branch on the `host-fs` feature, not on
+  the target, so that the host's `--no-default-features` tests run the code the
+  target compiles.
+- **D-30 (owner instruction for a graceful skip; Team A default for the probe).**
+  Skip only when the target's standard library is missing. The probe tests the
+  directory and a `libcore-*.rlib` in it, because `rustc` prints the path whether
+  or not it exists (measured by Team A). It does not use `rustup`, so it works
+  with a distribution's toolchain, and it needs no network.
+- **D-31 (Team A default).** `VAULT_REQUIRE_WASM=1` makes a missing target a
+  failure, as `VAULT_REQUIRE_GPU=1` does for an adapter, and the CI job sets it, so
+  that CI can never pass by skipping.
+- **D-32 (Team A default).** A skip still runs the four checks on the host. A
+  skipped machine then catches a broken feature gate, which is the likeliest way
+  for these crates to drift.
+- **D-33 (Team A default).** Only a missing target skips. With the target
+  installed, every failure fails, a download included, so that a skip never hides
+  a broken build.
+- **D-34 (Team A default).** Because the gate only compiles, the calls that
+  compile but fail at run time on this target are ruled out by section 3.17's
+  list, and clippy is the recommended enforcement.
+- **D-35 (Team A default).** The gate lands after section 3.6, in the order of
+  section 3.18, because it fails until then.
+- **D-36 (Team A default).** The names `cargo xtask wasm-check`,
+  `VAULT_REQUIRE_WASM` and the CI job `wasm-check` are Team A's. `cargo xtask
+  check` gains the gate as a fourth step. `AGENTS.md` and `docs/REFERENCE.md` say
+  three today, and the implementer updates them, because this spec's author does
+  not change those files.
+
 ## 7. Clean-Room Verification Checklist
 
 - [x] Zero C/C++ code snippets or struct definitions included.
@@ -861,3 +1150,14 @@ Every open point of the brief is settled here.
 - [x] Synthetic test vectors only; no archive, member or save holds game
   data. Every archive offset in section 5 was checked by hand.
 - [x] Decisions separate owner instructions from Team A defaults.
+- [x] Revision 2: `wasm-gate.tsv` was written from section 3.17 by a throwaway
+  script, and a second, separate script recomputed every row's outcome, exit and
+  lines from the rule. `wasm-graph.tsv` holds crate names as `cargo tree` printed
+  them, with `cap-std` pruned, and each name was confirmed to be in the host
+  graph.
+- [x] Revision 2 keeps the ingestion rule: no implementation-source path, no
+  40-character hexadecimal string, and no code listing. No engine Rust code and no
+  crate manifest was opened. The only inputs from the workspace are the dependency
+  listing and the one `rustc` measurement, both disclosed in the provenance.
+- [x] Revision 2 changes no revision 1 rule or fixture. Sections 3.6 and 3.17 add
+  to them.

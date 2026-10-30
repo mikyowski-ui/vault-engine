@@ -43,3 +43,11 @@ Storage:
   (usage counts canonical key bytes plus value bytes).
 - `mods-entries.tsv`, `mods-expected.tsv`: entries of the `mods` namespace,
   and the manifest discovery, layer finding and layer mounting results.
+
+The compile gate (revision 2, SPEC-023 sections 3.17 and 5.8):
+
+- `wasm-gate.tsv`: 11 gate decisions: what the target probe found, whether
+  `VAULT_REQUIRE_WASM` asks for the target, how the checks went, and the
+  outcome, exit status and exact first and last lines.
+- `wasm-graph.tsv`: each gated crate's workspace dependencies, and the only
+  other crates it may depend on for that target with `host-fs` off.

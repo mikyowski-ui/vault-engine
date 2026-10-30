@@ -1,0 +1,5 @@
+crate	workspace_deps	allowed_deps
+vault-vm	-	proc-macro2,quote,syn,thiserror,thiserror-impl,unicode-ident
+vault-formats	-	proc-macro2,quote,syn,thiserror,thiserror-impl,unicode-ident
+vault-guidance	vault-formats	proc-macro2,quote,syn,thiserror,thiserror-impl,unicode-ident
+vault-core	vault-formats,vault-vm	proc-macro2,quote,serde,serde_core,serde_derive,slotmap,syn,thiserror,thiserror-impl,unicode-ident

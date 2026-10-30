@@ -1,0 +1,12 @@
+case	rustc_exit	libdir	libcore_rlib	require	wasm_check	host_check	outcome	exit	first_line	last_line
+dir-missing	0	missing	-	unset	-	pass	skip	0	skipped: wasm32-unknown-unknown target not installed	host check ok: 4 crates
+dir-empty	0	empty	no	unset	-	pass	skip	0	skipped: wasm32-unknown-unknown target not installed	host check ok: 4 crates
+rustc-fails	1	-	-	unset	-	pass	skip	0	skipped: wasm32-unknown-unknown target not installed	host check ok: 4 crates
+require-other	0	missing	-	0	-	pass	skip	0	skipped: wasm32-unknown-unknown target not installed	host check ok: 4 crates
+skip-host-fails	0	missing	-	unset	-	fail:vault-core	fail	1	skipped: wasm32-unknown-unknown target not installed	wasm-check failed: vault-core
+required-missing	0	missing	-	1	-	-	error	1	error: wasm32-unknown-unknown target not installed	error: wasm32-unknown-unknown target not installed
+required-empty	0	empty	no	1	-	-	error	1	error: wasm32-unknown-unknown target not installed	error: wasm32-unknown-unknown target not installed
+installed	0	present	yes	unset	pass	-	ok	0	wasm-check ok: 4 crates	wasm-check ok: 4 crates
+installed-required	0	present	yes	1	pass	-	ok	0	wasm-check ok: 4 crates	wasm-check ok: 4 crates
+crate-fails	0	present	yes	unset	fail:vault-formats	-	fail	1	wasm-check failed: vault-formats	wasm-check failed: vault-formats
+crate-fails-required	0	present	yes	1	fail:vault-core	-	fail	1	wasm-check failed: vault-core	wasm-check failed: vault-core
