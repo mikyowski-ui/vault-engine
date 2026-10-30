@@ -19,12 +19,14 @@
 //!   maximum), and the SPEC-007 to-hit chance beside the crosshair while it
 //!   is over a target, at once rather than after the hover's rest.
 //! - **Quick save and load.** F6 saves to and F7 loads from
-//!   [`quick_slot_directory`] at once, with no picker and no prompt.
+//!   [`QUICK_SLOT`] at once, with no picker and no prompt.
 use super::{MapPreview, Screen, pointer::Feedback};
-use crate::{enhanced::GameSpeed, interface::Painter};
+use crate::{enhanced::GameSpeed, interface::Painter, storage::Namespace};
+#[cfg(test)]
+use vault_core::host_save::quick_slot_directory;
 use vault_core::{
     EnginePreset, ObjectRef,
-    host_save::{SaveInfo, quick_slot_directory},
+    host_save::{QUICK_SLOT, SaveInfo},
     ui::{ColorKey, cursor},
 };
 use vault_formats::{
@@ -426,11 +428,10 @@ impl MapPreview {
             host_time: 0,
             thumbnail: Some(self.capture_thumbnail()),
         };
-        let dir = quick_slot_directory(&self.save_root);
-        match self.host.save_game_in(&dir, &info) {
+        match self.write_game_slot(QUICK_SLOT, &info) {
             Ok(()) => self.post_message(QUICK_SAVED.to_vec(), false),
             Err(error) => {
-                tracing::warn!(%error, slot = %dir.display(), "quick save failed");
+                tracing::warn!(%error, slot = QUICK_SLOT, "quick save failed");
                 self.status = error.to_string().into_bytes();
                 self.post_message(QUICK_SAVE_FAILED.to_vec(), true);
             }
@@ -438,19 +439,21 @@ impl MapPreview {
     }
     /// Enhanced F7: the quick-save slot loaded at once.
     pub(crate) fn enhanced_quick_load(&mut self) {
-        let dir = quick_slot_directory(&self.save_root);
-        if !dir.is_dir() {
+        let keys = self
+            .slot_storage()
+            .list(Namespace::Savegame, Some(QUICK_SLOT));
+        if keys.is_ok_and(|keys| keys.is_empty()) {
             self.post_message(NO_QUICK_SAVE.to_vec(), true);
             return;
         }
-        match self.host.load_game_from(&dir) {
+        match self.read_game_slot(QUICK_SLOT) {
             Ok(()) => {
                 self.return_to_map();
                 self.settle_panel();
                 self.post_message(QUICK_LOADED.to_vec(), false);
             }
             Err(error) => {
-                tracing::warn!(%error, slot = %dir.display(), "quick load failed");
+                tracing::warn!(%error, slot = QUICK_SLOT, "quick load failed");
                 self.status = error.to_string().into_bytes();
                 self.post_message(QUICK_LOAD_FAILED.to_vec(), true);
             }

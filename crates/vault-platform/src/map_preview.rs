@@ -198,6 +198,8 @@ pub struct MapPreview {
     pub debug_session: bool,
     /// The directory holding `SAVEGAME/SLOTnn`.
     pub save_root: std::path::PathBuf,
+    /// Where the slots live (SPEC-023 §3.15); `None`: `save_root`'s folders.
+    pub storage: Option<Arc<dyn crate::storage::StorageBackend>>,
     /// SPEC-014 §3.19 where F12 writes `scrNNNNN.bmp`: the process's
     /// working directory (the empty path) in the game.
     pub screenshot_dir: std::path::PathBuf,
@@ -617,6 +619,7 @@ impl MapPreview {
             mod_export: None,
             debug_session: false,
             save_root: std::path::PathBuf::from("."),
+            storage: None,
             screenshot_dir: std::path::PathBuf::new(),
             quick: Default::default(),
             slot_list: Default::default(),

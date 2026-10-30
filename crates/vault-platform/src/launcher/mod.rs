@@ -230,11 +230,11 @@ impl Mods {
             }
             Some(ModList::File(file)) => {
                 mods.file = Some(file.clone());
-                match std::fs::read_to_string(file) {
+                match crate::storage::read_config_file(file) {
                     // Save creates it.
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => mods.fail(format!("{}: {error}", file.display())),
-                    Ok(text) => match vault_formats::parse_load_order(&text) {
+                    Ok(None) => {}
+                    Err(error) => mods.fail(error),
+                    Ok(Some(text)) => match vault_formats::parse_load_order(&text) {
                         Ok(entries) => mods.entries = entries,
                         Err(error) => mods.fail(format!("{}: {error}", file.display())),
                     },

@@ -2262,12 +2262,16 @@ revisit rules (lock unjamming, healing, and old corpses replaced by remains;
 over the asset. The player is saved centrally. Party members travel with the
 player between maps but are written to the current map in a save slot. The
 per-load map-script instance is recreated on each entry, as in SPEC-006 step 6,
-so its previous local block is not reattached. `WorldHost::save_game` writes
-`SAVEGAME/SLOTnn/SAVE.DAT`, the manifest's `.SAV` companions, and `AUTOMAP.SAV`
-under the SPEC-008 §3.3 safe rule: every file is staged as `<name>.TMP`, and only
-after all succeed are the old files renamed to `.BAK`, the staged files renamed
-into place (restoring the backups if that fails), and the backups removed.
-`load_game` reads and validates the header, every payload, every companion map
+so its previous local block is not reattached. A save is a slot image
+(`WorldHost::slot_image`): `SAVE.DAT`, the manifest's `.SAV` companions, and
+`AUTOMAP.SAV`, which `vault_platform::session` commits to the session's
+`StorageBackend` as one batch (`save_game` does the same to a folder, for tools).
+On the desktop that is `SAVEGAME/SLOTnn/` under the SPEC-008 §3.3 safe rule:
+every file is staged as `<name>.TMP`, and only after all succeed are the old
+files renamed to `.BAK`, the staged files renamed into place (restoring the
+backups if that fails), and the backups removed. Other files of the slot are
+left alone (SPEC-023 §3.11).
+`load_slot` reads and validates the header, every payload, every companion map
 (parsed in full), and the automap before it changes any state. A companion
 name from the manifest is used only when it is exactly the name
 `saved_map_name` would give: a plain `[A-Za-z0-9_-]` stem plus `.SAV`, with no
@@ -2328,6 +2332,47 @@ Where SPEC-008 leaves details open, this engine makes these choices:
   so a missing compiled map script cannot trap transitions.
 
 </details>
+
+## In-memory mounts and portable storage (SPEC-023)
+
+Game data and the engine's own state each have one interface, so a host without
+OS paths needs neither.
+
+- **Game data from buffers.** `vault_formats::vfs` mounts Fallout 1 and Fallout 2
+  archives and loose files from shared byte buffers (`ByteSource`, `MemoryDir`).
+  `MemoryMount::mount` builds the same `DatProvider`, `Dat2Provider` and
+  `LayeredVfs` a file mount builds, so the same rules answer every request, and a
+  file and a buffer of the same bytes give the same list, bytes and refusals.
+  `classify_drop` turns a dropped file list into a mount and a report. A mount with
+  no archive is a loose corpus. Required members are checked by
+  `MemoryProvider::validate`, a separate step, as they are for a file mount.
+- **`host-fs`.** A default feature of `vault-formats`, `vault-core` and
+  `vault-guidance` that gates every file-backed provider, `cap-std` and the folder
+  form of the save slots. Without it those crates reach no OS path:
+  `cargo test -p vault-formats --no-default-features` runs the memory tests with
+  no file-backed code compiled.
+- **`StorageBackend`.** `vault_platform::storage` holds three namespaces: `config`
+  (the settings and load-order files), `savegame` (`<slot>/<file>`) and `mods`
+  (`<layer>/<path>`). Keys keep their spelling and compare by their canonical,
+  lower-case form. A commit is one atomic batch, a value is at most 64 MiB, and
+  `.tmp` and `.bak` names are reserved outside `mods`.
+  - `FsStorage` keeps the desktop's folders. It resolves keys case-insensitively,
+    refuses symbolic links and two names that differ only in case, and commits
+    with the staged protocol of `vault_formats::staged`. A settings folder must
+    exist; `savegame` and `mods` folders are created.
+  - `MemoryStorage` is the reference, with an optional quota. A replay runs on it,
+    so it never touches the user's real slots.
+  - `KvStorage` adapts a flat store (`KvStore`: a prefix scan and an atomic write)
+    with the record keys `vault-engine/1/<scope>/<namespace>/<key>`. Reads answer
+    from memory, and each commit becomes one host transaction, in order. A failed
+    transaction makes `flush` report it, and later commits return `Unavailable`
+    until the store is reopened.
+- **Sessions.** `PreviewArgs::data` and `PreviewArgs::storage` hand a session its
+  `Vfs` and its backend. A desktop session that names neither mounts its files and
+  keeps its slots in `FsStorage`, with the same files and bytes as before.
+
+Other host files stay plain files for now: `fallout.cfg`, screenshots, and the
+character sheet and print files of the character editor.
 
 ## Combat AI (SPEC-009)
 

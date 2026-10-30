@@ -1,7 +1,8 @@
-//! SPEC-008 §2.4/§2.5/§3.3 save slots: `SAVEGAME/SLOTnn/SAVE.DAT` with its
-//! companion `<map>.SAV` files and `AUTOMAP.SAV`, staged writes committed
-//! only after every file succeeds, and the restore order (current map
-//! before later components).
+//! SPEC-008 §2.4/§2.5/§3.3 save slots: `SAVE.DAT` with its companion
+//! `<map>.SAV` files and `AUTOMAP.SAV`, and the restore order (current map
+//! before later components). SPEC-023 §3.11: a save produces a [`SlotImage`]
+//! and a load consumes a [`SlotReader`], so this code opens no file; where
+//! the slot lives is the caller's, and `folder` keeps one in a directory.
 use crate::{
     ObjectRef, Perk, WorldError, WorldState,
     assets::WorldAssets,
@@ -11,11 +12,7 @@ use crate::{
     queue::{EventKind, TimedEvent},
     worldmap::WorldMap,
 };
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeMap;
 use vault_formats::{
     AutomapDb, ParseError,
     map::{MapObject, ObjectState},
@@ -25,8 +22,18 @@ use vault_formats::{
 };
 use vault_vm::VmHost;
 
+#[cfg(feature = "host-fs")]
+mod folder;
+#[cfg(feature = "host-fs")]
+pub use folder::{quick_slot_directory, slot_directory, write_slot};
+
 pub const CENTRAL_FILE: &str = "SAVE.DAT";
 pub const AUTOMAP_FILE: &str = "AUTOMAP.SAV";
+/// The `enhanced` preset's quick-save slot, beside the ten numbered slots.
+/// The SPEC-014 §3.14 screen lists `SLOT01`-`SLOT10` only, so it never shows
+/// this slot and a quick save never touches a numbered one. It holds the
+/// same files as any slot (SPEC-008 §3.3), the enhanced sidecar included.
+pub const QUICK_SLOT: &str = "QUICKSAV";
 
 /// Presentation fields supplied by the platform (host clock and capture).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -41,23 +48,60 @@ pub struct SaveInfo {
     pub thumbnail: Option<Vec<u8>>,
 }
 
-/// `SAVEGAME/SLOTnn` under the writable patch root, for slots 01-10.
-pub fn slot_directory(root: &Path, slot: u8) -> Result<PathBuf, WorldError> {
+/// The folder name of numbered slot `slot`, 01-10.
+pub fn slot_name(slot: u8) -> Result<String, WorldError> {
     if !(1..=10).contains(&slot) {
         return Err(WorldError::Invalid(format!(
             "save slot {slot} outside 1-10"
         )));
     }
-    Ok(root.join("SAVEGAME").join(format!("SLOT{slot:02}")))
+    Ok(format!("SLOT{slot:02}"))
 }
 
-/// The `enhanced` preset's quick-save slot: `SAVEGAME/QUICKSAV` below the
-/// save root, beside the ten numbered slots. The SPEC-014 §3.14 screen
-/// lists `SLOT01`-`SLOT10` only, so it never shows this slot and a quick
-/// save never touches a numbered one. It holds the same files as any slot
-/// (SPEC-008 §3.3), the enhanced sidecar included.
-pub fn quick_slot_directory(root: &Path) -> PathBuf {
-    root.join("SAVEGAME").join("QUICKSAV")
+/// SPEC-023 §3.11: every file a save writes, as (name, bytes), with no
+/// opinion on where they go. `vault_platform::session` commits it to a
+/// `StorageBackend`; [`write_slot`] commits it to a folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SlotImage {
+    files: Vec<(String, Vec<u8>)>,
+}
+
+impl SlotImage {
+    pub fn files(&self) -> &[(String, Vec<u8>)] {
+        &self.files
+    }
+    /// Whether a save of this image keeps an enhanced sidecar. An image
+    /// without one removes an old one, so that an overwritten slot never
+    /// carries stale settings.
+    pub fn has_sidecar(&self) -> bool {
+        self.files
+            .iter()
+            .any(|(name, _)| name == crate::companion::SIDECAR)
+    }
+}
+
+/// Where a load reads a slot's files from: `read_file` gives a file's bytes,
+/// or `None` when the slot does not hold it. Names are [`CENTRAL_FILE`],
+/// [`AUTOMAP_FILE`], the sidecar, or a [`valid_companion_name`].
+pub trait SlotReader {
+    fn read_file(&mut self, name: &str) -> Result<Option<Vec<u8>>, WorldError>;
+}
+
+impl SlotReader for SlotImage {
+    fn read_file(&mut self, name: &str) -> Result<Option<Vec<u8>>, WorldError> {
+        Ok(self
+            .files
+            .iter()
+            .find(|(file, _)| file.eq_ignore_ascii_case(name))
+            .map(|(_, bytes)| bytes.clone()))
+    }
+}
+
+/// A file the slot must hold.
+fn required(files: &mut dyn SlotReader, name: &str) -> Result<Vec<u8>, WorldError> {
+    files
+        .read_file(name)?
+        .ok_or_else(|| WorldError::Invalid(format!("{name}: missing save companion")))
 }
 
 /// SPEC-014 §3.1 step 8 sets the clock to tick 264600, 07:21 on 5 December
@@ -87,9 +131,6 @@ pub fn calendar_date(ticks: u64, start_year: u16, start_day: u64) -> [u16; 3] {
     [month, day as u16 + 1, year]
 }
 
-fn io(path: &Path, error: std::io::Error) -> WorldError {
-    WorldError::Invalid(format!("{}: {error}", path.display()))
-}
 fn fixed<const N: usize>(text: &[u8]) -> [u8; N] {
     let mut out = [0; N];
     let count = text.len().min(N);
@@ -103,9 +144,6 @@ fn text(bytes: &[u8]) -> &[u8] {
 /// uppercased again (`VAULTENT.sav` opens `VAULTENT.SAV`).
 fn save_map_file(save: &SaveGame) -> String {
     String::from_utf8_lossy(text(&save.header.map_file)).to_ascii_uppercase()
-}
-fn backup_name(path: &Path) -> PathBuf {
-    path.with_extension("BAK")
 }
 /// A companion name the slot accepts: exactly what
 /// [`saved_map_name`](crate::persistence::saved_map_name) gives back for it,
@@ -129,28 +167,6 @@ fn checked_companion(name: &str) -> Result<&str, WorldError> {
         )))
     }
 }
-/// Case-insensitive lookup of a slot file: the fixed central and automap
-/// names, or a [`valid_companion_name`].
-fn slot_file(dir: &Path, name: &str) -> Result<PathBuf, WorldError> {
-    if name != CENTRAL_FILE && name != AUTOMAP_FILE {
-        checked_companion(name)?;
-    }
-    let exact = dir.join(name);
-    if exact.is_file() {
-        return Ok(exact);
-    }
-    let entries = fs::read_dir(dir).map_err(|error| io(dir, error))?;
-    entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|file| file.to_str())
-                .is_some_and(|file| file.eq_ignore_ascii_case(name))
-        })
-        .ok_or_else(|| WorldError::Invalid(format!("{}: missing save companion", exact.display())))
-}
-
 fn queue_record(world: &WorldState, event: &TimedEvent) -> Result<QueueRecord, WorldError> {
     let payload = match event.kind {
         EventKind::Drug { stats, modifiers } => QueuePayload::Drug { stats, modifiers },
@@ -431,19 +447,10 @@ impl<A: WorldAssets> WorldHost<A> {
             fallout2,
         })
     }
-    /// Write a slot under the SPEC-008 §3.3 safe rule: every file is first
-    /// written to a temporary `<name>.TMP`, so a failure leaves the old slot
-    /// untouched. Only then is the slot committed: the old central and
-    /// companion files are renamed to `.BAK`, the staged files are renamed
-    /// into place (restoring the backups if that fails), and the backups are
-    /// removed.
-    pub fn save_game(&mut self, root: &Path, slot: u8, info: &SaveInfo) -> Result<(), WorldError> {
-        self.save_game_in(&slot_directory(root, slot)?, info)
-    }
-    /// [`Self::save_game`] into the slot directory `dir` (a numbered slot's,
-    /// or [`quick_slot_directory`]).
-    pub fn save_game_in(&mut self, dir: &Path, info: &SaveInfo) -> Result<(), WorldError> {
-        let dir = dir.to_path_buf();
+    /// The slot image of the current game ([`SlotImage`]): what a save
+    /// writes, built before anything is written, so a failure here touches
+    /// no slot.
+    pub fn slot_image(&mut self, info: &SaveInfo) -> Result<SlotImage, WorldError> {
         let save = self.build_save(info)?;
         let mut files = vec![(CENTRAL_FILE.to_string(), save.write()?)];
         for (name, bytes) in &self.world.persistence.maps {
@@ -464,83 +471,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 + &crate::doors::write_table(&self.world.enhanced.opened_doors);
             files.push((crate::companion::SIDECAR.to_string(), text.into_bytes()));
         }
-        fs::create_dir_all(&dir).map_err(|error| io(&dir, error))?;
-        let staged = |name: &str| dir.join(format!("{name}.TMP"));
-        let staging = files.iter().try_for_each(|(name, bytes)| {
-            let path = staged(name);
-            fs::write(&path, bytes).map_err(|error| io(&path, error))
-        });
-        if let Err(error) = staging {
-            for (name, _) in &files {
-                let _ = fs::remove_file(staged(name));
-            }
-            return Err(error);
-        }
-        let mut backups = Vec::new();
-        for entry in fs::read_dir(&dir).map_err(|error| io(&dir, error))? {
-            let Ok(path) = entry.map(|entry| entry.path()) else {
-                continue;
-            };
-            let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let central = path
-                .file_name()
-                .and_then(|f| f.to_str())
-                .is_some_and(|f| f.eq_ignore_ascii_case(CENTRAL_FILE));
-            if (central || extension.eq_ignore_ascii_case("SAV"))
-                && fs::rename(&path, backup_name(&path)).is_ok()
-            {
-                backups.push(path);
-            }
-        }
-        let mut committed = Vec::new();
-        let result = files.iter().try_for_each(|(name, _)| {
-            let path = dir.join(name);
-            fs::rename(staged(name), &path).map_err(|error| io(&path, error))?;
-            committed.push(path);
-            Ok(())
-        });
-        match result {
-            Ok(()) => {
-                for path in backups {
-                    let _ = fs::remove_file(backup_name(&path));
-                }
-                if !sidecar {
-                    let path = dir.join(crate::companion::SIDECAR);
-                    match fs::remove_file(&path) {
-                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                            return Err(io(&path, error));
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(())
-            }
-            Err(error) => {
-                for path in committed {
-                    let _ = fs::remove_file(path);
-                }
-                for (name, _) in &files {
-                    let _ = fs::remove_file(staged(name));
-                }
-                for path in backups {
-                    let _ = fs::rename(backup_name(&path), &path);
-                }
-                Err(error)
-            }
-        }
+        Ok(SlotImage { files })
     }
     /// Read and validate a whole slot (header, every payload, the listed
     /// companions, and the automap byte length) before changing any state,
-    /// then restore it.
-    pub fn load_game(&mut self, root: &Path, slot: u8) -> Result<(), WorldError> {
-        self.load_game_from(&slot_directory(root, slot)?)
-    }
-    /// [`Self::load_game`] from the slot directory `dir` (a numbered
-    /// slot's, or [`quick_slot_directory`]).
-    pub fn load_game_from(&mut self, dir: &Path) -> Result<(), WorldError> {
-        let dir = dir.to_path_buf();
-        let central_path = slot_file(&dir, CENTRAL_FILE)?;
-        let central = fs::read(&central_path).map_err(|error| io(&central_path, error))?;
+    /// then restore it. SPEC-023 §3.11: `files` is where the slot lives.
+    pub fn load_slot(&mut self, files: &mut dyn SlotReader) -> Result<(), WorldError> {
+        let central = required(files, CENTRAL_FILE)?;
         // SPEC-018 §2.3, §7.2: slots belong to one game; a Fallout 2 game
         // reads only the Fallout 2 layout.
         let fallout2 = self.world.fallout2.is_some();
@@ -587,15 +524,13 @@ impl<A: WorldAssets> WorldHost<A> {
             // (`../../X.SAV`, `C:X.SAV`, ...) never reads outside the slot
             // and never enters the working saved-map set.
             let name = checked_companion(name)?.to_string();
-            let path = slot_file(&dir, &name)?;
-            let bytes = fs::read(&path).map_err(|error| io(&path, error))?;
+            let bytes = required(files, &name)?;
             // SPEC-008 §3.3 safe rule: every companion map is validated
             // before any working state changes.
             vault_formats::MapFile::parse_for(&bytes, &lookup, self.assets.game_profile())?;
             maps.insert(name, bytes);
         }
-        let automap_path = slot_file(&dir, AUTOMAP_FILE)?;
-        let automap = fs::read(&automap_path).map_err(|error| io(&automap_path, error))?;
+        let automap = required(files, AUTOMAP_FILE)?;
         if i64::try_from(automap.len()).ok() != Some(i64::from(save.automap_length)) {
             return Err(WorldError::Invalid(
                 "AUTOMAP.SAV length differs from the recorded length".into(),
@@ -622,17 +557,20 @@ impl<A: WorldAssets> WorldHost<A> {
         // The `enhanced` sidecar, read (and validated) under Enhanced only;
         // a slot without one has no companion settings or opened doors.
         let (distances, enhanced) = if self.preset() == crate::EnginePreset::Enhanced {
-            let path = dir.join(crate::companion::SIDECAR);
-            match fs::read_to_string(&path) {
-                Ok(text) => (
-                    crate::companion::parse_sidecar(&text).map_err(WorldError::Invalid)?,
-                    crate::doors::EnhancedState {
-                        opened_doors: crate::doors::parse_table(&text)
-                            .map_err(WorldError::Invalid)?,
-                    },
-                ),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
-                Err(error) => return Err(io(&path, error)),
+            match files.read_file(crate::companion::SIDECAR)? {
+                Some(bytes) => {
+                    let text = String::from_utf8(bytes).map_err(|_| {
+                        WorldError::Invalid(format!("{} is not text", crate::companion::SIDECAR))
+                    })?;
+                    (
+                        crate::companion::parse_sidecar(&text).map_err(WorldError::Invalid)?,
+                        crate::doors::EnhancedState {
+                            opened_doors: crate::doors::parse_table(&text)
+                                .map_err(WorldError::Invalid)?,
+                        },
+                    )
+                }
+                None => Default::default(),
             }
         } else {
             Default::default()

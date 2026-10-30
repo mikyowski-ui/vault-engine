@@ -3,9 +3,16 @@
 //! box), committing through the SPEC-008 slot writer and reader, and quick
 //! save/load. Slots live below the configured save root.
 use super::{MapPreview, Screen, dialog::Dialog};
-use crate::{AppResult, input::key_text};
+use crate::{
+    AppResult,
+    input::key_text,
+    session::{StoredSlot, commit_slot},
+    storage::{FsStorage, Namespace, StorageBackend},
+};
+use std::sync::Arc;
 use vault_core::{
-    host_save::{SaveInfo, slot_directory},
+    WorldError,
+    host_save::{CENTRAL_FILE, SaveInfo, slot_name},
     ui::{
         BUTTON_PRESS, ColorKey, ERROR_SOUND, FRAME_MS, red_button,
         saveload::{
@@ -80,18 +87,18 @@ fn saveload_input(
     })
 }
 
-/// Read every slot header below `root`, in `game`'s layout (SPEC-018
+/// Read every slot header in `storage`, in `game`'s layout (SPEC-018
 /// §2.3: slots belong to one game, so the other game's slots do not read).
 fn scan(
-    root: &std::path::Path,
+    storage: &dyn StorageBackend,
     game: vault_core::GameProfile,
     fallout2: Option<(usize, bool)>,
 ) -> (Vec<SlotState>, Vec<Option<Vec<u8>>>) {
     (1..=saveload::SLOTS as u8)
         .map(|slot| {
-            let path = slot_directory(root, slot).map(|dir| dir.join("SAVE.DAT"));
-            let Ok(bytes) = path.and_then(|path| {
-                std::fs::read(path).map_err(|e| vault_core::WorldError::Invalid(e.to_string()))
+            let Some(bytes) = slot_name(slot).ok().and_then(|name| {
+                let key = format!("{name}/{CENTRAL_FILE}");
+                storage.read(Namespace::Savegame, &key).ok().flatten()
             }) else {
                 return (SlotState::Empty, None);
             };
@@ -156,10 +163,35 @@ impl MapPreview {
         let globals = self.host.world.gvars.as_ref().map_or(0, Vec::len);
         Some((globals, self.host.scripts_gated()))
     }
+    /// Where this world's slots live (SPEC-023 §3.15): the session's
+    /// backend, or for a world on its own the folders of `save_root`.
+    pub(crate) fn slot_storage(&self) -> Arc<dyn StorageBackend> {
+        self.storage
+            .clone()
+            .unwrap_or_else(|| Arc::new(FsStorage::at_save_root(&self.save_root)))
+    }
+    /// Save the game into the slot named `slot` (SPEC-023 §3.11).
+    pub(crate) fn write_game_slot(
+        &mut self,
+        slot: &str,
+        info: &SaveInfo,
+    ) -> Result<(), WorldError> {
+        let image = self.host.slot_image(info)?;
+        Ok(commit_slot(&*self.slot_storage(), slot, &image)?)
+    }
+    /// Load the slot named `slot`: validated whole before any state changes.
+    pub(crate) fn read_game_slot(&mut self, slot: &str) -> Result<(), WorldError> {
+        let storage = self.slot_storage();
+        let mut files = StoredSlot {
+            storage: &*storage,
+            slot,
+        };
+        self.host.load_slot(&mut files)
+    }
     /// Every slot's state and thumbnail.
     fn scan_slots(&self) -> (Vec<SlotState>, Vec<Option<Vec<u8>>>) {
         scan(
-            &self.save_root,
+            &*self.slot_storage(),
             self.save_profile(),
             self.fallout2_slot_check(),
         )
@@ -420,7 +452,8 @@ impl MapPreview {
             return;
         };
         let mode = screen.mode;
-        match self.host.load_game(&self.save_root, slot as u8 + 1) {
+        let loaded = slot_name(slot as u8 + 1).and_then(|name| self.read_game_slot(&name));
+        match loaded {
             Ok(()) => {
                 self.close_save_screen();
                 self.return_to_map();
@@ -463,7 +496,7 @@ impl MapPreview {
             host_time: 0,
             thumbnail: Some(thumbnail),
         };
-        match self.host.save_game(&self.save_root, slot, &info) {
+        match slot_name(slot).and_then(|name| self.write_game_slot(&name, &info)) {
             Ok(()) => true,
             Err(error) => {
                 self.status = error.to_string().into_bytes();
@@ -582,9 +615,8 @@ impl MapPreview {
         }
         match self.quick.f7() {
             Quick::Pick(mode) => self.open_save_screen(mode),
-            _ => match self
-                .host
-                .load_game(&self.save_root, self.slot_list.selected as u8 + 1)
+            _ => match slot_name(self.slot_list.selected as u8 + 1)
+                .and_then(|name| self.read_game_slot(&name))
             {
                 Ok(()) => {
                     self.return_to_map();
@@ -630,6 +662,10 @@ impl MapPreview {
         self.show_dialog(if quit { dialog.quitting() } else { dialog });
     }
 }
+
+#[cfg(test)]
+#[path = "saveload_parity_tests.rs"]
+mod parity_tests;
 
 #[cfg(test)]
 impl MapPreview {

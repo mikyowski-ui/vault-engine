@@ -102,6 +102,8 @@ pub struct Game {
     language: String,
     seed: i32,
     save_root: PathBuf,
+    /// Where the worlds keep their slots (SPEC-023 §3.15).
+    pub(crate) storage: Option<Arc<dyn crate::storage::StorageBackend>>,
     /// SPEC-014 §3.19 where F12 writes `scrNNNNN.bmp`: the process's
     /// working directory (the empty path).
     pub(crate) screenshot_dir: PathBuf,
@@ -249,6 +251,7 @@ impl Game {
             language: language.to_owned(),
             seed,
             save_root,
+            storage: None,
             screenshot_dir: PathBuf::new(),
             menu_passes: 0,
             config_path,
@@ -602,6 +605,7 @@ impl Game {
         world.host.world.clock.ticks = flow::START_TICKS;
         world.audio = self.audio.clone();
         world.save_root = self.save_root.clone();
+        world.storage = self.storage.clone();
         world.screenshot_dir = self.screenshot_dir.clone();
         world.config_path = self.config_path.clone();
         world.preferences = self.preferences.clone();

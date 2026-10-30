@@ -690,8 +690,8 @@ impl Config {
     /// Read a settings file, its relative paths resolved against its
     /// directory; unknown keys are reported and ignored.
     pub fn load(path: &Path) -> crate::AppResult<Self> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let text = crate::storage::read_config_file(path)?
+            .ok_or_else(|| format!("{}: file not found", path.display()))?;
         let config = Self::parse(&text).map_err(|error| format!("{}: {error}", path.display()))?;
         for (key, _) in &config.unknown {
             tracing::warn!(file = %path.display(), key, "unknown setting ignored");
@@ -1163,6 +1163,15 @@ pub fn discover_games(dirs: &PerGame<Vec<PathBuf>>) -> PerGame<GamePaths> {
 /// Replace the file at `path` with `bytes`: a temporary sibling is written
 /// and renamed over it, so a failed write leaves the old file whole.
 pub fn write_replacing(path: &Path, bytes: &[u8]) -> crate::AppResult<()> {
+    use crate::storage::{Namespace, StorageBackend, StorageOp};
+    // SPEC-023 §3.10: one batch with one put, so a failed write leaves the
+    // old file whole. A name that is no `config` key is written as it was.
+    if let Some((storage, key)) = crate::storage::config_file(path) {
+        let put = [StorageOp::put(key, bytes)];
+        return storage
+            .commit(Namespace::Config, &put)
+            .map_err(|error| format!("{}: {error}", path.display()).into());
+    }
     let name = path
         .file_name()
         .ok_or_else(|| format!("{} names no file", path.display()))?;
@@ -1182,7 +1191,7 @@ pub fn write_replacing(path: &Path, bytes: &[u8]) -> crate::AppResult<()> {
 /// it (an existing file is never replaced); `None`, with a warning, when
 /// none does.
 pub fn persist(config: &Config, dirs: &[PathBuf]) -> Option<PathBuf> {
-    use std::io::Write;
+    use crate::storage::{FsStorage, Namespace, StorageBackend, StorageError, StorageOp};
     let text = match config.to_toml() {
         Ok(text) => text,
         Err(error) => {
@@ -1192,11 +1201,13 @@ pub fn persist(config: &Config, dirs: &[PathBuf]) -> Option<PathBuf> {
     };
     for dir in dirs {
         let path = dir.join(FILE_NAME);
-        let written = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .and_then(|mut file| file.write_all(text.as_bytes()));
+        let storage = FsStorage::config_at(dir);
+        let put = [StorageOp::put(FILE_NAME, text.as_bytes())];
+        let written = match storage.read(Namespace::Config, FILE_NAME) {
+            Ok(None) => storage.commit(Namespace::Config, &put),
+            Ok(Some(_)) => Err(StorageError::Io("the file exists".into())),
+            Err(error) => Err(error),
+        };
         match written {
             Ok(()) => {
                 tracing::info!(file = %path.display(), "discovered game data saved");

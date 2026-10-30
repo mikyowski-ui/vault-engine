@@ -42,6 +42,14 @@ pub struct PreviewArgs {
     /// It changes no output, and is neither logged nor saved.
     #[arg(skip)]
     pub render_path: vault_render::RenderPath,
+    /// SPEC-023 §3.15: the session's game data, already mounted (a memory
+    /// mount, on a host without OS paths); `None`: the files below.
+    #[arg(skip)]
+    pub data: Option<Arc<dyn Vfs>>,
+    /// SPEC-023 §3.15: where the session's slots live; `None`: the session
+    /// chooses by its origin, and a world on its own uses `save_dir`.
+    #[arg(skip)]
+    pub storage: Option<Arc<dyn crate::storage::StorageBackend>>,
     /// Mount a loose directory: the whole asset source, or with DAT
     /// archives the loose patch root both databases consult first.
     #[arg(long, requires = "preview_asset", value_name = "PATH")]
@@ -589,6 +597,9 @@ impl PreviewArgs {
     /// read, and members stream from the file on demand), or a loose
     /// directory alone.
     pub fn source(&self) -> AppResult<Arc<dyn Vfs>> {
+        if let Some(data) = &self.data {
+            return Ok(data.clone());
+        }
         let base = self.base_source()?;
         match &self.mods {
             Some(mods) => Self::mount_mods(base, mods),
@@ -716,6 +727,7 @@ impl PreviewArgs {
             )?;
             // SPEC-018 §6: a Fallout 2 game's new-game data and hand-off.
             game.game_profile = self.game_profile;
+            game.storage = self.storage.clone();
             game.headless = self.headless;
             game.debug = self.debug;
             game.preset = self.preset;
@@ -741,6 +753,7 @@ impl PreviewArgs {
             )?;
             map.host.set_subtitles(self.subtitles);
             map.save_root = save_root;
+            map.storage = self.storage.clone();
             map.config_path = self.config.clone();
             crate::session::WorldOptions {
                 headless: self.headless,

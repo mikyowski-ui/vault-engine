@@ -4,6 +4,7 @@
 //! Engine extension, not part of any specification.
 use crate::config::{self, Config, ModList, Preset};
 use crate::enhanced::{EnhancedSettings, ViewportMode};
+use crate::storage::{self, FsStorage, Namespace, StorageBackend};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -47,11 +48,8 @@ pub fn layer_dirs(mod_list: &ModList) -> Vec<PathBuf> {
             .cloned()
             .collect(),
         ModList::File(file) => {
-            let Ok(entries) = std::fs::read_to_string(file)
-                .map_err(|error| error.to_string())
-                .and_then(|text| {
-                    vault_formats::parse_load_order(&text).map_err(|error| error.to_string())
-                })
+            let text = storage::read_config_file(file).ok().flatten();
+            let Some(entries) = text.and_then(|text| vault_formats::parse_load_order(&text).ok())
             else {
                 return Vec::new();
             };
@@ -72,16 +70,17 @@ pub fn layer_dirs(mod_list: &ModList) -> Vec<PathBuf> {
 /// malformed one, or a link in its place, is an error naming the folder.
 pub fn read_manifest(dir: &Path) -> Result<Option<ModManifest>, String> {
     let path = dir.join(MANIFEST);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("{}: {error}", path.display())),
-    };
-    if !metadata.is_file() {
+    // A folder in its place is no entry, but it is no manifest either.
+    if path.is_dir() {
         return Err(format!("{}: not a regular file", path.display()));
     }
-    let text =
-        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let bytes = FsStorage::mods_at(dir)
+        .read(Namespace::Mods, MANIFEST)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    let text = String::from_utf8(bytes).map_err(|error| format!("{}: {error}", path.display()))?;
     ModManifest::parse(&text)
         .map(Some)
         .map_err(|error| format!("{}: {error}", dir.display()))

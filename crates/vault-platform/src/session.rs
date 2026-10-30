@@ -25,6 +25,12 @@
 //!
 //! Between those steps the session is its [`AssetPreview`] (the façade
 //! dereferences to it), so input routing stays where it is.
+//!
+//! SPEC-023 §3.15: a session's game data is a `Vfs` and its slots live in a
+//! [`StorageBackend`]. An entry point may hand in both ([`PreviewArgs::data`]
+//! and [`PreviewArgs::storage`]); otherwise a desktop session mounts its files
+//! and keeps its slots in [`FsStorage`], and a replay keeps them in
+//! [`MemoryStorage`], so that it never touches the user's real storage.
 use crate::{
     AppResult,
     audio::Audio,
@@ -32,9 +38,17 @@ use crate::{
     input::KeyRepeat,
     map_preview::MapPreview,
     preview::{AssetPreview, PreviewArgs},
+    storage::{FsStorage, MemoryStorage, Namespace, StorageBackend, StorageError, StorageOp},
 };
-use std::path::{Path, PathBuf};
-use vault_core::GameProfile;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use vault_core::{
+    GameProfile, WorldError,
+    companion::SIDECAR,
+    host_save::{SlotImage, SlotReader},
+};
 use vault_formats::{Dat2Archive, DatArchive};
 use winit::keyboard::KeyCode;
 
@@ -230,6 +244,50 @@ pub fn validate_edition(
     Ok(edition)
 }
 
+/// SPEC-023 §3.11 rule 2: saving into `slot` is one commit, a put of every
+/// file of the image and a delete of the sidecar when the image has none.
+/// Other files of the slot are left alone. A save counts once it is durable.
+pub fn commit_slot(
+    storage: &dyn StorageBackend,
+    slot: &str,
+    image: &SlotImage,
+) -> Result<(), StorageError> {
+    let mut ops: Vec<StorageOp> = image
+        .files()
+        .iter()
+        .map(|(name, bytes)| StorageOp::put(format!("{slot}/{name}"), bytes.as_slice()))
+        .collect();
+    if !image.has_sidecar() {
+        ops.push(StorageOp::delete(format!("{slot}/{SIDECAR}")));
+    }
+    storage.commit(Namespace::Savegame, &ops)?;
+    storage.flush()
+}
+
+/// A slot's files in a [`StorageBackend`], for a load.
+pub struct StoredSlot<'a> {
+    pub storage: &'a dyn StorageBackend,
+    pub slot: &'a str,
+}
+
+impl SlotReader for StoredSlot<'_> {
+    fn read_file(&mut self, name: &str) -> Result<Option<Vec<u8>>, WorldError> {
+        let key = format!("{}/{name}", self.slot);
+        Ok(self.storage.read(Namespace::Savegame, &key)?)
+    }
+}
+
+/// The storage a session gets when its entry point names none.
+fn default_storage(origin: SessionOrigin, args: &PreviewArgs) -> Arc<dyn StorageBackend> {
+    match origin {
+        SessionOrigin::Replay => Arc::new(MemoryStorage::new()),
+        _ => {
+            let root = args.save_dir.as_deref().unwrap_or(Path::new("."));
+            Arc::new(FsStorage::at_save_root(root))
+        }
+    }
+}
+
 /// What a frame did to the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Advance {
@@ -263,8 +321,13 @@ impl SessionRuntime {
     /// Validate the configuration's edition, then load what it names.
     /// `None` when it names nothing to show (the bare color test).
     pub fn start(config: SessionConfig) -> AppResult<Option<Self>> {
-        let SessionConfig { origin, args } = config;
+        let SessionConfig { origin, mut args } = config;
         let edition = validate_edition(args.game_profile, args.master_dat.as_deref())?;
+        let storage = args
+            .storage
+            .take()
+            .unwrap_or_else(|| default_storage(origin, &args));
+        args.storage = Some(storage);
         let Some(preview) = args.load()? else {
             return Ok(None);
         };
