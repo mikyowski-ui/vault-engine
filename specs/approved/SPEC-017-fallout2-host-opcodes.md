@@ -1,6 +1,6 @@
 # SPEC-017: Fallout 2 Host Words and VM Deltas
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Section 8 revised (Revision 2) by the coordinator at the owner's request, 2026-10-25. Revision 3 (retail audit recorded; script gate open) by the coordinator, 2026-10-25.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Section 8 revised (Revision 2) by the coordinator at the owner's request, 2026-10-25. Revision 3 (retail audit recorded; script gate open) by the coordinator, 2026-10-25. Revision 4 (the opt-in sfall word set, section 2) by Team A, 2026-10-30, on the owner's instruction.
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-25.
 Sources:
@@ -50,6 +50,28 @@ retail Fallout 2 install (the GOG release).
   - Decisions 36 to 41 are new.
 - **What it cites.** Counts, word numbers, two script names and constant
   selector values only. No script byte is reproduced.
+
+**Revision 4 (the sfall word set), 2026-10-30.** The Spec-Author sub-agent
+(Team A) wrote this revision on the owner's brief of 2026-10-30, which approves
+SPEC-024b Decision D-3.
+
+- **What changed.**
+  - section 2.1 gains the third set, `FALLOUT2_SFALL`;
+  - sections 2.2 to 2.4 say how that set sits beside the enhanced range;
+  - section 4.1 says when its rows can be reached;
+  - section 8.5 names the set Play loads with;
+  - section 7.14 and Decisions 42 to 46 are new, and Decision 1 is amended.
+- **What did not change.** With sfall mode off, which is the default, no word
+  changes number or meaning under either profile, with or without the enhanced
+  preset. Sections 3, 5 and 8.1 to 8.4, the vectors of sections 7.1 to 7.13 and
+  8.6, and the audit results are unchanged.
+- **Sources.**
+  - the owner's brief;
+  - SPEC-024b and `oracle/SPEC-024/sfall-opcodes.tsv`;
+  - `docs/REFERENCE.md` (the enhanced words, and mod-script verification).
+
+No decompilation, disassembly, re-implementation source or game asset was used,
+and no engine Rust code was read.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary file layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -130,6 +152,7 @@ program and never changes the stack contract. `[Safe rule]`
 | --- | --- | --- |
 | `fallout1` | `FALLOUT1` = `0x8000..=0x8155` (unchanged) | SPEC-005 |
 | `fallout2` | `FALLOUT2` = `0x8000..=0x8183` | SPEC-005 as amended by section 3, plus section 4 |
+| `fallout2` with sfall mode on | `FALLOUT2_SFALL` = `0x8000..=0x8281` | `0x8000..=0x8155` as under `FALLOUT2`, then SPEC-024b's table for `0x8156..=0x8281` |
 
 The rules below are `[Must-match]` unless tagged.
 
@@ -156,6 +179,23 @@ The rules below are `[Must-match]` unless tagged.
   rejects every non-push word with bits 10-14 set (SPEC-004 §2.5,
   `[May-improve]`) is unchanged under both profiles.
 
+**Sfall mode (Revision 4).** `[Safe rule]`, as an owner instruction (Decision 42).
+
+- **Off by default.** Sfall mode is the opt-in session setting of SPEC-024b
+  section 3.1: from the settings file, a mod manifest or the command line, and
+  under `fallout2` only.
+- **Off.** `FALLOUT1`, `FALLOUT2`, their dispatch tables and the enhanced range
+  are exactly as the rules above and section 2.2 state them. No word changes
+  number or meaning, and every existing test and script behaves as before.
+- **On.** A program is checked against `FALLOUT2_SFALL`, and every word in
+  `0x8156..=0x8281` routes to SPEC-024b's table. That covers section 4.1's words,
+  `0x8184..=0x81FF` (which no other set holds), and the part of the enhanced
+  range section 2.2 names. `0x8000..=0x8155` stays as under `FALLOUT2`, including
+  the seven words of section 3.2 and the multiplexed words of section 5.
+- **Dispatch index.** The `FALLOUT2_SFALL` table has **642 entries**, indices
+  0-641 (`0x8000`-`0x8281`). An index from 642 to 1023 is an unregistered slot, as
+  above. The load-time rule on bits 10-14 is unchanged.
+
 ### 2.2 The enhanced range
 
 `0x8200..=0x82FF` stays separate from both game sets. `[Safe rule]`
@@ -164,10 +204,40 @@ The rules below are `[Must-match]` unless tagged.
 - It is accepted only when the enhanced preset is active, under either
   profile, and it dispatches through the enhanced table by its full word, as
   today.
-- `0x8184..=0x81FF` belongs to no set and no extension. A program
-  containing one of these words is refused at load under both profiles.
+- `0x8184..=0x81FF` belongs to no set and no extension, except under sfall
+  mode. A program containing one of these words is refused at load under both
+  profiles.
 - No word in this spec is renumbered into the enhanced range, and the
   enhanced range never shadows a game word.
+
+**Under sfall mode (Revision 4).** `FALLOUT2_SFALL` overlaps this range, and the
+sfall word always wins, whatever the preset. (Decisions 42 to 44)
+
+| Range | Sfall mode off | Sfall mode on |
+| --- | --- | --- |
+| `0x8000..=0x8155` | Sections 2.1 and 3 | Unchanged |
+| `0x8156..=0x8183` | Section 4.1 | SPEC-024b |
+| `0x8184..=0x81FF` | Refused at load | SPEC-024b |
+| `0x8200..=0x8281` | Enhanced preset only, otherwise refused at load | SPEC-024b, with or without the enhanced preset |
+| `0x8282..=0x82FF` | Enhanced preset only, otherwise refused at load | Unchanged |
+
+The enhanced words defined today inside the overlap cannot be reached under
+sfall mode. Each number means the sfall word instead, and the stack contracts
+differ:
+
+| Word | Enhanced word | Sfall word |
+| --- | --- | --- |
+| `0x8200` | `engine_api_version` | `fs_size` |
+| `0x8210` | `op_cam_pan_to` | `sfall_ver_major` |
+| `0x8211` | `op_cam_set_zoom` | `sfall_ver_minor` |
+| `0x8212` | `op_cam_shake` | `sfall_ver_build` |
+| `0x8213` | `op_cam_reset` | `hero_select_win` |
+
+So a script written for those enhanced words does not do its enhanced work under
+sfall mode. Mod-script verification runs with SPEC-024b's table there, so it
+judges such a script by the sfall contracts. No enhanced word is defined in
+`0x8282..=0x82FF` today, so the enhanced preset adds no script word under sfall
+mode. Its other settings are unaffected.
 
 ### 2.3 Dispatch per profile
 
@@ -176,6 +246,11 @@ by the active profile when the program runs, never by inspecting the script.
 A save made under one profile never loads under the other (roadmap, "Saves";
 SPEC-018 §7.2),
 so a running program never changes profile. `[Safe rule]`
+
+Under `fallout2`, sfall mode selects a second table (Revision 4). The session
+setting chooses it, never the script. The setting is fixed when the session is
+built, and loading a save does not change it, so a running program never changes
+word set either. `[Safe rule]` (Decision 45)
 
 ### 2.4 VM-core deltas from SPEC-004
 
@@ -187,8 +262,9 @@ so a running program never changes profile. `[Safe rule]`
 
 The only change is the end of the registration range: SPEC-004 §3.7 says the
 game words extend through `0x8155`. Under Fallout 2 they extend through
-`0x8183`. SPEC-004 §4.3's note that word `0x8156` reads outside the dispatch
-array applies under `fallout1` only. `[Must-match]`
+`0x8183`, and under sfall mode through `0x8281`. SPEC-004 §4.3's note that word
+`0x8156` reads outside the dispatch array applies under `fallout1` only.
+`[Must-match]`
 
 **Lifecycle procedures.** Fallout 2 adds four public procedure names after
 SPEC-004 §3.7's table. They follow the same lookup and action-code rules
@@ -300,6 +376,13 @@ the Fallout 2 corpus uses each of them. `[Safe rule]`
 The range holds 46 words: four defined and 42 reserved. Team A placed the
 four defined words at `0x8156`-`0x8159`; their numbers are the least certain
 part of this spec (Decisions 5 and 6).
+
+**Under sfall mode (Revision 4).** This table applies to `FALLOUT2` only. Under
+`FALLOUT2_SFALL`, `0x8156..=0x8183` are SPEC-024b's words. The three
+registration words keep the effects and pop orders above at sfall's numbers:
+`reg_anim_change_fid` at `0x825E`, `reg_anim_take_out` at `0x825F` and
+`reg_anim_turn_towards` at `0x8260`. `inven_cmds` has no number in SPEC-024b's
+table, so it cannot be reached under sfall mode. `[Safe rule]` (Decision 42)
 
 ### 4.2 `mark_area_known` (`0x80B2` under Fallout 2)
 
@@ -809,6 +892,67 @@ Build a synthetic program whose procedure table has `start` and
 - During that request, `script_action` (`80C7`) pushes I 24.
 - Under `fallout1`, the host never requests event 24.
 
+### 7.14 Vector P: sfall mode routes the overlap (Revision 4)
+
+**Load time.** Build minimal programs as in Vector A. Vector A itself is
+unchanged: its columns are sfall mode off. All columns here are `fallout2`.
+
+| Word | Off | Off, enhanced preset | On | On, enhanced preset |
+| --- | --- | --- | --- | --- |
+| `0x8155` | Loads | Loads | Loads | Loads |
+| `0x8156` | Loads | Loads | Loads | Loads |
+| `0x8183` | Loads | Loads | Loads | Loads |
+| `0x8184` | Refused at load | Refused at load | Loads | Loads |
+| `0x81FF` | Refused at load | Refused at load | Loads | Loads |
+| `0x8200` | Refused at load | Loads | Loads | Loads |
+| `0x8213` | Refused at load | Loads | Loads | Loads |
+| `0x8281` | Refused at load | As today | Loads | Loads |
+| `0x8282` | Refused at load | As today | Refused at load | As today |
+
+"As today" means the result an engine without Revision 4 gives for that word.
+Neither word is a defined enhanced word, so this vector does not state it, but
+the two "As today" cells of `0x8282` must agree. A session that asks for sfall
+mode under `fallout1` is refused when it is built, so no `fallout1` column exists.
+
+**Execution.** Each fragment runs under the columns named. Stack bytes put the
+payload first, as in section 7.
+
+Fragment 1, the `0x8156` of Vector K:
+
+```text
+0000: 80 BC C0 01 00 00 00 0D C0 01 00 00 00 01 81 56
+```
+
+- Off: `inven_cmds` pops I 1, I 13 and self. With Vector K's mock world the
+  final stack bytes are `00 04 00 00 C0 01`.
+- On: `read_byte` is tier X (SPEC-024b section 4.10). It pops I 1 and pushes I 0,
+  so the final stack is self, I 13, I 0, with self `0x00010000`:
+  `00 01 00 00 C0 01 00 00 00 0D C0 01 00 00 00 00 C0 01`.
+
+Fragment 2, `0x8200`:
+
+```text
+0000: C0 01 00 00 00 07 82 00
+```
+
+- Off, enhanced preset: `engine_api_version` pops nothing and pushes the API
+  version, 2 today, so the final stack is I 7, I 2:
+  `00 00 00 07 C0 01 00 00 00 02 C0 01`.
+- On, with or without the enhanced preset: `fs_size` is tier P2. It pops I 7 and
+  pushes I 0, with a diagnostic. Final stack bytes: `00 00 00 00 C0 01`.
+
+Fragment 3, `0x8210`:
+
+```text
+0000: C0 01 00 00 00 64 C0 01 00 00 00 00 82 10
+```
+
+- Off, enhanced preset: `op_cam_pan_to` pops both operands (hex 100, duration 0)
+  and pushes nothing. The stack finishes empty.
+- On, with or without the enhanced preset: `sfall_ver_major` pops nothing and
+  pushes I 4, so the final stack is I 100, I 0, I 4:
+  `00 00 00 64 C0 01 00 00 00 00 C0 01 00 00 00 04 C0 01`.
+
 ## 8. Corpus Audit and the Fallout 2 Gate
 
 Every word number in sections 3.2 and 4 comes from Team A's knowledge.
@@ -1034,6 +1178,8 @@ audit (section 8.4) and opens it.** `[Safe rule]` (Decisions 28, 36)
 With the gate open, Fallout 2 Play loads every `.INT` with the `FALLOUT2`
 word set and runs it through the Fallout 2 host table, as map preview and the
 headless harness already did. Section 8.7's rules 2 to 7 no longer apply.
+Under sfall mode it uses `FALLOUT2_SFALL` and SPEC-024b's table instead. The
+audit itself keeps the `fallout2` table whatever the setting. (Decision 46)
 
 Only script execution is gated. Play is not: section 8.7 says what a Play
 session does while the gate is closed. Map preview, the VM test harness of
@@ -1137,7 +1283,8 @@ no longer loads (SPEC-018 §7.2).
 ## 9. Decisions
 
 1. **The Fallout 2 word set is `0x8000..=0x8183`, and the enhanced range
-   `0x8200..=0x82FF` stays separate** (owner instruction).
+   `0x8200..=0x82FF` stays separate** (owner instruction). Revision 4 keeps this
+   exactly with sfall mode off. Decision 42 says what sfall mode changes.
 2. **SPEC-005 words keep their meaning under Fallout 2 unless this spec
    states a difference with a reason** (owner instruction). Section 3.1
    lists the rows that only change data source, and section 3.2 the six
@@ -1245,6 +1392,31 @@ it touches, and SPEC-018 §10 lists them as R1-R6.
     flags; the kill categories are 0-18; and `push_p_proc` is event 24 in all
     three specs.
 
+**Revision 4 decisions** (2026-10-30, Team A, on the owner's brief)
+
+42. **Sfall mode routes `0x8156..=0x8281` to SPEC-024b; with it off, nothing
+    changes** (owner instruction, approving SPEC-024b Decision D-3). sfall's
+    published numbering collides with this spec's Fallout 2 words and with the
+    enhanced range. Under the default `fallout1` and `fallout2` profiles every
+    word behaves as it did before this revision, so no existing test or script
+    breaks. Opt-in sfall mode under `fallout2`, set by the settings file or a mod
+    manifest, uses the new set.
+43. **The shadowing covers every enhanced word in the overlap** (Team A default,
+    applying Decision 42). SPEC-024b's draft named only `0x8200`, but
+    `docs/REFERENCE.md` defines the camera words `0x8210`-`0x8213` too. Their
+    numbers are in the owner's range, so they route to sfall as well, and
+    section 2.2 lists them.
+44. **`0x8282..=0x82FF` keeps its meaning under sfall mode** (Team A default,
+    from SPEC-024b section 3.2). It is outside the owner's range. Future enhanced
+    words belong there, or they will not work under sfall mode.
+45. **Sfall mode is fixed when the session is built** (Team A default), for the
+    same reason as section 2.3's profile rule: a program must never see a word
+    change meaning while it runs.
+46. **The retail audit is not repeated for the new set** (Team A default). Section
+    8.4's audit found no retail word above `0x8155`, so `FALLOUT2_SFALL` runs
+    retail scripts through the same rows. It does not confirm SPEC-024b's words,
+    which SPEC-024b Decision D-26 leaves unaudited.
+
 **Revision 3 decisions** (2026-10-25, coordinator, at the owner's request)
 
 36. **The gate is open** (owner instruction, with the audit recorded). The
@@ -1304,3 +1476,10 @@ vault's `spec_lint.py`. The checks above were made by reading the text. Every
 hex vector was assembled and offset-checked by hand: each push is 6 bytes,
 each word 2. The cross-references are to section titles of SPEC-003 to
 SPEC-016 as they stand on this date.
+
+Verification notes for Revision 4 (2026-10-30): the sfall names, pop counts and
+pushes in sections 2.2 and 7.14 were read from `oracle/SPEC-024/sfall-opcodes.tsv`.
+A throwaway script read section 7.14 back from this file. It decoded each hex
+fragment, recomputed each sfall stack result from the oracle's rows, and
+recomputed the load table from the ranges in section 2. The ingestion grep finds
+no implementation-source path and no 40-character hexadecimal string.

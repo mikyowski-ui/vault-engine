@@ -1,0 +1,95 @@
+vector	step	operation	push	state_after	rule
+A	1	create_array(3,0)	I:1	#1 list perm [I:0,I:0,I:0]	size>=0 makes a list of int 0
+A	2	set_array(1,I:0,"x")	-	#1 list perm [S:"x",I:0,I:0]	in-range set
+A	3	set_array(1,I:3,I:9)	-	#1 list perm [S:"x",I:0,I:0]	index 3 is outside 0..2: ignored
+A	4	get_array(1,I:0)	S:"x"	#1 list perm [S:"x",I:0,I:0]	in-range get
+A	5	get_array(1,I:3)	I:0	#1 list perm [S:"x",I:0,I:0]	out of range gives int 0
+A	6	set_array(1,F:1.9,I:7)	-	#1 list perm [S:"x",I:7,I:0]	float index truncates toward zero
+A	7	len_array(1)	I:3	#1 list perm [S:"x",I:7,I:0]	list length
+A	8	resize_array(1,5)	-	#1 list perm [S:"x",I:7,I:0,I:0,I:0]	growth appends int 0
+A	9	resize_array(1,2)	-	#1 list perm [S:"x",I:7]	shrink drops the tail
+A	10	array_key(1,-1)	I:0	#1 list perm [S:"x",I:7]	index -1 reports 0 for a list
+A	11	array_key(1,7)	I:7	#1 list perm [S:"x",I:7]	a list returns the index back, unchecked
+A	12	create_array(4,2)	I:2	#1 list perm [S:"x",I:7]; #2 list perm [I:0,I:0,I:0,I:0]	flags are ignored on a list (compiler output)
+B	1	create_array(-1,0)	I:1	#1 map perm []	size -1 makes a map
+B	2	set_array(1,"b",I:2)	-	#1 map perm [S:"b"=>I:2]	new keys append; I:5 and F:5.0 are distinct keys
+B	3	set_array(1,I:5,"five")	-	#1 map perm [S:"b"=>I:2,I:5=>S:"five"]	new keys append; I:5 and F:5.0 are distinct keys
+B	4	set_array(1,F:5.0,I:3)	-	#1 map perm [S:"b"=>I:2,I:5=>S:"five",F:5.0=>I:3]	new keys append; I:5 and F:5.0 are distinct keys
+B	5	set_array(1,"b",I:20)	-	#1 map perm [S:"b"=>I:20,I:5=>S:"five",F:5.0=>I:3]	update keeps the position
+B	6	array_key(1,1)	I:5	#1 map perm [S:"b"=>I:20,I:5=>S:"five",F:5.0=>I:3]	key at iteration position 1
+B	7	array_key(1,9)	I:0	#1 map perm [S:"b"=>I:20,I:5=>S:"five",F:5.0=>I:3]	position out of range gives int 0
+B	8	array_key(1,-1)	I:1	#1 map perm [S:"b"=>I:20,I:5=>S:"five",F:5.0=>I:3]	index -1 reports 1 for a map
+B	9	scan_array(1,I:3)	F:5.0	#1 map perm [S:"b"=>I:20,I:5=>S:"five",F:5.0=>I:3]	returns the key of the first match
+B	10	scan_array(1,F:3.0)	I:-1	#1 map perm [S:"b"=>I:20,I:5=>S:"five",F:5.0=>I:3]	I:3 does not equal F:3.0
+B	11	set_array(1,I:5,I:0)	-	#1 map perm [S:"b"=>I:20,F:5.0=>I:3]	int 0 removes the pair; later pairs close up
+B	12	set_array(1,"zero",F:0.0)	-	#1 map perm [S:"b"=>I:20,F:5.0=>I:3,S:"zero"=>F:0.0]	float 0.0 stores a zero
+B	13	set_array(1,"none",I:0)	-	#1 map perm [S:"b"=>I:20,F:5.0=>I:3,S:"zero"=>F:0.0]	int 0 on an absent key adds nothing
+B	14	get_array(1,"none")	I:0	#1 map perm [S:"b"=>I:20,F:5.0=>I:3,S:"zero"=>F:0.0]	absent key gives int 0
+B	15	len_array(1)	I:3	#1 map perm [S:"b"=>I:20,F:5.0=>I:3,S:"zero"=>F:0.0]	pair count
+B	16	resize_array(1,1)	-	#1 map perm [S:"b"=>I:20]	a map shrinks from the end of iteration order
+B	17	resize_array(1,9)	-	#1 map perm [S:"b"=>I:20]	a map never grows
+B	18	resize_array(1,0)	-	#1 map perm []	clear
+C	1	create_array(-1,2)	I:1	#1 lookup perm []	lookup map
+C	2	set_array(1,"k",I:0)	-	#1 lookup perm [S:"k"=>I:0]	a lookup map stores int 0
+C	3	set_array(1,"k",I:9)	-	#1 lookup perm [S:"k"=>I:0]	existing values are read-only
+C	4	get_array(1,"k")	I:0	#1 lookup perm [S:"k"=>I:0]	stored zero
+D	1	create list [b,2,1.5,a,-1,2.0]	I:1	#1 list perm [S:"b",I:2,F:1.5,S:"a",I:-1,F:2.0]	setup
+D	2	resize_array(1,-2)	-	#1 list perm [I:-1,F:1.5,I:2,F:2.0,S:"a",S:"b"]	sort: numbers by value, int before equal float, then strings by bytes
+D	3	resize_array(1,-3)	-	#1 list perm [S:"b",S:"a",F:2.0,I:2,F:1.5,I:-1]	descending order is the exact reverse order of the keys
+D	4	resize_array(1,-4)	-	#1 list perm [I:-1,F:1.5,I:2,F:2.0,S:"a",S:"b"]	reverse
+D	5	create map {c:1,a:3,b:2}	I:2	#2 map perm [S:"c"=>I:1,S:"a"=>I:3,S:"b"=>I:2]	setup
+D	6	resize_array(2,-2)	-	#2 map perm [S:"a"=>I:3,S:"b"=>I:2,S:"c"=>I:1]	a map sorts by key
+D	7	resize_array(2,-6)	-	#2 map perm [S:"c"=>I:1,S:"b"=>I:2,S:"a"=>I:3]	sort a map by value, ascending
+D	8	resize_array(2,-7)	-	#2 map perm [S:"a"=>I:3,S:"b"=>I:2,S:"c"=>I:1]	sort a map by value, descending
+D	9	create list [10,20,30,40]	I:3	#3 list perm [I:10,I:20,I:30,I:40]	setup
+D	10	resize_array(3,-5) with draws 1,2,0	-	#3 list perm [I:40,I:10,I:30,I:20]	i=3 swaps 1; i=2 keeps; i=1 swaps 0; each draw is random(0,i)
+E	1	temp_array(1,0)	I:1	#1 list temp [I:0]	temporary
+E	2	temp_array(1,0)	I:2	#1 list temp [I:0]; #2 list temp [I:0]	temporary
+E	3	fix_array(2)	-	#1 list temp [I:0]; #2 list perm [I:0]	temporary becomes permanent
+E	4	end of Simulation phase	-	#2 list perm [I:0]	array 1 is freed, array 2 stays
+E	5	len_array(1)	I:-1	#2 list perm [I:0]	unknown ID gives -1
+E	6	get_array(1,I:0)	I:0	#2 list perm [I:0]	unknown ID gives int 0
+E	7	set_array(1,I:0,I:1)	-	#2 list perm [I:0]	unknown ID is ignored
+E	8	create_array(0,0)	I:3	#2 list perm [I:0]; #3 list perm []	IDs never repeat within a session
+E	9	free_array(2)	-	#3 list perm []	any array can be freed
+F	1	create array 1 and lookup map 2	I:2	#1 list perm [S:"hi",F:0.5]; #2 lookup perm [I:1=>I:0]	setup
+F	2	save_array("traps",1)	-	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #2 lookup perm [I:1=>I:0]	array becomes saved
+F	3	temp_array(-1,0)	I:3	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #2 lookup perm [I:1=>I:0]; #3 map temp []	a temporary array is live during the step
+F	4	load_array("traps")	I:1	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #2 lookup perm [I:1=>I:0]; #3 map temp []	live saved array
+F	5	load_array("none")	I:0	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #2 lookup perm [I:1=>I:0]; #3 map temp []	unknown key gives 0
+F	sidecar	VSFL bytes, saved arrays only	56 53 46 4C 01 00 00 00 04 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 01 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F	bytes=83	layout of section 5.8
+F	sidecar-fnv	fnv1a64 of the sidecar	49621DE91D153669	-	SPEC-021 section 2.1
+F	stream	VSX1 bytes, all live arrays	56 53 58 31 01 00 00 00 04 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 03 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F 02 00 00 00 01 01 01 00 00 01 00 00 00 01 01 00 00 00 01 00 00 00 00 03 00 00 00 01 00 00 00 00 00 00 00 00	bytes=119	section 5.9
+F	sfall_hash	fnv1a64 of the stream	BA30F4E08B23BC1F	-	section 5.9
+F	stream-after-step	VSX1 bytes after the step ended	56 53 58 31 01 00 00 00 04 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 02 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F 02 00 00 00 01 01 01 00 00 01 00 00 00 01 01 00 00 00 01 00 00 00 00	bytes=106	the temporary array is gone
+F	sfall_hash-after-step	fnv1a64 of the stream	19CAF6C38E7EB5FE	-	value a checkpoint sees
+F	12	load the slot	-	#1 list saved key=S:"traps" [S:"hi",F:0.5]	every array is deleted, then saved arrays return under their IDs
+F	13	load_array("traps")	I:1	#1 list saved key=S:"traps" [S:"hi",F:0.5]	same ID as when saved
+F	14	create_array(0,0)	I:4	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #4 list perm []	next ID restored from the sidecar
+F	15	load_array("...all_arrays...")	I:5	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #4 list perm []; #5 list temp [S:"traps"]	reserved key: temporary list of saved keys
+F	16	save_array(I:0,1)	-	#1 list perm [S:"hi",F:0.5]; #4 list perm []; #5 list temp [S:"traps"]	key 0 unsaves; the array stays permanent
+F2	1	save_array("k",1) then save_array("k",2)	-	#1 list perm []; #2 list saved key=S:"k" []	the key moves; array 1 stays permanent
+F2	2	free_array(2)	-	#1 list perm []	a freed array leaves the save set
+F2	3	load_array("k")	I:0	#1 list perm []	no array holds the key now
+F3	stream	VSX1 bytes of an empty extension state	56 53 58 31 01 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00	bytes=20	section 5.9
+F3	sfall_hash	fnv1a64 of the stream	AF364CE5AE92BB79	-	section 5.9
+H1	1	HOOK_TOHIT registered ModA,ModB args=[100]	rets=[75]	final=75; order=ModB,ModA	public example: the result is 75 in either order
+H2	1	HOOK_TOHIT registered ModB,ModA args=[100]	rets=[75.0]	final=75; order=ModA,ModB	public example: the result is 75 in either order
+H3	1	HOOK_TOHIT r1,r2 via register_hook_proc; hs_tohit; s1,s2 via _spec args=[50]	rets=[None]	final=50; order=r2,r1,hs_tohit,s1,s2	reverse registration, then hs script, then spec in registration order
+H3	2	HOOK_TOHIT after register_hook_proc(id,0) from r2 args=[50]	rets=[None]	final=50; order=r1,hs_tohit,s1,s2	procedure 0 unregisters the calling script
+H4	1	HOOK_ITEMDAMAGE early writes ret0,ret1; late writes ret0 args=[5, 6, 7, 8, 9]	rets=[30, 20]	final=[30, 20]; order=early,late	each member restarts at ret0; ret1 survives; last writer wins per index
+H5	1	HOOK_MOVECOST one return slot, two writes args=[0]	rets=[1]	final=[1]; order=m	a write past the last return does nothing
+H6	1	HOOK_MOVECOST second get_sfall_arg of one argument args=[11]	rets=[0]	final=[0]; order=m	reading past the last argument gives 0
+H7	1	HOOK_TOHIT ret0=1500 args=[95]	rets=[1500]	final=999; order=m	ret0 is limited to -99..999
+H7	2	HOOK_TOHIT ret0=-500 args=[95]	rets=[-500]	final=-99; order=m	ret0 is limited to -99..999
+H7	3	HOOK_TOHIT ret0=40 args=[95]	rets=[40]	final=40; order=m	ret0 is limited to -99..999
+H7	4	HOOK_TOHIT no member sets ret0 args=[95]	rets=[None]	final=95; order=m	the engine value stays
+H8	1	HOOK_AFTERHITROLL ret0=3 ret1=9 ret2=0 args=2,A,T,3,60	rets=[3, 9, 0]	final=roll=3,part=3,target=T; order=m	part 9 and a null target are invalid and ignored; roll 0..3 applies
+H9	1	HOOK_BARTERPRICE ret0=-1 ret1=200 args=P,M,150,T,0,75,O,120,1,0	rets=[-1, 200]	final=price=150,offer=200; order=m	ret0 -1 leaves the price; ret1 replaces the offer value
+H9	2	HOOK_BARTERPRICE ret0=90 only args=P,M,150,T,0,75,O,120,1,0	rets=[90, None]	final=price=90,offer=120; order=m	an unset return leaves the engine value
+H10	1	HOOK_INVENTORYMOVE no member sets ret0 args=1,I,0	rets=[None]	final=move proceeds; order=m	the engine handler runs
+H10	2	HOOK_INVENTORYMOVE ret0=-1 args=1,I,0	rets=[-1]	final=move proceeds; order=m	-1 uses the engine handler
+H10	3	HOOK_INVENTORYMOVE ret0=0 args=1,I,0	rets=[0]	final=move refused; order=m	any other value refuses
+H11	1	HOOK_KEYPRESS ret0=0 args=1,30,65	rets=[0]	final=logical key 30; order=m	0 means no override
+H11	2	HOOK_KEYPRESS ret0=48 args=1,30,65	rets=[48]	final=logical key 48; order=m	press maps 30 to 48
+H11	3	HOOK_KEYPRESS release with ret0=0 args=0,30,65	rets=[0]	final=logical key 48 released; order=m	the release of 30 also ends what its press produced

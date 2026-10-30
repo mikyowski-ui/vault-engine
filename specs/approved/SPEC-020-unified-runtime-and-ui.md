@@ -77,7 +77,7 @@ Every point that the draft left open, or that it named wrongly, is resolved here
 
 ## 5. Verification Checklist
 
-- [x] Module paths only; no file path under a `src/` directory, and no 40-character hash.
+- [x] Module paths only; no file path under a source directory, and no 40-character hash.
 - [x] Every rule tagged `[Must-match]`, `[May-improve]` or `[Safe rule]`.
 - [x] Every module named here exists in the workspace as of 2026-10-27, except `SessionRuntime`, which this refactor introduces.
 - [x] Decisions record each correction to the draft and whether it is an owner instruction or a coordinator default.
