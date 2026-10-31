@@ -154,6 +154,13 @@ two-repository route above and not from Team A.
   and a replay flag, and separates its sidecar delete from SPEC-023's stale `.SAV`
   sweep (D-27 to D-29). No oracle file changed. A later research-vault revision
   supersedes this one.
+- **Prose correction, 2026-10-30.** Team A, on the owner's brief of 2026-10-30 and
+  from the implementer's report in `05608f9`, aligned sections 4.1, 5.4, 6.4 and
+  6.5 with `sfall-opcodes.tsv` (D-T1). No oracle file changed. That brief also
+  names a Revision 3, with Decisions D-32 and D-40, opcode and hook promotions for
+  Et Tu and Restoration Project Updated, and new oracle vectors. None of it had
+  reached this repository when the correction was made, so none of it is recorded
+  here as ingested.
 
 ## Hash-only oracle verification
 

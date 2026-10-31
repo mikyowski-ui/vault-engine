@@ -16,6 +16,7 @@
   - **Section 3.2.** The shadowing covers every enhanced word in the overlap. Revision 1 named only `0x8200`, but the four camera words `0x8210..=0x8213` are enhanced words too (D-27).
   - **Section 5.8.** Separates its named delete of `VAULTSFL.DAT` from SPEC-023's stale `.SAV` sweep (D-29). The rule itself does not change.
   - Every other rule, and every oracle file, is unchanged.
+- **Prose correction to Revision 2 (2026-10-30, Team A).** On the owner's brief of 2026-10-30, from the implementer's report in `05608f9`, sections 4.1, 5.4, 6.4 and 6.5 now agree with `sfall-opcodes.tsv` (D-T1). `scan_array`'s value is class `N` and `set_sfall_arg`'s value is class `I`, and section 4.1 says what `ret_class` means. No oracle file, vector or word number changed.
 
 ## Clean-Room Rules for Research Agents
 
@@ -144,6 +145,8 @@ Each operand of a word has a class, given in the `arg_classes` column of `sfall-
 The whole table is `[Safe rule]`, with one documented basis: the public hook example passes a float to `set_sfall_arg` and `set_sfall_return`, so a float must be accepted where an int is declared.
 
 **Failed operand.** Every operand is popped first. The word then has no effect, writes a diagnostic, and pushes its default: int 0 for return class `I`, `O`, `N`, or `A`; float 0.0 for `F`; the empty string for `S`. **Unlike SPEC-017, a failed operand is not a VM error**, because scripts written for sfall expect its functions not to stop the script. `[Safe rule]`
+
+**Return class.** The `ret_class` column of `sfall-opcodes.tsv` chooses that default. It does not limit what a word returns, because a pushed value keeps its own type. So `scan_array` and `array_key`, with `ret_class` `I`, can push a float or string map key (vector B step 9 pushes `F:5.0`), `get_sfall_arg` pushes what the argument holds, and `list_next` pushes an object reference. The Push column of a word table gives what the word can push. `[Safe rule]`
 
 Stack underflow stays a VM error (SPEC-004 section 3.8). `[Must-match]`
 
@@ -453,13 +456,15 @@ Loading a slot deletes every array first, then restores the saved ones under the
 | `0x8232` | `resize_array` | size I, ID | none | Resize or order operation, below | Ignored |
 | `0x8230` | `free_array` | ID | none | Deletes the array, including from the save set | Ignored |
 | `0x8231` | `len_array` | ID | I | Elements or pairs | -1 |
-| `0x8239` | `scan_array` | value A, ID | A | First match: list index or map key, else int -1 | Int -1 |
+| `0x8239` | `scan_array` | value N, ID | A | First match: list index or map key, else int -1 | Int -1 |
 | `0x8254` | `save_array` | ID, key A | none | Section 5.5 | Ignored |
 | `0x8255` | `load_array` | key A | I | Section 5.5 | n/a |
 | `0x8256` | `array_key` | index I, ID | A | Below | Int 0 |
 | `0x8257` | `arrayexpr` | value A, key A | I | Section 5.7. Always int 0 | n/a |
 
 Number, pop order, push, and each effect the documentation names are `[Must-match]`. **Note `save_array`'s order**: the key is the first argument and the ID the second, the opposite of every other array word.
+
+The operand classes here are the `arg_classes` column's. Section 4.1 relates the Push column to `ret_class`.
 
 **Creation.**
 
@@ -501,6 +506,8 @@ Number, pop order, push, and each effect the documentation names are `[Must-matc
 **`array_key`.** With index -1 it reports the shape: 0 list, 1 map. For a list it returns the index unchecked. For a map it returns the key at that iteration position, or int 0 outside the range. `[Must-match]`; `[Safe rule]` for out of range.
 
 **Caution kept as published.** `scan_array`'s -1 is ambiguous on a map with a -1 key. `[Must-match]`
+
+**Caution, a string value.** `scan_array`'s value has class `N`, so a string is a failed operand (section 4.1): nothing is searched, and the push is int 0, not -1. A script can read that 0 as a match at index 0. `[Safe rule]`
 
 ### 5.5 Save keys
 
@@ -665,11 +672,11 @@ Running a chain creates one context, holding the argument array, the return arra
 | --- | --- | --- | --- | --- | --- |
 | `0x81E4` | `get_sfall_arg` | none | A | Next argument; advances the cursor. Int 0 past the end | Int 0 |
 | `0x823C` | `get_sfall_args` | none | I array | New temporary list of all current arguments | Empty temporary list |
-| `0x823D` | `set_sfall_arg` | value A, index I | none | Replaces argument `index`, 0-based | Ignored |
+| `0x823D` | `set_sfall_arg` | value I, index I | none | Replaces argument `index`, 0-based | Ignored |
 | `0x81E5` | `set_sfall_return` | value A | none | Writes the next return; does nothing once all are written | Ignored |
 | `0x81EA` | `init_hook` | none | I | 0 | 1 during setup, else 0 |
 
-`[Must-match]`; `[Safe rule]` for the "Outside a chain" column.
+`[Must-match]`; `[Safe rule]` for the "Outside a chain" column. The operand classes here are the `arg_classes` column's, and section 4.1 relates the Push column to `ret_class`.
 
 `get_sfall_arg_at(n)` returns argument n without moving the cursor, and int 0 when n is out of range. `[Must-match]`
 
@@ -688,8 +695,8 @@ The published example chains "divide by 2" and "multiply by 1.5" on a hit chance
 
 Further rules, `[Safe rule]`:
 
-- `set_sfall_arg` converts its value to the argument's declared type: `int`, `critter`, `item`, and `obj` by class `I`, and `mixed` unchanged. An index out of range is ignored.
-- A return is converted by the hook's declared return type, the same way. A value that cannot convert leaves that return unset, with a diagnostic.
+- `set_sfall_arg` takes its value by class `I`, so a float truncates and a string is a failed operand (section 4.1). The resulting int replaces the argument whatever its declared type, `mixed` included. An index out of range is ignored.
+- A return is converted by the hook's declared return type: `int`, `critter`, `item`, and `obj` by class `I`, and `mixed` unchanged. A value that cannot convert leaves that return unset, with a diagnostic.
 - A member that ends in a VM error is unloaded from every chain, and its writes up to that point stay. The chain continues with the next member.
 - A member runs to completion, by SPEC-004 section 3.7's synchronous call. A word that would suspend it (a dialogue, a wait, or a timer yield) ends that member, with a diagnostic.
 - Chains nest when a member causes another hook. Each chain has its own context, and the outer one resumes untouched. Past **8 nested chains**, a chain is skipped with a diagnostic and the engine's values stand.
@@ -986,3 +993,4 @@ Every decision is a research default unless the Class column says otherwise.
 | D-27 | The shadowing covers the enhanced camera words `0x8210..=0x8213` as well as `0x8200` | Team A default, applying D-3 | Revision 1 named only `0x8200`, but `docs/REFERENCE.md` defines all five. Their numbers are in the owner's range, and their operand counts differ from the sfall words', so leaving them out would make dispatch ambiguous |
 | D-28 | The manifest key is `sfall` under `[scripting]`, by the `[enhanced]` keys' rules, and `--sfall` turns the mode on from the command line | Team A default | A manifest refuses unknown tables, so the key must be defined for the owner's manifest route to work. A replay reads neither file, so without a flag no replay could run under sfall mode, and section 7.3's test 7 needs one |
 | D-29 | A save with sfall mode off keeps section 5.8's named delete of an old `VAULTSFL.DAT`. SPEC-023's stale `.SAV` sweep leaves the file untouched | Team A default; the sweep's scope is an owner instruction (SPEC-023 D-18, D-38) | Without the delete, a slot just saved with sfall mode off would hold an old sidecar, and section 5.8's loading table would refuse it |
+| D-T1 | Where the prose and `sfall-opcodes.tsv` disagree on an operand class, the table's class stands: `scan_array`'s value is `N`, and `set_sfall_arg`'s value is `I`. `ret_class` chooses a failed operand's default and does not limit the pushed value | Owner instruction for the direction (brief of 2026-10-30); Team A default for the meaning of `ret_class` | The engine compiles its word table from this file. Vector B step 9 pushes `F:5.0` from a row with `ret_class` `I`, so `ret_class` cannot limit the value. Vectors H1 and H2 hold under class `I`. This ID stays outside the numbered series because a research revision is expected, and its numbers are not known on this side |
