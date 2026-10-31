@@ -1,0 +1,44 @@
+case	sfall	order	member	block	outcome	arg3_read	arg3_after	ret0_after	native	result	note
+O1	on	1	hs_calcapcost	sfall	ok	5	4	4	5	-	The sfall block runs first, then the lower layer, then the higher. The last writer wins, and the changed argument carries forward
+O1	on	2	alpha	mod	ok	4	4	8	5	-	-
+O1	on	3	beta	mod	ok	4	4	5	5	5	-
+O2	on	1	hs_calcapcost	sfall	ok	5	4	4	5	-	beta writes nothing, so alpha's return stands
+O2	on	2	alpha	mod	ok	4	4	8	5	-	-
+O2	on	3	beta	mod	ok	4	4	8	5	8	-
+O3	on	1	hs_calcapcost	sfall	ok	5	5	unset	5	-	No member writes, so the native cost stands
+O3	on	2	alpha	mod	ok	5	5	unset	5	-	-
+O3	on	3	beta	mod	ok	5	5	unset	5	5	-
+O4	off	1	alpha	mod	ok	5	5	10	5	-	Sfall mode off: the mod block alone runs. beta reads the native 5, because alpha changed no argument
+O4	off	2	beta	mod	ok	5	5	6	5	6	-
+O5a	on	1	hs_calcapcost	sfall	ok	5	4	4	5	-	alpha writes, then ends in a VM error. Its write stays until beta's, and it leaves every chain
+O5a	on	2	alpha	mod	vm-error	4	4	8	5	-	-
+O5a	on	3	beta	mod	ok	4	4	5	5	5	-
+O5b	on	1	hs_calcapcost	sfall	ok	5	4	4	5	-	The next query, with alpha still unloaded. Nothing alpha would write reaches this query
+O5b	on	2	alpha	mod	skipped	-	4	4	5	-	-
+O5b	on	3	beta	mod	ok	4	4	4	5	4	-
+O6a	on	1	hs_calcapcost	sfall	ok	5	4	4	5	-	alpha reaches a word that would suspend it. That ends the member, and its write stays
+O6a	on	2	alpha	mod	suspended	4	4	8	5	-	-
+O6a	on	3	beta	mod	ok	4	4	8	5	8	-
+O6b	on	1	hs_calcapcost	sfall	ok	5	5	unset	5	-	The next query: a suspended member is not unloaded, so alpha runs again
+O6b	on	2	alpha	mod	ok	5	5	10	5	-	-
+O6b	on	3	beta	mod	ok	5	5	10	5	10	-
+O7	on	1	hs_calcapcost	sfall	ok	5	5	unset	5	-	A negative return becomes 0, by SPEC-024b section 6.10, after the chain
+O7	on	2	alpha	mod	ok	5	5	10	5	-	-
+O7	on	3	beta	mod	ok	5	5	-3	5	0	-
+O8	on	1	hs_calcapcost	sfall	ok	5	5	unset	5	-	beta writes a string, which does not convert to int, so alpha's return stands (SPEC-024b 6.5)
+O8	on	2	alpha	mod	ok	5	5	10	5	-	-
+O8	on	3	beta	mod	return-unconverted	5	5	10	5	10	-
+O9	on	1	gl_b	sfall	ok	5	52	52	5	-	The full order. gl_a then gl_b call register_hook_proc, gl_c then gl_d call register_hook_proc_spec. Each member appends its own digit
+O9	on	2	gl_a	sfall	ok	52	521	521	5	-	-
+O9	on	3	hs_calcapcost	sfall	ok	521	5213	5213	5	-	-
+O9	on	4	gl_c	sfall	ok	5213	52134	52134	5	-	-
+O9	on	5	gl_d	sfall	ok	52134	521345	521345	5	-	-
+O9	on	6	alpha	mod	ok	521345	5213456	5213456	5	-	-
+O9	on	7	beta	mod	ok	5213456	52134567	52134567	5	52134567	-
+O10	on	1	hs_calcapcost	sfall	ok	5	51	51	5	-	Inside a mod: manifest rows in file order, then word registrations in call order
+O10	on	2	alpha:r1	mod	ok	51	512	512	5	-	-
+O10	on	3	alpha:r2	mod	ok	512	5123	5123	5	-	-
+O10	on	4	alpha:word	mod	ok	5123	51234	51234	5	-	-
+O10	on	5	beta:r1	mod	ok	51234	512345	512345	5	512345	-
+O11	on	1	gl_a	sfall	ok	5	51	51	5	-	No manifest member: exactly SPEC-024b's order
+O11	on	2	hs_calcapcost	sfall	ok	51	512	512	5	512	-

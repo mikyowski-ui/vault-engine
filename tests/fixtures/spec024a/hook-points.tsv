@@ -1,0 +1,52 @@
+hook_id	hook_name	point	fires	profiles	arg_types	ret_types	native_result	boundary
+0	HOOK_TOHIT	to-hit	yes	both	int,critter,critter,int,int,int,int,int	int	The hit chance	SPEC-024b 6.8
+1	HOOK_AFTERHITROLL	after the hit roll	yes	both	int,critter,critter,int,int	int,int,critter	The roll, the body part, the target	SPEC-024b 6.9
+2	HOOK_CALCAPCOST	AP cost	yes	both	critter,int,int,int,item	int	An item action's AP cost	SPEC-024b 6.10
+3	HOOK_DEATHANIM1	-	no	-	int,critter,critter,int,int	int	-	SPEC-024b 6.19
+4	HOOK_DEATHANIM2	-	no	-	int,critter,critter,int,int	int	-	SPEC-024b 6.19
+5	HOOK_COMBATDAMAGE	damage	yes	both	critter,critter,int,int,int,int,item,int,int,int,int,int,mixed	int,int,int,int,int	Damage and special-effect flags of target and attacker, and knockback	SPEC-024b 6.11
+6	HOOK_ONDEATH	-	no	-	critter	-	-	SPEC-024b 6.19
+7	HOOK_FINDTARGET	-	no	-	critter,critter,critter,critter,critter	critter,critter,critter,critter	-	SPEC-024b 6.19
+8	HOOK_USEOBJON	use an item on a critter	yes	both	critter,critter,int	int	Whether the use proceeds, and whether the item is destroyed	SPEC-024b 6.15
+9	HOOK_REMOVEINVENOBJ	-	no	-	obj,item,int,int,obj	-	-	SPEC-024b 6.19
+10	HOOK_BARTERPRICE	barter price	yes	both	critter,critter,int,critter,int,int,critter,int,int,int	int,int	Price, and the value of the player's offer	SPEC-024b 6.12
+11	HOOK_MOVECOST	movement cost	yes	both	critter,int,int	int	The AP cost of the hexes	SPEC-024b 6.13
+12	HOOK_HEXMOVEBLOCKING	-	no	-	critter,int,int,int	obj	-	SPEC-024b 6.19
+13	HOOK_HEXAIBLOCKING	-	no	-	critter,int,int,int	obj	-	SPEC-024b 6.19
+14	HOOK_HEXSHOOTBLOCKING	-	no	-	critter,int,int,int	obj	-	SPEC-024b 6.19
+15	HOOK_HEXSIGHTBLOCKING	-	no	-	critter,int,int,int	obj	-	SPEC-024b 6.19
+16	HOOK_ITEMDAMAGE	-	no	-	int,int,item,critter,int,int	int,int	-	SPEC-024b 6.19
+17	HOOK_AMMOCOST	-	no	-	item,int,int,int	int	-	SPEC-024b 6.19
+18	HOOK_USEOBJ	use an object	yes	both	critter,obj	int	Whether the use proceeds, and whether the item is destroyed	SPEC-024b 6.15
+19	HOOK_KEYPRESS	key press	yes	both	int,int,int	int	The logical key the game sees	SPEC-024b 6.13
+20	HOOK_MOUSECLICK	-	no	-	int,int	-	-	SPEC-024b 6.19
+21	HOOK_USESKILL	-	no	-	critter,obj,int,int	int	-	SPEC-024b 6.19
+22	HOOK_STEAL	-	no	-	critter,obj,item,int,int	int,int	-	SPEC-024b 6.19
+23	HOOK_WITHINPERCEPTION	-	no	-	critter,obj,int,int	int	-	SPEC-024b 6.19
+24	HOOK_INVENTORYMOVE	inventory move	yes	both	int,item,item	int	Whether the move is allowed	SPEC-024b 6.13
+25	HOOK_INVENWIELD	-	no	-	critter,item,int,int,int	int	-	SPEC-024b 6.19
+26	HOOK_ADJUSTFID	art change	mod	both	int,int	int	The art ID stored on the player object	SPEC-024a 3.3
+27	HOOK_COMBATTURN	-	no	-	int,critter,int	int	-	SPEC-024b 6.19
+28	HOOK_CARTRAVEL	-	no	-	int,int	int,int	-	SPEC-024b 6.19
+29	HOOK_SETGLOBALVAR	global variable write	yes	both	int,int	int	The value stored	SPEC-024b 6.18
+30	HOOK_RESTTIMER	-	no	-	int,int,int,int	int	-	SPEC-024b 6.19
+31	HOOK_GAMEMODECHANGE	game mode change	yes	both	int,int	-	None: a notice	SPEC-024b 6.14
+32	HOOK_USEANIMOBJ	-	no	-	critter,obj,int	int	-	SPEC-024b 6.19
+33	HOOK_EXPLOSIVETIMER	-	no	-	int,obj,int	int,int	-	SPEC-024b 6.19
+34	HOOK_DESCRIPTIONOBJ	-	no	-	obj	string	-	SPEC-024b 6.19
+35	HOOK_USESKILLON	-	no	-	critter,obj,int	int,int	-	SPEC-024b 6.19
+36	HOOK_ONEXPLOSION	-	no	-	int,critter,int,int,obj,critter,int	int	-	SPEC-024b 6.19
+37	HOOK_SUBCOMBATDAMAGE	-	no	-	critter,critter,item,int,int,int,int,int,int,int,int,mixed	int	-	SPEC-024b 6.19
+38	HOOK_SETLIGHTING	-	no	-	obj,int,int	int,int	-	SPEC-024b 6.19
+39	HOOK_SNEAK	-	no	-	int,int,critter	int,int	-	SPEC-024b 6.19
+40	HOOK_STDPROCEDURE	standard procedure	yes	both	int,obj,obj,int,obj,int	int	Whether the procedure runs	SPEC-024b 6.16
+41	HOOK_STDPROCEDURE_END	-	no	-	int,obj,obj,int,obj,int	int	-	SPEC-024b 6.19
+42	HOOK_TARGETOBJECT	-	no	-	int,int,obj	mixed	-	SPEC-024b 6.19
+43	HOOK_ENCOUNTER	encounter	yes	fallout2	int,int,int,int,int	int,int	The map that loads, or whether the encounter happens	SPEC-024b 6.17
+44	HOOK_ADJUSTPOISON	-	no	-	critter,int,int	int,int	-	SPEC-024b 6.19
+45	HOOK_ADJUSTRADS	-	no	-	critter,int	int	-	SPEC-024b 6.19
+46	HOOK_ROLLCHECK	-	no	-	int,int,int,int,int	int	-	SPEC-024b 6.19
+47	HOOK_BESTWEAPON	-	no	-	critter,item,item,item,critter	item	-	SPEC-024b 6.19
+48	HOOK_CANUSEWEAPON	-	no	-	critter,item,int,int	int	-	SPEC-024b 6.19
+49-60	-	reserved	no	-	-	-	-	SPEC-024b 6.19
+61	HOOK_BUILDSFXWEAPON	-	no	-	int,item,int,obj	string	-	SPEC-024b 6.19

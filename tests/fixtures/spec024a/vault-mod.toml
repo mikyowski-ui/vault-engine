@@ -1,0 +1,12 @@
+# SPEC-024a fixture: a mod whose script registers its own hook.
+name = "Cheap AP"
+id = "cheap-ap"
+api = 1
+version = "1.0.0"
+description = "Synthetic. Every item action costs the ap_cost setting."
+
+[settings]
+ap_cost = 1
+
+[[global_scripts]]
+file = "gl_cheapap.int"

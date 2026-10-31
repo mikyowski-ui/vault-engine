@@ -1,0 +1,11 @@
+word	mnemonic	pops	push	arg_classes	ret_class	pop_order
+0x8300	mod_api_version	0	1	-	I	none
+0x8301	mod_get_setting	2	1	S,A	A	default,key
+0x8302	mod_set_setting	2	0	S,A	-	value,key
+0x8303	mod_log	1	0	S	-	text
+0x8304	mod_register_hook	2	0	I,P	-	procedure,hook
+0x8305	mod_hook_id	0	1	-	I	none
+0x8306	mod_get_hook_arg	1	1	I	A	index
+0x8307	mod_set_hook_arg	2	0	I,A	-	value,index
+0x8308	mod_set_hook_return	2	0	I,A	-	value,index
+0x8309	mod_game_mode	0	1	-	I	none
