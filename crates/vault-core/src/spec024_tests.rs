@@ -70,7 +70,7 @@ impl Run {
 }
 
 /// The strings a fragment may push.
-fn base(strings: &[&[u8]]) -> IntProgram {
+pub(crate) fn base(strings: &[&[u8]]) -> IntProgram {
     IntProgram::parse_in(
         &fixture::program(strings, &[]),
         &WordSet::FALLOUT2_SFALL,
@@ -78,7 +78,7 @@ fn base(strings: &[&[u8]]) -> IntProgram {
     )
     .unwrap()
 }
-fn literal_offset(program: &IntProgram, text: &[u8]) -> u32 {
+pub(crate) fn literal_offset(program: &IntProgram, text: &[u8]) -> u32 {
     (0..0x4000)
         .find(|offset| program.literal(*offset) == Some(text))
         .unwrap_or_else(|| panic!("no literal {text:?}"))
@@ -1115,24 +1115,71 @@ fn array_words_change_no_spec_021_hash() {
     assert_ne!(host.world.sfall_hash(), empty);
 }
 
+/// A value of a vector's call: `I:5`, or a bare `"text"`.
+fn vector_value(cell: &str) -> Op {
+    match cell.strip_prefix("I:") {
+        Some(number) => I(number.parse().unwrap()),
+        None => S(Box::leak(
+            cell.trim_matches('"')
+                .as_bytes()
+                .to_vec()
+                .into_boxed_slice(),
+        )),
+    }
+}
+
 #[test]
-fn d_t1_scan_array_takes_a_number_and_a_string_is_a_failed_operand() {
+fn d_46_scan_array_takes_any_value_by_vector_ss1() {
     let (mut host, _) = sfall_host();
+    let rows: Vec<&str> = crate::spec024_arrays_tests::VECTORS
+        .lines()
+        .filter(|line| line.starts_with("SS1\t"))
+        .collect();
+    assert_eq!(rows.len(), 11);
+    for line in rows {
+        let cells: Vec<&str> = line.split('\t').collect();
+        let (name, args) = crate::spec024_arrays_tests::call(cells[2]);
+        let number = |index: usize| I(args[index].parse().unwrap());
+        let ops = match name {
+            "create_array" => vec![number(0), number(1), W(0x822d)],
+            "set_array" => {
+                let (key, value) = (vector_value(args[1]), vector_value(args[2]));
+                vec![number(0), key, value, W(0x822e)]
+            }
+            "scan_array" => vec![number(0), vector_value(args[1]), W(0x8239)],
+            other => panic!("{other}"),
+        };
+        let done = run(&mut host, &ops);
+        assert_eq!(done.result, Ok(RunOutcome::FragmentEnd), "{line}");
+        match cells[3] {
+            "-" => assert!(done.stack().is_empty(), "{line}"),
+            push => assert_eq!(
+                done.ints(),
+                [push.strip_prefix("I:").unwrap().parse::<i32>().unwrap()],
+                "{line}"
+            ),
+        }
+        let store = &host.world.sfall.as_ref().unwrap().arrays;
+        assert_eq!(
+            crate::spec024_arrays_tests::state(store),
+            cells[4],
+            "{line}"
+        );
+        assert_eq!(diagnostics(&mut host), Vec::<String>::new(), "{line}");
+    }
+    // A number that is absent still gives -1, and a float is its own value.
     let list = run(&mut host, &[I(2), I(0), W(0x822d)]).ints()[0];
     run(&mut host, &[I(list), I(1), I(9), W(0x822e)]);
-    assert_eq!(run(&mut host, &[I(list), I(9), W(0x8239)]).ints(), [1]);
     assert_eq!(run(&mut host, &[I(list), F(1.5), W(0x8239)]).ints(), [-1]);
-    // Nothing is searched, and the push is the row's default: int 0, not -1.
-    let done = run(&mut host, &[I(list), S(b"x"), W(0x8239)]);
-    assert_eq!(done.result, Ok(RunOutcome::FragmentEnd));
-    assert_eq!(done.ints(), [0]);
-    assert!(
-        diagnostics(&mut host)
-            .iter()
-            .any(|line| line.contains("scan_array"))
-    );
-    // `ret_class` limits no pushed value: a map's key keeps its type.
+    assert_eq!(run(&mut host, &[I(list), F(9.0), W(0x8239)]).ints(), [-1]);
+    // `ret_class` limits no pushed value: a map's key keeps its type, and a
+    // string finds the key of its value.
     let map = run(&mut host, &[I(-1), I(0), W(0x822d)]).ints()[0];
     run(&mut host, &[I(map), S(b"key"), I(5), W(0x822e)]);
+    run(&mut host, &[I(map), S(b"other"), S(b"found"), W(0x822e)]);
     assert_eq!(run(&mut host, &[I(map), I(5), W(0x8239)]).text(), b"key");
+    assert_eq!(
+        run(&mut host, &[I(map), S(b"found"), W(0x8239)]).text(),
+        b"other"
+    );
 }

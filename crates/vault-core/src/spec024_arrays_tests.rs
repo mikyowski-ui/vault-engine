@@ -10,7 +10,7 @@ use vault_vm::{
     sfall_arrays::{ArrayStore, Elements, SfallArray, SidecarError, Storage, value_order},
 };
 
-const VECTORS: &str = include_str!("../../../oracle/SPEC-024/sfall-array-vectors.tsv");
+pub(crate) const VECTORS: &str = include_str!("../../../oracle/SPEC-024/sfall-array-vectors.tsv");
 
 fn text(value: &str) -> SfallValue {
     SfallValue::text(value)
@@ -70,12 +70,12 @@ fn shown_array((id, array): (&u32, &SfallArray)) -> String {
     };
     format!("#{id} {shape} {storage}{key} [{}]", elements.join(","))
 }
-fn state(store: &ArrayStore) -> String {
+pub(crate) fn state(store: &ArrayStore) -> String {
     let arrays: Vec<String> = store.arrays().iter().map(shown_array).collect();
     arrays.join("; ")
 }
 /// The call in `operation`: its name and its operands.
-fn call(operation: &str) -> (&str, Vec<&str>) {
+pub(crate) fn call(operation: &str) -> (&str, Vec<&str>) {
     let (name, rest) = operation.split_once('(').unwrap();
     let inside = rest.split(')').next().unwrap();
     (name, inside.split(',').collect())

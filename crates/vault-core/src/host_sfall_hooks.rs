@@ -80,6 +80,7 @@ impl Chain {
 #[derive(Debug)]
 struct Context {
     args: Vec<SfallValue>,
+    arg_types: &'static [HookType],
     rets: Vec<Option<SfallValue>>,
     ret_types: &'static [HookType],
     next_arg: usize,
@@ -253,6 +254,8 @@ impl<A: WorldAssets> WorldHost<A> {
         match run {
             Ok(RunOutcome::Ended | RunOutcome::Stopped | RunOutcome::FragmentEnd) => {}
             Ok(RunOutcome::Waiting) if vm.wait_predicate == BOX_WAIT => {}
+            // A procedure's own return also yields: the call is over.
+            Ok(RunOutcome::Yielded) if restore.is_none_or(|resume| resume.returned(vm)) => {}
             Ok(outcome) => {
                 self.world.diagnostic(format!(
                     "hook script {}: {outcome:?} ends this member",
@@ -356,6 +359,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         hooks.contexts.push(Context {
             args,
+            arg_types: row.args,
             rets: vec![None; row.rets.len()],
             ret_types: row.rets,
             next_arg: 0,
@@ -415,15 +419,23 @@ impl<A: WorldAssets> WorldHost<A> {
             .map(|context| context.args.clone())
             .unwrap_or_default()
     }
-    /// `set_sfall_arg`: the value is class `I` (D-T1), and the int replaces
-    /// the argument whatever its declared type, `mixed` included.
-    pub(crate) fn set_sfall_arg(&mut self, index: i32, value: i32) {
-        let slot = usize::try_from(index)
-            .ok()
-            .zip(self.context())
-            .and_then(|(index, context)| context.args.get_mut(index));
-        if let Some(slot) = slot {
-            *slot = SfallValue::Int(value);
+    /// `set_sfall_arg`: the value is class `A` (Decision D-46), and converts
+    /// to the argument's declared type. A value that cannot convert leaves
+    /// the argument unchanged, so a string reaches only a `mixed` argument
+    /// (§6.5), and an index out of range is ignored.
+    pub(crate) fn set_sfall_arg(&mut self, index: i32, value: &SfallValue) {
+        let Some(at) = usize::try_from(index).ok() else {
+            return;
+        };
+        let Some(context) = self.context().filter(|context| at < context.args.len()) else {
+            return;
+        };
+        let kind = context.arg_types.get(at).copied();
+        match kind.unwrap_or(HookType::Mixed).convert(value) {
+            Some(value) => context.args[at] = value,
+            None => self
+                .world
+                .diagnostic(format!("set_sfall_arg: argument {at} cannot take that")),
         }
     }
     /// `set_sfall_return`: the next return, nothing once all are written. A
@@ -1002,6 +1014,10 @@ impl Resume {
             returns: vm.return_stack.byte_len(),
         }
     }
+    /// Whether the call has returned to where it began.
+    fn returned(&self, vm: &Vm) -> bool {
+        vm.return_stack.byte_len() == self.returns
+    }
     fn apply(&self, vm: &mut Vm) {
         let _ = vm.value_stack.truncate(self.values);
         let _ = vm.return_stack.truncate(self.returns);
@@ -1037,6 +1053,7 @@ impl<A: WorldAssets> WorldHost<A> {
         for _ in 0..count {
             hooks.contexts.push(Context {
                 args: Vec::new(),
+                arg_types: &[],
                 rets: Vec::new(),
                 ret_types: &[],
                 next_arg: 0,

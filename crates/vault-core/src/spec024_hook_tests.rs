@@ -8,12 +8,13 @@ use crate::{
         HOOK_AFTERHITROLL, HOOK_BARTERPRICE, HOOK_CALCAPCOST, HOOK_COMBATDAMAGE,
         HOOK_INVENTORYMOVE, HOOK_KEYPRESS, HOOK_MOVECOST, HOOK_TOHIT, Preview,
     },
-    spec024_tests::{Op, sfall_host},
+    spec024_arrays_tests::VECTORS,
+    spec024_tests::{Op, base, diagnostics, literal_offset, sfall_host},
     test_support::TestAssets,
     world::ObjectRef,
 };
-use Op::{F, I, W};
-use vault_vm::{IntProgram, WordSet, sfall::SfallValue};
+use Op::{F, I, S, W};
+use vault_vm::{IntProgram, WordSet, sfall::SfallValue, sfall_arrays::Storage};
 
 const GET_ARG: Op = W(0x81e4);
 const SET_RETURN: Op = W(0x81e5);
@@ -35,7 +36,8 @@ const RANDOM: Op = W(0x80b4);
 /// there.
 const RIGHT: u8 = crate::critical::hit_mode::RIGHT_PRIMARY;
 
-fn encode(ops: &[Op]) -> Vec<u8> {
+/// `ops`' bytes; a string op is a literal of `strings`.
+fn encode(ops: &[Op], strings: &IntProgram) -> Vec<u8> {
     let mut bytes = Vec::new();
     for op in ops {
         match op {
@@ -48,7 +50,10 @@ fn encode(ops: &[Op]) -> Vec<u8> {
                 bytes.extend(value.to_bits().to_be_bytes());
             }
             Op::W(word) => bytes.extend(word.to_be_bytes()),
-            Op::S(_) => panic!("hook fixtures hold no strings"),
+            Op::S(text) => {
+                bytes.extend([0x90, 0x01]);
+                bytes.extend(literal_offset(strings, text).to_be_bytes());
+            }
         }
     }
     bytes
@@ -56,11 +61,21 @@ fn encode(ops: &[Op]) -> Vec<u8> {
 /// A compiled script's shape: the initial stream runs `start`, procedure 1,
 /// and `procedures` follow it at indices 2 up.
 fn script(start: &[Op], procedures: &[(&'static str, &[Op])]) -> IntProgram {
-    let mut listed: Vec<(&[u8], Vec<u8>)> = vec![(b"start", fixture::returning(encode(start)))];
-    for (name, body) in procedures {
-        listed.push((name.as_bytes(), fixture::returning(encode(body))));
+    script_with(&[], start, procedures)
+}
+/// [`script`], with `strings` for its literals.
+fn script_with(
+    strings: &[&[u8]],
+    start: &[Op],
+    procedures: &[(&'static str, &[Op])],
+) -> IntProgram {
+    let table = base(strings);
+    let body = |ops: &[Op]| fixture::returning(encode(ops, &table));
+    let mut listed: Vec<(&[u8], Vec<u8>)> = vec![(b"start", body(start))];
+    for (name, ops) in procedures {
+        listed.push((name.as_bytes(), body(ops)));
     }
-    let mut bytes = fixture::program(&[], &listed);
+    let mut bytes = fixture::program(strings, &listed);
     let words = WordSet::FALLOUT2_SFALL;
     let body = IntProgram::parse_in(&bytes, &words, false)
         .unwrap()
@@ -137,25 +152,114 @@ fn h1_h2_the_published_example_gives_75_in_either_order() {
     }
 }
 
-#[test]
-fn d_t1_set_sfall_arg_takes_an_int_whatever_the_argument_declares() {
-    let hook = HOOK_COMBATDAMAGE;
-    // A float truncates, and argument 12, `mixed`, takes the int too.
-    let mut body = vec![I(12), F(7.9), SET_ARG, I(2), F(-3.9), SET_ARG];
-    for index in 0..13 {
-        body.extend([I(20 + index), GET_ARG, SET_GLOBAL]);
+/// `I:7` or `S:"text"`.
+fn shown(value: &SfallValue) -> String {
+    match value {
+        SfallValue::Int(value) => format!("I:{value}"),
+        SfallValue::Text(text) => format!("S:\"{}\"", String::from_utf8_lossy(text)),
+        other => format!("{other:?}"),
     }
-    let (mut host, _) = sfall_host();
+}
+/// `HOOK_COMBATDAMAGE`'s thirteen arguments, with `set` run on them first,
+/// and each then read into element `index` of the list it returns, which
+/// keeps a value's type. Argument 2 is 10.
+fn damage_chain(host: &mut WorldHost<TestAssets>, strings: &[&[u8]], set: &[Op]) -> i32 {
+    let state = host.world.sfall.as_mut().unwrap();
+    let list = state.arrays.create(13, 0, Storage::Permanent);
+    let mut body = set.to_vec();
+    for index in 0..13 {
+        body.extend([I(list), I(index), GET_ARG, W(0x822e)]);
+    }
+    let register = [I(HOOK_COMBATDAMAGE), I(2), REGISTER_PROC];
     install(
-        &mut host,
+        host,
         "gl_0.int",
-        script(&[I(hook), I(2), REGISTER_PROC], &[("m", &body)]),
+        script_with(strings, &register, &[("m", &body)]),
     );
-    set_up(&mut host);
+    set_up(host);
     let mut args = ints(&[0; 13]);
-    args[12] = SfallValue::text("mixed");
-    host.run_hook(hook, args);
-    assert_eq!((global(&host, 32), global(&host, 22)), (7, -3));
+    args[2] = SfallValue::Int(10);
+    diagnostics(host);
+    let rets = host.run_hook(HOOK_COMBATDAMAGE, args).unwrap();
+    assert_eq!(rets, [None, None, None, None, None], "rets=[None]");
+    list
+}
+fn argument(host: &WorldHost<TestAssets>, list: i32, index: i32) -> SfallValue {
+    let state = host.world.sfall.as_ref().unwrap();
+    state.arrays.get(list, &SfallValue::Int(index))
+}
+
+#[test]
+fn d_46_set_sfall_arg_converts_by_the_arguments_type_by_vector_ss2() {
+    let rows: Vec<&str> = VECTORS
+        .lines()
+        .filter(|line| line.starts_with("SS2\t"))
+        .collect();
+    assert_eq!(rows.len(), 4);
+    for line in rows {
+        let cells: Vec<&str> = line.split('\t').collect();
+        let call = cells[2]
+            .split_once("set_sfall_arg(")
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .unwrap()
+            .0;
+        let (index, value) = call.split_once(',').unwrap();
+        let text: &'static [u8] = Box::leak(
+            value
+                .trim_matches('"')
+                .as_bytes()
+                .to_vec()
+                .into_boxed_slice(),
+        );
+        let value = match value.strip_prefix("F:") {
+            Some(number) => F(number.parse().unwrap()),
+            None => S(text),
+        };
+        let (mut host, _) = sfall_host();
+        let index: i32 = index.parse().unwrap();
+        let set = [I(index), value, SET_ARG];
+        let list = damage_chain(&mut host, &[text], &set);
+        let lines = diagnostics(&mut host);
+        let result = format!(
+            "final=arg2={},arg12={},diagnostics={}; order=m",
+            shown(&argument(&host, list, 2)),
+            shown(&argument(&host, list, 12)),
+            lines.len()
+        );
+        assert_eq!(result, cells[4], "{line}");
+    }
+}
+
+#[test]
+fn d_46_a_mixed_argument_keeps_a_float_and_an_int_argument_truncates_it() {
+    let (mut host, _) = sfall_host();
+    let list = damage_chain(
+        &mut host,
+        &[],
+        &[I(12), F(7.9), SET_ARG, I(2), F(-3.9), SET_ARG],
+    );
+    assert_eq!(argument(&host, list, 2), SfallValue::Int(-3));
+    assert_eq!(argument(&host, list, 12), SfallValue::float(7.9));
+    // An object type converts by class `I`, and an index out of range is
+    // ignored, with no diagnostic.
+    let (mut host, _) = sfall_host();
+    let list = damage_chain(
+        &mut host,
+        &[],
+        &[
+            I(0),
+            F(5.9),
+            SET_ARG,
+            I(13),
+            I(1),
+            SET_ARG,
+            I(-1),
+            I(1),
+            SET_ARG,
+        ],
+    );
+    assert_eq!(argument(&host, list, 0), SfallValue::Int(5));
+    assert!(diagnostics(&mut host).is_empty());
 }
 
 #[test]

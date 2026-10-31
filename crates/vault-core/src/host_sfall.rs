@@ -576,7 +576,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 integer(self.arrays().temp_list(values))
             }
             0x823d => {
-                self.set_sfall_arg(int(0), int(1));
+                self.set_sfall_arg(int(0), &args[1]);
                 None
             }
             _ => self.sfall_promoted(vm, row, args)?,
