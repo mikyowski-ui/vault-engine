@@ -1,18 +1,243 @@
 //! SPEC-024b §4.11: each row Revision 3 promoted, under a script, on its
 //! synthetic stack vectors (§7.1) and its rules.
 use crate::{
-    WorldEffect, WorldHost,
+    CharacterSheet, GameProfile, WorldEffect, WorldHost, WorldState,
+    assets::{VfsWorldAssets, WorldAssets},
+    fallout2_tests::new_game,
     fixture_items::{self as support, ItemAssets, WEAPON_W},
-    sfall::{UNIQUE_IDS, encounter_flag},
-    spec024_tests::{I, Op, S, W, diagnostics, run, sfall_host},
+    sfall::{SfallWorld, UNIQUE_IDS, encounter_flag},
+    spec024_tests::{I, ORACLE, Op, S, W, diagnostics, run, sfall_host},
     test_support::{TestAssets, npc_prototype},
+    world::ObjectRef,
 };
 use std::sync::Arc;
-use vault_formats::msg::MsgCatalog;
+use vault_formats::{Vfs, msg::MsgCatalog};
 use vault_vm::{RunOutcome, VmStatus};
 
 const LIST_LEN: u16 = 0x8231;
 const LIST_GET: u16 = 0x822f;
+
+fn hex(cell: &str) -> Vec<u8> {
+    cell.split_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+        .collect()
+}
+/// A string of a vector's call, as a script's literal.
+fn literal(text: &str) -> &'static [u8] {
+    Box::leak(
+        text.trim_matches('"')
+            .as_bytes()
+            .to_vec()
+            .into_boxed_slice(),
+    )
+}
+/// `0x10` or `5`.
+fn number(cell: &str) -> i32 {
+    match cell.strip_prefix("0x") {
+        Some(hex) => u32::from_str_radix(hex, 16).unwrap() as i32,
+        None => cell.parse().unwrap(),
+    }
+}
+/// The push a row states, against what a word left on the stack.
+fn pushed(cell: &str, ints: &[i32], cells: &[&str]) {
+    match cell {
+        "-" => assert!(ints.is_empty(), "{cells:?}"),
+        cell => assert_eq!(
+            ints,
+            [number(cell.strip_prefix("I:").unwrap())],
+            "{cells:?}"
+        ),
+    }
+}
+
+/// The session of vectors V, U, M, T and E, row by row.
+pub(crate) struct RowSession {
+    host: WorldHost<TestAssets>,
+    objects: [ObjectRef; 2],
+}
+impl RowSession {
+    pub(crate) fn for_group(group: &str) -> Self {
+        let (mut host, a) = sfall_host();
+        let b = host.world.spawn(npc_prototype(), 20001, 0).unwrap();
+        match group {
+            // V1's first state holds the file's bytes.
+            "V1" | "V2" | "V3" | "V4" => {
+                let cell = crate::spec024_arrays_tests::vector_cell("V1", "1", 4);
+                let bytes = hex(cell.split_once("bytes=").unwrap().1);
+                host.assets.resources.insert("art/x.frm".into(), bytes);
+            }
+            // The ordinary IDs U1 shows, and its allocator's 900.
+            "U1" => {
+                host.world.set_object_id(a, 5);
+                host.world.set_object_id(b, 6);
+                host.world.set_next_object_id(0x384);
+            }
+            "M1" => {
+                let text = "{5}{}{text}\n";
+                host.assets.game.insert("a.msg".into(), messages(text));
+                host.assets.game.insert("b.msg".into(), messages(text));
+            }
+            "E1" => {
+                let weapon = support::parse(&support::bytes(WEAPON_W));
+                let mut proto = (*weapon).clone();
+                proto.pid = 159;
+                host.assets.prototypes.insert(159, Arc::new(proto));
+                let mut plain = (*support::parse(&support::bytes(WEAPON_W))).clone();
+                plain.data = vault_formats::pro::PrototypeData::Misc;
+                plain.pid = 41;
+                host.assets.prototypes.insert(41, Arc::new(plain));
+            }
+            _ => {}
+        }
+        Self {
+            host,
+            objects: [a, b],
+        }
+    }
+    fn object(&self, cell: &str) -> i32 {
+        self.objects[usize::from(cell != "A")] as i32
+    }
+    fn file_state(&mut self, cells: &[&str]) {
+        if cells[4] == "-" {
+            return;
+        }
+        let (position, bytes) = self.host.virtual_file_for_test(1);
+        let state = cells[4].strip_prefix("pos=").unwrap();
+        let (at, shown) = state.split_once(" bytes=").unwrap();
+        assert_eq!(position, at.parse::<usize>().unwrap(), "{cells:?}");
+        assert_eq!(bytes, hex(shown), "{cells:?}");
+    }
+    /// One `fs_*` call, and what it left on the stack.
+    fn file_call(&mut self, call: &str) -> Vec<i32> {
+        let (name, args) = crate::spec024_arrays_tests::call(call);
+        let int = |index: usize| I(number(args[index]));
+        let ops = match name {
+            "fs_copy" => vec![S(literal(args[0])), S(literal(args[1])), W(0x81f8)],
+            "fs_seek" => vec![int(0), int(1), W(0x8202)],
+            "fs_read_short" => vec![int(0), W(0x820a)],
+            "fs_write_short" => vec![int(0), int(1), W(0x81fb)],
+            other => panic!("{other}"),
+        };
+        run(&mut self.host, &ops).ints()
+    }
+    fn file_row(&mut self, cells: &[&str]) {
+        // "a at 0, then b at 0": a seek to 0 before each call.
+        let (calls, seeks): (Vec<&str>, bool) = match cells[2].split_once(" at 0, then ") {
+            Some((first, second)) => (vec![first, second.trim_end_matches(" at 0")], true),
+            None => (cells[2].split("; ").collect(), false),
+        };
+        let mut left = Vec::new();
+        for call in calls {
+            if seeks {
+                self.file_call("fs_seek(1,0)");
+            }
+            left = self.file_call(call);
+        }
+        pushed(cells[3], &left, cells);
+        self.file_state(cells);
+    }
+    fn id_row(&mut self, cells: &[&str]) {
+        let (_, args) = crate::spec024_arrays_tests::call(cells[2]);
+        let object = self.object(args[0]);
+        let mut ops = vec![S(b"set_unique_id"), I(object)];
+        match args.get(1) {
+            Some(flag) => ops.extend([I(number(flag)), W(0x8278)]),
+            None => ops.push(W(0x8277)),
+        }
+        let done = run(&mut self.host, &ops);
+        pushed(cells[3], &done.ints(), cells);
+        let host = &self.host;
+        let next = host.world.sfall.as_deref().unwrap().next_unique;
+        let shown = format!(
+            "A={:#x} B={:#x} next={next:#x}",
+            host.object_id_for_test(self.objects[0]),
+            host.object_id_for_test(self.objects[1])
+        );
+        assert_eq!(shown, cells[4], "{cells:?}");
+    }
+    fn message_row(&mut self, cells: &[&str]) {
+        let (name, args) = crate::spec024_arrays_tests::call(cells[2]);
+        if name == "add_extra_msg_file" {
+            let ops = [S(b"add_extra_msg_file"), S(literal(args[0])), W(0x8277)];
+            let done = run(&mut self.host, &ops);
+            pushed(cells[3], &done.ints(), cells);
+            let next = self.host.next_message_file_for_test();
+            assert_eq!(format!("next={next:#x}"), cells[4], "{cells:?}");
+            return;
+        }
+        let ops = [I(number(args[0])), I(number(args[1])), W(0x826b)];
+        let text = run(&mut self.host, &ops).text();
+        assert_eq!(
+            format!("S:\"{}\"", String::from_utf8_lossy(&text)),
+            cells[3],
+            "{cells:?}"
+        );
+    }
+    fn tag_row(&mut self, cells: &[&str]) {
+        // Rows 5 and 6 are about an addicted player.
+        if cells[2].contains("player addicted") {
+            let sheet = self.host.world.player_sheet_mut().unwrap();
+            sheet.flags |= crate::progression::ADDICTED_FLAG;
+        }
+        let (name, args) = crate::spec024_arrays_tests::call(cells[2]);
+        let tag = I(number(args[0]));
+        let word = match name {
+            "show_iface_tag" => 0x81dc,
+            "hide_iface_tag" => 0x81dd,
+            _ => 0x81de,
+        };
+        let done = run(&mut self.host, &[tag, W(word)]);
+        pushed(cells[3], &done.ints(), cells);
+        let lit: Vec<String> = (0..=9)
+            .filter(|tag| run(&mut self.host, &[I(*tag), W(0x81de)]).ints() == [1])
+            .map(|tag| tag.to_string())
+            .collect();
+        match cells[4] {
+            "-" => {}
+            "box stays lit" => assert_eq!(lit, ["4"], "{cells:?}"),
+            state => assert_eq!(format!("lit=[{}]", lit.join(",")), state, "{cells:?}"),
+        }
+    }
+    fn explosive_row(&mut self, cells: &[&str]) {
+        let (_, args) = crate::spec024_arrays_tests::call(cells[2]);
+        let ops: Vec<Op> = args
+            .iter()
+            .map(|arg| I(number(arg)))
+            .chain([W(0x8261)])
+            .collect();
+        let id = run(&mut self.host, &ops).ints()[0];
+        let shown = list_of(&mut self.host, id);
+        let expected = if cells[3].contains("proto min") {
+            let weapon = support::parse(&support::bytes(WEAPON_W));
+            let vault_formats::pro::PrototypeData::Item(item) = &weapon.data else {
+                panic!("a weapon fixture");
+            };
+            let vault_formats::pro::ItemData::Weapon(data) = &item.data else {
+                panic!("a weapon fixture");
+            };
+            format!("temporary list [{},{}]", data.damage[0], data.damage[1])
+        } else {
+            cells[3].to_owned()
+        };
+        assert_eq!(
+            format!("temporary list [{},{}]", shown[0], shown[1]),
+            expected,
+            "{cells:?}"
+        );
+        // A temporary list: the step's end frees it.
+        self.host.sfall_end_of_step();
+        assert_eq!(run(&mut self.host, &[I(id), W(LIST_LEN)]).ints(), [-1]);
+    }
+    pub(crate) fn row(&mut self, cells: &[&str]) {
+        match &cells[0][..1] {
+            "V" => self.file_row(cells),
+            "U" => self.id_row(cells),
+            "M" => self.message_row(cells),
+            "T" => self.tag_row(cells),
+            _ => self.explosive_row(cells),
+        }
+    }
+}
 
 fn list_of(host: &mut WorldHost<TestAssets>, id: i32) -> Vec<i32> {
     let length = run(host, &[I(id), W(LIST_LEN)]).ints()[0];
@@ -20,7 +245,7 @@ fn list_of(host: &mut WorldHost<TestAssets>, id: i32) -> Vec<i32> {
         .map(|index| run(host, &[I(id), I(index), W(LIST_GET)]).ints()[0])
         .collect()
 }
-fn messages(text: &str) -> Arc<MsgCatalog> {
+pub(crate) fn messages(text: &str) -> Arc<MsgCatalog> {
     Arc::new(MsgCatalog::parse(text.as_bytes()).unwrap())
 }
 
@@ -175,6 +400,22 @@ fn message_str_game_reads_each_id_range_and_says_error_otherwise() {
             "file {file:#x}, message {number}"
         );
     }
+}
+
+#[test]
+fn extra_game_msg_file_list_is_read_from_misc_only() {
+    let (mut host, _) = sfall_host();
+    host.assets
+        .game
+        .insert("first.msg".into(), messages("{5}{}{first}\n"));
+    host.assets.resources.insert(
+        "ddraw.ini".into(),
+        b"[Other]\nExtraGameMsgFileList=first\n".to_vec(),
+    );
+    assert_eq!(
+        run(&mut host, &[I(0x2000), I(5), W(0x826b)]).text(),
+        b"Error"
+    );
 }
 
 #[test]
@@ -529,4 +770,174 @@ fn tap_key_queues_a_scan_code_for_the_next_input_phase() {
     run(&mut host, &[I(31), W(0x8162)]);
     run(&mut host, &[I(201), I(0), I(0), I(0), W(0x80e1)]);
     assert!(host.sfall_take_keys().is_empty());
+}
+
+/// §7.3 test 10, through the real assets: `art/x.frm` in a VFS.
+#[test]
+fn t10_a_load_reads_the_patched_rate_and_a_new_game_or_a_load_removes_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("art")).unwrap();
+    let frm = vault_fixtures::world::frm(1, 1, 1);
+    std::fs::write(dir.path().join("art/x.frm"), &frm).unwrap();
+    let vfs: Arc<dyn Vfs> = Arc::new(vault_formats::LocalDirProvider::mount(dir.path()).unwrap());
+    let assets = VfsWorldAssets::new(vfs, "english").unwrap();
+    assets.set_game_profile(GameProfile::Fallout2);
+    let world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+    let mut host = WorldHost::new(world, assets);
+    host.world.fallout2 = Some(Box::new(new_game()));
+    host.enable_sfall().unwrap();
+    let rate = |host: &WorldHost<VfsWorldAssets>| host.assets.frame("art/x.frm").unwrap().fps;
+    let path: &'static [u8] = b"art/x.frm";
+    let write = |host: &mut WorldHost<VfsWorldAssets>| {
+        let handle = run(host, &[S(path), S(path), W(0x81f8)]).ints()[0];
+        assert_eq!(handle, 1);
+        run(host, &[I(handle), I(4), W(0x8202)]);
+        run(host, &[I(handle), I(25), W(0x81fb)]);
+    };
+    let plain = rate(&host);
+    assert_ne!(plain, 25);
+    // V1's write, over a decode the cache already holds.
+    write(&mut host);
+    assert_eq!(rate(&host), 25, "the write dropped the cached decode");
+    host.sfall_restored();
+    assert_eq!(rate(&host), plain, "a load removes the virtual file");
+    write(&mut host);
+    assert_eq!(rate(&host), 25);
+    host.enable_sfall().unwrap();
+    assert_eq!(rate(&host), plain, "a new game removes it too");
+    // The handle went with it.
+    assert_eq!(run(&mut host, &[I(1), W(0x820a)]).ints(), [0]);
+}
+
+/// §7.3 test 11, on the fixture tables' encounter.
+#[test]
+fn t11_a_forced_encounter_draws_nothing_and_survives_a_save() {
+    let (mut host, _) = sfall_host();
+    host.assets.any_map = Some(crate::world::empty_map());
+    let mut state = new_game();
+    state.position = [10, 10];
+    host.world.fallout2 = Some(Box::new(state));
+    let counters = |host: &WorldHost<TestAssets>| {
+        let state = host.world.fallout2.as_deref().unwrap();
+        (state.counter(0, 1), state.counter(0, 3))
+    };
+    let before = counters(&host);
+    run(&mut host, &[I(2), I(0x8), W(0x8229)]);
+    // Saved between the call and the check, it occurs after a load.
+    let sidecar = host.world.sfall.as_deref().unwrap().sidecar();
+    host.world.sfall = Some(Box::new(SfallWorld::from_sidecar(&sidecar).unwrap()));
+    let drawn = host.world.rng.clone();
+    let selected = host.fallout2_check_encounter().unwrap().unwrap();
+    assert_eq!(host.world.rng, drawn, "no random number is drawn");
+    assert_eq!(counters(&host), before, "no counter changes");
+    assert_eq!((selected.map, selected.special), (2, true));
+    host.fallout2_enter_encounter(selected).unwrap();
+    let others = host
+        .world
+        .iter()
+        .filter(|(object, _)| *object != host.world.player);
+    assert_eq!(others.count(), 0, "no group is spawned");
+    let state = host.world.sfall.as_deref().unwrap();
+    assert_eq!(state.forced_map, -1, "the pending encounter cleared");
+}
+
+#[test]
+fn forced_encounter_flags_leave_the_car_and_fade_to_black() {
+    // Driving, the car comes along; with `ENCOUNTER_FLAG_NO_CAR` it stays.
+    for (flags, moves) in [(0, true), (encounter_flag::NO_CAR, false)] {
+        let (mut host, _) = sfall_host();
+        host.assets.any_map = Some(crate::world::empty_map());
+        let mut state = new_game();
+        (state.car.has_car, state.car.area, state.car.map) = (true, 5, 5);
+        (state.driving, state.world_map_open) = (true, true);
+        host.world.fallout2 = Some(Box::new(state));
+        run(&mut host, &[I(2), I(flags as i32), W(0x8229)]);
+        let selected = host.fallout2_check_encounter().unwrap().unwrap();
+        host.fallout2_enter_encounter(selected).unwrap();
+        let car = host.world.fallout2.as_deref().unwrap().car;
+        assert_eq!(car.map != 5, moves, "flags {flags}");
+    }
+    let (mut host, _) = sfall_host();
+    host.assets.any_map = Some(crate::world::empty_map());
+    host.world.fallout2 = Some(Box::new(new_game()));
+    let fades = |host: &WorldHost<TestAssets>| {
+        host.world
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, WorldEffect::Fade { out: true, .. }))
+            .count()
+    };
+    run(
+        &mut host,
+        &[I(2), I(encounter_flag::FADEOUT as i32), W(0x8229)],
+    );
+    let selected = host.fallout2_check_encounter().unwrap().unwrap();
+    host.fallout2_enter_encounter(selected).unwrap();
+    assert_eq!(fades(&host), 1);
+    assert!(host.library.faded_out, "the load does not fade back in");
+}
+
+/// §7.3 test 12.
+#[test]
+fn t12_a_unique_id_does_not_stack_and_a_released_one_stacks_again() {
+    let mut host = item_host();
+    let owner = host.world.spawn(npc_prototype(), 20000, 0).unwrap();
+    let (a, b) = (
+        support::spawn(&mut host, 0x500),
+        support::spawn(&mut host, 0x500),
+    );
+    assert!(host.world.stackable(a, b), "otherwise identical");
+    host.set_unique_id(a, 0);
+    assert!(!host.world.stackable(a, b));
+    host.world.add_item(owner, a, 1, true).unwrap();
+    host.world.add_item(owner, b, 1, true).unwrap();
+    assert_eq!(host.world.get(owner).unwrap().inventory.len(), 2);
+    host.set_unique_id(a, -1);
+    assert!(host.world.stackable(a, b));
+    host.world.drop_item(owner, a, 1).unwrap();
+    host.world.add_item(owner, a, 1, true).unwrap();
+    assert_eq!(host.world.get(owner).unwrap().inventory.len(), 1);
+}
+
+/// §7.3 test 13.
+#[test]
+fn t13_opcode_exists_0x823b_gives_1_under_sfall_mode() {
+    let (mut host, _) = sfall_host();
+    assert_eq!(
+        run(&mut host, &[S(b"opcode_exists"), I(0x823b), W(0x8277)]).ints(),
+        [1]
+    );
+}
+
+/// §7.3 test 14.
+#[test]
+fn t14_every_row_the_audit_promoted_is_tier_p1_in_its_table() {
+    const USAGE: &str = include_str!("../../../oracle/SPEC-024/mod-opcode-usage.tsv");
+    const HOOKS: &str = include_str!("../../../oracle/SPEC-024/sfall-hooks.tsv");
+    let header: Vec<&str> = USAGE.lines().next().unwrap().split('\t').collect();
+    let column = |name: &str| header.iter().position(|cell| *cell == name).unwrap();
+    let (kind, id, tier) = (column("kind"), column("id"), column("rev3_tier"));
+    let mut promoted = 0;
+    for line in USAGE.lines().skip(1) {
+        let cells: Vec<&str> = line.split('\t').collect();
+        if cells[tier] != "P1" {
+            continue;
+        }
+        promoted += 1;
+        let row = if cells[kind] == "hook" {
+            HOOKS
+                .lines()
+                .map(|row| row.split('\t').collect::<Vec<_>>())
+                .find(|row| row[0] == cells[id])
+                .map(|row| row[3].to_owned())
+        } else {
+            ORACLE
+                .lines()
+                .map(|row| row.split('\t').collect::<Vec<_>>())
+                .find(|row| row[0] == cells[kind] && row[1] == cells[id])
+                .map(|row| row[9].to_owned())
+        };
+        assert_eq!(row.as_deref(), Some("P1"), "{line}");
+    }
+    assert_eq!(promoted, 32, "26 opcode rows and 6 hooks");
 }

@@ -195,44 +195,45 @@ fn argument(host: &WorldHost<TestAssets>, list: i32, index: i32) -> SfallValue {
     state.arrays.get(list, &SfallValue::Int(index))
 }
 
+/// One row of SS2.
+fn ss2_row(cells: &[&str]) {
+    let call = cells[2]
+        .split_once("set_sfall_arg(")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .unwrap()
+        .0;
+    let (index, value) = call.split_once(',').unwrap();
+    let text: &'static [u8] = Box::leak(
+        value
+            .trim_matches('"')
+            .as_bytes()
+            .to_vec()
+            .into_boxed_slice(),
+    );
+    let value = match value.strip_prefix("F:") {
+        Some(number) => F(number.parse().unwrap()),
+        None => S(text),
+    };
+    let (mut host, _) = sfall_host();
+    let index: i32 = index.parse().unwrap();
+    let set = [I(index), value, SET_ARG];
+    let list = damage_chain(&mut host, &[text], &set);
+    let lines = diagnostics(&mut host);
+    let result = format!(
+        "final=arg2={},arg12={},diagnostics={}; order=m",
+        shown(&argument(&host, list, 2)),
+        shown(&argument(&host, list, 12)),
+        lines.len()
+    );
+    assert_eq!(result, cells[4], "{cells:?}");
+}
+
 #[test]
 fn d_46_set_sfall_arg_converts_by_the_arguments_type_by_vector_ss2() {
-    let rows: Vec<&str> = VECTORS
-        .lines()
-        .filter(|line| line.starts_with("SS2\t"))
-        .collect();
+    let rows = rows("SS2");
     assert_eq!(rows.len(), 4);
-    for line in rows {
-        let cells: Vec<&str> = line.split('\t').collect();
-        let call = cells[2]
-            .split_once("set_sfall_arg(")
-            .and_then(|(_, rest)| rest.split_once(')'))
-            .unwrap()
-            .0;
-        let (index, value) = call.split_once(',').unwrap();
-        let text: &'static [u8] = Box::leak(
-            value
-                .trim_matches('"')
-                .as_bytes()
-                .to_vec()
-                .into_boxed_slice(),
-        );
-        let value = match value.strip_prefix("F:") {
-            Some(number) => F(number.parse().unwrap()),
-            None => S(text),
-        };
-        let (mut host, _) = sfall_host();
-        let index: i32 = index.parse().unwrap();
-        let set = [I(index), value, SET_ARG];
-        let list = damage_chain(&mut host, &[text], &set);
-        let lines = diagnostics(&mut host);
-        let result = format!(
-            "final=arg2={},arg12={},diagnostics={}; order=m",
-            shown(&argument(&host, list, 2)),
-            shown(&argument(&host, list, 12)),
-            lines.len()
-        );
-        assert_eq!(result, cells[4], "{line}");
+    for cells in &rows {
+        ss2_row(cells);
     }
 }
 
@@ -919,6 +920,49 @@ fn default_ran(host: &WorldHost<TestAssets>) -> bool {
         .any(|effect| matches!(effect, WorldEffect::DefaultAction { .. }))
 }
 
+/// One row of H12.
+fn h12_row(cells: &[&str]) {
+    let (mut host, _) = sfall_host();
+    registered(&mut host, HOOK_GAMEMODECHANGE, &member(2, cells[3]));
+    // The first value is the one at the end of setup, which runs nothing.
+    host.sfall_end_of_step();
+    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 0, "{cells:?}");
+    host.world.combat = true;
+    host.sfall_end_of_step();
+    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 1, "{cells:?}");
+    let settled = (host.sfall_mode_bits()) as i32;
+    match cells[1] {
+        "1" => {
+            let previous = game_mode::LOCAL_MAP as i32;
+            assert_eq!(
+                saw(&host, HOOK_GAMEMODECHANGE),
+                (vec![0, previous], 1),
+                "{cells:?}"
+            );
+            assert_ne!(settled as u32 & game_mode::COMBAT, 0, "{cells:?}");
+            host.sfall_end_of_step();
+            assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 1, "no change, no run");
+        }
+        "2" => {
+            host.world.combat = false;
+            host.world.combat = true;
+            host.sfall_end_of_step();
+            assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 1, "{cells:?}");
+        }
+        _ => {
+            assert!(host.script_close_for_test());
+            assert!(!host.sfall_session_closed());
+            host.sfall_end_of_step();
+            assert_eq!(
+                saw(&host, HOOK_GAMEMODECHANGE),
+                (vec![1, settled], 2),
+                "{cells:?}"
+            );
+            assert!(host.sfall_session_closed());
+        }
+    }
+}
+
 #[test]
 fn hook_31_game_mode_change_runs_once_a_step_when_the_bit_set_changed() {
     let row = sfall::hook_row(HOOK_GAMEMODECHANGE).unwrap();
@@ -928,32 +972,9 @@ fn hook_31_game_mode_change_runs_once_a_step_when_the_bit_set_changed() {
     );
     let vector = rows("H12");
     assert_eq!(vector.len(), 3);
-    let (mut host, _) = sfall_host();
-    registered(&mut host, HOOK_GAMEMODECHANGE, &member(2, vector[0][3]));
-    host.set_sfall_screens(game_mode::COMBAT);
-    host.set_sfall_screens(0);
-    // The first value is the one at the end of setup, which runs nothing.
-    host.sfall_end_of_step();
-    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 0);
-    host.world.combat = true;
-    host.sfall_end_of_step();
-    let previous = game_mode::LOCAL_MAP as i32;
-    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE), (vec![0, previous], 1));
-    host.sfall_end_of_step();
-    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 1, "no change, no run");
-    // H12 step 2: two changes that cancel out in one step.
-    host.world.combat = false;
-    host.world.combat = true;
-    host.sfall_end_of_step();
-    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 1);
-    // H12 step 3: signal_close_game runs it with arg0 1, though the mode
-    // did not change, and only then does the session end.
-    let mode = host.sfall_mode_bits() as i32;
-    let close = host.script_close_for_test();
-    assert!(close && !host.sfall_session_closed());
-    host.sfall_end_of_step();
-    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE), (vec![1, mode], 2));
-    assert!(host.sfall_session_closed());
+    for cells in &vector {
+        h12_row(cells);
+    }
     // A close in a step that also changed the mode runs it once.
     let (mut host, _) = sfall_host();
     registered(&mut host, HOOK_GAMEMODECHANGE, &member(2, vector[2][3]));
@@ -962,6 +983,26 @@ fn hook_31_game_mode_change_runs_once_a_step_when_the_bit_set_changed() {
     host.script_close_for_test();
     host.sfall_end_of_step();
     assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 1);
+}
+
+/// One row of H13.
+fn h13_row(cells: &[&str]) {
+    let (mut host, target) = sfall_host();
+    let user = host.world.player;
+    let used = item(&mut host, 0);
+    registered(&mut host, HOOK_USEOBJON, &member(3, cells[3]));
+    host.world.effects.clear();
+    host.use_item_stage(user, used, target).unwrap();
+    let expected = vec![target as i32, user as i32, used as i32];
+    assert_eq!(saw(&host, HOOK_USEOBJON), (expected, 1), "{cells:?}");
+    let alive = host.world.get(used).is_some();
+    let (routed, kept) = match cells[4] {
+        "final=engine routing runs; order=m" => (true, true),
+        "final=item kept; no routing; order=m" => (false, true),
+        "final=item destroyed; no routing; order=m" => (false, false),
+        other => panic!("{other}"),
+    };
+    assert_eq!((default_ran(&host), alive), (routed, kept), "{cells:?}");
 }
 
 #[test]
@@ -973,23 +1014,8 @@ fn hook_8_use_obj_on_runs_before_routing_for_a_critter_target() {
     );
     let vector = rows("H13");
     assert_eq!(vector.len(), 5);
-    for cells in vector {
-        let (mut host, target) = sfall_host();
-        let user = host.world.player;
-        let used = item(&mut host, 0);
-        registered(&mut host, HOOK_USEOBJON, &member(3, cells[3]));
-        host.world.effects.clear();
-        host.use_item_stage(user, used, target).unwrap();
-        let expected = vec![target as i32, user as i32, used as i32];
-        assert_eq!(saw(&host, HOOK_USEOBJON), (expected, 1), "{cells:?}");
-        let alive = host.world.get(used).is_some();
-        let (routed, kept) = match cells[4] {
-            "final=engine routing runs; order=m" => (true, true),
-            "final=item kept; no routing; order=m" => (false, true),
-            "final=item destroyed; no routing; order=m" => (false, false),
-            other => panic!("{other}"),
-        };
-        assert_eq!((default_ran(&host), alive), (routed, kept), "{cells:?}");
+    for cells in &vector {
+        h13_row(cells);
     }
     // A target that is not a critter runs no chain.
     let (mut host, _) = sfall_host();
@@ -1026,6 +1052,23 @@ fn with_use_script(host: &mut WorldHost<TestAssets>, object: ObjectRef) -> u32 {
     id
 }
 
+/// One row of H14.
+fn h14_row(cells: &[&str]) {
+    let (mut host, used) = sfall_host();
+    let user = host.world.player;
+    with_use_script(&mut host, used);
+    registered(&mut host, HOOK_USEOBJ, &member(2, cells[3]));
+    host.use_object(user, used).unwrap();
+    assert_eq!(
+        saw(&host, HOOK_USEOBJ),
+        (vec![user as i32, used as i32], 1),
+        "{cells:?}"
+    );
+    assert_eq!(global(&host, 3), 0, "use_p_proc not requested: {cells:?}");
+    let destroyed = cells[4].starts_with("final=item destroyed");
+    assert_eq!(host.world.get(used).is_none(), destroyed, "{cells:?}");
+}
+
 #[test]
 fn hook_18_use_obj_runs_before_use_p_proc_and_before_the_drug_path() {
     let row = sfall::hook_row(HOOK_USEOBJ).unwrap();
@@ -1035,20 +1078,8 @@ fn hook_18_use_obj_runs_before_use_p_proc_and_before_the_drug_path() {
     );
     let vector = rows("H14");
     assert_eq!(vector.len(), 2);
-    for cells in vector {
-        let (mut host, used) = sfall_host();
-        let user = host.world.player;
-        with_use_script(&mut host, used);
-        registered(&mut host, HOOK_USEOBJ, &member(2, cells[3]));
-        host.use_object(user, used).unwrap();
-        assert_eq!(
-            saw(&host, HOOK_USEOBJ),
-            (vec![user as i32, used as i32], 1),
-            "{cells:?}"
-        );
-        assert_eq!(global(&host, 3), 0, "use_p_proc not requested: {cells:?}");
-        let destroyed = cells[4].starts_with("final=item destroyed");
-        assert_eq!(host.world.get(used).is_none(), destroyed, "{cells:?}");
+    for cells in &vector {
+        h14_row(cells);
     }
     // Unset, the request runs, and a critter's own use of a map object
     // from outside the interface runs no chain.
@@ -1086,6 +1117,38 @@ fn hook_18_use_obj_runs_before_use_p_proc_and_before_the_drug_path() {
     );
 }
 
+/// One row of H15.
+fn h15_row(cells: &[&str]) {
+    let (mut host, owner) = sfall_host();
+    let id = with_use_script(&mut host, owner);
+    if cells[2].contains("critter_p_proc") {
+        // Events 1, 12, 22 and 23 never run it, and neither does a procedure
+        // the script does not have.
+        registered(&mut host, HOOK_STDPROCEDURE, &member(6, "rets=[-1]"));
+        for event in [
+            ScriptEvent::Start,
+            ScriptEvent::Critter,
+            ScriptEvent::Timed,
+            ScriptEvent::MapUpdate,
+            ScriptEvent::Talk,
+        ] {
+            host.dispatch(request(id, event)).unwrap();
+        }
+        assert_eq!(saw(&host, HOOK_STDPROCEDURE).1, 0, "{cells:?}");
+        return;
+    }
+    registered(&mut host, HOOK_STDPROCEDURE, &member(6, cells[3]));
+    let (caller, target) = (host.world.player, item(&mut host, 0));
+    let mut use_request = request(id, ScriptEvent::Use);
+    (use_request.source, use_request.target, use_request.fixed) = (caller, target, 0);
+    let result = host.dispatch(use_request).unwrap();
+    let expected = vec![6, owner as i32, caller as i32, 0, target as i32, 0];
+    assert_eq!(saw(&host, HOOK_STDPROCEDURE), (expected, 1), "{cells:?}");
+    let ran = cells[4].starts_with("final=use_p_proc runs");
+    assert_eq!(global(&host, 3) == 1, ran, "{cells:?}");
+    assert!(!result.overridden && !result.pending, "the default follows");
+}
+
 #[test]
 fn hook_40_std_procedure_can_cancel_a_named_request() {
     let row = sfall::hook_row(HOOK_STDPROCEDURE).unwrap();
@@ -1095,36 +1158,9 @@ fn hook_40_std_procedure_can_cancel_a_named_request() {
     );
     let vector = rows("H15");
     assert_eq!(vector.len(), 4);
-    for cells in &vector[..3] {
-        let (mut host, owner) = sfall_host();
-        let id = with_use_script(&mut host, owner);
-        registered(&mut host, HOOK_STDPROCEDURE, &member(6, cells[3]));
-        let (caller, target) = (host.world.player, item(&mut host, 0));
-        let mut use_request = request(id, ScriptEvent::Use);
-        (use_request.source, use_request.target, use_request.fixed) = (caller, target, 9);
-        let result = host.dispatch(use_request).unwrap();
-        let expected = vec![6, owner as i32, caller as i32, 0, target as i32, 9];
-        assert_eq!(saw(&host, HOOK_STDPROCEDURE), (expected, 1), "{cells:?}");
-        let ran = cells[4].starts_with("final=use_p_proc runs");
-        assert_eq!(global(&host, 3) == 1, ran, "{cells:?}");
-        assert!(!result.overridden && !result.pending, "the default follows");
+    for cells in &vector {
+        h15_row(cells);
     }
-    // H15 step 4: events 1, 12, 22 and 23 never run it, and neither does a
-    // procedure the script does not have.
-    assert!(vector[3][2].contains("critter_p_proc"));
-    let (mut host, owner) = sfall_host();
-    let id = with_use_script(&mut host, owner);
-    registered(&mut host, HOOK_STDPROCEDURE, &member(6, "rets=[-1]"));
-    for event in [
-        ScriptEvent::Start,
-        ScriptEvent::Critter,
-        ScriptEvent::Timed,
-        ScriptEvent::MapUpdate,
-        ScriptEvent::Talk,
-    ] {
-        host.dispatch(request(id, event)).unwrap();
-    }
-    assert_eq!(saw(&host, HOOK_STDPROCEDURE).1, 0);
 }
 
 /// A selected encounter on map 0 of the fixture tables, table 0 and entry
@@ -1136,6 +1172,13 @@ fn encounter_host(rets: &str) -> WorldHost<TestAssets> {
     state.position = [10, 10];
     host.world.fallout2 = Some(Box::new(state));
     host.assets.any_map = Some(crate::world::empty_map());
+    // The critters of the entry's groups.
+    for pid in [0x0100_0001, 0x0100_0002, 0x0100_0003, 0x0100_0004] {
+        let mut prototype = (*crate::test_support::npc_prototype()).clone();
+        prototype.pid = pid;
+        let prototype = std::sync::Arc::new(prototype);
+        host.assets.prototypes.insert(pid, prototype);
+    }
     host.world.gvars = Some(vec![0; 8]);
     host.world.clock.set(crate::fallout2::START_TICKS);
     let rets = rets.replace("41", "1").replace("42", "2");
@@ -1144,6 +1187,58 @@ fn encounter_host(rets: &str) -> WorldHost<TestAssets> {
 }
 /// §8.5's draws for entry 1: the check, the special gate, the pick.
 const ENTRY_1: [i32; 5] = [22, 3, 3, 3, 30];
+
+/// Whether groups spawned: objects beyond the map's own.
+fn groups(host: &WorldHost<TestAssets>) -> usize {
+    host.world
+        .iter()
+        .filter(|(reference, _)| *reference != host.world.player)
+        .count()
+}
+/// One row of H16.
+fn h16_row(cells: &[&str]) {
+    let mut host = encounter_host(cells[3]);
+    match cells[1] {
+        "1" | "2" | "3" | "4" => {
+            host.world.rng.script(&ENTRY_1);
+            let selected = host.fallout2_check_encounter().unwrap();
+            let expected = vec![0, 0, 0, 0, 1];
+            assert_eq!(saw(&host, HOOK_ENCOUNTER), (expected, 1), "{cells:?}");
+            // The counter stands when the hook cancels (§6.17).
+            let state = host.world.fallout2.as_deref().unwrap();
+            assert_eq!(state.counter(0, 1), 0, "{cells:?}");
+            let final_cell = cells[4];
+            let Some(selected) = selected else {
+                assert!(
+                    final_cell.starts_with("final=travel continues"),
+                    "{cells:?}"
+                );
+                return;
+            };
+            let map = if final_cell.contains("41") { 1 } else { 0 };
+            assert_eq!(selected.map, map, "{cells:?}");
+            let spawned = !final_cell.contains("no groups");
+            assert_eq!(selected.forced.is_none(), spawned, "{cells:?}");
+            host.world.rng.script(&[0, 50, 2, 3]);
+            host.fallout2_enter_encounter(selected).unwrap();
+            assert_eq!(host.world.rng.unused_script().is_empty(), spawned);
+            assert_eq!(groups(&host) > 0, spawned, "{cells:?}");
+        }
+        "5" | "6" => {
+            let map = if cells[4].contains("42") { 2 } else { 0 };
+            assert_eq!(host.hook_map_entry(0), map, "{cells:?}");
+            let expected = vec![1, 0, 0, -1, -1];
+            assert_eq!(saw(&host, HOOK_ENCOUNTER), (expected, 1), "{cells:?}");
+        }
+        _ => {
+            // A forced encounter runs no chain.
+            host.world.sfall.as_deref_mut().unwrap().forced_map = 2;
+            let selected = host.fallout2_check_encounter().unwrap().unwrap();
+            assert_eq!(selected.map, 2);
+            assert_eq!(saw(&host, HOOK_ENCOUNTER).1, 0, "{cells:?}");
+        }
+    }
+}
 
 #[test]
 fn hook_43_encounter_replaces_cancels_or_keeps_only_the_map() {
@@ -1154,39 +1249,33 @@ fn hook_43_encounter_replaces_cancels_or_keeps_only_the_map() {
     );
     let vector = rows("H16");
     assert_eq!(vector.len(), 7);
-    for (cells, expected) in vector[..4].iter().zip([
-        Some((0, None)),
-        Some((1, None)),
-        None,
-        Some((1, Some(crate::sfall::encounter_flag::NO_ICON))),
-    ]) {
-        let mut host = encounter_host(cells[3]);
-        let world = &mut host.world;
-        world.rng.script(&ENTRY_1);
-        let selected = host.fallout2_check_encounter().unwrap();
-        assert_eq!(
-            saw(&host, HOOK_ENCOUNTER),
-            (vec![0, 0, 0, 0, 1], 1),
-            "{cells:?}"
-        );
-        assert_eq!(
-            selected.map(|selected| (selected.map, selected.forced)),
-            expected,
-            "{cells:?}"
-        );
-        // The counter stands when the hook cancels (§6.17).
-        let state = host.world.fallout2.as_deref().unwrap();
-        assert_eq!(state.counter(0, 1), 0, "{cells:?}");
+    for cells in &vector {
+        h16_row(cells);
     }
-    // Event 1: the drop to terrain, with ret0 42, and -1 ignored.
-    for (cells, map) in vector[4..6].iter().zip([2, 0]) {
-        let mut host = encounter_host(cells[3]);
-        assert_eq!(host.hook_map_entry(0), map, "{cells:?}");
-        assert_eq!(
-            saw(&host, HOOK_ENCOUNTER),
-            (vec![1, 0, 0, -1, -1], 1),
-            "{cells:?}"
-        );
+    // Event 1 from an area's entrance: the chain sees the entrance's map,
+    // and a replaced map loads, by the header's own entrance.
+    let host = encounter_host("rets=[None]");
+    let entrance = {
+        let state = host.world.fallout2.as_deref().unwrap();
+        state.entrance_of(0, 0).unwrap()
+    };
+    let wanted = if entrance.map == 1 { 2 } else { 1 };
+    let mut host = encounter_host(&format!("rets=[{wanted}]"));
+    let mut replaced = crate::world::empty_map();
+    replaced.header.entry_orientation = 5;
+    let path = host.fallout2_map_path(wanted).unwrap();
+    host.assets.maps.insert(path, replaced);
+    host.fallout2_enter_entrance(0, 0).unwrap();
+    let expected = vec![1, entrance.map as i32, 0, -1, -1];
+    assert_eq!(saw(&host, HOOK_ENCOUNTER), (expected, 1));
+    assert_eq!(
+        host.world.map.header.entry_orientation, 5,
+        "the map replaced"
+    );
+    // Event 1 from the drop to terrain.
+    let mut host = encounter_host("rets=[-1]");
+    if host.fallout2_drop_to_terrain().unwrap() {
+        assert_eq!(saw(&host, HOOK_ENCOUNTER).1, 1);
     }
     // A map with no row is ignored, with a diagnostic.
     let mut host = encounter_host("rets=[9999]");
@@ -1196,12 +1285,24 @@ fn hook_43_encounter_replaces_cancels_or_keeps_only_the_map() {
             .iter()
             .any(|line| line.contains("no row"))
     );
-    // H16 step 7: a forced encounter runs no chain.
-    let mut host = encounter_host("rets=[-1]");
-    host.world.sfall.as_deref_mut().unwrap().forced_map = 2;
-    let selected = host.fallout2_check_encounter().unwrap().unwrap();
-    assert_eq!(selected.map, 2);
-    assert_eq!(saw(&host, HOOK_ENCOUNTER).1, 0);
+}
+
+/// One row of H17.
+fn h17_row(cells: &[&str]) {
+    let (mut host, _) = sfall_host();
+    host.world.gvars = Some(vec![0; 16]);
+    if cells[4].starts_with("final=no chain runs") {
+        // An invalid index runs nothing.
+        registered(&mut host, HOOK_SETGLOBALVAR, &member(2, "rets=[None]"));
+        run(&mut host, &[I(99), I(5), W(0x80c6)]);
+        assert_eq!(saw(&host, HOOK_SETGLOBALVAR).1, 0, "{cells:?}");
+        return;
+    }
+    registered(&mut host, HOOK_SETGLOBALVAR, &member(2, cells[3]));
+    run(&mut host, &[I(12), I(5), W(0x80c6)]);
+    assert_eq!(saw(&host, HOOK_SETGLOBALVAR), (vec![12, 5], 1), "{cells:?}");
+    let stored = host.world.gvars.as_ref().unwrap()[12];
+    assert_eq!(format!("final=GVAR 12 = {stored}; order=m"), cells[4]);
 }
 
 #[test]
@@ -1240,6 +1341,245 @@ fn hook_29_set_global_var_can_replace_the_value_stored() {
     run(&mut host, &[I(3), I(7), W(0x80c6)]);
     assert_eq!(host.world.gvars.as_ref().unwrap()[3], 7);
     assert_eq!(saw(&host, HOOK_SETGLOBALVAR).1, 0);
+}
+
+/// Each member's trace digit in the vectors' `order=` lists.
+fn trace_of(order: &str) -> i32 {
+    order
+        .trim_start_matches("order=")
+        .split(',')
+        .map(|member| match member {
+            "ModA" | "r1" | "early" | "m" => 1,
+            "ModB" | "r2" | "late" => 2,
+            "hs_tohit" => 3,
+            "s1" => 4,
+            "s2" => 5,
+            other => panic!("{other}"),
+        })
+        .fold(0, |trace, digit| trace * 10 + digit)
+}
+/// `final=...; order=...`: the two cells of a row's column.
+fn after(cells: &[&str]) -> (&'static str, &'static str) {
+    let cell: &'static str = Box::leak(cells[4].to_owned().into_boxed_str());
+    let (value, order) = cell.split_once("; ").unwrap();
+    (value.trim_start_matches("final="), order)
+}
+/// The returns `rets=[...]` lists, as a member writes them.
+fn written(cells: &[&str]) -> Vec<Op> {
+    member(0, cells[3])[6..].to_vec()
+}
+/// H1 and H2: the published example. `ModA` divides by 2 and `ModB`
+/// multiplies by 1.5, so the last member's type shows in the return.
+fn h1_h2_row(cells: &[&str]) {
+    let halve = [
+        GET_ARG,
+        I(2),
+        DIVIDE,
+        DUPLICATE,
+        SET_RETURN,
+        I(0),
+        SWAP,
+        SET_ARG,
+    ];
+    let raise = [
+        GET_ARG,
+        F(1.5),
+        MULTIPLY,
+        DUPLICATE,
+        SET_RETURN,
+        I(0),
+        SWAP,
+        SET_ARG,
+    ];
+    let body = |digit, ops: &[Op]| {
+        let mut body = traced(digit);
+        body.extend_from_slice(ops);
+        body
+    };
+    let (mod_a, mod_b) = (body(1, &halve), body(2, &raise));
+    let (first, second) = if cells[2].contains("registered ModA,ModB") {
+        (&mod_a, &mod_b)
+    } else {
+        (&mod_b, &mod_a)
+    };
+    let (mut host, _) = sfall_host();
+    let register = [I(HOOK_TOHIT), I(2), REGISTER_PROC];
+    install(&mut host, "gl_0.int", script(&register, &[("m", first)]));
+    install(&mut host, "gl_1.int", script(&register, &[("m", second)]));
+    set_up(&mut host);
+    let rets = host.run_hook(HOOK_TOHIT, ints(&[100, 0, 0, 3, 0, 0, 1, 100]));
+    let (value, order) = after(cells);
+    assert_eq!(
+        rets.unwrap()[0],
+        Some(SfallValue::Int(value.parse().unwrap()))
+    );
+    assert_eq!(global(&host, 1), trace_of(order), "{cells:?}");
+}
+fn h3_row(cells: &[&str]) {
+    let hook = HOOK_TOHIT;
+    let (mut host, _) = sfall_host();
+    let register = |word| [I(hook), I(2), word];
+    for (name, digit, word) in [
+        ("gl_0r1.int", 1, REGISTER_PROC),
+        ("gl_1r2.int", 2, REGISTER_PROC),
+        ("gl_2s1.int", 4, REGISTER_SPEC),
+        ("gl_3s2.int", 5, REGISTER_SPEC),
+    ] {
+        let body = traced(digit);
+        install(&mut host, name, script(&register(word), &[("m", &body)]));
+    }
+    let body = traced(3);
+    install(&mut host, "hs_tohit.int", script(&body, &[]));
+    set_up(&mut host);
+    if cells[1] == "2" {
+        let r2 = host.global_for_test(1);
+        host.unregister_for_test(hook, r2);
+    }
+    host.world.sfall.as_mut().unwrap().globals.clear();
+    let rets = host.run_hook(hook, ints(&[50])).unwrap();
+    assert_eq!(rets, [None], "{cells:?}");
+    let (value, order) = after(cells);
+    assert_eq!(value, "50", "the engine's value stands");
+    assert_eq!(global(&host, 1), trace_of(order), "{cells:?}");
+}
+/// H4's hook is tier P2, so no chain of it runs (§6.19). The composition it
+/// pins is the chain's, and `HOOK_COMBATDAMAGE` has the returns to show it.
+fn h4_row(cells: &[&str]) {
+    let hook = HOOK_COMBATDAMAGE;
+    let (mut host, _) = sfall_host();
+    let mut early = traced(1);
+    early.extend([I(10), SET_RETURN, I(20), SET_RETURN]);
+    let mut late = traced(2);
+    late.extend([I(30), SET_RETURN]);
+    let register = [I(hook), I(2), REGISTER_SPEC];
+    install(&mut host, "gl_0.int", script(&register, &[("m", &early)]));
+    install(&mut host, "gl_1.int", script(&register, &[("m", &late)]));
+    set_up(&mut host);
+    let rets = host.run_hook(hook, ints(&[5, 6, 7, 8, 9])).unwrap();
+    assert_eq!(after(cells).0, "[30, 20]");
+    assert_eq!(
+        rets[..2],
+        [Some(SfallValue::Int(30)), Some(SfallValue::Int(20))]
+    );
+    assert_eq!(global(&host, 1), trace_of(after(cells).1), "{cells:?}");
+}
+fn h5_h6_row(cells: &[&str]) {
+    let hook = HOOK_MOVECOST;
+    let (body, args): (&[Op], i32) = if cells[0] == "H5" {
+        (&[I(1), SET_RETURN, I(2), SET_RETURN], 0)
+    } else {
+        (&[GET_ARG, DISCARD, GET_ARG, SET_RETURN], 11)
+    };
+    let mut host = hooked(hook, body);
+    let rets = host.run_hook(hook, ints(&[args])).unwrap();
+    let expected: i32 = after(cells).0.trim_matches(['[', ']']).parse().unwrap();
+    assert_eq!(rets, [Some(SfallValue::Int(expected))], "{cells:?}");
+}
+fn h7_row(cells: &[&str]) {
+    let (mut host, [attacker, _, defender, _]) = attack_host(HOOK_TOHIT, &written(cells));
+    let attack = host
+        .world
+        .attack_profile(
+            attacker,
+            defender,
+            0,
+            crate::critical::location::TORSO,
+            false,
+        )
+        .unwrap();
+    let chance = host
+        .hook_hit_chance(attacker, defender, &attack, true, None)
+        .unwrap();
+    // With no return the engine's value stays, whatever the fixture's is.
+    let expected = if cells[3] == "rets=[None]" {
+        attack.hit_chance(true).unwrap()
+    } else {
+        after(cells).0.parse().unwrap()
+    };
+    assert_eq!(chance, expected, "{cells:?}");
+}
+fn h8_row(cells: &[&str]) {
+    let (mut host, [attacker, _, defender, _]) = attack_host(HOOK_AFTERHITROLL, &written(cells));
+    let mut attack = host
+        .world
+        .attack_profile(attacker, defender, 0, 3, false)
+        .unwrap();
+    let mut target = defender;
+    let mut rng = host.world.rng.clone();
+    let roll = host
+        .hook_after_roll(attacker, &mut target, &mut attack, 2, &mut rng)
+        .unwrap();
+    assert_eq!(
+        after(cells).0,
+        format!("roll={roll},part={},target=T", attack.location)
+    );
+    assert_eq!(target, defender, "{cells:?}");
+}
+fn h9_row(cells: &[&str]) {
+    let (mut host, [_, merchant, ..]) = attack_host(HOOK_BARTERPRICE, &written(cells));
+    let session = host.begin_barter(merchant).unwrap();
+    let plain = host.barter_price(&session);
+    let offer = host.world.inventory_value(session.offer);
+    let (price, value) = host.hooked_barter(&session, true);
+    // The row's 150 and 120 stand for the engine's own values.
+    let shown = format!(
+        "price={},offer={}",
+        if price == plain { 150 } else { price },
+        if value == offer { 120 } else { value }
+    );
+    assert_eq!(after(cells).0, shown, "{cells:?}");
+}
+fn h10_row(cells: &[&str]) {
+    let moves = hooked(HOOK_INVENTORYMOVE, &written(cells)).sfall_inventory_move(1, 7, 0);
+    assert_eq!(after(cells).0 == "move proceeds", moves, "{cells:?}");
+}
+fn h11_row(cells: &[&str]) {
+    // ret0 is the row's value on a press, and 0 on a release.
+    let ret = cells[2]
+        .split_once("ret0=")
+        .and_then(|(_, rest)| rest.split(' ').next())
+        .unwrap();
+    let press: i32 = if cells[2].contains("release") {
+        48
+    } else {
+        ret.parse().unwrap()
+    };
+    let body = [GET_ARG, I(press), MULTIPLY, SET_RETURN];
+    let mut host = hooked(HOOK_KEYPRESS, &body);
+    let pressed = host.sfall_key(true, 30, 65);
+    let logical = if cells[2].contains("release") {
+        host.sfall_key(false, 30, 65)
+    } else {
+        pressed
+    };
+    assert!(
+        after(cells)
+            .0
+            .starts_with(&format!("logical key {logical}")),
+        "{cells:?}"
+    );
+}
+/// One row of an H vector, or of SS2, against the engine.
+pub(crate) fn hook_vector_row(cells: &[&str]) {
+    match cells[0] {
+        "H1" | "H2" => h1_h2_row(cells),
+        "H3" => h3_row(cells),
+        "H4" => h4_row(cells),
+        "H5" | "H6" => h5_h6_row(cells),
+        "H7" => h7_row(cells),
+        "H8" => h8_row(cells),
+        "H9" => h9_row(cells),
+        "H10" => h10_row(cells),
+        "H11" => h11_row(cells),
+        "H12" => h12_row(cells),
+        "H13" => h13_row(cells),
+        "H14" => h14_row(cells),
+        "H15" => h15_row(cells),
+        "H16" => h16_row(cells),
+        "H17" => h17_row(cells),
+        "SS2" => ss2_row(cells),
+        other => panic!("no hook vector {other}"),
+    }
 }
 
 #[test]

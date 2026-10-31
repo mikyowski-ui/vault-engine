@@ -3,7 +3,13 @@
 use crate::{
     WorldState,
     sfall::{GlobalKey, SfallWorld},
+    spec024_hook_tests::hook_vector_row,
+    spec024_rows_tests::RowSession,
     state_hash::fnv1a64,
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    panic::{AssertUnwindSafe, catch_unwind},
 };
 use vault_vm::{
     sfall::SfallValue,
@@ -203,83 +209,308 @@ fn f_world(store: ArrayStore) -> SfallWorld {
     world
 }
 
-#[test]
-fn t3_every_array_vector_gives_its_push_and_its_state() {
-    let mut store = ArrayStore::default();
-    let mut vector = String::new();
-    let mut sidecar = Vec::new();
-    let mut rows = 0;
-    for line in VECTORS.lines().skip(1) {
-        let cells: Vec<&str> = line.split('\t').collect();
-        let [name, step_name, operation, push, state_after, _] = cells[..] else {
-            panic!("{line}");
-        };
-        if !matches!(name, "A" | "B" | "C" | "D" | "E" | "F" | "F2" | "F3") {
-            continue;
+/// One array vector row, on the walk's store.
+fn array_row(walk: &mut Walk, cells: &[&str]) {
+    let [name, step_name, operation, push, state_after, _] = cells[..] else {
+        panic!("{cells:?}");
+    };
+    let store = &mut walk.store;
+    let world = f_world(store.clone());
+    match step_name {
+        "sidecar" => {
+            let bytes = hex(push);
+            assert_eq!(world.sidecar(), bytes, "{cells:?}");
+            assert_eq!(state_after, format!("bytes={}", bytes.len()));
+            walk.sidecar = bytes;
+            return;
         }
-        if name != vector {
-            vector = name.to_owned();
-            store = ArrayStore::default();
+        "sidecar-fnv" => {
+            assert_eq!(
+                format!("{:016X}", fnv1a64(&walk.sidecar)),
+                push,
+                "{cells:?}"
+            );
+            return;
         }
-        rows += 1;
-        let world = f_world(store.clone());
-        match step_name {
-            "sidecar" => {
-                let bytes = hex(push);
-                assert_eq!(world.sidecar(), bytes, "{line}");
-                assert_eq!(state_after, format!("bytes={}", bytes.len()));
-                sidecar = bytes;
-                continue;
+        "stream" => {
+            let streamed = if name == "F3" {
+                SfallWorld::default().extension_stream()
+            } else {
+                world.extension_stream()
+            };
+            assert_eq!(streamed, hex(push), "{cells:?}");
+            return;
+        }
+        "stream-after-step" => {
+            let mut after = world;
+            after.arrays.end_of_step();
+            assert_eq!(after.extension_stream(), hex(push), "{cells:?}");
+            return;
+        }
+        "sfall_hash" | "sfall_hash-after-step" => {
+            let mut hashed = if name == "F3" {
+                SfallWorld::default()
+            } else {
+                world
+            };
+            if step_name != "sfall_hash" {
+                hashed.arrays.end_of_step();
             }
-            "sidecar-fnv" => {
-                assert_eq!(format!("{:016X}", fnv1a64(&sidecar)), push, "{line}");
-                continue;
-            }
-            "stream" => {
-                let streamed = if name == "F3" {
-                    SfallWorld::default().extension_stream()
-                } else {
-                    world.extension_stream()
-                };
-                assert_eq!(streamed, hex(push), "{line}");
-                continue;
-            }
-            "stream-after-step" => {
-                let mut after = world;
-                after.arrays.end_of_step();
-                assert_eq!(after.extension_stream(), hex(push), "{line}");
-                continue;
-            }
-            "sfall_hash" | "sfall_hash-after-step" => {
-                let mut hashed = if name == "F3" {
-                    SfallWorld::default()
-                } else {
-                    world
-                };
-                if step_name != "sfall_hash" {
-                    hashed.arrays.end_of_step();
+            let hash = fnv1a64(&hashed.extension_stream());
+            assert_eq!(format!("{hash:016X}"), push, "{cells:?}");
+            return;
+        }
+        _ => {}
+    }
+    if operation == "load the slot" {
+        *store = SfallWorld::from_sidecar(&walk.sidecar).unwrap().arrays;
+    } else {
+        assert_eq!(step(store, operation), push, "{cells:?}");
+    }
+    // Vector D's rows show the array they touch; the rest show all.
+    if name == "D" {
+        let id: u32 = state_after[1..].split(' ').next().unwrap().parse().unwrap();
+        let array = (&id, &store.arrays()[&id]);
+        assert_eq!(shown_array(array), state_after, "{cells:?}");
+    } else {
+        assert_eq!(state(store), state_after, "{cells:?}");
+    }
+}
+/// One row of MG1, on the state the walk migrated.
+fn migration_row(walk: &mut Walk, cells: &[&str]) {
+    let [_, step_name, _, push, state_after, _] = cells[..] else {
+        panic!("{cells:?}");
+    };
+    match step_name {
+        "sidecar-r1" => {
+            walk.migrated = Some(SfallWorld::from_sidecar(&hex(push)).unwrap());
+            assert_eq!(state_after, format!("bytes={}", hex(push).len()));
+        }
+        "sidecar-r1-empty" => {
+            walk.migrated = Some(SfallWorld::from_sidecar(&hex(push)).unwrap());
+            assert_eq!(walk.migrated, Some(SfallWorld::default()));
+        }
+        step_name => {
+            let world = walk.migrated.as_mut().expect("the row before it loaded");
+            match step_name {
+                "2" => assert_eq!(state(&world.arrays), state_after),
+                "defaults" => assert_eq!(
+                    format!(
+                        "next unique ID {:#x}; forced map {}; forced flags {}",
+                        world.next_unique, world.forced_map, world.forced_flags
+                    ),
+                    push
+                ),
+                "stream" => assert_eq!(world.extension_stream(), hex(push)),
+                "sidecar" => {
+                    walk.sidecar = world.sidecar();
+                    assert_eq!(walk.sidecar, hex(push));
+                    assert_eq!(state_after, format!("bytes={}", walk.sidecar.len()));
                 }
-                let hash = fnv1a64(&hashed.extension_stream());
-                assert_eq!(format!("{hash:016X}"), push, "{line}");
-                continue;
+                "sidecar-fnv" => {
+                    assert_eq!(format!("{:016X}", fnv1a64(&walk.sidecar)), push);
+                }
+                "sfall_hash" | "sfall_hash-empty" => {
+                    let hash = fnv1a64(&world.extension_stream());
+                    assert_eq!(format!("{hash:016X}"), push);
+                }
+                other => {
+                    assert_eq!(step(&mut world.arrays, cells[2]), push, "{other}");
+                    assert_eq!(state(&world.arrays), state_after);
+                }
             }
-            _ => {}
-        }
-        if operation == "load the slot" {
-            store = SfallWorld::from_sidecar(&sidecar).unwrap().arrays;
-        } else {
-            assert_eq!(step(&mut store, operation), push, "{line}");
-        }
-        // Vector D's rows show the array they touch; the rest show all.
-        if name == "D" {
-            let id: u32 = state_after[1..].split(' ').next().unwrap().parse().unwrap();
-            let array = (&id, &store.arrays()[&id]);
-            assert_eq!(shown_array(array), state_after, "{line}");
-        } else {
-            assert_eq!(state(&store), state_after, "{line}");
         }
     }
-    assert_eq!(rows, 74);
+}
+/// One row of MG2: its bytes are refused for its reason.
+fn refusal_row(cells: &[&str]) {
+    let error = SfallWorld::from_sidecar(&hex(cells[3])).unwrap_err();
+    let reason = cells[4].strip_prefix("refused: ").unwrap();
+    let expected = match error {
+        SidecarError::Revision(revision) => format!("unknown revision {revision}"),
+        SidecarError::Truncated => "truncated".to_owned(),
+        SidecarError::Trailing(_) => "trailing bytes".to_owned(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(reason, expected, "{cells:?}");
+}
+
+/// What reads a vector group's rows. A group with no reader fails
+/// [`every_vector_group_has_a_reader`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reader {
+    Arrays,
+    Migration,
+    Refusal,
+    Hooks,
+    Files,
+    UniqueIds,
+    Messages,
+    Tags,
+    Explosives,
+}
+fn reader_of(group: &str) -> Option<Reader> {
+    Some(match group {
+        "A" | "B" | "C" | "D" | "E" | "F" | "F2" | "F3" | "SS1" => Reader::Arrays,
+        "MG1" => Reader::Migration,
+        "MG2" => Reader::Refusal,
+        "H1" | "H2" | "H3" | "H4" | "H5" | "H6" | "H7" | "H8" | "H9" | "H10" | "H11" | "H12"
+        | "H13" | "H14" | "H15" | "H16" | "H17" | "SS2" => Reader::Hooks,
+        "V1" | "V2" | "V3" | "V4" => Reader::Files,
+        "U1" => Reader::UniqueIds,
+        "M1" => Reader::Messages,
+        "T1" => Reader::Tags,
+        "E1" => Reader::Explosives,
+        _ => return None,
+    })
+}
+/// A walk's state, which a vector's rows carry from one to the next. V1 to
+/// V4 are one session: V3 and V4 name V1's handle.
+#[derive(Default)]
+struct Walk {
+    group: String,
+    store: ArrayStore,
+    sidecar: Vec<u8>,
+    migrated: Option<SfallWorld>,
+    session: Option<RowSession>,
+}
+impl Walk {
+    fn row(&mut self, reader: Reader, cells: &[&str]) {
+        let name = cells[0];
+        if name != self.group {
+            // V1 to V4 keep their one session.
+            if !(name.starts_with('V') && self.group.starts_with('V')) {
+                self.session = None;
+            }
+            self.group = name.to_owned();
+            self.store = ArrayStore::default();
+        }
+        match reader {
+            Reader::Arrays => array_row(self, cells),
+            Reader::Migration => migration_row(self, cells),
+            Reader::Refusal => refusal_row(cells),
+            Reader::Hooks => hook_vector_row(cells),
+            Reader::Files
+            | Reader::UniqueIds
+            | Reader::Messages
+            | Reader::Tags
+            | Reader::Explosives => self
+                .session
+                .get_or_insert_with(|| RowSession::for_group(cells[0]))
+                .row(cells),
+        }
+    }
+}
+/// Every row of the groups `keep` keeps, in file order: the failing steps,
+/// each by its vector and step, and the rows run per group. A failure does
+/// not stop the walk, so one mismatch cannot hide a later one.
+fn walk(keep: impl Fn(&str) -> bool) -> (Vec<String>, BTreeMap<String, usize>) {
+    let mut state = Walk::default();
+    let mut failures = Vec::new();
+    let mut counts = BTreeMap::new();
+    for line in VECTORS.lines().skip(1) {
+        let cells: Vec<&str> = line.split('\t').collect();
+        let name = cells[0];
+        if !keep(name) {
+            continue;
+        }
+        *counts.entry(name.to_owned()).or_insert(0) += 1;
+        let Some(reader) = reader_of(name) else {
+            failures.push(format!("{name}: no reader"));
+            continue;
+        };
+        let ran = catch_unwind(AssertUnwindSafe(|| state.row(reader, &cells)));
+        if let Err(panic) = ran {
+            let text = panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+                .unwrap_or_default();
+            failures.push(format!("{name} step {}: {text}", cells[1]));
+        }
+    }
+    (failures, counts)
+}
+fn assert_walked(failures: Vec<String>) {
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn t3_every_array_vector_gives_its_push_and_its_state() {
+    let (failures, counts) = walk(|_| true);
+    assert_walked(failures);
+    assert_eq!(counts.values().sum::<usize>(), 182, "{counts:?}");
+    for (group, rows) in [
+        ("A", 12),
+        ("B", 18),
+        ("C", 4),
+        ("D", 10),
+        ("E", 9),
+        ("F", 16),
+        ("F2", 3),
+        ("F3", 2),
+        ("V1", 5),
+        ("V2", 1),
+        ("V3", 3),
+        ("V4", 1),
+        ("U1", 5),
+        ("M1", 8),
+        ("T1", 6),
+        ("E1", 6),
+        ("MG1", 10),
+        ("MG2", 4),
+        ("SS1", 11),
+        ("SS2", 4),
+    ] {
+        assert_eq!(counts.get(group), Some(&rows), "{group}");
+    }
+    let hooks: usize = (1..=17).map(|n| counts[&format!("H{n}")]).sum();
+    assert_eq!(hooks, 44);
+}
+
+/// A new group in the TSV has no reader until a test reads it.
+#[test]
+fn every_vector_group_has_a_reader() {
+    let groups: BTreeSet<&str> = VECTORS
+        .lines()
+        .skip(1)
+        .map(|line| line.split('\t').next().unwrap())
+        .collect();
+    let unread: Vec<&&str> = groups
+        .iter()
+        .filter(|group| reader_of(group).is_none())
+        .collect();
+    assert_eq!(unread, Vec::<&&str>::new());
+    assert!(groups.len() >= 37, "{groups:?}");
+    // The walk says so for a row of such a group too.
+    assert_eq!(reader_of("Z1"), None);
+}
+
+#[test]
+fn t9_vectors_v_u_m_t_e_compare_the_push_and_the_state_step_by_step() {
+    let (failures, counts) =
+        walk(|group| matches!(group, "V1" | "V2" | "V3" | "V4" | "U1" | "M1" | "T1" | "E1"));
+    assert_walked(failures);
+    assert_eq!(counts.values().sum::<usize>(), 35);
+}
+
+#[test]
+fn t15_mg1_loads_to_its_state_its_hash_and_its_next_save_and_mg2_refuses() {
+    let (failures, counts) = walk(|group| matches!(group, "MG1" | "MG2"));
+    assert_walked(failures);
+    assert_eq!(counts.values().sum::<usize>(), 14);
+    // The slot's side of this test is in `persistence_tests`.
+    assert_eq!(
+        vector_cell("MG1", "sfall_hash-empty", 3),
+        vector_cell("F3", "sfall_hash", 3)
+    );
+}
+
+#[test]
+fn t16_ss1_and_ss2_compare_the_push_the_state_the_arguments_and_the_diagnostics() {
+    let (failures, counts) = walk(|group| matches!(group, "SS1" | "SS2"));
+    assert_walked(failures);
+    assert_eq!(counts.values().sum::<usize>(), 15);
 }
 
 #[test]

@@ -115,6 +115,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 "sfall mode exists only under the fallout2 profile".into(),
             ));
         }
+        self.sfall_clear_tables();
         self.sfall = Some(Box::default());
         self.world.sfall = Some(Box::<SfallWorld>::default());
         self.assets.set_sfall_scripts(true);
@@ -1060,7 +1061,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// The file `name`, read once for the session: the VFS layers, then the
     /// writable folder.
-    fn ini_file(&mut self, name: &str) -> Option<&IniFile> {
+    pub(crate) fn ini_file(&mut self, name: &str) -> Option<&IniFile> {
         let sfall = self.sfall.as_deref_mut()?;
         if !sfall.ini.contains_key(name) {
             let bytes = self.assets.resource(name).ok().or_else(|| {

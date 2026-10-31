@@ -1977,6 +1977,31 @@ fn spec024_a_sidecar_is_always_written_and_a_vanilla_slot_starts_empty() {
     assert_eq!(written, empty);
 }
 
+/// §4.11: what a save keeps of the promoted rows, through a real slot.
+#[test]
+fn spec024_a_slot_keeps_the_next_unique_id_and_the_pending_encounter() {
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    sfall_on(&mut host);
+    let state = host.world.sfall.as_deref_mut().unwrap();
+    state.next_unique = 0x1000_0009;
+    (state.forced_map, state.forced_flags) = (7, 0x12);
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    let saved = host.world.sfall_hash();
+    let state = host.world.sfall.as_deref_mut().unwrap();
+    state.next_unique = 0x1000_0000;
+    (state.forced_map, state.forced_flags) = (-1, 0);
+    assert_ne!(host.world.sfall_hash(), saved, "both are hashed");
+    host.load_game(root.path(), 1).unwrap();
+    let state = host.world.sfall.as_deref().unwrap();
+    assert_eq!(state.next_unique, 0x1000_0009);
+    assert_eq!((state.forced_map, state.forced_flags), (7, 0x12));
+    assert_eq!(host.world.sfall_hash(), saved);
+}
+
 /// Every file of a slot folder, by name.
 fn slot_files(slot: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     fs::read_dir(slot)

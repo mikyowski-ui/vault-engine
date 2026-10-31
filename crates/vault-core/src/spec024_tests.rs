@@ -2,6 +2,7 @@
 //! oracle tables and the stack vectors.
 use crate::{
     CharacterSheet, GameProfile, WorldEffect, WorldHost, WorldState,
+    assets::WorldAssets,
     fallout2::Fallout2World,
     fixture_state as fixture,
     sfall_ini::IniFiles,
@@ -13,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use vault_formats::map::{ObjectDetail, ObjectState};
 use vault_vm::{IntProgram, RunOutcome, Value, Vm, VmError, WordSet, sfall};
 
-const ORACLE: &str = include_str!("../../../oracle/SPEC-024/sfall-opcodes.tsv");
+pub(crate) const ORACLE: &str = include_str!("../../../oracle/SPEC-024/sfall-opcodes.tsv");
 
 pub(crate) fn sfall_host() -> (WorldHost<TestAssets>, ObjectRef) {
     let world = WorldState::new(CharacterSheet::default(), 1).unwrap();
@@ -83,7 +84,7 @@ pub(crate) fn literal_offset(program: &IntProgram, text: &[u8]) -> u32 {
         .find(|offset| program.literal(*offset) == Some(text))
         .unwrap_or_else(|| panic!("no literal {text:?}"))
 }
-pub(crate) fn run(host: &mut WorldHost<TestAssets>, ops: &[Op]) -> Run {
+pub(crate) fn run<A: WorldAssets>(host: &mut WorldHost<A>, ops: &[Op]) -> Run {
     let strings: Vec<&[u8]> = ops
         .iter()
         .filter_map(|op| match op {
@@ -116,7 +117,7 @@ pub(crate) fn run(host: &mut WorldHost<TestAssets>, ops: &[Op]) -> Run {
     let result = vm.run(host, 100_000);
     Run { vm, result }
 }
-pub(crate) fn diagnostics(host: &mut WorldHost<TestAssets>) -> Vec<String> {
+pub(crate) fn diagnostics<A: WorldAssets>(host: &mut WorldHost<A>) -> Vec<String> {
     host.world
         .effects
         .drain(..)

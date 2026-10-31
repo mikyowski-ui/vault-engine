@@ -530,8 +530,11 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     fn listed_message_file(&mut self, file: i32) -> Option<String> {
         if self.promoted()?.listed.is_none() {
-            let list = self.ini_any_section("ddraw.ini", "ExtraGameMsgFileList");
-            let files = list.as_deref().map(listed_files).unwrap_or_default();
+            let list = self
+                .ini_file("ddraw.ini")
+                .and_then(|file| file.get("Misc", "ExtraGameMsgFileList"))
+                .map(listed_files);
+            let files = list.unwrap_or_default();
             self.promoted()?.listed = Some(files);
         }
         self.promoted()?.listed.as_ref()?.get(&file).cloned()
@@ -735,6 +738,15 @@ impl<A: WorldAssets> WorldHost<A> {
     pub(crate) fn script_close_for_test(&mut self) -> bool {
         self.signal_close_game();
         self.sfall.is_some()
+    }
+    /// Virtual file `handle`'s position and bytes.
+    pub(crate) fn virtual_file_for_test(&mut self, handle: i32) -> (usize, Vec<u8>) {
+        let file = self.virtual_file(handle).expect("a handle");
+        (file.position, file.bytes.clone())
+    }
+    /// The ID `add_extra_msg_file` gives next.
+    pub(crate) fn next_message_file_for_test(&mut self) -> i32 {
+        FIRST_ADDED_FILE + self.promoted().expect("sfall mode").added.len() as i32
     }
     pub(crate) fn object_id_for_test(&self, object: ObjectRef) -> i32 {
         self.world.get(object).expect("a live object").raw.id as i32
