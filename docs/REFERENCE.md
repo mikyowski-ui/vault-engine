@@ -346,7 +346,12 @@ session, the Vanilla and enhanced replay logs (frame by frame and by
 digest), and every world file of the gallery, each on the reference path
 and on the instanced path. The CPU executor runs everywhere. The GPU
 variants skip with `skipped: no GPU adapter` unless `VAULT_REQUIRE_GPU=1`,
-and one lock serialises their device creation.
+and one lock serialises their device creation. They skip the same way when
+the device is lost on its first draw, as on the software Direct3D 12 adapter
+of the Windows runners, printing the adapter and the cause. Each test process
+makes that draw once, on a device of its own. Any other failure of that draw,
+such as a shader the backend rejects, fails the tests and names the cause, so
+it cannot pass for a missing GPU.
 
 ### Launcher
 

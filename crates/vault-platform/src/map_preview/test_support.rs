@@ -59,25 +59,11 @@ pub(crate) fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The instanced path on a GPU device, for a GPU test (SPEC-022 §4): `None`,
-/// after printing `skipped: no GPU adapter`, when no device can be
-/// created, unless `VAULT_REQUIRE_GPU` is `1`, when the test fails. The
-/// caller holds [`gpu_lock`] until the renderer is dropped.
+/// The instanced path on a GPU device, for a GPU test (SPEC-022 §4), by the
+/// rules of [`vault_render::layers::gpu::test_device`]. The caller holds
+/// [`gpu_lock`] until the renderer is dropped.
 pub(crate) fn gpu_renderer() -> Option<vault_render::SceneRenderer> {
-    match vault_render::layers::gpu::GpuDevice::new() {
-        Ok(device) => {
-            println!("GPU adapter: {}", device.adapter());
-            Some(vault_render::SceneRenderer::with_device(device))
-        }
-        Err(error) => {
-            assert!(
-                std::env::var("VAULT_REQUIRE_GPU").as_deref() != Ok("1"),
-                "VAULT_REQUIRE_GPU=1 but {error}"
-            );
-            println!("skipped: no GPU adapter");
-            None
-        }
-    }
+    vault_render::layers::gpu::test_device().map(vault_render::SceneRenderer::with_device)
 }
 
 /// The instanced path on the CPU executor: the same canvases as the GPU

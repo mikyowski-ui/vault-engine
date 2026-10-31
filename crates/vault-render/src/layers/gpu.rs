@@ -12,7 +12,8 @@
 //! CPU one. Every texture and buffer is kept and rewritten in place, and
 //! only when its bytes change.
 use super::instanced::{
-    BatchKind, BatchPlan, FrameInputs, HEXES, InstanceError, LookupTables, Rect, SpriteInstance,
+    BatchKind, BatchPlan, DrawMode, FrameInputs, HEXES, HexLightBuffer, InstanceError,
+    LayerUniforms, LightSource, LookupTables, Rect, SortKey, SpriteImage, SpriteInstance,
     intersect,
 };
 use crate::IndexedImage;
@@ -21,7 +22,7 @@ use std::{
     future::Future,
     pin::pin,
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll, Waker},
@@ -48,12 +49,39 @@ fn block_on<F: Future>(future: F) -> Option<F::Output> {
     }
 }
 
+/// Why a device stopped being usable. wgpu reports the two apart: a loss
+/// reaches only the device-lost callback, and any other error no scope
+/// caught reaches the uncaptured handler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceFailure {
+    /// The driver or the system took the device, or it was destroyed.
+    Lost(String),
+    /// wgpu refused something outside every error scope: the pipeline, say,
+    /// when the backend's shader compiler rejects it.
+    Refused(String),
+}
+
+/// What became of a device: the first failure, which later ones follow from.
+#[derive(Debug, Default)]
+struct DeviceHealth(Mutex<Option<DeviceFailure>>);
+
+impl DeviceHealth {
+    fn note(&self, failure: DeviceFailure) {
+        let mut held = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        held.get_or_insert(failure);
+    }
+    fn failure(&self) -> Option<DeviceFailure> {
+        let held = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        held.clone()
+    }
+}
+
 /// A headless wgpu device for the instanced path.
 pub struct GpuDevice {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    /// Set by the device-lost callback.
-    lost: Arc<AtomicBool>,
+    /// Set by the device-lost callback and the uncaptured-error handler.
+    health: Arc<DeviceHealth>,
     /// The adapter's name and backend.
     adapter: String,
 }
@@ -84,17 +112,25 @@ impl GpuDevice {
         }))
         .ok_or_else(|| InstanceError::NoDevice("device request timed out".into()))?
         .map_err(|error| InstanceError::NoDevice(error.to_string()))?;
-        let lost = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&lost);
-        device.set_device_lost_callback(move |_, _| flag.store(true, Ordering::SeqCst));
+        let health = Arc::new(DeviceHealth::default());
+        let held = Arc::clone(&health);
+        device.set_device_lost_callback(move |reason, message| {
+            if reason != wgpu::DeviceLostReason::Destroyed {
+                tracing::warn!(?reason, %message, "GPU device lost");
+            }
+            held.note(DeviceFailure::Lost(format!("{reason:?}: {message}")));
+        });
         // Errors are caught by error scopes; an uncaptured one marks the
         // device unusable instead of panicking.
-        let flag = Arc::clone(&lost);
-        device.on_uncaptured_error(Arc::new(move |_| flag.store(true, Ordering::SeqCst)));
+        let held = Arc::clone(&health);
+        device.on_uncaptured_error(Arc::new(move |error| {
+            tracing::warn!(%error, "GPU error outside every scope");
+            held.note(DeviceFailure::Refused(error.to_string()));
+        }));
         Ok(Self {
             device,
             queue,
-            lost,
+            health,
             adapter: name,
         })
     }
@@ -102,15 +138,113 @@ impl GpuDevice {
     pub fn adapter(&self) -> &str {
         &self.adapter
     }
-    /// Whether the device is lost.
+    /// Whether the device can no longer be used, for either reason of
+    /// [`DeviceFailure`]: the engine then takes the reference path.
     pub fn is_lost(&self) -> bool {
-        self.lost.load(Ordering::SeqCst)
+        self.health.failure().is_some()
+    }
+    /// Why the device can no longer be used.
+    pub fn failure(&self) -> Option<DeviceFailure> {
+        self.health.failure()
     }
     /// Destroy the device, as a lost device (test T12).
     pub fn destroy(&self) {
         self.device.destroy();
-        self.lost.store(true, Ordering::SeqCst);
+        self.health.note(DeviceFailure::Lost("destroyed".into()));
     }
+}
+
+/// What a device did the first time it drew.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FirstUse {
+    Usable,
+    /// The device was lost: no GPU test can run on it, as with no adapter.
+    /// Some software adapters do this on any draw.
+    Lost(String),
+    /// Anything else stopped the draw: a fault here, or in the shader on
+    /// this backend, which must fail a test rather than skip it.
+    Failed(String),
+}
+
+/// Sort `refresh`, a device's first refresh, and the `failure` it left. Only
+/// a device loss counts as [`FirstUse::Lost`]: an error that reached no scope
+/// is [`FirstUse::Failed`], so a broken shader cannot pass for a missing GPU.
+pub fn classify_first_use(
+    refresh: Result<(), &InstanceError>,
+    failure: Option<&DeviceFailure>,
+) -> FirstUse {
+    match (failure, refresh) {
+        (Some(DeviceFailure::Lost(cause)), _) => FirstUse::Lost(cause.clone()),
+        (Some(DeviceFailure::Refused(cause)), _) => FirstUse::Failed(cause.clone()),
+        (None, Err(InstanceError::DeviceLost)) => FirstUse::Lost("device lost".into()),
+        (None, Err(error)) => FirstUse::Failed(error.to_string()),
+        (None, Ok(())) => FirstUse::Usable,
+    }
+}
+
+/// Draw one small refresh on `device` through the real pipeline, a canvas
+/// read included, and classify it. The device is spent: tests get their own.
+pub fn first_use(device: GpuDevice) -> FirstUse {
+    let mut executor = GpuExecutor::new(device);
+    let refresh = first_refresh(&mut executor);
+    let failure = executor.device().failure();
+    classify_first_use(refresh.as_ref().map(|_| ()), failure.as_ref())
+}
+
+/// A plain sprite, then an outline read of the canvas under it, on a canvas
+/// of mixed pixels: an upload, two passes, a snapshot and a readback.
+fn first_refresh(executor: &mut GpuExecutor) -> Result<GpuCounts, InstanceError> {
+    const SIZE: u32 = 4;
+    let tables = LookupTables {
+        intensity: vec![0; 65536].into(),
+        mix: vec![0; 65536].into(),
+        gray: [[0; 256]; 2],
+        blends: std::array::from_fn(|_| Box::new([[0; 256]; 8])),
+    };
+    let light = HexLightBuffer::default();
+    let images = [SpriteImage::new(2, 2, vec![2_u8; 4])];
+    let instance = |primary, mode, dst| {
+        Ok(SpriteInstance {
+            key: SortKey::new(0, primary, 0)?,
+            mode,
+            flags: 0,
+            light: LightSource::None,
+            hex: 0,
+            fixed: 0,
+            dst,
+            size: [2, 2],
+            image: 0,
+            src: [0, 0],
+            level: None,
+            clip: [0, 0, SIZE as i32, SIZE as i32],
+            aux: 0x100,
+        })
+    };
+    let instances = [
+        instance(0, DrawMode::Plain, [0, 0])?,
+        instance(1, DrawMode::OutlineBlend, [1, 1])?,
+    ];
+    let plan = BatchPlan::new(&instances)?;
+    let inputs = FrameInputs {
+        tables: &tables,
+        light: &light,
+        uniforms: LayerUniforms {
+            canvas: [SIZE, SIZE],
+            offset: [0, 0],
+            ambient: 0,
+            elevation: 0,
+            cutout: None,
+            peek: None,
+        },
+        mask: None,
+        images: &images,
+    };
+    let mut canvas =
+        IndexedImage::new(SIZE, SIZE).map_err(|error| InstanceError::Upload(error.to_string()))?;
+    for (index, pixel) in canvas.pixels_mut().iter_mut().enumerate() {
+        *pixel = index as u8;
+    }
+    executor.execute(&mut canvas, &instances, &plan, &inputs)
 }
 
 /// The lock every GPU test holds while it creates, uses and drops its
@@ -123,24 +257,49 @@ pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// A GPU device for a GPU test (§4): `None`, after printing `skipped: no
-/// GPU adapter`, when none can be created, unless `VAULT_REQUIRE_GPU` is
-/// `1`, when the test fails. The caller holds [`test_lock`].
-#[cfg(test)]
-pub(crate) fn test_device() -> Option<GpuDevice> {
-    match GpuDevice::new() {
-        Ok(device) => {
-            println!("GPU adapter: {}", device.adapter());
-            Some(device)
-        }
-        Err(error) => {
-            assert!(
-                std::env::var("VAULT_REQUIRE_GPU").as_deref() != Ok("1"),
-                "VAULT_REQUIRE_GPU=1 but {error}"
-            );
-            println!("skipped: no GPU adapter");
+/// The one line a GPU test prints when the adapter cannot draw.
+fn lost_line(adapter: &str, cause: &str) -> String {
+    format!("skipped: GPU device lost on its first use on {adapter}: {cause}")
+}
+
+/// A GPU device for a GPU test (SPEC-022 §4), here and in the shell's tests:
+/// `None`, after printing a skip line, when none can be created or a device
+/// is lost on its first use, unless `VAULT_REQUIRE_GPU` is `1`, when the test
+/// fails. Any other failure of the first use fails the test, naming its
+/// cause. A process makes the first draw once, on a device of its own, so a
+/// working device reaches its test untouched. The caller holds the lock of
+/// its GPU tests.
+pub fn test_device() -> Option<GpuDevice> {
+    static FIRST: OnceLock<Result<(String, FirstUse), String>> = OnceLock::new();
+    let required = std::env::var("VAULT_REQUIRE_GPU").as_deref() == Ok("1");
+    let first = FIRST.get_or_init(|| {
+        let device = GpuDevice::new().map_err(|error| error.to_string())?;
+        let adapter = device.adapter().to_owned();
+        Ok((adapter, first_use(device)))
+    });
+    let no_adapter = |error: &dyn std::fmt::Display| {
+        assert!(!required, "VAULT_REQUIRE_GPU=1 but {error}");
+        println!("skipped: no GPU adapter");
+        None
+    };
+    match first {
+        Err(error) => no_adapter(error),
+        Ok((adapter, FirstUse::Lost(cause))) => {
+            let line = lost_line(adapter, cause);
+            assert!(!required, "VAULT_REQUIRE_GPU=1 but {line}");
+            println!("{line}");
             None
         }
+        Ok((adapter, FirstUse::Failed(cause))) => {
+            panic!("the first GPU draw failed on {adapter}: {cause}")
+        }
+        Ok((_, FirstUse::Usable)) => match GpuDevice::new() {
+            Ok(device) => {
+                println!("GPU adapter: {}", device.adapter());
+                Some(device)
+            }
+            Err(error) => no_adapter(&error),
+        },
     }
 }
 
@@ -1118,3 +1277,77 @@ impl Atlas {
 
 /// The hex light texture's side.
 const _: () = assert!(200 * 200 == HEXES);
+
+#[cfg(test)]
+mod first_use_tests {
+    use super::*;
+
+    const LOST: InstanceError = InstanceError::DeviceLost;
+
+    #[test]
+    fn only_a_device_loss_counts_as_lost_and_the_cause_comes_from_the_device() {
+        let lost = DeviceFailure::Lost("Unknown: device removed".into());
+        let refused = DeviceFailure::Refused("FXC D3DCompile error".into());
+        let upload = InstanceError::Upload("canvas readback".into());
+        assert_eq!(classify_first_use(Ok(()), None), FirstUse::Usable);
+        // A loss, whatever the refresh made of it.
+        for refresh in [Err(&LOST), Err(&upload), Ok(())] {
+            assert_eq!(
+                classify_first_use(refresh, Some(&lost)),
+                FirstUse::Lost("Unknown: device removed".into())
+            );
+        }
+        // The engine reports a refused device as lost too. The test must not.
+        assert_eq!(
+            classify_first_use(Err(&LOST), Some(&refused)),
+            FirstUse::Failed("FXC D3DCompile error".into())
+        );
+        assert_eq!(
+            classify_first_use(Err(&LOST), None),
+            FirstUse::Lost("device lost".into())
+        );
+        assert_eq!(
+            classify_first_use(Err(&upload), None),
+            FirstUse::Failed("upload failed: canvas readback".into())
+        );
+    }
+
+    #[test]
+    fn the_first_failure_stands_and_the_skip_line_names_adapter_and_cause() {
+        let health = DeviceHealth::default();
+        assert_eq!(health.failure(), None);
+        health.note(DeviceFailure::Refused("first".into()));
+        health.note(DeviceFailure::Lost("after it".into()));
+        assert_eq!(
+            health.failure(),
+            Some(DeviceFailure::Refused("first".into()))
+        );
+        assert_eq!(
+            lost_line("Microsoft Basic Render Driver (Dx12)", "Unknown: removed"),
+            "skipped: GPU device lost on its first use on \
+             Microsoft Basic Render Driver (Dx12): Unknown: removed"
+        );
+    }
+
+    /// The whole path on a real device: a working one is usable, and one
+    /// destroyed first is lost, not failed.
+    #[test]
+    fn a_device_is_usable_until_it_is_destroyed() {
+        let _gpu = test_lock();
+        let Ok(device) = GpuDevice::new() else {
+            println!("skipped: no GPU adapter");
+            return;
+        };
+        match first_use(device) {
+            FirstUse::Usable => {}
+            FirstUse::Lost(cause) => {
+                println!("skipped: this adapter loses its device: {cause}");
+                return;
+            }
+            FirstUse::Failed(cause) => panic!("{cause}"),
+        }
+        let device = GpuDevice::new().unwrap();
+        device.destroy();
+        assert_eq!(first_use(device), FirstUse::Lost("destroyed".into()));
+    }
+}
