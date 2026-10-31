@@ -490,12 +490,54 @@ fn links_and_collisions_are_refused_and_nothing_outside_the_root_is_read() {
 
     fs::write(root.join("Twice.txt"), b"1").unwrap();
     fs::write(root.join("twice.txt"), b"2").unwrap();
-    let error = storage.read(Namespace::Mods, "twice.txt").unwrap_err();
-    assert_eq!(kind(&error), "Collision");
-    assert_eq!(
-        kind(&storage.list(Namespace::Mods, None).unwrap_err()),
-        "Collision"
-    );
+    // A file system that ignores case has one entry, so no collision exists.
+    if names_like(&root, "twice.txt") == 2 {
+        let error = storage.read(Namespace::Mods, "twice.txt").unwrap_err();
+        assert_eq!(kind(&error), "Collision");
+        assert_eq!(
+            kind(&storage.list(Namespace::Mods, None).unwrap_err()),
+            "Collision"
+        );
+    } else {
+        assert_single_entry(&storage, &root);
+        println!("skipped the collision half: this file system ignores case");
+    }
+}
+
+/// How many entries of `root` have the name `name` in any case.
+#[cfg(unix)]
+fn names_like(root: &Path, name: &str) -> usize {
+    fs::read_dir(root)
+        .unwrap()
+        .filter(|entry| {
+            let entry = entry.as_ref().unwrap();
+            entry.file_name().eq_ignore_ascii_case(name)
+        })
+        .count()
+}
+
+/// The one entry the two writes left reads back as last written, and lists
+/// once.
+#[cfg(unix)]
+fn assert_single_entry(storage: &FsStorage, root: &Path) {
+    assert_eq!(names_like(root, "twice.txt"), 1);
+    let found = storage.read(Namespace::Mods, "twice.txt").unwrap();
+    assert_eq!(found.as_deref(), Some(&b"2"[..]));
+    assert_eq!(storage.list(Namespace::Mods, None).unwrap(), ["twice.txt"]);
+}
+
+/// The other half of the collision test, on any file system: the entry a
+/// case-insensitive one leaves, in either spelling.
+#[cfg(unix)]
+#[test]
+fn a_single_entry_of_either_case_reads_back_as_written() {
+    for name in ["Twice.txt", "twice.txt"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join(name), b"2").unwrap();
+        assert_single_entry(&FsStorage::mods_at(&root), &root);
+    }
 }
 
 #[test]
