@@ -17,9 +17,11 @@ Text formats: TSV files have one header row. A `-` means "not used".
   the `ap_cost` setting. SPEC-024a section 9.1 walks it line by line.
 - `hook-order.tsv`: vectors O1 to O11 of section 9.2, one row per member's turn,
   for two mods and one sfall script on one hook point.
+- `hook-order-rev4.tsv` (Revision 2): vectors O12 to O15 of section 9.2, on points
+  SPEC-024b Revision 4 added, with a `hook` column and no arg3 columns.
 - `hook-points.tsv`: the hook list of section 3 with every row of
-  `oracle/SPEC-024/sfall-hooks.tsv`: whether the point fires (`yes`, `no`, or
-  `mod` for the mod block alone), under which profiles, its types, the native
-  result it overrides, and where its boundary text is.
+  `oracle/SPEC-024/sfall-hooks.tsv`: whether the point fires (`yes` for the 30
+  tier P1 hooks of SPEC-024b Revision 4, else `no`), under which profiles, its
+  types, the native result it overrides, and where its boundary text is.
 - `mod-words.tsv`: the words of section 7.3, with the `pops` and `push` columns
   the stack model reads and the operand classes of SPEC-024b section 4.1.

@@ -1,6 +1,6 @@
 # SPEC-024a: Engine Hooks and Mod Scripts
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-31, under AGENTS.md "Spec Authoring (Team A)". Revision 1.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-31, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (Team A, 2026-10-31); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-31. Sources:
 
@@ -11,11 +11,20 @@
 
 No decompilation, disassembly, re-implementation source, game asset, research-vault material, or engine Rust code was used. No sfall material was consulted: everything said here about sfall's words and hooks comes from SPEC-024b and its oracle. Team A's general knowledge comes from model training data that cannot be audited (`PROVENANCE.md`).
 
+**Provenance of Revision 2.** Author: the Spec-Author sub-agent (Team A), 2026-10-31, on the owner's brief of 2026-10-31. Sources: the owner's brief; this spec's Revision 1 and its fixtures; SPEC-024b Revision 4; SPEC-019 section 3.19.3, for the car's steps; and `docs/REFERENCE.md`, including what the implementer recorded for SPEC-024b Revision 4. The brief put `oracle/` out of bounds, so `oracle/SPEC-024/` was not opened for this revision: the 16 new rows come from SPEC-024b's text, and their types from this fixture's existing rows. No decompilation, disassembly, re-implementation source, game asset, research-vault material, sfall material, or engine Rust code was used.
+
 **Fixtures:** `tests/fixtures/spec024a/`, written by Team A from this spec. They are not in `oracle/`, which is reserved for research-side vectors.
 
 ## Revision history
 
 - **Revision 1 (2026-10-31, Team A).** First text. It takes up SPEC-024b Decision D-21, which said section 4.9's global-script rules yield to this document.
+- **Revision 2 (2026-10-31, Team A).** On the owner's brief of 2026-10-31, this revision aligns with SPEC-024b Revision 4, which gives 16 more hooks boundary text.
+  - **Section 3.1.** The list now holds all 30 tier P1 hooks, and every one runs both blocks.
+  - **Section 3.3, replaced.** `HOOK_ADJUSTFID` takes SPEC-024b section 6.19's boundary, a preview of the figure. Revision 1's boundary on the player object, and its limit to the mod block, are withdrawn (Decision D-17).
+  - **Section 3.2.** `HOOK_CARTRAVEL` joins `HOOK_ENCOUNTER` as a `fallout2`-only point, and the rest timer's Esc rule is added (Decisions D-28 to D-30).
+  - **Sections 1.1, 3.4, and 10.** References move from SPEC-024b section 6.19 to 6.20, and the counts change to match.
+  - **Fixtures.** `hook-points.tsv` and `README.md` change. `hook-order-rev4.tsv` is new. Word vectors W20 to W22 are added.
+  - **Unchanged.** The chain order, the shared depth counter, the manifest grammar, the words and their numbers, the `mod_stack` record, the program, and both manifests.
 
 ## Clean-Room Rules for Spec Authors
 
@@ -71,7 +80,7 @@ These amendments apply only while manifest scripting is on. SPEC-024b and SPEC-0
 | SPEC-024b section 6.1, setup | Gains step 4 (section 4.4) |
 | SPEC-024b section 6.2, `register_hook_proc_spec` | "The end of the chain" means the end of the sfall block (section 5.1) |
 | SPEC-024b section 6.2, who may register | A manifest script counts as a global script |
-| SPEC-024b section 6.19 and Decision D-24 | `HOOK_ADJUSTFID` (26) has boundary text here, for the mod block only. Its sfall block stays inert, as those sections say (Decision D-17) |
+| SPEC-024b section 6.20 and Decision D-24 | No change: the 20 tier P2 hooks stay inert in both blocks. Revision 1's exception for `HOOK_ADJUSTFID` is gone, because SPEC-024b Revision 4 gives that hook a boundary |
 | SPEC-024b section 1, invariant | With sfall mode off, a hook point can run for manifest members. `hs_*.int`, sfall's words, arrays, and the sidecar still do not exist |
 | SPEC-017 section 2.1 and SPEC-024b section 3.2 | Dispatch indices 768 to 777 are registered slots (section 7.1). Every other index those sections call unregistered stays so |
 
@@ -162,7 +171,7 @@ A replay reads neither `vault-engine.toml` nor a manifest's `[enhanced]` and `[s
 
 ### 3.1 The list
 
-This is the one list. `tests/fixtures/spec024a/hook-points.tsv` holds it with all 51 rows of `sfall-hooks.tsv`. IDs and names are SPEC-024b's. `[Must-match]`
+This is the one list: the 30 tier P1 hooks of SPEC-024b sections 6.8 to 6.19, and each runs both blocks. `tests/fixtures/spec024a/hook-points.tsv` holds it with all 51 rows of `sfall-hooks.tsv`. IDs and names are SPEC-024b's. `[Must-match]`
 
 The Boundary column says where each point's exact text is. SPEC-024b's sections stay normative for their points, and if this table and those sections ever differ, those sections win. `[Must-match]`
 
@@ -171,57 +180,56 @@ The Boundary column says where each point's exact text is. SPEC-024b's sections 
 | 0 | `HOOK_TOHIT` | To-hit | 0 chance after the cap; 1 attacker; 2 target; 3 body part; 4 source hex; 5 attack type; 6 range-aware; 7 chance before the cap | ret0 chance, -99 to 999 | The hit chance | SPEC-024b 6.8 |
 | 1 | `HOOK_AFTERHITROLL` | After the hit roll | 0 roll; 1 attacker; 2 target; 3 body part; 4 hit chance | ret0 roll, 0 to 3; ret1 body part, 0 to 8; ret2 a live critter | The roll, the body part, the target | SPEC-024b 6.9 |
 | 2 | `HOOK_CALCAPCOST` | AP cost | 0 critter; 1 attack type; 2 aimed; 3 default cost; 4 weapon | ret0 cost; negative becomes 0 | An item action's AP cost | SPEC-024b 6.10 |
+| 4 | `HOOK_DEATHANIM2` | Death animation | 0 weapon PID; 1 attacker; 2 target; 3 damage; 4 death animation chosen | ret0 death animation | The death animation | SPEC-024b 6.19 |
 | 5 | `HOOK_COMBATDAMAGE` | Damage | 0 target; 1 attacker; 2 target damage; 3 attacker damage; 4 target flags; 5 attacker flags; 6 weapon; 7 body part; 8 multiplier; 9 rounds; 10 knockback; 11 attack type; 12 int 0 | ret0 target damage; ret1 attacker damage; ret2 target flags; ret3 attacker flags; ret4 knockback | Damage and special-effect flags of target and attacker, and knockback | SPEC-024b 6.11 |
 | 8 | `HOOK_USEOBJON` | Use an item on a critter | 0 target; 1 user; 2 item | ret0 0 keep, 1 destroy, -1 or unset engine | Whether the use proceeds, and whether the item is destroyed | SPEC-024b 6.15 |
 | 10 | `HOOK_BARTERPRICE` | Barter price | 0 player side; 1 other side; 2 price; 3 merchant offer table; 4 caps on it; 5 its value; 6 player offer table; 7 its value; 8 offer pressed; 9 party member | ret0 price, -1 unchanged; ret1 offer value | Price, and the value of the player's offer | SPEC-024b 6.12 |
 | 11 | `HOOK_MOVECOST` | Movement cost | 0 critter; 1 hexes; 2 original cost | ret0 cost; negative becomes 0 | The AP cost of the hexes | SPEC-024b 6.13 |
+| 17 | `HOOK_AMMOCOST` | Ammunition cost | 0 weapon; 1 rounds; 2 ammunition spent; 3 hook type | ret0 ammunition; negative is invalid | The ammunition an attack spends | SPEC-024b 6.19 |
 | 18 | `HOOK_USEOBJ` | Use an object | 0 user; 1 object | ret0 as `HOOK_USEOBJON` | Whether the use proceeds, and whether the item is destroyed | SPEC-024b 6.15 |
 | 19 | `HOOK_KEYPRESS` | Key press | 0 pressed; 1 scan code; 2 virtual-key code | ret0 scan code; 0 no override | The logical key the game sees | SPEC-024b 6.13 |
+| 20 | `HOOK_MOUSECLICK` | Mouse click | 0 pressed; 1 button | None | None: a notice | SPEC-024b 6.19 |
+| 22 | `HOOK_STEAL` | Steal | 0 thief; 1 victim; 2 item; 3 planting; 4 quantity | ret0 1 success, 0 failure, 2 failure with the window open, -1 engine; ret1 experience | The steal check's result, and the item's experience | SPEC-024b 6.19 |
+| 23 | `HOOK_WITHINPERCEPTION` | Perception | 0 watcher; 1 target; 2 in range; 3 hook type | ret0 0 no, 1 yes, 2 forced | The perception result | SPEC-024b 6.19 |
 | 24 | `HOOK_INVENTORYMOVE` | Inventory move | 0 target; 1 item; 2 item replaced, or 0 | ret0 -1 or unset engine; any other value prevents | Whether the move is allowed | SPEC-024b 6.13 |
-| 26 | `HOOK_ADJUSTFID` | Art change | 0 art ID worked out; 1 art ID stored now | ret0 art ID | The art ID stored on the player object | Section 3.3, mod block only |
+| 25 | `HOOK_INVENWIELD` | Wield or unwield | 0 critter; 1 item; 2 slot; 3 wielding; 4 being removed | ret0 -1 engine; any other value skips it | Whether the engine's handler runs | SPEC-024b 6.19 |
+| 26 | `HOOK_ADJUSTFID` | Art change | 0 FID from base art, armor, and weapon; 1 modified FID, equal to arg0 | ret0 FID; one with no art leaves arg0's | The art ID of the inventory and barter figure | SPEC-024b 6.19 |
+| 27 | `HOOK_COMBATTURN` | Combat turn | 0 event; 1 critter; 2 after a load | ret0 1 skips at the start, -1 ends combat at the end | Whether the turn runs, and whether combat ends | SPEC-024b 6.19 |
+| 28 | `HOOK_CARTRAVEL` | Car travel | 0 car speed in steps; 1 fuel use | ret0 speed, -1 keeps it; ret1 fuel use | The car's steps and fuel use for the iteration | SPEC-024b 6.19 |
 | 29 | `HOOK_SETGLOBALVAR` | Global variable write | 0 index; 1 value | ret0 value | The value stored | SPEC-024b 6.18 |
+| 30 | `HOOK_RESTTIMER` | Rest timer | 0 game time; 1 end state; 2 hours; 3 minutes | ret0 1 stops, 0 continues | Whether the rest goes on | SPEC-024b 6.19 |
 | 31 | `HOOK_GAMEMODECHANGE` | Game mode change | 0 exiting; 1 previous mode | None | None: a notice | SPEC-024b 6.14 |
+| 32 | `HOOK_USEANIMOBJ` | Use animation | 0 critter; 1 object; 2 animation | ret0 animation; -1 skips it | The animation of the use | SPEC-024b 6.19 |
+| 34 | `HOOK_DESCRIPTIONOBJ` | Description | 0 object | ret0 text | The description text | SPEC-024b 6.19 |
+| 35 | `HOOK_USESKILLON` | Skill use | 0 user; 1 target; 2 skill | ret0 user, -1 cancels, 0 skips; ret1 1 passes the combat refusal | The skill's user, whether the request goes on, and the combat refusal | SPEC-024b 6.19 |
+| 38 | `HOOK_SETLIGHTING` | Light change | 0 object, or -1; 1 intensity; 2 radius, or -1 | ret0 intensity, 0 to 65536; ret1 radius, 0 to 8 | The intensity and the radius | SPEC-024b 6.19 |
 | 40 | `HOOK_STDPROCEDURE` | Standard procedure | 0 event; 1 owner; 2 caller; 3 int 0; 4 object acted on; 5 fixed parameter | ret0 -1 cancels | Whether the procedure runs | SPEC-024b 6.16 |
 | 43 | `HOOK_ENCOUNTER` | Encounter | 0 event type; 1 map; 2 Special entry; 3 table; 4 entry | ret0 map, -1 cancels event 0; ret1 1 loads with no groups | The map that loads, or whether the encounter happens | SPEC-024b 6.17 |
+| 45 | `HOOK_ADJUSTRADS` | Radiation change | 0 critter; 1 amount | ret0 amount | The radiation added or removed | SPEC-024b 6.19 |
+| 48 | `HOOK_CANUSEWEAPON` | Weapon usability | 0 critter; 1 item; 2 attack type; 3 can use | ret0 result | Whether the critter can use the weapon | SPEC-024b 6.19 |
 
 ### 3.2 Rules for every point
 
 - SPEC-024b sections 6.4 to 6.7 apply to every point, whichever kind of mod a member belongs to: the context, the composition rules, the phases and previews, and the numbering. `[Must-match]`
-- Under `fallout1`, `HOOK_ENCOUNTER` has no boundary, because its text anchors on SPEC-018. A row or registration for it is kept and never runs. Every other point fires under both profiles. `[Safe rule]`
+- Under `fallout1`, `HOOK_ENCOUNTER` and `HOOK_CARTRAVEL` have no boundary, because their text anchors on SPEC-018 and SPEC-019. A row or registration for either is kept and never runs. Every other point fires under both profiles (Decision D-28). `[Safe rule]`
+- A boundary that names a word the session lacks has no such path. With sfall mode off, `unwield_slot` cannot run `HOOK_INVENWIELD`, and the point's other paths still do (Decision D-30). `[Safe rule]`
 - With sfall mode off, a preview query still runs (SPEC-024b section 6.6). So does the once-per-step comparison of `HOOK_GAMEMODECHANGE`, on the same bit set as `get_game_mode` (section 7.3). `[Safe rule]`
+- With sfall mode off, Esc stops a rest at once unless `HOOK_RESTTIMER` has a member. With a member, it stops at the rest's next step, as `docs/REFERENCE.md` records for sfall mode, so the member sees it (Decision D-29). `[Safe rule]`
 - An empty chain costs nothing and changes nothing. `[Must-match]`
 
-### 3.3 `HOOK_ADJUSTFID` (26, `hs_adjustfid.int`): art change
+### 3.3 Points from SPEC-024b Revision 4
 
-SPEC-024b gives this point numbers and types only. The text below is Team A's, from SPEC-005 section 3.8, and is not a claim about sfall (Decision D-17). All of it is `[Safe rule]`.
+SPEC-024b section 6.19 gives these 16 points their boundaries, and both blocks run on them.
 
-**Mod block only.** This point runs its mod block and skips its sfall block. So `hs_adjustfid.int` and every sfall registration on ID 26 load and register and run nothing, as SPEC-024b section 6.19 says, until the research side gives that block its boundary. One Et Tu script uses this hook (`oracle/SPEC-024/mod-opcode-usage.tsv`), written to a meaning this spec does not know.
-
-**Boundary.** Runs each time one of SPEC-005 section 3.8's rules is about to replace the **player object's** art, after the rule has worked out the new art ID and before it is stored or registered:
-
-1. the gender update, at its step 2;
-2. the inventory window's close, when it applies the figure art;
-3. `wield_obj_critter` with armor, at its step 3, before the art change is registered;
-4. `rm_obj_from_inven` taking worn armor off the player;
-5. `refresh_pc_art` (SPEC-024b section 4.11).
-
-It does not run for any other critter, or when the rule leaves the art unchanged, such as the gender update's step 3.
-
-| Index | Type | Value |
-| ---: | --- | --- |
-| arg0 | int | The art ID the rule worked out |
-| arg1 | int | The art ID the player object holds now |
-
-| Return | Overrides | Limits |
-| --- | --- | --- |
-| ret0 | The art ID the rule stores or registers | Must be a critter-category art ID the SPEC-007 codec accepts. Anything else is ignored, with a diagnostic |
-
-- The player prototype's art, at the gender update's step 4, is not overridden.
-- The open inventory window's figure stays unhooked. It is drawn while the window is open, and SPEC-005 section 3.8 says the object's art does not change until the window closes. The point runs at the close, in the Input or Simulation phase.
+- **`HOOK_ADJUSTFID` is a preview.** It runs when the figure's FID on the inventory or barter screen is recalculated, in phase 2, and presentation reads the stored result. It never changes the player object's art, and no point in this list does. `[Must-match]`
+- **`HOOK_CANUSEWEAPON`** is a preview for the player's active item slots, and an ordinary query for AI. `[Must-match]`
+- **`HOOK_AMMOCOST` type 1 and `HOOK_WITHINPERCEPTION` type 2** never run, for either block, by SPEC-024b Decision D-53. `[Must-match]`
+- **`HOOK_DESCRIPTIONOBJ`** returns a string, so `mod_set_hook_return` converts its value by class `S`, as SPEC-024b section 6.5 says. A number leaves that return as it was (Decision D-26). `[Must-match]`
+- **`HOOK_CARTRAVEL`'s arg0** is the steps the engine works out. SPEC-024b section 6.19 declares 3 to 8, and SPEC-019 section 3.19.3 gives 1, 2, or 4. A member takes what it is given, and must not assume a range (Decision D-31). `[Safe rule]`
 
 ### 3.4 The other points
 
-The other 35 rows have no boundary text. Their scripts load and register, and no chain runs, as SPEC-024b section 6.19 says. A manifest row may name one: it is kept, runs nothing, and writes one diagnostic at setup. IDs 49 to 60 are reserved. `[Must-match]`
+The other 20 hooks have no boundary text. Their scripts load and register, and no chain runs, as SPEC-024b section 6.20 says. A manifest row may name one: it is kept, runs nothing, and writes one diagnostic at setup. IDs 49 to 60 are reserved. `[Must-match]`
 
 ## 4. Attaching Scripts
 
@@ -435,7 +443,8 @@ All data is synthetic, and everything is in `tests/fixtures/spec024a/`. Its `REA
 | `vault-mod-row.toml` | Vector N2: the same mod with a `[[hooks]]` row |
 | `gl_cheapap.int.hex` | Section 9.1's program, as `OFFSET: bytes` lines |
 | `hook-order.tsv` | Section 9.2's order vectors O1 to O11 |
-| `hook-points.tsv` | Section 3's list, with every oracle row. Its `fires` column is `yes`, `no`, or `mod` for the mod block alone |
+| `hook-order-rev4.tsv` | Section 9.2's vectors O12 to O15, on points from SPEC-024b Revision 4 |
+| `hook-points.tsv` | Section 3's list, with every row of `sfall-hooks.tsv`. Its `fires` column is `yes` for the 30 points, else `no` |
 | `mod-words.tsv` | Section 7.3's table, for the stack model |
 
 ### 9.1 The program
@@ -515,6 +524,15 @@ All data is synthetic, and everything is in `tests/fixtures/spec024a/`. Its `REA
 | O10 | Rows, then a word registration, inside a mod: 512345 |
 | O11 | No manifest member: SPEC-024b's order, 512 |
 
+`hook-order-rev4.tsv` has the same idea with a `hook` column and no arg3 columns. Every art ID in O12 and O13 has art, except `0x0100FFFF`.
+
+| Case | Hook | Shows |
+| --- | --- | --- |
+| O12 | `HOOK_ADJUSTFID` | Both blocks run, and the higher layer's FID wins: `0x0100000E` |
+| O13 | `HOOK_ADJUSTFID` | The last write has no art. The limit applies once, to the final value, so arg0's figure stands, not an earlier member's |
+| O14 | `HOOK_DESCRIPTIONOBJ` | Sfall mode off. A number does not convert to a string, so alpha's text stands: `Old` |
+| O15 | `HOOK_COMBATTURN` | The sfall block asks to skip the turn, and the higher layer's 0 overwrites it, so the turn runs |
+
 ### 9.3 Depth vector
 
 D1 uses a chain on `HOOK_SETGLOBALVAR` whose one member calls `set_global_var` on the next global, reached from its own call, so section 5.4's exception applies. An ordinary script writes global 0.
@@ -551,6 +569,9 @@ Run each with N1's mod loaded and `ap_cost` at 1, unless a row says otherwise. S
 | W17 | `I:1, I:2`, in O1's chain | `0x8308` | empty | The point has one return: ignored |
 | W18 | empty, on a local map | `0x8309` | `I:2` | The bit `0x2` |
 | W19 | empty stack | `0x8303` | VM error | Underflow stays a VM error |
+| W20 | `I:0, "Old"`, in O14's chain | `0x8308` | empty | ret0 is `"Old"`, by class `S` |
+| W21 | `I:0, I:7`, in O14's chain, after W20 | `0x8308` | empty | ret0 stays `"Old"`, with a diagnostic |
+| W22 | empty, in O12's chain | `0x8305` | `I:26` | The innermost chain's hook ID |
 
 **Load-time vectors.** Build minimal programs as SPEC-017 section 7.1 does.
 
@@ -585,20 +606,21 @@ The `mod_stack` record of N1 is section 2.3's example: `EE7C38513A262548` is the
 
 ## 10. Required Tests
 
-1. Every row of `hook-order.tsv`, on the engine's chain: the turn order, the outcome, ret0 after each turn, and the result.
+1. Every row of `hook-order.tsv` and `hook-order-rev4.tsv`, on the engine's chain: the turn order, the outcome, ret0 after each turn, and the result.
 2. Section 9.1's program, through the loader and the chain, on N1 and N2: the registration, ret0 1, and ret0 3 with the setting changed. SPEC-017 section 8.2's model gives no finding.
 3. Vector D1.
 4. Every W vector, the load-time vectors, and every N vector.
 5. With no scripted mod enabled, every SPEC-021 golden, every SPEC-024b vector, and every replay digest is unchanged.
 6. With sfall mode on and no scripted mod, SPEC-024b's vectors H1 to H17 are unchanged.
-7. A scripted mod on all fifteen points whose members return nothing and draw nothing leaves the `state_hash` and `combat_hash` columns of a checkpoint stream as they are with no mod.
+7. A scripted mod on all 30 points whose members return nothing and draw nothing leaves the `state_hash` and `combat_hash` columns of a checkpoint stream as they are with no mod.
 8. Two runs of one log, with a member that draws random numbers, give identical checkpoint streams on two platforms.
 9. A test double that fails when a chain starts in phase 3 or phase 4, run over a replay with every point attached.
 10. A replay with a changed manifest byte, a changed layer order, or a missing layer is refused before the first step, naming the first `id` that differs.
 11. A log recorded with a changed setting replays to the same stream with no settings file present, and writes no file.
-12. `HOOK_ADJUSTFID`: each of section 3.3's five paths runs its mod block once, a valid ret0 is stored, an invalid one is ignored, an open inventory's figure is unchanged until the window closes, and a member of its sfall block never runs.
+12. `HOOK_ADJUSTFID`, with members in both blocks: the figure takes the final FID, the chain runs in phase 2 and only when the figure's inputs change, and the player object's art does not change. `HOOK_AMMOCOST` type 1 and `HOOK_WITHINPERCEPTION` type 2 run neither block.
 13. Re-entry, membership, and error rules of sections 5.3 and 5.4, including a member that registers another member during a chain.
-14. `hook-points.tsv` has every row of `sfall-hooks.tsv`, with the same IDs, names, and types.
+14. `hook-points.tsv` has every row of `sfall-hooks.tsv`, with the same IDs, names, and types, and its `fires` column is `yes` exactly for tier P1.
+15. With sfall mode off, Esc stops a rest at once with no `HOOK_RESTTIMER` member, and at the next step with one. Under `fallout1`, a row on `HOOK_CARTRAVEL` or `HOOK_ENCOUNTER` runs nothing.
 
 ## 11. Decisions
 
@@ -621,17 +643,22 @@ Each decision is marked as an owner instruction or a Team A default.
 | D-13 | Ten words are defined: the brief's settings and log words, plus the version, registration, three context words, a hook ID, and the game mode | Team A default | With sfall mode off, a mod has no other way to read an argument, write a return, or read the new mode in `HOOK_GAMEMODECHANGE` |
 | D-14 | The rest of the range is refused at load. These words take SPEC-024b's failed-operand rule, even with sfall mode off | Team A default | A missing word then fails at the check, not partway through a script. Mod scripts should not stop on a bad operand, for SPEC-024b's reason |
 | D-15 | No slot records a mod list, and a mod has no per-save data of its own | Team A default | Saves stay unchanged. A later revision can add a sidecar |
-| D-16 | Manifest scripting turns on from the rows themselves, under both profiles, under either preset | Team A default | Enabling the layer is already an opt-in. The hook boundaries anchor on specs both profiles share, except `HOOK_ENCOUNTER` |
-| D-17 | `HOOK_ADJUSTFID` fires for its mod block only, with boundary text from SPEC-005 section 3.8, on the player object only. arg1 is the stored art ID. The open inventory figure stays unhooked. The sfall block stays inert until the research side gives it a boundary | Team A default | The brief names art change. SPEC-024b has only its row, and this spec may not use sfall's documents, so the meaning is unchecked against sfall. An Et Tu script uses this hook, so firing it on a guessed meaning could break that mod. A boundary in Presentation would break D-3 |
+| D-16 | Manifest scripting turns on from the rows themselves, under both profiles, under either preset | Team A default | Enabling the layer is already an opt-in. The hook boundaries anchor on specs both profiles share, except the two of Decision D-28 |
+| D-17 | **Withdrawn by Revision 2.** Revision 1 fired `HOOK_ADJUSTFID` for the mod block only, on the player object, with its own boundary. It now follows SPEC-024b section 6.19 in both blocks (Decision D-27) | Team A default; withdrawn on the owner's brief of 2026-10-31 | SPEC-024b Revision 4 gives the hook a boundary, so nothing is left for this spec to supply. No point overrides the player object's stored art |
 | D-18 | Manifests add `id` and `api`. `point` uses the public hook names. `hs_` file names are refused, and one script has one owner | Team A default | `name` is free text and cannot key storage. Public names keep one list. The other two rules stop one file running in two roles |
 | D-19 | `signal_close_game`'s `HOOK_GAMEMODECHANGE` run is the last thing in phase 2 | Team A default | SPEC-024b section 4.11 says it runs after the Simulation phase, and section 6.6 forbids a chain in phases 3 and 4 |
 | D-20 | Settings are declared and typed, kept in `config` as `mod-settings-<id>.toml`, and committed at the end of phase 2. There is no launcher page in this revision | Team A default | A typed table cannot be poisoned by a bad write. `config` already holds per-host choices. Settings are options, not save data |
 | D-21 | Replays get `--mod-list` and a `mod_stack` record, compared before the first step | Team A default | A replay had no way to mount layers, and a different stack would diverge silently |
 | D-22 | The mod log is a 256-line ring, on a read-only overlay page, outside every hash | Team A default | Bounded, and it cannot affect a run |
 | D-23 | A chain's members are fixed at the query, and a member already running is skipped, except SPEC-024b section 6.18's case | Team A default | Both make the outcome independent of when a registration lands. The re-entry rule is what `docs/REFERENCE.md` records |
-| D-24 | The limits of a point apply once, to the final value | Team A default | SPEC-024b section 6.5's last-writer rule implies it, and vector O7 pins it |
+| D-24 | The limits of a point apply once, to the final value | Team A default | SPEC-024b section 6.5's last-writer rule implies it, and vectors O7 and O13 pin it |
 | D-25 | `[[global_scripts]]` carries `repeat` and `type` | Team A default | `set_global_script_repeat` does not exist with sfall mode off |
 | D-26 | A return that cannot convert leaves an earlier member's write standing. Vector O8 pins it | Team A default | SPEC-024b section 6.5 says such a value "leaves that return unset", which could also mean clearing it. Its rule that a return is overridden only by writing that index points to this reading |
+| D-27 | SPEC-024a follows SPEC-024b Revision 4's 30 tier P1 hooks, and each runs both blocks, with no exception | Owner instruction (brief of 2026-10-31) | One list of points, with SPEC-024b's boundaries |
+| D-28 | `HOOK_CARTRAVEL` fires only under `fallout2`, as `HOOK_ENCOUNTER` does | Team A default | SPEC-019's car is its only anchor |
+| D-29 | With sfall mode off, Esc's later stop applies only while `HOOK_RESTTIMER` has a member | Team A default | The hook must see Esc at the rest's next step, as `docs/REFERENCE.md` records. With no member, an empty chain must change nothing |
+| D-30 | A boundary that names a word the session lacks has no such path, and the point's other paths still run | Team A default | Sfall's words do not exist with sfall mode off, and the point stays useful without them |
+| D-31 | `HOOK_CARTRAVEL`'s arg0 is what the engine works out, and this spec states no range | Team A default | SPEC-024b says 3 to 8, SPEC-019 gives 1, 2, or 4, and `docs/REFERENCE.md` records the gap. Only a research revision can settle it |
 
 ## 12. Clean-Room Verification Checklist
 
@@ -641,7 +668,8 @@ Each decision is marked as an owner instruction or a Team A default.
 - [x] A Provenance line, a revision history, and a Decisions section that marks owner instructions and Team A defaults
 - [x] Synthetic vectors only
 - [x] No research-vault material, decompilation, re-implementation source, sfall document, or game asset consulted, and no engine Rust code read
-- [x] `hook-points.tsv` was checked row by row against `sfall-hooks.tsv`
+- [x] Revision 1: `hook-points.tsv` was checked row by row against `sfall-hooks.tsv`
+- [x] Revision 2: section 3.1 and `hook-points.tsv` were checked against the argument and return tables of SPEC-024b sections 6.8 to 6.19. `oracle/` was out of bounds, so `fires` was not compared with the oracle's tier column here. Section 10's test 14 does that
 - [x] Section 9.1's program was computed from SPEC-004's layout and stepped through both procedures by a small interpreter written from SPEC-004. The built `asset-audit --dump-vm-trace` accepted a copy with its three mod words swapped for words it knows, and traced it to `ended`
 - [x] `hook-order.tsv` was computed by a small model of section 5 and checked by hand
 - [ ] The research linter was not run: Team A has no access to it

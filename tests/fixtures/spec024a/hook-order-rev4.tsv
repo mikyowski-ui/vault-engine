@@ -1,0 +1,11 @@
+case	hook	order	member	block	outcome	ret0_after	native	result	note
+O12	HOOK_ADJUSTFID	1	hs_adjustfid	sfall	ok	0x0100000C	0x01000001	-	Both blocks run on this point
+O12	HOOK_ADJUSTFID	2	alpha	mod	ok	0x0100000C	0x01000001	-	-
+O12	HOOK_ADJUSTFID	3	beta	mod	ok	0x0100000E	0x01000001	0x0100000E	-
+O13	HOOK_ADJUSTFID	1	hs_adjustfid	sfall	ok	0x0100000C	0x01000001	-	beta's FID has no art, so the limit leaves arg0's figure, not hs_adjustfid's
+O13	HOOK_ADJUSTFID	2	beta	mod	ok	0x0100FFFF	0x01000001	0x01000001	-
+O14	HOOK_DESCRIPTIONOBJ	1	alpha	mod	ok	"Old"	base text	-	Sfall mode off. beta writes a number, which does not convert to a string
+O14	HOOK_DESCRIPTIONOBJ	2	beta	mod	return-unconverted	"Old"	base text	"Old"	-
+O15	HOOK_COMBATTURN	1	hs_combatturn	sfall	ok	1	turn runs	-	Start of a turn. 1 would skip it, and any other value does nothing
+O15	HOOK_COMBATTURN	2	alpha	mod	ok	1	turn runs	-	-
+O15	HOOK_COMBATTURN	3	beta	mod	ok	0	turn runs	turn runs	-
