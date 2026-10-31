@@ -103,7 +103,7 @@ pub(crate) struct PointerState {
     pub rested: bool,
     pub feedback: Option<Feedback>,
     /// The object whose look-at text the monitor last received.
-    looked: Option<ObjectRef>,
+    pub(crate) looked: Option<ObjectRef>,
     pub held: Option<Held>,
     pub menu: Option<ActionMenu>,
     pub edge: Option<Edge>,
@@ -758,18 +758,32 @@ impl MapPreview {
                     .plan_to_tile(player, hex, usize::MAX)
                     .map(|movement| movement.directions.len() as i32)
                     .filter(|length| *length > 0);
-                let feedback =
-                    match cursor::move_hover(path, key.combat, key.legs, key.free_movement, key.ap)
-                    {
-                        MoveHover::Nothing => None,
-                        MoveHover::Cost(cost) => Some(Feedback::Cost(
-                            cost.to_string().into_bytes(),
-                            cursor::COST_COLOR,
-                        )),
-                        MoveHover::Blocked => {
-                            Some(Feedback::Cost(b"X".to_vec(), cursor::BLOCKED_COLOR))
-                        }
-                    };
+                let hooked = |hexes: i32, cost: i32| {
+                    let inputs = vec![hexes, cost];
+                    self.host
+                        .sfall_preview(Preview::MoveCost, inputs, |host| {
+                            host.hook_move_cost(player, hexes, cost)
+                        })
+                        .unwrap_or(cost)
+                };
+                let hover = cursor::priced_move_hover(
+                    path,
+                    key.combat,
+                    key.legs,
+                    key.free_movement,
+                    key.ap,
+                    hooked,
+                );
+                let feedback = match hover {
+                    MoveHover::Nothing => None,
+                    MoveHover::Cost(cost) => Some(Feedback::Cost(
+                        cost.to_string().into_bytes(),
+                        cursor::COST_COLOR,
+                    )),
+                    MoveHover::Blocked => {
+                        Some(Feedback::Cost(b"X".to_vec(), cursor::BLOCKED_COLOR))
+                    }
+                };
                 self.pointer.route = Some((key, feedback.clone()));
                 feedback
             }

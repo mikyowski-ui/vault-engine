@@ -429,12 +429,24 @@ impl MapPreview {
     }
     /// M-I5 / SPEC-013 §3.18: the player table's plain value, the whole
     /// table even while a container opened on it is shown.
-    fn barter_offer_value(&self) -> i64 {
+    pub(crate) fn barter_offer_value(&self) -> i64 {
         if let Some((_, offer)) = self.host.sfall_barter_shown() {
             return offer;
         }
         match &self.screen {
             Screen::Barter(screen) => self.host.world.inventory_value(screen.session.offer),
+            _ => 0,
+        }
+    }
+    /// The merchant table's price on the window: what the Simulation phase
+    /// stored (SPEC-024b §6.6), else the plain price.
+    pub(crate) fn barter_shown_price(&mut self) -> i32 {
+        match (&self.screen, self.host.sfall_barter_shown()) {
+            (_, Some((price, _))) => price,
+            (Screen::Barter(screen), None) => {
+                let session = screen.session.clone();
+                self.host.barter_price(&session)
+            }
             _ => 0,
         }
     }
@@ -690,14 +702,7 @@ impl MapPreview {
         let Some(owners) = self.barter_owners() else {
             return Err("barter is not open".into());
         };
-        let price = match (&self.screen, self.host.sfall_barter_shown()) {
-            (_, Some((price, _))) => price,
-            (Screen::Barter(screen), None) => {
-                let session = screen.session.clone();
-                self.host.barter_price(&session)
-            }
-            _ => 0,
-        };
+        let price = self.barter_shown_price();
         // The conversation's upper part stays, with the last barter message
         // as its reply; the barter window covers its lower subwindow.
         let reply = match &self.screen {

@@ -2112,6 +2112,8 @@ pub(crate) use vault_fixtures::world as fixture;
 #[cfg(test)]
 mod interface_tests;
 #[cfg(test)]
+mod sfall_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 use crate::audio::sound_fixture;

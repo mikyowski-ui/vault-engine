@@ -128,6 +128,9 @@ pub enum Preview {
     SlotCost,
     /// The to-hit percentage under the targeting cursor.
     HoverChance,
+    /// The cost beside the movement cursor: a planning query for N hexes
+    /// (§6.13), before the free-movement pool.
+    MoveCost,
 }
 
 /// The int return at `index`, if a member set it.
@@ -671,7 +674,7 @@ impl<A: WorldAssets> WorldHost<A> {
             .map_or(cost, |value| value.max(0))
     }
     /// `HOOK_MOVECOST` (§6.13): `hexes` becoming `cost` AP.
-    pub(crate) fn hook_move_cost(&mut self, critter: ObjectRef, hexes: i32, cost: i32) -> i32 {
+    pub fn hook_move_cost(&mut self, critter: ObjectRef, hexes: i32, cost: i32) -> i32 {
         if self.sfall.is_none() {
             return cost;
         }

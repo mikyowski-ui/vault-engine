@@ -3,10 +3,8 @@
 //! and nothing here reaches SPEC-021's `state_hash`.
 use crate::state_hash::fnv1a64;
 use std::collections::BTreeMap;
-use vault_vm::{
-    sfall::SfallValue,
-    sfall_arrays::{self, ArrayStore, SidecarError},
-};
+pub use vault_vm::sfall::SfallValue;
+use vault_vm::sfall_arrays::{self, ArrayStore, SidecarError};
 
 /// The save sidecar, beside the slot's `SAVE.DAT` (§5.8).
 pub const SIDECAR: &str = "VAULTSFL.DAT";

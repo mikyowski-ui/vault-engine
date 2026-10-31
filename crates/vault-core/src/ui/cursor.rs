@@ -116,12 +116,16 @@ pub const HOVER_REST_MS: u64 = 250;
 /// Movement hover in combat: path length times 1, 4 with one crippled leg
 /// or 8 with both, less free movement, at least 0.
 pub fn movement_cost(path: i32, crippled_legs: u8, free_move: i32) -> i32 {
+    (movement_rate_cost(path, crippled_legs) - free_move).max(0)
+}
+/// The hexes at the per-hex rate, before the free-movement pool.
+pub fn movement_rate_cost(path: i32, crippled_legs: u8) -> i32 {
     let factor = match crippled_legs {
         0 => 1,
         1 => 4,
         _ => 8,
     };
-    (path * factor - free_move).max(0)
+    path * factor
 }
 /// The movement hover text: `None` without a path is a red `X`; out of
 /// combat nothing; in combat the cost in white when affordable.
@@ -138,13 +142,26 @@ pub fn move_hover(
     free_move: i32,
     ap: i32,
 ) -> MoveHover {
+    priced_move_hover(path, combat, crippled_legs, free_move, ap, |_, cost| cost)
+}
+/// [`move_hover`] with `price` given the hexes and their cost at the per-hex
+/// rate, in combat only, where movement costs AP. It returns the cost the
+/// free-movement pool then pays from (SPEC-024b §6.13).
+pub fn priced_move_hover(
+    path: Option<i32>,
+    combat: bool,
+    crippled_legs: u8,
+    free_move: i32,
+    ap: i32,
+    price: impl FnOnce(i32, i32) -> i32,
+) -> MoveHover {
     let Some(path) = path else {
         return MoveHover::Blocked;
     };
     if !combat {
         return MoveHover::Nothing;
     }
-    let cost = movement_cost(path, crippled_legs, free_move);
+    let cost = (price(path, movement_rate_cost(path, crippled_legs)) - free_move).max(0);
     if cost <= ap {
         MoveHover::Cost(cost)
     } else {

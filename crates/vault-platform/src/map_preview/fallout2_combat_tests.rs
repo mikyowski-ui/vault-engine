@@ -17,6 +17,15 @@ fn new_game(vfs: Arc<dyn Vfs>, sheet: &str) -> MapPreview {
 }
 /// [`new_game`] under `preset`.
 pub(super) fn new_game_with(vfs: Arc<dyn Vfs>, sheet: &str, preset: EnginePreset) -> MapPreview {
+    new_game_setup(vfs, sheet, preset, |_| {})
+}
+/// [`new_game_with`], with `setup` run once the game's state is installed.
+pub(super) fn new_game_setup(
+    vfs: Arc<dyn Vfs>,
+    sheet: &str,
+    preset: EnginePreset,
+    setup: impl FnOnce(&mut WorldHost<VfsWorldAssets>),
+) -> MapPreview {
     let open = || {
         let assets = VfsWorldAssets::new(vfs.clone(), "english").unwrap();
         assets.set_game_profile(vault_core::GameProfile::Fallout2);
@@ -36,7 +45,10 @@ pub(super) fn new_game_with(vfs: Arc<dyn Vfs>, sheet: &str, preset: EnginePreset
         sheet,
         1,
         preset,
-        |host| host.begin_fallout2_game(tables),
+        |host| {
+            host.begin_fallout2_game(tables);
+            setup(host);
+        },
     )
     .unwrap();
     world.host.movie_policy = MoviePolicy::CompleteImmediately;

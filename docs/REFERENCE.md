@@ -3272,6 +3272,10 @@ on a hash map, an address or a locale. Two values are equal when they have the s
 type and content, so `1`, `1.0`, `0.0` and `-0.0` are four keys. A shuffle draws
 from the gameplay generator. IDs start at 1 and are never reused in a session.
 
+`scan_array` takes a number: a string is a failed operand, so nothing is searched and
+it pushes int 0, not -1, which a script can read as a match at index 0. `set_sfall_arg`
+takes an int, whatever the argument declares, so a float truncates.
+
 Temporary arrays end with the frame: at the end of the Simulation phase, before
 the checkpoint, so a checkpoint never sees one. `MapPreview::tick` calls
 `WorldHost::sfall_end_of_step` every frame, even while a modal screen holds the
@@ -3313,7 +3317,7 @@ first. An empty chain costs nothing.
 | `HOOK_CALCAPCOST` | 2 | On attack costs, the 2 AP reload and the 2 AP generic use. A return of 0 is free |
 | `HOOK_COMBATDAMAGE` | 5 | Once per victim of a hit, before anything is debited |
 | `HOOK_BARTERPRICE` | 10 | On the offer's comparison, and on the screen's preview |
-| `HOOK_MOVECOST` | 11 | On each committed hex in combat |
+| `HOOK_MOVECOST` | 11 | On each committed hex in combat, and on the movement cursor's planning query |
 | `HOOK_KEYPRESS` | 19 | Once per physical press and release, before any handling |
 | `HOOK_INVENTORYMOVE` | 24 | On a drag or a drop to the ground. It can only prevent the move |
 
@@ -3322,9 +3326,10 @@ error is unloaded from every chain, and a word that would suspend a member ends 
 Past 8 nested chains a chain is skipped.
 
 A chain runs only in the Input or Simulation phase. A value the interface only
-shows is a preview: the to-hit percentage under the cursor, the AP cost on the bar
-and the barter totals are queried in the Simulation phase when their inputs change,
-and drawing reads what is stored. So a hook fires less often here than under sfall,
+shows is a preview: the to-hit percentage under the cursor, the AP cost on the bar,
+the cost beside the movement cursor and the barter totals are queried in the
+Simulation phase when their inputs change, and drawing reads what is stored. A value
+whose inputs have not reached a step yet shows the unhooked cost. So a hook fires less often here than under sfall,
 which a script that counts firings can notice. The input log holds the physical
 key, so a replay runs `HOOK_KEYPRESS` again and gets the same logical key.
 
@@ -3371,8 +3376,6 @@ answered the code takes the stated choice and comments it.
 
 Sfall mode (SPEC-024b), against the spec's boundaries:
 
-- `HOOK_MOVECOST` runs on committed steps. The AP cost beside the movement
-  cursor is not previewed, so it shows the unhooked planning cost.
 - `HOOK_COMBATDAMAGE` has no AI area-safety site: the engine's AI runs no such
   simulation, so the spec's clause has nothing to attach to.
 - A nested chain that reaches a script already running skips that member, with a

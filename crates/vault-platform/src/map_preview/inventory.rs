@@ -580,7 +580,7 @@ impl MapPreview {
     /// SPEC-024b §6.13: a drop on the ground runs the hook once per item,
     /// and once only for caps; an ammunition entry's items are its packs.
     /// Only the items it allows leave.
-    fn hooked_drop(&mut self, item: ObjectRef, quantity: i32) {
+    pub(crate) fn hooked_drop(&mut self, item: ObjectRef, quantity: i32) {
         const GROUND: i32 = 6;
         let money = self
             .host
@@ -688,7 +688,7 @@ impl MapPreview {
         self.drain_effects();
     }
     /// §3.34 the drop of `item`, lifted from `from`, on `target`.
-    fn inventory_drop(&mut self, from: Slot, item: ObjectRef, target: DropTarget) {
+    pub(crate) fn inventory_drop(&mut self, from: Slot, item: ObjectRef, target: DropTarget) {
         let player = self.host.world.player;
         let quantity = self.entry_quantity(item);
         let open = match &self.screen {

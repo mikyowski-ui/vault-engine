@@ -1189,7 +1189,7 @@ impl MapPreview {
     }
     /// §3.23 the AP cost the slot shows for an attack: SPEC-007 §3.4's cost
     /// (base cost, the player's reductions, +1 when aimed, at least 1).
-    fn slot_attack_cost(&self, hit: u8, aimed: bool) -> i32 {
+    pub(crate) fn slot_attack_cost(&self, hit: u8, aimed: bool) -> i32 {
         if let Some(cost) = self
             .host
             .sfall_previewed(Preview::SlotCost, &[i32::from(hit), i32::from(aimed)])
