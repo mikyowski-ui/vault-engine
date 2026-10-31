@@ -4,7 +4,7 @@
 use crate::state_hash::fnv1a64;
 use std::{collections::BTreeMap, ops::RangeInclusive};
 pub use vault_vm::sfall::SfallValue;
-use vault_vm::sfall_arrays::{self, ArrayStore, SidecarError};
+use vault_vm::sfall_arrays::{self, ArrayStore, Header, SidecarError};
 
 /// The save sidecar, beside the slot's `SAVE.DAT` (§5.8).
 pub const SIDECAR: &str = "VAULTSFL.DAT";
@@ -61,16 +61,24 @@ pub struct SfallWorld {
 }
 impl Default for SfallWorld {
     fn default() -> Self {
+        let header = Header::default();
         Self {
             globals: BTreeMap::new(),
             arrays: ArrayStore::default(),
-            next_unique: *UNIQUE_IDS.start(),
-            forced_map: -1,
-            forced_flags: 0,
+            next_unique: header.next_unique,
+            forced_map: header.forced_map,
+            forced_flags: header.forced_flags,
         }
     }
 }
 impl SfallWorld {
+    fn header(&self) -> Header {
+        Header {
+            next_unique: self.next_unique,
+            forced_map: self.forced_map,
+            forced_flags: self.forced_flags,
+        }
+    }
     fn global_records(&self) -> Vec<(SfallValue, SfallValue)> {
         self.globals
             .iter()
@@ -82,6 +90,7 @@ impl SfallWorld {
         sfall_arrays::write_stream(
             sfall_arrays::SIDECAR_TAG,
             &self.arrays,
+            self.header(),
             &self.global_records(),
             true,
         )
@@ -91,13 +100,16 @@ impl SfallWorld {
         sfall_arrays::write_stream(
             sfall_arrays::STREAM_TAG,
             &self.arrays,
+            self.header(),
             &self.global_records(),
             false,
         )
     }
-    /// A sidecar's state, parsed whole so that a bad file changes nothing.
+    /// A sidecar's state, parsed whole so that a bad file changes nothing. A
+    /// revision 1 sidecar migrates: what it lacks takes its default, and the
+    /// next save writes revision 2 (Decision D-32).
     pub fn from_sidecar(bytes: &[u8]) -> Result<Self, SidecarError> {
-        let (arrays, records) = sfall_arrays::parse_sidecar(bytes)?;
+        let (arrays, header, records) = sfall_arrays::parse_sidecar(bytes)?;
         let mut globals = BTreeMap::new();
         for (key, value) in records {
             let parsed =
@@ -107,7 +119,9 @@ impl SfallWorld {
         Ok(Self {
             globals,
             arrays,
-            ..Default::default()
+            next_unique: header.next_unique,
+            forced_map: header.forced_map,
+            forced_flags: header.forced_flags,
         })
     }
 }

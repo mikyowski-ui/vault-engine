@@ -170,10 +170,28 @@ fn hex(cell: &str) -> Vec<u8> {
         .map(|byte| u8::from_str_radix(byte, 16).unwrap())
         .collect()
 }
-/// Vector F's globals, as its sidecar bytes hold them.
+/// The bytes of `vector`'s row `step`.
+pub(crate) fn vector_bytes(vector: &str, step: &str) -> Vec<u8> {
+    hex(vector_cell(vector, step, 3))
+}
+/// Column `index` of `vector`'s row `step`.
+pub(crate) fn vector_cell(vector: &str, step: &str, index: usize) -> &'static str {
+    let row = VECTORS
+        .lines()
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .find(|cells| cells[0] == vector && cells[1] == step)
+        .unwrap_or_else(|| panic!("no row {step} in {vector}"));
+    row[index]
+}
+/// Vector F's globals and header fields, as its sidecar bytes hold them.
 fn f_world(store: ArrayStore) -> SfallWorld {
+    let bytes = vector_bytes("F", "sidecar");
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
     let mut world = SfallWorld {
         arrays: store,
+        next_unique: word(12),
+        forced_map: word(16) as i32,
+        forced_flags: word(20),
         ..Default::default()
     };
     world
@@ -196,7 +214,7 @@ fn t3_every_array_vector_gives_its_push_and_its_state() {
         let [name, step_name, operation, push, state_after, _] = cells[..] else {
             panic!("{line}");
         };
-        if name.starts_with('H') {
+        if !matches!(name, "A" | "B" | "C" | "D" | "E" | "F" | "F2" | "F3") {
             continue;
         }
         if name != vector {
@@ -265,16 +283,14 @@ fn t3_every_array_vector_gives_its_push_and_its_state() {
 }
 
 #[test]
-fn t4_the_sidecar_round_trips_and_each_mutation_refuses() {
-    let line = VECTORS
-        .lines()
-        .find(|line| line.starts_with("F\tsidecar\t"))
-        .unwrap();
-    let bytes = hex(line.split('\t').nth(3).unwrap());
+fn t4_vector_f_round_trips_byte_for_byte_and_each_mutation_refuses_the_slot() {
+    let bytes = vector_bytes("F", "sidecar");
     let world = SfallWorld::from_sidecar(&bytes).unwrap();
     assert_eq!(world.sidecar(), bytes);
     assert_eq!(world.arrays.next_id(), 4);
     assert_eq!(world.globals.len(), 2);
+    assert_eq!(world.next_unique, 0x1000_0002);
+    assert_eq!((world.forced_map, world.forced_flags), (161, 0x10));
 
     let mutated = |at: usize, byte: u8| {
         let mut copy = bytes.clone();
@@ -282,12 +298,14 @@ fn t4_the_sidecar_round_trips_and_each_mutation_refuses() {
         SfallWorld::from_sidecar(&copy)
     };
     assert_eq!(mutated(0, b'X'), Err(SidecarError::Tag));
-    assert_eq!(mutated(4, 2), Err(SidecarError::Revision(2)));
+    // A revision other than 1 and 2, as vector MG2's are.
+    assert_eq!(mutated(4, 3), Err(SidecarError::Revision(3)));
+    assert_eq!(mutated(4, 0), Err(SidecarError::Revision(0)));
     // The first global's key type byte, and the first array's shape.
-    assert_eq!(mutated(16, 9), Err(SidecarError::Type(9)));
-    assert_eq!(mutated(52, 2), Err(SidecarError::Shape(2)));
-    assert_eq!(mutated(54, 3), Err(SidecarError::Storage(3)));
-    assert_eq!(mutated(56, 2), Err(SidecarError::Option(2)));
+    assert_eq!(mutated(28, 9), Err(SidecarError::Type(9)));
+    assert_eq!(mutated(64, 2), Err(SidecarError::Shape(2)));
+    assert_eq!(mutated(66, 3), Err(SidecarError::Storage(3)));
+    assert_eq!(mutated(68, 2), Err(SidecarError::Option(2)));
     let mut longer = bytes.clone();
     longer.push(0);
     assert_eq!(
@@ -302,8 +320,8 @@ fn t4_the_sidecar_round_trips_and_each_mutation_refuses() {
         );
     }
     // A duplicate ID: two copies of the only array record.
-    let record = 48..bytes.len();
-    let mut twice = bytes[..44].to_vec();
+    let record = 60..bytes.len();
+    let mut twice = bytes[..56].to_vec();
     twice.extend(2u32.to_le_bytes());
     twice.extend_from_slice(&bytes[record.clone()]);
     twice.extend_from_slice(&bytes[record]);
@@ -311,14 +329,101 @@ fn t4_the_sidecar_round_trips_and_each_mutation_refuses() {
         SfallWorld::from_sidecar(&twice),
         Err(SidecarError::DuplicateId(1))
     );
+    // A revision 2 file cut to revision 1's header is no revision 1 file:
+    // the revision chose the layout.
+    let mut downgraded = bytes.clone();
+    downgraded[4] = 1;
+    assert!(SfallWorld::from_sidecar(&downgraded).is_err());
+}
+
+/// Vector MG1 (Decision D-32): a revision 1 sidecar's load, defaults, hash,
+/// next save and the next array ID, row by row.
+#[test]
+fn mg1_a_revision_1_sidecar_migrates_to_its_state_defaults_and_hash() {
+    let rows: Vec<&str> = VECTORS
+        .lines()
+        .filter(|line| line.starts_with("MG1\t"))
+        .collect();
+    assert_eq!(rows.len(), 10);
+    let bytes = vector_bytes("MG1", "sidecar-r1");
+    assert_eq!(
+        vector_cell("MG1", "sidecar-r1", 4),
+        format!("bytes={}", bytes.len())
+    );
+    let mut world = SfallWorld::from_sidecar(&bytes).unwrap();
+    assert_eq!(state(&world.arrays), vector_cell("MG1", "2", 4));
+    assert_eq!(world.globals.len(), 2);
+    let defaults = format!(
+        "next unique ID {:#x}; forced map {}; forced flags {}",
+        world.next_unique, world.forced_map, world.forced_flags
+    );
+    assert_eq!(defaults, vector_cell("MG1", "defaults", 3));
+    let stream = world.extension_stream();
+    assert_eq!(stream, vector_bytes("MG1", "stream"));
+    assert_eq!(
+        format!("{:016X}", fnv1a64(&stream)),
+        vector_cell("MG1", "sfall_hash", 3)
+    );
+    // Never a hash of the revision 1 bytes.
+    assert_ne!(fnv1a64(&stream), fnv1a64(&bytes));
+    let saved = world.sidecar();
+    assert_eq!(saved, vector_bytes("MG1", "sidecar"));
+    assert_eq!(
+        vector_cell("MG1", "sidecar", 4),
+        format!("bytes={}", saved.len())
+    );
+    assert_eq!(
+        format!("{:016X}", fnv1a64(&saved)),
+        vector_cell("MG1", "sidecar-fnv", 3)
+    );
+    // The revision 2 file and the migrated state are one state.
+    assert_eq!(SfallWorld::from_sidecar(&saved).unwrap(), world);
+    assert_eq!(
+        step(&mut world.arrays, vector_cell("MG1", "8", 2)),
+        vector_cell("MG1", "8", 3)
+    );
+    assert_eq!(state(&world.arrays), vector_cell("MG1", "8", 4));
+    let empty = vector_bytes("MG1", "sidecar-r1-empty");
+    let world = SfallWorld::from_sidecar(&empty).unwrap();
+    assert_eq!(world, SfallWorld::default());
+    let hash = format!("{:016X}", fnv1a64(&world.extension_stream()));
+    assert_eq!(hash, vector_cell("MG1", "sfall_hash-empty", 3));
+    assert_eq!(hash, vector_cell("F3", "sfall_hash", 3));
+}
+
+/// Vector MG2: revisions 0 and 3, and a revision 1 file cut short or left
+/// long, are refused with the typed error.
+#[test]
+fn mg2_other_revisions_and_a_cut_or_long_revision_1_file_are_refused() {
+    let rows: Vec<&str> = VECTORS
+        .lines()
+        .filter(|line| line.starts_with("MG2\t"))
+        .collect();
+    assert_eq!(rows.len(), 4);
+    for (step_name, expected) in [
+        ("refused-r0", SidecarError::Revision(0)),
+        ("refused-r3", SidecarError::Revision(3)),
+        ("refused-r1-truncated", SidecarError::Truncated),
+        ("refused-r1-oversized", SidecarError::Trailing(1)),
+    ] {
+        let bytes = vector_bytes("MG2", step_name);
+        assert_eq!(
+            SfallWorld::from_sidecar(&bytes),
+            Err(expected),
+            "{step_name}"
+        );
+        assert!(vector_cell("MG2", step_name, 4).starts_with("refused: "));
+    }
 }
 
 #[test]
 fn t5_the_hash_is_the_vector_value_on_a_fresh_session() {
     let world = WorldState::new(crate::CharacterSheet::default(), 1).unwrap();
-    assert_eq!(world.sfall_hash(), 0xAF36_4CE5_AE92_BB79);
+    let expected = u64::from_str_radix(vector_cell("F3", "sfall_hash", 3), 16).unwrap();
+    assert_eq!(world.sfall_hash(), expected);
     let fresh = SfallWorld::default();
-    assert_eq!(fresh.extension_stream().len(), 20);
+    assert_eq!(fresh.extension_stream(), vector_bytes("F3", "stream"));
+    assert_eq!(fresh.extension_stream().len(), 32);
     // It takes `&self` and changes nothing.
     let before = world.state_hash();
     assert_eq!(world.sfall_hash(), world.sfall_hash());

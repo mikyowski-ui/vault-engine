@@ -716,7 +716,16 @@ mod tests {
             panic!("a map session");
         };
         assert!(map.host.sfall_mode());
-        assert_eq!(map.host.world.sfall_hash(), 0xAF36_4CE5_AE92_BB79);
+        // Vector F3: the empty extension state's hash.
+        let f3 = include_str!("../../../oracle/SPEC-024/sfall-array-vectors.tsv")
+            .lines()
+            .find_map(|line| line.strip_prefix("F3\tsfall_hash\t"))
+            .and_then(|row| row.split('\t').nth(1))
+            .unwrap();
+        assert_eq!(
+            map.host.world.sfall_hash(),
+            u64::from_str_radix(f3, 16).unwrap()
+        );
         map.tick(16).unwrap();
         map.tick(32).unwrap();
         assert_eq!(

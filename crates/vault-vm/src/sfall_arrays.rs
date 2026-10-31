@@ -14,7 +14,10 @@ pub const ALL_ARRAYS: &[u8] = b"...all_arrays...";
 /// The sidecar's and the extension stream's tags (§5.8, §5.9).
 pub const SIDECAR_TAG: &[u8; 4] = b"VSFL";
 pub const STREAM_TAG: &[u8; 4] = b"VSX1";
-const FORMAT_REVISION: u32 = 1;
+const FORMAT_REVISION: u32 = 2;
+/// The revision the engine no longer writes, whose header stops at offset
+/// 12. It still loads (Decision D-32).
+const OLD_REVISION: u32 = 1;
 
 /// A list holds values; a map holds key and value pairs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,11 +361,30 @@ fn write_value(out: &mut Vec<u8>, value: &SfallValue) {
         }
     }
 }
+/// The fields format revision 2 adds to the header (§5.8). The default is
+/// what a new game has, and what a revision 1 sidecar migrates to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Header {
+    pub next_unique: u32,
+    /// -1 for no pending forced encounter.
+    pub forced_map: i32,
+    pub forced_flags: u32,
+}
+impl Default for Header {
+    fn default() -> Self {
+        Self {
+            next_unique: 0x1000_0000,
+            forced_map: -1,
+            forced_flags: 0,
+        }
+    }
+}
 /// §5.8's layout under `tag`, with `globals` in the order given: the sidecar
 /// holds the saved arrays only, and the extension stream every live array.
 pub fn write_stream(
     tag: &[u8; 4],
     store: &ArrayStore,
+    header: Header,
     globals: &[(SfallValue, SfallValue)],
     saved_only: bool,
 ) -> Vec<u8> {
@@ -370,6 +392,9 @@ pub fn write_stream(
     out.extend(tag);
     out.extend(FORMAT_REVISION.to_le_bytes());
     out.extend(store.next_id.to_le_bytes());
+    out.extend(header.next_unique.to_le_bytes());
+    out.extend(header.forced_map.to_le_bytes());
+    out.extend(header.forced_flags.to_le_bytes());
     out.extend((globals.len() as u32).to_le_bytes());
     for (key, value) in globals {
         write_value(&mut out, key);
@@ -472,19 +497,31 @@ impl<'a> Reader<'a> {
         }
     }
 }
-/// A parsed sidecar: the store as saved, and the global records in order.
-pub type Sidecar = (ArrayStore, Vec<(SfallValue, SfallValue)>);
-/// Parse a whole `VAULTSFL.DAT`, before any state changes (§5.8).
+/// A parsed sidecar: the store as saved, its header's fields, and the global
+/// records in order.
+pub type Sidecar = (ArrayStore, Header, Vec<(SfallValue, SfallValue)>);
+/// Parse a whole `VAULTSFL.DAT`, before any state changes (§5.8). The tag
+/// and the revision come first, and only then is a layout chosen. A revision
+/// 1 file has no fields of [`Header`], so they take their defaults.
 pub fn parse_sidecar(bytes: &[u8]) -> Result<Sidecar, SidecarError> {
     let mut reader = Reader { bytes, at: 0 };
     if reader.take(4).map_err(|_| SidecarError::Tag)? != SIDECAR_TAG {
         return Err(SidecarError::Tag);
     }
     let revision = reader.u32()?;
-    if revision != FORMAT_REVISION {
+    if revision != FORMAT_REVISION && revision != OLD_REVISION {
         return Err(SidecarError::Revision(revision));
     }
     let next_id = reader.u32()?;
+    let header = if revision == FORMAT_REVISION {
+        Header {
+            next_unique: reader.u32()?,
+            forced_map: reader.u32()? as i32,
+            forced_flags: reader.u32()?,
+        }
+    } else {
+        Header::default()
+    };
     let mut globals = Vec::new();
     for _ in 0..reader.u32()? {
         let key = reader.value()?;
@@ -544,5 +581,5 @@ pub fn parse_sidecar(bytes: &[u8]) -> Result<Sidecar, SidecarError> {
         next_id,
         last_created: None,
     };
-    Ok((store, globals))
+    Ok((store, header, globals))
 }

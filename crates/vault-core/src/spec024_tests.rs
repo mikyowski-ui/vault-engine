@@ -1105,7 +1105,8 @@ fn array_words_change_no_spec_021_hash() {
     let (mut host, _) = sfall_host();
     let (state, combat) = (host.world.state_hash(), host.world.combat_hash());
     let empty = host.world.sfall_hash();
-    assert_eq!(empty, 0xAF36_4CE5_AE92_BB79);
+    let hash = crate::spec024_arrays_tests::vector_cell("F3", "sfall_hash", 3);
+    assert_eq!(empty, u64::from_str_radix(hash, 16).unwrap());
     run(&mut host, &[I(3), I(0), W(0x822d), S(b"k"), W(0x8254)]);
     run(&mut host, &[S(b"a_myvar1"), I(1000), W(0x819d)]);
     assert_eq!(

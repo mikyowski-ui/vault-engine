@@ -1972,8 +1972,108 @@ fn spec024_a_sidecar_is_always_written_and_a_vanilla_slot_starts_empty() {
         .save_game(root.path(), 2, &SaveInfo::default())
         .unwrap();
     let written = fs::read(slot_directory(root.path(), 2).unwrap().join(SIDECAR)).unwrap();
-    assert_eq!(written.len(), 20);
-    assert_eq!(&written[..4], b"VSFL");
+    let mut empty = crate::spec024_arrays_tests::vector_bytes("F3", "stream");
+    empty[..4].copy_from_slice(b"VSFL");
+    assert_eq!(written, empty);
+}
+
+/// Every file of a slot folder, by name.
+fn slot_files(slot: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fs::read_dir(slot)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// Decision D-32 on a real slot: vector MG1's revision 1 sidecar loads, and
+/// the load writes no file. The next save writes revision 2's exact bytes.
+#[test]
+fn spec024_a_revision_1_slot_loads_stays_as_it_is_and_its_next_save_is_revision_2() {
+    use crate::{
+        sfall::SIDECAR,
+        spec024_arrays_tests::{vector_bytes, vector_cell},
+    };
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut modded = host(dir.path());
+    modded.load_map("maps/synth.map").unwrap();
+    sfall_on(&mut modded);
+    modded
+        .save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    let slot = slot_directory(root.path(), 1).unwrap();
+    let old = vector_bytes("MG1", "sidecar-r1");
+    fs::write(slot.join(SIDECAR), &old).unwrap();
+    let before = slot_files(&slot);
+    modded.load_game(root.path(), 1).unwrap();
+    assert_eq!(slot_files(&slot), before, "a load rewrites no file");
+    let hash = u64::from_str_radix(vector_cell("MG1", "sfall_hash", 3), 16).unwrap();
+    assert_eq!(modded.world.sfall_hash(), hash);
+    let state = modded.world.sfall.as_deref().unwrap();
+    assert_eq!(
+        crate::spec024_arrays_tests::state(&state.arrays),
+        vector_cell("MG1", "2", 4)
+    );
+    assert_eq!(state.next_unique, 0x1000_0000);
+    assert_eq!((state.forced_map, state.forced_flags), (-1, 0));
+    modded
+        .save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    assert_eq!(
+        fs::read(slot.join(SIDECAR)).unwrap(),
+        vector_bytes("MG1", "sidecar")
+    );
+    // That revision 2 slot loads to the same hash.
+    modded.load_game(root.path(), 1).unwrap();
+    assert_eq!(modded.world.sfall_hash(), hash);
+    // An empty revision 1 sidecar gives vector F3's value.
+    fs::write(slot.join(SIDECAR), vector_bytes("MG1", "sidecar-r1-empty")).unwrap();
+    modded.load_game(root.path(), 1).unwrap();
+    let empty = u64::from_str_radix(vector_cell("F3", "sfall_hash", 3), 16).unwrap();
+    assert_eq!(modded.world.sfall_hash(), empty);
+}
+
+/// Vector MG2 on a real slot, and revision 1 with the mode off.
+#[test]
+fn spec024_each_refused_sidecar_refuses_the_slot_and_changes_nothing() {
+    use crate::{sfall::SIDECAR, spec024_arrays_tests::vector_bytes};
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut modded = host(dir.path());
+    modded.load_map("maps/synth.map").unwrap();
+    sfall_on(&mut modded);
+    modded
+        .save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    let slot = slot_directory(root.path(), 1).unwrap();
+    let before = (modded.world.state_hash(), modded.world.sfall_hash());
+    for (step, reason) in [
+        ("refused-r0", "revision 0"),
+        ("refused-r3", "revision 3"),
+        ("refused-r1-truncated", "ends early"),
+        ("refused-r1-oversized", "follow the last record"),
+    ] {
+        fs::write(slot.join(SIDECAR), vector_bytes("MG2", step)).unwrap();
+        let error = modded.load_game(root.path(), 1).unwrap_err().to_string();
+        assert!(error.contains(SIDECAR) && error.contains(reason), "{error}");
+        assert_eq!(
+            (modded.world.state_hash(), modded.world.sfall_hash()),
+            before,
+            "{step}"
+        );
+    }
+    // Sfall mode off refuses a sidecar of either revision.
+    fs::write(slot.join(SIDECAR), vector_bytes("MG1", "sidecar-r1")).unwrap();
+    let mut vanilla = host(dir.path());
+    vanilla.load_map("maps/synth.map").unwrap();
+    let error = vanilla.load_game(root.path(), 1).unwrap_err().to_string();
+    assert!(error.contains("sfall mode"), "{error}");
 }
 
 #[test]
