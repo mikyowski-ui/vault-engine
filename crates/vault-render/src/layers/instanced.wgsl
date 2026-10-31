@@ -39,6 +39,7 @@ struct Uniforms {
 const RECORD_WORDS: u32 = 12u;
 const EXEMPT: u32 = 1u;
 const PEEK: u32 = 2u;
+const LAST_MODE: u32 = 6u;
 const BAYER = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
 
 struct Instance {
@@ -135,16 +136,23 @@ fn lit(item: Instance, s: u32, level: u32) -> u32 {
     return intensity(s, level);
 }
 
-// §3.10 the peek test.
+// `abs`, spelled so that naga's HLSL has no unary negate of an unsigned value
+// for FXC to warn about. `0 - value` wraps at the i32 limit as `abs` does.
+fn magnitude(value: i32) -> i32 {
+    return select(value, 0 - value, value < 0);
+}
+
+// §3.10 the peek test. The low two bits of a two's complement number are its
+// Euclidean remainder by 4, which needs no signed divide.
 fn peek_cuts(pixel: vec2<i32>) -> bool {
     let world = pixel - uniforms.offset;
-    let wx = u32(((world.x % 4) + 4) % 4);
-    let wy = u32(((world.y % 4) + 4) % 4);
+    let wx = u32(world.x & 3);
+    let wy = u32(world.y & 3);
     let b = BAYER[wy * 4u + wx];
     let dx = pixel.x - uniforms.peek_center.x;
     let dy = pixel.y - uniforms.peek_center.y;
     let outer = i32(uniforms.peek_outer);
-    if abs(dx) > outer || abs(dy) > outer {
+    if magnitude(dx) > outer || magnitude(dy) > outer {
         return false;
     }
     let d2 = u32(dx * dx + dy * dy);
@@ -155,7 +163,7 @@ fn peek_cuts(pixel: vec2<i32>) -> bool {
     if d2 > u32(outer) * u32(outer) {
         return false;
     }
-    return 256u * d2 < uniforms.thresholds[b / 4u][b % 4u];
+    return 256u * d2 < uniforms.thresholds[b >> 2u][b & 3u];
 }
 
 @fragment
@@ -171,6 +179,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<u32> {
         discard;
     }
     if (item.flags & PEEK) != 0u && (uniforms.flags & 2u) != 0u && peek_cuts(pixel) {
+        discard;
+    }
+    // Not in the switch: naga writes no `break` after a `discard`, and FXC
+    // refuses a case that does not end in one.
+    if item.mode > LAST_MODE {
         discard;
     }
     let level = level_of(item);
@@ -229,9 +242,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<u32> {
             let d = textureLoad(snapshot, pixel, 0).r;
             result = textureLoad(atlas, item.level + vec2<i32>(i32(d), i32(s) - 1), 0).r;
         }
-        default: {
-            discard;
-        }
+        default: {}
     }
     return vec4<u32>(result, 0u, 0u, 0u);
 }

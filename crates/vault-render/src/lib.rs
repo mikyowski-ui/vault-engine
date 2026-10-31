@@ -921,6 +921,8 @@ pub fn surface_point_with(
 }
 
 #[cfg(test)]
+mod fxc_tests;
+#[cfg(test)]
 mod tests {
     use super::{ScalingMode, Viewport};
 
