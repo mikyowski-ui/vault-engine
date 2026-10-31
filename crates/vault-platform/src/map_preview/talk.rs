@@ -139,12 +139,14 @@ impl MapPreview {
                 })
             }
             Some(TalkWindow::Control(_)) => return self.control_click(point),
-            None if let Some(panel) = panel => {
+            None => {
+                let Some(panel) = panel else {
+                    return false;
+                };
                 let layout = panel.layout();
                 let control = layout.hit(point);
                 control.and_then(|control| Some((layout.rect(control)?, control.sounds())))
             }
-            None => return false,
         };
         if let Some((rect, sounds)) = held {
             let (press, release) = cues(sounds);
