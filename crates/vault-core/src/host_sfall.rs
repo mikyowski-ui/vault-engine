@@ -249,15 +249,10 @@ impl<A: WorldAssets> WorldHost<A> {
         row: &'static SfallRow,
         operands: &[Value],
     ) -> Result<Option<SfallValue>, VmError> {
-        // §5.4 and §6.4 name these values `A`, where the table says narrower.
-        let classes: &[Class] = match row.id {
-            0x8239 | 0x823d => &[Class::I, Class::A],
-            _ => row.args,
-        };
         if (0x8276..=0x827c).contains(&row.id) || matches!(row.id, 0x8280 | 0x8281) {
             return self.sfall_function(vm, row, operands);
         }
-        let Some(args) = self.operands(vm, row.name, classes, operands) else {
+        let Some(args) = self.operands(vm, row.name, row.args, operands) else {
             return Ok(self.failed(row));
         };
         let int = |index: usize| args[index].int();
@@ -568,7 +563,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 integer(self.arrays().temp_list(values))
             }
             0x823d => {
-                self.set_sfall_arg(int(0), &args[1]);
+                self.set_sfall_arg(int(0), int(1));
                 None
             }
             _ => {

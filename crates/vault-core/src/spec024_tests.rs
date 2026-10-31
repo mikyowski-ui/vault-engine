@@ -1050,3 +1050,25 @@ fn array_words_change_no_spec_021_hash() {
     );
     assert_ne!(host.world.sfall_hash(), empty);
 }
+
+#[test]
+fn d_t1_scan_array_takes_a_number_and_a_string_is_a_failed_operand() {
+    let (mut host, _) = sfall_host();
+    let list = run(&mut host, &[I(2), I(0), W(0x822d)]).ints()[0];
+    run(&mut host, &[I(list), I(1), I(9), W(0x822e)]);
+    assert_eq!(run(&mut host, &[I(list), I(9), W(0x8239)]).ints(), [1]);
+    assert_eq!(run(&mut host, &[I(list), F(1.5), W(0x8239)]).ints(), [-1]);
+    // Nothing is searched, and the push is the row's default: int 0, not -1.
+    let done = run(&mut host, &[I(list), S(b"x"), W(0x8239)]);
+    assert_eq!(done.result, Ok(RunOutcome::FragmentEnd));
+    assert_eq!(done.ints(), [0]);
+    assert!(
+        diagnostics(&mut host)
+            .iter()
+            .any(|line| line.contains("scan_array"))
+    );
+    // `ret_class` limits no pushed value: a map's key keeps its type.
+    let map = run(&mut host, &[I(-1), I(0), W(0x822d)]).ints()[0];
+    run(&mut host, &[I(map), S(b"key"), I(5), W(0x822e)]);
+    assert_eq!(run(&mut host, &[I(map), I(5), W(0x8239)]).text(), b"key");
+}

@@ -138,6 +138,27 @@ fn h1_h2_the_published_example_gives_75_in_either_order() {
 }
 
 #[test]
+fn d_t1_set_sfall_arg_takes_an_int_whatever_the_argument_declares() {
+    let hook = HOOK_COMBATDAMAGE;
+    // A float truncates, and argument 12, `mixed`, takes the int too.
+    let mut body = vec![I(12), F(7.9), SET_ARG, I(2), F(-3.9), SET_ARG];
+    for index in 0..13 {
+        body.extend([I(20 + index), GET_ARG, SET_GLOBAL]);
+    }
+    let (mut host, _) = sfall_host();
+    install(
+        &mut host,
+        "gl_0.int",
+        script(&[I(hook), I(2), REGISTER_PROC], &[("m", &body)]),
+    );
+    set_up(&mut host);
+    let mut args = ints(&[0; 13]);
+    args[12] = SfallValue::text("mixed");
+    host.run_hook(hook, args);
+    assert_eq!((global(&host, 32), global(&host, 22)), (7, -3));
+}
+
+#[test]
 fn h3_the_chain_runs_newest_first_then_the_script_then_spec_oldest_first() {
     let (mut host, _) = sfall_host();
     let hook = HOOK_TOHIT;

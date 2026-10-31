@@ -79,7 +79,6 @@ impl Chain {
 #[derive(Debug)]
 struct Context {
     args: Vec<SfallValue>,
-    arg_types: &'static [HookType],
     rets: Vec<Option<SfallValue>>,
     ret_types: &'static [HookType],
     next_arg: usize,
@@ -318,7 +317,6 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         hooks.contexts.push(Context {
             args,
-            arg_types: row.args,
             rets: vec![None; row.rets.len()],
             ret_types: row.rets,
             next_arg: 0,
@@ -378,22 +376,15 @@ impl<A: WorldAssets> WorldHost<A> {
             .map(|context| context.args.clone())
             .unwrap_or_default()
     }
-    /// `set_sfall_arg`: by the argument's declared type.
-    pub(crate) fn set_sfall_arg(&mut self, index: i32, value: &SfallValue) {
-        let Some(context) = self.context() else {
-            return;
-        };
-        let Ok(index) = usize::try_from(index) else {
-            return;
-        };
-        let (Some(kind), true) = (context.arg_types.get(index), index < context.args.len()) else {
-            return;
-        };
-        match kind.convert(value) {
-            Some(value) => context.args[index] = value,
-            None => self
-                .world
-                .diagnostic(format!("set_sfall_arg: argument {index} cannot take that")),
+    /// `set_sfall_arg`: the value is class `I` (D-T1), and the int replaces
+    /// the argument whatever its declared type, `mixed` included.
+    pub(crate) fn set_sfall_arg(&mut self, index: i32, value: i32) {
+        let slot = usize::try_from(index)
+            .ok()
+            .zip(self.context())
+            .and_then(|(index, context)| context.args.get_mut(index));
+        if let Some(slot) = slot {
+            *slot = SfallValue::Int(value);
         }
     }
     /// `set_sfall_return`: the next return, nothing once all are written. A
@@ -1007,7 +998,6 @@ impl<A: WorldAssets> WorldHost<A> {
         for _ in 0..count {
             hooks.contexts.push(Context {
                 args: Vec::new(),
-                arg_types: &[],
                 rets: Vec::new(),
                 ret_types: &[],
                 next_arg: 0,
