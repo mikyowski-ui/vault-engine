@@ -53,7 +53,44 @@ pub struct SfallRow {
     pub ret: Option<Class>,
     pub tier: Tier,
 }
+/// A hook argument's or return's declared type (§6.5): every object type
+/// converts as class `I`, and `mixed` is taken as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookType {
+    Int,
+    Critter,
+    Item,
+    Object,
+    Mixed,
+    Text,
+}
+impl HookType {
+    /// `value` as this type, or `None` when it cannot convert.
+    pub fn convert(self, value: &SfallValue) -> Option<SfallValue> {
+        match self {
+            Self::Int | Self::Critter | Self::Item | Self::Object => value.coerce(Class::I),
+            Self::Mixed => Some(value.clone()),
+            Self::Text => value.coerce(Class::S),
+        }
+    }
+}
+/// One row of `sfall-hooks.tsv`. A hook that does not fire is tier P2: its
+/// script loads and registers, and no chain runs (§6.14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HookRow {
+    pub id: i32,
+    pub name: &'static str,
+    pub file: &'static str,
+    pub fires: bool,
+    pub args: &'static [HookType],
+    pub rets: &'static [HookType],
+}
 include!(concat!(env!("OUT_DIR"), "/sfall_catalog.rs"));
+
+/// The row of hook `id`: none for the reserved range or an unknown ID.
+pub fn hook_row(id: i32) -> Option<&'static HookRow> {
+    SFALL_HOOKS.iter().find(|row| row.id == id)
+}
 
 /// The row of `word`, reserved words included.
 pub fn word_row(word: u16) -> Option<&'static SfallRow> {

@@ -1754,3 +1754,41 @@ fn reports_a_fallout2_install_with_a_smoke_run() {
     // The Fallout 2 packet table loads, so combat AI is available.
     assert!(!text.contains("combat AI unavailable"), "{text}");
 }
+
+#[test]
+fn spec024_sfall_audits_a_folder_of_scripts_with_the_sfall_table() {
+    let script = |body: &[u16]| {
+        let body: Vec<Vec<u8>> = body.iter().map(|word| vm::op(*word)).collect();
+        state::program(
+            &[],
+            &[(b"start".as_slice(), state::returning(body.concat()))],
+        )
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let scripts = temp.path().join("scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    // No `scripts.lst`: a mod's hook scripts are listed nowhere. Each word
+    // here leaves the stack balanced by its sfall contract alone.
+    std::fs::write(scripts.join("hs_tohit.int"), script(&[0x8210, 0x801a])).unwrap();
+    let (success, _, text, errors) = audit(temp.path(), &["--report-script-stack", "--sfall"]);
+    assert!(success, "{errors}");
+    assert!(
+        text.contains("Script stack (sfall table): 1 scripts"),
+        "{text}"
+    );
+    assert!(text.contains("Script stack sfall check: passed"), "{text}");
+    // `fs_size` pops one, so with nothing to pop this one is a finding.
+    std::fs::write(scripts.join("gl_bad.int"), script(&[0x8200])).unwrap();
+    let (success, _, text, _) = audit(temp.path(), &["--report-script-stack", "--sfall"]);
+    assert!(success, "a report never fails the run");
+    assert!(text.contains("Script stack sfall check: failed"), "{text}");
+    assert!(text.contains("underflow"), "{text}");
+}
+
+#[test]
+fn spec024_the_sfall_flag_needs_the_report() {
+    let temp = tempfile::tempdir().unwrap();
+    let (success, _, _, errors) = audit(temp.path(), &["--sfall"]);
+    assert!(!success);
+    assert!(errors.contains("--report-script-stack"), "{errors}");
+}

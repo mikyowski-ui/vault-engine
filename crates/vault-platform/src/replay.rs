@@ -533,10 +533,13 @@ impl Replay {
                         self.press_key(key, true)?;
                     }
                 } else if !pressed {
+                    let key = self.session.physical_key(false, key);
                     self.repeat.release(key);
                     self.session.key_up(key);
                 } else if !repeat {
                     // The desktop ignores the OS repeats; the engine repeats.
+                    // The log holds the physical key: the hook runs again.
+                    let key = self.session.physical_key(true, key);
                     self.repeat.press(key, self.session.keyboard());
                     self.press_key(key, self.session.escape_exits())?;
                 }

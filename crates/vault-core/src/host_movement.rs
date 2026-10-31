@@ -180,7 +180,7 @@ impl<A: WorldAssets> WorldHost<A> {
             1 => 4,
             _ => 8,
         };
-        let mut remaining = cost;
+        let mut remaining = self.hook_move_cost(actor, 1, cost);
         if player {
             let free = self.world.free_movement.min(remaining);
             self.world.free_movement -= free;

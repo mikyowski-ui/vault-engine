@@ -510,7 +510,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// at most `trunc(H / 3)` of its range-aware hit chance H, or 5 when it
     /// is dead; a chance of 0 or less still draws.
     pub(crate) fn line_of_fire(
-        &self,
+        &mut self,
         attacker: ObjectRef,
         defender: ObjectRef,
         attack: &Attack,
@@ -548,7 +548,9 @@ impl<A: WorldAssets> WorldHost<A> {
                 } else {
                     self.world
                         .attack_profile(attacker, blocker, attack.hit_mode, place, attack.aimed)
-                        .and_then(|profile| profile.hit_chance(true))
+                        .and_then(|profile| {
+                            self.hook_hit_chance(attacker, blocker, &profile, true, Some(&mut *rng))
+                        })
                         .map_or(0, |chance| chance / 3)
                 };
                 if rng.range(1, 100)? <= chance {
@@ -616,10 +618,10 @@ impl<A: WorldAssets> WorldHost<A> {
     /// critical; a non-critter receives the hit bit and no damage or draw.
     /// Also returns Stage B's impact hex when it ran.
     pub(crate) fn resolve_attack(
-        &self,
+        &mut self,
         attacker: ObjectRef,
-        defender: ObjectRef,
-        attack: &Attack,
+        target: &mut ObjectRef,
+        attack: &mut Attack,
         rng: &mut impl RandomSource,
     ) -> Result<(Spray, Option<Victim>, Option<i32>), WorldError> {
         let spraying = matches!(
@@ -627,13 +629,17 @@ impl<A: WorldAssets> WorldHost<A> {
             crate::combat::attack_mode::BURST | crate::combat::attack_mode::CONTINUOUS
         );
         let mut spray = if spraying {
-            self.resolve_spray(attacker, defender, attack, rng)?
+            self.spray_for(attacker, target, attack, rng)?
         } else {
+            let code = attack.roll_result(rng)?;
+            let code = self.hook_after_roll(attacker, target, attack, code, rng)?;
             Spray {
-                main: attack.resolve(rng)?,
+                main: attack.resolution_of(code, rng)?,
                 extras: Vec::new(),
             }
         };
+        let defender = *target;
+        let attack = &*attack;
         let ranged = matches!(
             attack.subtype(),
             Some(crate::combat::Subtype::Ranged | crate::combat::Subtype::Throwing)
@@ -1457,14 +1463,18 @@ impl<A: WorldAssets> WorldHost<A> {
         }
     }
     /// The SPEC-007 non-aimed attack cost of a mode (unaffordable on error).
-    fn attack_cost(&self, critter: ObjectRef, target: ObjectRef, mode: u8) -> i32 {
-        self.world
+    fn attack_cost(&mut self, critter: ObjectRef, target: ObjectRef, mode: u8) -> i32 {
+        match self
+            .world
             .attack_profile(critter, target, mode, location::UNCALLED, false)
-            .map_or(i32::MAX, |attack| attack.ap_cost())
+        {
+            Ok(attack) => self.hook_ap_cost(critter, &attack),
+            Err(_) => i32::MAX,
+        }
     }
     /// The SPEC-007 hit chance plus the AI's accuracy bonus.
     fn ai_hit_chance(
-        &self,
+        &mut self,
         critter: ObjectRef,
         target: ObjectRef,
         mode: u8,
@@ -1475,7 +1485,7 @@ impl<A: WorldAssets> WorldHost<A> {
             .world
             .attack_profile(critter, target, mode, place, false)?;
         attack.accuracy_bonus = self.world.ai.accuracy;
-        attack.hit_chance(range_aware)
+        self.hook_hit_chance(critter, target, &attack, range_aware, None)
     }
     /// §3.9 weapon switching: the inventory best (AP-checked), else a
     /// retrieved environment weapon, wielded with its selected mode; success
@@ -1557,8 +1567,9 @@ impl<A: WorldAssets> WorldHost<A> {
         else {
             return Ok(location::TORSO);
         };
+        let cost = self.hook_ap_cost(critter, &aimed);
         let inputs = CalledShot {
-            aimed_affordable: aimed.ap_cost() <= self.world.action_points(critter),
+            aimed_affordable: cost <= self.world.action_points(critter),
             aiming_available: aimed.aimed_shot_available(),
             called_freq: packet.called_freq,
             difficulty: self.world.combat_difficulty.unwrap_or(1),
@@ -1566,13 +1577,19 @@ impl<A: WorldAssets> WorldHost<A> {
             min_to_hit: packet.min_to_hit,
         };
         let mut rng = std::mem::take(&mut self.world.rng);
-        let place = ai::select_location(inputs, &mut rng, |place| {
-            Ok(self
-                .ai_hit_chance(critter, target, mode, place, true)
-                .unwrap_or(i32::MIN))
-        });
+        let drawn = ai::draw_location(inputs, &mut rng);
         self.world.rng = rng;
-        place
+        let Some(place) = drawn? else {
+            return Ok(location::TORSO);
+        };
+        let chance = self
+            .ai_hit_chance(critter, target, mode, place, true)
+            .unwrap_or(i32::MIN);
+        Ok(if chance < inputs.min_to_hit {
+            location::TORSO
+        } else {
+            place
+        })
     }
     /// §3.12 attack loop entry: reference the target, select the mode for
     /// the right-hand weapon, upgrade from unarmed when warranted, and run
@@ -1719,8 +1736,9 @@ impl<A: WorldAssets> WorldHost<A> {
                 animation: ai::HANDS,
             });
             self.print_misc(5002, critter, weapon);
+            let cost = self.hook_fixed_cost(critter, 2, weapon);
             if let Some(state) = self.world.critter_state_mut(critter) {
-                state.ap = (state.ap - 2).max(0);
+                state.ap = (state.ap - cost).max(0);
             }
         }
         Ok(())
@@ -1739,6 +1757,9 @@ struct Healing<'a, A: WorldAssets> {
 }
 impl<A: WorldAssets> HealingInventory for Healing<'_, A> {
     type Unit = ObjectRef;
+    fn use_cost(&mut self) -> i32 {
+        self.host.hook_fixed_cost(self.critter, 2, 0)
+    }
     fn hp(&self) -> i32 {
         self.host.world.hit_points(self.critter).unwrap_or(0)
     }

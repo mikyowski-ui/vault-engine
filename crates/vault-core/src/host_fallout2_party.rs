@@ -326,16 +326,16 @@ impl<A: WorldAssets> WorldHost<A> {
         {
             return Ok(());
         }
-        let cost = self
-            .world
-            .attack_profile(
-                critter,
-                target,
-                hit_mode::RIGHT_PRIMARY,
-                crate::critical::location::UNCALLED,
-                false,
-            )
-            .map_or(i32::MAX, |attack| attack.ap_cost());
+        let cost = match self.world.attack_profile(
+            critter,
+            target,
+            hit_mode::RIGHT_PRIMARY,
+            crate::critical::location::UNCALLED,
+            false,
+        ) {
+            Ok(attack) => self.hook_ap_cost(critter, &attack),
+            Err(_) => i32::MAX,
+        };
         let spare = self.world.action_points(critter).saturating_sub(cost);
         if spare <= 0 {
             return Ok(());

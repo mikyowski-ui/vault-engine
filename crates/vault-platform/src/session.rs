@@ -697,6 +697,37 @@ mod tests {
     }
 
     #[test]
+    fn a_fallout2_session_runs_in_sfall_mode_and_a_key_passes_with_no_hook() {
+        let corpus = synthetic_corpus();
+        let install = tempfile::tempdir().unwrap();
+        let (master, critter) =
+            vault_fixtures::dat2::fallout2_install(corpus.path(), install.path(), 2);
+        let mut session = SessionRuntime::start(SessionConfig::new(
+            SessionOrigin::CommandLine,
+            PreviewArgs {
+                headless: true,
+                sfall: true,
+                ..dat_args(Fallout2, &master, &critter)
+            },
+        ))
+        .unwrap()
+        .unwrap();
+        let AssetPreview::Map(map) = &mut *session else {
+            panic!("a map session");
+        };
+        assert!(map.host.sfall_mode());
+        assert_eq!(map.host.world.sfall_hash(), 0xAF36_4CE5_AE92_BB79);
+        map.tick(16).unwrap();
+        map.tick(32).unwrap();
+        assert_eq!(
+            session.physical_key(true, KeyCode::KeyA),
+            KeyCode::KeyA,
+            "no hook registered"
+        );
+        assert_eq!(session.physical_key(false, KeyCode::KeyA), KeyCode::KeyA);
+    }
+
+    #[test]
     fn a_session_refuses_sfall_mode_under_fallout1_when_it_is_built() {
         let corpus = synthetic_corpus();
         let args = PreviewArgs {

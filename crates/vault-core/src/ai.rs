@@ -450,19 +450,30 @@ pub fn select_location(
     rng: &mut impl RandomSource,
     hit_chance: impl FnOnce(u8) -> Result<i32, WorldError>,
 ) -> Result<u8, WorldError> {
-    if !inputs.aimed_affordable || !inputs.aiming_available {
+    let Some(location) = draw_location(inputs, rng)? else {
         return Ok(TORSO);
-    }
-    if rng.range(1, inputs.called_freq)? != 1
-        || inputs.intelligence < called_shot_intelligence(inputs.difficulty)
-    {
-        return Ok(TORSO);
-    }
-    let location = rng.range(0, 8)? as u8;
+    };
     if hit_chance(location)? < inputs.min_to_hit {
         return Ok(TORSO);
     }
     Ok(location)
+}
+/// [`select_location`]'s draws: the location to test, or none for the torso.
+/// The test that follows draws nothing of its own, so a hook there may use
+/// the world's generator again.
+pub(crate) fn draw_location(
+    inputs: CalledShot,
+    rng: &mut impl RandomSource,
+) -> Result<Option<u8>, WorldError> {
+    if !inputs.aimed_affordable || !inputs.aiming_available {
+        return Ok(None);
+    }
+    if rng.range(1, inputs.called_freq)? != 1
+        || inputs.intelligence < called_shot_intelligence(inputs.difficulty)
+    {
+        return Ok(None);
+    }
+    Ok(Some(rng.range(0, 8)? as u8))
 }
 
 /// §3.8 flee candidates: for N from AP down to 1, directions D, D+1, D+5.
@@ -538,6 +549,10 @@ pub trait HealingInventory {
     fn hp(&self) -> i32;
     fn ap(&self) -> i32;
     fn set_ap(&mut self, ap: i32);
+    /// SPEC-007 §3.4's generic use: 2 AP.
+    fn use_cost(&mut self) -> i32 {
+        2
+    }
     /// `None` past the end; `Some(None)` for a non-drug entry; otherwise the
     /// drug's PID.
     fn entry(&self, position: usize) -> Option<Option<u32>>;
@@ -589,7 +604,8 @@ pub fn heal_limited(
         } else {
             inventory.restore(unit)?;
         }
-        inventory.set_ap((inventory.ap() - 2).max(0));
+        let cost = inventory.use_cost();
+        inventory.set_ap((inventory.ap() - cost).max(0));
         position = 0;
     }
     Ok(())

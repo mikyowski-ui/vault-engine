@@ -552,6 +552,8 @@ fn fixture_c() -> Attack {
         ticks: 864000,
         combat_difficulty: 1,
         accuracy_bonus: 0,
+        hooked_chance: None,
+        hooked_cost: None,
         tables: None,
     }
 }
@@ -1065,10 +1067,10 @@ fn spec007_spray_budgets_rays_extras_and_continuous_fire() {
     };
     // Burst: center ray budget 3 - 1 direct hit = 2, left 3, right 4; the
     // extra critter on all three lines absorbs 9 rounds, the target 1.
-    let (host, defender, extra) = spray_world(attack_mode::BURST);
+    let (mut host, defender, extra) = spray_world(attack_mode::BURST);
     let attack = profile(&host, defender);
     let spray = host
-        .resolve_spray(host.world.player, defender, &attack, &mut Lowest)
+        .resolve_spray(player_of(&host), defender, &attack, &mut Lowest)
         .unwrap();
     assert_eq!(
         (spray.main.code, spray.main.rounds, spray.main.ammo),
@@ -1082,7 +1084,7 @@ fn spec007_spray_budgets_rays_extras_and_continuous_fire() {
     let (mut host, defender, extra) = spray_world(attack_mode::BURST);
     let attack = profile(&host, defender);
     let spray = host
-        .resolve_spray(host.world.player, defender, &attack, &mut Lowest)
+        .resolve_spray(player_of(&host), defender, &attack, &mut Lowest)
         .unwrap();
     host.apply_spray(host.world.player, defender, &attack, &spray)
         .unwrap();
@@ -1092,10 +1094,10 @@ fn spec007_spray_budgets_rays_extras_and_continuous_fire() {
 
     // Continuous: budgets reset to 1 per critter, later duplicate extras are
     // ignored, and ray hits on the target do not count.
-    let (host, defender, extra) = spray_world(attack_mode::CONTINUOUS);
+    let (mut host, defender, extra) = spray_world(attack_mode::CONTINUOUS);
     let attack = profile(&host, defender);
     let spray = host
-        .resolve_spray(host.world.player, defender, &attack, &mut Lowest)
+        .resolve_spray(player_of(&host), defender, &attack, &mut Lowest)
         .unwrap();
     assert_eq!((spray.main.rounds, spray.main.damage), (1, 5));
     let (object, _, outcome) = &spray.extras[0];
@@ -1106,7 +1108,7 @@ fn spec007_spray_budgets_rays_extras_and_continuous_fire() {
     wall(&mut host.world, 20299);
     let attack = profile(&host, defender);
     let spray = host
-        .resolve_spray(host.world.player, defender, &attack, &mut Lowest)
+        .resolve_spray(player_of(&host), defender, &attack, &mut Lowest)
         .unwrap();
     assert_eq!((spray.main.rounds, spray.extras.len()), (1, 0));
 
@@ -1116,7 +1118,7 @@ fn spec007_spray_budgets_rays_extras_and_continuous_fire() {
     host.world.clock.set(864000);
     let attack = profile(&host, defender);
     let spray = host
-        .resolve_spray(host.world.player, defender, &attack, &mut Lowest)
+        .resolve_spray(player_of(&host), defender, &attack, &mut Lowest)
         .unwrap();
     assert_eq!((spray.main.code, spray.main.multiplier), (3, 3));
     assert_eq!(spray.main.damage, 7);
@@ -1151,7 +1153,7 @@ impl crate::RandomSource for Traced {
 #[test]
 fn spec007_spray_stage_a_extra_damage_order_and_post_processing() {
     use crate::combat::attack_mode;
-    let (host, defender, extra) = spray_world(attack_mode::BURST);
+    let (mut host, defender, extra) = spray_world(attack_mode::BURST);
     let mut attack = right_primary(
         &host.world,
         host.world.player,
@@ -1167,7 +1169,7 @@ fn spec007_spray_stage_a_extra_damage_order_and_post_processing() {
     // select it. Every later D100 hits.
     let mut rng = Traced::new(&[1, 100, 100], false);
     let spray = host
-        .resolve_spray(host.world.player, defender, &attack, &mut rng)
+        .resolve_spray(player_of(&host), defender, &attack, &mut rng)
         .unwrap();
     // Roll, direct trial, Stage A, then the center ray's trials at the
     // extra (hits plus one) and at once its three damage draws.
@@ -1189,7 +1191,7 @@ fn spec007_spray_stage_a_extra_damage_order_and_post_processing() {
     jinxed.jinxed = true;
     let mut rng = Traced::new(&[], true);
     let spray = host
-        .resolve_spray(host.world.player, defender, &jinxed, &mut rng)
+        .resolve_spray(player_of(&host), defender, &jinxed, &mut rng)
         .unwrap();
     assert_eq!(
         rng.ranges.iter().filter(|range| **range == (0, 1)).count(),
@@ -1236,14 +1238,15 @@ fn spec007_fixture_i_spray_draw_order() {
     };
     type Host = crate::WorldHost<TestAssets>;
     fn run(
-        host: &Host,
+        host: &mut Host,
         defender: ObjectRef,
         attack: &crate::combat::Attack,
         draws: &[i32],
     ) -> (crate::Spray, Vec<(i32, i32)>) {
         let mut rng = Traced::new(draws, false);
+        let player = host.world.player;
         let spray = host
-            .resolve_spray(host.world.player, defender, attack, &mut rng)
+            .resolve_spray(player, defender, attack, &mut rng)
             .unwrap();
         assert!(rng.script.is_empty(), "every listed outcome is drawn");
         (spray, rng.ranges)
@@ -1253,7 +1256,7 @@ fn spec007_fixture_i_spray_draw_order() {
     // I1, Sniper, no critter on any ray: 7 draws.
     let (mut host, defender, extra, attack) = fixture(true, false);
     host.world.erase(extra);
-    let (spray, ranges) = run(&host, defender, &attack, &[40, 50, 20, 90, 4, 30, 15]);
+    let (spray, ranges) = run(&mut host, defender, &attack, &[40, 50, 20, 90, 4, 30, 15]);
     assert_eq!(&ranges[..5], &[d100, d100, d100, d100, (1, 10)]);
     assert_eq!(ranges[5], d100, "the critical tier draw");
     assert_eq!(ranges.last(), Some(&(10, 20)));
@@ -1275,7 +1278,12 @@ fn spec007_fixture_i_spray_draw_order() {
         .find(|hex| !center.contains(hex) && !right.contains(hex))
         .expect("a hex on the left ray only");
     host.world.move_object(x, at, 0, false).unwrap();
-    let (spray, ranges) = run(&host, defender, &attack, &[80, 50, 95, 60, 30, 10, 12, 9]);
+    let (spray, ranges) = run(
+        &mut host,
+        defender,
+        &attack,
+        &[80, 50, 95, 60, 30, 10, 12, 9],
+    );
     assert_eq!(
         ranges,
         [d100, d100, d100, d100, d100, d100, (10, 20), (1, 10)]
@@ -1288,14 +1296,14 @@ fn spec007_fixture_i_spray_draw_order() {
     // fifth and last draw, and 0 keeps the failure.
     let (mut host, defender, extra, attack) = fixture(false, true);
     host.world.erase(extra);
-    let (spray, ranges) = run(&host, defender, &attack, &[80, 50, 95, 60, 0]);
+    let (spray, ranges) = run(&mut host, defender, &attack, &[80, 50, 95, 60, 0]);
     assert_eq!(ranges, [d100, d100, d100, d100, (0, 1)]);
     assert_eq!(spray.main.code, 1);
 
     // I4, Jinxed: 100 then 2 is a critical failure; the spray returns at
     // once, and 40 is the critical-failure table draw.
-    let (host, defender, _, attack) = fixture(false, true);
-    let (spray, ranges) = run(&host, defender, &attack, &[100, 2, 40]);
+    let (mut host, defender, _, attack) = fixture(false, true);
+    let (spray, ranges) = run(&mut host, defender, &attack, &[100, 2, 40]);
     assert_eq!(&ranges[..2], &[d100, d100]);
     assert!(!ranges[2..].contains(&(0, 1)), "no Jinxed coin");
     assert_eq!(spray.main.code, 0);
@@ -1965,4 +1973,8 @@ fn spec007_a_scripted_request_lasts_only_for_the_first_turn() {
     );
     assert_eq!(ai.turns, [a]);
     assert!(host.world.combat_state.request.is_none());
+}
+
+fn player_of(host: &crate::WorldHost<TestAssets>) -> ObjectRef {
+    host.world.player
 }

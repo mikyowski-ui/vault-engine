@@ -58,6 +58,8 @@ struct SelfOverride {
     strong: bool,
 }
 
+pub use crate::host_sfall_hooks::{Preview, SfallHooks};
+
 /// The session's sfall state on the host side: everything scripts rebuild,
 /// so none of it is saved or hashed. `None` on the host with the mode off.
 #[derive(Default)]
@@ -82,6 +84,8 @@ pub struct SfallHost {
     ini_configs: BTreeMap<String, u32>,
     /// Keys the hook mapped, waiting for the game (metarule3 201 empties it).
     pub(crate) key_queue: VecDeque<i32>,
+    /// Part 3: hooks and global scripts.
+    pub(crate) hooks: SfallHooks,
 }
 
 fn integer(value: i32) -> Option<SfallValue> {
@@ -104,6 +108,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.sfall = Some(Box::default());
         self.world.sfall = Some(Box::<SfallWorld>::default());
         self.assets.set_sfall_scripts(true);
+        self.sfall_setup_owed();
         Ok(())
     }
     /// Where `set_ini_setting` writes, and where a file no VFS layer holds
@@ -121,6 +126,7 @@ impl<A: WorldAssets> WorldHost<A> {
             sfall.ini_configs.clear();
             sfall.last_targets.clear();
         }
+        self.sfall_setup_owed();
     }
     /// The screens' `get_game_mode` bits, from the shell.
     pub fn set_sfall_screens(&mut self, bits: u32) {
@@ -530,15 +536,46 @@ impl<A: WorldAssets> WorldHost<A> {
         &mut self,
         vm: &mut Vm,
         row: &'static SfallRow,
-        _args: &[SfallValue],
+        args: &[SfallValue],
     ) -> Result<Option<SfallValue>, VmError> {
-        match row.id {
-            0x819c => Ok(integer(15)),
+        let int = |index: usize| args[index].int();
+        Ok(match row.id {
+            0x816a => {
+                self.set_global_repeat(vm, int(0));
+                None
+            }
+            0x819b => {
+                self.set_global_kind(vm, int(0));
+                None
+            }
+            0x819c => integer(15),
+            0x81e4 => Some(self.next_sfall_arg()),
+            0x81e5 => {
+                self.set_sfall_return(&args[0]);
+                None
+            }
+            0x81ea => integer(self.init_hook()),
+            0x8207 => {
+                self.register_hook(vm, int(0), None, false);
+                None
+            }
+            0x8262 | 0x827d => {
+                self.register_hook(vm, int(0), Some(int(1)), row.id == 0x827d);
+                None
+            }
+            0x823c => {
+                let values = self.sfall_args();
+                integer(self.arrays().temp_list(values))
+            }
+            0x823d => {
+                self.set_sfall_arg(int(0), &args[1]);
+                None
+            }
             _ => {
                 self.stub_diagnostic(vm, row.name);
-                Ok(sfall::stub_default(row))
+                sfall::stub_default(row)
             }
-        }
+        })
     }
     /// `sfall_func0..8` (§4.2): the name, then its arguments. Every call
     /// pushes exactly one value.
@@ -776,6 +813,13 @@ impl<A: WorldAssets> WorldHost<A> {
                     .unwrap_or_default();
                 Ok(integer(self.arrays().temp_list(names)))
             }
+            "get_sfall_arg_at" => {
+                let index = args.first().and_then(|value| value.coerce(Class::I));
+                Ok(match index {
+                    Some(index) => Some(self.sfall_arg_at(index.int())),
+                    None => integer(0),
+                })
+            }
             "get_ini_config" => match file {
                 Some(file) => Ok(integer(self.ini_config(&file))),
                 None => Ok(integer(0)),
@@ -870,6 +914,9 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.get_mut(critter)?.character.as_mut()
     }
     /// The world's bits (§4.4), and the shell's for the screens.
+    pub(crate) fn sfall_mode_bits(&self) -> u32 {
+        self.sfall_game_mode()
+    }
     fn sfall_game_mode(&self) -> u32 {
         let mut bits = self.sfall.as_deref().map_or(0, |sfall| sfall.screens);
         if bits & game_mode::WORLD_MAP == 0 {
@@ -1068,6 +1115,8 @@ impl<A: WorldAssets> WorldHost<A> {
     /// The end of a headless step's Simulation phase (SPEC-021 §3.10): a
     /// shell calls it once a frame, whether the world ticked or not.
     pub fn sfall_end_of_step(&mut self) {
+        self.sfall_setup_if_due();
+        self.sfall_repeat_globals();
         if let Some(sfall) = self.sfall.as_deref_mut() {
             sfall.steps = sfall.steps.saturating_add(1);
             sfall.lists.clear();

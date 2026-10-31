@@ -299,6 +299,10 @@ impl MapPreview {
     /// The hold pulse of an arrow press opens the item menu at the pointer;
     /// every frame also checks the columns' open containers.
     pub(crate) fn barter_tick(&mut self) -> bool {
+        if let Screen::Barter(screen) = &self.screen {
+            let session = screen.session.clone();
+            self.host.sfall_barter_preview(&session);
+        }
         let checked = self.check_barter_views();
         checked | self.barter_pulse()
     }
@@ -426,6 +430,9 @@ impl MapPreview {
     /// M-I5 / SPEC-013 §3.18: the player table's plain value, the whole
     /// table even while a container opened on it is shown.
     fn barter_offer_value(&self) -> i64 {
+        if let Some((_, offer)) = self.host.sfall_barter_shown() {
+            return offer;
+        }
         match &self.screen {
             Screen::Barter(screen) => self.host.world.inventory_value(screen.session.offer),
             _ => 0,
@@ -683,8 +690,9 @@ impl MapPreview {
         let Some(owners) = self.barter_owners() else {
             return Err("barter is not open".into());
         };
-        let price = match &self.screen {
-            Screen::Barter(screen) => {
+        let price = match (&self.screen, self.host.sfall_barter_shown()) {
+            (_, Some((price, _))) => price,
+            (Screen::Barter(screen), None) => {
                 let session = screen.session.clone();
                 self.host.barter_price(&session)
             }

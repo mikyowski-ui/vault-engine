@@ -9,6 +9,7 @@
 use super::{MapPreview, Screen};
 use crate::interface::Painter;
 use std::sync::Arc;
+use vault_core::host_sfall::Preview;
 use vault_core::{
     ObjectAction, ObjectRef,
     assets::WorldAssets,
@@ -839,11 +840,56 @@ impl MapPreview {
         let player = self.host.world.player;
         let world = &self.host.world;
         let (mode, aimed) = self.slot_attack()?;
-        let attack = world
+        let mut attack = world
             .attack_profile(player, target, mode, location::UNCALLED, aimed)
             .ok()?;
+        attack.hooked_cost = self
+            .host
+            .sfall_previewed(Preview::SlotCost, &[i32::from(mode), i32::from(aimed)]);
         world.preflight(player, target, &attack).ok()?;
+        let inputs = [target as i32, i32::from(mode), i32::from(aimed)];
+        if let Some(chance) = self.host.sfall_previewed(Preview::HoverChance, &inputs) {
+            return Some(chance);
+        }
         attack.hit_chance(true).ok()
+    }
+    /// SPEC-024b §6.6: this step's previews, in the Simulation phase. Drawing
+    /// reads what they store, and never runs a script.
+    pub(crate) fn sfall_previews(&mut self) {
+        if !self.host.sfall_mode() {
+            return;
+        }
+        let player = self.host.world.player;
+        let Some((mode, aimed)) = self.slot_attack() else {
+            return;
+        };
+        let profile = |world: &vault_core::WorldState, target| {
+            world
+                .attack_profile(player, target, mode, location::UNCALLED, aimed)
+                .ok()
+        };
+        if let Some(attack) = profile(&self.host.world, player) {
+            let inputs = vec![i32::from(mode), i32::from(aimed)];
+            self.host.sfall_preview(Preview::SlotCost, inputs, |host| {
+                host.hook_ap_cost(player, &attack)
+            });
+        }
+        if let Some(target) = self.pointer.looked
+            && let Some(mut attack) = profile(&self.host.world, target)
+            && {
+                attack.hooked_cost = self
+                    .host
+                    .sfall_previewed(Preview::SlotCost, &[i32::from(mode), i32::from(aimed)]);
+                self.host.world.preflight(player, target, &attack).is_ok()
+            }
+        {
+            let inputs = vec![target as i32, i32::from(mode), i32::from(aimed)];
+            self.host
+                .sfall_preview(Preview::HoverChance, inputs, |host| {
+                    host.hook_hit_chance(player, target, &attack, true, None)
+                        .unwrap_or(0)
+                });
+        }
     }
     /// Draw the cursor at the pointer: a dragged item, the action menu, the
     /// edge-scroll art, the in-world cursor over the map, else the arrow.

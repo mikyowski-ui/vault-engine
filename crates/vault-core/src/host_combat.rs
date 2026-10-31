@@ -216,6 +216,8 @@ impl WorldState {
             // SPEC-014 §2.3: combat_difficulty defaults to 1 (normal).
             combat_difficulty: self.combat_difficulty.unwrap_or(1),
             accuracy_bonus: 0,
+            hooked_chance: None,
+            hooked_cost: None,
             tables: self.rules.tables.clone(),
         })
     }
@@ -682,12 +684,24 @@ impl<A: WorldAssets> WorldHost<A> {
     /// drawn where the ray meets it), Jinxed and Sniper once on the final
     /// result, then the main target's critical and damage draws.
     pub fn resolve_spray(
-        &self,
+        &mut self,
         attacker: ObjectRef,
         defender: ObjectRef,
         attack: &Attack,
         rng: &mut impl crate::RandomSource,
     ) -> Result<Spray, WorldError> {
+        self.spray_for(attacker, &mut { defender }, &mut attack.clone(), rng)
+    }
+    /// [`Self::resolve_spray`], with `HOOK_AFTERHITROLL` free to change the
+    /// target and the body part (SPEC-024b §6.9).
+    pub(crate) fn spray_for(
+        &mut self,
+        attacker: ObjectRef,
+        target: &mut ObjectRef,
+        attack: &mut Attack,
+        rng: &mut impl crate::RandomSource,
+    ) -> Result<Spray, WorldError> {
+        let defender = *target;
         let weapon = attack
             .weapon
             .as_ref()
@@ -703,12 +717,20 @@ impl<A: WorldAssets> WorldHost<A> {
             ammo,
             ..Resolution::default()
         };
+        // A critical failure ends here unless a hook changes the roll; the
+        // hook runs once, on the final result.
+        let mut rolled = false;
         if code == 0 {
-            attack.critical_failure(&mut main, Subtype::Ranged, rng)?;
-            return Ok(Spray {
-                main,
-                extras: Vec::new(),
-            });
+            code = self.hook_after_roll(attacker, target, attack, code, rng)?;
+            rolled = true;
+            if code == 0 {
+                attack.critical_failure(&mut main, Subtype::Ranged, rng)?;
+                return Ok(Spray {
+                    main,
+                    extras: Vec::new(),
+                });
+            }
+            main.code = code;
         }
         // A critical spray adds 20 without reapplying the 95 cap.
         let accuracy = if code == 3 { chance + 20 } else { chance };
@@ -768,6 +790,9 @@ impl<A: WorldAssets> WorldHost<A> {
         // Jinxed and Sniper once, on the final result; a spray is ranged, so
         // Slayer and Silent Death never apply.
         code = attack.postprocess(code, Subtype::Ranged, rng)?;
+        if !rolled {
+            code = self.hook_after_roll(attacker, target, attack, code, rng)?;
+        }
         main.code = code;
         // Extra targets took normal-scale damage before any main critical.
         let resolved = extras
@@ -820,7 +845,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// damage draws at once. Returns main-target hits.
     #[allow(clippy::too_many_arguments)]
     fn spray_ray(
-        &self,
+        &mut self,
         attacker: ObjectRef,
         defender: ObjectRef,
         attack: &Attack,
@@ -873,7 +898,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 false,
             )?;
             profile.weapon = attack.weapon.clone();
-            let accuracy = profile.hit_chance(true)?;
+            let accuracy =
+                self.hook_hit_chance(attacker, object, &profile, true, Some(&mut *rng))?;
             let mut hits = 0;
             while rng.range(1, 100)? <= accuracy && budget > 0 {
                 hits += 1;
@@ -1007,7 +1033,7 @@ impl<A: WorldAssets> WorldHost<A> {
     pub fn perform_attack(
         &mut self,
         attacker: ObjectRef,
-        defender: ObjectRef,
+        mut defender: ObjectRef,
         mode: u8,
         place: u8,
         aimed: bool,
@@ -1017,6 +1043,9 @@ impl<A: WorldAssets> WorldHost<A> {
             .world
             .attack_profile(attacker, defender, mode, place, aimed)?;
         let request = self.apply_request(attacker, defender, &mut attack);
+        if self.sfall_mode() {
+            attack.hooked_cost = Some(self.hook_ap_cost(attacker, &attack));
+        }
         if let Err(refusal) = self.world.preflight(attacker, defender, &attack) {
             return Ok(Err(refusal));
         }
@@ -1038,14 +1067,18 @@ impl<A: WorldAssets> WorldHost<A> {
                 .weapon
                 .as_ref()
                 .is_some_and(|weapon| weapon.min_strength > attack.strength);
+        if self.sfall_mode() {
+            let chance = self.hook_hit_chance(attacker, defender, &attack, true, None)?;
+            attack.hooked_chance = Some(chance);
+        }
         let mut rng = std::mem::take(&mut self.world.rng);
-        let outcome = self.resolve_attack(attacker, defender, &attack, &mut rng);
+        let outcome = self.resolve_attack(attacker, &mut defender, &mut attack, &mut rng);
         self.world.rng = rng;
         let (mut spray, victim, impact) = outcome?;
         if let Some(request) = request {
             adjust_for_request(&request, &mut spray.main);
         }
-        let recorded = spray.main.clone();
+        let mut recorded = spray.main.clone();
         // A random target or a missed-shot bystander replaces the defender
         // as an unintended victim (SPEC-007 §3.6); a non-critter impact
         // becomes the recorded defender and is presented as the miss it is.
@@ -1066,6 +1099,9 @@ impl<A: WorldAssets> WorldHost<A> {
         let hit = spray.main.defender_flags & effect::HIT != 0;
         if struck {
             spray.main.defender_flags &= !effect::HIT;
+        }
+        if self.hook_combat_damage(attacker, target, &attack, &mut spray) {
+            recorded = spray.main.clone();
         }
         self.world.ai.callbacks.clear();
         // SPEC-013 §3.10: an exploding weapon's explosion is where the

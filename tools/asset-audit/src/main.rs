@@ -201,6 +201,13 @@ struct Args {
     /// (Decision 35): it never fails the run.
     #[arg(long)]
     report_script_stack: bool,
+    /// SPEC-024b §3.2: with `--report-script-stack`, check every `.INT`
+    /// under `scripts/` of `--fallout2-dir`, or else of `--corpus-dir`, a
+    /// mod's folder included, with sfall mode's table instead. No
+    /// `scripts.lst` is needed. The Fallout 2 audit itself keeps the
+    /// `fallout2` table (SPEC-017 Decision 46).
+    #[arg(long, requires = "report_script_stack")]
+    sfall: bool,
     /// SPEC-017 §8.1: a Fallout 2 install folder (its `MASTER.DAT`,
     /// `CRITTER.DAT` and `patch000.dat`, mounted as SPEC-018 §1 says) whose
     /// scripts the stack model checks with the Fallout 2 table, adding the
@@ -270,6 +277,23 @@ fn report_script_stack(vfs: &dyn Vfs, fallout2: Option<&PathBuf>) -> Result<(), 
     println!(
         "Script stack model check: {}",
         if passed { "passed" } else { "failed" }
+    );
+    Ok(())
+}
+
+/// SPEC-024b §3.2 a folder's scripts with sfall mode's table: its findings
+/// by kind, as `--report-script-stack` prints them, and a model check line.
+fn report_sfall_script_stack(vfs: &dyn Vfs) -> Result<(), Box<dyn Error>> {
+    let audit = stack::audit_sfall(vfs)?;
+    let table = vault_vm::stack_check::Table::new(vault_vm::WordSet::FALLOUT2_SFALL);
+    audit.report("sfall", &table, &[]);
+    println!(
+        "Script stack sfall check: {}",
+        if audit.total() == 0 {
+            "passed"
+        } else {
+            "failed"
+        }
     );
     Ok(())
 }
@@ -1085,7 +1109,15 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
         }
     }
     // A report, outside the categories: it prints and never fails the run.
-    if args.report_script_stack {
+    if args.report_script_stack && args.sfall {
+        match &args.fallout2_dir {
+            Some(folder) => {
+                let install = vault_formats::fallout2::Fallout2Install::discover(folder)?;
+                report_sfall_script_stack(&install.open()?.provider(None))?;
+            }
+            None => report_sfall_script_stack(&*vfs)?,
+        }
+    } else if args.report_script_stack {
         report_script_stack(&*vfs, args.fallout2_dir.as_ref())?;
     }
     if args.report_fallout2_art

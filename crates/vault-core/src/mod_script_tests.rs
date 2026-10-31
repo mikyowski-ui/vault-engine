@@ -264,6 +264,39 @@ fn an_enhanced_range_word_validates_only_under_enhanced() {
 }
 
 #[test]
+fn sfall_mode_checks_mod_scripts_with_its_own_table() {
+    // `sfall_ver_major` pushes one value, and `fs_size` pops one.
+    let major = script(|_| {
+        [
+            fixture::instruction(0x8210),
+            fixture::instruction(0x801a),
+            count(1),
+        ]
+        .concat()
+    });
+    let underflows = script(|_| [fixture::instruction(0x8200), count(1)].concat());
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), &clean(0), &major, &[("over.int", &underflows)]);
+    // Without the mode, the word is outside the set.
+    let mut host_off = host(mount(dir.path()), GameProfile::Fallout2);
+    assert!(!first_request(&mut host_off, REGISTERED).1);
+    let refused = host_off.assets.take_diagnostics();
+    assert!(refused[0].contains("refused at load"), "{refused:?}");
+    assert!(!refused[0].contains("sfall"), "{refused:?}");
+    // With it, the script runs by the sfall contract.
+    let mut host_on = host(mount(dir.path()), GameProfile::Fallout2);
+    host_on.enable_sfall().unwrap();
+    assert!(first_request(&mut host_on, REGISTERED).1);
+    let vault_vm_words = host_on.assets.program(REGISTERED).unwrap().1;
+    assert!(vault_vm_words.words().sfall());
+    // A script that breaks the sfall contract is refused, and says whose.
+    let error = host_on.assets.program_by_name(b"over.int").unwrap_err();
+    assert!(matches!(error, WorldError::ScriptRefused(_)), "{error}");
+    let refused = host_on.assets.take_diagnostics();
+    assert!(refused[0].contains("fallout2 + sfall table"), "{refused:?}");
+}
+
+#[test]
 fn the_verdict_is_kept_for_the_session() {
     let dir = tempfile::tempdir().unwrap();
     write(

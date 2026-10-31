@@ -242,6 +242,32 @@ fn vector_p_routes_the_overlap() {
 }
 
 #[test]
+fn with_the_mode_off_the_enhanced_words_keep_their_rows() {
+    // SPEC-024b §7.3 test 2 and Vector P's off columns.
+    let world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+    let mut host = WorldHost::new(world, TestAssets::all_art());
+    host.world.fallout2 = Some(Box::new(Fallout2World::new_game(tables(), -1)));
+    host.world.rules.preset = crate::EnginePreset::Enhanced;
+    assert_eq!(host.word_set(), WordSet::FALLOUT2);
+    let program = |bytes: &[u8]| {
+        let base = fixture::program(&[], &[]);
+        let program = IntProgram::parse_in(&base, &WordSet::FALLOUT2, true).unwrap();
+        Vm::fragment(program, bytes).unwrap()
+    };
+    let mut vm = program(&[0xc0, 0x01, 0, 0, 0, 7, 0x82, 0x00]);
+    assert_eq!(vm.run(&mut host, 100), Ok(RunOutcome::FragmentEnd));
+    assert_eq!(vm.value_stack.pop().unwrap().payload, 2, "the API version");
+    assert_eq!(vm.value_stack.pop().unwrap().payload, 7);
+    // `op_cam_pan_to` pops both operands and pushes nothing.
+    let mut vm = program(&[0xc0, 0x01, 0, 0, 0, 100, 0xc0, 0x01, 0, 0, 0, 0, 0x82, 0x10]);
+    assert_eq!(vm.run(&mut host, 100), Ok(RunOutcome::FragmentEnd));
+    assert_eq!(vm.value_stack.byte_len(), 0);
+    // The sfall range above the enhanced words is unknown here.
+    let mut vm = program(&[0x82, 0x20]);
+    assert_eq!(vm.run(&mut host, 100), Err(VmError::Opcode(0x8220)));
+}
+
+#[test]
 fn the_stack_vectors_of_section_7_1() {
     let (mut host, _) = sfall_host();
     assert_eq!(

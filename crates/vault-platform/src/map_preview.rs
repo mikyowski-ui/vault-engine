@@ -1926,6 +1926,7 @@ impl MapPreview {
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
         self.host.set_sfall_screens(self.sfall_screens());
         let changed = self.frame(now);
+        self.sfall_previews();
         self.host.sfall_end_of_step();
         changed
     }

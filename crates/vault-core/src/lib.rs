@@ -39,6 +39,7 @@ pub mod host_rest;
 mod host_revisit;
 pub mod host_save;
 pub mod host_sfall;
+mod host_sfall_hooks;
 mod host_sfall_objects;
 mod host_skills;
 mod host_sound;
@@ -183,6 +184,8 @@ mod skills_tests;
 mod spec017_tests;
 #[cfg(test)]
 mod spec024_arrays_tests;
+#[cfg(test)]
+mod spec024_hook_tests;
 #[cfg(test)]
 mod spec024_tests;
 #[cfg(test)]

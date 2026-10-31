@@ -425,13 +425,14 @@ impl MapPreview {
     fn use_on_target(&mut self, item: ObjectRef, target: ObjectRef) {
         let player = self.host.world.player;
         if self.host.world.combat {
+            let cost = self.host.hook_fixed_cost(player, 2, item);
             let Some(state) = self.host.world.critter_state_mut(player) else {
                 return;
             };
-            if state.ap < 2 {
+            if state.ap < cost {
                 return;
             }
-            state.ap -= 2;
+            state.ap -= cost;
         }
         self.return_to_map();
         self.selected = Some(target);
@@ -570,10 +571,33 @@ impl MapPreview {
                         screen.counter = Some((Counter::new(quantity), Count::Drop { item }));
                     }
                 } else {
-                    self.drop_units(item, 1);
+                    self.hooked_drop(item, 1);
                 }
             }
             ItemEntry::Cancel => {}
+        }
+    }
+    /// SPEC-024b §6.13: a drop on the ground runs the hook once per item,
+    /// and once only for caps; an ammunition entry's items are its packs.
+    /// Only the items it allows leave.
+    fn hooked_drop(&mut self, item: ObjectRef, quantity: i32) {
+        const GROUND: i32 = 6;
+        let money = self
+            .host
+            .world
+            .get(item)
+            .is_some_and(|object| object.money.is_some());
+        let runs = if money { 1 } else { quantity };
+        let allowed = (0..runs)
+            .filter(|_| self.host.sfall_inventory_move(GROUND, item, 0))
+            .count() as i32;
+        let quantity = if money {
+            quantity.min(allowed * quantity)
+        } else {
+            allowed
+        };
+        if quantity > 0 {
+            self.drop_units(item, quantity);
         }
     }
     /// The short look line (the look-at text) on the monitor.
@@ -678,6 +702,40 @@ impl MapPreview {
         let weapon = |data: &ItemData| matches!(data, ItemData::Weapon(_));
         let ammo = |data: &ItemData| matches!(data, ItemData::Ammunition { .. });
         let armor = |data: &ItemData| matches!(data, ItemData::Armor(_));
+        // SPEC-024b §6.13: before the move and any validity test. The hook
+        // can only prevent it.
+        let occupant = match target {
+            DropTarget::List(row) => {
+                let offset = match &self.screen {
+                    Screen::Inventory(screen) => screen.offset,
+                    _ => 0,
+                };
+                let entries = self.list_entries();
+                entries.get(offset + row).map(|(entry, _)| *entry)
+            }
+            DropTarget::LeftHand => self.slot_item(Slot::LeftHand),
+            DropTarget::RightHand => self.slot_item(Slot::RightHand),
+            DropTarget::Armor => self.slot_item(Slot::Armor),
+            _ => None,
+        }
+        .filter(|occupant| *occupant != item);
+        let kind = match (target, occupant) {
+            (DropTarget::Nowhere, _) => None,
+            (_, Some(gun)) if is(self, gun, weapon) && is(self, item, ammo) => Some(4),
+            (_, Some(bag)) if is(self, bag, container) => Some(5),
+            (DropTarget::List(_), _) if open.is_some() => Some(5),
+            (DropTarget::List(_), _) => Some(0),
+            (DropTarget::LeftHand, _) => Some(1),
+            (DropTarget::RightHand, _) => Some(2),
+            (DropTarget::Armor, _) => Some(3),
+            (DropTarget::Figure, _) => Some(8),
+        };
+        if let Some(kind) = kind {
+            let replaced = occupant.or(open.filter(|_| kind == 5)).unwrap_or(0);
+            if !self.host.sfall_inventory_move(kind, item, replaced) {
+                return;
+            }
+        }
         let result = match target {
             DropTarget::List(row) => {
                 let offset = match &self.screen {
@@ -890,7 +948,7 @@ impl MapPreview {
                     self.status = error.to_string().into_bytes();
                 }
             }
-            Count::Drop { item } => self.drop_units(item, quantity),
+            Count::Drop { item } => self.hooked_drop(item, quantity),
         }
         self.drain_effects();
     }

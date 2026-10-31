@@ -50,7 +50,7 @@ pub struct AnimationSequence {
 /// offset zero, which is also where a program's first interned string would
 /// live (SPEC-004 §3.1 says nothing of offset zero). Reserving the empty
 /// string there keeps the null value from aliasing a real string.
-fn reserve_null_string(vm: &mut Vm) -> Result<(), VmError> {
+pub(crate) fn reserve_null_string(vm: &mut Vm) -> Result<(), VmError> {
     vm.intern(b"").map(|_| ())
 }
 #[derive(Debug, Clone, Copy, Default)]
@@ -487,6 +487,12 @@ impl<A: WorldAssets> WorldHost<A> {
             instance.initialized = true;
         }
     }
+    /// The next program identifier.
+    pub(crate) fn allocate_program(&mut self) -> Option<u32> {
+        let id = self.next_program;
+        self.next_program = id.checked_add(1)?;
+        Some(id)
+    }
     pub(crate) fn sid(&self, vm: &Vm) -> Option<u32> {
         self.sfall_script(vm)
             .or_else(|| self.program_scripts.get(&vm.id).copied())
@@ -577,6 +583,7 @@ impl<A: WorldAssets> WorldHost<A> {
             0,
             crate::queue::EventKind::Midnight,
         )?;
+        self.sfall_global_event(b"map_exit_p_proc");
         self.world.restore_roofs();
         self.world.map.header.flags.0 |= 1;
         self.world.map.header.last_visit = self.world.clock.ticks as u32;
@@ -871,6 +878,7 @@ impl<A: WorldAssets> WorldHost<A> {
             }
         }
         self.world.spatial_enabled = true;
+        self.sfall_global_event(b"map_enter_p_proc");
         self.world.trace.push(WorldTrace::LoadStep(9));
         self.map_update()?;
         self.world.trace.push(WorldTrace::LoadStep(10));
@@ -1173,7 +1181,7 @@ impl<A: WorldAssets> WorldHost<A> {
         };
         Ok(result)
     }
-    fn run_vm(&mut self, vm: &mut Vm) -> Result<RunOutcome, VmError> {
+    pub(crate) fn run_vm(&mut self, vm: &mut Vm) -> Result<RunOutcome, VmError> {
         self.active.insert(vm.id);
         let mut outcome = Err(VmError::InstructionLimit);
         if self.vm_observer.is_some() {
@@ -1327,6 +1335,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.broadcast(ScriptEvent::MapUpdate, 0);
         let result = self.drain_requests();
         self.world.spatial_enabled = previous;
+        self.sfall_global_event(b"map_update_p_proc");
         result
     }
     /// SPEC-013 §3.22: the town or world map closed (a location was
@@ -1590,6 +1599,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     pub fn tick(&mut self, now_ms: u64) -> Result<bool, WorldError> {
         self.world.elapsed_ms = now_ms;
+        self.sfall_setup_if_due();
         // SPEC-014 §3.28: animation resumes where a pause left it.
         self.resume_background(now_ms);
         // Asset load problems that did not stop a load (SPEC-002 §3.5).
@@ -2508,6 +2518,11 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
         // SPEC-024b §3.2: under sfall mode its table takes the overlap.
         let result = if opcode >= vault_vm::sfall::FIRST_WORD {
             self.sfall_word(opcode, vm)
+        } else if opcode == 0x80bc && self.sfall_global_without_self(vm) {
+            // §4.8 `[May-improve]`: null, with a diagnostic.
+            self.world
+                .diagnostic("self_obj: a global script has no object");
+            vm.value_stack.push(Value::integer(0))
         } else if matches!(opcode, 0x80bd | 0x80be) && self.sfall_self(vm).is_some() {
             // §4.8: `source_obj` and `target_obj` do not work straight after
             // `set_self`.

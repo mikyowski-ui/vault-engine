@@ -309,6 +309,141 @@ pub fn is_modifier(key: winit::keyboard::KeyCode) -> bool {
 /// upper case with Shift; a number-row digit, or with Shift its symbol;
 /// the punctuation keys, plain or shifted; and Space. The keypad and every
 /// other key type none.
+/// SPEC-024b §6.13's codes of a physical key: the DirectInput scan code (the
+/// set-1 make code, with `0x80` added for extended keys) and the Windows
+/// virtual-key code.
+const KEY_CODES: &[(winit::keyboard::KeyCode, i32, i32)] = {
+    use winit::keyboard::KeyCode::*;
+    &[
+        (Escape, 1, 27),
+        (Digit1, 2, 49),
+        (Digit2, 3, 50),
+        (Digit3, 4, 51),
+        (Digit4, 5, 52),
+        (Digit5, 6, 53),
+        (Digit6, 7, 54),
+        (Digit7, 8, 55),
+        (Digit8, 9, 56),
+        (Digit9, 10, 57),
+        (Digit0, 11, 48),
+        (Minus, 12, 189),
+        (Equal, 13, 187),
+        (Backspace, 14, 8),
+        (Tab, 15, 9),
+        (KeyQ, 16, 81),
+        (KeyW, 17, 87),
+        (KeyE, 18, 69),
+        (KeyR, 19, 82),
+        (KeyT, 20, 84),
+        (KeyY, 21, 89),
+        (KeyU, 22, 85),
+        (KeyI, 23, 73),
+        (KeyO, 24, 79),
+        (KeyP, 25, 80),
+        (BracketLeft, 26, 219),
+        (BracketRight, 27, 221),
+        (Enter, 28, 13),
+        (ControlLeft, 29, 162),
+        (KeyA, 30, 65),
+        (KeyS, 31, 83),
+        (KeyD, 32, 68),
+        (KeyF, 33, 70),
+        (KeyG, 34, 71),
+        (KeyH, 35, 72),
+        (KeyJ, 36, 74),
+        (KeyK, 37, 75),
+        (KeyL, 38, 76),
+        (Semicolon, 39, 186),
+        (Quote, 40, 222),
+        (Backquote, 41, 192),
+        (ShiftLeft, 42, 160),
+        (Backslash, 43, 220),
+        (KeyZ, 44, 90),
+        (KeyX, 45, 88),
+        (KeyC, 46, 67),
+        (KeyV, 47, 86),
+        (KeyB, 48, 66),
+        (KeyN, 49, 78),
+        (KeyM, 50, 77),
+        (Comma, 51, 188),
+        (Period, 52, 190),
+        (Slash, 53, 191),
+        (ShiftRight, 54, 161),
+        (NumpadMultiply, 55, 106),
+        (AltLeft, 56, 164),
+        (Space, 57, 32),
+        (CapsLock, 58, 20),
+        (F1, 59, 112),
+        (F2, 60, 113),
+        (F3, 61, 114),
+        (F4, 62, 115),
+        (F5, 63, 116),
+        (F6, 64, 117),
+        (F7, 65, 118),
+        (F8, 66, 119),
+        (F9, 67, 120),
+        (F10, 68, 121),
+        (F11, 87, 122),
+        (F12, 88, 123),
+        (NumpadEnter, 156, 13),
+        (ControlRight, 157, 163),
+        (NumpadDivide, 181, 111),
+        (AltRight, 184, 165),
+        (Home, 199, 36),
+        (ArrowUp, 200, 38),
+        (PageUp, 201, 33),
+        (ArrowLeft, 203, 37),
+        (ArrowRight, 205, 39),
+        (End, 207, 35),
+        (ArrowDown, 208, 40),
+        (PageDown, 209, 34),
+        (Insert, 210, 45),
+        (Delete, 211, 46),
+        (Pause, 197, 19),
+        (ScrollLock, 70, 145),
+        (NumLock, 69, 144),
+        (PrintScreen, 183, 44),
+    ]
+};
+/// The scan code and virtual-key code of `key`, when it has them.
+pub fn key_codes(key: winit::keyboard::KeyCode) -> Option<(i32, i32)> {
+    KEY_CODES
+        .iter()
+        .find(|(known, ..)| *known == key)
+        .map(|(_, scan, virtual_key)| (*scan, *virtual_key))
+}
+/// The physical key of a scan code.
+pub fn key_of_scan(scan: i32) -> Option<winit::keyboard::KeyCode> {
+    KEY_CODES
+        .iter()
+        .find(|(_, known, _)| *known == scan)
+        .map(|(key, ..)| *key)
+}
+
+#[cfg(test)]
+mod key_code_tests {
+    use super::*;
+    use winit::keyboard::KeyCode;
+
+    #[test]
+    fn the_spec_024b_key_codes_are_the_published_ones_and_each_scan_is_one_key() {
+        assert_eq!(key_codes(KeyCode::KeyA), Some((30, 65)));
+        assert_eq!(key_codes(KeyCode::Escape), Some((1, 27)));
+        // An extended key adds 0x80 to its make code.
+        assert_eq!(key_codes(KeyCode::ArrowUp), Some((0x48 + 0x80, 38)));
+        assert_eq!(key_codes(KeyCode::KeyB).unwrap().0, 48);
+        assert_eq!(key_of_scan(30), Some(KeyCode::KeyA));
+        assert_eq!(key_of_scan(0), None);
+        let mut scans: Vec<i32> = KEY_CODES.iter().map(|row| row.1).collect();
+        scans.sort_unstable();
+        scans.dedup();
+        assert_eq!(scans.len(), KEY_CODES.len());
+        for (key, scan, _) in KEY_CODES {
+            assert_eq!(key_of_scan(*scan), Some(*key));
+        }
+    }
+}
+
 pub fn key_text(key: winit::keyboard::KeyCode, shift: bool) -> Option<u8> {
     use winit::keyboard::KeyCode::{self, *};
     const LETTERS: [KeyCode; 26] = [

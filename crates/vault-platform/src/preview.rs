@@ -269,6 +269,24 @@ impl AssetPreview {
         }
     }
     /// A key went up (SPEC-014 §3.27 holds releases during the combat lock).
+    /// SPEC-024b §6.13: one physical press or release, before any game or
+    /// UI handling (and never for an engine repeat). It gives the key the
+    /// game sees. An override to a scan code with no key changes nothing.
+    pub fn physical_key(&mut self, pressed: bool, key: KeyCode) -> KeyCode {
+        let world = match self {
+            Self::Map(preview) => Some(&mut **preview),
+            Self::Game(game) => game.world(),
+            _ => None,
+        };
+        let Some(world) = world.filter(|world| world.host.sfall_mode()) else {
+            return key;
+        };
+        let Some((scan, virtual_key)) = crate::input::key_codes(key) else {
+            return key;
+        };
+        let logical = world.host.sfall_key(pressed, scan, virtual_key);
+        crate::input::key_of_scan(logical).unwrap_or(key)
+    }
     pub fn key_up(&mut self, key: KeyCode) {
         match self {
             Self::Map(preview) => preview.key_up(key),

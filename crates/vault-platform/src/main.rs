@@ -1980,11 +1980,19 @@ impl ApplicationHandler for Shell {
                     return;
                 };
                 if !pressed {
+                    let key = self
+                        .session
+                        .as_mut()
+                        .map_or(key, |session| session.physical_key(false, key));
                     self.repeat.release(key);
                     if let Some(preview) = &mut self.session {
                         preview.key_up(key);
                     }
                 } else if !event.repeat {
+                    let key = self
+                        .session
+                        .as_mut()
+                        .map_or(key, |session| session.physical_key(true, key));
                     if let Some(preview) = &self.session {
                         self.repeat.press(key, preview.keyboard());
                     }
@@ -2278,6 +2286,12 @@ mod tests {
 
     fn parse(args: &[&str]) -> Args {
         Args::try_parse_from(std::iter::once("vault-platform").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn the_sfall_flag_parses_and_defaults_off() {
+        assert!(parse(&["--sfall"]).preview.sfall);
+        assert!(!parse(&[]).preview.sfall);
     }
 
     fn installed() -> config::Config {

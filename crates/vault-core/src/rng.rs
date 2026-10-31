@@ -17,6 +17,10 @@ pub struct ParkMiller {
 }
 pub trait RandomSource {
     fn range(&mut self, first: i32, last: i32) -> Result<i32, WorldError>;
+    /// Swap the world's generator with this one, if this is what an attack
+    /// took out of the world: a hook that runs during the attack draws from
+    /// the gameplay sequence (SPEC-024b §6.6).
+    fn lend(&mut self, _world: &mut ParkMiller) {}
 }
 impl ParkMiller {
     pub fn seeded(seed: i32) -> Result<Self, WorldError> {
@@ -95,6 +99,9 @@ impl ParkMiller {
     }
 }
 impl RandomSource for ParkMiller {
+    fn lend(&mut self, world: &mut ParkMiller) {
+        std::mem::swap(self, world);
+    }
     /// Every call consumes one draw. Reversed bounds return the first bound
     /// (`[Must-match]`); under the SPEC-006 §3.4 safe rule, so does any range
     /// whose width does not fit in 1 through 2147483647.

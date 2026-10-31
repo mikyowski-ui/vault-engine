@@ -3210,6 +3210,134 @@ game log that starts at the main menu stops with an error.
 
 The three committed scenarios are in `tests/fixtures/spec021/rev3/`.
 
+## Sfall mode (SPEC-024b)
+
+Sfall mode runs compiled scripts written for sfall's extended script interface:
+its instruction words, dynamic arrays and hook scripts. It is off by default,
+exists only under the `fallout2` profile, and is fixed when the session is
+built. With it off, no word, hook, array, file or hash below exists, with one
+exception: a save removes an old `VAULTSFL.DAT`.
+
+Turn it on with any of these. `--sfall` wins over both files, and a replay needs
+it, because a replay reads neither:
+
+```toml
+# vault-engine.toml, or a layer's vault-mod.toml
+[scripting]
+sfall = true
+```
+
+```sh
+vault-platform --game-profile fallout2 --game --sfall
+vault-platform --game-profile fallout2 --replay-inputs LOG --sfall
+```
+
+Asking for it under `fallout1` is refused when the session is built, naming the
+profile.
+
+**Words.** `WordSet::FALLOUT2_SFALL` is `0x8000..=0x8281`, 642 entries. Below
+`0x8156` nothing changes. From `0x8156` up, the words are sfall's, with or without
+the enhanced preset, so `inven_cmds` and the enhanced words `0x8200` and
+`0x8210..=0x8213` cannot be reached in this mode. `reg_anim_change_fid`,
+`reg_anim_take_out` and `reg_anim_turn_towards` keep their effects at `0x825E` to
+`0x8260`. `vault-vm/build.rs` compiles the table from
+`oracle/SPEC-024/sfall-opcodes.tsv`, so a word cannot drift from its contract.
+
+| Tier | Rows | What it does |
+| --- | --- | --- |
+| P1 | 99 words, 18 functions (26 rows), 1 `metarule3` | Runs |
+| P2 | 177 words, 107 function rows, 6 `metarule3`, 9 `metarule2_explosions` | Pops its operands, pushes int 0 or the empty string, and writes one diagnostic per program and row |
+| X | 18 words | As P2. These words address the original executable's memory, and never touch this process's |
+| R | 6 words | Consume nothing and raise the undefined-instruction VM error |
+
+A wrong operand type is not a VM error here, unlike SPEC-017: every operand is
+popped, the word has no effect, it writes a diagnostic and pushes its default.
+Stack underflow stays a VM error.
+
+`sin cos tan arctan log exponent ^` are written in `vault_vm::sfall_math` from
+`+ - * /` alone, in binary64 and rounded to binary32, so every platform gives the
+same bits; `sfall_tests` pins them. SPEC-024b §4.7 asks for one implementation
+pinned in `Cargo.lock`; this repository takes no new dependency, so the code here
+is that pin. Past 2^30 an angle reduces less accurately, and identically
+everywhere.
+
+**INI files.** `get_ini_setting("file|section|key")` and its relatives read through
+the VFS layers, then the writable folder (the save root; none in a replay). A file
+is read once per session. `set_ini_setting` updates that cache and writes to the
+folder, never to an archive.
+
+**Arrays.** The store belongs to the world. Lists run by index, maps in
+first-insertion order until an order operation rewrites them, and nothing depends
+on a hash map, an address or a locale. Two values are equal when they have the same
+type and content, so `1`, `1.0`, `0.0` and `-0.0` are four keys. A shuffle draws
+from the gameplay generator. IDs start at 1 and are never reused in a session.
+
+Temporary arrays end with the frame: at the end of the Simulation phase, before
+the checkpoint, so a checkpoint never sees one. `MapPreview::tick` calls
+`WorldHost::sfall_end_of_step` every frame, even while a modal screen holds the
+world, and a harness that drives a host directly must do the same.
+
+**The sidecar.** `VAULTSFL.DAT` sits beside `SAVE.DAT` and holds the globals and the
+saved arrays, in the vault's own layout: saves made by sfall itself do not import.
+A save under sfall mode always writes it, even empty, and a load parses it whole
+before any state changes.
+
+| Slot | Mode on | Mode off |
+| --- | --- | --- |
+| Valid sidecar | Restores it | Refuses the slot, and says why |
+| No sidecar | Empty state | Loads as always |
+| Damaged sidecar | Refuses the slot | Refuses the slot |
+
+A save with the mode off names `VAULTSFL.DAT` for deletion, so the slot can load
+again. That is a separate delete: the stale `.SAV` sweep of SPEC-023 never touches
+the file.
+
+`WorldState::sfall_hash` is FNV-1a 64 of the `VSX1` stream, which adds every live
+array. `state_hash` stays `VSH1`, so arrays that have not reached covered state are
+visible only through this hash, and no golden changes.
+
+**Hooks.** On a new game or a load, before the first Simulation phase, each
+`scripts/hs_*.int` loads and runs `start` with `init_hook` at 1, then each
+`scripts/gl*.int` does, ascending by lowercased name. These scripts outlive a map
+and keep their state between runs. Registration is not saved: scripts register
+again at each setup.
+
+A chain runs procedures from `register_hook` and `register_hook_proc`, newest
+first, then the `hs_` script's `start`, then `register_hook_proc_spec`, oldest
+first. An empty chain costs nothing.
+
+| Hook | ID | Runs |
+| --- | ---: | --- |
+| `HOOK_TOHIT` | 0 | After the cap of 95, for attacks, spray and line-of-fire recomputations, and AI tests |
+| `HOOK_AFTERHITROLL` | 1 | Once per attack, after Jinxed, Slayer and Sniper, before critical effects |
+| `HOOK_CALCAPCOST` | 2 | On attack costs, the 2 AP reload and the 2 AP generic use. A return of 0 is free |
+| `HOOK_COMBATDAMAGE` | 5 | Once per victim of a hit, before anything is debited |
+| `HOOK_BARTERPRICE` | 10 | On the offer's comparison, and on the screen's preview |
+| `HOOK_MOVECOST` | 11 | On each committed hex in combat |
+| `HOOK_KEYPRESS` | 19 | Once per physical press and release, before any handling |
+| `HOOK_INVENTORYMOVE` | 24 | On a drag or a drop to the ground. It can only prevent the move |
+
+The other 42 hooks load and register, and no chain runs. A member that ends in a VM
+error is unloaded from every chain, and a word that would suspend a member ends it.
+Past 8 nested chains a chain is skipped.
+
+A chain runs only in the Input or Simulation phase. A value the interface only
+shows is a preview: the to-hit percentage under the cursor, the AP cost on the bar
+and the barter totals are queried in the Simulation phase when their inputs change,
+and drawing reads what is stored. So a hook fires less often here than under sfall,
+which a script that counts firings can notice. The input log holds the physical
+key, so a replay runs `HOOK_KEYPRESS` again and gets the same logical key.
+
+`--report-script-stack --sfall` checks every `.INT` under `scripts/` of a folder with
+this table, with no `scripts.lst` needed. Run it on a mod's scripts before trusting
+them: the oracle's stack contracts were never checked against Et Tu or Restoration
+Project scripts (SPEC-024b D-26). Mod scripts are checked with the same table when
+they load.
+
+```sh
+asset-audit --corpus-dir mods/mymod --report-script-stack --sfall
+```
+
 ## Core contracts
 
 `EntityStore<T>` is a `slotmap::SlotMap<EntityId, T>`. Construct it with
@@ -3241,4 +3369,14 @@ answered the code takes the stated choice and comments it.
 
 ## Known gaps
 
-None.
+Sfall mode (SPEC-024b), against the spec's boundaries:
+
+- `HOOK_MOVECOST` runs on committed steps. The AP cost beside the movement
+  cursor is not previewed, so it shows the unhooked planning cost.
+- `HOOK_COMBATDAMAGE` has no AI area-safety site: the engine's AI runs no such
+  simulation, so the spec's clause has nothing to attach to.
+- A nested chain that reaches a script already running skips that member, with a
+  diagnostic.
+- The key hook maps keys the engine's table knows; another scan code leaves the
+  physical key in place, and `metarule3` 201 has no queue to empty, because the
+  engine handles a key as it arrives.

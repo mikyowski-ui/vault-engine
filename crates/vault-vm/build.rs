@@ -117,6 +117,48 @@ fn sfall_row(cells: &[&str]) -> String {
         cells[9],
     )
 }
+fn hook_types(text: &str) -> String {
+    text.split(',')
+        .filter(|name| *name != "-")
+        .map(|name| match name {
+            "int" => "HookType::Int",
+            "critter" => "HookType::Critter",
+            "item" => "HookType::Item",
+            "obj" => "HookType::Object",
+            "mixed" => "HookType::Mixed",
+            "string" => "HookType::Text",
+            other => panic!("unknown hook type {other}"),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+/// `oracle/SPEC-024/sfall-hooks.tsv`: the 50 hooks, by ID. The reserved range
+/// has no row here.
+fn sfall_hooks() -> Vec<String> {
+    let table = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+        .join("../../oracle/SPEC-024/sfall-hooks.tsv");
+    println!("cargo:rerun-if-changed={}", table.display());
+    let text = fs::read_to_string(table).expect("the SPEC-024 oracle must be present");
+    let rows: Vec<String> = text
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let cells: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cells.len(), 10, "a hook row has ten columns");
+            let id = cells[0].parse::<i32>().ok()?;
+            Some(format!(
+                "HookRow {{id:{id},name:{:?},file:{:?},fires:{},args:&[{}],rets:&[{}]}}",
+                cells[1],
+                cells[2],
+                cells[3] == "P1",
+                hook_types(cells[5]),
+                hook_types(cells[7]),
+            ))
+        })
+        .collect();
+    assert_eq!(rows.len(), 50, "every hook");
+    rows
+}
 /// SPEC-024b section 3: the oracle table, compiled in and counted, so a word
 /// cannot drift from the published contract. A reserved word has a row with
 /// no pop count, and no `OpcodeSpec` for the stack model.
@@ -168,7 +210,9 @@ fn sfall_catalog() {
             rows.join(",\n")
         )
     };
+    let hooks = sfall_hooks();
     let source = [
+        table("SFALL_HOOKS", "HookRow", &hooks),
         table(
             "SFALL_WORDS",
             "SfallRow",

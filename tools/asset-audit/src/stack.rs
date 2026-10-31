@@ -259,6 +259,40 @@ pub fn listed_images(vfs: &dyn Vfs) -> Result<(Vec<Image>, usize, usize), String
     Ok((images, absent, undecodable))
 }
 
+/// SPEC-024b §3.2: every `.INT` under `scripts/`, listed or not, with sfall
+/// mode's table: a mod's hook and global scripts appear in no `scripts.lst`.
+pub fn audit_sfall(vfs: &dyn Vfs) -> Result<StackAudit, String> {
+    let every = WordSet {
+        words: 0x8000..=0xffff,
+    };
+    let paths: Vec<String> = vfs
+        .files()
+        .map(|path| path.as_str().to_owned())
+        .filter(|path| path.starts_with("scripts/") && path.ends_with(".int"))
+        .collect();
+    let mut images = Vec::new();
+    let mut undecodable = 0;
+    for path in paths {
+        let bytes = vfs
+            .read_bounded(&path, MAX_ASSET_BYTES)
+            .map_err(|error| format!("{path}: {error}"))?;
+        match IntProgram::parse_in(&bytes, &every, false) {
+            Ok(program) => {
+                let name = path.trim_start_matches("scripts/").to_owned();
+                images.push(Image::of(name, &program));
+            }
+            Err(error) => {
+                undecodable += 1;
+                eprintln!("SCRIPT STACK UNDECODABLE {path}: {error}");
+            }
+        }
+    }
+    let table = Table::new(WordSet::FALLOUT2_SFALL);
+    let mut audit = StackAudit::run(&images, &table, &[], &[]);
+    audit.undecodable = undecodable;
+    Ok(audit)
+}
+
 /// The audit over a mounted corpus with `words`' table and its recorded
 /// exceptions. Under Fallout 2, SPEC-017's ten words are inferred whenever
 /// they occur.

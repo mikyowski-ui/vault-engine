@@ -160,6 +160,11 @@ pub struct Attack {
     pub ticks: u64,
     /// Combat difficulty preference: 0 easy, 1 normal, 2 hard.
     pub combat_difficulty: i32,
+    /// SPEC-024b §6.8: `HOOK_TOHIT`'s result for the range-aware chance.
+    pub hooked_chance: Option<i32>,
+    /// SPEC-024b §6.10: `HOOK_CALCAPCOST`'s result. The clamp to 1 does not
+    /// apply after the hook.
+    pub hooked_cost: Option<i32>,
     /// Initial scripted combat-request accuracy adjustment.
     pub accuracy_bonus: i32,
     /// Overridden critical tables ([`crate::tables`]); `None` uses the
@@ -240,6 +245,9 @@ impl Attack {
     /// SPEC-007 §3.4 attack cost: base cost, presence-tested player
     /// reductions, then +1 aiming, clamped to at least 1.
     pub fn ap_cost(&self) -> i32 {
+        if let Some(cost) = self.hooked_cost {
+            return cost;
+        }
         let subtype = self.subtype();
         let mut cost = match &self.weapon {
             None => 3,
@@ -273,6 +281,14 @@ impl Attack {
     /// SPEC-007 §3.5 hit chance. `range_aware` includes the R term; both
     /// variants count cover for ranged/throw attacks. Capped above at 95 only.
     pub fn hit_chance(&self, range_aware: bool) -> Result<i32, WorldError> {
+        if range_aware && let Some(chance) = self.hooked_chance {
+            return Ok(chance);
+        }
+        Ok(self.chance_parts(range_aware)?.0)
+    }
+    /// The hit chance after the upper cap, and before it (SPEC-024b §6.8's
+    /// arguments 0 and 7).
+    pub(crate) fn chance_parts(&self, range_aware: bool) -> Result<(i32, i32), WorldError> {
         let subtype = self
             .subtype()
             .ok_or_else(|| WorldError::Invalid("attack mode has no valid skill".into()))?;
@@ -331,7 +347,8 @@ impl Attack {
                 _ => 0,
             };
         }
-        Ok(chance.min(95).max(i64::from(i32::MIN)) as i32)
+        let bounded = |value: i64| value.max(i64::from(i32::MIN)).min(i64::from(i32::MAX)) as i32;
+        Ok((bounded(chance.min(95)), bounded(chance)))
     }
     /// D100 roll against `chance`, with the first-day-gated critical upgrade.
     pub(crate) fn roll(
@@ -464,14 +481,29 @@ impl Attack {
     /// Single-shot or ordinary melee/unarmed attack (burst/continuous fire
     /// uses [`Attack::resolve_spray`]).
     pub fn resolve(&self, rng: &mut impl RandomSource) -> Result<Resolution, WorldError> {
+        let code = self.roll_result(rng)?;
+        self.resolution_of(code, rng)
+    }
+    /// The roll with its forced upgrades: the attack's result, final.
+    pub(crate) fn roll_result(&self, rng: &mut impl RandomSource) -> Result<i32, WorldError> {
         let subtype = self
             .subtype()
             .ok_or_else(|| WorldError::Invalid("attack mode has no valid skill".into()))?;
         let chance = self.hit_chance(true)?;
         let full_location = critical::location_adjustment(self.location, false)
             .ok_or_else(|| WorldError::Invalid("hit location must be 0-8".into()))?;
-        let mut code = self.roll(chance, self.critical_chance - full_location, rng)?;
-        code = self.postprocess(code, subtype, rng)?;
+        let code = self.roll(chance, self.critical_chance - full_location, rng)?;
+        self.postprocess(code, subtype, rng)
+    }
+    /// What result `code` does: critical effects, then damage.
+    pub(crate) fn resolution_of(
+        &self,
+        code: i32,
+        rng: &mut impl RandomSource,
+    ) -> Result<Resolution, WorldError> {
+        let subtype = self
+            .subtype()
+            .ok_or_else(|| WorldError::Invalid("attack mode has no valid skill".into()))?;
         let mut resolution = Resolution {
             code,
             multiplier: 2,

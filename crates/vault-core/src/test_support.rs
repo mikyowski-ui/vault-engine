@@ -175,7 +175,29 @@ impl WorldAssets for TestAssets {
             ArtPolicy::Loads | ArtPolicy::Critters => self.art.contains_key(&fid),
         }
     }
+    fn files(&self, pattern: &[u8]) -> Vec<Vec<u8>> {
+        // `scripts/gl*.int`: the script files that start `gl`.
+        let (prefix, suffix) = {
+            let text = String::from_utf8_lossy(pattern).to_ascii_lowercase();
+            let (first, last) = text.split_once('*').unwrap_or((&text, ""));
+            (first.to_owned(), last.to_owned())
+        };
+        let mut found = Vec::new();
+        for (file, _) in &self.programs {
+            let path = format!("scripts/{}", file.to_ascii_lowercase());
+            if path.starts_with(&prefix) && path.ends_with(&suffix) {
+                found.push(path.into_bytes());
+            }
+        }
+        found
+    }
     fn available(&self, path: &[u8]) -> bool {
+        if let Some(name) = path.strip_prefix(b"scripts/") {
+            return self
+                .programs
+                .iter()
+                .any(|(file, _)| file.as_bytes().eq_ignore_ascii_case(name));
+        }
         let Some(effects) = &self.effects else {
             return true;
         };

@@ -327,10 +327,10 @@ impl<A: WorldAssets> WorldHost<A> {
         // control record always succeeds, without the price comparison.
         let trade = self.control_of(session.merchant).is_some();
         let accepted = trade
-            || !offer_empty
-                && !self.world.holds_armed(session.offer)
-                && i64::from(self.barter_price(session))
-                    <= self.world.inventory_value(session.offer);
+            || !offer_empty && !self.world.holds_armed(session.offer) && {
+                let (price, offer) = self.hooked_barter(session, true);
+                i64::from(price) <= offer
+            };
         if !accepted {
             self.print_game("inventry.msg", 28, &[]);
             return Ok(Trade::Refused);
@@ -338,12 +338,14 @@ impl<A: WorldAssets> WorldHost<A> {
         self.transfer_all(session.table, self.world.player)?;
         self.transfer_all(session.offer, session.merchant)?;
         self.print_game("inventry.msg", 27, &[]);
+        self.sfall_barter_changed();
         Ok(Trade::Accepted)
     }
     /// Leaving barter returns T to the merchant and P to the player, then
     /// restores the hidden equipment (armor worn, the right-hand item in
     /// the right hand, a fallback weapon unequipped).
     pub fn end_barter(&mut self, session: BarterSession) -> Result<(), WorldError> {
+        self.sfall_barter_closed();
         self.transfer_all(session.table, session.merchant)?;
         self.transfer_all(session.offer, self.world.player)?;
         for (item, flag) in session.hidden {

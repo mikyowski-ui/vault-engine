@@ -1501,7 +1501,7 @@ fn spec009_team_switching_and_random_retarget() {
 /// critter X1, the defender, then X2 (DT 2, DR 20) or a wall, with a
 /// single-fire weapon of range 20 and damage 1-20. The clock is before the
 /// first day, so no critical-upgrade draws are made.
-fn fixture_e(blocker: &str, x1_team: i32) -> (WorldHost<TestAssets>, [ObjectRef; 4]) {
+pub(crate) fn fixture_e(blocker: &str, x1_team: i32) -> (WorldHost<TestAssets>, [ObjectRef; 4]) {
     let mut world = world();
     let player = world.player;
     world.get_mut(player).unwrap().raw.hex = Some(0);
@@ -1535,15 +1535,16 @@ fn fixture_e(blocker: &str, x1_team: i32) -> (WorldHost<TestAssets>, [ObjectRef;
     (ai_host(world, assets), [attacker, x1, defender, far])
 }
 fn miss(
-    host: &WorldHost<TestAssets>,
+    host: &mut WorldHost<TestAssets>,
     attacker: ObjectRef,
     defender: ObjectRef,
     outcomes: &[i32],
 ) -> (crate::Spray, Option<crate::host_ai::Victim>) {
-    let attack = right_primary(&host.world, attacker, defender, location::UNCALLED, false);
+    let mut attack = right_primary(&host.world, attacker, defender, location::UNCALLED, false);
     let mut draws = Draws::new(outcomes);
+    let mut target = defender;
     let (spray, victim, _) = host
-        .resolve_attack(attacker, defender, &attack, &mut draws)
+        .resolve_attack(attacker, &mut target, &mut attack, &mut draws)
         .unwrap();
     assert!(draws.0.is_empty(), "unused outcomes {:?}", draws.0);
     (spray, victim)
@@ -1577,10 +1578,10 @@ fn spec007_fixture_e_missed_shot_bystanders() {
     use crate::host_ai::Victim;
     // E1 under the Stage A safe rule: X1's line-of-fire draw selects it, it
     // is committed, and its one round (DT 0, DR 0) is the damage draw.
-    let (host, [attacker, x1, defender, x2]) = fixture_e("critter", 2);
+    let (mut host, [attacker, x1, defender, x2]) = fixture_e("critter", 2);
     let chance = line_of_fire_chance(&host, attacker, x1);
     assert!(chance >= 1);
-    let (spray, victim) = miss(&host, attacker, defender, &[100, chance, 12]);
+    let (spray, victim) = miss(&mut host, attacker, defender, &[100, chance, 12]);
     assert_eq!(spray.main.code, 1);
     assert_ne!(spray.main.defender_flags & effect::HIT, 0);
     assert_eq!((spray.main.damage, spray.main.multiplier), (12, 2));
@@ -1589,7 +1590,7 @@ fn spec007_fixture_e_missed_shot_bystanders() {
     // Stage B's ray from the defender reports X2: 12 - 2 = 10, less 20%.
     let x2_chance = line_of_fire_chance(&host, attacker, x2);
     let (spray, victim) = miss(
-        &host,
+        &mut host,
         attacker,
         defender,
         &[100, chance + 1, x2_chance + 1, 12],
@@ -1599,13 +1600,13 @@ fn spec007_fixture_e_missed_shot_bystanders() {
     // A projectile-through X2 is never hit: no candidate, no damage draw.
     let mut host = host;
     host.world.get_mut(x2).unwrap().raw.flags = BasicFlags::PROJECTILE_THROUGH;
-    let (spray, victim) = miss(&host, attacker, defender, &[100, chance + 1]);
+    let (spray, victim) = miss(&mut host, attacker, defender, &[100, chance + 1]);
     assert!(victim.is_none());
     assert_eq!(spray.main.defender_flags & effect::HIT, 0);
     // E3: a wall in X2's place is an obstruction for Stage A and Stage B's
     // victim: the hit bit, 0 damage, and no damage draw.
-    let (host, [attacker, _, defender, wall]) = fixture_e("wall", 2);
-    let (spray, victim) = miss(&host, attacker, defender, &[100, chance + 1]);
+    let (mut host, [attacker, _, defender, wall]) = fixture_e("wall", 2);
+    let (spray, victim) = miss(&mut host, attacker, defender, &[100, chance + 1]);
     assert_eq!(victim, Some(Victim::Object(wall)));
     assert_ne!(spray.main.defender_flags & effect::HIT, 0);
     assert_eq!(spray.main.damage, 0);
@@ -1633,8 +1634,8 @@ fn spec007_missed_shot_at_the_extension_hex_hits_the_defender_at_numerator_2() {
         .unwrap();
     let mut assets = assets();
     assets.prototypes.insert(30, ammo(30, 0, 10));
-    let host = ai_host(world, assets);
-    let (spray, victim) = miss(&host, attacker, defender, &[100, 9]);
+    let mut host = ai_host(world, assets);
+    let (spray, victim) = miss(&mut host, attacker, defender, &[100, 9]);
     assert!(matches!(victim, Some(Victim::Bystander(victim, _)) if victim == defender));
     assert_eq!((spray.main.damage, spray.main.multiplier), (9, 2));
     assert_eq!(spray.main.attacker_flags & effect::CRITICAL, 0);

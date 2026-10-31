@@ -5,6 +5,7 @@
 use super::{MapPreview, world_kit::draw_indicator_box};
 use crate::{input::key_text, interface::Painter};
 use std::collections::VecDeque;
+use vault_core::host_sfall::Preview;
 use vault_core::{
     ObjectAction, ObjectRef, WorldEffect,
     assets::WorldAssets,
@@ -1059,13 +1060,14 @@ impl MapPreview {
             // a kit on the player, else the use procedure.
             if self.host.world.combat {
                 let player = self.host.world.player;
+                let cost = self.host.hook_fixed_cost(player, 2, item);
                 let Some(state) = self.host.world.critter_state_mut(player) else {
                     return;
                 };
-                if state.ap < 2 {
+                if state.ap < cost {
                     return;
                 }
-                state.ap -= 2;
+                state.ap -= cost;
             }
             self.use_item_now(item, vault_core::BookRoute::ItemSlot);
             return;
@@ -1089,12 +1091,17 @@ impl MapPreview {
     fn reload_from_slot(&mut self, weapon: ObjectRef) {
         let player = self.host.world.player;
         let combat = self.host.world.combat;
+        let cost = if combat {
+            self.host.hook_fixed_cost(player, 2, weapon)
+        } else {
+            2
+        };
         if combat
             && self
                 .host
                 .world
                 .critter_state(player)
-                .is_none_or(|state| state.ap < 2)
+                .is_none_or(|state| state.ap < cost)
         {
             return;
         }
@@ -1115,7 +1122,7 @@ impl MapPreview {
             && combat
             && let Some(state) = self.host.world.critter_state_mut(player)
         {
-            state.ap = (state.ap - 2).max(0);
+            state.ap = (state.ap - cost).max(0);
         }
         let next = bar::next_weapon_mode(WeaponMode::Reload, |mode| self.slot_mode_available(mode));
         let hand = self.hand();
@@ -1183,6 +1190,12 @@ impl MapPreview {
     /// §3.23 the AP cost the slot shows for an attack: SPEC-007 §3.4's cost
     /// (base cost, the player's reductions, +1 when aimed, at least 1).
     fn slot_attack_cost(&self, hit: u8, aimed: bool) -> i32 {
+        if let Some(cost) = self
+            .host
+            .sfall_previewed(Preview::SlotCost, &[i32::from(hit), i32::from(aimed)])
+        {
+            return cost;
+        }
         let world = &self.host.world;
         let player = world.player;
         match world.attack_profile(player, player, hit, location::UNCALLED, aimed) {
@@ -1401,6 +1414,11 @@ impl MapPreview {
                     return;
                 }
             };
+        // SPEC-024b §6.10: the hook runs before the cost meets the AP.
+        let mut attack = attack;
+        if self.host.sfall_mode() {
+            attack.hooked_cost = Some(self.host.hook_ap_cost(player, &attack));
+        }
         if let Err(refusal) = self.host.world.preflight(player, target, &attack) {
             self.refuse_attack(refusal, attack.ap_cost(), mode);
             return;
@@ -1582,13 +1600,14 @@ impl MapPreview {
                     return;
                 }
                 if self.host.world.combat {
+                    let cost = self.host.hook_fixed_cost(player, 2, item);
                     let Some(state) = self.host.world.critter_state_mut(player) else {
                         return;
                     };
-                    if state.ap < 2 {
+                    if state.ap < cost {
                         return;
                     }
-                    state.ap -= 2;
+                    state.ap -= cost;
                 }
                 self.selected = Some(target);
                 self.interact(ObjectAction::UseObject(item));
