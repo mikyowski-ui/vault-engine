@@ -160,6 +160,38 @@ two-repository route above and not from Team A.
   - **Check.** The same grep finds nothing, and the diff has no code listing. The
     builder side cannot run `spec_lint.py`, and the spec's checklist records no
     linter run for the Revision 3 text.
+- **Revision 4, ingested 2026-10-31.** It came from the research vault by the same
+  route. Its sources are the `S1` documents and headers, Et Tu 2.0.3911's scripts
+  and script list, the approved specs in the research vault, and the owner's
+  measurements of an installed Et Tu (the owner's brief of 2026-10-31). The research
+  side states that sfall's implementation code was still not read. Revision 4
+  promotes 33 behaviors (35 table rows) and 16 hooks to tier P1, so
+  `sfall-opcodes.tsv` holds 193 P1 rows and `sfall-hooks.tsv` holds 30 P1 hooks. It
+  adds decisions D-47 to D-59, and rewords D-40 and D-41.
+  - **Oracle files.** It changes `README.md`, `sfall-opcodes.tsv`,
+    `sfall-hooks.tsv` and `sfall-array-vectors.tsv`. In the two tier tables only
+    the `tier` column changes. `sfall-array-vectors.tsv` gains 189 rows (W1 to W30
+    and H18 to H33), giving 371, and no existing row changes.
+    `mod-opcode-usage.tsv` does not change.
+  - **Check.** The same grep finds nothing, and the diff has no code listing. The
+    word and hook tables of its new sections agree with the oracle. The builder
+    side cannot run `spec_lint.py`, and the spec's checklist has no linter line
+    for the Revision 4 text, although D-59 reports what the linter refuses.
+  - **D-58's ingestion check, 2026-10-31.** D-58 leaves these anchors to ingestion,
+    and the spec's checklist line stays unticked because the file is not edited on
+    this side. `remove_wm_town_names` (SPEC-019 section 3.12.2),
+    `npc_engine_level_up` (section 3.17) and `car_gas_amount` (section 3.19.1) hold.
+    Three do not, and need a research revision:
+    - `encounter_detection`: SPEC-018 section 5.6 has no Outdoorsman check, and says
+      that no encounter can be avoided, so the setting has nothing to skip.
+    - `HOOK_CARTRAVEL`: arg0 is declared as 3 to 8 steps, but SPEC-019 section
+      3.19.3 gives `max(1, trunc(4 / d))` for d from 1 to 10, which is 1, 2 or 4. Its
+      fuel use is known only after the steps, and the hook runs before they apply.
+    - `set_fo1_hit_chance`: no approved spec has a Fallout 2 hit-chance term.
+      SPEC-007 section 3.5 serves both profiles, so the setting changes nothing.
+  - **SPEC-024a.** Revision 4's `HOOK_ADJUSTFID` boundary, its promotions and its
+    move of section 6.19 to 6.20 leave SPEC-024a and `hook-points.tsv` out of date,
+    and SPEC-024a needs its own revision.
 - **A linter note the hand-off discloses.** Its README says that eleven public
   names in `sfall-opcodes.tsv` also occur as identifiers in reference revision
   `R1`, so the linter flags them if pointed at that table. They are public names

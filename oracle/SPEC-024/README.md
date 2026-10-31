@@ -6,7 +6,7 @@ Vectors backing `SPEC-024b-sfall-opcodes-arrays-and-hooks.md` section 7. These h
 | --- | --- |
 | `sfall-opcodes.tsv` | 449 rows: all 300 words `0x8156` to `0x8281`, 133 `sfall_funcN` rows, 7 `metarule3` rows, 9 `metarule2_explosions` rows |
 | `sfall-hooks.tsv` | 50 hooks plus the reserved range 49-60 |
-| `sfall-array-vectors.tsv` | 182 rows: array vectors A to F3, hook-chain vectors H1 to H17, vectors V1 to V4, U1, M1, T1, and E1 for the rows promoted in Revision 3, sidecar migration vectors MG1 and MG2, and string-value vectors SS1 and SS2 |
+| `sfall-array-vectors.tsv` | 371 rows: array vectors A to F3, hook-chain vectors H1 to H33, vectors V1 to V4, U1, M1, T1, and E1 for the rows promoted in Revision 3, sidecar migration vectors MG1 and MG2, string-value vectors SS1 and SS2, and vectors W1 to W30 for the words promoted in Revision 4 |
 | `mod-opcode-usage.tsv` | 108 rows: every Tier P2 opcode row and hook the two target mods use, ranked. This is evidence, not a test input |
 
 ## `sfall-opcodes.tsv`
@@ -31,7 +31,7 @@ Where a function has two published argument counts, it has one row per count.
 
 ## `sfall-hooks.tsv`
 
-`arg_types` and `ret_types` list the types of arg0 up, and ret0 up. `critter`, `item`, and `obj` are object references. `tier` is P1 for the fourteen hooks with boundary text, and P2 for hooks that load but do not fire (SPEC-024b section 6.19).
+`arg_types` and `ret_types` list the types of arg0 up, and ret0 up. `critter`, `item`, and `obj` are object references. `tier` is P1 for the thirty hooks with boundary text, and P2 for hooks that load but do not fire (SPEC-024b section 6.20).
 
 ## `sfall-array-vectors.tsv`
 
@@ -44,10 +44,11 @@ Columns are `vector`, `step`, `operation`, `push`, `state_after`, and `rule`. Ea
 - MG2 rows, named `refused-*`, hold the bytes in `push` and the reason in `state_after`. MG1's `defaults` row states the three migration defaults in `push`.
 - H rows give arguments, returns, the final value, and the member order. `rets=[None]` means no member set a return. A `[75.0]` return is a float converted when applied.
 - H1 and H2 are the published chain example. The others are synthetic.
-- V, U, M, T, and E rows use the same columns, with the state in `state_after`. Vector V's bytes are a synthetic FRM-shaped header, and a step's bytes are spaced hexadecimal pairs after `bytes=`.
+- V, U, M, T, E, and W rows use the same columns, with the state in `state_after`. Vector V's bytes are a synthetic FRM-shaped header, and a step's bytes are spaced hexadecimal pairs after `bytes=`.
 - Vector U's ordinary ID 900 stands for whatever the engine's allocator gives.
 - SS2 rows use the H columns. Their final value gives arguments 2 and 12 and the diagnostic count.
 - Vectors F and F3 changed in Revision 3, because the sidecar is now format revision 2 (SPEC-024b section 5.8).
+- W rows state a synthetic case in `operation`, so a table maximum or a font's advances there are examples, not game data.
 - Vector names are unique across this file and SPEC-024b section 7.1. M1 already names message files, and S1 and S2 name stack vectors, so migration is MG and string values are SS.
 
 ## `mod-opcode-usage.tsv`

@@ -1,12 +1,14 @@
 # SPEC-024b: sfall Extended Opcodes, Dynamic Arrays, and Hook Scripts
 
-**Status:** research hand-off, Revision 3, 2026-10-30. Revision 1 was ingested on the owner's brief of 2026-10-30, which approves Decision D-3, and Revision 2 (Team A) made that amendment. Revision 3 comes from the research side, is built on Revision 2's text with Team A's prose correction merged, and needs ingestion. See "Revision history".
+**Status:** research hand-off, Revision 4, 2026-10-31. Revision 1 was ingested on the owner's brief of 2026-10-30, which approves Decision D-3, and Revision 2 (Team A) made that amendment. Revision 3, built on Revision 2's text with Team A's prose correction merged, has been ingested. Revision 4 comes from the research side and needs ingestion. See "Revision history".
 
 **Provenance:** written on the research side from the published sfall scripting documentation at tag v4.5.1 (reference revision S1): the opcode list, the function reference, the function notes, the hook reference, the arrays guide, the compiler guide, and the public script headers. The engine's own approved specs supplied the anchors. sfall's implementation code was **not** read, and nothing here was checked against a running sfall or against Et Tu or Restoration Project scripts (Decisions D-1 and D-26).
 
 **Provenance of Revision 2.** Author: the Spec-Author sub-agent (Team A), 2026-10-30, on the owner's brief of 2026-10-30. Sources: the owner's brief; this spec and `oracle/SPEC-024/`; SPEC-017, SPEC-023; and `docs/REFERENCE.md` (the enhanced words, mod manifests, and what a replay reads). No decompilation, disassembly, re-implementation source, game asset, or engine Rust code was used, and no sfall material was consulted on this side.
 
 **Provenance of Revision 3.** Written on the research side from three sources: the published sfall documents and headers of revision S1, as bundled with *Fallout Et Tu* 2.0.3911; compiled `.int` scripts and script source from *Fallout Et Tu* and from *Restoration Project Updated* 2.4.34; and the engine's approved specs. sfall's implementation code was still **not** read, and nothing was checked against a running sfall. Scripts supplied word numbers, operand constants, counts, and observed call patterns. No script text is reproduced here.
+
+**Provenance of Revision 4.** Written on the research side from the published sfall documents and headers of revision S1, *Fallout Et Tu* 2.0.3911's scripts and script list, the approved specs in the research vault, and the owner's measurements of an installed *Fallout Et Tu* (brief of 2026-10-31). sfall's implementation code was still **not** read. SPEC-018 and SPEC-019 were not re-read for this revision, so their sections are cited as earlier revisions recorded them (Decision D-58).
 
 **Oracle:** `oracle/SPEC-024/` holds the complete tables and computed vectors. Section 7 says how they relate to this text. Revision 3 changes three oracle files and adds a fourth.
 
@@ -35,11 +37,17 @@
   - **Sections 5.8 and 5.9.** A revision 1 sidecar now migrates instead of being refused: it loads, each field revision 2 adds takes a listed default, `sfall_hash` is the migrated state's, and the next save writes revision 2. The premise that no sidecar exists yet is gone.
   - **Section 6.5.** States that a string converts only to a `mixed` argument.
   - **Section 7 and the oracle.** New vectors MG1 and MG2 (migration), and SS1 and SS2 (string values), add 29 rows to `sfall-array-vectors.tsv`. No existing row changes. New tests 15 and 16.
+- **Revision 4 (2026-10-31, research).** On the owner's brief of 2026-10-31, which reports the engine's audit and a headless run of an installed *Fallout Et Tu*. Every name in that report is now promoted or has a decision.
+  - **Section 4.12, new.** 33 behaviors (35 table rows) move from tier P2 to P1, with session settings as a new kind of state. Nine named behaviors stay P2 (Decisions D-49 to D-52).
+  - **Section 6.19, new.** All 16 hooks that Et Tu registers but that did not fire gain boundary text, so P1 now holds 30 hooks and P2 holds 20. The old section 6.19 is now section 6.20.
+  - **Section 6.5.** A return declared `string` converts by class `S`.
+  - **Sections 1.1, 4.2, and 9.** Three script-visible names are described without attribution to any other project (Decision D-41). Decision D-40 records the measured firings.
+  - **Section 7 and the oracle.** Vectors W1 to W30 and H18 to H33 add 189 rows to `sfall-array-vectors.tsv`. No existing row changes. New tests 17 and 18. `mod-opcode-usage.tsv` does not change: it records the Revision 3 audit.
 
 ## Clean-Room Rules for Research Agents
 
 - Document only binary layouts, formulas, opcode numbers, stack transitions, state rules, and observable behavior.
-- Do not copy code, struct definitions, function signatures, or internal variable names from `sfall`, `fallout2-ce`, `fallout1-re`, or any decompilation.
+- Do not copy code, struct definitions, function signatures, or internal variable names from `sfall`, `fallout1-re`, any decompilation, or any re-implementation.
 - Public SSL opcode names, public hook names, and public script file names are permitted. They are what compiled scripts and mod files contain.
 - Provide synthetic test vectors.
 
@@ -49,11 +57,11 @@ This specification lets the engine run compiled scripts that use sfall's extende
 
 - **Part 1 (section 4):** the extended instruction words `0x8156..=0x8281`, the `sfall_func0` to `sfall_func8` dispatchers, the `metarule3` sub-functions, and their stack contracts (`vault_vm::extensions`).
 - **Part 2 (section 5):** dynamic arrays, their storage classes, deterministic iteration, and the save sidecar (`vault_vm` and `vault_core`).
-- **Part 3 (section 6):** `hs_*.int` hook scripts, registration, argument and return handling, and fourteen fully specified hooks (`vault_core::host`).
+- **Part 3 (section 6):** `hs_*.int` hook scripts, registration, argument and return handling, and thirty fully specified hooks (`vault_core::host`).
 
 Section 3 comes first because these word numbers collide with SPEC-017.
 
-Out of scope: `ddraw.ini` engine patches, shaders, the graphics and sound words, and the 36 hooks of tier P2. They keep a stack contract only (sections 4.10 and 6.19).
+Out of scope: `ddraw.ini` engine patches, shaders, the graphics and sound words, and the 20 hooks of tier P2. They keep a stack contract only (sections 4.10 and 6.20).
 
 **Tiers.** Every word, function, and hook in the oracle carries one tier. `[Must-match]`
 
@@ -97,9 +105,20 @@ Et Tu ships sfall v4.5.1, which is revision S1, and its bundled documents genera
 - **Source calibration.** The source scan ran over the 1045 Et Tu scripts that exist in both forms. Over Tier P2 rows it matches the binary on all 148 script and row pairs, with no extra and no missing pair. Over hooks it matches on all 36 pairs. Its only misses are 460 pairs for P1 array words that the compiler generates from array syntax, plus one extra pair for `load_array`. Neither touches a P2 row. RPU's source calls all match the table's operand counts.
 - **Use.** 86 of the 280 Tier P2 opcode rows, and 22 of the 42 Tier P2 hooks, are used. Of the eight hooks already in P1, seven are used, and `HOOK_TOHIT` is used by neither mod.
 - **Hook files.** Neither mod ships an `hs_*.int`. Every registration in both goes through `register_hook_proc` or `register_hook_proc_spec`.
-- **Names outside the table.** `rest_option_msgs`, `set_rest_option`, and `set_party_member_cc_msg_ids` are fallout2-ce extensions behind Et Tu's own engine test, and `metarule3` 999 appears in one `sfall.dat` script. Section 4.2's unknown-name rule and SPEC-017 section 5.2's unknown rule cover them.
+- **Names outside the table.** `rest_option_msgs`, `set_rest_option`, and `set_party_member_cc_msg_ids` are script-visible names that Et Tu's scripts call, on the path behind Et Tu's own engine test, and `metarule3` 999 appears in one `sfall.dat` script. Section 4.2's unknown-name rule and SPEC-017 section 5.2's unknown rule cover them (Decision D-41).
 
 **Ranking.** Rows are ordered by scripts, then call sites (Decision D-31). Ties at the cut-off are real, so the tie rule matters: nine opcode rows tie for the last four places, and nineteen hooks tie for the last three.
+
+**Measured on an install (Revision 4).** The owner's brief reports the engine's own audit and a headless run of an installed *Fallout Et Tu*. Its figures agree with `mod-opcode-usage.tsv` on every name it shares with this audit. This is evidence, not a requirement.
+
+| Measurement | Names | Disposition |
+| --- | --- | --- |
+| P2 words that fired, once per run each | 8 | All promoted (section 4.12) |
+| P2 hooks registered at startup, none fired | 16 | All promoted (section 6.19) |
+| Tier X stubs that fired per run | `write_byte` 2, `write_int` 1 | Stay stubs (Decision D-40) |
+| Static P2 words on more than one script or call site | 20 | 15 promoted; 5 stay P2 |
+| Static P2 words on one call site | 14 | 10 promoted; 4 stay P2 |
+| Unknown names | 3, and `metarule3` 999 | Stay unknown (Decision D-41). No word lies above `0x8281` |
 
 ## 2. Conventions
 
@@ -229,10 +248,11 @@ Functions of tier P1, `[Must-match]` unless a row says otherwise:
 | `floor2` | number | See section 4.7 |
 | `get_object_data`, `set_object_data`, `get_flags`, `set_flags`, `critter_inven_obj2` | See section 4.8 | See section 4.8 |
 | `set_unique_id`, `get_terrain_name`, `add_extra_msg_file`, `message_box`, `create_win`, `dialog_obj`, `signal_close_game` | See section 4.11 | See section 4.11 |
+| `encounter_detection`, `npc_engine_level_up`, `remove_wm_town_names`, `set_fo1_hit_chance`, `set_reaction_thresholds`, `set_terrain_name`, `car_gas_amount`, `get_text_width`, `set_rest_mode`, `set_car_intface_art`, `real_dude_obj`, `set_scr_name`, `dialog_message`, `set_cursor_mode`, `unwield_slot`, and the two redraw functions | See section 4.12 | See section 4.12 |
 
 Limiting the existence queries to P1 means a script that checks before relying on a function takes its fallback path rather than trusting a stub.
 
-Et Tu tells sfall from fallout2-ce by `opcode_exists(0x823B)`: 1 means sfall. `modified_ini` is P1, so here the answer is 1 and Et Tu takes its sfall paths. `0x823B` must stay P1. `[Safe rule]` The three fallout2-ce function names of section 1.1 stay unknown names here, and Et Tu reaches them only on its fallout2-ce path.
+Et Tu's engine test is `opcode_exists(0x823B)`: 1 takes its sfall paths. `modified_ini` is P1, so here the answer is 1 and Et Tu takes its sfall paths. `0x823B` must stay P1. `[Safe rule]` The three unknown names of section 1.1 stay unknown here, because Et Tu calls them only when that test gives 0.
 
 ### 4.3 `metarule`, `metarule3`, and `metarule2_explosions`
 
@@ -455,7 +475,7 @@ Repeating global scripts run in phase 2 of the step, in the order above.
 - **X words** are `read_byte`, `read_short`, `read_int`, `read_string`, `write_byte`, `write_short`, `write_int`, `write_string`, `call_offset_v0` to `call_offset_v4`, and `call_offset_r0` to `call_offset_r4`. They address the original executable's memory, which does not exist here, so they are no-op stubs under the P2 rule. Each pops its operands, has no effect, pushes the default return value if it pushes (int 0, or the empty string for `read_string`), writes the standard diagnostic once per program, and never halts the script. `[Safe rule]` Their addresses are never used to reach host memory.
 - **R words** follow section 3.3.
 
-**X words in the target mods.** Et Tu's base scripts use them, so these effects are lost here (Decision D-40). `gl_0_settings.int` holds `write_int` and `write_byte`, for its rest-timer patch. `gl_fo1mechanics.int` holds `write_byte`, for its Dogmeat dialogue patch. Two optional mini-mods also hold them: `gl_footprints.int` (`read_int`) and `gl_character_randomizer.int` (`read_int`, `write_int`, `write_string`). The scripts keep running, because the P2 rule keeps the stack balanced. RPU uses no X word.
+**X words in the target mods.** Et Tu's base scripts use them, so these effects are lost here (Decision D-40). `gl_0_settings.int` holds `write_int` and `write_byte`, for its rest-timer patch. `gl_fo1mechanics.int` holds `write_byte`, for its Dogmeat dialogue patch. Two optional mini-mods also hold them: `gl_footprints.int` (`read_int`) and `gl_character_randomizer.int` (`read_int`, `write_int`, `write_string`). The scripts keep running, because the P2 rule keeps the stack balanced. RPU uses no X word. The owner's headless run measured them firing: `write_byte` twice and `write_int` once per run, which are these three writes.
 
 ### 4.11 Words and functions promoted in Revision 3
 
@@ -626,6 +646,99 @@ The tag numbers are `[Must-match]`. `BoxBarCount` comes from `ddraw.ini`, and is
 - The key is queued, and is pressed and released as a logical key at the start of the next phase 1, after that step's input records. `[Safe rule]`
 - Scan codes are those of `HOOK_KEYPRESS`'s arg1. A value outside 1 to 255 does nothing, with a diagnostic. `[Safe rule]`
 - It does not run `HOOK_KEYPRESS`, and is not written to the input log, because a replay queues it again. `[Safe rule]`
+
+### 4.12 Words and functions promoted in Revision 4
+
+The owner's measurements named 42 tier P2 behaviors (section 1.1). These 33 have a published effect and an engine anchor, so they are promoted (Decision D-47). The other nine stay P2, for the reasons in Decisions D-49 to D-52. Numbers, operands, and pushes are `[Must-match]`. An effect is `[Must-match]` only where the row or sentence says so. Vectors W1 to W30 cover every row. Evidence sentences are not requirements. Word `0x8274` and the two redraw functions have public names that also occur as R1 identifiers, so this text gives them by number and table category, and `sfall-opcodes.tsv` holds the names (Decision D-59).
+
+**Session settings.** Several rows set a **session setting**. It starts at its default on a new game and on each slot load, before session setup (section 6.1). It is not saved and is outside `sfall_hash` (section 5.9). This is published for `mod_skill_points_per_level`, `set_perk_freq`, the critical table, and `set_rest_mode`, and is `[Safe rule]` for the others (Decision D-48).
+
+| Word | Mnemonic | Pop order | Push | Effect |
+| --- | --- | --- | --- | --- |
+| `0x81A2` | `set_skill_max` | value I | none | Session setting: the skill cap |
+| `0x81B7` | `set_pc_stat_max` | value I, stat I | none | Session setting: the player's upper bound for one stat |
+| `0x822A` | `set_map_time_multi` | multiplier F | none | Session setting: world-map time multiplier, default 1.0 |
+| `0x823A` | `get_tile_fid` | tile data I | I | Below |
+| `0x81E2` | `get_critical_table` | value type I, level I, body part I, critter type I | I | The entry's current value |
+| `0x81E1` | `set_critical_table` | value I, value type I, level I, body part I, critter type I | none | Session setting: replaces one entry |
+| `0x81E3` | `reset_critical_table` | value type I, level I, body part I, critter type I | none | One entry returns to the base table |
+| `0x8274` | Named in `sfall-opcodes.tsv` | FID I | I | 1 when the art exists, else 0 |
+| `0x8246` | `mod_skill_points_per_level` | value I | none | Session setting: added to level-up points, default 0 |
+| `0x8247` | `set_perk_freq` | value I | none | Session setting: levels between perks |
+| `0x817A` | `set_perk_level` | value I, perk I | none | Session setting: a perk's level requirement |
+| `0x827E` | `reg_anim_callback` | procedure P | none | Adds a procedure step to the open animation sequence |
+| `0x8273` | `create_spatial` | radius I, elevation I, tile I, script ID I | O | Below |
+| `0x81F5` | `get_script` | object O | I | Below |
+| `0x8172` | `set_world_map_pos` | y I, x I | none | Moves the party on the world map |
+| `0x8270` | `tile_get_objs` | elevation I, tile I | I array | Below |
+
+Each function below pushes one value, and a function with no documented result pushes int 0 (section 4.2). A function reads each argument by the class shown here, and a failed argument follows section 4.1.
+
+| Function | Arguments, in call order | Result | Effect |
+| --- | --- | --- | --- |
+| `encounter_detection` | toggle I | int 0 | Session setting, default 1 |
+| `npc_engine_level_up` | toggle I | int 0 | Session setting, default 1 |
+| `remove_wm_town_names` | toggle I | int 0 | Session setting, default 0 |
+| `set_fo1_hit_chance` | toggle I | int 0 | Session setting, default 0 |
+| `set_reaction_thresholds` | neutral I, good I | int 0 | Session setting, defaults -10 and 10 |
+| `set_terrain_name` | x I, y I, name S | int 0 | Session setting: one cell's terrain name |
+| `car_gas_amount` | none | int | `car_fuel` (SPEC-019 section 3.19.1) |
+| `get_text_width` | text S | int | Width in the current font |
+| `set_rest_mode` | flags I | int 0 | Session setting, default 0 |
+| `set_car_intface_art` | index I | int 0 | Session setting, default 433 |
+| Interface redraw, in `sfall-opcodes.tsv` category "Main interface" | optional window type I | int 0 | No effect on the world |
+| Map redraw, in `sfall-opcodes.tsv` category "Tiles and paths" | none | int 0 | No effect on the world |
+| `real_dude_obj` | none | object | The player object |
+| `set_scr_name` | optional name S | int 0 | Below |
+| `dialog_message` | text S | int 0 | Below |
+| `set_cursor_mode` | mode I | int 0 | Below |
+| `unwield_slot` | critter O, slot I | int 0 | Below |
+
+**Character limits.**
+
+- **`set_skill_max`.** The value, clamped to 0..300, replaces the final cap of SPEC-006 section 3.3 for every critter. The default is 300. `[Must-match]` for 300 as the ceiling; `[Safe rule]` for the rest. Evidence: R1's own cap is 200, and Et Tu sets 200.
+- **`set_pc_stat_max`.** The value replaces the upper bound of the stat query's clamp, for the player only. `[Must-match]` A stat outside 0 to 34 is ignored. `[Safe rule]` Et Tu raises radiation resistance's maximum to 100.
+- **`mod_skill_points_per_level`.** The value is clamped to -100..100. `[Must-match]` It is added inside SPEC-011 section 3.21 step 1: `sp = unspent + 5 + 2 x R(Intelligence) + 2 x Educated rank + value`. The Gifted subtraction, the floor at 0, and the cap at 99 then apply. `[Safe rule]` for the order (Decision D-56).
+- **`set_perk_freq`.** A positive value replaces I in SPEC-011 section 3.21 step 2, overriding Skilled. 0 restores the default. `[Must-match]` A negative value acts as 0. `[Safe rule]`
+- **`set_perk_level`.** The value replaces the perk's level requirement in SPEC-011's eligibility table. A perk outside the table is ignored. `[Safe rule]`. Evidence: Et Tu passes 999 to take Magnetic Personality off the chooser.
+
+**World map.**
+
+- **`set_map_time_multi`.** After the Pathfinder factor, `Q = trunc(pre-Pathfinder Q x (1 - 0.25 x ranks) x multiplier)`, in double precision with the multiplier held as binary32, for the Q of SPEC-008's travel rule. `[Must-match]` that the factors multiply, as the published example gives; `[Safe rule]` for one truncation (Decision D-57). A negative value is ignored, with a diagnostic. `[Safe rule]`
+- **`encounter_detection`.** With 0, an encounter reached at SPEC-018 section 5.6's check skips the Outdoorsman check: no number is drawn for it, no experience is given, no dialog box opens, and the encounter starts. `[Must-match]` for the effect; `[Safe rule]` for no draw. Et Tu sets 0.
+- **`remove_wm_town_names`.** 1 stops the town names drawing under the circles of SPEC-019 section 3.12. `[Must-match]` It changes only drawing.
+- **`set_terrain_name`.** x and y are cell coordinates, as in `get_terrain_name` (section 4.11). The name replaces that cell's result. `[Must-match]` An empty name is stored like any other, and a cell outside the world is ignored. `[Safe rule]`
+- **`set_car_intface_art`.** The index, into `intrface.lst`, replaces the car image on the world map interface. 433 is the published default. `[Must-match]` A negative index is ignored. `[Safe rule]`
+- **`set_world_map_pos`.** x and y are world pixels, as for `metarule3` 105. The party's position becomes that point, with no travel, time, or encounter check. A point outside the world is ignored. `[Safe rule]`
+
+**Combat and reactions.**
+
+- **`set_fo1_hit_chance`.** With 1, a player attack uses SPEC-007 section 3.5's range term, which has no (PE - 2) penalty. `[Must-match]` for the published effect; `[Safe rule]` for naming that term (Decision D-55). An NPC's attack does not change. Et Tu sets 1 unless its option keeps Fallout 2's rule.
+- **`set_reaction_thresholds`.** Each value is clamped to -125..125. If good is then below neutral, the call is ignored, with a diagnostic. `[Must-match]` for the range and the order. A reaction greater than good is good, greater than neutral is neutral, and otherwise bad. `[Must-match]` Et Tu sets 25 and 75.
+- **Critical table.** The indexes are critter type (SPEC-007's victim table number), body part (section 6.7), level (the tier of SPEC-007 section 3.6), and value type. `set_critical_table` replaces one entry and `reset_critical_table` restores it. `[Must-match]` A changed entry is what SPEC-007 section 3.6's lookup reads. An index outside the table gives int 0 or is ignored, with a diagnostic. `[Safe rule]` The published override file is a `ddraw.ini`-style input, and is out of scope.
+
+**Art and map data.**
+
+- **`get_tile_fid`.** Bits 0 to 23 are the hex, 24 to 27 the elevation, and 28 to 31 the mode. `[Must-match]` The square is `(hex mod 200) / 2 + 100 x ((hex / 200) / 2)`, each division truncating, in SPEC-003 section 2.8's block. `[Safe rule]`
+  - Mode 0 gives `0x04000000` plus the floor index, mode 1 the same with the roof index, and mode 2 the raw tile word. `[Must-match]` for the modes; `[Safe rule]` for the FID form.
+  - Any other mode, or a hex or elevation outside the map, gives int 0. `[Safe rule]`
+- **Word `0x8274`.** Gives 1 when the FID resolves through SPEC-001's list to a readable file in the mounted archives. A negative value or a row past the list gives 0. `[Must-match]` for the query; `[Safe rule]` for the cases.
+- **`tile_get_objs`.** Gives a new temporary list of the objects on that hex and elevation, in SPEC-014 section 3.44's per-hex order, including hidden, dead, and system objects. `[Must-match]` for what it includes; `[Safe rule]` for the order. A hex outside the map gives an empty list.
+- **`get_text_width`.** The sum of the advances in the current font (SPEC-002). `[Must-match]`
+- **The two redraw functions.** Presentation already follows the state each frame, so these change nothing and only push int 0. `[Safe rule]`
+
+**Scripts and objects.**
+
+- **`get_script`.** Gives the object's script as its one-based line in `scripts.lst`, 0 for an unscripted object, and -1 for a null object. `[Must-match]`; `[Safe rule]` for one-based (Decision D-54).
+- **`create_spatial`.** Adds an ordinary spatial script record with SPEC-003's packed location `tile + elevation x 536870912` and the radius, for the script on that line of `scripts.lst`. It is saved with the map like any other. It gives the script's object, or null for an unknown script. `[Must-match]` for creating it; `[Safe rule]` for the result. Evidence: Et Tu creates toxic goo this way on a map's first run.
+- **`real_dude_obj`.** Gives the player object. `set_dude_obj` is P2, so `dude_obj` never changes and the two agree. `[Must-match]`
+- **`set_scr_name`.** Overrides the name of the calling script's self object, for `obj_name` and the map's messages. An empty or omitted name clears it. A second call on the same object is ignored until the override is reset. Leaving the map or loading a slot resets it. `[Must-match]` A null self object ignores the call. `[Safe rule]`
+- **`reg_anim_callback`.** Appends a step to the sequence the calling program has open. When the sequence reaches the step, the procedure runs once, synchronously, in that program. A cancelled sequence that never reaches the step does not run it. `[Must-match]` for the step; `[Safe rule]` for the rest. Outside an open sequence the call is ignored, with a diagnostic. `[Safe rule]`
+- **`dialog_message`.** Shows the text in SPEC-006 section 3.9's reply window during dialogue, or in the same NPC response area during barter. `[Must-match]` Otherwise the call is ignored, with a diagnostic. `[Safe rule]`
+- **`set_cursor_mode`.** 0 is movement, 1 is command, and 2 is targeting, from `sfall.h`'s names, for the modes of SPEC-014 section 3.27. Any other value is ignored. `[Safe rule]` Evidence: Et Tu passes 0 to leave skill targeting before its own step.
+- **`unwield_slot`.** Slot 0 is armor, 1 the right hand, and 2 the left hand. The item stays in the critter's inventory, unequipped, with art and stats repaired as `inven_unwield` does. It works while the inventory or barter screen is open. `[Must-match]` An empty slot does nothing. A null critter or another slot does nothing, with a diagnostic. `[Safe rule]`
+- **`npc_engine_level_up`.** With 0, the party-member step of SPEC-019 section 3.17 changes no level stage, and scripts do it instead. `[Must-match]`
+- **`set_rest_mode`.** Bit 1 refuses rest on every map. Bit 2 refuses rest on a map whose `can_rest_here` is No, even with no critters near. Bit 4 runs the rest with no healing. 0 clears them. `[Must-match]` They add to the rest eligibility test of SPEC-008 section 3.9, and never allow what it refuses. `[Safe rule]`
 
 ## 5. Part 2: Dynamic Arrays
 
@@ -869,7 +982,7 @@ Array divergence that has not yet reached covered state is caught by a companion
 - With an empty store and no globals, it is the fixed 32-byte stream of vector F3.
 - After a revision 1 sidecar loads, it is the stream of the migrated state, in revision 2's layout with section 5.8's defaults (vector MG1). So an empty revision 1 sidecar gives vector F3's value. `[Must-match]`
 
-Hook registrations, global-script counters, open lists, the last-created record, virtual files, added message files, interface tag flags, and the stored hero style are not covered, because scripts rebuild them. `[Safe rule]`
+Hook registrations, global-script counters, open lists, the last-created record, virtual files, added message files, interface tag flags, the stored hero style, and the session settings of section 4.12 are not covered, because scripts rebuild them. `[Safe rule]`
 
 ## 6. Part 3: Hook Scripts
 
@@ -947,7 +1060,7 @@ The published example chains "divide by 2" and "multiply by 1.5" on a hit chance
 Further rules, `[Safe rule]`:
 
 - `set_sfall_arg` takes any value (class `A`, Decision D-46), then converts it to the argument's declared type: `int`, `critter`, `item`, and `obj` by class `I`, and `mixed` unchanged. A value that cannot convert leaves the argument unchanged, with one diagnostic. So a string converts only to a `mixed` argument, because class `I` never parses a string, even one made of digits (vector SS2). An index out of range is ignored.
-- A return is converted by the hook's declared return type, the same way. A value that cannot convert leaves that return unset, with a diagnostic.
+- A return is converted by the hook's declared return type, the same way, and a `string` return by class `S`. A value that cannot convert leaves that return unset, with a diagnostic.
 - A member that ends in a VM error is unloaded from every chain, and its writes up to that point stay. The chain continues with the next member.
 - A member runs to completion, by SPEC-004 section 3.7's synchronous call. A word that would suspend it (a dialogue, a wait, or a timer yield) ends that member, with a diagnostic.
 - Chains nest when a member causes another hook. Each chain has its own context, and the outer one resumes untouched. Past **8 nested chains**, a chain is skipped with a diagnostic and the engine's values stand.
@@ -967,7 +1080,7 @@ This differs from sfall in how many times a hook fires (Decision D-17). A script
 
 ### 6.7 Common numbering
 
-These agree with the engine's own tables. `[Must-match]` The argument and return tables of sections 6.8 to 6.18 are also `[Must-match]` unless a row says otherwise.
+These agree with the engine's own tables. `[Must-match]` The argument and return tables of sections 6.8 to 6.19 are also `[Must-match]` unless a row says otherwise.
 
 | Hook value | Engine value |
 | --- | --- |
@@ -1243,7 +1356,243 @@ It does not run for a forced encounter, or for any other scripted one. `[Must-ma
 
 A member that calls `set_global_var` runs a nested chain, within section 6.5's depth limit. Past that limit the nested write still stores its value, and only its chain is skipped. `[Safe rule]` Evidence: Et Tu's handler sets other globals from inside the hook.
 
-### 6.19 The other 36 hooks
+### 6.19 Hooks promoted in Revision 4
+
+Et Tu registers all 16 of these at startup, and none fired, because they were tier P2 (section 1.1). Each now has a boundary. Vectors H18 to H33 cover them in this order. A preview follows section 6.6. Two published hook types need `ddraw.ini` options that are out of scope, so they do not run: `HOOK_AMMOCOST` type 1 and `HOOK_WITHINPERCEPTION` type 2 (Decision D-53).
+
+**`HOOK_DEATHANIM2` (4, `hs_deathanim2.int`).**
+
+**Boundary.** Runs after SPEC-007 section 3.8's death choice, unless the target is knocked down or knocked out. `[Must-match]` A `critter_dmg` death also runs it, with weapon PID -1 and the attacker that SPEC-007 section 3.8 names by art `0x020001F5`. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | int | Weapon PID, -1 when unarmed |
+| arg1 | critter | Attacker |
+| arg2 | critter | Target |
+| arg3 | int | Damage |
+| arg4 | int | Death animation chosen by the engine |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | The death animation | Published as unvalidated. With no art for it, the engine's choice stands, with a diagnostic. `[Safe rule]` |
+
+**`HOOK_AMMOCOST` (17, `hs_ammocost.int`).**
+
+**Boundary.** Runs when ammunition is charged for an attack (SPEC-007 sections 3.4 and 3.7), with arg3 0 after a single attack, 2 while burst rounds are counted, and 3 after a burst. It changes what is spent, never the damage. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | item | Weapon |
+| arg1 | int | Rounds in the burst, 1 for a single shot |
+| arg2 | int | Ammunition the engine would spend; for type 2, its cost per round |
+| arg3 | int | Hook type |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | The ammunition spent, or the cost per round for type 2 | 0 means none is spent. Negative is invalid, and the engine's value stands. `[Must-match]` |
+
+**`HOOK_MOUSECLICK` (20, `hs_mouseclick.int`).**
+
+**Boundary.** Runs in phase 1, once for each recorded press or release, before the engine handles it. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | int | 1 pressed, 0 released |
+| arg1 | int | Button: 0 left, 1 right, up to 7 |
+
+It has no returns.
+
+**`HOOK_STEAL` (22, `hs_steal.int`).**
+
+**Boundary.** Runs at SPEC-013 section 3.9.2 step 4, in place of the start of that spec's section 3.9.3 check, once for each moved item. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | critter | Thief |
+| arg1 | obj | Victim, V of SPEC-013 section 3.9.3 |
+| arg2 | item | Item |
+| arg3 | int | 0 stealing, 1 planting |
+| arg4 | int | Quantity |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | The check: 1 success, 0 failure, 2 failure that keeps the window open, -1 the engine's check | A forced result draws no number and prints no message, so the member must. `[Must-match]` 0 is treated as caught, by SPEC-013 section 3.9.4. `[Safe rule]` |
+| ret1 | Experience for this item, replacing SPEC-013 section 3.9.5's increment | Negative is invalid and is ignored. `[Must-match]` |
+
+**`HOOK_WITHINPERCEPTION` (23, `hs_withinperception.int`).**
+
+**Boundary.** Runs after `perceives(observer, target)` of SPEC-009 section 3.3 gives its result, with arg3 1 from `obj_can_see_obj`, 3 when AI selects a target, and 0 otherwise. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | critter | Watcher |
+| arg1 | obj | Target |
+| arg2 | int | 1 in range, 0 otherwise |
+| arg3 | int | Hook type |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | The result: 0 not in range, 1 in range, 2 forced detection | 2 skips `obj_can_see_obj`'s blocker ray. In any other caller it acts as 1. `[Must-match]` |
+
+**`HOOK_INVENWIELD` (25, `hs_invenwield.int`).**
+
+**Boundary.** Runs before a critter wields or unwields armor or a weapon by `wield_obj_critter`, `inven_unwield`, `unwield_slot`, AI, or removal of an equipped item, but not through the player's inventory screen. Replacing an equipped item runs it only for the wield. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | critter | Critter |
+| arg1 | item | Item |
+| arg2 | int | Slot, 0 armor, 1 right hand, 2 left hand |
+| arg3 | int | 1 wielding, 0 unwielding |
+| arg4 | int | 1 when an equipped item is being removed from the inventory, else 0 |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | -1 uses the engine handler. Any other value skips it | Published as not recommended. When an item is being removed, the removal still happens. `[Safe rule]` |
+
+**`HOOK_ADJUSTFID` (26, `hs_adjustfid.int`).**
+
+**Boundary.** A preview. Runs when the character figure's FID on the inventory or barter screen is recalculated. Presentation reads the stored result. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | int | FID from the critter's base art and its armor and weapon |
+| arg1 | int | The modified FID. Equal to arg0 here, because `set_hero_style` changes no art (Decision D-42) |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | The figure's FID | A value with no art leaves arg0's figure. `[Safe rule]` |
+
+**`HOOK_COMBATTURN` (27, `hs_combatturn.int`).**
+
+**Boundary.** Runs at the start and end of each turn of SPEC-007 section 3.3, for player and NPC, and once when combat ends. `[Must-match]` At the start it runs after the turn's actor is set and before AP refill. `[Safe rule]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | int | 1 start of turn, 0 normal end, -1 combat ended abruptly, -2 combat ended normally |
+| arg1 | critter | Critter doing the turn |
+| arg2 | int | 1 at the start or end of the player's turn after loading a game saved in combat, else 0 |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | 1 at the start skips the turn. -1 at the end ends combat | Any other value does nothing. `[Must-match]` |
+
+For the two end-of-combat events, arg1 is the last turn's critter. `[Safe rule]`
+
+**`HOOK_CARTRAVEL` (28, `hs_cartravel.int`).**
+
+**Boundary.** Runs once per travel iteration while the party travels by car (SPEC-019 section 3.19), after the engine computes speed and fuel use and before it applies them. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | int | Car speed, 3 to 8 steps |
+| arg1 | int | Fuel use, 100 and below |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | Car speed | -1 keeps the engine's. `[Must-match]` Below -1 acts as -1. `[Safe rule]` |
+| ret1 | Fuel use | Negative becomes 0. `[Safe rule]` |
+
+**`HOOK_RESTTIMER` (30, `hs_resttimer.int`).**
+
+**Boundary.** Runs once for each step of the rest in SPEC-014 section 3.41.6, after the step's Esc poll, and once when the rest ends normally. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | int | Game time in ticks |
+| arg1 | int | 1 normal end, -1 Esc pressed, 0 otherwise |
+| arg2 | int | Hours of the rest |
+| arg3 | int | Minutes of the rest |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | 1 stops the rest. 0 continues a rest that Esc would stop | Any other value does nothing. `[Must-match]` |
+
+**`HOOK_USEANIMOBJ` (32, `hs_useanimobj.int`).**
+
+**Boundary.** Runs before a critter's use of a scenery or container object on the map plays its animation, or before the walk or run when it must first approach (SPEC-007 section 3.11). `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | critter | Critter |
+| arg1 | obj | Object used |
+| arg2 | int | Animation code |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | The animation code | -1 skips the animation, and the use still follows. `[Must-match]` for the skip; `[Safe rule]` for the use |
+
+**`HOOK_DESCRIPTIONOBJ` (34, `hs_descriptionobj.int`).**
+
+**Boundary.** Runs on the examine action, after `description_p_proc` (SPEC-006) did not override, and before the base text prints. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | obj | Object |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | The description text | A number is not a string, so the published pointer form leaves it unset (section 6.5). `[Safe rule]` |
+
+**`HOOK_USESKILLON` (35, `hs_useskillon.int`).**
+
+**Boundary.** Runs at the start of SPEC-013 section 3.2's skill-on request, before gating. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | critter | User |
+| arg1 | obj | Target |
+| arg2 | int | Skill |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | A new user. -1 cancels the request, and 0 skips this return | The user is not replaced for Steal. `[Must-match]` |
+| ret1 | 1 passes the combat refusal of SPEC-013 section 3.2 | Only for the player or a critter the player controls. `[Must-match]` |
+
+**`HOOK_SETLIGHTING` (38, `hs_setlighting.int`).**
+
+**Boundary.** Runs before an object's light (`obj_set_light_level`, and SPEC-007 section 3.9's projectile light) or the map's light (`set_light_level`) is set, on the computed intensity. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | obj | Object, or -1 for the map |
+| arg1 | int | Intensity |
+| arg2 | int | Radius, or -1 for the map |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | Intensity | Clamped to 0..65536. `[Must-match]` |
+| ret1 | Radius | Clamped to 0..8, for an object only. `[Must-match]` |
+
+**`HOOK_ADJUSTRADS` (45, `hs_adjustrads.int`).**
+
+**Boundary.** Runs when radiation is about to change (SPEC-011's selector 37, and SPEC-013 section 3.20), for the player only, because the change does nothing for an NPC. The amount is the one left after resistance. `[Must-match]` that it runs; `[Safe rule]` for the point. Evidence: Et Tu adds it to the current level.
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | critter | Critter |
+| arg1 | int | Amount added, or removed when negative |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | The amount | Any int. `[Must-match]` |
+
+**`HOOK_CANUSEWEAPON` (48, `hs_canuseweapon.int`).**
+
+**Boundary.** Runs after SPEC-009 section 3.9's usability test for AI, and as a preview for the player's active item slots. `[Must-match]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | critter | Critter |
+| arg1 | item | Item |
+| arg2 | int | Attack type, or -1 for the player |
+| arg3 | int | 1 can use, 0 cannot |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | The result | Any non-zero value allows it. `[Must-match]` |
+
+### 6.20 The other 20 hooks
 
 Tier P2 hooks are listed with full argument and return types in `sfall-hooks.tsv`. Their scripts load, register, and run during setup, but **no chain runs**, because their engine boundaries are not specified here. The engine's own behavior stands. `[Safe rule]`
 
@@ -1257,7 +1606,7 @@ All data is synthetic. `oracle/SPEC-024/README.md` explains the files.
 | --- | --- |
 | `sfall-opcodes.tsv` | All 300 words, 133 `sfall_funcN` rows, 7 `metarule3` rows, 9 `metarule2_explosions` rows |
 | `sfall-hooks.tsv` | All 50 hooks and the reserved range |
-| `sfall-array-vectors.tsv` | Arrays (A to F3), hook chains (H1 to H17), and the promoted rows: virtual files (V1 to V4), unique IDs (U1), message files (M1), interface tags (T1), and explosive damage (E1); sidecar migration (MG1, MG2); and string values (SS1, SS2). All are computed by a reference model. MG and SS are not M and S because M1 already names message files here, and S1 and S2 name stack vectors in section 7.1 |
+| `sfall-array-vectors.tsv` | Arrays (A to F3), hook chains (H1 to H33), the rows promoted in Revision 3: virtual files (V1 to V4), unique IDs (U1), message files (M1), interface tags (T1), and explosive damage (E1); sidecar migration (MG1, MG2); string values (SS1, SS2); and the words of section 4.12 (W1 to W30). All are computed by a reference model. MG and SS are not M and S because M1 already names message files here, and S1 and S2 name stack vectors in section 7.1 |
 | `mod-opcode-usage.tsv` | The ranked mod audit of section 1.1. It is evidence, not a test input |
 
 ### 7.1 Stack vectors
@@ -1310,7 +1659,7 @@ All data is synthetic. `oracle/SPEC-024/README.md` explains the files.
 5. `sfall_hash` equals the vector values. It equals vector F3's value on a fresh session.
 6. A map with the same operations in two allocator states serializes to identical bytes.
 7. Two runs of one input log with a hook that draws random numbers give identical checkpoint streams on two platforms.
-8. A hook registered on each of the fourteen hooks, returning nothing, changes no SPEC-021 hash from the unhooked run, apart from any random draws of its own.
+8. A hook registered on each of the thirty hooks, returning nothing, changes no SPEC-021 hash from the unhooked run, apart from any random draws of its own.
 9. Vectors V1 to V4, U1, M1, T1, and E1, step by step, compare the push and the state.
 10. After vector V1's write, a load of the path reads the patched rate, and a new game or a load removes the virtual file.
 11. A forced encounter draws no random number, changes no counter, spawns no group, and runs no `HOOK_ENCOUNTER` chain. Saved between the call and the check, it still occurs after a load.
@@ -1319,6 +1668,8 @@ All data is synthetic. `oracle/SPEC-024/README.md` explains the files.
 14. Every row of `mod-opcode-usage.tsv` with `rev3_tier` P1 is tier P1 in `sfall-opcodes.tsv` or `sfall-hooks.tsv`.
 15. Vector MG1's `sidecar-r1` bytes load to its state and `defaults`, `sfall_hash` equals its value, and the next save writes exactly its `sidecar` bytes. Its empty sidecar gives vector F3's value. Every byte string of vector MG2 refuses the slot.
 16. Vectors SS1 and SS2, step by step, compare the push, the state, the final arguments, and the diagnostic count.
+17. Vectors W1 to W30, step by step, compare the push and the state. A session setting returns to its default on a new game and on a load.
+18. Vectors H18 to H33, each with its boundary. `HOOK_AMMOCOST` type 1 and `HOOK_WITHINPERCEPTION` type 2 never run.
 
 ## 8. Clean-Room Verification Checklist
 
@@ -1338,6 +1689,9 @@ All data is synthetic. `oracle/SPEC-024/README.md` explains the files.
 - [x] Revision 3 amendment: regenerating the oracle changes exactly the two `sfall-opcodes.tsv` rows of Decision D-46
 - [x] Revision 3 amendment: owner decision on D-32 (brief of 2026-10-30): revision 1 sidecars migrate
 - [x] Revision 3 amendment: regenerating the oracle adds 29 rows to `sfall-array-vectors.tsv` and changes no existing row
+- [x] Revision 4: regenerating the oracle moves 35 opcode rows and 16 hook rows from P2 to P1, adds 189 vector rows, and changes no existing vector
+- [x] Revision 4: every name in the owner's measurements is promoted or has a decision
+- [ ] Revision 4: the SPEC-018 and SPEC-019 anchors of Decision D-58 checked at ingestion
 
 ## 9. Decisions
 
@@ -1384,11 +1738,24 @@ Every decision is a research default unless the Class column says otherwise.
 | D-37 | `message_box` waits as a modal screen, and gives -1 where a program cannot wait | Default | -1 is the published failure value, so a script that cannot show the box takes its documented path |
 | D-38 | `tap_key` is a queued logical key. It runs no `HOOK_KEYPRESS` and is not logged | Default | A replay queues it again, and logging it would apply it twice |
 | D-39 | A forced encounter runs no `HOOK_ENCOUNTER` chain and makes no draw | Default, from published text | The hook's text excludes scripted encounters, and Et Tu's handler depends on that |
-| D-40 | X words are no-op stubs, although Et Tu's base scripts use them. Each pops its operands, pushes the default return value if it pushes, writes the standard diagnostic once per program, and never halts the script | Owner instruction (brief of 2026-10-30) | Three memory writes have no effect: two for the rest timer, and one for Dogmeat's dialogue. Engine rules could replace them, but none is specified here, and the words address memory that does not exist |
-| D-41 | The three fallout2-ce function names stay unknown | Default | They are not sfall functions, and Et Tu takes that path only when `opcode_exists(0x823B)` is 0 |
+| D-40 | X words are no-op stubs, although Et Tu's base scripts use them. Each pops its operands, pushes the default return value if it pushes, writes the standard diagnostic once per program, and never halts the script | Owner instruction (brief of 2026-10-30) | Three memory writes have no effect: two for the rest timer, and one for Dogmeat's dialogue. Engine rules could replace them, but none is specified here, and the words address memory that does not exist. The owner's headless run measured `write_byte` twice and `write_int` once per run, so these stubs do fire, and the decision stands |
+| D-41 | Four script-visible selectors stay unknown: `rest_option_msgs`, `set_rest_option`, and `set_party_member_cc_msg_ids`, which Et Tu's scripts call, and `metarule3` 999, in one `sfall.dat` script | Default | The published documents hold none of them. Et Tu calls the three names only when `opcode_exists(0x823B)` is 0, and section 4.2's unknown-name rule covers them. SPEC-017 section 5.2's unknown rule covers 999 |
 | D-42 | `set_hero_style` stores a number and changes no art | Research limit | Et Tu ships appearance archives, but their mounting rule is unpublished. The word keeps its stack contract and its stored value until that is specified |
 | D-43 | `HOOK_GAMEMODECHANGE` compares once per step | Default | Modes can change several times inside a step, and one fixed comparison point keeps firing replayable. A script that counts firings can notice |
 | D-44 | A cancelled `HOOK_STDPROCEDURE` counts as run with no override | Default | The documents say only that execution is cancelled |
 | D-45 | An interface box is lit by the engine's condition or by a script flag, and a script cannot hide what the engine lit | Default | SPEC-019's lit conditions stand, and RPU tests for a real addiction before hiding ADDICT |
 | D-46 | `scan_array`'s value and `set_sfall_arg`'s value are class `A`, in `sfall-opcodes.tsv` and in sections 5.4 and 6.4. This reverses D-T1's direction for these two words | Owner instruction (later brief of 2026-10-30) | For `scan_array`, the arrays guide declares the value `mixed` and the published array test script searches for strings, so the opcode list's `int/float` is the narrower statement. For `set_sfall_arg`, every published signature says `int`, so class `A` is this project's rule, and it lets a `mixed` argument hold a float or a string. Vectors H1 and H2 hold, because an `int` argument still converts by class `I` |
+| D-47 | Revision 4 promotes a measured name when the published text gives a usable effect and an approved spec gives it an anchor. Otherwise it stays P2 with its own decision | Owner instruction for the review (brief of 2026-10-31); default for the test | A contract with no anchor would be a guess. Promotion also changes what `opcode_exists` and `metarule_exist` report, so a script stops taking its fallback path |
+| D-48 | Session settings are not saved, and return to their defaults on a new game and on each load | Published for four; default for the others | The documents say so for `mod_skill_points_per_level`, `set_perk_freq`, the critical table, and `set_rest_mode`. Et Tu sets most of the others again on `game_loaded`, and saving them would change the sidecar |
+| D-49 | `draw_image`, `draw_image_scaled`, `interface_art_draw`, `get_window_attribute`, and `show_window` stay P2 | Default | They draw into windows, which section 1 leaves out of scope, and `create_win` windows stay undrawn. No approved spec gives a compositing or window-geometry rule. Lost in Et Tu: the note art on the Pip-Boy, the Tell Me About box, and one map's upsell screens |
+| D-50 | `play_sfall_sound` stays P2 | Default | Sound words are out of scope (section 1), and its mp3 and wma inputs have no decoder spec. Et Tu calls it once, on one map |
+| D-51 | `set_town_title` stays P2 | Default | No approved spec has hover text over the player's world-map marker, so there is nowhere to draw it. Only the classic world-map script uses it |
+| D-52 | `set_attack_explosion_radius` and `set_attack_is_explosion` stay P2 | Default | `set_attack_is_explosion` has a macro and no published text, and SPEC-007 section 3.7 records R1's splash enumeration as inert, so there is no splash to change. Lost in Et Tu: the Molotov's splash |
+| D-53 | `HOOK_AMMOCOST` type 1 and `HOOK_WITHINPERCEPTION` type 2 do not run | Default | The documents tie each to a `ddraw.ini` option, and those options are out of scope. Both are off in a default install |
+| D-54 | `get_script` and `create_spatial` use one-based lines of `scripts.lst` | Default, from script evidence | The documents say "line number". Et Tu's `scripts.h` gives its first line 1, and lines 85 and 189 agree with their constants |
+| D-55 | `set_fo1_hit_chance` 1 selects SPEC-007 section 3.5's range term for the player | Default | The documents call it Fallout 1's behavior, and section 3.5 is R1's formula, with no (PE - 2) term |
+| D-56 | `mod_skill_points_per_level` adds before the Gifted step, the floor, and the cap | Default | The documents say only that it modifies the amount. This order keeps the cap at 99 |
+| D-57 | `set_map_time_multi` multiplies with Pathfinder in one product, with one truncation | Default, from the published example | The example gives 25 percent for 0.5 and two ranks, and either order satisfies it. One truncation loses least |
+| D-58 | SPEC-018 and SPEC-019 anchors were not re-read for Revision 4 | Research limit | Those specs are on the engine side, and this revision did not open them. `encounter_detection`, `remove_wm_town_names`, `npc_engine_level_up`, `car_gas_amount`, and `HOOK_CARTRAVEL` cite them as earlier revisions recorded. Ingestion must check each, along with the Fallout 2 hit-chance term beside `set_fo1_hit_chance` |
+| D-59 | Word `0x8274` and the two redraw functions of section 4.12 are not named in this text | Default | Their public names also occur as R1 identifiers, so the spec linter refuses them here. `sfall-opcodes.tsv` and vectors W12 and W20 hold the names, as `oracle/SPEC-024/README.md` says for such names. The linter's allowlist is unchanged |
 | D-T1 | Superseded in part by D-46. Where the prose and `sfall-opcodes.tsv` disagree on an operand class, the table's class stands: `scan_array`'s value is `N`, and `set_sfall_arg`'s value is `I`. **The part that stands:** `ret_class` chooses a failed operand's default and does not limit the pushed value | Owner instruction for the direction (brief of 2026-10-30); Team A default for the meaning of `ret_class` | The engine compiles its word table from this file. Vector B step 9 pushes `F:5.0` from a row with `ret_class` `I`, so `ret_class` cannot limit the value. This ID stays outside the numbered series because Team A wrote it before the research revision's numbers were known on that side |

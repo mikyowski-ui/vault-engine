@@ -181,3 +181,192 @@ SS2	1	HOOK_COMBATDAMAGE set_sfall_arg(12,"text") args=arg2=10,arg12=I:0	rets=[No
 SS2	2	HOOK_COMBATDAMAGE set_sfall_arg(2,"text") args=arg2=10,arg12=I:0	rets=[None]	final=arg2=I:10,arg12=I:0,diagnostics=1; order=m	an int argument cannot convert it: unchanged, one diagnostic
 SS2	3	HOOK_COMBATDAMAGE set_sfall_arg(2,"7") args=arg2=10,arg12=I:0	rets=[None]	final=arg2=I:10,arg12=I:0,diagnostics=1; order=m	class I never parses a string, so the digits do not help
 SS2	4	HOOK_COMBATDAMAGE set_sfall_arg(2,F:7.9) args=arg2=10,arg12=I:0	rets=[None]	final=arg2=I:7,arg12=I:0,diagnostics=0; order=m	a float still truncates into an int argument
+W1	1	no call	-	cap=300; raw 250 reads 250	the published Fallout 2 cap
+W1	2	set_skill_max(200)	-	cap=200; raw 250 reads 200	the cap falls
+W1	3	set_skill_max(500)	-	cap=300; raw 250 reads 250	never above 300
+W1	4	set_skill_max(-5)	-	cap=0; raw 250 reads 0	never below 0
+W2	1	no call	-	stat 31 maximum 90; raw 98 reads 90	the table maximum
+W2	2	set_pc_stat_max(31,100)	-	stat 31 maximum 100; raw 98 reads 98	the call replaces the maximum
+W2	3	player stat 31, raw 120	I:100	stat 31 maximum 100	clamped to the new maximum
+W2	4	NPC stat 31, raw 98	I:90	stat 31 maximum 100	the player only; an NPC keeps the table maximum
+W2	5	set_pc_stat_max(99,5)	-	stat 31 maximum 100	a stat outside 0 to 34 is ignored
+W3	1	Q=9600, Pathfinder 0, set_map_time_multi(F:1.0)	I:9600	multi=1.0	the default multiplier
+W3	2	Q=9600, Pathfinder 2, set_map_time_multi(F:1.0)	I:4800	multi=1.0	Pathfinder alone
+W3	3	Q=9600, Pathfinder 2, set_map_time_multi(F:0.5)	I:2400	multi=0.5	the published example: 25 percent of normal
+W3	4	Q=9600, Pathfinder 0, set_map_time_multi(F:0.408)	I:3916	multi=0.408	the multiplier is binary32
+W3	5	set_map_time_multi(F:-1.0)	-	multi=0.408	a negative value is ignored, with a diagnostic
+W4	1	no call, encounter met	-	Outdoorsman check runs; detection=1	the default
+W4	2	encounter_detection(0), encounter met	I:0	no check, no draw, no XP, no box; encounter starts; detection=0	always forced into the encounter
+W4	3	encounter_detection(1), encounter met	I:0	Outdoorsman check runs; detection=1	the toggle returns
+W5	1	no call, player levels up	-	party level step runs; engine=1	the default
+W5	2	npc_engine_level_up(0), player levels up	I:0	no party member changes level stage; engine=0	left to scripts
+W6	1	remove_wm_town_names(1)	I:0	names=0; world state unchanged	only drawing changes
+W6	2	remove_wm_town_names(0)	I:0	names=1; world state unchanged	the default
+W7	1	set_fo1_hit_chance(1), player, d=10, P=6, no Long Range	I:0	range term +8	SPEC-007 section 3.5
+W7	2	set_fo1_hit_chance(1), NPC attacker	I:0	the profile term, unchanged	the player only
+W7	3	set_fo1_hit_chance(0), player	I:0	the profile term	the default
+W8	1	reaction -10, thresholds -10,10	bad	-	greater than, not equal to
+W8	2	reaction -9, thresholds -10,10	neutral	-	greater than, not equal to
+W8	3	reaction 10, thresholds -10,10	neutral	-	greater than, not equal to
+W8	4	reaction 11, thresholds -10,10	good	-	greater than, not equal to
+W8	5	set_reaction_thresholds(25,75)	I:0	neutral=25; good=75	the values Et Tu sets
+W8	6	reaction 25, thresholds 25,75	bad	-	greater than, not equal to
+W8	7	reaction 26, thresholds 25,75	neutral	-	greater than, not equal to
+W8	8	reaction 75, thresholds 25,75	neutral	-	greater than, not equal to
+W8	9	reaction 76, thresholds 25,75	good	-	greater than, not equal to
+W8	10	set_reaction_thresholds(50,40)	I:0	neutral=25; good=75	good below neutral is ignored, with a diagnostic
+W8	11	set_reaction_thresholds(-200,200)	I:0	neutral=-125; good=125	each is clamped to -125..125
+W9	1	get_tile_fid(0x01004F51), hex 20305, elevation 1	I:0x04000123	square 5052 holds 0x10A50123	ground FID
+W9	2	get_tile_fid(0x11004F51), hex 20305, elevation 1	I:0x040000A5	square 5052 holds 0x10A50123	roof FID
+W9	3	get_tile_fid(0x21004F51), hex 20305, elevation 1	I:0x10A50123	square 5052 holds 0x10A50123	the raw word
+W9	4	get_tile_fid(0x30000000)	I:0	-	an unknown mode gives 0
+W9	5	get_tile_fid(0x00009C40)	I:0	-	hex 40000 is outside the map
+W9	6	get_tile_fid(0x03000000)	I:0	-	an elevation outside 0 to 2 gives 0
+W10	1	get_terrain_name at cell (23,24)	S:"Desert"	overrides=0	worldmap.msg 1000 + terrain index
+W10	2	set_terrain_name(23,24,"Coast")	I:0	overrides=1	one cell only
+W10	3	get_terrain_name at cell (23,24)	S:"Coast"	overrides=1	the override wins
+W10	4	get_terrain_name at cell (24,24)	S:"Desert"	overrides=1	a neighbor is untouched
+W10	5	set_terrain_name(23,24,"")	I:0	overrides=1	an empty string is an override like any other
+W10	6	set_terrain_name(9999,0,"x")	I:0	overrides=1	a cell outside the world is ignored
+W10	7	load the slot	-	overrides=0	not saved; scripts set it again
+W11	1	get_critical_table(13,0,0,4)	I:5001	overlay=0	the base table
+W11	2	set_critical_table(13,0,0,4,6300)	-	overlay=1	the value replaces this entry
+W11	3	get_critical_table(13,0,0,4)	I:6300	overlay=1	the changed value
+W11	4	reset_critical_table(13,0,0,4)	-	overlay=0	one entry returns to the base table
+W11	5	get_critical_table(13,0,0,4)	I:5001	overlay=0	the base table
+W11	6	get_critical_table(99,0,0,0)	I:0	overlay=0	an index outside the table gives 0
+W11	7	set_critical_table(13,0,0,4,6300), then load the slot	-	overlay=0	published: changes are not saved
+W12	1	art_exists(FID of a file in the mounted archives)	I:1	-	list row present and file readable
+W12	2	art_exists(FID whose list row names an absent file)	I:0	-	the file decides
+W12	3	art_exists(FID beyond the list)	I:0	-	no row
+W12	4	art_exists(-1)	I:0	-	not an art identifier
+W13	1	car_gas_amount	I:5000	car_fuel=5000	the fuel state
+W13	2	metarule(32,90000), then car_gas_amount	I:80000	car_fuel=80000	SPEC-019 section 3.19.1 clamps
+W13	3	car_gas_amount, no car	I:0	has_car=0; car_fuel=0	the state, with no car check
+W14	1	get_text_width("abc"), advances a=5 b=6 c=7	I:18	-	the sum of advances in the current font
+W14	2	get_text_width("cc"), advances a=5 b=6 c=7	I:14	-	the sum of advances in the current font
+W14	3	get_text_width(""), advances a=5 b=6 c=7	I:0	-	the sum of advances in the current font
+W15	1	unspent 0, R(IN) 5, Educated 0, Gifted 0, mod_skill_points_per_level(0)	I:15	sp	SPEC-011 section 3.21 unchanged
+W15	2	unspent 0, R(IN) 5, Educated 0, Gifted 0, mod_skill_points_per_level(2)	I:17	sp	the value Et Tu sets
+W15	3	unspent 0, R(IN) 5, Educated 0, Gifted 1, mod_skill_points_per_level(2)	I:12	sp	before the Gifted step
+W15	4	unspent 0, R(IN) 5, Educated 0, Gifted 0, mod_skill_points_per_level(-100)	I:0	sp	the floor at 0
+W15	5	unspent 0, R(IN) 5, Educated 0, Gifted 0, mod_skill_points_per_level(150)	I:99	sp	the value is clamped to 100; the cap at 99 still applies
+W16	1	set_perk_freq(0), Skilled 0, n=3	I:1	I=3	n mod I = 0; a value of 0 or below restores the default
+W16	2	set_perk_freq(0), Skilled 1, n=3	I:0	I=4	n mod I = 0; a value of 0 or below restores the default
+W16	3	set_perk_freq(5), Skilled 1, n=5	I:1	I=5	n mod I = 0; a value of 0 or below restores the default
+W16	4	set_perk_freq(5), Skilled 0, n=3	I:0	I=5	n mod I = 0; a value of 0 or below restores the default
+W16	5	set_perk_freq(-1), Skilled 0, n=3	I:1	I=3	n mod I = 0; a value of 0 or below restores the default
+W17	1	perk 50, level requirement 6, player level 12	eligible	required=6	the table value
+W17	2	set_perk_level(50,999), player level 12	not eligible	required=999	hides the perk
+W17	3	set_perk_level(9999,1)	-	required=999	a perk outside the table is ignored
+W18	1	set_rest_mode(0), can_rest_here 1, no critters near	allowed	mode=0	no flag
+W18	2	set_rest_mode(1), can_rest_here 1, no critters near	refused	mode=1	RESTMODE_DISABLED: every map
+W18	3	set_rest_mode(2), can_rest_here 0, no critters near	refused	mode=2	RESTMODE_STRICT: can_rest_here is No
+W18	4	set_rest_mode(2), can_rest_here 1, no critters near	allowed	mode=2	RESTMODE_STRICT on a map that allows rest
+W18	5	set_rest_mode(4), can_rest_here 1, no critters near	allowed, no healing	mode=4	RESTMODE_NO_HEALING
+W18	6	load the slot	-	mode=0	published: reset on each reload
+W19	1	no call	-	car art=433	the published default
+W19	2	set_car_intface_art(495)	I:0	car art=495	the value Et Tu sets
+W19	3	set_car_intface_art(-1)	I:0	car art=495	a negative index is ignored
+W20	1	intface_redraw	I:0	world state unchanged	presentation already follows the state
+W20	2	intface_redraw(-1)	I:0	world state unchanged	every window
+W20	3	tile_refresh_display	I:0	world state unchanged	presentation already follows the state
+W21	1	real_dude_obj	player object	dude_obj=player object	set_dude_obj is a stub, so the two are one object
+W22	1	reg_anim_begin	-	sequence=	registered in order
+W22	2	reg_anim_animate(c,16,0)	-	sequence=animate	registered in order
+W22	3	reg_anim_callback(p)	-	sequence=animate,p	registered in order
+W22	4	reg_anim_animate(c,0,0)	-	sequence=animate,p,stand	registered in order
+W22	5	reg_anim_end	-	sequence=animate,p,stand	registered in order
+W22	6	the sequence runs	-	order=animate,p,stand; p ran once	the procedure is a step like any other
+W22	7	the sequence is cancelled before its step	-	p did not run	a step that is not reached does not run
+W22	8	reg_anim_callback(p) outside a sequence	-	p did not run	ignored, with a diagnostic
+W23	1	obj_name(self)	S:"table"	override=none	scrname.msg or the prototype
+W23	2	set_scr_name("Mike")	I:0	override="Mike"	the script's self object
+W23	3	obj_name(self)	S:"Mike"	override="Mike"	the override wins
+W23	4	set_scr_name("Other")	I:0	override="Mike"	published: only once until reset
+W23	5	leave the map, or load the slot	-	override=none	published reset
+W23	6	set_scr_name("")	I:0	override=none	an empty name, or no name, uses the prototype
+W24	1	create_spatial(85,15000,1,2)	script object	spatial record: script 85, location 536885912, radius 2	SPEC-003 packed location
+W24	2	create_spatial(99999,15000,1,2)	I:0	no record	an unknown script gives null
+W25	1	dialog_message("x"), in dialogue	I:0	reply window shows "x"	the reply window
+W25	2	dialog_message("x"), in barter	I:0	NPC response shows "x"	the same window in barter
+W25	3	dialog_message("x"), neither	I:0	nothing shown	ignored, with a diagnostic
+W26	1	get_script(object running line 85 of scripts.lst)	I:85	-	one-based line number
+W26	2	get_script(unscripted object)	I:0	-	published
+W26	3	get_script(null)	I:-1	-	published: an argument error
+W27	1	set_cursor_mode(2)	I:0	mode=targeting	crosshair mode
+W27	2	set_cursor_mode(0)	I:0	mode=movement	leaves targeting
+W27	3	set_cursor_mode(1)	I:0	mode=command	the arrow
+W27	4	set_cursor_mode(7)	I:0	mode=command	an unknown mode is ignored
+W28	1	set_world_map_pos(772,995)	-	party=(772,995)	world pixels
+W28	2	set_world_map_pos(-1,5)	-	party=(772,995)	a point outside the world is ignored
+W29	1	tile_get_objs(15000,0), objects A then B on the hex	temporary list [A,B]	-	the per-hex list order
+W29	2	tile_get_objs(15000,1)	temporary list []	-	elevation filters
+W29	3	tile_get_objs(-1,0)	temporary list []	-	a hex outside the map
+W30	1	unwield_slot(dude_obj,1), right hand holds I	I:0	I in inventory, unworn	published slot 1
+W30	2	unwield_slot(dude_obj,0), armor A worn	I:0	A in inventory, unworn; stats recomputed	published slot 0
+W30	3	unwield_slot(dude_obj,2), left hand empty	I:0	nothing changes	an empty slot
+W30	4	unwield_slot(dude_obj,5)	I:0	nothing changes	an unknown slot, with a diagnostic
+W30	5	unwield_slot(0,1)	I:0	nothing changes	a null critter
+H18	1	HOOK_DEATHANIM2 no member sets ret0 args=-1,A,T,50,20	rets=[None]	final=animation 20; order=m	the engine choice stands
+H18	2	HOOK_DEATHANIM2 ret0=23 args=-1,A,T,50,20	rets=[23]	final=animation 23; order=m	no validation of a present animation
+H18	3	HOOK_DEATHANIM2 knocked-down target args=-	rets=-	final=no chain runs; order=-	published
+H19	1	HOOK_AMMOCOST type 0, ret0=3 args=W,1,1,0	rets=[3]	final=3 rounds spent; order=m	a single shot
+H19	2	HOOK_AMMOCOST type 0, ret0=0 args=W,1,1,0	rets=[0]	final=0 rounds spent; order=m	published: unlimited ammo
+H19	3	HOOK_AMMOCOST type 0, ret0=-1 args=W,1,1,0	rets=[-1]	final=1 round spent; order=m	a negative return is invalid
+H19	4	HOOK_AMMOCOST type 2, ret0=2 args=W,10,1,2	rets=[2]	final=2 rounds each; order=m	cost per round in a burst
+H19	5	HOOK_AMMOCOST type 3, ret0=4 args=W,5,5,3	rets=[4]	final=4 rounds spent; order=m	after a burst
+H20	1	HOOK_MOUSECLICK press of button 0 args=1,0	rets=[]	final=the click proceeds; order=m	no returns
+H20	2	HOOK_MOUSECLICK release of button 0 args=0,0	rets=[]	final=the release proceeds; order=m	one run per event
+H21	1	HOOK_STEAL ret0=-1 args=T,V,I,0,1	rets=[-1, None]	final=section 3.9.3 runs; order=m	the engine handler
+H21	2	HOOK_STEAL ret0=1 ret1=40 args=T,V,I,0,1	rets=[1, 40]	final=moved, not caught, no draw, pending XP +40; order=m	forced success
+H21	3	HOOK_STEAL ret0=0 args=T,V,I,0,1	rets=[0, None]	final=caught, no draw, window closes; order=m	forced failure
+H21	4	HOOK_STEAL ret0=2 args=T,V,I,1,1	rets=[2, None]	final=not moved, no draw, window stays open; order=m	failure without closing
+H21	5	HOOK_STEAL ret0=1 ret1=-5 args=T,V,I,0,1	rets=[1, -5]	final=moved, pending XP by section 3.9.5; order=m	a negative ret1 is invalid
+H22	1	HOOK_WITHINPERCEPTION no member sets ret0 args=W,T,1,1	rets=[None]	final=in range; order=m	the engine result stands
+H22	2	HOOK_WITHINPERCEPTION ret0=0 args=W,T,1,1	rets=[0]	final=cannot see; order=m	not in range
+H22	3	HOOK_WITHINPERCEPTION ret0=1 args=W,T,0,1	rets=[1]	final=sees unless blocked; order=m	in range; the blocker ray still runs
+H22	4	HOOK_WITHINPERCEPTION ret0=2, type 1 args=W,T,0,1	rets=[2]	final=sees, no blocker ray; order=m	forced detection
+H22	5	HOOK_WITHINPERCEPTION ret0=2, type 3 args=W,T,0,3	rets=[2]	final=in range; order=m	2 forces only obj_can_see_obj
+H23	1	HOOK_INVENWIELD wield, no member sets ret0 args=C,I,1,1,0	rets=[None]	final=wielded; order=m	the engine handler
+H23	2	HOOK_INVENWIELD wield, ret0=0 args=C,I,1,1,0	rets=[0]	final=not wielded; order=m	any value but -1 overrides
+H23	3	HOOK_INVENWIELD equipped item removed args=C,I,1,0,1	rets=[None]	final=unwielded and removed; order=m	arg4 is 1
+H23	4	HOOK_INVENWIELD replacing a wielded item args=C,J,1,1,0	rets=[None]	final=one chain, for the wield; order=m	published: no unwield chain
+H24	1	HOOK_ADJUSTFID no member sets ret0 args=0x01000042,0x01000042	rets=[None]	final=figure 0x01000042; order=m	arg1 equals arg0 here
+H24	2	HOOK_ADJUSTFID ret0=0x01000099 args=0x01000042,0x01000042	rets=['0x01000099']	final=figure 0x01000099; order=m	presentation reads the stored result
+H24	3	HOOK_ADJUSTFID same inputs next step args=-	rets=-	final=no chain runs; order=-	a preview runs when its inputs change
+H25	1	HOOK_COMBATTURN start of turn, ret0=1 args=1,C,0	rets=[1]	final=turn skipped; order=m	published
+H25	2	HOOK_COMBATTURN normal end of turn, ret0=-1 args=0,C,0	rets=[-1]	final=combat ends; order=m	published
+H25	3	HOOK_COMBATTURN end of combat args=-2,C,0	rets=[None]	final=combat has ended; order=m	always runs at the end
+H25	4	HOOK_COMBATTURN combat ended by script args=-1,C,0	rets=[None]	final=combat has ended; order=m	ended abruptly
+H25	5	HOOK_COMBATTURN first player turn after a load args=1,P,1	rets=[None]	final=the turn runs; order=m	arg2 is 1
+H26	1	HOOK_CARTRAVEL no member sets a return args=5,100	rets=[None, None]	final=speed 5, fuel 100; order=m	the engine values
+H26	2	HOOK_CARTRAVEL ret0=8 ret1=50 args=5,100	rets=[8, 50]	final=speed 8, fuel 50; order=m	both overridden
+H26	3	HOOK_CARTRAVEL ret0=-1 ret1=50 args=5,100	rets=[-1, 50]	final=speed 5, fuel 50; order=m	published: fuel only
+H27	1	HOOK_RESTTIMER a rest step args=1000,0,6,0	rets=[None]	final=the rest continues; order=m	event 0
+H27	2	HOOK_RESTTIMER a rest step, ret0=1 args=1000,0,6,0	rets=[1]	final=the rest stops; order=m	published
+H27	3	HOOK_RESTTIMER Esc pressed, ret0=0 args=1000,-1,6,0	rets=[0]	final=the rest continues; order=m	published
+H27	4	HOOK_RESTTIMER Esc pressed args=1000,-1,6,0	rets=[None]	final=the rest stops; order=m	SPEC-014 section 3.41.6
+H27	5	HOOK_RESTTIMER normal end args=2000,1,6,0	rets=[None]	final=the rest has ended; order=m	event 1
+H28	1	HOOK_USEANIMOBJ no member sets ret0 args=C,O,12	rets=[None]	final=animation 12; order=m	the engine choice
+H28	2	HOOK_USEANIMOBJ ret0=13 args=C,O,12	rets=[13]	final=animation 13; order=m	overridden
+H28	3	HOOK_USEANIMOBJ ret0=-1 args=C,O,12	rets=[-1]	final=no animation; the use still follows; order=m	published: skip
+H29	1	HOOK_DESCRIPTIONOBJ no member sets ret0 args=O	rets=[None]	final=the engine text; order=m	unchanged
+H29	2	HOOK_DESCRIPTIONOBJ ret0="New" args=O	rets=['New']	final=text "New"; order=m	overridden
+H29	3	HOOK_DESCRIPTIONOBJ ret0=7 args=O	rets=[None]	final=the engine text; order=m	a number is not a string: unset, with a diagnostic
+H29	4	HOOK_DESCRIPTIONOBJ the script overrode the description args=-	rets=-	final=no chain runs; order=-	published
+H30	1	HOOK_USESKILLON ret0=0 args=P,O,9	rets=[0, None]	final=P uses the skill; order=m	0 skips this return
+H30	2	HOOK_USESKILLON ret0=C args=P,O,9	rets=['C', None]	final=C uses the skill; order=m	a new user
+H30	3	HOOK_USESKILLON ret0=-1 args=P,O,10	rets=[-1, None]	final=request cancelled; order=m	published
+H30	4	HOOK_USESKILLON ret0=C, Steal args=P,O,10	rets=['C', None]	final=P uses the skill; order=m	published: not for Steal
+H30	5	HOOK_USESKILLON in combat, ret1=1 args=P,O,9	rets=[0, 1]	final=gating skips the combat refusal; order=m	published
+H31	1	HOOK_SETLIGHTING object, ret0=70000 ret1=12 args=O,30000,4	rets=[70000, 12]	final=intensity 65536, radius 8; order=m	clamped
+H31	2	HOOK_SETLIGHTING map, ret0=20000 args=-1,30000,-1	rets=[20000, None]	final=ambient 20000; order=m	ret1 only for an object
+H31	3	HOOK_SETLIGHTING no member sets a return args=O,30000,4	rets=[None, None]	final=intensity 30000, radius 4; order=m	unchanged
+H32	1	HOOK_ADJUSTRADS no member sets ret0 args=P,100	rets=[None]	final=100 added; order=m	unchanged
+H32	2	HOOK_ADJUSTRADS ret0=40 args=P,100	rets=[40]	final=40 added; order=m	overridden
+H32	3	HOOK_ADJUSTRADS NPC target args=-	rets=-	final=no chain runs; order=-	nothing changes for an NPC
+H33	1	HOOK_CANUSEWEAPON no member sets ret0 args=C,I,0,1	rets=[None]	final=can use; order=m	the engine result stands
+H33	2	HOOK_CANUSEWEAPON ret0=0 args=C,I,0,1	rets=[0]	final=cannot use; order=m	zero refuses
+H33	3	HOOK_CANUSEWEAPON ret0=5 args=C,I,0,0	rets=[5]	final=can use; order=m	any non-zero value allows
+H33	4	HOOK_CANUSEWEAPON player, ret0=0 args=P,I,-1,1	rets=[0]	final=slot shows it unusable; order=m	a preview
