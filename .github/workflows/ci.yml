@@ -100,7 +100,7 @@ jobs:
         run: |
           awk '/^---- .* stdout ----$/ || /^error(\[E[0-9]+\])?: / {
                  if (msg != "") print msg; msg = $0; n = 0; next }
-               msg != "" && n < 8 { msg = msg "%0A" $0; n++ }
+               msg != "" && n < 200 { msg = msg "%0A" $0; n++ }
                END { if (msg != "") print msg }' test-output.txt \
             | head -n 40 | sed 's/^/::error title=cargo test::/'
       - uses: actions/upload-artifact@v4
@@ -134,7 +134,7 @@ jobs:
         run: |
           awk '/^---- .* stdout ----$/ || /^error(\[E[0-9]+\])?: / {
                  if (msg != "") print msg; msg = $0; n = 0; next }
-               msg != "" && n < 8 { msg = msg "%0A" $0; n++ }
+               msg != "" && n < 200 { msg = msg "%0A" $0; n++ }
                END { if (msg != "") print msg }' test-output.txt \
             | head -n 40 | sed 's/^/::error title=cargo test::/'
 
