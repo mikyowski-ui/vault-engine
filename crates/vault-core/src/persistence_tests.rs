@@ -1869,7 +1869,7 @@ fn a_folder_save_removes_stale_maps_and_keeps_every_other_file() {
     let slot = slot_directory(root.path(), 1).unwrap();
     fs::write(slot.join("DEN.SAV"), "stale").unwrap();
     fs::write(slot.join("old map.sav"), "stale").unwrap();
-    fs::write(slot.join("VAULTSFL.DAT"), "kept").unwrap();
+    fs::write(slot.join("NOTES.TXT"), "kept").unwrap();
     fs::write(slot.join("DEN.SAV.OLD"), "kept").unwrap();
     fs::create_dir(slot.join("FOLDER.SAV")).unwrap();
 
@@ -1878,8 +1878,139 @@ fn a_folder_save_removes_stale_maps_and_keeps_every_other_file() {
 
     assert!(!slot.join("DEN.SAV").exists());
     assert!(!slot.join("old map.sav").exists());
-    assert_eq!(fs::read(slot.join("VAULTSFL.DAT")).unwrap(), b"kept");
+    assert_eq!(fs::read(slot.join("NOTES.TXT")).unwrap(), b"kept");
     assert_eq!(fs::read(slot.join("DEN.SAV.OLD")).unwrap(), b"kept");
     assert!(slot.join("FOLDER.SAV").is_dir());
     assert!(slot.join("SAVE.DAT").is_file());
+}
+
+/// `host` with sfall mode's state on. The slot code does not ask which game
+/// the save belongs to, so the synthetic Fallout 1 corpus serves.
+fn sfall_on(host: &mut WorldHost<VfsWorldAssets>) {
+    host.sfall = Some(Default::default());
+    host.world.sfall = Some(Default::default());
+}
+
+#[test]
+fn spec024_a_slot_keeps_saved_arrays_and_globals_and_nothing_else() {
+    use crate::sfall::{GlobalKey, SIDECAR};
+    use vault_vm::{sfall::SfallValue, sfall_arrays::Storage};
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    sfall_on(&mut host);
+    let state = host.world.sfall.as_deref_mut().unwrap();
+    let saved = state.arrays.create(2, 0, Storage::Permanent);
+    state
+        .arrays
+        .set(saved, SfallValue::Int(1), SfallValue::text("kept"));
+    state.arrays.save(SfallValue::text("traps"), saved);
+    let plain = state.arrays.create(1, 0, Storage::Permanent);
+    let temporary = state.arrays.create(1, 0, Storage::Temporary);
+    state
+        .globals
+        .insert(GlobalKey::Int(7), SfallValue::float(0.5));
+    let next = state.arrays.next_id();
+    let hash = host.world.state_hash();
+
+    host.save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    let slot = slot_directory(root.path(), 1).unwrap();
+    assert!(slot.join(SIDECAR).is_file());
+    // SPEC-021's stream does not see any of it.
+    assert_eq!(host.world.state_hash(), hash);
+
+    host.world.sfall.as_deref_mut().unwrap().arrays.free(saved);
+    host.load_game(root.path(), 1).unwrap();
+    let state = host.world.sfall.as_deref_mut().unwrap();
+    assert_eq!(state.arrays.next_id(), next);
+    assert_eq!(state.arrays.load(&SfallValue::text("traps")), saved);
+    assert_eq!(
+        state.arrays.get(saved, &SfallValue::Int(1)),
+        SfallValue::text("kept")
+    );
+    assert_eq!(
+        state.arrays.len(plain),
+        -1,
+        "a load deletes what was not saved"
+    );
+    assert_eq!(state.arrays.len(temporary), -1);
+    assert_eq!(state.globals[&GlobalKey::Int(7)], SfallValue::float(0.5));
+    // The last-created record does not survive: an expression does nothing.
+    state
+        .arrays
+        .expression(SfallValue::Int(0), SfallValue::Int(9));
+    assert_eq!(
+        state.arrays.get(saved, &SfallValue::Int(0)),
+        SfallValue::Int(0)
+    );
+}
+
+#[test]
+fn spec024_a_sidecar_is_always_written_and_a_vanilla_slot_starts_empty() {
+    use crate::sfall::SIDECAR;
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut vanilla = host(dir.path());
+    vanilla.load_map("maps/synth.map").unwrap();
+    vanilla
+        .save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    let slot = slot_directory(root.path(), 1).unwrap();
+    assert!(!slot.join(SIDECAR).exists());
+    // A vanilla save can start using sfall.
+    let mut modded = host(dir.path());
+    modded.load_map("maps/synth.map").unwrap();
+    sfall_on(&mut modded);
+    modded.load_game(root.path(), 1).unwrap();
+    let state = modded.world.sfall.as_deref().unwrap();
+    assert_eq!(state.arrays.next_id(), 1);
+    assert!(state.arrays.is_empty() && state.globals.is_empty());
+    // An empty state is still written, as vector F3's layout with its tag.
+    modded
+        .save_game(root.path(), 2, &SaveInfo::default())
+        .unwrap();
+    let written = fs::read(slot_directory(root.path(), 2).unwrap().join(SIDECAR)).unwrap();
+    assert_eq!(written.len(), 20);
+    assert_eq!(&written[..4], b"VSFL");
+}
+
+#[test]
+fn spec024_a_sidecar_refuses_the_slot_when_it_cannot_apply() {
+    use crate::sfall::SIDECAR;
+    let dir = corpus();
+    let root = tempfile::tempdir().unwrap();
+    let mut modded = host(dir.path());
+    modded.load_map("maps/synth.map").unwrap();
+    sfall_on(&mut modded);
+    modded
+        .save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    let slot = slot_directory(root.path(), 1).unwrap();
+    // Sfall mode off: the slot is refused, with an explicit message.
+    let mut vanilla = host(dir.path());
+    vanilla.load_map("maps/synth.map").unwrap();
+    let before = vanilla.world.state_hash();
+    let error = vanilla.load_game(root.path(), 1).unwrap_err().to_string();
+    assert!(
+        error.contains(SIDECAR) && error.contains("sfall mode"),
+        "{error}"
+    );
+    assert_eq!(vanilla.world.state_hash(), before);
+    // A damaged sidecar is refused too, and nothing changes.
+    let mut bytes = fs::read(slot.join(SIDECAR)).unwrap();
+    bytes[4] = 9;
+    fs::write(slot.join(SIDECAR), &bytes).unwrap();
+    let before = modded.world.state_hash();
+    let error = modded.load_game(root.path(), 1).unwrap_err().to_string();
+    assert!(error.contains("revision 9"), "{error}");
+    assert_eq!(modded.world.state_hash(), before);
+    // A save with the mode off removes the old sidecar by name, on a folder
+    // as on a backend, and the slot then loads.
+    vanilla
+        .save_game(root.path(), 1, &SaveInfo::default())
+        .unwrap();
+    assert!(!slot.join(SIDECAR).exists());
+    vanilla.load_game(root.path(), 1).unwrap();
 }

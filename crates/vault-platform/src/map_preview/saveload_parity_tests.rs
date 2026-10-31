@@ -183,7 +183,6 @@ fn a_save_drops_stale_maps_and_a_stale_sidecar_and_keeps_other_files() {
     let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
     let old = [
         StorageOp::put("SLOT01/OLDMAP.SAV", "stale"),
-        StorageOp::put("SLOT01/VAULTSFL.DAT", "kept"),
         StorageOp::put("SLOT01/NOTES.TXT", "kept"),
         StorageOp::put(format!("SLOT01/{SIDECAR}"), "stale"),
     ];
@@ -193,9 +192,26 @@ fn a_save_drops_stale_maps_and_a_stale_sidecar_and_keeps_other_files() {
     let read = |key: &str| storage.read(Namespace::Savegame, key).unwrap();
     assert_eq!(read("SLOT01/OLDMAP.SAV"), None);
     assert_eq!(read(&format!("SLOT01/{SIDECAR}")), None);
-    assert_eq!(read("SLOT01/VAULTSFL.DAT").unwrap(), b"kept");
     assert_eq!(read("SLOT01/NOTES.TXT").unwrap(), b"kept");
     assert!(read("SLOT01/SAVE.DAT").is_some());
+}
+
+#[test]
+fn a_save_with_sfall_mode_off_names_the_sfall_sidecar() {
+    // SPEC-024b §5.8, D-29: this is a named delete. The `.SAV` sweep never
+    // touches the file, as T20's `sidecars-kept` shows.
+    let corpus = short_map_corpus();
+    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let old = [StorageOp::put("SLOT01/VAULTSFL.DAT", "old")];
+    storage.commit(Namespace::Savegame, &old).unwrap();
+    let mut world = world_on(corpus.path(), storage.clone());
+    assert!(world.save_slot(0, b"Vanilla".to_vec()));
+    assert_eq!(
+        storage
+            .read(Namespace::Savegame, "SLOT01/VAULTSFL.DAT")
+            .unwrap(),
+        None
+    );
 }
 
 #[test]

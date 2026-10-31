@@ -64,12 +64,22 @@ pub fn slot_name(slot: u8) -> Result<String, WorldError> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SlotImage {
     files: Vec<(String, Vec<u8>)>,
+    /// A save with sfall mode off: the commit names `VAULTSFL.DAT` for
+    /// deletion (SPEC-024b §5.8, D-29). The `.SAV` sweep never touches it.
+    drops_sfall: bool,
 }
 
 impl SlotImage {
     /// An image holding `files`, as a save would produce it.
     pub fn new(files: Vec<(String, Vec<u8>)>) -> Self {
-        Self { files }
+        Self {
+            files,
+            drops_sfall: false,
+        }
+    }
+    /// Whether a save of this image removes an old `VAULTSFL.DAT`.
+    pub fn drops_sfall(&self) -> bool {
+        self.drops_sfall
     }
     pub fn files(&self) -> &[(String, Vec<u8>)] {
         &self.files
@@ -486,7 +496,41 @@ impl<A: WorldAssets> WorldHost<A> {
                 + &crate::doors::write_table(&self.world.enhanced.opened_doors);
             files.push((crate::companion::SIDECAR.to_string(), text.into_bytes()));
         }
-        Ok(SlotImage { files })
+        // SPEC-024b §5.8: under sfall mode the sidecar is always written,
+        // even empty; without it, an old one goes.
+        if let Some(state) = self.world.sfall.as_deref() {
+            files.push((crate::sfall::SIDECAR.to_string(), state.sidecar()));
+        }
+        Ok(SlotImage {
+            files,
+            drops_sfall: !self.sfall_mode(),
+        })
+    }
+    /// SPEC-024b §5.8: the slot's sidecar, parsed whole before any state
+    /// changes. With the mode on, a slot without one is an empty state, so a
+    /// vanilla save can start using sfall. With it off, a slot holding one
+    /// is refused: its programs were written for other word meanings.
+    fn read_sfall_sidecar(
+        &mut self,
+        files: &mut dyn SlotReader,
+    ) -> Result<Option<Box<crate::sfall::SfallWorld>>, WorldError> {
+        let name = crate::sfall::SIDECAR;
+        let bytes = files.read_file(name)?;
+        if !self.sfall_mode() {
+            return match bytes {
+                Some(_) => Err(WorldError::Invalid(format!(
+                    "this slot holds {name}: it was saved under sfall mode, whose scripts mean \
+                     other words; turn sfall mode on to load it"
+                ))),
+                None => Ok(None),
+            };
+        }
+        let state = match bytes {
+            Some(bytes) => crate::sfall::SfallWorld::from_sidecar(&bytes)
+                .map_err(|error| WorldError::Invalid(format!("{name}: {error}")))?,
+            None => Default::default(),
+        };
+        Ok(Some(Box::new(state)))
     }
     /// Read and validate a whole slot (header, every payload, the listed
     /// companions, and the automap byte length) before changing any state,
@@ -569,6 +613,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 "save names no loadable map ({map_file:?})"
             )));
         }
+        let sfall = self.read_sfall_sidecar(files)?;
         // The `enhanced` sidecar, read (and validated) under Enhanced only;
         // a slot without one has no companion settings or opened doors.
         let (distances, enhanced) = if self.preset() == crate::EnginePreset::Enhanced {
@@ -590,10 +635,14 @@ impl<A: WorldAssets> WorldHost<A> {
         } else {
             Default::default()
         };
-        match tables {
-            Some(tables) => self.apply_fallout2_save(save, maps, automap, tables)?,
-            None => self.apply_save(save, maps, automap)?,
-        }
+        self.install_sfall = sfall;
+        let applied = match tables {
+            Some(tables) => self.apply_fallout2_save(save, maps, automap, tables),
+            None => self.apply_save(save, maps, automap),
+        };
+        self.install_sfall = None;
+        applied?;
+        self.sfall_restored();
         self.world.companion_distance = distances;
         self.world.enhanced = enhanced;
         Ok(())
@@ -696,6 +745,12 @@ impl<A: WorldAssets> WorldHost<A> {
         // SPEC-018 §7: a Fallout 2 load installs its restored state here,
         // before the current map loads.
         world.fallout2 = self.install_fallout2.take();
+        // SPEC-024b §5.3: a load replaces the store whole, and a reset that
+        // is not a load keeps it.
+        world.sfall = self
+            .install_sfall
+            .take()
+            .or_else(|| self.world.sfall.take());
         self.world = world;
         Ok(())
     }

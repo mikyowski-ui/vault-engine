@@ -841,3 +841,186 @@ fn the_reg_anim_words_keep_their_effects_at_sfall_numbers() {
     assert_eq!(sequence.commands[0].0, 0x8157);
     assert_eq!(sequence.commands[1].0, 0x8159);
 }
+
+#[test]
+fn the_array_stack_vectors_of_section_7_1() {
+    // S7: `create_array` has its flags on top.
+    let (mut host, _) = sfall_host();
+    assert_eq!(run(&mut host, &[I(-1), I(0), W(0x822d)]).ints(), [1]);
+    // S5: `set_array` pops three and pushes nothing.
+    let done = run(&mut host, &[I(1), S(b"x"), I(9), W(0x822e)]);
+    assert!(done.ints().is_empty());
+    assert_eq!(run(&mut host, &[I(1), S(b"x"), W(0x822f)]).ints(), [9]);
+    // S4: `save_array` has the ID on top.
+    let done = run(&mut host, &[S(b"traps"), I(1), W(0x8254)]);
+    assert!(done.ints().is_empty());
+    assert_eq!(run(&mut host, &[S(b"traps"), W(0x8255)]).ints(), [1]);
+    // S6: an absent element.
+    assert_eq!(run(&mut host, &[I(1), I(0), W(0x822f)]).ints(), [0]);
+    assert_eq!(run(&mut host, &[I(99), W(0x8231)]).ints(), [-1]);
+}
+
+#[test]
+fn compiled_arrays_use_temp_array_and_arrayexpr() {
+    let (mut host, _) = sfall_host();
+    let done = run(
+        &mut host,
+        &[
+            I(2),
+            I(4),
+            W(0x8233),
+            S(b"k"),
+            I(5),
+            W(0x8257),
+            I(1),
+            S(b"v"),
+            W(0x8257),
+        ],
+    );
+    let [list, zero, again] = done.ints()[..] else {
+        panic!("{:?}", done.ints());
+    };
+    assert_eq!((zero, again), (0, 0));
+    // The string key on a list is ignored, and index 1 took the value.
+    assert_eq!(run(&mut host, &[I(list), I(1), W(0x822f)]).text(), b"v");
+    assert_eq!(run(&mut host, &[I(list), W(0x8231)]).ints(), [2]);
+    // A temporary array ends with the frame.
+    host.sfall_end_of_step();
+    assert_eq!(run(&mut host, &[I(list), W(0x8231)]).ints(), [-1]);
+    // A permanent one outlives it, and `fix_array` promotes a temporary.
+    let kept = run(&mut host, &[I(1), I(0), W(0x8233)]).ints()[0];
+    run(&mut host, &[I(kept), W(0x8234)]);
+    host.sfall_end_of_step();
+    assert_eq!(run(&mut host, &[I(kept), W(0x8231)]).ints(), [1]);
+}
+
+#[test]
+fn a_shuffle_draws_from_the_gameplay_generator() {
+    use crate::RandomSource;
+    let (mut host, _) = sfall_host();
+    let list = run(&mut host, &[I(4), I(0), W(0x822d)]).ints()[0];
+    for index in 0..4 {
+        run(
+            &mut host,
+            &[I(list), I(index), I(10 * (index + 1)), W(0x822e)],
+        );
+    }
+    let mut twin = host.world.rng.clone();
+    run(&mut host, &[I(list), I(-5), W(0x8232)]);
+    let mut expected = vec![10, 20, 30, 40];
+    for last in (1..4).rev() {
+        let other = twin.range(0, last as i32).unwrap();
+        expected.swap(last, other as usize);
+    }
+    let found: Vec<i32> = (0..4)
+        .map(|index| run(&mut host, &[I(list), I(index), W(0x822f)]).ints()[0])
+        .collect();
+    assert_eq!(found, expected);
+    assert_eq!(
+        host.world.rng.range(1, 1000).unwrap(),
+        twin.range(1, 1000).unwrap()
+    );
+}
+
+#[test]
+fn the_words_that_make_arrays_give_temporary_lists() {
+    let (mut host, me) = sfall_host();
+    let list = run(&mut host, &[S(b"a,b"), S(b","), W(0x8235)]).ints()[0];
+    assert_eq!(run(&mut host, &[I(list), W(0x8231)]).ints(), [2]);
+    assert_eq!(run(&mut host, &[I(list), I(1), W(0x822f)]).text(), b"b");
+    let split = run(&mut host, &[S(b"ab"), S(b""), W(0x8235)]).ints()[0];
+    assert_eq!(run(&mut host, &[I(split), I(0), W(0x822f)]).text(), b"a");
+    let objects = run(&mut host, &[I(0), W(0x8236)]).ints()[0];
+    assert_eq!(
+        run(&mut host, &[I(objects), I(me as i32), W(0x8239)])
+            .ints()
+            .len(),
+        1
+    );
+    assert!(run(&mut host, &[I(objects), I(me as i32), W(0x8239)]).ints()[0] >= 0);
+    let table = run(&mut host, &[S(b"get_metarule_table"), W(0x8276)]).ints()[0];
+    assert_eq!(run(&mut host, &[I(table), W(0x8231)]).ints(), [18]);
+    assert_eq!(
+        run(&mut host, &[I(table), I(0), W(0x822f)]).text(),
+        b"critter_inven_obj2"
+    );
+    host.sfall_end_of_step();
+    assert_eq!(run(&mut host, &[I(table), W(0x8231)]).ints(), [-1]);
+}
+
+#[test]
+fn ini_queries_give_arrays_in_file_order() {
+    let (mut host, _) = sfall_host();
+    host.assets.resources.insert(
+        "cfg.ini".into(),
+        b"[Zeta]\nb=2\na=1\n[Alpha]\nk=v\n".to_vec(),
+    );
+    let sections = run(
+        &mut host,
+        &[S(b"get_ini_sections"), S(b"cfg.ini"), W(0x8277)],
+    )
+    .ints()[0];
+    assert_eq!(
+        run(&mut host, &[I(sections), I(0), W(0x822f)]).text(),
+        b"Zeta"
+    );
+    assert_eq!(
+        run(&mut host, &[I(sections), I(1), W(0x822f)]).text(),
+        b"Alpha"
+    );
+    let section = run(
+        &mut host,
+        &[S(b"get_ini_section"), S(b"cfg.ini"), S(b"zeta"), W(0x8278)],
+    )
+    .ints()[0];
+    assert_eq!(run(&mut host, &[I(section), I(0), W(0x8256)]).text(), b"b");
+    assert_eq!(
+        run(&mut host, &[I(section), S(b"a"), W(0x822f)]).text(),
+        b"1"
+    );
+    assert_eq!(run(&mut host, &[I(section), I(-1), W(0x8256)]).ints(), [1]);
+    // An absent file gives an empty array.
+    let empty = run(
+        &mut host,
+        &[S(b"get_ini_sections"), S(b"no.ini"), W(0x8277)],
+    )
+    .ints()[0];
+    assert_eq!(run(&mut host, &[I(empty), W(0x8231)]).ints(), [0]);
+    // A configuration is permanent, and a repeated call gives the same array.
+    let config = run(
+        &mut host,
+        &[S(b"get_ini_config"), S(b"cfg.ini"), I(0), W(0x8278)],
+    )
+    .ints()[0];
+    host.sfall_end_of_step();
+    let again = run(
+        &mut host,
+        &[S(b"get_ini_config"), S(b"cfg.ini"), I(1), W(0x8278)],
+    )
+    .ints()[0];
+    assert_eq!(config, again);
+    let sub = run(&mut host, &[I(config), S(b"Alpha"), W(0x822f)]).ints()[0];
+    assert_eq!(run(&mut host, &[I(sub), S(b"k"), W(0x822f)]).text(), b"v");
+    run(&mut host, &[I(config), W(0x8230)]);
+    let fresh = run(
+        &mut host,
+        &[S(b"get_ini_config"), S(b"cfg.ini"), I(0), W(0x8278)],
+    )
+    .ints()[0];
+    assert_ne!(fresh, config, "unless it was freed");
+}
+
+#[test]
+fn array_words_change_no_spec_021_hash() {
+    let (mut host, _) = sfall_host();
+    let (state, combat) = (host.world.state_hash(), host.world.combat_hash());
+    let empty = host.world.sfall_hash();
+    assert_eq!(empty, 0xAF36_4CE5_AE92_BB79);
+    run(&mut host, &[I(3), I(0), W(0x822d), S(b"k"), W(0x8254)]);
+    run(&mut host, &[S(b"a_myvar1"), I(1000), W(0x819d)]);
+    assert_eq!(
+        (host.world.state_hash(), host.world.combat_hash()),
+        (state, combat)
+    );
+    assert_ne!(host.world.sfall_hash(), empty);
+}

@@ -68,8 +68,9 @@ fn stored_path(dir: &Path, name: &str) -> PathBuf {
 /// Commit `image` to the slot folder `dir` under the SPEC-008 §3.3 safe rule
 /// ([`staged`]): one batch, so a failure leaves the old slot untouched. As
 /// SPEC-023 §3.11 rule 2 says, it holds a put of every file of the image, a
-/// delete of the sidecar when the image has none, and a delete of every stale
-/// `.SAV` ([`SlotImage::stale`]). Other files of the slot are left alone.
+/// delete of the sidecar when the image has none, a delete of every stale
+/// `.SAV` ([`SlotImage::stale`]), and a save with sfall mode off names
+/// `VAULTSFL.DAT` too (SPEC-024b §5.8). Other files are left alone.
 pub fn write_slot(dir: &Path, image: &SlotImage) -> Result<(), WorldError> {
     let targets: Vec<(PathBuf, &[u8])> = image
         .files()
@@ -86,6 +87,10 @@ pub fn write_slot(dir: &Path, image: &SlotImage) -> Result<(), WorldError> {
     }
     let stale = stale_files(dir, image)?;
     ops.extend(stale.iter().map(|target| StagedOp::Delete { target }));
+    let sfall = stored_path(dir, crate::sfall::SIDECAR);
+    if image.drops_sfall() {
+        ops.push(StagedOp::Delete { target: &sfall });
+    }
     staged::commit(&ops, StagingNames::Reserved, |_| Ok(()))
         .map_err(|error| WorldError::Invalid(error.to_string()))
 }
@@ -123,8 +128,8 @@ struct FolderSlot<'a>(&'a Path);
 
 impl SlotReader for FolderSlot<'_> {
     fn read_file(&mut self, name: &str) -> Result<Option<Vec<u8>>, WorldError> {
-        if name == crate::companion::SIDECAR {
-            let path = self.0.join(name);
+        if name == crate::companion::SIDECAR || name == crate::sfall::SIDECAR {
+            let path = stored_path(self.0, name);
             return match fs::read(&path) {
                 Ok(bytes) => Ok(Some(bytes)),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),

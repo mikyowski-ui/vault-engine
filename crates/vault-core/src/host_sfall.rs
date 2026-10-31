@@ -6,7 +6,7 @@
 //! and X rows keep the stack balanced with a stub, and tier R rows fail
 //! closed, consuming nothing.
 use crate::{
-    WorldError,
+    RandomSource, WorldError,
     assets::WorldAssets,
     host::{HostResult, WorldHost},
     sfall::{GlobalKey, SfallWorld},
@@ -20,6 +20,7 @@ use vault_vm::{
     ExternalValue, Value, Vm, VmError,
     extensions::{Argument, FALLOUT2, HostCall},
     sfall::{self, Class, SfallRow, SfallValue, Tier},
+    sfall_arrays::{ArrayStore, Storage},
 };
 
 /// A frame's length to `get_uptime`, in milliseconds (§4.4).
@@ -77,6 +78,8 @@ pub struct SfallHost {
     ini_files: Option<Box<dyn IniFiles>>,
     /// Each attacker's last target (§4.8).
     last_targets: BTreeMap<ObjectRef, ObjectRef>,
+    /// `get_ini_config`'s map of each file while it lasts (§4.5).
+    ini_configs: BTreeMap<String, u32>,
     /// Keys the hook mapped, waiting for the game (metarule3 201 empties it).
     pub(crate) key_queue: VecDeque<i32>,
 }
@@ -108,6 +111,15 @@ impl<A: WorldAssets> WorldHost<A> {
     pub fn set_sfall_ini_files(&mut self, files: Box<dyn IniFiles>) {
         if let Some(sfall) = self.sfall.as_deref_mut() {
             sfall.ini_files = Some(files);
+        }
+    }
+    /// A new world state came in from a load: what scripts rebuild goes.
+    pub(crate) fn sfall_restored(&mut self) {
+        if let Some(sfall) = self.sfall.as_deref_mut() {
+            sfall.loaded.clear();
+            sfall.lists.clear();
+            sfall.ini_configs.clear();
+            sfall.last_targets.clear();
         }
     }
     /// The screens' `get_game_mode` bits, from the shell.
@@ -413,8 +425,50 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
                 None
             }
+            0x822d | 0x8233 => {
+                let storage = if row.id == 0x822d {
+                    Storage::Permanent
+                } else {
+                    Storage::Temporary
+                };
+                integer(self.arrays().create(int(0), int(1), storage))
+            }
+            0x822e => {
+                self.arrays().set(int(0), args[1].clone(), args[2].clone());
+                None
+            }
+            0x822f => Some(self.arrays().get(int(0), &args[1])),
+            0x8230 => {
+                self.arrays().free(int(0));
+                None
+            }
+            0x8231 => integer(self.arrays().len(int(0))),
+            0x8232 => {
+                self.resize_array(int(0), int(1))?;
+                None
+            }
+            0x8234 => {
+                self.arrays().fix(int(0));
+                None
+            }
+            0x8235 => {
+                let pieces = sfall::split(args[0].bytes(), args[1].bytes())
+                    .into_iter()
+                    .map(SfallValue::Text)
+                    .collect();
+                integer(self.arrays().temp_list(pieces))
+            }
+            0x8236 => {
+                let objects = self
+                    .sfall_list(int(0))
+                    .into_iter()
+                    .map(|object| SfallValue::Int(object as i32))
+                    .collect();
+                integer(self.arrays().temp_list(objects))
+            }
             0x8237 => integer(sfall::atoi(args[0].bytes())),
             0x8238 => Some(SfallValue::float(sfall::atof(args[0].bytes()))),
+            0x8239 => Some(self.arrays().scan(int(0), &args[1])),
             0x823b => integer(self.modified_ini()),
             0x8242 => {
                 let (skill, value) = (int(1), int(2));
@@ -448,6 +502,16 @@ impl<A: WorldAssets> WorldHost<A> {
             },
             0x8251 => integer(args[0].bytes().first().map_or(0, |byte| i32::from(*byte))),
             0x8253 => integer(args[0].type_code()),
+            0x8254 => {
+                self.arrays().save(args[0].clone(), int(1));
+                None
+            }
+            0x8255 => integer(self.arrays().load(&args[0])),
+            0x8256 => Some(self.arrays().key_at(int(0), int(1))),
+            0x8257 => {
+                self.arrays().expression(args[0].clone(), args[1].clone());
+                integer(0)
+            }
             0x825e..=0x8260 => {
                 self.sfall_registration(row.id, &args);
                 None
@@ -658,14 +722,126 @@ impl<A: WorldAssets> WorldHost<A> {
             _ => self.sfall_array_function(vm, name, args),
         }
     }
-    /// The functions of parts 2 and 3.
+    /// The functions of part 2 that make arrays.
     fn sfall_array_function(
         &mut self,
         _vm: &mut Vm,
-        _name: &str,
-        _args: &[SfallValue],
+        name: &str,
+        args: &[SfallValue],
     ) -> Result<Option<SfallValue>, VmError> {
-        Ok(None)
+        let file = args
+            .first()
+            .and_then(|file| crate::sfall_ini::valid_file(file.bytes()));
+        match name {
+            "get_metarule_table" => {
+                let names = sfall::p1_functions()
+                    .into_iter()
+                    .map(SfallValue::text)
+                    .collect();
+                Ok(integer(self.arrays().temp_list(names)))
+            }
+            "get_ini_section" => {
+                let section = args.get(1).map_or(&[][..], SfallValue::bytes);
+                let section = String::from_utf8_lossy(section).into_owned();
+                let pairs: Vec<(SfallValue, SfallValue)> = file
+                    .and_then(|file| {
+                        let section = self.ini_file(&file)?.section(&section)?;
+                        Some(
+                            section
+                                .pairs
+                                .iter()
+                                .map(|(key, value)| {
+                                    (
+                                        SfallValue::text(key.as_bytes()),
+                                        SfallValue::text(value.as_bytes()),
+                                    )
+                                })
+                                .collect(),
+                        )
+                    })
+                    .unwrap_or_default();
+                Ok(integer(self.arrays().map_of(pairs, Storage::Temporary)))
+            }
+            "get_ini_sections" => {
+                let names: Vec<SfallValue> = file
+                    .and_then(|file| {
+                        let file = self.ini_file(&file)?;
+                        Some(
+                            file.sections
+                                .iter()
+                                .map(|section| SfallValue::text(section.name.as_bytes()))
+                                .collect(),
+                        )
+                    })
+                    .unwrap_or_default();
+                Ok(integer(self.arrays().temp_list(names)))
+            }
+            "get_ini_config" => match file {
+                Some(file) => Ok(integer(self.ini_config(&file))),
+                None => Ok(integer(0)),
+            },
+            _ => Ok(None),
+        }
+    }
+    /// `get_ini_config`: a permanent map of section name to permanent
+    /// sub-map, the same array on a repeated call unless it was freed.
+    fn ini_config(&mut self, name: &str) -> i32 {
+        let held = self
+            .sfall
+            .as_deref()
+            .and_then(|sfall| sfall.ini_configs.get(name).copied());
+        if let Some(id) = held.filter(|id| self.arrays().exists(*id)) {
+            return id as i32;
+        }
+        let sections: Vec<(String, Vec<(String, String)>)> = self
+            .ini_file(name)
+            .map(|file| {
+                file.sections
+                    .iter()
+                    .map(|section| (section.name.clone(), section.pairs.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let store = self.arrays();
+        let pairs = sections
+            .into_iter()
+            .map(|(section, pairs)| {
+                let pairs = pairs
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (
+                            SfallValue::text(key.into_bytes()),
+                            SfallValue::text(value.into_bytes()),
+                        )
+                    })
+                    .collect();
+                let map = store.map_of(pairs, Storage::Permanent);
+                (SfallValue::text(section.into_bytes()), SfallValue::Int(map))
+            })
+            .collect();
+        let id = store.map_of(pairs, Storage::Permanent);
+        if let Some(sfall) = self.sfall.as_deref_mut() {
+            sfall.ini_configs.insert(name.to_owned(), id as u32);
+        }
+        id
+    }
+    /// The store: it exists with the mode on.
+    fn arrays(&mut self) -> &mut ArrayStore {
+        &mut self.world.sfall.get_or_insert_default().arrays
+    }
+    /// `resize_array`, whose shuffle draws from the gameplay generator
+    /// (§5.6).
+    fn resize_array(&mut self, id: i32, size: i32) -> Result<(), VmError> {
+        let world = &mut self.world;
+        let store = &mut world.sfall.get_or_insert_default().arrays;
+        let rng = &mut world.rng;
+        let known = store
+            .resize(id, size, |last| rng.range(0, last))
+            .map_err(|error| VmError::Host(error.to_string()))?;
+        if !known {
+            world.diagnostic(format!("resize_array: size {size} names no operation"));
+        }
+        Ok(())
     }
     fn sfall_object_get_or_zero(&mut self, object: ObjectRef, offset: i32) -> i32 {
         if object == 0 {
@@ -895,6 +1071,9 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Some(sfall) = self.sfall.as_deref_mut() {
             sfall.steps = sfall.steps.saturating_add(1);
             sfall.lists.clear();
+        }
+        if let Some(state) = self.world.sfall.as_deref_mut() {
+            state.arrays.end_of_step();
         }
     }
 }

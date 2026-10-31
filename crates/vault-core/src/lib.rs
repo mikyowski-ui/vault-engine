@@ -182,6 +182,8 @@ mod skills_tests;
 #[cfg(test)]
 mod spec017_tests;
 #[cfg(test)]
+mod spec024_arrays_tests;
+#[cfg(test)]
 mod spec024_tests;
 #[cfg(test)]
 mod state_hash_tests;

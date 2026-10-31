@@ -5,6 +5,7 @@ mod host;
 mod machine;
 mod program;
 pub mod sfall;
+pub mod sfall_arrays;
 mod sfall_math;
 mod sfall_text;
 mod stack;

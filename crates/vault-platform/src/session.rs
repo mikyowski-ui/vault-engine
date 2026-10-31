@@ -251,8 +251,9 @@ pub fn validate_edition(
 
 /// SPEC-023 §3.11 rule 2: saving into `slot` lists the slot, then makes one
 /// commit: a put of every file of the image, a delete of the sidecar when the
-/// image has none, and a delete of every stale `.SAV`. Other files of the
-/// slot are left alone. A save counts once it is durable.
+/// image has none, and a delete of every stale `.SAV`. A save with sfall mode
+/// off also names `VAULTSFL.DAT` (SPEC-024b §5.8). Other files of the slot
+/// are left alone. A save counts once it is durable.
 pub fn commit_slot(
     storage: &dyn StorageBackend,
     slot: &str,
@@ -270,6 +271,12 @@ pub fn commit_slot(
         if key.rsplit('/').next().is_some_and(|name| image.stale(name)) {
             ops.push(StorageOp::delete(key));
         }
+    }
+    if image.drops_sfall() {
+        ops.push(StorageOp::delete(format!(
+            "{slot}/{}",
+            vault_core::sfall::SIDECAR
+        )));
     }
     storage.commit(Namespace::Savegame, &ops)?;
     storage.flush()
