@@ -32,6 +32,23 @@ fn spec019_vector_a_bar_geometry() {
 }
 
 #[test]
+fn spec024_custom_boxes_follow_the_named_ones_up_to_five_slots() {
+    let named = indicators(true, true, false, 3, 0);
+    assert_eq!(
+        with_custom(named.clone(), &[5, 6]),
+        [
+            Indicator::Addict,
+            Indicator::Sneak,
+            Indicator::Poisoned,
+            Indicator::Custom(5),
+            Indicator::Custom(6)
+        ]
+    );
+    assert_eq!(with_custom(named, &[5, 6, 7]).len(), 5);
+    assert_eq!(Indicator::Custom(7).label().0, 107);
+}
+
+#[test]
 fn spec019_vector_b_indicator_boxes() {
     let lit = indicators(true, true, false, 3, 0);
     assert_eq!(

@@ -2,12 +2,24 @@
 //! mode on ([`crate::WorldState::sfall`]); with it off none of this does,
 //! and nothing here reaches SPEC-021's `state_hash`.
 use crate::state_hash::fnv1a64;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::RangeInclusive};
 pub use vault_vm::sfall::SfallValue;
 use vault_vm::sfall_arrays::{self, ArrayStore, SidecarError};
 
 /// The save sidecar, beside the slot's `SAVE.DAT` (§5.8).
 pub const SIDECAR: &str = "VAULTSFL.DAT";
+
+/// §4.11 the object IDs `set_unique_id` assigns.
+pub const UNIQUE_IDS: RangeInclusive<u32> = 0x1000_0000..=0x7fff_ffff;
+
+/// §4.11 a forced encounter's flags.
+pub mod encounter_flag {
+    pub const NO_CAR: u32 = 0x1;
+    pub const LOCK: u32 = 0x2;
+    pub const NO_ICON: u32 = 0x4;
+    pub const ICON_SP: u32 = 0x8;
+    pub const FADEOUT: u32 = 0x10;
+}
 
 /// A sfall global's key (§4.9): any int, or a string of exactly 8 bytes.
 /// Numbers order before strings, as §5.6 asks of the sidecar.
@@ -35,12 +47,28 @@ impl GlobalKey {
 }
 
 /// The world's sfall state.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SfallWorld {
     /// §4.9 each value keeps its type.
     pub globals: BTreeMap<GlobalKey, SfallValue>,
     /// §5: shared by all scripts.
     pub arrays: ArrayStore,
+    /// §4.11 the next ID `set_unique_id` assigns.
+    pub next_unique: u32,
+    /// §4.11 the pending forced encounter's map, or -1 for none.
+    pub forced_map: i32,
+    pub forced_flags: u32,
+}
+impl Default for SfallWorld {
+    fn default() -> Self {
+        Self {
+            globals: BTreeMap::new(),
+            arrays: ArrayStore::default(),
+            next_unique: *UNIQUE_IDS.start(),
+            forced_map: -1,
+            forced_flags: 0,
+        }
+    }
 }
 impl SfallWorld {
     fn global_records(&self) -> Vec<(SfallValue, SfallValue)> {
@@ -76,7 +104,11 @@ impl SfallWorld {
                 GlobalKey::of(&key).ok_or_else(|| SidecarError::GlobalKey(format!("{key:?}")))?;
             globals.insert(parsed, value);
         }
-        Ok(Self { globals, arrays })
+        Ok(Self {
+            globals,
+            arrays,
+            ..Default::default()
+        })
     }
 }
 impl crate::WorldState {

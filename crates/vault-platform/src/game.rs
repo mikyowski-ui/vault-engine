@@ -1174,6 +1174,12 @@ impl Game {
         let Stage::World(world) = &mut self.stage else {
             return;
         };
+        // SPEC-024b §4.11: `signal_close_game` returns to the operating
+        // system with no prompt, not to the main menu.
+        if world.host.sfall_session_closed() {
+            self.finished = true;
+            return;
+        }
         let player = world.host.world.player;
         let state = &world.host.world;
         let over = !state.combat

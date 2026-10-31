@@ -1924,10 +1924,20 @@ impl MapPreview {
     /// One frame. Its Simulation phase ends here, whether the world ticked
     /// or a modal screen held it (SPEC-024b §5.3).
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
+        // SPEC-024b §4.11: after this step's input records, each tapped key
+        // is pressed and released. A replay queues them again.
+        for scan in self.host.sfall_take_keys() {
+            if let Some(key) = crate::input::key_of_scan(scan) {
+                self.step(key);
+                self.key_up(key);
+            }
+        }
         self.host.set_sfall_screens(self.sfall_screens());
         let changed = self.frame(now);
+        self.show_message_box();
         self.sfall_previews();
         self.host.sfall_end_of_step();
+        self.quit_requested |= self.host.sfall_session_closed();
         changed
     }
     /// SPEC-024b §4.4: the `get_game_mode` bits of the open screen.

@@ -14,6 +14,15 @@ fn float(value: f32) -> SfallValue {
     SfallValue::float(value)
 }
 
+/// The oracle's rows that `keep` keeps, over its tab-split cells.
+fn oracle_rows(keep: impl Fn(&[&str]) -> bool) -> usize {
+    ORACLE
+        .lines()
+        .skip(1)
+        .filter(|line| keep(&line.split('\t').collect::<Vec<_>>()))
+        .count()
+}
+
 #[test]
 fn every_oracle_row_is_in_the_table_with_its_contract() {
     let mut seen = 0;
@@ -48,15 +57,27 @@ fn every_oracle_row_is_in_the_table_with_its_contract() {
         seen += 1;
     }
     assert_eq!(seen, 449);
+    // Revision 3's word tiers, counted in the oracle and in the table.
+    let oracle = |tier: &str| oracle_rows(|cells| cells[0] == "word" && cells[9] == tier);
     let count = |tier| SFALL_WORDS.iter().filter(|row| row.tier == tier).count();
+    for (tier, name, expected) in [
+        (Tier::P1, "P1", 117),
+        (Tier::P2, "P2", 159),
+        (Tier::X, "X", 18),
+        (Tier::R, "R", 6),
+    ] {
+        assert_eq!(oracle(name), expected, "{name} in the oracle");
+        assert_eq!(count(tier), expected, "{name} in the table");
+    }
+    // 26 promoted usage rows cover 32 opcode rows here: sfall_func has one
+    // row per argument count.
+    assert_eq!(oracle_rows(|cells| cells[9] == "P1"), 158);
     assert_eq!(
-        (
-            count(Tier::P1),
-            count(Tier::P2),
-            count(Tier::X),
-            count(Tier::R)
-        ),
-        (99, 177, 18, 6)
+        oracle_rows(|cells| cells[0] == "sfall_func" && cells[9] == "P1"),
+        SFALL_FUNCTIONS
+            .iter()
+            .filter(|row| row.tier == Tier::P1)
+            .count()
     );
 }
 
@@ -107,13 +128,27 @@ fn the_stack_model_reads_the_oracle_under_sfall_with_or_without_enhanced() {
 #[test]
 fn p1_queries_are_limited_to_p1() {
     let names = p1_functions();
-    assert_eq!(names.len(), 18);
+    assert_eq!(names.len(), 25);
     assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+    // The list is the oracle's distinct P1 names, each one read from there.
+    let mut oracle: Vec<&str> = ORACLE
+        .lines()
+        .skip(1)
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .filter(|cells| cells[0] == "sfall_func" && cells[9] == "P1")
+        .map(|cells| cells[2])
+        .collect();
+    oracle.sort_unstable();
+    oracle.dedup();
+    assert_eq!(names, oracle);
     assert!(names.contains(&"string_find"));
-    assert!(!names.contains(&"message_box"));
+    assert!(names.contains(&"message_box"), "promoted by section 4.11");
+    assert!(!names.contains(&"add_iface_tag"), "still tier P2");
+    assert_eq!(function_tier(b"add_iface_tag"), Some(Tier::P2));
     assert_eq!(function_tier(b"string_find"), Some(Tier::P1));
-    assert_eq!(function_tier(b"message_box"), Some(Tier::P2));
+    assert_eq!(function_tier(b"message_box"), Some(Tier::P1));
     assert_eq!(function_tier(b"no_such_fn"), None);
+    assert!(p1_word(0x8261), "promoted by section 4.11");
     assert!(p1_word(0x8210));
     assert!(!p1_word(0x8200), "fs_size is P2");
     assert!(!p1_word(0x8252), "a reserved word");

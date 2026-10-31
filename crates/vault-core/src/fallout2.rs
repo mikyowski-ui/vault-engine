@@ -219,6 +219,8 @@ pub struct Selected {
     pub entry: u32,
     pub map: u32,
     pub special: bool,
+    /// SPEC-024b §4.11: a scripted encounter's flags. It spawns no group.
+    pub forced: Option<u32>,
 }
 
 /// §5.8 entering an area.
@@ -677,6 +679,7 @@ impl Fallout2World {
             entry: entry.number,
             map,
             special: entry.special,
+            forced: None,
         }))
     }
     /// §5.7 "Dropping to terrain": one map of the party cell's terrain's

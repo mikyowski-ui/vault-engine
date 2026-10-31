@@ -7,6 +7,7 @@ use crate::{
     assets::WorldAssets,
     fallout2::{self, AreaEntry, Conditions, Fallout2Tables, Fallout2World, Selected, Step},
     host::WorldHost,
+    sfall::encounter_flag,
     worldmap::TravelSpeed,
 };
 use std::sync::Arc;
@@ -223,6 +224,9 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// §5.6 the encounter check at the party's cell.
     pub fn fallout2_check_encounter(&mut self) -> Result<Option<Selected>, WorldError> {
+        if let Some(forced) = self.take_forced_encounter() {
+            return Ok(Some(forced));
+        }
         let luck = self.world.player_stat(6);
         let explorer = self.world.perk(Perk::Explorer);
         let level = self.world.player_sheet().map_or(1, |sheet| sheet.level);
@@ -250,6 +254,9 @@ impl<A: WorldAssets> WorldHost<A> {
     /// header's entrance), then its groups spawned in expression order.
     /// No campaign global is written (§6.2).
     pub fn fallout2_enter_encounter(&mut self, selected: Selected) -> Result<(), WorldError> {
+        if let Some(flags) = selected.forced {
+            return self.fallout2_enter_forced(selected.map, flags);
+        }
         self.fallout2_load_encounter_map(selected.map)?;
         let tables = self.fallout2_state()?.tables.clone();
         let Some(table) = tables.worldmap.tables.get(&selected.table) else {
@@ -267,6 +274,24 @@ impl<A: WorldAssets> WorldHost<A> {
                 continue;
             };
             self.fallout2_spawn_group(group.min, group.max, definition)?;
+        }
+        self.world_map_closed();
+        Ok(())
+    }
+    /// SPEC-024b §4.11 a forced encounter: the map through §5.7's step 1,
+    /// with no group, and the flags' effects.
+    fn fallout2_enter_forced(&mut self, map: u32, flags: u32) -> Result<(), WorldError> {
+        if flags & encounter_flag::FADEOUT != 0 {
+            self.library.faded_out = true;
+            self.world.emit(WorldEffect::Fade {
+                out: true,
+                duration: 0,
+                from_black: false,
+            });
+        }
+        self.fallout2_load_encounter_map(map)?;
+        if flags & encounter_flag::NO_CAR != 0 {
+            self.fallout2_state()?.driving = false;
         }
         self.world_map_closed();
         Ok(())

@@ -110,6 +110,10 @@ pub(crate) trait WorldEdition {
     fn flashing(start: u64, encounter: Self::Encounter) -> Self::Pending;
     /// A special encounter flashes the crosshair; others the bolt.
     fn special(encounter: Self::Encounter) -> bool;
+    /// Whether the encounter flashes at all.
+    fn flashes(_encounter: Self::Encounter) -> bool {
+        true
+    }
     fn button_at(point: [i32; 2]) -> Option<Self::Button>;
     fn button_contains(button: Self::Button, point: [i32; 2]) -> bool;
     /// The world map's side-panel button `button` was released over it.
@@ -335,6 +339,10 @@ impl MapPreview {
                 Leg::Encounter(encounter) => {
                     world.clear_dots();
                     world.journey = None;
+                    if !E::flashes(encounter) {
+                        E::enter_encounter(self, encounter);
+                        return Ok(true);
+                    }
                     let position = E::position(self).unwrap_or([0, 0]);
                     if let Some(world) = E::screen_mut(self) {
                         world.view = bounds.centered(position);

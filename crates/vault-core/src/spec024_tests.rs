@@ -116,7 +116,7 @@ pub(crate) fn run(host: &mut WorldHost<TestAssets>, ops: &[Op]) -> Run {
     let result = vm.run(host, 100_000);
     Run { vm, result }
 }
-fn diagnostics(host: &mut WorldHost<TestAssets>) -> Vec<String> {
+pub(crate) fn diagnostics(host: &mut WorldHost<TestAssets>) -> Vec<String> {
     host.world
         .effects
         .drain(..)
@@ -326,12 +326,51 @@ fn a_failed_operand_pops_everything_and_pushes_the_default() {
     assert_eq!(run(&mut host, &[I(4), W(0x81ec)]).float(), 2.0);
 }
 
+/// Decision D-40, on every X row of the oracle: run twice in one program,
+/// each pops its operands, pushes its default, diagnoses once, and the
+/// program ends normally.
+#[test]
+fn x_words_are_stubs_that_diagnose_once_per_program_and_never_halt() {
+    let mut rows = 0;
+    for line in ORACLE.lines().skip(1) {
+        let cells: Vec<&str> = line.split('\t').collect();
+        if cells[0] != "word" || cells[9] != "X" {
+            continue;
+        }
+        rows += 1;
+        let word = u16::from_str_radix(&cells[1][2..], 16).unwrap();
+        let classes = cells[6].split(',').map(|class| match class {
+            "S" => S(b"text"),
+            _ => I(0x7fff_0000),
+        });
+        let mut ops: Vec<Op> = classes.collect();
+        ops.push(W(word));
+        let call = ops.clone();
+        ops.extend(call);
+        let (mut host, _) = sfall_host();
+        let done = run(&mut host, &ops);
+        assert_eq!(done.result, Ok(RunOutcome::FragmentEnd), "{line}");
+        let pushed = cells[5] == "1";
+        let expected = if pushed { 2 } else { 0 };
+        assert_eq!(done.stack().len(), expected, "{line}");
+        if pushed && cells[7] == "S" {
+            assert_eq!(done.text(), b"", "{line}");
+        } else if pushed {
+            assert_eq!(done.ints(), [0, 0], "{line}");
+        }
+        assert_eq!(diagnostics(&mut host).len(), 1, "{line}");
+        assert_eq!(host.programs.len(), 0, "{line}");
+    }
+    assert_eq!(rows, 18);
+}
+
 #[test]
 fn a_p2_word_diagnoses_once_per_program_and_x_words_never_touch_memory() {
     let (mut host, _) = sfall_host();
+    // Two P2 rows of the oracle, `free_shader` twice.
     run(
         &mut host,
-        &[I(1), W(0x8162), I(1), W(0x8162), I(2), W(0x8171)],
+        &[I(1), W(0x8167), I(1), W(0x8167), I(2), W(0x8168)],
     );
     assert_eq!(diagnostics(&mut host).len(), 2);
     let done = run(&mut host, &[I(0x7fff_0000), W(0x8158)]);
@@ -499,10 +538,19 @@ fn the_math_and_string_words_run_from_scripts() {
         run(&mut host, &[S(b"metarule_exist"), S(b"floor2"), W(0x8277)]).ints(),
         [1]
     );
+    // §4.11 made `message_box` a P1 function, and `add_iface_tag` is P2.
     assert_eq!(
         run(
             &mut host,
             &[S(b"metarule_exist"), S(b"message_box"), W(0x8277)]
+        )
+        .ints(),
+        [1]
+    );
+    assert_eq!(
+        run(
+            &mut host,
+            &[S(b"metarule_exist"), S(b"add_iface_tag"), W(0x8277)]
         )
         .ints(),
         [0]
@@ -965,11 +1013,27 @@ fn the_words_that_make_arrays_give_temporary_lists() {
     );
     assert!(run(&mut host, &[I(objects), I(me as i32), W(0x8239)]).ints()[0] >= 0);
     let table = run(&mut host, &[S(b"get_metarule_table"), W(0x8276)]).ints()[0];
-    assert_eq!(run(&mut host, &[I(table), W(0x8231)]).ints(), [18]);
+    // The P1 names of the oracle, ascending by bytes.
+    let mut names: Vec<&str> = ORACLE
+        .lines()
+        .skip(1)
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .filter(|cells| cells[0] == "sfall_func" && cells[9] == "P1")
+        .map(|cells| cells[2])
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), 25);
     assert_eq!(
-        run(&mut host, &[I(table), I(0), W(0x822f)]).text(),
-        b"critter_inven_obj2"
+        run(&mut host, &[I(table), W(0x8231)]).ints(),
+        [names.len() as i32]
     );
+    for (index, name) in names.iter().enumerate() {
+        assert_eq!(
+            run(&mut host, &[I(table), I(index as i32), W(0x822f)]).text(),
+            name.as_bytes()
+        );
+    }
     host.sfall_end_of_step();
     assert_eq!(run(&mut host, &[I(table), W(0x8231)]).ints(), [-1]);
 }

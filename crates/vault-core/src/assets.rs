@@ -155,6 +155,10 @@ pub trait WorldAssets {
     /// `prototype` takes the place of its PID's until that reloads
     /// (SPEC-024b §4.8 `set_proto_data`).
     fn replace_prototype(&self, _prototype: Arc<Prototype>) {}
+    /// SPEC-024b §4.11: `bytes` takes precedence over `path` in the VFS
+    /// layers for every later read, and `None` ends that. Either way the
+    /// path's cached decode goes, so the next load sees the bytes.
+    fn set_virtual_file(&self, _path: &str, _bytes: Option<Vec<u8>>) {}
     /// The game whose map and prototype layouts are read (SPEC-016).
     fn game_profile(&self) -> crate::GameProfile {
         crate::GameProfile::Fallout1
@@ -231,6 +235,8 @@ pub struct VfsWorldAssets {
     /// normalized path: the checked program, or `None` for a refusal.
     /// Retail scripts are never entered.
     mod_scripts: RefCell<BTreeMap<String, Option<IntProgram>>>,
+    /// SPEC-024b §4.11 the session's virtual files, by canonical path.
+    virtual_files: RefCell<BTreeMap<String, Vec<u8>>>,
 }
 impl VfsWorldAssets {
     pub fn new(vfs: Arc<dyn Vfs>, language: &str) -> Result<Self, WorldError> {
@@ -260,6 +266,7 @@ impl VfsWorldAssets {
             diagnostics: RefCell::new(Vec::new()),
             enhanced_scripts: std::cell::Cell::new(false),
             sfall_scripts: std::cell::Cell::new(false),
+            virtual_files: RefCell::new(BTreeMap::new()),
             registry: ModRegistry::default(),
             game: std::cell::Cell::new(crate::GameProfile::Fallout1),
             mod_scripts: RefCell::new(BTreeMap::new()),
@@ -325,9 +332,16 @@ impl VfsWorldAssets {
         let files = self
             .files
             .get_or_init(|| self.vfs.files().cloned().collect());
-        VfsPath::new(path).is_ok_and(|path| files.contains(&path))
+        VfsPath::new(path).is_ok_and(|path| {
+            files.contains(&path) || self.virtual_files.borrow().contains_key(path.as_str())
+        })
     }
     pub fn read(&self, path: &str) -> Result<Vec<u8>, WorldError> {
+        if let Ok(path) = VfsPath::new(path)
+            && let Some(bytes) = self.virtual_files.borrow().get(path.as_str())
+        {
+            return Ok(bytes.clone());
+        }
         self.vfs
             .read_bounded(path, MAX_ASSET_BYTES)
             .map_err(|error| WorldError::Invalid(format!("{path}: {error}")))
@@ -538,6 +552,35 @@ impl VfsWorldAssets {
 impl WorldAssets for VfsWorldAssets {
     fn take_diagnostics(&self) -> Vec<String> {
         std::mem::take(&mut *self.diagnostics.borrow_mut())
+    }
+    fn set_virtual_file(&self, path: &str, bytes: Option<Vec<u8>>) {
+        let Ok(path) = VfsPath::new(path) else {
+            return;
+        };
+        let path = path.as_str();
+        let same = |key: &String| VfsPath::new(key).is_ok_and(|key| key.as_str() == path);
+        let mut files = self.virtual_files.borrow_mut();
+        match bytes {
+            Some(bytes) => {
+                files.insert(path.to_owned(), bytes);
+            }
+            None => {
+                files.remove(path);
+            }
+        }
+        self.messages.borrow_mut().retain(|key, _| !same(key));
+        self.game_catalogs.borrow_mut().retain(|key, _| !same(key));
+        self.lists.borrow_mut().retain(|key, _| !same(key));
+        self.palettes.borrow_mut().retain(|key, _| !same(key));
+        self.programs.borrow_mut().retain(|_, (key, _)| !same(key));
+        self.mod_scripts.borrow_mut().retain(|key, _| !same(key));
+        let mut frames = self.frames.borrow_mut();
+        if let Some(key) = frames.keys().find(|key| same(key)).cloned()
+            && let Some(Ok(frame)) = frames.remove(&key)
+        {
+            let mut total = self.frame_bytes.borrow_mut();
+            *total = total.saturating_sub(frame_cost(&frame));
+        }
     }
     fn replace_prototype(&self, prototype: Arc<Prototype>) {
         self.prototypes

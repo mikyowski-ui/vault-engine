@@ -205,6 +205,8 @@ impl WorldState {
         if object.raw.flags.0 & refused != 0
             || matches!(data.data, ItemData::Container { .. })
             || !object.inventory.is_empty()
+            // SPEC-024b §4.11: a unique ID stays with one item.
+            || (self.sfall.is_some() && crate::sfall::UNIQUE_IDS.contains(&object.raw.id))
         {
             return None;
         }

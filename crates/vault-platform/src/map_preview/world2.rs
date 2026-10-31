@@ -28,6 +28,7 @@ use std::ops::{Deref, DerefMut};
 use vault_core::{
     Fallout2Travel,
     fallout2::{self, Fallout2World, Selected},
+    sfall::encounter_flag,
     ui::{
         ColorKey, ERROR_SOUND, Rect,
         fallout2::{self as ui2, TownList, panel, view},
@@ -190,6 +191,10 @@ impl WorldEdition for Fallout2 {
     }
     fn special(selected: Selected) -> bool {
         selected.special
+    }
+    /// SPEC-024b §4.11: `ENCOUNTER_FLAG_NO_ICON` shows no flashing icon.
+    fn flashes(selected: Selected) -> bool {
+        selected.forced.unwrap_or(0) & encounter_flag::NO_ICON == 0
     }
     fn button_at(point: [i32; 2]) -> Option<PanelButton> {
         PanelButton::at(point)

@@ -149,7 +149,8 @@ fn spec018_encounter_selection() {
             table: 0,
             entry: 1,
             map: 0,
-            special: false
+            special: false,
+            forced: None,
         })
     );
     assert!(unused.is_empty());
@@ -169,7 +170,8 @@ fn spec018_encounter_selection() {
             table: 0,
             entry: 3,
             map: 2,
-            special: true
+            special: true,
+            forced: None,
         })
     );
     assert_eq!(world.counter(0, 3), 0);
@@ -415,6 +417,7 @@ fn spec018_entering_an_encounter_spawns_its_groups() {
         entry: 1,
         map: 0,
         special: false,
+        forced: None,
     })
     .unwrap();
     assert!(host.world.rng.unused_script().is_empty());
@@ -493,6 +496,7 @@ fn spec018_revision2_spawning_distances_and_objects() {
         entry: 1,
         map: 0,
         special: false,
+        forced: None,
     })
     .unwrap();
     assert!(host.world.rng.unused_script().is_empty());

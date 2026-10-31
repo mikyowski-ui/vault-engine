@@ -1312,14 +1312,7 @@ impl WorldState {
             return Err(WorldError::Invalid("world object limit exceeded".into()));
         }
         if object.raw.id == 0 || self.id_index().contains_key(&object.raw.id) {
-            while {
-                let next = self.next_uid;
-                self.id_index().contains_key(&next)
-            } {
-                self.next_uid = self.next_uid.checked_add(1).ok_or(WorldError::Arithmetic)?;
-            }
-            object.raw.id = self.next_uid;
-            self.next_uid = self.next_uid.checked_add(1).ok_or(WorldError::Arithmetic)?;
+            object.raw.id = self.allocate_object_id()?;
         }
         let reference = self.next_reference;
         self.next_reference = self
@@ -1387,6 +1380,27 @@ impl WorldState {
     }
     /// The unique-id index, rebuilt when it no longer mirrors the live
     /// objects (see `unique_ids`).
+    /// The next object ID no object holds.
+    pub(crate) fn allocate_object_id(&mut self) -> Result<u32, WorldError> {
+        while {
+            let next = self.next_uid;
+            self.id_index().contains_key(&next)
+        } {
+            self.next_uid = self.next_uid.checked_add(1).ok_or(WorldError::Arithmetic)?;
+        }
+        let id = self.next_uid;
+        self.next_uid = self.next_uid.checked_add(1).ok_or(WorldError::Arithmetic)?;
+        Ok(id)
+    }
+    /// `reference` takes object ID `id`.
+    pub(crate) fn set_object_id(&mut self, reference: ObjectRef, id: u32) {
+        let Some(object) = self.get_mut(reference) else {
+            return;
+        };
+        let old = std::mem::replace(&mut object.raw.id, id);
+        self.unique_ids.remove(&old);
+        self.unique_ids.insert(id, reference);
+    }
     fn id_index(&mut self) -> &BTreeMap<u32, ObjectRef> {
         let player_id = self.get(self.player).map(|object| object.raw.id);
         let stale = self.unique_ids.len() != self.references.len()

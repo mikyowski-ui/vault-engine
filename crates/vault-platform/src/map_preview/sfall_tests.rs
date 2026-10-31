@@ -64,9 +64,6 @@ struct Game {
     _layer: tempfile::TempDir,
 }
 fn game(hook: i32, body: &[Op]) -> Game {
-    let (install, base) = synthetic_install(passive_script());
-    let layer = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(layer.path().join("scripts")).unwrap();
     let script = fixture::corpus_program(
         &[],
         &[
@@ -77,6 +74,13 @@ fn game(hook: i32, body: &[Op]) -> Game {
             (b"member", fixture::returning(bytes(body))),
         ],
     );
+    with_script(script)
+}
+/// A game in sfall mode whose `gl_test.int` is `script`.
+fn with_script(script: Vec<u8>) -> Game {
+    let (install, base) = synthetic_install(passive_script());
+    let layer = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(layer.path().join("scripts")).unwrap();
     std::fs::write(layer.path().join("scripts/gl_test.int"), script).unwrap();
     // What the displays draw with: the interface font, and a digit strip
     // whose cells differ, as the corpus's one-color art does not.
@@ -503,4 +507,75 @@ fn the_screens_report_their_game_mode_bits() {
     let list = world.host.world.get(world.host.world.player).unwrap();
     assert!(list.character.is_some());
     assert_eq!(world.sfall_screens(), game_mode::INVENTORY);
+}
+
+/// The literals of [`spoken`]: `message_box`, `hi` and `signal_close_game`.
+const STRINGS: [&[u8]; 3] = [b"message_box", b"hi", b"signal_close_game"];
+const MESSAGE_BOX: u32 = 6;
+const BOX_TEXT: u32 = MESSAGE_BOX + 14;
+const CLOSE_GAME: u32 = BOX_TEXT + 6;
+const SET_REPEAT: u16 = 0x816a;
+const TAP_KEY: u16 = 0x8162;
+const FUNC0: u16 = 0x8276;
+const FUNC1: u16 = 0x8277;
+/// A global script whose `start` is `body`, and which `start` makes repeat
+/// every step.
+fn spoken(body: Vec<u8>) -> Game {
+    let mut start = body;
+    start.extend(bytes(&[I(1), W(SET_REPEAT)]));
+    with_script(fixture::corpus_program(
+        &STRINGS,
+        &[(b"start", fixture::returning(start))],
+    ))
+}
+fn message_box(global: i32) -> Vec<u8> {
+    let mut body = fixture::push(global);
+    body.extend(fixture::literal(MESSAGE_BOX));
+    body.extend(fixture::literal(BOX_TEXT));
+    body.extend(fixture::instruction(FUNC1));
+    body.extend(fixture::instruction(SET_GLOBAL));
+    body
+}
+
+#[test]
+fn message_box_is_modal_and_its_key_gives_the_script_the_result() {
+    let mut game = spoken(message_box(5));
+    assert_eq!(global(&game.world, 5), -1, "session setup cannot wait");
+    // The repeat opens the box, and the next step shows it.
+    game.world.tick(32).unwrap();
+    game.world.tick(48).unwrap();
+    assert!(game.world.dialog.is_some());
+    let before = game.world.host.world.clock.ticks;
+    game.world.tick(64).unwrap();
+    assert_eq!(game.world.host.world.clock.ticks, before, "the world waits");
+    assert_eq!(global(&game.world, 5), -1, "no result yet");
+    game.world.image().unwrap();
+    assert!(game.world.step(KeyCode::Enter));
+    assert!(game.world.dialog.is_none());
+    assert_eq!(global(&game.world, 5), 1, "Enter is Yes or Done");
+    assert!(game.world.host.sfall_open_message_box().is_none());
+    // The next repeat opens another, and Escape is No.
+    game.world.tick(80).unwrap();
+    game.world.tick(96).unwrap();
+    assert!(game.world.step(KeyCode::Escape));
+    assert_eq!(global(&game.world, 5), 0);
+}
+
+#[test]
+fn a_tapped_key_reaches_the_screen_at_the_next_input_phase() {
+    let mut game = spoken(bytes(&[I(0x17), W(TAP_KEY)]));
+    game.world.image().unwrap();
+    game.world.tick(32).unwrap();
+    assert!(matches!(game.world.screen, Screen::Inventory(_)));
+}
+
+#[test]
+fn signal_close_game_ends_the_session_with_no_prompt() {
+    let mut body = fixture::push(5);
+    body.extend(fixture::literal(CLOSE_GAME));
+    body.extend(fixture::instruction(FUNC0));
+    body.extend(fixture::instruction(SET_GLOBAL));
+    let game = spoken(body);
+    assert!(game.world.quit_requested);
+    assert!(game.world.dialog.is_none());
 }

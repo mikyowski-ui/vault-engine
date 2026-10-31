@@ -366,13 +366,16 @@ impl MapPreview {
         use vault_core::ui::fallout2 as ui2;
         let sheet = self.host.world.player_sheet();
         let flags = sheet.map_or(0, |sheet| sheet.flags);
+        // SPEC-024b §4.11: a script's flag lights its box too.
+        let tag = |tag| self.host.sfall_tag_flag(tag);
         let boxes = ui2::indicators(
-            flags & progression::ADDICTED_FLAG != 0,
-            flags & 1 != 0,
-            flags & progression::LEVEL_UP_FLAG != 0,
+            flags & progression::ADDICTED_FLAG != 0 || tag(4),
+            flags & 1 != 0 || tag(0),
+            flags & progression::LEVEL_UP_FLAG != 0 || tag(3),
             sheet.map_or(0, |sheet| sheet.poison),
             sheet.map_or(0, |sheet| sheet.radiation),
         );
+        let boxes = ui2::with_custom(boxes, &self.host.sfall_custom_tags());
         let Some(geometry) = self.bar_geometry() else {
             return;
         };

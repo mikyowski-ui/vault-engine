@@ -29,6 +29,8 @@ pub struct ManagedWindow {
     pub text: Vec<u8>,
     pub buttons: BTreeMap<Vec<u8>, Widget>,
     pub regions: BTreeMap<Vec<u8>, Widget>,
+    /// SPEC-024b §4.11 `create_win`'s flags; 0 from `createwin`.
+    pub flags: i32,
 }
 #[derive(Debug, Clone)]
 pub struct SoundState {
@@ -172,6 +174,50 @@ impl LibraryState {
                 / divisor,
         )
         .map_err(|_| VmError::Arithmetic)
+    }
+    fn insert_window(
+        &mut self,
+        name: Vec<u8>,
+        rectangle: [i32; 4],
+        flags: i32,
+    ) -> Result<(), VmError> {
+        if self.windows.len() >= 64 || self.windows.contains_key(&name) {
+            return Err(error("managed window creation failed"));
+        }
+        let id = self.next_window;
+        self.next_window += 1;
+        self.windows.insert(
+            name,
+            ManagedWindow {
+                id,
+                rectangle,
+                cursor: [0; 2],
+                fill: [0; 3],
+                text: Vec::new(),
+                buttons: BTreeMap::new(),
+                regions: BTreeMap::new(),
+                flags,
+            },
+        );
+        Ok(())
+    }
+    /// SPEC-024b §4.11 `create_win`: as `createwin`, with its flags.
+    pub(crate) fn create_window(
+        &mut self,
+        name: &[u8],
+        [x, y, width, height]: [i32; 4],
+        flags: i32,
+    ) -> Result<(), VmError> {
+        let rectangle = [
+            self.scaled(x, false)?,
+            self.scaled(y, true)?,
+            self.scaled(width, false)?,
+            self.scaled(height, true)?,
+        ];
+        if rectangle[2] <= 0 || rectangle[3] <= 0 || rectangle[2] > 8192 || rectangle[3] > 8192 {
+            return Err(error("invalid managed window dimensions"));
+        }
+        self.insert_window(key(name), rectangle, flags)
     }
     fn window_mut(&mut self, id: i32) -> Result<&mut ManagedWindow, VmError> {
         self.windows
@@ -332,24 +378,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     return Err(error("invalid managed window dimensions"));
                 }
                 if word == 0x8062 {
-                    if self.library.windows.len() >= 64 || self.library.windows.contains_key(&name)
-                    {
-                        return Err(error("managed window creation failed"));
-                    }
-                    let id = self.library.next_window;
-                    self.library.next_window += 1;
-                    self.library.windows.insert(
-                        name,
-                        ManagedWindow {
-                            id,
-                            rectangle,
-                            cursor: [0; 2],
-                            fill: [0; 3],
-                            text: Vec::new(),
-                            buttons: BTreeMap::new(),
-                            regions: BTreeMap::new(),
-                        },
-                    );
+                    self.library.insert_window(name, rectangle, 0)?;
                 } else {
                     self.library
                         .windows

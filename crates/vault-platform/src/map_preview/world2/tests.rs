@@ -317,6 +317,29 @@ fn spec019_the_fuel_gauge_and_running_dry() {
 }
 
 #[test]
+fn spec024_a_forced_encounter_flashes_unless_its_flags_say_no_icon() {
+    let selected = |forced| Selected {
+        table: 0,
+        entry: 0,
+        map: 0,
+        special: false,
+        forced,
+    };
+    assert!(<super::Fallout2 as super::WorldEdition>::flashes(selected(
+        None
+    )));
+    assert!(<super::Fallout2 as super::WorldEdition>::flashes(selected(
+        Some(0)
+    )));
+    assert!(<super::Fallout2 as super::WorldEdition>::flashes(selected(
+        Some(0x8)
+    )));
+    assert!(!<super::Fallout2 as super::WorldEdition>::flashes(
+        selected(Some(0x4))
+    ));
+}
+
+#[test]
 fn spec019_encounter_flash_and_terrain_drop() {
     let dir = corpus();
     let mut preview = preview(dir.path());
@@ -330,6 +353,7 @@ fn spec019_encounter_flash_and_terrain_drop() {
                 entry: 0,
                 map: 0,
                 special: false,
+                forced: None,
             },
         });
     }

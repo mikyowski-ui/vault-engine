@@ -12,6 +12,7 @@ use crate::{
     host::{WorldHost, reserve_null_string},
     host_combat::Spray,
     host_sfall::game_mode,
+    host_sfall_rows::BOX_WAIT,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use vault_vm::{
@@ -251,6 +252,7 @@ impl<A: WorldAssets> WorldHost<A> {
     ) {
         match run {
             Ok(RunOutcome::Ended | RunOutcome::Stopped | RunOutcome::FragmentEnd) => {}
+            Ok(RunOutcome::Waiting) if vm.wait_predicate == BOX_WAIT => {}
             Ok(outcome) => {
                 self.world.diagnostic(format!(
                     "hook script {}: {outcome:?} ends this member",
@@ -271,6 +273,33 @@ impl<A: WorldAssets> WorldHost<A> {
             }
         }
     }
+    /// A program cannot wait in a hook member (§6.5) or in session setup
+    /// (§6.1), so §4.11's `message_box` gives -1 there.
+    pub(crate) fn sfall_cannot_wait(&mut self) -> bool {
+        self.hooks()
+            .is_some_and(|hooks| hooks.in_setup || !hooks.contexts.is_empty())
+    }
+    /// A global script a closed message box held: `release` gives it the
+    /// result, and it runs on to its end.
+    pub(crate) fn sfall_resume_member(
+        &mut self,
+        program: u32,
+        release: impl FnOnce(&mut Vm) -> Result<(), VmError>,
+    ) -> Result<(), VmError> {
+        let Some(mut vm) = self
+            .hooks()
+            .and_then(|hooks| hooks.programs.remove(&program))
+        else {
+            return Ok(());
+        };
+        let released = release(&mut vm);
+        let run = self.run_vm(&mut vm);
+        self.finish_member(&mut vm, run, None);
+        if let Some(hooks) = self.hooks() {
+            hooks.programs.insert(program, vm);
+        }
+        released
+    }
     /// Run one member to completion (SPEC-004 §3.7's synchronous call).
     fn run_member(&mut self, member: Member) {
         let Some(mut vm) = self
@@ -284,6 +313,13 @@ impl<A: WorldAssets> WorldHost<A> {
             ));
             return;
         };
+        // A global script holds at its message box until the box closes.
+        if vm.wait_predicate == BOX_WAIT && vm.status.contains(VmStatus::WAITING) {
+            if let Some(hooks) = self.hooks() {
+                hooks.programs.insert(member.program, vm);
+            }
+            return;
+        }
         let procedure = member
             .procedure
             .or_else(|| vm.program.find_procedure(b"start", true));

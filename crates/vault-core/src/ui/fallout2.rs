@@ -306,6 +306,8 @@ pub enum Indicator {
     Level,
     Poisoned,
     Radiated,
+    /// SPEC-024b §4.11 a custom box, by its tag.
+    Custom(i32),
 }
 impl Indicator {
     /// `intrface.msg` label ID, engine string and color.
@@ -316,6 +318,7 @@ impl Indicator {
             Self::Addict => (102, text::INDICATORS[2], ColorKey::RED),
             Self::Poisoned => (103, text::INDICATORS[3], ColorKey::RED),
             Self::Radiated => (104, text::INDICATORS[4], ColorKey::RED),
+            Self::Custom(tag) => (100 + tag, "", ColorKey::GREEN),
         }
     }
 }
@@ -337,6 +340,14 @@ pub fn indicators(
     .into_iter()
     .filter_map(|(on, indicator)| on.then_some(indicator))
     .collect()
+}
+
+/// SPEC-024b §4.11: the custom boxes follow the named ones, in ascending tag
+/// order, and at most five slots exist.
+pub fn with_custom(mut boxes: Vec<Indicator>, tags: &[i32]) -> Vec<Indicator> {
+    boxes.extend(tags.iter().copied().map(Indicator::Custom));
+    boxes.truncate(5);
+    boxes
 }
 
 /// §3.12.1 the view over a world of `world` pixels (SPEC-018 §5.3): the

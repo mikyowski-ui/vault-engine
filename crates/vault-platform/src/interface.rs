@@ -214,6 +214,31 @@ impl Painter<'_> {
         ) as i32
     }
     /// Draw text centered in `width` from `origin`.
+    /// `text` in palette index `color`, as a script names a color.
+    pub fn text_indexed(
+        &self,
+        image: &mut IndexedImage,
+        font: i32,
+        color: u8,
+        text: &[u8],
+        origin: [i32; 2],
+        limit: i32,
+    ) -> i32 {
+        let Some(font) = self.font(font) else {
+            return 0;
+        };
+        image.draw_text(
+            &font,
+            self.palette,
+            text,
+            origin,
+            limit.max(0) as u32,
+            TextStyle {
+                foreground: color,
+                ..Default::default()
+            },
+        ) as i32
+    }
     pub fn centered(
         &self,
         image: &mut IndexedImage,

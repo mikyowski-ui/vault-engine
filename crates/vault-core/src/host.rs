@@ -287,6 +287,9 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn replace_prototype(&self, prototype: std::sync::Arc<vault_formats::Prototype>) {
         (**self).replace_prototype(prototype)
     }
+    fn set_virtual_file(&self, path: &str, bytes: Option<Vec<u8>>) {
+        (**self).set_virtual_file(path, bytes)
+    }
     fn game_profile(&self) -> crate::GameProfile {
         (**self).game_profile()
     }
@@ -2599,6 +2602,9 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
             // SPEC-005 §3.2 safe rule: wait until playback ends (the
             // reference's predicate has the opposite polarity).
             Ok(!self.library.movie_playing)
+        } else if reference == crate::host_sfall_rows::BOX_WAIT {
+            // SPEC-024b §4.11: a message box closes through its own call.
+            Ok(false)
         } else {
             Err(VmError::Host("unknown wait predicate".into()))
         }

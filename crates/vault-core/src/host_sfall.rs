@@ -19,7 +19,7 @@ use vault_formats::pro::Category;
 use vault_vm::{
     ExternalValue, Value, Vm, VmError,
     extensions::{Argument, FALLOUT2, HostCall},
-    sfall::{self, Class, SfallRow, SfallValue, Tier},
+    sfall::{self, Class, SfallRow, Tier},
     sfall_arrays::{ArrayStore, Storage},
 };
 
@@ -59,6 +59,9 @@ struct SelfOverride {
 }
 
 pub use crate::host_sfall_hooks::{Preview, SfallHooks};
+pub use crate::host_sfall_rows::MessageBox;
+use crate::host_sfall_rows::Promoted;
+pub use vault_vm::sfall::SfallValue;
 
 /// The session's sfall state on the host side: everything scripts rebuild,
 /// so none of it is saved or hashed. `None` on the host with the mode off.
@@ -86,6 +89,11 @@ pub struct SfallHost {
     pub(crate) key_queue: VecDeque<i32>,
     /// Part 3: hooks and global scripts.
     pub(crate) hooks: SfallHooks,
+    /// §4.11: the rows Revision 3 promoted.
+    pub(crate) promoted: Promoted,
+    /// `signal_close_game` asked to end the session at this step's end.
+    pub(crate) close_signalled: bool,
+    pub(crate) closed: bool,
 }
 
 fn integer(value: i32) -> Option<SfallValue> {
@@ -126,6 +134,7 @@ impl<A: WorldAssets> WorldHost<A> {
             sfall.ini_configs.clear();
             sfall.last_targets.clear();
         }
+        self.sfall_clear_tables();
         self.sfall_setup_owed();
     }
     /// The screens' `get_game_mode` bits, from the shell.
@@ -177,7 +186,7 @@ impl<A: WorldAssets> WorldHost<A> {
         });
     }
     /// Once per program and row: a stub's diagnostic (§4.10).
-    fn stub_diagnostic(&mut self, vm: &Vm, name: &'static str) {
+    pub(crate) fn stub_diagnostic(&mut self, vm: &Vm, name: &'static str) {
         let first = self
             .sfall
             .as_deref_mut()
@@ -241,6 +250,10 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world
             .diagnostic(format!("{}: failed operand", row.name));
         sfall::failed_default(row)
+    }
+    /// A failed operand a word found after reading its operands (§4.1).
+    pub(crate) fn sfall_failed(&mut self, row: &SfallRow) -> Option<SfallValue> {
+        self.failed(row)
     }
     /// A P1 word, with its operands popped.
     fn sfall_p1(
@@ -566,10 +579,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.set_sfall_arg(int(0), int(1));
                 None
             }
-            _ => {
-                self.stub_diagnostic(vm, row.name);
-                sfall::stub_default(row)
-            }
+            _ => self.sfall_promoted(vm, row, args)?,
         })
     }
     /// `sfall_func0..8` (§4.2): the name, then its arguments. Every call
@@ -602,6 +612,10 @@ impl<A: WorldAssets> WorldHost<A> {
                             return Ok(integer(0));
                         }
                     }
+                }
+                // The result of a box that opens is pushed when it closes.
+                if name == b"message_box" {
+                    return Ok(self.sfall_message_box(vm, &args));
                 }
                 let result = self.sfall_named(vm, &shown, &args)?;
                 Ok(Some(match result {
@@ -736,6 +750,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 };
                 Ok(integer(self.critter_inventory_object(critter, selector)))
             }
+            "set_unique_id" => {
+                let (Some(object), Some(flag)) = (live(self, 0), int(1, Class::I)) else {
+                    return failed(self);
+                };
+                Ok(integer(self.set_unique_id(object, flag)))
+            }
             "set_ini_setting" => {
                 let (Some(setting), Some(value)) = (text(0), args.get(1)) else {
                     return failed(self);
@@ -751,7 +771,10 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.write_ini(&setting, &value);
                 Ok(None)
             }
-            _ => self.sfall_array_function(vm, name, args),
+            _ => match self.sfall_promoted_function(name, args) {
+                Some(result) => Ok(result),
+                None => self.sfall_array_function(vm, name, args),
+            },
         }
     }
     /// The functions of part 2 that make arrays.
@@ -865,7 +888,7 @@ impl<A: WorldAssets> WorldHost<A> {
         id
     }
     /// The store: it exists with the mode on.
-    fn arrays(&mut self) -> &mut ArrayStore {
+    pub(crate) fn arrays(&mut self) -> &mut ArrayStore {
         &mut self.world.sfall.get_or_insert_default().arrays
     }
     /// `resize_array`, whose shuffle draws from the gameplay generator
@@ -1062,13 +1085,16 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// `ModifiedIni`, in whichever section of `ddraw.ini` holds it.
     fn modified_ini(&mut self) -> i32 {
-        self.ini_file("ddraw.ini")
-            .and_then(|file| {
-                file.sections
-                    .iter()
-                    .find_map(|section| section.get("ModifiedIni"))
-            })
+        self.ini_any_section("ddraw.ini", "ModifiedIni")
             .map_or(0, |value| sfall::atoi(value.as_bytes()))
+    }
+    /// `key`'s value, in whichever section of `file` holds it first.
+    pub(crate) fn ini_any_section(&mut self, file: &str, key: &str) -> Option<String> {
+        let file = self.ini_file(file)?;
+        file.sections
+            .iter()
+            .find_map(|section| section.get(key))
+            .map(str::to_owned)
     }
     /// `set_ini_setting`: the cache, then the writable folder, never an
     /// archive. A missing file is created.
@@ -1115,6 +1141,7 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Some(sfall) = self.sfall.as_deref_mut() {
             sfall.steps = sfall.steps.saturating_add(1);
             sfall.lists.clear();
+            sfall.closed |= std::mem::take(&mut sfall.close_signalled);
         }
         if let Some(state) = self.world.sfall.as_deref_mut() {
             state.arrays.end_of_step();
