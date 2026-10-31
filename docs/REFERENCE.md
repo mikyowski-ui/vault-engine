@@ -3435,8 +3435,9 @@ Sfall mode (SPEC-024b), against the spec's boundaries:
 
 - `HOOK_COMBATDAMAGE` has no AI area-safety site: the engine's AI runs no such
   simulation, so the spec's clause has nothing to attach to.
-- A nested chain that reaches a script already running skips that member, with a
-  diagnostic.
+- `set_global_var` reaches a member in the script that called it, as §6.18 asks. Any
+  other word that causes a chain skips a member whose script is already running,
+  with a diagnostic.
 - The key hook and `tap_key` map keys the engine's table knows; another scan code
   leaves the physical key in place, and a tapped one presses nothing.
 - A virtual file's write drops the cached decode of a frame, message file, list,

@@ -848,7 +848,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     .is_some_and(|(array, index)| index < array.len());
                 // SPEC-024b §6.18: the index is valid, and nothing is stored yet.
                 let value = if valid {
-                    self.hook_global_var(call.int(1), call.int(0))
+                    self.hook_global_var(vm, call.int(1), call.int(0))
                 } else {
                     call.int(0)
                 };

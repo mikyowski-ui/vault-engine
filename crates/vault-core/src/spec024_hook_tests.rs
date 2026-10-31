@@ -17,7 +17,7 @@ use crate::{
 };
 use Op::{F, I, S, W};
 use vault_vm::{
-    IntProgram, WordSet,
+    IntProgram, Vm, WordSet,
     sfall::{self, SfallValue},
     sfall_arrays::Storage,
 };
@@ -845,7 +845,8 @@ fn sequence(body: &[Op], hooks: bool) -> (Vec<u64>, u64) {
         // sequence reaches none of them.
         host.hook_use_on_held(attacker, attacker, defender);
         let _ = host.hook_use(attacker, 0);
-        host.hook_global_var(0, 1);
+        host.world.gvars.get_or_insert_with(|| vec![0]);
+        run(&mut host, &[I(0), I(0), W(0x80c6)]);
         host.hook_std_procedure(6, attacker, defender, 0, 0);
         host.hook_map_entry(0);
         host.sfall_end_of_step();
@@ -1305,6 +1306,99 @@ fn h17_row(cells: &[&str]) {
     assert_eq!(format!("final=GVAR 12 = {stored}; order=m"), cells[4]);
 }
 
+/// A global script's own member, while that script is still running.
+#[test]
+fn a_script_that_writes_a_global_in_its_start_runs_its_own_member() {
+    let (mut host, _) = sfall_host();
+    host.world.gvars = Some(vec![0; 16]);
+    let start = [
+        I(HOOK_SETGLOBALVAR),
+        I(2),
+        REGISTER_PROC,
+        I(3),
+        I(5),
+        W(0x80c6),
+    ];
+    let mut body = member(2, "rets=[9]");
+    body.extend([I(4), I(1), SET_GLOBAL]);
+    install(&mut host, "gl_0.int", script(&start, &[("m", &body)]));
+    set_up(&mut host);
+    assert_eq!(saw(&host, HOOK_SETGLOBALVAR), (vec![3, 5], 1));
+    assert_eq!(
+        host.world.gvars.as_ref().unwrap()[3],
+        9,
+        "the return stands"
+    );
+    assert_eq!(global(&host, 4), 1, "the member ran to its end");
+    assert_eq!(diagnostics(&mut host), Vec::<String>::new());
+    // The script goes on after the word, and its stack is as it was.
+    run(&mut host, &[I(6), I(1), W(0x80c6)]);
+    assert_eq!(saw(&host, HOOK_SETGLOBALVAR), (vec![6, 1], 2));
+}
+
+/// §6.18: a member's own write runs a nested chain on that same member,
+/// each with its own context, until §6.5's limit. Past it the write stores.
+#[test]
+fn a_member_that_writes_a_global_nests_its_own_chain_to_the_limit() {
+    let (mut host, _) = sfall_host();
+    host.world.gvars = Some(vec![0; 16]);
+    let body = [
+        I(1),
+        I(1),
+        GLOBAL_INT,
+        I(1),
+        ADD,
+        SET_GLOBAL,
+        GET_ARG,
+        I(1),
+        ADD,
+        I(7),
+        W(0x80c6),
+        I(9),
+        SET_RETURN,
+    ];
+    registered(&mut host, HOOK_SETGLOBALVAR, &body);
+    host.world.effects.clear();
+    run(&mut host, &[I(3), I(5), W(0x80c6)]);
+    assert_eq!(global(&host, 1), 8, "eight nested chains");
+    let stored = host.world.gvars.as_ref().unwrap();
+    // Each outer chain's return was written after its nested one came back.
+    assert_eq!(
+        stored[3..=10],
+        [9; 8],
+        "the outer contexts resumed untouched"
+    );
+    assert_eq!(stored[11], 7, "the ninth write still stores its value");
+    let lines = diagnostics(&mut host);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("past 8 nested chains"), "{lines:?}");
+}
+
+/// Two scripts write inside each other's chains: neither is skipped, and
+/// §6.5's limit ends the walk.
+#[test]
+fn two_members_that_write_globals_reach_each_other() {
+    let (mut host, _) = sfall_host();
+    host.world.gvars = Some(vec![0; 16]);
+    let register = [I(HOOK_SETGLOBALVAR), I(2), REGISTER_PROC];
+    let stepper = |digit: i32| {
+        let mut body = traced(digit);
+        body.extend([GET_ARG, I(1), ADD, I(7), W(0x80c6)]);
+        body
+    };
+    let (first, second) = (stepper(1), stepper(2));
+    install(&mut host, "gl_0.int", script(&register, &[("m", &first)]));
+    install(&mut host, "gl_1.int", script(&register, &[("m", &second)]));
+    set_up(&mut host);
+    host.world.effects.clear();
+    run(&mut host, &[I(3), I(5), W(0x80c6)]);
+    let lines = diagnostics(&mut host);
+    assert!(
+        !lines.iter().any(|line| line.contains("is running")),
+        "{lines:?}"
+    );
+}
+
 #[test]
 fn hook_29_set_global_var_can_replace_the_value_stored() {
     let row = sfall::hook_row(HOOK_SETGLOBALVAR).unwrap();
@@ -1591,7 +1685,7 @@ fn with_the_mode_off_the_hook_paths_return_the_engine_value() {
     assert!(off.sfall_inventory_move(1, 2, 3));
     assert_eq!(off.sfall_key(true, 30, 65), 30);
     assert_eq!(off.run_hook(HOOK_TOHIT, Vec::new()), None);
-    assert_eq!(off.hook_global_var(1, 5), 5);
+    assert_eq!(off.hook_global_var(&mut Vm::new(base(&[])), 1, 5), 5);
     assert_eq!(off.hook_map_entry(3), 3);
     assert!(!off.hook_std_procedure(6, 0, 0, 0, 0));
     assert!(!off.hook_item_use(0, 0).unwrap());

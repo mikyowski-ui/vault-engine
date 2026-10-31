@@ -301,6 +301,31 @@ impl<A: WorldAssets> WorldHost<A> {
             }
         }
     }
+    /// `body`, which runs `hook`'s chain from a word of running `vm`. A member
+    /// of that chain's own script is entered by SPEC-004 §3.7's synchronous
+    /// call, as any member is, so `vm` waits in the programs meanwhile.
+    fn reentered<T>(&mut self, vm: &mut Vm, hook: i32, body: impl FnOnce(&mut Self) -> T) -> T {
+        let id = vm.id;
+        let member = self.hooks().is_some_and(|hooks| {
+            let chain = hooks.chains.get(&hook);
+            chain.is_some_and(|chain| chain.members().iter().any(|m| m.program == id))
+        });
+        if !member {
+            return body(self);
+        }
+        let stand_in = Vm::new(vm.program.clone());
+        let running = std::mem::replace(vm, stand_in);
+        if let Some(hooks) = self.hooks() {
+            hooks.programs.insert(id, running);
+        }
+        let result = body(self);
+        if let Some(running) = self.hooks().and_then(|hooks| hooks.programs.remove(&id)) {
+            *vm = running;
+        }
+        // The nested run's end must not end the outer run's.
+        self.active.insert(id);
+        result
+    }
     /// A program cannot wait in a hook member (§6.5) or in session setup
     /// (§6.1), so §4.11's `message_box` gives -1 there.
     pub(crate) fn sfall_cannot_wait(&mut self) -> bool {
@@ -821,13 +846,15 @@ impl<A: WorldAssets> WorldHost<A> {
         }
     }
     /// `HOOK_SETGLOBALVAR` (§6.18): the value `set_global_var` stores.
-    pub(crate) fn hook_global_var(&mut self, index: i32, value: i32) -> i32 {
+    pub(crate) fn hook_global_var(&mut self, vm: &mut Vm, index: i32, value: i32) -> i32 {
         if self.sfall.is_none() {
             return value;
         }
-        self.run_hook(HOOK_SETGLOBALVAR, vec![int(index), int(value)])
-            .and_then(|rets| int_return(&rets, 0))
-            .unwrap_or(value)
+        self.reentered(vm, HOOK_SETGLOBALVAR, |host| {
+            host.run_hook(HOOK_SETGLOBALVAR, vec![int(index), int(value)])
+        })
+        .and_then(|rets| int_return(&rets, 0))
+        .unwrap_or(value)
     }
     /// `HOOK_TOHIT` (§6.8) on `attack`'s hit chance: the chance after the
     /// cap, or what the chain made of it, clamped to -99 through 999.

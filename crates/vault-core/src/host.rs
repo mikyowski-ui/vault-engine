@@ -81,7 +81,7 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub movie_policy: crate::movie::MoviePolicy,
     pub(crate) callbacks: VecDeque<(u32, u32)>,
     program_scripts: BTreeMap<u32, u32>,
-    active: BTreeSet<u32>,
+    pub(crate) active: BTreeSet<u32>,
     next_program: u32,
     /// NPC combat policy: the built-in SPEC-009 packet AI by default.
     pub combat_ai: Box<dyn crate::combat_state::CombatAi>,
