@@ -2,19 +2,25 @@
 //! of `sfall-array-vectors.tsv`, the eight hook boundaries, and §7.3 tests 7
 //! and 8.
 use crate::{
-    WorldHost, fixture_state as fixture,
+    ScriptEvent, WorldEffect, WorldHost, fixture_state as fixture,
     host_ai_tests::fixture_e,
+    host_sfall::game_mode,
     host_sfall_hooks::{
-        HOOK_AFTERHITROLL, HOOK_BARTERPRICE, HOOK_CALCAPCOST, HOOK_COMBATDAMAGE,
-        HOOK_INVENTORYMOVE, HOOK_KEYPRESS, HOOK_MOVECOST, HOOK_TOHIT, Preview,
+        HOOK_AFTERHITROLL, HOOK_BARTERPRICE, HOOK_CALCAPCOST, HOOK_COMBATDAMAGE, HOOK_ENCOUNTER,
+        HOOK_GAMEMODECHANGE, HOOK_INVENTORYMOVE, HOOK_KEYPRESS, HOOK_MOVECOST, HOOK_SETGLOBALVAR,
+        HOOK_STDPROCEDURE, HOOK_TOHIT, HOOK_USEOBJ, HOOK_USEOBJON, Preview,
     },
     spec024_arrays_tests::VECTORS,
-    spec024_tests::{Op, base, diagnostics, literal_offset, sfall_host},
-    test_support::TestAssets,
+    spec024_tests::{Op, base, diagnostics, literal_offset, run, sfall_host},
+    test_support::{TestAssets, request},
     world::ObjectRef,
 };
 use Op::{F, I, S, W};
-use vault_vm::{IntProgram, WordSet, sfall::SfallValue, sfall_arrays::Storage};
+use vault_vm::{
+    IntProgram, WordSet,
+    sfall::{self, SfallValue},
+    sfall_arrays::Storage,
+};
 
 const GET_ARG: Op = W(0x81e4);
 const SET_RETURN: Op = W(0x81e5);
@@ -810,6 +816,12 @@ fn sequence(body: &[Op], hooks: bool) -> (Vec<u64>, u64) {
             HOOK_MOVECOST,
             HOOK_INVENTORYMOVE,
             HOOK_KEYPRESS,
+            HOOK_USEOBJON,
+            HOOK_USEOBJ,
+            HOOK_SETGLOBALVAR,
+            HOOK_GAMEMODECHANGE,
+            HOOK_STDPROCEDURE,
+            HOOK_ENCOUNTER,
         ] {
             start.extend([I(hook), I(2), REGISTER_PROC]);
         }
@@ -828,6 +840,13 @@ fn sequence(body: &[Op], hooks: bool) -> (Vec<u64>, u64) {
                 .unwrap();
         }
         host.sfall_inventory_move(0, 0, 0);
+        // The new boundaries, each with one query a step: the rest of the
+        // sequence reaches none of them.
+        host.hook_use_on_held(attacker, attacker, defender);
+        let _ = host.hook_use(attacker, 0);
+        host.hook_global_var(0, 1);
+        host.hook_std_procedure(6, attacker, defender, 0, 0);
+        host.hook_map_entry(0);
         host.sfall_end_of_step();
         hashes.push(host.world.state_hash());
     }
@@ -849,6 +868,380 @@ fn t8_hooks_that_return_nothing_change_no_hash() {
     assert_eq!(sequence(&[], true), plain);
 }
 
+/// The rows of `vector`, as cells.
+fn rows(vector: &str) -> Vec<Vec<&'static str>> {
+    VECTORS
+        .lines()
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .filter(|cells| cells[0] == vector)
+        .collect()
+}
+/// A member that keeps its `count` arguments in globals `10..` and its run
+/// count in global 1, then writes a row's returns: `rets=[41, None]`.
+fn member(count: i32, rets: &str) -> Vec<Op> {
+    let mut body = vec![I(1), I(1), GLOBAL_INT, I(1), ADD, SET_GLOBAL];
+    for index in 0..count {
+        body.extend([I(10 + index), GET_ARG, SET_GLOBAL]);
+    }
+    let values = rets
+        .strip_prefix("rets=[")
+        .and_then(|rets| rets.strip_suffix(']'))
+        .unwrap_or("");
+    for value in values.split(", ").filter_map(|value| value.parse().ok()) {
+        body.extend([I(value), SET_RETURN]);
+    }
+    body
+}
+/// `body` registered on `hook` on `host`.
+fn registered(host: &mut WorldHost<TestAssets>, hook: i32, body: &[Op]) {
+    let start = [I(hook), I(2), REGISTER_PROC];
+    install(host, "gl_0.int", script(&start, &[("m", body)]));
+    set_up(host);
+}
+/// What a row of `hook`'s member saw, and how often it ran.
+fn saw(host: &WorldHost<TestAssets>, hook: i32) -> (Vec<i32>, i32) {
+    let count = sfall::hook_row(hook).unwrap().args.len() as i32;
+    let args = (0..count).map(|index| global(host, 10 + index)).collect();
+    (args, global(host, 1))
+}
+/// A carried item of its own PID, for the use hooks.
+fn item(host: &mut WorldHost<TestAssets>, flags: u32) -> ObjectRef {
+    let mut bytes = vault_fixtures::world::prototype(0, 5);
+    vault_fixtures::world::word(&mut bytes, 0, 0x45);
+    vault_fixtures::world::word(&mut bytes, 0x18, flags as i32);
+    let prototype = std::sync::Arc::new(vault_formats::Prototype::parse(&bytes).unwrap());
+    host.world.spawn(prototype, 20100, 0).unwrap()
+}
+fn default_ran(host: &WorldHost<TestAssets>) -> bool {
+    host.world
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, WorldEffect::DefaultAction { .. }))
+}
+
+#[test]
+fn hook_31_game_mode_change_runs_once_a_step_when_the_bit_set_changed() {
+    let row = sfall::hook_row(HOOK_GAMEMODECHANGE).unwrap();
+    assert_eq!(
+        (row.file, row.args.len(), row.rets.len()),
+        ("hs_gamemodechange.int", 2, 0)
+    );
+    let vector = rows("H12");
+    assert_eq!(vector.len(), 3);
+    let (mut host, _) = sfall_host();
+    registered(&mut host, HOOK_GAMEMODECHANGE, &member(2, vector[0][3]));
+    host.set_sfall_screens(game_mode::COMBAT);
+    host.set_sfall_screens(0);
+    // The first value is the one at the end of setup, which runs nothing.
+    host.sfall_end_of_step();
+    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 0);
+    host.world.combat = true;
+    host.sfall_end_of_step();
+    let previous = game_mode::LOCAL_MAP as i32;
+    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE), (vec![0, previous], 1));
+    host.sfall_end_of_step();
+    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 1, "no change, no run");
+    // H12 step 2: two changes that cancel out in one step.
+    host.world.combat = false;
+    host.world.combat = true;
+    host.sfall_end_of_step();
+    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 1);
+    // H12 step 3: signal_close_game runs it with arg0 1, though the mode
+    // did not change, and only then does the session end.
+    let mode = host.sfall_mode_bits() as i32;
+    let close = host.script_close_for_test();
+    assert!(close && !host.sfall_session_closed());
+    host.sfall_end_of_step();
+    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE), (vec![1, mode], 2));
+    assert!(host.sfall_session_closed());
+    // A close in a step that also changed the mode runs it once.
+    let (mut host, _) = sfall_host();
+    registered(&mut host, HOOK_GAMEMODECHANGE, &member(2, vector[2][3]));
+    host.sfall_end_of_step();
+    host.world.combat = true;
+    host.script_close_for_test();
+    host.sfall_end_of_step();
+    assert_eq!(saw(&host, HOOK_GAMEMODECHANGE).1, 1);
+}
+
+#[test]
+fn hook_8_use_obj_on_runs_before_routing_for_a_critter_target() {
+    let row = sfall::hook_row(HOOK_USEOBJON).unwrap();
+    assert_eq!(
+        (row.file, row.args.len(), row.rets.len()),
+        ("hs_useobjon.int", 3, 1)
+    );
+    let vector = rows("H13");
+    assert_eq!(vector.len(), 5);
+    for cells in vector {
+        let (mut host, target) = sfall_host();
+        let user = host.world.player;
+        let used = item(&mut host, 0);
+        registered(&mut host, HOOK_USEOBJON, &member(3, cells[3]));
+        host.world.effects.clear();
+        host.use_item_stage(user, used, target).unwrap();
+        let expected = vec![target as i32, user as i32, used as i32];
+        assert_eq!(saw(&host, HOOK_USEOBJON), (expected, 1), "{cells:?}");
+        let alive = host.world.get(used).is_some();
+        let (routed, kept) = match cells[4] {
+            "final=engine routing runs; order=m" => (true, true),
+            "final=item kept; no routing; order=m" => (false, true),
+            "final=item destroyed; no routing; order=m" => (false, false),
+            other => panic!("{other}"),
+        };
+        assert_eq!((default_ran(&host), alive), (routed, kept), "{cells:?}");
+    }
+    // A target that is not a critter runs no chain.
+    let (mut host, _) = sfall_host();
+    let user = host.world.player;
+    let (used, other) = (item(&mut host, 0), item(&mut host, 0));
+    registered(&mut host, HOOK_USEOBJON, &member(3, "rets=[0]"));
+    host.use_item_stage(user, used, other).unwrap();
+    assert_eq!(saw(&host, HOOK_USEOBJON).1, 0);
+    // A member's destroy request for the used item is ignored: 1 is the way.
+    let (mut host, target) = sfall_host();
+    let used = item(&mut host, 0);
+    let ops = [GET_ARG, DISCARD, GET_ARG, DISCARD, GET_ARG, W(0x80f4)];
+    registered(&mut host, HOOK_USEOBJON, &ops);
+    host.world.effects.clear();
+    host.use_item_stage(user, used, target).unwrap();
+    assert!(host.world.get(used).is_some());
+    assert!(
+        diagnostics(&mut host)
+            .iter()
+            .any(|line| line.contains("cannot destroy"))
+    );
+}
+
+/// A use script on `object`: `use_p_proc` sets global 3, and the request
+/// that loads it has run.
+fn with_use_script(host: &mut WorldHost<TestAssets>, object: ObjectRef) -> u32 {
+    let body = [I(3), I(1), SET_GLOBAL];
+    let program = script(&[], &[("use_p_proc", &body)]);
+    host.assets.programs.push(("obj.int".to_owned(), program));
+    let file = host.assets.programs.len() as i32 - 1;
+    let id = host.world.add_script(object, file, 1, 0).unwrap();
+    host.dispatch(request(id, ScriptEvent::Critter)).unwrap();
+    assert_eq!(global(host, 3), 0, "the first request runs only start");
+    id
+}
+
+#[test]
+fn hook_18_use_obj_runs_before_use_p_proc_and_before_the_drug_path() {
+    let row = sfall::hook_row(HOOK_USEOBJ).unwrap();
+    assert_eq!(
+        (row.file, row.args.len(), row.rets.len()),
+        ("hs_useobj.int", 2, 1)
+    );
+    let vector = rows("H14");
+    assert_eq!(vector.len(), 2);
+    for cells in vector {
+        let (mut host, used) = sfall_host();
+        let user = host.world.player;
+        with_use_script(&mut host, used);
+        registered(&mut host, HOOK_USEOBJ, &member(2, cells[3]));
+        host.use_object(user, used).unwrap();
+        assert_eq!(
+            saw(&host, HOOK_USEOBJ),
+            (vec![user as i32, used as i32], 1),
+            "{cells:?}"
+        );
+        assert_eq!(global(&host, 3), 0, "use_p_proc not requested: {cells:?}");
+        let destroyed = cells[4].starts_with("final=item destroyed");
+        assert_eq!(host.world.get(used).is_none(), destroyed, "{cells:?}");
+    }
+    // Unset, the request runs, and a critter's own use of a map object
+    // from outside the interface runs no chain.
+    let (mut host, used) = sfall_host();
+    let user = host.world.player;
+    with_use_script(&mut host, used);
+    registered(&mut host, HOOK_USEOBJ, &member(2, "rets=[None]"));
+    host.use_object(user, used).unwrap();
+    assert_eq!(global(&host, 3), 1);
+    host.use_object(used, used).unwrap();
+    assert_eq!(saw(&host, HOOK_USEOBJ).1, 1);
+    // An inventory item with the Use flag runs it, and one without runs
+    // HOOK_USEOBJON on the user.
+    let (mut host, _) = sfall_host();
+    let user = host.world.player;
+    let (flagged, plain) = (item(&mut host, 0x800), item(&mut host, 0));
+    let mut start = vec![I(HOOK_USEOBJ), I(2), REGISTER_PROC];
+    start.extend([I(HOOK_USEOBJON), I(3), REGISTER_PROC]);
+    let (first, second) = (member(2, "rets=[0]"), member(3, "rets=[0]"));
+    let mut second = second;
+    second.extend([I(4), I(1), SET_GLOBAL]);
+    install(
+        &mut host,
+        "gl_0.int",
+        script(&start, &[("a", &first), ("b", &second)]),
+    );
+    set_up(&mut host);
+    assert!(host.hook_item_use(user, flagged).unwrap());
+    assert_eq!(global(&host, 4), 0);
+    assert!(host.hook_item_use(user, plain).unwrap());
+    assert_eq!(global(&host, 4), 1);
+    assert_eq!(
+        saw(&host, HOOK_USEOBJON).0,
+        [user as i32, user as i32, plain as i32]
+    );
+}
+
+#[test]
+fn hook_40_std_procedure_can_cancel_a_named_request() {
+    let row = sfall::hook_row(HOOK_STDPROCEDURE).unwrap();
+    assert_eq!(
+        (row.file, row.args.len(), row.rets.len()),
+        ("hs_stdprocedure.int", 6, 1)
+    );
+    let vector = rows("H15");
+    assert_eq!(vector.len(), 4);
+    for cells in &vector[..3] {
+        let (mut host, owner) = sfall_host();
+        let id = with_use_script(&mut host, owner);
+        registered(&mut host, HOOK_STDPROCEDURE, &member(6, cells[3]));
+        let (caller, target) = (host.world.player, item(&mut host, 0));
+        let mut use_request = request(id, ScriptEvent::Use);
+        (use_request.source, use_request.target, use_request.fixed) = (caller, target, 9);
+        let result = host.dispatch(use_request).unwrap();
+        let expected = vec![6, owner as i32, caller as i32, 0, target as i32, 9];
+        assert_eq!(saw(&host, HOOK_STDPROCEDURE), (expected, 1), "{cells:?}");
+        let ran = cells[4].starts_with("final=use_p_proc runs");
+        assert_eq!(global(&host, 3) == 1, ran, "{cells:?}");
+        assert!(!result.overridden && !result.pending, "the default follows");
+    }
+    // H15 step 4: events 1, 12, 22 and 23 never run it, and neither does a
+    // procedure the script does not have.
+    assert!(vector[3][2].contains("critter_p_proc"));
+    let (mut host, owner) = sfall_host();
+    let id = with_use_script(&mut host, owner);
+    registered(&mut host, HOOK_STDPROCEDURE, &member(6, "rets=[-1]"));
+    for event in [
+        ScriptEvent::Start,
+        ScriptEvent::Critter,
+        ScriptEvent::Timed,
+        ScriptEvent::MapUpdate,
+        ScriptEvent::Talk,
+    ] {
+        host.dispatch(request(id, event)).unwrap();
+    }
+    assert_eq!(saw(&host, HOOK_STDPROCEDURE).1, 0);
+}
+
+/// A selected encounter on map 0 of the fixture tables, table 0 and entry
+/// 1: the vector's map 40, table 5 and entry 2. Maps 1 and 2 stand for its
+/// 41 and 42.
+fn encounter_host(rets: &str) -> WorldHost<TestAssets> {
+    let (mut host, _) = sfall_host();
+    let mut state = crate::fallout2_tests::new_game();
+    state.position = [10, 10];
+    host.world.fallout2 = Some(Box::new(state));
+    host.assets.any_map = Some(crate::world::empty_map());
+    host.world.gvars = Some(vec![0; 8]);
+    host.world.clock.set(crate::fallout2::START_TICKS);
+    let rets = rets.replace("41", "1").replace("42", "2");
+    registered(&mut host, HOOK_ENCOUNTER, &member(5, &rets));
+    host
+}
+/// §8.5's draws for entry 1: the check, the special gate, the pick.
+const ENTRY_1: [i32; 5] = [22, 3, 3, 3, 30];
+
+#[test]
+fn hook_43_encounter_replaces_cancels_or_keeps_only_the_map() {
+    let row = sfall::hook_row(HOOK_ENCOUNTER).unwrap();
+    assert_eq!(
+        (row.file, row.args.len(), row.rets.len()),
+        ("hs_encounter.int", 5, 2)
+    );
+    let vector = rows("H16");
+    assert_eq!(vector.len(), 7);
+    for (cells, expected) in vector[..4].iter().zip([
+        Some((0, None)),
+        Some((1, None)),
+        None,
+        Some((1, Some(crate::sfall::encounter_flag::NO_ICON))),
+    ]) {
+        let mut host = encounter_host(cells[3]);
+        let world = &mut host.world;
+        world.rng.script(&ENTRY_1);
+        let selected = host.fallout2_check_encounter().unwrap();
+        assert_eq!(
+            saw(&host, HOOK_ENCOUNTER),
+            (vec![0, 0, 0, 0, 1], 1),
+            "{cells:?}"
+        );
+        assert_eq!(
+            selected.map(|selected| (selected.map, selected.forced)),
+            expected,
+            "{cells:?}"
+        );
+        // The counter stands when the hook cancels (§6.17).
+        let state = host.world.fallout2.as_deref().unwrap();
+        assert_eq!(state.counter(0, 1), 0, "{cells:?}");
+    }
+    // Event 1: the drop to terrain, with ret0 42, and -1 ignored.
+    for (cells, map) in vector[4..6].iter().zip([2, 0]) {
+        let mut host = encounter_host(cells[3]);
+        assert_eq!(host.hook_map_entry(0), map, "{cells:?}");
+        assert_eq!(
+            saw(&host, HOOK_ENCOUNTER),
+            (vec![1, 0, 0, -1, -1], 1),
+            "{cells:?}"
+        );
+    }
+    // A map with no row is ignored, with a diagnostic.
+    let mut host = encounter_host("rets=[9999]");
+    assert_eq!(host.hook_map_entry(0), 0);
+    assert!(
+        diagnostics(&mut host)
+            .iter()
+            .any(|line| line.contains("no row"))
+    );
+    // H16 step 7: a forced encounter runs no chain.
+    let mut host = encounter_host("rets=[-1]");
+    host.world.sfall.as_deref_mut().unwrap().forced_map = 2;
+    let selected = host.fallout2_check_encounter().unwrap().unwrap();
+    assert_eq!(selected.map, 2);
+    assert_eq!(saw(&host, HOOK_ENCOUNTER).1, 0);
+}
+
+#[test]
+fn hook_29_set_global_var_can_replace_the_value_stored() {
+    let row = sfall::hook_row(HOOK_SETGLOBALVAR).unwrap();
+    assert_eq!(
+        (row.file, row.args.len(), row.rets.len()),
+        ("hs_setglobalvar.int", 2, 1)
+    );
+    let vector = rows("H17");
+    assert_eq!(vector.len(), 3);
+    for (cells, expected) in vector[..2].iter().zip([5, 9]) {
+        let (mut host, _) = sfall_host();
+        host.world.gvars = Some(vec![0; 16]);
+        registered(&mut host, HOOK_SETGLOBALVAR, &member(2, cells[3]));
+        run(&mut host, &[I(12), I(5), W(0x80c6)]);
+        assert_eq!(saw(&host, HOOK_SETGLOBALVAR), (vec![12, 5], 1), "{cells:?}");
+        assert_eq!(
+            host.world.gvars.as_ref().unwrap()[12],
+            expected,
+            "{cells:?}"
+        );
+    }
+    // H17 step 3: an invalid index runs nothing.
+    let (mut host, _) = sfall_host();
+    host.world.gvars = Some(vec![0; 16]);
+    registered(&mut host, HOOK_SETGLOBALVAR, &member(2, "rets=[None]"));
+    run(&mut host, &[I(99), I(5), W(0x80c6)]);
+    assert_eq!(saw(&host, HOOK_SETGLOBALVAR).1, 0);
+    // A member that writes a global runs a nested chain, and past the depth
+    // limit the write still stores its value.
+    let (mut host, _) = sfall_host();
+    host.world.gvars = Some(vec![0; 16]);
+    registered(&mut host, HOOK_SETGLOBALVAR, &member(2, "rets=[None]"));
+    host.fill_contexts_for_test(8);
+    run(&mut host, &[I(3), I(7), W(0x80c6)]);
+    assert_eq!(host.world.gvars.as_ref().unwrap()[3], 7);
+    assert_eq!(saw(&host, HOOK_SETGLOBALVAR).1, 0);
+}
+
 #[test]
 fn with_the_mode_off_the_hook_paths_return_the_engine_value() {
     let world = crate::WorldState::new(crate::CharacterSheet::default(), 1).unwrap();
@@ -858,6 +1251,10 @@ fn with_the_mode_off_the_hook_paths_return_the_engine_value() {
     assert!(off.sfall_inventory_move(1, 2, 3));
     assert_eq!(off.sfall_key(true, 30, 65), 30);
     assert_eq!(off.run_hook(HOOK_TOHIT, Vec::new()), None);
+    assert_eq!(off.hook_global_var(1, 5), 5);
+    assert_eq!(off.hook_map_entry(3), 3);
+    assert!(!off.hook_std_procedure(6, 0, 0, 0, 0));
+    assert!(!off.hook_item_use(0, 0).unwrap());
     off.sfall_end_of_step();
     off.sfall_setup_if_due();
 }

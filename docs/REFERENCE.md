@@ -3250,14 +3250,48 @@ the enhanced preset, so `inven_cmds` and the enhanced words `0x8200` and
 
 | Tier | Rows | What it does |
 | --- | --- | --- |
-| P1 | 99 words, 18 functions (26 rows), 1 `metarule3` | Runs |
-| P2 | 177 words, 107 function rows, 6 `metarule3`, 9 `metarule2_explosions` | Pops its operands, pushes int 0 or the empty string, and writes one diagnostic per program and row |
-| X | 18 words | As P2. These words address the original executable's memory, and never touch this process's |
+| P1 | 158 rows: 117 words, 25 functions (39 rows), 1 `metarule3`, 1 `metarule2_explosions` | Runs |
+| P2 | 159 words, 94 function rows, 6 `metarule3`, 8 `metarule2_explosions` | Pops its operands, pushes int 0 or the empty string, and writes one diagnostic per program and row |
+| X | 18 words | As P2. These words address the original executable's memory, and never touch this process's. Et Tu's base scripts use them for a rest-timer patch and a Dogmeat dialogue patch, and those effects are lost here (SPEC-024b D-40) |
 | R | 6 words | Consume nothing and raise the undefined-instruction VM error |
 
 A wrong operand type is not a VM error here, unlike SPEC-017: every operand is
 popped, the word has no effect, it writes a diagnostic and pushes its default.
 Stack underflow stays a VM error.
+
+Revision 3 audited Et Tu and Restoration Project Updated and promoted the 25
+behaviors they use most (SPEC-024b §4.11):
+
+| Group | Rows |
+| --- | --- |
+| Party and explosives | `party_member_list`, `get_explosion_damage` |
+| Object IDs | `set_unique_id`. An item with an ID in `0x10000000..=0x7FFFFFFF` does not stack |
+| Message files | `message_str_game`, `add_extra_msg_file`, and `ExtraGameMsgFileList` from `ddraw.ini` |
+| World map | `set_car_current_town`, `get_terrain_name`, `force_encounter`, `force_encounter_with_flags` |
+| Virtual files | `fs_copy`, `fs_seek`, `fs_read_short`, `fs_write_short` |
+| Appearance | `set_hero_style`, `refresh_pc_art` |
+| Interface tags | `show_iface_tag`, `hide_iface_tag`, `is_iface_tag_active` |
+| Screen and windows | `get_screen_width`, `get_screen_height`, `create_win` |
+| Other | `dialog_obj`, `message_box`, `signal_close_game`, `tap_key` |
+
+The ones a mod author can trip on:
+
+- A virtual file takes precedence over its path in the VFS layers for every later
+  read, and a write drops the path's cached decode. `fs_read_short` and
+  `fs_write_short` are big-endian. The table clears at a new game and at a load,
+  and is never saved.
+- A pending forced encounter occurs at the next encounter check after the party
+  moves on the world map. It draws no random number, spawns no group and runs no
+  `HOOK_ENCOUNTER` chain, and it is saved in the sidecar until then.
+- `get_screen_width` and `get_screen_height` are 640 and 480 on every host, so a
+  script gives the same result on any window.
+- `set_hero_style` stores a number and changes no art: hero appearance archives are
+  not defined here.
+- `message_box` is a modal screen, and the world waits for its closing key. It gives
+  -1 with no box in a hook member and during session setup, where a program cannot
+  wait.
+- `signal_close_game` returns to the operating system with no prompt, after the
+  current step.
 
 `sin cos tan arctan log exponent ^` are written in `vault_vm::sfall_math` from
 `+ - * /` alone, in binary64 and rounded to binary32, so every platform gives the
@@ -3277,33 +3311,44 @@ on a hash map, an address or a locale. Two values are equal when they have the s
 type and content, so `1`, `1.0`, `0.0` and `-0.0` are four keys. A shuffle draws
 from the gameplay generator. IDs start at 1 and are never reused in a session.
 
-`scan_array` takes a number: a string is a failed operand, so nothing is searched and
-it pushes int 0, not -1, which a script can read as a match at index 0. `set_sfall_arg`
-takes an int, whatever the argument declares, so a float truncates.
+`scan_array` and `set_sfall_arg` take their value as class `A`, any value
+(SPEC-024b D-46). `scan_array` searches for a string like any other value, and a
+string never equals an int, so an absent string gives -1. `set_sfall_arg` converts
+the value to the argument's declared type: a float truncates into an int argument,
+and a string reaches only a `mixed` argument. A string sent to an int argument, even
+`"7"`, leaves the argument unchanged, with one diagnostic.
 
 Temporary arrays end with the frame: at the end of the Simulation phase, before
 the checkpoint, so a checkpoint never sees one. `MapPreview::tick` calls
 `WorldHost::sfall_end_of_step` every frame, even while a modal screen holds the
 world, and a harness that drives a host directly must do the same.
 
-**The sidecar.** `VAULTSFL.DAT` sits beside `SAVE.DAT` and holds the globals and the
-saved arrays, in the vault's own layout: saves made by sfall itself do not import.
-A save under sfall mode always writes it, even empty, and a load parses it whole
-before any state changes.
+**The sidecar.** `VAULTSFL.DAT` sits beside `SAVE.DAT` and holds the globals, the
+saved arrays, the next unique object ID and the pending forced encounter, in the
+vault's own layout: saves made by sfall itself do not import. A save under sfall mode
+always writes it, even empty, and a load parses it whole before any state changes.
+
+A save with a revision 1 sidecar still loads, and is upgraded on its next save. The
+fields revision 2 adds take their defaults (next unique ID `0x10000000`, no pending
+encounter), and the load writes no file, so the slot stays revision 1 on disk until
+that save.
 
 | Slot | Mode on | Mode off |
 | --- | --- | --- |
-| Valid sidecar | Restores it | Refuses the slot, and says why |
+| Revision 2 sidecar | Restores it | Refuses the slot, and says why |
+| Revision 1 sidecar | Migrates it | Refuses the slot, and says why |
 | No sidecar | Empty state | Loads as always |
-| Damaged sidecar | Refuses the slot | Refuses the slot |
+| Damaged sidecar, or another revision | Refuses the slot | Refuses the slot |
 
 A save with the mode off names `VAULTSFL.DAT` for deletion, so the slot can load
 again. That is a separate delete: the stale `.SAV` sweep of SPEC-023 never touches
 the file.
 
 `WorldState::sfall_hash` is FNV-1a 64 of the `VSX1` stream, which adds every live
-array. `state_hash` stays `VSH1`, so arrays that have not reached covered state are
-visible only through this hash, and no golden changes.
+array. After a revision 1 sidecar loads, it is the hash of the migrated state. Format
+revision 2 changed this hash for every state, and `state_hash` stays `VSH1`, so arrays
+that have not reached covered state are visible only through this hash, and no golden
+of `state_hash` changes.
 
 **Hooks.** On a new game or a load, before the first Simulation phase, each
 `scripts/hs_*.int` loads and runs `start` with `init_hook` at 1, then each
@@ -3321,12 +3366,19 @@ first. An empty chain costs nothing.
 | `HOOK_AFTERHITROLL` | 1 | Once per attack, after Jinxed, Slayer and Sniper, before critical effects |
 | `HOOK_CALCAPCOST` | 2 | On attack costs, the 2 AP reload and the 2 AP generic use. A return of 0 is free |
 | `HOOK_COMBATDAMAGE` | 5 | Once per victim of a hit, before anything is debited |
+| `HOOK_USEOBJON` | 8 | When a critter uses an item on a critter or itself, uses an item with no Use flag, or uses a drug, before the item is used. ret0 0 keeps the item, 1 destroys it, and either ends the action |
 | `HOOK_BARTERPRICE` | 10 | On the offer's comparison, and on the screen's preview |
 | `HOOK_MOVECOST` | 11 | On each committed hex in combat, and on the movement cursor's planning query |
+| `HOOK_USEOBJ` | 18 | When a critter uses an inventory item with the Use flag, a lit flare or an explosive, or the player uses an object on the map. Returns as `HOOK_USEOBJON` |
 | `HOOK_KEYPRESS` | 19 | Once per physical press and release, before any handling |
 | `HOOK_INVENTORYMOVE` | 24 | On a drag or a drop to the ground. It can only prevent the move |
+| `HOOK_SETGLOBALVAR` | 29 | In `set_global_var`, for a valid index, before the value is stored. ret0 is the value stored |
+| `HOOK_GAMEMODECHANGE` | 31 | Once a step, when the `get_game_mode` bits changed, and once on `signal_close_game`. It has no returns |
+| `HOOK_STDPROCEDURE` | 40 | Before a requested procedure the script has, except events 1, 12, 22 and 23. ret0 -1 cancels it, and the action's default still follows |
+| `HOOK_ENCOUNTER` | 43 | On a selected random encounter, and on entering a map from the world map. ret0 replaces the map, -1 cancels a random encounter, and ret1 1 loads the map with no groups. A forced encounter never runs it |
 
-The other 42 hooks load and register, and no chain runs. A member that ends in a VM
+Those are the 14 hooks of tier P1. The other 36 load and register, and no chain runs.
+A member cannot destroy the item a use hook is about: it returns 1 instead. A member that ends in a VM
 error is unloaded from every chain, and a word that would suspend a member ends it.
 Past 8 nested chains a chain is skipped.
 
@@ -3340,9 +3392,9 @@ key, so a replay runs `HOOK_KEYPRESS` again and gets the same logical key.
 
 `--report-script-stack --sfall` checks every `.INT` under `scripts/` of a folder with
 this table, with no `scripts.lst` needed. Run it on a mod's scripts before trusting
-them: the oracle's stack contracts were never checked against Et Tu or Restoration
-Project scripts (SPEC-024b D-26). Mod scripts are checked with the same table when
-they load.
+them. Revision 3's audit ran this stack model over Et Tu's compiled scripts on the
+research side with no finding, and `oracle/SPEC-024/mod-opcode-usage.tsv` holds its
+results. Mod scripts are checked with the same table when they load.
 
 ```sh
 asset-audit --corpus-dir mods/mymod --report-script-stack --sfall
@@ -3385,6 +3437,11 @@ Sfall mode (SPEC-024b), against the spec's boundaries:
   simulation, so the spec's clause has nothing to attach to.
 - A nested chain that reaches a script already running skips that member, with a
   diagnostic.
-- The key hook maps keys the engine's table knows; another scan code leaves the
-  physical key in place, and `metarule3` 201 has no queue to empty, because the
-  engine handles a key as it arrives.
+- The key hook and `tap_key` map keys the engine's table knows; another scan code
+  leaves the physical key in place, and a tapped one presses nothing.
+- A virtual file's write drops the cached decode of a frame, message file, list,
+  palette or script at that path. A prototype, the art catalog and the fonts are
+  read once, so a write to one of those files is seen only by a new session.
+- `HOOK_USEOBJ` runs for the player's use of a map object and for a critter's use of
+  an inventory item in the shell's item paths; `HOOK_ENCOUNTER` event 1 runs for
+  the drop to terrain and for entering an area.

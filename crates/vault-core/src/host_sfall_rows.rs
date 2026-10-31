@@ -731,6 +731,11 @@ impl<A: WorldAssets> WorldHost<A> {
     pub(crate) fn hero_style_for_test(&mut self) -> i32 {
         self.promoted().expect("sfall mode").hero_style
     }
+    /// `signal_close_game` from a script.
+    pub(crate) fn script_close_for_test(&mut self) -> bool {
+        self.signal_close_game();
+        self.sfall.is_some()
+    }
     pub(crate) fn object_id_for_test(&self, object: ObjectRef) -> i32 {
         self.world.get(object).expect("a live object").raw.id as i32
     }

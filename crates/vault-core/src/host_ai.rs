@@ -1791,7 +1791,20 @@ impl<A: WorldAssets> HealingInventory for Healing<'_, A> {
         }
     }
     fn consume(&mut self, unit: &ObjectRef) -> Result<bool, WorldError> {
-        Ok(self.host.consume_drug(self.critter, *unit)? == 1)
+        // SPEC-024b §6.15: the loop holds the unit, so its `used` and
+        // `restore` carry out what the hook decided.
+        Ok(
+            match self
+                .host
+                .hook_use_on_held(self.critter, self.critter, *unit)
+            {
+                crate::host_sfall::UseHook::Engine => {
+                    self.host.consume_drug(self.critter, *unit)? == 1
+                }
+                crate::host_sfall::UseHook::Kept => false,
+                crate::host_sfall::UseHook::Destroyed => true,
+            },
+        )
     }
     fn restore(&mut self, unit: ObjectRef) -> Result<(), WorldError> {
         self.host.world.add_item(self.critter, unit, 1, true)

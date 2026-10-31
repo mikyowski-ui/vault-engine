@@ -41,7 +41,7 @@ pub enum Playback {
 /// intensity; setting it gives 8, or 0 without intensity.
 const PROJECTILE_LIGHT_RADIUS: i32 = 9;
 /// The lit flare, whose throw is the only corpus throw that carries light.
-const LIT_FLARE: u32 = 205;
+pub(crate) const LIT_FLARE: u32 = 205;
 /// The player's ordinary light (§3.9 safe rule): radius 4 at full intensity.
 const PLAYER_LIGHT: (i32, i32) = (4, 65536);
 /// The weapon explosion art of the explode effect (`roktxpd.frm`).

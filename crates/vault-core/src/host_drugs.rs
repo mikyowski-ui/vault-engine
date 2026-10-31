@@ -10,6 +10,7 @@ use crate::{
     assets::WorldAssets,
     drugs::{self, Sensitivity, Stage},
     host::WorldHost,
+    host_sfall::UseHook,
     progression::ADDICTED_FLAG,
     queue::{EventKind, TimedEvent},
 };
@@ -404,7 +405,13 @@ impl<A: WorldAssets> WorldHost<A> {
     /// §3.6 inventory "use" of a drug on oneself. Safe rule: the unit is
     /// destroyed only on result 1 (a -1 consumer keeps it).
     pub fn use_drug(&mut self, critter: ObjectRef, drug: ObjectRef) -> Result<i32, WorldError> {
-        self.consume_unit(critter, drug)
+        // SPEC-024b §6.15: the hook's 0 keeps the unit, as a -1 consumer
+        // does, and its 1 has destroyed it.
+        match self.hook_use_on(critter, critter, drug)? {
+            UseHook::Engine => self.consume_unit(critter, drug),
+            UseHook::Kept => Ok(-1),
+            UseHook::Destroyed => Ok(1),
+        }
     }
     /// §3.6 default use of a drug on a target (after the target's script
     /// did not override it): a non-critter "does nothing", a dead critter

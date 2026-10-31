@@ -579,3 +579,28 @@ fn signal_close_game_ends_the_session_with_no_prompt() {
     assert!(game.world.quit_requested);
     assert!(game.world.dialog.is_none());
 }
+
+#[test]
+fn an_inventory_use_runs_the_use_hook_before_the_items_own_path() {
+    const USEOBJON: i32 = 8;
+    let mut body = recording(3);
+    body.extend([I(1), W(SET_RETURN)]);
+    let mut game = game(USEOBJON, &body);
+    let used = item(&mut game.world, 5, 1);
+    let player = game.world.host.world.player;
+    game.world
+        .use_item_now(used, vault_core::BookRoute::Inventory);
+    assert_eq!(
+        [
+            global(&game.world, 10),
+            global(&game.world, 11),
+            global(&game.world, 12),
+            global(&game.world, 1)
+        ],
+        [player as i32, player as i32, used as i32, 1]
+    );
+    assert!(
+        game.world.host.world.get(used).is_none(),
+        "ret0 1 removes it"
+    );
+}

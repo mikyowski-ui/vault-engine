@@ -651,6 +651,23 @@ impl MapPreview {
     pub(super) fn use_item_now(&mut self, item: ObjectRef, route: vault_core::BookRoute) {
         let player = self.host.world.player;
         let pid = self.host.world.get(item).map_or(0, |o| o.raw.pid);
+        // SPEC-024b §6.15: before the item's own path. Opening a container
+        // in the window is no use.
+        let opens = matches!(self.item_kind(item), Some(ItemData::Container { .. }))
+            && matches!(self.screen, Screen::Inventory(_));
+        if !opens {
+            match self.host.hook_item_use(player, item) {
+                Ok(false) => {}
+                Ok(true) => {
+                    self.drain_effects();
+                    return;
+                }
+                Err(error) => {
+                    self.status = error.to_string().into_bytes();
+                    return;
+                }
+            }
+        }
         if skills::skill_book(pid).is_some() {
             if let Err(error) = self.host.read_book(item, route) {
                 self.status = error.to_string().into_bytes();

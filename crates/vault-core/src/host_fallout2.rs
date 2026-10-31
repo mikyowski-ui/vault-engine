@@ -248,7 +248,8 @@ impl<A: WorldAssets> WorldHost<A> {
         for note in notes {
             world.diagnostic(note);
         }
-        Ok(selected)
+        // SPEC-024b §6.17: after step 8, before the flash and the map load.
+        Ok(selected.and_then(|selected| self.hook_random_encounter(selected)))
     }
     /// §5.7 entering a selected encounter: its map at a start point (or the
     /// header's entrance), then its groups spawned in expression order.
@@ -308,6 +309,7 @@ impl<A: WorldAssets> WorldHost<A> {
         let Some(map) = state.terrain_map(&mut world.rng)? else {
             return Ok(false);
         };
+        let map = self.hook_map_entry(map);
         self.fallout2_load_encounter_map(map)?;
         self.world_map_closed();
         Ok(true)
@@ -538,11 +540,13 @@ impl<A: WorldAssets> WorldHost<A> {
             .ok_or_else(|| WorldError::Invalid(format!("area {area} has no entrance {slot}")))?;
         state.area = area as i32;
         state.entrance = slot as i32;
+        // SPEC-024b §6.17: a replaced map has no use for this entrance's hex.
+        let map = self.hook_map_entry(entrance.map);
         let path = self
-            .fallout2_map_path(entrance.map as i32)
-            .ok_or_else(|| WorldError::Invalid(format!("map {} is not available", entrance.map)))?;
+            .fallout2_map_path(map as i32)
+            .ok_or_else(|| WorldError::Invalid(format!("map {map} is not available")))?;
         self.load_map(&path)?;
-        if entrance.tile >= 0 {
+        if entrance.tile >= 0 && map == entrance.map {
             let header = &self.world.map.header;
             let elevation = if entrance.elevation >= 0 {
                 entrance.elevation as u8

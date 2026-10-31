@@ -1613,10 +1613,26 @@ impl<A: WorldAssets> WorldHost<A> {
                 )
             })
     }
+    /// SPEC-024b §6.15: the player uses an object from the main interface,
+    /// which a held item is not. Whether `HOOK_USEOBJ` ended the action.
+    fn player_use_ended(&mut self, user: ObjectRef, target: ObjectRef) -> Result<bool, WorldError> {
+        let placed = self.world.get(target).is_some_and(|o| o.owner.is_none());
+        if user != self.world.player || !placed {
+            return Ok(false);
+        }
+        Ok(self.hook_use(user, target)? != crate::host_sfall::UseHook::Engine)
+    }
     /// The use of a target: a door's use (§3.11.4); otherwise its
     /// `use_p_proc`, and without an override, `proto.msg` 480 naming it
     /// for a player using scenery; then the map update.
-    fn use_object(&mut self, user: ObjectRef, target: ObjectRef) -> Result<(), WorldError> {
+    pub(crate) fn use_object(
+        &mut self,
+        user: ObjectRef,
+        target: ObjectRef,
+    ) -> Result<(), WorldError> {
+        if self.player_use_ended(user, target)? {
+            return Ok(());
+        }
         if self.is_door(target) {
             let by_hand = user == self.world.player
                 && self
@@ -1725,6 +1741,9 @@ impl<A: WorldAssets> WorldHost<A> {
     /// animation, with `proto.msg` 485 or 486 naming it for the player. No
     /// flag word changes.
     fn use_container(&mut self, user: ObjectRef, container: ObjectRef) -> Result<(), WorldError> {
+        if self.player_use_ended(user, container)? {
+            return Ok(());
+        }
         let Some(object) = self.world.get(container) else {
             return Ok(());
         };

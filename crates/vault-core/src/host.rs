@@ -2,6 +2,7 @@ use crate::{
     ObjectAction, ObjectRef, Perk, ScriptEvent, WorldEffect, WorldError, WorldRules, WorldState,
     assets::WorldAssets,
     dialogue::{DialogueText, HeadDefinition, Mood, TalkingHead, npc_reaction},
+    host_sfall::UseHook,
     library::LibraryState,
     queue::EventKind,
     world::{ScriptRequest, WorldObject, WorldTrace, empty_map, object_record},
@@ -1108,6 +1109,25 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
             }
         };
+        // SPEC-024b §6.16: after the fields above are installed. A cancelled
+        // procedure counts as run with no override.
+        if procedure.is_some()
+            && self.hook_std_procedure(
+                request.event.code(),
+                instance.owner,
+                request.source,
+                target,
+                request.fixed,
+            )
+            && let Some(script) = self.world.scripts.get_mut(&instance.id)
+        {
+            script.source = 0;
+            return Ok(DispatchResult {
+                overridden: false,
+                result: script.result,
+                pending: false,
+            });
+        }
         self.world.trace.push(WorldTrace::Script {
             id: instance.id,
             event: request.event,
@@ -2348,6 +2368,18 @@ impl<A: WorldAssets> WorldHost<A> {
         item: ObjectRef,
         target: ObjectRef,
     ) -> Result<(), WorldError> {
+        if self.world.get(item).is_none() || self.world.get(target).is_none() {
+            return Ok(());
+        }
+        // SPEC-024b §6.15: before the routing list and the kit route, for a
+        // critter target only.
+        let critter = self
+            .world
+            .get(target)
+            .is_some_and(|object| object.category() == Category::Critter);
+        if critter && self.hook_use_on(target, actor, item)? != UseHook::Engine {
+            return Ok(());
+        }
         if self.world.get(item).is_none() || self.world.get(target).is_none() {
             return Ok(());
         }

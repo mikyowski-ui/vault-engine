@@ -839,12 +839,27 @@ impl<A: WorldAssets> WorldHost<A> {
                     .unwrap_or(0)
             })),
             0x80c6 => {
-                if let Some(slot) = self.world.gvars.as_mut().and_then(|array| {
-                    usize::try_from(call.int(1))
-                        .ok()
-                        .and_then(|i| array.get_mut(i))
-                }) {
-                    *slot = call.int(0);
+                let index = usize::try_from(call.int(1)).ok();
+                let valid = self
+                    .world
+                    .gvars
+                    .as_ref()
+                    .zip(index)
+                    .is_some_and(|(array, index)| index < array.len());
+                // SPEC-024b §6.18: the index is valid, and nothing is stored yet.
+                let value = if valid {
+                    self.hook_global_var(call.int(1), call.int(0))
+                } else {
+                    call.int(0)
+                };
+                if let Some(slot) = self
+                    .world
+                    .gvars
+                    .as_mut()
+                    .zip(index)
+                    .and_then(|(array, index)| array.get_mut(index))
+                {
+                    *slot = value;
                 } else {
                     self.world.diagnostic("GVAR write out of bounds/absent");
                 }
@@ -1316,6 +1331,7 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             // SPEC-005 §3.2: removing the script's own object stops it;
             // the null and loading-restriction early returns do not.
+            0x80f4 if self.sfall_keeps_used_item(call.uint(0)) => None,
             0x80f4 => {
                 let object = call.uint(0);
                 self.self_stopping(vm, object, |host, own| {
@@ -2111,6 +2127,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     }
                 }
             }
+            0x8144 if self.sfall_keeps_used_item(call.uint(1)) => integer(0),
             0x8144 => {
                 let object = call.uint(1);
                 if object == 0 {

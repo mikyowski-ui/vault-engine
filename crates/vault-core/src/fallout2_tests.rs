@@ -22,7 +22,7 @@ fn tables() -> Arc<Fallout2Tables> {
     tables_with(Vec::new())
 }
 /// The new game of §8.4: the start map is map 2 (`artemple`).
-fn new_game() -> Fallout2World {
+pub(crate) fn new_game() -> Fallout2World {
     let tables = tables();
     let start = tables.maps.match_name(b"artemple.map");
     assert_eq!(start, 2);

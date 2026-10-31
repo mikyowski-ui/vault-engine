@@ -9,12 +9,17 @@ use crate::{
     barter::BarterSession,
     combat::{Attack, Resolution},
     critical::effect,
+    fallout2::Selected,
     host::{WorldHost, reserve_null_string},
+    host_choreography::LIT_FLARE,
     host_combat::Spray,
     host_sfall::game_mode,
     host_sfall_rows::BOX_WAIT,
+    sfall::encounter_flag,
+    skills,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use vault_formats::pro::ItemSubtype;
 use vault_vm::{
     RunOutcome, Vm, VmError, VmStatus,
     sfall::{self, HookRow, HookType, SfallValue},
@@ -24,10 +29,16 @@ pub const HOOK_TOHIT: i32 = 0;
 pub const HOOK_AFTERHITROLL: i32 = 1;
 pub const HOOK_CALCAPCOST: i32 = 2;
 pub const HOOK_COMBATDAMAGE: i32 = 5;
+pub const HOOK_USEOBJON: i32 = 8;
 pub const HOOK_BARTERPRICE: i32 = 10;
 pub const HOOK_MOVECOST: i32 = 11;
+pub const HOOK_USEOBJ: i32 = 18;
 pub const HOOK_KEYPRESS: i32 = 19;
 pub const HOOK_INVENTORYMOVE: i32 = 24;
+pub const HOOK_SETGLOBALVAR: i32 = 29;
+pub const HOOK_GAMEMODECHANGE: i32 = 31;
+pub const HOOK_STDPROCEDURE: i32 = 40;
+pub const HOOK_ENCOUNTER: i32 = 43;
 /// §6.5 past this many nested chains, a chain is skipped.
 const MAX_CHAINS: usize = 8;
 
@@ -122,6 +133,18 @@ pub struct SfallHooks {
     /// §6.12: entering barter or a transaction runs the query twice.
     barter_fresh: bool,
     previews: BTreeMap<Preview, (Vec<i32>, i32)>,
+    /// §6.15 the items running chains are about, which no member destroys.
+    used_items: Vec<ObjectRef>,
+}
+/// What `HOOK_USEOBJON` or `HOOK_USEOBJ` decided (§6.15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseHook {
+    /// -1, unset, or any other value: the engine's handler runs.
+    Engine,
+    /// 0: the action ends, and the item stays where it is.
+    Kept,
+    /// 1: the action ends, and the item goes.
+    Destroyed,
 }
 /// The values only the interface shows (§6.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -201,8 +224,10 @@ impl<A: WorldAssets> WorldHost<A> {
         for name in names {
             self.load_sfall_script(&name, true);
         }
-        if let Some(hooks) = self.hooks() {
-            hooks.in_setup = false;
+        let mode = self.sfall_mode_bits();
+        if let Some(sfall) = self.sfall.as_deref_mut() {
+            sfall.hooks.in_setup = false;
+            sfall.last_mode = Some(mode);
         }
     }
     /// Load a hook or global script and run its initial stream, which in a
@@ -592,6 +617,217 @@ impl<A: WorldAssets> WorldHost<A> {
                 procedure: None,
             });
         }
+    }
+    /// `HOOK_GAMEMODECHANGE` (§6.14): the bit set is compared once a step,
+    /// and `signal_close_game` runs the chain once with arg0 1, whether the
+    /// mode changed or not, before the session ends.
+    pub(crate) fn hook_game_mode(&mut self) {
+        let mode = self.sfall_mode_bits();
+        let Some(sfall) = self.sfall.as_deref_mut() else {
+            return;
+        };
+        let closing = std::mem::take(&mut sfall.close_signalled);
+        let previous = sfall.last_mode.replace(mode).unwrap_or(mode);
+        if closing || previous != mode {
+            let args = vec![int(i32::from(closing)), int(previous as i32)];
+            self.run_hook(HOOK_GAMEMODECHANGE, args);
+        }
+        if let Some(sfall) = self.sfall.as_deref_mut() {
+            sfall.closed |= closing;
+        }
+    }
+    /// One use chain, with `item` safe from its members (§6.15).
+    fn use_chain(&mut self, hook: i32, args: Vec<SfallValue>, item: ObjectRef) -> UseHook {
+        if let Some(hooks) = self.hooks() {
+            hooks.used_items.push(item);
+        }
+        let rets = self.run_hook(hook, args);
+        if let Some(hooks) = self.hooks() {
+            hooks.used_items.pop();
+        }
+        match rets.and_then(|rets| int_return(&rets, 0)) {
+            Some(0) => UseHook::Kept,
+            Some(1) => UseHook::Destroyed,
+            _ => UseHook::Engine,
+        }
+    }
+    /// §6.15's published defect: a member cannot destroy the item its chain
+    /// is about, which it does by returning 1. Whether `object` is that
+    /// item; the request is then ignored, with a diagnostic.
+    pub(crate) fn sfall_keeps_used_item(&mut self, object: ObjectRef) -> bool {
+        let used = self
+            .hooks()
+            .is_some_and(|hooks| hooks.used_items.contains(&object));
+        if used {
+            self.world
+                .diagnostic("a member cannot destroy the used item; it returns 1".to_owned());
+        }
+        used
+    }
+    /// A use chain's result, for a caller that holds the item itself.
+    pub(crate) fn hook_use_on_held(
+        &mut self,
+        target: ObjectRef,
+        user: ObjectRef,
+        item: ObjectRef,
+    ) -> UseHook {
+        if self.sfall.is_none() {
+            return UseHook::Engine;
+        }
+        let args = vec![object(target), object(user), object(item)];
+        self.use_chain(HOOK_USEOBJON, args, item)
+    }
+    /// `HOOK_USEOBJON`: whether it ended the action. A return of 1 destroys
+    /// the item, as SPEC-006 §3.8's wrapper does.
+    pub(crate) fn hook_use_on(
+        &mut self,
+        target: ObjectRef,
+        user: ObjectRef,
+        item: ObjectRef,
+    ) -> Result<UseHook, crate::WorldError> {
+        let done = self.hook_use_on_held(target, user, item);
+        self.finish_use(done, item)?;
+        Ok(done)
+    }
+    /// `HOOK_USEOBJ`, by `user` on `used`.
+    pub(crate) fn hook_use(
+        &mut self,
+        user: ObjectRef,
+        used: ObjectRef,
+    ) -> Result<UseHook, crate::WorldError> {
+        if self.sfall.is_none() {
+            return Ok(UseHook::Engine);
+        }
+        let done = self.use_chain(HOOK_USEOBJ, vec![object(user), object(used)], used);
+        self.finish_use(done, used)?;
+        Ok(done)
+    }
+    fn finish_use(&mut self, done: UseHook, item: ObjectRef) -> Result<(), crate::WorldError> {
+        if done == UseHook::Destroyed {
+            self.world.destroy_unit(item)?;
+            self.map_update()?;
+        }
+        Ok(())
+    }
+    /// §6.15 a critter's direct use of inventory `item`, before the item's
+    /// own path: whether a chain ended the action. An item with the Use
+    /// action flag, or a lit flare or an explosive, runs `HOOK_USEOBJ`, and
+    /// any other item `HOOK_USEOBJON` on the user. A drug's path runs its
+    /// own `HOOK_USEOBJON`.
+    pub fn hook_item_use(
+        &mut self,
+        user: ObjectRef,
+        item: ObjectRef,
+    ) -> Result<bool, crate::WorldError> {
+        if self.sfall.is_none() {
+            return Ok(false);
+        }
+        let Some(found) = self.world.get(item) else {
+            return Ok(false);
+        };
+        let flagged = found
+            .prototype
+            .as_ref()
+            .is_some_and(|prototype| prototype.permits_use());
+        let pid = found.raw.pid;
+        let done = if flagged || pid == LIT_FLARE || skills::is_explosive(pid) {
+            self.hook_use(user, item)?
+        } else if self.world.item_subtype(item) == Some(ItemSubtype::Drug) {
+            UseHook::Engine
+        } else {
+            self.hook_use_on(user, user, item)?
+        };
+        Ok(done != UseHook::Engine)
+    }
+    /// `HOOK_STDPROCEDURE` (§6.16): whether a member cancelled the
+    /// procedure. It never runs for events 1, 12, 22 and 23.
+    pub(crate) fn hook_std_procedure(
+        &mut self,
+        event: i32,
+        owner: ObjectRef,
+        source: ObjectRef,
+        target: ObjectRef,
+        fixed: i32,
+    ) -> bool {
+        if self.sfall.is_none() || matches!(event, 1 | 12 | 22 | 23) {
+            return false;
+        }
+        let args = vec![
+            int(event),
+            object(owner),
+            object(source),
+            int(0),
+            object(target),
+            int(fixed),
+        ];
+        self.run_hook(HOOK_STDPROCEDURE, args)
+            .and_then(|rets| int_return(&rets, 0))
+            == Some(-1)
+    }
+    /// Whether `map` has a row in SPEC-018 §5.1, with a diagnostic if not.
+    fn encounter_map(&mut self, map: i32) -> bool {
+        let known = self
+            .world
+            .fallout2
+            .as_deref()
+            .is_some_and(|state| state.tables.maps.get(map).is_some());
+        if !known {
+            self.world
+                .diagnostic(format!("HOOK_ENCOUNTER: map {map} has no row"));
+        }
+        known
+    }
+    /// `HOOK_ENCOUNTER` event 0 (§6.17) on a selected random encounter:
+    /// what remains of it. -1 cancels it, and ret1 1 keeps only its map.
+    pub(crate) fn hook_random_encounter(&mut self, mut selected: Selected) -> Option<Selected> {
+        if self.sfall.is_none() {
+            return Some(selected);
+        }
+        let args = vec![
+            int(0),
+            int(selected.map as i32),
+            int(i32::from(selected.special)),
+            int(selected.table as i32),
+            int(selected.entry as i32),
+        ];
+        let Some(rets) = self.run_hook(HOOK_ENCOUNTER, args) else {
+            return Some(selected);
+        };
+        match int_return(&rets, 0) {
+            Some(-1) => return None,
+            Some(map) if self.encounter_map(map) => selected.map = map as u32,
+            _ => {}
+        }
+        if int_return(&rets, 1) == Some(1) {
+            selected.special = false;
+            selected.forced = Some(encounter_flag::NO_ICON);
+        }
+        Some(selected)
+    }
+    /// `HOOK_ENCOUNTER` event 1 (§6.17): the map an entry from the world map
+    /// loads. -1 is ignored here, as no encounter exists to cancel.
+    pub(crate) fn hook_map_entry(&mut self, map: u32) -> u32 {
+        if self.sfall.is_none() {
+            return map;
+        }
+        let args = vec![int(1), int(map as i32), int(0), int(-1), int(-1)];
+        let replaced = self
+            .run_hook(HOOK_ENCOUNTER, args)
+            .and_then(|rets| int_return(&rets, 0))
+            .filter(|map| *map != -1);
+        match replaced {
+            Some(map) if self.encounter_map(map) => map as u32,
+            _ => map,
+        }
+    }
+    /// `HOOK_SETGLOBALVAR` (§6.18): the value `set_global_var` stores.
+    pub(crate) fn hook_global_var(&mut self, index: i32, value: i32) -> i32 {
+        if self.sfall.is_none() {
+            return value;
+        }
+        self.run_hook(HOOK_SETGLOBALVAR, vec![int(index), int(value)])
+            .and_then(|rets| int_return(&rets, 0))
+            .unwrap_or(value)
     }
     /// `HOOK_TOHIT` (§6.8) on `attack`'s hit chance: the chance after the
     /// cap, or what the chain made of it, clamped to -99 through 999.

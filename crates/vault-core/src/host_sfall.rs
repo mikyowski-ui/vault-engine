@@ -58,7 +58,7 @@ struct SelfOverride {
     strong: bool,
 }
 
-pub use crate::host_sfall_hooks::{Preview, SfallHooks};
+pub use crate::host_sfall_hooks::{Preview, SfallHooks, UseHook};
 pub use crate::host_sfall_rows::MessageBox;
 use crate::host_sfall_rows::Promoted;
 pub use vault_vm::sfall::SfallValue;
@@ -94,6 +94,8 @@ pub struct SfallHost {
     /// `signal_close_game` asked to end the session at this step's end.
     pub(crate) close_signalled: bool,
     pub(crate) closed: bool,
+    /// §6.14 the bit set at the last comparison.
+    pub(crate) last_mode: Option<u32>,
 }
 
 fn integer(value: i32) -> Option<SfallValue> {
@@ -1138,10 +1140,10 @@ impl<A: WorldAssets> WorldHost<A> {
     pub fn sfall_end_of_step(&mut self) {
         self.sfall_setup_if_due();
         self.sfall_repeat_globals();
+        self.hook_game_mode();
         if let Some(sfall) = self.sfall.as_deref_mut() {
             sfall.steps = sfall.steps.saturating_add(1);
             sfall.lists.clear();
-            sfall.closed |= std::mem::take(&mut sfall.close_signalled);
         }
         if let Some(state) = self.world.sfall.as_deref_mut() {
             state.arrays.end_of_step();
