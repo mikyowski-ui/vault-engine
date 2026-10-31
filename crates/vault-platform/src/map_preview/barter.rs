@@ -691,7 +691,7 @@ impl MapPreview {
                 )
             }
             None => (
-                self.host.figure_art(world.player, self.active_item(), 3),
+                self.shown_figure(self.host.figure_art(world.player, self.active_item(), 3)),
                 3,
                 false,
             ),

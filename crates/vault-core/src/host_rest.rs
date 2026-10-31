@@ -43,6 +43,8 @@ pub struct RestSession {
     plan: Plan,
     wait: Option<Wait>,
     finished: Option<RestOutcome>,
+    /// The hours and minutes of the latest wait (SPEC-024b §6.19).
+    span: (i32, i32),
 }
 impl RestSession {
     /// How the rest ended, once it has.
@@ -267,6 +269,7 @@ impl<A: WorldAssets> WorldHost<A> {
             plan: Plan::Once,
             wait: None,
             finished: None,
+            span: (0, 0),
         };
         if !self.rest_allowed() {
             session.finished = Some(RestOutcome::Refused);
@@ -307,11 +310,37 @@ impl<A: WorldAssets> WorldHost<A> {
         &mut self,
         session: &mut RestSession,
     ) -> Result<Option<RestOutcome>, WorldError> {
+        let running = session.finished.is_none();
+        let outcome = self.rest_progress(session)?;
+        if running && outcome == Some(RestOutcome::Completed) {
+            self.hook_rest(1, session.span);
+        }
+        Ok(outcome)
+    }
+    /// SPEC-024b §6.19 a UI step's `HOOK_RESTTIMER`, after its Esc poll:
+    /// whether the rest stops here.
+    pub fn rest_step_over(&mut self, session: &mut RestSession, escape: bool) -> bool {
+        let event = if escape { -1 } else { 0 };
+        let stop = match self.hook_rest(event, session.span) {
+            Some(1) => true,
+            Some(0) => false,
+            _ => escape,
+        };
+        if stop {
+            session.finished = Some(RestOutcome::Cancelled);
+        }
+        stop
+    }
+    fn rest_progress(
+        &mut self,
+        session: &mut RestSession,
+    ) -> Result<Option<RestOutcome>, WorldError> {
         if let Some(outcome) = session.finished {
             return Ok(Some(outcome));
         }
         loop {
             if let Some(wait) = &mut session.wait {
+                session.span = (wait.hours, wait.minutes);
                 match self.advance_wait(wait)? {
                     None => return Ok(None),
                     Some(RestOutcome::Completed) => session.wait = None,
@@ -379,7 +408,7 @@ impl<A: WorldAssets> WorldHost<A> {
             if let Some(outcome) = self.advance_rest(&mut session)? {
                 return Ok(outcome);
             }
-            if ui_step() {
+            if self.rest_step_over(&mut session, ui_step()) {
                 return Ok(RestOutcome::Cancelled);
             }
         }

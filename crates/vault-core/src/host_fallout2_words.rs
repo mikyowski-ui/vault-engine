@@ -584,6 +584,18 @@ impl<A: WorldAssets> WorldHost<A> {
             .map(|object| object.inventory.clone())
             .unwrap_or_default();
         for (item, _) in inventory {
+            let held = self
+                .world
+                .get(item)
+                .is_some_and(|object| object.raw.flags.0 & flag != 0);
+            let slot = if flag == BasicFlags::LEFT_HAND.0 {
+                2
+            } else {
+                1
+            };
+            if held && !self.hook_wield(critter, item, slot, false) {
+                return;
+            }
             if let Some(object) = self.world.get_mut(item) {
                 object.raw.flags.0 &= !flag;
             }

@@ -287,6 +287,18 @@ impl AssetPreview {
         let logical = world.host.sfall_key(pressed, scan, virtual_key);
         crate::input::key_of_scan(logical).unwrap_or(key)
     }
+    /// SPEC-024b §6.19: one recorded press or release of the named button,
+    /// before any game or UI handling.
+    pub fn physical_button(&mut self, pressed: bool, button: &str) {
+        let world = match self {
+            Self::Map(preview) => Some(&mut **preview),
+            Self::Game(game) => game.world(),
+            _ => None,
+        };
+        if let (Some(world), Some(button)) = (world, crate::input::button_number(button)) {
+            world.host.sfall_mouse(pressed, button);
+        }
+    }
     pub fn key_up(&mut self, key: KeyCode) {
         match self {
             Self::Map(preview) => preview.key_up(key),

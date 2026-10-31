@@ -49,6 +49,8 @@ pub(crate) use vault_core::ui::pipboy::{AutomapView, Page, StatusView, Tab};
 pub(crate) struct Resting {
     pub session: RestSession,
     since: u64,
+    /// SPEC-024b §6.19: Esc waits for the step's `HOOK_RESTTIMER`.
+    escape: bool,
 }
 
 /// The open Pip-Boy: the core modal (SPEC-020 §2.1: the page, the held
@@ -393,6 +395,11 @@ impl MapPreview {
                 }
             }
             PipBoyOutcome::Rest(option) => self.begin_pipboy_rest(option),
+            PipBoyOutcome::StopRest if self.host.sfall_mode() => {
+                if let Some(resting) = self.pipboy().and_then(|pipboy| pipboy.rest.as_mut()) {
+                    resting.escape = true;
+                }
+            }
             PipBoyOutcome::StopRest => self.finish_rest(RestOutcome::Cancelled),
         }
     }
@@ -413,7 +420,11 @@ impl MapPreview {
             Ok(session) => {
                 if let Some(pipboy) = self.pipboy() {
                     pipboy.modal.begin_rest(option);
-                    pipboy.rest = Some(Resting { session, since });
+                    pipboy.rest = Some(Resting {
+                        session,
+                        since,
+                        escape: false,
+                    });
                     pipboy.raster = None;
                 }
             }
@@ -471,7 +482,12 @@ impl MapPreview {
             }
             pipboy.raster = None;
             match self.host.advance_rest(&mut resting.session) {
-                Ok(None) => {}
+                Ok(None) => {
+                    let escape = std::mem::take(&mut resting.escape);
+                    if self.host.rest_step_over(&mut resting.session, escape) {
+                        self.finish_rest(RestOutcome::Cancelled);
+                    }
+                }
                 Ok(Some(outcome)) => self.finish_rest(outcome),
                 Err(error) => {
                     self.status = error.to_string().into_bytes();

@@ -404,6 +404,19 @@ pub fn select_hit_mode(
     rng: &mut impl RandomSource,
     other_weapon: impl FnOnce() -> bool,
 ) -> Result<u8, WorldError> {
+    select_hit_mode_with(weapon, secondary_freq, intelligence, rng, |_| {
+        other_weapon()
+    })
+}
+/// [`select_hit_mode`] with the generator lent to `other_weapon`, whose
+/// search can run hooks that draw from it (SPEC-024b §6.6).
+pub fn select_hit_mode_with<R: RandomSource>(
+    weapon: Option<ModeWeapon>,
+    secondary_freq: i32,
+    intelligence: i32,
+    rng: &mut R,
+    other_weapon: impl FnOnce(&mut R) -> bool,
+) -> Result<u8, WorldError> {
     let Some(weapon) = weapon else {
         return Ok(PUNCH);
     };
@@ -414,7 +427,7 @@ pub fn select_hit_mode(
         return Ok(RIGHT_PRIMARY);
     }
     if weapon.secondary_subtype == subtype::THROW
-        && !other_weapon()
+        && !other_weapon(rng)
         && stat_check(intelligence, 0, rng)?.code >= 2
     {
         return Ok(RIGHT_PRIMARY);

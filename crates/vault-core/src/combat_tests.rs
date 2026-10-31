@@ -1010,7 +1010,7 @@ impl crate::RandomSource for Lowest {
 }
 
 /// Player with a 10-round spray weapon; defender 5 east; extra critter 2 east.
-fn spray_world(mode: u8) -> (crate::WorldHost<TestAssets>, ObjectRef, ObjectRef) {
+pub(crate) fn spray_world(mode: u8) -> (crate::WorldHost<TestAssets>, ObjectRef, ObjectRef) {
     let mut sheet = CharacterSheet::default();
     sheet.invested[0] = 200;
     sheet.recompute(Default::default());

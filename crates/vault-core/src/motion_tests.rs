@@ -144,7 +144,7 @@ fn diagnostics(host: &WorldHost<Assets>) -> Vec<String> {
         .collect()
 }
 /// A built sequence's entries: delay and what each does.
-fn labels(sequence: &MotionSequence) -> Vec<(i32, String)> {
+pub(crate) fn labels(sequence: &MotionSequence) -> Vec<(i32, String)> {
     sequence
         .schedule
         .entries()

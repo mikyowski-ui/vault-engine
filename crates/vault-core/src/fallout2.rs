@@ -537,11 +537,18 @@ impl Fallout2World {
     /// remaining steps are not made); the terrain counter is not used.
     /// Returns the outcome and the steps made.
     pub fn drive(&mut self) -> (Step, i32) {
+        self.drive_steps(self.car_speed())
+    }
+    /// The steps of this car iteration, from the subtile it starts on.
+    pub fn car_speed(&self) -> i32 {
+        let terrain = self.cell().map_or(0, |cell| self.subtile(cell).terrain);
+        car_steps(self.tables.worldmap.difficulty(terrain))
+    }
+    /// [`Self::drive`] with `steps` decided.
+    pub fn drive_steps(&mut self, steps: i32) -> (Step, i32) {
         let Some(mut travel) = self.travel else {
             return (Step::Arrived, 0);
         };
-        let terrain = self.cell().map_or(0, |cell| self.subtile(cell).terrain);
-        let steps = car_steps(self.tables.worldmap.difficulty(terrain));
         let mut outcome = Step::Moving;
         let mut made = 0;
         for _ in 0..steps {

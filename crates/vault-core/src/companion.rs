@@ -370,6 +370,11 @@ impl<A: WorldAssets> WorldHost<A> {
                     .map(|object| object.inventory.clone())
                     .unwrap_or_default();
                 for (item, _) in inventory {
+                    if self.world.wielded(critter, hit_mode::RIGHT_PRIMARY) == Some(item)
+                        && !self.hook_wield(critter, item, 1, false)
+                    {
+                        return Ok(());
+                    }
                     if let Some(object) = self.world.get_mut(item) {
                         object.raw.flags.0 &= !BasicFlags::RIGHT_HAND.0;
                     }

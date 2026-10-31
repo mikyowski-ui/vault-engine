@@ -10,6 +10,7 @@ use crate::{
     critical::effect,
     host::WorldHost,
     host_drugs::Arg,
+    host_sfall_boundaries::StealHook,
     skills::{self, StealExperience, StealInputs},
     stats::Perk,
     world::{ScriptEvent, ScriptRequest},
@@ -361,23 +362,34 @@ impl<A: WorldAssets> WorldHost<A> {
         let source = session.shown(from_target);
         let destination = session.shown(!from_target);
         let party = self.world.party.contains(&session.root);
+        let mut experience = None;
         if session.steal {
             // SPEC-013 §3.9.3 steps 5-6, §3.9.5: a party member's move is a
             // critical success with no draws and never a catch; step 8's
             // 571/573 message is still displayed.
-            let caught = !party && self.loot_steal_check(session, item)?;
-            let name = self
-                .world
-                .get(item)
-                .map(|o| o.name.clone())
-                .unwrap_or_default();
-            let id = match (from_target, caught) {
-                (true, true) => 570,
-                (true, false) => 571,
-                (false, true) => 572,
-                (false, false) => 573,
+            let (check, award) = self.hook_steal(session, item, !from_target, quantity);
+            experience = award;
+            let caught = match check {
+                StealHook::Engine => {
+                    let caught = !party && self.loot_steal_check(session, item)?;
+                    let name = self
+                        .world
+                        .get(item)
+                        .map(|o| o.name.clone())
+                        .unwrap_or_default();
+                    let id = match (from_target, caught) {
+                        (true, true) => 570,
+                        (true, false) => 571,
+                        (false, true) => 572,
+                        (false, false) => 573,
+                    };
+                    self.print_game("skill.msg", id, &[Arg::Text(&name)]);
+                    caught
+                }
+                StealHook::Moved => false,
+                StealHook::Caught => true,
+                StealHook::Kept => return Ok(LootMove::Refused),
             };
-            self.print_game("skill.msg", id, &[Arg::Text(&name)]);
             if caught {
                 session.caught = true;
                 return Ok(LootMove::Caught);
@@ -394,7 +406,10 @@ impl<A: WorldAssets> WorldHost<A> {
             return Ok(LootMove::Refused);
         }
         if session.steal && !party {
-            session.experience.success();
+            match experience {
+                Some(award) => session.experience.pending += award,
+                None => session.experience.success(),
+            }
         }
         Ok(LootMove::Moved)
     }

@@ -521,6 +521,13 @@ impl MapPreview {
         if !self.slot_weapon(item) {
             return false;
         }
+        if let Some(item) = item
+            && self
+                .host
+                .sfall_slot_refused(item, self.slot_hit_mode(self.slot_mode()))
+        {
+            return true;
+        }
         let flags = self
             .host
             .world
@@ -1179,7 +1186,7 @@ impl MapPreview {
     /// empty hand, else the hand's primary or secondary hit mode. Reload
     /// reports no attack (`slot_attack`); here it reads the primary, for
     /// the ammo bar.
-    fn slot_hit_mode(&self, mode: WeaponMode) -> u8 {
+    pub(crate) fn slot_hit_mode(&self, mode: WeaponMode) -> u8 {
         if self.active_item().is_none() {
             return hit_mode::PUNCH;
         }

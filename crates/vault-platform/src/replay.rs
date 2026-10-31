@@ -514,6 +514,9 @@ impl Replay {
     /// The desktop shell's handling of one observed command.
     fn apply(&mut self, command: InputCommand) -> AppResult<()> {
         let timed = self.timed == Some(true);
+        if let InputCommand::PointerButton { button, pressed } = &command {
+            self.session.physical_button(*pressed, button);
+        }
         match command {
             InputCommand::Key {
                 physical_key,

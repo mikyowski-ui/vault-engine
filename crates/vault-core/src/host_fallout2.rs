@@ -183,9 +183,12 @@ impl<A: WorldAssets> WorldHost<A> {
         let state = self.fallout2_state()?;
         state.mark = None;
         let (step, emptied) = if state.car_travel() {
-            let (step, made) = state.drive();
+            let speed = state.car_speed();
+            let (steps, fuel) = self.hook_car_travel(speed, fallout2::FUEL_PER_ITERATION);
+            let state = self.fallout2_state()?;
+            let (step, made) = state.drive_steps(steps);
             if made > 0 {
-                state.car.fuel = (state.car.fuel - fallout2::FUEL_PER_ITERATION).max(0);
+                state.car.fuel = (state.car.fuel - fuel).max(0);
             }
             (step, made > 0 && state.car.fuel == 0)
         } else {

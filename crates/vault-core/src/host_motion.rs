@@ -1093,7 +1093,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// §3.11.3 the reach: the ground reach (10) for a prone critter,
     /// scenery with extended flag `0x01`, or a container whose interaction
     /// word has bit 0 set; the middle reach (11) otherwise.
-    fn reach(&self, target: ObjectRef) -> u8 {
+    pub(crate) fn reach(&self, target: ObjectRef) -> u8 {
         let Some(object) = self.world.get(target) else {
             return animation::MIDDLE_REACH;
         };
@@ -1199,21 +1199,32 @@ impl<A: WorldAssets> WorldHost<A> {
         actor: ObjectRef,
         container: ObjectRef,
     ) -> Result<MotionSequence, Refused> {
+        self.container_motion_as(actor, container, Some(self.reach(container)))
+    }
+    /// [`Self::container_motion`] with its animation decided, or none
+    /// (SPEC-024b §6.19's `HOOK_USEANIMOBJ`).
+    fn container_motion_as(
+        &self,
+        actor: ObjectRef,
+        container: ObjectRef,
+        reach: Option<u8>,
+    ) -> Result<MotionSequence, Refused> {
         let (pid, closed) = self
             .world
             .get(container)
             .map_or((0, false), |object| (object.raw.pid, object.raw.frame == 0));
         let code = self.weapon_code(actor);
-        let reach = self.reach(container);
         let mut sequence = MotionSequence::new();
         self.approach_entries(&mut sequence, actor, container, RUN_DISTANCE)?;
         self.checks(&mut sequence, actor, container)?;
         if code != 0 {
             self.put_away(&mut sequence, actor, -1)?;
         }
-        self.animate_entry(&mut sequence, actor, reach, None, 0)?;
+        if let Some(reach) = reach {
+            self.animate_entry(&mut sequence, actor, reach, None, 0)?;
+        }
         if pid != GIZMO_REMAINS {
-            let delay = self.reach_frame(actor, reach, Some(0));
+            let delay = reach.map_or(-1, |reach| self.reach_frame(actor, reach, Some(0)));
             let call = Call::UseContainer { container };
             sequence.push(actor, delay, Motion::Call(call))?;
         }
@@ -1231,7 +1242,12 @@ impl<A: WorldAssets> WorldHost<A> {
         actor: ObjectRef,
         container: ObjectRef,
     ) -> Result<(), WorldError> {
-        let sequence = self.container_motion(actor, container).map_err(refused)?;
+        let reach = self.reach(container);
+        let sequence = match self.hook_use_animation(actor, container, reach) {
+            Some(chosen) => self.container_motion_as(actor, container, chosen),
+            None => self.container_motion(actor, container),
+        }
+        .map_err(refused)?;
         self.start_interaction(actor, sequence, Click::Action, true)?;
         Ok(())
     }
@@ -1244,15 +1260,27 @@ impl<A: WorldAssets> WorldHost<A> {
         target: ObjectRef,
         call: Call,
     ) -> Result<MotionSequence, Refused> {
+        self.use_motion_as(actor, target, call, Some(self.reach(target)))
+    }
+    /// [`Self::use_motion`] with its animation decided, or none (SPEC-024b
+    /// §6.19's `HOOK_USEANIMOBJ`).
+    fn use_motion_as(
+        &self,
+        actor: ObjectRef,
+        target: ObjectRef,
+        call: Call,
+        reach: Option<u8>,
+    ) -> Result<MotionSequence, Refused> {
         let code = self.weapon_code(actor);
-        let reach = self.reach(target);
         let mut sequence = MotionSequence::new();
         self.approach_entries(&mut sequence, actor, target, RUN_DISTANCE)?;
         self.checks(&mut sequence, actor, target)?;
         if code != 0 {
             self.put_away(&mut sequence, actor, 0)?;
         }
-        self.animate_entry(&mut sequence, actor, reach, None, -1)?;
+        if let Some(reach) = reach {
+            self.animate_entry(&mut sequence, actor, reach, None, -1)?;
+        }
         sequence.push(actor, -1, Motion::Call(call))?;
         if code != 0 {
             self.take_out(&mut sequence, actor, code)?;
@@ -1265,7 +1293,23 @@ impl<A: WorldAssets> WorldHost<A> {
         target: ObjectRef,
         call: Call,
     ) -> Result<(), WorldError> {
-        let mut sequence = self.use_motion(actor, target, call).map_err(refused)?;
+        // SPEC-024b §6.19: the use of scenery, not of an item on it.
+        let scenery = matches!(call, Call::Use { .. })
+            && self
+                .world
+                .get(target)
+                .is_some_and(|object| object.category() == vault_formats::pro::Category::Scenery);
+        let reach = self.reach(target);
+        let chosen = if scenery {
+            self.hook_use_animation(actor, target, reach)
+        } else {
+            None
+        };
+        let mut sequence = match chosen {
+            Some(chosen) => self.use_motion_as(actor, target, call, chosen),
+            None => self.use_motion(actor, target, call),
+        }
+        .map_err(refused)?;
         sequence.by_hand = actor == self.world.player && !self.script_action;
         self.start_interaction(actor, sequence, Click::Action, true)?;
         Ok(())
@@ -1279,6 +1323,16 @@ impl<A: WorldAssets> WorldHost<A> {
         &self,
         actor: ObjectRef,
         ladder: ObjectRef,
+    ) -> Result<MotionSequence, Refused> {
+        self.ladder_motion_as(actor, ladder, Some(animation::CLIMB))
+    }
+    /// [`Self::ladder_motion`] with its animation decided, or none
+    /// (SPEC-024b §6.19's `HOOK_USEANIMOBJ`).
+    fn ladder_motion_as(
+        &self,
+        actor: ObjectRef,
+        ladder: ObjectRef,
+        climb: Option<u8>,
     ) -> Result<MotionSequence, Refused> {
         let mut sequence = MotionSequence {
             reset: false,
@@ -1302,11 +1356,13 @@ impl<A: WorldAssets> WorldHost<A> {
         if code != 0 {
             self.put_away(&mut sequence, actor, -1)?;
         }
-        let name = self
-            .character_sound_name(actor, animation::CLIMB, 0)
-            .unwrap_or_default();
-        sequence.push(actor, -1, Motion::Sound { name })?;
-        self.animate_entry(&mut sequence, actor, animation::CLIMB, None, 0)?;
+        if let Some(climb) = climb {
+            let name = self
+                .character_sound_name(actor, climb, 0)
+                .unwrap_or_default();
+            sequence.push(actor, -1, Motion::Sound { name })?;
+            self.animate_entry(&mut sequence, actor, climb, None, 0)?;
+        }
         let call = Call::Use { target: ladder };
         sequence.push(actor, -1, Motion::Call(call))?;
         if code != 0 {
@@ -1319,7 +1375,11 @@ impl<A: WorldAssets> WorldHost<A> {
         actor: ObjectRef,
         ladder: ObjectRef,
     ) -> Result<(), WorldError> {
-        let sequence = self.ladder_motion(actor, ladder).map_err(refused)?;
+        let sequence = match self.hook_use_animation(actor, ladder, animation::CLIMB) {
+            Some(chosen) => self.ladder_motion_as(actor, ladder, chosen),
+            None => self.ladder_motion(actor, ladder),
+        }
+        .map_err(refused)?;
         self.start_interaction(actor, sequence, Click::Action, true)?;
         Ok(())
     }

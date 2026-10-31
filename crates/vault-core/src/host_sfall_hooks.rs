@@ -135,6 +135,10 @@ pub struct SfallHooks {
     previews: BTreeMap<Preview, (Vec<i32>, i32)>,
     /// §6.15 the items running chains are about, which no member destroys.
     used_items: Vec<ObjectRef>,
+    /// §6.19 this turn is a player's turn resumed by a load.
+    pub(crate) turn_resumed: bool,
+    /// §6.19 a turn's chain returned -1 at its end.
+    pub(crate) combat_ending: bool,
 }
 /// What `HOOK_USEOBJON` or `HOOK_USEOBJ` decided (§6.15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,21 +160,25 @@ pub enum Preview {
     /// The cost beside the movement cursor: a planning query for N hexes
     /// (§6.13), before the free-movement pool.
     MoveCost,
+    /// The character figure on the inventory or barter screen (§6.19).
+    Figure,
+    /// Whether the player's active weapon can be used (§6.19).
+    SlotUsable,
 }
 
 /// The int return at `index`, if a member set it.
-fn int_return(rets: &[Option<SfallValue>], index: usize) -> Option<i32> {
+pub(crate) fn int_return(rets: &[Option<SfallValue>], index: usize) -> Option<i32> {
     rets.get(index)?.as_ref().map(SfallValue::int)
 }
-fn object(reference: ObjectRef) -> SfallValue {
+pub(crate) fn object(reference: ObjectRef) -> SfallValue {
     SfallValue::Int(reference as i32)
 }
-fn int(value: i32) -> SfallValue {
+pub(crate) fn int(value: i32) -> SfallValue {
     SfallValue::Int(value)
 }
 
 impl<A: WorldAssets> WorldHost<A> {
-    fn hooks(&mut self) -> Option<&mut SfallHooks> {
+    pub(crate) fn hooks(&mut self) -> Option<&mut SfallHooks> {
         self.sfall.as_deref_mut().map(|sfall| &mut sfall.hooks)
     }
     /// A session setup is owed: after a new game or a slot load, and before

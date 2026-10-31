@@ -6,6 +6,23 @@ use vault_core::{CommandId, SequenceIds};
 use crate::AppResult;
 use crate::enhanced::{EnhancedSettings, RoofPeek, ViewportMode};
 
+/// SPEC-024b §6.19 a recorded button's number: 0 left, 1 right, up to 7.
+pub fn button_number(name: &str) -> Option<i32> {
+    match name {
+        "Left" => Some(0),
+        "Right" => Some(1),
+        "Middle" => Some(2),
+        "Back" => Some(3),
+        "Forward" => Some(4),
+        other => other
+            .strip_prefix("Other(")?
+            .strip_suffix(')')?
+            .parse()
+            .ok()
+            .filter(|button| (0..=7).contains(button)),
+    }
+}
+
 /// Platform observations only; game-specific input bindings belong to later phases.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

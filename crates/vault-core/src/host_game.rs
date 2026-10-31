@@ -3,6 +3,7 @@ use crate::{
     assets::WorldAssets,
     dialogue::{DialogueOption, DialogueText},
     host::{AnimationSequence, HostResult, WorldHost},
+    host_sfall_boundaries::perception,
     queue::EventKind,
     rng::{self, RandomSource},
     world::{ObjectRef, WorldObject},
@@ -1020,6 +1021,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 if item != 0 && owner != 0 {
                     let worn = self.worn(item);
                     let result = if op == 0x80d9 {
+                        self.hook_removal(owner, item);
                         self.world.remove_item(owner, item, quantity)
                     } else {
                         self.world.add_item(owner, item, quantity, op == 0x8116)
@@ -1069,7 +1071,7 @@ impl<A: WorldAssets> WorldHost<A> {
                         .diagnostic("obj_can_see_obj requires two objects");
                     integer(0)
                 } else {
-                    integer(i32::from(self.world.can_see(observer, target)))
+                    integer(i32::from(self.hooked_can_see(observer, target)))
                 }
             }
             0x80de => {
@@ -1185,7 +1187,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 integer(0)
             }
             0x80e9 => {
-                self.world.ambient_percent(call.int(0));
+                self.hooked_map_light(call.int(0));
                 None
             }
             // Time arithmetic wraps as 32-bit two's complement (safe rule).
@@ -1360,7 +1362,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     let placed = hearer.raw.hex.is_some() && heard.raw.hex.is_some();
                     let level = hearer.raw.elevation == heard.raw.elevation;
                     integer(i32::from(
-                        placed && level && self.world.can_perceive(first, second),
+                        placed && level && self.perceives(first, second, perception::OTHER),
                     ))
                 }
             }
@@ -1571,8 +1573,7 @@ impl<A: WorldAssets> WorldHost<A> {
             0x8107 => {
                 if call.uint(2) != 0
                     && let Err(error) =
-                        self.world
-                            .object_light(call.uint(2), call.int(1), call.int(0))
+                        self.hooked_object_light(call.uint(2), call.int(1), call.int(0))
                 {
                     self.world.diagnostic(error.to_string());
                 }
@@ -1774,6 +1775,7 @@ impl<A: WorldAssets> WorldHost<A> {
                         .find(|(r, _)| *r == item)
                         .map_or(0, |(_, n)| *n)
                         .min(call.int(0));
+                    self.hook_removal(owner, item);
                     if let Err(error) = self.world.remove_item(owner, item, amount) {
                         self.world.diagnostic(error.to_string());
                     }

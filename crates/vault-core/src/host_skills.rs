@@ -64,6 +64,9 @@ impl<A: WorldAssets> WorldHost<A> {
         target: ObjectRef,
         index: i32,
     ) -> Result<bool, WorldError> {
+        let Some((actor, passed)) = self.hook_skill_on(actor, target, index) else {
+            return Ok(false);
+        };
         if index == skill::SNEAK {
             self.toggle_sneak()?;
             return Ok(true);
@@ -78,7 +81,8 @@ impl<A: WorldAssets> WorldHost<A> {
             pid: object.raw.pid,
             is_actor: actor == target,
         };
-        if let Gate::Rejected { combat } = skills::gate(index, self.world.combat, &info) {
+        let in_combat = self.world.combat && !passed;
+        if let Gate::Rejected { combat } = skills::gate(index, in_combat, &info) {
             if combat && actor == self.world.player {
                 self.print_game("proto.msg", 902, &[]);
             }
@@ -643,6 +647,7 @@ impl<A: WorldAssets> WorldHost<A> {
         } else {
             amount
         };
+        let amount = self.hook_radiation(critter, amount);
         if amount > 0 {
             if let Some(sheet) = self.world.player_sheet_mut() {
                 sheet.flags |= EXPOSED_FLAG;

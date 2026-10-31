@@ -14,6 +14,7 @@ use crate::{
     critical::{effect, hit_mode},
     fallout2_party::{self as party, Candidate, Exposure, distance},
     host::WorldHost,
+    host_sfall_boundaries::perception,
     routing::rotation,
 };
 use vault_formats::{
@@ -155,11 +156,12 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         let mut snapshot = std::mem::take(&mut self.world.ai.snapshot);
         snapshot.sort_by_key(|entry| self.world.object_distance(critter, *entry));
-        let candidates: Vec<ObjectRef> = snapshot
-            .iter()
-            .copied()
-            .filter(|entry| self.hostile_candidate(critter, *entry))
-            .collect();
+        let mut candidates: Vec<ObjectRef> = Vec::new();
+        for entry in &snapshot {
+            if self.hostile_candidate(critter, *entry) {
+                candidates.push(*entry);
+            }
+        }
         self.world.ai.snapshot = snapshot;
         let player = self.world.player;
         let rows: Vec<Candidate> = candidates
@@ -179,17 +181,18 @@ impl<A: WorldAssets> WorldHost<A> {
             .filter(|reference| *reference != 0 && self.world.get(*reference).is_some())
     }
     /// §3.16 rule 3's hostile candidate test for snapshot entry `entry`.
-    fn hostile_candidate(&self, critter: ObjectRef, entry: ObjectRef) -> bool {
+    fn hostile_candidate(&mut self, critter: ObjectRef, entry: ObjectRef) -> bool {
         let world = &self.world;
         let player = world.player;
         if entry == critter
             || entry == player
             || world.party.contains(&entry)
             || world.is_dead(entry)
-            || !world.can_perceive(critter, entry)
+            || !self.perceives(critter, entry, perception::AI_TARGET)
         {
             return false;
         }
+        let world = &self.world;
         let ours = |other: Option<ObjectRef>| {
             other.is_some_and(|other| other == player || world.party.contains(&other))
         };

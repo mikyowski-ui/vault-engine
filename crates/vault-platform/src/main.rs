@@ -1416,6 +1416,9 @@ impl Shell {
                 pressed,
             },
         );
+        if let Some(session) = &mut self.session {
+            session.physical_button(pressed, &format!("{button:?}"));
+        }
         if self.enhanced_button(event_loop, window, button, pressed) {
             return;
         }

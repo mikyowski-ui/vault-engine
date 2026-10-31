@@ -6,6 +6,7 @@ use crate::{
     assets::WorldAssets,
     critical::{effect, maneuver, state},
     host::WorldHost,
+    host_sfall_boundaries::perception,
     stats::Perk,
     world::ScriptRequest,
 };
@@ -488,6 +489,10 @@ impl<A: WorldAssets> WorldHost<A> {
                 .is_some_and(|request| request.attacker == critter)
         });
         let resumed = std::mem::take(&mut self.world.combat_state.resumed);
+        if self.hook_turn_start(critter, resumed) {
+            self.end_turn(critter);
+            return Ok(false);
+        }
         if !self.world.combat_active(critter) {
             if let Some(state) = self.world.critter_state_mut(critter) {
                 state.results.0 &= !effect::LOSE_TURN;
@@ -582,6 +587,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         // SPEC-021 §3.6: the turn's end-of-turn steps are done.
         self.record_combat_event(crate::traces::CombatEvent::Turn, Some(critter));
+        self.hook_turn_end(critter);
     }
     /// Whether the player's input loop must stop: input gate clear, accepted
     /// end request, knockout/dead/lose-turn, ordinary AP at most zero (free
@@ -619,7 +625,7 @@ impl<A: WorldAssets> WorldHost<A> {
             // SPEC-005 0x8153: a script's deferred quit-combat request ends
             // combat at the next turn boundary (cleanup then awards no
             // experience and leaves a knockout in place).
-            if self.world.combat_quit {
+            if self.world.combat_quit || self.sfall_ends_combat() {
                 self.end_combat()?;
                 return Ok(CombatProgress::Ended);
             }
@@ -693,7 +699,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         let unperceived = match self.danger_target(critter, ai) {
             None => true,
-            Some(danger) => !self.world.can_perceive(critter, danger),
+            Some(danger) => !self.perceives(critter, danger, perception::OTHER),
         };
         unperceived
             || self.world.critter_state(critter).map(|s| s.ap)
@@ -730,6 +736,8 @@ impl<A: WorldAssets> WorldHost<A> {
     /// the input gate, award kill experience to a living player unless quit,
     /// wake a knocked-out surviving player, and dispatch map updates.
     pub fn end_combat(&mut self) -> Result<(), WorldError> {
+        let last = self.world.combat_actor;
+        let abrupt = self.world.combat_quit;
         let list = std::mem::take(&mut self.world.combat_state.list);
         for critter in &list {
             if let Some(object) = self.world.get_mut(*critter) {
@@ -787,6 +795,7 @@ impl<A: WorldAssets> WorldHost<A> {
         let updated = self.map_update();
         // SPEC-021 §3.6: combat cleanup is complete.
         self.record_combat_event(crate::traces::CombatEvent::End, None);
+        self.hook_combat_over(last, abrupt);
         updated
     }
 }

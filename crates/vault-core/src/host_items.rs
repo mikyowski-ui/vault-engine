@@ -283,6 +283,14 @@ impl<A: WorldAssets> WorldHost<A> {
         } else {
             BasicFlags::RIGHT_HAND
         };
+        let slot = match flag {
+            BasicFlags::WORN => 0,
+            BasicFlags::LEFT_HAND => 2,
+            _ => 1,
+        };
+        if !self.hook_wield(critter, item, slot, true) {
+            return Ok(());
+        }
         // From a stack the slot takes one unit (SPEC-011 §3.13).
         let item = self.world.split_unit(item)?;
         self.world.equip(critter, item, flag.0)?;

@@ -15,6 +15,7 @@ use crate::{
     critical::{effect, hit_mode, location},
     host::WorldHost,
     host_combat::{Refusal, Spray},
+    host_sfall_boundaries::perception,
     routing::rotation,
 };
 #[cfg(test)]
@@ -347,16 +348,10 @@ impl<A: WorldAssets> WorldHost<A> {
     /// §3.3 onlooker alerting: every snapshot entry that perceives the
     /// damaged critter (itself, dead entries, and any team included).
     pub fn alert_onlookers(&mut self, victim: ObjectRef) {
-        let watchers: Vec<_> = self
-            .world
-            .ai
-            .snapshot
-            .iter()
-            .copied()
-            .filter(|watcher| self.world.can_perceive(*watcher, victim))
-            .collect();
-        for watcher in watchers {
-            self.world.add_intent(watcher, intent::ALERT);
+        for watcher in self.world.ai.snapshot.clone() {
+            if self.perceives(watcher, victim, perception::OTHER) {
+                self.world.add_intent(watcher, intent::ALERT);
+            }
         }
     }
     /// §3.4 damage-application writers, under the single rule of SPEC-007
@@ -434,7 +429,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// §3.5 `danger(C)` over the live snapshot (sorted in place).
     pub fn danger(&mut self, critter: ObjectRef) -> Option<ObjectRef> {
         let mut snapshot = std::mem::take(&mut self.world.ai.snapshot);
-        let found = ai::danger(&mut snapshot, critter, &self.world);
+        let found = self.hooked_danger(&mut snapshot, critter);
         self.world.ai.snapshot = snapshot;
         found
     }
@@ -1283,7 +1278,12 @@ impl<A: WorldAssets> WorldHost<A> {
                     .world
                     .weapon_data(*item)
                     .map_or(0, |gun| gun.ap_cost[0]),
-                usable_primary: self.usable(critter, *item, hit_mode::RIGHT_PRIMARY, min_to_hit),
+                usable_primary: self.hooked_usable(
+                    critter,
+                    *item,
+                    hit_mode::RIGHT_PRIMARY,
+                    min_to_hit,
+                ),
                 loaded: self.world.loaded(*item).0,
                 ammo_available: self.compatible_ammo(critter, *item).is_some(),
                 choice: WeaponChoice {
@@ -1319,7 +1319,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         let min_to_hit = self.packet(critter).map_or(0, |packet| packet.min_to_hit);
         let world = &self.world;
-        let mut items: Vec<_> = world
+        let mut items: Vec<ObjectRef> = world
             .occupancy(world.elevation)
             .into_values()
             .flatten()
@@ -1334,16 +1334,16 @@ impl<A: WorldAssets> WorldHost<A> {
         let limit = world.effective(critter, 1).saturating_add(5);
         let right = world.wielded(critter, hit_mode::RIGHT_PRIMARY);
         for item in items {
-            if world.object_distance(critter, item) > limit {
+            if self.world.object_distance(critter, item) > limit {
                 break;
             }
-            if world.item_subtype(item) != Some(kind) {
+            if self.world.item_subtype(item) != Some(kind) {
                 continue;
             }
             let found = if kind == ItemSubtype::Weapon {
-                self.usable(critter, item, hit_mode::RIGHT_PRIMARY, min_to_hit)
+                self.hooked_usable(critter, item, hit_mode::RIGHT_PRIMARY, min_to_hit)
             } else {
-                right.is_some_and(|weapon| world.reload_permitted(weapon, item))
+                right.is_some_and(|weapon| self.world.reload_permitted(weapon, item))
             };
             if found {
                 return Some(item);
@@ -1418,6 +1418,9 @@ impl<A: WorldAssets> WorldHost<A> {
     /// Wield in the right hand (no AP for NPCs): the art shows the weapon's
     /// animation code, and the take-out animation plays.
     fn wield(&mut self, critter: ObjectRef, weapon: ObjectRef) -> Result<(), WorldError> {
+        if !self.hook_wield(critter, weapon, 1, true) {
+            return Ok(());
+        }
         self.world
             .equip(critter, weapon, BasicFlags::RIGHT_HAND.0)?;
         let code = self
@@ -1439,6 +1442,9 @@ impl<A: WorldAssets> WorldHost<A> {
         let Some(item) = self.world.wielded(critter, hit_mode::RIGHT_PRIMARY) else {
             return false;
         };
+        if !self.hook_wield(critter, item, 1, false) {
+            return false;
+        }
         if let Some(object) = self.world.get_mut(item) {
             object.raw.flags.0 &= !BasicFlags::RIGHT_HAND.0;
         }
@@ -1539,15 +1545,19 @@ impl<A: WorldAssets> WorldHost<A> {
                 Some(ModeWeapon {
                     secondary_subtype,
                     usable_secondary: secondary_subtype != ai::subtype::NONE
-                        && self.usable(critter, item, hit_mode::RIGHT_SECONDARY, min_to_hit),
+                        && self.hooked_usable(critter, item, hit_mode::RIGHT_SECONDARY, min_to_hit),
                 })
             }
         };
         let intelligence = self.world.effective(critter, 4);
         let mut rng = std::mem::take(&mut self.world.rng);
-        let mode = ai::select_hit_mode(mode_weapon, frequency, intelligence, &mut rng, || {
-            self.inventory_search(critter, false).is_some()
-        });
+        let mode =
+            ai::select_hit_mode_with(mode_weapon, frequency, intelligence, &mut rng, |rng| {
+                rng.lend(&mut self.world.rng);
+                let found = self.inventory_search(critter, false).is_some();
+                rng.lend(&mut self.world.rng);
+                found
+            });
         self.world.rng = rng;
         mode
     }

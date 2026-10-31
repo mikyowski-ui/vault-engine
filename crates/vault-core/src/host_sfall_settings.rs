@@ -413,6 +413,9 @@ impl<A: WorldAssets> WorldHost<A> {
         let Some(item) = item else {
             return;
         };
+        if !self.hook_wield(critter, item, slot, false) {
+            return;
+        };
         if let Err(error) = self.world.unequip(critter, item) {
             self.world.diagnostic(format!("unwield_slot: {error}"));
             return;

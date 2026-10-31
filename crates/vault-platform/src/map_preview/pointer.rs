@@ -873,6 +873,13 @@ impl MapPreview {
         if !self.host.sfall_mode() {
             return;
         }
+        self.sfall_figure_preview();
+        if let Some(item) = self.active_item()
+            && self.slot_weapon(Some(item))
+        {
+            self.host
+                .sfall_slot_usable(item, self.slot_hit_mode(self.slot_mode()));
+        }
         let player = self.host.world.player;
         let Some((mode, aimed)) = self.slot_attack() else {
             return;
@@ -904,6 +911,26 @@ impl MapPreview {
                         .unwrap_or(0)
                 });
         }
+    }
+    /// §6.19 `HOOK_ADJUSTFID` on the inventory or barter screen's figure.
+    /// The query takes the figure facing the viewer, so turning it is no
+    /// new input.
+    fn sfall_figure_preview(&mut self) {
+        if !matches!(self.screen, Screen::Inventory(_) | Screen::Barter(_)) {
+            return;
+        }
+        let player = self.host.world.player;
+        if let Some(fid) = self.host.figure_art(player, self.active_item(), 3) {
+            self.host.sfall_figure(fid);
+        }
+    }
+    /// The figure to draw for `fid`: what the preview stored, when a chain
+    /// changed it.
+    pub(crate) fn shown_figure(&self, fid: Option<u32>) -> Option<u32> {
+        let player = self.host.world.player;
+        let front = self.host.figure_art(player, self.active_item(), 3)?;
+        let shown = self.host.sfall_figure_shown(front);
+        if shown == front { fid } else { Some(shown) }
     }
     /// Draw the cursor at the pointer: a dragged item, the action menu, the
     /// edge-scroll art, the in-world cursor over the map, else the arrow.

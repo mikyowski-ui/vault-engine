@@ -21,6 +21,10 @@ const MOVECOST: i32 = 11;
 const CALCAPCOST: i32 = 2;
 const TOHIT: i32 = 0;
 const BARTERPRICE: i32 = 10;
+const MOUSECLICK: i32 = 20;
+const ADJUSTFID: i32 = 26;
+const RESTTIMER: i32 = 30;
+const CANUSEWEAPON: i32 = 48;
 
 const GET_ARG: u16 = 0x81e4;
 const SET_RETURN: u16 = 0x81e5;
@@ -603,4 +607,142 @@ fn an_inventory_use_runs_the_use_hook_before_the_items_own_path() {
         game.world.host.world.get(used).is_none(),
         "ret0 1 removes it"
     );
+}
+
+#[test]
+fn hook_20_a_recorded_button_runs_its_chain_with_its_number() {
+    assert_eq!(
+        [
+            "Left", "Right", "Middle", "Back", "Forward", "Other(7)", "Other(8)"
+        ]
+        .map(crate::input::button_number),
+        [Some(0), Some(1), Some(2), Some(3), Some(4), Some(7), None]
+    );
+    let Game {
+        world,
+        _install,
+        _layer,
+    } = game(MOUSECLICK, &recording(2));
+    let mut preview = crate::preview::AssetPreview::Map(Box::new(world));
+    preview.physical_button(true, "Middle");
+    preview.physical_button(false, "Other(8)");
+    let crate::preview::AssetPreview::Map(world) = &preview else {
+        panic!("a map");
+    };
+    assert_eq!(
+        [global(world, 10), global(world, 11), global(world, 1)],
+        [1, 2, 1],
+        "a button past 7 has no number"
+    );
+}
+
+#[test]
+fn hook_30_esc_waits_for_the_steps_chain_which_can_refuse_it() {
+    let mut body = recording(4);
+    body.extend([I(2), W(GLOBAL_INT), W(SET_RETURN)]);
+    let mut game = game(RESTTIMER, &body);
+    let world = &mut game.world;
+    set_global(world, 2, 0);
+    // SPEC-008 §3.9: no map row refuses the rest, and nobody near stops it.
+    world.host.world.map.header.map_number = 9999;
+    let player = world.host.world.player;
+    let others: Vec<_> = world
+        .host
+        .world
+        .iter()
+        .map(|(object, _)| object)
+        .filter(|object| *object != player && world.host.world.critter_state(*object).is_some())
+        .collect();
+    let team = world.host.world.critter_state(player).unwrap().team;
+    for other in others {
+        world.host.set_team(other, team);
+    }
+    let mut now = 1_000;
+    world.tick(now).unwrap();
+    assert!(world.host.rest_allowed());
+    assert!(world.step(KeyCode::KeyP));
+    assert!(world.tap([130, 20]), "the Alarm Clock button");
+    world.image().unwrap();
+    assert!(world.tap([300, 140]), "an hour");
+    let resting = |world: &MapPreview| matches!(&world.screen, Screen::PipBoy(pipboy) if pipboy.rest.is_some());
+    assert!(resting(world));
+    // The member answers 0: Esc is noted, and the step's chain refuses it.
+    assert!(world.step(KeyCode::Escape));
+    assert!(resting(world), "the stop waits for the step");
+    now += 60;
+    world.tick(now).unwrap();
+    assert_eq!(global(world, 11), -1, "the step saw Esc");
+    assert!(resting(world), "0 keeps a rest that Esc would stop");
+    now += 60;
+    world.tick(now).unwrap();
+    assert_eq!(global(world, 11), 0, "and the next step is an ordinary one");
+    // With nothing returned, the same Esc stops it.
+    set_global(world, 2, 7);
+    assert!(world.step(KeyCode::Escape));
+    now += 60;
+    world.tick(now).unwrap();
+    assert!(!resting(world));
+}
+
+#[test]
+fn hook_26_the_figure_shows_the_previews_art_when_it_has_any() {
+    let mut body = recording(2);
+    body.extend([I(2), W(GLOBAL_INT), W(SET_RETURN)]);
+    let mut game = game(ADJUSTFID, &body);
+    let world = &mut game.world;
+    let player = world.host.world.player;
+    let other = world
+        .host
+        .world
+        .iter()
+        .map(|(_, object)| object.raw.art_id)
+        .find(|art| vault_formats::Fid(*art).category() == 1)
+        .unwrap();
+    set_global(world, 2, other as i32);
+    world.image().unwrap();
+    assert!(world.step(KeyCode::KeyI));
+    world.tick(16).unwrap();
+    let front = world
+        .host
+        .figure_art(player, world.active_item(), 3)
+        .unwrap();
+    assert_eq!(global(world, 10), front as i32);
+    assert_eq!(global(world, 11), front as i32, "arg1 equals arg0");
+    let shown = |world: &MapPreview| world.shown_figure(Some(front));
+    assert!(vault_core::assets::WorldAssets::art_exists(
+        &world.host.assets,
+        other
+    ));
+    assert_eq!(shown(world), Some(other));
+    let runs = global(world, 1);
+    world.tick(32).unwrap();
+    assert_eq!(global(world, 1), runs, "the same inputs run no chain");
+    // Closed, the preview stops asking.
+    assert!(world.step(KeyCode::Escape));
+    world.tick(48).unwrap();
+    assert_eq!(global(world, 1), runs);
+}
+
+#[test]
+fn hook_48_a_refused_weapon_disables_the_item_slot() {
+    let mut body = recording(4);
+    body.extend([I(2), W(GLOBAL_INT), W(SET_RETURN)]);
+    let slot = |answer: i32| {
+        let mut game = game(CANUSEWEAPON, &body);
+        let world = &mut game.world;
+        let player = world.host.world.player;
+        let gun = item(world, 3, 1);
+        let flag = vault_formats::pro::BasicFlags::RIGHT_HAND.0;
+        world.host.world.equip(player, gun, flag).unwrap();
+        world.host.world.active_hand = 1;
+        set_global(world, 2, answer);
+        world.tick(16).unwrap();
+        assert_eq!(global(world, 12), -1, "the player's query");
+        let runs = global(world, 1);
+        world.tick(32).unwrap();
+        assert_eq!(global(world, 1), runs, "the same inputs run no chain");
+        world.slot_disabled()
+    };
+    assert!(slot(0));
+    assert!(!slot(1));
 }

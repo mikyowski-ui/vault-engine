@@ -1050,6 +1050,7 @@ impl MapPreview {
         let player = self.host.world.player;
         let facing = self.figure.0;
         let fid = self.host.figure_art(player, self.active_item(), facing);
+        let fid = self.shown_figure(fid);
         let direction = (usize::from(facing), false);
         self.draw_portrait(image, fid, direction, layout::FIGURE_BOX);
     }

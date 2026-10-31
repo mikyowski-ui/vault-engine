@@ -196,6 +196,8 @@ pub struct Resolution {
     pub rounds: i32,
     /// Ammunition scheduled for consumption at cleanup.
     pub ammo: i32,
+    /// SPEC-024b §6.19 the cost of each round of a burst under sfall mode.
+    pub burst_cost: Option<i32>,
     /// Computed critical-failure self damage (committed to a living attacker
     /// under the SPEC-007 §3.6 safe rule).
     pub self_damage: i32,

@@ -2249,9 +2249,12 @@ impl<A: WorldAssets> WorldHost<A> {
                         None => self.world.emit(WorldEffect::Message(name)),
                     }
                 }
-                ObjectAction::Description => self.world.emit(WorldEffect::Message(
-                    self.world.get(target).expect("target").description.clone(),
-                )),
+                ObjectAction::Description => {
+                    let text = self.hook_description(target).unwrap_or_else(|| {
+                        self.world.get(target).expect("target").description.clone()
+                    });
+                    self.world.emit(WorldEffect::Message(text));
+                }
                 _ => {}
             }
             self.world

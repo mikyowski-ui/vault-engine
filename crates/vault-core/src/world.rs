@@ -2403,17 +2403,23 @@ impl WorldState {
         }
         self.spatial_enabled = true;
     }
-    pub fn ambient_percent(&mut self, percent: i32) {
-        let requested = if percent == 50 {
+    /// The ambient light `set_light_level` asks for.
+    pub(crate) fn ambient_request(percent: i32) -> i64 {
+        if percent == 50 {
             40960
         } else {
             (if percent > 50 { 40960 } else { 16384 }) + i64::from(percent) * 24576 / 100
-        };
-        self.set_ambient(requested);
+        }
+    }
+    pub fn ambient_percent(&mut self, percent: i32) {
+        self.set_ambient(Self::ambient_request(percent));
     }
     pub fn set_ambient(&mut self, value: i64) {
-        self.ambient =
-            (value + 6553 * i64::from(self.perk(Perk::NightVision))).clamp(16384, 65536) as i32;
+        self.ambient = self.ambient_of(value);
+    }
+    /// The ambient light a requested `value` becomes.
+    pub(crate) fn ambient_of(&self, value: i64) -> i32 {
+        (value + 6553 * i64::from(self.perk(Perk::NightVision))).clamp(16384, 65536) as i32
     }
     pub fn object_light(
         &mut self,
@@ -2421,12 +2427,23 @@ impl WorldState {
         percent: i32,
         radius: i32,
     ) -> Result<(), WorldError> {
+        self.store_object_light(reference, Self::light_request(percent)?, radius)
+    }
+    /// The intensity `obj_set_light_level` computes from `percent`.
+    pub(crate) fn light_request(percent: i32) -> Result<i32, WorldError> {
         let request = if percent == 0 {
             0
         } else {
             i64::from(percent) * 65636 / 100
         };
-        let requested = i32::try_from(request).map_err(|_| WorldError::Arithmetic)?;
+        i32::try_from(request).map_err(|_| WorldError::Arithmetic)
+    }
+    pub(crate) fn store_object_light(
+        &mut self,
+        reference: ObjectRef,
+        requested: i32,
+        radius: i32,
+    ) -> Result<(), WorldError> {
         self.emit(WorldEffect::ObjectLight {
             object: reference,
             requested,

@@ -334,12 +334,15 @@ impl<A: WorldAssets> WorldHost<A> {
         // taken: the reference-visible magazine counts are kept.
         if resolution.ammo > 0
             && let Some(item) = self.world.wielded(attacker, attack.hit_mode)
-            && let Some(ObjectState::Other {
+        {
+            let spent = self.hook_ammo_spent(item, resolution);
+            if let Some(ObjectState::Other {
                 detail: ObjectDetail::Weapon { rounds, .. },
                 ..
             }) = self.world.get_mut(item).map(|o| &mut o.raw.state)
-        {
-            *rounds = rounds.saturating_sub(resolution.ammo).max(0);
+            {
+                *rounds = rounds.saturating_sub(spent).max(0);
+            }
         }
         // SPEC-007 §3.6 safe rule: attacker self-damage and its flags are
         // committed when the attacker is not marked dead (the reference tests
@@ -708,6 +711,7 @@ impl<A: WorldAssets> WorldHost<A> {
             .ok_or_else(|| WorldError::Invalid("spray requires a weapon".into()))?;
         let continuous = weapon.mode == crate::combat::attack_mode::CONTINUOUS;
         let ammo = weapon.rounds.min(weapon.burst).max(0);
+        let burst_cost = self.hook_burst_cost(attacker, attack, ammo, rng);
         let chance = attack.hit_chance(true)?;
         // One roll with effective Critical Chance and no location subtraction.
         let mut code = attack.roll(chance, attack.critical_chance, rng)?;
@@ -715,6 +719,7 @@ impl<A: WorldAssets> WorldHost<A> {
             code,
             multiplier: 2,
             ammo,
+            burst_cost,
             ..Resolution::default()
         };
         // A critical failure ends here unless a hook changes the roll; the

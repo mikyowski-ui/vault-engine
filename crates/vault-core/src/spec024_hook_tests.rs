@@ -23,11 +23,11 @@ use vault_vm::{
 };
 
 const GET_ARG: Op = W(0x81e4);
-const SET_RETURN: Op = W(0x81e5);
+pub(crate) const SET_RETURN: Op = W(0x81e5);
 const SET_ARG: Op = W(0x823d);
 const INIT_HOOK: Op = W(0x81ea);
 const REGISTER: Op = W(0x8207);
-const REGISTER_PROC: Op = W(0x8262);
+pub(crate) const REGISTER_PROC: Op = W(0x8262);
 const REGISTER_SPEC: Op = W(0x827d);
 const DUPLICATE: Op = W(0x801b);
 const SWAP: Op = W(0x8018);
@@ -40,7 +40,7 @@ const SET_GLOBAL: Op = W(0x819d);
 const RANDOM: Op = W(0x80b4);
 /// The right hand's primary attack: `fixture_e`'s attacker holds its gun
 /// there.
-const RIGHT: u8 = crate::critical::hit_mode::RIGHT_PRIMARY;
+pub(crate) const RIGHT: u8 = crate::critical::hit_mode::RIGHT_PRIMARY;
 
 pub(crate) fn global_of(host: &WorldHost<TestAssets>, key: i32) -> i32 {
     global(host, key)
@@ -76,11 +76,11 @@ fn encode(ops: &[Op], strings: &IntProgram) -> Vec<u8> {
 }
 /// A compiled script's shape: the initial stream runs `start`, procedure 1,
 /// and `procedures` follow it at indices 2 up.
-fn script(start: &[Op], procedures: &[(&'static str, &[Op])]) -> IntProgram {
+pub(crate) fn script(start: &[Op], procedures: &[(&'static str, &[Op])]) -> IntProgram {
     script_with(&[], start, procedures)
 }
 /// [`script`], with `strings` for its literals.
-fn script_with(
+pub(crate) fn script_with(
     strings: &[&[u8]],
     start: &[Op],
     procedures: &[(&'static str, &[Op])],
@@ -102,17 +102,17 @@ fn script_with(
     bytes[init + 12..init + 16].copy_from_slice(&body.to_be_bytes());
     IntProgram::parse_in(&bytes, &words, false).unwrap()
 }
-fn install(host: &mut WorldHost<TestAssets>, name: &str, program: IntProgram) {
+pub(crate) fn install(host: &mut WorldHost<TestAssets>, name: &str, program: IntProgram) {
     host.assets.programs.push((name.to_owned(), program));
 }
-fn set_up(host: &mut WorldHost<TestAssets>) {
+pub(crate) fn set_up(host: &mut WorldHost<TestAssets>) {
     host.sfall_setup_owed();
     host.sfall_setup_if_due();
 }
 fn ints(values: &[i32]) -> Vec<SfallValue> {
     values.iter().copied().map(SfallValue::Int).collect()
 }
-fn global(host: &WorldHost<TestAssets>, key: i32) -> i32 {
+pub(crate) fn global(host: &WorldHost<TestAssets>, key: i32) -> i32 {
     host.world
         .sfall
         .as_ref()
@@ -382,7 +382,7 @@ fn hooked(hook: i32, body: &[Op]) -> WorldHost<TestAssets> {
     set_up(&mut host);
     host
 }
-fn attack_host(hook: i32, body: &[Op]) -> (WorldHost<TestAssets>, [ObjectRef; 4]) {
+pub(crate) fn attack_host(hook: i32, body: &[Op]) -> (WorldHost<TestAssets>, [ObjectRef; 4]) {
     let (mut host, critters) = fixture_e("critter", 2);
     host.sfall = Some(Default::default());
     host.world.sfall = Some(Default::default());
@@ -881,7 +881,7 @@ fn t8_hooks_that_return_nothing_change_no_hash() {
 }
 
 /// The rows of `vector`, as cells.
-fn rows(vector: &str) -> Vec<Vec<&'static str>> {
+pub(crate) fn rows(vector: &str) -> Vec<Vec<&'static str>> {
     VECTORS
         .lines()
         .map(|line| line.split('\t').collect::<Vec<_>>())
@@ -890,7 +890,7 @@ fn rows(vector: &str) -> Vec<Vec<&'static str>> {
 }
 /// A member that keeps its `count` arguments in globals `10..` and its run
 /// count in global 1, then writes a row's returns: `rets=[41, None]`.
-fn member(count: i32, rets: &str) -> Vec<Op> {
+pub(crate) fn member(count: i32, rets: &str) -> Vec<Op> {
     let mut body = vec![I(1), I(1), GLOBAL_INT, I(1), ADD, SET_GLOBAL];
     for index in 0..count {
         body.extend([I(10 + index), GET_ARG, SET_GLOBAL]);
@@ -905,19 +905,19 @@ fn member(count: i32, rets: &str) -> Vec<Op> {
     body
 }
 /// `body` registered on `hook` on `host`.
-fn registered(host: &mut WorldHost<TestAssets>, hook: i32, body: &[Op]) {
+pub(crate) fn registered(host: &mut WorldHost<TestAssets>, hook: i32, body: &[Op]) {
     let start = [I(hook), I(2), REGISTER_PROC];
     install(host, "gl_0.int", script(&start, &[("m", body)]));
     set_up(host);
 }
 /// What a row of `hook`'s member saw, and how often it ran.
-fn saw(host: &WorldHost<TestAssets>, hook: i32) -> (Vec<i32>, i32) {
+pub(crate) fn saw(host: &WorldHost<TestAssets>, hook: i32) -> (Vec<i32>, i32) {
     let count = sfall::hook_row(hook).unwrap().args.len() as i32;
     let args = (0..count).map(|index| global(host, 10 + index)).collect();
     (args, global(host, 1))
 }
 /// A carried item of its own PID, for the use hooks.
-fn item(host: &mut WorldHost<TestAssets>, flags: u32) -> ObjectRef {
+pub(crate) fn item(host: &mut WorldHost<TestAssets>, flags: u32) -> ObjectRef {
     let mut bytes = vault_fixtures::world::prototype(0, 5);
     vault_fixtures::world::word(&mut bytes, 0, 0x45);
     vault_fixtures::world::word(&mut bytes, 0x18, flags as i32);

@@ -1247,7 +1247,11 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             return Ok(());
         }
-        let death = dead.then(|| self.death_animation(scene, &react));
+        let death = dead.then(|| {
+            let animation = self.death_animation(scene, &react);
+            let weapon = self.world.wielded(scene.attacker, react.profile.hit_mode);
+            self.hook_death(scene.attacker, critter, weapon, react.damage, animation)
+        });
         let mut final_animation = death.unwrap_or(0);
         if let Some(animation) = death
             && animation == animation::FIRE_DANCE
@@ -1736,8 +1740,7 @@ impl<A: WorldAssets> WorldHost<A> {
                     .world
                     .get(projectile)
                     .map_or(0, |object| object.raw.light.intensity);
-                self.world
-                    .set_light(projectile, PROJECTILE_LIGHT_RADIUS, intensity);
+                self.hooked_projectile_light(projectile, PROJECTILE_LIGHT_RADIUS, intensity);
                 self.world.move_object(projectile, hex, elevation, false)?;
             }
             None => self.world.erase(projectile),

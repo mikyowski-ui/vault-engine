@@ -587,14 +587,17 @@ impl WorldState {
     /// first reported movement blocker is the target itself. The ignored
     /// reference is explicitly null (the reference leaves it uninitialized).
     pub fn can_see(&self, observer: ObjectRef, target: ObjectRef) -> bool {
+        self.can_perceive(observer, target) && self.clear_sight(observer, target)
+    }
+    /// `obj_can_see_obj`'s blocker ray alone.
+    pub(crate) fn clear_sight(&self, observer: ObjectRef, target: ObjectRef) -> bool {
         let (Some(watcher), Some(seen)) = (self.get(observer), self.get(target)) else {
             return false;
         };
         let (Some(from), Some(to)) = (watcher.raw.hex, seen.raw.hex) else {
             return false;
         };
-        self.can_perceive(observer, target)
-            && self.ray(observer, from, to, 16, None).obstacle == Some(target)
+        self.ray(observer, from, to, 16, None).obstacle == Some(target)
     }
     /// Shooting/cover: repeated stride-32 casts. A non-critter is a hard
     /// obstruction; each other critter adds one cover body, and the next cast
