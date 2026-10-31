@@ -66,6 +66,11 @@ pub trait VmHost {
     /// ordinary run (a conditional procedure's condition stream).
     fn observe_before(&mut self, _vm: &Vm) {}
     fn observe_after(&mut self, _vm: &Vm, _result: &Result<RunOutcome, VmError>) {}
+    /// Whether a timed wait releases on its first readiness check (SPEC-004
+    /// §3.3). A host running a hook member says no: the member must end.
+    fn timed_wait_releases(&mut self) -> bool {
+        true
+    }
     fn wait_ready(
         &mut self,
         _reference: u32,

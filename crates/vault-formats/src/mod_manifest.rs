@@ -39,10 +39,31 @@
 //! file = "data/mymod/towns.patch.txt"
 //! ```
 //!
+//! And it may attach `.INT` scripts to the engine's hook points (SPEC-024a
+//! §2.2), which turns manifest scripting on:
+//!
+//! ```toml
+//! id = "cheap-ap"
+//! api = 1
+//!
+//! [settings]
+//! ap_cost = 1
+//!
+//! [[global_scripts]]
+//! file = "gl_cheapap.int"
+//! repeat = 0
+//! type = 0
+//!
+//! [[hooks]]
+//! point = "HOOK_CALCAPCOST"
+//! file = "gl_cheapap.int"
+//! procedure = "ap_cost"
+//! ```
+//!
 //! The file is the same TOML subset as `load_order.toml`: strings, `true`
 //! and `false`, numbers, `#` comments, the `[enhanced]` table and the
-//! three array tables. Unknown keys and tables are errors (a misspelt
-//! setting would otherwise do nothing).
+//! array tables. Unknown keys and tables are errors (a misspelt setting
+//! would otherwise do nothing).
 use crate::vfs::{Vfs, VfsError, VfsPath, strip_comment, toml_string};
 #[cfg(feature = "host-fs")]
 use std::io;
@@ -70,6 +91,26 @@ pub const MAX_LOCALS: u32 = 1_000_000;
 pub const MAP_NUMBERS: std::ops::RangeInclusive<u32> = 66..=0xffff;
 /// The largest manifest read from a layer.
 const MANIFEST_BYTES: usize = 1 << 20;
+/// SPEC-024a §7.1: the word API this engine has, and the most `api` asks.
+pub const MOD_API: u32 = 1;
+/// §7.4: the most `[settings]` keys a mod has.
+pub const MAX_SETTINGS: usize = 64;
+/// §7.4: the longest string setting.
+pub const MAX_SETTING_TEXT: usize = 255;
+/// §2.2: the one list of hook points.
+const HOOK_POINTS: &str = include_str!("../../../tests/fixtures/spec024a/hook-points.tsv");
+
+/// The ID of the hook named `point`, as exact bytes (SPEC-024a §2.2). The
+/// reserved range has no name.
+pub fn hook_point(point: &str) -> Option<i32> {
+    HOOK_POINTS.lines().skip(1).find_map(|line| {
+        let mut cells = line.split('\t');
+        let id = cells.next()?;
+        (cells.next()? == point && point != "-")
+            .then(|| id.parse().ok())
+            .flatten()
+    })
+}
 
 /// Which part of the manifest a line is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +121,98 @@ enum Section {
     Script,
     Map,
     Patch,
+    Settings,
+    GlobalScript,
+    Hook,
+}
+
+/// One `[settings]` value (SPEC-024a §7.4). Its type never changes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModSetting {
+    Int(i32),
+    Float(f32),
+    Text(String),
+}
+impl ModSetting {
+    /// §7.4 a value in the manifest's grammar: a TOML integer, `true` and
+    /// `false` as 1 and 0, a decimal with a fraction or exponent, rounded
+    /// to the nearest binary32, or a quoted string.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let text = text.trim();
+        if text.starts_with(['"', '\'']) {
+            let (string, rest) = toml_string(text).map_err(|error| match error {
+                crate::VfsError::LoadOrder(message) => message,
+                other => other.to_string(),
+            })?;
+            if !rest.trim().is_empty() {
+                return Err(format!("unexpected `{}` after the value", rest.trim()));
+            }
+            if string.len() > MAX_SETTING_TEXT {
+                return Err(format!(
+                    "a string setting is at most {MAX_SETTING_TEXT} bytes"
+                ));
+            }
+            return Ok(Self::Text(string));
+        }
+        match text {
+            "true" => return Ok(Self::Int(1)),
+            "false" => return Ok(Self::Int(0)),
+            _ => {}
+        }
+        let number = text.replace('_', "");
+        let bad = || format!("expected an integer, a decimal, a string or a flag at {text:?}");
+        if number.contains(['.', 'e', 'E']) {
+            let value: f32 = number.parse().map_err(|_| bad())?;
+            return value
+                .is_finite()
+                .then_some(Self::Float(value))
+                .ok_or_else(bad);
+        }
+        number.parse().map(Self::Int).map_err(|_| bad())
+    }
+    /// The value in the manifest's grammar, which [`Self::parse`] reads back.
+    pub fn to_toml(&self) -> String {
+        match self {
+            Self::Int(value) => value.to_string(),
+            Self::Float(value) => format!("{value:?}"),
+            Self::Text(text) => format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\"")),
+        }
+    }
+    /// Whether `other` has this value's type.
+    pub fn same_type(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
+/// A `[settings]` key: `[A-Za-z0-9_]`, 1 to 31 bytes.
+pub fn setting_key(key: &str) -> bool {
+    (1..=31).contains(&key.len())
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// A `[[global_scripts]]` entry: `scripts/<file>` is a global script
+/// (SPEC-024a §4.3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GlobalScriptRegistration {
+    /// The file name under `scripts/`, lowercase.
+    pub file: String,
+    /// Runs `start` every `repeat` steps, and 0 never.
+    pub repeat: u32,
+    /// As `set_global_script_type`: 0 to 3.
+    pub kind: u32,
+}
+
+/// A `[[hooks]]` entry: `procedure` of `scripts/<file>` joins `point`'s chain
+/// (SPEC-024a §4.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookRegistration {
+    /// A public hook name ([`hook_point`]).
+    pub point: String,
+    /// The file name under `scripts/`, lowercase.
+    pub file: String,
+    pub procedure: String,
 }
 
 /// A `[[scripts]]` entry: `scripts/<file>` answers script list row
@@ -115,6 +248,10 @@ pub struct PatchRegistration {
 pub struct ModManifest {
     /// Shown in the launcher's mod list; required and not empty.
     pub name: String,
+    /// SPEC-024a §2.2: `[a-z0-9_-]`, needed with any table of that section.
+    pub id: Option<String>,
+    /// The word API the mod needs: [`MOD_API`], with the same need.
+    pub api: Option<u32>,
     pub version: Option<String>,
     pub author: Option<String>,
     pub description: Option<String>,
@@ -125,6 +262,10 @@ pub struct ModManifest {
     pub scripts: Vec<ScriptRegistration>,
     pub maps: Vec<MapRegistration>,
     pub patches: Vec<PatchRegistration>,
+    /// SPEC-024a §7.4: the declared settings, ascending by key bytes.
+    pub settings: BTreeMap<String, ModSetting>,
+    pub global_scripts: Vec<GlobalScriptRegistration>,
+    pub hooks: Vec<HookRegistration>,
 }
 
 /// The `[enhanced]` table: launch settings, each validated against its
@@ -206,6 +347,7 @@ impl ModManifest {
         let mut seen: Vec<String> = Vec::new();
         let mut section = Section::Top;
         let mut section_scripting = false;
+        let mut has_settings = false;
         // Where the current array entry began, for its missing-key error.
         let mut entry_line = 0;
         for (index, raw) in text.lines().enumerate() {
@@ -242,10 +384,24 @@ impl ModManifest {
                             manifest.patches.push(PatchRegistration::default());
                             Section::Patch
                         }
+                        "global_scripts" => {
+                            manifest
+                                .global_scripts
+                                .push(GlobalScriptRegistration::default());
+                            Section::GlobalScript
+                        }
+                        "hooks" => {
+                            manifest.hooks.push(HookRegistration {
+                                point: String::new(),
+                                file: String::new(),
+                                procedure: "start".to_owned(),
+                            });
+                            Section::Hook
+                        }
                         _ => {
                             return Err(error(format!(
-                                "unknown table `[[{name}]]` (`[[scripts]]`, `[[maps]]` or \
-                                 `[[patches]]`)"
+                                "unknown table `[[{name}]]` (`[[scripts]]`, `[[maps]]`, \
+                                 `[[patches]]`, `[[global_scripts]]` or `[[hooks]]`)"
                             )));
                         }
                     };
@@ -270,9 +426,17 @@ impl ModManifest {
                         section_scripting = true;
                         section = Section::Scripting;
                     }
+                    "settings" => {
+                        if has_settings {
+                            return Err(error("duplicate table `[settings]`".into()));
+                        }
+                        has_settings = true;
+                        section = Section::Settings;
+                    }
                     _ => {
                         return Err(error(format!(
-                            "unknown table `[{table}]` (only `[enhanced]` and `[scripting]`)"
+                            "unknown table `[{table}]` (only `[enhanced]`, `[scripting]` and \
+                             `[settings]`)"
                         )));
                     }
                 }
@@ -282,6 +446,7 @@ impl ModManifest {
                 .split_once('=')
                 .ok_or_else(|| error("expected `key = value`".into()))?;
             let key = key.trim();
+            let raw = rest.trim();
             let (value, rest) = value(rest).map_err(error)?;
             if !rest.trim().is_empty() {
                 return Err(error(format!(
@@ -330,6 +495,34 @@ impl ModManifest {
                     Value::Number(number) => Err(error(format!("{expects}, not {number}"))),
                     _ => Err(error(expects)),
                 }
+            };
+            // `integer`, written as a decimal integer.
+            let decimal = |value: Value, range: std::ops::RangeInclusive<u32>| {
+                if raw.contains(['.', 'e', 'E']) {
+                    return Err(error(format!("`{key}` is a decimal integer, not {raw}")));
+                }
+                integer(value, range)
+            };
+            // SPEC-024a §2.2: a script of the layer's `scripts/`.
+            let script_file = |value: Value| {
+                let name = string(value)?.to_ascii_lowercase();
+                let base = name.strip_suffix(".int").unwrap_or_default();
+                let valid = (1..=32).contains(&base.len())
+                    && base
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+                if !valid {
+                    return Err(error(format!(
+                        "`{key}` is a base name of up to 32 letters, digits, `_` and `-`, then \
+                         .int, not \"{name}\""
+                    )));
+                }
+                if name.starts_with("hs_") {
+                    return Err(error(format!(
+                        "`{key}` cannot be \"{name}\": hs_ names are found by sfall mode"
+                    )));
+                }
+                Ok(name)
             };
             // A file name with `extension`, directly in its folder.
             let file_name = |value: Value, extension: &str| {
@@ -426,6 +619,62 @@ impl ModManifest {
                         _ => return Err(error(format!("unknown key `{key}` in `[[patches]]`"))),
                     }
                 }
+                Section::Settings => {
+                    if !setting_key(key) {
+                        return Err(error(format!(
+                            "`{key}` is not a setting key: up to 31 letters, digits and `_`"
+                        )));
+                    }
+                    if manifest.settings.len() == MAX_SETTINGS {
+                        return Err(error(format!("more than {MAX_SETTINGS} settings")));
+                    }
+                    let setting = ModSetting::parse(raw).map_err(error)?;
+                    manifest.settings.insert(key.to_owned(), setting);
+                }
+                Section::GlobalScript => {
+                    let script = manifest
+                        .global_scripts
+                        .last_mut()
+                        .expect("the entry exists");
+                    match key {
+                        "file" => script.file = script_file(value)?,
+                        "repeat" => script.repeat = decimal(value, 0..=i32::MAX as u32)?,
+                        "type" => script.kind = decimal(value, 0..=3)?,
+                        _ => {
+                            return Err(error(format!(
+                                "unknown key `{key}` in `[[global_scripts]]`"
+                            )));
+                        }
+                    }
+                }
+                Section::Hook => {
+                    let hook = manifest.hooks.last_mut().expect("the entry exists");
+                    match key {
+                        "point" => {
+                            let point = string(value)?;
+                            if hook_point(&point).is_none() {
+                                return Err(error(format!("no hook point \"{point}\"")));
+                            }
+                            hook.point = point;
+                        }
+                        "file" => hook.file = script_file(value)?,
+                        "procedure" => {
+                            let procedure = string(value)?;
+                            let valid = (1..=31).contains(&procedure.len())
+                                && procedure
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+                            if !valid {
+                                return Err(error(format!(
+                                    "`procedure` is up to 31 letters, digits and `_`, not \
+                                     \"{procedure}\""
+                                )));
+                            }
+                            hook.procedure = procedure;
+                        }
+                        _ => return Err(error(format!("unknown key `{key}` in `[[hooks]]`"))),
+                    }
+                }
                 Section::Top => match key {
                     "name" => {
                         let name = string(value)?;
@@ -434,6 +683,30 @@ impl ModManifest {
                         }
                         manifest.name = name;
                         named = true;
+                    }
+                    "id" => {
+                        let id = string(value)?;
+                        let valid = (1..=32).contains(&id.len())
+                            && id.bytes().all(|byte| {
+                                byte.is_ascii_lowercase()
+                                    || byte.is_ascii_digit()
+                                    || matches!(byte, b'_' | b'-')
+                            });
+                        if !valid {
+                            return Err(error(format!(
+                                "`id` is up to 32 of a-z, 0-9, `_` and `-`, not \"{id}\""
+                            )));
+                        }
+                        manifest.id = Some(id);
+                    }
+                    "api" => {
+                        let api = decimal(value, 1..=u32::MAX)?;
+                        if api > MOD_API {
+                            return Err(error(format!(
+                                "`api` is {api}, and this engine has word API {MOD_API}"
+                            )));
+                        }
+                        manifest.api = Some(api);
                     }
                     "version" => manifest.version = Some(string(value)?),
                     "author" => manifest.author = Some(string(value)?),
@@ -449,7 +722,46 @@ impl ModManifest {
                 message: "`name` is missing".into(),
             });
         }
+        manifest.check_scripting()?;
         Ok(manifest)
+    }
+    /// Whether this manifest makes its layer scripted (SPEC-024a §2.1).
+    pub fn scripted(&self) -> bool {
+        !self.hooks.is_empty() || !self.global_scripts.is_empty()
+    }
+    /// SPEC-024a §2.2's rules that span rows.
+    fn check_scripting(&self) -> Result<(), ManifestError> {
+        let bad = |message: String| Err(ManifestError { line: 0, message });
+        if self.scripted() || !self.settings.is_empty() {
+            for (key, present) in [("id", self.id.is_some()), ("api", self.api.is_some())] {
+                if !present {
+                    return bad(format!(
+                        "`{key}` is needed with `[settings]`, `[[hooks]]` or \
+                         `[[global_scripts]]`"
+                    ));
+                }
+            }
+        }
+        for (index, script) in self.global_scripts.iter().enumerate() {
+            if self.global_scripts[..index]
+                .iter()
+                .any(|other| other.file == script.file)
+            {
+                return bad(format!("two `[[global_scripts]]` name {}", script.file));
+            }
+        }
+        for (index, hook) in self.hooks.iter().enumerate() {
+            if self.hooks[..index]
+                .iter()
+                .any(|other| other.file == hook.file && other.point == hook.point)
+            {
+                return bad(format!(
+                    "two `[[hooks]]` attach {} to {}",
+                    hook.file, hook.point
+                ));
+            }
+        }
+        Ok(())
     }
     /// The array entry `section` ended (its keys `seen`): its required
     /// keys must be there.
@@ -458,7 +770,11 @@ impl ModManifest {
             Section::Script => ("scripts", &["file", "index"]),
             Section::Map => ("maps", &["file", "number"]),
             Section::Patch => ("patches", &["table", "file"]),
-            Section::Top | Section::Enhanced | Section::Scripting => return Ok(()),
+            Section::GlobalScript => ("global_scripts", &["file"]),
+            Section::Hook => ("hooks", &["point", "file"]),
+            Section::Top | Section::Enhanced | Section::Scripting | Section::Settings => {
+                return Ok(());
+            }
         };
         match required
             .iter()
@@ -491,6 +807,12 @@ impl ModManifest {
         }
         let mut text = String::from("# A Vault Engine mod layer's manifest (see README.txt).\n");
         text += &quote("name", &self.name)?;
+        if let Some(id) = &self.id {
+            text += &quote("id", id)?;
+        }
+        if let Some(api) = self.api {
+            text += &format!("api = {api}\n");
+        }
         for (key, value) in [
             ("version", &self.version),
             ("author", &self.author),
@@ -544,6 +866,23 @@ impl ModManifest {
             text += "\n[[patches]]\n";
             text += &quote("table", &patch.table)?;
             text += &quote("file", &patch.file)?;
+        }
+        if !self.settings.is_empty() {
+            text += "\n[settings]\n";
+            for (key, setting) in &self.settings {
+                text += &format!("{key} = {}\n", setting.to_toml());
+            }
+        }
+        for script in &self.global_scripts {
+            text += "\n[[global_scripts]]\n";
+            text += &quote("file", &script.file)?;
+            text += &format!("repeat = {}\ntype = {}\n", script.repeat, script.kind);
+        }
+        for hook in &self.hooks {
+            text += "\n[[hooks]]\n";
+            text += &quote("point", &hook.point)?;
+            text += &quote("file", &hook.file)?;
+            text += &quote("procedure", &hook.procedure)?;
         }
         // What is written must read back.
         Self::parse(&text).map_err(|error| bad(error.message))?;
@@ -1174,5 +1513,146 @@ mod tests {
             let error = ModManifest::parse(text).unwrap_err().to_string();
             assert!(error.contains(wanted), "{error}");
         }
+    }
+
+    /// SPEC-024a §9.5's vectors that one manifest decides.
+    #[test]
+    fn spec024a_manifest_vectors() {
+        const N1: &str = include_str!("../../../tests/fixtures/spec024a/vault-mod.toml");
+        const N2: &str = include_str!("../../../tests/fixtures/spec024a/vault-mod-row.toml");
+        let n1 = ModManifest::parse(N1).unwrap();
+        assert!(n1.scripted(), "N1");
+        assert_eq!(n1.id.as_deref(), Some("cheap-ap"));
+        assert_eq!(n1.api, Some(1));
+        assert_eq!(n1.settings["ap_cost"], ModSetting::Int(1));
+        assert_eq!(n1.global_scripts[0].file, "gl_cheapap.int");
+        assert_eq!(
+            (n1.global_scripts[0].repeat, n1.global_scripts[0].kind),
+            (0, 0)
+        );
+        let n2 = ModManifest::parse(N2).unwrap();
+        assert!(n2.scripted(), "N2");
+        assert_eq!(n2.hooks[0].procedure, "ap_cost");
+        let stops = [
+            (
+                "N3",
+                N1.replace("id = \"cheap-ap\"\n", ""),
+                "`id` is needed",
+            ),
+            ("N4", N1.replace("api = 1\n", ""), "`api` is needed"),
+            ("N5", N1.replace("api = 1", "api = 2"), "word API"),
+            (
+                "N6",
+                N2.replace("HOOK_CALCAPCOST", "HOOK_CALCAPCOSTS"),
+                "no hook point",
+            ),
+            (
+                "N7",
+                N1.replace("gl_cheapap.int", "hs_tohit.int"),
+                "hs_ names",
+            ),
+            (
+                "N9",
+                format!(
+                    "{N2}\n[[hooks]]\npoint = \"HOOK_CALCAPCOST\"\nfile = \"gl_cheapap.int\"\n"
+                ),
+                "two `[[hooks]]`",
+            ),
+        ];
+        for (name, text, wanted) in stops {
+            let error = ModManifest::parse(&text).unwrap_err().to_string();
+            assert!(error.contains(wanted), "{name}: {error}");
+        }
+        let n12 = N1
+            .lines()
+            .take_while(|line| !line.starts_with("[[global_scripts]]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let n12 = ModManifest::parse(&n12).unwrap();
+        assert!(!n12.scripted(), "N12");
+        assert_eq!(n12.settings.len(), 1);
+        let n13 = N2.replace("HOOK_CALCAPCOST", "HOOK_ONDEATH");
+        assert!(ModManifest::parse(&n13).unwrap().scripted(), "N13");
+        let n14 = N2.replace("procedure = \"ap_cost\"", "procedure = \"absent\"");
+        assert!(ModManifest::parse(&n14).is_ok(), "N14");
+        // What a parse keeps, a write gives back.
+        for manifest in [n1, n2] {
+            let text = manifest.to_toml().unwrap();
+            assert_eq!(ModManifest::parse(&text).unwrap(), manifest);
+        }
+    }
+
+    /// SPEC-024a §2.2's table and §7.4's values, past the vectors.
+    #[test]
+    fn spec024a_rows_and_settings_keep_their_rules() {
+        let base = "name = \"a\"\nid = \"a\"\napi = 1\n";
+        let bad = [
+            ("id = \"A\"", "name = \"a\"\nid = \"A\"\napi = 1"),
+            (
+                "api = 1.0",
+                "name = \"a\"\nid = \"a\"\napi = 1.0\n[settings]\nk = 1",
+            ),
+            ("api = 0", "name = \"a\"\nid = \"a\"\napi = 0"),
+            ("a bad file", "[[global_scripts]]\nfile = \"a b.int\""),
+            ("a folder", "[[global_scripts]]\nfile = \"s/a.int\""),
+            ("no extension", "[[global_scripts]]\nfile = \"a\""),
+            (
+                "long file",
+                "[[global_scripts]]\nfile = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.int\"",
+            ),
+            ("type 4", "[[global_scripts]]\nfile = \"a.int\"\ntype = 4"),
+            (
+                "repeat",
+                "[[global_scripts]]\nfile = \"a.int\"\nrepeat = -1",
+            ),
+            (
+                "repeat",
+                "[[global_scripts]]\nfile = \"a.int\"\nrepeat = 1.5",
+            ),
+            (
+                "twice",
+                "[[global_scripts]]\nfile = \"a.int\"\n[[global_scripts]]\nfile = \"A.INT\"",
+            ),
+            (
+                "procedure",
+                "[[hooks]]\npoint = \"HOOK_TOHIT\"\nfile = \"a.int\"\nprocedure = \"a-b\"",
+            ),
+            ("no point", "[[hooks]]\nfile = \"a.int\""),
+            ("no file", "[[hooks]]\npoint = \"HOOK_TOHIT\""),
+            ("reserved", "[[hooks]]\npoint = \"-\"\nfile = \"a.int\""),
+            (
+                "a key",
+                "[[hooks]]\npoint = \"HOOK_TOHIT\"\nfile = \"a.int\"\nother = 1",
+            ),
+            ("key", "[settings]\na-b = 1"),
+            ("array", "[settings]\nk = [1]"),
+            ("range", "[settings]\nk = 3000000000"),
+        ];
+        for (name, text) in bad {
+            let text = if text.starts_with("name") {
+                text.to_owned()
+            } else {
+                format!("{base}{text}")
+            };
+            assert!(ModManifest::parse(&text).is_err(), "{name}");
+        }
+        let many: String = (0..65).map(|key| format!("k{key} = 1\n")).collect();
+        assert!(ModManifest::parse(&format!("{base}[settings]\n{many}")).is_err());
+        let long = format!("{base}[settings]\nk = \"{}\"", "x".repeat(256));
+        assert!(ModManifest::parse(&long).is_err());
+        let values = "[settings]\nb = true\nc = false\nf = 0.1\ne = 1e2\ns = \"hi\"\ni = -3";
+        let manifest = ModManifest::parse(&format!("{base}{values}")).unwrap();
+        let get = |key: &str| manifest.settings[key].clone();
+        assert_eq!(get("b"), ModSetting::Int(1));
+        assert_eq!(get("c"), ModSetting::Int(0));
+        assert_eq!(get("f"), ModSetting::Float(0.1));
+        assert_eq!(get("e"), ModSetting::Float(100.0));
+        assert_eq!(get("s"), ModSetting::Text("hi".into()));
+        assert_eq!(get("i"), ModSetting::Int(-3));
+        assert_eq!(ModSetting::Float(0.1).to_toml(), "0.1");
+        assert_eq!(ModSetting::parse("0.1").unwrap().to_toml(), "0.1");
+        assert_eq!(hook_point("HOOK_TOHIT"), Some(0));
+        assert_eq!(hook_point("HOOK_BUILDSFXWEAPON"), Some(61));
+        assert_eq!(hook_point("-"), None);
     }
 }

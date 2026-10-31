@@ -29,17 +29,17 @@ use vault_vm::{
     sfall_arrays::Storage,
 };
 
-const GET_ARG: Op = W(0x81e4);
+pub(crate) const GET_ARG: Op = W(0x81e4);
 pub(crate) const SET_RETURN: Op = W(0x81e5);
-const SET_ARG: Op = W(0x823d);
+pub(crate) const SET_ARG: Op = W(0x823d);
 const INIT_HOOK: Op = W(0x81ea);
 const REGISTER: Op = W(0x8207);
 pub(crate) const REGISTER_PROC: Op = W(0x8262);
-const REGISTER_SPEC: Op = W(0x827d);
-const DUPLICATE: Op = W(0x801b);
-const SWAP: Op = W(0x8018);
-const DISCARD: Op = W(0x801a);
-const ADD: Op = W(0x8039);
+pub(crate) const REGISTER_SPEC: Op = W(0x827d);
+pub(crate) const DUPLICATE: Op = W(0x801b);
+pub(crate) const SWAP: Op = W(0x8018);
+pub(crate) const DISCARD: Op = W(0x801a);
+pub(crate) const ADD: Op = W(0x8039);
 const MULTIPLY: Op = W(0x803b);
 const DIVIDE: Op = W(0x803c);
 const GLOBAL_INT: Op = W(0x819e);
@@ -92,6 +92,15 @@ pub(crate) fn script_with(
     start: &[Op],
     procedures: &[(&'static str, &[Op])],
 ) -> IntProgram {
+    script_in(&WordSet::FALLOUT2_SFALL, strings, start, procedures)
+}
+/// [`script_with`], under `words`.
+pub(crate) fn script_in(
+    words: &WordSet,
+    strings: &[&[u8]],
+    start: &[Op],
+    procedures: &[(&'static str, &[Op])],
+) -> IntProgram {
     let table = base(strings);
     let body = |ops: &[Op]| fixture::returning(encode(ops, &table));
     let mut listed: Vec<(&[u8], Vec<u8>)> = vec![(b"start", body(start))];
@@ -99,15 +108,14 @@ pub(crate) fn script_with(
         listed.push((name.as_bytes(), body(ops)));
     }
     let mut bytes = fixture::program(strings, &listed);
-    let words = WordSet::FALLOUT2_SFALL;
-    let body = IntProgram::parse_in(&bytes, &words, false)
+    let body = IntProgram::parse_in(&bytes, words, false)
         .unwrap()
         .procedures()[1]
         .body;
     // The bootstrap's initial stream holds the root push at +12.
     let init = u32::from_be_bytes(bytes[12..16].try_into().unwrap()) as usize;
     bytes[init + 12..init + 16].copy_from_slice(&body.to_be_bytes());
-    IntProgram::parse_in(&bytes, &words, false).unwrap()
+    IntProgram::parse_in(&bytes, words, false).unwrap()
 }
 pub(crate) fn install(host: &mut WorldHost<TestAssets>, name: &str, program: IntProgram) {
     host.assets.programs.push((name.to_owned(), program));
@@ -392,6 +400,7 @@ fn hooked(hook: i32, body: &[Op]) -> WorldHost<TestAssets> {
 pub(crate) fn attack_host(hook: i32, body: &[Op]) -> (WorldHost<TestAssets>, [ObjectRef; 4]) {
     let (mut host, critters) = fixture_e("critter", 2);
     host.sfall = Some(Default::default());
+    host.hook_host = Some(Default::default());
     host.world.sfall = Some(Default::default());
     host.assets.programs.clear();
     let register = [I(hook), I(2), REGISTER_PROC];
@@ -853,9 +862,23 @@ const ALL_P1: [i32; 30] = [
 ];
 
 fn sequence(body: &[Op], hooks: bool) -> (Vec<u64>, u64) {
+    let (hashes, _, sfall) = sequence_with(body, hooks, true, false);
+    (hashes, sfall)
+}
+/// The sequence, with its `state_hash` and `combat_hash` columns, under
+/// `hooks`' sfall members, `sfall` mode, and a manifest row on every point.
+pub(crate) fn sequence_with(
+    body: &[Op],
+    hooks: bool,
+    sfall: bool,
+    rows: bool,
+) -> (Vec<u64>, Vec<u64>, u64) {
     let (mut host, [attacker, defender, ..]) = fixture_e("critter", 2);
-    host.sfall = Some(Default::default());
-    host.world.sfall = Some(Default::default());
+    if sfall {
+        host.sfall = Some(Default::default());
+        host.hook_host = Some(Default::default());
+        host.world.sfall = Some(Default::default());
+    }
     host.assets.programs.clear();
     if hooks {
         let mut start = Vec::new();
@@ -864,8 +887,31 @@ fn sequence(body: &[Op], hooks: bool) -> (Vec<u64>, u64) {
         }
         install(&mut host, "gl_0.int", script(&start, &[("m", body)]));
     }
+    if rows {
+        let words = WordSet::FALLOUT2_SFALL.with_mods(true);
+        let member = script_in(&words, &[], &[], &[("m", body)]);
+        install(&mut host, "attached.int", member);
+        let hooks = ALL_P1.iter().map(|hook| crate::host_mods::ModHook {
+            hook: *hook,
+            file: "attached.int".to_owned(),
+            procedure: "m".to_owned(),
+        });
+        let session = crate::host_mods::ModSession::new(
+            vec![crate::host_mods::ScriptedMod {
+                id: "attached".to_owned(),
+                version: String::new(),
+                manifest: 0,
+                globals: Vec::new(),
+                hooks: hooks.collect(),
+                defaults: Default::default(),
+            }],
+            false,
+        );
+        host.enable_mod_scripts(std::sync::Arc::new(session));
+    }
     set_up(&mut host);
     let mut hashes = Vec::new();
+    let mut combat = Vec::new();
     for _ in 0..4 {
         host.sfall_key(true, 30, 65);
         host.sfall_key(false, 30, 65);
@@ -906,8 +952,9 @@ fn sequence(body: &[Op], hooks: bool) -> (Vec<u64>, u64) {
         host.weapon_chain(attacker, gun, 0, true);
         host.sfall_end_of_step();
         hashes.push(host.world.state_hash());
+        combat.push(host.world.combat_hash());
     }
-    (hashes, host.world.sfall_hash())
+    (hashes, combat, host.world.sfall_hash())
 }
 
 #[test]

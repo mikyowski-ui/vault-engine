@@ -1888,6 +1888,7 @@ fn a_folder_save_removes_stale_maps_and_keeps_every_other_file() {
 /// the save belongs to, so the synthetic Fallout 1 corpus serves.
 fn sfall_on(host: &mut WorldHost<VfsWorldAssets>) {
     host.sfall = Some(Default::default());
+    host.hook_host = Some(Default::default());
     host.world.sfall = Some(Default::default());
 }
 

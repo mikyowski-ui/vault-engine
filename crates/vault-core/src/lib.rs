@@ -32,6 +32,7 @@ mod host_fallout2_words;
 mod host_fidget;
 mod host_game;
 mod host_items;
+pub mod host_mods;
 mod host_motion;
 mod host_movement;
 mod host_movie;
@@ -195,6 +196,8 @@ mod spec024_hook_tests;
 mod spec024_rows_tests;
 #[cfg(test)]
 mod spec024_tests;
+#[cfg(test)]
+mod spec024a_tests;
 #[cfg(test)]
 mod state_hash_tests;
 #[cfg(test)]

@@ -97,6 +97,14 @@ pub fn word_row(word: u16) -> Option<&'static SfallRow> {
     let index = usize::from(word.checked_sub(FIRST_WORD)?);
     SFALL_WORDS.get(index).filter(|row| row.id == word)
 }
+/// SPEC-024a §7.3: the row of a mod word.
+pub fn mod_row(word: u16) -> Option<&'static SfallRow> {
+    MOD_ROWS.iter().find(|row| row.id == word)
+}
+/// The stack row of a mod word.
+pub fn mod_spec(word: u16) -> Option<&'static OpcodeSpec> {
+    MOD_SPECS.iter().find(|spec| spec.word == word)
+}
 /// The stack row of `word`: none for a reserved word (§3.3).
 pub fn spec(word: u16) -> Option<&'static OpcodeSpec> {
     SFALL_SPECS

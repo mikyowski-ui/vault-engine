@@ -61,7 +61,7 @@ impl MapPreview {
                 .world
                 .attack_profile(player, target, hit_mode, location::UNCALLED, true);
         let chances = attack.and_then(|attack| {
-            if self.host.sfall_mode() {
+            if self.host.hooks_on() {
                 self.host.hooked_chances(player, target, &attack)
             } else {
                 called::chances(&attack)

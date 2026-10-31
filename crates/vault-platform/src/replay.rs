@@ -34,7 +34,7 @@ use crate::{
     enhanced::{
         EnhancedFrame, EnhancedSettings, GameSpeed, PointerAt, PointerButton, ViewportMode,
     },
-    input::{InputCommand, KeyRepeat, LoggedCommand, WheelUnit},
+    input::{InputCommand, KeyRepeat, LoggedCommand, ModRecord, WheelUnit},
     map_preview::MapPreview,
     preview::AssetPreview,
     session::{Advance, KeyPress, SessionRuntime},
@@ -207,6 +207,8 @@ pub struct Replay {
     commands: u64,
     last: Option<CommandId>,
     stopped: bool,
+    /// SPEC-024a §2.3: the layers were compared with the log.
+    stack_checked: bool,
     /// The log records its frames (it starts with a `surface` record);
     /// `None` until the first record is read.
     timed: Option<bool>,
@@ -255,6 +257,7 @@ impl Replay {
             commands: 0,
             last: None,
             stopped: false,
+            stack_checked: false,
             timed: None,
             repeat: KeyRepeat::default(),
             checkpoints,
@@ -287,6 +290,8 @@ impl Replay {
     /// SPEC-021 §3.10 the row of a finished step, `applied` records in. A
     /// comparison failure stops the run here.
     fn checkpoint(&mut self, applied: u64) -> AppResult<()> {
+        #[cfg(test)]
+        let _phase = OutsideSimulation::enter();
         let Some(checkpoints) = &mut self.checkpoints else {
             return Ok(());
         };
@@ -359,6 +364,13 @@ impl Replay {
             let timed = *self
                 .timed
                 .get_or_insert(matches!(logged.command, InputCommand::Surface { .. }));
+            // SPEC-024a §2.3: before the first step, the record or its
+            // absence is compared with the layers.
+            if let InputCommand::ModStack { mods, .. } = &logged.command {
+                self.check_stack(Some(mods))?;
+            } else if !timed || matches!(logged.command, InputCommand::Tick { .. }) {
+                self.check_stack(None)?;
+            }
             if !timed {
                 self.frame(self.now + FRAME_MS, false)?;
             }
@@ -384,6 +396,49 @@ impl Replay {
             // records, which this replay applies when it reaches them.
             if let Some(world) = interactive_world(&mut self.session) {
                 world.take_debug_commands();
+            }
+        }
+        self.check_stack(None)
+    }
+
+    /// SPEC-024a §2.3: this session's scripted layers against the log's
+    /// `mod_stack` record, once: the same `id`s in the same order, with the
+    /// same `version` and `manifest`. A log with no record means no scripted
+    /// layer. Then every setting comes from the record.
+    fn check_stack(&mut self, record: Option<&[ModRecord]>) -> AppResult<()> {
+        if std::mem::replace(&mut self.stack_checked, true) {
+            return Ok(());
+        }
+        let session = self.session.mod_session();
+        let ours: &[vault_core::host_mods::ScriptedMod] =
+            session.as_ref().map_or(&[], |session| session.mods());
+        let logged = record.unwrap_or_default();
+        for index in 0..ours.len().max(logged.len()) {
+            let same = match (ours.get(index), logged.get(index)) {
+                (Some(ours), Some(logged)) => {
+                    ours.id == logged.id
+                        && ours.version == logged.version
+                        && format!("{:016X}", ours.manifest) == logged.manifest
+                }
+                _ => false,
+            };
+            if !same {
+                let id = logged
+                    .get(index)
+                    .map(|one| &one.id)
+                    .or_else(|| ours.get(index).map(|one| &one.id));
+                let id = id.map_or("", String::as_str);
+                return Err(format!("mod stack mismatch: {id}").into());
+            }
+        }
+        if let Some(session) = &session {
+            for (index, one) in logged.iter().enumerate() {
+                for (key, text) in &one.settings {
+                    let value = crate::mods::parse_record_value(text);
+                    if !value.is_some_and(|value| session.restore(index, key, value)) {
+                        return Err(format!("mod stack mismatch: {}", one.id).into());
+                    }
+                }
             }
         }
         Ok(())
@@ -449,6 +504,8 @@ impl Replay {
     /// Compose the presented frame; dialogue choice areas and the picking
     /// geometry follow it, as on the desktop.
     fn present(&mut self) -> AppResult<()> {
+        #[cfg(test)]
+        let _phase = OutsideSimulation::enter();
         self.compose()?;
         self.hover()
     }
@@ -658,7 +715,9 @@ impl Replay {
             }
             // Focus does not reach the preview; a logged hover is the
             // desktop's output, recomputed here.
-            InputCommand::Focus { .. } | InputCommand::MapHover { .. } => {}
+            InputCommand::Focus { .. }
+            | InputCommand::MapHover { .. }
+            | InputCommand::ModStack { .. } => {}
         }
         Ok(())
     }
@@ -789,8 +848,34 @@ pub fn replay_with_checkpoints(
 }
 
 #[cfg(test)]
+thread_local! {
+    /// SPEC-024a §10 test 9: a checkpoint or a frame is being made.
+    static OUTSIDE_SIMULATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// While it lives, [`OUTSIDE_SIMULATION`] is set.
+#[cfg(test)]
+struct OutsideSimulation;
+#[cfg(test)]
+impl OutsideSimulation {
+    fn enter() -> Self {
+        OUTSIDE_SIMULATION.set(true);
+        Self
+    }
+}
+#[cfg(test)]
+impl Drop for OutsideSimulation {
+    fn drop(&mut self) {
+        OUTSIDE_SIMULATION.set(false);
+    }
+}
+
+#[cfg(test)]
 #[path = "replay_checkpoint_tests.rs"]
 mod checkpoint_tests;
+
+#[cfg(test)]
+#[path = "replay_mod_tests.rs"]
+mod mod_tests;
 
 #[cfg(test)]
 mod tests {

@@ -962,6 +962,7 @@ fn party_member_list_has_two_modes_and_the_player_comes_first() {
 fn item_host() -> WorldHost<ItemAssets> {
     let mut host = support::host();
     host.sfall = Some(Box::default());
+    host.hook_host = Some(Box::default());
     host.world.sfall = Some(Box::default());
     host
 }

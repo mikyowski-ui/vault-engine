@@ -285,7 +285,9 @@ fn report_script_stack(vfs: &dyn Vfs, fallout2: Option<&PathBuf>) -> Result<(), 
 /// by kind, as `--report-script-stack` prints them, and a model check line.
 fn report_sfall_script_stack(vfs: &dyn Vfs) -> Result<(), Box<dyn Error>> {
     let audit = stack::audit_sfall(vfs)?;
-    let table = vault_vm::stack_check::Table::new(vault_vm::WordSet::FALLOUT2_SFALL);
+    // SPEC-024a §7.2: a mod's script can use the mod words too.
+    let table =
+        vault_vm::stack_check::Table::new(vault_vm::WordSet::FALLOUT2_SFALL.with_mods(true));
     audit.report("sfall", &table, &[]);
     println!(
         "Script stack sfall check: {}",

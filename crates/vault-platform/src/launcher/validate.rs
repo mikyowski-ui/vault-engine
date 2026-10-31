@@ -312,6 +312,7 @@ pub fn mods(directory: &Path, entries: &[LayerEntry], policy: LoadOrderPolicy) -
         Some(dir) => crate::mods::read_manifest(&dir),
         None => Ok(None),
     };
+    let mut enabled_dirs = Vec::new();
     let (layers, manifests) = entries
         .iter()
         .map(|entry| {
@@ -319,10 +320,15 @@ pub fn mods(directory: &Path, entries: &[LayerEntry], policy: LoadOrderPolicy) -
             if !entry.enabled {
                 return (Check::unset("disabled"), manifest.ok().flatten());
             }
-            let check = match (mount(std::slice::from_ref(entry)), &manifest) {
-                (Err(error), _) => Check::bad(error),
-                (Ok(_), Err(error)) => Check::bad(error.clone()),
-                (Ok(vfs), Ok(_)) => Check::ok(plural(vfs.files().count(), "file")),
+            // SPEC-024a §2.2: with the layers below it, as a launch reads
+            // them, so a conflict shows on the higher layer.
+            enabled_dirs.extend(crate::mods::layer_dir(directory, entry, policy));
+            let conflict = crate::mods::manifest_layers(&enabled_dirs).err();
+            let check = match (mount(std::slice::from_ref(entry)), &manifest, conflict) {
+                (Err(error), _, _) => Check::bad(error),
+                (Ok(_), Err(error), _) => Check::bad(error.clone()),
+                (Ok(_), Ok(_), Some(error)) => Check::bad(error),
+                (Ok(vfs), Ok(_), None) => Check::ok(plural(vfs.files().count(), "file")),
             };
             (check, manifest.ok().flatten())
         })

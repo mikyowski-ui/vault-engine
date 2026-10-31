@@ -48,7 +48,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// Fallout 2 game is running, Fallout 1's otherwise. The profile, not
     /// the script, decides a word's meaning.
     pub fn word_set(&self) -> WordSet {
-        if self.world.fallout2.is_some() {
+        let words = if self.world.fallout2.is_some() {
             if self.sfall_mode() {
                 WordSet::FALLOUT2_SFALL
             } else {
@@ -56,7 +56,8 @@ impl<A: WorldAssets> WorldHost<A> {
             }
         } else {
             WordSet::FALLOUT1
-        }
+        };
+        words.with_mods(self.mod_session.is_some())
     }
     /// Whether `call` takes its SPEC-017 row rather than its SPEC-005 one:
     /// under Fallout 2, a reassigned or new word, and `metarule` with one of

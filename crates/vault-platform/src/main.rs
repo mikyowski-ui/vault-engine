@@ -70,6 +70,10 @@ struct Args {
         conflicts_with_all = ["smoke_test", "no_audio"]
     )]
     replay_inputs: Option<PathBuf>,
+    /// SPEC-024a §2.3: a load order, as a `mod_list` file. It wins over the
+    /// settings file, and it is how a replay mounts layers.
+    #[arg(long, value_name = "PATH")]
+    mod_list: Option<PathBuf>,
     /// With --replay-inputs: also write the final frame as a binary PPM.
     #[arg(long, value_name = "PATH", requires = "replay_inputs")]
     replay_frame: Option<PathBuf>,
@@ -295,7 +299,11 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
         game,
         preset,
         enhanced,
-        mod_list: config.mod_list.clone(),
+        mod_list: args
+            .mod_list
+            .clone()
+            .map(config::ModList::File)
+            .or_else(|| config.mod_list.clone()),
         zero_arg_game,
         audio: !args.no_audio && config.audio.unwrap_or(true),
     }
@@ -333,8 +341,12 @@ fn with_mod_settings(
     let Some(config) = config.filter(|_| args.replay_inputs.is_none()) else {
         return Ok(None);
     };
+    let mut config = config.clone();
+    if let Some(list) = &args.mod_list {
+        config.mod_list = Some(config::ModList::File(list.clone()));
+    }
     let (merged, applied) =
-        mods::with_mods(config).map_err(|error| format!("mod_list: {error}"))?;
+        mods::with_mods(&config).map_err(|error| format!("mod_list: {error}"))?;
     if !applied.is_empty() {
         tracing::info!(?applied, "mod settings applied");
     }
@@ -823,6 +835,17 @@ impl Shell {
     fn log_touch_ui(&mut self, event_loop: &ActiveEventLoop) {
         if self.touch_ui {
             self.log(event_loop, InputCommand::TouchUi { enabled: true });
+        }
+    }
+    /// SPEC-024a §2.3: a scripted session logs its mod stack last of the
+    /// session records, and before the first tick. Any other logs nothing.
+    fn log_mod_stack(&mut self, event_loop: &ActiveEventLoop) {
+        let session = self
+            .session
+            .as_ref()
+            .and_then(|session| session.mod_session());
+        if let Some(session) = session {
+            self.log(event_loop, input::mod_stack_record(&session));
         }
     }
     /// The session's game speed, when it is not 1.0: logged after the
@@ -1754,6 +1777,7 @@ impl Shell {
         self.log_enhanced(event_loop);
         self.log_touch_ui(event_loop);
         self.start_game_speed(event_loop);
+        self.log_mod_stack(event_loop);
         self.refresh_preview(event_loop, window);
     }
 }
@@ -1835,6 +1859,7 @@ impl ApplicationHandler for Shell {
                 self.log_enhanced(event_loop);
                 self.log_touch_ui(event_loop);
                 self.start_game_speed(event_loop);
+                self.log_mod_stack(event_loop);
             }
             Err(error) => {
                 self.fail(event_loop, error);
@@ -2153,6 +2178,8 @@ fn run(mut args: Args) -> AppResult<()> {
         // game profile chooses the data's formats (SPEC-015/016).
         args.preview.game_profile = args.game_profile.unwrap_or_default();
         args.preview.render_path = launch_render_path(&args, None);
+        // SPEC-024a §2.3: the one way a replay mounts layers.
+        args.preview.mods = args.mod_list.clone().map(config::ModList::File);
         // SPEC-021 §3.10: these fail with status 1, before the run starts.
         let expected = args
             .checkpoints_expect
@@ -2294,6 +2321,8 @@ mod tests {
     #[test]
     fn the_sfall_flag_parses_and_defaults_off() {
         assert!(parse(&["--sfall"]).preview.sfall);
+        let list = parse(&["--mod-list", "order.toml"]).mod_list;
+        assert_eq!(list.as_deref(), Some(Path::new("order.toml")));
         assert!(!parse(&[]).preview.sfall);
     }
 

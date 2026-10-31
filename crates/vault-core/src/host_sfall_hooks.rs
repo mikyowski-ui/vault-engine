@@ -2,7 +2,9 @@
 //! depend on. A chain runs synchronously, at a boundary in the host specs,
 //! and only in the Input or Simulation phase: presentation reads what a
 //! preview stored (§6.6), so drawing never runs a script. An empty chain
-//! costs nothing and changes nothing. With sfall mode off none of this runs.
+//! costs nothing and changes nothing. With neither sfall mode nor manifest
+//! scripting on, none of this runs. SPEC-024a adds the mod block, after the
+//! sfall block of every chain ([`crate::host_mods`]).
 use crate::{
     ObjectRef, RandomSource,
     assets::WorldAssets,
@@ -14,6 +16,7 @@ use crate::{
     host_choreography::LIT_FLARE,
     host_combat::Spray,
     host_sfall::game_mode,
+    host_sfall_boundaries::HOOK_CARTRAVEL,
     host_sfall_rows::BOX_WAIT,
     sfall::encounter_flag,
     skills,
@@ -58,6 +61,22 @@ struct Chain {
     script: Option<u32>,
     /// `register_hook_proc_spec`, oldest first.
     back: Vec<Member>,
+    /// SPEC-024a §5.1's mod block, in chain order.
+    mods: Vec<ModMember>,
+}
+/// One member of the mod block.
+#[derive(Debug, Clone, Copy)]
+struct ModMember {
+    /// The mod's place in the load order, lowest first.
+    layer: usize,
+    /// Rows first, then word registrations.
+    word: bool,
+    /// The row's index, or the registration's turn.
+    order: usize,
+    /// `None` until the row's script loads.
+    program: Option<u32>,
+    /// `None` is inert: a row whose procedure is absent (§4.2).
+    procedure: Option<usize>,
 }
 impl Chain {
     fn members(&self) -> Vec<Member> {
@@ -71,6 +90,12 @@ impl Chain {
             .copied()
             .chain(script)
             .chain(self.back.iter().copied())
+            .chain(self.mods.iter().filter_map(|member| {
+                Some(Member {
+                    program: member.program?,
+                    procedure: Some(member.procedure?),
+                })
+            }))
             .collect()
     }
     fn held(&mut self, program: u32) -> Option<&mut Member> {
@@ -82,6 +107,7 @@ impl Chain {
     fn remove(&mut self, program: u32) {
         self.front.retain(|member| member.program != program);
         self.back.retain(|member| member.program != program);
+        self.mods.retain(|member| member.program != Some(program));
         if self.script == Some(program) {
             self.script = None;
         }
@@ -90,6 +116,7 @@ impl Chain {
 /// The context of one running chain (§6.4).
 #[derive(Debug)]
 struct Context {
+    hook: i32,
     args: Vec<SfallValue>,
     arg_types: &'static [HookType],
     rets: Vec<Option<SfallValue>>,
@@ -135,6 +162,22 @@ pub struct SfallHooks {
     previews: BTreeMap<Preview, (Vec<i32>, i32)>,
     /// §6.15 the items running chains are about, which no member destroys.
     used_items: Vec<ObjectRef>,
+    /// §6.14 the bit set at the last comparison.
+    last_mode: Option<u32>,
+    /// SPEC-024a §4.1 each manifest script's mod, by its place in the stack.
+    owners: BTreeMap<u32, usize>,
+    /// §5.3 programs that left every chain, until the next setup.
+    left: BTreeSet<u32>,
+    /// §7.4 the programs that were told about a setting they cannot read.
+    warned: BTreeSet<u32>,
+    /// §5.1 the next word registration's turn.
+    next_word: usize,
+    /// Each turn of a chain: the member, arg3 and ret0 after it.
+    #[cfg(test)]
+    pub(crate) turns: Vec<(u32, Option<SfallValue>, Option<SfallValue>)>,
+    /// Each loaded script's program, by file.
+    #[cfg(test)]
+    pub(crate) files: BTreeMap<Vec<u8>, u32>,
     /// §6.19 this turn is a player's turn resumed by a load.
     pub(crate) turn_resumed: bool,
     /// §6.19 a turn's chain returned -1 at its end.
@@ -179,7 +222,20 @@ pub(crate) fn int(value: i32) -> SfallValue {
 
 impl<A: WorldAssets> WorldHost<A> {
     pub(crate) fn hooks(&mut self) -> Option<&mut SfallHooks> {
-        self.sfall.as_deref_mut().map(|sfall| &mut sfall.hooks)
+        self.hook_host.as_deref_mut()
+    }
+    /// Whether a hook point can run: sfall mode or manifest scripting is on.
+    pub fn hooks_on(&self) -> bool {
+        self.hook_host.is_some()
+    }
+    /// Whether `hook` has a member to run (SPEC-024a §3.2's Esc rule).
+    pub fn hook_has_members(&self, hook: i32) -> bool {
+        self.hook_host.as_deref().is_some_and(|hooks| {
+            hooks
+                .chains
+                .get(&hook)
+                .is_some_and(|chain| !chain.members().is_empty())
+        })
     }
     /// A session setup is owed: after a new game or a slot load, and before
     /// the first Simulation phase that follows (§6.1).
@@ -202,13 +258,25 @@ impl<A: WorldAssets> WorldHost<A> {
             in_setup: true,
             ..Default::default()
         };
+        if self.sfall.is_some() {
+            self.sfall_scripts_setup();
+        }
+        self.mod_scripts_setup();
+        let mode = self.sfall_mode_bits();
+        if let Some(hooks) = self.hooks() {
+            hooks.in_setup = false;
+            hooks.last_mode = Some(mode);
+        }
+    }
+    /// §6.1's steps 2 and 3.
+    fn sfall_scripts_setup(&mut self) {
         // Step 2: each hook ascending, a shared file loading once.
         let mut loaded: BTreeMap<&str, Option<u32>> = BTreeMap::new();
         for row in &sfall::SFALL_HOOKS {
             let program = match loaded.get(row.file) {
                 Some(program) => *program,
                 None => {
-                    let program = self.load_sfall_script(row.file.as_bytes(), false);
+                    let program = self.load_sfall_script(row.file.as_bytes(), None);
                     loaded.insert(row.file, program);
                     program
                 }
@@ -217,7 +285,9 @@ impl<A: WorldAssets> WorldHost<A> {
                 hooks.chains.entry(row.id).or_default().script = Some(program);
             }
         }
-        // Step 3: the global scripts, ascending by lowercased base name.
+        // Step 3: the global scripts, ascending by lowercased base name. A
+        // file a manifest names is a manifest script only (SPEC-024a §4.3).
+        let claimed = self.mod_files();
         let mut names: Vec<Vec<u8>> = self
             .assets
             .files(b"scripts/gl*.int")
@@ -226,23 +296,25 @@ impl<A: WorldAssets> WorldHost<A> {
                 let name = path.rsplit(|byte| *byte == b'/').next().unwrap_or(&path);
                 name.to_ascii_lowercase()
             })
+            .filter(|name| !claimed.contains(name))
             .collect();
         names.sort_unstable();
         names.dedup();
         for name in names {
-            self.load_sfall_script(&name, true);
-        }
-        let mode = self.sfall_mode_bits();
-        if let Some(sfall) = self.sfall.as_deref_mut() {
-            sfall.hooks.in_setup = false;
-            sfall.last_mode = Some(mode);
+            self.load_sfall_script(&name, Some((0, 0)));
         }
     }
     /// Load a hook or global script and run its initial stream, which in a
     /// compiled script is its `start` (SPEC-004 §2.2). A file that is absent
     /// is no member; one the mod-script check refuses takes the cannot-load
     /// path of SPEC-006 §3.7 (§6.1).
-    fn load_sfall_script(&mut self, file: &[u8], global: bool) -> Option<u32> {
+    fn load_sfall_script(&mut self, file: &[u8], global: Option<(i32, i32)>) -> Option<u32> {
+        let vm = self.prepare_script(file, global)?;
+        self.start_script(vm)
+    }
+    /// The first half of a load: the program, not yet started. `global` is
+    /// a global script's `repeat` and `type`.
+    pub(crate) fn prepare_script(&mut self, file: &[u8], global: Option<(i32, i32)>) -> Option<Vm> {
         let path = [b"scripts/", file].concat();
         if !self.assets.available(&path) {
             return None;
@@ -263,14 +335,21 @@ impl<A: WorldAssets> WorldHost<A> {
         self.registry.register_program(id, path.as_bytes());
         let hooks = self.hooks()?;
         hooks.scripts.insert(id);
-        if global {
+        #[cfg(test)]
+        hooks.files.insert(file.to_ascii_lowercase(), id);
+        if let Some((repeat, kind)) = global {
             hooks.globals.push(GlobalScript {
                 program: id,
-                repeat: 0,
+                repeat,
                 since: 0,
-                kind: 0,
+                kind,
             });
         }
+        Some(vm)
+    }
+    /// The second half: its initial stream runs.
+    pub(crate) fn start_script(&mut self, mut vm: Vm) -> Option<u32> {
+        let id = vm.id;
         let run = self.run_vm(&mut vm);
         self.finish_member(&mut vm, run, None);
         self.hooks()?.programs.insert(id, vm);
@@ -302,6 +381,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.world
                     .diagnostic(format!("hook script {}: {error}; unloaded", vm.id));
                 if let Some(hooks) = self.hooks() {
+                    hooks.left.insert(vm.id);
                     for chain in hooks.chains.values_mut() {
                         chain.remove(vm.id);
                     }
@@ -333,6 +413,13 @@ impl<A: WorldAssets> WorldHost<A> {
         // The nested run's end must not end the outer run's.
         self.active.insert(id);
         result
+    }
+    /// Whether a chain is running: a timed wait there would suspend a member
+    /// (§6.5), so it ends it instead of releasing.
+    pub(crate) fn chain_running(&self) -> bool {
+        self.hook_host
+            .as_deref()
+            .is_some_and(|hooks| !hooks.contexts.is_empty())
     }
     /// A program cannot wait in a hook member (§6.5) or in session setup
     /// (§6.1), so §4.11's `message_box` gives -1 there.
@@ -405,6 +492,12 @@ impl<A: WorldAssets> WorldHost<A> {
         args: Vec<SfallValue>,
     ) -> Option<Vec<Option<SfallValue>>> {
         let row: &'static HookRow = sfall::hook_row(hook).filter(|row| row.fires)?;
+        // SPEC-024a §3.2: their text anchors on specs of the other profile.
+        if matches!(hook, HOOK_ENCOUNTER | HOOK_CARTRAVEL)
+            && self.assets.game_profile() != crate::GameProfile::Fallout2
+        {
+            return None;
+        }
         let hooks = self.hooks()?;
         let members = hooks.chains.get(&hook)?.members();
         if members.is_empty() {
@@ -416,6 +509,7 @@ impl<A: WorldAssets> WorldHost<A> {
             return None;
         }
         hooks.contexts.push(Context {
+            hook,
             args,
             arg_types: row.args,
             rets: vec![None; row.rets.len()],
@@ -423,12 +517,31 @@ impl<A: WorldAssets> WorldHost<A> {
             next_arg: 0,
             next_ret: 0,
         });
+        if let Some(observer) = &mut self.chain_observer {
+            observer(hook);
+        }
         for member in members {
+            // §5.4 the members were fixed at the query, and one that left
+            // its chains meanwhile is passed over.
+            let left = self
+                .hooks()
+                .is_some_and(|hooks| hooks.left.contains(&member.program));
+            if left {
+                continue;
+            }
             if let Some(context) = self.hooks().and_then(|hooks| hooks.contexts.last_mut()) {
                 context.next_arg = 0;
                 context.next_ret = 0;
             }
             self.run_member(member);
+            #[cfg(test)]
+            if let Some(hooks) = self.hooks()
+                && let Some(context) = hooks.contexts.last()
+            {
+                let arg3 = context.args.get(3).cloned();
+                let ret0 = context.rets.first().cloned().flatten();
+                hooks.turns.push((member.program, arg3, ret0));
+            }
         }
         self.hooks()
             .and_then(|hooks| hooks.contexts.pop())
@@ -512,6 +625,140 @@ impl<A: WorldAssets> WorldHost<A> {
             None => self
                 .world
                 .diagnostic(format!("set_sfall_return: return {at} cannot take that")),
+        }
+    }
+    /// SPEC-024a `mod_set_hook_return`: return `index`, by the point's type.
+    /// Out of range or outside a chain it is ignored; it moves no cursor.
+    pub(crate) fn set_hook_return_at(&mut self, index: i32, value: &SfallValue) {
+        let Some(at) = usize::try_from(index).ok() else {
+            return;
+        };
+        let Some(context) = self.context() else {
+            return;
+        };
+        let Some(kind) = context.ret_types.get(at).copied() else {
+            return;
+        };
+        match kind.convert(value) {
+            Some(value) => context.rets[at] = Some(value),
+            None => self
+                .world
+                .diagnostic(format!("mod_set_hook_return: return {at} cannot take that")),
+        }
+    }
+    /// SPEC-024a `mod_hook_id`: the innermost chain's hook, or -1.
+    pub(crate) fn current_hook(&mut self) -> i32 {
+        self.context().map_or(-1, |context| context.hook)
+    }
+    /// SPEC-024a §4.3: attach `row` of mod `layer`, with no program yet.
+    pub(crate) fn attach_mod_row(&mut self, layer: usize, hook: i32, order: usize) {
+        if let Some(hooks) = self.hooks() {
+            hooks.chains.entry(hook).or_default().mods.push(ModMember {
+                layer,
+                word: false,
+                order,
+                program: None,
+                procedure: None,
+            });
+        }
+    }
+    /// The row's program has loaded: it is `layer`'s, with `procedure`, or
+    /// inert without one.
+    pub(crate) fn bind_mod_row(
+        &mut self,
+        layer: usize,
+        hook: i32,
+        order: usize,
+        program: u32,
+        procedure: Option<usize>,
+    ) {
+        let Some(hooks) = self.hooks() else {
+            return;
+        };
+        let rows = hooks.chains.entry(hook).or_default().mods.iter_mut();
+        if let Some(member) = rows
+            .filter(|member| member.layer == layer && !member.word)
+            .find(|member| member.order == order)
+        {
+            member.program = Some(program);
+            member.procedure = procedure;
+        }
+    }
+    /// `program`'s mod, and that it is a manifest script (SPEC-024a §4.1).
+    pub(crate) fn set_mod_owner(&mut self, program: u32, layer: usize) {
+        if let Some(hooks) = self.hooks() {
+            hooks.owners.insert(program, layer);
+        }
+    }
+    /// The place in the stack of `program`'s mod, if it has one.
+    pub(crate) fn mod_owner(&mut self, program: u32) -> Option<usize> {
+        self.hooks()?.owners.get(&program).copied()
+    }
+    /// One diagnostic per program (§7.4): whether this is that one.
+    pub(crate) fn first_warning(&mut self, program: u32) -> bool {
+        self.hooks()
+            .is_some_and(|hooks| hooks.warned.insert(program))
+    }
+    /// SPEC-024a `mod_register_hook` (§4.2). Registering again changes the
+    /// procedure and keeps the place, procedure 0 removes the registration,
+    /// and an inert row stays inert until the next setup: N14 says nothing
+    /// runs, even for a `start` that registers on the row's point.
+    pub(crate) fn mod_register(&mut self, vm: &Vm, hook: i32, procedure: i32) {
+        let Some(layer) = self.mod_owner(vm.id) else {
+            self.world
+                .diagnostic("mod_register_hook: the caller has no owner".to_owned());
+            return;
+        };
+        if sfall::hook_row(hook).is_none() {
+            self.world
+                .diagnostic(format!("mod_register_hook: hook {hook} has no row"));
+            return;
+        }
+        let procedures = vm.program.procedures().len();
+        let index = usize::try_from(procedure)
+            .ok()
+            .filter(|index| *index < procedures);
+        if procedure != 0 && index.is_none() {
+            self.world
+                .diagnostic(format!("mod_register_hook: no procedure {procedure}"));
+            return;
+        }
+        let Some(hooks) = self.hooks() else {
+            return;
+        };
+        let turn = hooks.next_word;
+        let chain = hooks.chains.entry(hook).or_default();
+        let held = chain
+            .mods
+            .iter()
+            .position(|member| member.program == Some(vm.id));
+        match (procedure, held) {
+            (0, Some(at)) => {
+                chain.mods.remove(at);
+            }
+            (0, None) => {}
+            (_, Some(at)) => {
+                if chain.mods[at].procedure.is_some() {
+                    chain.mods[at].procedure = index;
+                }
+            }
+            (_, None) => {
+                let key = (layer, true, turn);
+                let at = chain
+                    .mods
+                    .partition_point(|member| (member.layer, member.word, member.order) <= key);
+                chain.mods.insert(
+                    at,
+                    ModMember {
+                        layer,
+                        word: true,
+                        order: turn,
+                        program: Some(vm.id),
+                        procedure: index,
+                    },
+                );
+                hooks.next_word += 1;
+            }
         }
     }
     /// `init_hook`: 1 during setup, else 0, and 0 inside a chain.
@@ -656,11 +903,14 @@ impl<A: WorldAssets> WorldHost<A> {
     /// mode changed or not, before the session ends.
     pub(crate) fn hook_game_mode(&mut self) {
         let mode = self.sfall_mode_bits();
-        let Some(sfall) = self.sfall.as_deref_mut() else {
+        let closing = self
+            .sfall
+            .as_deref_mut()
+            .is_some_and(|sfall| std::mem::take(&mut sfall.close_signalled));
+        let Some(hooks) = self.hooks() else {
             return;
         };
-        let closing = std::mem::take(&mut sfall.close_signalled);
-        let previous = sfall.last_mode.replace(mode).unwrap_or(mode);
+        let previous = hooks.last_mode.replace(mode).unwrap_or(mode);
         if closing || previous != mode {
             let args = vec![int(i32::from(closing)), int(previous as i32)];
             self.run_hook(HOOK_GAMEMODECHANGE, args);
@@ -704,7 +954,7 @@ impl<A: WorldAssets> WorldHost<A> {
         user: ObjectRef,
         item: ObjectRef,
     ) -> UseHook {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return UseHook::Engine;
         }
         let args = vec![object(target), object(user), object(item)];
@@ -728,7 +978,7 @@ impl<A: WorldAssets> WorldHost<A> {
         user: ObjectRef,
         used: ObjectRef,
     ) -> Result<UseHook, crate::WorldError> {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return Ok(UseHook::Engine);
         }
         let done = self.use_chain(HOOK_USEOBJ, vec![object(user), object(used)], used);
@@ -752,7 +1002,7 @@ impl<A: WorldAssets> WorldHost<A> {
         user: ObjectRef,
         item: ObjectRef,
     ) -> Result<bool, crate::WorldError> {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return Ok(false);
         }
         let Some(found) = self.world.get(item) else {
@@ -782,7 +1032,7 @@ impl<A: WorldAssets> WorldHost<A> {
         target: ObjectRef,
         fixed: i32,
     ) -> bool {
-        if self.sfall.is_none() || matches!(event, 1 | 12 | 22 | 23) {
+        if self.hook_host.is_none() || matches!(event, 1 | 12 | 22 | 23) {
             return false;
         }
         let args = vec![
@@ -813,7 +1063,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// `HOOK_ENCOUNTER` event 0 (§6.17) on a selected random encounter:
     /// what remains of it. -1 cancels it, and ret1 1 keeps only its map.
     pub(crate) fn hook_random_encounter(&mut self, mut selected: Selected) -> Option<Selected> {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return Some(selected);
         }
         let args = vec![
@@ -840,7 +1090,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// `HOOK_ENCOUNTER` event 1 (§6.17): the map an entry from the world map
     /// loads. -1 is ignored here, as no encounter exists to cancel.
     pub(crate) fn hook_map_entry(&mut self, map: u32) -> u32 {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return map;
         }
         let args = vec![int(1), int(map as i32), int(0), int(-1), int(-1)];
@@ -855,7 +1105,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// `HOOK_SETGLOBALVAR` (§6.18): the value `set_global_var` stores.
     pub(crate) fn hook_global_var(&mut self, vm: &mut Vm, index: i32, value: i32) -> i32 {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return value;
         }
         self.reentered(vm, HOOK_SETGLOBALVAR, |host| {
@@ -874,7 +1124,7 @@ impl<A: WorldAssets> WorldHost<A> {
         range_aware: bool,
         rng: Option<&mut dyn RandomSource>,
     ) -> Result<i32, crate::WorldError> {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return attack.hit_chance(range_aware);
         }
         let (chance, raw) = attack.chance_parts(range_aware)?;
@@ -908,7 +1158,7 @@ impl<A: WorldAssets> WorldHost<A> {
         code: i32,
         rng: &mut impl RandomSource,
     ) -> Result<i32, crate::WorldError> {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return Ok(code);
         }
         let args = vec![
@@ -954,7 +1204,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// `HOOK_CALCAPCOST` (§6.10) at the end of an attack-cost query.
     pub fn hook_ap_cost(&mut self, critter: ObjectRef, attack: &Attack) -> i32 {
         let cost = attack.ap_cost();
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return cost;
         }
         let weapon = self.world.wielded(critter, attack.hit_mode).unwrap_or(0);
@@ -968,12 +1218,12 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// The hook on the 2 AP reload and generic-use results.
     pub fn hook_fixed_cost(&mut self, critter: ObjectRef, cost: i32, item: ObjectRef) -> i32 {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return cost;
         }
         self.calc_ap_cost(critter, 0, false, cost, item)
     }
-    fn calc_ap_cost(
+    pub(crate) fn calc_ap_cost(
         &mut self,
         critter: ObjectRef,
         kind: i32,
@@ -994,7 +1244,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// `HOOK_MOVECOST` (§6.13): `hexes` becoming `cost` AP.
     pub fn hook_move_cost(&mut self, critter: ObjectRef, hexes: i32, cost: i32) -> i32 {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return cost;
         }
         let args = vec![object(critter), int(hexes), int(cost)];
@@ -1012,7 +1262,7 @@ impl<A: WorldAssets> WorldHost<A> {
         attack: &Attack,
         spray: &mut Spray,
     ) -> bool {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return false;
         }
         let weapon = self.world.wielded(attacker, attack.hit_mode).unwrap_or(0);
@@ -1115,7 +1365,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// The price and offer value of the offer control's comparison.
     pub(crate) fn hooked_barter(&mut self, session: &BarterSession, offered: bool) -> (i32, i64) {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             let offer = self.world.inventory_value(session.offer);
             return (self.barter_price(session), offer);
         }
@@ -1133,7 +1383,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// On entering barter and after a transaction it runs twice, for the
     /// player and then for the NPC (§6.12).
     pub fn sfall_barter_preview(&mut self, session: &BarterSession) {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return;
         }
         let inputs = self.barter_inputs(session);
@@ -1193,9 +1443,8 @@ impl<A: WorldAssets> WorldHost<A> {
     /// The value stored for `kind` from these `inputs`, for presentation.
     /// Other inputs have no stored value, and show the unhooked one.
     pub fn sfall_previewed(&self, kind: Preview, inputs: &[i32]) -> Option<i32> {
-        self.sfall
+        self.hook_host
             .as_deref()?
-            .hooks
             .previews
             .get(&kind)
             .filter(|(old, _)| old == inputs)
@@ -1203,7 +1452,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// What the barter screen stored, for presentation.
     pub fn sfall_barter_shown(&self) -> Option<(i32, i64)> {
-        let preview = self.sfall.as_deref()?.hooks.barter?;
+        let preview = self.hook_host.as_deref()?.barter?;
         Some((preview.price, preview.offer))
     }
     /// The called-shot window's eight chances, queried once as it opens.
@@ -1229,7 +1478,7 @@ impl<A: WorldAssets> WorldHost<A> {
         item: ObjectRef,
         replaced: ObjectRef,
     ) -> bool {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return true;
         }
         let args = vec![int(target), object(item), object(replaced)];
@@ -1242,7 +1491,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// so a replay runs the hook again. A release also ends whatever its
     /// press produced.
     pub fn sfall_key(&mut self, pressed: bool, scan: i32, virtual_key: i32) -> i32 {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return scan;
         }
         let args = vec![int(i32::from(pressed)), int(scan), int(virtual_key)];
@@ -1306,6 +1555,21 @@ impl<A: WorldAssets> WorldHost<A> {
     pub(crate) fn global_for_test(&mut self, index: usize) -> u32 {
         self.hooks().expect("sfall mode").globals[index].program
     }
+    /// The running chain's members on `hook`.
+    pub(crate) fn members_for_test(&mut self, hook: i32) -> usize {
+        let chain = self.hooks().expect("hooks").chains.get(&hook);
+        chain.map_or(0, |chain| chain.members().len())
+    }
+    /// `program` takes `id`'s place, and runs its initial stream. Its
+    /// registrations and whether it left its chains stay.
+    pub(crate) fn replace_program_for_test(&mut self, id: u32, program: vault_vm::IntProgram) {
+        let mut vm = Vm::new(program);
+        reserve_null_string(&mut vm).unwrap();
+        vm.id = id;
+        let run = self.run_vm(&mut vm);
+        self.finish_member(&mut vm, run, None);
+        self.hooks().expect("hooks").programs.insert(id, vm);
+    }
     /// `register_hook_proc(hook, 0)` from `program`.
     pub(crate) fn unregister_for_test(&mut self, hook: i32, program: u32) {
         let mut vm = Vm::new(self.test_program(program));
@@ -1323,6 +1587,7 @@ impl<A: WorldAssets> WorldHost<A> {
         hooks.contexts.clear();
         for _ in 0..count {
             hooks.contexts.push(Context {
+                hook: -1,
                 args: Vec::new(),
                 arg_types: &[],
                 rets: Vec::new(),

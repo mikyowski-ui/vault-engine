@@ -1743,7 +1743,7 @@ click on the map selects an object instead of acting, showing its id, PID,
 FID, script, AI packet, team, HP/AP, flags and LVARs, with LVAR edits and
 **H** for a full heal), GVAR and MVAR editors, Map jump (any numbered map, an
 elevation and an optional tile), Spawn (PID and quantity), the unlocked
-view's Camera page, and Renderer. Up/Down choose a row, digits and Minus
+view's Camera page, the Mod log with manifest scripting on, and Renderer. Up/Down choose a row, digits and Minus
 type, Backspace deletes and Enter commits.
 
 The Renderer page is read-only, so every key but F8 and F9 passes through to
@@ -3445,6 +3445,154 @@ results. Mod scripts are checked with the same table when they load.
 asset-audit --corpus-dir mods/mymod --report-script-stack --sfall
 ```
 
+That check knows the mod words below as well.
+
+## Manifest scripting (SPEC-024a)
+
+A mod layer's `vault-mod.toml` can attach `.INT` scripts to the engine's hook points
+and run global scripts, with no sfall mode needed. A layer is **scripted** when its
+manifest has a `[[hooks]]` or `[[global_scripts]]` row, and manifest scripting is on
+exactly when an enabled layer is scripted. It works under `fallout1` and `fallout2`,
+under either preset, and with sfall mode on or off. It is fixed when the session is
+built, and with no scripted layer nothing below exists.
+
+```toml
+name = "Cheap AP"
+id = "cheap-ap"        # [a-z0-9_-], 1 to 32 bytes, unique across enabled layers
+api = 1                # the word API the mod needs
+
+[settings]
+ap_cost = 1
+
+[[global_scripts]]
+file = "gl_cheapap.int"
+repeat = 0             # runs start every n steps; 0 never
+type = 0               # 0 to 3, as set_global_script_type
+
+[[hooks]]
+point = "HOOK_CALCAPCOST"
+file = "gl_cheapap.int"
+procedure = "ap_cost"  # default start
+```
+
+`id` and `api` are needed with any of those three tables. `file` is a base name under
+`scripts/`, up to 32 letters, digits, `_` and `-`, then `.int` in any case. `point` is
+a name from `tests/fixtures/spec024a/hook-points.tsv`, as exact bytes. A layer with
+`[settings]` and no script row is valid and not scripted.
+
+Each of these stops the launch with `mod_list:` and the folder's name, and the
+launcher shows the same error on the layer: a key or value outside these rules, `api`
+above 1, a `file` that is not in the layer's own `scripts/`, a `file` beginning `hs_`,
+one manifest repeating a `file` and `point` or a global `file`, and two enabled layers
+with one `id` or naming one `file`. Disabled layers are not read for conflicts.
+
+Every script passes the mod-script check, with the words below in its table. A higher
+layer can replace a script's file as usual, and the row stays with the mod that
+declared it. A script the check refuses runs none of its rows until the next setup.
+
+**Hook points.** Manifest mods attach to the 30 points of "Sfall mode", on the same
+boundaries, and a chain has two blocks:
+
+| Block | Members | Order |
+| --- | --- | --- |
+| Sfall | SPEC-024b's | `register_hook` and `register_hook_proc`, newest first; the `hs_` script; `register_hook_proc_spec`, oldest first |
+| Mod | `[[hooks]]` rows and `mod_register_hook` | Lowest layer first; in a layer, rows in manifest order, then word registrations in call order |
+
+So the highest layer has the last word, as it does on a file, and there is no
+priority key. The word used to register chooses the block, not the script. With
+sfall mode off the sfall block is empty.
+
+Composition is SPEC-024b's, across both blocks. Each member starts with both cursors
+at 0, arguments and returns carry forward, the last writer wins per index, and only
+returns reach the engine. The two word families work on one context. A point's limits
+apply once, to the final value.
+
+- A member that ends in a VM error, running out of instructions included, leaves every
+  chain of both blocks until the next setup, and its writes stay.
+- A word that would suspend a member, including a timed `wait`, ends that member with a
+  diagnostic. It is not unloaded, and runs on the next query.
+- One counter covers all chains: past 8 nested chains, a chain is skipped.
+- A chain's members are fixed when its query starts. A registration during a chain
+  counts from the next query, and a member that left is passed over at its turn.
+- A member whose program is running on an outer chain is skipped with a diagnostic,
+  except from that program's own `set_global_var`.
+- A row on one of the 20 tier P2 hooks is kept and runs nothing, with one diagnostic at
+  setup. So does a row whose `procedure` is absent, and that row stays inert until the
+  next setup even if its script's `start` registers on the same point.
+- Under `fallout1`, `HOOK_ENCOUNTER` and `HOOK_CARTRAVEL` never run.
+- With sfall mode off, Esc stops a rest at once unless `HOOK_RESTTIMER` has a member. With
+  a member it stops at the rest's next step, so the member sees it.
+
+**Global scripts.** A file a `[[global_scripts]]` row names is a global script,
+whatever its name, with no attached object. A `gl*` file a manifest names is a manifest
+script only, and loads once. Sfall's run first, then each layer's in row order. `start`
+runs in setup, and `map_enter_p_proc`, `map_exit_p_proc` and `map_update_p_proc` at those
+events. Every script loads once, keeps its state between runs, and outlives a map.
+
+Setup runs after a new game or a load, before the first Simulation phase: sfall's
+`hs_` scripts and `gl*` scripts, then for each scripted layer, lowest first, its rows
+attach, its global scripts load, and its other scripts load. Registration is not saved.
+
+**Words.** `0x8300..=0x83FF` is reserved. These ten are in the set only with manifest
+scripting on. `0x830A` and up are refused at load, so a script needing a word this
+engine lacks takes the refused path rather than failing partway. Operands follow
+sfall's value model, with sfall mode on or off: a failed operand pops them all, has no
+effect, writes a diagnostic, and the word pushes its default.
+
+| Word | Mnemonic | Pop order | Push | Effect |
+| --- | --- | --- | --- | --- |
+| `0x8300` | `mod_api_version` | none | I | 1 |
+| `0x8301` | `mod_get_setting` | default, key | any | The caller's mod's setting, or the default |
+| `0x8302` | `mod_set_setting` | value, key | none | Writes the caller's mod's setting |
+| `0x8303` | `mod_log` | text | none | One line in the mod log |
+| `0x8304` | `mod_register_hook` | procedure, hook | none | Registers in the mod block. Again: a new procedure, same place. Procedure 0 removes it, a row's included, until the next setup |
+| `0x8305` | `mod_hook_id` | none | I | The innermost chain's hook, or -1 |
+| `0x8306` | `mod_get_hook_arg` | index | any | That argument, or int 0. It moves no cursor |
+| `0x8307` | `mod_set_hook_arg` | value, index | none | As `set_sfall_arg` |
+| `0x8308` | `mod_set_hook_return` | value, index | none | Sets that return, by the point's type. A value that cannot convert leaves it |
+| `0x8309` | `mod_game_mode` | none | I | `get_game_mode`'s bits |
+
+`mod_register_hook` needs a program a manifest declares. `opcode_exists` gives 0 for
+these words, and `engine_api_version` keeps its own number.
+
+**Settings.** A mod's settings are its `[settings]` keys: up to 64, each up to 31 letters,
+digits and `_`. An integer is int, a decimal with a fraction or exponent is float, a
+quoted string of up to 255 bytes is string, and `true` and `false` are 1 and 0. A key's
+type never changes, and a mod cannot reach another's.
+
+A write takes effect at once. A key changed from its manifest default is kept in the
+`config` namespace as `mod-settings-<id>.toml`, written at the end of the Simulation
+phase of a step that changed one. At session start each key takes its stored value,
+else its manifest default, and a stored key the manifest lacks or of the wrong type is
+dropped with a diagnostic. Neither a new game nor a load changes a setting, and settings
+are not saved in a slot.
+
+**The mod log.** `mod_log` keeps one line, `<id>: <text>`, or `-: <text>` with no owner.
+Text is cut to 200 bytes, and bytes outside 32 to 126 become `?`. The newest 256 lines
+last the session, on the F9 overlay's read-only **Mod log** page and in the debug log.
+
+**Replays.** A replay reads no settings file and no manifest key, so `--mod-list PATH`
+names its load order, as a `mod_list` file does. In a live session the flag wins over
+the settings file. A scripted session logs one record after the other session records
+and before the first tick:
+
+```json
+{"command_id":7,"kind":"mod_stack","api":1,"mods":[{"id":"cheap-ap","version":"1.0.0","manifest":"EE7C38513A262548","settings":{"ap_cost":"i:1"}}]}
+```
+
+`manifest` is the FNV-1a 64 of the file, and a setting is `i:` and decimal, `f:` and the
+binary32 bits, or `s:` and the text. A replay compares its scripted layers with the
+record, and any difference stops it before the first step with `mod stack mismatch:` and
+the first `id` that differs. A log with no record means no scripted layer. Settings come
+from the record, and a replay's writes reach its table and no file.
+
+Hooks never run while drawing or at a checkpoint. The registry, settings, log, and the
+record are outside every hash and every save, and `SAVE.DAT`, `VAULTENG.TOML` and
+`VAULTSFL.DAT` do not change. A mod whose members write nothing and draw nothing leaves
+the `state_hash` and `combat_hash` columns as they are with no mod.
+
+Lua or Wasm scripting, custom HUD drawing and networked mods are out of scope.
+
 ## Core contracts
 
 `EntityStore<T>` is a `slotmap::SlotMap<EntityId, T>`. Construct it with
@@ -3491,6 +3639,8 @@ Sfall mode (SPEC-024b), against the spec's boundaries:
   "3 to 8" of §6.19's table.
 - `create_spatial` gives the record's script ID as its object, because a spatial
   record has no object of its own.
+- A timed `wait` in a hook member now ends the member, as §6.5 asks. Before SPEC-024a
+  it released at once and the member ran on.
 - `set_global_var` reaches a member in the script that called it, as §6.18 asks. Any
   other word that causes a chain skips a member whose script is already running,
   with a diagnostic.

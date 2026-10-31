@@ -107,6 +107,14 @@ pub enum InputCommand {
     TouchUi {
         enabled: bool,
     },
+    /// SPEC-024a §2.3: the scripted layers and their settings, logged once
+    /// with manifest scripting on, after the other session records and
+    /// before the first tick. A replay compares its layers with it and takes
+    /// the settings from it.
+    ModStack {
+        api: i32,
+        mods: Vec<ModRecord>,
+    },
     /// The `enhanced` preset's game speed (1.0, 1.5 or 2.0): logged after
     /// the surface, scaling, enhanced and touch UI records when a session
     /// starts at another speed than 1.0, and on every Alt+F. A replay
@@ -114,6 +122,39 @@ pub enum InputCommand {
     GameSpeed {
         speed: f32,
     },
+}
+
+/// One scripted layer of a `mod_stack` record (SPEC-024a §2.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModRecord {
+    pub id: String,
+    pub version: String,
+    /// `fnv1a64` of the manifest's bytes, 16 uppercase hexadecimal digits.
+    pub manifest: String,
+    /// Each declared key's value, ascending by key bytes.
+    pub settings: std::collections::BTreeMap<String, String>,
+}
+
+/// The `mod_stack` record of `session`.
+pub fn mod_stack_record(session: &vault_core::host_mods::ModSession) -> InputCommand {
+    let mods = session
+        .mods()
+        .iter()
+        .enumerate()
+        .map(|(index, scripted)| ModRecord {
+            id: scripted.id.clone(),
+            version: scripted.version.clone(),
+            manifest: format!("{:016X}", scripted.manifest),
+            settings: session
+                .settings(index)
+                .iter()
+                .map(|(key, value)| (key.clone(), crate::mods::record_value(value)))
+                .collect(),
+        });
+    InputCommand::ModStack {
+        api: vault_core::host_mods::MOD_API_VERSION,
+        mods: mods.collect(),
+    }
 }
 
 /// The logged form of [`EnhancedSettings`], named as in `vault-engine.toml`.

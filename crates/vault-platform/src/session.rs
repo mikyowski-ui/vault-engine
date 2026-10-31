@@ -489,6 +489,16 @@ pub(crate) fn start_sfall<A: vault_core::assets::WorldAssets>(
     }
 }
 
+/// Manifest scripting for a world's host, likewise (SPEC-024a §2.1).
+pub(crate) fn start_mods<A: vault_core::assets::WorldAssets>(
+    host: &mut vault_core::WorldHost<A>,
+    session: Option<Arc<vault_core::host_mods::ModSession>>,
+) {
+    if let Some(session) = session {
+        host.enable_mod_scripts(session);
+    }
+}
+
 /// The INI files of the profile's writable folder (SPEC-024b §4.5).
 struct FolderIni {
     root: PathBuf,

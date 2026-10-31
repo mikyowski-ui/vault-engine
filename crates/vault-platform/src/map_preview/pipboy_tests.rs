@@ -485,3 +485,54 @@ fn spec014_pipboy_screen_saver_runs_after_two_idle_minutes() {
     preview.tick(now).unwrap();
     assert!(!pipboy(&preview).saver_running());
 }
+
+/// A world whose `dir` is one scripted layer, with `rows` on §9.1's program.
+fn scripted(dir: &std::path::Path, rows: &str) -> MapPreview {
+    let hex = include_str!("../../../../tests/fixtures/spec024a/gl_cheapap.int.hex");
+    let program: Vec<u8> = hex
+        .lines()
+        .filter_map(|line| line.split_once(": "))
+        .flat_map(|(_, bytes)| bytes.split(' '))
+        .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+        .collect();
+    std::fs::write(dir.join("scripts/gl_cheapap.int"), program).unwrap();
+    let manifest = format!("name = \"M\"\nid = \"m\"\napi = 1\n[settings]\nap_cost = 1\n{rows}");
+    std::fs::write(dir.join("vault-mod.toml"), manifest).unwrap();
+    let session = crate::mods::mod_session(&[dir.to_path_buf()], None, false)
+        .unwrap()
+        .unwrap();
+    let mut preview = load(dir);
+    preview.host.enable_mod_scripts(session);
+    preview
+}
+/// The Alarm Clock's hour, resting.
+fn rest(preview: &mut MapPreview) {
+    preview.tick(1000).unwrap();
+    assert!(preview.step(KeyCode::KeyP));
+    assert!(preview.tap([130, 20]), "the Alarm Clock button");
+    preview.image().unwrap();
+    assert!(preview.tap([300, 140]), "an hour");
+    assert!(pipboy(preview).rest.is_some());
+}
+/// SPEC-024a §10 test 15: with sfall mode off, Esc waits for the step only
+/// while `HOOK_RESTTIMER` has a member.
+#[test]
+fn esc_stops_a_rest_at_once_with_no_member_and_at_the_next_step_with_one() {
+    let dir = corpus();
+    let other = "[[hooks]]\npoint = \"HOOK_CALCAPCOST\"\nfile = \"gl_cheapap.int\"\n\
+                 procedure = \"ap_cost\"\n";
+    let mut preview = scripted(dir.path(), other);
+    rest(&mut preview);
+    assert!(preview.step(KeyCode::Escape));
+    assert!(pipboy(&preview).rest.is_none(), "at once");
+
+    let dir = corpus();
+    let timer = other.replace("HOOK_CALCAPCOST", "HOOK_RESTTIMER");
+    let mut preview = scripted(dir.path(), &timer);
+    rest(&mut preview);
+    assert!(preview.step(KeyCode::Escape));
+    assert!(pipboy(&preview).rest.is_some(), "the member sees it first");
+    preview.tick(1100).unwrap();
+    // `ap_cost` returns the setting, 1, which also stops the rest.
+    assert!(pipboy(&preview).rest.is_none(), "at the next step");
+}

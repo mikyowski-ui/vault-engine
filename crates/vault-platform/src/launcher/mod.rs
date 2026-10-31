@@ -16,7 +16,7 @@
 //! This is engine infrastructure, not part of any specification.
 mod browse;
 pub(crate) mod font;
-mod validate;
+pub(crate) mod validate;
 mod view;
 mod widgets;
 

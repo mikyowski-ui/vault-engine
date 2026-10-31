@@ -870,7 +870,7 @@ impl MapPreview {
     /// SPEC-024b §6.6: this step's previews, in the Simulation phase. Drawing
     /// reads what they store, and never runs a script.
     pub(crate) fn sfall_previews(&mut self) {
-        if !self.host.sfall_mode() {
+        if !self.host.hooks_on() {
             return;
         }
         self.sfall_figure_preview();

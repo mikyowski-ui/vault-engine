@@ -58,6 +58,7 @@ struct SelfOverride {
     strong: bool,
 }
 
+pub use crate::host_sfall_boundaries::HOOK_RESTTIMER;
 pub use crate::host_sfall_hooks::{Preview, SfallHooks, UseHook};
 pub use crate::host_sfall_rows::MessageBox;
 use crate::host_sfall_rows::Promoted;
@@ -74,8 +75,6 @@ pub struct SfallHost {
     loaded: BTreeSet<u64>,
     /// Steps since the session started, for `get_uptime`.
     pub(crate) steps: u64,
-    /// The screens' `get_game_mode` bits, as the shell last set them.
-    screens: u32,
     /// §4.8 the open lists, by ID: each is a snapshot and a cursor.
     lists: BTreeMap<i32, VecDeque<ObjectRef>>,
     next_list: i32,
@@ -87,15 +86,11 @@ pub struct SfallHost {
     ini_configs: BTreeMap<String, u32>,
     /// Keys the hook mapped, waiting for the game (metarule3 201 empties it).
     pub(crate) key_queue: VecDeque<i32>,
-    /// Part 3: hooks and global scripts.
-    pub(crate) hooks: SfallHooks,
     /// §4.11: the rows Revision 3 promoted.
     pub(crate) promoted: Promoted,
     /// `signal_close_game` asked to end the session at this step's end.
     pub(crate) close_signalled: bool,
     pub(crate) closed: bool,
-    /// §6.14 the bit set at the last comparison.
-    pub(crate) last_mode: Option<u32>,
 }
 
 fn integer(value: i32) -> Option<SfallValue> {
@@ -117,6 +112,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.sfall_clear_tables();
         self.sfall = Some(Box::default());
+        self.hook_host = Some(Box::default());
         self.world.sfall = Some(Box::<SfallWorld>::default());
         self.world.session = SessionSettings::sfall();
         self.assets.set_sfall_scripts(true);
@@ -143,9 +139,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// The screens' `get_game_mode` bits, from the shell.
     pub fn set_sfall_screens(&mut self, bits: u32) {
-        if let Some(sfall) = self.sfall.as_deref_mut() {
-            sfall.screens = bits;
-        }
+        self.screens = bits;
     }
     /// The object `set_self` put in place for `vm`'s next word.
     pub(crate) fn sfall_self(&self, vm: &Vm) -> Option<ObjectRef> {
@@ -226,7 +220,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// `operands` as `classes` says, or `None` for a failed operand. An `O`
     /// operand that is not a live object means null (SPEC-017 §1).
-    fn operands(
+    pub(crate) fn operands(
         &mut self,
         vm: &Vm,
         name: &str,
@@ -957,7 +951,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.sfall_game_mode()
     }
     fn sfall_game_mode(&self) -> u32 {
-        let mut bits = self.sfall.as_deref().map_or(0, |sfall| sfall.screens);
+        let mut bits = self.screens;
         if bits & game_mode::WORLD_MAP == 0 {
             bits |= game_mode::LOCAL_MAP;
         }

@@ -85,6 +85,15 @@ pub(crate) fn literal_offset(program: &IntProgram, text: &[u8]) -> u32 {
         .unwrap_or_else(|| panic!("no literal {text:?}"))
 }
 pub(crate) fn run<A: WorldAssets>(host: &mut WorldHost<A>, ops: &[Op]) -> Run {
+    run_as(host, ops, &WordSet::FALLOUT2_SFALL, 50)
+}
+/// [`run`], under `words`, as program `id`.
+pub(crate) fn run_as<A: WorldAssets>(
+    host: &mut WorldHost<A>,
+    ops: &[Op],
+    words: &WordSet,
+    id: u32,
+) -> Run {
     let strings: Vec<&[u8]> = ops
         .iter()
         .filter_map(|op| match op {
@@ -92,7 +101,7 @@ pub(crate) fn run<A: WorldAssets>(host: &mut WorldHost<A>, ops: &[Op]) -> Run {
             _ => None,
         })
         .collect();
-    let program = base(&strings);
+    let program = IntProgram::parse_in(&fixture::program(&strings, &[]), words, false).unwrap();
     let mut bytes = Vec::new();
     for op in ops {
         match op {
@@ -112,7 +121,7 @@ pub(crate) fn run<A: WorldAssets>(host: &mut WorldHost<A>, ops: &[Op]) -> Run {
         }
     }
     let mut vm = Vm::fragment(program, &bytes).unwrap();
-    vm.id = 50;
+    vm.id = id;
     vm.intern(b"").unwrap();
     let result = vm.run(host, 100_000);
     Run { vm, result }

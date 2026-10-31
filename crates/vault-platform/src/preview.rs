@@ -278,7 +278,7 @@ impl AssetPreview {
             Self::Game(game) => game.world(),
             _ => None,
         };
-        let Some(world) = world.filter(|world| world.host.sfall_mode()) else {
+        let Some(world) = world.filter(|world| world.host.hooks_on()) else {
             return key;
         };
         let Some((scan, virtual_key)) = crate::input::key_codes(key) else {
@@ -297,6 +297,14 @@ impl AssetPreview {
         };
         if let (Some(world), Some(button)) = (world, crate::input::button_number(button)) {
             world.host.sfall_mouse(pressed, button);
+        }
+    }
+    /// SPEC-024a: the session's scripted mods, with manifest scripting on.
+    pub fn mod_session(&self) -> Option<Arc<vault_core::host_mods::ModSession>> {
+        match self {
+            Self::Map(preview) => preview.host.mod_session.clone(),
+            Self::Game(game) => game.mod_session.clone(),
+            _ => None,
         }
     }
     pub fn key_up(&mut self, key: KeyCode) {
@@ -753,7 +761,18 @@ impl PreviewArgs {
         (self.sfall && !self.headless)
             .then(|| self.save_dir.clone().unwrap_or_else(|| PathBuf::from(".")))
     }
+    /// SPEC-024a §2.1: the session's scripted mods. A replay takes their
+    /// settings from its log, and writes none.
+    fn mod_session(&self) -> AppResult<Option<Arc<vault_core::host_mods::ModSession>>> {
+        let Some(mods) = &self.mods else {
+            return Ok(None);
+        };
+        let storage = self.storage.as_deref().filter(|_| !self.headless);
+        crate::mods::mod_session(&crate::mods::layer_dirs(mods), storage, !self.headless)
+            .map_err(|error| format!("mod_list: {error}").into())
+    }
     pub fn load(&self) -> AppResult<Option<AssetPreview>> {
+        let mod_session = self.mod_session()?;
         let language = self.language.as_deref().unwrap_or("english");
         let save_root = self.save_dir.clone().unwrap_or_else(|| PathBuf::from("."));
         // One world-canvas renderer for the session's worlds.
@@ -775,6 +794,7 @@ impl PreviewArgs {
             game.enhanced = self.enhanced;
             game.touch_ui = self.touch_ui;
             game.sfall = self.sfall;
+            game.mod_session = mod_session;
             game.sfall_files = self.sfall_files();
             game.mod_export = self.mod_export.clone();
             game.renderer = renderer;
@@ -794,6 +814,7 @@ impl PreviewArgs {
                 self.preset,
                 self.game_profile,
                 self.sfall,
+                mod_session,
             )?;
             map.host.set_subtitles(self.subtitles);
             map.save_root = save_root;

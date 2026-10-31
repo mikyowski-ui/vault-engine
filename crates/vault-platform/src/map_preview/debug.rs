@@ -61,6 +61,8 @@ pub(crate) enum Page {
     /// The `enhanced` camera's presentation tools (after the spawner, only
     /// in the unlocked enhanced view): the free camera and the camera demo.
     Camera,
+    /// Read-only: SPEC-024a §7.5's mod log, with manifest scripting on.
+    ModLog,
     /// Read-only: the world canvas's render path and its metrics
     /// (SPEC-022 §3.7, §3.12), after the spawner and the camera page.
     Renderer,
@@ -73,7 +75,7 @@ impl Page {
             Self::Globals => Self::MapVars,
             Self::MapVars => Self::MapJump,
             Self::MapJump => Self::Spawn,
-            Self::Spawn | Self::Camera => Self::Renderer,
+            Self::Spawn | Self::Camera | Self::ModLog => Self::Renderer,
             Self::Renderer => Self::Watch,
         }
     }
@@ -86,6 +88,7 @@ impl Page {
             Self::MapJump => "map jump",
             Self::Spawn => "item spawner",
             Self::Camera => "enhanced camera",
+            Self::ModLog => "mod log",
             Self::Renderer => "renderer",
         }
     }
@@ -310,10 +313,11 @@ impl MapPreview {
         if key == KeyCode::F8 {
             // The camera page follows the spawner in the unlocked
             // `enhanced` view only.
-            let next = if page == Page::Spawn && self.enhanced_view().is_some() {
-                Page::Camera
-            } else {
-                page.next()
+            let scripted = self.host.mod_session.is_some();
+            let next = match page {
+                Page::Spawn if self.enhanced_view().is_some() => Page::Camera,
+                Page::Spawn | Page::Camera if scripted => Page::ModLog,
+                page => page.next(),
             };
             if let Some(overlay) = &mut self.debug {
                 overlay.set_page(next);
@@ -322,7 +326,7 @@ impl MapPreview {
             return true;
         }
         // The read-only pages pass every other key through.
-        if matches!(page, Page::Watch | Page::Renderer) {
+        if matches!(page, Page::Watch | Page::ModLog | Page::Renderer) {
             return false;
         }
         // The camera page's presentation actions (not debug commands: the
@@ -394,7 +398,7 @@ impl MapPreview {
                 let index = overlay.cursor;
                 let typed = "type a number first";
                 let command = match page {
-                    Page::Watch | Page::Camera | Page::Renderer => Err(typed),
+                    Page::Watch | Page::Camera | Page::ModLog | Page::Renderer => Err(typed),
                     Page::Inspect => match (selected, overlay.value()) {
                         (None, _) => Err("no object selected"),
                         (Some(object), value) => value
@@ -452,7 +456,7 @@ impl MapPreview {
     fn debug_rows(&self, page: Page) -> usize {
         let world = &self.host.world;
         match page {
-            Page::Watch | Page::Camera | Page::Renderer => 0,
+            Page::Watch | Page::Camera | Page::ModLog | Page::Renderer => 0,
             Page::Inspect => self
                 .debug
                 .as_ref()
@@ -674,6 +678,18 @@ impl MapPreview {
                 );
                 for _ in lines.len()..6 {
                     line(image, "", ColorKey::WHITE);
+                }
+            }
+            Page::ModLog => {
+                let lines = self
+                    .host
+                    .mod_session
+                    .as_ref()
+                    .map_or_else(Vec::new, |session| session.log_lines());
+                line(image, "-- newest last --", ColorKey::AMBER);
+                let shown = lines.len().saturating_sub(LIST_ROWS);
+                for text in &lines[shown..] {
+                    line(image, text, ColorKey::GREEN);
                 }
             }
             Page::Renderer => {
@@ -1021,5 +1037,36 @@ mod tests {
                 .collect()
         };
         assert!(view(&reference) == view(&instanced), "the map views differ");
+    }
+
+    /// SPEC-024a §7.5: read-only, between Camera and Renderer, and only with
+    /// manifest scripting on.
+    #[test]
+    fn the_mod_log_page_appears_with_manifest_scripting() {
+        use vault_core::host_mods::ModSession;
+        let dir = tempfile::tempdir().unwrap();
+        let mut preview = world(dir.path());
+        preview.set_debug(true);
+        let cycle = |preview: &mut MapPreview| {
+            let mut seen = Vec::new();
+            for _ in 0..8 {
+                preview.step(KeyCode::F8);
+                seen.push(page(preview));
+            }
+            seen
+        };
+        assert!(!cycle(&mut preview).contains(&Page::ModLog));
+        preview
+            .host
+            .enable_mod_scripts(std::sync::Arc::new(ModSession::new(Vec::new(), false)));
+        while page(&preview) != Page::Spawn {
+            preview.step(KeyCode::F8);
+        }
+        preview.step(KeyCode::F8);
+        assert_eq!(page(&preview), Page::ModLog);
+        assert!(!preview.debug_key(KeyCode::KeyA), "keys pass to the world");
+        preview.image().unwrap();
+        preview.step(KeyCode::F8);
+        assert_eq!(page(&preview), Page::Renderer);
     }
 }

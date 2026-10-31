@@ -152,6 +152,8 @@ pub trait WorldAssets {
     /// Whether scripts are parsed and checked under sfall mode's word set
     /// (SPEC-024b §3.2).
     fn set_sfall_scripts(&self, _enabled: bool) {}
+    /// Whether SPEC-024a's words are in the set scripts are parsed under.
+    fn set_mod_scripts(&self, _enabled: bool) {}
     /// `prototype` takes the place of its PID's until that reloads
     /// (SPEC-024b §4.8 `set_proto_data`).
     fn replace_prototype(&self, _prototype: Arc<Prototype>) {}
@@ -226,6 +228,8 @@ pub struct VfsWorldAssets {
     enhanced_scripts: std::cell::Cell<bool>,
     /// SPEC-024b §3.2: sfall mode's word set, once the session turned it on.
     sfall_scripts: std::cell::Cell<bool>,
+    /// SPEC-024a §7.1: the mod words, with manifest scripting on.
+    manifest_scripts: std::cell::Cell<bool>,
     /// What the mod layers' `vault-mod.toml` manifests register (empty
     /// without mod layers).
     registry: ModRegistry,
@@ -266,6 +270,7 @@ impl VfsWorldAssets {
             diagnostics: RefCell::new(Vec::new()),
             enhanced_scripts: std::cell::Cell::new(false),
             sfall_scripts: std::cell::Cell::new(false),
+            manifest_scripts: std::cell::Cell::new(false),
             virtual_files: RefCell::new(BTreeMap::new()),
             registry: ModRegistry::default(),
             game: std::cell::Cell::new(crate::GameProfile::Fallout1),
@@ -348,11 +353,12 @@ impl VfsWorldAssets {
     }
     /// The word set scripts load under: the profile's, or sfall mode's.
     fn script_words(&self) -> WordSet {
-        if self.sfall_scripts.get() {
+        let words = if self.sfall_scripts.get() {
             crate::fallout2::sfall_word_set(self.game.get())
         } else {
             crate::fallout2::word_set(self.game.get())
-        }
+        };
+        words.with_mods(self.manifest_scripts.get())
     }
     /// A script, checked against the game profile's word set (SPEC-017
     /// §2.1), with the enhanced range as the preset says.
@@ -421,6 +427,7 @@ impl VfsWorldAssets {
         };
         let every = WordSet {
             words: 0x8000..=0xffff,
+            mods: false,
         };
         let refusal = match IntProgram::parse_in(bytes, &every, false) {
             Err(error) => format!("undecodable: {error}"),
@@ -589,6 +596,10 @@ impl WorldAssets for VfsWorldAssets {
     }
     fn set_sfall_scripts(&self, enabled: bool) {
         self.sfall_scripts.set(enabled);
+        self.programs.borrow_mut().clear();
+    }
+    fn set_mod_scripts(&self, enabled: bool) {
+        self.manifest_scripts.set(enabled);
         self.programs.borrow_mut().clear();
     }
     fn prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {

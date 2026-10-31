@@ -170,6 +170,15 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// SPEC-024b: sfall mode's host state. `None` with the mode off, when
     /// nothing of that specification exists.
     pub sfall: Option<Box<crate::host_sfall::SfallHost>>,
+    /// Hook chains and global scripts, with sfall mode or manifest scripting
+    /// on (SPEC-024a §1). Rebuilt on each setup, and never saved.
+    pub hook_host: Option<Box<crate::host_sfall::SfallHooks>>,
+    /// SPEC-024a: the session's scripted mods, with manifest scripting on.
+    pub mod_session: Option<std::sync::Arc<crate::host_mods::ModSession>>,
+    /// Told the hook of each chain as it starts (SPEC-024a §10's test 9).
+    pub chain_observer: Option<Box<dyn FnMut(i32) + Send>>,
+    /// The screens' `get_game_mode` bits, as the shell last set them.
+    pub(crate) screens: u32,
 }
 impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn prototype(&self, pid: u32) -> Result<std::sync::Arc<vault_formats::Prototype>, WorldError> {
@@ -285,6 +294,9 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn set_sfall_scripts(&self, enabled: bool) {
         (**self).set_sfall_scripts(enabled)
     }
+    fn set_mod_scripts(&self, enabled: bool) {
+        (**self).set_mod_scripts(enabled)
+    }
     fn replace_prototype(&self, prototype: std::sync::Arc<vault_formats::Prototype>) {
         (**self).replace_prototype(prototype)
     }
@@ -356,6 +368,10 @@ impl<A: WorldAssets> WorldHost<A> {
             departed: BTreeMap::new(),
             combat_trace: None,
             sfall: None,
+            hook_host: None,
+            mod_session: None,
+            chain_observer: None,
+            screens: 0,
         }
     }
     /// SPEC-008 §3.10 a music request: the track is recorded as the last
@@ -2557,11 +2573,14 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
     }
     /// A host word, with the row of the active profile (SPEC-017 §2.3).
     fn extension(&mut self, opcode: u16, vm: &mut Vm) -> Result<(), VmError> {
-        if self.sfall.is_none() {
+        if extensions::MOD_WORDS.contains(&opcode) {
+            return self.mod_word(opcode, vm);
+        }
+        if self.hook_host.is_none() {
             return self.host_word(opcode, vm);
         }
         // SPEC-024b §3.2: under sfall mode its table takes the overlap.
-        let result = if opcode >= vault_vm::sfall::FIRST_WORD {
+        let result = if self.sfall.is_some() && opcode >= vault_vm::sfall::FIRST_WORD {
             self.sfall_word(opcode, vm)
         } else if opcode == 0x80bc && self.sfall_global_without_self(vm) {
             // §4.8 `[May-improve]`: null, with a diagnostic.
@@ -2638,6 +2657,9 @@ impl<A: WorldAssets> VmHost for WorldHost<A> {
         let id = vm.id;
         self.programs.insert(id, vm);
         Ok(id)
+    }
+    fn timed_wait_releases(&mut self) -> bool {
+        !self.chain_running()
     }
     fn wait_ready(&mut self, reference: u32, _start: u32, _deadline: u32) -> Result<bool, VmError> {
         if reference == 2 {

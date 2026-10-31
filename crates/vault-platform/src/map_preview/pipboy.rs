@@ -395,7 +395,13 @@ impl MapPreview {
                 }
             }
             PipBoyOutcome::Rest(option) => self.begin_pipboy_rest(option),
-            PipBoyOutcome::StopRest if self.host.sfall_mode() => {
+            // SPEC-024a §3.2: only a chain with a member needs to see it.
+            PipBoyOutcome::StopRest
+                if self.host.sfall_mode()
+                    || self
+                        .host
+                        .hook_has_members(vault_core::host_sfall::HOOK_RESTTIMER) =>
+            {
                 if let Some(resting) = self.pipboy().and_then(|pipboy| pipboy.rest.as_mut()) {
                     resting.escape = true;
                 }

@@ -153,6 +153,8 @@ pub struct Game {
     pub touch_ui: bool,
     /// SPEC-024b §3.1: every world of this session runs in sfall mode.
     pub sfall: bool,
+    /// SPEC-024a: the session's scripted mods, which outlive each world.
+    pub mod_session: Option<Arc<vault_core::host_mods::ModSession>>,
     /// Where `set_ini_setting` writes (SPEC-024b §4.5).
     pub sfall_files: Option<PathBuf>,
     /// The `enhanced` preset's game speed every world runs at (Alt+F
@@ -281,6 +283,7 @@ impl Game {
             enhanced: None,
             touch_ui: false,
             sfall: false,
+            mod_session: None,
             sfall_files: None,
             game_speed: Default::default(),
             mod_export: None,
@@ -596,6 +599,7 @@ impl Game {
         let assets = VfsWorldAssets::new(self.vfs.clone(), &self.language)?;
         let fallout2 = self.fallout2.clone();
         let sfall = self.sfall;
+        let mod_session = self.mod_session.clone();
         let path = if fallout2.is_some() {
             vault_core::fallout2::START_MAP
         } else {
@@ -609,6 +613,7 @@ impl Game {
                     host.begin_fallout2_game(tables);
                 }
                 crate::session::start_sfall(host, sfall);
+                crate::session::start_mods(host, mod_session);
             })?;
         world.host.world.clock.ticks = flow::START_TICKS;
         world.audio = self.audio.clone();

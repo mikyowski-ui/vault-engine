@@ -88,7 +88,7 @@ impl<A: WorldAssets> WorldHost<A> {
         damage: i32,
         animation: u8,
     ) -> u8 {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return animation;
         }
         let pid = weapon
@@ -125,7 +125,7 @@ impl<A: WorldAssets> WorldHost<A> {
         rounds: i32,
         rng: &mut impl RandomSource,
     ) -> Option<i32> {
-        self.sfall.as_ref()?;
+        self.hook_host.as_ref()?;
         let weapon = self.world.wielded(attacker, attack.hit_mode)?;
         let args = vec![object(weapon), int(rounds), int(1), int(2)];
         rng.lend(&mut self.world.rng);
@@ -140,7 +140,7 @@ impl<A: WorldAssets> WorldHost<A> {
             Some(cost) => (resolution.ammo, resolution.ammo.saturating_mul(cost), 3),
             None => (1, resolution.ammo, 0),
         };
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return spent;
         }
         let args = vec![object(weapon), int(rounds), int(spent), int(kind)];
@@ -152,7 +152,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// engine handles it. The input log holds the event, so a replay runs
     /// the hook again.
     pub fn sfall_mouse(&mut self, pressed: bool, button: i32) {
-        if self.sfall.is_some() {
+        if self.hook_host.is_some() {
             self.run_hook(HOOK_MOUSECLICK, vec![int(i32::from(pressed)), int(button)]);
         }
     }
@@ -166,7 +166,7 @@ impl<A: WorldAssets> WorldHost<A> {
         planting: bool,
         quantity: i32,
     ) -> (StealHook, Option<i32>) {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return (StealHook::Engine, None);
         }
         let args = vec![
@@ -197,7 +197,7 @@ impl<A: WorldAssets> WorldHost<A> {
         kind: i32,
     ) -> i32 {
         let engine = i32::from(in_range);
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return engine;
         }
         let args = vec![object(observer), object(target), int(engine), int(kind)];
@@ -212,7 +212,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// `obj_can_see_obj`: 2 skips the blocker ray.
     pub(crate) fn hooked_can_see(&mut self, observer: ObjectRef, target: ObjectRef) -> bool {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return self.world.can_see(observer, target);
         }
         let placed =
@@ -233,7 +233,7 @@ impl<A: WorldAssets> WorldHost<A> {
         snapshot: &mut [ObjectRef],
         critter: ObjectRef,
     ) -> Option<ObjectRef> {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return crate::ai::danger(snapshot, critter, &self.world);
         }
         crate::ai::danger(snapshot, critter, &HookedThreats(RefCell::new(self)))
@@ -261,7 +261,7 @@ impl<A: WorldAssets> WorldHost<A> {
         slot: i32,
         wielding: bool,
     ) -> bool {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return true;
         }
         let args = vec![
@@ -278,7 +278,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// inventory. If it is equipped the chain runs, and the removal happens
     /// whatever it returns.
     pub(crate) fn hook_removal(&mut self, owner: ObjectRef, item: ObjectRef) {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return;
         }
         if let Some(slot) = self.equipped_slot(item) {
@@ -342,7 +342,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// `HOOK_CARTRAVEL`: the steps and the fuel of one car iteration.
     pub(crate) fn hook_car_travel(&mut self, steps: i32, fuel: i32) -> (i32, i32) {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return (steps, fuel);
         }
         let Some(rets) = self.run_hook(HOOK_CARTRAVEL, vec![int(steps), int(fuel)]) else {
@@ -358,7 +358,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// `HOOK_RESTTIMER`'s return for `event` of a rest of `span`, its hours
     /// and minutes.
     pub(crate) fn hook_rest(&mut self, event: i32, span: (i32, i32)) -> Option<i32> {
-        self.sfall.as_ref()?;
+        self.hook_host.as_ref()?;
         let ticks = self.world.clock.ticks as u32 as i32;
         let args = vec![int(ticks), int(event), int(span.0), int(span.1)];
         self.hook_int(HOOK_RESTTIMER, args)
@@ -371,7 +371,7 @@ impl<A: WorldAssets> WorldHost<A> {
         target: ObjectRef,
         animation: u8,
     ) -> Option<Option<u8>> {
-        self.sfall.as_ref()?;
+        self.hook_host.as_ref()?;
         let args = vec![object(actor), object(target), int(i32::from(animation))];
         let chosen = self.hook_int(HOOK_USEANIMOBJ, args)?;
         if chosen == -1 {
@@ -391,7 +391,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// `HOOK_DESCRIPTIONOBJ`: the text that replaces `target`'s own.
     pub(crate) fn hook_description(&mut self, target: ObjectRef) -> Option<Vec<u8>> {
-        self.sfall.as_ref()?;
+        self.hook_host.as_ref()?;
         let rets = self.run_hook(HOOK_DESCRIPTIONOBJ, vec![object(target)])?;
         match rets.first()? {
             Some(SfallValue::Text(text)) => Some(text.as_slice().to_vec()),
@@ -406,7 +406,7 @@ impl<A: WorldAssets> WorldHost<A> {
         target: ObjectRef,
         index: i32,
     ) -> Option<(ObjectRef, bool)> {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return Some((actor, false));
         }
         let args = vec![object(actor), object(target), int(index)];
@@ -431,7 +431,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// `HOOK_SETLIGHTING` on `intensity` and `radius`; `owner` is -1 for the
     /// map, which takes no radius.
     pub(crate) fn hook_light(&mut self, owner: i32, intensity: i32, radius: i32) -> (i32, i32) {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return (intensity, radius);
         }
         let args = vec![int(owner), int(intensity), int(radius)];
@@ -475,7 +475,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// `HOOK_ADJUSTRADS`: the amount `critter`'s radiation changes by.
     pub(crate) fn hook_radiation(&mut self, critter: ObjectRef, amount: i32) -> i32 {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return amount;
         }
         self.hook_int(HOOK_ADJUSTRADS, vec![object(critter), int(amount)])
@@ -499,7 +499,7 @@ impl<A: WorldAssets> WorldHost<A> {
         kind: i32,
         usable: bool,
     ) -> bool {
-        if self.sfall.is_none() {
+        if self.hook_host.is_none() {
             return usable;
         }
         let args = vec![

@@ -516,6 +516,7 @@ impl MapPreview {
             preset,
             vault_core::GameProfile::Fallout1,
             false,
+            None,
         )
     }
     /// [`Self::load_with`] reading `game`'s map and prototype layouts
@@ -530,6 +531,7 @@ impl MapPreview {
         preset: EnginePreset,
         game: vault_core::GameProfile,
         sfall: bool,
+        mod_session: Option<Arc<vault_core::host_mods::ModSession>>,
     ) -> AppResult<Self> {
         let assets = VfsWorldAssets::new(vfs, language)?;
         assets.set_game_profile(game);
@@ -540,6 +542,7 @@ impl MapPreview {
         };
         Self::with_setup(assets, path, character, seed, preset, |host| {
             crate::session::start_sfall(host, sfall);
+            crate::session::start_mods(host, mod_session);
         })
     }
     /// The world for `path` with a ready player sheet (SPEC-014 §3.12's
@@ -1938,8 +1941,33 @@ impl MapPreview {
         self.show_message_box();
         self.sfall_previews();
         self.host.sfall_end_of_step();
+        self.commit_mod_state();
         self.quit_requested |= self.host.sfall_session_closed();
         changed
+    }
+    /// SPEC-024a §7.4 and §7.5, at the end of phase 2: the log's new lines
+    /// reach the debug log, and each mod with a changed setting its file.
+    fn commit_mod_state(&mut self) {
+        let Some(session) = self.host.mod_session.clone() else {
+            return;
+        };
+        for line in session.take_unsent() {
+            tracing::debug!(target: "vault_debug", "{line}");
+        }
+        let ops = crate::mods::settings_batch(session.take_changed());
+        if ops.is_empty() {
+            return;
+        }
+        let committed = self.storage.as_ref().map(|storage| {
+            storage
+                .commit(crate::storage::Namespace::Config, &ops)
+                .and_then(|()| storage.flush())
+        });
+        if let Some(Err(error)) = committed {
+            self.host
+                .world
+                .diagnostic(format!("mod settings commit: {error}"));
+        }
     }
     /// SPEC-024b §4.12: what scripts asked of the interface.
     fn apply_sfall_requests(&mut self) {

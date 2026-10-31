@@ -116,32 +116,42 @@ pub(crate) fn instruction_length(word: u16) -> usize {
 pub struct WordSet {
     /// The core and host words, `0x8000` up to the last host word.
     pub words: std::ops::RangeInclusive<u16>,
+    /// SPEC-024a §7.1: [`crate::extensions::MOD_WORDS`] are in the set, with
+    /// manifest scripting on.
+    pub mods: bool,
 }
 impl WordSet {
     /// SPEC-004/005: `0x8000` to `0x8155`.
     pub const FALLOUT1: Self = Self {
         words: 0x8000..=0x8155,
+        mods: false,
     };
     /// SPEC-017 §2.1: `0x8000` to `0x8183`: SPEC-005 as amended by
     /// SPEC-017 §3, plus the 46 words of SPEC-017 §4 (four defined, 42
     /// reserved). Its dispatch table has 388 entries.
     pub const FALLOUT2: Self = Self {
         words: 0x8000..=0x8183,
+        mods: false,
     };
     /// SPEC-017 §2.1 and SPEC-024b §3.2: `0x8000` to `0x8281`, Fallout 2 with
     /// sfall mode on. Its table has 642 entries: `0x8156` up are SPEC-024b's
     /// words, whatever the preset.
     pub const FALLOUT2_SFALL: Self = Self {
         words: 0x8000..=0x8281,
+        mods: false,
     };
     /// Whether this is a Fallout 2 set, whose host words are SPEC-005's as
     /// amended by SPEC-017 ([`crate::extensions::opcode_in`]).
     pub fn fallout2(&self) -> bool {
-        *self == Self::FALLOUT2 || self.sfall()
+        self.words == Self::FALLOUT2.words || self.sfall()
     }
     /// Whether this is the sfall mode set.
     pub fn sfall(&self) -> bool {
-        *self == Self::FALLOUT2_SFALL
+        self.words == Self::FALLOUT2_SFALL.words
+    }
+    /// This set, with SPEC-024a's words when `mods` is set.
+    pub fn with_mods(self, mods: bool) -> Self {
+        Self { mods, ..self }
     }
     /// [`Self::accepts`], plus the versioned enhanced range
     /// ([`crate::extensions::ENHANCED_RANGE`]) when `enhanced` is set.
@@ -158,6 +168,7 @@ impl WordSet {
             word & 0x8000 != 0
         } else {
             self.words.contains(&word)
+                || (self.mods && crate::extensions::MOD_WORDS.contains(&word))
         }
     }
 }

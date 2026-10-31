@@ -159,6 +159,36 @@ fn sfall_hooks() -> Vec<String> {
     assert_eq!(rows.len(), 50, "every hook");
     rows
 }
+/// SPEC-024a section 7.3: `tests/fixtures/spec024a/mod-words.tsv`, as rows of
+/// the value model and as the stack model's rows.
+fn mod_words() -> (Vec<String>, Vec<String>) {
+    let table = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+        .join("../../tests/fixtures/spec024a/mod-words.tsv");
+    println!("cargo:rerun-if-changed={}", table.display());
+    let text = fs::read_to_string(table).expect("the SPEC-024a fixtures must be present");
+    let (mut rows, mut specs) = (Vec::new(), Vec::new());
+    for line in text.lines().skip(1) {
+        let cells: Vec<&str> = line.split('\t').collect();
+        assert_eq!(cells.len(), 7, "a word row has seven columns");
+        let word = u16::from_str_radix(cells[0].trim_start_matches("0x"), 16).expect("a word");
+        let pops: usize = cells[2].parse().expect("a pop count");
+        // The columns of an oracle row, so one reader serves both.
+        let oracle = [
+            "word", cells[0], cells[1], cells[0], cells[2], cells[3], cells[4], cells[5], "mod",
+            "P1",
+        ];
+        rows.push(sfall_row(&oracle));
+        specs.push(format!(
+            "OpcodeSpec {{word:0x{word:04x},name:{:?},operands:&[{}],\
+             push:PushKind::{},registered:true,variable:false}}",
+            cells[1],
+            vec!["Rule::Unchecked"; pops].join(","),
+            if cells[3] == "1" { "Value" } else { "None" },
+        ));
+    }
+    assert_eq!(rows.len(), 10, "every word of section 7.3");
+    (rows, specs)
+}
 /// SPEC-024b section 3: the oracle table, compiled in and counted, so a word
 /// cannot drift from the published contract. A reserved word has a row with
 /// no pop count, and no `OpcodeSpec` for the stack model.
@@ -211,7 +241,10 @@ fn sfall_catalog() {
         )
     };
     let hooks = sfall_hooks();
+    let (mod_rows, mod_specs) = mod_words();
     let source = [
+        table("MOD_ROWS", "SfallRow", &mod_rows),
+        table("MOD_SPECS", "OpcodeSpec", &mod_specs),
         table("SFALL_HOOKS", "HookRow", &hooks),
         table(
             "SFALL_WORDS",

@@ -104,6 +104,9 @@ pub const FALLOUT2_RESERVED: std::ops::RangeInclusive<u16> = 0x815a..=0x8183;
 /// has one, otherwise SPEC-005's. A reserved word, or one outside the set,
 /// has no row.
 pub fn opcode_in(words: &crate::WordSet, word: u16) -> Option<&'static OpcodeSpec> {
+    if words.mods && MOD_WORDS.contains(&word) {
+        return crate::sfall::mod_spec(word);
+    }
     if !words.words.contains(&word) {
         return None;
     }
@@ -117,6 +120,10 @@ pub fn opcode_in(words: &crate::WordSet, word: u16) -> Option<&'static OpcodeSpe
     }
     opcode(word)
 }
+/// SPEC-024a §7.1: the defined words of the reserved `0x8300..=0x83FF`.
+pub const MOD_WORDS: std::ops::RangeInclusive<u16> = 0x8300..=0x8309;
+/// What `mod_api_version` gives, and the most a manifest's `api` can ask.
+pub const MOD_API_VERSION: i32 = 1;
 /// The versioned "enhanced" opcode range. These words are not part of
 /// SPEC-004/005: a vanilla host rejects every one of them as an unknown
 /// word, and only an enhanced host ([`crate::VmHost::enhanced_opcodes`])

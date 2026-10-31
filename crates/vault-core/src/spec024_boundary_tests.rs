@@ -188,6 +188,7 @@ fn hook_17_a_burst_counts_then_charges_and_keeps_its_damage() {
         let (mut host, defender, _) =
             crate::combat_tests::spray_world(crate::combat::attack_mode::BURST);
         host.sfall = Some(Default::default());
+        host.hook_host = Some(Default::default());
         host.world.sfall = Some(Default::default());
         if let Some(rets) = rets {
             registered(&mut host, HOOK_AMMOCOST, &member(4, rets));
@@ -1000,6 +1001,7 @@ fn t18_ammo_cost_type_1_and_within_perception_type_2_never_run() {
     let (mut burst, target, _) =
         crate::combat_tests::spray_world(crate::combat::attack_mode::BURST);
     burst.sfall = Some(Default::default());
+    burst.hook_host = Some(Default::default());
     burst.world.sfall = Some(Default::default());
     registered(&mut burst, HOOK_AMMOCOST, &counting(1));
     let player = burst.world.player;

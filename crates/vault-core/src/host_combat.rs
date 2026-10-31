@@ -1048,7 +1048,7 @@ impl<A: WorldAssets> WorldHost<A> {
             .world
             .attack_profile(attacker, defender, mode, place, aimed)?;
         let request = self.apply_request(attacker, defender, &mut attack);
-        if self.sfall_mode() {
+        if self.hooks_on() {
             attack.hooked_cost = Some(self.hook_ap_cost(attacker, &attack));
         }
         if let Err(refusal) = self.world.preflight(attacker, defender, &attack) {
@@ -1072,7 +1072,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 .weapon
                 .as_ref()
                 .is_some_and(|weapon| weapon.min_strength > attack.strength);
-        if self.sfall_mode() {
+        if self.hooks_on() {
             let chance = self.hook_hit_chance(attacker, defender, &attack, true, None)?;
             attack.hooked_chance = Some(chance);
         }

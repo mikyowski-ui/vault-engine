@@ -1426,7 +1426,7 @@ impl MapPreview {
             };
         // SPEC-024b §6.10: the hook runs before the cost meets the AP.
         let mut attack = attack;
-        if self.host.sfall_mode() {
+        if self.host.hooks_on() {
             attack.hooked_cost = Some(self.host.hook_ap_cost(player, &attack));
         }
         if let Err(refusal) = self.host.world.preflight(player, target, &attack) {

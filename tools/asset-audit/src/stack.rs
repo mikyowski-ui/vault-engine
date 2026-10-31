@@ -233,6 +233,7 @@ pub fn listed_images(vfs: &dyn Vfs) -> Result<(Vec<Image>, usize, usize), String
     let list = LstTable::parse(&list, LstKind::Script).map_err(|error| error.to_string())?;
     let every = WordSet {
         words: 0x8000..=0xffff,
+        mods: false,
     };
     let names: BTreeSet<String> = list
         .entries()
@@ -264,6 +265,7 @@ pub fn listed_images(vfs: &dyn Vfs) -> Result<(Vec<Image>, usize, usize), String
 pub fn audit_sfall(vfs: &dyn Vfs) -> Result<StackAudit, String> {
     let every = WordSet {
         words: 0x8000..=0xffff,
+        mods: false,
     };
     let paths: Vec<String> = vfs
         .files()
@@ -287,7 +289,7 @@ pub fn audit_sfall(vfs: &dyn Vfs) -> Result<StackAudit, String> {
             }
         }
     }
-    let table = Table::new(WordSet::FALLOUT2_SFALL);
+    let table = Table::new(WordSet::FALLOUT2_SFALL.with_mods(true));
     let mut audit = StackAudit::run(&images, &table, &[], &[]);
     audit.undecodable = undecodable;
     Ok(audit)

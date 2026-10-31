@@ -4,15 +4,21 @@
 //! Engine extension, not part of any specification.
 use crate::config::{self, Config, ModList, Preset};
 use crate::enhanced::{EnhancedSettings, ViewportMode};
-use crate::storage::{self, FsStorage, Namespace, StorageBackend};
+use crate::storage::{self, FsStorage, Namespace, StorageBackend, StorageOp};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use vault_core::mod_export::Setup;
+use vault_core::{
+    host_mods::{ModGlobal, ModHook, ModSession, ScriptedMod},
+    mod_export::Setup,
+    sfall::SfallValue,
+    state_hash::fnv1a64,
+};
 use vault_formats::{
     EnhancedOverrides, LayerEntry, LoadOrderPolicy, ModManifest, Vfs,
-    mod_manifest::{self, MANIFEST},
+    mod_manifest::{self, MANIFEST, ModSetting},
 };
 
 /// The folder a load-order entry mounts, resolved against `directory` as
@@ -69,6 +75,11 @@ pub fn layer_dirs(mod_list: &ModList) -> Vec<PathBuf> {
 /// The manifest at the root of layer folder `dir`, if it has one. A
 /// malformed one, or a link in its place, is an error naming the folder.
 pub fn read_manifest(dir: &Path) -> Result<Option<ModManifest>, String> {
+    Ok(read_manifest_bytes(dir)?.map(|(manifest, _)| manifest))
+}
+
+/// [`read_manifest`], with the file's bytes (SPEC-024a §2.3 hashes them).
+fn read_manifest_bytes(dir: &Path) -> Result<Option<(ModManifest, Vec<u8>)>, String> {
     let path = dir.join(MANIFEST);
     // A folder in its place is no entry, but it is no manifest either.
     if path.is_dir() {
@@ -80,10 +91,221 @@ pub fn read_manifest(dir: &Path) -> Result<Option<ModManifest>, String> {
     let Some(bytes) = bytes else {
         return Ok(None);
     };
-    let text = String::from_utf8(bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+    let text =
+        String::from_utf8(bytes.clone()).map_err(|error| format!("{}: {error}", path.display()))?;
     ModManifest::parse(&text)
-        .map(Some)
+        .map(|manifest| Some((manifest, bytes)))
         .map_err(|error| format!("{}: {error}", dir.display()))
+}
+
+/// One enabled layer with a manifest.
+pub struct ManifestLayer {
+    dir: PathBuf,
+    manifest: ModManifest,
+    bytes: Vec<u8>,
+}
+
+/// The manifests of the enabled `dirs`, lowest first, under SPEC-024a §2.2's
+/// rules that reach past one manifest: each script is in its own layer's
+/// `scripts/`, and two layers share no `id` and no script. The error names
+/// the folder, and both folders for a conflict.
+pub fn manifest_layers(dirs: &[PathBuf]) -> Result<Vec<ManifestLayer>, String> {
+    let mut layers: Vec<ManifestLayer> = Vec::new();
+    for dir in dirs {
+        let Some((manifest, bytes)) = read_manifest_bytes(dir)? else {
+            continue;
+        };
+        let scripts = script_files(&manifest);
+        for file in &scripts {
+            let path = format!("scripts/{file}");
+            if crate::launcher::validate::find_loose(dir, &path).is_none() {
+                return Err(format!("{}: {path} is not in this layer", dir.display()));
+            }
+        }
+        for other in &layers {
+            if let (Some(id), Some(theirs)) = (&manifest.id, &other.manifest.id)
+                && id == theirs
+            {
+                return Err(format!(
+                    "{} and {} both have id \"{id}\"",
+                    other.dir.display(),
+                    dir.display()
+                ));
+            }
+            let named = script_files(&other.manifest);
+            if let Some(file) = scripts.iter().find(|file| named.contains(*file)) {
+                return Err(format!(
+                    "{} and {} both name {file}",
+                    other.dir.display(),
+                    dir.display()
+                ));
+            }
+        }
+        layers.push(ManifestLayer {
+            dir: dir.clone(),
+            manifest,
+            bytes,
+        });
+    }
+    Ok(layers)
+}
+
+/// The scripts `manifest`'s rows name, lowercased.
+fn script_files(manifest: &ModManifest) -> Vec<String> {
+    let globals = manifest.global_scripts.iter().map(|row| row.file.clone());
+    let hooks = manifest.hooks.iter().map(|row| row.file.clone());
+    let mut files: Vec<String> = globals.chain(hooks).collect();
+    files.sort_unstable();
+    files.dedup();
+    files
+}
+
+/// A manifest's setting as a script sees it.
+fn script_value(setting: &ModSetting) -> SfallValue {
+    match setting {
+        ModSetting::Int(value) => SfallValue::Int(*value),
+        ModSetting::Float(value) => SfallValue::float(*value),
+        ModSetting::Text(text) => SfallValue::text(text.as_bytes()),
+    }
+}
+
+/// A script's value as a setting, for storage.
+fn stored_value(value: &SfallValue) -> ModSetting {
+    match value {
+        SfallValue::Int(value) => ModSetting::Int(*value),
+        SfallValue::Float(bits) => ModSetting::Float(f32::from_bits(*bits)),
+        SfallValue::Text(text) => ModSetting::Text(String::from_utf8_lossy(text).into_owned()),
+    }
+}
+
+/// SPEC-024a §2.3's text of a setting: `i:` and decimal, `f:` and the
+/// binary32 bits, or `s:` and the text.
+pub fn record_value(value: &SfallValue) -> String {
+    match value {
+        SfallValue::Int(value) => format!("i:{value}"),
+        SfallValue::Float(bits) => format!("f:{bits:08X}"),
+        SfallValue::Text(text) => format!("s:{}", String::from_utf8_lossy(text)),
+    }
+}
+
+/// [`record_value`] read back.
+pub fn parse_record_value(text: &str) -> Option<SfallValue> {
+    let (kind, value) = text.split_once(':')?;
+    match kind {
+        "i" => value.parse().ok().map(SfallValue::Int),
+        "f" => u32::from_str_radix(value, 16)
+            .ok()
+            .map(|bits| SfallValue::float(f32::from_bits(bits))),
+        "s" => Some(SfallValue::text(value.as_bytes())),
+        _ => None,
+    }
+}
+
+/// The `config` key of mod `id`'s changed settings (SPEC-024a §7.4).
+fn settings_key(id: &str) -> String {
+    format!("mod-settings-{id}.toml")
+}
+
+/// The stored settings of a mod over its manifest's: a key the manifest does
+/// not declare, or a value of the wrong type, is dropped with a diagnostic.
+fn apply_stored(session: &ModSession, index: usize, storage: &dyn StorageBackend) {
+    let id = &session.mods()[index].id;
+    let key = settings_key(id);
+    let text = match storage.read(Namespace::Config, &key) {
+        Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+        Ok(None) => return,
+        Err(error) => {
+            session.note(format!("{key}: {error}"));
+            return;
+        }
+    };
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let restored = line.split_once('=').is_some_and(|(name, value)| {
+            ModSetting::parse(value)
+                .is_ok_and(|setting| session.restore(index, name.trim(), script_value(&setting)))
+        });
+        if !restored {
+            session.note(format!("{key}: dropped {line:?}"));
+        }
+    }
+}
+
+/// The session's scripted mods, when any enabled layer of `dirs` is scripted
+/// (SPEC-024a §2.1). Settings start from `storage`; a replay passes none, and
+/// `commits` is off, because it takes them from its log and writes nothing.
+pub fn mod_session(
+    dirs: &[PathBuf],
+    storage: Option<&dyn StorageBackend>,
+    commits: bool,
+) -> Result<Option<Arc<ModSession>>, String> {
+    let mods: Vec<ScriptedMod> = manifest_layers(dirs)?
+        .iter()
+        .filter(|layer| layer.manifest.scripted())
+        .map(scripted_mod)
+        .collect();
+    if mods.is_empty() {
+        return Ok(None);
+    }
+    let session = ModSession::new(mods, commits);
+    if let Some(storage) = storage {
+        for index in 0..session.mods().len() {
+            apply_stored(&session, index, storage);
+        }
+    }
+    Ok(Some(Arc::new(session)))
+}
+
+fn scripted_mod(layer: &ManifestLayer) -> ScriptedMod {
+    let manifest = &layer.manifest;
+    ScriptedMod {
+        id: manifest.id.clone().unwrap_or_default(),
+        version: manifest.version.clone().unwrap_or_default(),
+        manifest: fnv1a64(&layer.bytes),
+        globals: manifest
+            .global_scripts
+            .iter()
+            .map(|row| ModGlobal {
+                file: row.file.clone(),
+                repeat: row.repeat as i32,
+                kind: row.kind as i32,
+            })
+            .collect(),
+        hooks: manifest
+            .hooks
+            .iter()
+            .filter_map(|row| {
+                Some(ModHook {
+                    hook: mod_manifest::hook_point(&row.point)?,
+                    file: row.file.clone(),
+                    procedure: row.procedure.clone(),
+                })
+            })
+            .collect(),
+        defaults: manifest
+            .settings
+            .iter()
+            .map(|(key, setting)| (key.clone(), script_value(setting)))
+            .collect(),
+    }
+}
+
+/// The batch of SPEC-024a §7.4's commit: each changed mod's file, holding
+/// the keys that differ from its manifest, or no file when none does.
+pub fn settings_batch(changed: Vec<(String, BTreeMap<String, SfallValue>)>) -> Vec<StorageOp> {
+    changed
+        .into_iter()
+        .map(|(id, keys)| {
+            let key = settings_key(&id);
+            if keys.is_empty() {
+                return StorageOp::Delete { key };
+            }
+            let text: String = keys
+                .iter()
+                .map(|(name, value)| format!("{name} = {}\n", stored_value(value).to_toml()))
+                .collect();
+            StorageOp::put(key, text)
+        })
+        .collect()
 }
 
 /// `manifest`'s `[enhanced]` settings over `config` (each key it sets
@@ -477,5 +699,101 @@ mod tests {
         assert_eq!(config.sfall, Some(true));
         apply(&mut config, &off);
         assert_eq!(config.sfall, Some(false));
+    }
+
+    const N1: &str = include_str!("../../../tests/fixtures/spec024a/vault-mod.toml");
+
+    fn scripted_layer(dir: &Path, manifest_text: &str, script: Option<&str>) {
+        manifest(dir, manifest_text);
+        if let Some(file) = script {
+            std::fs::create_dir_all(dir.join("scripts")).unwrap();
+            std::fs::write(dir.join("scripts").join(file), b"").unwrap();
+        }
+    }
+
+    /// SPEC-024a §9.5's vectors that need folders: N8, N10, N11 and N12.
+    #[test]
+    fn spec024a_layers_are_checked_across_the_load_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        scripted_layer(&a, N1, None);
+        let error = manifest_layers(std::slice::from_ref(&a)).err().unwrap();
+        assert!(error.contains("scripts/gl_cheapap.int"), "N8: {error}");
+        scripted_layer(&a, N1, Some("GL_CHEAPAP.INT"));
+        assert_eq!(
+            manifest_layers(std::slice::from_ref(&a))
+                .ok()
+                .unwrap()
+                .len(),
+            1
+        );
+        scripted_layer(&b, N1, Some("gl_cheapap.int"));
+        let both = [a.clone(), b.clone()];
+        let error = manifest_layers(&both).err().unwrap();
+        assert!(
+            error.contains(&a.display().to_string()) && error.contains(&b.display().to_string()),
+            "N10: {error}"
+        );
+        let renamed = N1.replace("cheap-ap", "other");
+        scripted_layer(&b, &renamed, Some("gl_cheapap.int"));
+        let error = manifest_layers(&both).err().unwrap();
+        assert!(error.contains("both name gl_cheapap.int"), "{error}");
+        // N11: a disabled layer counts for nothing.
+        std::fs::write(
+            dir.path().join("load_order.toml"),
+            "[[layer]]\npath = \"a\"\nenabled = false\n",
+        )
+        .unwrap();
+        let list = ModList::File(dir.path().join("load_order.toml"));
+        assert!(
+            mod_session(&layer_dirs(&list), None, true)
+                .unwrap()
+                .is_none()
+        );
+        // N12: settings alone are valid, and not scripted.
+        let n12: String = N1.split("[[global_scripts]]").next().unwrap().to_owned();
+        scripted_layer(&a, &n12, None);
+        let found = mod_session(std::slice::from_ref(&a), None, true).unwrap();
+        assert!(found.is_none(), "N12");
+    }
+
+    /// §2.2: the launcher shows the launch's error on the layer.
+    #[test]
+    fn spec024a_the_launcher_shows_a_conflict_on_the_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        scripted_layer(&dir.path().join("a"), N1, Some("gl_cheapap.int"));
+        scripted_layer(&dir.path().join("b"), N1, Some("gl_cheapap.int"));
+        let entries =
+            vault_formats::parse_load_order("[[layer]]\npath = \"a\"\n[[layer]]\npath = \"b\"\n")
+                .unwrap();
+        let checked =
+            crate::launcher::validate::mods(dir.path(), &entries, LoadOrderPolicy::default());
+        assert!(checked.layers[0].is_ok());
+        assert!(!checked.layers[1].is_ok());
+    }
+
+    /// §2.3's text of each type of setting.
+    #[test]
+    fn spec024a_setting_records_round_trip() {
+        for (value, text) in [
+            (SfallValue::Int(-3), "i:-3"),
+            (SfallValue::float(1.5), "f:3FC00000"),
+            (SfallValue::text(&b"a:b"[..]), "s:a:b"),
+        ] {
+            assert_eq!(record_value(&value), text);
+            assert_eq!(parse_record_value(text), Some(value));
+        }
+        assert_eq!(parse_record_value("x:1"), None);
+        let keys = BTreeMap::from([("b".to_owned(), SfallValue::Int(2))]);
+        let keys = [("m".to_owned(), keys), ("n".to_owned(), BTreeMap::new())];
+        assert_eq!(
+            settings_batch(keys.to_vec()),
+            [
+                StorageOp::put("mod-settings-m.toml", "b = 2\n"),
+                StorageOp::Delete {
+                    key: "mod-settings-n.toml".into()
+                },
+            ]
+        );
     }
 }
