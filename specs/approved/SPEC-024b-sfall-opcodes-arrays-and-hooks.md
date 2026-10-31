@@ -1,12 +1,14 @@
 # SPEC-024b: sfall Extended Opcodes, Dynamic Arrays, and Hook Scripts
 
-**Status:** research hand-off, Revision 1, 2026-10-30. Ingested on the owner's brief of 2026-10-30, which approves Decision D-3. Revision 2 (Team A, 2026-10-30) makes that amendment; see "Revision history".
+**Status:** research hand-off, Revision 3, 2026-10-30. Revision 1 was ingested on the owner's brief of 2026-10-30, which approves Decision D-3, and Revision 2 (Team A) made that amendment. Revision 3 comes from the research side, is built on Revision 2's text with Team A's prose correction merged, and needs ingestion. See "Revision history".
 
 **Provenance:** written on the research side from the published sfall scripting documentation at tag v4.5.1 (reference revision S1): the opcode list, the function reference, the function notes, the hook reference, the arrays guide, the compiler guide, and the public script headers. The engine's own approved specs supplied the anchors. sfall's implementation code was **not** read, and nothing here was checked against a running sfall or against Et Tu or Restoration Project scripts (Decisions D-1 and D-26).
 
 **Provenance of Revision 2.** Author: the Spec-Author sub-agent (Team A), 2026-10-30, on the owner's brief of 2026-10-30. Sources: the owner's brief; this spec and `oracle/SPEC-024/`; SPEC-017, SPEC-023; and `docs/REFERENCE.md` (the enhanced words, mod manifests, and what a replay reads). No decompilation, disassembly, re-implementation source, game asset, or engine Rust code was used, and no sfall material was consulted on this side.
 
-**Oracle:** `oracle/SPEC-024/` holds the complete tables and computed vectors. Section 7 says how they relate to this text. Revision 2 changes no oracle file.
+**Provenance of Revision 3.** Written on the research side from three sources: the published sfall documents and headers of revision S1, as bundled with *Fallout Et Tu* 2.0.3911; compiled `.int` scripts and script source from *Fallout Et Tu* and from *Restoration Project Updated* 2.4.34; and the engine's approved specs. sfall's implementation code was still **not** read, and nothing was checked against a running sfall. Scripts supplied word numbers, operand constants, counts, and observed call patterns. No script text is reproduced here.
+
+**Oracle:** `oracle/SPEC-024/` holds the complete tables and computed vectors. Section 7 says how they relate to this text. Revision 3 changes three oracle files and adds a fourth.
 
 ## Revision history
 
@@ -17,6 +19,22 @@
   - **Section 5.8.** Separates its named delete of `VAULTSFL.DAT` from SPEC-023's stale `.SAV` sweep (D-29). The rule itself does not change.
   - Every other rule, and every oracle file, is unchanged.
 - **Prose correction to Revision 2 (2026-10-30, Team A).** On the owner's brief of 2026-10-30, from the implementer's report in `05608f9`, sections 4.1, 5.4, 6.4 and 6.5 now agree with `sfall-opcodes.tsv` (D-T1). `scan_array`'s value is class `N` and `set_sfall_arg`'s value is class `I`, and section 4.1 says what `ret_class` means. No oracle file, vector or word number changed.
+- **Revision 3 (2026-10-30, research).** Closes Decision D-26 with an audit of the two target mods (section 1.1), and promotes what they use most.
+  - **Section 4.11, new.** 25 behaviors move from tier P2 to P1. Section 4.3 and section 4.2 change to match.
+  - **Sections 6.14 to 6.18, new.** Six hooks gain boundary text, so P1 now holds 14 hooks and P2 holds 36.
+  - **Section 5.8.** The sidecar becomes format revision 2 (Decision D-32). Its layout and vectors F and F3 change. A revision 1 sidecar migrates on load.
+  - **Section 4.2.** `sfall_funcN`'s one-push rule is no longer provisional.
+  - **Section 4.10.** Records that Et Tu's base scripts use tier X words (Decision D-40).
+  - Revision 2's text is otherwise unchanged, and Decisions D-27 to D-29 stand.
+- **Amendment to Revision 3 (2026-10-30, research).** On a later owner's brief of 2026-10-30, before ingestion.
+  - **`sfall-opcodes.tsv`.** `scan_array`'s value and `set_sfall_arg`'s value become class `A`, which reverses D-T1's direction for these two words (Decision D-46). Only those two rows change. No vector, word number, or stack contract changes.
+  - **Sections 4.1, 5.4, and 6.4.** Team A's prose correction is merged, including what `ret_class` means, except its class `N` and class `I` rules.
+  - **Section 6.5.** A value `set_sfall_arg` cannot convert leaves the argument unchanged.
+  - **Sections 1 and 4.10.** X words are no-op stubs, not refused words (Decisions D-8 and D-40). This does not change what they do.
+- **Second amendment to Revision 3 (2026-10-30, research).** On the owner's brief of 2026-10-30, which settles Decision D-32.
+  - **Sections 5.8 and 5.9.** A revision 1 sidecar now migrates instead of being refused: it loads, each field revision 2 adds takes a listed default, `sfall_hash` is the migrated state's, and the next save writes revision 2. The premise that no sidecar exists yet is gone.
+  - **Section 6.5.** States that a string converts only to a `mixed` argument.
+  - **Section 7 and the oracle.** New vectors MG1 and MG2 (migration), and SS1 and SS2 (string values), add 29 rows to `sfall-array-vectors.tsv`. No existing row changes. New tests 15 and 16.
 
 ## Clean-Room Rules for Research Agents
 
@@ -31,11 +49,11 @@ This specification lets the engine run compiled scripts that use sfall's extende
 
 - **Part 1 (section 4):** the extended instruction words `0x8156..=0x8281`, the `sfall_func0` to `sfall_func8` dispatchers, the `metarule3` sub-functions, and their stack contracts (`vault_vm::extensions`).
 - **Part 2 (section 5):** dynamic arrays, their storage classes, deterministic iteration, and the save sidecar (`vault_vm` and `vault_core`).
-- **Part 3 (section 6):** `hs_*.int` hook scripts, registration, argument and return handling, and eight fully specified hooks (`vault_core::host`).
+- **Part 3 (section 6):** `hs_*.int` hook scripts, registration, argument and return handling, and fourteen fully specified hooks (`vault_core::host`).
 
 Section 3 comes first because these word numbers collide with SPEC-017.
 
-Out of scope: `ddraw.ini` engine patches, shaders, the graphics and sound words, and the 42 hooks of tier P2. They keep a stack contract only (sections 4.10 and 6.14).
+Out of scope: `ddraw.ini` engine patches, shaders, the graphics and sound words, and the 36 hooks of tier P2. They keep a stack contract only (sections 4.10 and 6.19).
 
 **Tiers.** Every word, function, and hook in the oracle carries one tier. `[Must-match]`
 
@@ -43,7 +61,7 @@ Out of scope: `ddraw.ini` engine patches, shaders, the graphics and sound words,
 | --- | --- |
 | P1 | Fully specified here |
 | P2 | Number and stack contract are specified; the effect is a stub (section 4.10) |
-| X | Refused by design (section 4.10) |
+| X | No-op stub by design, with no memory access (section 4.10) |
 | R | Reserved word with no published contract (section 3.3) |
 
 **Compatibility tags.**
@@ -54,9 +72,34 @@ Out of scope: `ddraw.ini` engine patches, shaders, the graphics and sound words,
 | `[May-improve]` | The documentation acknowledges a defect; the rule gives a safe replacement |
 | `[Safe rule]` | The documentation is silent, or its behavior cannot be deterministic; the rule is this vault's definition. It is deterministic and never undefined |
 
-A `[Must-match]` tag means "matches the published documentation". It does not mean "confirmed against a running sfall" (Decision D-1).
+A `[Must-match]` tag means "matches the published documentation". It does not mean "confirmed against a running sfall" (Decision D-1). The sidecar migration rules of sections 5.8 and 5.9 are the one exception: nothing published states them, and they carry the tag by owner instruction because every build must follow them (Decision D-32).
 
 **Invariant.** With sfall mode off, no word, hook, array, file, or hash in this specification exists, and every existing behavior and golden is unchanged. The one exception is how a slot's old `VAULTSFL.DAT` is treated (section 5.8). With sfall mode on and no hook registered, every formula in SPEC-007, SPEC-009, SPEC-011, and SPEC-014 gives the same value as with sfall mode off. `[Must-match]`
+
+### 1.1 Mod audit (Revision 3)
+
+This section is evidence, not requirements. `oracle/SPEC-024/mod-opcode-usage.tsv` holds the ranked results, and it reports numbers and public names only, never script bytes.
+
+| Corpus | Form | Scripts | Method |
+| --- | --- | ---: | --- |
+| *Fallout Et Tu* 2.0.3911 (`Fo1in2`), `mods` folder | Compiled `.int` | 1060 | SPEC-017 section 8.2's stack model, which also reads operand constants |
+| `sfall.dat` and `ce.dat`, shipped with Et Tu | Compiled `.int` | 3 | The same. Counted in their own column, not in the ranking |
+| *Restoration Project Updated* 2.4.34 (RPU) | Source only | 1513 | RPU's own build selection and preprocessing, then a token scan of the procedures `-O2` keeps |
+
+Et Tu ships sfall v4.5.1, which is revision S1, and its bundled documents generate this table byte for byte. RPU pins sfall 4.4.8. RPU's tree has no sfall headers, so the v4.5.1 headers stood in for them. No compiler was run, so RPU's numbers come from its source: its 1496 listed scripts with source, and 17 global scripts. Its other 48 listed scripts have no source in the tree, and are not counted.
+
+**Results.**
+
+- **Stack model.** The port reproduces the recorded Fallout 1 model check: 0 findings and the one `gatedemo.int` exception (SPEC-017 section 8.4), over the 881 listed scripts present in the unpacked corpus. On the mods it gives **0 findings** over 1063 scripts, with all 4748 sfall words of the linear decode reached, none above `0x8281`, and no reserved word.
+- **Selectors.** Every `sfall_funcN` name, `metarule3` sub-function, and hook ID was read from a constant. None was unresolved.
+- **Signatures.** SPEC-017 section 8.3's inference over each promoted word with a compiled call site finds the table's signature among the consistent candidates. Several candidates can fit, because the model accepts values left on the stack until a frame ends, so this confirms each signature rather than proving it.
+- **`sfall_funcN` always pushes.** Functions documented as having no result are followed by the discard word at every statement call that was sampled: `set_unique_id` 84 of 84, `message_box` 8 of 8, `create_win` 6 of 6, `signal_close_game` 5 of 5. `get_terrain_name`, whose result is used, is followed by it at 0 of 24.
+- **Source calibration.** The source scan ran over the 1045 Et Tu scripts that exist in both forms. Over Tier P2 rows it matches the binary on all 148 script and row pairs, with no extra and no missing pair. Over hooks it matches on all 36 pairs. Its only misses are 460 pairs for P1 array words that the compiler generates from array syntax, plus one extra pair for `load_array`. Neither touches a P2 row. RPU's source calls all match the table's operand counts.
+- **Use.** 86 of the 280 Tier P2 opcode rows, and 22 of the 42 Tier P2 hooks, are used. Of the eight hooks already in P1, seven are used, and `HOOK_TOHIT` is used by neither mod.
+- **Hook files.** Neither mod ships an `hs_*.int`. Every registration in both goes through `register_hook_proc` or `register_hook_proc_spec`.
+- **Names outside the table.** `rest_option_msgs`, `set_rest_option`, and `set_party_member_cc_msg_ids` are fallout2-ce extensions behind Et Tu's own engine test, and `metarule3` 999 appears in one `sfall.dat` script. Section 4.2's unknown-name rule and SPEC-017 section 5.2's unknown rule cover them.
+
+**Ranking.** Rows are ordered by scripts, then call sites (Decision D-31). Ties at the cut-off are real, so the tie rule matters: nine opcode rows tie for the last four places, and nineteen hooks tie for the last three.
 
 ## 2. Conventions
 
@@ -146,7 +189,7 @@ The whole table is `[Safe rule]`, with one documented basis: the public hook exa
 
 **Failed operand.** Every operand is popped first. The word then has no effect, writes a diagnostic, and pushes its default: int 0 for return class `I`, `O`, `N`, or `A`; float 0.0 for `F`; the empty string for `S`. **Unlike SPEC-017, a failed operand is not a VM error**, because scripts written for sfall expect its functions not to stop the script. `[Safe rule]`
 
-**Return class.** The `ret_class` column of `sfall-opcodes.tsv` chooses that default. It does not limit what a word returns, because a pushed value keeps its own type. So `scan_array` and `array_key`, with `ret_class` `I`, can push a float or string map key (vector B step 9 pushes `F:5.0`), `get_sfall_arg` pushes what the argument holds, and `list_next` pushes an object reference. The Push column of a word table gives what the word can push. `[Safe rule]`
+**Return class.** The `ret_class` column of `sfall-opcodes.tsv` chooses that default, the value pushed when an operand fails. It does not limit what a word returns, because a pushed value keeps its own type. So `scan_array` and `array_key`, with `ret_class` `I`, can push a float or string map key (vector B step 9 pushes `F:5.0`), `get_sfall_arg` pushes what the argument holds, and `list_next` pushes an object reference. The Push column of a word table gives what the word can push. `[Safe rule]`
 
 Stack underflow stays a VM error (SPEC-004 section 3.8). `[Must-match]`
 
@@ -169,7 +212,7 @@ A returned string is allocated in the calling program's runtime string storage a
 The numbers have a gap: 7 and 8 sit after `0x827F`. There is **no `sfall_func9`** in the published list; `0x8282` is not an sfall word. `[Must-match]`
 
 - Pop order is `aN`, then down to `a1`, then the name. `[Must-match]`
-- Each call pushes **exactly one** value, including functions documented as having no result, which push int 0. `[Must-match]`, provisional until the stack check confirms it on real mod scripts (Decision D-26).
+- Each call pushes **exactly one** value, including functions documented as having no result, which push int 0. `[Must-match]` The mod audit confirms it (section 1.1).
 - The name is matched as exact bytes. An unknown name pushes int 0 with a diagnostic. `[Safe rule]`
 - A known name called with fewer arguments takes the documented default; extra arguments are ignored. `[Safe rule]`
 
@@ -185,8 +228,11 @@ Functions of tier P1, `[Must-match]` unless a row says otherwise:
 | `string_find`, `string_format`, `string_to_case`, `string_compare` | See section 4.6 | See section 4.6 |
 | `floor2` | number | See section 4.7 |
 | `get_object_data`, `set_object_data`, `get_flags`, `set_flags`, `critter_inven_obj2` | See section 4.8 | See section 4.8 |
+| `set_unique_id`, `get_terrain_name`, `add_extra_msg_file`, `message_box`, `create_win`, `dialog_obj`, `signal_close_game` | See section 4.11 | See section 4.11 |
 
 Limiting the existence queries to P1 means a script that checks before relying on a function takes its fallback path rather than trusting a stub.
+
+Et Tu tells sfall from fallout2-ce by `opcode_exists(0x823B)`: 1 means sfall. `modified_ini` is P1, so here the answer is 1 and Et Tu takes its sfall paths. `0x823B` must stay P1. `[Safe rule]` The three fallout2-ce function names of section 1.1 stay unknown names here, and Et Tu reaches them only on its fallout2-ce path.
 
 ### 4.3 `metarule`, `metarule3`, and `metarule2_explosions`
 
@@ -196,7 +242,7 @@ Limiting the existence queries to P1 means a script that checks before relying o
 | Sub | Public macro | p1 | p2 | p3 | Tier | Effect |
 | ---: | --- | --- | --- | --- | --- | --- |
 | 200 | `set_horrigan_days` | days | 0 | 0 | P2 | Stub |
-| 201 | `clear_keyboard_buffer` | 0 | 0 | 0 | P1 | Empties the logical key queue; int 0. `[Must-match]` |
+| 201 | `clear_keyboard_buffer` | 0 | 0 | 0 | P1 | Empties the logical key queue, including any `tap_key` still queued; int 0. `[Must-match]` |
 | 210 | `get_current_save_slot` | 0 | 0 | 0 | P2 | Stub |
 | 211 | `set_current_save_slot` | page | slot | 0 | P2 | Stub |
 | 212 | `get_current_quick_save_page` | 0 | 0 | 0 | P2 | Stub |
@@ -205,7 +251,7 @@ Limiting the existence queries to P1 means a script that checks before relying o
 
 Any other sub-function follows SPEC-017 section 5.2's unknown rule. `[Must-match]`
 
-- **`metarule2_explosions`** (`0x8261`) pops three operands and pushes one value, as `[a, b, c] -> [r]`. Its sub-functions 1 to 9 are P2. The opcode list shows a single operand, but the headers and function notes show three, and this spec follows those. `[Must-match]`
+- **`metarule2_explosions`** (`0x8261`) pops three operands and pushes one value, as `[a, b, c] -> [r]`, where a is the sub-function. Sub-function 6, `get_explosion_damage`, is P1 (section 4.11). Sub-functions 1 to 5 and 7 to 9 are P2, and any other sub-function pushes int 0 with a diagnostic. The opcode list shows a single operand, but the headers and function notes show three, and the compiled and source calls in the audit use three. `[Must-match]`; `[Safe rule]` for other sub-functions.
 
 ### 4.4 Environment words
 
@@ -406,8 +452,180 @@ Repeating global scripts run in phase 2 of the step, in the order above.
 ### 4.10 Tiers P2, X, and R
 
 - **P2 words and functions.** The operands are popped as the table says. The word has no effect and writes one diagnostic per program. If it pushes, the push is int 0, or the empty string for return class `S`. Scripts keep running. `[Safe rule]`
-- **X words** are `read_byte`, `read_short`, `read_int`, `read_string`, `write_byte`, `write_short`, `write_int`, `write_string`, `call_offset_v0` to `call_offset_v4`, and `call_offset_r0` to `call_offset_r4`. They address the original executable's memory, which does not exist here. They follow the P2 rule. `[Safe rule]` Their addresses are never used to reach host memory.
+- **X words** are `read_byte`, `read_short`, `read_int`, `read_string`, `write_byte`, `write_short`, `write_int`, `write_string`, `call_offset_v0` to `call_offset_v4`, and `call_offset_r0` to `call_offset_r4`. They address the original executable's memory, which does not exist here, so they are no-op stubs under the P2 rule. Each pops its operands, has no effect, pushes the default return value if it pushes (int 0, or the empty string for `read_string`), writes the standard diagnostic once per program, and never halts the script. `[Safe rule]` Their addresses are never used to reach host memory.
 - **R words** follow section 3.3.
+
+**X words in the target mods.** Et Tu's base scripts use them, so these effects are lost here (Decision D-40). `gl_0_settings.int` holds `write_int` and `write_byte`, for its rest-timer patch. `gl_fo1mechanics.int` holds `write_byte`, for its Dogmeat dialogue patch. Two optional mini-mods also hold them: `gl_footprints.int` (`read_int`) and `gl_character_randomizer.int` (`read_int`, `write_int`, `write_string`). The scripts keep running, because the P2 rule keeps the stack balanced. RPU uses no X word.
+
+### 4.11 Words and functions promoted in Revision 3
+
+These are the 25 behaviors the mod audit (section 1.1) put first. Numbers, operands, and pushes are `[Must-match]`. An effect is `[Must-match]` only where the row or sentence says so. The published text for many of these is a signature alone, so most effects are `[Safe rule]`, and the "Evidence" sentences say what the real scripts show. Evidence sentences are not requirements.
+
+Words with no binary call site have no compiled evidence for their stack shape: `force_encounter`, `set_car_current_town`, `is_iface_tag_active`, `fs_seek`, `fs_read_short`, and `fs_write_short`. Their source calls all match the table's operand count (section 1.1).
+
+**Party and explosives.**
+
+| Word | Mnemonic | Pop order | Push | Effect |
+| --- | --- | --- | --- | --- |
+| `0x8271` | `party_member_list` | include hidden | I array | Temporary list of party entries. `[Must-match]` for the two modes |
+| `0x8261` sub 6 | `get_explosion_damage` | 0, PID, 6 | I array | Temporary list `[min, max]`. `[Must-match]` |
+
+- **`party_member_list`.** 0 gives the entries that are alive critters with object flag `0x01` (hidden) clear, and 1 gives every entry. `[Must-match]` Any other value acts as 1. `[Safe rule]` Entries are in SPEC-019 section 3.14 order, so the player comes first, as that section's count includes the player. `[Safe rule]`
+- **`get_explosion_damage`.** PIDs 51 and 206 give `[30, 50]`, and PIDs 85 and 209 give `[40, 80]`, from SPEC-013 section 3.10. Any other weapon PID gives its prototype's minimum and maximum damage (section 4.8 offsets 40 and 44). Any other PID gives `[0, 0]`. `[Safe rule]` for every PID but the four explosives. Evidence: RPU indexes the result as two elements for a trap's damage draw.
+
+**Object IDs.** `set_unique_id` (object, optional flag) gives int. `[Must-match]`
+
+- The unique range is `0x10000000..=0x7FFFFFFF`. An object whose `0x00` ID (section 4.8) is in that range keeps it, and that ID is returned without reassignment. Otherwise it takes the next unique ID, which is then returned. `[Must-match]`
+- The next unique ID starts at `0x10000000`, rises by 1 for each assignment, and is saved in the sidecar (section 5.8). A released ID is not reused. `[Safe rule]`
+- Flag -1 releases a unique ID: the object takes a new ordinary ID from the engine's allocator, which is returned. `[Must-match]` On an object without a unique ID, flag -1 returns its ID unchanged. Any other flag is ignored. `[Safe rule]`
+- At the range's end, no ID is assigned and the current ID is returned, with a diagnostic. A null object gives 0. `[Safe rule]`
+- **Stacking.** Under sfall mode, SPEC-011 section 3.13 gains one condition: neither item has an ID in the unique range. `[Must-match]`
+
+**Message files.**
+
+| Word | Mnemonic | Pop order | Push | Effect |
+| --- | --- | --- | --- | --- |
+| `0x826B` | `message_str_game` | message, file ID | S | As `message_str`, from a game message file. `[Must-match]` |
+
+| File ID | File |
+| ---: | --- |
+| 0 to 4 | `combat`, `combatai`, `scrname`, `misc`, `custom` |
+| 5 to 9 | `inventry`, `item`, `lsgame`, `map`, `options` |
+| 10 to 14 | `perk`, `pipboy`, `quests`, `proto`, `script` |
+| 15 to 20 | `skill`, `skilldex`, `stat`, `trait`, `worldmap`, `editor` |
+| `0x1000` to `0x1005` | `pro_item`, `pro_crit`, `pro_scen`, `pro_wall`, `pro_tile`, `pro_misc` |
+| `0x2000` to `0x2FFF` | `ExtraGameMsgFileList` entries |
+| `0x3000` to `0x3FFF` | `add_extra_msg_file` entries |
+
+The IDs are `[Must-match]`. Files are `.msg` files under `text/<language>/game/`. The published names give the file stems; ID 1 is `combatai.msg`, because that is the file's name in the game data. `[Safe rule]` for the stems.
+
+- A nonpositive message number, an absent message, an unassigned file ID, or an absent file gives `Error`, as `message_str` does (SPEC-005). `[Must-match]`
+- It starts no speech and no lip sync, unlike `message_str` in a talking-head dialogue. `[Safe rule]`
+- **`ExtraGameMsgFileList`** is read from `ddraw.ini`, section `[Misc]`, as a comma list. Files take consecutive IDs from `0x2000`. An entry written `name:n` takes `0x2000 + n`, and the entries after it continue from there. `[Must-match]`
+
+**`add_extra_msg_file`** (name, optional ignored number) gives int. `[Must-match]`
+
+- It loads the named `.msg` from the current language's game folder, then from `text/English/game/`, and gives the next ID from `0x3000`. `[Must-match]`
+- The same file name, without case, gives the same ID. An absent file, or a table past `0x3FFF`, gives -1 and uses no ID. `[Safe rule]`
+- The table clears at a new game and at a load, so scripts rebuild it during setup in the same order. Nothing about it is saved. `[Safe rule]` Evidence: both RPU callers do this under `game_loaded`.
+
+**World map and car.**
+
+| Word | Mnemonic | Pop order | Push | Effect |
+| --- | --- | --- | --- | --- |
+| `0x81B6` | `set_car_current_town` | town | none | Sets `car_area` (SPEC-019 section 3.19.1). `[Must-match]` |
+| `0x8171` | `force_encounter` | map | none | Forced encounter, flags 0. `[Must-match]` |
+| `0x8229` | `force_encounter_with_flags` | flags, map | none | Forced encounter with flags. `[Must-match]` |
+
+- **`set_car_current_town`** writes `car_area` whether or not `has_car` is 1. A number that is not an area in SPEC-018 section 4.3 changes nothing, with a diagnostic. `[Safe rule]`
+- **`get_terrain_name`** (no arguments, or x and y) gives string. `[Must-match]` With no arguments it uses the party's cell. Otherwise x and y are world pixels, as for `metarule3` 105 (SPEC-018 section 5.3). `[Safe rule]`
+  - The result is `worldmap.msg` message `1000 + terrain index`, where the index is the cell's position in `terrain_types` (SPEC-018 section 4.4). A point outside the world gives the empty string. `[Safe rule]`
+  - Evidence: Et Tu compares the result with `worldmap.msg` 1001, 1002, and 1003 to detect mountain, city, and ocean, so a name taken from `worldmap.txt` would fail on a translated install.
+
+**Forced encounters.** One encounter can be pending, with its map and flags. `[Safe rule]` except where tagged.
+
+- The word stores the map and flags. A later call replaces them, unless the pending one has flag `0x2`, which then ignores the call. `[Must-match]`
+- A map number with no row in SPEC-018 section 5.1 changes nothing, with a diagnostic. Map 0 is valid. Evidence: RPU calls `force_encounter(0)`.
+- It may be called on the world map or on a local map. It takes effect at the next encounter check of SPEC-018 section 5.6 after the party moves on the world map. `[Must-match]`
+- At that check, the pending encounter replaces steps 1 to 8: no random number is drawn, no counter changes, and no Outdoorsman check applies. `[Must-match]` for the check.
+- The map loads through SPEC-018 section 5.7's step 1. No group is spawned.
+- The pending encounter clears, and is saved in the sidecar until then (section 5.8). `HOOK_ENCOUNTER` does not fire (section 6.17).
+
+| Flag | Name | Effect |
+| ---: | --- | --- |
+| `0x1` | `ENCOUNTER_FLAG_NO_CAR` | The car stays where it is. `[Must-match]` |
+| `0x2` | `ENCOUNTER_FLAG_LOCK` | Blocks new forced encounters until this one occurs. `[Must-match]` |
+| `0x4` | `ENCOUNTER_FLAG_NO_ICON` | No flashing icon (SPEC-019 section 3.12.7). `[Must-match]` |
+| `0x8` | `ENCOUNTER_FLAG_ICON_SP` | The special icon. `[Must-match]` |
+| `0x10` | `ENCOUNTER_FLAG_FADEOUT` | Fades to black as `gfade_out`. The map load does not fade back in, and a script restores it with `gfade_in`. `[Must-match]` |
+
+**Virtual files.** A session holds a table of virtual files, each with a canonical path (SPEC-023 section 2.2), bytes, and a position. All of this is `[Safe rule]` unless tagged, because the published text is signatures plus one paragraph.
+
+| Word | Mnemonic | Pop order | Push | Effect |
+| --- | --- | --- | --- | --- |
+| `0x81F8` | `fs_copy` | source, path | I | Handle, or -1 |
+| `0x8202` | `fs_seek` | position, handle | none | Sets the position |
+| `0x820A` | `fs_read_short` | handle | I | Next 16 bits |
+| `0x81FB` | `fs_write_short` | value, handle | none | Writes 16 bits |
+
+- **Precedence.** A virtual file takes precedence over the same path in the `Vfs` layers, for every later read in the session. `[Must-match]`
+- **`fs_copy`** reads the source's bytes, from a virtual file if one exists, else through the `Vfs`. An invalid path or an absent source gives -1 and creates nothing.
+  - On success the file at `path` holds those bytes, with position 0, and the call gives its handle. Handles start at 1 and rise.
+  - An existing `path` keeps its handle. Evidence: RPU's `has_head` calls `fs_copy` on every conversation and treats only -1 as failure.
+- **`fs_seek`.** A position from 0 to the file size, inclusive, is stored. Anything else leaves it, with a diagnostic.
+- **`fs_read_short` and `fs_write_short`** are **big-endian**. Evidence: RPU writes a small frame rate straight into an FRM header field, and reads its frame count for a numeric test. FRM fields are big-endian (SPEC-001), so no other order gives those scripts their intended result.
+  - A read sign-extends the 16 bits. A write stores the low 16 bits. Each advances the position by 2.
+  - With fewer than 2 bytes left, a read gives 0, a write stores nothing, and the position stays, with a diagnostic.
+  - An unknown handle is a failed operand (section 4.1).
+- **Cached data.** A write drops any cached decode of that path, so the next load sees the new bytes.
+- **Lifetime.** The table clears at a new game and at a load, and nothing about it is saved. Saving a virtual file takes `fs_resize(id, -1)`, which stays tier P2, so none is saved. Evidence: both RPU frame-rate patches run under `game_loaded`.
+- The other `fs_*` words stay tier P2 and do not touch this table.
+
+**Appearance.**
+
+| Word | Mnemonic | Pop order | Push | Effect |
+| --- | --- | --- | --- | --- |
+| `0x8215` | `set_hero_style` | style | none | Stores the style |
+| `0x8227` | `refresh_pc_art` | none | none | Rebuilds the player's art |
+
+- The stored style is an int, 0 at session start. It is not saved. Evidence: Et Tu keeps its style in an sfall global and sets it again. `[Safe rule]`
+- `refresh_pc_art` applies SPEC-005 section 3.8's player art rule again, at once, to the player's current armor and sex. It costs no AP. `[Safe rule]`
+- **Limit.** Hero appearance archives are not defined here, so the stored style changes no art (Decision D-42). `[Safe rule]`
+
+**Interface tags.**
+
+| Word | Mnemonic | Pop order | Push | Effect |
+| --- | --- | --- | --- | --- |
+| `0x81DC` | `show_iface_tag` | tag | none | Sets the tag's script flag |
+| `0x81DD` | `hide_iface_tag` | tag | none | Clears the tag's script flag |
+| `0x81DE` | `is_iface_tag_active` | tag | I | 1 when the box is lit, else 0 |
+
+| Tag | Box | `show` and `hide` | `is_iface_tag_active` |
+| ---: | --- | --- | --- |
+| 0 | SNEAK | Yes | Yes |
+| 1, 2 | POISONED, RADIATED | No | Yes |
+| 3, 4 | LEVEL, ADDICT | Yes | Yes |
+| 5 to `4 + BoxBarCount` | Custom | Yes | Yes |
+
+The tag numbers are `[Must-match]`. `BoxBarCount` comes from `ddraw.ini`, and is 5 when absent. Any other tag does nothing and reads as 0. `[Safe rule]`
+
+- A box is lit when SPEC-019 section 3.5.2's condition holds, or its script flag is set. `hide_iface_tag` clears only the flag, so it cannot hide a box the engine has lit. `[Safe rule]` Evidence: RPU hides ADDICT only after testing that the player has no real addiction.
+- Custom boxes follow the five named boxes, in ascending tag order, and SPEC-019's five-slot limit still applies. Tag t reads `intrface.msg` message `100 + t`. `[Safe rule]`
+- Script flags are not saved, and clear at a new game and at a load. Evidence: RPU's repeating global scripts set them again. `[Safe rule]`
+
+**Screen and windows.**
+
+| Word | Mnemonic | Pop order | Push | Effect |
+| --- | --- | --- | --- | --- |
+| `0x8220` | `get_screen_width` | none | I | 640. `[Safe rule]` |
+| `0x8221` | `get_screen_height` | none | I | 480. `[Safe rule]` |
+
+- These are constants on every host. SPEC-005 window geometry is in 640 by 480 units, and a value taken from the host window would make scripts differ between machines and break replays. `[Safe rule]`
+- **`create_win`** (name, x, y, width, height, optional flags) acts as `createwin` (SPEC-005, `0x8062`), and pushes int 0. `[Must-match]` Without flags, the flags are `0x4`. `[Must-match]` The flags are `0x2` do not move to the front, `0x4` on top of other windows, `0x8` hidden, `0x10` exclusive, and `0x20` transparent. `[Must-match]`
+- Windows are presentation state, and do not affect the world. The sfall drawing functions stay tier P2, so a window from `create_win` shows only what SPEC-005's window words draw. `[Safe rule]`
+
+**Dialogue queries.** `dialog_obj` (no arguments) gives the critter the player is talking to or bartering with (SPEC-006, SPEC-011), else null. `[Must-match]`
+
+**`message_box`** (text, optional flags, color 1, color 2) gives int. `[Must-match]`
+
+- 1 for Yes or Done (Enter), 0 for No (Escape), and -1 when no box can be created. `[Must-match]`
+- `\n` starts a new line. Color 1 is the first line's palette index, and color 2 the other lines'. Both default to 145. Flags -1, or absent, mean `0x11`. `[Must-match]`
+- The flags are `0x0` auto-size, `0x1` normal, `0x2` small, `0x4` align left, `0x8` align top, `0x10` Yes and No buttons instead of Done, and `0x20` no buttons. `[Must-match]`
+- The box is SPEC-014 section 3.13's generic dialog box, as a modal screen. The program waits at the next instruction, and the result is pushed when the box closes. The world does not advance, as for any modal screen in SPEC-021. `[Safe rule]`
+- Where a program cannot wait, the call gives -1 with no box: in a hook member (section 6.5), and in session setup (section 6.1). `[Safe rule]`
+- The closing key comes from the input log, so a replay gives the same result. With `0x20` set, Enter and Escape still close the box. `[Safe rule]`
+
+**`signal_close_game`** (no arguments) pushes int 0. `[Must-match]`
+
+- It acts as `metarule` rule 13, then ends the session instead of returning to the main menu. `[Must-match]`
+- The session ends after the current step's Simulation phase. `HOOK_GAMEMODECHANGE` then runs once with arg0 1. Play returns to the operating system with no prompt, and a headless run stops as a finished run. `[Safe rule]`
+- Evidence: Et Tu's `gl_0.ssl` shows a box and calls this when sfall's major version is 5 or more, or when a required `ddraw.ini` key reads 0. Here the version is 4, and an absent `ddraw.ini` gives -1 rather than 0, so neither test closes the game. Its deliberate invalid-object call afterwards gives null by section 4.1.
+
+**Keys.** `tap_key` (`0x8162`) pops a scan code and pushes nothing. `[Must-match]`
+
+- The key is queued, and is pressed and released as a logical key at the start of the next phase 1, after that step's input records. `[Safe rule]`
+- Scan codes are those of `HOOK_KEYPRESS`'s arg1. A value outside 1 to 255 does nothing, with a diagnostic. `[Safe rule]`
+- It does not run `HOOK_KEYPRESS`, and is not written to the input log, because a replay queues it again. `[Safe rule]`
 
 ## 5. Part 2: Dynamic Arrays
 
@@ -456,7 +674,7 @@ Loading a slot deletes every array first, then restores the saved ones under the
 | `0x8232` | `resize_array` | size I, ID | none | Resize or order operation, below | Ignored |
 | `0x8230` | `free_array` | ID | none | Deletes the array, including from the save set | Ignored |
 | `0x8231` | `len_array` | ID | I | Elements or pairs | -1 |
-| `0x8239` | `scan_array` | value N, ID | A | First match: list index or map key, else int -1 | Int -1 |
+| `0x8239` | `scan_array` | value A, ID | A | First match: list index or map key, else int -1 | Int -1 |
 | `0x8254` | `save_array` | ID, key A | none | Section 5.5 | Ignored |
 | `0x8255` | `load_array` | key A | I | Section 5.5 | n/a |
 | `0x8256` | `array_key` | index I, ID | A | Below | Int 0 |
@@ -507,7 +725,7 @@ The operand classes here are the `arg_classes` column's. Section 4.1 relates the
 
 **Caution kept as published.** `scan_array`'s -1 is ambiguous on a map with a -1 key. `[Must-match]`
 
-**Caution, a string value.** `scan_array`'s value has class `N`, so a string is a failed operand (section 4.1): nothing is searched, and the push is int 0, not -1. A script can read that 0 as a match at index 0. `[Safe rule]`
+**A string value.** `scan_array`'s value has class `A`, so a string is searched like any other value, by section 5.6's equality (Decision D-46, vector SS1). `[Must-match]`
 
 ### 5.5 Save keys
 
@@ -555,7 +773,7 @@ The last-created record is not saved, and a load clears it. `[Safe rule]`
 
 ### 5.8 The save sidecar
 
-This is a vault format, deliberately **not** byte-compatible with sfall's `sfallgv.sav`, whose layout is unpublished (Decision D-15). All of section 5.8 is `[Safe rule]`.
+This is a vault format, deliberately **not** byte-compatible with sfall's `sfallgv.sav`, whose layout is unpublished (Decision D-15). All of section 5.8 is `[Safe rule]`, except the migration rules, which carry their own tags.
 
 **File.** `VAULTSFL.DAT`, beside the slot's `SAVE.DAT`, through the storage path that SPEC-023 gives other slot files.
 
@@ -566,9 +784,12 @@ This is a vault format, deliberately **not** byte-compatible with sfall's `sfall
 | Offset | Bytes | Content |
 | ---: | --- | --- |
 | 0 | 4 | Tag `VSFL` |
-| 4 | 4 | u32 format revision, 1 |
+| 4 | 4 | u32 format revision, 2 |
 | 8 | 4 | u32 next array ID |
-| 12 | variable | seq(global record) |
+| 12 | 4 | u32 next unique object ID, starting at `0x10000000` (section 4.11) |
+| 16 | 4 | i32 pending forced-encounter map, or -1 for none (section 4.11) |
+| 20 | 4 | u32 pending forced-encounter flags, 0 for none |
+| 24 | variable | seq(global record) |
 | then | variable | seq(array record) |
 
 **Global record:** key value, then stored value. Ascending by the section 5.6 order of the keys.
@@ -600,10 +821,39 @@ The type bytes equal `typeof`'s results.
 
 | Situation | Result |
 | --- | --- |
-| Sfall mode on, sidecar present and valid | Restores globals, arrays, and the next ID |
-| Sfall mode on, no sidecar | Empty state, next ID 1. A vanilla save can start using sfall |
-| Sfall mode off, sidecar present | Refuses the slot, with an explicit message: its programs were written for other word meanings |
-| Bad tag, unknown revision, truncation, trailing bytes, unknown type byte, a duplicate ID, or a shape byte outside 0-1 | Refuses the slot, with an explicit message. Saved data is never dropped silently |
+| Sfall mode on, revision 2 sidecar present and valid | Restores globals, arrays, the next array ID, the next unique ID, and the pending forced encounter |
+| Sfall mode on, revision 1 sidecar present and valid | Migrates, as below |
+| Sfall mode on, no sidecar | Empty state, next array ID 1, next unique ID `0x10000000`, no pending encounter. A vanilla save can start using sfall |
+| Sfall mode off, sidecar of either revision present | Refuses the slot, with an explicit message: its programs were written for other word meanings |
+| Bad tag, a revision other than 1 or 2, truncation, trailing bytes, unknown type byte, a duplicate ID, or a shape byte outside 0-1 | Refuses the slot, with an explicit message. Saved data is never dropped silently |
+
+**Migrating a revision 1 sidecar (Decision D-32).** The engine has written format revision 1 since this specification's Revision 1, so revision 1 sidecars exist beside players' saves. Revision 1 differs from revision 2 only in its header, which stops at offset 12. Its global, array, and value records are the ones above.
+
+| Offset | Bytes | Content |
+| ---: | --- | --- |
+| 0 | 4 | Tag `VSFL` |
+| 4 | 4 | u32 format revision, 1 |
+| 8 | 4 | u32 next array ID |
+| 12 | variable | seq(global record) |
+| then | variable | seq(array record) |
+
+A reader checks the tag, then the revision, and only then chooses the layout.
+
+1. A revision 1 sidecar loads. Everything it holds carries over unchanged: the next array ID, every global, and every array with its ID, shape, lookup byte, storage, save key, and element order. `[Must-match]`
+2. Each field that revision 2 adds takes this default on migration. These three are the only fields it adds. `[Must-match]`
+
+   | Field | Default on migration |
+   | --- | --- |
+   | Next unique object ID | `0x10000000`, where a new game starts it |
+   | Pending forced-encounter map | -1, so no encounter is pending |
+   | Pending forced-encounter flags | 0 |
+
+3. `sfall_hash` after the load is the hash of the migrated revision 2 state (section 5.9), never a hash of the revision 1 bytes. `[Must-match]`
+4. The next save writes revision 2. The engine never writes revision 1 again. `[Must-match]`
+5. A load rewrites no file, so the slot keeps its revision 1 sidecar until that next save. `[Safe rule]`
+6. A missing sidecar keeps the rule in the table above. A truncated or oversized revision 1 sidecar is refused as revision 1 refuses it today. Any revision other than 1 and 2 is refused with the existing unknown-revision error. `[Safe rule]`
+
+Vectors MG1 and MG2 pin these rules.
 
 ### 5.9 `sfall_hash` and SPEC-021
 
@@ -616,9 +866,10 @@ Array divergence that has not yet reached covered state is caught by a companion
 - `WorldState::sfall_hash(&self) -> u64` is `fnv1a64` (SPEC-021 section 2.1) of the **extension stream**.
 - That stream is the section 5.8 layout with tag `VSX1`, and with **every live array**, of any storage class. The storage byte is significant.
 - It obeys SPEC-021 section 3.3's rules: it takes `&self`, draws no random number, and changes no state.
-- With an empty store and no globals, it is the fixed 20-byte stream of vector F3.
+- With an empty store and no globals, it is the fixed 32-byte stream of vector F3.
+- After a revision 1 sidecar loads, it is the stream of the migrated state, in revision 2's layout with section 5.8's defaults (vector MG1). So an empty revision 1 sidecar gives vector F3's value. `[Must-match]`
 
-Hook registrations, global-script counters, open lists, and the last-created record are not covered, because scripts rebuild them. `[Safe rule]`
+Hook registrations, global-script counters, open lists, the last-created record, virtual files, added message files, interface tag flags, and the stored hero style are not covered, because scripts rebuild them. `[Safe rule]`
 
 ## 6. Part 3: Hook Scripts
 
@@ -672,7 +923,7 @@ Running a chain creates one context, holding the argument array, the return arra
 | --- | --- | --- | --- | --- | --- |
 | `0x81E4` | `get_sfall_arg` | none | A | Next argument; advances the cursor. Int 0 past the end | Int 0 |
 | `0x823C` | `get_sfall_args` | none | I array | New temporary list of all current arguments | Empty temporary list |
-| `0x823D` | `set_sfall_arg` | value I, index I | none | Replaces argument `index`, 0-based | Ignored |
+| `0x823D` | `set_sfall_arg` | value A, index I | none | Replaces argument `index`, 0-based | Ignored |
 | `0x81E5` | `set_sfall_return` | value A | none | Writes the next return; does nothing once all are written | Ignored |
 | `0x81EA` | `init_hook` | none | I | 0 | 1 during setup, else 0 |
 
@@ -695,8 +946,8 @@ The published example chains "divide by 2" and "multiply by 1.5" on a hit chance
 
 Further rules, `[Safe rule]`:
 
-- `set_sfall_arg` takes its value by class `I`, so a float truncates and a string is a failed operand (section 4.1). The resulting int replaces the argument whatever its declared type, `mixed` included. An index out of range is ignored.
-- A return is converted by the hook's declared return type: `int`, `critter`, `item`, and `obj` by class `I`, and `mixed` unchanged. A value that cannot convert leaves that return unset, with a diagnostic.
+- `set_sfall_arg` takes any value (class `A`, Decision D-46), then converts it to the argument's declared type: `int`, `critter`, `item`, and `obj` by class `I`, and `mixed` unchanged. A value that cannot convert leaves the argument unchanged, with one diagnostic. So a string converts only to a `mixed` argument, because class `I` never parses a string, even one made of digits (vector SS2). An index out of range is ignored.
+- A return is converted by the hook's declared return type, the same way. A value that cannot convert leaves that return unset, with a diagnostic.
 - A member that ends in a VM error is unloaded from every chain, and its writes up to that point stay. The chain continues with the next member.
 - A member runs to completion, by SPEC-004 section 3.7's synchronous call. A word that would suspend it (a dialogue, a wait, or a timer yield) ends that member, with a diagnostic.
 - Chains nest when a member causes another hook. Each chain has its own context, and the outer one resumes untouched. Past **8 nested chains**, a chain is skipped with a diagnostic and the engine's values stand.
@@ -706,7 +957,7 @@ Further rules, `[Safe rule]`:
 
 Hooks must not break two engine rules: drawing never changes the world (SPEC-022 section 3.13), and the same inputs give the same states (SPEC-021 section 3.10). All of section 6.6 is `[Safe rule]`.
 
-- **A chain runs only in phase 1 (Input) or phase 2 (Simulation)**, never in phase 3 (Checkpoint) or 4 (Presentation).
+- **A chain runs only in phase 1 (Input), in phase 2 (Simulation), or in session setup (section 6.1)**, never in phase 3 (Checkpoint) or 4 (Presentation).
 - **A chain runs once per engine query**, even if an identical query came just before. Query order is the order of the host specs. A chain may draw random numbers: the draws are part of the deterministic sequence, because the queries are.
 - **Preview queries.** sfall also runs hooks for values that are only displayed, such as the to-hit percentage under the targeting cursor or the AP cost on the interface bar. Here, such a value is queried in phase 2 from the state of that step, and presentation reads the stored result.
   - A preview runs at most once per step, and only when its inputs differ from the previous step's.
@@ -716,7 +967,7 @@ This differs from sfall in how many times a hook fires (Decision D-17). A script
 
 ### 6.7 Common numbering
 
-These agree with the engine's own tables. `[Must-match]` The argument and return tables of sections 6.8 to 6.13 are also `[Must-match]` unless a row says otherwise.
+These agree with the engine's own tables. `[Must-match]` The argument and return tables of sections 6.8 to 6.18 are also `[Must-match]` unless a row says otherwise.
 
 | Hook value | Engine value |
 | --- | --- |
@@ -833,7 +1084,7 @@ Later application uses the returned values, with its SPEC-007 guards and persist
 | Return | Overrides | Limits |
 | --- | --- | --- |
 | ret0 | Price | -1 leaves it unchanged. `[Must-match]` Any other negative value becomes 0. `[Safe rule]` |
-| ret1 | V_P, for section 3.19 step 3 and display | Negative becomes 0. `[Safe rule]` |
+| ret1 | V_P, for SPEC-011 section 3.19 step 3 and display | Negative becomes 0. `[Safe rule]` |
 
 ### 6.13 `HOOK_MOVECOST`, `HOOK_INVENTORYMOVE`, and `HOOK_KEYPRESS`
 
@@ -886,7 +1137,113 @@ A prevented move leaves the item where it was, as a refused drop does, with no A
 - The input log records the **physical** key, so a replay runs the hook again and gets the same logical key. `[Safe rule]`
 - The documentation tells scripts to return the same override for press and release. As a guard against stuck keys, releasing a physical key also releases whatever its press produced (vector H11). `[Safe rule]`
 
-### 6.14 The other 42 hooks
+### 6.14 `HOOK_GAMEMODECHANGE` (31, `hs_gamemodechange.int`)
+
+**Boundary.** Runs once when the `get_game_mode` bit set (section 4.4) has changed. `[Must-match]` The value is compared once per step, at the end of phase 2 and before temporary arrays are freed. Changes that cancel out inside one step run nothing, and several in a row run it once. The first value is the one at the end of session setup, which runs nothing. `[Safe rule]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | int | 1 when the player exits the game, else 0 |
+| arg1 | int | The previous game mode |
+
+It has no returns. Members read the new mode with `get_game_mode`. `signal_close_game` runs it with arg0 1, even when the mode did not change. Returning to the main menu is not exiting the game. `[Safe rule]`
+
+### 6.15 `HOOK_USEOBJON` (8, `hs_useobjon.int`) and `HOOK_USEOBJ` (18, `hs_useobj.int`)
+
+**`HOOK_USEOBJON` boundary.** Runs before the item is used and before any `use_obj_on_p_proc` request, when: `[Must-match]`
+
+1. A critter uses an item on a critter or on itself: at SPEC-006 section 3.8's interaction stage, before its routing list, and before SPEC-013 section 3.13's kit route.
+2. A critter uses an inventory item that has no Use action flag and is not an active flare or explosive. The target is the user.
+3. The player or an AI critter uses a drug (SPEC-011).
+
+Using an item on a target that is not a critter does not run it. AP charged before the interaction stage stays charged. `[Safe rule]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | critter | The target |
+| arg1 | critter | The user |
+| arg2 | int | The item used, as an object reference |
+
+**`HOOK_USEOBJ` boundary.** Runs before the item is used and before its `use_p_proc` request, when a critter uses an inventory item that has the Use action flag or is an active flare or Dynamite, and when the player uses an object from the main interface. `[Must-match]` It runs before SPEC-013 section 3.10's arming, and before the drug path. `[Safe rule]` for the order.
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | critter | The user |
+| arg1 | obj | The object used |
+
+Both hooks return the same value.
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | 0: place it back. 1: remove it. -1 or unset: engine handler | Any other value counts as unset. `[Safe rule]` |
+
+- 0 ends the action: no procedure is requested, no default runs, and the item stays where it is. `[Must-match]`
+- 1 ends the action the same way, and destroys the item, as SPEC-006 section 3.8's wrapper does when an operation returns 1. `[Must-match]`
+- **Published defect.** The documentation says removing or destroying the item inside the hook crashes. `[May-improve]`: a member's destroy request for the used item is ignored, with a diagnostic. It returns 1 instead.
+
+### 6.16 `HOOK_STDPROCEDURE` (40, `hs_stdprocedure.int`)
+
+**Boundary.** Runs when the host requests a named procedure of a script (SPEC-004 section 3.7), for the script of any object, before the procedure runs, after the source, target, and fixed parameter are installed. `[Must-match]`; `[Safe rule]` for the exact moment.
+
+It never runs for `start` (event 1), `critter_p_proc` (12), `timed_event_p_proc` (22), or `map_update_p_proc` (23). `[Must-match]` It does not run when the script has no such procedure. `[Safe rule]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | int | The event number, as `script_action` reports it (SPEC-004 section 3.7) |
+| arg1 | obj | The object that owns the procedure (`self_obj`) |
+| arg2 | obj | The caller (`source_obj`), or 0 |
+| arg3 | int | 0. The value 1 belongs to ID 41, which stays tier P2 |
+| arg4 | obj | The object acted upon (`target_obj`), or 0 |
+| arg5 | int | The fixed parameter |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | -1 cancels the procedure | Any other value lets it run. `[Must-match]` |
+
+A cancelled procedure counts as run with no override, so the action's default still follows (SPEC-006 section 3.8). `[Safe rule]`
+
+### 6.17 `HOOK_ENCOUNTER` (43, `hs_encounter.int`)
+
+**Boundary.** `[Must-match]` for the two events.
+
+- **Event 0.** Runs when SPEC-018 section 5.6 selects a random encounter, after its step 8 and before the flash and the map load.
+- **Event 1.** Runs when the player enters a local map from the world map: for SPEC-018 section 5.7's dropping to terrain, and for entering an area, before the map loads.
+
+It does not run for a forced encounter, or for any other scripted one. `[Must-match]` Evidence: Et Tu's handler itself calls `force_encounter_with_flags` and returns -1, which works only if the forced encounter does not run the handler again.
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | int | Event type: 0 random encounter, 1 entry from the world map |
+| arg1 | int | The map that will load |
+| arg2 | int | 1 for a Special entry (SPEC-018 section 4.4), else 0 |
+| arg3 | int | Encounter table number, or -1 for event 1 |
+| arg4 | int | Entry number in the table, or -1 for event 1 |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | The map. For event 0, -1 cancels the encounter and travel continues | For event 1, -1 is ignored. `[Must-match]`; `[Safe rule]` for ignoring it. A map with no SPEC-018 section 5.1 row is ignored, with a diagnostic. `[Safe rule]` |
+| ret1 | 1 cancels the encounter and loads ret0's map, for event 0 | Any other value does nothing. `[Must-match]` |
+
+- A replaced map still spawns the entry's groups, unless ret1 is 1. `[Safe rule]`
+- Draws and counter changes already made by SPEC-018 section 5.6 stand when the hook cancels. `[Safe rule]`
+- SPEC-018 section 5.6's statement that every selected encounter is entered holds only with no member cancelling it. `[Must-match]`
+
+### 6.18 `HOOK_SETGLOBALVAR` (29, `hs_setglobalvar.int`)
+
+**Boundary.** Runs in `set_global_var` (`0x80C6`), after the index is found valid and before the value is stored. `[Must-match]`; `[Safe rule]` for the order. An invalid index runs nothing. Writes the engine itself makes to a global do not run it. `[Safe rule]`
+
+| Index | Type | Value |
+| ---: | --- | --- |
+| arg0 | int | The index of the global variable |
+| arg1 | int | The value being set |
+
+| Return | Overrides | Limits |
+| --- | --- | --- |
+| ret0 | The value stored | None |
+
+A member that calls `set_global_var` runs a nested chain, within section 6.5's depth limit. Past that limit the nested write still stores its value, and only its chain is skipped. `[Safe rule]` Evidence: Et Tu's handler sets other globals from inside the hook.
+
+### 6.19 The other 36 hooks
 
 Tier P2 hooks are listed with full argument and return types in `sfall-hooks.tsv`. Their scripts load, register, and run during setup, but **no chain runs**, because their engine boundaries are not specified here. The engine's own behavior stands. `[Safe rule]`
 
@@ -900,7 +1257,8 @@ All data is synthetic. `oracle/SPEC-024/README.md` explains the files.
 | --- | --- |
 | `sfall-opcodes.tsv` | All 300 words, 133 `sfall_funcN` rows, 7 `metarule3` rows, 9 `metarule2_explosions` rows |
 | `sfall-hooks.tsv` | All 50 hooks and the reserved range |
-| `sfall-array-vectors.tsv` | Arrays (A to F3) and hook chains (H1 to H11), computed by a reference model |
+| `sfall-array-vectors.tsv` | Arrays (A to F3), hook chains (H1 to H17), and the promoted rows: virtual files (V1 to V4), unique IDs (U1), message files (M1), interface tags (T1), and explosive damage (E1); sidecar migration (MG1, MG2); and string values (SS1, SS2). All are computed by a reference model. MG and SS are not M and S because M1 already names message files here, and S1 and S2 name stack vectors in section 7.1 |
+| `mod-opcode-usage.tsv` | The ranked mod audit of section 1.1. It is evidence, not a test input |
 
 ### 7.1 Stack vectors
 
@@ -917,6 +1275,14 @@ All data is synthetic. `oracle/SPEC-024/README.md` explains the files.
 | S9 | `I:5`, then `0x8252` | `0x8252` | `I:5`, VM error | Reserved word |
 | S10 | `I:7, I:2` | `0x827F` | `I:3` | Unsigned division |
 | S11 | `I:-1, I:2` | `0x827F` | `I:2147483647` | `0xFFFFFFFF` divided by 2 |
+| S12 | empty | `0x8220` | `I:640` | `get_screen_width` is a constant |
+| S13 | `"dialog_obj"` | `0x8276` | `I:0` | Outside dialogue: null, and one value is pushed |
+| S14 | `"set_unique_id", I:0` | `0x8277` | `I:0` | A null object |
+| S15 | `"art/none.frm", "art/none.frm"` | `0x81F8` | `I:-1` | `fs_copy` of an absent source: 2 pops, 1 push |
+| S16 | `I:6, I:41, I:0` | `0x8261` | array ID | `get_explosion_damage`: 3 pops, 1 push; the list is `[0, 0]` |
+| S17 | `I:2, I:0, I:0` | `0x8261` | `I:0` | Sub-function 2 is still a stub |
+| S18 | `"message_box", "x"`, inside a hook member | `0x8277` | `I:-1` | A member cannot wait |
+| S19 | `I:161, I:16` | `0x8229` | empty | `force_encounter_with_flags`: flags on top |
 
 ### 7.2 Published string and math vectors
 
@@ -940,11 +1306,19 @@ All data is synthetic. `oracle/SPEC-024/README.md` explains the files.
 1. Every row of `sfall-opcodes.tsv`: under sfall mode, a call pops `pops` operands and pushes `push` values. Tier R rows raise the VM error.
 2. With sfall mode off, `0x8156` keeps its SPEC-017 row, `0x8200` and `0x8210..=0x8213` keep their enhanced rows, and all SPEC-021 goldens are byte-identical. SPEC-017 section 7.14 gives the vectors.
 3. Every array vector, step by step, compares the push and the state.
-4. The sidecar bytes of vector F round-trip, and each mutation in section 5.8's refusal row refuses the slot.
+4. The sidecar bytes of vector F round-trip, and each mutation in section 5.8's refusal row refuses the slot. A revision mutation uses a value other than 1 and 2, as vector MG2 does.
 5. `sfall_hash` equals the vector values. It equals vector F3's value on a fresh session.
 6. A map with the same operations in two allocator states serializes to identical bytes.
 7. Two runs of one input log with a hook that draws random numbers give identical checkpoint streams on two platforms.
-8. A hook registered on each of the eight hooks, returning nothing, changes no SPEC-021 hash from the unhooked run, apart from any random draws of its own.
+8. A hook registered on each of the fourteen hooks, returning nothing, changes no SPEC-021 hash from the unhooked run, apart from any random draws of its own.
+9. Vectors V1 to V4, U1, M1, T1, and E1, step by step, compare the push and the state.
+10. After vector V1's write, a load of the path reads the patched rate, and a new game or a load removes the virtual file.
+11. A forced encounter draws no random number, changes no counter, spawns no group, and runs no `HOOK_ENCOUNTER` chain. Saved between the call and the check, it still occurs after a load.
+12. An item with an ID in the unique range does not stack with an otherwise identical item. After `set_unique_id(item, -1)`, it stacks again.
+13. `opcode_exists(0x823B)` gives 1 under sfall mode.
+14. Every row of `mod-opcode-usage.tsv` with `rev3_tier` P1 is tier P1 in `sfall-opcodes.tsv` or `sfall-hooks.tsv`.
+15. Vector MG1's `sidecar-r1` bytes load to its state and `defaults`, `sfall_hash` equals its value, and the next save writes exactly its `sidecar` bytes. Its empty sidecar gives vector F3's value. Every byte string of vector MG2 refuses the slot.
+16. Vectors SS1 and SS2, step by step, compare the push, the state, the final arguments, and the diagnostic count.
 
 ## 8. Clean-Room Verification Checklist
 
@@ -953,10 +1327,17 @@ All data is synthetic. `oracle/SPEC-024/README.md` explains the files.
 - [x] All multi-byte integer endianness explicitly stated
 - [x] Every normative rule tagged `[Must-match]`, `[May-improve]`, or `[Safe rule]`
 - [x] Synthetic test vectors included, computed by a reference model
-- [x] Opcode and hook tables generated from the published documents, not typed by hand
+- [x] Opcode and hook tables generated from the published documents, not typed by hand, except the two operand classes of Decision D-46, which the generator sets by name
 - [x] Spec linter run against `fallout1-re` symbols with 0 errors
 - [x] Owner approval of Decision D-3 (brief of 2026-10-30), and the SPEC-017 amendment (SPEC-017 Revision 4)
 - [x] Revision 2, by Team A: the ingestion grep finds no implementation-source path and no 40-character hexadecimal string, and this text has no code listing. The research linter was not re-run on this side, because Team A has no access to it, so the linter line above describes Revision 1
+- [x] Revision 3: the opcode, hook, and vector tables regenerated from the documents bundled with Et Tu, which give the Revision 2 tables byte for byte before the tier change
+- [x] Revision 3: the stack model reproduces SPEC-017 section 8.4's Fallout 1 result before any mod result was used
+- [x] Revision 3: the source scan was calibrated against compiled scripts before its RPU counts were used
+- [x] Revision 3 amendment: owner decision on D-40 (brief of 2026-10-30)
+- [x] Revision 3 amendment: regenerating the oracle changes exactly the two `sfall-opcodes.tsv` rows of Decision D-46
+- [x] Revision 3 amendment: owner decision on D-32 (brief of 2026-10-30): revision 1 sidecars migrate
+- [x] Revision 3 amendment: regenerating the oracle adds 29 rows to `sfall-array-vectors.tsv` and changes no existing row
 
 ## 9. Decisions
 
@@ -971,7 +1352,7 @@ Every decision is a research default unless the Class column says otherwise.
 | D-5 | `sfall_func9` is not specified, although the brief named it | Default | The published list ends at `sfall_func8` (`0x8281`) |
 | D-6 | A wrong operand type is a diagnostic and a default result, not a VM error | Default | sfall scripts expect functions not to stop them. This differs from SPEC-017 |
 | D-7 | Tier P1 is the foundational set. P2 keeps stack balance with stubs | Default | Stack balance keeps scripts alive; undefined effects are not guessed |
-| D-8 | X words are refused by design | Default | They address another program's memory |
+| D-8 | X words are no-op stubs by design, and never reach memory (Decision D-40) | Default | They address another program's memory |
 | D-9 | Map iteration is first-insertion order | Default | The docs leave it open. It is fully deterministic and needs no sort on each read |
 | D-10 | A frame is one headless step, and temporary arrays end before the checkpoint | Default | A render frame is not a replayable unit. Checkpoints stay free of transient arrays |
 | D-11 | IDs start at 1, rise, are not reused in a session, and are stored in the sidecar | Default | Stale IDs fail safely and allocation is deterministic |
@@ -989,8 +1370,25 @@ Every decision is a research default unless the Class column says otherwise.
 | D-23 | `get_uptime` is derived from the step count | Default | The wall clock is not replayable |
 | D-24 | P2 hooks load but do not fire | Default | Their boundaries are not specified |
 | D-25 | `HOOK_COMBATDAMAGE` arg12 is 0 | Default | The published attack-data offsets describe another engine's memory |
-| D-26 | Et Tu and Restoration Project scripts were not audited | Research limit | Neither mod is in the local corpus. The stack check should run on them before these contracts are final |
+| D-26 | Et Tu and Restoration Project scripts were not audited | Research limit; **closed by Revision 3** (D-30) | Neither mod was in the local corpus at Revision 1 |
 | D-27 | The shadowing covers the enhanced camera words `0x8210..=0x8213` as well as `0x8200` | Team A default, applying D-3 | Revision 1 named only `0x8200`, but `docs/REFERENCE.md` defines all five. Their numbers are in the owner's range, and their operand counts differ from the sfall words', so leaving them out would make dispatch ambiguous |
 | D-28 | The manifest key is `sfall` under `[scripting]`, by the `[enhanced]` keys' rules, and `--sfall` turns the mode on from the command line | Team A default | A manifest refuses unknown tables, so the key must be defined for the owner's manifest route to work. A replay reads neither file, so without a flag no replay could run under sfall mode, and section 7.3's test 7 needs one |
 | D-29 | A save with sfall mode off keeps section 5.8's named delete of an old `VAULTSFL.DAT`. SPEC-023's stale `.SAV` sweep leaves the file untouched | Team A default; the sweep's scope is an owner instruction (SPEC-023 D-18, D-38) | Without the delete, a slot just saved with sfall mode off would hold an old sidecar, and section 5.8's loading table would refuse it |
-| D-T1 | Where the prose and `sfall-opcodes.tsv` disagree on an operand class, the table's class stands: `scan_array`'s value is `N`, and `set_sfall_arg`'s value is `I`. `ret_class` chooses a failed operand's default and does not limit the pushed value | Owner instruction for the direction (brief of 2026-10-30); Team A default for the meaning of `ret_class` | The engine compiles its word table from this file. Vector B step 9 pushes `F:5.0` from a row with `ret_class` `I`, so `ret_class` cannot limit the value. Vectors H1 and H2 hold under class `I`. This ID stays outside the numbered series because a research revision is expected, and its numbers are not known on this side |
+| D-30 | The audit reads Et Tu's compiled scripts through SPEC-017 section 8.2's model, and RPU's source through its own build selection, because RPU ships no `.int` files. No downloaded compiler was run | Research limit | A token scan of source is weaker evidence than a binary, so it was calibrated on the 1045 Et Tu scripts that exist in both forms, with no error on any P2 row or hook. RPU has no stack evidence of its own, and its 48 listed scripts with no source are retail scripts the mod leaves unchanged |
+| D-31 | Opcodes rank by scripts, then call sites, with ties broken by need of a higher-ranked row, then use in both mods, then number. `0x8261` and its sub-function 6 are the same call sites, so they count as one of the 25. Hooks rank by scripts, then need, then handler size | Default | Nine rows tie for the last four opcode places, and nineteen for the last three hook places, so a sort alone would decide them. `fs_read_short` and `fs_write_short` are needed for `fs_seek` to do anything, `add_extra_msg_file` supplies `message_str_game`'s file IDs in RPU, and `HOOK_USEOBJ` is registered beside `HOOK_USEOBJON` |
+| D-32 | The sidecar becomes format revision 2, with the next unique ID and the pending forced encounter. A revision 1 sidecar migrates on load: section 5.8 gives each added field's default (next unique ID `0x10000000`, pending map -1, pending flags 0), `sfall_hash` is the migrated state's, and the next save writes revision 2. The engine never writes revision 1 again | Owner instruction (brief of 2026-10-30) | Published text says unique IDs are saved, and a counter cannot be rebuilt from objects on unloaded maps. Et Tu sets a pending encounter that a save could otherwise lose. The engine has written revision 1 since this specification's Revision 1, so players have those sidecars, and refusing them would strand their saves. The defaults lose nothing: `set_unique_id` and the forced-encounter words were tier P2 stubs when revision 1 was specified, so a revision 1 game has no assigned unique ID and no pending encounter to keep. Vectors F and F3 changed, and vectors MG1 and MG2 pin the migration |
+| D-33 | `fs_read_short` and `fs_write_short` are big-endian | Default, from script evidence | The documents are silent. RPU writes a small number into a big-endian FRM field, and only this order gives the result the script wants |
+| D-34 | `get_terrain_name` reads `worldmap.msg` `1000 + terrain index` | Default, from script evidence | The documents are silent. Et Tu compares against those messages, so `worldmap.txt`'s names would fail on a translated install |
+| D-35 | `get_screen_width` and `get_screen_height` are 640 and 480 on every host | Default | A host-dependent value would reach script logic and break replays. Et Tu's layouts work at these values |
+| D-36 | Virtual files are not saved, and a write drops the path's cached decode | Default | Saving needs `fs_resize`, which stays P2, and both RPU patches run again on each load |
+| D-37 | `message_box` waits as a modal screen, and gives -1 where a program cannot wait | Default | -1 is the published failure value, so a script that cannot show the box takes its documented path |
+| D-38 | `tap_key` is a queued logical key. It runs no `HOOK_KEYPRESS` and is not logged | Default | A replay queues it again, and logging it would apply it twice |
+| D-39 | A forced encounter runs no `HOOK_ENCOUNTER` chain and makes no draw | Default, from published text | The hook's text excludes scripted encounters, and Et Tu's handler depends on that |
+| D-40 | X words are no-op stubs, although Et Tu's base scripts use them. Each pops its operands, pushes the default return value if it pushes, writes the standard diagnostic once per program, and never halts the script | Owner instruction (brief of 2026-10-30) | Three memory writes have no effect: two for the rest timer, and one for Dogmeat's dialogue. Engine rules could replace them, but none is specified here, and the words address memory that does not exist |
+| D-41 | The three fallout2-ce function names stay unknown | Default | They are not sfall functions, and Et Tu takes that path only when `opcode_exists(0x823B)` is 0 |
+| D-42 | `set_hero_style` stores a number and changes no art | Research limit | Et Tu ships appearance archives, but their mounting rule is unpublished. The word keeps its stack contract and its stored value until that is specified |
+| D-43 | `HOOK_GAMEMODECHANGE` compares once per step | Default | Modes can change several times inside a step, and one fixed comparison point keeps firing replayable. A script that counts firings can notice |
+| D-44 | A cancelled `HOOK_STDPROCEDURE` counts as run with no override | Default | The documents say only that execution is cancelled |
+| D-45 | An interface box is lit by the engine's condition or by a script flag, and a script cannot hide what the engine lit | Default | SPEC-019's lit conditions stand, and RPU tests for a real addiction before hiding ADDICT |
+| D-46 | `scan_array`'s value and `set_sfall_arg`'s value are class `A`, in `sfall-opcodes.tsv` and in sections 5.4 and 6.4. This reverses D-T1's direction for these two words | Owner instruction (later brief of 2026-10-30) | For `scan_array`, the arrays guide declares the value `mixed` and the published array test script searches for strings, so the opcode list's `int/float` is the narrower statement. For `set_sfall_arg`, every published signature says `int`, so class `A` is this project's rule, and it lets a `mixed` argument hold a float or a string. Vectors H1 and H2 hold, because an `int` argument still converts by class `I` |
+| D-T1 | Superseded in part by D-46. Where the prose and `sfall-opcodes.tsv` disagree on an operand class, the table's class stands: `scan_array`'s value is `N`, and `set_sfall_arg`'s value is `I`. **The part that stands:** `ret_class` chooses a failed operand's default and does not limit the pushed value | Owner instruction for the direction (brief of 2026-10-30); Team A default for the meaning of `ret_class` | The engine compiles its word table from this file. Vector B step 9 pushes `F:5.0` from a row with `ret_class` `I`, so `ret_class` cannot limit the value. This ID stays outside the numbered series because Team A wrote it before the research revision's numbers were known on that side |

@@ -57,12 +57,12 @@ F	2	save_array("traps",1)	-	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #2 looku
 F	3	temp_array(-1,0)	I:3	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #2 lookup perm [I:1=>I:0]; #3 map temp []	a temporary array is live during the step
 F	4	load_array("traps")	I:1	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #2 lookup perm [I:1=>I:0]; #3 map temp []	live saved array
 F	5	load_array("none")	I:0	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #2 lookup perm [I:1=>I:0]; #3 map temp []	unknown key gives 0
-F	sidecar	VSFL bytes, saved arrays only	56 53 46 4C 01 00 00 00 04 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 01 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F	bytes=83	layout of section 5.8
-F	sidecar-fnv	fnv1a64 of the sidecar	49621DE91D153669	-	SPEC-021 section 2.1
-F	stream	VSX1 bytes, all live arrays	56 53 58 31 01 00 00 00 04 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 03 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F 02 00 00 00 01 01 01 00 00 01 00 00 00 01 01 00 00 00 01 00 00 00 00 03 00 00 00 01 00 00 00 00 00 00 00 00	bytes=119	section 5.9
-F	sfall_hash	fnv1a64 of the stream	BA30F4E08B23BC1F	-	section 5.9
-F	stream-after-step	VSX1 bytes after the step ended	56 53 58 31 01 00 00 00 04 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 02 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F 02 00 00 00 01 01 01 00 00 01 00 00 00 01 01 00 00 00 01 00 00 00 00	bytes=106	the temporary array is gone
-F	sfall_hash-after-step	fnv1a64 of the stream	19CAF6C38E7EB5FE	-	value a checkpoint sees
+F	sidecar	VSFL bytes, saved arrays only	56 53 46 4C 02 00 00 00 04 00 00 00 02 00 00 10 A1 00 00 00 10 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 01 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F	bytes=95	layout of section 5.8
+F	sidecar-fnv	fnv1a64 of the sidecar	5B73271CB0AB8BA9	-	SPEC-021 section 2.1
+F	stream	VSX1 bytes, all live arrays	56 53 58 31 02 00 00 00 04 00 00 00 02 00 00 10 A1 00 00 00 10 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 03 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F 02 00 00 00 01 01 01 00 00 01 00 00 00 01 01 00 00 00 01 00 00 00 00 03 00 00 00 01 00 00 00 00 00 00 00 00	bytes=131	section 5.9
+F	sfall_hash	fnv1a64 of the stream	87A66F177C1E9C6F	-	section 5.9
+F	stream-after-step	VSX1 bytes after the step ended	56 53 58 31 02 00 00 00 04 00 00 00 02 00 00 10 A1 00 00 00 10 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 02 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F 02 00 00 00 01 01 01 00 00 01 00 00 00 01 01 00 00 00 01 00 00 00 00	bytes=118	the temporary array is gone
+F	sfall_hash-after-step	fnv1a64 of the stream	464C94BBE86ADF2E	-	value a checkpoint sees
 F	12	load the slot	-	#1 list saved key=S:"traps" [S:"hi",F:0.5]	every array is deleted, then saved arrays return under their IDs
 F	13	load_array("traps")	I:1	#1 list saved key=S:"traps" [S:"hi",F:0.5]	same ID as when saved
 F	14	create_array(0,0)	I:4	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #4 list perm []	next ID restored from the sidecar
@@ -71,8 +71,8 @@ F	16	save_array(I:0,1)	-	#1 list perm [S:"hi",F:0.5]; #4 list perm []; #5 list t
 F2	1	save_array("k",1) then save_array("k",2)	-	#1 list perm []; #2 list saved key=S:"k" []	the key moves; array 1 stays permanent
 F2	2	free_array(2)	-	#1 list perm []	a freed array leaves the save set
 F2	3	load_array("k")	I:0	#1 list perm []	no array holds the key now
-F3	stream	VSX1 bytes of an empty extension state	56 53 58 31 01 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00	bytes=20	section 5.9
-F3	sfall_hash	fnv1a64 of the stream	AF364CE5AE92BB79	-	section 5.9
+F3	stream	VSX1 bytes of an empty extension state	56 53 58 31 02 00 00 00 01 00 00 00 00 00 00 10 FF FF FF FF 00 00 00 00 00 00 00 00 00 00 00 00	bytes=32	section 5.9
+F3	sfall_hash	fnv1a64 of the stream	E010EA749700C826	-	section 5.9
 H1	1	HOOK_TOHIT registered ModA,ModB args=[100]	rets=[75]	final=75; order=ModB,ModA	public example: the result is 75 in either order
 H2	1	HOOK_TOHIT registered ModB,ModA args=[100]	rets=[75.0]	final=75; order=ModA,ModB	public example: the result is 75 in either order
 H3	1	HOOK_TOHIT r1,r2 via register_hook_proc; hs_tohit; s1,s2 via _spec args=[50]	rets=[None]	final=50; order=r2,r1,hs_tohit,s1,s2	reverse registration, then hs script, then spec in registration order
@@ -93,3 +93,91 @@ H10	3	HOOK_INVENTORYMOVE ret0=0 args=1,I,0	rets=[0]	final=move refused; order=m	
 H11	1	HOOK_KEYPRESS ret0=0 args=1,30,65	rets=[0]	final=logical key 30; order=m	0 means no override
 H11	2	HOOK_KEYPRESS ret0=48 args=1,30,65	rets=[48]	final=logical key 48; order=m	press maps 30 to 48
 H11	3	HOOK_KEYPRESS release with ret0=0 args=0,30,65	rets=[0]	final=logical key 48 released; order=m	the release of 30 also ends what its press produced
+H12	1	HOOK_GAMEMODECHANGE mode changed in the step args=0,64	rets=[None]	final=get_game_mode gives 65; order=m	the hook has no return; arg1 is the previous mode
+H12	2	HOOK_GAMEMODECHANGE two changes that cancel out in one step args=-	rets=-	final=no chain runs; order=-	compared once, at the end of the Simulation phase
+H12	3	HOOK_GAMEMODECHANGE signal_close_game args=1,65	rets=[None]	final=chain runs once, then the session ends; order=m	arg0 1 means the player exits the game
+H13	1	HOOK_USEOBJON no member sets ret0 args=T,U,I	rets=[None]	final=engine routing runs; order=m	the default routing of SPEC-006 section 3.8
+H13	2	HOOK_USEOBJON ret0=-1 args=T,U,I	rets=[-1]	final=engine routing runs; order=m	-1 uses the engine handler
+H13	3	HOOK_USEOBJON ret0=0 args=T,U,I	rets=[0]	final=item kept; no routing; order=m	place it back
+H13	4	HOOK_USEOBJON ret0=1 args=T,U,I	rets=[1]	final=item destroyed; no routing; order=m	remove it
+H13	5	HOOK_USEOBJON ret0=7 args=T,U,I	rets=[7]	final=engine routing runs; order=m	an undocumented value counts as unset
+H14	1	HOOK_USEOBJ ret0=1 args=U,I	rets=[1]	final=item destroyed; use_p_proc not requested; order=m	remove it
+H14	2	HOOK_USEOBJ ret0=0 args=U,I	rets=[0]	final=item kept; use_p_proc not requested; order=m	place it back
+H15	1	HOOK_STDPROCEDURE no member sets ret0 args=6,S,A,0,T,0	rets=[None]	final=use_p_proc runs; order=m	arg0 is the event number
+H15	2	HOOK_STDPROCEDURE ret0=-1 args=6,S,A,0,T,0	rets=[-1]	final=use_p_proc does not run; no override; order=m	the default action still follows
+H15	3	HOOK_STDPROCEDURE ret0=0 args=6,S,A,0,T,0	rets=[0]	final=use_p_proc runs; order=m	only -1 cancels
+H15	4	HOOK_STDPROCEDURE request for critter_p_proc args=-	rets=-	final=no chain runs; order=-	events 1, 12, 22 and 23 never fire it
+H16	1	HOOK_ENCOUNTER event 0, no member sets a return args=0,40,0,5,2	rets=[None, None]	final=encounter on map 40; order=m	the groups spawn
+H16	2	HOOK_ENCOUNTER event 0, ret0=41 args=0,40,0,5,2	rets=[41, None]	final=encounter on map 41; order=m	the map is replaced and the groups spawn
+H16	3	HOOK_ENCOUNTER event 0, ret0=-1 args=0,40,0,5,2	rets=[-1, None]	final=travel continues; order=m	the encounter is cancelled; step 7 of SPEC-018 section 5.6 stands
+H16	4	HOOK_ENCOUNTER event 0, ret0=41 ret1=1 args=0,40,0,5,2	rets=[41, 1]	final=map 41 loads, no groups; order=m	ret1 1 cancels the encounter and keeps the map
+H16	5	HOOK_ENCOUNTER event 1, ret0=42 args=1,40,0,-1,-1	rets=[42, None]	final=map 42 loads; order=m	no encounter exists to cancel
+H16	6	HOOK_ENCOUNTER event 1, ret0=-1 args=1,40,0,-1,-1	rets=[-1, None]	final=map 40 loads; order=m	-1 cancels for event 0 only
+H16	7	HOOK_ENCOUNTER forced encounter args=-	rets=-	final=no chain runs; order=-	a scripted encounter
+H17	1	HOOK_SETGLOBALVAR no member sets ret0 args=12,5	rets=[None]	final=GVAR 12 = 5; order=m	the written value stands
+H17	2	HOOK_SETGLOBALVAR ret0=9 args=12,5	rets=[9]	final=GVAR 12 = 9; order=m	the override is stored
+H17	3	HOOK_SETGLOBALVAR index out of range args=-	rets=-	final=no chain runs; order=-	the word already fails
+V1	1	fs_copy("art\x.frm","art\x.frm")	I:1	pos=0 bytes=00 00 00 04 00 0A 00 00 00 19 00 00	the source reads through the Vfs; the first handle is 1
+V1	2	fs_seek(1,8)	-	pos=8 bytes=00 00 00 04 00 0A 00 00 00 19 00 00	position set
+V1	3	fs_read_short(1)	I:25	pos=10 bytes=00 00 00 04 00 0A 00 00 00 19 00 00	big-endian; the position advances by 2
+V1	4	fs_seek(1,4); fs_write_short(1,25)	-	pos=6 bytes=00 00 00 04 00 19 00 00 00 19 00 00	big-endian; the rate field becomes 25
+V1	5	fs_copy("art/x.frm","art/x.frm")	I:1	pos=0 bytes=00 00 00 04 00 19 00 00 00 19 00 00	an existing path keeps its handle; the source resolves to the virtual file; the position returns to 0
+V2	1	fs_copy("art/none.frm","art/none.frm")	I:-1	-	an absent source gives -1 and creates nothing
+V3	1	fs_seek(1,99)	-	pos=0 bytes=00 00 00 04 00 19 00 00 00 19 00 00	past the end: the position does not change
+V3	2	fs_seek(1,11); fs_read_short(1)	I:0	pos=11 bytes=00 00 00 04 00 19 00 00 00 19 00 00	one byte left: 0, and no move
+V3	3	fs_seek(1,11); fs_write_short(1,7)	-	pos=11 bytes=00 00 00 04 00 19 00 00 00 19 00 00	one byte left: no write, and no move
+V4	1	fs_write_short(1,-1) at 0, then fs_read_short(1) at 0	I:-1	pos=2 bytes=FF FF 00 04 00 19 00 00 00 19 00 00	the low 16 bits are written; a read sign-extends
+U1	1	set_unique_id(A)	I:0x10000000	A=0x10000000 B=0x6 next=0x10000001	the first ID of the range
+U1	2	set_unique_id(A)	I:0x10000000	A=0x10000000 B=0x6 next=0x10000001	an assigned ID is kept
+U1	3	set_unique_id(B)	I:0x10000001	A=0x10000000 B=0x10000001 next=0x10000002	IDs rise
+U1	4	set_unique_id(A,-1)	I:0x384	A=0x384 B=0x10000001 next=0x10000002	the engine allocator gives a new ordinary ID (900 here); the item stacks again
+U1	5	set_unique_id(A)	I:0x10000002	A=0x10000002 B=0x10000001 next=0x10000003	a released ID is not reused
+M1	1	add_extra_msg_file("a.msg")	I:0x3000	next=0x3001	first ID of the range
+M1	2	add_extra_msg_file("b.msg")	I:0x3001	next=0x3002	IDs rise
+M1	3	add_extra_msg_file("A.MSG")	I:0x3000	next=0x3002	the same file keeps its ID; names compare without case
+M1	4	add_extra_msg_file("none.msg")	I:-1	next=0x3002	an absent file gives -1 and uses no ID
+M1	5	message_str_game(0x3000,5), number 5 present	S:"text"	-	as message_str
+M1	6	message_str_game(0x3000,6), number 6 absent	S:"Error"	-	as message_str
+M1	7	message_str_game(0x3005,5)	S:"Error"	-	an unassigned file ID
+M1	8	message_str_game(0,0)	S:"Error"	-	a nonpositive number
+T1	1	show_iface_tag(4)	-	lit=[4]	the ADDICT box lights
+T1	2	show_iface_tag(1)	-	lit=[4]	tags 1 and 2 are read-only
+T1	3	show_iface_tag(99)	-	lit=[4]	beyond the last custom tag
+T1	4	hide_iface_tag(4)	-	lit=[]	the script flag clears
+T1	5	is_iface_tag_active(4), player addicted, no script flag	I:1	-	the engine condition still lights it
+T1	6	hide_iface_tag(4), player addicted	-	box stays lit	hide clears the script flag only
+E1	1	metarule2_explosions(6,51,0)	temporary list [30,50]	-	Dynamite
+E1	2	metarule2_explosions(6,206,0)	temporary list [30,50]	-	armed Dynamite
+E1	3	metarule2_explosions(6,85,0)	temporary list [40,80]	-	Plastic Explosives
+E1	4	metarule2_explosions(6,209,0)	temporary list [40,80]	-	armed Plastic Explosives
+E1	5	metarule2_explosions(6,159,0)	temporary list [proto min,proto max]	-	any other weapon
+E1	6	metarule2_explosions(6,41,0)	temporary list [0,0]	-	not a weapon
+MG1	sidecar-r1	VSFL bytes, format revision 1	56 53 46 4C 01 00 00 00 03 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 01 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F	bytes=83	revision 1 layout of section 5.8
+MG1	2	load the slot	-	#1 list saved key=S:"traps" [S:"hi",F:0.5]	everything revision 1 holds carries over
+MG1	defaults	fields revision 1 lacks	next unique ID 0x10000000; forced map -1; forced flags 0	-	the migration defaults of section 5.8
+MG1	stream	VSX1 bytes after the load	56 53 58 31 02 00 00 00 03 00 00 00 00 00 00 10 FF FF FF FF 00 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 01 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F	bytes=95	section 5.9
+MG1	sfall_hash	fnv1a64 of the stream	365D1E6B2F91E99E	-	the hash of the migrated revision 2 state
+MG1	sidecar	VSFL bytes the next save writes	56 53 46 4C 02 00 00 00 03 00 00 00 00 00 00 10 FF FF FF FF 00 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 01 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F	bytes=95	the next save writes revision 2
+MG1	sidecar-fnv	fnv1a64 of the sidecar	86D05047FDC7D879	-	SPEC-021 section 2.1
+MG1	8	create_array(0,0)	I:3	#1 list saved key=S:"traps" [S:"hi",F:0.5]; #3 list perm []	next array ID carried over
+MG1	sidecar-r1-empty	VSFL bytes, revision 1, nothing stored	56 53 46 4C 01 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00	bytes=20	written by a save under sfall mode with no data
+MG1	sfall_hash-empty	fnv1a64 of the stream after that load	E010EA749700C826	-	equals vector F3
+MG2	refused-r3	load VSFL bytes with revision 3	56 53 46 4C 03 00 00 00 03 00 00 00 00 00 00 10 FF FF FF FF 00 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 01 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F	refused: unknown revision 3	only revisions 1 and 2 load
+MG2	refused-r0	load VSFL bytes with revision 0	56 53 46 4C 00 00 00 00 03 00 00 00 00 00 00 10 FF FF FF FF 00 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 01 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F	refused: unknown revision 0	only revisions 1 and 2 load
+MG2	refused-r1-truncated	load a revision 1 sidecar missing its last byte	56 53 46 4C 01 00 00 00 03 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 01 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00	refused: truncated	as revision 1 refuses it
+MG2	refused-r1-oversized	load a revision 1 sidecar with one trailing byte	56 53 46 4C 01 00 00 00 03 00 00 00 02 00 00 00 01 07 00 00 00 02 00 00 00 3F 03 08 00 00 00 61 5F 6D 79 76 61 72 31 01 E8 03 00 00 01 00 00 00 01 00 00 00 00 00 02 00 01 03 05 00 00 00 74 72 61 70 73 02 00 00 00 03 02 00 00 00 68 69 02 00 00 00 3F 00	refused: trailing bytes	as revision 1 refuses it
+SS1	1	create_array(2,0)	I:1	#1 list perm [I:0,I:0]	setup
+SS1	2	set_array(1,I:0,"a")	-	#1 list perm [S:"a",I:0]	setup
+SS1	3	set_array(1,I:1,"b")	-	#1 list perm [S:"a",S:"b"]	setup
+SS1	4	scan_array(1,"b")	I:1	#1 list perm [S:"a",S:"b"]	a string is found at its index
+SS1	5	scan_array(1,"z")	I:-1	#1 list perm [S:"a",S:"b"]	an absent string gives -1
+SS1	6	create_array(2,0)	I:2	#1 list perm [S:"a",S:"b"]; #2 list perm [I:0,I:0]	element 0 of list 2 is int 0
+SS1	7	set_array(2,I:1,I:9)	-	#1 list perm [S:"a",S:"b"]; #2 list perm [I:0,I:9]	setup
+SS1	8	scan_array(2,"z")	I:-1	#1 list perm [S:"a",S:"b"]; #2 list perm [I:0,I:9]	-1, not 0: class N pushed int 0 here, which read as a match at index 0
+SS1	9	scan_array(2,"0")	I:-1	#1 list perm [S:"a",S:"b"]; #2 list perm [I:0,I:9]	a string never equals an int
+SS1	10	scan_array(2,I:0)	I:0	#1 list perm [S:"a",S:"b"]; #2 list perm [I:0,I:9]	a number search on the same array still works
+SS1	11	scan_array(2,I:9)	I:1	#1 list perm [S:"a",S:"b"]; #2 list perm [I:0,I:9]	a number search on the same array still works
+SS2	1	HOOK_COMBATDAMAGE set_sfall_arg(12,"text") args=arg2=10,arg12=I:0	rets=[None]	final=arg2=I:10,arg12=S:"text",diagnostics=0; order=m	a mixed argument takes the string unchanged
+SS2	2	HOOK_COMBATDAMAGE set_sfall_arg(2,"text") args=arg2=10,arg12=I:0	rets=[None]	final=arg2=I:10,arg12=I:0,diagnostics=1; order=m	an int argument cannot convert it: unchanged, one diagnostic
+SS2	3	HOOK_COMBATDAMAGE set_sfall_arg(2,"7") args=arg2=10,arg12=I:0	rets=[None]	final=arg2=I:10,arg12=I:0,diagnostics=1; order=m	class I never parses a string, so the digits do not help
+SS2	4	HOOK_COMBATDAMAGE set_sfall_arg(2,F:7.9) args=arg2=10,arg12=I:0	rets=[None]	final=arg2=I:7,arg12=I:0,diagnostics=0; order=m	a float still truncates into an int argument

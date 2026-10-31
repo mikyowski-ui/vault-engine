@@ -133,12 +133,32 @@ two-repository route above and not from Team A.
   (reference revision `S1`): the opcode list, function reference and notes, hook
   reference, arrays and compiler guides, and public script headers. The research
   side states that it did not read sfall's implementation code, and that nothing
-  was checked against a running sfall or the target mods' scripts (the spec's
-  Decisions D-1 and D-26). A `[Must-match]` tag there means "as documented".
+  was checked against a running sfall (the spec's Decision D-1). A `[Must-match]`
+  tag there means "as documented", except the sidecar migration rules, which
+  carry the tag by owner instruction (D-32).
 - **Ingestion check, 2026-10-30.** Neither the spec nor any oracle file contains
   a `src/` path or a 40-character hexadecimal string, and the spec has no code
   listing. The builder side cannot run `spec_lint.py`. The spec's checklist
   records zero errors.
+- **Revision 3, ingested 2026-10-30.** It came from the research vault by the same
+  route. Its sources are the `S1` documents and headers as bundled with *Fallout
+  Et Tu* 2.0.3911, compiled `.int` scripts and script source from Et Tu and from
+  *Restoration Project Updated* 2.4.34, and the approved specs. The research side
+  states that no script text is reproduced, and that sfall's implementation code
+  was still not read. This audit closes Decision D-26, and Revision 3 promotes 25
+  behaviors and six hooks to tier P1.
+  - **Oracle files.** It changes `README.md`, `sfall-opcodes.tsv`,
+    `sfall-hooks.tsv` and `sfall-array-vectors.tsv`, and adds
+    `mod-opcode-usage.tsv`, the audit's ranked results in numbers and public
+    names. That table is evidence, not a test input.
+  - **D-46** supersedes D-T1's operand-class narrowing: the value operands of
+    `scan_array` and `set_sfall_arg` are class `A`. D-T1's ruling on `ret_class`
+    stands.
+  - **D-32** makes the sidecar format revision 2, and a revision 1 sidecar now
+    migrates on load instead of being refused (vectors MG1 and MG2).
+  - **Check.** The same grep finds nothing, and the diff has no code listing. The
+    builder side cannot run `spec_lint.py`, and the spec's checklist records no
+    linter run for the Revision 3 text.
 - **A linter note the hand-off discloses.** Its README says that eleven public
   names in `sfall-opcodes.tsv` also occur as identifiers in reference revision
   `R1`, so the linter flags them if pointed at that table. They are public names
@@ -152,15 +172,11 @@ two-repository route above and not from Team A.
   2026-10-30. It approves Decision D-3 as an owner instruction, amends SPEC-017 to
   match, corrects the list of shadowed enhanced words, defines the manifest key
   and a replay flag, and separates its sidecar delete from SPEC-023's stale `.SAV`
-  sweep (D-27 to D-29). No oracle file changed. A later research-vault revision
-  supersedes this one.
+  sweep (D-27 to D-29). No oracle file changed. Revision 3 builds on this text.
 - **Prose correction, 2026-10-30.** Team A, on the owner's brief of 2026-10-30 and
   from the implementer's report in `05608f9`, aligned sections 4.1, 5.4, 6.4 and
-  6.5 with `sfall-opcodes.tsv` (D-T1). No oracle file changed. That brief also
-  names a Revision 3, with Decisions D-32 and D-40, opcode and hook promotions for
-  Et Tu and Restoration Project Updated, and new oracle vectors. None of it had
-  reached this repository when the correction was made, so none of it is recorded
-  here as ingested.
+  6.5 with `sfall-opcodes.tsv` (D-T1). No oracle file changed. Revision 3 merges
+  this correction, apart from the two classes D-46 reverses.
 
 ## Hash-only oracle verification
 
