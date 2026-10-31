@@ -367,7 +367,8 @@ impl<A: WorldAssets> WorldHost<A> {
             // SPEC-013 §3.9.3 steps 5-6, §3.9.5: a party member's move is a
             // critical success with no draws and never a catch; step 8's
             // 571/573 message is still displayed.
-            let (check, award) = self.hook_steal(session, item, !from_target, quantity);
+            let (thief, victim) = (session.looter, session.root);
+            let (check, award) = self.hook_steal(thief, victim, item, !from_target, quantity);
             experience = award;
             let caught = match check {
                 StealHook::Engine => {

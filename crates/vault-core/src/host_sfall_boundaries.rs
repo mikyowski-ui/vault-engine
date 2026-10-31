@@ -7,7 +7,6 @@ use crate::{
     combat::{Attack, Resolution},
     host::WorldHost,
     host_sfall_hooks::{Preview, int, int_return, object},
-    loot::LootSession,
     skills::skill,
 };
 use std::cell::RefCell;
@@ -161,7 +160,8 @@ impl<A: WorldAssets> WorldHost<A> {
     /// experience that replaces SPEC-013 §3.9.5's increment.
     pub(crate) fn hook_steal(
         &mut self,
-        session: &LootSession,
+        thief: ObjectRef,
+        victim: ObjectRef,
         item: ObjectRef,
         planting: bool,
         quantity: i32,
@@ -170,8 +170,8 @@ impl<A: WorldAssets> WorldHost<A> {
             return (StealHook::Engine, None);
         }
         let args = vec![
-            object(session.looter),
-            object(session.root),
+            object(thief),
+            object(victim),
             object(item),
             int(i32::from(planting)),
             int(quantity),

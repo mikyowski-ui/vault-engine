@@ -1,11 +1,16 @@
 //! SPEC-024b §7.3 tests 3 to 6: every array vector of
 //! `oracle/SPEC-024/sfall-array-vectors.tsv`, step by step, and the sidecar.
 use crate::{
-    WorldState,
+    WorldHost, WorldState,
     sfall::{GlobalKey, SfallWorld},
     spec024_hook_tests::hook_vector_row,
     spec024_rows_tests::RowSession,
+    spec024_tests::{
+        Op::{I, W},
+        run, sfall_host,
+    },
     state_hash::fnv1a64,
+    test_support::TestAssets,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -355,8 +360,8 @@ fn reader_of(group: &str) -> Option<Reader> {
         "A" | "B" | "C" | "D" | "E" | "F" | "F2" | "F3" | "SS1" => Reader::Arrays,
         "MG1" => Reader::Migration,
         "MG2" => Reader::Refusal,
-        "H1" | "H2" | "H3" | "H4" | "H5" | "H6" | "H7" | "H8" | "H9" | "H10" | "H11" | "H12"
-        | "H13" | "H14" | "H15" | "H16" | "H17" | "SS2" => Reader::Hooks,
+        "SS2" => Reader::Hooks,
+        group if hook_group(group, 1..=33) => Reader::Hooks,
         "V1" | "V2" | "V3" | "V4" => Reader::Files,
         "U1" => Reader::UniqueIds,
         "M1" => Reader::Messages,
@@ -365,6 +370,11 @@ fn reader_of(group: &str) -> Option<Reader> {
         group if word_group(group) => Reader::Words,
         _ => return None,
     })
+}
+/// H groups numbered in `numbers`.
+fn hook_group(group: &str, numbers: std::ops::RangeInclusive<u32>) -> bool {
+    let number = group.strip_prefix('H').and_then(|n| n.parse::<u32>().ok());
+    number.is_some_and(|number| numbers.contains(&number))
 }
 /// W1 to W30, the rows Revision 4 promoted.
 fn word_group(group: &str) -> bool {
@@ -476,6 +486,38 @@ fn t3_every_array_vector_gives_its_push_and_its_state() {
     assert_eq!(hooks, 106);
     let words: usize = (1..=30).map(|n| counts[&format!("W{n}")]).sum();
     assert_eq!(words, 127);
+}
+
+/// §7.3 test 17: W1 to W30 step by step, and a session setting returns to
+/// its default on a new game and on a load (D-48).
+#[test]
+fn t17_the_w_vectors_and_session_settings_that_do_not_outlive_a_session() {
+    let (failures, counts) = walk(word_group);
+    assert_walked(failures);
+    assert_eq!(counts.len(), 30, "{counts:?}");
+    assert_eq!(counts.values().sum::<usize>(), 127);
+    let (mut host, _) = sfall_host();
+    let defaults = host.world.session.clone();
+    let change = |host: &mut WorldHost<TestAssets>| {
+        run(host, &[I(150), W(0x81a2)]);
+        assert_ne!(host.world.session, defaults, "set_skill_max changed one");
+    };
+    change(&mut host);
+    host.sfall_restored();
+    assert_eq!(host.world.session, defaults, "a load");
+    change(&mut host);
+    host.enable_sfall().unwrap();
+    assert_eq!(host.world.session, defaults, "a new game");
+}
+
+/// §7.3 test 18: H18 to H33, each row through its boundary. D-53's half is
+/// `spec024_boundary_tests::t18_ammo_cost_type_1_and_within_perception_type_2_never_run`.
+#[test]
+fn t18_the_h_vectors_of_revision_4_each_with_its_boundary() {
+    let (failures, counts) = walk(|group| hook_group(group, 18..=33));
+    assert_walked(failures);
+    assert_eq!(counts.len(), 16, "{counts:?}");
+    assert_eq!(counts.values().sum::<usize>(), 62);
 }
 
 /// A new group in the TSV has no reader until a test reads it.

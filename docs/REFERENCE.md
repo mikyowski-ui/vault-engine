@@ -3250,8 +3250,8 @@ the enhanced preset, so `inven_cmds` and the enhanced words `0x8200` and
 
 | Tier | Rows | What it does |
 | --- | --- | --- |
-| P1 | 158 rows: 117 words, 25 functions (39 rows), 1 `metarule3`, 1 `metarule2_explosions` | Runs |
-| P2 | 159 words, 94 function rows, 6 `metarule3`, 8 `metarule2_explosions` | Pops its operands, pushes int 0 or the empty string, and writes one diagnostic per program and row |
+| P1 | 193 rows: 133 words, 42 functions (58 rows), 1 `metarule3`, 1 `metarule2_explosions` | Runs |
+| P2 | 143 words, 75 function rows, 6 `metarule3`, 8 `metarule2_explosions` | Pops its operands, pushes int 0 or the empty string, and writes one diagnostic per program and row |
 | X | 18 words | As P2. These words address the original executable's memory, and never touch this process's. Et Tu's base scripts use them for a rest-timer patch and a Dogmeat dialogue patch, and those effects are lost here (SPEC-024b D-40) |
 | R | 6 words | Consume nothing and raise the undefined-instruction VM error |
 
@@ -3292,6 +3292,28 @@ The ones a mod author can trip on:
   wait.
 - `signal_close_game` returns to the operating system with no prompt, after the
   current step.
+
+Revision 4 promoted the 33 behaviors the owner's measurements named that have a
+published effect and an anchor in an approved spec, on 35 rows (SPEC-024b §4.12):
+
+| Group | Rows |
+| --- | --- |
+| Character limits | `set_skill_max`, `set_pc_stat_max`, `mod_skill_points_per_level`, `set_perk_freq`, `set_perk_level` |
+| World map | `set_map_time_multi`, `encounter_detection`, `remove_wm_town_names`, `set_terrain_name`, `set_car_intface_art`, `set_world_map_pos`, `car_gas_amount` |
+| Combat and reactions | `set_fo1_hit_chance`, `set_reaction_thresholds`, `get_critical_table`, `set_critical_table`, `reset_critical_table` |
+| Art and map data | `get_tile_fid`, word `0x8274`, `tile_get_objs`, `get_text_width`, the interface and map redraw functions |
+| Scripts and objects | `get_script`, `create_spatial`, `real_dude_obj`, `set_scr_name`, `reg_anim_callback`, `dialog_message`, `set_cursor_mode`, `unwield_slot`, `npc_engine_level_up`, `set_rest_mode` |
+
+Nine named behaviors stay P2: window drawing (`draw_image`, `draw_image_scaled`,
+`interface_art_draw`, `get_window_attribute`, `show_window`), `play_sfall_sound`,
+`set_town_title`, and `set_attack_explosion_radius` with `set_attack_is_explosion`
+(D-49 to D-52).
+
+Most of these set a session setting. It starts at its default on a new game and on
+each load, is never saved, and is outside `sfall_hash`, so a mod sets them again from
+its global scripts. Sfall mode's defaults are the published ones, and two differ from
+the engine with the mode off: the skill cap is 300 and not 200, and
+`set_reaction_thresholds` starts at -10 and 10 and not at the engine's mood bands.
 
 `sin cos tan arctan log exponent ^` are written in `vault_vm::sfall_math` from
 `+ - * /` alone, in binary64 and rounded to binary32, so every platform gives the
@@ -3365,30 +3387,53 @@ first. An empty chain costs nothing.
 | `HOOK_TOHIT` | 0 | After the cap of 95, for attacks, spray and line-of-fire recomputations, and AI tests |
 | `HOOK_AFTERHITROLL` | 1 | Once per attack, after Jinxed, Slayer and Sniper, before critical effects |
 | `HOOK_CALCAPCOST` | 2 | On attack costs, the 2 AP reload and the 2 AP generic use. A return of 0 is free |
+| `HOOK_DEATHANIM2` | 4 | After the death choice, for an attack or a `critter_dmg` death, unless the target is prone. Art must exist for ret0 |
 | `HOOK_COMBATDAMAGE` | 5 | Once per victim of a hit, before anything is debited |
 | `HOOK_USEOBJON` | 8 | When a critter uses an item on a critter or itself, uses an item with no Use flag, or uses a drug, before the item is used. ret0 0 keeps the item, 1 destroys it, and either ends the action |
 | `HOOK_BARTERPRICE` | 10 | On the offer's comparison, and on the screen's preview |
 | `HOOK_MOVECOST` | 11 | On each committed hex in combat, and on the movement cursor's planning query |
+| `HOOK_AMMOCOST` | 17 | Type 0 after a single shot, 2 as a burst is counted, 3 after it. It changes what is spent, never the damage |
 | `HOOK_USEOBJ` | 18 | When a critter uses an inventory item with the Use flag, a lit flare or an explosive, or the player uses an object on the map. Returns as `HOOK_USEOBJON` |
 | `HOOK_KEYPRESS` | 19 | Once per physical press and release, before any handling |
+| `HOOK_MOUSECLICK` | 20 | Once per recorded press and release, before any handling. It has no returns |
+| `HOOK_STEAL` | 22 | In place of the steal check, for each moved item. A forced result draws nothing and prints nothing. ret1 replaces the item's experience |
+| `HOOK_WITHINPERCEPTION` | 23 | After `perceives`: type 1 from `obj_can_see_obj`, 3 when AI selects a target, 0 elsewhere. ret0 2 skips the ray for type 1, and acts as 1 otherwise |
 | `HOOK_INVENTORYMOVE` | 24 | On a drag or a drop to the ground. It can only prevent the move |
+| `HOOK_INVENWIELD` | 25 | Before `wield_obj_critter`, `inven_unwield`, `unwield_slot`, an AI wield or unwield, or removing an equipped item, which still happens. Never from the inventory screen |
+| `HOOK_ADJUSTFID` | 26 | A preview of the figure on the inventory and barter screens |
+| `HOOK_COMBATTURN` | 27 | At each turn's start and end, and once when combat ends. 1 at the start skips the turn, and -1 at the end ends combat |
+| `HOOK_CARTRAVEL` | 28 | Once per car iteration, between computing speed and fuel and applying them |
 | `HOOK_SETGLOBALVAR` | 29 | In `set_global_var`, for a valid index, before the value is stored. ret0 is the value stored |
+| `HOOK_RESTTIMER` | 30 | Once per rest step, after its Esc poll, and once at a normal end. 1 stops the rest, and 0 keeps one Esc would stop |
 | `HOOK_GAMEMODECHANGE` | 31 | Once a step, when the `get_game_mode` bits changed, and once on `signal_close_game`. It has no returns |
+| `HOOK_USEANIMOBJ` | 32 | Before the approach to a use of scenery, a container or a ladder. -1 skips the animation, and the use follows |
+| `HOOK_DESCRIPTIONOBJ` | 34 | On examine, after `description_p_proc` did not override, before the base text. ret0 is a string |
+| `HOOK_USESKILLON` | 35 | Before the skill request's gating. ret0 replaces the user, except for Steal, or -1 cancels. ret1 1 passes the combat refusal for the player or a controlled critter |
+| `HOOK_SETLIGHTING` | 38 | Before `obj_set_light_level`, a thrown light or `set_light_level`, on the computed intensity |
 | `HOOK_STDPROCEDURE` | 40 | Before a requested procedure the script has, except events 1, 12, 22 and 23. ret0 -1 cancels it, and the action's default still follows |
 | `HOOK_ENCOUNTER` | 43 | On a selected random encounter, and on entering a map from the world map. ret0 replaces the map, -1 cancels a random encounter, and ret1 1 loads the map with no groups. A forced encounter never runs it |
+| `HOOK_ADJUSTRADS` | 45 | When the player's radiation changes, after resistance |
+| `HOOK_CANUSEWEAPON` | 48 | After the AI's usability test, and a preview for the player's active slot, which a 0 disables |
 
-Those are the 14 hooks of tier P1. The other 36 load and register, and no chain runs.
+Those are the 30 hooks of tier P1. The other 20 load and register, and no chain runs.
+`HOOK_AMMOCOST` type 1 and `HOOK_WITHINPERCEPTION` type 2 never run, because each
+needs a `ddraw.ini` option that is out of scope (D-53).
 A member cannot destroy the item a use hook is about: it returns 1 instead. A member that ends in a VM
 error is unloaded from every chain, and a word that would suspend a member ends it.
 Past 8 nested chains a chain is skipped.
 
 A chain runs only in the Input or Simulation phase. A value the interface only
 shows is a preview: the to-hit percentage under the cursor, the AP cost on the bar,
-the cost beside the movement cursor and the barter totals are queried in the
+the cost beside the movement cursor, the barter totals, the character figure and
+whether the active weapon can be used are queried in the
 Simulation phase when their inputs change, and drawing reads what is stored. A value
 whose inputs have not reached a step yet shows the unhooked cost. So a hook fires less often here than under sfall,
 which a script that counts firings can notice. The input log holds the physical
-key, so a replay runs `HOOK_KEYPRESS` again and gets the same logical key.
+key and button, so a replay runs `HOOK_KEYPRESS` and `HOOK_MOUSECLICK` again, and
+`HOOK_KEYPRESS` gives the same logical key.
+
+Under sfall mode Esc stops a rest at its next step, not at once, because
+`HOOK_RESTTIMER` must see it there.
 
 `--report-script-stack --sfall` checks every `.INT` under `scripts/` of a folder with
 this table, with no `scripts.lst` needed. Run it on a mod's scripts before trusting
@@ -3435,6 +3480,17 @@ Sfall mode (SPEC-024b), against the spec's boundaries:
 
 - `HOOK_COMBATDAMAGE` has no AI area-safety site: the engine's AI runs no such
   simulation, so the spec's clause has nothing to attach to.
+- `encounter_detection`, `set_fo1_hit_chance` and `set_car_intface_art` store their
+  setting and change nothing yet. The engine has no Outdoorsman avoidance check to
+  skip, no `(PE - 2)` term for the player to lose (§3.5's range term is the only one),
+  and draws no car image to replace. D-58 asked for these anchors to be checked.
+- `set_terrain_name` takes cell coordinates, as its text says, while
+  `get_terrain_name` takes world pixels, as §4.11 says, although §4.12 calls them the
+  same.
+- `HOOK_CARTRAVEL`'s arg0 is the engine's steps, 1 to 4 by SPEC-019 §3.19.3, not the
+  "3 to 8" of §6.19's table.
+- `create_spatial` gives the record's script ID as its object, because a spatial
+  record has no object of its own.
 - `set_global_var` reaches a member in the script that called it, as §6.18 asks. Any
   other word that causes a chain skips a member whose script is already running,
   with a diagnostic.

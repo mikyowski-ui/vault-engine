@@ -31,6 +31,10 @@ use vault_formats::pro::BasicFlags;
 const GET_ARG: Op = W(0x81e4);
 const EQUAL: u16 = 0x8033;
 const AND: u16 = 0x803e;
+const ADD: u16 = 0x8039;
+const DISCARD: u16 = 0x801a;
+const GLOBAL_INT: u16 = 0x819e;
+const SET_GLOBAL: u16 = 0x819d;
 
 /// A row's `args=` as ints, each symbol resolved by `names`.
 fn expected(cells: &[&str], names: &[(&str, ObjectRef)]) -> Vec<i32> {
@@ -65,7 +69,7 @@ fn messages(host: &WorldHost<TestAssets>) -> Vec<Vec<u8>> {
     lines.collect()
 }
 
-fn h18_row(cells: &[&str]) {
+pub(crate) fn h18_row(cells: &[&str]) {
     let (mut host, [attacker, _, target, _]) = attack_host(HOOK_DEATHANIM2, &member(5, cells[3]));
     if no_chain(cells) {
         let state = host.world.critter_state_mut(target).unwrap();
@@ -134,7 +138,7 @@ fn hook_4_an_animation_with_no_art_leaves_the_engines_with_a_diagnostic() {
 fn magazine(host: &WorldHost<TestAssets>, gun: ObjectRef) -> i32 {
     host.world.loaded(gun).0
 }
-fn h19_row(cells: &[&str]) {
+pub(crate) fn h19_row(cells: &[&str]) {
     let (mut host, [attacker, _, defender, _]) = attack_host(HOOK_AMMOCOST, &member(4, cells[3]));
     let gun = host.world.wielded(attacker, RIGHT).unwrap();
     let names = [("W", gun)];
@@ -233,7 +237,7 @@ fn hook_17_type_1_never_runs() {
     assert_eq!((args[3], runs), (0, 1));
 }
 
-fn h20_row(cells: &[&str]) {
+pub(crate) fn h20_row(cells: &[&str]) {
     let (mut host, _) = sfall_host();
     registered(&mut host, HOOK_MOUSECLICK, &member(2, cells[3]));
     let args = expected(cells, &[]);
@@ -259,7 +263,7 @@ fn steal_session(host: &mut WorldHost<TestAssets>, victim: ObjectRef) -> (LootSe
     session.press();
     (session, loot)
 }
-fn h21_row(cells: &[&str]) {
+pub(crate) fn h21_row(cells: &[&str]) {
     let (mut host, victim) = sfall_host();
     let player = host.world.player;
     host.world.get_mut(player).unwrap().raw.hex = Some(19900);
@@ -319,7 +323,7 @@ fn hook_22_steal_by_vector_h21() {
     rows("H21").iter().for_each(|row| h21_row(row));
 }
 
-fn h22_row(cells: &[&str]) {
+pub(crate) fn h22_row(cells: &[&str]) {
     let (mut host, [watcher, blocker, target, far]) =
         attack_host(HOOK_WITHINPERCEPTION, &member(4, cells[3]));
     let args = expected(cells, &[("W", watcher), ("T", target)]);
@@ -396,7 +400,7 @@ fn hook_23_type_2_never_runs() {
     assert_eq!(saw(&host, HOOK_WITHINPERCEPTION).0[3], perception::OTHER);
 }
 
-fn h23_row(cells: &[&str]) {
+pub(crate) fn h23_row(cells: &[&str]) {
     let (mut host, critter) = sfall_host();
     let first = item(&mut host, 0);
     host.world.add_item(critter, first, 1, true).unwrap();
@@ -454,7 +458,7 @@ fn hook_25_a_removal_goes_on_whatever_the_chain_returns() {
     assert_eq!(saw(&host, HOOK_INVENWIELD).1, 1);
 }
 
-fn h24_row(cells: &[&str]) {
+pub(crate) fn h24_row(cells: &[&str]) {
     let (mut host, _) = sfall_host();
     if no_chain(cells) {
         registered(&mut host, HOOK_ADJUSTFID, &member(2, "rets=[]"));
@@ -501,7 +505,7 @@ impl CombatAi for Turns {
         Ok(())
     }
 }
-fn h25_row(cells: &[&str]) {
+pub(crate) fn h25_row(cells: &[&str]) {
     let (mut host, [critter, ..]) = attack_host(HOOK_COMBATTURN, &member(3, cells[3]));
     let player = host.world.player;
     let args = expected(cells, &[("C", critter), ("P", player)]);
@@ -581,7 +585,7 @@ fn hook_27_a_resumed_players_turn_says_so_at_both_ends() {
     assert_eq!(saw(&host, HOOK_COMBATTURN).0, [0, player as i32, 0]);
 }
 
-fn h26_row(cells: &[&str]) {
+pub(crate) fn h26_row(cells: &[&str]) {
     let (mut host, _) = sfall_host();
     registered(&mut host, HOOK_CARTRAVEL, &member(2, cells[3]));
     let (speed, fuel) = host.hook_car_travel(5, 100);
@@ -619,7 +623,7 @@ fn hook_28_a_car_iteration_makes_the_chains_steps_and_uses_its_fuel() {
     assert_eq!((state.position[0], state.car.fuel), (13, 950));
 }
 
-fn h27_row(cells: &[&str]) {
+pub(crate) fn h27_row(cells: &[&str]) {
     let (mut host, _) = sfall_host();
     registered(&mut host, HOOK_RESTTIMER, &member(4, cells[3]));
     let args = expected(cells, &[]);
@@ -675,7 +679,7 @@ fn scenery(host: &mut WorldHost<TestAssets>) -> ObjectRef {
     let prototype = std::sync::Arc::new(vault_formats::Prototype::parse(&bytes).unwrap());
     host.world.spawn(prototype, 20100, 0).unwrap()
 }
-fn h28_row(cells: &[&str]) {
+pub(crate) fn h28_row(cells: &[&str]) {
     let (mut host, critter) = sfall_host();
     let object = scenery(&mut host);
     registered(&mut host, HOOK_USEANIMOBJ, &member(3, cells[3]));
@@ -744,7 +748,7 @@ fn hook_32_an_item_used_on_scenery_is_not_a_use_of_it() {
     assert_eq!(saw(&host, HOOK_USEANIMOBJ).1, 0);
 }
 
-fn h29_row(cells: &[&str]) {
+pub(crate) fn h29_row(cells: &[&str]) {
     let (mut host, object) = sfall_host();
     host.world.get_mut(object).unwrap().description = b"Base".to_vec();
     let player = host.world.player;
@@ -812,7 +816,7 @@ fn hook_34_description_by_vector_h29() {
     rows("H29").iter().for_each(|row| h29_row(row));
 }
 
-fn h30_row(cells: &[&str]) {
+pub(crate) fn h30_row(cells: &[&str]) {
     let (mut host, critter) = sfall_host();
     let player = host.world.player;
     host.world.get_mut(player).unwrap().raw.hex = Some(19900);
@@ -865,7 +869,7 @@ fn hook_35_with_no_pass_combat_refuses() {
     assert!(!host.use_skill_on(player, object, 9).unwrap());
 }
 
-fn h31_row(cells: &[&str]) {
+pub(crate) fn h31_row(cells: &[&str]) {
     let (mut host, object) = sfall_host();
     registered(&mut host, HOOK_SETLIGHTING, &member(3, cells[3]));
     let args = expected(cells, &[("O", object)]);
@@ -897,7 +901,7 @@ fn hook_38_the_words_run_on_the_computed_intensity() {
     assert_eq!(host.world.ambient, 20000);
 }
 
-fn h32_row(cells: &[&str]) {
+pub(crate) fn h32_row(cells: &[&str]) {
     let (mut host, npc) = sfall_host();
     let player = host.world.player;
     registered(&mut host, HOOK_ADJUSTRADS, &member(2, cells[3]));
@@ -923,7 +927,7 @@ fn hook_45_adjust_rads_by_vector_h32() {
     rows("H32").iter().for_each(|row| h32_row(row));
 }
 
-fn h33_row(cells: &[&str]) {
+pub(crate) fn h33_row(cells: &[&str]) {
     let (mut host, [critter, ..]) = attack_host(HOOK_CANUSEWEAPON, &member(4, cells[3]));
     let gun = host.world.wielded(critter, RIGHT).unwrap();
     let player = host.world.player;
@@ -971,6 +975,61 @@ fn hook_48_the_slot_preview_stores_its_result_for_presentation() {
         host.sfall_previewed(Preview::SlotUsable, &[0, 0, 0])
             .is_none()
     );
+}
+
+/// Count this chain's runs in global 1, and the runs of type `kind`, the
+/// last of the hook's four arguments, in global 5.
+fn counting(kind: i32) -> Vec<Op> {
+    let mut body = vec![I(1), I(1), W(GLOBAL_INT), I(1), W(ADD), W(SET_GLOBAL)];
+    body.extend([I(5), I(5), W(GLOBAL_INT)]);
+    for _ in 0..3 {
+        body.extend([GET_ARG, W(DISCARD)]);
+    }
+    body.extend([GET_ARG, I(kind), W(EQUAL), W(ADD), W(SET_GLOBAL)]);
+    body
+}
+
+/// §7.3 test 18's second half (D-53), over every query there is.
+#[test]
+fn t18_ammo_cost_type_1_and_within_perception_type_2_never_run() {
+    let (mut host, [attacker, _, defender, _]) = attack_host(HOOK_AMMOCOST, &counting(1));
+    host.perform_attack(attacker, defender, RIGHT, 8, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(global(&host, 1), 1, "the single shot");
+    let (mut burst, target, _) =
+        crate::combat_tests::spray_world(crate::combat::attack_mode::BURST);
+    burst.sfall = Some(Default::default());
+    burst.world.sfall = Some(Default::default());
+    registered(&mut burst, HOOK_AMMOCOST, &counting(1));
+    let player = burst.world.player;
+    let attack = burst
+        .world
+        .attack_profile(player, target, RIGHT, 8, false)
+        .unwrap();
+    let mut rng = crate::ParkMiller::seeded(7).unwrap();
+    let spray = burst
+        .resolve_spray(player, target, &attack, &mut rng)
+        .unwrap();
+    let gun = burst.world.wielded(player, RIGHT).unwrap();
+    burst.hook_ammo_spent(gun, &spray.main);
+    assert_eq!(global(&burst, 1), 2, "the burst's two types");
+    assert_eq!((global(&host, 5), global(&burst, 5)), (0, 0), "type 1");
+
+    let (mut host, [watcher, _, target, _]) = attack_host(HOOK_WITHINPERCEPTION, &counting(2));
+    run(&mut host, &[I(watcher as i32), I(target as i32), W(0x80dc)]);
+    run(&mut host, &[I(watcher as i32), I(target as i32), W(0x80f5)]);
+    host.world.get_mut(target).unwrap().opponent = watcher;
+    host.world.ai.snapshot = vec![target];
+    host.danger(watcher);
+    host.world.ai.snapshot = vec![watcher];
+    host.alert_onlookers(target);
+    host.world.get_mut(target).unwrap().opponent = 0;
+    host.world.get_mut(watcher).unwrap().opponent = target;
+    host.start_combat(watcher, target).unwrap();
+    host.request_end_combat(&mut crate::combat_state::PacketAi);
+    assert!(global(&host, 1) >= 4, "each caller ran it");
+    assert_eq!(global(&host, 5), 0, "type 2");
 }
 
 #[test]

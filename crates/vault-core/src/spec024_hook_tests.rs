@@ -5,12 +5,19 @@ use crate::{
     ScriptEvent, WorldEffect, WorldHost, fixture_state as fixture,
     host_ai_tests::fixture_e,
     host_sfall::game_mode,
+    host_sfall_boundaries::{
+        HOOK_ADJUSTFID, HOOK_ADJUSTRADS, HOOK_AMMOCOST, HOOK_CANUSEWEAPON, HOOK_CARTRAVEL,
+        HOOK_COMBATTURN, HOOK_DEATHANIM2, HOOK_DESCRIPTIONOBJ, HOOK_INVENWIELD, HOOK_MOUSECLICK,
+        HOOK_RESTTIMER, HOOK_SETLIGHTING, HOOK_STEAL, HOOK_USEANIMOBJ, HOOK_USESKILLON,
+        HOOK_WITHINPERCEPTION,
+    },
     host_sfall_hooks::{
         HOOK_AFTERHITROLL, HOOK_BARTERPRICE, HOOK_CALCAPCOST, HOOK_COMBATDAMAGE, HOOK_ENCOUNTER,
         HOOK_GAMEMODECHANGE, HOOK_INVENTORYMOVE, HOOK_KEYPRESS, HOOK_MOVECOST, HOOK_SETGLOBALVAR,
         HOOK_STDPROCEDURE, HOOK_TOHIT, HOOK_USEOBJ, HOOK_USEOBJON, Preview,
     },
     spec024_arrays_tests::VECTORS,
+    spec024_boundary_tests as boundary,
     spec024_tests::{Op, base, diagnostics, literal_offset, run, sfall_host},
     test_support::{TestAssets, request},
     world::ObjectRef,
@@ -811,6 +818,40 @@ fn a_preview_runs_only_when_its_inputs_change() {
 }
 
 /// The attack sequence of tests 7 and 8, with a chain on each hook.
+/// Every hook of tier P1.
+const ALL_P1: [i32; 30] = [
+    HOOK_TOHIT,
+    HOOK_AFTERHITROLL,
+    HOOK_CALCAPCOST,
+    HOOK_COMBATDAMAGE,
+    HOOK_BARTERPRICE,
+    HOOK_MOVECOST,
+    HOOK_INVENTORYMOVE,
+    HOOK_KEYPRESS,
+    HOOK_USEOBJON,
+    HOOK_USEOBJ,
+    HOOK_SETGLOBALVAR,
+    HOOK_GAMEMODECHANGE,
+    HOOK_STDPROCEDURE,
+    HOOK_ENCOUNTER,
+    HOOK_DEATHANIM2,
+    HOOK_AMMOCOST,
+    HOOK_MOUSECLICK,
+    HOOK_STEAL,
+    HOOK_WITHINPERCEPTION,
+    HOOK_INVENWIELD,
+    HOOK_ADJUSTFID,
+    HOOK_COMBATTURN,
+    HOOK_CARTRAVEL,
+    HOOK_RESTTIMER,
+    HOOK_USEANIMOBJ,
+    HOOK_DESCRIPTIONOBJ,
+    HOOK_USESKILLON,
+    HOOK_SETLIGHTING,
+    HOOK_ADJUSTRADS,
+    HOOK_CANUSEWEAPON,
+];
+
 fn sequence(body: &[Op], hooks: bool) -> (Vec<u64>, u64) {
     let (mut host, [attacker, defender, ..]) = fixture_e("critter", 2);
     host.sfall = Some(Default::default());
@@ -818,22 +859,7 @@ fn sequence(body: &[Op], hooks: bool) -> (Vec<u64>, u64) {
     host.assets.programs.clear();
     if hooks {
         let mut start = Vec::new();
-        for hook in [
-            HOOK_TOHIT,
-            HOOK_AFTERHITROLL,
-            HOOK_CALCAPCOST,
-            HOOK_COMBATDAMAGE,
-            HOOK_BARTERPRICE,
-            HOOK_MOVECOST,
-            HOOK_INVENTORYMOVE,
-            HOOK_KEYPRESS,
-            HOOK_USEOBJON,
-            HOOK_USEOBJ,
-            HOOK_SETGLOBALVAR,
-            HOOK_GAMEMODECHANGE,
-            HOOK_STDPROCEDURE,
-            HOOK_ENCOUNTER,
-        ] {
+        for hook in ALL_P1 {
             start.extend([I(hook), I(2), REGISTER_PROC]);
         }
         install(&mut host, "gl_0.int", script(&start, &[("m", body)]));
@@ -859,6 +885,25 @@ fn sequence(body: &[Op], hooks: bool) -> (Vec<u64>, u64) {
         run(&mut host, &[I(0), I(0), W(0x80c6)]);
         host.hook_std_procedure(6, attacker, defender, 0, 0);
         host.hook_map_entry(0);
+        // Revision 4's boundaries, each one query: the attack above reached
+        // only `HOOK_AMMOCOST`.
+        let gun = host.world.wielded(attacker, RIGHT).unwrap_or(0);
+        host.hook_death(attacker, defender, None, 5, 20);
+        host.sfall_mouse(true, 0);
+        host.hook_steal(attacker, defender, gun, false, 1);
+        host.perceives(attacker, defender, 0);
+        host.hook_wield(attacker, gun, 1, true);
+        host.sfall_figure(0x0100_0042);
+        host.hook_turn_start(attacker, false);
+        host.hook_turn_end(attacker);
+        host.hook_car_travel(4, 100);
+        host.hook_rest(0, (1, 0));
+        host.hook_use_animation(attacker, defender, 10);
+        host.hook_description(defender);
+        host.hook_skill_on(attacker, defender, 9);
+        host.hook_light(-1, 30000, -1);
+        host.hook_radiation(attacker, 5);
+        host.weapon_chain(attacker, gun, 0, true);
         host.sfall_end_of_step();
         hashes.push(host.world.state_hash());
     }
@@ -876,6 +921,14 @@ fn t7_two_runs_with_a_hook_that_draws_give_identical_streams() {
 
 #[test]
 fn t8_hooks_that_return_nothing_change_no_hash() {
+    let mut named = ALL_P1;
+    named.sort_unstable();
+    let firing: Vec<i32> = sfall::SFALL_HOOKS
+        .iter()
+        .filter(|row| row.fires)
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(named.to_vec(), firing, "all thirty, by the table");
     let plain = sequence(&[], false);
     assert_eq!(sequence(&[], true), plain);
 }
@@ -1681,6 +1734,22 @@ pub(crate) fn hook_vector_row(cells: &[&str]) {
         "H15" => h15_row(cells),
         "H16" => h16_row(cells),
         "H17" => h17_row(cells),
+        "H18" => boundary::h18_row(cells),
+        "H19" => boundary::h19_row(cells),
+        "H20" => boundary::h20_row(cells),
+        "H21" => boundary::h21_row(cells),
+        "H22" => boundary::h22_row(cells),
+        "H23" => boundary::h23_row(cells),
+        "H24" => boundary::h24_row(cells),
+        "H25" => boundary::h25_row(cells),
+        "H26" => boundary::h26_row(cells),
+        "H27" => boundary::h27_row(cells),
+        "H28" => boundary::h28_row(cells),
+        "H29" => boundary::h29_row(cells),
+        "H30" => boundary::h30_row(cells),
+        "H31" => boundary::h31_row(cells),
+        "H32" => boundary::h32_row(cells),
+        "H33" => boundary::h33_row(cells),
         "SS2" => ss2_row(cells),
         other => panic!("no hook vector {other}"),
     }
