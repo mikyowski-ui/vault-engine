@@ -647,7 +647,8 @@ impl MapPreview {
             }
             let name = area.name.as_bytes();
             let width = painter.width(screen::LABEL_FONT, name);
-            if width > 0 {
+            // SPEC-024b §4.12 `remove_wm_town_names`.
+            if width > 0 && self.host.world.session.town_names {
                 let origin = ui2::city_label(center, radius, width);
                 self.draw_label(painter, image, name, origin, width, VIEW_CLIP);
             }

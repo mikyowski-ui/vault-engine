@@ -61,17 +61,17 @@ fn every_oracle_row_is_in_the_table_with_its_contract() {
     let oracle = |tier: &str| oracle_rows(|cells| cells[0] == "word" && cells[9] == tier);
     let count = |tier| SFALL_WORDS.iter().filter(|row| row.tier == tier).count();
     for (tier, name, expected) in [
-        (Tier::P1, "P1", 117),
-        (Tier::P2, "P2", 159),
+        (Tier::P1, "P1", 133),
+        (Tier::P2, "P2", 143),
         (Tier::X, "X", 18),
         (Tier::R, "R", 6),
     ] {
         assert_eq!(oracle(name), expected, "{name} in the oracle");
         assert_eq!(count(tier), expected, "{name} in the table");
     }
-    // 26 promoted usage rows cover 32 opcode rows here: sfall_func has one
-    // row per argument count.
-    assert_eq!(oracle_rows(|cells| cells[9] == "P1"), 158);
+    // Revision 4: sfall_func has one row per argument count, so 33 behaviors
+    // are 35 rows.
+    assert_eq!(oracle_rows(|cells| cells[9] == "P1"), 193);
     assert_eq!(
         oracle_rows(|cells| cells[0] == "sfall_func" && cells[9] == "P1"),
         SFALL_FUNCTIONS
@@ -128,7 +128,7 @@ fn the_stack_model_reads_the_oracle_under_sfall_with_or_without_enhanced() {
 #[test]
 fn p1_queries_are_limited_to_p1() {
     let names = p1_functions();
-    assert_eq!(names.len(), 25);
+    assert_eq!(names.len(), 42);
     assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
     // The list is the oracle's distinct P1 names, each one read from there.
     let mut oracle: Vec<&str> = ORACLE

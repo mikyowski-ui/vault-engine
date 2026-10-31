@@ -1932,6 +1932,7 @@ impl MapPreview {
                 self.key_up(key);
             }
         }
+        self.apply_sfall_requests();
         self.host.set_sfall_screens(self.sfall_screens());
         let changed = self.frame(now);
         self.show_message_box();
@@ -1939,6 +1940,23 @@ impl MapPreview {
         self.host.sfall_end_of_step();
         self.quit_requested |= self.host.sfall_session_closed();
         changed
+    }
+    /// SPEC-024b §4.12: what scripts asked of the interface.
+    fn apply_sfall_requests(&mut self) {
+        use vault_core::ui::cursor::Mode;
+        if let Some(text) = self.host.world.dialogue.script_message.take() {
+            if matches!(self.screen, Screen::Barter(_)) {
+                self.barter_reply(text);
+            } else if let Err(error) = self.host.show_script_reply(text) {
+                self.status = error.to_string().into_bytes();
+            }
+        }
+        match self.host.world.session.cursor_mode.take() {
+            Some(0) => self.hud.mode = Mode::Movement,
+            Some(1) => self.hud.mode = Mode::Arrow,
+            Some(2) => self.hud.mode = Mode::Crosshair,
+            _ => {}
+        }
     }
     /// SPEC-024b §4.4: the `get_game_mode` bits of the open screen.
     fn sfall_screens(&self) -> u32 {

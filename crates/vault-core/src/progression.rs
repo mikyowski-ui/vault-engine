@@ -191,7 +191,12 @@ impl CharacterSheet {
         let row = perk_row(perk);
         perk.selectable()
             && self.rank(perk) < row.max_rank
-            && self.level >= row.min_level
+            && self.level
+                >= self
+                    .perk_levels
+                    .get(&perk)
+                    .copied()
+                    .unwrap_or(row.min_level)
             && row
                 .skill
                 .is_none_or(|(skill, percent)| self.skill(skill, context) >= percent)
@@ -264,12 +269,18 @@ impl CharacterSheet {
     /// copy of the sheet, so the reconciliation repeats.
     pub fn reconcile_levels(&mut self, context: StatContext) -> bool {
         if self.level != self.reconciled_level && self.level <= MAX_LEVEL {
-            let interval = if self.has_trait(Trait::Skilled) { 4 } else { 3 };
+            // SPEC-024b §4.12: a positive `set_perk_freq` overrides Skilled.
+            let interval = match context.perk_interval {
+                ..=0 if self.has_trait(Trait::Skilled) => 4,
+                ..=0 => 3,
+                interval => interval,
+            };
             for level in self.reconciled_level.saturating_add(1)..=self.level {
                 let mut points = i64::from(self.unspent_skills)
                     + 5
                     + 2 * self.raw(4, context)
-                    + 2 * i64::from(self.rank(Perk::Educated));
+                    + 2 * i64::from(self.rank(Perk::Educated))
+                    + i64::from(context.level_points);
                 if self.has_trait(Trait::Gifted) {
                     points = (points - 5).max(0);
                 }

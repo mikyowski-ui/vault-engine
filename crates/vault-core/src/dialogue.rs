@@ -65,12 +65,17 @@ impl Mood {
         }
     }
     pub fn from_reaction(reaction: i32) -> Self {
-        if reaction <= 25 {
-            Self::Bad
-        } else if reaction <= 75 {
+        Self::of_reaction(reaction, [25, 75])
+    }
+    /// The band of `reaction`: neutral above the first threshold, good above
+    /// the second (SPEC-024b §4.12 `set_reaction_thresholds`).
+    pub fn of_reaction(reaction: i32, [neutral, good]: [i32; 2]) -> Self {
+        if reaction > good {
+            Self::Good
+        } else if reaction > neutral {
             Self::Neutral
         } else {
-            Self::Good
+            Self::Bad
         }
     }
     pub fn transition(self, reaction: i32) -> Option<(u8, Self)> {
@@ -634,6 +639,9 @@ pub struct GDialog {
     pub waiting: bool,
     pub pending_barter: bool,
     pub barter_modifier: i32,
+    /// SPEC-024b §4.12 `dialog_message`'s text, which shows in the reply
+    /// window or the barter response area until the next reply.
+    pub script_message: Option<Vec<u8>>,
     pub resolved_reply: Vec<u8>,
     pub resolved_options: Vec<Vec<u8>>,
     pub page: usize,
@@ -666,6 +674,7 @@ impl Default for GDialog {
             depth: 0,
             waiting: false,
             pending_barter: false,
+            script_message: None,
             barter_modifier: 0,
             resolved_reply: Vec::new(),
             resolved_options: Vec::new(),
@@ -736,6 +745,7 @@ impl GDialog {
             });
         }
         self.reply = Some(text);
+        self.script_message = None;
         self.program = program;
         self.page = 0;
         self.page_offsets = vec![0];
@@ -900,6 +910,7 @@ pub fn npc_reaction(
     presence: u32,
     cult: bool,
     reputation: Reputation,
+    thresholds: [i32; 2],
 ) -> i32 {
     if locals.len() < 4 {
         return -1;
@@ -931,7 +942,7 @@ pub fn npc_reaction(
     }
     let value = value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     locals[0] = value;
-    locals[1] = Mood::from_reaction(value).category();
+    locals[1] = Mood::of_reaction(value, thresholds).category();
     locals[2] = 1;
     value
 }

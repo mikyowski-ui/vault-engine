@@ -425,7 +425,7 @@ fn spec006_queue_iq_reaction_and_art_vectors() {
     assert_eq!(session.background, 5);
     let mut locals = [0; 4];
     assert_eq!(
-        npc_reaction(&mut locals, 5, 0, false, Reputation::default()),
+        npc_reaction(&mut locals, 5, 0, false, Reputation::default(), [25, 75]),
         50
     );
     assert_eq!(&locals[..3], &[50, 2, 1]);
@@ -438,7 +438,8 @@ fn spec006_queue_iq_reaction_and_art_vectors() {
             Reputation {
                 value: 999,
                 ..Default::default()
-            }
+            },
+            [25, 75]
         ),
         50
     );

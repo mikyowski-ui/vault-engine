@@ -42,6 +42,16 @@ const RANDOM: Op = W(0x80b4);
 /// there.
 const RIGHT: u8 = crate::critical::hit_mode::RIGHT_PRIMARY;
 
+pub(crate) fn global_of(host: &WorldHost<TestAssets>, key: i32) -> i32 {
+    global(host, key)
+}
+/// A program with ID `id` whose procedure 2 adds 1 to global 3.
+pub(crate) fn callback_program(id: u32) -> Vm {
+    let body = [I(3), I(3), GLOBAL_INT, I(1), ADD, SET_GLOBAL];
+    let mut vm = Vm::new(script(&[], &[("p", &body)]));
+    vm.id = id;
+    vm
+}
 /// `ops`' bytes; a string op is a literal of `strings`.
 fn encode(ops: &[Op], strings: &IntProgram) -> Vec<u8> {
     let mut bytes = Vec::new();

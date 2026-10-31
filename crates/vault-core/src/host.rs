@@ -595,6 +595,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// The left map's programs and presentation stop before a load.
     fn teardown_map(&mut self) -> Result<(), WorldError> {
+        self.sfall_reset_names();
         self.motions.clear();
         self.world.background_enabled = false;
         self.world.scrolling_enabled = false;
@@ -1742,7 +1743,11 @@ impl<A: WorldAssets> WorldHost<A> {
             false
         }
     }
-    fn callback(&mut self, program: u32, procedure: u32) -> Result<RunOutcome, WorldError> {
+    pub(crate) fn callback(
+        &mut self,
+        program: u32,
+        procedure: u32,
+    ) -> Result<RunOutcome, WorldError> {
         // SPEC-005 §3.2: a program that stopped itself runs nothing more.
         if self.programs.get(&program).is_some_and(Vm::self_stopped) {
             return Ok(RunOutcome::Stopped);
@@ -1932,11 +1937,12 @@ impl<A: WorldAssets> WorldHost<A> {
         let presence = self.world.perk(Perk::Presence);
         let cult = self.world.perk(Perk::CultOfPersonality) > 0;
         let reputation = self.reputation_inputs();
+        let thresholds = self.world.session.reaction;
         self.world
             .lvars
             .get_mut(base..base + 4)
             .map_or(-1, |locals| {
-                npc_reaction(locals, charisma, presence, cult, reputation)
+                npc_reaction(locals, charisma, presence, cult, reputation, thresholds)
             })
     }
     pub(crate) fn start_dialogue(
@@ -1967,7 +1973,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 0 => owner,
                 target => target,
             };
-            let mood = Mood::from_reaction(self.reaction(source));
+            let thresholds = self.world.session.reaction;
+            let mood = Mood::of_reaction(self.reaction(source), thresholds);
             let idle = self.world.dialogue.idle;
             // SPEC-006 §3.11 safe rule: a head outside the list selects no
             // fidget art and is diagnosed; the session still opens, without

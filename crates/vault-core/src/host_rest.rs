@@ -9,6 +9,10 @@ pub const TEAM_CHECK_MAPS: [i32; 5] = [35, 39, 40, 45, 46];
 pub const TEAM_CHECK_EXEMPT_TOWNS: [i32; 6] = [0, 2, 3, 6, 7, 10];
 /// Credited minutes that trigger three hours of party resting healing.
 pub const REST_CREDIT_HEAL: i32 = 180;
+/// SPEC-024b §4.12 `set_rest_mode`'s bits.
+const REST_DISABLED: i32 = 1;
+const REST_STRICT: i32 = 2;
+const REST_NO_HEALING: i32 = 4;
 
 /// The visible alarm-menu choices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +127,18 @@ impl<A: WorldAssets> WorldHost<A> {
     pub fn rest_allowed(&self) -> bool {
         let map = self.world.map.header.map_number;
         let elevation = self.world.elevation;
+        // SPEC-024b §4.12 `set_rest_mode`: these add to the test below.
+        let mode = self.world.session.rest_mode;
+        if mode & REST_DISABLED != 0
+            || (mode & REST_STRICT != 0
+                && self
+                    .world
+                    .fallout2
+                    .as_deref()
+                    .is_some_and(|state| !state.can_rest(map, elevation)))
+        {
+            return false;
+        }
         // SPEC-008 §3.10: the town is the current map's fixed table town;
         // -1 (an unnumbered map) falls into the team-checking default.
         let teams = match self.world.fallout2.as_deref() {
@@ -160,12 +176,14 @@ impl<A: WorldAssets> WorldHost<A> {
                     || (teams && state.team != player_team))
         })
     }
-    fn credit_rest(&mut self, minutes: i32) {
+    pub(crate) fn credit_rest(&mut self, minutes: i32) {
         self.world.rest_credit = self.world.rest_credit.saturating_add(minutes);
         if self.world.rest_credit >= REST_CREDIT_HEAL {
             // Any overshoot is discarded.
             self.world.rest_credit = 0;
-            self.heal_party(3);
+            if self.world.session.rest_mode & REST_NO_HEALING == 0 {
+                self.heal_party(3);
+            }
         }
     }
     /// One UI step's candidate time: reaching/passing the next due event

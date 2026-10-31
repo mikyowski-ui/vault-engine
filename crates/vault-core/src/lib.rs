@@ -42,6 +42,7 @@ pub mod host_sfall;
 mod host_sfall_hooks;
 mod host_sfall_objects;
 mod host_sfall_rows;
+mod host_sfall_settings;
 mod host_skills;
 mod host_sound;
 pub mod host_talk;

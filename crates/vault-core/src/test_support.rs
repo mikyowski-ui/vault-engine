@@ -61,6 +61,8 @@ pub(crate) struct TestAssets {
     pub art_policy: ArtPolicy,
     /// Critter animation codes without art (see [`ArtPolicy`]).
     pub missing: BTreeSet<u8>,
+    /// What `font_number` gives, for every number.
+    pub font: Option<Arc<vault_formats::Font>>,
     /// `(category, art index)` to list token.
     pub tokens: BTreeMap<(u8, u16), Vec<u8>>,
     /// Effect files present, as upper-case stems; without a set every path
@@ -166,6 +168,9 @@ impl WorldAssets for TestAssets {
             .get(&fid)
             .cloned()
             .ok_or_else(|| WorldError::Invalid("object art unavailable".into()))
+    }
+    fn font_number(&self, _number: i32) -> Option<Arc<vault_formats::Font>> {
+        self.font.clone()
     }
     fn art_exists(&self, fid: u32) -> bool {
         let unless_missing = !self.missing.contains(&Fid(fid).animation());

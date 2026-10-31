@@ -767,6 +767,9 @@ pub struct WorldState {
     /// SPEC-024b: sfall mode's world state; `None` with the mode off. It is
     /// outside `state_hash`, which stays `VSH1`.
     pub sfall: Option<Box<crate::sfall::SfallWorld>>,
+    /// SPEC-024b §4.12: what a script set for this session. It is neither
+    /// saved nor hashed.
+    pub session: crate::sfall::SessionSettings,
     /// Kill experience accumulated during combat, awarded at cleanup.
     pub combat_experience: i32,
     pub combat_state: crate::combat_state::CombatState,
@@ -993,6 +996,7 @@ impl WorldState {
             free_movement: 0,
             kills: [0; 15],
             sfall: None,
+            session: Default::default(),
             combat_experience: 0,
             combat_state: Default::default(),
             world_map: Default::default(),
@@ -1455,6 +1459,10 @@ impl WorldState {
             remaining_ap: ap,
             visible_light: self.visible_light(object),
             difficulty: self.difficulty,
+            skill_cap: self.session.skill_cap,
+            stat_max: self.session.stat_max.filter(|_| object == self.player),
+            level_points: self.session.level_points,
+            perk_interval: self.session.perk_interval,
         }
     }
     pub fn player_sheet(&self) -> Option<&CharacterSheet> {
@@ -1959,6 +1967,40 @@ impl WorldState {
     pub fn script_for(&self, object: ObjectRef) -> Option<u32> {
         let sid = self.get(object)?.raw.script_id;
         (sid != -1 && self.scripts.contains_key(&(sid as u32))).then_some(sid as u32)
+    }
+    /// SPEC-024b §4.12 `create_spatial`: an ordinary spatial record, with no
+    /// object, saved with the map like any other.
+    pub(crate) fn add_spatial_script(
+        &mut self,
+        file: i32,
+        tile: i32,
+        elevation: u8,
+        radius: i32,
+    ) -> Result<u32, WorldError> {
+        let id = self.add_script(0, file, 1, 0)?;
+        if let Some(script) = self.scripts.get_mut(&id) {
+            script.spatial = Some((tile, elevation, radius));
+        }
+        Ok(id)
+    }
+    /// SPEC-024b §4.12 `tile_get_objs`: every object on the hex, hidden, dead
+    /// and system objects too, in SPEC-014 §3.44's per-hex order.
+    pub(crate) fn objects_on_hex(&self, hex: i32, elevation: u8) -> Vec<ObjectRef> {
+        let mut objects: Vec<ObjectRef> = self
+            .iter()
+            .filter(|(_, object)| {
+                object.owner.is_none()
+                    && object.raw.hex == Some(hex)
+                    && object.raw.elevation == elevation
+            })
+            .map(|(reference, _)| reference)
+            .collect();
+        let flat = |object: &ObjectRef| {
+            let flags = self.get(*object).map_or(0, |found| found.raw.flags.0);
+            flags & BasicFlags::FLAT.0 == 0
+        };
+        objects.sort_by_key(|object| (flat(object), self.insertions.get(object).copied()));
+        objects
     }
     pub fn add_script(
         &mut self,

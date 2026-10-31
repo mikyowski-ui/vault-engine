@@ -348,6 +348,7 @@ enum Reader {
     Messages,
     Tags,
     Explosives,
+    Words,
 }
 fn reader_of(group: &str) -> Option<Reader> {
     Some(match group {
@@ -361,8 +362,14 @@ fn reader_of(group: &str) -> Option<Reader> {
         "M1" => Reader::Messages,
         "T1" => Reader::Tags,
         "E1" => Reader::Explosives,
+        group if word_group(group) => Reader::Words,
         _ => return None,
     })
+}
+/// W1 to W30, the rows Revision 4 promoted.
+fn word_group(group: &str) -> bool {
+    let number = group.strip_prefix('W').and_then(|n| n.parse::<u32>().ok());
+    number.is_some_and(|number| (1..=30).contains(&number))
 }
 /// A walk's state, which a vector's rows carry from one to the next. V1 to
 /// V4 are one session: V3 and V4 name V1's handle.
@@ -394,7 +401,8 @@ impl Walk {
             | Reader::UniqueIds
             | Reader::Messages
             | Reader::Tags
-            | Reader::Explosives => self
+            | Reader::Explosives
+            | Reader::Words => self
                 .session
                 .get_or_insert_with(|| RowSession::for_group(cells[0]))
                 .row(cells),
@@ -439,7 +447,7 @@ fn assert_walked(failures: Vec<String>) {
 fn t3_every_array_vector_gives_its_push_and_its_state() {
     let (failures, counts) = walk(|_| true);
     assert_walked(failures);
-    assert_eq!(counts.values().sum::<usize>(), 182, "{counts:?}");
+    assert_eq!(counts.values().sum::<usize>(), 371, "{counts:?}");
     for (group, rows) in [
         ("A", 12),
         ("B", 18),
@@ -464,8 +472,10 @@ fn t3_every_array_vector_gives_its_push_and_its_state() {
     ] {
         assert_eq!(counts.get(group), Some(&rows), "{group}");
     }
-    let hooks: usize = (1..=17).map(|n| counts[&format!("H{n}")]).sum();
-    assert_eq!(hooks, 44);
+    let hooks: usize = (1..=33).map(|n| counts[&format!("H{n}")]).sum();
+    assert_eq!(hooks, 106);
+    let words: usize = (1..=30).map(|n| counts[&format!("W{n}")]).sum();
+    assert_eq!(words, 127);
 }
 
 /// A new group in the TSV has no reader until a test reads it.

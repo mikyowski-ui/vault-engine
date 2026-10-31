@@ -28,6 +28,8 @@ use vault_vm::{
     sfall::{self, SfallRow, Tier},
 };
 
+use crate::host_sfall_settings::CriticalOverlay;
+
 /// §4.11 the file of each `message_str_game` ID from 0.
 const GAME_FILES: [&str; 21] = [
     "combat", "combatai", "scrname", "misc", "custom", "inventry", "item", "lsgame", "map",
@@ -92,6 +94,11 @@ pub(crate) struct Promoted {
     tags: BTreeSet<i32>,
     hero_style: i32,
     message_box: Option<MessageBox>,
+    /// §4.12: the critical entries a script changed, and the tables to go
+    /// back to.
+    pub(crate) critical: Option<CriticalOverlay>,
+    /// §4.12 `set_scr_name`: each named object's own name.
+    pub(crate) names: BTreeMap<ObjectRef, Vec<u8>>,
 }
 
 /// `name` with the extension of a message file.
@@ -131,7 +138,7 @@ fn canonical(path: &[u8]) -> Option<String> {
 }
 
 impl<A: WorldAssets> WorldHost<A> {
-    fn promoted(&mut self) -> Option<&mut Promoted> {
+    pub(crate) fn promoted(&mut self) -> Option<&mut Promoted> {
         self.sfall.as_deref_mut().map(|sfall| &mut sfall.promoted)
     }
     /// A new game or a load: the tables that clear (§4.11).
@@ -146,6 +153,7 @@ impl<A: WorldAssets> WorldHost<A> {
         for file in files {
             self.assets.set_virtual_file(&file.path, None);
         }
+        self.sfall_reset_settings();
     }
     /// A word of §4.11, with its operands read by class.
     pub(crate) fn sfall_promoted(
@@ -255,10 +263,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 let members = self.party_entries(int(0));
                 Some(SfallValue::Int(self.arrays().temp_list(members)))
             }
-            _ => {
-                self.stub_diagnostic(vm, row.name);
-                sfall::stub_default(row)
-            }
+            _ => match self.sfall_settings_word(vm, row, args) {
+                Some(result) => result,
+                None => {
+                    self.stub_diagnostic(vm, row.name);
+                    sfall::stub_default(row)
+                }
+            },
         })
     }
     /// A function of §4.11 by name, or `None` for another.
@@ -296,7 +307,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 self.signal_close_game();
                 None
             }
-            _ => return None,
+            _ => return self.sfall_settings_function(name, args),
         })
     }
     fn virtual_file(&mut self, handle: i32) -> Option<&mut VirtualFile> {
@@ -408,11 +419,22 @@ impl<A: WorldAssets> WorldHost<A> {
         })
     }
     fn terrain_name(&mut self, point: Option<[i32; 2]>) -> SfallValue {
-        let index = self.world.fallout2.as_deref().and_then(|state| {
-            let position = point.unwrap_or(state.position);
-            let cell = state.tables.worldmap.cell_of(position)?;
-            Some(state.subtile(cell).terrain as i32)
+        let cell = self.world.fallout2.as_deref().and_then(|state| {
+            state
+                .tables
+                .worldmap
+                .cell_of(point.unwrap_or(state.position))
         });
+        // §4.12 `set_terrain_name`: a cell's own name wins.
+        let named = cell.and_then(|cell| self.world.session.terrain_names.get(&cell));
+        if let Some(name) = named {
+            return SfallValue::Text(name.clone());
+        }
+        let index = self
+            .world
+            .fallout2
+            .as_deref()
+            .and_then(|state| Some(state.subtile(cell?).terrain as i32));
         let text = index.and_then(|index| {
             let catalog = self.assets.game_messages("worldmap.msg").ok()?;
             catalog

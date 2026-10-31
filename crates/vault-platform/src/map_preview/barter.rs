@@ -450,7 +450,7 @@ impl MapPreview {
             _ => 0,
         }
     }
-    fn barter_reply(&mut self, text: Vec<u8>) {
+    pub(crate) fn barter_reply(&mut self, text: Vec<u8>) {
         if let Screen::Barter(screen) = &mut self.screen {
             screen.reply = Some(text);
         }

@@ -104,6 +104,9 @@ pub enum Call {
     /// §3.11.4 the finishing callback, for an object being opened or
     /// closed.
     Finish { open: bool },
+    /// SPEC-024b §4.12 `reg_anim_callback`: `procedure` of `program`, run
+    /// once and synchronously when the sequence reaches this step.
+    Script { program: u32, procedure: u32 },
 }
 
 /// How a script animation plays (SPEC-005).

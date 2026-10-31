@@ -9,7 +9,7 @@ use crate::{
     RandomSource, WorldError,
     assets::WorldAssets,
     host::{HostResult, WorldHost},
-    sfall::{GlobalKey, SfallWorld},
+    sfall::{GlobalKey, SessionSettings, SfallWorld},
     sfall_ini::{IniCache, IniFile, IniFiles, Setting},
     stats::CharacterSheet,
     world::ObjectRef,
@@ -118,6 +118,7 @@ impl<A: WorldAssets> WorldHost<A> {
         self.sfall_clear_tables();
         self.sfall = Some(Box::default());
         self.world.sfall = Some(Box::<SfallWorld>::default());
+        self.world.session = SessionSettings::sfall();
         self.assets.set_sfall_scripts(true);
         self.sfall_setup_owed();
         Ok(())
@@ -758,6 +759,23 @@ impl<A: WorldAssets> WorldHost<A> {
                     return failed(self);
                 };
                 Ok(integer(self.set_unique_id(object, flag)))
+            }
+            "set_scr_name" => {
+                match args.first() {
+                    None => self.set_script_name(self.self_object(vm), b""),
+                    Some(SfallValue::Text(name)) => {
+                        self.set_script_name(self.self_object(vm), name);
+                    }
+                    Some(_) => return failed(self),
+                }
+                Ok(None)
+            }
+            "dialog_message" => {
+                let Some(message) = text(0) else {
+                    return failed(self);
+                };
+                self.dialog_message(message);
+                Ok(None)
             }
             "set_ini_setting" => {
                 let (Some(setting), Some(value)) = (text(0), args.get(1)) else {

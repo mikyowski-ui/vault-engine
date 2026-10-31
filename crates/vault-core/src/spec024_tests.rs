@@ -1024,7 +1024,7 @@ fn the_words_that_make_arrays_give_temporary_lists() {
         .collect();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 25);
+    assert_eq!(names.len(), 42);
     assert_eq!(
         run(&mut host, &[I(table), W(0x8231)]).ints(),
         [names.len() as i32]

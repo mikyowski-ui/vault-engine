@@ -179,6 +179,7 @@ fn labels(sequence: &MotionSequence) -> Vec<(i32, String)> {
                     Call::SkillStage { skill, .. } => format!("skill {skill}"),
                     Call::OpenBit { open } => format!("open bit {open}"),
                     Call::Finish { open } => format!("finish {open}"),
+                    Call::Script { procedure, .. } => format!("script {procedure}"),
                 },
             };
             (entry.delay, label)

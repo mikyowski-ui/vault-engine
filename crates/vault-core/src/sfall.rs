@@ -21,6 +21,67 @@ pub mod encounter_flag {
     pub const FADEOUT: u32 = 0x10;
 }
 
+/// The maxima `set_pc_stat_max` set: [`NO_STAT_MAX`] leaves a stat's own.
+pub type StatMaxima = [i32; 35];
+pub const NO_STAT_MAX: i32 = i32::MIN;
+
+/// §4.12 the session settings. They start at their defaults on a new game and
+/// on each load, are not saved, and are outside `sfall_hash` (Decision D-48).
+/// The `Default` is the engine with the mode off, so nothing here changes a
+/// formula then.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionSettings {
+    pub skill_cap: i32,
+    pub stat_max: Option<StatMaxima>,
+    /// `set_map_time_multi`, kept as binary32.
+    pub map_time: f32,
+    pub level_points: i32,
+    /// `set_perk_freq`: 0 for the default.
+    pub perk_interval: i32,
+    pub encounter_detection: bool,
+    pub npc_level_up: bool,
+    pub town_names: bool,
+    pub fo1_hit_chance: bool,
+    /// The reaction bands: neutral above the first, good above the second.
+    pub reaction: [i32; 2],
+    /// `set_terrain_name`, by cell.
+    pub terrain_names: BTreeMap<[usize; 2], Vec<u8>>,
+    pub rest_mode: i32,
+    pub car_art: i32,
+    /// `set_cursor_mode`, waiting for the shell.
+    pub cursor_mode: Option<i32>,
+}
+impl Default for SessionSettings {
+    fn default() -> Self {
+        Self {
+            skill_cap: 200,
+            stat_max: None,
+            map_time: 1.0,
+            level_points: 0,
+            perk_interval: 0,
+            encounter_detection: true,
+            npc_level_up: true,
+            town_names: true,
+            fo1_hit_chance: false,
+            reaction: [25, 75],
+            terrain_names: BTreeMap::new(),
+            rest_mode: 0,
+            car_art: 433,
+            cursor_mode: None,
+        }
+    }
+}
+impl SessionSettings {
+    /// §4.12's defaults, which sfall mode starts from.
+    pub fn sfall() -> Self {
+        Self {
+            skill_cap: 300,
+            reaction: [-10, 10],
+            ..Self::default()
+        }
+    }
+}
+
 /// A sfall global's key (§4.9): any int, or a string of exactly 8 bytes.
 /// Numbers order before strings, as §5.6 asks of the sidecar.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

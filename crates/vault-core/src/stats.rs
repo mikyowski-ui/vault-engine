@@ -182,6 +182,11 @@ pub struct StatContext {
     pub remaining_ap: i32,
     pub visible_light: i32,
     pub difficulty: i32,
+    /// SPEC-024b §4.12 the session settings a sheet's formulas read.
+    pub skill_cap: i32,
+    pub stat_max: Option<crate::sfall::StatMaxima>,
+    pub level_points: i32,
+    pub perk_interval: i32,
 }
 impl Default for StatContext {
     fn default() -> Self {
@@ -193,6 +198,10 @@ impl Default for StatContext {
             remaining_ap: 0,
             visible_light: 65536,
             difficulty: 1,
+            skill_cap: 200,
+            stat_max: None,
+            level_points: 0,
+            perk_interval: 0,
         }
     }
 }
@@ -207,6 +216,8 @@ pub struct CharacterSheet {
     pub tags: [i32; 4],
     pub traits: [i32; 2],
     pub perks: BTreeMap<Perk, u32>,
+    /// SPEC-024b §4.12 `set_perk_level`'s requirements: never saved.
+    pub perk_levels: BTreeMap<Perk, i32>,
     pub current_hp: i32,
     pub poison: i32,
     pub radiation: i32,
@@ -240,6 +251,7 @@ impl Default for CharacterSheet {
             tags: [-1; 4],
             traits: [-1; 2],
             perks: BTreeMap::new(),
+            perk_levels: BTreeMap::new(),
             current_hp: 0,
             poison: 0,
             radiation: 0,
@@ -369,7 +381,13 @@ impl CharacterSheet {
             34 => (0, 1),
             _ => (0, i32::MAX),
         };
-        value.clamp(i64::from(low), i64::from(high)) as i32
+        // SPEC-024b §4.12 `set_pc_stat_max`, for the player only.
+        let high = context
+            .stat_max
+            .map(|maxima| maxima[index])
+            .filter(|maximum| self.player && *maximum != crate::sfall::NO_STAT_MAX)
+            .unwrap_or(high);
+        value.clamp(i64::from(low), i64::from(high.max(low))) as i32
     }
     pub fn recompute(&mut self, context: StatContext) {
         let e: Vec<_> = (0..7)
@@ -501,7 +519,7 @@ impl CharacterSheet {
                 };
             }
         }
-        saturated(value.min(200))
+        saturated(value.min(i64::from(context.skill_cap)))
     }
     pub fn buy_skill(&mut self, index: usize) -> bool {
         if index >= 18 || self.unspent_skills <= 0 {

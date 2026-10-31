@@ -383,7 +383,8 @@ impl<A: WorldAssets> WorldHost<A> {
     /// §3.17 after the player gained `levels` levels: each single gain, in
     /// order, advances each eligible member at most one stage.
     pub(crate) fn party_level_ups(&mut self, levels: u32) {
-        if levels == 0 || self.world.fallout2.is_none() {
+        // SPEC-024b §4.12: with `npc_engine_level_up(0)`, scripts do this.
+        if levels == 0 || self.world.fallout2.is_none() || !self.world.session.npc_level_up {
             return;
         }
         let level = self.world.player_sheet().map_or(1, |sheet| sheet.level);

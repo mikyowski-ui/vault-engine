@@ -9,7 +9,7 @@ use crate::{
     assets::WorldAssets,
     choreography::{CAPACITY, Frames, Refused},
     host::{AnimationSequence, WorldHost},
-    motion::{Goal, Motion, MotionSequence, Play, Walk},
+    motion::{Call, Goal, Motion, MotionSequence, Play, Walk},
 };
 
 /// SPEC-007 §2.1 the take-out animation.
@@ -64,6 +64,13 @@ impl<A: WorldAssets> WorldHost<A> {
             };
             let delay = values.first().copied().unwrap_or(0);
             match op {
+                0x827e => {
+                    let call = Call::Script {
+                        program: values[0] as u32,
+                        procedure: values[1] as u32,
+                    };
+                    motion.push(object, -1, Motion::Call(call))?;
+                }
                 0x810f | 0x8110 | 0x8126 => {
                     let animation = values[values.len() - 2] as u8;
                     let art = self.script_art(object, animation);

@@ -947,6 +947,7 @@ impl<A: WorldAssets> WorldHost<A> {
             Call::Use { target } => self.use_object(owner, target)?,
             Call::UseOn { item, target } => self.use_item_stage(owner, item, target)?,
             Call::UseContainer { container } => self.use_container(owner, container)?,
+            Call::Script { program, procedure } => self.sequence_callback(program, procedure),
             Call::Loot { target } => self.post_loot(owner, target),
             Call::Arrive { target, action } => {
                 self.arriving = true;

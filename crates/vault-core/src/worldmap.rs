@@ -374,11 +374,21 @@ pub struct TravelSpeed {
 /// binary64. Under the SPEC-008 §3.4 safe rule Outdoorsman is clamped below
 /// at 0 and Pathfinder to 0-4, so W is at least 60 and Q at least 0.
 pub fn travel_speed(outdoorsman: i32, pathfinder: u32) -> Result<TravelSpeed, WorldError> {
+    travel_speed_at(outdoorsman, pathfinder, 1.0)
+}
+/// [`travel_speed`] with SPEC-024b §4.12's `set_map_time_multi`, in one
+/// product with Pathfinder and one truncation (Decision D-57).
+pub fn travel_speed_at(
+    outdoorsman: i32,
+    pathfinder: u32,
+    multiplier: f32,
+) -> Result<TravelSpeed, WorldError> {
     let skill = outdoorsman.clamp(0, 100) as f32;
     let ranks = pathfinder.min(4);
     let interval = (60.0_f32 + 60.0_f32 * skill / 100.0_f32).trunc();
     let ticks = (864000.0_f32 / interval).trunc();
-    let ticks = (f64::from(ticks) * (1.0 - 0.25 * f64::from(ranks))).trunc();
+    let ticks =
+        (f64::from(ticks) * (1.0 - 0.25 * f64::from(ranks)) * f64::from(multiplier)).trunc();
     Ok(TravelSpeed {
         interval: interval as u32,
         ticks: ticks as u32,

@@ -80,7 +80,8 @@ impl<A: WorldAssets> WorldHost<A> {
             .world
             .player_sheet()
             .map_or(0, |sheet| sheet.skill(17, context));
-        worldmap::travel_speed(outdoorsman, self.world.perk(Perk::Pathfinder))
+        let multiplier = self.world.session.map_time;
+        worldmap::travel_speed_at(outdoorsman, self.world.perk(Perk::Pathfinder), multiplier)
     }
     /// SPEC-014 §3.39 building the world-map screen, on opening (`opening`,
     /// which also computes W and Q once) and on each return from a town
