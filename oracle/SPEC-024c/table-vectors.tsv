@@ -1,0 +1,47 @@
+rules	subject	expected
+SPEC-018 as written	map 0	stem=cave1; lookup=Cave; sounds=2
+SPEC-018 as written	map 5	stem=town; lookup=Town; sounds=0
+SPEC-018 as written	map 6	stem=town; lookup=Town; sounds=0
+SPEC-018 as written	area 0	valid slots=2,3,4
+SPEC-018 as written	dropped area 0 entrance_0	no map has that lookup name
+SPEC-018 as written	dropped area 0 entrance_1	no map has that lookup name
+SPEC-018 as written	dropped area 0 entrance_5	no map has that lookup name
+SPEC-018 as written	maps diagnostic, line 6	other line
+SPEC-018 as written	maps diagnostic, line 7	repeated key: lookup_name
+SPEC-018 as written	maps diagnostic, line 8	repeated key: map_name
+SPEC-018 as written	maps diagnostic, line 11	other line
+SPEC-018 as written	maps diagnostic, line 12	repeated key: lookup_name
+SPEC-018 as written	maps diagnostic, line 13	repeated key: map_name
+SPEC-018 as written	maps diagnostic, line 15	other line
+SPEC-018 as written	maps diagnostic, line 16	repeated key: lookup_name
+SPEC-018 as written	maps diagnostic, line 17	repeated key: map_name
+SPEC-018 as written	maps diagnostic, line 19	other line
+SPEC-018 as written	maps diagnostic, line 9	invalid ambient item
+SPEC-018 as written	maps diagnostic, line 26	duplicate lookup_name
+SPEC-018 as written	maps diagnostic, line 26	duplicate stem
+SPEC-018 as written	city diagnostic, line 11	other line
+SPEC-018 as written	city diagnostic, line 12	repeated key: world_pos
+SPEC-018 as written	city diagnostic, line 13	repeated key: entrance_0
+SPEC-018 as written	city diagnostic, line 13	entrance dropped: no map has that lookup name
+SPEC-018 as written	city diagnostic, line 5	entrance dropped: no map has that lookup name
+SPEC-018 as written	city diagnostic, line 6	eight items
+SPEC-018 as written	city diagnostic, line 7	eight items
+SPEC-018 as written	city diagnostic, line 8	eight items
+SPEC-018 as written	city diagnostic, line 9	entrance dropped: no map has that lookup name
+SPEC-018 as written	totals	maps=3; areas=1; entrances=6; dropped=3; diagnostics=22
+SPEC-024c	map 0	stem=artemple; lookup=Temple; sounds=0
+SPEC-024c	map 1	stem=gate; lookup=North Gate; sounds=4
+SPEC-024c	map 2	stem=gate; lookup=Gate Circle; sounds=0
+SPEC-024c	map 3	stem=cave1; lookup=Cave; sounds=0
+SPEC-024c	map 5	stem=town; lookup=Town; sounds=0
+SPEC-024c	map 6	stem=town; lookup=Town; sounds=0
+SPEC-024c	area 0	valid slots=0,1,2,3,4
+SPEC-024c	area 1	valid slots=0
+SPEC-024c	dropped area 0 entrance_5	no map has that lookup name
+SPEC-024c	maps diagnostic, line 19	other line
+SPEC-024c	maps diagnostic, line 26	duplicate lookup_name
+SPEC-024c	maps diagnostic, line 26	duplicate stem
+SPEC-024c	city diagnostic, line 7	eight items
+SPEC-024c	city diagnostic, line 8	eight items
+SPEC-024c	city diagnostic, line 9	entrance dropped: no map has that lookup name
+SPEC-024c	totals	maps=6; areas=2; entrances=7; dropped=1; diagnostics=6

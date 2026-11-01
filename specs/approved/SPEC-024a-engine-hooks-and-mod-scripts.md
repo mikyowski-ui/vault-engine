@@ -1,6 +1,6 @@
 # SPEC-024a: Engine Hooks and Mod Scripts
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-31, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (Team A, 2026-10-31); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-31, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-31); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-31. Sources:
 
@@ -12,6 +12,8 @@
 No decompilation, disassembly, re-implementation source, game asset, research-vault material, or engine Rust code was used. No sfall material was consulted: everything said here about sfall's words and hooks comes from SPEC-024b and its oracle. Team A's general knowledge comes from model training data that cannot be audited (`PROVENANCE.md`).
 
 **Provenance of Revision 2.** Author: the Spec-Author sub-agent (Team A), 2026-10-31, on the owner's brief of 2026-10-31. Sources: the owner's brief; this spec's Revision 1 and its fixtures; SPEC-024b Revision 4; SPEC-019 section 3.19.3, for the car's steps; and `docs/REFERENCE.md`, including what the implementer recorded for SPEC-024b Revision 4. The brief put `oracle/` out of bounds, so `oracle/SPEC-024/` was not opened for this revision: the 16 new rows come from SPEC-024b's text, and their types from this fixture's existing rows. No decompilation, disassembly, re-implementation source, game asset, research-vault material, sfall material, or engine Rust code was used.
+
+**Provenance of Revision 3.** Author: the Spec-Author sub-agent (Team A), 2026-10-31, on the owner's brief of 2026-10-31. Sources: the owner's brief; this spec; SPEC-024b Revision 5; the implementer's notes in `docs/REFERENCE.md` and in the message of the commit that implements Revision 2. No engine Rust code was read, and the owner's budget figure in section 5.3 was not measured. No decompilation, disassembly, re-implementation source, game asset, research-vault material, or sfall material was used.
 
 **Fixtures:** `tests/fixtures/spec024a/`, written by Team A from this spec. They are not in `oracle/`, which is reserved for research-side vectors.
 
@@ -25,6 +27,12 @@ No decompilation, disassembly, re-implementation source, game asset, research-va
   - **Sections 1.1, 3.4, and 10.** References move from SPEC-024b section 6.19 to 6.20, and the counts change to match.
   - **Fixtures.** `hook-points.tsv` and `README.md` change. `hook-order-rev4.tsv` is new. Word vectors W20 to W22 are added.
   - **Unchanged.** The chain order, the shared depth counter, the manifest grammar, the words and their numbers, the `mod_stack` record, the program, and both manifests.
+- **Revision 3 (2026-10-31, Team A).** On the owner's brief of 2026-10-31, this revision records the implementer's readings.
+  - **Section 4.2 and vector N14.** A row whose procedure is absent stays inert until the next setup, even if its script's `start` registers on that point (Decision D-33).
+  - **Vectors W10 and N13.** W10 first removes the registration N1's `start` made. N13's "nothing runs" means the row: `start`'s registration on point 2 still runs.
+  - **Section 5.3.** A host call's instruction budget is 1,000,000 (Decision D-32).
+  - **Section 3.3.** `HOOK_CARTRAVEL`'s arg0 follows SPEC-024b Revision 5 (Decision D-31).
+  - No fixture file, word, or chain rule changes.
 
 ## Clean-Room Rules for Spec Authors
 
@@ -225,7 +233,7 @@ SPEC-024b section 6.19 gives these 16 points their boundaries, and both blocks r
 - **`HOOK_CANUSEWEAPON`** is a preview for the player's active item slots, and an ordinary query for AI. `[Must-match]`
 - **`HOOK_AMMOCOST` type 1 and `HOOK_WITHINPERCEPTION` type 2** never run, for either block, by SPEC-024b Decision D-53. `[Must-match]`
 - **`HOOK_DESCRIPTIONOBJ`** returns a string, so `mod_set_hook_return` converts its value by class `S`, as SPEC-024b section 6.5 says. A number leaves that return as it was (Decision D-26). `[Must-match]`
-- **`HOOK_CARTRAVEL`'s arg0** is the steps the engine works out. SPEC-024b section 6.19 declares 3 to 8, and SPEC-019 section 3.19.3 gives 1, 2, or 4. A member takes what it is given, and must not assume a range (Decision D-31). `[Safe rule]`
+- **`HOOK_CARTRAVEL`'s arg0** is the steps the engine works out by SPEC-019 section 3.19.3: 1, 2, or 4 (SPEC-024b section 6.19, Decision D-31). `[Must-match]`
 
 ### 3.4 The other points
 
@@ -250,7 +258,7 @@ There are three routes onto a point. `[Must-match]`
 | `register_hook`, `register_hook_proc`, `register_hook_proc_spec` | Any global or hook script, under sfall mode | Sfall block, by SPEC-024b section 6.2 |
 
 - The word chooses the block, not the script. So an sfall mod packaged with a manifest keeps its SPEC-024b order. `[Must-match]`
-- A `[[hooks]]` row names a procedure, and the host finds it by SPEC-004 section 3.7's name lookup. An absent name leaves the row inert, with one diagnostic at setup. The fallback to procedure index 1 does not apply to a member. `[Safe rule]`
+- A `[[hooks]]` row names a procedure, and the host finds it by SPEC-004 section 3.7's name lookup. An absent name leaves the row inert until the next setup, with one diagnostic at setup. That holds even if the script's `start` registers on the same point: `mod_register_hook` does not revive the row, so nothing runs there (Decision D-33). The fallback to procedure index 1 does not apply to a member. `[Safe rule]`
 - Inside the mod block, a program has at most one registration per point. Registering again changes its procedure and keeps its position. Procedure 0 removes it, a manifest row's included, until the next setup. `[Safe rule]`
 - `mod_register_hook` from a program with no owner is ignored, with a diagnostic. A hook ID without a row in `hook-points.tsv`, or in 49 to 60, is ignored, with a diagnostic. `[Safe rule]`
 - Registration is not saved. Setup rebuilds it (section 4.4). `[Must-match]`
@@ -324,7 +332,7 @@ Both word families work on one context. A return one family writes is a return t
 `[Must-match]`, from SPEC-024b section 6.5 and its Decision D-19, for both blocks.
 
 - A member that ends in a VM error leaves **every** chain of both blocks until the next setup. Its writes up to that point stay, and the chain goes on with the next member.
-- That covers the 100,000-instruction limit of a host call (`docs/REFERENCE.md`): running out of it is a VM error.
+- That covers the 1,000,000-instruction budget of a host call: running out of it is a VM error (Decision D-32).
 - A member of a program that ended in a VM error anywhere else, such as a repeating global script, has left its chains the same way.
 - A word that would suspend a member ends that member, with a diagnostic. Its writes stay. It is not unloaded, and it runs on the next query.
 - A return that cannot convert leaves that index as it was, with a diagnostic. It does not undo an earlier member's write (Decision D-26).
@@ -559,7 +567,7 @@ Run each with N1's mod loaded and `ap_cost` at 1, unless a row says otherwise. S
 | W7 | `"ap_cost", F:2.5` | `0x8302` | empty | Truncated by class `I`, and W2 now gives `I:2` |
 | W8 | `"ap_cost", "x"` | `0x8302` | empty | Cannot convert: unchanged, with a diagnostic |
 | W9 | `"hi"` | `0x8303` | empty | The log's newest line is `cheap-ap: hi` |
-| W10 | `I:2, I:0` | `0x8304` | empty | Procedure 0 with nothing registered: no effect |
+| W10 | `I:2, I:0`, after removing N1's registration on point 2 | `0x8304` | empty | Procedure 0 with nothing registered: no effect. N1's `start` registers on that point, so a test removes that registration first |
 | W11 | `I:50, I:2` | `0x8304` | empty | A reserved hook ID: ignored, with a diagnostic |
 | W12 | empty | `0x8305` | `I:-1` | Outside a chain |
 | W13 | `I:3` | `0x8306` | `I:0` | Outside a chain |
@@ -599,8 +607,8 @@ Run each with N1's mod loaded and `ap_cost` at 1, unless a row says otherwise. S
 | N10 | N1 enabled in two layers | Stops the launch, naming both |
 | N11 | N1 in a disabled layer | Accepted, not scripted, no word in the set |
 | N12 | N1 without its script rows, keeping `[settings]` | Accepted, not scripted |
-| N13 | N2 with `point = "HOOK_ONDEATH"` | Accepted. One diagnostic at setup, and nothing runs |
-| N14 | N2 with `procedure = "absent"` | Accepted. One diagnostic at setup, and nothing runs |
+| N13 | N2 with `point = "HOOK_ONDEATH"` | Accepted. One diagnostic at setup, and the row runs nothing. `start`'s own registration on point 2 still runs |
+| N14 | N2 with `procedure = "absent"` | Accepted. One diagnostic at setup, and nothing runs: the row stays inert until the next setup, although `start` registers on its point |
 
 The `mod_stack` record of N1 is section 2.3's example: `EE7C38513A262548` is the FNV-1a 64 of `vault-mod.toml`'s 264 bytes.
 
@@ -658,7 +666,9 @@ Each decision is marked as an owner instruction or a Team A default.
 | D-28 | `HOOK_CARTRAVEL` fires only under `fallout2`, as `HOOK_ENCOUNTER` does | Team A default | SPEC-019's car is its only anchor |
 | D-29 | With sfall mode off, Esc's later stop applies only while `HOOK_RESTTIMER` has a member | Team A default | The hook must see Esc at the rest's next step, as `docs/REFERENCE.md` records. With no member, an empty chain must change nothing |
 | D-30 | A boundary that names a word the session lacks has no such path, and the point's other paths still run | Team A default | Sfall's words do not exist with sfall mode off, and the point stays useful without them |
-| D-31 | `HOOK_CARTRAVEL`'s arg0 is what the engine works out, and this spec states no range | Team A default | SPEC-024b says 3 to 8, SPEC-019 gives 1, 2, or 4, and `docs/REFERENCE.md` records the gap. Only a research revision can settle it |
+| D-31 | `HOOK_CARTRAVEL`'s arg0 is the engine's step count, 1, 2, or 4, by SPEC-019 section 3.19.3 | Owner instruction (brief of 2026-10-31); Team A default in Revision 2 | SPEC-024b declared 3 to 8, and its Revision 5 follows SPEC-019 |
+| D-32 | A host call's instruction budget is 1,000,000, and running out of it is a VM error | Owner instruction (brief of 2026-10-31) | The brief gives this as the engine's normal per-call budget. Team A did not measure it. `docs/REFERENCE.md` gives a 100,000-instruction hard limit for a critical invocation, which Revision 2 cited here, and a host call is not necessarily critical |
+| D-33 | A `[[hooks]]` row whose procedure is absent stays inert until the next setup, and `mod_register_hook` does not revive it | Owner instruction (brief of 2026-10-31), from the implementer's reading | Vector N14 says nothing runs, although the fixture's `start` registers on that point |
 
 ## 12. Clean-Room Verification Checklist
 
@@ -672,4 +682,5 @@ Each decision is marked as an owner instruction or a Team A default.
 - [x] Revision 2: section 3.1 and `hook-points.tsv` were checked against the argument and return tables of SPEC-024b sections 6.8 to 6.19. `oracle/` was out of bounds, so `fires` was not compared with the oracle's tier column here. Section 10's test 14 does that
 - [x] Section 9.1's program was computed from SPEC-004's layout and stepped through both procedures by a small interpreter written from SPEC-004. The built `asset-audit --dump-vm-trace` accepted a copy with its three mod words swapped for words it knows, and traced it to `ended`
 - [x] `hook-order.tsv` was computed by a small model of section 5 and checked by hand
+- [x] Revision 3: the ingestion patterns were rechecked by search, and no fixture file changed
 - [ ] The research linter was not run: Team A has no access to it

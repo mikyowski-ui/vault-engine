@@ -1,0 +1,7 @@
+vector	sfall_mode	EnableHeroAppearanceMod	bytes	style_word	HApStyle_global	stored_style	rule
+A1	on	1	440	1	1	1	the player takes the sheet
+A2	on	2	440	2	2	2	mode 2 counts as on
+A3	on	1	440	0	0	0	a zero word is written like any other
+A4	on	1	432	-	no write	0	no word in the file, so nothing is written
+A5	on	0	440	1	no write	0	the appearance option is off
+A6	off	1	440	1	no write	0	sfall mode is off

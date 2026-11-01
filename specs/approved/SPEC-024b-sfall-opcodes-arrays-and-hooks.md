@@ -1,6 +1,6 @@
 # SPEC-024b: sfall Extended Opcodes, Dynamic Arrays, and Hook Scripts
 
-**Status:** research hand-off, Revision 4, 2026-10-31. Revision 1 was ingested on the owner's brief of 2026-10-30, which approves Decision D-3, and Revision 2 (Team A) made that amendment. Revision 3, built on Revision 2's text with Team A's prose correction merged, has been ingested. Revision 4 comes from the research side and needs ingestion. See "Revision history".
+**Status:** research hand-off, Revision 5, 2026-10-31. Revision 1 was ingested on the owner's brief of 2026-10-30, which approves Decision D-3, and Revision 2 (Team A) made that amendment. Revision 3, built on Revision 2's text with Team A's prose correction merged, and Revision 4 have been ingested. Revision 5 (Team A) carries in SPEC-024c section 5 and the implementer's notes. See "Revision history".
 
 **Provenance:** written on the research side from the published sfall scripting documentation at tag v4.5.1 (reference revision S1): the opcode list, the function reference, the function notes, the hook reference, the arrays guide, the compiler guide, and the public script headers. The engine's own approved specs supplied the anchors. sfall's implementation code was **not** read, and nothing here was checked against a running sfall or against Et Tu or Restoration Project scripts (Decisions D-1 and D-26).
 
@@ -9,6 +9,8 @@
 **Provenance of Revision 3.** Written on the research side from three sources: the published sfall documents and headers of revision S1, as bundled with *Fallout Et Tu* 2.0.3911; compiled `.int` scripts and script source from *Fallout Et Tu* and from *Restoration Project Updated* 2.4.34; and the engine's approved specs. sfall's implementation code was still **not** read, and nothing was checked against a running sfall. Scripts supplied word numbers, operand constants, counts, and observed call patterns. No script text is reproduced here.
 
 **Provenance of Revision 4.** Written on the research side from the published sfall documents and headers of revision S1, *Fallout Et Tu* 2.0.3911's scripts and script list, the approved specs in the research vault, and the owner's measurements of an installed *Fallout Et Tu* (brief of 2026-10-31). sfall's implementation code was still **not** read. SPEC-018 and SPEC-019 were not re-read for this revision, so their sections are cited as earlier revisions recorded them (Decision D-58).
+
+**Provenance of Revision 5.** Author: the Spec-Author sub-agent (Team A), 2026-10-31, on the owner's brief of 2026-10-31. Sources: the owner's brief; this spec; SPEC-024c; SPEC-007, SPEC-008, SPEC-018, and SPEC-019, for Decision D-58's anchors; and the implementer's notes in `docs/REFERENCE.md`. No decompilation, disassembly, re-implementation source, game asset, or engine Rust code was used, and no sfall material was consulted on this side.
 
 **Oracle:** `oracle/SPEC-024/` holds the complete tables and computed vectors. Section 7 says how they relate to this text. Revision 3 changes three oracle files and adds a fourth.
 
@@ -43,6 +45,12 @@
   - **Section 6.5.** A return declared `string` converts by class `S`.
   - **Sections 1.1, 4.2, and 9.** Three script-visible names are described without attribution to any other project (Decision D-41). Decision D-40 records the measured firings.
   - **Section 7 and the oracle.** Vectors W1 to W30 and H18 to H33 add 189 rows to `sfall-array-vectors.tsv`. No existing row changes. New tests 17 and 18. `mod-opcode-usage.tsv` does not change: it records the Revision 3 audit.
+- **Revision 5 (2026-10-31, Team A).** On the owner's brief of 2026-10-31.
+  - **Section 1.** SPEC-024c's `ddraw.ini` keys are no longer out of scope, as SPEC-024c section 5 asks.
+  - **Section 4.12.** `encounter_detection`, `set_fo1_hit_chance`, and `set_car_intface_art` are stored only, until the subsystem each needs exists. Decision D-58 records the ingestion check.
+  - **Sections 4.11 and 4.12.** `set_terrain_name` takes cell coordinates, and `get_terrain_name` takes world pixels.
+  - **Section 6.19.** `HOOK_CARTRAVEL`'s arg0 is the engine's step count from SPEC-019: 1, 2, or 4.
+  - No word number, stack contract, tier, vector, or oracle file changes.
 
 ## Clean-Room Rules for Research Agents
 
@@ -61,7 +69,7 @@ This specification lets the engine run compiled scripts that use sfall's extende
 
 Section 3 comes first because these word numbers collide with SPEC-017.
 
-Out of scope: `ddraw.ini` engine patches, shaders, the graphics and sound words, and the 20 hooks of tier P2. They keep a stack contract only (sections 4.10 and 6.20).
+Out of scope: `ddraw.ini` engine patches, apart from the keys SPEC-024c defines, shaders, the graphics and sound words, and the 20 hooks of tier P2. They keep a stack contract only (sections 4.10 and 6.20).
 
 **Tiers.** Every word, function, and hook in the oracle carries one tier. `[Must-match]`
 
@@ -538,7 +546,7 @@ The IDs are `[Must-match]`. Files are `.msg` files under `text/<language>/game/`
 | `0x8229` | `force_encounter_with_flags` | flags, map | none | Forced encounter with flags. `[Must-match]` |
 
 - **`set_car_current_town`** writes `car_area` whether or not `has_car` is 1. A number that is not an area in SPEC-018 section 4.3 changes nothing, with a diagnostic. `[Safe rule]`
-- **`get_terrain_name`** (no arguments, or x and y) gives string. `[Must-match]` With no arguments it uses the party's cell. Otherwise x and y are world pixels, as for `metarule3` 105 (SPEC-018 section 5.3). `[Safe rule]`
+- **`get_terrain_name`** (no arguments, or x and y) gives string. `[Must-match]` With no arguments it uses the party's cell. Otherwise x and y are world pixels, as for `metarule3` 105 (SPEC-018 section 5.3), and not the cell coordinates `set_terrain_name` takes (section 4.12). `[Safe rule]`
   - The result is `worldmap.msg` message `1000 + terrain index`, where the index is the cell's position in `terrain_types` (SPEC-018 section 4.4). A point outside the world gives the empty string. `[Safe rule]`
   - Evidence: Et Tu compares the result with `worldmap.msg` 1001, 1002, and 1003 to detect mountain, city, and ocean, so a name taken from `worldmap.txt` would fail on a translated install.
 
@@ -706,14 +714,17 @@ Each function below pushes one value, and a function with no documented result p
 
 - **`set_map_time_multi`.** After the Pathfinder factor, `Q = trunc(pre-Pathfinder Q x (1 - 0.25 x ranks) x multiplier)`, in double precision with the multiplier held as binary32, for the Q of SPEC-008's travel rule. `[Must-match]` that the factors multiply, as the published example gives; `[Safe rule]` for one truncation (Decision D-57). A negative value is ignored, with a diagnostic. `[Safe rule]`
 - **`encounter_detection`.** With 0, an encounter reached at SPEC-018 section 5.6's check skips the Outdoorsman check: no number is drawn for it, no experience is given, no dialog box opens, and the encounter starts. `[Must-match]` for the effect; `[Safe rule]` for no draw. Et Tu sets 0.
+  - **Stored only.** Neither SPEC-018 section 5.6 nor SPEC-008 has an Outdoorsman avoidance check, so the setting is kept and changes nothing until such a check exists (Decision D-58). `[Safe rule]`
 - **`remove_wm_town_names`.** 1 stops the town names drawing under the circles of SPEC-019 section 3.12. `[Must-match]` It changes only drawing.
-- **`set_terrain_name`.** x and y are cell coordinates, as in `get_terrain_name` (section 4.11). The name replaces that cell's result. `[Must-match]` An empty name is stored like any other, and a cell outside the world is ignored. `[Safe rule]`
+- **`set_terrain_name`.** x and y are world-map cell coordinates, unlike `get_terrain_name`, which takes world pixels (section 4.11). The name replaces the result for every point in that cell. `[Must-match]` An empty name is stored like any other, and a cell outside the world is ignored. `[Safe rule]`
 - **`set_car_intface_art`.** The index, into `intrface.lst`, replaces the car image on the world map interface. 433 is the published default. `[Must-match]` A negative index is ignored. `[Safe rule]`
+  - **Stored only.** No approved spec draws a car image on the world map interface, so the setting is kept and changes nothing until one does (Decision D-58). `[Safe rule]`
 - **`set_world_map_pos`.** x and y are world pixels, as for `metarule3` 105. The party's position becomes that point, with no travel, time, or encounter check. A point outside the world is ignored. `[Safe rule]`
 
 **Combat and reactions.**
 
 - **`set_fo1_hit_chance`.** With 1, a player attack uses SPEC-007 section 3.5's range term, which has no (PE - 2) penalty. `[Must-match]` for the published effect; `[Safe rule]` for naming that term (Decision D-55). An NPC's attack does not change. Et Tu sets 1 unless its option keeps Fallout 2's rule.
+  - **Stored only.** SPEC-007 section 3.5's range term is the only one any approved spec has, under either profile, so the setting is kept and changes nothing until a Fallout 2 term exists (Decision D-58). `[Safe rule]`
 - **`set_reaction_thresholds`.** Each value is clamped to -125..125. If good is then below neutral, the call is ignored, with a diagnostic. `[Must-match]` for the range and the order. A reaction greater than good is good, greater than neutral is neutral, and otherwise bad. `[Must-match]` Et Tu sets 25 and 75.
 - **Critical table.** The indexes are critter type (SPEC-007's victim table number), body part (section 6.7), level (the tier of SPEC-007 section 3.6), and value type. `set_critical_table` replaces one entry and `reset_critical_table` restores it. `[Must-match]` A changed entry is what SPEC-007 section 3.6's lookup reads. An index outside the table gives int 0 or is ignored, with a diagnostic. `[Safe rule]` The published override file is a `ddraw.ini`-style input, and is out of scope.
 
@@ -1485,13 +1496,15 @@ For the two end-of-combat events, arg1 is the last turn's critter. `[Safe rule]`
 
 | Index | Type | Value |
 | ---: | --- | --- |
-| arg0 | int | Car speed, 3 to 8 steps |
+| arg0 | int | Car speed: the steps of SPEC-019 section 3.19.3, which are 1, 2, or 4 |
 | arg1 | int | Fuel use, 100 and below |
 
 | Return | Overrides | Limits |
 | --- | --- | --- |
 | ret0 | Car speed | -1 keeps the engine's. `[Must-match]` Below -1 acts as -1. `[Safe rule]` |
 | ret1 | Fuel use | Negative becomes 0. `[Safe rule]` |
+
+Vector H26's arg0 of 5 is a synthetic value that tests composition. It is not a step count the engine gives.
 
 **`HOOK_RESTTIMER` (30, `hs_resttimer.int`).**
 
@@ -1691,7 +1704,8 @@ All data is synthetic. `oracle/SPEC-024/README.md` explains the files.
 - [x] Revision 3 amendment: regenerating the oracle adds 29 rows to `sfall-array-vectors.tsv` and changes no existing row
 - [x] Revision 4: regenerating the oracle moves 35 opcode rows and 16 hook rows from P2 to P1, adds 189 vector rows, and changes no existing vector
 - [x] Revision 4: every name in the owner's measurements is promoted or has a decision
-- [ ] Revision 4: the SPEC-018 and SPEC-019 anchors of Decision D-58 checked at ingestion
+- [x] Revision 4: the SPEC-018 and SPEC-019 anchors of Decision D-58 checked at ingestion. Three do not hold, and Decision D-58 records the result
+- [x] Revision 5, by Team A: the ingestion grep finds no implementation-source path and no 40-character hexadecimal string, and this text has no code listing. The research linter was not re-run on this side, because Team A has no access to it
 
 ## 9. Decisions
 
@@ -1756,6 +1770,6 @@ Every decision is a research default unless the Class column says otherwise.
 | D-55 | `set_fo1_hit_chance` 1 selects SPEC-007 section 3.5's range term for the player | Default | The documents call it Fallout 1's behavior, and section 3.5 is R1's formula, with no (PE - 2) term |
 | D-56 | `mod_skill_points_per_level` adds before the Gifted step, the floor, and the cap | Default | The documents say only that it modifies the amount. This order keeps the cap at 99 |
 | D-57 | `set_map_time_multi` multiplies with Pathfinder in one product, with one truncation | Default, from the published example | The example gives 25 percent for 0.5 and two ranks, and either order satisfies it. One truncation loses least |
-| D-58 | SPEC-018 and SPEC-019 anchors were not re-read for Revision 4 | Research limit | Those specs are on the engine side, and this revision did not open them. `encounter_detection`, `remove_wm_town_names`, `npc_engine_level_up`, `car_gas_amount`, and `HOOK_CARTRAVEL` cite them as earlier revisions recorded. Ingestion must check each, along with the Fallout 2 hit-chance term beside `set_fo1_hit_chance` |
+| D-58 | SPEC-018 and SPEC-019 anchors were not re-read for Revision 4 | Research limit | Those specs are on the engine side, and this revision did not open them. `encounter_detection`, `remove_wm_town_names`, `npc_engine_level_up`, `car_gas_amount`, and `HOOK_CARTRAVEL` cite them as earlier revisions recorded. Ingestion must check each, along with the Fallout 2 hit-chance term beside `set_fo1_hit_chance`. **Result, recorded by Revision 5.** `remove_wm_town_names`, `npc_engine_level_up`, and `car_gas_amount` hold. `encounter_detection` and `set_fo1_hit_chance` have nothing to act on, and neither does `set_car_intface_art`, which was not on this list, so all three are stored only until the subsystem each needs exists. `HOOK_CARTRAVEL` takes SPEC-019's step count |
 | D-59 | Word `0x8274` and the two redraw functions of section 4.12 are not named in this text | Default | Their public names also occur as R1 identifiers, so the spec linter refuses them here. `sfall-opcodes.tsv` and vectors W12 and W20 hold the names, as `oracle/SPEC-024/README.md` says for such names. The linter's allowlist is unchanged |
 | D-T1 | Superseded in part by D-46. Where the prose and `sfall-opcodes.tsv` disagree on an operand class, the table's class stands: `scan_array`'s value is `N`, and `set_sfall_arg`'s value is `I`. **The part that stands:** `ret_class` chooses a failed operand's default and does not limit the pushed value | Owner instruction for the direction (brief of 2026-10-30); Team A default for the meaning of `ret_class` | The engine compiles its word table from this file. Vector B step 9 pushes `F:5.0` from a row with `ret_class` `I`, so `ret_class` cannot limit the value. This ID stays outside the numbered series because Team A wrote it before the research revision's numbers were known on that side |

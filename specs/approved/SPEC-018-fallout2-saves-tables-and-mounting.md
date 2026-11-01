@@ -1,6 +1,6 @@
 # SPEC-018: Fallout 2 Mounting, Saves and Data Tables
 
-**Status:** approved. Section 1 is an owner decision of 2026-10-25; the rest by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail corpus audit) and Revision 3 (AI packets, player locals) by the coordinator, 2026-10-25. Revision 4 (the Fallout 2 character sheet) by the Spec-Author sub-agent (Team A), 2026-10-26, verified against the owner's retail install.
+**Status:** approved. Section 1 is an owner decision of 2026-10-25; the rest by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail corpus audit) and Revision 3 (AI packets, player locals) by the coordinator, 2026-10-25. Revision 4 (the Fallout 2 character sheet) by the Spec-Author sub-agent (Team A), 2026-10-26, verified against the owner's retail install. Revision 5 (Team A, 2026-10-31) carries in SPEC-024c section 5.
 
 **Provenance:** Team A (the Spec-Author sub-agent), 2026-10-25, from the
 coordinator's brief of the same day and the owner's archive-role decision
@@ -93,6 +93,22 @@ clarifications by Team A:
 
 Only field offsets, lengths, indices and names were measured; no sheet
 bytes are reproduced.
+
+**Revision 5 (SPEC-024c's amendments), 2026-10-31.** By the Spec-Author
+sub-agent (Team A), on the owner's brief of the same day, from SPEC-024c, a
+research hand-off. No source was consulted beyond that spec and this one. Each
+change below is marked "(Revision 5)", and Decision R18 records them:
+
+- section 3.3's header rule, which lost three of a mod's map records and
+  silently changed a fourth;
+- sections 4.2 and 4.3: split ambient items, alias records, and 8-item entrances
+  whose hex is -1;
+- section 6.3's 440-byte sheet;
+- sections 6.1, 6.3, 6.4, 6.5 and 6.6: the values SPEC-024c's `ddraw.ini` keys
+  can replace are now defaults.
+
+With sfall mode off, or with no `ddraw.ini`, sections 6.1, 6.4, 6.5 and 6.6 are
+unchanged. The retail tables keep every record they have.
 
 ## 1. Archive roles and mounting `[Must-match: owner decision, 2026-10-25]`
 
@@ -233,9 +249,17 @@ one sectioned key/value grammar. `[Must-match]` for what it accepts, (D7):
    is removed. These four files have no other comment marker.
 4. **Trimming.** Leading and trailing space (`0x20`), tab (`0x09`) and CR
    (`0x0D`) are removed. A line that is then empty is skipped.
-5. **Section headers.** A line that begins with `[` and ends with `]` opens a
-   section. Its name is the text between them, trimmed. An empty name is
-   ignored, with a diagnostic, and the lines after it belong to no section.
+5. **Section headers.** (Revision 5) A line that begins with `[` and has a `]`
+   after it opens a section. Its name is the text between the `[` and the first
+   `]`, trimmed. Text after that `]` is ignored, with no diagnostic. An empty
+   name is ignored, with a diagnostic, and the lines after it belong to no
+   section.
+   - `#` is still not a comment marker. A note after a header is ignored because
+     it follows a header, and on a pair line a `#` stays part of the value.
+   - A line with no `]` is not a header, and rule 7 applies: it is ignored with a
+     diagnostic, and the lines under it stay in the section before.
+   - A `[` after the start of a line opens nothing, so `color=[x]` stays a pair.
+     `[Safe rule]`
 6. **Pairs.** Any other line that contains `=` is a pair. The key is the text
    before the first `=`, trimmed. The value is the text after it, trimmed,
    and may be empty. A pair with an empty key is ignored, with a diagnostic.
@@ -313,7 +337,7 @@ highest number that has a record, plus 1. `[Must-match]` (D8)
 | `map_name` | Stem | Required | The map file is `maps/<stem>.map`, the canonical lower-case path |
 | `lookup_name` | Name | None | The name by which `city.txt` and `worldmap.txt` refer to this map |
 | `music` | Stem, or empty | None | City music track, `sound/music/<music>.acm` (section 5.2) |
-| `ambient_sfx` | List of `sound:weight` items, sound a Stem and weight an Integer 0-100 | Empty | Ambient sound choices; an invalid item is dropped. Parsed, with no effect in this revision |
+| `ambient_sfx` | List of `sound:weight` items, sound a Stem and weight an Integer 0-100 | Empty | Ambient sound choices. An item that holds spaces or tabs is split at them, and each part is read as an item (Revision 5, `[Safe rule]`). An invalid item is dropped. Parsed, with no effect in this revision |
 | `saved` | Boolean | Yes | No: the map is in the excluded set (section 5.2) |
 | `dead_bodies_age` | Boolean | Yes | No: the corpse-replacement revisit rule is skipped (section 5.2) |
 | `can_rest_here` | List of exactly 3 Booleans, for elevations 0, 1, 2 | `Yes,Yes,Yes` | Rest permission per elevation (section 5.2); any other item count defaults |
@@ -326,6 +350,10 @@ highest number that has a record, plus 1. `[Must-match]` (D8)
   exist. Number-to-file lookups use each record's own stem. Name-to-number
   lookups (section 5.1) take the lowest number. Duplicate lookup names
   resolve the same way. Each duplicate gets a diagnostic. `[Safe rule]`
+  (Revision 5) Two records with equal stems and different `lookup_name`s are
+  **aliases**, and take no diagnostic. Two records with the same stem and the
+  same lookup name, or without one, keep theirs. Loading through an alias gives
+  the lower map number, and with it the same working `.SAV`. `[Safe rule]`
 - **Refusal.** A file with no valid record is refused. `[Safe rule]`
 - **Start points.** A map's start points are its valid
   `random_start_point_N` entries in ascending N, renumbered 0, 1, 2 and so
@@ -369,7 +397,10 @@ An entrance value is a List of exactly seven items, in this order:
 - An entrance with the wrong item count, an invalid item, or a lookup name
   that no map has, is dropped with a diagnostic. `[Safe rule]`
 - An entrance with exactly 8 items is read from its first seven, ignoring
-  the eighth, with a diagnostic. (Revision 3, R16)
+  the eighth, with a diagnostic. (Revision 3, R16) When item 6, the hex, is -1
+  and item 8 is an Integer, the line takes no diagnostic: a hex of -1 ignores
+  items 5 and 7, so every reading gives the same entrance. Any other 8-item line
+  keeps its diagnostic. `[Safe rule]` (Revision 5)
 - An entrance whose X and Y are both -1 is valid, and is never drawn on the
   town map. Scripts and section 5 still use it. Only one of the two at -1 is
   invalid. `[Safe rule]` (Revision 2, R12)
@@ -1058,6 +1089,9 @@ silent, SPEC-014's Fallout 1 flow applies with the data below. (D23-D27)
   from that date. So tick 264600 is 25 July 2241 at 07:21, and the date
   fields of the `SAVE.DAT` header, `get_month`, `get_day` and every displayed
   date use this calendar. `[Must-match]` (D24)
+- (Revision 5) These are defaults. Under sfall mode, `ddraw.ini`'s `StartTime`
+  can replace the reset tick, and `StartYear`, `StartMonth` and `StartDay` the
+  date of game day 0. SPEC-024c section 3.6 gives the rules.
 
 ### 6.2 Campaign and map globals
 
@@ -1083,7 +1117,8 @@ silent, SPEC-014's Fallout 1 flow applies with the data below. (D23-D27)
 - The premade sheets and bios are the same files as Fallout 1, in the same
   cyclic order: `premade/combat.gcd` and `.bio`, `premade/stealth.gcd` and
   `.bio`, `premade/diplomat.gcd` and `.bio`. Portraits, ID text and the
-  screen are SPEC-019 §3.3's. (D25)
+  screen are SPEC-019 §3.3's. (D25) (Revision 5) These three are the default
+  for `PremadePaths` and `PremadeFIDs` (SPEC-024c section 3.10).
 - (Revision 4) A Fallout 2 `.gcd` sheet is **432 bytes** (`0x1B0`). It is
   SPEC-006 §2.2's sheet with one more 4-byte word, the **extra critter
   word**, after the 368-byte critter-stat portion. Every later field moves
@@ -1128,13 +1163,28 @@ silent, SPEC-014's Fallout 1 flow applies with the data below. (D23-D27)
 
   Loading, its normalization and its safe rule are SPEC-006 §2.3's,
   unchanged. (Revision 4)
-- (Revision 4) **Which layout.** A sheet is read by its exact length, under
-  either profile: 428 bytes is SPEC-006's layout and 432 bytes this one. A
-  sheet of any other length is refused, before any player state changes,
+- (Revision 5) **The 440-byte sheet.** A 440-byte sheet is the 432-byte layout,
+  then two words. `[Must-match]` for the length and the style word's offset.
+
+  | Offset | Bytes | Field |
+  | --- | ---: | --- |
+  | `0x01B0` | 4 | Appearance race word, named by position only, with no effect |
+  | `0x01B4` | 4 | Appearance style word |
+
+  What the style word does is SPEC-024c section 2.4's. Each sheet keeps its length
+  and its two words as read, and they are not part of the player's state.
+  `[Safe rule]`
+- (Revision 4, Revision 5) **Which layout.** A sheet is read by its exact length,
+  under either profile and in either sfall mode: 428 bytes is SPEC-006's layout,
+  432 bytes this one, and 440 bytes the 432-byte layout and its two words. One mod
+  can mix all three, so the length is tested per file. File names compare without
+  case. A sheet of any other length is refused, before any player state changes,
   as SPEC-006 §2.3's safe rule says; in particular, the trailing word of a
   432-byte sheet is never ignored. The character editor's SAVE (SPEC-014
   §3.43) writes 432 bytes, with the extra word 0, under Fallout 2, and 428
-  bytes under Fallout 1. `[Safe rule]` (R17)
+  bytes under Fallout 1. When the sheet in hand was read at 440 bytes, it writes
+  440 bytes with the words as read, so a load and a save give identical bytes
+  (Revision 5). `[Safe rule]` (R17)
 - The trait indices keep their positions 0-15; their names come from
   `trait.msg`. Index 13 is Sex Appeal under Fallout 2, not Night Person.
   Trait and perk effects under Fallout 2 belong to a later specification.
@@ -1150,6 +1200,10 @@ The Fallout 2 game movie table replaces SPEC-012 §2.11's. Index m is the
 `play_gmovie` operand and the position in the played-movie component (section
 7.3). Files are under `art/cuts/`. `[Must-match]` (D26)
 
+(Revision 5) The table is the default. Under sfall mode, `ddraw.ini`'s `MovieN`
+replaces the file of index `N - 1`, for every use of that index, and the flags stay
+with the index. SPEC-024c section 3.5 gives the rules.
+
 | Index | File | Index | File | Index | File |
 | ---: | --- | ---: | --- | ---: | --- |
 | 0 | `iplogo.mve` | 6 | `car.mve` | 12 | `artimer1.mve` |
@@ -1160,7 +1214,7 @@ The Fallout 2 game movie table replaces SPEC-012 §2.11's. Index m is the
 | 5 | `adestroy.mve` | 11 | `derrick.mve` | | |
 
 - Startup plays `iplogo.mve` and then `intro.mve`, as SPEC-014 §3.1 step 9.
-- The new-game hand-off plays `elder.mve` (index 2) in place of
+- The new-game hand-off plays index 2's file, by default `elder.mve`, in place of
   `ovrintro.mve`, with SPEC-014 §3.12 step 2's flag `0x04`.
 - The `play_gmovie` flags per index and every other caller are SPEC-019
   §3.21's, which lists the same 17 files in the same order. (R5)
@@ -1169,6 +1223,12 @@ The Fallout 2 game movie table replaces SPEC-012 §2.11's. Index m is the
 ### 6.5 Starting map and world state
 
 `[Must-match]` (D23)
+
+(Revision 5) `artemple` is the default. Under sfall mode, a valid `StartingMap`
+in `ddraw.ini` replaces it throughout this section and section 6.6: the new-game
+map, the start area, the current entrance and the city music. SPEC-024c section
+3.4 gives the rules. `StartXPos` and `StartYPos` can replace the world position
+below (SPEC-024c section 3.7).
 
 - The new-game map is `maps/artemple.map`, loaded by that fixed name, with
   the **header's default entrance** (hex, elevation and orientation, SPEC-016
@@ -1207,13 +1267,16 @@ The Fallout 2 game movie table replaces SPEC-012 §2.11's. Index m is the
 1. **Before the selection screen**, parse the section 4 tables and the
    campaign initializer, and build the automap database (section 7.6). A
    refusal returns to the main menu with a message naming the file and
-   line. Nothing has changed then.
+   line. Nothing has changed then. (Revision 5) `StartingMap` is tested here. An
+   invalid value, or an absent `maps/<stem>.map`, falls back to `artemple`, with
+   a diagnostic naming the value. `[Safe rule]`
 2. Then follow SPEC-014 §3.12 steps 1 to 10, with three changes: step 2
    plays `elder.mve`; step 7 loads `maps/artemple.map` as in section 6.5;
    step 8 starts that map's city music.
 3. The world state of section 6.5 is installed after the reset and before
    step 7's map load. The map load's direct move (section 5.4) then leaves
-   the party at the start area's position.
+   the party at the start area's position. (Revision 5) A valid `StartXPos` and
+   `StartYPos` pair is applied after that move. `[Safe rule]`
 4. While Fallout 2 scripts are gated (section 6.7), the hand-off is
    otherwise unchanged. When it completes, the message monitor shows the
    gate notice.
@@ -1977,6 +2040,7 @@ written the same way into every spec it touches.
 | R15 | The retail player script, `scripts.lst` entry 0, declares 5 local variables; SPEC-006 §3.5 says the Fallout 1 entry declares none | Under Fallout 2 the player's script record gets a local slice of the entry's declared count, all 0 at a new game, kept and saved like any party member's (section 6.5) | Coordinator, Revision 3, measured |
 | R16 | Two retail entrances (areas 30 and 31) have 8 items, and area 30's only entrance was dropped | An 8-item entrance is read from its first seven items. Both retail lines have -1 for the hex however they are read, so both take the header's default entrance | Coordinator, Revision 3, measured |
 | R17 | All 6 retail `premade/*.gcd` sheets are 432 bytes; Fallout 1's 6 are 428. The name sits at `0x174`, the tags at `0x194`, the traits at `0x1A4` and the points at `0x1AC`. Every word from `0x090` to `0x173` is 0 in all 6. Read as SPEC-006's 428 bytes, a premade showed an empty name, its first tag twice, a lost trait, and its second trait as character points | Section 6.3: the 432-byte layout, chosen by exact length; any other length refused; SAVE writes the game's layout. The measured field offsets are `[Must-match]`. Placing the extra word at `0x170`, after the kill category as in SPEC-016 §3.1's prototype, is a structural choice. Its meaning (perhaps the damage type) is not established, so it is kept, written back and given no effect | Team A, Revision 4, measured (re-measured independently of the coordinator's draft) |
+| R18 | SPEC-024c's audit of a mod's tables and sheets: three section headers followed by text were not read as headers, so three map records were lost and a fourth silently took their keys; sheets of 440 bytes; and `ddraw.ini` start keys | Revision 5 carries in SPEC-024c section 5: the header rule of section 3.3, the rules of sections 4.2, 4.3 and 6.3, and defaults in sections 6.1 and 6.3 to 6.6. SPEC-024c stays the full text of each rule, and if the two differ SPEC-024c wins | Owner instruction (brief of 2026-10-31), from a research hand-off. SPEC-024c's D-1 and D-3 are owner approved |
 | R6 | Other contradictions | Script-directed travel is SPEC-019's direct move. Encounter suppression uses SPEC-019's area circles. This spec defines dropping to terrain, the map known/visited flags, the saved area positions, the `metarule3` 104 entrance match, the world-map music, display and location names, and the `genrep.txt`, `karmavar.txt` and `endgame.txt` grammars. SPEC-011's progression tables apply provisionally. The Fallout 2 `ai.txt` keys and town reputations are not read | Team A default, reconciliation 2026-10-25 |
 
 ## 11. Verification notes
@@ -1999,7 +2063,8 @@ written the same way into every spec it touches.
   defects, all of which section 4's safe rules drop:
   - one start point at elevation 3;
   - one `music` line with no `=`;
-  - one `ambient_sfx` list missing a comma;
+  - one `ambient_sfx` list missing a comma, which reads with no diagnostic since
+    Revision 5;
   - two item fields running two items together;
   - two repeated keys, of which the later is kept.
 - [x] Revision 4 was re-measured by Team A on 2026-10-26, independently of
@@ -2014,3 +2079,7 @@ written the same way into every spec it touches.
     40-character hex string and no code listing.
   - The only things reproduced are lengths, offsets, counts and the
     blank sheets' name `None`. No premade's name, tags or traits appear.
+- [x] Revision 5 was written by Team A on 2026-10-31 from SPEC-024c alone. It
+  reads no mod data of its own, and SPEC-024c's vectors stay in
+  `oracle/SPEC-024c/`. Rules that need a real install stay unchecked, as
+  SPEC-024c section 7 says. The ingestion patterns were rechecked by search.

@@ -1,0 +1,9 @@
+vector	bytes	fnv1a64	name	tags	traits	points	extra_word	race_word	style_word	rule
+G1	428	30ECCBA327AAE28C	Synth	0,1,2,-1	3,-1	0	-	-	-	the Fallout 1 layout
+G2	432	863AEBC5B776332C	Synth	0,1,2,-1	3,-1	0	0	-	-	the Fallout 2 layout
+G3	440	A267716A4F1B50AC	Synth	0,1,2,-1	3,-1	0	0	0	0	the 432-byte layout, then two zero words
+G4	440	A267726A4F1B525F	Synth	0,1,2,-1	3,-1	0	0	0	1	a style word of 1
+G5	440	C87418E9C7098C6F	Synth	0,1,2,-1	3,-1	0	0	3	2	both words set; the sheet keeps them
+G6	436	FB2097C117A34BEC	refused	-	-	-	-	-	-	436 bytes: refused before any player state changes
+G7	444	947CF2705953016C	refused	-	-	-	-	-	-	444 bytes: refused before any player state changes
+G8	0	CBF29CE484222325	refused	-	-	-	-	-	-	an empty file: refused

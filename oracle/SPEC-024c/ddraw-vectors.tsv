@@ -1,0 +1,48 @@
+vector	ini_text_with_bars_for_line_ends	field	expected	diagnostics	rule
+D1	(no file)	starting_map	artemple	0	no file: every default
+D2	[Misc]|StartingMap=V13ent.map|	starting_map	v13ent	0	the value Et Tu sets
+D3	[Misc]|StartingMap=V13ent|	starting_map	v13ent	0	the final .map is optional
+D4	[MISC]|startingmap=V13ENT.MAP|	starting_map	v13ent	0	names and keys fold case
+D5	[Misc]|;StartingMap=V13ent.map|	starting_map	artemple	0	a comment is unset, with no diagnostic
+D6	[Misc]|StartingMap=|	starting_map	artemple	0	an empty value is unset, with no diagnostic
+D7	[Misc]|StartingMap=toolongname.map|	starting_map	artemple	1	not a Stem: the fallback, with a diagnostic
+D8	[Misc]|StartingMap=absent.map|	starting_map	artemple	1	no such file: the fallback, with a diagnostic
+D9	[Main]|StartingMap=V13ent.map|	starting_map	artemple	0	only the section [Misc] counts
+D10	(no file)	movie_2	elder.mve	0	the SPEC-018 table
+D11	[Misc]|Movie3=ovrintro.mve|	movie_2	ovrintro.mve	0	MovieN is index N - 1
+D12	[Misc]|Movie3=|	movie_2	elder.mve	0	an empty value is unset
+D13	[Misc]|Movie3=a/b.mve|	movie_2	elder.mve	1	a path is refused: the default, with a diagnostic
+D14	[Misc]|Movie18=extra.mve|	movie_2	elder.mve	1	Movie18 to Movie32 are not supported, with a diagnostic
+D15	(no file)	start_tick	264600	0	the SPEC-018 default
+D16	[Misc]|StartTime=721|	start_tick	264600	0	HHMM with the leading zero left out
+D17	[Misc]|StartTime=0|	start_tick	0	0	midnight
+D18	[Misc]|StartTime=2359|	start_tick	863400	0	the last minute of the day
+D19	[Misc]|StartTime=2400|	start_tick	264600	1	no hour 24: the default, with a diagnostic
+D20	[Misc]|StartTime=1260|	start_tick	264600	1	no minute 60: the default, with a diagnostic
+D21	[Misc]|StartTime=-1|	start_tick	264600	0	-1 is unset, with no diagnostic
+D22	(no file)	start_date	25 Jul 2241	0	the SPEC-018 calendar
+D23	[Misc]|StartYear=2161|StartMonth=11|StartDay=4|	start_date	5 Dec 2161	0	month and day are 0-indexed
+D24	[Misc]|StartYear=2161|	start_date	25 Jul 2161	0	each key stands alone
+D25	[Misc]|StartMonth=12|	start_date	25 Jul 2241	1	no month 12: that key is unset, with a diagnostic
+D26	[Misc]|StartMonth=1|StartDay=28|	start_date	25 Feb 2241	1	February has 28 days: StartDay is unset
+D27	(no file)	world_pos	start area	0	the start area of SPEC-018
+D28	[Misc]|StartXPos=823|StartYPos=72|	world_pos	823,72	0	world pixels
+D29	[Misc]|StartXPos=823|	world_pos	start area	1	one axis alone: the default, with a diagnostic
+D30	[Misc]|StartXPos=1400|StartYPos=72|	world_pos	start area	1	outside the world: the default, with a diagnostic
+D31	(no file)	version	FALLOUT II 1.02d	0	the SPEC-019 text
+D32	[Misc]|VersionString=FALLOUT ET TU v1.16.3903|	version	FALLOUT ET TU v1.16.3903	0	a literal text
+D33	[Misc]|VersionString=Test %d.%d|	version	Test 1.2	0	two numbers: 1, then 2
+D34	[Misc]|VersionString=%d %d %d|	version	FALLOUT II 1.02d	1	three numbers: the default, with a diagnostic
+D35	(no file)	premades	combat,stealth,diplomat	0	the SPEC-018 order
+D36	[Misc]|PremadePaths=a,b|PremadeFIDs=201,202|	premades	a,b	0	as listed
+D37	[Misc]|PremadePaths=a,b|PremadeFIDs=201|	premades	combat,stealth,diplomat	1	unequal lists: the default, with a diagnostic
+D38	(no file)	male_start	unchanged	0	the existing rule stands
+D39	[Misc]|MaleStartModel=hmjmps|	male_start	hmjmps	0	a row of critters.lst
+D40	[Misc]|MaleStartModel=nosuch|	male_start	unchanged	1	no such row: unchanged, with a diagnostic
+D41	[Misc]|MaleDefaultModel=hmwarr|	male_default	hmwarr	0	replaces the jumpsuit base name
+D42	(no file)	menu_offset	0,0	0	no move
+D43	[Misc]|MainMenuOffsetX=392|MainMenuOffsetY=26|	menu_offset	392,26	0	the values Et Tu sets
+D44	(no file)	menu_colour	unchanged	0	the SPEC-019 key
+D45	[Misc]|MainMenuFontColour=0x000055|	menu_colour	palette index 85, version and copyright	0	the last byte picks the colour
+D46	[Misc]|MainMenuFontColour=0x010055|	menu_colour	palette index 85, version only	0	flag 1: the version string only
+D47	[Misc]|MainMenuFontColour=0x020055|	menu_colour	palette index 85, version and copyright	1	flag 2 is not supported: a diagnostic

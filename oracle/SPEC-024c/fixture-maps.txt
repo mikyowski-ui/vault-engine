@@ -1,0 +1,28 @@
+; A synthetic table.
+[Map 000]
+lookup_name=Temple
+map_name=artemple
+
+[Map 001] # a note after the header
+lookup_name=North Gate
+map_name=gate
+ambient_sfx=wind:20, rock:10 owl:5, water:15
+
+[Map 002]	# a tab before the note
+lookup_name=Gate Circle
+map_name=gate
+
+[Map 003] trailing words with no marker
+lookup_name=Cave
+map_name=cave1
+
+[Map 004
+
+[Map 005]
+lookup_name=Town
+map_name=town
+note=[kept as a value]
+
+[Map 006]
+lookup_name=Town
+map_name=town

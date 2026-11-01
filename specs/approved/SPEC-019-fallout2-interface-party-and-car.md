@@ -1,6 +1,6 @@
 # SPEC-019: Fallout 2 Interface, Party Control, the Car, and Game-Flow Deltas
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail art audit; scripts run) by the coordinator, 2026-10-25. Revision 3 (premade portraits) by the Spec-Author sub-agent (Team A), 2026-10-26, verified against the owner's retail install.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail art audit; scripts run) by the coordinator, 2026-10-25. Revision 3 (premade portraits) by the Spec-Author sub-agent (Team A), 2026-10-26, verified against the owner's retail install. Revision 4 (Team A, 2026-10-31) carries in SPEC-024c section 5.
 
 **Provenance:** written by Team A (the Spec-Author sub-agent) on 2026-10-25 from
 the coordinator's brief of the same day. Source categories:
@@ -139,6 +139,9 @@ is the area number. A city's display name is its `area_name`.
 - **Revision 3 (2026-10-26).** Premade portraits: their retail size
   (section 2.2) and their place in the monitor window (section 3.3, D-32).
   Drafted by the coordinator; re-measured and approved by Team A.
+- **Revision 4 (2026-10-31).** By Team A, on the owner's brief of the same day:
+  the main menu's version text and positions are defaults (section 3.2, D-33),
+  from SPEC-024c section 5.
 
 ## 2. Data, Constants and State
 
@@ -423,6 +426,14 @@ default]` for the geometry; `[Must-match]` for the six buttons.
 | Version | Text `FALLOUT II 1.02d`, font 100, key 21204, right edge at x = 615, y = 460 |
 | Hotkeys | `i`, `n`, `l`, `o`, `c`, `e`, either case, for buttons 0-5 |
 | Music | `sound/music/07desert.acm`, as SPEC-014 §3.4; a missing file plays nothing (SPEC-010) |
+
+**Defaults (Revision 4).** The version text, the colors of the version text and
+the copyright line, and the positions above are defaults. Under sfall mode,
+`ddraw.ini` can change them, and SPEC-024c section 3.9 gives the rules:
+`VersionString` replaces the version text, `MainMenuOffsetX` and `MainMenuOffsetY`
+move the six buttons and their labels, `MainMenuCreditsOffsetX` and
+`MainMenuCreditsOffsetY` move the copyright line, and `MainMenuFontColour` sets
+the palette index. `[Must-match]`
 
 **Loop and choices.** As SPEC-014 §3.4 and §3.5, with one added choice.
 `[Must-match]`
@@ -1625,6 +1636,10 @@ touch, and are listed in SPEC-018 §10 as R1-R6.
     (section 3.3), as a safe rule.
   - **Scan lines.** The scan-line effect is kept from SPEC-014 §3.7,
     because nothing measured says Fallout 2 drops it.
+- **D-33 (owner instruction, brief of 2026-10-31, Revision 4).** Section 3.2's
+  version text, colors and positions become defaults for SPEC-024c section 3.9's
+  `ddraw.ini` keys, as SPEC-024c section 5 asks. SPEC-024c stays the full text of
+  those rules.
 
 ## 6. Coordination With SPEC-017 and SPEC-018
 
@@ -1693,3 +1708,5 @@ The first revision's requests were answered in the reconciliation pass of
   by hand against the window bounds and the odd-row rule. The ingestion
   patterns were rechecked by search: no source-tree path, no 40-character hex
   string and no code listing.
+- [x] Revision 4 was written by Team A on 2026-10-31 from SPEC-024c alone, and the
+  ingestion patterns were rechecked by search.
