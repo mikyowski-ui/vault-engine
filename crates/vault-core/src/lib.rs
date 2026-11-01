@@ -199,6 +199,8 @@ mod spec024_tests;
 #[cfg(test)]
 mod spec024a_tests;
 #[cfg(test)]
+mod spec024c_tests;
+#[cfg(test)]
 mod state_hash_tests;
 #[cfg(test)]
 mod state_tests;

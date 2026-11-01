@@ -175,3 +175,39 @@ fn spec018_fallout2_gcd_has_an_extra_word_before_the_name() {
         assert!(GcdFile::parse(&s432[..end]).is_err());
     }
 }
+
+fn spec006_sheet() -> Vec<u8> {
+    fixture_assets::sparse(include_str!("../../../tests/fixtures/state/player.gcd.hex"))
+}
+/// SPEC-024c §2.1: the length chooses the layout, under no other condition.
+#[test]
+fn a_sheet_is_read_by_its_exact_length_at_440_bytes_too() {
+    let s428 = spec006_sheet();
+    let mut s432 = s428[..0x170].to_vec();
+    s432.extend([0, 0, 0, 7]);
+    s432.extend(&s428[0x170..]);
+    assert_eq!(s432.len(), crate::gcd::GCD2_LEN);
+    let mut s440 = s432.clone();
+    s440.extend(5_i32.to_be_bytes());
+    s440.extend((-2_i32).to_be_bytes());
+    assert_eq!(s440.len(), crate::gcd::GCD3_LEN);
+    let read = GcdFile::parse(&s440).unwrap();
+    let plain = GcdFile::parse(&s432).unwrap();
+    assert_eq!(
+        read.appearance,
+        Some(crate::SheetAppearance { race: 5, style: -2 })
+    );
+    assert_eq!(plain.appearance, None);
+    assert_eq!(
+        (read.name, read.tags, read.traits, read.extra_word),
+        (plain.name, plain.tags, plain.traits, plain.extra_word),
+        "the 432-byte layout, then two words"
+    );
+    assert_eq!(read.write(), s440);
+    assert_eq!(plain.write(), s432);
+    // 436 bytes has no layout, and neither has 444.
+    assert!(GcdFile::parse(&s440[..436]).is_err());
+    let mut s444 = s440;
+    s444.extend([0; 4]);
+    assert!(GcdFile::parse(&s444).is_err());
+}

@@ -302,7 +302,8 @@ impl EditorStage {
         self.write_sheet(op, &file);
     }
     /// SAVE writes the game's sheet (428 bytes, or SPEC-018 §6.3's 432
-    /// under Fallout 2); PRINT TO FILE the printed sheet. A failure plays
+    /// under Fallout 2, or 440 for a sheet read at 440, SPEC-024c §2.5);
+    /// PRINT TO FILE the printed sheet. A failure plays
     /// `iisxxxx1` before its box. SAVE's failure shows "Error saving NAME!"
     /// (the §3.11 `[May-improve]` safe rule for the reference's
     /// "NAMEError saving !") and keeps the options dialog.

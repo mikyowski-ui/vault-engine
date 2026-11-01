@@ -13,6 +13,8 @@ mod movie;
 mod preview;
 mod replay;
 mod session;
+#[cfg(test)]
+mod spec024c_tests;
 // The whole of SPEC-023's interface: the desktop itself uses the file system
 // backend, and the rest is for hosts without OS paths and for the tests.
 #[cfg_attr(not(test), allow(dead_code))]

@@ -298,7 +298,8 @@ pub fn written_name<'a>(file: &[u8], existing: impl IntoIterator<Item = &'a [u8]
 /// statistics, invested skill points, name (NUL-terminated, at most 31
 /// bytes), tags, traits and character points; the critter-only words are
 /// zero. Under Fallout 2 it is SPEC-018 §6.3's 432-byte sheet (Revision 4),
-/// whose damage-type word is 0 (normal).
+/// whose damage-type word is 0 (normal). A sheet read at 440 bytes keeps that
+/// length and its words as read, under either profile (SPEC-024c §2.5).
 pub fn sheet_gcd(sheet: &CharacterSheet, game: crate::GameProfile) -> GcdFile {
     let mut name = [0; 32];
     let length = sheet.name.len().min(31);
@@ -311,11 +312,15 @@ pub fn sheet_gcd(sheet: &CharacterSheet, game: crate::GameProfile) -> GcdFile {
         body: 0,
         experience_reward: 0,
         kill_category: 0,
-        extra_word: (game == crate::GameProfile::Fallout2).then_some(0),
+        extra_word: match sheet.read_words {
+            Some((extra, _)) => Some(extra),
+            None => (game == crate::GameProfile::Fallout2).then_some(0),
+        },
         name,
         tags: sheet.tags,
         traits: sheet.traits,
         remaining_points: sheet.remaining_creation,
+        appearance: sheet.read_words.map(|(_, appearance)| appearance),
     }
 }
 

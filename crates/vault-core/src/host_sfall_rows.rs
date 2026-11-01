@@ -10,7 +10,7 @@ use crate::{
     host::WorldHost,
     host_sfall::SfallValue,
     progression::LEVEL_UP_FLAG,
-    sfall::{UNIQUE_IDS, encounter_flag},
+    sfall::{GlobalKey, UNIQUE_IDS, encounter_flag},
     skills,
     world::ObjectRef,
 };
@@ -19,6 +19,7 @@ use std::{
     sync::Arc,
 };
 use vault_formats::{
+    SheetAppearance,
     msg::MsgCatalog,
     pro::{Category, ItemData, PrototypeData},
     vfs::VfsPath,
@@ -154,6 +155,31 @@ impl<A: WorldAssets> WorldHost<A> {
             self.assets.set_virtual_file(&file.path, None);
         }
         self.sfall_reset_settings();
+    }
+    /// SPEC-024c §2.4: the player took a sheet with `appearance`, in a new
+    /// game. With sfall mode on and the appearance option on, `HApStyle` and
+    /// the stored style take its style word. Anything else writes nothing.
+    pub fn sfall_take_sheet(&mut self, appearance: Option<SheetAppearance>) {
+        let Some(style) = appearance.map(|appearance| appearance.style) else {
+            return;
+        };
+        if !matches!(self.hero_appearance_mode(), 1 | 2) {
+            return;
+        }
+        if let Some(state) = self.world.sfall.as_deref_mut() {
+            state
+                .globals
+                .insert(GlobalKey::Text(*b"HApStyle"), SfallValue::Int(style));
+        }
+        if let Some(promoted) = self.promoted() {
+            promoted.hero_style = style;
+        }
+    }
+    /// `EnableHeroAppearanceMod` of `ddraw.ini`.
+    fn hero_appearance_mode(&mut self) -> i32 {
+        self.ini_file("ddraw.ini")
+            .and_then(|file| file.get("Misc", "EnableHeroAppearanceMod"))
+            .map_or(0, |value| sfall::atoi(value.as_bytes()))
     }
     /// A word of §4.11, with its operands read by class.
     pub(crate) fn sfall_promoted(

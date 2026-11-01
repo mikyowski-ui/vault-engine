@@ -234,6 +234,10 @@ pub struct CharacterSheet {
     /// Critter experience reward (not the player's accumulated experience).
     pub experience_reward: i32,
     pub kill_category: i32,
+    /// SPEC-024c §2.5 the extra word and appearance words of a sheet read at
+    /// 440 bytes. They go back out with it, and are not the player's state:
+    /// nothing saves or hashes them.
+    pub read_words: Option<(i32, vault_formats::SheetAppearance)>,
 }
 impl Default for CharacterSheet {
     fn default() -> Self {
@@ -266,6 +270,7 @@ impl Default for CharacterSheet {
             body: 0,
             experience_reward: 0,
             kill_category: 0,
+            read_words: None,
         };
         sheet.recompute(StatContext::default());
         sheet.heal(10000, StatContext::default());
@@ -288,6 +293,9 @@ impl CharacterSheet {
             traits: gcd.traits,
             remaining_creation: gcd.remaining_points,
             current_hp: 0,
+            read_words: gcd
+                .appearance
+                .map(|appearance| (gcd.extra_word.unwrap_or(0), appearance)),
             ..Self::default()
         };
         result.recompute(context);

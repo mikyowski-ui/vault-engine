@@ -63,7 +63,7 @@ pub use fid::{ArtCatalog, Fid, FidError};
 pub use font::{Font, FontKind, FontSet, TextFlags};
 pub use frm::FrmArchive;
 pub use gam::{GamFile, GamSection};
-pub use gcd::GcdFile;
+pub use gcd::{GcdFile, SheetAppearance};
 pub use geometry::HexGrid;
 pub use lip::LipFile;
 pub use lst::{LstKind, LstTable};

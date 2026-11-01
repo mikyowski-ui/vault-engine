@@ -1,5 +1,6 @@
-//! SPEC-006 428-byte sheet, and SPEC-018 §6.3's 432-byte Fallout 2 sheet
-//! (Revision 4). Decoding and player-only normalization are distinct.
+//! SPEC-006 428-byte sheet, SPEC-018 §6.3's 432-byte Fallout 2 sheet
+//! (Revision 4), and SPEC-024c §2's 440-byte sheet. Decoding and player-only
+//! normalization are distinct.
 use crate::{ParseError, binary::Reader};
 
 /// SPEC-006 §2.2: the Fallout 1 sheet.
@@ -7,6 +8,17 @@ pub const GCD_LEN: usize = 428;
 /// SPEC-018 §6.3 (Revision 4): the Fallout 2 sheet, with a damage-type word
 /// after the 368-byte critter-stat portion.
 pub const GCD2_LEN: usize = 432;
+/// SPEC-024c §2: the 432-byte layout, then the two appearance words.
+pub const GCD3_LEN: usize = 440;
+
+/// SPEC-024c §2.2 the two words at the end of a 440-byte sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SheetAppearance {
+    /// `0x1B0`: named by position only, with no effect (D-4).
+    pub race: i32,
+    /// `0x1B4`: the appearance style the sheet gives the player (D-3).
+    pub style: i32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcdFile {
@@ -26,24 +38,25 @@ pub struct GcdFile {
     pub tags: [i32; 4],
     pub traits: [i32; 2],
     pub remaining_points: i32,
+    /// `None` unless the sheet was read at 440 bytes. It also chooses that
+    /// layout for [`GcdFile::write`].
+    pub appearance: Option<SheetAppearance>,
 }
 impl GcdFile {
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         let mut r = Reader::new(bytes, "GCD")?;
-        // The exact length chooses the layout (SPEC-018 §6.3, Revision 4):
-        // 428 bytes is SPEC-006's sheet, 432 the Fallout 2 sheet. Any other
-        // length is refused (SPEC-006 §2.3's safe rule). Reading a 432-byte
-        // sheet with the 428-byte layout would shift its name, tags, traits
-        // and points by one word.
-        let fallout2 = match bytes.len() {
-            GCD_LEN => false,
-            GCD2_LEN => true,
-            length => {
-                return Err(r.error(format!(
-                    "a sheet is {GCD_LEN} bytes (Fallout 1) or {GCD2_LEN} (Fallout 2), not {length}"
-                )));
-            }
-        };
+        // The exact length chooses the layout, per file and under either
+        // profile (SPEC-018 §6.3, SPEC-024c §2.1): one mod holds all three.
+        // Any other length is refused (SPEC-006 §2.3's safe rule). Reading a
+        // 432-byte sheet with the 428-byte layout would shift its name,
+        // tags, traits and points by one word.
+        let length = bytes.len();
+        if ![GCD_LEN, GCD2_LEN, GCD3_LEN].contains(&length) {
+            return Err(r.error(format!(
+                "a sheet is {GCD_LEN}, {GCD2_LEN} or {GCD3_LEN} bytes, not {length}"
+            )));
+        }
+        let fallout2 = length != GCD_LEN;
         let flags = r.word()?;
         let base = r.words()?;
         let bonus = r.words()?;
@@ -56,6 +69,14 @@ impl GcdFile {
         let tags: [i32; 4] = r.words()?;
         let traits: [i32; 2] = r.words()?;
         let remaining_points = r.be_i32()?;
+        let appearance = if length == GCD3_LEN {
+            Some(SheetAppearance {
+                race: r.be_i32()?,
+                style: r.be_i32()?,
+            })
+        } else {
+            None
+        };
         // SPEC-006 §2.2 describes the serialized words as "not
         // guaranteed-valid"; the checks below are engine safe bounds, not
         // reference behavior: a name without its NUL terminator, a SPECIAL
@@ -89,6 +110,7 @@ impl GcdFile {
             tags,
             traits,
             remaining_points,
+            appearance,
         })
     }
     pub fn player_normalized(&self) -> Self {
@@ -100,9 +122,10 @@ impl GcdFile {
         result
     }
     /// The big-endian sheet (SPEC-014 §3.43 writes it in binary mode): 428
-    /// bytes, or the 432-byte Fallout 2 sheet when it has the extra word.
+    /// bytes, 432 when it has the extra word, and 440 when it has the
+    /// appearance words too (SPEC-024c §2.5).
     pub fn write(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(GCD2_LEN);
+        let mut bytes = Vec::with_capacity(GCD3_LEN);
         bytes.extend(self.flags.to_be_bytes());
         let words = self
             .base
@@ -119,6 +142,10 @@ impl GcdFile {
             bytes.extend(word.to_be_bytes());
         }
         bytes.extend(self.remaining_points.to_be_bytes());
+        if let Some(appearance) = self.appearance {
+            bytes.extend(appearance.race.to_be_bytes());
+            bytes.extend(appearance.style.to_be_bytes());
+        }
         bytes
     }
     pub fn name_bytes(&self) -> &[u8] {

@@ -600,6 +600,7 @@ impl Game {
         let fallout2 = self.fallout2.clone();
         let sfall = self.sfall;
         let mod_session = self.mod_session.clone();
+        let appearance = sheet.read_words.map(|(_, appearance)| appearance);
         let path = if fallout2.is_some() {
             vault_core::fallout2::START_MAP
         } else {
@@ -614,6 +615,8 @@ impl Game {
                 }
                 crate::session::start_sfall(host, sfall);
                 crate::session::start_mods(host, mod_session);
+                // SPEC-024c §2.4: after the world state, before setup.
+                host.sfall_take_sheet(appearance);
             })?;
         world.host.world.clock.ticks = flow::START_TICKS;
         world.audio = self.audio.clone();
