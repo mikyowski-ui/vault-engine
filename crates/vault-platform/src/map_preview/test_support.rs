@@ -5,6 +5,80 @@ use std::{path::Path, sync::Arc};
 use vault_core::ObjectRef;
 use vault_formats::{LocalDirProvider, Vfs, pro::Category};
 
+/// One row per step of a scripted session, compared with a pinned table in
+/// `tests/fixtures/characterization/`. These pin exact behaviour across a
+/// refactor: `state_hash` leaves out the clock, the queue and the world map,
+/// so each row carries them too. Set `VAULT_BLESS_CHARACTERIZATION=1` to
+/// rewrite a table, and only when a change in behaviour is intended.
+pub(crate) struct Recorder {
+    name: &'static str,
+    rows: String,
+}
+
+impl Recorder {
+    pub(crate) fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            rows: "step\tstate\tcombat\tticks\trng\tcritter\tscreen\tmode\treplay\trequest\tmap\tf1\tf2\tstatus\n"
+                .to_owned(),
+        }
+    }
+
+    /// The row for `preview` as `step` left it.
+    pub(crate) fn row(&mut self, step: &str, preview: &MapPreview) {
+        let world = &preview.host.world;
+        let screen = match &preview.screen {
+            super::Screen::Map => "map",
+            super::Screen::World(_) => "world",
+            super::Screen::Town(_) => "town",
+            super::Screen::World2(_) => "world2",
+            super::Screen::Town2(_) => "town2",
+            _ => "other",
+        };
+        let f2 = world
+            .fallout2
+            .as_deref()
+            .map(|state| format!("{:?} {:?}", state.position, state.travel));
+        self.rows.push_str(&format!(
+            "{step}\t{:016x}\t{:016x}\t{}\t{:?}\t{:?}\t{screen}\t{:?}\t{:?}\t{:?}\t{}\t{:?} {:?}\t{f2:?}\t{}\n",
+            world.state_hash(),
+            world.combat_hash(),
+            world.clock.ticks,
+            world.rng.state(),
+            world.critter_state(world.player),
+            preview.hud.mode,
+            preview.hud.replay.is_some(),
+            world.pending_combat.is_some(),
+            world.map.header.map_number,
+            world.world_map.saved.position,
+            world.world_map.travel,
+            String::from_utf8_lossy(&preview.status),
+        ));
+    }
+
+    /// Compare with the pinned table.
+    pub(crate) fn check(self) {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/characterization")
+            .join(format!("{}.tsv", self.name));
+        if std::env::var_os("VAULT_BLESS_CHARACTERIZATION").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &self.rows).unwrap();
+            return;
+        }
+        let pinned = std::fs::read_to_string(&path).unwrap_or_default();
+        for (at, (old, new)) in pinned.lines().zip(self.rows.lines()).enumerate() {
+            assert_eq!(new, old, "{} line {}", self.name, at + 1);
+        }
+        assert_eq!(
+            self.rows.lines().count(),
+            pinned.lines().count(),
+            "{} row count",
+            self.name
+        );
+    }
+}
+
 /// The synthetic corpus in a new temporary directory.
 pub(crate) fn synthetic_corpus() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();

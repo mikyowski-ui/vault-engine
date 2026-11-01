@@ -389,3 +389,39 @@ fn spec019_fallout1_keeps_its_own_world_map() {
     preview.open_world_map();
     assert!(matches!(preview.screen, Screen::World(_)));
 }
+
+/// Pins the jittered city target, travel, the locked row and entering a
+/// city, a row per pass.
+#[test]
+fn characterization_fallout2_travel_and_entry() {
+    use crate::map_preview::test_support::Recorder;
+    let dir = corpus();
+    let mut preview = preview(dir.path());
+    let mut rows = Recorder::new("fallout2-travel");
+    open(&mut preview);
+    rows.row("open", &preview);
+    click(&mut preview, [510, 140 + 27]);
+    rows.row("row-travels", &preview);
+    let mut now = 1000;
+    for _ in 0..4000 {
+        now += 41;
+        preview.tick(now).unwrap();
+        rows.row("travel", &preview);
+        if state(&mut preview).travel.is_none() {
+            break;
+        }
+    }
+    click(&mut preview, [510, 140 + 2 * 27]);
+    rows.row("locked-row", &preview);
+    state(&mut preview).position = [500, 400];
+    preview.tick(200_000).unwrap();
+    rows.row("at-city", &preview);
+    let party = screen::window([500, 400], world(&preview).view);
+    click(&mut preview, party);
+    rows.row("party-click", &preview);
+    preview.tick(200_299).unwrap();
+    rows.row("held", &preview);
+    preview.tick(200_300).unwrap();
+    rows.row("entered", &preview);
+    rows.check();
+}
