@@ -1,0 +1,14 @@
+case	state	input	result	world_changed
+S1	Fallout 1 session, map screen	Alt+L	Selector opens over a stopped session; no step, no record, no clock	no
+S2	S1, selector open	Esc	Session resumes at the same step	no
+S3	S1, selector open	Alt+L	Session resumes at the same step	no
+S4	S1, selector open	1, or Enter on Fallout 1	Session resumes at the same step	no
+S5	S1, selector open	2, Fallout 2 found	Old session torn down; Fallout 2 boots from its first step	new session
+S6	S1, selector open	2, Fallout 2 not found	Row disabled; nothing happens	no
+S7	S1, selector open	2, Fallout 2 fails validation at that moment	The reason shows on the row; the old session stays	no
+S8	Main menu of a session	Alt+L	Selector opens, as S1	no
+S9	A movie playing	Alt+L	Selector opens at the step boundary; the movie resumes on Esc	no
+S10	Session recording to a log, S2 cancelled	Any	The log is the same as with no Alt+L	no
+S11	Session recording to a log, S5	Switch	The log ends as at quit; the new session is not recorded	new session
+S12	Session with a memory-mounted Vfs	Alt+L	Nothing, with one diagnostic	no
+S13	Replay, smoke test or gallery capture	Alt+L in a log	Not a shell key there: no effect	no

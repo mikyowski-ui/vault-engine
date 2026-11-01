@@ -127,6 +127,7 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
   - Section 3.27: the in-world cursor is a flat map object drawn in the section 3.44 flat pass.
   - Section 3.44: no R1 sequence uses the outline animation step (item 47).
   - Section 3.18: the Combat messages row points to SPEC-007 §3.12.
+- **R1-rev14 (2026-11-01, Team A).** On the owner's brief, section 3.19 points to SPEC-020's Phase L1. No rule of this spec changes, and section 3.3's main menu is untouched.
 - **R1-rev13 (2026-11-01, Team A).** On the owner's brief, sections 3.27 and 3.44: the in-world cursor is always the top layer. This deliberately leaves R1, which drew it in the flat pass. See Decisions at the end of this spec.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
@@ -788,6 +789,8 @@ Buttons send their key on mouse release. Unless stated, buttons use `ib2p1xx1` o
 | Ctrl+P | Pause |
 
 In the combat input loop, Space ends the turn, Enter requests the end of combat, and the loop also ends when the player's AP reaches 0. `[Must-match]`
+
+**Engine additions (R1-rev14).** Hotkey toasts (SPEC-020 section 2.6) name these keys and change none of them. Alt+L is the shell's warm switch (SPEC-020 section 2.5), caught before this table, so no screen of this spec sees it. `[Must-match]`
 
 **Screenshot, F12.** `[Must-match]`
 
@@ -3689,3 +3692,10 @@ Update notes (2026-11-01, R1-rev13, Team A): sections 3.27 and 3.44 make the cur
 | D-1 | The in-world cursor is always composited last, on both render paths | Owner instruction (brief of 2026-11-01) | No door or container sprite may draw over the cursor |
 | D-2 | The rule holds under both profiles and both presets, Vanilla included | Team A default | The brief names no exception. It changes what R1 drew, so a pinned frame of a covered cursor changes (SPEC-020 Decision D-9) |
 | D-3 | The cursor leaves the hex lists, its outline leaves the list of 100, and the AP text moves to the cursor layer | Team A default | The brief lists the cursor, and these are its parts. Each would otherwise be drawn under something |
+
+## Decisions (R1-rev14)
+
+| ID | Decision | Class | Why |
+| --- | --- | --- | --- |
+| D-4 | The main menu and every rule of this spec stay as they are, and Phase L1 is specified in SPEC-020 | Owner instruction (brief of 2026-11-01) | The brief keeps the vanilla main menu untouched |
+| D-5 | Alt+L is caught by the shell before section 3.19 | Team A default | No key of this spec uses it, and a text field must not receive it |

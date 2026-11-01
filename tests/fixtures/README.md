@@ -39,6 +39,7 @@ All files here were authored for Vault Engine. None contain original game assets
 - `input-commands.jsonl`: expected structured records for synthetic input.
 - `spec013/`: an armed explosive dropped beside a scripted door, under both profiles.
 - `spec019/`: the loot window's rectangles under both profiles.
+- `spec020/`: the boot decision, the warm switch's cases and the hotkey hints.
 
 Tests copy loose fixtures into temporary directories when exercising namespace
 changes, collisions, or symlink attacks. The committed fixture directory is never

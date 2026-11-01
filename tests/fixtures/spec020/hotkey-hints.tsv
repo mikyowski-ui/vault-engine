@@ -1,0 +1,8 @@
+order	key	text	condition
+1	F1	F1: Help	Always
+2	I	I: Inventory	Always
+3	S	S: Skilldex	Always
+4	P	P: Pip-Boy	Always
+5	Z	Z: Wait (Pip-Boy clock)	Always
+6	F9	F9: Debugger	Always
+7	Alt+L	Alt+L: Switch game	Both editions found

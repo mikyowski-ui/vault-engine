@@ -1,6 +1,6 @@
 # SPEC-023: In-Memory VFS Mounting and Portable Storage
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-30); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-30) and Revision 4 (Team A, 2026-11-01); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -97,6 +97,7 @@ re-implementation source or game asset was used.
 
 ### Revision history
 
+- **Revision 4 (2026-11-01).** Team A, on the owner's brief of the same day: the settings keys and the warm switch of SPEC-020 Phase L1 (sections 3.10 and 3.15). No format, key rule or vector changes.
 - **Revision 1 (2026-10-27).** First approved text.
 - **Revision 2 (2026-10-30).** Adds the offline-safe `wasm32-unknown-unknown`
   compile gate (section 3.17).
@@ -538,6 +539,11 @@ canonical keys. `[Must-match]`
    is rewritten, as unknown keys are. `[Safe rule]`
 5. A commit of the settings file is one batch with one put, so a failed
    write leaves the old file whole. `[Must-match]`
+6. **Phase L1 keys (Revision 4).** `last_played` (`fallout1` or `fallout2`) and
+   `hotkey_hints` (`once`, `always` or `off`) join `vault-engine.toml`, for
+   SPEC-020 sections 2.4 and 2.6. Setting `game` and `last_played` together is one
+   commit. A start named by flags writes neither. A failed commit is a diagnostic,
+   and the session goes on. `[Must-match]`
 
 ### 3.11 The `savegame` Namespace and Slot Images
 
@@ -661,6 +667,10 @@ Team A names the type `SlotImage` (D-21); it lives beside the save-slot code.
    paths and bytes stay as they are, so the gallery and the replay logs stay
    bit-identical (SPEC-020 section 3). `[Must-match]`
 3. A replay never reads or writes the user's real storage. `[Safe rule]`
+4. **A warm switch (Revision 4).** SPEC-020 section 2.5 keeps the `StorageBackend`
+   and drops the `Vfs`, with every provider and archive handle under it. The old
+   session's pending commits finish before the mount is dropped, and the new session
+   builds its own `Vfs`, so nothing read through the old mount survives. `[Must-match]`
 
 ### 3.16 Module Placement and Names
 
@@ -1230,6 +1240,14 @@ Revision 3 adds these decisions.
 - **D-39 (Team A default).** `.SAV` is matched after case folding and by name
   alone, as the code before this spec matched every `.SAV` of the slot. The
   loader's stem check is not used, so an unloadable leftover cannot stay forever.
+
+### Decisions of Revision 4
+
+| ID | Decision | Class | Why |
+| --- | --- | --- | --- |
+| D-40 | The last-played edition is stored in `StorageBackend` settings | Owner instruction (brief of 2026-11-01) | The brief's requirement |
+| D-41 | Both keys live in `vault-engine.toml`, not in a new `config` file | Team A default | The file already keeps a game's choices, and unknown keys survive older builds |
+| D-42 | A warm switch keeps the backend and drops the `Vfs` | Team A default | The backend holds no game data (D-11), and the mount is what names an edition |
 
 ## 7. Clean-Room Verification Checklist
 
