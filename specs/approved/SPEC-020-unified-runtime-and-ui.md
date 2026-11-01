@@ -1,6 +1,6 @@
 # SPEC-020: Unified Session Runtime and Core UI Authority
 
-**Status:** approved by the owner, 2026-10-27. Revision 1, 2026-10-27, by the coordinator at the owner's request: module paths replace file paths, two module references in the draft are corrected, and tags and a Decisions section are added. Revision 2 (Team A, 2026-11-01), on the owner's brief of the same day, adds rule 5 of section 2.1 and the gallery note in section 3. Revision 3 (Team A, 2026-11-01), on the owner's brief of the same day, adds Phase L1: sections 2.4 to 2.6.
+**Status:** approved by the owner, 2026-10-27. Revision 1, 2026-10-27, by the coordinator at the owner's request: module paths replace file paths, two module references in the draft are corrected, and tags and a Decisions section are added. Revision 2 (Team A, 2026-11-01), on the owner's brief of the same day, adds rule 5 of section 2.1 and the gallery note in section 3. Revision 3 (Team A, 2026-11-01), on the owner's brief of the same day, adds Phase L1: sections 2.4 to 2.6. Revision 4 (Team A, 2026-11-01) adds the preset toggle, Setup and the `Hotkey hints` launcher row.
 
 **Provenance:** drafted by the project owner on 2026-10-27 as the contract for Wave 1. Revised the same day by the coordinator. Source categories:
 
@@ -75,6 +75,9 @@ Consolidate the split execution paths in `vault_platform::game`, `vault_platform
 - It has two rows, `1  Fallout 1` and `2  Fallout 2`, each with its enabled-mod count when above 0. A row whose edition was not found is disabled, and says `not found`. `[Must-match]`
 - `1` or `2`, or a click on a row, chooses that row at once. Up, Down, Left and Right move the highlight, and Enter chooses it. A pointer over a row highlights it. `[Must-match]`
 - The highlight starts on `last_played`, else on the `game` setting, else on Fallout 1. `[Safe rule]`
+- **Preset (Revision 4).** A row below the editions reads `P  Preset: Vanilla` or `P  Preset: Enhanced`, starting on the preset the next boot would have. `P`, or a click on the row, toggles it. A toggle is held by the selector, and takes effect only when an edition is chosen: it then wins over the settings file, manifests and `--preset` for that boot, and sets `preset` in the same commit as `game` and `last_played`. With no toggle, `preset` is not written. At a later start the usual order applies, so a manifest's `[enhanced]` key can win again. `[Must-match]`
+- **Setup (Revision 4).** A row reads `S  Setup`. `S`, `Tab`, or a click on the row opens the launcher on its Game data tab, with the highlighted edition in its Game row. The Mods tab is where a mod stack is chosen: the engine has one load order for each settings file, so there is no separate mod profile (Decision D-31). `[Must-match]`
+- **The launcher from Setup (Revision 4).** Its Quit button reads `Back`, and returns to the selector, which runs discovery again. Save works as it does today. Play counts as a choice, and also sets `last_played`. Over a session, the session stays stopped as section 2.5 says, Save leaves it alone, and Play goes through section 2.5's switch. `[Must-match]`
 - Esc, and a closed window, end the process when no session is running. F11, Alt+Enter and Alt+S work as in the launcher. `[Safe rule]`
 - Choosing an edition sets `game` and `last_played` in one commit (SPEC-023 section 3.10), then boots it through the same path as the launcher's Play. A failed boot opens the launcher, showing why, as Play does today. `[Must-match]`
 
@@ -94,21 +97,21 @@ Consolidate the split execution paths in `vault_platform::game`, `vault_platform
 
 **Opening.** It opens the selector of section 2.4 over the session. While the selector is open, no headless step runs, no input record is written, the frame clock stops, and audio pauses. So a session that opens the selector and cancels gives the same log, checkpoint stream and state as one that never opened it. `[Must-match]`
 
-**Closing without a switch.** Esc, Alt+L, or choosing the edition already running closes the selector, and the session resumes at the same step. `[Must-match]`
+**Closing without a switch.** Esc, Alt+L, or choosing the edition already running with the preset it is running closes the selector, and the session resumes at the same step. A toggle not chosen is forgotten. `[Must-match]`
 
-**Switching.** Choosing the other edition: `[Must-match]`
+**Switching.** Choosing the other edition, or the running edition under the other preset (Revision 4): `[Must-match]`
 
 1. **Validate first.** The chosen edition's install is validated, as discovery does. A failure shows its reason on that row, and the running session stays untouched.
 2. **Tear down.** The running `SessionRuntime` ends, as at quit: audio stops, a `--record-inputs` log ends, and pending settings commit. The world, its VM programs, the hook registry, mod sessions, and every cache of decoded assets go with it, and the `Vfs` mount is dropped. Nothing is saved, so unsaved progress is lost, as the selector's title says.
 3. **Boot.** A new `SessionRuntime` is built from a zero-argument start's configuration for that edition, with `game` and `last_played` set. Only the window, the renderer's device and the `StorageBackend` carry over, and the OS process does not restart.
 
-**Flags.** Command-line flags do not carry over, except display flags. So a session started with `--sfall` or `--master-dat` does not pass them to the other edition: its settings file and manifests decide. `[Safe rule]`
+**Flags.** Command-line flags do not carry over, except display flags. A toggled preset wins over a carried `--preset`. So a session started with `--sfall` or `--master-dat` does not pass them to the other edition: its settings file and manifests decide. `[Safe rule]`
 
 **A clean boot.** No state crosses the switch: a warm-booted session behaves as a cold start of that edition with the same settings. `[Must-match]`
 
 **Where it does nothing.** A session whose `Vfs` came from memory (SPEC-023 section 3.15) has no discovery, so Alt+L writes one diagnostic. In a replay, a smoke test or a gallery capture there is no shell key. `[Safe rule]`
 
-`tests/fixtures/spec020/switch-cases.tsv` lists each case.
+`tests/fixtures/spec020/switch-cases.tsv` and `switch-cases-rev4.tsv` list each case.
 
 ### 2.6 Hotkey toasts
 
@@ -134,6 +137,10 @@ The texts are exact, and are engine strings, not `.msg` entries. No key's action
 
 **The setting.** `hotkey_hints` in `vault-engine.toml` is `once`, the default, `always` or `off`. With `once`, finishing the list sets it to `off`, in one commit. A failed commit is a diagnostic. `[Safe rule]`
 
+**With no settings file (Revision 4).** When no `vault-engine.toml` exists, finishing the list makes no commit, creates no file and writes no diagnostic. The value `off` stays in memory for the process, across a warm switch, and the next commit of the settings writes it. `[Safe rule]`
+
+**Launcher row (Revision 4).** The Display & audio tab's left column gains a `Hotkey hints` row, under both presets, which steps through `Once`, `Always` and `Off`. Save writes it like any row. Setting `Once` after `Off` shows the list again at the next map. `[Must-match]`
+
 **Determinism.** `[Must-match]`
 
 - A toast is shell state. It is never world state, so `WorldState::state_hash`, `combat_hash`, the checkpoint stream, saves, the message monitor and the RNG do not change.
@@ -154,7 +161,7 @@ The texts are exact, and are engine strings, not `.msg` entries. No key's action
 
    **Gallery authorization (Revision 2).** `cargo xtask capture-gallery` may re-record a gallery image if and only if an existing gallery scene visibly changes because of the Fallout 2 loot layout (SPEC-019 section 3.7) or the cursor layer order (SPEC-014 section 3.27). The commit names each re-recorded file and which of the two causes changed it. Any other gallery change stays a regression. This note covers gallery images only: a replay digest that changes is not authorized here, and goes back to the owner (Decision D-9). `[Must-match]`
 
-5. **Phase L1.** Every row of `tests/fixtures/spec020/boot-decision.tsv` and `switch-cases.tsv`. A warm switch from each edition to the other, then a cold start of it with the same settings and seed, give the same SPEC-021 checkpoint stream. With toasts on and off, a session gives the same `state_hash` values, replay digests and screenshots. Every test here runs headless, by driving the selector's state directly. `[Must-match]`
+5. **Phase L1.** Every row of `tests/fixtures/spec020/boot-decision.tsv`, `switch-cases.tsv` and `switch-cases-rev4.tsv`. A warm switch from each edition to the other, then a cold start of it with the same settings and seed, give the same SPEC-021 checkpoint stream. With toasts on and off, a session gives the same `state_hash` values, replay digests and screenshots. Every test here runs headless, by driving the selector's state directly. `[Must-match]`
 
 ## 4. Decisions
 
@@ -192,13 +199,25 @@ Every point that the draft left open, or that it named wrongly, is resolved here
 | D-20 | Mod layers are counted and listed, never enabled by discovery | Team A default | Enabling a found mod would change a game the player did not ask to change |
 | D-21 | While the selector is open over a session, nothing runs, is logged or is timed | Team A default | Otherwise a cancelled Alt+L would change a recorded log |
 | D-22 | There is no autosave and no second prompt. The title warns about unsaved progress | Team A default | The switch already takes two deliberate actions, and an autosave would overwrite a slot nobody chose |
-| D-23 | Choosing the running edition resumes it and does not reboot it | Team A default | A reboot would throw away progress for no gain |
+| D-23 | Choosing the running edition resumes it and does not reboot it, unless the preset was toggled (Revision 4) | Team A default | A reboot would throw away progress for no gain |
 | D-24 | The install is validated before teardown | Team A default | A failed switch must not cost the running session |
 | D-25 | Only display flags carry over a switch | Team A default | `--sfall` is refused under `fallout1`, and `--master-dat` names one edition's data |
 | D-26 | A log ends at a switch, and the new session is not recorded | Team A default | A log holds one session, and replaying across a switch would need a new record kind |
 | D-27 | Toasts are a shell overlay, not message-monitor lines | Team A default | The monitor is part of the frame a digest covers, and Vanilla's digests must not move |
-| D-28 | `hotkey_hints` defaults to `once`, and has no launcher row or menu entry | Team A default | Hints should teach once and then stop. No SPEC-014 window changes |
+| D-28 | `hotkey_hints` defaults to `once`, with no game menu entry. Revision 4 adds a launcher row (D-33) | Team A default | Hints should teach once and then stop. No SPEC-014 window changes |
 | D-29 | The hint order and the timing numbers | Team A default | The brief gives the keys only. The order follows the brief's list |
+
+### Phase L1 polish decisions (Revision 4)
+
+| ID | Decision | Class | Why |
+| --- | --- | --- | --- |
+| D-30 | The selector toggles the preset and opens Setup with `S` or `Tab` | Owner instruction (brief of 2026-11-01) | Players can switch between Vanilla and Enhanced without editing the settings file |
+| D-31 | "Mod profile" means the launcher's Mods tab, reached through Setup | Team A default | The brief allows Setup in its place, and no spec defines a named profile: there is one load order per settings file |
+| D-32 | `P` toggles the preset, and a toggle commits only with a choice | Team A default | A toggle that wrote at once could not be cancelled with Esc |
+| D-33 | `Hotkey hints` is a launcher row on the Display & audio tab | Owner instruction | The brief's requirement. It steps all three values, because a plain on and off could not reach `always` |
+| D-34 | With no settings file, finishing the hints is silent and stays in memory | Owner instruction | The brief's requirement. Creating a file would be a side effect nobody asked for |
+| D-35 | The launcher from Setup reads `Back`, not `Quit` | Team A default | Quit over a stopped session would throw the session away with one click |
+| D-36 | Launcher Play from Setup sets `last_played` | Team A default | It is the same choice as the selector's |
 
 ## 5. Verification Checklist
 

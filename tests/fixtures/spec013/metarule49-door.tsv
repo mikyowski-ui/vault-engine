@@ -1,0 +1,14 @@
+section	item	fallout2	fallout1	rule
+fragment	damage_p_proc body	C0 01 00 00 00 1E C0 01 00 00 00 31 80 BC 81 0B C0 01 00 00 00 06 80 33 80 2F 80 BC 80 F4	same	If metarule(49, self_obj) is 6, destroy_object(self_obj). The bytes end at 0x1E, the branch target
+setup	explosive	PID 206, armed, event type 8, at hex 20100	same	SPEC-013 3.10
+setup	door D3	Scenery door, distance 2, the fragment as its damage_p_proc	same	-
+setup	door D4	The same door at distance 4	same	Outside the notice radius
+notice	D3 fixed_param	6	6	SPEC-013 3.10, step 4
+notice	D3 metarule(49, self_obj)	6, with no diagnostic	0: rule 49 is an unknown rule there	SPEC-017 5.1
+notice	D3 result	Destroyed; the program stops at its next instruction; stack empty	Not destroyed; the branch is taken; stack empty	SPEC-005 3.2
+notice	D3 destroy_p_proc	Skipped, because the script destroyed its own object	Not requested	SPEC-005 3.2
+notice	D4	Does not run	Does not run	Distance 4
+outside	The fragment in any other call	-1 with one diagnostic; the branch is taken; stack empty	0; the branch is taken; stack empty	SPEC-017 5.1
+explosive	metarule(49, the armed explosive) while it detonates	6	0	SPEC-017 5.1
+explosive	metarule(49, the armed explosive) before its event fires	-1 with one diagnostic	0	SPEC-017 5.1
+explosive	metarule(49, a loaded weapon) during the notice	The weapon's damage type	0	SPEC-017 5.1

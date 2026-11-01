@@ -1,0 +1,14 @@
+section	item	both_profiles	rule
+setup	scene	As armed-explosive-door.tsv	-
+draws	D(30, 50) in order	B 40, then C 30	SPEC-013 3.10
+damage	critter B	29: 40 - 4 = 36, 36 - trunc(36 x 20 / 100) = 29	SPEC-013 3.10
+damage	critter B knockback	2	trunc(29 / 10)
+damage	critter C	30	-
+damage	critter C knockback	3	trunc(30 / 10)
+damage	player, critter E	None	Distance 4
+scripts	D1 damage_p_proc	Runs once, fixed_param 6, source the player, target D1. The door opens	SPEC-013 3.10
+scripts	D2	Unchanged	No script, so no effect
+scripts	S1 damage_p_proc	Runs once, fixed_param 6, source the player, target S1	-
+scripts	S2 damage_p_proc	Does not run	Distance 4
+scripted	The same scene from an explosion request at hex 20100	D1 and S1 run with fixed_param 6, source 0. No critter off the center hex takes damage	SPEC-013 3.10
+end	explosive	Destroyed	SPEC-013 3.10, Retry

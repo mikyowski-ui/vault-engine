@@ -8,4 +8,5 @@ no game data.
   all, because the launcher opens whatever else is true.
 - `switch-cases.tsv`: section 2.5's cases. `world_changed` says whether any world
   state changed, and `no` includes every hash, checkpoint and log.
+- `switch-cases-rev4.tsv` (Revision 4): the preset toggle and Setup, cases S14 to S25.
 - `hotkey-hints.tsv`: section 2.6's hints, in order, with their exact text.
