@@ -372,3 +372,149 @@ fn spec020_the_mod_count_reads_the_list_and_counts_the_enabled() {
     };
     assert_eq!(enabled_mods(&missing), 0, "it never stops a boot");
 }
+
+/// `switch-cases-rev4.tsv`, the cases the selector answers by itself: S14,
+/// S16, and S17 to S19 over a Vanilla session.
+#[test]
+fn spec020_rev4_the_preset_toggle_on_the_selector() {
+    use GameProfile::{Fallout1, Fallout2};
+    let table = include_str!("../../../tests/fixtures/spec020/switch-cases-rev4.tsv");
+    assert_eq!(table.lines().count(), 13, "S14 to S25");
+    // S14: the row toggles, and nothing is chosen.
+    let mut selector =
+        Selector::new(&Config::default(), both(), None).with_preset(Preset::Vanilla, None);
+    assert_eq!(selector.preset_label(), "P  Preset: Vanilla");
+    assert_eq!(selector.handle(&key(KeyCode::KeyP)), None);
+    assert_eq!(selector.preset_label(), "P  Preset: Enhanced");
+    assert_eq!(selector.toggled(), Some(Preset::Enhanced));
+    // S15: the choice carries it.
+    assert_eq!(
+        selector.handle(&key(KeyCode::Digit2)),
+        Some(BootAction::Choose(Fallout2))
+    );
+    // S16: no toggle.
+    let mut selector =
+        Selector::new(&Config::default(), both(), None).with_preset(Preset::Vanilla, None);
+    assert_eq!(
+        selector.handle(&key(KeyCode::Digit1)),
+        Some(BootAction::Choose(Fallout1))
+    );
+    assert_eq!(selector.toggled(), None);
+    // The row starts on the next boot's preset, not the file's.
+    let settings = Config {
+        preset: Some(Preset::Vanilla),
+        ..Config::default()
+    };
+    let selector = Selector::new(&settings, both(), None).with_preset(Preset::Enhanced, None);
+    assert_eq!(selector.preset_label(), "P  Preset: Enhanced");
+    assert_eq!(selector.toggled(), None);
+
+    let over_vanilla = || {
+        Selector::new(&Config::default(), both(), Some(Fallout1))
+            .with_preset(Preset::Vanilla, Some(Preset::Vanilla))
+    };
+    // S17: the same edition under the other preset is a switch.
+    let mut selector = over_vanilla();
+    selector.handle(&key(KeyCode::KeyP));
+    assert_eq!(
+        selector.handle(&key(KeyCode::Digit1)),
+        Some(BootAction::Choose(Fallout1))
+    );
+    // S18: toggled back, it resumes.
+    let mut selector = over_vanilla();
+    selector.handle(&key(KeyCode::KeyP));
+    selector.handle(&key(KeyCode::KeyP));
+    assert_eq!(selector.toggled(), None);
+    assert_eq!(
+        selector.handle(&key(KeyCode::Digit1)),
+        Some(BootAction::Leave)
+    );
+    // S19: Esc forgets a toggle.
+    let mut selector = over_vanilla();
+    selector.handle(&key(KeyCode::KeyP));
+    assert_eq!(
+        selector.handle(&key(KeyCode::Escape)),
+        Some(BootAction::Leave)
+    );
+    // The next boot's preset can differ from the session's, if the settings
+    // changed under it. Toggling to the session's own still resumes it, and
+    // with no toggle the running edition resumes as ever (D-23).
+    let drifted = || {
+        Selector::new(&Config::default(), both(), Some(Fallout1))
+            .with_preset(Preset::Enhanced, Some(Preset::Vanilla))
+    };
+    assert_eq!(
+        drifted().handle(&key(KeyCode::Digit1)),
+        Some(BootAction::Leave)
+    );
+    let mut selector = drifted();
+    selector.handle(&key(KeyCode::KeyP));
+    assert_eq!(selector.toggled(), Some(Preset::Vanilla));
+    assert_eq!(
+        selector.handle(&key(KeyCode::Digit1)),
+        Some(BootAction::Leave)
+    );
+}
+
+/// S21: `S`, `Tab` or a click opens Setup on the highlighted edition, even
+/// one not found, because the launcher is where its paths are fixed. A click
+/// on the preset row toggles, and a pointer over either changes no edition.
+#[test]
+fn spec020_rev4_setup_and_the_preset_row_take_the_mouse_and_keys() {
+    use GameProfile::{Fallout1, Fallout2};
+    for found in [both(), only_first()] {
+        let settings = Config {
+            last_played: Some("fallout2".to_owned()),
+            ..Config::default()
+        };
+        let mut selector = Selector::new(&settings, found, None);
+        for input in [key(KeyCode::KeyS), key(KeyCode::Tab)] {
+            assert_eq!(
+                selector.handle(&input),
+                Some(BootAction::Setup(Fallout2)),
+                "{input:?}"
+            );
+        }
+    }
+    let mut selector = Selector::new(&Config::default(), both(), None);
+    let [x, y, ..] = Selector::rect(SETUP_ROW);
+    let setup = LauncherInput::Press([x + 4, y + 4]);
+    assert_eq!(selector.handle(&setup), Some(BootAction::Setup(Fallout1)));
+    let [x, y, ..] = Selector::rect(PRESET_ROW);
+    assert_eq!(selector.handle(&LauncherInput::Press([x + 4, y + 4])), None);
+    assert_eq!(selector.toggled(), Some(Preset::Enhanced));
+    let before = selector.image();
+    selector.handle(&LauncherInput::Pointer([x + 4, y + 4]));
+    assert_eq!(selector.highlight(), Fallout1);
+    assert_ne!(
+        selector.image().pixels(),
+        before.pixels(),
+        "the row lights under the pointer"
+    );
+    assert_eq!(
+        Selector::new(&Config::default(), both(), None)
+            .highlighting(Fallout2)
+            .highlight(),
+        Fallout2
+    );
+}
+
+/// Revision 5 of SPEC-023: with no settings file the end of the list writes
+/// nothing, says nothing and creates nothing. With one it commits, and a
+/// commit that fails still reports.
+#[test]
+fn spec020_rev4_finished_hints_are_quiet_with_no_settings_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirs = [dir.path().to_path_buf()];
+    assert_eq!(finish_hints(&dirs), Ok(false));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+    let path = dir.path().join(config::FILE_NAME);
+    Config::default().commit(&path).unwrap();
+    assert_eq!(finish_hints(&dirs), Ok(true));
+    let read = Config::load(&path).unwrap();
+    assert_eq!(read.hotkey_hints, Some(HotkeyHints::Off));
+
+    std::fs::write(&path, b"preset = [").unwrap();
+    assert!(finish_hints(&dirs).is_err(), "the file fails to commit");
+}

@@ -917,15 +917,16 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
     );
     key(&mut launcher, KeyCode::Space);
     assert_eq!(launcher.config.preset, Some(Preset::Enhanced));
-    // Enhanced: the rows follow Debug in the focus order.
+    // Enhanced: the rows follow the left column in the focus order.
     let order = launcher.order();
-    let debug = order
+    let last = order
         .iter()
-        .position(|widget| *widget == Widget::Debug)
+        .position(|widget| *widget == Widget::HotkeyHints)
         .unwrap();
-    assert_eq!(&order[debug + 1..debug + 7], &enhanced);
-    assert_eq!(order[debug + 7], Widget::Save);
-    launcher.focus = Widget::Debug;
+    assert_eq!(order[last - 1], Widget::Debug);
+    assert_eq!(&order[last + 1..last + 7], &enhanced);
+    assert_eq!(order[last + 7], Widget::Save);
+    launcher.focus = Widget::HotkeyHints;
     for widget in enhanced {
         key(&mut launcher, KeyCode::Tab);
         assert_eq!(launcher.focus, widget);
@@ -1217,4 +1218,121 @@ fn the_touch_ui_row_follows_fullscreen_toggles_and_saves() {
     let rect = launcher.rect(Widget::TouchUi).unwrap();
     launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
     assert_eq!(launcher.config.touch_ui, Some(false));
+}
+
+/// SPEC-020 §2.6: the `Hotkey hints` row, on the Display & audio tab under
+/// both presets, steps through its three values and saves like any row.
+#[test]
+fn the_hotkey_hints_row_steps_and_saves_under_both_presets() {
+    let dir = tempfile::tempdir().unwrap();
+    for preset in [Preset::Vanilla, Preset::Enhanced] {
+        let config = Config {
+            preset: Some(preset),
+            ..Config::default()
+        };
+        let mut launcher = Launcher::new(setup(dir.path(), config));
+        launcher.tab = Tab::Display;
+        assert!(launcher.order().contains(&Widget::HotkeyHints));
+        launcher.focus = Widget::HotkeyHints;
+        let shown = |launcher: &Launcher| launcher.config.hotkey_hints;
+        for expected in [HotkeyHints::Always, HotkeyHints::Off, HotkeyHints::Once] {
+            let before = launcher.image();
+            key(&mut launcher, KeyCode::Enter);
+            assert_eq!(shown(&launcher), Some(expected));
+            assert_ne!(
+                launcher.image().pixels(),
+                before.pixels(),
+                "the row shows its value"
+            );
+        }
+        key(&mut launcher, KeyCode::ArrowLeft);
+        assert_eq!(shown(&launcher), Some(HotkeyHints::Off), "wraps backward");
+        key(&mut launcher, KeyCode::ArrowRight);
+        assert_eq!(shown(&launcher), Some(HotkeyHints::Once));
+        key(&mut launcher, KeyCode::ArrowRight);
+        let path = launcher.save().unwrap();
+        let read = Config::load(&path).unwrap();
+        assert_eq!(read.hotkey_hints, Some(HotkeyHints::Always));
+    }
+}
+
+/// The row stays clear of the help line below the column.
+#[test]
+fn the_hotkey_hints_row_is_on_the_tab_and_clear_of_the_help_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut launcher = Launcher::new(setup(dir.path(), Config::default()));
+    launcher.tab = Tab::Display;
+    let rect = launcher.rect(Widget::HotkeyHints).unwrap();
+    assert!(rect.y + rect.h < view::HELP_TOP - 8);
+    let press = LauncherInput::Press([rect.x + 2, rect.y + 2]);
+    assert_eq!(launcher.handle(press), None);
+    assert_eq!(launcher.config.hotkey_hints, Some(HotkeyHints::Always));
+}
+
+/// `switch-cases-rev4.tsv` S21, S22 and S24: from Setup, Quit reads `Back`
+/// and asks for the selector, on the Game data tab with the edition it was
+/// opened for. Save writes the settings and asks nothing of the shell.
+#[test]
+fn from_the_selector_quit_is_back_and_save_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = Launcher::new(setup(dir.path(), Config::default()));
+    let same_game =
+        Launcher::new(setup(dir.path(), Config::default())).opened_by_selector(plain.game());
+    assert_ne!(
+        same_game.image().pixels(),
+        plain.image().pixels(),
+        "only its button differs: it reads Back"
+    );
+    let mut launcher = Launcher::new(setup(dir.path(), Config::default()))
+        .opened_by_selector(GameProfile::Fallout2);
+    assert_eq!(launcher.tab, Tab::Data);
+    assert_eq!(launcher.game(), GameProfile::Fallout2);
+    launcher.focus = Widget::Save;
+    assert_eq!(key(&mut launcher, KeyCode::Enter), None);
+    let path = dir.path().join(config::FILE_NAME);
+    assert_eq!(
+        Config::load(&path).unwrap().game,
+        Some(GameProfile::Fallout2)
+    );
+    assert_eq!(
+        Config::load(&path).unwrap().last_played,
+        None,
+        "Save is no choice"
+    );
+    launcher.focus = Widget::Quit;
+    assert_eq!(
+        key(&mut launcher, KeyCode::Enter),
+        Some(LauncherAction::Back)
+    );
+
+    let mut plain = plain;
+    plain.focus = Widget::Quit;
+    assert_eq!(key(&mut plain, KeyCode::Enter), Some(LauncherAction::Quit));
+}
+
+/// Decision D-36: Play from Setup is a choice, and sets `last_played` with
+/// the rest of the settings. A launcher that was not opened from it does not.
+#[test]
+fn play_from_setup_sets_last_played() {
+    for selector in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        install(dir.path());
+        let config = Config {
+            master_dat: Some(dir.path().join("MASTER.DAT")),
+            critter_dat: Some(dir.path().join("CRITTER.DAT")),
+            ..Config::default()
+        };
+        let mut launcher = Launcher::new(setup(dir.path(), config));
+        if selector {
+            launcher = launcher.opened_by_selector(GameProfile::Fallout1);
+        }
+        launcher.focus = Widget::Play;
+        assert_eq!(
+            key(&mut launcher, KeyCode::Enter),
+            Some(LauncherAction::Play)
+        );
+        let path = dir.path().join(config::FILE_NAME);
+        let read = Config::load(&path).unwrap();
+        assert_eq!(read.last_played.is_some(), selector);
+    }
 }

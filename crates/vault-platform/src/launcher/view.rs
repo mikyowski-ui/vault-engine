@@ -6,7 +6,7 @@ use super::font::{self, CHECK, CROSS};
 use super::validate::{Check, State};
 use super::widgets::{self, Look, Rect, Row};
 use super::{Field, Launcher, Tab, Widget};
-use crate::config::{Preset, game_name, roof_peek_name, scaling_name};
+use crate::config::{HotkeyHints, Preset, game_name, roof_peek_name, scaling_name};
 use crate::enhanced::{RoofPeek, ViewportMode};
 use vault_core::GameProfile;
 use vault_formats::{LayerEntry, ModManifest};
@@ -82,7 +82,7 @@ const COLUMNS: [(i32, i32, i32); 2] = [
     (28, 136, 150),
     (330, 440, 172),
 ];
-const HELP_TOP: i32 = 330;
+pub(super) const HELP_TOP: i32 = 340;
 const NOTE_TOP: i32 = 380;
 fn display_top(row: i32) -> i32 {
     96 + row * 36
@@ -91,13 +91,14 @@ fn display_rect(column: usize, row: i32) -> Rect {
     let (_, x, w) = COLUMNS[column];
     Rect::new(x, display_top(row), w, 18)
 }
-const DISPLAY: [Widget; 6] = [
+const DISPLAY: [Widget; 7] = [
     Widget::Scaling,
     Widget::Fullscreen,
     Widget::TouchUi,
     Widget::Preset,
     Widget::Audio,
     Widget::Debug,
+    Widget::HotkeyHints,
 ];
 /// The enhanced preset's rows, in the right-hand column, shown with it only.
 const ENHANCED: [Widget; 6] = [
@@ -273,6 +274,10 @@ pub fn draw(launcher: &Launcher) -> IndexedImage {
             disabled: modal || (playing && !ready),
             ..look(widget)
         };
+        let label = match widget {
+            Widget::Quit if launcher.from_selector => "Back",
+            _ => label,
+        };
         widgets::button(image_ref, rect, label, look);
     }
     let tone = match launcher.status_state {
@@ -365,7 +370,8 @@ fn draw_display(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, re
     let config = &launcher.config;
     let scaling = config.scaling.unwrap_or(ScalingMode::AspectFit);
     let preset = config.preset.unwrap_or_default();
-    let rows: [(Widget, &str, String, &str); 6] = [
+    let hints = config.hotkey_hints.unwrap_or_default();
+    let rows: [(Widget, &str, String, &str); 7] = [
         (
             Widget::Scaling,
             "Scaling",
@@ -407,6 +413,16 @@ fn draw_display(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, re
             "Debug overlay",
             on_off(config.debug.unwrap_or(false)).into(),
             "the vault-debug inspector; F9 toggles",
+        ),
+        (
+            Widget::HotkeyHints,
+            "Hotkey hints",
+            format!("< {} >", hint_name(hints)),
+            match hints {
+                HotkeyHints::Once => "teach the keys, once, then stop",
+                HotkeyHints::Always => "teach the keys every session",
+                HotkeyHints::Off => "no hints",
+            },
         ),
     ];
     font::draw(
@@ -459,6 +475,15 @@ fn draw_display(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, re
         "Written to vault-engine.toml on Save or Play. Command-line flags still win.",
         color::DIM,
     );
+}
+
+/// A `hotkey_hints` value as its row writes it.
+fn hint_name(hints: HotkeyHints) -> &'static str {
+    match hints {
+        HotkeyHints::Once => "Once",
+        HotkeyHints::Always => "Always",
+        HotkeyHints::Off => "Off",
+    }
 }
 
 /// One column's rows: each label, then its value in a toggle; the rows'

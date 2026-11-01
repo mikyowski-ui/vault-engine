@@ -53,11 +53,12 @@ switches between *Fallout* and *Fallout 2*, and picks the `vanilla` or
 
 With one game installed, it boots at once. With both, the **boot menu** asks
 which, and after that a 3-second banner starts the one you last played, unless
-you press a key to switch. Naming anything on the command line skips both, so
-scripted runs are unchanged.
+you press a key to switch. The menu also flips between Vanilla and Enhanced with
+`P`, and `S` opens Setup, where the mod stack is chosen. Naming anything on the
+command line skips both, so scripted runs are unchanged.
 
-**`Alt+L`** switches between *Fallout* and *Fallout 2* in the same window, without
-restarting. It warns first, because unsaved progress is lost, and `Esc` goes back
+**`Alt+L`** switches between *Fallout* and *Fallout 2*, or between presets, in the
+same window, without restarting. It warns first, because unsaved progress is lost, and `Esc` goes back
 exactly where you were. Short hints teach the main keys the first time you play.
 
 **Hotkeys:** `Alt+V` widescreen · mouse wheel zoom · hold `Alt` roof peek ·

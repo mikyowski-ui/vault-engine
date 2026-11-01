@@ -65,6 +65,8 @@ pub enum HotkeyHints {
 }
 
 impl HotkeyHints {
+    /// The launcher row's order (SPEC-020 §2.6).
+    pub const ALL: [Self; 3] = [Self::Once, Self::Always, Self::Off];
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "once" => Some(Self::Once),

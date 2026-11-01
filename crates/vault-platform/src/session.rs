@@ -332,6 +332,7 @@ pub enum KeyPress {
 pub struct SessionRuntime {
     origin: SessionOrigin,
     edition: GameProfile,
+    preset: vault_core::EnginePreset,
     /// The `Vfs` came from memory (SPEC-023 §3.15), so nothing was
     /// discovered and nothing can be switched to (SPEC-020 §2.5).
     memory_mounted: bool,
@@ -353,6 +354,7 @@ impl SessionRuntime {
             .unwrap_or_else(|| default_storage(origin, &args));
         args.storage = Some(storage);
         let memory_mounted = args.data.is_some();
+        let preset = args.preset;
         let Some(preview) = args.load()? else {
             return Ok(None);
         };
@@ -364,6 +366,7 @@ impl SessionRuntime {
         Ok(Some(Self {
             origin,
             edition,
+            preset,
             memory_mounted,
             preview,
         }))
@@ -371,6 +374,13 @@ impl SessionRuntime {
     /// The validated edition the session runs.
     pub fn edition(&self) -> GameProfile {
         self.edition
+    }
+    /// The preset the session runs, as the settings name it.
+    pub fn preset(&self) -> crate::config::Preset {
+        match self.preset {
+            vault_core::EnginePreset::Vanilla => crate::config::Preset::Vanilla,
+            vault_core::EnginePreset::Enhanced => crate::config::Preset::Enhanced,
+        }
     }
     /// The screen a game shows, as `--debug` titles it.
     #[cfg(test)]

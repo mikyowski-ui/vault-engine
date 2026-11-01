@@ -7,7 +7,7 @@
 //! mounted. Discovery reads directory tables only. It never mounts anything
 //! and enables no mod. The shell wires this up, and a test drives it directly.
 use crate::{
-    config::{self, Config, GAMES, GamePaths, HotkeyHints, ModList, PerGame},
+    config::{self, Config, GAMES, GamePaths, HotkeyHints, ModList, PerGame, Preset},
     launcher::{LauncherInput, color, font, validate},
 };
 use std::path::{Path, PathBuf};
@@ -29,17 +29,29 @@ pub type Installs = PerGame<Result<GamePaths, String>>;
 
 /// The frame the screens draw, the launcher's.
 const FRAME: [i32; 2] = [640, 480];
-/// The two rows: their left, the first's top, and their size.
+/// The rows: their left, the first's top, and their size. Below the two
+/// editions come the preset and Setup.
 const ROW_LEFT: i32 = 120;
 const ROW_TOP: i32 = 200;
 const ROW_SIZE: [i32; 2] = [400, 32];
 const ROW_GAP: i32 = 8;
+const PRESET_ROW: usize = 2;
+const SETUP_ROW: usize = 3;
+const ROWS: usize = 4;
 
 /// A game's name as the screens write it.
 pub fn edition_name(game: GameProfile) -> &'static str {
     match game {
         GameProfile::Fallout1 => "Fallout 1",
         GameProfile::Fallout2 => "Fallout 2",
+    }
+}
+
+/// A preset as the selector's row writes it.
+fn preset_name(preset: Preset) -> &'static str {
+    match preset {
+        Preset::Vanilla => "Vanilla",
+        Preset::Enhanced => "Enhanced",
     }
 }
 
@@ -171,17 +183,27 @@ impl Row {
 pub enum BootAction {
     /// Esc: the process ends, or the running session resumes.
     Leave,
-    /// This edition.
+    /// This edition, under [`Selector::toggled`].
     Choose(GameProfile),
+    /// The launcher, on this edition (Revision 4).
+    Setup(GameProfile),
 }
 
-/// The selector: two rows, over nothing or over a stopped session.
+/// The selector: two rows, over nothing or over a stopped session, then the
+/// preset and Setup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selector {
     rows: [Row; 2],
     highlight: usize,
     /// The edition running under it, which is what changes the title.
     pub running: Option<GameProfile>,
+    /// The preset the running session has.
+    running_preset: Option<Preset>,
+    /// The preset the next boot would have, and what `P` made of it.
+    next: Preset,
+    preset: Preset,
+    /// The preset or Setup row under the pointer.
+    hover: Option<usize>,
 }
 
 impl Selector {
@@ -201,11 +223,36 @@ impl Selector {
         let start = named(config.last_played.as_deref())
             .or(config.game)
             .unwrap_or(GameProfile::Fallout1);
+        let next = config.preset.unwrap_or_default();
         Self {
             highlight: rows.iter().position(|row| row.game == start).unwrap_or(0),
             rows,
             running,
+            running_preset: None,
+            next,
+            preset: next,
+            hover: None,
         }
+    }
+    /// The preset row starts on `next`, which flags and manifests can make
+    /// other than the settings'. `running` is the session's own.
+    pub fn with_preset(mut self, next: Preset, running: Option<Preset>) -> Self {
+        self.next = next;
+        self.preset = next;
+        self.running_preset = running;
+        self
+    }
+    /// The highlight on `game`, as the launcher left it.
+    pub fn highlighting(mut self, game: GameProfile) -> Self {
+        if let Some(row) = self.rows.iter().position(|row| row.game == game) {
+            self.highlight = row;
+        }
+        self
+    }
+    /// The toggle a choice takes: the preset, when `P` left it other than
+    /// the next boot's. Two presses are no toggle (case S18).
+    pub fn toggled(&self) -> Option<Preset> {
+        (self.preset != self.next).then_some(self.preset)
     }
     pub fn title(&self) -> &'static str {
         if self.running.is_some() {
@@ -237,19 +284,33 @@ impl Selector {
         [ROW_LEFT, top, ROW_SIZE[0], ROW_SIZE[1]]
     }
     fn row_at([x, y]: [i32; 2]) -> Option<usize> {
-        (0..2).find(|index| {
+        (0..ROWS).find(|index| {
             let [left, top, width, height] = Self::rect(*index);
             (left..left + width).contains(&x) && (top..top + height).contains(&y)
         })
     }
     /// A row chooses its edition; a disabled one does nothing (case S6),
-    /// and the edition already running just resumes (Decision D-23).
+    /// and the edition already running just resumes, unless the preset was
+    /// toggled away from its own (Decision D-23).
     fn choose(&self, index: usize) -> Option<BootAction> {
         let row = &self.rows[index];
-        if self.running == Some(row.game) {
+        let same = self
+            .toggled()
+            .is_none_or(|preset| self.running_preset == Some(preset));
+        if self.running == Some(row.game) && same {
             return Some(BootAction::Leave);
         }
         row.install.is_ok().then_some(BootAction::Choose(row.game))
+    }
+    /// `P`, or a click: held here until an edition is chosen.
+    fn toggle(&mut self) {
+        self.preset = match self.preset {
+            Preset::Vanilla => Preset::Enhanced,
+            Preset::Enhanced => Preset::Vanilla,
+        };
+    }
+    fn setup(&self) -> BootAction {
+        BootAction::Setup(self.rows[self.highlight].game)
     }
     /// One input, and what it asks for.
     pub fn handle(&mut self, input: &LauncherInput) -> Option<BootAction> {
@@ -266,16 +327,30 @@ impl Selector {
                     None
                 }
                 KeyCode::Enter | KeyCode::NumpadEnter => self.choose(self.highlight),
+                KeyCode::KeyP => {
+                    self.toggle();
+                    None
+                }
+                KeyCode::KeyS | KeyCode::Tab => Some(self.setup()),
                 KeyCode::Escape => Some(BootAction::Leave),
                 _ => None,
             },
             LauncherInput::Pointer(point) => {
-                if let Some(row) = Self::row_at(*point) {
+                let row = Self::row_at(*point);
+                self.hover = row.filter(|row| *row >= PRESET_ROW);
+                if let Some(row) = row.filter(|row| *row < PRESET_ROW) {
                     self.highlight = row;
                 }
                 None
             }
-            LauncherInput::Press(point) => Self::row_at(*point).and_then(|row| self.choose(row)),
+            LauncherInput::Press(point) => match Self::row_at(*point)? {
+                PRESET_ROW => {
+                    self.toggle();
+                    None
+                }
+                SETUP_ROW => Some(self.setup()),
+                row => self.choose(row),
+            },
             LauncherInput::Wheel(_) | LauncherInput::Dropped(_) => None,
         }
     }
@@ -303,7 +378,22 @@ impl Selector {
             let label = font::clip_end(&row.label(index + 1), (w as usize - 16) / 6);
             font::draw(&mut image, [x + 8, y + 12], &label, ink);
         }
+        let preset = self.preset_label();
+        for (index, label) in [(PRESET_ROW, preset.as_str()), (SETUP_ROW, "S  Setup")] {
+            let [x, y, w, h] = Self::rect(index);
+            let lit = self.hover == Some(index);
+            image.fill_rect(
+                [x, y, w, h],
+                if lit { color::SELECTED } else { color::PANEL },
+            );
+            let ink = if lit { color::FOCUS } else { color::TEXT };
+            font::draw(&mut image, [x + 8, y + 12], label, ink);
+        }
         image
+    }
+    /// §2.4: `P  Preset: Vanilla`.
+    pub fn preset_label(&self) -> String {
+        format!("P  Preset: {}", preset_name(self.preset))
     }
 }
 
@@ -412,6 +502,16 @@ pub fn commit_choice(config: &Config, dirs: &[PathBuf]) -> Result<PathBuf, Strin
         None => config::persist(config, dirs)
             .ok_or_else(|| "no folder takes the settings file".to_owned()),
     }
+}
+
+/// §2.6: the list is finished, so `off` goes to the settings file, in one
+/// commit. With no file there is nothing to commit and nothing to report:
+/// `false`, and the value stays in memory until settings are next committed.
+pub fn finish_hints(dirs: &[PathBuf]) -> Result<bool, String> {
+    let Some(path) = config::find(dirs) else {
+        return Ok(false);
+    };
+    commit_hints(&path, HotkeyHints::Off).map(|()| true)
 }
 
 /// The setting `hints` written over the settings at `path`, in one commit.

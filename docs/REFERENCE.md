@@ -333,6 +333,20 @@ the highlight, and **Enter** chooses it. **Esc** or closing the window quits, an
 F11, Alt+Enter and Alt+S work as in the launcher. A choice sets `game` and
 `last_played` in one commit, and a boot that fails opens the launcher, showing why.
 
+Two rows sit below the editions. `P  Preset: Vanilla` starts on the preset the next
+boot would have, after `--preset` and the manifests. **P** or a click toggles it, and
+the toggle does nothing until an edition is chosen. It then wins over the flag, the
+manifests and the settings for that boot, and `preset` joins the same commit. With no
+toggle, `preset` is not written, and at a later start a manifest can win again.
+Toggling back is no toggle.
+
+`S  Setup` opens the launcher on its Game data tab, with the highlighted edition in
+its Game row, and **S**, **Tab** or a click opens it. Choosing a mod stack happens
+there, on the Mods tab, because the engine keeps one load order for each settings
+file and has no named mod profiles. Its Quit button reads **Back**, which returns to
+the boot menu and looks for the installs again, forgetting a toggle. Save works as it
+always does. Play counts as a choice, and also sets `last_played`.
+
 **The banner** boots its edition after 3 seconds and writes nothing. Any key or
 mouse button stops it and opens the boot menu, Enter included. Pointer movement, a
 lone modifier and the keys above do not. Neither screen appears in a replay, a smoke
@@ -342,16 +356,20 @@ test or a gallery capture, and neither writes to a `--record-inputs` log.
 progress is lost.`, on every screen, under both presets and both editions. The game
 never receives the key and it is not logged. While the menu is open nothing runs, is
 logged or is timed, and audio holds. **Esc**, **Alt+L**, or the edition already
-running closes it, and the session resumes at the same step, so a cancelled Alt+L
-changes no log, checkpoint or state. Choosing the other edition validates it first,
-and a failure shows on its row with the session untouched. Then the session ends as
+running under the preset it is running closes it, and the session resumes at the same
+step, so a cancelled Alt+L changes no log, checkpoint or state. An untaken toggle is
+forgotten. Choosing the other edition, or the running one under the other preset,
+validates it first, and a failure shows on its row with the session untouched. Setup
+works here too, and the session stays stopped under it: Save and Back leave it alone,
+Alt+L does nothing until Back, and Play is a switch. Then the session ends as
 at quit, with nothing saved: its log ends, and the world, its scripts, its decoded
 assets and its `Vfs` go with it. The new one is a cold start of that edition, and is
 not recorded. Only the window, the renderer and the storage carry over. Of the
 command line, only `--scaling`, `--fullscreen`, `--touch-ui`, `--preset`, `--viewport`,
 `--zoom`, `--render-path` and `--no-audio` cross a switch, so a session started with
 `--sfall` or `--master-dat` does not pass them on: the settings file and manifests
-decide. Alt+L does nothing in a replay or a smoke test, and a session whose data
+decide. A toggle wins over a carried `--preset`, which then stops carrying, so the next
+switch takes the settings and manifests. Alt+L does nothing in a replay or a smoke test, and a session whose data
 is in memory writes one diagnostic.
 
 **Hotkey hints.** A short amber plate near the top of the window teaches the keys,
@@ -362,7 +380,11 @@ seconds, dissolves over 0.5 and leaves a 1-second gap. The timer stops during co
 dialogue, any window, a movie and the F9 panel, and a HUD message hides a hint until
 it has gone. Pressing the shown hint's key ends it, and changes nothing about that
 key. `hotkey_hints` in `vault-engine.toml` is `once`, the default, `always` or `off`,
-and `once` becomes `off` when the list is finished. The shell draws a hint over a copy
+and `once` becomes `off` when the list is finished. The launcher's **Hotkey hints** row
+sets it, and setting `Once` after `Off` shows the list again from the next session
+started. With no settings file, finishing the list creates none and says nothing: `off`
+stays in memory for the process, across a warm switch, and the next commit of the
+settings writes it. The shell draws a hint over a copy
 of the frame, so it is in no screenshot, digest, state hash, save or log, and it never
 shows in a replay, a smoke test or a gallery capture.
 
@@ -468,8 +490,8 @@ It has three tabs and a bottom bar:
 - **Display & audio**: two columns of evenly spaced rows, with one help
   line below them for the focused (else hovered) row.
   - **Left column:** scaling (`aspect_fit` or `integer`), fullscreen, the
-    touch UI, preset (`vanilla` or `enhanced`), audio on or off, and the
-    debug overlay.
+    touch UI, preset (`vanilla` or `enhanced`), audio on or off, the debug
+    overlay, and hotkey hints (`Once`, `Always` or `Off`), under both presets.
   - **Right column, enhanced preset only:** these rows are hidden, and out
     of the focus order, under Vanilla, where the column says how to show
     them.
@@ -498,6 +520,7 @@ It has three tabs and a bottom bar:
   the mod's `name`, with an `[enhanced]` badge when the manifest carries
   launch settings. A malformed manifest fails its layer and refuses Play.
 - **Save**, **Play**, **Launch with Debug** and **Quit**, with a status line.
+  Opened by the boot menu's Setup, **Quit** reads **Back**.
   Save writes `vault-engine.toml`, rewriting the file it was read from in
   place or else creating one beside the executable (then in the working
   directory). Unknown keys are kept, and paths below the file's directory are

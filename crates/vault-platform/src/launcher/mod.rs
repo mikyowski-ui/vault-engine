@@ -23,7 +23,7 @@ mod widgets;
 #[cfg(test)]
 mod tests;
 
-use crate::config::{self, Config, GamePaths, ModList, PerGame, Preset};
+use crate::config::{self, Config, GamePaths, HotkeyHints, ModList, PerGame, Preset};
 use crate::enhanced::ViewportMode;
 use browse::{Browser, Target};
 use std::path::{Path, PathBuf};
@@ -68,6 +68,8 @@ pub enum LauncherAction {
     Play,
     PlayDebug,
     Quit,
+    /// Back to the selector, from Setup (SPEC-020 §2.4).
+    Back,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +121,8 @@ pub enum Widget {
     UiScale,
     /// The game speed (`game_speed`), with the enhanced preset only.
     GameSpeed,
+    /// The hotkey toasts (`hotkey_hints`), under both presets.
+    HotkeyHints,
     Layers,
     LayerUp,
     LayerDown,
@@ -267,6 +271,9 @@ pub struct Launcher {
     /// The start found the fields' data on disk (the active game's profile
     /// named none).
     discovered: bool,
+    /// The selector's Setup opened it: Quit reads `Back`, and Play is a
+    /// choice (SPEC-020 §2.4).
+    from_selector: bool,
 }
 
 /// A game's name in the launcher's messages.
@@ -296,6 +303,7 @@ impl Launcher {
             status_state: State::Unset,
             data_dirs: setup.data_dirs,
             discovered: false,
+            from_selector: false,
         };
         let paths = launcher.config.paths();
         launcher.load_fields(&paths);
@@ -340,6 +348,18 @@ impl Launcher {
         if self.config.active_game() != game {
             self.switch_game(game);
         }
+    }
+
+    /// Opened by the selector's Setup, on `game`.
+    pub fn opened_by_selector(mut self, game: GameProfile) -> Self {
+        self.from_selector = true;
+        self.select_game(game);
+        self
+    }
+
+    /// The game its Game row shows.
+    pub fn game(&self) -> GameProfile {
+        self.config.active_game()
     }
 
     /// Whether the start found the game data on disk: the launcher shows
@@ -431,9 +451,11 @@ impl Launcher {
                 Widget::Game | Widget::Scaling | Widget::Preset | Widget::Viewport => {
                     return self.activate(focus);
                 }
-                Widget::Zoom | Widget::RoofPeek | Widget::UiScale | Widget::GameSpeed => {
-                    self.choose(focus, delta)
-                }
+                Widget::Zoom
+                | Widget::RoofPeek
+                | Widget::UiScale
+                | Widget::GameSpeed
+                | Widget::HotkeyHints => self.choose(focus, delta),
                 _ => self.move_focus(delta),
             },
             KeyCode::ArrowUp | KeyCode::ArrowDown => self.move_focus(delta),
@@ -614,7 +636,8 @@ impl Launcher {
             | Widget::SmoothCamera
             | Widget::RoofPeek
             | Widget::UiScale
-            | Widget::GameSpeed => self.choose(widget, 1),
+            | Widget::GameSpeed
+            | Widget::HotkeyHints => self.choose(widget, 1),
             Widget::Layers | Widget::LayerToggle => self.edit_layers(Edit::Toggle),
             Widget::LayerUp => self.move_layer(-1),
             Widget::LayerDown => self.move_layer(1),
@@ -634,6 +657,7 @@ impl Launcher {
             },
             Widget::Play => return self.play(LauncherAction::Play),
             Widget::PlayDebug => return self.play(LauncherAction::PlayDebug),
+            Widget::Quit if self.from_selector => return Some(LauncherAction::Back),
             Widget::Quit => return Some(LauncherAction::Quit),
             Widget::BrowseList => self.browse_enter(),
             Widget::BrowseUse => {
@@ -701,6 +725,12 @@ impl Launcher {
                     .unwrap_or(0);
                 config.game_speed = Some(speeds[step(at, speeds.len())]);
             }
+            Widget::HotkeyHints => {
+                let values = HotkeyHints::ALL;
+                let shown = config.hotkey_hints.unwrap_or_default();
+                let at = values.iter().position(|value| *value == shown).unwrap_or(0);
+                config.hotkey_hints = Some(values[step(at, values.len())]);
+            }
             _ => {}
         }
     }
@@ -711,6 +741,11 @@ impl Launcher {
         if let Err(reason) = self.ready() {
             self.report(State::Bad, format!("Not ready. {reason}"));
             return None;
+        }
+        // Decision D-36: Play from Setup is the selector's choice.
+        if self.from_selector {
+            let game = config::game_name(self.config.active_game());
+            self.config.last_played = Some(game.to_owned());
         }
         let unsaved_mods = self.mods.dirty;
         match self.save() {

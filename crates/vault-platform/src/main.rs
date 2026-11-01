@@ -482,6 +482,46 @@ fn play_args(shown: &Args, debug: bool) -> Args {
     args
 }
 
+/// The preset a boot on `args` and `config` would have, in the order a
+/// start uses: the flag, then the manifests, then the settings. A manifest
+/// that does not parse stops the boot, and says why then.
+fn next_preset(args: &Args, config: &config::Config) -> config::Preset {
+    let modded = with_mod_settings(args, Some(config)).ok().flatten();
+    args.preset
+        .or(modded.as_ref().unwrap_or(config).preset)
+        .unwrap_or_default()
+}
+
+/// The command line a boot starts from: a selector's toggle wins over
+/// `--preset` and the manifests, for this boot.
+fn boot_args(pending: &Args, toggle: Option<config::Preset>) -> Args {
+    let mut args = pending.clone();
+    args.preset = toggle.or(args.preset);
+    args
+}
+
+/// §2.4 what a choice makes of the settings it commits, all of it in one
+/// commit: `game`, `last_played`, a toggle, and a hints value held in memory.
+fn apply_choice(
+    settings: &mut config::Config,
+    game: vault_core::GameProfile,
+    toggle: Option<config::Preset>,
+    hints_off: bool,
+) {
+    settings.last_played = Some(config::game_name(game).to_owned());
+    settings.preset = toggle.or(settings.preset);
+    if hints_off {
+        settings.hotkey_hints = Some(config::HotkeyHints::Off);
+    }
+}
+
+/// The settings a selector reads now: the file's, or none.
+fn current_settings() -> config::Config {
+    config::find(&config::search_dirs())
+        .and_then(|path| config::Config::load(&path).ok())
+        .unwrap_or_default()
+}
+
 /// The launcher a start shows, if it shows one: with `--launcher`, or for
 /// a start naming nothing whose settings are missing, malformed
 /// (`problem`) or name game data that does not validate. The command
@@ -491,6 +531,26 @@ fn launcher_for(
     config: Option<&config::Config>,
     problem: Option<String>,
 ) -> Option<launcher::Launcher> {
+    let forced = args.launcher || problem.is_some();
+    let launcher = launcher_on(args, config, problem);
+    match launcher.ready() {
+        // Data the launcher discovered is shown before it is played (and
+        // saved by Play).
+        Ok(()) if !forced && !launcher.discovered() => None,
+        Ok(()) => Some(launcher),
+        Err(reason) => {
+            tracing::info!(%reason, "no valid game data set up: showing the launcher");
+            Some(launcher)
+        }
+    }
+}
+
+/// The launcher on `config`, with the command line's display flags.
+fn launcher_on(
+    args: &Args,
+    config: Option<&config::Config>,
+    problem: Option<String>,
+) -> launcher::Launcher {
     let mut config = config.cloned().unwrap_or_default();
     if let Some(scaling) = args.scaling {
         config.scaling = Some(scaling);
@@ -517,25 +577,14 @@ fn launcher_for(
     if args.no_audio {
         config.audio = Some(false);
     }
-    let forced = args.launcher || problem.is_some();
-    let launcher = launcher::Launcher::new(launcher::Setup {
+    launcher::Launcher::new(launcher::Setup {
         config,
         settings_path: config::find(&config::search_dirs()),
         save_dirs: config::search_dirs(),
         start_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         problem,
         data_dirs: config::standard_data_dirs(),
-    });
-    match launcher.ready() {
-        // Data the launcher discovered is shown before it is played (and
-        // saved by Play).
-        Ok(()) if !forced && !launcher.discovered() => None,
-        Ok(()) => Some(launcher),
-        Err(reason) => {
-            tracing::info!(%reason, "no valid game data set up: showing the launcher");
-            Some(launcher)
-        }
-    }
+    })
 }
 
 /// The settings file beside the executable or in the working directory.
@@ -776,6 +825,9 @@ struct Shell {
     toasts: Option<toast::HotkeyToasts>,
     /// The list's end turns `hotkey_hints` off.
     hints_once: bool,
+    /// With no settings file that `off` stays here, for this process, until
+    /// settings are next committed (SPEC-020 §2.6).
+    hints_off: bool,
 }
 
 /// An enhanced frame, its layout, its side panels tiled to that layout,
@@ -1148,19 +1200,17 @@ impl Shell {
             self.redraw_toast(window);
         }
     }
-    /// The list is finished: `once` becomes `off`, in one commit. A failure
-    /// is a diagnostic, and the session goes on (SPEC-020 §2.6).
+    /// The list is finished: `once` becomes `off`, in one commit, or in
+    /// memory with no settings file. A failed commit is a diagnostic, and
+    /// the session goes on (SPEC-020 §2.6).
     fn finish_hints(&mut self) {
         self.toasts = None;
         if !std::mem::take(&mut self.hints_once) {
             return;
         }
-        let Some(path) = config::find(&config::search_dirs()) else {
-            tracing::warn!("hotkey_hints not saved: there is no settings file");
-            return;
-        };
-        if let Err(error) = boot::commit_hints(&path, config::HotkeyHints::Off) {
-            tracing::warn!(%error, "hotkey_hints not saved");
+        match boot::finish_hints(&config::search_dirs()) {
+            Ok(saved) => self.hints_off = !saved,
+            Err(error) => tracing::warn!(%error, "hotkey_hints not saved"),
         }
     }
     /// The enhanced presentation's refresh: the next redraw builds the
@@ -1561,6 +1611,10 @@ impl Shell {
         if self.boot.is_some() {
             return self.refresh_boot(window);
         }
+        // The launcher from Setup, over a session that is still stopped.
+        if self.stopped.is_some() {
+            return self.refresh_launcher(window);
+        }
         if let Some(pointer) = self.pointer {
             self.log_hover(event_loop, pointer);
             self.refresh_pointer(window);
@@ -1844,6 +1898,7 @@ impl Shell {
                 // A session's log ends as at any quit.
                 if self.session.is_some() {
                     self.boot = None;
+                    self.launcher = None;
                     self.record(InputCommand::Quit);
                 }
                 event_loop.exit();
@@ -1869,14 +1924,12 @@ impl Shell {
                     self.hold_back(original);
                     return None;
                 }
-                if self.boot.is_some() {
-                    if event.repeat {
-                        return None;
-                    }
-                    // Its release stays with the shell, even once closed.
-                    if self.stopped.is_some() {
-                        self.shell_keys.push(key);
-                    }
+                if self.boot.is_some() && event.repeat {
+                    return None;
+                }
+                // Its release stays with the shell, even once closed.
+                if self.stopped.is_some() && !event.repeat {
+                    self.shell_keys.push(key);
                 }
                 launcher::LauncherInput::Key {
                     key,
@@ -1901,7 +1954,7 @@ impl Shell {
                 state: ElementState::Pressed,
                 button,
                 ..
-            } if self.boot.is_some() => {
+            } if self.boot.is_some() || self.stopped.is_some() => {
                 self.boot_buttons.push(button);
                 match self.pixel() {
                     Some(pixel) if button == MouseButton::Left => {
@@ -1918,7 +1971,7 @@ impl Shell {
                 state: ElementState::Released,
                 button,
                 ..
-            } if self.boot.is_some() => {
+            } if self.boot.is_some() || self.stopped.is_some() => {
                 if !self.take_boot_button(button) {
                     self.hold_back(original);
                 }
@@ -2001,9 +2054,22 @@ impl Shell {
         match action {
             None => self.refresh_launcher(window),
             Some(launcher::LauncherAction::Quit) => event_loop.exit(),
-            Some(launcher::LauncherAction::Play) => self.start_game(event_loop, window, false),
-            Some(launcher::LauncherAction::PlayDebug) => self.start_game(event_loop, window, true),
+            Some(launcher::LauncherAction::Back) => self.setup_back(window),
+            Some(launcher::LauncherAction::Play) => self.launcher_play(event_loop, window, false),
+            Some(launcher::LauncherAction::PlayDebug) => {
+                self.launcher_play(event_loop, window, true);
+            }
         }
+    }
+
+    /// Play. Over a session it is a switch (case S25): the launcher has
+    /// validated its data, so the session ends and the game boots.
+    fn launcher_play(&mut self, event_loop: &ActiveEventLoop, window: &Window, debug: bool) {
+        if self.stopped.is_some() {
+            self.end_session();
+            self.pending = self.switch_base.clone();
+        }
+        self.start_game(event_loop, window, debug);
     }
 
     /// Play: the launcher's settings start the game exactly as a
@@ -2015,6 +2081,9 @@ impl Shell {
             return;
         };
         let config = launcher.launch_config();
+        // Its own Save wrote the value held in memory, or it changed it.
+        self.hints_off &= config.hotkey_hints == Some(config::HotkeyHints::Off)
+            && config::find(&config::search_dirs()).is_none();
         let mut args = play_args(pending, debug);
         let (launch, session, audio) =
             match start(&mut args, Some(&config), session::SessionOrigin::Launcher) {
@@ -2105,11 +2174,7 @@ impl Shell {
         window: &Window,
         input: &launcher::LauncherInput,
     ) {
-        let selector = self
-            .boot_config
-            .as_ref()
-            .zip(self.boot_found.as_ref())
-            .map(|(config, found)| boot::Selector::new(config, found.clone(), None));
+        let selector = self.pre_boot_selector();
         let Some(screen) = self.boot.as_mut() else {
             return;
         };
@@ -2130,24 +2195,96 @@ impl Shell {
             }
             Some(boot::BootAction::Leave) => event_loop.exit(),
             Some(boot::BootAction::Choose(game)) => self.choose_edition(event_loop, window, game),
+            Some(boot::BootAction::Setup(game)) => self.open_setup(window, game),
         }
     }
 
-    /// The selector's choice boots, with `game` and `last_played` set in
-    /// one commit.
+    /// The selector before any session, on the boot settings.
+    fn pre_boot_selector(&self) -> Option<boot::Selector> {
+        let (config, found) = self.boot_config.as_ref().zip(self.boot_found.as_ref())?;
+        let next = self
+            .pending
+            .as_ref()
+            .map_or_else(Default::default, |args| next_preset(args, config));
+        Some(boot::Selector::new(config, found.clone(), None).with_preset(next, None))
+    }
+
+    /// The selector over the stopped session, on what the disk says now.
+    fn switch_selector(&self) -> Option<boot::Selector> {
+        let session = self.session.as_ref()?;
+        let settings = current_settings();
+        let found = boot::discover(&settings, &config::standard_data_dirs());
+        let next = self
+            .switch_base
+            .as_ref()
+            .map_or_else(Default::default, |args| next_preset(args, &settings));
+        let running = session.edition();
+        Some(
+            boot::Selector::new(&settings, found, Some(running))
+                .with_preset(next, Some(session.preset())),
+        )
+    }
+
+    /// Setup: the launcher, on the Game data tab with `game` in its Game
+    /// row. A session under it stays stopped.
+    fn open_setup(&mut self, window: &Window, game: vault_core::GameProfile) {
+        let mut settings = current_settings();
+        if self.hints_off {
+            settings.hotkey_hints = Some(config::HotkeyHints::Off);
+        }
+        let args = self.pending.as_ref().or(self.switch_base.as_ref());
+        let Some(args) = args else {
+            return;
+        };
+        let launcher = launcher_on(args, Some(&settings), None).opened_by_selector(game);
+        window.set_title(&launcher.title());
+        self.title = launcher.title();
+        self.launcher = Some(Box::new(launcher));
+        self.boot = None;
+        self.refresh_launcher(window);
+    }
+
+    /// Back from Setup: the selector, which runs discovery again. Nothing
+    /// it held survives, because Save may have changed what it read.
+    fn setup_back(&mut self, window: &Window) {
+        let Some(launcher) = self.launcher.take() else {
+            return;
+        };
+        if config::find(&config::search_dirs()).is_some() {
+            self.hints_off = false;
+        }
+        let selector = if self.stopped.is_some() {
+            self.switch_selector()
+        } else {
+            let settings = current_settings();
+            self.boot_found = Some(boot::discover(&settings, &config::standard_data_dirs()));
+            self.boot_config = Some(settings);
+            self.pre_boot_selector()
+        };
+        self.boot =
+            selector.map(|selector| boot::Screen::Selector(selector.highlighting(launcher.game())));
+        self.refresh_boot(window);
+    }
+
+    /// The selector's choice boots, with `game`, `last_played` and any
+    /// toggled preset set in one commit.
     fn choose_edition(
         &mut self,
         event_loop: &ActiveEventLoop,
         window: &Window,
         game: vault_core::GameProfile,
     ) {
+        let toggle = match &self.boot {
+            Some(boot::Screen::Selector(selector)) => selector.toggled(),
+            _ => None,
+        };
         if self.stopped.is_none() {
             let paths = self
                 .boot_found
                 .as_ref()
                 .and_then(|found| found.get(game).clone().ok());
             if let Some(paths) = paths {
-                self.boot_edition(event_loop, window, game, paths, true);
+                self.boot_edition(event_loop, window, game, paths, Some(toggle));
             }
             return;
         }
@@ -2175,7 +2312,7 @@ impl Shell {
         self.end_session();
         self.boot_config = Some(settings);
         self.pending = self.switch_base.clone();
-        self.boot_edition(event_loop, window, game, paths, true);
+        self.boot_edition(event_loop, window, game, paths, Some(toggle));
     }
 
     /// SPEC-020 §2.5 step 2: the session ends as at quit. Its log ends, and
@@ -2184,7 +2321,9 @@ impl Shell {
     fn end_session(&mut self) {
         self.boot = None;
         self.stopped = None;
+        let launcher = self.launcher.take();
         self.record(InputCommand::Quit);
+        self.launcher = launcher;
         self.flush_records();
         self.input_log = InputLog::default();
         self.session = None;
@@ -2202,28 +2341,36 @@ impl Shell {
     }
 
     /// Boot `game` on the boot settings, through the same path as Play. A
-    /// failed boot opens the launcher, showing why. `commits` records the
-    /// choice; the banner's own boot writes nothing.
+    /// failed boot opens the launcher, showing why. `choice` records a
+    /// choice, with its toggled preset; the banner's own boot has none, and
+    /// writes nothing.
     fn boot_edition(
         &mut self,
         event_loop: &ActiveEventLoop,
         window: &Window,
         game: vault_core::GameProfile,
         paths: config::GamePaths,
-        commits: bool,
+        choice: Option<Option<config::Preset>>,
     ) {
         let (Some(mut settings), Some(pending)) = (self.boot_config.take(), self.pending.take())
         else {
             return;
         };
         settings.choose_game(game, paths);
-        if commits {
-            settings.last_played = Some(config::game_name(game).to_owned());
-            if let Err(error) = boot::commit_choice(&settings, &config::search_dirs()) {
-                tracing::warn!(%error, "the choice of game was not saved");
+        let toggle = choice.flatten();
+        if choice.is_some() {
+            apply_choice(&mut settings, game, toggle, self.hints_off);
+            match boot::commit_choice(&settings, &config::search_dirs()) {
+                Ok(_) => self.hints_off = false,
+                Err(error) => tracing::warn!(%error, "the choice of game was not saved"),
             }
         }
-        let mut args = (*pending).clone();
+        // The toggle is a choice for this boot: a later one takes the usual
+        // order, so a carried `--preset` does not undo it.
+        if let (Some(_), Some(base)) = (toggle, &mut self.switch_base) {
+            base.preset = None;
+        }
+        let mut args = boot_args(&pending, toggle);
         let origin = session::SessionOrigin::Launcher;
         let reason = match start(&mut args, Some(&settings), origin) {
             Ok((launch, Some(session), audio)) => {
@@ -2246,6 +2393,10 @@ impl Shell {
     /// Alt+L: the selector over the session, or closing it again. A session
     /// from memory discovered nothing, so it only says so (case S12).
     fn switch_key(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        // Setup is left by its own Back.
+        if self.launcher.is_some() {
+            return;
+        }
         if self.stopped.is_some() {
             return self.close_switch(event_loop, window);
         }
@@ -2257,13 +2408,10 @@ impl Shell {
             tracing::warn!("Alt+L: this session's data is in memory, with nothing to switch to");
             return;
         }
-        let running = session.edition();
-        let dirs = config::search_dirs();
-        let settings = config::find(&dirs)
-            .and_then(|path| config::Config::load(&path).ok())
-            .unwrap_or_default();
-        let found = boot::discover(&settings, &config::standard_data_dirs());
-        self.stop_session(boot::Selector::new(&settings, found, Some(running)));
+        let Some(selector) = self.switch_selector() else {
+            return;
+        };
+        self.stop_session(selector);
         window.set_cursor_visible(true);
         self.refresh_boot(window);
     }
@@ -2367,7 +2515,7 @@ impl Shell {
                 .as_ref()
                 .and_then(|found| found.get(edition).clone().ok());
             if let Some(paths) = paths {
-                return self.boot_edition(event_loop, &window, edition, paths, false);
+                return self.boot_edition(event_loop, &window, edition, paths, None);
             }
         }
         if changed {
@@ -2491,7 +2639,7 @@ impl ApplicationHandler for Shell {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // SPEC-020 §2.4 and §2.5: a boot screen has no game frame, and the
         // session under the selector takes no step.
-        if self.boot.is_some() {
+        if self.boot.is_some() || self.stopped.is_some() {
             return self.boot_tick(event_loop);
         }
         // The F9 overlay's commands follow the inputs that committed them.
@@ -2742,7 +2890,7 @@ impl ApplicationHandler for Shell {
             WindowEvent::RedrawRequested => {
                 // A boot screen is on the window already. The enhanced
                 // layers draw the cursor themselves.
-                let boot = self.boot.is_some();
+                let boot = self.boot.is_some() || self.stopped.is_some();
                 let enhanced = !boot && self.present_enhanced(event_loop, &window);
                 if std::mem::take(&mut self.pointer_moved) && !enhanced && !boot {
                     self.present_pointer();
