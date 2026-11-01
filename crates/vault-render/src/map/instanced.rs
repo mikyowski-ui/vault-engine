@@ -9,8 +9,8 @@
 //! canvas): the reference path has no partial refresh, and the enhanced
 //! canvas is drawn as separate views.
 use super::{
-    Cutout, Drawn, FloorLight, ListIndexes, MapArt, MapLight, MapRenderError, MapScene, MapView,
-    TRANSLUCENT, TileLight, check_floor_view, cutout_parts, draw_sequence_with,
+    Cutout, FloorLight, ListIndexes, MapArt, MapLight, MapRenderError, MapScene, MapView,
+    TRANSLUCENT, TileLight, check_floor_view, cursor_visited, cutout_parts, draw_sequence,
     enhanced::{self, RoofPeekParams},
     floor_squares, frame_rect, overscan_hexes, placement, render_map_scene, roof_squares,
     translucent_row,
@@ -63,7 +63,9 @@ impl DrawRecord {
             FrameLayer::Flat | FrameLayer::Upright | FrameLayer::Outline => {
                 Self::new(layer, primary, secondary >> 3, (secondary & 7) as u8)
             }
-            FrameLayer::FloatingText | FrameLayer::NoHex => Self::new(layer, primary, secondary, 0),
+            FrameLayer::FloatingText | FrameLayer::NoHex | FrameLayer::Cursor => {
+                Self::new(layer, primary, secondary, 0)
+            }
         })
     }
 }
@@ -351,15 +353,16 @@ pub fn gather_map_frame<'a, A: MapArt>(
         };
         Ok(Some((frame, placement(view, frame, shift, object)?.0)))
     };
-    let cursor = scene.cursor;
     let extra = if scene.overscan {
         overscan_hexes(view, elevation, art)
     } else {
         Vec::new()
     };
-    let cursor_place = cursor.map(|cursor| (cursor.hex, cursor.order));
-    let (placed, hexless) = draw_sequence_with(view, elevation, cursor_place, &extra);
-    let lists = ListIndexes::new(elevation, cursor_place);
+    let cursor = scene
+        .cursor
+        .filter(|cursor| cursor_visited(view, cursor.hex, &extra));
+    let (placed, hexless) = draw_sequence(view, elevation, &extra);
+    let lists = ListIndexes::new(elevation);
     let mut outlines: Vec<(&FrmFrame, [i64; 2], OutlineInk)> = Vec::new();
     let mut highlights = Vec::new();
     // A drawn image layer (the cursor objects): lit at its hex.
@@ -382,35 +385,7 @@ pub fn gather_map_frame<'a, A: MapArt>(
         };
         builder.push(key, index, origin, rect, mode, flags, light, clip);
     };
-    for drawn in placed {
-        let index = match (drawn, cursor) {
-            (Drawn::Object(index), _) => index,
-            (Drawn::Cursor, Some(cursor)) => {
-                let key =
-                    SortKey::object(FrameLayer::Flat, hex_u32(cursor.hex)?, lists.cursor[0], 0)?;
-                draw_layer(&mut builder, key, cursor.art.0, cursor.art.1, cursor.hex);
-                if outlines.len() < 100
-                    && let Some((frame, origin, word)) = cursor.outline
-                    && let Some(ink) = scene.outlines.and_then(|inks| inks.ink(word))
-                {
-                    outlines.push((frame, origin, ink));
-                }
-                continue;
-            }
-            (Drawn::CursorText, Some(cursor)) => {
-                if let Some((text, origin)) = cursor.text {
-                    let key = SortKey::object(
-                        FrameLayer::Upright,
-                        hex_u32(cursor.hex)?,
-                        lists.cursor[1],
-                        0,
-                    )?;
-                    draw_layer(&mut builder, key, text, origin, cursor.hex);
-                }
-                continue;
-            }
-            (Drawn::Cursor | Drawn::CursorText, None) => continue,
-        };
+    for index in placed {
         let object = &elevation[index];
         let Some((frame, origin)) = sprite(object)? else {
             continue;
@@ -500,9 +475,13 @@ pub fn gather_map_frame<'a, A: MapArt>(
         );
     }
 
-    // Layer 4: the outlines, as ring images the outline painter records.
-    for (position, (frame, origin, ink)) in outlines.into_iter().chain(highlights).enumerate() {
-        let key = SortKey::outline(u32::try_from(position).unwrap_or(u32::MAX), 0)?;
+    // An outline, as a ring image the outline painter records.
+    let push_ring = |builder: &mut Builder<'a>,
+                     key: SortKey,
+                     frame: &FrmFrame,
+                     origin: [i64; 2],
+                     ink: OutlineInk|
+     -> Result<(), InstanceError> {
         let (ring_image, mode, aux) =
             ring_image(frame, origin, ink, [view.width, view.height], tables)?;
         let ring_origin = [origin[0] - 1, origin[1] - 1];
@@ -515,6 +494,13 @@ pub fn gather_map_frame<'a, A: MapArt>(
         let image = builder.owned(ring_image);
         builder.push(key, image, ring_origin, rect, mode, 0, Light::None, canvas);
         builder.set_aux(aux);
+        Ok(())
+    };
+
+    // Layer 4: the outlines.
+    for (position, (frame, origin, ink)) in outlines.into_iter().chain(highlights).enumerate() {
+        let key = SortKey::outline(u32::try_from(position).unwrap_or(u32::MAX), 0)?;
+        push_ring(&mut builder, key, frame, origin, ink)?;
     }
 
     // Layer 5: the floating texts, in creation order.
@@ -563,6 +549,23 @@ pub fn gather_map_frame<'a, A: MapArt>(
             clip,
         );
         builder.set_aux(aux);
+    }
+
+    // Layer 7: the cursor, after everything else (revision 4).
+    if let Some(cursor) = cursor {
+        let (art, origin) = cursor.art;
+        let key = SortKey::cursor(SortKey::CURSOR_ART)?;
+        draw_layer(&mut builder, key, art, origin, cursor.hex);
+        if let Some((frame, origin, word)) = cursor.outline
+            && let Some(ink) = scene.outlines.and_then(|inks| inks.ink(word))
+        {
+            let key = SortKey::cursor(SortKey::CURSOR_OUTLINE)?;
+            push_ring(&mut builder, key, frame, origin, ink)?;
+        }
+        if let Some((text, origin)) = cursor.text {
+            let key = SortKey::cursor(SortKey::CURSOR_TEXT)?;
+            draw_layer(&mut builder, key, text, origin, cursor.hex);
+        }
     }
 
     // The tables the cutout blends with must be the light palette's.

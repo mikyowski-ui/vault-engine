@@ -14,7 +14,7 @@ use vault_formats::{
 
 mod enhanced;
 mod instanced;
-use crate::layers::{FrameLayer, SHROUD_PRIMARY};
+use crate::layers::{FrameLayer, SHROUD_PRIMARY, SortKey};
 pub use enhanced::{
     BAYER, RoofPeekParams, ShroudCell, ShroudField, ShroudRecording, Vignette, bayer, draw_shroud,
     draw_vignette, record_shroud, roof_hides, shroud_dark,
@@ -230,42 +230,24 @@ pub struct Shroud<'a> {
     pub dark: u8,
 }
 
-/// SPEC-014 §3.27 the in-world cursor: a flat object on the current
-/// elevation (flat, no-block, shoot-through, light-through, temporary)
-/// that shows every mode's art, drawn in the §3.44 flat pass at its hex
-/// and lit as any object there, and in movement mode a second, upright
-/// object for the AP text, drawn in the upright pass at the same hex. Both
-/// exist only in the refresh: they are not world objects, so scripts,
-/// saves, picking and blocking never see them.
+/// SPEC-014 §3.27 (R1-rev13) the in-world cursor: a presentation object
+/// that shows every mode's art, always the top layer of a refresh, lit as
+/// any object on its hex. Movement mode adds its outline and AP text, drawn
+/// with it. It exists only in the refresh and takes no place in a hex's
+/// object list, so scripts, saves, picking and blocking never see it.
 #[derive(Clone, Copy)]
 pub struct SceneCursor<'a> {
-    /// The hex both objects are at.
+    /// The hex it is at.
     pub hex: i32,
-    /// Their place in the elevation's object list (insertion order): they
-    /// follow the objects listed before index `order` and precede the rest,
-    /// so within their hex groups they come after the objects inserted
-    /// before their last move (every move reinserts them at the end).
-    pub order: usize,
     /// The cursor art and its top-left corner in the view (index 0 is
     /// transparent).
     pub art: (&'a IndexedImage, [i64; 2]),
     /// Movement mode's outline: the hex frame at its top-left corner and
-    /// its outline word, added to the outline list when the cursor is
-    /// drawn, so it is painted after the roofs like every outline.
+    /// its outline word, drawn right after the art and outside the list of
+    /// 100.
     pub outline: Option<(&'a FrmFrame, [i64; 2], u32)>,
     /// The AP-text object's art and top-left corner.
     pub text: Option<(&'a IndexedImage, [i64; 2])>,
-}
-
-/// One entry of a refresh's drawing order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Drawn {
-    /// An object, by its index in the elevation's list.
-    Object(usize),
-    /// The in-world cursor (flat pass).
-    Cursor,
-    /// Movement mode's AP text (upright pass).
-    CursorText,
 }
 
 /// SPEC-014 §3.37 the player see-through cutout: the `egg.frm` mask placed
@@ -630,31 +612,8 @@ fn visited_hexes(view: MapView) -> impl Iterator<Item = i32> {
 /// group oldest insertion first). Hidden objects and objects on unvisited
 /// hexes are not drawn. The second list holds the objects without a hex,
 /// drawn last. The `extra` hexes ([`overscan_hexes`], empty in Vanilla)
-/// are visited too.
+/// are visited too, merged into the ascending order.
 fn draw_sequence(view: MapView, objects: &[MapObject], extra: &[i32]) -> (Vec<usize>, Vec<usize>) {
-    let (placed, hexless) = draw_sequence_with(view, objects, None, extra);
-    let placed = placed
-        .into_iter()
-        .filter_map(|drawn| match drawn {
-            Drawn::Object(index) => Some(index),
-            Drawn::Cursor | Drawn::CursorText => None,
-        })
-        .collect();
-    (placed, hexless)
-}
-
-/// [`draw_sequence`] with the §3.27 cursor objects at `cursor` (their hex
-/// and list place, [`SceneCursor`]): the cursor in its hex's flat group and
-/// the AP text in its upright group, each before the objects listed from
-/// `order` on. On an unvisited hex neither is drawn. The `extra` hexes
-/// (the enhanced overscan, empty in Vanilla) are visited too, merged into
-/// the ascending order.
-fn draw_sequence_with(
-    view: MapView,
-    objects: &[MapObject],
-    cursor: Option<(i32, usize)>,
-    extra: &[i32],
-) -> (Vec<Drawn>, Vec<usize>) {
     let mut placed: Vec<(i32, bool, usize)> = Vec::new();
     let mut hexless = Vec::new();
     for (index, object) in objects.iter().enumerate() {
@@ -676,34 +635,22 @@ fn draw_sequence_with(
         hexes.dedup();
     }
     for hex in hexes {
-        let here = cursor.filter(|(at, _)| *at == hex).map(|(_, order)| order);
-        let (mut cursor_due, mut text_due) = (here.is_some(), here.is_some());
         let start = placed.partition_point(|(at, ..)| *at < hex);
         for (_, is_upright, index) in placed[start..].iter().take_while(|(at, ..)| *at == hex) {
-            let later = here.is_some_and(|order| *index >= order);
             if *is_upright {
-                if text_due && later {
-                    upright.push(Drawn::CursorText);
-                    text_due = false;
-                }
-                upright.push(Drawn::Object(*index));
+                upright.push(*index);
             } else {
-                if cursor_due && later {
-                    flat.push(Drawn::Cursor);
-                    cursor_due = false;
-                }
-                flat.push(Drawn::Object(*index));
+                flat.push(*index);
             }
-        }
-        if cursor_due {
-            flat.push(Drawn::Cursor);
-        }
-        if text_due {
-            upright.push(Drawn::CursorText);
         }
     }
     flat.extend(upright);
     (flat, hexless)
+}
+
+/// Whether a refresh of `view` draws a cursor at `hex`: on a hex it visits.
+fn cursor_visited(view: MapView, hex: i32, extra: &[i32]) -> bool {
+    extra.contains(&hex) || visited_hexes(view).any(|visited| visited == hex)
 }
 
 /// The `enhanced` overscan: the hexes of the visible objects (not hidden,
@@ -1213,18 +1160,17 @@ fn draw_map_scene_recorded(
         };
         Ok(Some((frame, placement(view, frame, shift, object)?.0)))
     };
-    let cursor = scene.cursor;
     let extra = if scene.overscan {
         overscan_hexes(view, objects, art)
     } else {
         Vec::new()
     };
-    let cursor_place = cursor.map(|cursor| (cursor.hex, cursor.order));
-    let (placed, hexless) = draw_sequence_with(view, objects, cursor_place, &extra);
+    let cursor = scene
+        .cursor
+        .filter(|cursor| cursor_visited(view, cursor.hex, &extra));
+    let (placed, hexless) = draw_sequence(view, objects, &extra);
     // The list indexes, only when recording.
-    let lists = record
-        .is_some()
-        .then(|| ListIndexes::new(objects, cursor_place));
+    let lists = record.is_some().then(|| ListIndexes::new(objects));
     let canvas = [0, 0, i64::from(image.width()), i64::from(image.height())];
     let mut log = |layer: FrameLayer, primary: i64, index: u32, part: u8| {
         if let Some(record) = record.as_mut() {
@@ -1233,36 +1179,7 @@ fn draw_map_scene_recorded(
     };
     let mut outlines = Vec::new();
     let mut highlights = Vec::new();
-    for drawn in placed {
-        let index = match (drawn, cursor) {
-            (Drawn::Object(index), _) => index,
-            // SPEC-014 §3.27: the cursor objects are lit as any object on
-            // their hex; the cursor's outline joins the list as it draws.
-            (Drawn::Cursor, Some(cursor)) => {
-                let (art, origin) = cursor.art;
-                pens.draw_layer(image, art, origin, level(Some(cursor.hex)));
-                if let Some(lists) = &lists {
-                    log(FrameLayer::Flat, cursor.hex.into(), lists.cursor[0], 0);
-                }
-                if outlines.len() < 100
-                    && let Some((frame, origin, word)) = cursor.outline
-                    && let Some(ink) = scene.outlines.and_then(|inks| inks.ink(word))
-                {
-                    outlines.push((frame, origin, ink));
-                }
-                continue;
-            }
-            (Drawn::CursorText, Some(cursor)) => {
-                if let Some((text, origin)) = cursor.text {
-                    pens.draw_layer(image, text, origin, level(Some(cursor.hex)));
-                    if let Some(lists) = &lists {
-                        log(FrameLayer::Upright, cursor.hex.into(), lists.cursor[1], 0);
-                    }
-                }
-                continue;
-            }
-            (Drawn::Cursor | Drawn::CursorText, None) => continue,
-        };
+    for index in placed {
         let object = &objects[index];
         let Some((frame, origin)) = sprite(object)? else {
             continue;
@@ -1378,6 +1295,31 @@ fn draw_map_scene_recorded(
             log(FrameLayer::NoHex, 0, rank as u32, 0);
         }
     }
+    // SPEC-014 §3.27 (R1-rev13): the cursor is the top layer, lit as any
+    // object on its hex, with nothing drawn after it.
+    if let Some(cursor) = cursor {
+        let (art, origin) = cursor.art;
+        let level = level(Some(cursor.hex));
+        pens.draw_layer(image, art, origin, level);
+        log(FrameLayer::Cursor, 0, SortKey::CURSOR_ART, 0);
+        if let Some((frame, origin, word)) = cursor.outline
+            && let Some(ink) = scene.outlines.and_then(|inks| inks.ink(word))
+        {
+            draw_outline(
+                image,
+                frame,
+                origin,
+                ink,
+                [0, 0, width, height],
+                [width, height],
+            );
+            log(FrameLayer::Cursor, 0, SortKey::CURSOR_OUTLINE, 0);
+        }
+        if let Some((text, origin)) = cursor.text {
+            pens.draw_layer(image, text, origin, level);
+            log(FrameLayer::Cursor, 0, SortKey::CURSOR_TEXT, 0);
+        }
+    }
     Ok(())
 }
 
@@ -1433,44 +1375,27 @@ pub(crate) fn cutout_parts(
 
 /// SPEC-022 §2.1 the list index of each drawn entry: its position in its
 /// hex's object list. The list holds the elevation's objects on that hex
-/// (hidden ones included) in insertion order, with the §3.27 cursor
-/// objects at their place (before the first object listed from their
-/// `order` on). Objects of other elevations are in other lists, so they
-/// never share a hex list here.
+/// (hidden ones included) in insertion order, and the cursor takes no place
+/// in it (revision 4). Objects of other elevations are in other lists, so
+/// they never share a hex list here.
 pub(crate) struct ListIndexes {
     /// By object index; objects without a hex have 0.
     pub objects: Vec<u32>,
-    /// The cursor's and the AP text's.
-    pub cursor: [u32; 2],
 }
 
 impl ListIndexes {
-    pub fn new(objects: &[MapObject], cursor: Option<(i32, usize)>) -> Self {
+    pub fn new(objects: &[MapObject]) -> Self {
         let mut counts: std::collections::BTreeMap<i32, u32> = Default::default();
         let mut indexes = vec![0; objects.len()];
-        let mut cursor_index = None;
         for (index, object) in objects.iter().enumerate() {
             let Some(hex) = object.hex else {
                 continue;
             };
             let count = counts.entry(hex).or_default();
-            if let Some((at, order)) = cursor
-                && at == hex
-                && index >= order
-                && cursor_index.is_none()
-            {
-                cursor_index = Some(*count);
-                *count += 2;
-            }
             indexes[index] = *count;
             *count += 1;
         }
-        let cursor_index = cursor_index
-            .unwrap_or_else(|| cursor.map_or(0, |(hex, _)| counts.get(&hex).copied().unwrap_or(0)));
-        Self {
-            objects: indexes,
-            cursor: [cursor_index, cursor_index + 1],
-        }
+        Self { objects: indexes }
     }
 }
 
@@ -2290,7 +2215,7 @@ mod tests {
     }
 
     #[test]
-    fn spec014_cursor_object_draws_in_the_flat_pass_and_its_outline_after_the_roofs() {
+    fn spec014_r1_rev13_the_cursor_is_the_top_layer_with_its_outline_and_text() {
         let map = preview();
         let mut art = std::collections::BTreeMap::new();
         art.insert(
@@ -2346,52 +2271,40 @@ mod tests {
         ];
         let cursor = SceneCursor {
             hex: 20100,
-            order: objects.len(),
             art: (&cursor_art, [0, 0]),
             outline: None,
             text: None,
         };
         let image = draw(view, objects.clone(), cursor);
-        // Over a flat object of a lower hex, under one of a higher hex, and
-        // under every upright object, whatever its hex.
-        assert_eq!(at(&image, 20098), 77, "over the lower flat object");
-        assert_eq!(at(&image, 20102), 20, "under the higher flat object");
-        assert_eq!(at(&image, 20096), 30, "under a lower upright object");
-        assert_eq!(at(&image, 20104), 30, "under a higher upright object");
-        // The AP text is upright: over the flat objects and the uprights of
-        // lower hexes, under those of higher hexes.
+        // Over every object, flat or upright, whatever its hex.
+        for hex in [20098, 20102, 20096, 20104] {
+            assert_eq!(at(&image, hex), 77, "over the object on {hex}");
+        }
+        // The AP text is last of all.
         let with_text = SceneCursor {
             text: Some((&text_art, [0, 0])),
             ..cursor
         };
         let image = draw(view, objects.clone(), with_text);
-        assert_eq!(at(&image, 20098), 88);
-        assert_eq!(at(&image, 20102), 88);
-        assert_eq!(at(&image, 20096), 88, "over the lower upright object");
-        assert_eq!(at(&image, 20104), 30, "under the higher upright object");
-        // Within its hex the cursor follows the flat objects inserted
-        // before its last move and precedes those inserted after.
-        let own = vec![flat(5, 20100)];
-        let before = SceneCursor { order: 1, ..cursor };
-        assert_eq!(at(&draw(view, own.clone(), before), 20100), 77);
-        let after = SceneCursor { order: 0, ..cursor };
-        assert_eq!(at(&draw(view, own, after), 20100), 20);
-        // The cursor's outline joins the outline list when it is drawn, so
-        // it is painted after the roofs: the roof hides the cursor's art,
-        // not its ring.
+        for hex in [20098, 20102, 20096, 20104] {
+            assert_eq!(at(&image, hex), 88, "the text on {hex}");
+        }
+        // On its own hex it takes no place in the list.
+        let own = vec![flat(5, 20100), upright(6, 20100)];
+        assert_eq!(at(&draw(view, own, cursor), 20100), 77);
+        // Over a roof, with its outline right after its art.
         view.roofs = true;
         let roof = [256_i64, 84];
         let small = IndexedImage::from_pixels(4, 4, vec![77; 16]).unwrap();
         let origin = [roof[0] + 1, roof[1]];
         let outlined = SceneCursor {
-            order: 0,
             art: (&small, origin),
             outline: Some((ring, origin, 3)),
             ..cursor
         };
         let image = draw(view, Vec::new(), outlined);
         let pixel = |[x, y]: [i64; 2]| image.pixels()[y as usize * 640 + x as usize];
-        assert_eq!(pixel(origin), 200, "the roof covers the cursor");
+        assert_eq!(pixel(origin), 77, "the cursor covers the roof");
         assert_eq!(pixel(roof), other, "the ring is drawn over the roof");
         // Without the outline the roof shows there.
         let plain = SceneCursor {
@@ -2402,6 +2315,65 @@ mod tests {
         assert_eq!(
             image.pixels()[roof[1] as usize * 640 + roof[0] as usize],
             200
+        );
+        // The art, its outline and the text draw in that order.
+        let wide = SceneCursor {
+            art: (&cursor_art, [0, 0]),
+            outline: Some((ring, origin, 3)),
+            ..cursor
+        };
+        let image = draw(view, Vec::new(), wide);
+        let pixel = |[x, y]: [i64; 2]| image.pixels()[y as usize * 640 + x as usize];
+        assert_eq!(pixel(roof), other, "the ring over the art");
+        let image = draw(
+            view,
+            Vec::new(),
+            SceneCursor {
+                text: Some((&text_art, [0, 0])),
+                ..wide
+            },
+        );
+        let pixel = |[x, y]: [i64; 2]| image.pixels()[y as usize * 640 + x as usize];
+        assert_eq!(pixel(roof), 88, "the text over the ring");
+        // D-44: the outline takes no place among the 100, so with the list
+        // full it is still drawn, and it costs no object its own outline.
+        view.roofs = false;
+        let shown = (0..40000).step_by(2).filter(|hex| {
+            let [x, y] = view.grid.hex_center(*hex).unwrap_or([-1, -1]);
+            (60..580).contains(&x) && (60..300).contains(&y)
+        });
+        let full: Vec<MapObject> = shown
+            .take(100)
+            .enumerate()
+            .map(|(index, hex)| {
+                let mut object = flat(10 + index as u32, hex);
+                object.outline = 3;
+                object
+            })
+            .collect();
+        assert_eq!(full.len(), 100);
+        let last = full[99].hex.unwrap();
+        let [x, y] = view.grid.hex_center(last).unwrap();
+        let ringed = |image: &IndexedImage| {
+            let row = |y: i64| &image.pixels()[y as usize * 640..(y as usize + 1) * 640];
+            (y - 4..y + 4).any(|y| row(y)[(x - 6) as usize..(x + 6) as usize].contains(&other))
+        };
+        let plain = SceneCursor {
+            art: (&small, [600, 370]),
+            ..cursor
+        };
+        assert!(ringed(&draw(view, full.clone(), plain)));
+        let spare = [300_i64, 300];
+        let with_outline = SceneCursor {
+            outline: Some((ring, spare, 3)),
+            ..plain
+        };
+        let image = draw(view, full, with_outline);
+        assert!(ringed(&image), "the hundredth object keeps its outline");
+        assert_eq!(
+            image.pixels()[(spare[1] as usize - 1) * 640 + spare[0] as usize],
+            other,
+            "the cursor's outline is drawn"
         );
     }
 

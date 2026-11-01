@@ -389,9 +389,17 @@ fn t1_highlight_positions_give_every_fixture_row() {
 
 #[test]
 fn t1_sort_keys_refuse_fields_outside_their_domains() {
-    // Layer 7.
-    assert_eq!(SortKey::new(7, 0, 0), Err(InstanceError::ReservedLayer(7)));
-    assert!(FrameLayer::from_index(7).is_err());
+    // Layer 7 is the cursor (revision 4): a primary other than 0 or a rank
+    // above 3 is refused, and there is no layer 8.
+    assert_eq!(FrameLayer::from_index(7), Ok(FrameLayer::Cursor));
+    assert_eq!(SortKey::new(8, 0, 0), Err(InstanceError::ReservedLayer(8)));
+    assert!(FrameLayer::from_index(8).is_err());
+    assert!(SortKey::new(7, 1, 0).is_err());
+    assert!(SortKey::new(7, 0, 4).is_err());
+    assert!(SortKey::cursor(4).is_err());
+    for rank in 0..=3 {
+        assert_eq!(SortKey::new(7, 0, rank), SortKey::cursor(rank));
+    }
     // A hex of 40000, a square of 10000.
     assert!(SortKey::object(FrameLayer::Flat, 40000, 0, 0).is_err());
     assert!(SortKey::new(2, 40000, 0).is_err());

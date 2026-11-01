@@ -330,7 +330,6 @@ fn scene_of<'a>(
     let ring = fixture.ring.frame(0, 0).unwrap();
     let cursor = SceneCursor {
         hex: 20104,
-        order: 3,
         art: (&fixture.cursor_art, [cx - 3, cy - 2]),
         outline: Some((ring, [cx - 16, cy - 8], outline::RED | outline::TRANSLUCENT)),
         text: Some((&fixture.cursor_text, [cx + 10, cy - 20])),
@@ -523,7 +522,7 @@ fn t9_t10_t11_full_refresh_parity_with_every_layer() {
         .iter()
         .map(|instance| instance.key.layer())
         .collect();
-    assert_eq!(layers, (0..7).collect(), "every layer is drawn");
+    assert_eq!(layers, (0..8).collect(), "every layer is drawn");
     // The hidden roof group draws no roof square over it.
     let hidden_rank = square_order()
         .iter()
@@ -681,7 +680,7 @@ fn t9_t10_t11_walking_critter_reinserts_on_each_step() {
         // On the player's hex the walker is the last entry: drawn after
         // the scenery and the player.
         if step == 2 {
-            let lists = ListIndexes::new(&objects.elevations[0], None);
+            let lists = ListIndexes::new(&objects.elevations[0]);
             let on_hex: Vec<u32> = objects.elevations[0]
                 .iter()
                 .enumerate()
@@ -1608,8 +1607,8 @@ fn t15_square_ranks_give_the_fixture_rows_and_the_reference_log() {
 #[test]
 fn t9_the_list_index_counts_only_the_current_elevation() {
     // The same hex on two elevations: each elevation's list starts from 0,
-    // hidden entries count though they are not drawn, and the cursor and
-    // its text take two places.
+    // hidden entries count though they are not drawn, and the cursor takes
+    // no place (revision 4, D-44), with or without one in the scene.
     let map = map();
     let mut objects = scene(Vec::new());
     let mut hidden = object(&map, 1, CRITTER, 20100);
@@ -1620,10 +1619,9 @@ fn t9_the_list_index_counts_only_the_current_elevation() {
         object(&map, 3, SCENERY, 20100),
         object(&map, 4, CRITTER, 20100),
     ];
-    let lists = ListIndexes::new(&objects.elevations[0], Some((20100, 2)));
-    assert_eq!(lists.objects, [0, 1, 4]);
-    assert_eq!(lists.cursor, [2, 3]);
-    let lists = ListIndexes::new(&objects.elevations[1], None);
+    let lists = ListIndexes::new(&objects.elevations[0]);
+    assert_eq!(lists.objects, [0, 1, 2]);
+    let lists = ListIndexes::new(&objects.elevations[1]);
     assert_eq!(lists.objects, [0, 1, 2]);
     // Both paths give those numbers.
     let art = art();
@@ -1649,6 +1647,206 @@ fn t9_the_list_index_counts_only_the_current_elevation() {
         &mut gpu,
     );
     assert_eq!(upright(MapScene::default()), [1, 2]);
+    let cursor_art = IndexedImage::from_pixels(2, 2, vec![200; 4]).unwrap();
+    let on_the_hex = MapScene {
+        cursor: Some(SceneCursor {
+            hex: 20100,
+            art: (&cursor_art, [320, 190]),
+            outline: None,
+            text: None,
+        }),
+        ..MapScene::default()
+    };
+    assert_eq!(upright(on_the_hex), [1, 2], "the cursor counts for nothing");
+}
+
+/// T20's pile: a door, a container, a critter with its outline and a wall on
+/// the cursor's hex, under the fixture's roofs, and an object without a hex
+/// over it.
+fn cursor_pile(fixture: &Fixture, view: MapView) -> MapObjects {
+    let map = &fixture.map;
+    let [cx, cy] = view.grid.hex_center(20104).unwrap();
+    let mut scene = objects(map);
+    let mut outlined = object(map, 82, CRITTER, 20104);
+    outlined.outline = outline::RED;
+    let mut free = object(map, 84, SCENERY, 0);
+    free.hex = None;
+    free.screen = [(cx + 12) as i32, (cy + 8) as i32];
+    scene.elevations[0].extend([
+        object(map, 80, SCENERY, 20104),
+        object(map, 81, ITEM, 20104),
+        outlined,
+        object(map, 83, WALL, 20104),
+        free,
+    ]);
+    scene
+}
+/// The pixels `art` paints at `origin`, as canvas indexes.
+fn painted(art: &IndexedImage, origin: [i64; 2], width: u32) -> Vec<usize> {
+    let columns = art.width() as usize;
+    art.pixels()
+        .iter()
+        .enumerate()
+        .filter(|(_, pixel)| **pixel != 0)
+        .map(|(at, _)| {
+            let [x, y] = [(at % columns) as i64, (at / columns) as i64];
+            ((origin[1] + y) * i64::from(width) + origin[0] + x) as usize
+        })
+        .collect()
+}
+
+/// T20: over a door, a container, a critter, a wall, a roof, outlines,
+/// floating text and an object without a hex, in each cursor mode, lit and
+/// unlit, through the cutout and under the shroud, every cursor pixel
+/// reaches the canvas on both paths, as it does over the bare floor.
+#[test]
+fn t20_the_cursor_is_the_top_layer_on_both_paths() {
+    let _gpu = gpu::test_lock();
+    let fixture = Fixture::new();
+    let mut gpu = gpu_executor();
+    let view = view_at(20100, [640, 380]);
+    let [cx, cy] = view.grid.hex_center(20104).unwrap();
+    let pile = cursor_pile(&fixture, view);
+    let bare = scene(Vec::new());
+    let cutout = Cutout {
+        hex: 20104,
+        ..fixture.cutout()
+    };
+    let ring = fixture.ring.frame(0, 0).unwrap();
+    let art_at = [cx - 3, cy - 10];
+    let text_at = [cx - 4, cy - 20];
+    let ring_at = [cx - 16, cy - 22];
+    let floating = [FloatingSprite {
+        hex: 20104,
+        offset: [-12, -14],
+        image: IndexedImage::from_pixels(24, 12, vec![77; 288]).unwrap(),
+    }];
+    let whole = vec![false; 40000];
+    let width = view.width;
+    // The ring's top row, inside the view and clear of the art and text.
+    let ring_top: Vec<usize> = (0..32)
+        .map(|x| ((ring_at[1] - 1) * i64::from(width) + ring_at[0] + x) as usize)
+        .collect();
+    for (mode, movement) in [("arrow", false), ("movement", true)] {
+        for word in [outline::RED, outline::RED | outline::TRANSLUCENT] {
+            let cursor = SceneCursor {
+                hex: 20104,
+                art: (&fixture.cursor_art, art_at),
+                outline: movement.then_some((ring, ring_at, word)),
+                text: movement.then_some((&fixture.cursor_text, text_at)),
+            };
+            for (name, lit, shrouded) in [
+                ("unlit", false, false),
+                ("lit", true, false),
+                ("shrouded", false, true),
+            ] {
+                let label = format!("{mode} {word:#x} {name}");
+                let top = MapScene {
+                    cutout: Some(&cutout),
+                    light: lit.then(|| fixture.light()),
+                    outlines: Some(&fixture.inks),
+                    floating: &floating,
+                    cursor: Some(cursor),
+                    shroud: shrouded.then_some(Shroud {
+                        allowed: &whole,
+                        dark: 0,
+                    }),
+                    ..MapScene::default()
+                };
+                parity(
+                    &label,
+                    &fixture.map,
+                    &pile,
+                    view,
+                    &fixture.art,
+                    top,
+                    &mut gpu,
+                );
+                let draw = |objects: &MapObjects, scene: MapScene| {
+                    render_map_scene(&fixture.map, objects, view, &fixture.art, scene).unwrap()
+                };
+                let canvas = draw(&pile, top);
+                // The same cursor over the bare floor, with no roof.
+                let open_view = MapView {
+                    roofs: false,
+                    ..view
+                };
+                let clear = MapScene {
+                    cutout: None,
+                    floating: &[],
+                    shroud: None,
+                    ..top
+                };
+                let open =
+                    render_map_scene(&fixture.map, &bare, open_view, &fixture.art, clear).unwrap();
+                let under = draw(
+                    &pile,
+                    MapScene {
+                        cursor: None,
+                        ..top
+                    },
+                );
+                let mut pixels = painted(&fixture.cursor_art, art_at, width);
+                if movement {
+                    pixels.extend(painted(&fixture.cursor_text, text_at, width));
+                    if word == outline::RED {
+                        pixels.extend(&ring_top);
+                    }
+                }
+                for at in &pixels {
+                    assert_eq!(canvas.pixels()[*at], open.pixels()[*at], "{label}: {at}");
+                }
+                let covered = pixels
+                    .iter()
+                    .filter(|at| under.pixels()[**at] != open.pixels()[**at])
+                    .count();
+                assert!(covered * 2 > pixels.len(), "{label}: the pile covers it");
+            }
+        }
+    }
+}
+
+/// T20's keys: `rev4/cursor-layer.tsv`, each after every other key of the
+/// refresh, with the art, outline and text in rank order.
+#[test]
+fn t20_the_cursor_keys_sort_after_every_other_key() {
+    let table = include_str!("../../../../tests/fixtures/spec022/rev4/cursor-layer.tsv");
+    let mut keys = Vec::new();
+    for row in table.lines().skip(1) {
+        let cells: Vec<&str> = row.split('\t').collect();
+        let rank: u32 = cells[0].parse().unwrap();
+        let key = SortKey::new(
+            cells[2].parse().unwrap(),
+            cells[3].parse().unwrap(),
+            cells[4].parse().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(key, SortKey::cursor(rank).unwrap());
+        assert_eq!(key.to_string(), cells[5]);
+        keys.push(key);
+    }
+    assert_eq!(keys.len(), 4);
+    let fixture = Fixture::new();
+    let view = view_at(20100, [640, 380]);
+    let pile = cursor_pile(&fixture, view);
+    let cutout = fixture.cutout();
+    let scene = scene_of(&fixture, &cutout, view, Options::FULL);
+    let tables = LookupTables::from_palette(&fixture.palette);
+    let frame = gather_map_frame(
+        &fixture.map,
+        &pile,
+        view,
+        &fixture.art,
+        scene,
+        Some(&tables),
+    )
+    .unwrap();
+    let mut sorted: Vec<SortKey> = frame.instances.iter().map(|item| item.key).collect();
+    sorted.sort();
+    let drawn = [keys[0], keys[1], keys[3]];
+    assert_eq!(sorted[sorted.len() - 3..], drawn);
+    let rest = sorted[sorted.len() - 4];
+    assert!(rest < keys[0] && rest.layer() < 7, "{rest}");
 }
 
 #[test]
@@ -1876,7 +2074,13 @@ fn t17_c_an_unlit_scene_draws_its_cutout_and_source_pixels() {
         match instance.mode {
             DrawMode::Egg => eggs += 1,
             DrawMode::Plain => assert_eq!(instance.flags & EXEMPT, 0),
-            DrawMode::OutlineBlend => assert_eq!(instance.key.layer(), 4),
+            // Layer 4, or the cursor's own translucent outline (revision 4).
+            DrawMode::OutlineBlend => assert!(
+                instance.key.layer() == 4
+                    || instance.key == SortKey::cursor(SortKey::CURSOR_OUTLINE).unwrap(),
+                "{:?}",
+                instance.key
+            ),
             mode => panic!("{mode:?} in an unlit scene"),
         }
     }

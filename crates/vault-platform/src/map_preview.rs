@@ -1282,9 +1282,9 @@ impl MapPreview {
         if modal && let Some(view) = &self.frozen_view {
             return Ok(view.clone());
         }
-        // SPEC-014 §3.27: the in-world cursor, a flat object at the hex
+        // SPEC-014 §3.27: the in-world cursor, the top layer at the hex
         // under the pointer (movement mode adds its red translucent
-        // outline and the upright AP-text object). It exists only in the
+        // outline and the AP-text object). It exists only in the
         // refresh, so no script, save, pick or route ever sees it. A
         // pointer on the `enhanced` world canvas has none in this view.
         let cursor = if self.pointer.world {
@@ -1339,7 +1339,6 @@ impl MapPreview {
         let ring = cursor
             .and_then(|cursor| cursor.ring.as_ref())
             .and_then(|(art, origin)| Some((art.frame(0, 0)?, *origin)));
-        let order = cursor.map_or(0, |cursor| self.cursor_order(&objects, cursor.hex));
         // SPEC-022: each view is one refresh on the session's render path.
         let shared = self.scene_renderer.clone();
         let mut refreshes = scene_render::FrameRefreshes::new(&shared);
@@ -1356,7 +1355,6 @@ impl MapPreview {
             };
             let scene_cursor = cursor.map(|cursor| SceneCursor {
                 hex: cursor.hex,
-                order,
                 art: (&cursor.art, [-ox, -oy]),
                 outline: ring.map(|(frame, origin)| {
                     (
@@ -1386,26 +1384,6 @@ impl MapPreview {
         }
         self.render_frame = refreshes.counts;
         Ok(images)
-    }
-    /// SPEC-014 §3.27 / §3.44 the in-world cursor's place in the view
-    /// elevation's object list (insertion order): before the first object
-    /// on its hex inserted after its last move, else at the end. Only the
-    /// order within its hex's groups matters.
-    fn cursor_order(&self, objects: &MapObjects, hex: i32) -> usize {
-        let world = &self.host.world;
-        let Some(list) = objects.elevations.get(usize::from(self.view.elevation)) else {
-            return 0;
-        };
-        let stamp = self.pointer.cursor_stamp;
-        list.iter()
-            .position(|object| {
-                object.hex == Some(hex)
-                    && world
-                        .reference_for_id(object.id)
-                        .and_then(|reference| world.insertion(reference))
-                        .is_none_or(|inserted| inserted > stamp)
-            })
-            .unwrap_or(list.len())
     }
     /// SPEC-014 §3.37 the cutout mask, loaded once. Without it everything
     /// draws normally (the safe rule), and the failure is reported once.

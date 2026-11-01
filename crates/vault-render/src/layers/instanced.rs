@@ -41,8 +41,8 @@ impl RenderPath {
     }
 }
 
-/// SPEC-022 §2.1 the frame layers, drawn in this order. Layer 7 is
-/// reserved and has no variant.
+/// SPEC-022 §2.1 the frame layers, drawn in this order. Layer 7 is the
+/// in-world cursor (revision 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum FrameLayer {
@@ -53,10 +53,11 @@ pub enum FrameLayer {
     Outline = 4,
     FloatingText = 5,
     NoHex = 6,
+    Cursor = 7,
 }
 
 impl FrameLayer {
-    /// The layer numbered `index`; 7 and up are refused.
+    /// The layer numbered `index`; 8 and up are refused.
     pub fn from_index(index: u8) -> Result<Self, InstanceError> {
         Ok(match index {
             0 => Self::Floor,
@@ -66,6 +67,7 @@ impl FrameLayer {
             4 => Self::Outline,
             5 => Self::FloatingText,
             6 => Self::NoHex,
+            7 => Self::Cursor,
             _ => return Err(InstanceError::ReservedLayer(index)),
         })
     }
@@ -102,6 +104,12 @@ impl fmt::Display for SortKey {
 }
 
 impl SortKey {
+    /// §2.1 the cursor ranks: the art, the movement outline's ring and its
+    /// wrap column, and the AP text.
+    pub const CURSOR_ART: u32 = 0;
+    pub const CURSOR_OUTLINE: u32 = 1;
+    pub const CURSOR_WRAP: u32 = 2;
+    pub const CURSOR_TEXT: u32 = 3;
     /// The key of a layer, primary and secondary field, each checked
     /// against its layer's domain (§2.1).
     pub fn new(layer: u8, primary: u32, secondary: u32) -> Result<Self, InstanceError> {
@@ -147,6 +155,14 @@ impl SortKey {
             FrameLayer::FloatingText | FrameLayer::NoHex => {
                 if primary != 0 {
                     return domain("primary", u64::from(primary));
+                }
+            }
+            FrameLayer::Cursor => {
+                if primary != 0 {
+                    return domain("primary", u64::from(primary));
+                }
+                if secondary > Self::CURSOR_TEXT {
+                    return domain("cursor rank", u64::from(secondary));
                 }
             }
         }
@@ -205,6 +221,10 @@ impl SortKey {
     /// An object without a hex, of reference draw rank `rank`.
     pub fn no_hex(rank: u32) -> Result<Self, InstanceError> {
         Self::new(FrameLayer::NoHex as u8, 0, rank)
+    }
+    /// The cursor layer's draw of rank `rank`, each at most once a refresh.
+    pub fn cursor(rank: u32) -> Result<Self, InstanceError> {
+        Self::new(FrameLayer::Cursor as u8, 0, rank)
     }
     /// `8 × index + part`, with the index below 2^29 and the part below 8.
     fn list_secondary(index: u32, part: u8) -> Result<u32, InstanceError> {

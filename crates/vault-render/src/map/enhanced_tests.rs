@@ -118,6 +118,14 @@ fn rich_render(
 ) -> IndexedImage {
     render(roofed_view(), lit, true, roof_cutaway, shroud)
 }
+/// [`rich_render`] with no in-world cursor.
+fn rich_without_cursor(
+    lit: bool,
+    roof_cutaway: Option<RoofCutaway>,
+    shroud: Option<Shroud>,
+) -> IndexedImage {
+    render_with(roofed_view(), lit, true, false, roof_cutaway, shroud)
+}
 
 /// The rich scene in `view`; without `extras`, no outlines, floating
 /// text, in-world cursor or hexless object (the layers drawn after the
@@ -126,6 +134,17 @@ fn render(
     view: MapView,
     lit: bool,
     extras: bool,
+    roof_cutaway: Option<RoofCutaway>,
+    shroud: Option<Shroud>,
+) -> IndexedImage {
+    render_with(view, lit, extras, extras, roof_cutaway, shroud)
+}
+/// [`render`], with the cursor chosen apart from the other `extras`.
+fn render_with(
+    view: MapView,
+    lit: bool,
+    extras: bool,
+    shows_cursor: bool,
     roof_cutaway: Option<RoofCutaway>,
     shroud: Option<Shroud>,
 ) -> IndexedImage {
@@ -169,7 +188,6 @@ fn render(
     let [cx, cy] = view.grid.hex_center(20104).unwrap();
     let cursor = SceneCursor {
         hex: 20104,
-        order: objects.elevations[0].len(),
         art: (&cursor_art, [cx - 3, cy - 2]),
         outline: Some((ring, [cx - 2, cy - 2], 3)),
         text: None,
@@ -184,7 +202,7 @@ fn render(
         light: lit.then_some(light),
         outlines: extras.then_some(&inks),
         floating: if extras { &floating } else { &[] },
-        cursor: extras.then_some(cursor),
+        cursor: shows_cursor.then_some(cursor),
         roof_cutaway,
         shroud,
         overscan: false,
@@ -194,12 +212,42 @@ fn render(
     image
 }
 
+/// The rich scene's digests, from the renderer before revision 4.
+const LIT_SCENE: &str = "f8472ccbac3f077c";
+const UNLIT_SCENE: &str = "f4722a14af55d696";
+
 #[test]
 fn vanilla_scenes_are_unchanged_without_the_enhanced_layers() {
-    // Digests recorded from the renderer before the enhanced layers
-    // existed: with both new fields `None` every pixel is the same.
-    assert_eq!(digest(&rich_render(true, None, None)), "b53c03a4aa8a2574");
-    assert_eq!(digest(&rich_render(false, None, None)), "9c9fc06ef3a314ba");
+    // Digests of the scene without its cursor, recorded from the renderer
+    // before the cursor became the top layer: with both enhanced fields
+    // `None` every pixel is the same.
+    assert_eq!(digest(&rich_without_cursor(true, None, None)), LIT_SCENE);
+    assert_eq!(digest(&rich_without_cursor(false, None, None)), UNLIT_SCENE);
+}
+
+/// SPEC-014 §3.27 (R1-rev13): the top-layer cursor over that pinned scene
+/// changes only its own art and ring, whatever it covers.
+#[test]
+fn the_cursor_changes_no_pixel_of_the_scene_outside_its_own() {
+    let view = roofed_view();
+    let [cx, cy] = view.grid.hex_center(20104).unwrap();
+    for lit in [true, false] {
+        let (with, without) = (
+            rich_render(lit, None, None),
+            rich_without_cursor(lit, None, None),
+        );
+        let width = i64::from(view.width);
+        let mut changed = 0;
+        for (at, (got, plain)) in with.pixels().iter().zip(without.pixels()).enumerate() {
+            let (x, y) = (at as i64 % width, at as i64 / width);
+            let own = (cx - 3..cx + 3).contains(&x) && (cy - 3..cy + 3).contains(&y);
+            if got != plain {
+                assert!(own, "lit {lit}: pixel ({x}, {y}) changed");
+                changed += 1;
+            }
+        }
+        assert!(changed > 0, "the cursor shows");
+    }
 }
 
 #[test]
@@ -214,9 +262,16 @@ fn far_cutaways_and_open_shrouds_leave_vanilla_scenes_unchanged() {
         allowed: &all,
         dark: 3,
     };
-    for (lit, expected) in [(true, "b53c03a4aa8a2574"), (false, "9c9fc06ef3a314ba")] {
-        assert_eq!(digest(&rich_render(lit, Some(far), None)), expected);
-        assert_eq!(digest(&rich_render(lit, None, Some(open))), expected);
+    for (lit, expected) in [(true, LIT_SCENE), (false, UNLIT_SCENE)] {
+        assert_eq!(digest(&rich_without_cursor(lit, Some(far), None)), expected);
+        assert_eq!(
+            digest(&rich_without_cursor(lit, None, Some(open))),
+            expected
+        );
+        // With the cursor too, both leave the plain refresh as it was.
+        let plain = digest(&rich_render(lit, None, None));
+        assert_eq!(digest(&rich_render(lit, Some(far), None)), plain);
+        assert_eq!(digest(&rich_render(lit, None, Some(open))), plain);
     }
 }
 

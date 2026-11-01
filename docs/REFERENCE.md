@@ -1691,12 +1691,13 @@ the platform cannot warp the pointer, the OS absolute position is used
 unchanged. The input log records the scaled position, so a replay needs no
 sensitivity of its own. These program-run preferences survive a game reset.
 
-The world draws its own cursor (§3.26-3.29). It is a flat map object at the
-hex under the pointer, drawn in the §3.44 flat pass in hex and insertion order
-(each move reinserts it), lit by its hex like any object, clipped to the map
-window, and under every upright object, roof and floating text. It exists
-only in the render scene, so scripts, saves, picking and blocking never see
-it. The movement-mode AP text is a separate upright object at the same hex.
+The world draws its own cursor (§3.26-3.29). It sits at the hex under the
+pointer, lit by its hex like any object and clipped to the map window, and it
+is always the top layer, on both render paths: nothing is drawn over it. Its
+outline in movement mode follows its art, and the AP text comes last. This
+leaves R1, which drew the cursor among the flat objects, by the owner's decision
+(SPEC-014 R1-rev13). It exists only in the render scene, so scripts, saves,
+picking and blocking never see it, and it takes no place in a hex's object list.
 Resting the pointer 250 ms shows
 the hover: the movement cost (or a red X), the arrow's action icon with the
 object's look-at text in the monitor, or the crosshair's hit chance. The
@@ -3025,12 +3026,12 @@ One reference refresh draws in this order:
 6. the outline list, at most 100 entries;
 7. the ground-item highlights;
 8. the floating text;
-9. the objects without a hex.
+9. the objects without a hex;
+10. the in-world cursor (revision 4).
 
 **Enhanced shroud.** It comes after every roof square and before the first
-outline, and it covers the whole view. The in-world cursor's art is drawn in
-the flat pass, so it is shrouded with the scene. Outlines, floating text and
-objects without a hex stay above the shroud.
+outline, and it covers the whole view. Outlines, floating text, objects without
+a hex and the in-world cursor stay above the shroud.
 
 It writes one constant palette index, the dark index, over D. It does not read
 D, and it does not darken through the intensity table. Any other pixel is left
@@ -3111,9 +3112,8 @@ log's numbers.
 **Object index.** The engine keeps one object list per elevation, and a
 refresh reads only the current elevation's list. An object's list index is its
 position among that list's entries on the same hex, in insertion order. Hidden
-objects count, though they are not drawn. The in-world cursor and its AP text
-take two places, at the cursor's place in the list. An object without a hex
-has index 0.
+objects count, though they are not drawn. The in-world cursor takes no place
+in the list (revision 4). An object without a hex has index 0.
 
 **Whole-view refreshes.** The reference path redraws the entire view on every
 refresh. It starts from a new canvas of index 0, draws the floor and every

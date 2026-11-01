@@ -3825,7 +3825,7 @@ fn spec014_a_modifier_repeat_takes_a_buffer_slot_and_meets_no_any_key_test() {
 }
 
 #[test]
-fn spec014_the_in_world_cursor_is_a_flat_scene_object_over_the_map_only() {
+fn spec014_the_in_world_cursor_is_the_top_layer_over_the_map_only() {
     let dir = corpus();
     std::fs::write(
         dir.path().join("art/intrface/msef003.frm"),
@@ -3858,22 +3858,32 @@ fn spec014_the_in_world_cursor_is_a_flat_scene_object_over_the_map_only() {
     assert_eq!(preview.host.world.render_objects().total, total);
     let base = preview.image().unwrap();
     assert!(preview.cursor_in_frame);
-    // Within its hex it precedes a flat object inserted after its last
-    // move, and a move reinserts it after that object.
+    // SPEC-014 §3.27 (R1-rev13): it is the top layer, so an object inserted
+    // on its hex after its last move does not draw over it, and a move
+    // changes nothing about that. It takes no place in the object list.
+    let drawn: Vec<usize> = cursor
+        .art
+        .pixels()
+        .iter()
+        .enumerate()
+        .filter(|(_, pixel)| **pixel != 0)
+        .map(|(at, _)| at)
+        .collect();
+    assert!(!drawn.is_empty());
     let prototype =
         Arc::new(vault_formats::Prototype::parse(&super::fixture::prototype(0, 5)).unwrap());
     let item = preview.host.world.spawn(prototype, hex, elevation).unwrap();
     preview.host.world.set_flat(item, true);
-    let id = preview.host.world.get(item).unwrap().raw.id;
-    let objects = preview.host.world.render_objects();
-    let list = &objects.elevations[usize::from(elevation)];
-    let order = preview.cursor_order(&objects, hex);
-    assert_eq!(list[order].id, id, "the item draws over the cursor");
+    assert_eq!(preview.host.world.render_objects().total, total + 1);
+    let same = |image: &vault_render::IndexedImage| {
+        drawn
+            .iter()
+            .all(|at| image.pixels()[*at] == base.pixels()[*at])
+    };
+    assert!(same(&preview.image().unwrap()), "the item stays under it");
     preview.hover([point[0] + 1, point[1]]);
     assert_eq!(preview.cursor_objects(preview.view).unwrap().hex, hex);
-    let objects = preview.host.world.render_objects();
-    let order = preview.cursor_order(&objects, hex);
-    assert_eq!(order, objects.elevations[usize::from(elevation)].len());
+    assert!(same(&preview.image().unwrap()), "and after a move");
     // Over the bar the arrow is drawn instead, and the scene is composed
     // again without the cursor object.
     preview.hover([320, 440]);

@@ -118,10 +118,6 @@ pub(crate) struct PointerState {
     pub outlined: Option<ObjectRef>,
     /// The hover outline was removed: the scene is drawn again.
     pub redraw: bool,
-    /// §3.27 / §3.44 the in-world cursor object's latest insertion stamp
-    /// (`vault_core::world::next_insertion`): every move reinserts it at
-    /// the end of its hex's flat group.
-    pub cursor_stamp: u64,
     /// Paths planned for movement hovers.
     #[cfg(test)]
     pub routes_planned: u32,
@@ -306,8 +302,6 @@ impl MapPreview {
         self.pointer.at = Some(point);
         self.pointer.world = world;
         let in_map = self.map_area(point);
-        // §3.27: the move reinserts the cursor object in its hex list.
-        self.pointer.cursor_stamp = vault_core::world::next_insertion();
         // Entering the map window turns the in-world cursor back on.
         let entered_map = in_map && !was_map;
         self.restart_rest(entered_map);
@@ -378,7 +372,6 @@ impl MapPreview {
                     self.hud.warp = Some(at);
                 }
             }
-            self.pointer.cursor_stamp = vault_core::world::next_insertion();
             self.restart_rest(false);
             let entry = if self.quit_requested {
                 Entry::Cancel
