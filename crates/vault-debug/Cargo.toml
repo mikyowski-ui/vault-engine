@@ -16,3 +16,4 @@ vault-fixtures.workspace = true
 
 [lints]
 workspace = true
+
