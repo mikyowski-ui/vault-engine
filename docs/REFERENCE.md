@@ -3760,6 +3760,34 @@ On real data:
 - Et Tu's own `ARCAVES.MAP` (`fo1_base`) has the same four doors with no scripts and
   no locks, so a blast does nothing to them.
 
+## Fallout 2 loot window, measured (SPEC-019 D-34)
+
+Measured from the retail `loot.frm` (537 by 376) and its buttons, on behalf of D-34's
+first real-install check. Coordinates are relative to the window. The rectangles stay
+as SPEC-019 section 3.7 and `tests/fixtures/spec019/loot-layout.tsv` give them, because
+they carry no tolerance. A move is Team A's decision.
+
+| Element | Rectangle in use | Measured on the art | Verdict |
+| --- | --- | --- | --- |
+| Player portrait | (44, 35) 60 by 100 | Well (44, 34) 66 by 102 | Fits, 3 pixels left of center |
+| Target portrait | (422, 35) 60 by 100 | Well (424, 34) 65 by 102 | Its left 2 pixels lie on the bevel, 4 pixels left of center |
+| Player list | x 176, rows y 35 to 322 | Well (175, 31) 72 by 308 | Fits, 3 pixels left of center. The well has 16 pixels spare below the rows |
+| Target list | x 297, rows y 35 to 322 | Well (292, 31) 72 by 309 | Fits, 1 pixel right of center. As above below the rows |
+| Scroll buttons | (128, 39) and (379, 39) 22 by 46 | Flat plate, no socket | Fit |
+| Body cycling | (436, 162) and (456, 162) 20 by 18 | Flat metal, no socket | Fit |
+| **Take All** | (249, 158) 39 by 41 | The art between the lists is a 16-wide slot, x 258 to 273, from y 151 down | **Off.** The 39-wide button lies across both list frames, and `invmaup.frm` is 39 by 41 |
+| **Done** | (288, 328) 15 by 16 | `DONE` plate x 392 to 506, y 325 to 349, label x 407 to 467 | **Off.** The red button lies on the target list's lower left corner, 192 pixels left of the plate's free space |
+
+Candidates for Team A, inferred from the art, which marks no socket for either button:
+
+- **Done:** (480, 329) 15 by 16, centered in the plate's free space, x 476 to 498.
+- **Take All:** (432, 204) 39 by 41, in the upper part of the grille plate (426, 193) 51
+  by 92, between its top screws and its first slot at y 249. Nothing else on the window
+  has flat room for it beside the lists.
+
+Neither rectangle overlaps a list row or changes what a click does, so this is a
+visible misplacement, not a bug in play. Fallout 1's art was not measured.
+
 ## Core contracts
 
 `EntityStore<T>` is a `slotmap::SlotMap<EntityId, T>`. Construct it with
