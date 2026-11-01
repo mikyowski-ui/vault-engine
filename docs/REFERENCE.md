@@ -3720,6 +3720,15 @@ Sfall mode (SPEC-024b), against the spec's boundaries:
 - The F9 trace shows the words from `0x8184` to `0x8281` as `invalid`, although they
   run. Only the display is wrong, and the mod words above have their names.
 
+Explosives (SPEC-013 R1-rev9), on real data:
+
+- The locked Temple of Trials doors do not open to an armed explosive. They are in
+  `arcaves.map`; `artemple.map` has no door. A timed explosive's notice reaches each
+  door's `damage_p_proc` with fixed parameter 6, as §3.10 says, but both scripts ask
+  metarule 49 for the damage type of the door itself, and SPEC-017 gives -1 for a
+  non-weapon. A script that reads `fixed_param`, as the fixture's does, opens. The
+  rule these two scripts need has to come from a spec.
+
 SPEC-024c, on real data:
 
 - Fallout Et Tu has its tables, start and premades working, but 14 of the 93 maps in

@@ -698,6 +698,57 @@ fn spec008_timed_event_with_a_missing_owner_restores_without_one() {
     assert_eq!(restored, [(now + 600, 0)]);
 }
 
+/// SPEC-011 §3.24 rule 4 and §4.13 Fixture L: armed at tick 0 for tick 100,
+/// dropped at tick 40, saved and loaded at tick 60, it fires at tick 100 at
+/// the hex where it lies. The event and its owner survive, on the same id.
+#[test]
+fn spec011_fixture_l_a_dropped_explosive_keeps_its_event_across_a_save() {
+    let dir = corpus();
+    let mut host = host(dir.path());
+    host.load_map("maps/synth.map").unwrap();
+    let player = host.world.player;
+    let item = find(&host, ITEM, Some(20300));
+    host.world.add_item(player, item, 1, false).unwrap();
+    host.world.get_mut(item).unwrap().raw.flags.0 |= BasicFlags::USED.0;
+    let start = host.world.clock.ticks;
+    host.world
+        .queue
+        .insert(start, 100, item, EventKind::Other(8))
+        .unwrap();
+    host.world.clock.set(start + 40);
+    host.world.drop_item(player, item, 1).unwrap();
+    let id = host.world.get(item).unwrap().raw.id;
+    let place = host.world.get(player).unwrap().raw.hex;
+    host.world.clock.set(start + 60);
+    let save = host.build_save(&SaveInfo::default()).unwrap();
+    assert!(
+        save.queue
+            .iter()
+            .any(|record| record.kind == 8 && record.owner == id as i32),
+        "saved with its owner"
+    );
+    let maps = host.world.persistence.maps.clone();
+    let automap = host.world.persistence.automap.clone();
+    host.apply_save(save, maps, automap).unwrap();
+    let (due, owner) = host
+        .world
+        .queue
+        .events()
+        .find(|event| event.kind == EventKind::Other(8))
+        .map(|event| (event.due, event.object))
+        .unwrap();
+    assert_eq!(due, start + 100);
+    let restored = host.world.get(owner).unwrap();
+    assert_eq!((restored.raw.id, restored.raw.hex), (id, place));
+    assert_eq!(restored.owner, None, "still on the ground");
+    assert!(restored.raw.flags.contains(BasicFlags::USED));
+    host.world.clock.set(start + 100);
+    host.process_queue().unwrap();
+    assert!(host.world.get(owner).is_none(), "fired and destroyed");
+    let blast = host.world.explosion.as_ref().unwrap();
+    assert_eq!(Some(blast.hex), place);
+}
+
 #[test]
 fn spec014_seen_state_marks_a_window_around_visited_hexes() {
     // SPEC-014 §3.33: a visited hex at the start of its byte (hex 20000,

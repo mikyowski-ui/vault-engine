@@ -37,6 +37,9 @@ pub(crate) const CRIPPLED: u32 = 0x7c;
 /// Explosion damage type's DT and DR stats.
 const EXPLOSION_DT: usize = 17 + 6;
 const EXPLOSION_DR: usize = 24 + 6;
+/// §3.10 the hex distance of the scenery notice, and of the blast radius
+/// (R1-rev9, D-3).
+const NOTICE_RADIUS: i32 = 3;
 /// §3.10 a timed explosive meeting an explosion in progress retries after
 /// 50 ticks (5 game seconds), as type 8.
 pub const EXPLOSION_RETRY_TICKS: i64 = 50;
@@ -915,13 +918,49 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Some((hex, elevation, pid)) = center {
             let (min, max) = skills::explosion_range(pid);
             let player = self.world.player;
-            self.start_explosion(hex, elevation, min, max, Some(player), animated)?;
+            let blast = self.fallout2_blast();
+            self.start_explosion(hex, elevation, (min, max), Some(player), animated, blast)?;
         }
         if let Some(owner) = self.world.get(explosive).and_then(|o| o.owner) {
             self.world.remove_item(owner, explosive, 1)?;
         }
         self.world.erase(explosive);
         Ok(())
+    }
+    /// R1-rev9: whether a timed explosive has its blast radius, and tells
+    /// scripts its damage type. Fallout 1 keeps the center-only rule.
+    fn fallout2_blast(&self) -> bool {
+        self.world.fallout2.is_some() || self.assets.game_profile() == crate::GameProfile::Fallout2
+    }
+    /// §3.10 the explosion's victims. The living critter blocking the center
+    /// hex; with `blast`, every living critter on the elevation within hex
+    /// distance 3 of it, by distance, then hex, then list order.
+    pub(crate) fn explosion_victims(&self, hex: i32, elevation: u8, blast: bool) -> Vec<ObjectRef> {
+        let living = |object: ObjectRef| {
+            self.world
+                .get(object)
+                .is_some_and(|o| Fid(o.raw.art_id).category() == 1)
+                && !self.world.is_dead(object)
+        };
+        if !blast {
+            let blocker = self.world.movement_blocker(hex, elevation, 0);
+            return blocker
+                .filter(|object| living(*object))
+                .into_iter()
+                .collect();
+        }
+        let mut near: Vec<(i32, i32, ObjectRef)> = self
+            .world
+            .iter()
+            .filter(|(reference, object)| object.raw.elevation == elevation && living(*reference))
+            .filter_map(|(reference, object)| {
+                let at = object.raw.hex?;
+                let distance = vault_formats::HexGrid::angular_distance(at, hex).ok()?;
+                (distance <= NOTICE_RADIUS).then_some((distance, at, reference))
+            })
+            .collect();
+        near.sort_by_key(|(distance, at, _)| (*distance, *at));
+        near.into_iter().map(|(.., object)| object).collect()
     }
     /// §3.10 only one animated explosion can be in progress: a timed or
     /// scripted one until its damage step, a weapon explosion while its
@@ -947,9 +986,11 @@ impl<A: WorldAssets> WorldHost<A> {
         });
         crate::world::ExplosionArt::new(center, elevation, fid, timing, first_delay)
     }
-    /// §3.10 an explosion at `hex`: damage covers only the living critter
+    /// §3.10 an explosion at `hex`: damage covers the living critter
     /// blocking the center hex, computed now with one D(min, max) draw (the
     /// splash enumeration is disabled in R1, so nothing else takes damage).
+    /// With `blast` (R1-rev9) it covers the blast radius, one draw for each
+    /// victim, and the scenery scripts learn the damage type.
     /// An animated explosion plays `whn1xxx1` with its art, `roktxpd.frm` on
     /// the center and the six adjacent hexes, and stays in progress until
     /// its damage step (`step_explosions`); an unanimated one applies the
@@ -958,45 +999,40 @@ impl<A: WorldAssets> WorldHost<A> {
         &mut self,
         hex: i32,
         elevation: u8,
-        min: i32,
-        max: i32,
+        (min, max): (i32, i32),
         source: Option<ObjectRef>,
         animated: bool,
+        blast: bool,
     ) -> Result<(), WorldError> {
-        let victim = self
-            .world
-            .movement_blocker(hex, elevation, 0)
-            .filter(|object| {
-                self.world
-                    .get(*object)
-                    .is_some_and(|o| Fid(o.raw.art_id).category() == 1)
-                    && !self.world.is_dead(*object)
-            });
-        let victim = match victim {
-            Some(victim) => {
-                let draw = self.world.rng.range(min, max)?;
-                let multihex = self
-                    .world
-                    .get(victim)
-                    .is_some_and(|o| o.raw.flags.contains(BasicFlags::MULTIHEX));
-                let (damage, knockback) = skills::explosion_damage(
-                    draw,
-                    self.world.effective(victim, EXPLOSION_DT),
-                    self.world.effective(victim, EXPLOSION_DR),
-                    multihex,
-                );
-                Some((victim, damage, knockback))
-            }
-            None => None,
-        };
+        let mut victims = Vec::new();
+        for victim in self.explosion_victims(hex, elevation, blast) {
+            let draw = self.world.rng.range(min, max)?;
+            let multihex = self
+                .world
+                .get(victim)
+                .is_some_and(|o| o.raw.flags.contains(BasicFlags::MULTIHEX));
+            let (damage, knockback) = skills::explosion_damage(
+                draw,
+                self.world.effective(victim, EXPLOSION_DT),
+                self.world.effective(victim, EXPLOSION_DR),
+                multihex,
+            );
+            victims.push((victim, damage, knockback));
+        }
         let art = self.explosion_art(hex, elevation, skills::explosion_art::ROCKET, 0);
+        let fixed = if blast {
+            crate::combat::damage_type::EXPLOSION
+        } else {
+            0
+        };
         let explosion = crate::world::ActiveExplosion {
             hex,
             elevation,
-            victim,
+            victims,
             source,
             art,
             notified: false,
+            fixed,
         };
         if animated {
             self.world.emit(WorldEffect::SoundEffect {
@@ -1013,7 +1049,7 @@ impl<A: WorldAssets> WorldHost<A> {
             return Ok(());
         }
         self.apply_explosion(&explosion)?;
-        self.notify_explosion_scripts(hex, elevation, source)
+        self.notify_explosion_scripts(&explosion)
     }
     /// §3.10 one poll of the explosions at `now_ms`. The animated explosion
     /// in progress advances its art; once the center art has played the
@@ -1027,8 +1063,8 @@ impl<A: WorldAssets> WorldHost<A> {
         let mut changed = explosion.art.poll(now_ms);
         if explosion.art.center_done() && !explosion.notified {
             explosion.notified = true;
-            let (hex, elevation, source) = (explosion.hex, explosion.elevation, explosion.source);
-            self.notify_explosion_scripts(hex, elevation, source)?;
+            let explosion = explosion.clone();
+            self.notify_explosion_scripts(&explosion)?;
         }
         if let Some(explosion) = self
             .world
@@ -1040,30 +1076,38 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         Ok(changed)
     }
-    /// §3.10 the computed damage on the center critter (still a living
-    /// critter), its knockback, and the credited source's attribution: kill
-    /// experience for a death, otherwise the victim references the source
-    /// and the first such victim requests combat. A scripted explosion has
-    /// no source, so none of this attribution happens.
+    /// §3.10 each victim's computed damage, in order.
     fn apply_explosion(
         &mut self,
         explosion: &crate::world::ActiveExplosion,
     ) -> Result<(), WorldError> {
-        let Some((victim, damage, knockback)) = explosion.victim else {
-            return Ok(());
-        };
+        for victim in &explosion.victims {
+            self.apply_explosion_to(*victim, explosion.source)?;
+        }
+        Ok(())
+    }
+    /// §3.10 the computed damage on one victim (still a living critter),
+    /// its knockback, and the credited source's attribution: kill
+    /// experience for a death, otherwise the victim references the source
+    /// and the first such victim requests combat. A scripted explosion has
+    /// no source, so none of this attribution happens.
+    fn apply_explosion_to(
+        &mut self,
+        (victim, damage, knockback): (ObjectRef, i32, i32),
+        source: Option<ObjectRef>,
+    ) -> Result<(), WorldError> {
         if self.world.get(victim).is_none() || self.world.is_dead(victim) {
             return Ok(());
         }
         // SPEC-007 §3.12: the explosion's message lines precede its damage.
         let lines = self.damage_lines(victim, damage);
         self.print_lines(lines);
-        self.damage_critter(victim, explosion.source, damage, 0)?;
+        self.damage_critter(victim, source, damage, 0)?;
         let player = self.world.player;
         if knockback > 0 && !self.world.is_dead(victim) {
-            self.knock_back(explosion.source.unwrap_or(player), victim, knockback)?;
+            self.knock_back(source.unwrap_or(player), victim, knockback)?;
         }
-        let Some(source) = explosion.source else {
+        let Some(source) = source else {
             return Ok(());
         };
         if self.world.is_dead(victim) {
@@ -1093,16 +1137,17 @@ impl<A: WorldAssets> WorldHost<A> {
     /// scenery object script within hex distance 3 of the center on its
     /// elevation, then every spatial script there, keeping those with a
     /// `damage_p_proc` (a program not yet loaded runs `start` first); then
-    /// run each collected `damage_p_proc` once. Critter scripts are not
-    /// notified.
+    /// run each collected `damage_p_proc` once, with the explosion's fixed
+    /// parameter. Critter scripts are not notified.
     fn notify_explosion_scripts(
         &mut self,
-        hex: i32,
-        elevation: u8,
-        source: Option<ObjectRef>,
+        explosion: &crate::world::ActiveExplosion,
     ) -> Result<(), WorldError> {
+        let (hex, elevation) = (explosion.hex, explosion.elevation);
+        let (source, fixed) = (explosion.source, explosion.fixed);
         let near = |at: i32| {
-            vault_formats::HexGrid::angular_distance(at, hex).is_ok_and(|distance| distance <= 3)
+            vault_formats::HexGrid::angular_distance(at, hex)
+                .is_ok_and(|distance| distance <= NOTICE_RADIUS)
         };
         let mut objects = Vec::new();
         let mut spatials = Vec::new();
@@ -1165,7 +1210,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 event: ScriptEvent::Damage,
                 source: source.unwrap_or(0),
                 target: owner,
-                fixed: 0,
+                fixed,
                 action: -1,
                 only_present: true,
             });
@@ -1208,7 +1253,8 @@ impl<A: WorldAssets> WorldHost<A> {
                 .diagnostic(format!("explosion hex {} is invalid", request.hex));
             return Ok(false);
         }
-        self.start_explosion(request.hex, elevation, request.min, request.max, None, true)?;
+        let range = (request.min, request.max);
+        self.start_explosion(request.hex, elevation, range, None, true, false)?;
         Ok(true)
     }
     /// The queued handlers for SPEC-013's payload-free events: explosions

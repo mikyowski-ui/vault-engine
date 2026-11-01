@@ -220,6 +220,24 @@ impl<A: WorldAssets> WorldHost<A> {
     /// instance stays in the list until the map is left.
     fn destroy(&mut self, object: ObjectRef, own: bool) -> Result<(), VmError> {
         let holder = self.object(object)?.owner;
+        // SPEC-004 §3.7: an object destroyed with its script instance has
+        // its `destroy_p_proc` requested. The dispatcher skips the running
+        // program, so a script destroying its own object skips it (SPEC-005
+        // §3.2).
+        if let Some(script) = self.world.script_for(object) {
+            let request = crate::world::ScriptRequest {
+                script,
+                event: crate::ScriptEvent::Destroy,
+                source: 0,
+                target: object,
+                fixed: 0,
+                action: -1,
+                only_present: true,
+            };
+            if let Err(error) = self.dispatch(request) {
+                self.world.diagnostic(format!("destroy_p_proc: {error}"));
+            }
+        }
         self.clear_animation(object);
         if own && let Some(holder) = holder {
             let count = self

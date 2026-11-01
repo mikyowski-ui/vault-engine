@@ -415,8 +415,10 @@ pub struct ExplosionRequest {
 pub struct ActiveExplosion {
     pub hex: i32,
     pub elevation: u8,
-    /// The critter blocking the center hex, its damage and knockback.
-    pub victim: Option<(ObjectRef, i32, i32)>,
+    /// Each victim in damage order, with its damage and knockback: the
+    /// critter blocking the center hex, or under `fallout2` a timed
+    /// explosive's whole blast radius.
+    pub victims: Vec<(ObjectRef, i32, i32)>,
     /// The credited attacker: the player for a timed explosive, none for a
     /// scripted request.
     pub source: Option<ObjectRef>,
@@ -424,6 +426,8 @@ pub struct ActiveExplosion {
     /// center has played, and the damage step follows the last art.
     pub art: ExplosionArt,
     pub notified: bool,
+    /// The fixed parameter of the scenery scripts' `damage_p_proc`.
+    pub fixed: i32,
 }
 
 /// The id of an explosion art object in render snapshots: no world object
