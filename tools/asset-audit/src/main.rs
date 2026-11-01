@@ -231,6 +231,11 @@ struct Args {
     /// scripts running. A report: it never fails the run.
     #[arg(long, requires = "fallout2_dir")]
     report_fallout2_install: bool,
+    /// SPEC-024a §2.1: with `--report-fallout2-install`, a mod's loose
+    /// folder mounted above the install. Repeat it, lowest first, so a total
+    /// conversion's tables are read as the game reads them.
+    #[arg(long, value_name = "PATH", requires = "report_fallout2_install")]
+    mod_layer: Vec<PathBuf>,
 }
 
 /// SPEC-019 §2.2 the interface-art report (`--report-fallout2-art`): per
@@ -1130,7 +1135,7 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
     if args.report_fallout2_install
         && let Some(folder) = &args.fallout2_dir
     {
-        fallout2::report(folder)?;
+        fallout2::report(folder, &args.mod_layer)?;
     }
     if args.validate_saves {
         failures.run("Saves", "save check(s)", || {

@@ -8,7 +8,7 @@ use super::{
     maps::MapsTable,
     party::{ControlField, PartyTable},
     save::{AreaSave, Fallout2Shape, MemberRecord, PartySave2, WorldMapSave2},
-    text::Diagnostics,
+    text::{Diagnostics, SectionedText},
     worldmap::{Condition, ConditionContext, Distance, Fill, Relation, WorldmapTable},
     *,
 };
@@ -670,16 +670,19 @@ fn spec018_revision2_entrances_and_party_records() {
     assert!(messages[1].contains("level_pids: \"-1\" dropped"));
 }
 
-/// SPEC-018 Revision 3 (R16): an entrance of exactly 8 items is read from
-/// its first seven, with a diagnostic; 9 items is still invalid.
+/// SPEC-024c §4.2: an entrance of exactly 8 items is read from its first
+/// seven. With a hex of -1 and an Integer eighth item it takes no
+/// diagnostic; any other 8-item line keeps it; 9 items is still invalid.
 #[test]
-fn spec018_revision3_eight_item_entrances() {
+fn spec024c_eight_item_entrances() {
     let maps = maps();
     let world = worldmap().world_size();
     let mut notes = Diagnostics::default();
     let city = CityTable::parse(
         b"[Area 0]\nworld_pos=1,1\nentrance_0=On,10,20,Temple,0,-1,-1,0\n\
-          entrance_1=On,10,20,Temple,0,-1,-1,0,0\nentrance_2=Off,5,6,Temple,1,12345,3\n",
+          entrance_1=On,10,20,Temple,0,-1,-1,0,0\nentrance_2=Off,5,6,Temple,1,12345,3\n\
+          entrance_3=On,10,20,Temple,1,500,2,0\nentrance_4=On,10,20,Temple,1,-1,2,x\n\
+          entrance_5=On,10,20,No Such Map,0,-1,-1,0\n",
         &maps,
         world,
         &mut notes,
@@ -700,12 +703,21 @@ fn spec018_revision3_eight_item_entrances() {
     );
     assert!(area.entrances[1].is_none(), "nine items stay invalid");
     assert_eq!(area.entrances[2].unwrap().orientation, 3);
+    // Both lines that keep the diagnostic are read from their first seven.
+    let third = area.entrances[3].unwrap();
+    assert_eq!((third.tile, third.orientation), (500, 2));
+    let fourth = area.entrances[4].unwrap();
+    assert_eq!((fourth.tile, fourth.orientation), (-1, 2));
+    // The rule makes no invalid entrance valid.
+    assert_eq!(area.entrances.len(), 5, "an unknown map stays dropped");
     let messages: Vec<&str> = notes.0.iter().map(|note| note.message.as_str()).collect();
     assert_eq!(
         messages,
         [
-            "[Area 0] entrance_0 has 8 items; read from the first seven",
             "[Area 0] entrance_1 is invalid; dropped",
+            "[Area 0] entrance_3 has 8 items; read from the first seven",
+            "[Area 0] entrance_4 has 8 items; read from the first seven",
+            "[Area 0] entrance_5 is invalid; dropped",
         ]
     );
 }
@@ -1110,4 +1122,260 @@ fn spec018_automap_index() {
     assert!(AutomapDb::parse_fallout2(past).is_err());
     assert_eq!(AutomapDb::default().bytes().len(), 797);
     assert_eq!(AutomapDb::default().map_count(), 66);
+}
+
+// SPEC-024c §4 ---------------------------------------------------------
+
+/// SPEC-024c §4.5: the worldmap size the measured tables were read with.
+const SPEC024C_WORLD: [i32; 2] = [1400, 1800];
+
+/// SPEC-024c §6.1 test 6: the `SPEC-024c` rows of `table-vectors.tsv`,
+/// each diagnostic matched once by its file, line and kind.
+#[test]
+fn spec024c_table_fixtures_give_every_vector() {
+    let vectors = include_str!("../../../../oracle/SPEC-024c/table-vectors.tsv");
+    let mut map_notes = Diagnostics::default();
+    let maps = MapsTable::parse(
+        include_bytes!("../../../../oracle/SPEC-024c/fixture-maps.txt"),
+        &mut map_notes,
+    )
+    .unwrap();
+    let mut city_notes = Diagnostics::default();
+    let city = CityTable::parse(
+        include_bytes!("../../../../oracle/SPEC-024c/fixture-city.txt"),
+        &maps,
+        SPEC024C_WORLD,
+        &mut city_notes,
+    )
+    .unwrap();
+    let mut left: Vec<(&str, usize, &str)> = Vec::new();
+    for (name, notes) in [("maps", &map_notes), ("city", &city_notes)] {
+        left.extend(
+            notes
+                .0
+                .iter()
+                .map(|note| (name, note.line, note.message.as_str())),
+        );
+    }
+    let dropped = city_notes
+        .0
+        .iter()
+        .filter(|note| note.message.ends_with("is invalid; dropped"))
+        .count();
+    let valid: usize = city
+        .areas()
+        .map(|area| area.entrances.iter().flatten().count())
+        .sum();
+    let mut rows = 0;
+    for row in vectors.lines().skip(1) {
+        let fields: Vec<&str> = row.split('\t').collect();
+        let [rules, subject, expected] = fields[..] else {
+            panic!("{row}");
+        };
+        if rules != "SPEC-024c" {
+            continue;
+        }
+        rows += 1;
+        if let Some(number) = subject.strip_prefix("map ") {
+            let record = maps.get(number.parse().unwrap()).expect(subject);
+            let lookup = record.lookup_name.as_deref().unwrap_or("");
+            let got = format!(
+                "stem={}; lookup={lookup}; sounds={}",
+                record.stem,
+                record.ambient.len()
+            );
+            assert_eq!(got, expected, "{subject}");
+        } else if let Some(number) = subject.strip_prefix("area ") {
+            let area = city.get(number.parse().unwrap()).expect(subject);
+            let slots: Vec<String> = (0..area.entrances.len())
+                .filter(|slot| area.entrances[*slot].is_some())
+                .map(|slot| slot.to_string())
+                .collect();
+            assert_eq!(format!("valid slots={}", slots.join(",")), expected);
+        } else if let Some(entrance) = subject.strip_prefix("dropped area 0 ") {
+            assert_eq!(expected, "no map has that lookup name");
+            let message = format!("[Area 00] {entrance} is invalid; dropped");
+            assert!(city_notes.0.iter().any(|note| note.message == message));
+        } else if let Some((file, line)) = subject.split_once(" diagnostic, line ") {
+            let line: usize = line.parse().unwrap();
+            let kind = match expected {
+                "other line" => "ignored line",
+                "duplicate lookup_name" => "lookup name",
+                "duplicate stem" => "'s file",
+                "eight items" => "has 8 items",
+                "entrance dropped: no map has that lookup name" => "is invalid; dropped",
+                other => panic!("{other}"),
+            };
+            let at = left
+                .iter()
+                .position(|(name, at, text)| *name == file && *at == line && text.contains(kind))
+                .unwrap_or_else(|| panic!("{subject}: {expected}: {left:?}"));
+            left.remove(at);
+        } else {
+            assert_eq!(subject, "totals");
+            assert_eq!(
+                format!(
+                    "maps={}; areas={}; entrances={}; dropped={dropped}; diagnostics={}",
+                    maps.records().count(),
+                    city.areas().count(),
+                    valid + dropped,
+                    map_notes.0.len() + city_notes.0.len()
+                ),
+                expected
+            );
+        }
+    }
+    assert_eq!(rows, 16);
+    assert!(left.is_empty(), "unexpected diagnostics: {left:?}");
+}
+
+/// SPEC-024c §6.1 test 7: a note after a header does not cost the section.
+#[test]
+fn spec024c_a_note_after_a_header_keeps_the_record_apart() {
+    let mut notes = Diagnostics::default();
+    let table = MapsTable::parse(
+        b"[Map 075]\nlookup_name=Demo\nmap_name=JUNKDEMO\n\n\
+          [Map 076] # a circle for the den\nlookup_name=Den Circle\nmap_name=den\n",
+        &mut notes,
+    )
+    .unwrap();
+    assert_eq!(table.get(75).unwrap().stem, "JUNKDEMO");
+    assert_eq!(table.get(75).unwrap().lookup_name.as_deref(), Some("Demo"));
+    assert_eq!(table.get(76).unwrap().stem, "den");
+    assert_eq!(table.count(), 77);
+    assert!(notes.0.is_empty(), "{notes:?}");
+}
+
+/// SPEC-018 §3.3 rule 5 as SPEC-024c §4.1 words it (D-1, D-9).
+#[test]
+fn spec024c_the_header_rule() {
+    let mut notes = Diagnostics::default();
+    let text = SectionedText::parse(
+        "t.txt",
+        b"[One] ] note\ncolor=[x]\nhash=a # b\n\
+          [Two\nunder=one\n[Two=2\n\
+          [ ] note\nlost=1\n\
+          [Three]; note\nkey=1\n",
+        &mut notes,
+    )
+    .unwrap();
+    let one = text.section("One").unwrap();
+    assert_eq!(one.name, "One", "the first `]` ends the name");
+    assert_eq!(
+        one.get("color").unwrap().text,
+        "[x]",
+        "a `[` later opens nothing"
+    );
+    assert_eq!(
+        one.get("hash").unwrap().text,
+        "a # b",
+        "`#` stays in a value"
+    );
+    assert_eq!(
+        one.get("under").unwrap().text,
+        "one",
+        "a line with no `]` leaves the section open"
+    );
+    assert!(text.section("Two").is_none());
+    assert_eq!(text.section("Three").unwrap().get("key").unwrap().text, "1");
+    let notes: Vec<(usize, &str)> = notes
+        .0
+        .iter()
+        .map(|note| (note.line, note.message.as_str()))
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            (4, "ignored line \"[Two\""),
+            (6, "ignored line \"[Two=2\""),
+            (7, "an empty section name; its lines are ignored"),
+            (8, "lost outside any section is ignored"),
+        ]
+    );
+}
+
+/// SPEC-024c §4.3: spaces and tabs split an `ambient_sfx` item, and a part
+/// still invalid is dropped alone.
+#[test]
+fn spec024c_ambient_items_split_at_spaces_and_tabs() {
+    let mut notes = Diagnostics::default();
+    let table = MapsTable::parse(
+        b"[Map 0]\nmap_name=a\nambient_sfx=one:1 two:2,three:3\tfour:4  five:5, bad six:6\n",
+        &mut notes,
+    )
+    .unwrap();
+    let names: Vec<(&str, i32)> = table
+        .get(0)
+        .unwrap()
+        .ambient
+        .iter()
+        .map(|(name, weight)| (name.as_str(), *weight))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("one", 1),
+            ("two", 2),
+            ("three", 3),
+            ("four", 4),
+            ("five", 5),
+            ("six", 6)
+        ]
+    );
+    assert_eq!(notes.0.len(), 1, "{notes:?}");
+    assert_eq!(notes.0[0].message, "ambient_sfx: \"bad\" dropped");
+    assert_eq!(notes.0[0].line, 3);
+}
+
+/// SPEC-024c §4.4: two lookup names for one file are aliases; the same
+/// name twice, or no name, keeps the diagnostic. Lookups do not change.
+#[test]
+fn spec024c_records_sharing_a_file() {
+    let mut notes = Diagnostics::default();
+    let table = MapsTable::parse(
+        b"[Map 0]\nmap_name=gate\nlookup_name=North Gate\n\
+          [Map 1]\nmap_name=GATE\nlookup_name=Gate Circle\n",
+        &mut notes,
+    )
+    .unwrap();
+    assert!(notes.0.is_empty(), "{notes:?}");
+    assert_eq!(table.by_lookup_name("gate circle"), Some(1));
+    assert_eq!(table.get(1).unwrap().path(), "maps/gate.map");
+    assert_eq!(table.match_name(b"gate.map"), 0, "names give the lowest");
+
+    let duplicates = |text: &[u8]| -> Vec<(usize, String)> {
+        let mut notes = Diagnostics::default();
+        MapsTable::parse(text, &mut notes).unwrap();
+        let notes = notes.0.into_iter();
+        notes.map(|note| (note.line, note.message)).collect()
+    };
+    // Case folded, as every name compares.
+    assert_eq!(
+        duplicates(
+            b"[Map 0]\nmap_name=a\nlookup_name=Town\n[Map 1]\nmap_name=a\nlookup_name=TOWN\n"
+        ),
+        [
+            (4, "map 1 repeats map 0's file a".to_owned()),
+            (4, "map 1 repeats map 0's lookup name TOWN".to_owned())
+        ]
+    );
+    assert_eq!(
+        duplicates(b"[Map 0]\nmap_name=a\n[Map 1]\nmap_name=a\n"),
+        [(3, "map 1 repeats map 0's file a".to_owned())]
+    );
+    assert_eq!(
+        duplicates(b"[Map 0]\nmap_name=a\nlookup_name=Town\n[Map 1]\nmap_name=a\n"),
+        [(4, "map 1 repeats map 0's file a".to_owned())]
+    );
+    // An alias of the first record does not hide a repeat of the second.
+    assert_eq!(
+        duplicates(
+            b"[Map 0]\nmap_name=a\nlookup_name=One\n[Map 1]\nmap_name=a\nlookup_name=Two\n\
+              [Map 2]\nmap_name=a\nlookup_name=two\n"
+        ),
+        [
+            (7, "map 2 repeats map 1's file a".to_owned()),
+            (7, "map 2 repeats map 1's lookup name two".to_owned())
+        ]
+    );
 }

@@ -1755,6 +1755,63 @@ fn reports_a_fallout2_install_with_a_smoke_run() {
     assert!(!text.contains("combat AI unavailable"), "{text}");
 }
 
+/// SPEC-024c §6.1 tests 7 and 8's shape: a mod's `maps.txt`, in a layer over
+/// the install, is what the report reads, with a note after a header and a
+/// second lookup name for one file costing no diagnostic.
+#[test]
+fn spec024c_the_install_report_reads_a_mods_tables_through_its_layer() {
+    let corpus = tempfile::tempdir().unwrap();
+    state::write_corpus(corpus.path());
+    vault_fixtures::fallout2::write_tables(corpus.path());
+    let map = std::fs::read(corpus.path().join("maps/synthetic.map")).unwrap();
+    std::fs::write(
+        corpus.path().join("maps/artemple.map"),
+        vault_fixtures::fallout2::named_map(map, "artemple.map", 3, 20100, 2),
+    )
+    .unwrap();
+    let install = tempfile::tempdir().unwrap();
+    vault_fixtures::dat2::fallout2_install(corpus.path(), install.path(), 2);
+    let run = |flags: &[&str]| {
+        let mut flags = flags.to_vec();
+        let folder = install.path().to_str().unwrap();
+        flags.extend(["--report-fallout2-install", "--fallout2-dir", folder]);
+        audit(corpus.path(), &flags).2
+    };
+    let bare = run(&[]);
+    assert!(bare.contains("Fallout 2 tables: loaded: 3 maps"), "{bare}");
+    assert!(!bare.contains("mod layers"), "{bare}");
+    assert!(!bare.contains("map file shared"), "{bare}");
+
+    let lower = tempfile::tempdir().unwrap();
+    let upper = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(lower.path().join("data")).unwrap();
+    std::fs::create_dir_all(upper.path().join("data")).unwrap();
+    // The highest layer wins, so the lower table must not be read.
+    std::fs::write(lower.path().join("data/maps.txt"), b"[Map 0]\nmap_name=a\n").unwrap();
+    let table = format!(
+        "{}\n[Map 76] # a circle on the world map\nlookup_name=Circle\nmap_name=artemple\n",
+        vault_fixtures::fallout2::MAPS
+    );
+    std::fs::write(upper.path().join("data/maps.txt"), table).unwrap();
+    let text = run(&[
+        "--mod-layer",
+        lower.path().to_str().unwrap(),
+        "--mod-layer",
+        upper.path().to_str().unwrap(),
+    ]);
+    for line in [
+        "Fallout 2 mod layers: 2\n",
+        "Fallout 2 tables: loaded: 77 maps",
+        "Fallout 2 map file shared: map 76 with map 2: artemple\n",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    // The fixture's own bad record stays; nothing comes of the two rules.
+    for note in ["repeats map", "ignored line"] {
+        assert!(!text.contains(note), "{note}\n{text}");
+    }
+}
+
 #[test]
 fn spec024_sfall_audits_a_folder_of_scripts_with_the_sfall_table() {
     let script = |body: &[u16]| {

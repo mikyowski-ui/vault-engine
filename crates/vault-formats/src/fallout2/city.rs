@@ -137,8 +137,9 @@ impl CityTable {
             let mut entrances: Vec<Option<Entrance>> = Vec::new();
             for (slot, value) in section.indexed("entrance", 0..=(MAX_ENTRANCES as u32 - 1)) {
                 // Revision 3 (R16): an eighth item is ignored, with a
-                // diagnostic.
-                if text::list(&value.text).len() == 8 {
+                // diagnostic, unless SPEC-024c §4.2 makes it harmless.
+                let items = text::list(&value.text);
+                if items.len() == 8 && !(items[5] == "-1" && text::integer(&items[7]).is_some()) {
                     notes.push(
                         file,
                         value.line,

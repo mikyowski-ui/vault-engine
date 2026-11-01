@@ -6,7 +6,8 @@
 //! writers' round trips, and a headless new-game smoke run: SPEC-018 §6's
 //! hand-off onto `artemple` with its scripts running for a bounded number
 //! of world ticks, with the VM errors by script, procedure and word and the
-//! diagnostics by kind.
+//! diagnostics by kind. `--mod-layer` mounts a mod's folders above the
+//! install, so a total conversion's tables are the ones read.
 //!
 //! A report, not an audit category: it never fails the run. Only counts,
 //! file and procedure names, PIDs, word numbers, line numbers and lengths
@@ -15,7 +16,7 @@
 use std::{
     collections::BTreeMap,
     error::Error,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -26,8 +27,8 @@ use vault_core::{
     movie::MoviePolicy,
 };
 use vault_formats::{
-    LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype, Vfs,
-    VfsError,
+    LayeredVfs, LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, ModLayer,
+    MsgCatalog, Prototype, Vfs, VfsError,
     fallout2::{Fallout2Install, REQUIRED_MEMBERS, missing_members},
     validate_asset,
 };
@@ -119,8 +120,8 @@ impl Kinds {
 }
 
 /// SPEC-018 §1: the install's databases, with its loose `data` folder as
-/// `data_root` when it has one.
-fn mount(folder: &Path) -> Result<Arc<dyn Vfs>, Box<dyn Error>> {
+/// `data_root` when it has one, and `layers` above them, lowest first.
+fn mount(folder: &Path, layers: &[PathBuf]) -> Result<Arc<dyn Vfs>, Box<dyn Error>> {
     let install = Fallout2Install::discover(folder)?;
     let opened = install.open()?;
     println!(
@@ -155,7 +156,21 @@ fn mount(folder: &Path) -> Result<Arc<dyn Vfs>, Box<dyn Error>> {
             format!("; missing {}", missing.join(", "))
         }
     );
-    Ok(Arc::new(provider))
+    let base: Arc<dyn Vfs> = Arc::new(provider);
+    if layers.is_empty() {
+        return Ok(base);
+    }
+    let mut mounted = Vec::new();
+    for layer in layers {
+        let name = layer.file_name().map_or_else(
+            || layer.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let loose: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(layer)?);
+        mounted.push(ModLayer::from_parts(name, Some(loose), None, None));
+    }
+    println!("Fallout 2 mod layers: {}", mounted.len());
+    Ok(Arc::new(LayeredVfs::new(base, mounted)))
 }
 
 /// `Fallout2Tables::load` over the master database as mounted.
@@ -194,6 +209,18 @@ fn tables(vfs: &dyn Vfs) -> Option<Arc<Fallout2Tables>> {
             }
             println!("Fallout 2 table diagnostics: {}", kinds.total());
             kinds.print("Fallout 2 table diagnostic");
+            for record in tables.maps.records() {
+                // SPEC-024c §4.4: a record sharing a lower record's file.
+                let first = tables.maps.records().find(|other| {
+                    other.number < record.number && other.stem.eq_ignore_ascii_case(&record.stem)
+                });
+                if let Some(first) = first {
+                    println!(
+                        "Fallout 2 map file shared: map {} with map {}: {}",
+                        record.number, first.number, record.stem
+                    );
+                }
+            }
             Some(Arc::new(tables))
         }
         Err(error) => {
@@ -506,8 +533,8 @@ fn smoke(vfs: Arc<dyn Vfs>, tables: Arc<Fallout2Tables>) -> Result<(), Box<dyn E
 
 /// The whole report; the last line says whether every member parsed and
 /// round-tripped and the tables loaded.
-pub fn report(folder: &Path) -> Result<(), Box<dyn Error>> {
-    let vfs = mount(folder)?;
+pub fn report(folder: &Path, layers: &[PathBuf]) -> Result<(), Box<dyn Error>> {
+    let vfs = mount(folder, layers)?;
     let tables = tables(&*vfs);
     let failed = parse_all(&*vfs);
     let loaded = tables.is_some();

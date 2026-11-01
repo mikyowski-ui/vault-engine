@@ -1,6 +1,7 @@
 //! SPEC-018 §4.2 `data/maps.txt`, the map table, and §5.1's map numbers
 //! and name matching.
 use super::text::{self, Diagnostics, SectionedText, TableError};
+use std::collections::BTreeMap;
 
 pub const FILE: &str = "data/maps.txt";
 /// The highest map number a record may have.
@@ -41,6 +42,14 @@ impl MapRecord {
     pub fn match_text(&self) -> String {
         format!("{}.MAP", self.stem.to_ascii_uppercase())
     }
+    /// SPEC-024c §4.4: whether this record and `other`, sharing a stem,
+    /// are the same file under two different lookup names.
+    fn aliases(&self, other: &Self) -> bool {
+        match (&self.lookup_name, &other.lookup_name) {
+            (Some(own), Some(theirs)) => !own.eq_ignore_ascii_case(theirs),
+            _ => false,
+        }
+    }
 }
 
 /// The parsed map table.
@@ -55,6 +64,7 @@ impl MapsTable {
         let file = FILE;
         let table = SectionedText::parse(file, bytes, notes)?;
         let mut records: Vec<Option<MapRecord>> = Vec::new();
+        let mut lines = BTreeMap::new();
         for (number, section) in table.numbered("map") {
             if number > MAX_MAP {
                 notes.push(file, section.line, format!("map {number} is outside 0-999"));
@@ -99,7 +109,14 @@ impl MapsTable {
             });
             let mut ambient = Vec::new();
             if let Some(value) = section.get("ambient_sfx") {
-                for item in text::list(&value.text) {
+                // SPEC-024c §4.3: an item holding spaces or tabs is split at
+                // them, so a missing comma costs no sound.
+                let items = text::list(&value.text);
+                let parts = items
+                    .iter()
+                    .flat_map(|item| item.split([' ', '\t']))
+                    .filter(|part| !part.is_empty());
+                for item in parts {
                     let parsed = item.split_once(':').and_then(|(sound, weight)| {
                         Some((
                             text::stem(sound.trim())?,
@@ -162,34 +179,38 @@ impl MapsTable {
                 records.resize(index + 1, None);
             }
             records[index] = Some(record);
+            lines.insert(number, section.line);
         }
         if records.iter().all(Option::is_none) {
             return Err(TableError::new(file, 0, "no valid map record"));
         }
         let out = Self { records };
         // §4.2 duplicate stems and lookup names exist; lookups take the
-        // lowest number.
-        let mut stems = std::collections::BTreeMap::new();
-        let mut names = std::collections::BTreeMap::new();
+        // lowest number. SPEC-024c §4.4: equal stems under different lookup
+        // names are aliases.
+        let mut stems: BTreeMap<String, Vec<&MapRecord>> = BTreeMap::new();
+        let mut names = BTreeMap::new();
         for record in out.records() {
-            if let Some(first) = stems.insert(text::fold(&record.stem), record.number) {
-                stems.insert(text::fold(&record.stem), first);
+            let line = lines[&record.number];
+            let earlier = stems.entry(text::fold(&record.stem)).or_default();
+            if let Some(first) = earlier.iter().find(|other| !other.aliases(record)) {
                 notes.push(
                     file,
-                    0,
+                    line,
                     format!(
-                        "map {} repeats map {first}'s file {}",
-                        record.number, record.stem
+                        "map {} repeats map {}'s file {}",
+                        record.number, first.number, record.stem
                     ),
                 );
             }
+            earlier.push(record);
             if let Some(name) = &record.lookup_name
                 && let Some(first) = names.insert(text::fold(name), record.number)
             {
                 names.insert(text::fold(name), first);
                 notes.push(
                     file,
-                    0,
+                    line,
                     format!(
                         "map {} repeats map {first}'s lookup name {name}",
                         record.number

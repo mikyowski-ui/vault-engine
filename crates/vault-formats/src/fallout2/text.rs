@@ -224,8 +224,15 @@ impl SectionedText {
             if text.is_empty() {
                 continue;
             }
-            if text.starts_with('[') && text.ends_with(']') && text.len() >= 2 {
-                let name = trim(&text[1..text.len() - 1]).to_owned();
+            // SPEC-024c §4.1: the name ends at the first `]`, and what
+            // follows it is ignored. A `[` with no `]` is no header and no
+            // pair, whatever else the line holds.
+            if let Some(rest) = text.strip_prefix('[') {
+                let Some((name, _)) = rest.split_once(']') else {
+                    notes.push(file, number, format!("ignored line {text:?}"));
+                    continue;
+                };
+                let name = trim(name).to_owned();
                 if name.is_empty() {
                     notes.push(file, number, "an empty section name; its lines are ignored");
                     current = None;
