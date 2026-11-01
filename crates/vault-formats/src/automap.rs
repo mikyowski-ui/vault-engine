@@ -145,14 +145,19 @@ impl AutomapDb {
         if start < self.index_len() {
             return Err(error(start, "entry offset points into the offset table"));
         }
+        // Checked: the length word is untrusted, and on a 32-bit target
+        // (wasm32) it can carry the sum past `usize::MAX`.
+        let body = start
+            .checked_add(5)
+            .ok_or_else(|| error(start, "entry header beyond the database"))?;
         let header = self
             .bytes
-            .get(start..start + 5)
+            .get(start..body)
             .ok_or_else(|| error(start, "entry header beyond the database"))?;
         let length = u32::from_be_bytes(header[..4].try_into().expect("word")) as usize;
-        let payload = self
-            .bytes
-            .get(start + 5..start + 5 + length)
+        let payload = body
+            .checked_add(length)
+            .and_then(|end| self.bytes.get(body..end))
             .ok_or_else(|| error(start, "entry payload beyond the database"))?;
         Ok(Some((header[4], payload)))
     }

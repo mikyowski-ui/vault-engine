@@ -40,6 +40,23 @@ use winit::keyboard::KeyCode;
 /// The load order a new mod list is written to, beside the settings.
 const LOAD_ORDER: &str = "load_order.toml";
 
+/// Where a new load order for `config`'s active game goes, for settings at
+/// `settings`. Each game has its own list, so when the other game's list
+/// already holds [`LOAD_ORDER`] this one takes a file named for its profile.
+fn new_load_order(config: &Config, settings: &Path) -> PathBuf {
+    let shared = settings.with_file_name(LOAD_ORDER);
+    let active = config.active_game();
+    let other = match active {
+        GameProfile::Fallout1 => GameProfile::Fallout2,
+        GameProfile::Fallout2 => GameProfile::Fallout1,
+    };
+    if config.scope(other).mod_list.as_ref() == Some(&ModList::File(shared.clone())) {
+        settings.with_file_name(format!("load_order_{}.toml", config.scope_name(active)))
+    } else {
+        shared
+    }
+}
+
 /// The enhanced preset's zoom stepper.
 pub const ZOOM_STEPS: [f32; 8] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
 /// The enhanced preset's interface scales (`None`: auto).
@@ -781,9 +798,22 @@ impl Launcher {
     /// The Game toggle: the fields are kept as the old game's profile and
     /// show the new game's, or, when it has none yet, its data discovered
     /// in its own directories; then they validate in its format.
+    ///
+    /// Each game has its own load order, so the Mods tab follows the toggle.
+    /// Unsaved Mods edits belong to the old game: the toggle waits for Save
+    /// rather than dropping them or writing them into the new game's list.
     fn switch_game(&mut self, game: GameProfile) {
+        if self.mods.dirty {
+            self.report(
+                State::Bad,
+                "Save the Mods tab's changes before changing the game.",
+            );
+            return;
+        }
         self.apply_fields();
         self.config.switch_game(game);
+        self.mods = Mods::load(self.config.mod_list.as_ref());
+        self.revalidate_mods();
         let paths = self.config.paths();
         self.load_fields(&paths);
         let found = if paths.is_empty() {
@@ -1068,8 +1098,14 @@ impl Launcher {
 
     fn revalidate_mods(&mut self) {
         let policy = LoadOrderPolicy {
-            // An inline list's paths are the user's own, as the game reads them.
-            allow_outside: matches!(self.config.mod_list, Some(ModList::Paths(_))),
+            // An inline list's paths are the user's own, as the game reads
+            // them, and so are those of a load order in the per-user folder.
+            allow_outside: matches!(self.config.mod_list, Some(ModList::Paths(_)))
+                || crate::mods::load_order_policy(
+                    &self.mods_dir(),
+                    crate::storage::user_config_root().as_deref(),
+                )
+                .allow_outside,
         };
         self.mods.check = validate::mods(&self.mods_dir(), &self.mods.entries, policy);
         let rows = List::rows(view::LAYERS);
@@ -1114,7 +1150,7 @@ impl Launcher {
             let file = mods
                 .file
                 .clone()
-                .unwrap_or_else(|| path.with_file_name(LOAD_ORDER));
+                .unwrap_or_else(|| new_load_order(&config, path));
             let text = vault_formats::vfs::write_load_order(&mods.entries)
                 .map_err(|error| error.to_string())?;
             config::write_replacing(&file, text.as_bytes()).map_err(|error| error.to_string())?;

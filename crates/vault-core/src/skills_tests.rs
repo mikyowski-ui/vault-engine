@@ -922,6 +922,53 @@ fn spec013_skill_gate_jam_check_and_defaults() {
 }
 
 #[test]
+fn spec013_lockpick_in_active_combat_is_refused_with_902_at_no_ap() {
+    use crate::combat_state::{CombatProgress, NoAi};
+    use vault_formats::pro::LockFlags;
+    let mut host = host();
+    let player = host.world.player;
+    let rat = critter(&mut host, adjacent(1), &[]);
+    let chest = items::spawn(&mut host, items::CONTAINER);
+    host.world
+        .move_object(chest, adjacent(2), 0, false)
+        .unwrap();
+    let object = host.world.get_mut(chest).unwrap();
+    let mut lock = object.lock().unwrap();
+    lock.0 |= LockFlags::LOCKED.0;
+    object.set_lock(lock);
+    // Real combat, on the player's turn with AP to spend.
+    host.start_combat(rat, player).unwrap();
+    assert_eq!(
+        host.advance_combat(&mut NoAi).unwrap(),
+        CombatProgress::PlayerTurn
+    );
+    let ap = host.world.action_points(player);
+    assert!(ap > 0);
+    host.world.effects.clear();
+
+    assert!(
+        !host
+            .use_skill_on(player, chest, skills::skill::LOCKPICK)
+            .unwrap(),
+        "refused"
+    );
+    // The fixture's `proto.msg` 902 reads "not in combat".
+    assert_eq!(messages(&mut host), ["not in combat"]);
+    assert_eq!(host.world.action_points(player), ap, "no AP charged");
+    assert!(host.motions.is_empty() && !host.owns_motion(player));
+    assert!(host.world.combat_state.player_turn, "the turn goes on");
+    assert_eq!(host.world.get(chest).unwrap().lock(), Some(lock));
+
+    // §3.2: the refusal is displayed only when the actor is the player.
+    assert!(
+        !host
+            .use_skill_on(rat, chest, skills::skill::LOCKPICK)
+            .unwrap()
+    );
+    assert!(messages(&mut host).is_empty());
+}
+
+#[test]
 fn spec013_the_skill_stage_follows_the_manipulation_animation() {
     use crate::{
         host_choreography::Playback,

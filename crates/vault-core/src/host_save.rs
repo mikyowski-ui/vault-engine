@@ -754,6 +754,27 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world = world;
         Ok(())
     }
+    /// SPEC-008 §3.3 safe rule: what would fail the restore once the reset
+    /// has replaced the world, checked while nothing has changed yet. The
+    /// map is read as [`load_map`](Self::load_map) will read it after the
+    /// reset, from the save's own working set and not the live one, and its
+    /// entry hex must pass SPEC-014 §3.29.
+    fn check_restorable(
+        &self,
+        save: &SaveGame,
+        maps: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<(), WorldError> {
+        for record in &save.queue {
+            event_kind(record)?;
+        }
+        let path = format!("maps/{}", save_map_file(save));
+        let (map, ..) = self.read_map_in(maps, &path)?;
+        let entry = map.header.entry_hex;
+        if !crate::ui::cursor::inside_border(entry) {
+            return Err(crate::host::entry_outside_border(entry));
+        }
+        Ok(())
+    }
     /// Restore in the reference order: reset and install the game tick,
     /// campaign snapshot A, the companion working set, then the current area
     /// map **before** the player, queue, world-map, and later components.
@@ -765,6 +786,7 @@ impl<A: WorldAssets> WorldHost<A> {
         maps: BTreeMap<String, Vec<u8>>,
         automap: AutomapDb,
     ) -> Result<(), WorldError> {
+        self.check_restorable(&save, &maps)?;
         self.reset_game()?;
         self.world.clock.set(u64::from(save.header.game_ticks));
         self.world.gvars = Some(save.campaign.clone());
@@ -978,5 +1000,111 @@ impl<A: WorldAssets> WorldHost<A> {
         world.combat = true;
         world.free_movement = saved.free_movement;
         world.combat_experience = saved.experience;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CharacterSheet, assets::VfsWorldAssets, fixture_state as fixture, test_support::dir_assets,
+    };
+    use std::path::Path;
+
+    type Host = WorldHost<VfsWorldAssets>;
+
+    /// A host on the synthetic map with a save of that moment, then moved
+    /// on, so that a load which touched anything would show.
+    fn saved_host(dir: &Path) -> (Host, SaveGame) {
+        fixture::write_corpus(dir);
+        let map = fixture::interactive_map();
+        std::fs::write(dir.join("maps/synth.map"), &map).unwrap();
+        std::fs::write(dir.join("maps/broken.map"), &map[..map.len() / 2]).unwrap();
+        let world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+        let mut host = WorldHost::new(world, dir_assets(dir));
+        host.load_campaign().unwrap();
+        host.load_map("maps/synth.map").unwrap();
+        let save = host.build_save(&SaveInfo::default()).unwrap();
+        host.world.clock.set(save_tick(&save) + 77);
+        host.world.gvars.as_mut().unwrap()[0] += 1;
+        host.world.diagnostic("live");
+        (host, save)
+    }
+    fn save_tick(save: &SaveGame) -> u64 {
+        u64::from(save.header.game_ticks)
+    }
+    /// What a reset or a partial restore would change.
+    fn fingerprint(host: &Host) -> impl PartialEq + std::fmt::Debug + use<> {
+        let world = &host.world;
+        (
+            world.state_hash(),
+            world.clock.ticks,
+            world.gvars.clone(),
+            world.player,
+            world.current_map_name(),
+            world.persistence.maps.clone(),
+            world.persistence.automap.clone(),
+            world.effects.len(),
+            world.trace.len(),
+            host.programs.len(),
+        )
+    }
+    fn assert_refused(host: &mut Host, save: SaveGame, maps: BTreeMap<String, Vec<u8>>) {
+        let before = fingerprint(host);
+        let automap = host.world.persistence.automap.clone();
+        let error = host.apply_save(save, maps, automap).unwrap_err();
+        assert_eq!(fingerprint(host), before, "after {error}");
+    }
+
+    #[test]
+    fn spec008_a_load_that_cannot_open_its_map_leaves_the_live_world() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, save) = saved_host(dir.path());
+        let maps = host.world.persistence.maps.clone();
+        let name = save_map_file(&save);
+        assert!(maps.contains_key(&name), "{name} in {:?}", maps.keys());
+
+        // A truncated saved copy.
+        let mut cut = maps.clone();
+        let bytes = cut.get_mut(&name).unwrap();
+        bytes.truncate(bytes.len() - 4);
+        assert_refused(&mut host, save.clone(), cut);
+
+        // No saved copy in the save's own set: the live set still has one,
+        // which must not stand in for it.
+        let mut without = maps.clone();
+        without.remove(&name);
+        assert_refused(&mut host, save.clone(), without);
+
+        // A base map that exists but does not parse, and one that is absent.
+        for base in [b"BROKEN.MAP".as_slice(), b"ABSENT.MAP"] {
+            let mut other = save.clone();
+            other.header.map_file = fixed(base);
+            assert_refused(&mut host, other, maps.clone());
+        }
+
+        // SPEC-014 §3.29: a parsed map whose entry fails the load.
+        let mut outside = maps.clone();
+        fixture::world::word(outside.get_mut(&name).unwrap(), 0x14, 30 * 200 + 100);
+        assert_refused(&mut host, save.clone(), outside);
+
+        // The load still works, and it is the reset that replaces the world.
+        let automap = host.world.persistence.automap.clone();
+        let tick = save_tick(&save);
+        host.apply_save(save, maps, automap).unwrap();
+        assert_eq!(host.world.clock.ticks, tick);
+    }
+    #[test]
+    fn spec008_a_timed_event_without_its_payload_is_refused_before_the_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, mut save) = saved_host(dir.path());
+        save.queue.push(QueueRecord {
+            due: 0,
+            kind: 3,
+            owner: -2,
+            payload: QueuePayload::None,
+        });
+        let maps = host.world.persistence.maps.clone();
+        assert_refused(&mut host, save, maps);
     }
 }

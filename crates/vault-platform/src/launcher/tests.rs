@@ -27,6 +27,63 @@ fn setup(dir: &Path, config: Config) -> Setup {
     }
 }
 
+/// Each game keeps its own load order: the Mods tab follows the Game toggle,
+/// a new list never lands in the other game's file, and unsaved edits stop
+/// the toggle rather than vanish or cross over.
+#[test]
+fn each_game_keeps_its_own_load_order() {
+    use GameProfile::{Fallout1, Fallout2};
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let settings = dir.join(config::FILE_NAME);
+    let config = Config {
+        game: Some(Fallout2),
+        ..Config::default()
+    };
+    let mut launcher = Launcher::new(Setup {
+        settings_path: Some(settings.clone()),
+        ..setup(dir, config)
+    });
+    let layer = |path: &str| LayerEntry {
+        path: Some(path.to_owned()),
+        ..LayerEntry::default()
+    };
+
+    launcher.mods.entries.push(layer("mods/two"));
+    launcher.layers_changed();
+    launcher.switch_game(Fallout1);
+    assert_eq!(launcher.config.active_game(), Fallout2);
+    assert_eq!(launcher.mods.entries, [layer("mods/two")]);
+    assert!(launcher.status.contains("Save the Mods tab"));
+    launcher.save().unwrap();
+
+    launcher.switch_game(Fallout1);
+    assert_eq!(launcher.config.active_game(), Fallout1);
+    assert!(launcher.mods.entries.is_empty());
+    assert_eq!(launcher.mods.file, None);
+    launcher.mods.entries.push(layer("mods/one"));
+    launcher.layers_changed();
+    launcher.save().unwrap();
+
+    let read = |name: &str| {
+        vault_formats::parse_load_order(&fs::read_to_string(dir.join(name)).unwrap()).unwrap()
+    };
+    assert_eq!(read("load_order.toml"), [layer("mods/two")]);
+    assert_eq!(read("load_order_fallout1.toml"), [layer("mods/one")]);
+    let saved = Config::load(&settings).unwrap();
+    assert_eq!(
+        saved.scope(Fallout1).mod_list,
+        Some(ModList::File(dir.join("load_order_fallout1.toml")))
+    );
+    assert_eq!(
+        saved.scope(Fallout2).mod_list,
+        Some(ModList::File(dir.join("load_order.toml")))
+    );
+
+    launcher.switch_game(Fallout2);
+    assert_eq!(launcher.mods.entries, [layer("mods/two")]);
+}
+
 fn key(launcher: &mut Launcher, key: KeyCode) -> Option<LauncherAction> {
     launcher.handle(LauncherInput::Key { key, shift: false })
 }

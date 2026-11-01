@@ -8,9 +8,15 @@
 //! and enables no mod. The shell wires this up, and a test drives it directly.
 use crate::{
     config::{self, Config, GAMES, GamePaths, HotkeyHints, ModList, PerGame, Preset},
-    launcher::{LauncherInput, color, font, validate},
+    launcher::{Empty, LauncherInput, color, font, validate},
+    mods,
+    preview::PreviewArgs,
+    session::EditionError,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use vault_core::GameProfile;
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
@@ -127,6 +133,44 @@ pub fn discover(config: &Config, dirs: &PerGame<Vec<PathBuf>>) -> Installs {
     }
 }
 
+/// Whether `game` can run on `config`'s profile for it: what would stop a
+/// session of `game` after its install is found. The checks are those a start
+/// makes, on `game`'s own `sfall` and `mod_list` and never the running
+/// session's: sfall mode under `fallout1`, a manifest that does not parse, a
+/// load order that cannot be read, a conflict across layers, or a layer that
+/// does not mount. `sfall_flag` is a carried `--sfall`. Nothing here changes
+/// `config`, or anything on disk, and no mount outlives the call.
+pub fn check_profile(config: &Config, game: GameProfile, sfall_flag: bool) -> Result<(), String> {
+    let scoped = config.scoped_to(game);
+    let (merged, _) = mods::with_mods(&scoped).map_err(|error| format!("mod_list: {error}"))?;
+    if (sfall_flag || merged.sfall == Some(true)) && game != GameProfile::Fallout2 {
+        return Err(EditionError::SfallProfile.to_string());
+    }
+    let Some(list) = &scoped.mod_list else {
+        return Ok(());
+    };
+    let dirs = mods::enabled_layer_dirs(list).map_err(|error| format!("mod_list: {error}"))?;
+    mods::manifest_layers(&dirs).map_err(|error| format!("mod_list: {error}"))?;
+    PreviewArgs::mount_mods(Arc::new(Empty), list)
+        .map(drop)
+        .map_err(|error| error.to_string())
+}
+
+/// SPEC-020 §2.5 step 1, for a choice in the selector, before anything is
+/// torn down: `game`'s install ([`find_edition`]), then its profile
+/// ([`check_profile`]). The error is the reason for [`Selector::fail`]. It
+/// changes nothing, so a refusal leaves the running session untouched.
+pub fn validate_choice(
+    config: &Config,
+    dirs: &PerGame<Vec<PathBuf>>,
+    game: GameProfile,
+    sfall_flag: bool,
+) -> Result<GamePaths, String> {
+    let paths = find_edition(config, dirs, game)?;
+    check_profile(config, game, sfall_flag)?;
+    Ok(paths)
+}
+
 /// Whether both editions are installed (the seventh hint's condition).
 pub fn both_found(config: &Config, dirs: &PerGame<Vec<PathBuf>>) -> bool {
     GAMES
@@ -134,18 +178,16 @@ pub fn both_found(config: &Config, dirs: &PerGame<Vec<PathBuf>>) -> bool {
         .all(|game| find_edition(config, dirs, *game).is_ok())
 }
 
-/// The enabled layers of `mod_list`. It reads the list and mounts nothing.
-pub fn enabled_mods(config: &Config) -> usize {
-    match &config.mod_list {
+/// The enabled layers of `game`'s `mod_list`. It reads the list and mounts
+/// nothing. A count never stops a boot, so a list that cannot be read counts
+/// none here, and [`check_profile`] says why when the row is chosen.
+pub fn enabled_mods(config: &Config, game: GameProfile) -> usize {
+    match &config.scope(game).mod_list {
         None => 0,
         Some(ModList::Paths(paths)) => paths.len(),
-        Some(ModList::File(file)) => crate::storage::read_config_file(file)
-            .ok()
-            .flatten()
-            .and_then(|text| vault_formats::parse_load_order(&text).ok())
-            .map_or(0, |entries| {
-                entries.iter().filter(|entry| entry.enabled).count()
-            }),
+        Some(ModList::File(file)) => mods::read_load_order(file).map_or(0, |order| {
+            order.entries.iter().filter(|entry| entry.enabled).count()
+        }),
     }
 }
 
@@ -210,11 +252,10 @@ impl Selector {
     /// §2.4: the highlight starts on `last_played`, else on the `game`
     /// setting, else on Fallout 1.
     pub fn new(config: &Config, found: Installs, running: Option<GameProfile>) -> Self {
-        let mods = enabled_mods(config);
         let row = |game, install| Row {
             game,
             install,
-            mods,
+            mods: enabled_mods(config, game),
         };
         let rows = [
             row(GameProfile::Fallout1, found.fallout1),

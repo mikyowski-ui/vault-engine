@@ -801,7 +801,7 @@ impl MapObject {
         for _ in 0..count {
             // SPEC-003 §2.12 gives the quantity no range rule; a negative
             // one cannot be represented and is rejected, while a zero
-            // stack is kept and reported.
+            // stack is kept and reported, and `write` emits it unchanged.
             let quantity = r.count("inventory quantity", i32::MAX as usize)?;
             if quantity == 0 {
                 diagnostics.push(format!(
@@ -1116,10 +1116,10 @@ impl MapObject {
             }
         }
         for entry in kept {
+            // The same range the reader accepts (SPEC-003 §2.12): a zero
+            // stack it kept writes back as zero.
             let quantity = i32::try_from(entry.quantity)
-                .ok()
-                .filter(|quantity| *quantity > 0)
-                .ok_or_else(|| error("inventory quantity must be 1..=i32::MAX"))?;
+                .map_err(|_| error("inventory quantity exceeds i32"))?;
             put_i32(out, quantity);
             entry.object.write(out, elevation, depth + 1, context)?;
         }

@@ -390,14 +390,19 @@ pub fn list(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// `text` without a final `suffix`, compared with ASCII case folded. Table
+/// text is Latin-1 converted to UTF-8, so the cut may fall inside a
+/// multi-byte character: that is simply no match.
+pub(crate) fn strip_suffix_fold<'a>(text: &'a str, suffix: &str) -> Option<&'a str> {
+    let at = text.len().checked_sub(suffix.len())?;
+    let (head, tail) = text.split_at_checked(at)?;
+    tail.eq_ignore_ascii_case(suffix).then_some(head)
+}
+
 /// §3.4 Stem: 1 to 8 bytes of letters, digits, `_` and `-`, after a final
 /// `.map` (case folded) is removed. The case is kept.
 pub fn stem(text: &str) -> Option<String> {
-    let stem = if text.len() >= 4 && text[text.len() - 4..].eq_ignore_ascii_case(".map") {
-        &text[..text.len() - 4]
-    } else {
-        text
-    };
+    let stem = strip_suffix_fold(text, ".map").unwrap_or(text);
     let ok = (1..=8).contains(&stem.len())
         && stem
             .bytes()

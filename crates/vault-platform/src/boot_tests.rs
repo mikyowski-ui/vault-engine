@@ -310,7 +310,10 @@ fn spec020_a_choice_commits_game_and_last_played_together() {
         ..Config::default()
     };
     settings.commit(&path).unwrap();
-    settings.choose_game(GameProfile::Fallout2, paths("/data/master.dat"));
+    // A path below the folder: it is absolute on every host, where
+    // `/data/master.dat` would take the folder's drive when read on Windows.
+    let master = dir.path().join("data").join("master.dat");
+    settings.choose_game(GameProfile::Fallout2, paths(master.to_str().unwrap()));
     settings.last_played = Some("fallout2".to_owned());
     assert_eq!(
         commit_choice(&settings, &[dir.path().to_path_buf()]),
@@ -320,11 +323,7 @@ fn spec020_a_choice_commits_game_and_last_played_together() {
     assert_eq!(read.game, Some(GameProfile::Fallout2));
     assert_eq!(read.last_played.as_deref(), Some("fallout2"));
     assert_eq!(read.preset, Some(Preset::Enhanced));
-    assert_eq!(
-        read.master_dat,
-        Some(PathBuf::from("/data/master.dat")),
-        "the choice's paths"
-    );
+    assert_eq!(read.master_dat, Some(master), "the choice's paths");
     // A first choice with no file writes a new one.
     let fresh = tempfile::tempdir().unwrap();
     let written = commit_choice(&settings, &[fresh.path().to_path_buf()]).unwrap();
@@ -364,13 +363,131 @@ fn spec020_the_mod_count_reads_the_list_and_counts_the_enabled() {
         mod_list: Some(ModList::File(list)),
         ..Config::default()
     };
-    assert_eq!(enabled_mods(&config), 1);
-    assert_eq!(enabled_mods(&Config::default()), 0);
+    assert_eq!(enabled_mods(&config, GameProfile::Fallout1), 1);
+    assert_eq!(enabled_mods(&config, GameProfile::Fallout2), 0, "its own");
+    assert_eq!(enabled_mods(&Config::default(), GameProfile::Fallout1), 0);
     let missing = Config {
         mod_list: Some(ModList::File(dir.path().join("gone.toml"))),
         ..Config::default()
     };
-    assert_eq!(enabled_mods(&missing), 0, "it never stops a boot");
+    assert_eq!(
+        enabled_mods(&missing, GameProfile::Fallout1),
+        0,
+        "it never stops a boot"
+    );
+}
+
+/// A settings file with Fallout 2 on sfall and a load order of `ettu`, whose
+/// manifest asks for sfall mode, and Fallout 1 on nothing.
+const SCOPED: &str = "game = \"fallout2\"\n\n[profiles.fallout2]\nsfall = true\n\
+                      mod_list = [\"mods/ettu\"]\n";
+
+fn scoped_settings(dir: &Path, text: &str) -> Config {
+    let layer = dir.join("mods/ettu");
+    std::fs::create_dir_all(&layer).unwrap();
+    std::fs::write(
+        layer.join("vault-mod.toml"),
+        "name = \"Et Tu\"\n[scripting]\nsfall = true\n",
+    )
+    .unwrap();
+    let path = dir.join(config::FILE_NAME);
+    std::fs::write(&path, text).unwrap();
+    Config::load(&path).unwrap()
+}
+
+/// Fallout 2's stack is no reason to refuse Fallout 1, from either side of a
+/// switch, and the rows count each edition's own mods.
+#[test]
+fn fallout2s_sfall_and_mods_do_not_stop_fallout1() {
+    use GameProfile::{Fallout1, Fallout2};
+    let dir = tempfile::tempdir().unwrap();
+    let settings = scoped_settings(dir.path(), SCOPED);
+    let (one, two) = installs();
+    let found = dirs(one.path(), two.path());
+    assert_eq!(settings.game, Some(Fallout2));
+    assert_eq!(settings.sfall, Some(true));
+    let before = settings.clone();
+    assert!(validate_choice(&settings, &found, Fallout1, false).is_ok());
+    assert!(validate_choice(&settings, &found, Fallout2, false).is_ok());
+    assert_eq!(settings, before, "a check changes nothing");
+
+    let selector = Selector::new(&settings, both(), Some(Fallout2));
+    assert_eq!(selector.row(Fallout1).label(1), "1  Fallout 1");
+    assert_eq!(selector.row(Fallout2).label(2), "2  Fallout 2  (1 mod)");
+
+    // The other way round, with Fallout 1 the file's game.
+    let mut settings = settings;
+    settings.switch_game(Fallout1);
+    assert_eq!((settings.sfall, settings.mod_list.clone()), (None, None));
+    assert!(check_profile(&settings, Fallout1, false).is_ok());
+    assert!(check_profile(&settings, Fallout2, false).is_ok());
+}
+
+/// The same file before scoping, in the state a refused switch left it:
+/// `game` already says Fallout 1, under sfall and Fallout 2's mods.
+#[test]
+fn a_file_from_before_scoping_lets_fallout1_boot_too() {
+    use GameProfile::{Fallout1, Fallout2};
+    let dir = tempfile::tempdir().unwrap();
+    let settings = scoped_settings(
+        dir.path(),
+        "game = \"fallout1\"\nmod_list = [\"mods/ettu\"]\n[scripting]\nsfall = true\n",
+    );
+    assert_eq!((settings.sfall, settings.mod_list.clone()), (None, None));
+    assert!(check_profile(&settings, Fallout1, false).is_ok());
+    assert!(check_profile(&settings, Fallout2, false).is_ok());
+    let fallout2 = settings.scoped_to(Fallout2);
+    assert_eq!(fallout2.sfall, Some(true));
+    assert_eq!(
+        fallout2.mod_list,
+        Some(ModList::Paths(vec![dir.path().join("mods/ettu")]))
+    );
+}
+
+/// Each refusal says why, for the selector's row, and changes nothing.
+#[test]
+fn a_profile_that_cannot_run_is_refused_with_its_reason() {
+    use GameProfile::{Fallout1, Fallout2};
+    let dir = tempfile::tempdir().unwrap();
+    // Sfall on the edition that cannot run it: by the key, by a manifest of
+    // one of its layers, and by a carried flag.
+    let by_key = scoped_settings(dir.path(), "[profiles.fallout1]\nsfall = true\n");
+    let (one, two) = installs();
+    let found = dirs(one.path(), two.path());
+    let before = by_key.clone();
+    let reason = validate_choice(&by_key, &found, Fallout1, false).unwrap_err();
+    assert_eq!(reason, "sfall mode runs only under the fallout2 profile");
+    assert_eq!(by_key, before);
+    let by_manifest = scoped_settings(
+        dir.path(),
+        "[profiles.fallout1]\nmod_list = [\"mods/ettu\"]\n",
+    );
+    let reason = check_profile(&by_manifest, Fallout1, false).unwrap_err();
+    assert!(reason.contains("fallout2"), "{reason}");
+    assert!(check_profile(&Config::default(), Fallout1, true).is_err());
+    assert!(check_profile(&Config::default(), Fallout2, true).is_ok());
+    // A load order that does not read, and a layer that does not mount.
+    let path = dir.path().join("gone.toml");
+    let unread = Config {
+        mod_list: Some(ModList::File(path.clone())),
+        ..Config::default()
+    };
+    let reason = check_profile(&unread, Fallout1, false).unwrap_err();
+    assert!(reason.starts_with("mod_list: "), "{reason}");
+    assert!(reason.contains(&path.display().to_string()), "{reason}");
+    let unmounted = Config {
+        mod_list: Some(ModList::Paths(vec![dir.path().join("mods/none")])),
+        ..Config::default()
+    };
+    let reason = check_profile(&unmounted, Fallout1, false).unwrap_err();
+    assert!(reason.starts_with("mod_list: "), "{reason}");
+    // A missing install comes first, as discovery says it.
+    let empty = tempfile::tempdir().unwrap();
+    let none = dirs(empty.path(), empty.path());
+    assert_eq!(
+        validate_choice(&Config::default(), &none, Fallout1, false),
+        Err(NOT_FOUND.to_owned())
+    );
 }
 
 /// `switch-cases-rev4.tsv`, the cases the selector answers by itself: S14,

@@ -7,6 +7,7 @@ use std::{
 use clap::{Parser, Subcommand};
 use vault_fixtures::{dat, dat2, gallery, state, vm};
 
+mod clean_room;
 mod wasm_check;
 
 #[derive(Parser)]
@@ -26,6 +27,11 @@ enum Task {
     /// missing it says so and checks them on the host instead;
     /// `VAULT_REQUIRE_WASM=1` makes a missing target a failure.
     WasmCheck,
+    /// The ingestion rule of `CLAUDE.md`: scan `specs/`, `oracle/` and `docs/`
+    /// for 40-character hashes, foreign source paths and C code fences, print
+    /// each hit as `file:line: kind`, and exit 1 if there is one. It edits
+    /// nothing. CI runs it; it is not one of `check`'s gates.
+    CleanRoomCheck,
     /// Materialize a complete synthetic map/prototype/art/INT corpus in an empty
     /// directory, and the same corpus with the enhanced camera demo map
     /// `maps/cam_demo.map` in `<PATH>-cam-demo`, also empty.
@@ -120,19 +126,25 @@ fn check() -> Result<(), Box<dyn Error>> {
     }
 }
 
+/// The exit of a task whose closing line says how it went, so the status is
+/// all that is left.
+fn exit_with(status: Result<u8, Box<dyn Error>>) -> ExitCode {
+    match status {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!("xtask: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let result = match Args::parse().command {
         Task::Check => check(),
-        // Its closing line says how it went, so the status is all that is left.
         Task::WasmCheck => {
-            return match root().and_then(|root| wasm_check::run(root, &cargo())) {
-                Ok(code) => ExitCode::from(code),
-                Err(error) => {
-                    eprintln!("xtask: {error}");
-                    ExitCode::FAILURE
-                }
-            };
+            return exit_with(root().and_then(|root| wasm_check::run(root, &cargo())));
         }
+        Task::CleanRoomCheck => return exit_with(root().and_then(clean_room::run)),
         Task::Fixtures { output } => materialize(&output),
         Task::ExportMod {
             name,

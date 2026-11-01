@@ -382,6 +382,25 @@ fn start(
     Option<session::SessionRuntime>,
     Option<audio::Audio>,
 )> {
+    // Only the game this start names reads its profile's `sfall` and
+    // `mod_list`, however the settings left their top-level values.
+    let game = args
+        .game_profile
+        .or(config.and_then(|config| config.game))
+        .unwrap_or_default();
+    let scoped = config.map(|config| config.scoped_to(game));
+    let config = scoped.as_ref();
+    // A custom profile keeps its own saves; `SessionRuntime::start` gives an
+    // edition's root the same way when no profile names another.
+    if !matches!(
+        origin,
+        session::SessionOrigin::Replay | session::SessionOrigin::Gallery
+    ) && !args.preview.headless
+        && args.preview.save_dir.is_none()
+        && let Some(config) = config
+    {
+        args.preview.save_dir = Some(session::desktop_save_root(config.scope_name(game)));
+    }
     let modded = with_mod_settings(args, config)?;
     let launch = resolve_launch(args, modded.as_ref().or(config));
     if launch.zero_arg_game {
@@ -2279,6 +2298,16 @@ impl Shell {
             _ => None,
         };
         if self.stopped.is_none() {
+            // The chosen game's own profile, before anything starts.
+            let sfall = self.pending.as_ref().is_some_and(|args| args.preview.sfall);
+            if let Some(settings) = &self.boot_config
+                && let Err(reason) = boot::check_profile(settings, game, sfall)
+            {
+                if let Some(boot::Screen::Selector(selector)) = &mut self.boot {
+                    selector.fail(game, reason);
+                }
+                return self.refresh_boot(window);
+            }
             let paths = self
                 .boot_found
                 .as_ref()
@@ -2296,7 +2325,8 @@ impl Shell {
             .map_err(|error| error.to_string());
         let found = settings.and_then(|settings| {
             let settings = settings.unwrap_or_default();
-            boot::find_edition(&settings, &config::standard_data_dirs(), game)
+            // A warm switch carries no `--sfall` (`switch_args`).
+            boot::validate_choice(&settings, &config::standard_data_dirs(), game, false)
                 .map(|paths| (settings, paths))
         });
         let (settings, paths) = match found {

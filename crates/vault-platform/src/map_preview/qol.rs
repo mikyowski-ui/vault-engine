@@ -121,6 +121,7 @@ fn nearest(palette: &Palette, rgb: [u8; 3]) -> u8 {
 /// The HP bar's fill color for `hp` of `max`: green above half, amber
 /// above a quarter, else red.
 fn bar_color(hp: i32, max: i32) -> [u8; 3] {
+    let (hp, max) = (i64::from(hp), i64::from(max));
     if hp * 2 > max {
         [0, 200, 0]
     } else if hp * 4 > max {
@@ -128,6 +129,13 @@ fn bar_color(hp: i32, max: i32) -> [u8; 3] {
     } else {
         [216, 0, 0]
     }
+}
+
+/// The HP bar's filled width within `width` for `hp` of `max`: nothing for
+/// no HP, the whole width at `max` or above.
+fn bar_fill(width: i32, hp: i32, max: i32) -> i32 {
+    let filled = i64::from(width) * i64::from(hp.max(0)) / i64::from(max.max(1));
+    i32::try_from(filled).map_or(width, |filled| filled.min(width))
 }
 
 /// The overlay's scale on the world canvas drawn at `zoom`: whole canvas
@@ -373,7 +381,7 @@ impl MapPreview {
             image.fill_rect([x, y, bw, bh], frame);
             let inner = [x + scale, y + scale, bw - 2 * scale, bh - 2 * scale];
             image.fill_rect(inner, empty);
-            let filled = inner[2] * hp.max(0) / max;
+            let filled = bar_fill(inner[2], hp, max);
             let fill = nearest(palette, bar_color(hp, max));
             image.fill_rect([inner[0], inner[1], filled.max(scale), inner[3]], fill);
         }
@@ -497,3 +505,32 @@ fn stamp_scaled(
 #[cfg(test)]
 #[path = "qol_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod hp_bar_tests {
+    use super::{bar_color, bar_fill};
+
+    const GREEN: [u8; 3] = [0, 200, 0];
+    const AMBER: [u8; 3] = [232, 176, 0];
+    const RED: [u8; 3] = [216, 0, 0];
+
+    #[test]
+    fn the_hp_bar_keeps_its_thresholds() {
+        assert_eq!(bar_color(16, 30), GREEN);
+        assert_eq!(bar_color(15, 30), AMBER);
+        assert_eq!(bar_color(8, 30), AMBER);
+        assert_eq!(bar_color(7, 30), RED);
+        assert_eq!(bar_fill(24, 15, 30), 12);
+        assert_eq!(bar_fill(24, 29, 30), 23);
+    }
+
+    #[test]
+    fn the_hp_bar_takes_any_hp_without_overflowing() {
+        assert_eq!(bar_color(i32::MAX - 1, i32::MAX), GREEN);
+        assert_eq!(bar_color(i32::MAX / 3, i32::MAX), AMBER);
+        assert_eq!(bar_color(i32::MIN, 30), RED);
+        assert_eq!(bar_fill(24, i32::MAX - 1, i32::MAX), 23);
+        assert_eq!(bar_fill(24, i32::MIN, 30), 0);
+        assert_eq!(bar_fill(24, i32::MAX, 30), 24);
+    }
+}

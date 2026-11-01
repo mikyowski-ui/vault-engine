@@ -57,15 +57,31 @@ Every pull request must pass:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+cargo xtask wasm-check
 ```
 
-`cargo xtask check` runs all three. `--locked` makes Cargo fail instead of
-changing `Cargo.lock`; commit lockfile changes deliberately. CI runs the same
-gates on Linux, checks the workspace on the minimum supported Rust version
-(`rust-version` in `Cargo.toml`, 1.88), builds and tests on Windows and macOS,
-and runs the `cargo audit` and `cargo deny` dependency checks over both
-`Cargo.lock` and `fuzz/Cargo.lock`. A new dependency must pass both and use a
-license allowed by `deny.toml`.
+`cargo xtask check` runs all four. `--locked` makes Cargo fail instead of
+changing `Cargo.lock`; commit lockfile changes deliberately.
+
+`cargo xtask wasm-check` compiles `vault-vm`, `vault-formats`,
+`vault-guidance` and `vault-core` for `wasm32-unknown-unknown` (SPEC-023
+§3.17). Where that target is not installed it says so and checks them on the
+host instead. `VAULT_REQUIRE_WASM=1`, which CI sets, makes a missing target a
+failure, so CI cannot pass by skipping.
+
+CI runs the same gates on Linux, checks the workspace on the minimum supported
+Rust version (`rust-version` in `Cargo.toml`, 1.88), builds and tests on
+Windows and macOS, and runs the `cargo audit` and `cargo deny` dependency
+checks over both `Cargo.lock` and `fuzz/Cargo.lock`. A new dependency must pass
+both and use a license allowed by `deny.toml`.
+
+CI also runs `cargo xtask clean-room-check`, which is separate from the four
+gates. It scans `specs/`, `oracle/` and `docs/` for 40-character hexadecimal
+strings, foreign `src/` paths and C code fences, and prints each hit as
+`file:line: kind`. In `specs/` and `oracle/`, any `src/` path is a hit. In
+`docs/`, write this repository's source paths from the repository root
+(`crates/vault-core/src/lib.rs`). A hit in `specs/` or `oracle/` is a tainted
+hand-off: report it as above, and do not edit the file to make the check pass.
 
 Every binary parser has a fuzz target in `fuzz/` (see `fuzz/README.md`). Add a
 target for each new binary parser, and keep the targets building: CI checks
@@ -79,6 +95,6 @@ with `cargo +nightly fuzz build` and runs each briefly.
 - [ ] Every change traces to a section of an approved spec, or is engine
       infrastructure that needs no spec.
 - [ ] New behavior has tests on synthetic fixtures.
-- [ ] The engineering gates pass locally.
+- [ ] The engineering gates and `cargo xtask clean-room-check` pass locally.
 - [ ] The README section for the affected spec records any engine choices
       made where the spec leaves details open.

@@ -31,6 +31,8 @@
 //! and [`PreviewArgs::storage`]); otherwise a desktop session mounts its files
 //! and keeps its slots in [`FsStorage`], and a replay keeps them in
 //! [`MemoryStorage`], so that it never touches the user's real storage.
+//! Where a desktop session's files go, with no `--save-dir`, is
+//! [`save_root_in`]'s rule.
 use crate::{
     AppResult,
     audio::Audio,
@@ -38,7 +40,7 @@ use crate::{
     input::KeyRepeat,
     map_preview::MapPreview,
     preview::{AssetPreview, PreviewArgs},
-    storage::{FsStorage, MemoryStorage, Namespace, StorageBackend, StorageError, StorageOp},
+    storage::{self, FsStorage, MemoryStorage, Namespace, StorageBackend, StorageError, StorageOp},
 };
 use std::{
     path::{Path, PathBuf},
@@ -295,6 +297,47 @@ impl SlotReader for StoredSlot<'_> {
     }
 }
 
+/// The writable data folder of `profile`, an edition's name or a custom
+/// profile's, with no `--save-dir` (which wins, and never reaches this).
+///
+/// A `legacy` folder (the working directory, the default before per-user
+/// roots) that holds a save slot stays an edition's save root, so no player
+/// loses sight of a save and nothing is moved or deleted. Otherwise it is the
+/// profile's folder under `data`, the per-user data folder. A custom profile
+/// had no legacy folder, so its saves are always its own. With no per-user
+/// folder at all, it is `legacy`, as it always was.
+pub fn save_root_in(profile: &str, legacy: &Path, data: Option<&Path>) -> PathBuf {
+    let edition = crate::config::parse_game(profile).is_some();
+    // A folder that cannot be listed is left to report that, as it did.
+    let in_use = || {
+        FsStorage::at_save_root(legacy)
+            .slots()
+            .map_or(true, |slots| !slots.is_empty())
+    };
+    match data {
+        Some(data) if !(edition && in_use()) => storage::profile_save_root(data, profile),
+        _ => legacy.to_path_buf(),
+    }
+}
+
+/// [`save_root_in`] on this host: the working directory is the legacy folder.
+pub fn desktop_save_root(profile: &str) -> PathBuf {
+    save_root_in(
+        profile,
+        Path::new("."),
+        storage::user_data_root().as_deref(),
+    )
+}
+
+/// Whether a session with no `--save-dir` takes a per-user save root. A
+/// replay, a gallery capture and any headless session run as they always
+/// have, in the working directory, and keep to it.
+fn takes_user_root(origin: SessionOrigin, args: &PreviewArgs) -> bool {
+    matches!(origin, SessionOrigin::CommandLine | SessionOrigin::Launcher)
+        && !args.headless
+        && args.save_dir.is_none()
+}
+
 /// The storage a session gets when its entry point names none.
 fn default_storage(origin: SessionOrigin, args: &PreviewArgs) -> Arc<dyn StorageBackend> {
     match origin {
@@ -348,6 +391,10 @@ impl SessionRuntime {
         if args.sfall && edition != GameProfile::Fallout2 {
             return Err(EditionError::SfallProfile.into());
         }
+        let user_root = takes_user_root(origin, &args);
+        if user_root {
+            args.save_dir = Some(desktop_save_root(crate::config::game_name(edition)));
+        }
         let storage = args
             .storage
             .take()
@@ -358,6 +405,12 @@ impl SessionRuntime {
         let Some(preview) = args.load()? else {
             return Ok(None);
         };
+        // A slot's commit makes its folders; a printed sheet expects this one.
+        if let Some(root) = args.save_dir.as_ref().filter(|_| user_root)
+            && let Err(error) = std::fs::create_dir_all(root)
+        {
+            tracing::warn!(dir = %root.display(), %error, "save folder not made");
+        }
         tracing::info!(
             ?origin,
             edition = crate::config::game_name(edition),
@@ -598,6 +651,59 @@ mod tests {
             preview_map: Some(MAP.into()),
             ..Default::default()
         }
+    }
+
+    /// `SAVE.DAT` in `SAVEGAME/SLOT01` of `root`.
+    fn slot_in(root: &Path) {
+        let slot = root.join("SAVEGAME/SLOT01");
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(slot.join("SAVE.DAT"), b"x").unwrap();
+    }
+
+    #[test]
+    fn a_save_root_is_per_profile_and_a_legacy_slot_keeps_its_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let (legacy, data) = (temp.path().join("cwd"), temp.path().join("data"));
+        std::fs::create_dir_all(&legacy).unwrap();
+        let root = |profile| save_root_in(profile, &legacy, Some(&data));
+        // Nothing in the old place: each profile has its own folder.
+        assert_eq!(root("fallout1"), data.join("saves/fallout1"));
+        assert_eq!(root("fallout2"), data.join("saves/fallout2"));
+        assert_eq!(root("ettu"), data.join("saves/ettu"));
+        // A folder with no slot in it is not a save root in use.
+        std::fs::create_dir_all(legacy.join("SAVEGAME/SLOT02")).unwrap();
+        assert_eq!(root("fallout1"), data.join("saves/fallout1"));
+        // A slot there keeps the editions on it, and stays where it is.
+        slot_in(&legacy);
+        assert_eq!(root("fallout1"), legacy);
+        assert_eq!(root("fallout2"), legacy);
+        assert!(legacy.join("SAVEGAME/SLOT01/SAVE.DAT").is_file());
+        assert!(!data.exists(), "the rule moves and makes nothing");
+        // A custom profile never had that folder.
+        assert_eq!(root("ettu"), data.join("saves/ettu"));
+        // With no per-user folder at all, the old place.
+        assert_eq!(save_root_in("ettu", &legacy, None), legacy);
+        assert_eq!(save_root_in("fallout1", &legacy, None), legacy);
+    }
+
+    #[test]
+    fn only_an_interactive_desktop_session_takes_a_user_root() {
+        let args = PreviewArgs::default();
+        assert!(takes_user_root(SessionOrigin::CommandLine, &args));
+        assert!(takes_user_root(SessionOrigin::Launcher, &args));
+        assert!(!takes_user_root(SessionOrigin::Replay, &args));
+        assert!(!takes_user_root(SessionOrigin::Gallery, &args));
+        let headless = PreviewArgs {
+            headless: true,
+            ..PreviewArgs::default()
+        };
+        assert!(!takes_user_root(SessionOrigin::CommandLine, &headless));
+        // `--save-dir` is used as it stands.
+        let named = PreviewArgs {
+            save_dir: Some("/chosen".into()),
+            ..PreviewArgs::default()
+        };
+        assert!(!takes_user_root(SessionOrigin::Launcher, &named));
     }
 
     #[test]

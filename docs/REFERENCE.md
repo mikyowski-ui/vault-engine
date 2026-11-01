@@ -4,7 +4,7 @@ The full reference for [Vault Engine](../README.md): installing and building,
 the desktop shell and its settings (`vault-engine.toml`), the launcher, the
 touch UI, the enhanced view and quality-of-life features, mod manifests
 (`vault-mod.toml`), the corpus audit tools, and the engine's notes on each
-approved specification (`SPEC-001` to `SPEC-019`). The front page is the
+approved specification (`SPEC-001` to `SPEC-024c`). The front page is the
 [README](../README.md); the clean-room process is in
 [`PROVENANCE.md`](../PROVENANCE.md).
 
@@ -63,9 +63,9 @@ frame.
 
 `AGENTS.md` is the repository's implementation policy. `PROVENANCE.md` records
 the two-team clean-room process, and `CONTRIBUTING.md` the clean-room
-certification every contribution requires. Format behavior follows
+certification every contribution requires. Behavior follows
 `specs/approved/SPEC-001-pal-frm-lst.md` through
-`SPEC-019-fallout2-interface-party-and-car.md`. No original game data is
+`SPEC-024c-mod-premade-startmap-and-city-rules.md`. No original game data is
 needed to build, test, or run the synthetic shell and preview fixtures.
 
 <details>
@@ -92,6 +92,13 @@ needed to build, test, or run the synthetic shell and preview fixtures.
 | `SPEC-017` | Fallout 2 host words and VM deltas |
 | `SPEC-018` | Fallout 2 mounting, saves and data tables |
 | `SPEC-019` | Fallout 2 interface, party control, the car and game-flow deltas |
+| `SPEC-020` | Unified session runtime and core UI authority, with the boot menu and warm switch ([Boot menu and Alt+L](#boot-menu-and-altl)) |
+| `SPEC-021` | Deterministic state hash, combat sub-hash, trace oracles and replay checkpoints ([Replay checkpoints](#replay-checkpoints)) |
+| `SPEC-022` | GPU-instanced sprite batching and hex lightmaps ([Render path](#render-path), [renderer notes](#renderer-notes-for-spec-022-revision-2)) |
+| `SPEC-023` | In-memory VFS mounting, portable storage and the wasm32 compile gate ([In-memory mounts](#in-memory-mounts-and-portable-storage-spec-023)) |
+| `SPEC-024a` | Engine hooks and mod scripts ([Manifest scripting](#manifest-scripting-spec-024a)) |
+| `SPEC-024b` | sfall extended opcodes, dynamic arrays and hook scripts ([Sfall mode](#sfall-mode-spec-024b)) |
+| `SPEC-024c` | Mod premade sheets, startup overrides and table parsing ([Mod premades](#mod-premades-startup-keys-and-tables-spec-024c)) |
 
 The per-spec reference sections further down are collapsed; open the one
 you need.
@@ -110,7 +117,7 @@ you need.
 | `vault-debug` | Headless VM stepper and instruction trace, GVAR/MVAR/LVAR watches, and map object/critter inspectors with tick diffs and text rendering |
 | `vault-platform` | Desktop shell, asset preview, input command logging |
 | `vault-fixtures` | Dev-only synthetic test fixture builders, compiled once and shared by the crates' tests and `xtask` |
-| `xtask` | Engineering gate runner, synthetic fixture writer, mod exporter (`export-mod`) and documentation gallery renderer (`capture-gallery`) |
+| `xtask` | Engineering gate runner (`check`, `wasm-check`), ingestion scan (`clean-room-check`), synthetic fixture writer, mod exporter (`export-mod`) and documentation gallery renderer (`capture-gallery`) |
 | `asset-audit` | Loose-corpus counts and format validation |
 
 ## Build and verify
@@ -131,6 +138,24 @@ cargo xtask check
 `--locked` fails instead of updating `Cargo.lock`, so CI and local gates build
 the committed dependency set.
 
+`cargo xtask clean-room-check` is not a gate, and `cargo xtask check` does not
+run it; CI does. It applies the ingestion rule of `CLAUDE.md` to `specs/`,
+`oracle/` and this folder, and prints each hit as `file:line: kind`, without
+the text it found. It exits 1 on any hit, and edits nothing, because a hit in
+`specs/` or `oracle/` is rejected and never sanitized on this side of the wall.
+- **Hash:** a run of exactly 40 hexadecimal digits. The oracle's longer
+  SHA-256 digests are not hits.
+- **Foreign source path:** a path through a directory named `src`, in any
+  case. In `specs/` and `oracle/` every such path is foreign. Here in `docs/`,
+  a path from the repository root into the sources of an existing folder under
+  `crates/` or `tools/` is allowed. Any other spelling of it is a hit.
+- **C code fence:** a Markdown fence tagged with a C or C++ language. It reads
+  only the tag, so a listing in a `text` fence is not found.
+
+Binary files (a NUL in the first 8000 bytes) are skipped and counted. Bytes
+that are not UTF-8 are replaced and the file is still read. A missing folder or
+an unreadable file is an error, not a pass.
+
 The dev profile builds `vault-formats` and `vault-core` at `opt-level = 2`, so
 debug runs of the desktop decode, decompress, light and route at near-release
 speed while the other crates keep full debug builds.
@@ -141,12 +166,15 @@ Cargo command `--locked`) runs these jobs on each push and pull request:
 - `wasm-check` (Linux): installs the `wasm32-unknown-unknown` target, runs
   `cargo xtask wasm-check` with `VAULT_REQUIRE_WASM=1`, so it can never pass by
   skipping, and runs the memory tests with `--no-default-features`.
+- `clean-room`: `cargo xtask clean-room-check`, run as
+  `cargo run --locked --package xtask -- clean-room-check`.
 - `msrv`: `cargo check --workspace --all-targets` on the `rust-version` from
   `Cargo.toml` (1.88).
 - `fuzz-check`: rustfmt over `fuzz/fuzz_targets/` and
   `cargo check --manifest-path fuzz/Cargo.toml --bins` on stable.
 - `windows-release`: a release build (`vault-platform.exe`, `asset-audit.exe`,
-  uploaded as artifacts) and the workspace tests.
+  uploaded as artifacts) and the workspace tests, with `VAULT_REQUIRE_GPU=1`,
+  so a GPU test cannot pass by skipping.
 - `macos`: build and test.
 - `supply-chain`: `cargo audit` and `cargo deny check` (policy in `deny.toml`)
   over both `Cargo.lock` and `fuzz/Cargo.lock`.
@@ -255,9 +283,44 @@ keeps these keys and **Alt+L** (and, under `preset = "enhanced"`, **Alt+V** and
 The window opens at 1280×960, or at the largest multiple of 640×480 that
 fits a smaller monitor.
 
-With no arguments the game starts from the data named in `vault-engine.toml`,
-looked for beside the executable and then in the working directory. Keys:
-`master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
+With no arguments the game starts from the data named in `vault-engine.toml`.
+A file beside the executable, then one in the working directory, wins, so a
+portable install stays put. Otherwise the file is the per-user one:
+`$XDG_CONFIG_HOME/vault-engine` or `~/.config/vault-engine` on Linux,
+`~/Library/Application Support/vault-engine` on macOS and
+`%APPDATA%\vault-engine` on Windows. Saves go to `saves/<profile>/` in the
+per-user data folder (`$XDG_DATA_HOME/vault-engine` or
+`~/.local/share/vault-engine` on Linux) unless `--save-dir` names a folder.
+If `./SAVEGAME` already holds a slot, both editions keep using the working
+directory, and nothing is moved.
+
+`sfall` and `mod_list` belong to one profile, so Fallout 2's mods never reach
+Fallout 1:
+
+```toml
+game = "fallout2"
+profile = "ettu"      # optional: the custom profile this edition runs under
+
+[profiles.fallout2]
+master_dat = "/games/fallout2/master.dat"
+sfall = true
+mod_list = "load_order.toml"
+
+[profiles.ettu]
+edition = "fallout2"  # required; a custom profile shares its edition's data
+sfall = true
+mod_list = ["mods/ettu"]
+```
+
+A custom profile inherits nothing from its edition, and path keys are refused
+in one. The old `[scripting] sfall` still reads as Fallout 2's. A top-level
+`mod_list` reads as Fallout 2's when it stands with `sfall = true`, otherwise
+as the file's `game`'s. The next commit of any kind moves both into
+`[profiles.<edition>]`. Commits edit lines in place, so comments, key order
+and unknown tables survive. The boot menu and Alt+L check the chosen game's
+profile before the running session ends, so a refusal costs nothing.
+
+Keys: `master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
 `game` (`fallout1`, the default, or `fallout2`; the `--game-profile` flag),
 `preset` (`vanilla` or `enhanced`), `scaling`, `fullscreen`, `touch_ui`
 (see [Touch UI](#touch-ui)), `debug` and `audio` (`false` keeps the audio
@@ -430,11 +493,12 @@ digest), and every world file of the gallery, each on the reference path
 and on the instanced path. The CPU executor runs everywhere. The GPU
 variants skip with `skipped: no GPU adapter` unless `VAULT_REQUIRE_GPU=1`,
 and one lock serialises their device creation. They skip the same way when
-the device is lost on its first draw, as on the software Direct3D 12 adapter
-of the Windows runners, printing the adapter and the cause. Each test process
-makes that draw once, on a device of its own. Any other failure of that draw,
-such as a shader the backend rejects, fails the tests and names the cause, so
-it cannot pass for a missing GPU.
+the device is lost on its first draw, printing the adapter and the cause.
+Each test process makes that draw once, on a device of its own. Any other
+failure of that draw, such as a shader the backend rejects, fails the tests
+and names the cause, so it cannot pass for a missing GPU. The Windows runners'
+only adapter is the software Direct3D 12 one, Microsoft Basic Render Driver,
+and CI sets `VAULT_REQUIRE_GPU=1` there.
 
 ### Launcher
 
@@ -512,7 +576,10 @@ It has three tabs and a bottom bar:
   load order's directory are written relative to it. A layer outside it is
   reported, because a load order's layers must lie inside its own directory.
   With no load order yet, Save writes `load_order.toml` beside the settings
-  and sets `mod_list = "load_order.toml"`. A `mod_list` given as an inline
+  and sets `mod_list = "load_order.toml"` for the active game, or writes
+  `load_order_<profile>.toml` when the other game already holds that file. The
+  tab follows the Game row, which waits for Save while the tab has unsaved
+  changes. A `mod_list` given as an inline
   path list in `vault-engine.toml` is shown read-only, with that explanation:
   edit it in the file, or remove it to manage a `load_order.toml` here. A load
   order that does not parse is also shown read-only, Save leaves it alone, and
@@ -1531,7 +1598,7 @@ travel iterations every 41 ms, and an encounter flashes 7 times before its map
 loads. The town map (§3.40) shows `twnmapNN.frm` with a triangle per known
 entrance (Vault 15 is `VAULTENT.MAP`, then `VAULTBUR.MAP`). A choice in the
 party's town loads its map; a choice elsewhere travels there on the world map
-(`vault-platform/src/map_preview/world.rs`, `vault_core::worldmap::screen`).
+(`crates/vault-platform/src/map_preview/world.rs`, `vault_core::worldmap::screen`).
 
 The Pip-Boy (SPEC-014 §3.41) is drawn on `pip.frm` with its companion art: the
 date and time from `numbers.frm` and `months.frm`, the vault-water note
@@ -1546,7 +1613,7 @@ Archives replays a played movie with flags `0x0B`. The Alarm Clock offers the
 `WorldHost::begin_rest`/`advance_rest` under the watch cursor; Escape stops a
 rest, and a queue interruption closes the Pip-Boy. After two idle minutes the
 screen saver runs. Closing runs `map_update_p_proc`. The `[May-improve]` safe
-rules apply (`vault-platform/src/map_preview/pipboy.rs`, `vault_core::ui::pipboy`).
+rules apply (`crates/vault-platform/src/map_preview/pipboy.rs`, `vault_core::ui::pipboy`).
 The game calendar starts at midnight on 5 December 2161 (SPEC-014 §3.1;
 `host_save::game_date`), shared by the Pip-Boy, the world map, the date
 opcodes and the save header.
@@ -1690,7 +1757,7 @@ On the local map, **I** opens the inventory and **C** the character screen
   Cancel or Escape restores the sheet saved on opening. The creation editor's
   Options SAVE, LOAD and PRINT TO FILE use the §3.43 file dialogs (`.GCD` and
   `.TXT` in the save root) with their overwrite question and messages
-  (`vault-platform/src/map_preview/character.rs`, `editor_screen.rs`;
+  (`crates/vault-platform/src/map_preview/character.rs`, `editor_screen.rs`;
   `vault_core::ui::{character, sheet}`).
 - A dialogue barter request (`gdialog_barter`) opens the SPEC-013 §3.18
   barter window (`barter.frm` under the conversation) with the dialogue's
@@ -3327,8 +3394,14 @@ Turn it on with any of these. `--sfall` wins over both files, and a replay needs
 it, because a replay reads neither:
 
 ```toml
-# vault-engine.toml, or a layer's vault-mod.toml
+# a layer's vault-mod.toml
 [scripting]
+sfall = true
+```
+
+```toml
+# vault-engine.toml
+[profiles.fallout2]
 sfall = true
 ```
 
@@ -3836,7 +3909,7 @@ answered the code takes the stated choice and comments it.
   head is `combat.msg` 1110". But §3.12 (and SPEC-014 §3.38) name a location
   `1000 + 10 × alias + location`, which is message 1000 for alias 0 and the
   head, and SPEC-014 §3.38 says messages 1000-1007 do not exist. The Fixture J
-  tests (`vault-core/src/combat_messages_tests.rs`) use alias 11, which gives
+  tests (`crates/vault-core/src/combat_messages_tests.rs`) use alias 11, which gives
   1110 "the head" as the fixture's expected text needs. Which value is
   intended?
 

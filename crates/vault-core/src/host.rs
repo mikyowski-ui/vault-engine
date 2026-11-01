@@ -54,6 +54,26 @@ pub struct AnimationSequence {
 pub(crate) fn reserve_null_string(vm: &mut Vm) -> Result<(), VmError> {
     vm.intern(b"").map(|_| ())
 }
+/// SPEC-014 §3.29: the error of a map entry hex outside the map border.
+pub(crate) fn entry_outside_border(entry: i32) -> WorldError {
+    WorldError::Invalid(format!("map entry hex {entry} is outside the map border"))
+}
+/// How many of their newest entries `WorldState::trace` and
+/// `LibraryState::sound_trace` keep at least. Both exist for tests and
+/// debugging: neither is saved, nor part of any SPEC-021 hash or oracle.
+pub(crate) const TRACE_RETAINED: usize = 4096;
+/// How far such a log may pass [`TRACE_RETAINED`] before it is cut back, so
+/// that a push costs a few moves on average and not a shift of the whole log.
+const TRACE_SLACK: usize = 512;
+/// Append `entry` to a debug log, dropping its oldest entries when it is
+/// full. It stays a plain `Vec`, for what reads it, and never passes
+/// [`TRACE_RETAINED`] + [`TRACE_SLACK`] entries.
+pub(crate) fn push_bounded<T>(log: &mut Vec<T>, entry: T) {
+    if log.len() >= TRACE_RETAINED + TRACE_SLACK {
+        log.drain(..=log.len() - TRACE_RETAINED);
+    }
+    log.push(entry);
+}
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DispatchResult {
     pub overridden: bool,
@@ -326,6 +346,10 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     }
 }
 impl<A: WorldAssets> WorldHost<A> {
+    /// Append to the world's event log, which stays bounded.
+    fn record_trace(&mut self, entry: WorldTrace) {
+        push_bounded(&mut self.world.trace, entry);
+    }
     pub fn new(world: WorldState, assets: A) -> Self {
         Self {
             world,
@@ -546,7 +570,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// `global_var` read gives -1 (SPEC-005 0x80C5), so play would go on
     /// with campaign flags reading as set.
     pub fn load_campaign(&mut self) -> Result<(), WorldError> {
-        self.world.trace.push(WorldTrace::InventoryRefresh);
+        self.record_trace(WorldTrace::InventoryRefresh);
         let gam = self
             .assets
             .gam("data/vault13.gam", GamSection::Campaign)
@@ -702,13 +726,13 @@ impl<A: WorldAssets> WorldHost<A> {
         self.assets.set_game_profile(game);
     }
     pub fn load_map(&mut self, path: &str) -> Result<(), WorldError> {
-        self.world.trace.push(WorldTrace::LoadStep(1));
+        self.record_trace(WorldTrace::LoadStep(1));
         self.leave_map()?;
         self.teardown_map()?;
         // SPEC-008 §3.10 / SPEC-013 §3.22: loading first starts the
         // background track `wind2`, looping, until the city music starts.
         self.request_music(crate::worldmap::LOADING_MUSIC);
-        self.world.trace.push(WorldTrace::LoadStep(2));
+        self.record_trace(WorldTrace::LoadStep(2));
         let (map, mut saved, mut load_error, file) = match self.read_map(path) {
             Ok((map, saved, file)) => (map, saved, None, file),
             Err(error) => (self.empty_map(), false, Some(error), String::new()),
@@ -718,7 +742,7 @@ impl<A: WorldAssets> WorldHost<A> {
         for message in &map.diagnostics {
             self.world.diagnostic(message.clone());
         }
-        self.world.trace.push(WorldTrace::LoadStep(3));
+        self.record_trace(WorldTrace::LoadStep(3));
         self.world.import_map(map, &self.assets)?;
         self.world.unloaded = false;
         // SPEC-006 §3.5 step 3: a fresh map's critters, whose stored -1
@@ -727,7 +751,7 @@ impl<A: WorldAssets> WorldHost<A> {
         if saved {
             self.world.resolve_last_attackers();
         }
-        self.world.trace.push(WorldTrace::LoadStep(4));
+        self.record_trace(WorldTrace::LoadStep(4));
         self.world.elevation = self.world.map.header.entry_elevation;
         // SPEC-014 §3.29: an entry hex outside the map border fails the load.
         let entry = self.world.map.header.entry_hex;
@@ -735,16 +759,14 @@ impl<A: WorldAssets> WorldHost<A> {
             // SPEC-006 §3.5 [May-improve] safe rule: a map that cannot be
             // entered is reported, and the engine is left on the reset empty
             // map, which still goes through the shared post-load stages.
-            load_error = Some(WorldError::Invalid(format!(
-                "map entry hex {entry} is outside the map border"
-            )));
+            load_error = Some(entry_outside_border(entry));
             self.world.import_map(self.empty_map(), &self.assets)?;
             self.world.restoring = false;
             saved = false;
             self.world.elevation = self.world.map.header.entry_elevation;
             self.world.set_view_center(self.world.map.header.entry_hex);
         }
-        self.world.trace.push(WorldTrace::LoadStep(5));
+        self.record_trace(WorldTrace::LoadStep(5));
         self.world.set_ambient(65536);
         let (hex, elevation, orientation) = (
             self.world.camera_hex,
@@ -812,7 +834,7 @@ impl<A: WorldAssets> WorldHost<A> {
             .then(|| crate::persistence::saved_map_name(file.as_bytes()))
             .flatten();
         if !self.world.restoring {
-            self.world.trace.push(WorldTrace::InventoryRefresh);
+            self.record_trace(WorldTrace::InventoryRefresh);
             let name = &self.world.map.header.name;
             let name = &name[..name.iter().position(|b| *b == 0).unwrap_or(name.len())];
             if let Ok(name) = std::str::from_utf8(name) {
@@ -828,7 +850,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 }
             }
         }
-        self.world.trace.push(WorldTrace::LoadStep(6));
+        self.record_trace(WorldTrace::LoadStep(6));
         self.world.scripts_enabled = true;
         let fixed = i32::from(!self.world.restoring);
         if let Some(file) = self.world.map.header.map_script_index() {
@@ -866,7 +888,7 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.spatial_enabled = true;
             self.report_load_dispatch(result);
         }
-        self.world.trace.push(WorldTrace::LoadStep(7));
+        self.record_trace(WorldTrace::LoadStep(7));
         // SPEC-006 §3.5 step 7 / SPEC-013 §3.22: the party is recovered
         // around the player's final entry placement, its script records
         // after the map's own critter records.
@@ -880,7 +902,7 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.world.rebuild_lighting();
         self.world.background_enabled = true;
-        self.world.trace.push(WorldTrace::LoadStep(8));
+        self.record_trace(WorldTrace::LoadStep(8));
         for script in self.world.script_ids() {
             let result = self.dispatch(ScriptRequest {
                 script,
@@ -910,9 +932,9 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.world.spatial_enabled = true;
         self.sfall_global_event(b"map_enter_p_proc");
-        self.world.trace.push(WorldTrace::LoadStep(9));
+        self.record_trace(WorldTrace::LoadStep(9));
         self.map_update()?;
-        self.world.trace.push(WorldTrace::LoadStep(10));
+        self.record_trace(WorldTrace::LoadStep(10));
         self.world.rendering_enabled = true;
         self.world.scrolling_enabled = true;
         self.world.enqueue_map_timers()?;
@@ -985,9 +1007,17 @@ impl<A: WorldAssets> WorldHost<A> {
     /// (the master patch root) before the assets. Returns the map, whether
     /// it came from the working set, and the file name it was opened under.
     fn read_map(&self, path: &str) -> Result<(vault_formats::MapFile, bool, String), WorldError> {
+        self.read_map_in(&self.world.persistence.maps, path)
+    }
+    /// [`Self::read_map`] with `working` as the working map set.
+    pub(crate) fn read_map_in(
+        &self,
+        working: &BTreeMap<String, Vec<u8>>,
+        path: &str,
+    ) -> Result<(vault_formats::MapFile, bool, String), WorldError> {
         let file = crate::persistence::requested_file_name(path);
         let saved = crate::persistence::saved_probe(&file).unwrap_or_else(|| file.clone());
-        if let Some(bytes) = self.world.persistence.maps.get(&saved) {
+        if let Some(bytes) = working.get(&saved) {
             let lookup = |pid| {
                 self.assets
                     .prototype(pid)
@@ -1155,7 +1185,7 @@ impl<A: WorldAssets> WorldHost<A> {
                 pending: false,
             });
         }
-        self.world.trace.push(WorldTrace::Script {
+        self.record_trace(WorldTrace::Script {
             id: instance.id,
             event: request.event,
             source: request.source,
@@ -1459,7 +1489,7 @@ impl<A: WorldAssets> WorldHost<A> {
             if count > 100_000 {
                 return Err(WorldError::Invalid("queue dispatch limit exceeded".into()));
             }
-            self.world.trace.push(WorldTrace::QueueFired(event.id));
+            self.record_trace(WorldTrace::QueueFired(event.id));
             let result = self.handle_event(event)?;
             if result != 0 {
                 return Ok(result);
@@ -2733,5 +2763,49 @@ impl<A: WorldAssets> WorldHost<A> {
             vm.value_stack.push(value)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CharacterSheet, test_support::TestAssets};
+
+    #[test]
+    fn a_debug_log_keeps_its_newest_entries_within_the_bound() {
+        let mut log = Vec::new();
+        for entry in 0..TRACE_RETAINED {
+            push_bounded(&mut log, entry);
+        }
+        assert_eq!(log.len(), TRACE_RETAINED);
+        assert_eq!(log[0], 0, "nothing goes before the bound");
+        for entry in TRACE_RETAINED..100_000 {
+            push_bounded(&mut log, entry);
+            assert!(log.len() <= TRACE_RETAINED + TRACE_SLACK);
+            assert!(log.len() >= TRACE_RETAINED);
+            assert_eq!(log[log.len() - TRACE_RETAINED], entry + 1 - TRACE_RETAINED);
+            assert_eq!(log.last(), Some(&entry));
+        }
+    }
+    /// The pushes of a long play session: queue events through the real pass.
+    #[test]
+    fn the_world_event_log_stays_bounded_over_a_long_session() {
+        let world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+        let mut host = WorldHost::new(world, TestAssets::all_art());
+        let now = host.world.clock.ticks;
+        for _ in 0..3 * TRACE_RETAINED {
+            host.world
+                .queue
+                .insert(now, 0, 0, EventKind::Other(9))
+                .unwrap();
+            host.process_queue().unwrap();
+        }
+        let fired = host
+            .world
+            .trace
+            .iter()
+            .filter(|entry| matches!(entry, WorldTrace::QueueFired(_)))
+            .count();
+        assert!((TRACE_RETAINED..=TRACE_RETAINED + TRACE_SLACK).contains(&fired));
     }
 }

@@ -7,6 +7,7 @@
 use crate::config::game_name;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     fmt, fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -382,6 +383,88 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A commit applies to memory in one step after its checks, so a panic
     // elsewhere leaves nothing half done.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The engine's folder under each per-user root.
+pub const APP_FOLDER: &str = "vault-engine";
+
+/// The host's conventions for per-user folders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostOs {
+    Windows,
+    MacOs,
+    /// Linux and the other Unixes: the XDG base directories.
+    Unix,
+}
+
+impl HostOs {
+    pub const fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::Unix
+        }
+    }
+}
+
+/// An environment lookup, passed in so that a test sets no variable.
+pub type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
+
+/// The host's own environment.
+fn host_env(name: &str) -> Option<OsString> {
+    std::env::var_os(name)
+}
+
+/// The engine's folder under the per-user root: on a Unix `xdg` when it names
+/// an absolute path (the base directory rules ignore any other) else
+/// `$HOME/unix_home`; on macOS `~/Library/Application Support`; on Windows
+/// `%APPDATA%`. `None` with no such variable set.
+fn user_root(os: HostOs, env: Env<'_>, xdg: &str, unix_home: &str) -> Option<PathBuf> {
+    let folder = |name: &str| {
+        env(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    let root = match os {
+        HostOs::Windows => folder("APPDATA").or_else(|| {
+            let home = folder("USERPROFILE")?;
+            Some(home.join("AppData").join("Roaming"))
+        })?,
+        HostOs::MacOs => folder("HOME")?.join("Library").join("Application Support"),
+        HostOs::Unix => folder(xdg)
+            .filter(|path| path.has_root())
+            .or_else(|| Some(folder("HOME")?.join(unix_home)))?,
+    };
+    Some(root.join(APP_FOLDER))
+}
+
+/// The settings folder: `~/.config/vault-engine` and its equivalents.
+pub fn config_root(os: HostOs, env: Env<'_>) -> Option<PathBuf> {
+    user_root(os, env, "XDG_CONFIG_HOME", ".config")
+}
+
+/// The data folder: `~/.local/share/vault-engine` and its equivalents.
+pub fn data_root(os: HostOs, env: Env<'_>) -> Option<PathBuf> {
+    user_root(os, env, "XDG_DATA_HOME", ".local/share")
+}
+
+/// [`config_root`] on this host.
+pub fn user_config_root() -> Option<PathBuf> {
+    config_root(HostOs::current(), &host_env)
+}
+
+/// [`data_root`] on this host.
+pub fn user_data_root() -> Option<PathBuf> {
+    data_root(HostOs::current(), &host_env)
+}
+
+/// The writable data folder of `profile` under the data folder `data`. Its
+/// slots are `SAVEGAME/` inside it, as in any save root
+/// ([`FsStorage::at_save_root`]).
+pub fn profile_save_root(data: &Path, profile: &str) -> PathBuf {
+    data.join("saves").join(profile)
 }
 
 /// The settings or load-order file at `path` as a `config` key of its
@@ -948,3 +1031,96 @@ impl<S: KvStore> StorageBackend for KvStorage<S> {
 #[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+
+    fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        }
+    }
+
+    #[test]
+    fn unix_roots_honour_the_xdg_variables_and_fall_back_to_home() {
+        let home = env(&[("HOME", "/home/a")]);
+        assert_eq!(
+            config_root(HostOs::Unix, &home),
+            Some(PathBuf::from("/home/a/.config/vault-engine"))
+        );
+        assert_eq!(
+            data_root(HostOs::Unix, &home),
+            Some(PathBuf::from("/home/a/.local/share/vault-engine"))
+        );
+        let xdg = env(&[
+            ("HOME", "/home/a"),
+            ("XDG_CONFIG_HOME", "/xdg/config"),
+            ("XDG_DATA_HOME", "/xdg/data"),
+        ]);
+        assert_eq!(
+            config_root(HostOs::Unix, &xdg),
+            Some(PathBuf::from("/xdg/config/vault-engine"))
+        );
+        assert_eq!(
+            data_root(HostOs::Unix, &xdg),
+            Some(PathBuf::from("/xdg/data/vault-engine"))
+        );
+        // The base directory rules ignore a relative value; an empty one is
+        // unset.
+        let odd = env(&[
+            ("HOME", "/home/a"),
+            ("XDG_CONFIG_HOME", "relative"),
+            ("XDG_DATA_HOME", ""),
+        ]);
+        assert_eq!(
+            config_root(HostOs::Unix, &odd),
+            Some(PathBuf::from("/home/a/.config/vault-engine"))
+        );
+        assert_eq!(
+            data_root(HostOs::Unix, &odd),
+            Some(PathBuf::from("/home/a/.local/share/vault-engine"))
+        );
+        assert_eq!(config_root(HostOs::Unix, &env(&[])), None);
+        assert_eq!(data_root(HostOs::Unix, &env(&[("HOME", "")])), None);
+    }
+
+    #[test]
+    fn macos_and_windows_use_their_own_folders() {
+        let mac = env(&[("HOME", "/Users/a"), ("XDG_CONFIG_HOME", "/xdg")]);
+        let support = Path::new("/Users/a/Library/Application Support/vault-engine");
+        assert_eq!(config_root(HostOs::MacOs, &mac).as_deref(), Some(support));
+        assert_eq!(data_root(HostOs::MacOs, &mac).as_deref(), Some(support));
+        let roaming = PathBuf::from(r"C:\Users\a\AppData\Roaming");
+        let windows = env(&[("APPDATA", r"C:\Users\a\AppData\Roaming")]);
+        assert_eq!(
+            config_root(HostOs::Windows, &windows),
+            Some(roaming.join(APP_FOLDER))
+        );
+        let home = PathBuf::from(r"C:\Users\a");
+        let fallback = env(&[("USERPROFILE", r"C:\Users\a")]);
+        assert_eq!(
+            data_root(HostOs::Windows, &fallback),
+            Some(home.join("AppData").join("Roaming").join(APP_FOLDER))
+        );
+        assert_eq!(config_root(HostOs::Windows, &env(&[])), None);
+    }
+
+    #[test]
+    fn a_profile_has_its_own_save_root_with_slots_under_savegame() {
+        let root = profile_save_root(Path::new("/data/vault-engine"), "ettu");
+        assert_eq!(root, Path::new("/data/vault-engine/saves/ettu"));
+        let temp = tempfile::tempdir().unwrap();
+        let root = profile_save_root(temp.path(), "fallout2");
+        FsStorage::at_save_root(&root)
+            .commit(
+                Namespace::Savegame,
+                &[StorageOp::put("SLOT01/SAVE.DAT", &b"x"[..])],
+            )
+            .unwrap();
+        assert!(root.join("SAVEGAME/SLOT01/SAVE.DAT").is_file());
+    }
+}

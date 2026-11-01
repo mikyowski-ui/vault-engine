@@ -18,6 +18,12 @@ const FORMAT_REVISION: u32 = 2;
 /// The revision the engine no longer writes, whose header stops at offset
 /// 12. It still loads (Decision D-32).
 const OLD_REVISION: u32 = 1;
+/// The longest list `create_array`, `temp_array` and `resize_array` will
+/// make (Decision D-60). Without it one word could ask for tens of GiB.
+pub const MAX_LIST_LENGTH: i32 = 1 << 20;
+/// The last ID a script can hold: IDs are ints (§5.2), so a higher one would
+/// reach it as a negative number, which names no array.
+const LAST_ID: u32 = i32::MAX as u32;
 
 /// A list holds values; a map holds key and value pairs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,9 +125,14 @@ impl ArrayStore {
     pub fn exists(&self, id: u32) -> bool {
         self.arrays.contains_key(&id)
     }
+    /// A new array under the next ID, or 0 with nothing made once the IDs
+    /// have run out: 0 is never an ID, and an ID is never reused (§5.2).
     fn insert(&mut self, elements: Elements, storage: Storage) -> i32 {
         let id = self.next_id;
-        self.next_id += 1;
+        if id > LAST_ID {
+            return 0;
+        }
+        self.next_id = id + 1;
         self.arrays.insert(
             id,
             SfallArray {
@@ -133,16 +144,17 @@ impl ArrayStore {
         self.last_created = Some(id);
         id as i32
     }
-    /// `create_array` or `temp_array` (§5.4): `size >= 0` makes a list of
-    /// that many int 0 values, whatever `flags` says; `size == -1` makes a
-    /// map, a lookup map when `flags == 2`. Anything else makes no array.
+    /// `create_array` or `temp_array` (§5.4): a `size` from 0 to
+    /// [`MAX_LIST_LENGTH`] makes a list of that many int 0 values, whatever
+    /// `flags` says; `size == -1` makes a map, a lookup map when `flags == 2`.
+    /// Anything else makes no array, takes no ID and gives 0.
     pub fn create(&mut self, size: i32, flags: i32, storage: Storage) -> i32 {
         let elements = match size {
             -1 => Elements::Map {
                 lookup: flags == 2,
                 pairs: Vec::new(),
             },
-            size if size >= 0 => Elements::List(vec![SfallValue::Int(0); size as usize]),
+            0..=MAX_LIST_LENGTH => Elements::List(vec![SfallValue::Int(0); size as usize]),
             _ => return 0,
         };
         self.insert(elements, storage)
@@ -257,7 +269,8 @@ impl ArrayStore {
         }
     }
     /// `resize_array` (§5.4). `false` for a size that names no operation,
-    /// and `draw(i)` gives a uniform integer in 0 to i for a shuffle.
+    /// or that would grow a list past [`MAX_LIST_LENGTH`], and `draw(i)`
+    /// gives a uniform integer in 0 to i for a shuffle.
     pub fn resize<E>(
         &mut self,
         id: i32,
@@ -270,8 +283,10 @@ impl ArrayStore {
         let length = array.len();
         match (size, &mut array.elements) {
             (0.., elements) => {
+                let limit = MAX_LIST_LENGTH as usize;
                 let size = size as usize;
                 match elements {
+                    Elements::List(_) if size > length && size > limit => return Ok(false),
                     Elements::List(values) if size > length => {
                         values.resize(size, SfallValue::Int(0));
                     }
@@ -461,6 +476,8 @@ pub enum SidecarError {
     Option(u8),
     #[error("{0} is not a sfall global's key")]
     GlobalKey(String),
+    #[error("next array ID {0} is 0, past the last ID, or not above every saved ID")]
+    NextId(u32),
 }
 
 struct Reader<'a> {
@@ -500,9 +517,17 @@ impl<'a> Reader<'a> {
 /// A parsed sidecar: the store as saved, its header's fields, and the global
 /// records in order.
 pub type Sidecar = (ArrayStore, Header, Vec<(SfallValue, SfallValue)>);
+/// Whether a saved next array ID can continue §5.2's series: never 0, at most
+/// one past [`LAST_ID`], where the IDs have run out, and above every saved ID,
+/// because each later ID is taken from it in turn. `arrays` is sorted by ID.
+fn valid_next_id(next_id: u32, arrays: &BTreeMap<u32, SfallArray>) -> bool {
+    (1..=LAST_ID + 1).contains(&next_id)
+        && arrays.last_key_value().is_none_or(|(id, _)| *id < next_id)
+}
 /// Parse a whole `VAULTSFL.DAT`, before any state changes (§5.8). The tag
 /// and the revision come first, and only then is a layout chosen. A revision
-/// 1 file has no fields of [`Header`], so they take their defaults.
+/// 1 file has no fields of [`Header`], so they take their defaults. Both
+/// revisions' next array ID is checked last, against the arrays it follows.
 pub fn parse_sidecar(bytes: &[u8]) -> Result<Sidecar, SidecarError> {
     let mut reader = Reader { bytes, at: 0 };
     if reader.take(4).map_err(|_| SidecarError::Tag)? != SIDECAR_TAG {
@@ -575,6 +600,9 @@ pub fn parse_sidecar(bytes: &[u8]) -> Result<Sidecar, SidecarError> {
     let left = bytes.len() - reader.at;
     if left != 0 {
         return Err(SidecarError::Trailing(left));
+    }
+    if !valid_next_id(next_id, &arrays) {
+        return Err(SidecarError::NextId(next_id));
     }
     let store = ArrayStore {
         arrays,

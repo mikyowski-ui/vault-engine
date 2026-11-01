@@ -29,16 +29,17 @@ Authorized by the project owner on 2026-10-25.
 - **Recording.** `PROVENANCE.md` records which specs came from Team A.
 
 ## Workspace Architecture
-This Cargo workspace consists of 7 core crates plus CLI tools:
-1. `crates/vault-formats`: VFS (`Vfs` trait, `LocalDirProvider`, `DatProvider`), DAT archives and LZSS, and parsers/writers for `.pal`, `.frm`/`.fr0`–`.fr5`, `.lst`, `.fon`, `.aaf`, `.msg`, `.pro`, `.map`, `.gam`, `.gcd`, `SAVE.DAT`, `AUTOMAP.DB`, `ai.txt`, `.acm`, `.mve`, movie fade `.cfg`, `.sve`, `.rix`, credits and `fallout.cfg`, plus the FID codec, sound-name builders, and hex geometry.
-2. `crates/vault-vm`: `.INT` loader (`IntProgram`), stack-based bytecode virtual machine, and opcode dispatcher.
-3. `crates/vault-core`: Deterministic world state and host extensions, generational handles (`slotmap`), routing, animation sequences, turn/AP combat and combat AI, roofs, click policy, world travel, and legacy save slots.
-4. `crates/vault-guidance`: Pip-Boy holodisk lists and pages and quest status (SPEC-008 §3.8), derived from campaign globals and messages.
-5. `crates/vault-render`: 256-color indexed palette shaders, sprite batching, hex-tile camera, and bitmap font rendering via `wgpu`.
+This Cargo workspace has 10 packages: 7 core crates, 1 dev-only fixture crate and 2 CLI tools. `fuzz/` is a separate workspace with its own `Cargo.lock`, excluded from this one.
+1. `crates/vault-formats`: VFS (`Vfs` trait, `LocalDirProvider`, `DatProvider`, `Dat2Provider`, `MemoryProvider`, and `LayeredVfs` for mod layers), DAT and DAT2 archives with LZSS and zlib, and parsers/writers for `.pal`, `.frm`/`.fr0`–`.fr5`, `.lst`, `.fon`, `.aaf`, `.msg`, `.pro`, `.map`, `.gam`, `.gcd`, `SAVE.DAT`, `AUTOMAP.DB`, `ai.txt`, `.acm`, `.mve`, movie fade `.cfg`, `.sve`, `.rix`, `.lip`, credits, `fallout.cfg`, the Fallout 2 tables and saves, and `vault-mod.toml` manifests, plus the FID codec, sound-name builders, and hex geometry. The file-backed code sits behind the default `host-fs` feature (SPEC-023).
+2. `crates/vault-vm`: `.INT` loader (`IntProgram`), stack-based bytecode virtual machine, opcode dispatcher, the per-game word sets (`WordSet`), and the sfall words and arrays (SPEC-024b).
+3. `crates/vault-core`: Deterministic world state and host extensions, state and combat hashes (SPEC-021), generational handles (`slotmap`), routing, animation sequences, turn/AP combat and combat AI, roofs, click policy, world travel, legacy save slots, the Fallout 2 party, sfall and mod script hooks, and UI state (`ui`, SPEC-020).
+4. `crates/vault-guidance`: Pip-Boy holodisk lists and pages and quest status (SPEC-008 §3.8), derived from campaign globals and messages, and the Automaps page grouping.
+5. `crates/vault-render`: 256-color indexed palette shaders, sprite batching, hex-tile camera, and bitmap font rendering via `wgpu`, with the CPU reference path and the GPU-instanced path that must match it (SPEC-022).
 6. `crates/vault-debug`: Headless VM stepper and instruction trace, GVAR/MVAR/LVAR watches, and map object/critter inspectors with plain-text rendering for overlays.
-7. `crates/vault-platform`: Desktop windowing (`winit`), input mapping, audio output, and main loop.
-8. `tools/xtask` & `tools/asset-audit`: CLI verification and local corpus auditing tools.
-9. `crates/vault-fixtures` (dev-only): the dependency-free synthetic test fixture builders from `tests/fixtures/`, compiled once and shared as a dev-dependency (a normal dependency of `xtask`).
+7. `crates/vault-platform`: Desktop shell: windowing (`winit`), input mapping, audio output (`cpal`, the default `audio` feature), and main loop, with `SessionRuntime` (SPEC-020), the launcher and boot menu, touch UI, portable storage (`StorageBackend`, SPEC-023), replays, mod layers, and the documentation gallery.
+8. `crates/vault-fixtures` (dev-only): the dependency-free synthetic test fixture builders from `tests/fixtures/`, compiled once and shared as a dev-dependency (a normal dependency of `xtask`).
+9. `tools/xtask`: the gate runner (`check`, `wasm-check`), `clean-room-check`, the synthetic fixture writer, `export-mod` and `capture-gallery`.
+10. `tools/asset-audit`: local corpus counts, format validation and audits.
 
 ## Engineering Gates
 Every PR must pass (`cargo xtask check` runs all four):

@@ -2,8 +2,15 @@
 //! the math bits and the string vectors of §7.2.
 use crate::extensions::{ENHANCED_RANGE, opcode_in};
 use crate::sfall::*;
-use crate::stack_check::Table;
-use crate::{WordSet, sfall};
+use crate::sfall_arrays::{
+    ArrayStore, Header, MAX_LIST_LENGTH, SIDECAR_TAG, SidecarError, Storage, parse_sidecar,
+    write_stream,
+};
+use crate::stack_check::{
+    Finding, Image, MAX_STEPS, MIN_STEPS, STEPS_PER_INSTRUCTION, Table, analyse, analyse_unit,
+    check, summary,
+};
+use crate::{IntProgram, WordSet, sfall};
 
 const ORACLE: &str = include_str!("../../../oracle/SPEC-024/sfall-opcodes.tsv");
 
@@ -420,4 +427,241 @@ fn power_and_div_follow_section_4_7() {
     assert_eq!(divide(&int(-1), &float(2.0)).unwrap(), float(-0.5));
     assert!(divide(&int(1), &int(0)).is_err());
     assert!(divide(&float(1.0), &float(0.0)).is_err());
+}
+
+#[test]
+fn decision_d60_a_list_past_the_cap_is_not_created() {
+    let mut store = ArrayStore::default();
+    for size in [i32::MAX, MAX_LIST_LENGTH + 1] {
+        for storage in [Storage::Permanent, Storage::Temporary] {
+            assert_eq!(store.create(size, 0, storage), 0, "{size}");
+        }
+    }
+    assert!(store.is_empty());
+    assert_eq!(store.next_id(), 1, "a refusal takes no ID");
+    // A refusal is no creation, so `arrayexpr` keeps its last array.
+    let first = store.create(1, 0, Storage::Permanent);
+    assert_eq!(store.create(i32::MAX, 0, Storage::Permanent), 0);
+    store.expression(int(0), int(5));
+    assert_eq!(store.get(first, &int(0)), int(5));
+    // The cap itself is a size like any other.
+    let largest = store.create(MAX_LIST_LENGTH, 2, Storage::Temporary);
+    assert_eq!(store.len(largest), 1 << 20);
+    // A map has no size to refuse, and -2 stays refused.
+    assert_ne!(store.create(-1, 0, Storage::Permanent), 0);
+    assert_eq!(store.create(-2, 0, Storage::Permanent), 0);
+}
+
+#[test]
+fn decision_d60_a_resize_past_the_cap_changes_nothing() {
+    fn resize(store: &mut ArrayStore, id: i32, size: i32) -> bool {
+        store.resize(id, size, |_| Ok::<_, ()>(0)).unwrap()
+    }
+    let mut store = ArrayStore::default();
+    let list = store.create(2, 0, Storage::Permanent);
+    store.set(list, int(1), int(7));
+    for size in [i32::MAX, MAX_LIST_LENGTH + 1] {
+        assert!(!resize(&mut store, list, size), "names no operation");
+        assert_eq!(store.len(list), 2);
+        assert_eq!(store.get(list, &int(1)), int(7));
+    }
+    assert!(resize(&mut store, list, MAX_LIST_LENGTH));
+    assert_eq!(store.len(list), 1 << 20);
+    assert_eq!(store.get(list, &int(1)), int(7));
+    assert!(resize(&mut store, list, 3), "a shrink is always allowed");
+    assert_eq!(store.len(list), 3);
+    // Above its length a map changes nothing, as ever, with no diagnostic.
+    let map = store.create(-1, 0, Storage::Permanent);
+    assert!(resize(&mut store, map, i32::MAX));
+    assert_eq!(store.len(map), 0);
+}
+
+/// A sidecar of `revision` whose one saved array is #3, next ID 4, with the
+/// next ID then replaced by `next_id`.
+fn sidecar_with_next_id(revision: u32, next_id: Option<u32>) -> Vec<u8> {
+    let mut store = ArrayStore::default();
+    for _ in 0..3 {
+        store.create(1, 0, Storage::Permanent);
+    }
+    store.save(SfallValue::text("kept"), 3);
+    let mut bytes = write_stream(SIDECAR_TAG, &store, Header::default(), &[], true);
+    assert_eq!(bytes[8..12], 4u32.to_le_bytes());
+    if revision == 1 {
+        // Revision 1's header stops at offset 12 (§5.8).
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        bytes.drain(12..24);
+    }
+    if let Some(next_id) = next_id {
+        bytes[8..12].copy_from_slice(&next_id.to_le_bytes());
+    }
+    bytes
+}
+
+#[test]
+fn a_saved_next_array_id_must_continue_the_series() {
+    for revision in [1, 2] {
+        let parsed = |next_id| {
+            parse_sidecar(&sidecar_with_next_id(revision, Some(next_id))).map(|(store, ..)| store)
+        };
+        // An untouched sidecar loads as before.
+        let bytes = sidecar_with_next_id(revision, None);
+        let (store, ..) = parse_sidecar(&bytes).unwrap();
+        assert_eq!(store.next_id(), 4);
+        assert!(store.exists(3));
+        // Never 0; never an ID held; never below one, which the series would
+        // reach; never past what a script can hold, up to u32::MAX.
+        for next_id in [0, 1, 2, 3, 0x8000_0001, u32::MAX - 1, u32::MAX] {
+            assert_eq!(
+                parsed(next_id),
+                Err(SidecarError::NextId(next_id)),
+                "revision {revision}"
+            );
+        }
+        assert_eq!(parsed(5).unwrap().next_id(), 5);
+    }
+    // With nothing saved, any start in the series will do.
+    let empty = write_stream(
+        SIDECAR_TAG,
+        &ArrayStore::default(),
+        Header::default(),
+        &[],
+        true,
+    );
+    assert_eq!(parse_sidecar(&empty).unwrap().0.next_id(), 1);
+    let mut zero = empty;
+    zero[8..12].fill(0);
+    assert_eq!(parse_sidecar(&zero), Err(SidecarError::NextId(0)));
+}
+
+#[test]
+fn the_last_array_id_stops_creation_and_the_save_still_loads() {
+    let bytes = sidecar_with_next_id(2, Some(i32::MAX as u32));
+    let (mut store, ..) = parse_sidecar(&bytes).unwrap();
+    assert_eq!(store.create(0, 0, Storage::Permanent), i32::MAX);
+    // The IDs have run out: no array, no reused ID, and no overflow.
+    assert_eq!(store.next_id(), 0x8000_0000);
+    assert_eq!(store.create(0, 0, Storage::Permanent), 0);
+    assert_eq!(store.temp_list(vec![int(1)]), 0);
+    assert_eq!(store.map_of(Vec::new(), Storage::Permanent), 0);
+    assert_eq!(store.next_id(), 0x8000_0000);
+    assert_eq!(store.arrays().len(), 2);
+    // What the engine can reach, it can write and load back.
+    let saved = write_stream(SIDECAR_TAG, &store, Header::default(), &[], true);
+    assert_eq!(parse_sidecar(&saved).unwrap().0.next_id(), 0x8000_0000);
+}
+
+/// Code at address `start` that leaves `depth` host results, then runs a
+/// loop of `no_ops` no-ops that drops one result per pass. Each shallower
+/// arrival at the head explores the loop again, until the discard underflows.
+fn shrinking_loop(depth: usize, no_ops: usize, start: u32) -> Vec<u8> {
+    let mut code = [0x80, 0xbc].repeat(depth);
+    let head = start + code.len() as u32;
+    code.extend([0x80, 0x00].repeat(no_ops));
+    code.extend([0x80, 0x1a, 0xc0, 0x01]);
+    code.extend(head.to_be_bytes());
+    code.extend([0x80, 0x04]);
+    code
+}
+
+/// [`shrinking_loop`] as a bare procedure body, after its frame word.
+fn looping_body(depth: usize, no_ops: usize) -> Image {
+    let code = [vec![0x80, 0x2b], shrinking_loop(depth, no_ops, 2)].concat();
+    Image::body(&code, 0)
+}
+
+fn findings(report: &crate::stack_check::UnitReport) -> Vec<(Finding, u16)> {
+    report.findings.clone()
+}
+
+#[test]
+fn a_cyclic_program_stops_at_its_step_budget_with_one_answer() {
+    let table = Table::new(WordSet::FALLOUT1);
+    // Within the budget, the loop ends as §8.2 says it does.
+    let small = looping_body(20, 20);
+    let report = analyse_unit(&small, &table, small.units[0]);
+    assert_eq!(findings(&report), [(Finding::Underflow, 0x801a)]);
+    // 30 passes of 10,003 steps overrun the floor, and the unit stops.
+    let large = looping_body(30, 10_000);
+    assert_eq!(large.step_budget(), MIN_STEPS);
+    let first = analyse(&large, &table);
+    assert_eq!(findings(&first[0]), [(Finding::StepBudget, 0)]);
+    // Steps, not time: a second run agrees, here as a unit on its own.
+    let alone = analyse_unit(&large, &table, large.units[0]);
+    assert_eq!(findings(&alone), findings(&first[0]));
+}
+
+#[test]
+fn a_program_over_budget_is_refused_by_the_load_check() {
+    use vault_fixtures::state::{program, returning};
+    // The jump needs the body's address, so parse once to learn it. The body
+    // is `main`'s successor, and starts with `returning`'s frame word.
+    let build = |body: u32| {
+        let code = shrinking_loop(30, 10_000, body + 2);
+        program(&[], &[(b"start".as_slice(), returning(code))])
+    };
+    let every = WordSet {
+        words: 0x8000..=0xffff,
+        mods: false,
+    };
+    let parsed = |image: &[u8]| IntProgram::parse_in(image, &every, false).unwrap();
+    let body = parsed(&build(0)).procedures()[1].body;
+    let hostile = parsed(&build(body));
+    let table = Table::new(WordSet::FALLOUT1);
+    let found = check("hostile.int", &hostile, &table, &[]);
+    assert_eq!(summary(&found), "step budget x1");
+    assert_eq!(found, check("hostile.int", &hostile, &table, &[]));
+}
+
+/// A body of `count` instructions that run straight through.
+fn straight_line(count: usize) -> Image {
+    let mut code = vec![0x80, 0x2b];
+    code.extend([0x80, 0x00].repeat(count - 2));
+    code.extend([0x80, 0x1c]);
+    Image::body(&code, 0)
+}
+
+#[test]
+fn the_step_budget_is_shared_by_a_programs_units() {
+    // 16 passes of 20,000 instructions spend the budget exactly: all 16 are
+    // clean, and each of the other 24 reports that it was not finished.
+    let mut image = straight_line(20_000);
+    assert_eq!(image.step_budget(), 20_000 * STEPS_PER_INSTRUCTION);
+    image.units = vec![image.units[0]; 40];
+    let table = Table::new(WordSet::FALLOUT1);
+    let reports = analyse(&image, &table);
+    assert_eq!(reports.len(), 40);
+    assert!(
+        reports[..16]
+            .iter()
+            .all(|report| report.findings.is_empty())
+    );
+    for report in &reports[16..] {
+        assert_eq!(findings(report), [(Finding::StepBudget, 0)]);
+    }
+    // One such unit on its own is clean.
+    assert!(
+        analyse_unit(&image, &table, image.units[0])
+            .findings
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_step_budget_scales_with_the_code_between_its_limits() {
+    let per = STEPS_PER_INSTRUCTION as usize;
+    assert_eq!(straight_line(2).step_budget(), MIN_STEPS);
+    let floor = MIN_STEPS as usize / per;
+    assert_eq!(straight_line(floor).step_budget(), MIN_STEPS);
+    assert_eq!(
+        straight_line(floor + 1).step_budget(),
+        MIN_STEPS + STEPS_PER_INSTRUCTION
+    );
+    let ceiling = MAX_STEPS as usize / per;
+    assert_eq!(straight_line(ceiling).step_budget(), MAX_STEPS);
+    assert_eq!(straight_line(ceiling + 1).step_budget(), MAX_STEPS);
+    // A clean program past the floor still passes: a flat budget would
+    // refuse it for its size alone.
+    let long = straight_line(MIN_STEPS as usize + 50_000);
+    let table = Table::new(WordSet::FALLOUT1);
+    assert!(analyse(&long, &table)[0].findings.is_empty());
 }

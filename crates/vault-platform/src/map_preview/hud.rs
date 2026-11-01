@@ -44,13 +44,16 @@ pub(crate) struct Counter {
     pub roll: Option<Roll>,
 }
 impl Counter {
-    /// Advance to `now` toward `value`; returns whether the drawing changed.
+    /// Advance to `now` toward `value`, clamped first (§3.21), so `shown`
+    /// is the previous value P and a change the counter cannot show does
+    /// not roll. Returns whether the drawing changed.
     fn tick(
         &mut self,
         now: u64,
         value: i32,
         segments: impl Fn(i32, bar::Band) -> Vec<(i32, i32, bar::Band)>,
     ) -> bool {
+        let value = bar::counter_value(value);
         if let Some(roll) = &mut self.roll {
             let mut changed = false;
             while now >= roll.next {
@@ -425,7 +428,14 @@ impl MapPreview {
         let hp = self.host.world.hit_points(player).unwrap_or(0);
         let max = self.host.world.player_stat(7);
         let ac = self.host.world.player_stat(9);
-        let shown_hp = self.hud.hp.shown.unwrap_or(hp);
+        // The band is the true HP's once the counter shows it: a value
+        // past 999 is clamped for the digits only.
+        let shown_hp = self
+            .hud
+            .hp
+            .shown
+            .filter(|shown| *shown != bar::counter_value(hp))
+            .unwrap_or(hp);
         for ((glyphs, band), origin) in [
             (
                 self.hud.hp.glyphs(hp, bar::hp_band(shown_hp, max)),
@@ -1772,5 +1782,73 @@ impl MapPreview {
         self.preferences.brightness =
             vault_core::ui::options::brightness_step(self.preferences.brightness, up);
         self.store_preferences();
+    }
+}
+
+#[cfg(test)]
+mod counter_tests {
+    use super::{Counter, bar};
+
+    const MAX_HP: i32 = 30;
+
+    fn tick(counter: &mut Counter, now: u64, hp: i32) -> bool {
+        counter.tick(now, hp, |old, first| {
+            bar::roll_segments(old, hp, MAX_HP, first)
+        })
+    }
+    /// A counter that has drawn `shown`, with its next change animated.
+    fn rolling(shown: i32) -> Counter {
+        let mut counter = Counter::default();
+        tick(&mut counter, 0, shown);
+        counter.animate = true;
+        counter
+    }
+
+    #[test]
+    fn spec014_a_normal_roll_keeps_its_frames_and_its_wait() {
+        let mut counter = rolling(10);
+        assert!(tick(&mut counter, 1000, 5));
+        let roll = counter.roll.as_ref().unwrap();
+        // §3.21: t = trunc(250 / 6), and 10 to 9 carries in the tens cell.
+        assert_eq!((roll.delay, roll.next), (41, 1041));
+        assert_eq!(roll.frames.len(), 1 + 3 * 5 + 2);
+        assert!(!tick(&mut counter, 1040, 5), "the wait is not over");
+        assert!(tick(&mut counter, 1041, 5));
+        assert_eq!(counter.roll.as_ref().unwrap().index, 1);
+        // Every frame waits t, the last one included.
+        tick(&mut counter, 1000 + 41 * 17, 5);
+        assert!(counter.roll.is_some());
+        tick(&mut counter, 1000 + 41 * 18, 5);
+        assert!(counter.roll.is_none());
+        let (glyphs, _) = counter.glyphs(5, bar::Band::White);
+        assert_eq!(glyphs, bar::counter_glyphs(5));
+    }
+
+    #[test]
+    fn spec014_i32_min_rolls_to_the_clamped_value_at_once() {
+        for hp in [i32::MIN, i32::MIN + 1, -1_000_000_000] {
+            let mut counter = rolling(30);
+            tick(&mut counter, 1000, hp);
+            let roll = counter.roll.as_ref().unwrap();
+            assert_eq!(roll.delay, 0, "past 249 units the wait is 0");
+            assert!(roll.frames.len() < 7000);
+            assert_eq!(counter.shown, Some(-999));
+            // No wait: the next tick plays it to its last frame.
+            tick(&mut counter, 1000, hp);
+            assert!(counter.roll.is_none());
+            let (glyphs, _) = counter.glyphs(hp, bar::Band::Red);
+            assert_eq!(glyphs, bar::counter_glyphs(hp));
+        }
+    }
+
+    #[test]
+    fn spec014_a_change_the_counter_cannot_show_does_not_roll() {
+        let mut counter = rolling(i32::MAX);
+        assert_eq!(counter.shown, Some(999));
+        counter.animate = true;
+        // §3.21: V is clamped first, and a roll whose value does not change
+        // has no waits and blocks nothing.
+        assert!(!tick(&mut counter, 1000, 1_000_000));
+        assert!(counter.roll.is_none() && !counter.animate);
     }
 }

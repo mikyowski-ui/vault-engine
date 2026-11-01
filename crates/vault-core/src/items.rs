@@ -283,20 +283,29 @@ impl WorldState {
         match slot {
             Some(slot) => {
                 let (old, count) = self.get(owner).expect("owner").inventory[slot];
-                let count = match self.pack_size(item) {
+                // [Safe rule]: a merge no `i32` can hold conserves no rounds,
+                // so it is refused, with both objects and the entry as they
+                // were.
+                let (front, count) = match self.pack_size(item) {
                     Some(pack) => {
-                        let rounds = self.ammo_rounds(old) + self.ammo_rounds(item);
+                        let rounds = self
+                            .ammo_rounds(old)
+                            .checked_add(self.ammo_rounds(item))
+                            .ok_or(WorldError::Arithmetic)?;
                         if rounds > pack {
-                            self.set_ammo_rounds(item, rounds - pack);
-                            count.checked_add(quantity)
+                            let front = rounds.checked_sub(pack);
+                            let front = front.ok_or(WorldError::Arithmetic)?;
+                            (Some(front), count.checked_add(quantity))
                         } else {
-                            self.set_ammo_rounds(item, rounds);
-                            count.checked_add(quantity - 1)
+                            (Some(rounds), count.checked_add(quantity - 1))
                         }
                     }
-                    None => count.checked_add(quantity),
+                    None => (None, count.checked_add(quantity)),
+                };
+                let count = count.ok_or(WorldError::Arithmetic)?;
+                if let Some(front) = front {
+                    self.set_ammo_rounds(item, front);
                 }
-                .ok_or(WorldError::Arithmetic)?;
                 self.get_mut(owner).expect("owner").inventory[slot] = (item, count);
                 // The old representative is destroyed; it must not take a
                 // shared script with it.
@@ -882,5 +891,54 @@ impl WorldState {
         self.set_ammo_rounds(ammo, taken);
         self.set_loaded(weapon, rounds - taken, pid);
         Ok(Some(ammo))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        ObjectRef, WorldError, WorldHost,
+        fixture_items::{self as support, AMMO_X, ItemAssets},
+    };
+
+    fn stack(host: &mut WorldHost<ItemAssets>, count: i32, rounds: i32) -> (ObjectRef, ObjectRef) {
+        let prototype = support::critter(0x0100_0201, &[], 0, &[]);
+        let owner = host.world.spawn(prototype, 20300, 0).unwrap();
+        let held = support::carry(host, owner, AMMO_X, 3);
+        host.world.get_mut(owner).unwrap().inventory[0].1 = count;
+        host.world.set_ammo_rounds(held, rounds);
+        (owner, held)
+    }
+    /// The refused addition leaves both objects and the entry as they were.
+    fn assert_refused(
+        host: &mut WorldHost<ItemAssets>,
+        (owner, held): (ObjectRef, ObjectRef),
+        count: i32,
+        rounds: [i32; 2],
+    ) {
+        let added = support::spawn(host, AMMO_X);
+        host.world.set_ammo_rounds(added, rounds[1]);
+        let error = host.world.add_item(owner, added, 1, true).unwrap_err();
+        assert!(matches!(error, WorldError::Arithmetic), "{error}");
+        assert_eq!(host.world.get(owner).unwrap().inventory, [(held, count)]);
+        assert_eq!(host.world.ammo_rounds(held), rounds[0]);
+        assert_eq!(host.world.ammo_rounds(added), rounds[1]);
+        assert_eq!(host.world.get(added).unwrap().owner, None);
+    }
+    /// SPEC-011 §3.13 conserves rounds, which no `i32` front can do here.
+    #[test]
+    fn spec011_an_ammunition_merge_past_the_word_range_is_refused() {
+        let mut host = support::host();
+        let entry = stack(&mut host, 3, i32::MAX);
+        assert_refused(&mut host, entry, 3, [i32::MAX, 1]);
+        let mut host = support::host();
+        let entry = stack(&mut host, 3, i32::MIN);
+        assert_refused(&mut host, entry, 3, [i32::MIN, -1]);
+    }
+    #[test]
+    fn spec011_an_ammunition_merge_past_the_quantity_range_keeps_the_front() {
+        let mut host = support::host();
+        let entry = stack(&mut host, i32::MAX, 15);
+        assert_refused(&mut host, entry, i32::MAX, [15, 15]);
     }
 }

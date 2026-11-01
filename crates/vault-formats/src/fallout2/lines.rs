@@ -215,10 +215,8 @@ impl EndgameSlide {
 /// §4.6 the palette of an art row's file: its name with `.pal` in place of
 /// `.frm`.
 pub fn row_palette(frm: &str) -> String {
-    match frm.len().checked_sub(4) {
-        Some(at) if frm[at..].eq_ignore_ascii_case(".frm") => format!("{}.pal", &frm[..at]),
-        _ => format!("{frm}.pal"),
-    }
+    let base = text::strip_suffix_fold(frm, ".frm").unwrap_or(frm);
+    format!("{base}.pal")
 }
 
 pub fn endgame(bytes: &[u8], notes: &mut Diagnostics) -> Result<Vec<EndgameSlide>, TableError> {

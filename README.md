@@ -78,8 +78,36 @@ enhanced-preset features.
 | `vault-debug` | Headless VM stepper, trace, variable watches, inspectors |
 | `vault-platform` | The desktop shell: launcher, game, input logs and replays, gallery |
 | `vault-fixtures` | Synthetic test fixtures (dev only) |
-| `xtask` | Gates (`check`), fixtures, mod export, gallery capture |
+| `xtask` | Gates (`check`, `wasm-check`), `clean-room-check`, fixtures, mod export, gallery capture |
 | `asset-audit` | Corpus validation and audits |
+
+## Specs and oracle vectors
+
+[`specs/approved/`](specs/approved) holds 26 specifications, `SPEC-001` to
+`SPEC-024c`, indexed in the [reference](docs/REFERENCE.md). Each classifies
+behaviour as `[Must-match]`, for what must be reproduced exactly, or
+`[May-improve]`, for defects replaced by an explicit error or a stated safe
+rule. The builder implements from these specs alone, and they reach it by two
+routes, both recorded in [`PROVENANCE.md`](PROVENANCE.md):
+
+- **Research vault.** A separate repository and agent session studies the
+  reference and hands specs and oracle vectors across one way. Implementation
+  sessions cannot read it.
+- **Team A.** When no research-vault file is attached, a dedicated spec-author
+  sub-agent drafts and approves the spec from public format standards, the
+  project's own specs, the owner's briefs and general knowledge of publicly
+  documented formats. A different agent implements it. This is a weaker
+  separation than the first route, and each such spec says so.
+
+[`oracle/`](oracle) holds the vectors handed over for `SPEC-010`, `SPEC-012`,
+`SPEC-024b` (in `oracle/SPEC-024`) and `SPEC-024c`. They are hashes, counts,
+header values, word tables, short sample excerpts and hand-designed synthetic
+streams, and each folder's README says what it holds. The generators stay on
+the research side. Team A's vectors are computed from the spec and kept in
+`tests/fixtures/` instead.
+
+`cargo xtask clean-room-check`, which CI runs, fails on a 40-character hash, a
+foreign `src/` path or a C code fence in `specs/`, `oracle/` or `docs/`.
 
 ## Docs
 

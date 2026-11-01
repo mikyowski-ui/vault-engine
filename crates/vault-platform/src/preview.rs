@@ -100,7 +100,8 @@ pub struct PreviewArgs {
         conflicts_with_all = ["preview_frm", "preview_map", "play_movie"]
     )]
     pub game: bool,
-    /// Directory holding `SAVEGAME/SLOTnn` (default: the current directory).
+    /// Directory holding `SAVEGAME/SLOTnn` (default: the per-user save folder
+    /// of the profile, or the current directory when it already holds saves).
     #[arg(long, value_name = "PATH")]
     pub save_dir: Option<PathBuf>,
     /// `fallout.cfg` read for preferences and written when they change.
@@ -657,7 +658,11 @@ impl PreviewArgs {
         mods: &crate::config::ModList,
     ) -> AppResult<Arc<dyn Vfs>> {
         let layered = match mods {
-            crate::config::ModList::File(path) => LayeredVfs::from_load_order(base, path),
+            crate::config::ModList::File(path) => {
+                let order = crate::mods::read_load_order(path)
+                    .map_err(|error| format!("mod_list: {error}"))?;
+                LayeredVfs::from_entries(base, &order.directory, &order.entries, order.policy)
+            }
             // Paths from the settings are the user's own (already resolved
             // against the settings file), so they may lie anywhere.
             crate::config::ModList::Paths(paths) => {
@@ -768,7 +773,9 @@ impl PreviewArgs {
             return Ok(None);
         };
         let storage = self.storage.as_deref().filter(|_| !self.headless);
-        crate::mods::mod_session(&crate::mods::layer_dirs(mods), storage, !self.headless)
+        let dirs =
+            crate::mods::enabled_layer_dirs(mods).map_err(|error| format!("mod_list: {error}"))?;
+        crate::mods::mod_session(&dirs, storage, !self.headless)
             .map_err(|error| format!("mod_list: {error}").into())
     }
     /// SPEC-024c §3.1: read once, under sfall mode only. With the mode off

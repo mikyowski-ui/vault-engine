@@ -138,18 +138,21 @@ impl<'a> Bits<'a> {
 
 /// The per-block step table `T[i] = wrap16(i x s)` for `i` in
 /// `-2^k .. 2^k - 1`; other indexes are decode errors.
+///
+/// Entries are computed on lookup, not stored. A block header rebuilds `T`
+/// and its 4-bit `k` allows 2^16 entries, so a stored table would let a file
+/// of one-sample blocks cost a full rebuild per sample; caching the last
+/// table would not help a file that changes `s` every block.
 struct Table {
-    values: Vec<i32>,
+    step: i64,
     half: i32,
 }
 impl Table {
+    /// `k` comes from a 4-bit field, so it is at most 15.
     fn new(k: u32, step: u32) -> Self {
-        let half = 1_i32 << k;
         Self {
-            values: (-half..half)
-                .map(|index| wrap16(i64::from(index) * i64::from(step)))
-                .collect(),
-            half,
+            step: i64::from(step),
+            half: 1 << k,
         }
     }
     fn get(&self, index: i32) -> Result<i32, ParseError> {
@@ -160,7 +163,7 @@ impl Table {
                 format!("step-table index {index} is outside -{0}..{0}", self.half),
             ));
         }
-        Ok(self.values[(index + self.half) as usize])
+        Ok(wrap16(i64::from(index) * self.step))
     }
 }
 

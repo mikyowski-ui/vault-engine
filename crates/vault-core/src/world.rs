@@ -865,6 +865,7 @@ pub struct WorldState {
     /// session: SPEC-011 §3.2 bonus arrays belong to the prototype.
     pub prototype_stats: BTreeMap<u32, ([i32; 35], [i32; 35])>,
     pub effects: VecDeque<WorldEffect>,
+    /// Bounded: every push goes through `host::push_bounded`.
     pub trace: Vec<WorldTrace>,
     pub elapsed_ms: u64,
     /// SPEC-014 §3.44 each object's latest insertion into its hex list
@@ -2808,7 +2809,7 @@ impl WorldState {
         &mut self,
         mut approve: impl FnMut(&TimedEvent) -> bool,
     ) -> Vec<TimedEvent> {
-        self.trace.push(WorldTrace::MapExitCleanup);
+        crate::host::push_bounded(&mut self.trace, WorldTrace::MapExitCleanup);
         let (player, party) = (self.player, self.party.clone());
         let mut leaving = Vec::new();
         self.queue.retain(|event| match event.kind {
