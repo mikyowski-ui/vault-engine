@@ -1,6 +1,6 @@
 # SPEC-018: Fallout 2 Mounting, Saves and Data Tables
 
-**Status:** approved. Section 1 is an owner decision of 2026-10-25; the rest by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail corpus audit) and Revision 3 (AI packets, player locals) by the coordinator, 2026-10-25. Revision 4 (the Fallout 2 character sheet) by the Spec-Author sub-agent (Team A), 2026-10-26, verified against the owner's retail install. Revision 5 (Team A, 2026-10-31) carries in SPEC-024c section 5.
+**Status:** approved. Section 1 is an owner decision of 2026-10-25; the rest by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail corpus audit) and Revision 3 (AI packets, player locals) by the coordinator, 2026-10-25. Revision 4 (the Fallout 2 character sheet) by the Spec-Author sub-agent (Team A), 2026-10-26, verified against the owner's retail install. Revision 5 (Team A, 2026-10-31) carries in SPEC-024c section 5. Revision 6 (Team A, 2026-11-01) adds the install report rules and version 19 maps.
 
 **Provenance:** Team A (the Spec-Author sub-agent), 2026-10-25, from the
 coordinator's brief of the same day and the owner's archive-role decision
@@ -93,6 +93,11 @@ clarifications by Team A:
 
 Only field offsets, lengths, indices and names were measured; no sheet
 bytes are reproduced.
+
+**Revision 6 (the install report), 2026-11-01.** By the Spec-Author sub-agent
+(Team A), on the owner's brief of the same day. Section 2.4 is new, sections 7.7 and
+9 follow SPEC-016 Revision 3, and Decision R19 records it. No data file or engine
+code was read.
 
 **Revision 5 (SPEC-024c's amendments), 2026-10-31.** By the Spec-Author
 sub-agent (Team A), on the owner's brief of the same day, from SPEC-024c, a
@@ -203,6 +208,37 @@ the **master database as mounted** in section 1: `data_root` first, then
   profile, and a Fallout 2 slot never loads under Fallout 1. The header
   check of section 7.2 enforces this for each slot, even when both profiles
   share a folder. `[Must-match: owner instruction]` (D3)
+
+### 2.4 The install report (Revision 6)
+
+`asset-audit --report-fallout2-install --fallout2-dir <install>` is a report, not
+an audit category: it never fails the run, and ends with `Fallout 2 install check:
+passed` or `failed`. `--mod-layer <folder>`, repeated with the lowest first, mounts
+a mod's folders over the install. `--sfall` turns sfall mode on for the report.
+These rules say what each one does. `[Safe rule]`
+
+1. **Word table.** Without `--sfall`, every `.INT` is checked with `WordSet::FALLOUT2`,
+   so a mod that needs sfall words ends `failed` with its tables clean. With `--sfall`,
+   it uses `WordSet::FALLOUT2_SFALL` (SPEC-024b section 3.2). When a `--mod-layer`
+   is scripted (SPEC-024a section 2.1), SPEC-024a's words join whichever table is
+   in use. The report's first line names the table.
+2. **Maps.** Every `.map` is parsed by SPEC-016: version 19 and version 20 are both
+   accepted, with or without `--sfall`. The report prints the count of each. Any other
+   version is a failure.
+3. **Palettes.** A `.pal` that SPEC-001's rules refuse is **auxiliary** when all of
+   these hold, and otherwise it is a failure:
+   - a `--mod-layer` folder serves it;
+   - the install itself has no file at that path;
+   - it is not `color.pal`.
+
+   An auxiliary palette is listed as `auxiliary palette: <path> <bytes>` and counted.
+   It never fails the report, and no file's bytes are printed. This rule belongs to
+   the report alone: a load of that file during play still follows SPEC-001.
+4. **Smoke run.** With `--sfall`, the headless run is a sfall session: `ddraw.ini` is
+   read (SPEC-024c section 3), so `StartingMap` chooses the map, and setup runs
+   (SPEC-024b section 6.1). A scripted `--mod-layer` turns manifest scripting on.
+5. **Output.** Only counts, names, PIDs, word and line numbers and lengths are
+   printed, as before.
 
 ## 3. Conventions
 
@@ -1486,7 +1522,8 @@ As SPEC-008 §2.8, except the index. `[Engine layout]` (D32)
 ### 7.7 Area-map `.SAV` files
 
 As SPEC-008 §2.9, with the SPEC-016 map stream (version 20, laid out as
-version 19) in place of SPEC-003's version 19. The header's map-number word
+version 19, or a version 19 map kept at that version, Revision 6) in place of
+SPEC-003's version 19. The header's map-number word
 holds the section 5.1 number. `[Must-match]` (D2)
 
 ### 7.8 Saving and loading
@@ -1931,7 +1968,8 @@ The result is the 428-byte sheet **S428**. Insert the word `00 00 00 03` at
 
 **SPEC-016** (maps and prototypes). This specification relies on SPEC-016 for
 the version-20 map stream (laid out as version 19, per the coordinator's
-brief) and the 416-byte critter prototype. Saved maps (section 7.7) and the
+brief), the version 19 maps it also accepts (Revision 6), and the 416-byte critter
+prototype. Saved maps (section 7.7) and the
 player object (section 7.3, order 5) follow it.
 
 The three Fallout 2 specifications were reconciled on 2026-10-25 (decisions
@@ -2041,6 +2079,7 @@ written the same way into every spec it touches.
 | R16 | Two retail entrances (areas 30 and 31) have 8 items, and area 30's only entrance was dropped | An 8-item entrance is read from its first seven items. Both retail lines have -1 for the hex however they are read, so both take the header's default entrance | Coordinator, Revision 3, measured |
 | R17 | All 6 retail `premade/*.gcd` sheets are 432 bytes; Fallout 1's 6 are 428. The name sits at `0x174`, the tags at `0x194`, the traits at `0x1A4` and the points at `0x1AC`. Every word from `0x090` to `0x173` is 0 in all 6. Read as SPEC-006's 428 bytes, a premade showed an empty name, its first tag twice, a lost trait, and its second trait as character points | Section 6.3: the 432-byte layout, chosen by exact length; any other length refused; SAVE writes the game's layout. The measured field offsets are `[Must-match]`. Placing the extra word at `0x170`, after the kill category as in SPEC-016 §3.1's prototype, is a structural choice. Its meaning (perhaps the damage type) is not established, so it is kept, written back and given no effect | Team A, Revision 4, measured (re-measured independently of the coordinator's draft) |
 | R18 | SPEC-024c's audit of a mod's tables and sheets: three section headers followed by text were not read as headers, so three map records were lost and a fourth silently took their keys; sheets of 440 bytes; and `ddraw.ini` start keys | Revision 5 carries in SPEC-024c section 5: the header rule of section 3.3, the rules of sections 4.2, 4.3 and 6.3, and defaults in sections 6.1 and 6.3 to 6.6. SPEC-024c stays the full text of each rule, and if the two differ SPEC-024c wins | Owner instruction (brief of 2026-10-31), from a research hand-off. SPEC-024c's D-1 and D-3 are owner approved |
+| R19 | A total conversion's report ended `failed` on valid data: sfall words, version 19 maps and short `.pal` files in mod folders | Section 2.4. `--sfall` chooses the word table and SPEC-016 accepts both map versions. Those two are owner instructions. The auxiliary palette test, and the table's name on the first line, are Team A defaults, because the brief gives the outcome and not the test | Owner instruction (brief of 2026-11-01), with Team A defaults |
 | R6 | Other contradictions | Script-directed travel is SPEC-019's direct move. Encounter suppression uses SPEC-019's area circles. This spec defines dropping to terrain, the map known/visited flags, the saved area positions, the `metarule3` 104 entrance match, the world-map music, display and location names, and the `genrep.txt`, `karmavar.txt` and `endgame.txt` grammars. SPEC-011's progression tables apply provisionally. The Fallout 2 `ai.txt` keys and town reputations are not read | Team A default, reconciliation 2026-10-25 |
 
 ## 11. Verification notes
@@ -2079,6 +2118,8 @@ written the same way into every spec it touches.
     40-character hex string and no code listing.
   - The only things reproduced are lengths, offsets, counts and the
     blank sheets' name `None`. No premade's name, tags or traits appear.
+- [x] Revision 6 was written by Team A on 2026-11-01 from the owner's brief. It reads
+  no install or mod. The ingestion patterns were rechecked by search.
 - [x] Revision 5 was written by Team A on 2026-10-31 from SPEC-024c alone. It
   reads no mod data of its own, and SPEC-024c's vectors stay in
   `oracle/SPEC-024c/`. Rules that need a real install stay unchecked, as

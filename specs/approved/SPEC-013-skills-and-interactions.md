@@ -69,6 +69,8 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
 - **R1-rev7 (2026-10-22).** Section 3.22: exit grids at the entrance hex are checked as usual, and a request made while a map loads replaces the pending one (new `[May-improve]` for transition processing). A town-map hotspot in another town opens the world map travelling there; arrival does not enter the town (SPEC-014 §3.39).
 - **R1-rev8 (2026-10-23).** Section 3.10: a not-yet-loaded script gets a startup request (number 1), which is its first request under SPEC-006 §3.5; no `damage_p_proc` body runs at that point.
 
+- **R1-rev9 (2026-11-01, Team A).** On the owner's brief, section 3.10: under `fallout2`, a timed explosive damages every living critter within 3 hexes, and object scripts learn the damage type. Under `fallout1`, every rule stands. See Decisions at the end of this spec, and `tests/fixtures/spec013/`.
+
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
 ### 2.1 Numeric Conventions
@@ -399,12 +401,18 @@ Moves to and from a party member always succeed with no draws and never award ex
 - Type 11 first displays `misc.msg` 4000, then detonates with animation. Type 8 detonates with animation and no message.
 - The center hex is the hex and elevation of the explosive's outermost holder, following nested containers, or the explosive's own hex when nobody holds it.
 - Damage range is 30-50 for PIDs 51 and 206, 40-80 otherwise. For the critter blocking the center hex, if it is a living critter: damage `v = D(min, max) - explosion DT`; if v is positive subtract `trunc(v * explosion DR / 100)`; clamp at 0. Knockback is `trunc(v / 10)` for a non-multihex victim.
-- **Damage covers the center target only.** The splash-victim enumeration is shared with SPEC-007 §3.7 and has its radius setup disabled in R1, so it returns no victims and makes no draws. A timed or scripted explosion therefore damages only the critter blocking the center hex. A critter on any other hex, including the six adjacent ones, takes nothing. The six adjacent hexes receive explosion art only. This is the same rule as SPEC-007 §3.7, which states it for every explosion. `[Must-match]`
+- **Damage covers the center target only.** The splash-victim enumeration is shared with SPEC-007 §3.7 and has its radius setup disabled in R1, so it returns no victims and makes no draws. A timed or scripted explosion therefore damages only the critter blocking the center hex. A critter on any other hex, including the six adjacent ones, takes nothing. The six adjacent hexes receive explosion art only. This is the same rule as SPEC-007 §3.7, which states it for every explosion. `[Must-match]` Under `fallout2`, the blast radius below replaces this rule for a timed explosive.
+- **Blast radius (R1-rev9).** Under `fallout2`, a timed explosive (event type 8 or 11) applies explosion damage (type 6, public name `DMG_explosion`) to every living critter on the explosion's elevation within hex distance 3 of the center hex, the player included. `[Must-match]`, as an owner instruction, for radial damage; `[Safe rule]` for the rest of this bullet.
+  - Victims are taken by ascending hex distance from the center, then ascending hex number, then list order. So the critter blocking the center hex comes first.
+  - When the explosion starts, each victim takes its own D(min, max) draw, in that order, then the formula above, with its own explosion DT and DR, and its own knockback. There is no falloff, and walls do not block the blast.
+  - Attribution is the rule below, for each victim, and only the first surviving victim requests combat.
+  - Scripted `explosion` requests and weapon explosions keep the center-only rule. Under `fallout1`, every explosion keeps it.
 - **Scenery and other blockers.** The engine itself never damages, destroys, opens or moves scenery, walls, doors, rocks or items in an explosion. Instead it notifies object scripts within a radius, after the center explosion art has finished playing, or immediately for an unanimated detonation. `[Must-match]`
   1. Collect, in script-list order, every item or scenery object script that has a `damage_p_proc` (procedure index 14) and whose owner is on the explosion's elevation within hex distance 3 of the center hex. Then collect every spatial script that has `damage_p_proc` and whose own hex is on that elevation within distance 3. Before a script is tested, the host checks whether it has a cached `damage_p_proc` index. If it has none and its program is not loaded yet, the host sends it a startup request, request number 1. That is the script's first request (SPEC-006 §3.5). It loads the program, caches the procedure indices, and runs the initial stream, which runs the `start` body with `script_action` returning 1. Nothing else is called unless `start` calls it, and no `damage_p_proc` body runs at this point. The script is then tested with its newly cached indices. Scripts present when the map loaded were already loaded by the step 8 startup requests of SPEC-006 §3.5, so only instances created later and not requested since are loaded here.
   2. Spatial-trigger checks are disabled while collecting. Then each collected script's `damage_p_proc` runs once, in collection order.
   3. Any visible effect, such as a door blown open or a rock removed, is whatever that procedure does. An object without such a script is unaffected. A critter's own script is not notified by this step.
-- **Order.** Damage values are computed when the explosion starts: one D(min, max) draw for the center critter, if there is one. For an animated detonation:
+  4. **Doors and scenery under `fallout2` (R1-rev9).** Each `damage_p_proc` of a timed explosive's notice runs with fixed parameter 6, the explosion damage type, and with the credited attacker as source, so a script can tell a blast from other damage. A door or scenery object is **destructible** exactly when its script has this procedure, because SPEC-003 gives such objects no hit points. Opening or destroying it is what its script does, and `destroy_p_proc` follows the existing rules (SPEC-004 section 3.7, SPEC-005 section 3.2). `[Safe rule]`
+- **Order.** Damage values are computed when the explosion starts: one D(min, max) draw for the center critter, if there is one. Under `fallout2`, a timed explosive takes one draw per victim of the blast radius. For an animated detonation:
   1. Play `whn1xxx1` and the center art, together with any victim reaction.
   2. Play the six adjacent arts.
   3. Notify the scenery scripts.
@@ -438,7 +446,9 @@ Frame counts are per direction, from the corpus FRM headers. The weapon sounds a
 
 **Map exit.** The map-exit handlers for types 8 and 11 detonate immediately without animation and without message 4000, on the map being left. An armed explosive carried by the player therefore detonates at the player's hex as the player leaves. `[Must-match]`
 
-**Dropping an armed explosive** from the inventory sets a flag. On closing the inventory, the engine enumerates explosion victims around the player and lets each enumerated non-player, non-team critter make a Perception stat check D(1, 10) to notice it. Because the enumeration returns no victims in R1, this makes no draws and has no effect. `[Must-match]`
+**A moved explosive.** The queued event stays with the explosive when it is dropped or transferred, and the center hex is found when it fires (SPEC-011 section 3.24). `[Must-match]` `tests/fixtures/spec013/armed-explosive-door.tsv` gives one armed explosive dropped beside a scripted door, under both profiles.
+
+**Dropping an armed explosive** from the inventory sets a flag. On closing the inventory, the engine enumerates explosion victims around the player and lets each enumerated non-player, non-team critter make a Perception stat check D(1, 10) to notice it. Because the enumeration returns no victims in R1, this makes no draws and has no effect. `[Must-match]` The blast radius does not change this: under `fallout2` too, the notice makes no draws.
 
 ### 3.11 First Aid (Default Routine)
 
@@ -1089,3 +1099,17 @@ Update notes (2026-10-22, R1-rev7): section 3.22's exit-grid and hotspot-travel 
 Update notes (2026-10-23): the section 3.15 Set Timer table gains the title color and the button sounds and timing. All four buttons use `ib1p1xx1` / `ib1lu1x1`; plus and minus act once per press with no repeat. No tag change. `tools/spec_lint.py` gives 0 errors.
 
 Update notes (2026-10-23, R1-rev8): the section 3.10 first-load wording now matches SPEC-006 §3.5. No tag change. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-11-01, R1-rev9, Team A): section 3.10 gains the blast radius and the door rule. The notice radius, the art, the order and the retry do not change. No map, script or engine code was read.
+
+## Decisions (R1-rev9)
+
+| ID | Decision | Class | Why |
+| --- | --- | --- | --- |
+| D-1 | A timed explosive applies radial explosion damage, and doors and scenery in radius are reached through their scripts | Owner instruction (brief of 2026-11-01) | The brief's requirement, with the Temple of Trials door as its example |
+| D-2 | Radial damage holds under `fallout2` only | Team A default | Fallout 1's center-only rule was measured from R1, and the Vanilla preset promises the original rules. Extending it to `fallout1` is a small edit here, for the owner to choose |
+| D-3 | The blast radius is hex distance 3 | Team A default | It equals the notice radius above, so critters and scripts share one circle |
+| D-4 | Each victim takes its own draw, with no falloff and no blocking by walls | Team A default | The simplest deterministic rule. The center rule's formula is otherwise unchanged |
+| D-5 | Only timed explosives change, not `explosion` requests or weapons | Team A default | The brief says armed explosives. Weapons stay under SPEC-007 section 3.7 |
+| D-6 | The engine invents no door hit points: an object is destructible exactly when its script has `damage_p_proc`, and fixed parameter 6 tells it the damage type | Team A default | SPEC-003 has no such field, and destroying unscripted doors would open locked retail doors. Whether the Temple of Trials script responds was not checked, because Team A read no map or script |
+| D-7 | A script that destroys its own object still skips its own `destroy_p_proc` | Team A default | SPEC-005 section 3.2 already says so, and this revision leaves it |

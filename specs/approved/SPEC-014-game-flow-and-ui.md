@@ -127,6 +127,7 @@ Evidence areas in reference revision R1 (source file paths and line ranges are w
   - Section 3.27: the in-world cursor is a flat map object drawn in the section 3.44 flat pass.
   - Section 3.44: no R1 sequence uses the outline animation step (item 47).
   - Section 3.18: the Combat messages row points to SPEC-007 §3.12.
+- **R1-rev13 (2026-11-01, Team A).** On the owner's brief, sections 3.27 and 3.44: the in-world cursor is always the top layer. This deliberately leaves R1, which drew it in the flat pass. See Decisions at the end of this spec.
 
 ## 2. Binary Layout / Data Format (Byte Offset Tables)
 
@@ -984,7 +985,7 @@ Animated cursors advance one frame every 100 milliseconds and loop. While one is
 
 ### 3.27 In-World Cursor Modes, Hover and Clicks
 
-Over the map window the system cursor is blank and an in-world flat object is drawn instead. Over other windows the in-world cursor is hidden and the arrow is shown, except that a crosshair just set from the item slot stays until the pointer enters the map. Leaving the map window out of combat while in crosshair, use or skill mode resets the mode to movement. `[Must-match]`
+Over the map window the system cursor is blank and an in-world cursor is drawn instead. Over other windows the in-world cursor is hidden and the arrow is shown, except that a crosshair just set from the item slot stays until the pointer enters the map. Leaving the map window out of combat while in crosshair, use or skill mode resets the mode to movement. `[Must-match]`
 
 | Mode | In-world art |
 | --- | --- |
@@ -995,13 +996,15 @@ Over the map window the system cursor is blank and an in-world flat object is dr
 
 In movement mode the hex snaps to the hovered hex; a second object for the AP text sits at that hex's screen position plus (16, 15). Other modes follow the pointer by pixel. `[Must-match]`
 
-**Cursor objects in the draw order.** `[Must-match]` The in-world cursor is an ordinary map object on the current elevation, marked flat (object flag `0x08`), no-block, shoot-through, light-through and temporary. Every mode's art is shown on this one object. It is therefore drawn in the **flat pass** of section 3.44, not as an overlay:
+**Cursor objects in the draw order (R1-rev13).** `[Must-match]` The in-world cursor is a presentation object on the current elevation: no-block, shoot-through, light-through and temporary. Every mode's art is shown on this one object. It is **always the top layer** of a map refresh, under both profiles and both presets, on both the `reference` and `instanced` render paths (SPEC-022 section 2.1):
 
-- It is drawn after the flat objects of lower-numbered hexes and before those of higher-numbered ones. Within its own hex it follows the order of insertion, and every move reinserts it at the end of that hex's flat group.
-- Every upright object, roof and floating text is drawn over it.
-- In movement mode its translucent outline is added to the outline list when it is drawn, so the outline is drawn after the roofs, like every outline.
+- The active cursor, whether the movement hex cursor, the action arrow or a crosshair, is composited after every floor tile, door, container, critter, wall, scenery object, roof, outline, ground-item highlight, floating text and object without a hex. No sprite ever draws over it.
+- It takes no place in a hex's object list, so it changes no other object's order.
+- Its art keeps the light of its hex, and is clipped to the map window, as before.
+- In movement mode its translucent outline is drawn right after its art. It is not an entry of the outline list, so it takes no place among the 100.
+- The AP-text object of movement mode is drawn last of all, at its position.
 
-The AP-text object of movement mode is a separate object that is not flat, so it is drawn in the upright pass at its hex.
+R1 drew this object in the flat pass, under every upright object. The rule above replaces that by owner instruction, and it changes only drawing: picking, blocking, the light of other objects, saves and the hover rules do not change.
 
 **Mode cycling.** A right-click in the map area (y at most 379, ignoring held repeats) or `m` selects mode `(current + 1) mod 3` over movement, arrow and crosshair. Out of combat a resulting crosshair becomes movement. In combat crosshair is skipped only when the active hand holds a non-weapon; an empty hand counts as a weapon. Entering crosshair turns hostile outlines on, and leaving it turns them off. `[Must-match]` The same formula applies to use and skill modes by their numeric values: use crosshair goes to arrow; First Aid, Steal and Repair go to crosshair (or movement); Doctor and Traps go to movement; Lockpick and Science go to arrow. `[May-improve]`: a right-click from use or skill mode goes to movement.
 
@@ -2895,7 +2898,7 @@ Fixture P gives the literal reference output and the safe-rule variant.
 
 ### 3.44 Map Object Draw Order, Lighting and Translucency
 
-**Frame layers.** A map refresh of a screen rectangle on the current elevation draws, in this order: floor tiles; the map objects in the two passes below; roofs (section 3.36); the outlines collected during the passes; floating text; and objects that have no hex, at full light 65536. `[Must-match]`
+**Frame layers.** A map refresh of a screen rectangle on the current elevation draws, in this order: floor tiles; the map objects in the two passes below; roofs (section 3.36); the outlines collected during the passes; floating text; objects that have no hex, at full light 65536; and last of all the in-world cursor (section 3.27, R1-rev13). `[Must-match]`
 
 **Per-hex object lists.** Every hex keeps its objects in one ordered list. `[Must-match]`
 
@@ -3676,3 +3679,13 @@ Update notes (2026-10-23, R1-rev10): every new art name, list index and size in 
 Update notes (2026-10-23, R1-rev11): the input rules of sections 3.21, 3.25 and 3.27 were traced through the reference roll, panel, mouse and keyboard paths. The floating-text colors in section 3.46 were checked against the corpus `color.pal`, the taunt fonts and colors against all 95 `data/ai.txt` packets, and the fixture widths against `font1.aaf`. The placement window is the 640-by-380 map window. Net tags: +10 `[Must-match]`, +2 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.
 
 Update notes (2026-10-23, R1-rev12): the keyboard translation tables were checked for every modifier, lock and Windows key, and the cursor object flags were read from the game-mouse set-up. Net tags: +2 `[Must-match]`. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-11-01, R1-rev13, Team A): sections 3.27 and 3.44 make the cursor the top layer. This is an owner decision against R1, not a finding about it. No art was read.
+
+## Decisions (R1-rev13)
+
+| ID | Decision | Class | Why |
+| --- | --- | --- | --- |
+| D-1 | The in-world cursor is always composited last, on both render paths | Owner instruction (brief of 2026-11-01) | No door or container sprite may draw over the cursor |
+| D-2 | The rule holds under both profiles and both presets, Vanilla included | Team A default | The brief names no exception. It changes what R1 drew, so a pinned frame of a covered cursor changes (SPEC-020 Decision D-9) |
+| D-3 | The cursor leaves the hex lists, its outline leaves the list of 100, and the AP text moves to the cursor layer | Team A default | The brief lists the cursor, and these are its parts. Each would otherwise be drawn under something |

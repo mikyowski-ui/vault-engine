@@ -37,6 +37,8 @@ All files here were authored for Vault Engine. None contain original game assets
 - `render/indices.hex`: a 16×16, row-major sprite using each index 0–255 once.
   The renderer pairs this with a generated RGB332 palette.
 - `input-commands.jsonl`: expected structured records for synthetic input.
+- `spec013/`: an armed explosive dropped beside a scripted door, under both profiles.
+- `spec019/`: the loot window's rectangles under both profiles.
 
 Tests copy loose fixtures into temporary directories when exercising namespace
 changes, collisions, or symlink attacks. The committed fixture directory is never

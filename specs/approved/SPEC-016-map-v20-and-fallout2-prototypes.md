@@ -1,7 +1,7 @@
 # SPEC-016: Map Version 20 and Fallout 2 Prototypes
 
 **Status:** approved by the project owner, 2026-10-25. Revision 2 (retail
-corpus audit), 2026-10-25.
+corpus audit), 2026-10-25. Revision 3 (Team A, 2026-11-01).
 
 **Provenance.** Written by the coordinator from the project owner's layout
 brief of 2026-10-25, against the approved SPEC-003. No game executable,
@@ -19,6 +19,13 @@ object PIDs and record lengths only; no game bytes are reproduced. It
 changes section 2's ladder records and section 3.1's record length, and adds
 Decisions 8 and 9 and two vectors.
 
+**Revision 3 (version 19 maps under `fallout2`), 2026-11-01.** By the
+Spec-Author sub-agent (Team A), on the owner's brief of the same day: *Fallout Et
+Tu* ships 14 of its 93 maps at version 19, and the owner states that original
+Fallout 2 loads that version. Team A read no mod file and no engine code. Section 2,
+section 4, Decision 4 and section 6 change, and Decisions 10 to 12 are added. With no
+version 19 map in play, nothing changes.
+
 ## 1. Scope
 
 This specification adds Fallout 2's map and prototype records to SPEC-003. The
@@ -28,6 +35,9 @@ with the exact version and length checks below:
 - Under `fallout1` every SPEC-003 rule is unchanged. `[Must-match]`
 - Under `fallout2`, the rules below replace SPEC-003's version and critter
   rules. Everything else is as SPEC-003. `[Must-match]`
+- Under `fallout2`, a map's own version word chooses its layout, version 19 or
+  version 20. Prototypes follow the profile, whichever version the map has.
+  `[Must-match]`
 
 ## 2. Maps
 
@@ -52,12 +62,18 @@ with the exact version and length checks below:
   prototype itself is unchanged: 45 bytes, one destination word. Under
   `fallout1` a ladder record keeps its one word. `[Must-match: retail
   corpus, Decision 8]`
-- Under `fallout2` a map must have version 20; any other version, 19
-  included, is refused. Under `fallout1` a map must have version 19 (SPEC-003),
-  so version 20 is refused there. `[Safe rule]`
+- **Accepted versions (Revision 3).** Under `fallout2` a map must have version
+  19 or version 20, and any other version is refused. `[Must-match: owner
+  instruction]` Under `fallout1` a map must have version 19 (SPEC-003), so version
+  20 is refused there. `[Safe rule]`
+- **A version 19 map under `fallout2` (Revision 3).** It is read exactly as SPEC-003
+  §2.7 says, with `fallout2` prototypes. Its ladder records keep SPEC-003's one
+  word, because the two-word record belongs to version 20, and that word is the
+  packed destination on the same map. It takes no diagnostic. `[Safe rule]`
+  (Decision 10)
 - A map's version is kept with it. Writing a map back (saves' working maps,
   SPEC-008) writes the version it was read with, so a Fallout 2 map stays
-  version 20. A new empty map is version 19 under `fallout1` and version 20
+  version 20, and a version 19 map stays version 19, with its one-word ladders. A new empty map is version 19 under `fallout1` and version 20
   under `fallout2`. `[Safe rule]`
 
 ## 3. Prototypes
@@ -101,8 +117,9 @@ unchanged under both profiles. `[Must-match: owner instruction]`
   - the working maps of saves (SPEC-008);
   - the prototypes the asset catalog reads.
 
-  A file in the other game's layout is refused with a message naming the
-  version or length. `[Safe rule]`
+  A file outside the profile's rules is refused with a message naming the
+  version or length. Under `fallout2` that no longer includes a version 19 map
+  (Revision 3). `[Safe rule]`
 - Map preview (`--preview-map`) under `--game-profile fallout2` loads a map
   from the SPEC-018 §1 databases (SPEC-015 archives) and renders it like a
   Fallout 1 map. `[Safe rule]`
@@ -118,7 +135,9 @@ unchanged under both profiles. `[Must-match: owner instruction]`
    version/length**, and neither alone decides (owner instruction). So a
    version 19 map is refused under `fallout2` and a version 20 map under
    `fallout1`, rather than read by its version alone (coordinator default:
-   one layout per profile keeps each game's rules exact).
+   one layout per profile keeps each game's rules exact). **Revision 3 withdraws
+   the first half:** a version 19 map loads under `fallout2` (Decision 10). A
+   version 20 map is still refused under `fallout1`.
 5. **A critter file's length is checked exactly (416 bytes) under
    `fallout2`.** Fallout 1's reader keeps SPEC-003's own length rules
    (coordinator default, following the owner's "exact record length checks").
@@ -137,6 +156,15 @@ unchanged under both profiles. `[Must-match: owner instruction]`
    critter prototypes. Refusing them would refuse retail data, so they are
    read with Fallout 1's layout and damage type 0 (coordinator default).
    They keep their length when written back.
+10. **`fallout2` accepts version 19 and version 20 maps** (Revision 3, owner
+    instruction). That a version 19 map keeps one-word ladders, with its version
+    word choosing the layout, is a Team A default: section 2 gives two words to
+    version 20 records, and the owner calls version 19 the format SPEC-003
+    defines. It is unmeasured here, because Team A read no mod map.
+11. **A version 19 ladder under `fallout2` goes to its packed destination on the
+    same map** (Revision 3, Team A default), because the record names no map.
+12. **Accepting version 19 covers working maps and saves too** (Revision 3, Team A
+    default): one rule covers every path of section 4.
 
 ## 6. Test vectors
 
@@ -144,7 +172,13 @@ The tests build every vector from synthetic data:
 
 - the synthetic version 19 map fixture with its version word set to 20,
   parsed under both profiles: accepted under `fallout2`, refused under
-  `fallout1`; and the unchanged fixture refused under `fallout2`;
+  `fallout1`; and (Revision 3) the unchanged fixture accepted under `fallout2`,
+  written back as the same bytes, with version 19;
+- (Revision 3) a map of version 18 and one of version 21, refused under `fallout2`;
+- (Revision 3) a version 19 map holding a ladder-up object: under `fallout2` its
+  record is 92 bytes, as SPEC-003 gives it, and a second object after it parses. The
+  same bytes with the version word set to 20 fail at that object, so the version
+  word, not the profile, chose the record;
 - a version 20 map written back, which keeps version 20 and the same bytes;
 - a synthetic critter prototype extended to 416 bytes with `damage_type = 3`:
   parsed under `fallout2` with `damage_type` 3, written back to the same 416

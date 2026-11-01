@@ -1,6 +1,6 @@
 # SPEC-019: Fallout 2 Interface, Party Control, the Car, and Game-Flow Deltas
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail art audit; scripts run) by the coordinator, 2026-10-25. Revision 3 (premade portraits) by the Spec-Author sub-agent (Team A), 2026-10-26, verified against the owner's retail install. Revision 4 (Team A, 2026-10-31) carries in SPEC-024c section 5.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Revision 2 (retail art audit; scripts run) by the coordinator, 2026-10-25. Revision 3 (premade portraits) by the Spec-Author sub-agent (Team A), 2026-10-26, verified against the owner's retail install. Revision 4 (Team A, 2026-10-31) carries in SPEC-024c section 5. Revision 5 (Team A, 2026-11-01) gives the loot window its own layout.
 
 **Provenance:** written by Team A (the Spec-Author sub-agent) on 2026-10-25 from
 the coordinator's brief of the same day. Source categories:
@@ -139,6 +139,9 @@ is the area number. A city's display name is its `area_name`.
 - **Revision 3 (2026-10-26).** Premade portraits: their retail size
   (section 2.2) and their place in the monitor window (section 3.3, D-32).
   Drafted by the coordinator; re-measured and approved by Team A.
+- **Revision 5 (2026-11-01).** By Team A, on the owner's brief of the same day: the
+  loot window's rectangles under `fallout2` (section 3.7, D-34 to D-36, Vector S).
+  They are unmeasured: Team A read no art.
 - **Revision 4 (2026-10-31).** By Team A, on the owner's brief of the same day:
   the main menu's version text and positions are defaults (section 3.2, D-33),
   from SPEC-024c section 5.
@@ -578,12 +581,39 @@ total-weight line reads `inventry.msg` 20, a space, the total carried weight,
 `/`, and the carry limit (SPEC-011 §3.14). The line is drawn in key 31744
 instead of key 992 when the total exceeds the limit. `[Team A default]`
 
-**Loot window.** As SPEC-013 §3.16, with a **Take All** button. `[Must-match]`
-that it exists; `[Team A default]` for its art and place.
+**Loot window.** As SPEC-013 §3.16, with a **Take All** button and the layout
+below (Revision 5). `[Must-match]` that it exists; `[Team A default]` for its art.
 
-- The button uses the Take All pair of section 2.2. It sits at the same
-  window rectangle as the engine's enhanced Take All button (roadmap part 2
-  b), with the art's own size.
+- **Layout (Revision 5).** Under `fallout2`, the window is `loot.frm` at screen (80,
+  0), and the two lists and the two portraits trade columns with SPEC-013's: each
+  portrait is outside its list. Coordinates are relative to the window. Under
+  `fallout1`, SPEC-013 §3.16's table stands, and no `fallout1` rectangle changes.
+  `[Safe rule]` for each coordinate, which is unmeasured (D-34).
+
+  | Element | `fallout2` | `fallout1` (SPEC-013 §3.16) |
+  | --- | --- | --- |
+  | Player list | 6 rows; (176, 35 + 48i) 64 by 48; icons at (180, 39 + 48i) | (44, 35 + 48i); icons at (48, 39 + 48i) |
+  | Target list | 6 rows; (297, 35 + 48i) 64 by 48; icons at (301, 41 + 48i) | (422, 35 + 48i); icons at (426, 41 + 48i) |
+  | Player portrait, and its up-level hot zone | 60 by 100 box at (44, 35) | Box at (176, 37); hot zone at (44, 35) |
+  | Target portrait, and its up-level hot zone | 60 by 100 box at (422, 35) | (297, 37) |
+  | Transfer handle | Each filled list row is its own drag handle | Same |
+  | Player drop zone | (176, 35) 64 by 288, screen x 256-320 | Screen x 124-188 |
+  | Target drop zone | (297, 35) 64 by 288, screen x 377-441 | Screen x 502-566 |
+  | Scroll buttons | As SPEC-013: x 128 and 379 | Same |
+  | Body cycling | As SPEC-013: (436, 162) and (456, 162) | Same |
+  | Take All | (249, 158) 39 by 41, midway between the lists | The enhanced button's rectangle, engine-drawn, enhanced preset only |
+  | Done | As SPEC-013: red button at (288, 328) | Same |
+
+- **No overlap.** Under `fallout2`, no two of these rectangles overlap, and each lies
+  inside the window, so hit-test order decides nothing, and a portrait or Take All
+  can never land on a list row. `[Must-match]` `tests/fixtures/spec019/loot-layout.tsv`
+  holds every rectangle (Vector S). Under `fallout1`, SPEC-013's own overlaps stand.
+- **One authority.** The rectangles live in `vault_core::ui::inventory`, and
+  edition code branches on `GameProfile` in one place (SPEC-020 sections 2.1 and
+  2.2). `[Must-match]`
+- A `loot.frm` that is not 537 by 376 keeps these rectangles, with one diagnostic.
+  `[Safe rule]`
+- The button uses the Take All pair of section 2.2, with the art's own size.
 - It does exactly what Shift+A does (SPEC-013 §3.16, "Take All"), including the
   weight test and the silent refusal. It is absent in steal sessions.
 
@@ -1511,6 +1541,15 @@ shows:
 - the background at (44, 54), an odd row, and at (43, 53), (256, 53),
   (44, 52) and (44, 240).
 
+### 4.19 Vector S: Loot Layout (Revision 5)
+
+Every `fallout2` row of `tests/fixtures/spec019/loot-layout.tsv` of kind `box` lies
+inside the window, and no two overlap. A click at window (270, 170) hits Take All, at
+(70, 80) the player portrait's hot zone, and at (200, 60) player row 0. Releasing a
+drag at screen (280, 200) drops into the player list, and at screen (400, 200) into
+the target list. A release at screen (150, 200) does nothing, although it is in
+SPEC-013's player drop zone. Under `fallout1`, every rectangle equals SPEC-013's.
+
 ## 5. Decisions
 
 Every point the brief and the public documentation leave open is resolved
@@ -1545,7 +1584,7 @@ here. None is an owner instruction except D-1.
   talk approach and the D, D + 1, D + 5 order of the enhanced Push.
 - **D-10 (Team A default).** Inventory weight line shows the carry limit.
 - **D-11 (Team A default).** The loot Take All button reuses the enhanced
-  button's rectangle.
+  button's rectangle. Withdrawn under `fallout2` by D-35.
 - **D-12 (Team A default).** Trade with a party member always accepts, and
   shows `inventry.msg` 27.
 - **D-13 (Team A default).** The Combat Control button's place, art and `c`
@@ -1640,6 +1679,18 @@ touch, and are listed in SPEC-018 §10 as R1-R6.
   version text, colors and positions become defaults for SPEC-024c section 3.9's
   `ddraw.ini` keys, as SPEC-024c section 5 asks. SPEC-024c stays the full text of
   those rules.
+- **D-34 (Team A default, Revision 5, unmeasured).** Under `fallout2` each portrait
+  is outside its list. The owner reports portraits and Take All in the wrong slots.
+  SPEC-013's own numbers point the same way: its left hot zone is a portrait-sized box
+  at (44, 35), and its cycling buttons at (436, 162) clear a 100-tall box at x 422 but
+  sit inside a 288-tall list there. Team A's general knowledge of the game agrees, and
+  cannot be audited (`PROVENANCE.md`). Team A read no art, so the first run on a real
+  install must confirm these rectangles.
+- **D-35 (Team A default, Revision 5).** Take All sits midway between the lists under
+  `fallout2`, centered on the lists' height, at the retail art's 39 by 41. No art was
+  read to place it.
+- **D-36 (owner instruction, brief of 2026-11-01).** The `fallout2` loot window has
+  explicit rectangles, with no overlap, and SPEC-013's `fallout1` table is unchanged.
 
 ## 6. Coordination With SPEC-017 and SPEC-018
 
@@ -1708,5 +1759,8 @@ The first revision's requests were answered in the reconciliation pass of
   by hand against the window bounds and the odd-row rule. The ingestion
   patterns were rechecked by search: no source-tree path, no 40-character hex
   string and no code listing.
+- [x] Revision 5 was written by Team A on 2026-11-01. A throwaway script checked every
+  `fallout2` rectangle pair in `loot-layout.tsv` for overlap, and found none. No art
+  was read, so the rectangles stay unmeasured.
 - [x] Revision 4 was written by Team A on 2026-10-31 from SPEC-024c alone, and the
   ingestion patterns were rechecked by search.

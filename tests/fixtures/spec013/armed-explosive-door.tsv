@@ -1,0 +1,26 @@
+section	item	fallout2	fallout1	rule
+setup	player	hex 20100, moves to distance 4 before the blast	same	Outside the radius
+setup	explosive	PID 51, one unit, armed in the inventory with S = 10	same	SPEC-013 3.10
+setup	skill result	2, so type 8 after 100 ticks	same	SPEC-013 3.10 step 5
+setup	critter B	living, distance 2, explosion DT 4, DR 20	same	-
+setup	critter C	living, distance 3, explosion DT 0, DR 0	same	-
+setup	critter E	living, distance 4	same	Outside the radius
+setup	door D1	scenery door, distance 2, script has damage_p_proc	same	The script opens the door when fixed_param is 6
+setup	door D2	scenery door, distance 1, no script	same	-
+setup	scenery S1	scenery, distance 3, script has damage_p_proc	same	-
+setup	scenery S2	scenery, distance 4, script has damage_p_proc	same	Outside the radius
+timeline	tick 0	Armed: PID becomes 206, in-use flag set, event queued for tick 100, owner the explosive	same	SPEC-011 3.24 rule 1
+timeline	tick 40	Dropped at hex 20100: the same object, with the same event and tick	same	SPEC-011 3.24 rule 2
+timeline	tick 60	Save and load: the event and its owner are restored	same	SPEC-011 3.24 rule 4
+timeline	tick 100	The event fires. The center hex is 20100	same	SPEC-013 3.10
+draws	D(30, 50) in order	B 40, then C 30	None: no critter blocks the center	SPEC-013 3.10
+damage	critter B	29: 40 - 4 = 36, 36 - trunc(36 x 20 / 100) = 29	None	SPEC-013 3.10
+damage	critter B knockback	2	None	trunc(29 / 10)
+damage	critter C	30	None	-
+damage	critter C knockback	3	None	trunc(30 / 10)
+damage	player, critter E	None	None	Distance 4
+scripts	D1 damage_p_proc	Runs once, fixed_param 6, source the player. The door opens	Runs once, with R1's fixed parameter. The door stays shut, because this script tests for 6	SPEC-013 3.10
+scripts	D2	Unchanged	Unchanged	No script, so no effect
+scripts	S1 damage_p_proc	Runs once, fixed_param 6, source the player	Runs once	-
+scripts	S2 damage_p_proc	Does not run	Does not run	Distance 4
+end	explosive	Destroyed	Destroyed	SPEC-013 3.10, Retry

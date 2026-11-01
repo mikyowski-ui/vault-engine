@@ -1,6 +1,6 @@
 # SPEC-020: Unified Session Runtime and Core UI Authority
 
-**Status:** approved by the owner, 2026-10-27. Revision 1, 2026-10-27, by the coordinator at the owner's request: module paths replace file paths, two module references in the draft are corrected, and tags and a Decisions section are added.
+**Status:** approved by the owner, 2026-10-27. Revision 1, 2026-10-27, by the coordinator at the owner's request: module paths replace file paths, two module references in the draft are corrected, and tags and a Decisions section are added. Revision 2 (Team A, 2026-11-01), on the owner's brief of the same day, adds rule 5 of section 2.1 and the gallery note in section 3.
 
 **Provenance:** drafted by the project owner on 2026-10-27 as the contract for Wave 1. Revised the same day by the coordinator. Source categories:
 
@@ -30,6 +30,7 @@ Consolidate the split execution paths in `vault_platform::game`, `vault_platform
 2. The other `vault_core::ui` modules (`automap`, `bar`, `cursor`, `editor`, `endgame` and `sheet`) are under the same authority (Decision D-5). `[Must-match]`
 3. Platform adapters in `vault-platform` keep no shadow copies of inventory lists, barter tables, Pip-Boy tabs, or character-sheet edits. They read that state from `vault_core::ui`, and send input to it. `[Must-match]`
 4. An adapter that receives an input the current modal state does not accept passes it to `vault_core::ui` unchanged, and acts only on the returned result. It never guesses the outcome locally. `[Safe rule]`
+5. The loot window's rectangles, under both editions, are hit-tested in `vault_core::ui::inventory`, from SPEC-019 section 3.7 and SPEC-013 section 3.16. An adapter draws from them and keeps no copy. `[Must-match]`
 
 ### 2.2 Unified world and viewport stepping
 
@@ -59,6 +60,8 @@ Consolidate the split execution paths in `vault_platform::game`, `vault_platform
 
    Any other change in output is a regression.
 
+   **Gallery authorization (Revision 2).** `cargo xtask capture-gallery` may re-record a gallery image if and only if an existing gallery scene visibly changes because of the Fallout 2 loot layout (SPEC-019 section 3.7) or the cursor layer order (SPEC-014 section 3.27). The commit names each re-recorded file and which of the two causes changed it. Any other gallery change stays a regression. This note covers gallery images only: a replay digest that changes is not authorized here, and goes back to the owner (Decision D-9). `[Must-match]`
+
 ## 4. Decisions
 
 Every point that the draft left open, or that it named wrongly, is resolved here.
@@ -74,6 +77,10 @@ Every point that the draft left open, or that it named wrongly, is resolved here
 - **D-5 (coordinator default).** The draft listed nine `vault_core::ui` modules. The six it left out (`automap`, `bar`, `cursor`, `editor`, `endgame` and `sheet`) come under the same authority, so that no platform shadow state remains for them either.
 - **D-6 (coordinator default).** The draft's `gallery/` directory does not exist at the workspace root. The gallery is `vault_platform::gallery`, with its `demos` and `encode` submodules, and its output is whatever `cargo xtask capture-gallery` writes.
 - **D-7 (coordinator default).** The edition parameter is the existing `vault_core::GameProfile`, re-exported from `vault-formats`. No new edition type is introduced.
+
+- **D-8 (owner instruction, brief of 2026-11-01).** The gallery authorization of section 3, in its stated limits.
+- **D-9 (Team A default).** The note does not extend to replay digests, because the brief names only the gallery. Moving the cursor to the top layer changes every frame where a sprite covered it, so a pinned digest of such a frame needs the owner's decision.
+- **D-10 (Team A default).** The loot rectangles are named in section 2.1, because this spec owns where hit-testing lives.
 
 ## 5. Verification Checklist
 

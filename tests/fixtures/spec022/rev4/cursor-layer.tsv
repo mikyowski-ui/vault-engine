@@ -1,0 +1,5 @@
+rank	draw	layer	primary	secondary	key
+0	cursor art	7	0	0	E000000000000000
+1	movement outline ring	7	0	1	E000000000000001
+2	movement outline wrap column	7	0	2	E000000000000002
+3	AP text	7	0	3	E000000000000003

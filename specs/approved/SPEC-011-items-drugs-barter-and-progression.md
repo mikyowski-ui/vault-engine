@@ -16,7 +16,8 @@ This document covers:
 - equipment: armor AC/DR/DT application, armor perks, hand slots and two-handed weapons, strength requirement, and opening the inventory in combat;
 - inventory: stacking, ammunition stacks, weight, carry and container limits, item value, reload and unload;
 - barter: the merchant price formula, reaction and script modifiers, Master Trader, and transaction acceptance;
-- the experience table, level-up HP, skill points, perk timing, the complete perk eligibility table, and perk effects.
+- the experience table, level-up HP, skill points, perk timing, the complete perk eligibility table, and perk effects;
+- an armed explosive's timer across a drop or a transfer (section 3.24, Team A, 2026-11-01).
 
 Relationship to other specifications: SPEC-002 defines `.MSG` parsing. SPEC-003 defines the prototype layouts that this document restates by meaning. SPEC-005 defines opcode stack contracts. SPEC-006 defines effective stats, trait adjustments, skill percentages, the random generator, reaction levels, and the timed queue. SPEC-007 defines AP costs, attack preflight, hit chance, and damage application. SPEC-008 defines save components and queue payload bytes. SPEC-009 defines NPC healing and reloading in combat. This document references those rules and does not restate them.
 
@@ -576,6 +577,15 @@ Effects that are not stat bonuses apply **only to the player** unless stated oth
 
 These effects are `[Must-match]`. Survivalist, Fortune Finder, Mental Block, Scrounger, Mysterious Stranger, Ranger, and Animal Friend have **no engine-side effect** in this revision. Scripts can only query them with `has_trait`. `[Must-match]`
 
+### 3.24 Armed Explosives Across a Drop or a Transfer
+
+Added by Team A on the owner's brief of 2026-11-01. It states how SPEC-013 section 3.10's timer behaves when the item moves, under both profiles. Rules 1, 2 and 4 are `[Must-match]`, and rule 3 is `[Safe rule]`.
+
+1. **Owner.** An armed explosive's queued event, type 8 or 11, is owned by the explosive object itself, not by whoever holds it (SPEC-013 section 3.10).
+2. **Moves.** Dropping it onto a map hex, or moving it to a container or another critter, by any path, changes neither the event nor its tick. The event is never cancelled or queued again by a move, and it fires at its scheduled tick, at the center hex found at that moment.
+3. **The same object.** A move carries the armed object itself. The clone that removing from a stack makes (section 3.13) never stands in for it, or the event would lose its owner. An armed explosive is therefore always one unit: arming from a stack first splits one unit off, and the rest stay unarmed.
+4. **What stays.** The in-use flag moves with it, so it does not stack (section 3.13) and barter refuses it (section 3.19). A save keeps the event and its owner (SPEC-008). Leaving the map keeps SPEC-013 section 3.10's map-exit rule, so one left on the ground detonates on the map being left.
+
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
 All fixtures use synthetic data and explicit draws. "Tick T" is the consumption time. All hex is big-endian.
@@ -749,6 +759,10 @@ Run `python3 -I tools/spec011/survey.py <unpacked corpus>` (a research-side tool
 - 16 of 43 weapons carry the two-handed flag. All 26 weapons with capacity > 0 have a caliber matched by some ammunition prototype. Every ammunition pack size is > 0, so the value and weight divisions are safe. Weapon minimum strength is within 0-10.
 - `perk.msg` defines names 101-164 and descriptions 201-264.
 
+### 4.13 Fixture L: Armed Explosive Moved Before It Fires
+
+`tests/fixtures/spec013/armed-explosive-door.tsv`, section `timeline`: armed at tick 0 for tick 100, dropped at tick 40, saved and loaded at tick 60, and fired at tick 100 at the hex where it lies. Variants: moved into a container held by a critter at hex H, it fires at H; a stack of 3 armed once leaves 2 unarmed units, and dropping the armed unit leaves the 2 in place.
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -760,3 +774,12 @@ Run `python3 -I tools/spec011/survey.py <unpacked corpus>` (a research-side tool
 Verification notes: `tools/spec_lint.py` gives 0 errors. Its 43 plain-word warnings were reviewed and are benign. They are this spec's own formula notation: "roll" (the SPEC-006 random-integer notation), "trunc", "rank", "level", "bonus", "amount", "modifier", "weight", "size", "current", "maximum" and "capacity". The only fenced block is a big-endian hex dump of a synthetic payload. The corpus survey (section 4.12) passes every check. Tag count: 159 `[Must-match]`, 8 `[May-improve]`.
 
 Update notes (2026-10-22): section 3.21 now says that cancelling Tag! or Mutate! still consumes the pending perk pick (SPEC-014 §3.42). Tag counts are unchanged.
+
+Update notes (2026-11-01, Team A): section 3.24 and Fixture L, on the owner's brief. No engine code was read.
+
+## Decisions (section 3.24)
+
+| ID | Decision | Class | Why |
+| --- | --- | --- | --- |
+| D-1 | The event stays bound to the explosive through a drop or a transfer, and fires at its scheduled tick | Owner instruction (brief of 2026-11-01) | The brief's requirement. It follows SPEC-013's owner and center-hex rules |
+| D-2 | An armed explosive is always one unit, and a move carries the object itself | Team A default | The clone of section 3.13 has a new identity, so a clone would orphan the event |

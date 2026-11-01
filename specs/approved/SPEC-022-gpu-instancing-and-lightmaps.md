@@ -1,6 +1,6 @@
 # SPEC-022: GPU-Instanced Sprite Batching and Hex Lightmaps
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 3 (Team A, 2026-10-30); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 3 (Team A, 2026-10-30); see "Revision history". Revision 4 (Team A, 2026-11-01) adds the cursor layer.
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -146,6 +146,13 @@ alone (section 7).
     bound are unchanged. New vectors are in `tests/fixtures/spec022/rev3/`.
     Team A changed no revision 1 or revision 2 file.
 
+- **Revision 4 (2026-11-01).** On the owner's brief of the same day, the in-world
+  cursor is layer 7, the top layer, on both paths (sections 2.1 and 3.3, D-42 to
+  D-44). It leaves the flat and upright passes and the hex lists. The key layout and
+  the form of every key of layers 0 to 6 are unchanged, though an object after the
+  cursor on its hex takes a list index two lower. New vectors are in
+  `tests/fixtures/spec022/rev4/`.
+
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
 - DO NOT copy C/C++ code, struct definitions, function names, internal variable names, or implementation-source paths from any inspected implementation.
@@ -223,7 +230,7 @@ is one rule. `[Must-match]`
 | 4 | Outline | Outline rings, in outline-list order; then ground-item highlights (revision 2) | 0 | 8 × outline position + part |
 | 5 | Floating text | Floating text boxes, in creation order | 0 | Creation rank |
 | 6 | No-hex | Objects that have no hex | 0 | Reference draw rank |
-| 7 | (Reserved) | Never used; an item of layer 7 is refused | — | — |
+| 7 | Cursor | The in-world cursor, its movement outline and its AP text (revision 4) | 0 | Cursor rank |
 
 The 64-bit sort key is: `[Must-match]`
 
@@ -249,9 +256,10 @@ Field domains: `[Must-match]`
   entries of the **current elevation**: the engine keeps a separate list per
   elevation (measured by the implementer, Wave 3; revision 1 counted every
   elevation's entries). The draw order is the same under either count. It is
-  below 2^29. Hidden objects count, though they are not drawn, and the
-  in-world cursor and its AP text take two places, at the cursor's place in
-  the list (measured by the implementer, 2026-10-30).
+  below 2^29. Hidden objects count, though they are not drawn. The in-world
+  cursor and its AP text take no place in the list (revision 4). Revision 3
+  gave them two places, as measured by the implementer on 2026-10-30, when they
+  were drawn in the object passes.
 - **Hex number** is 0 to 39999. **Square rank** is 0 to 9999.
 - **Shroud.** Primary 10000 is used only by the enhanced shroud (section
   3.3), so every shroud draw follows every roof square. Its secondary is the
@@ -265,6 +273,9 @@ Field domains: `[Must-match]`
   implementer, 2026-10-30). Revision 2's `100 + k` agreed only when the list
   was full, and is withdrawn (D-35). The key order is the same under either
   number. A position is below 2^29.
+- **Cursor rank** (revision 4) is 0 for the cursor art, 1 for the movement outline's
+  ring, 2 for its wrap column, and 3 for the AP text. Each rank appears at most
+  once in a refresh, and no other value is valid.
 - **Creation rank** is the text's position among the live floating texts,
   oldest first. **Reference draw rank** is the position in which the
   reference path draws the object among the no-hex objects.
@@ -569,9 +580,8 @@ the GPU atlas. `[Must-match]`
     pixel is dark from 80 on (`rev3/shroud-mask.tsv`).
   - The shell's dark index is the mapped entry below index 229 nearest to
     black, and the shell allows the whole grid, so in play only pixels off
-    the grid take it. The in-world cursor's art is drawn in the flat pass, so
-    it is shrouded with the scene. Outlines, floating text and objects
-    without a hex stay above the shroud.
+    the grid take it. Outlines, floating text, objects without a hex and the
+    in-world cursor (revision 4) stay above the shroud.
   - The painter stays the authority: the rule above checks the recorder, and
     never replaces it. If they differ, the reference path wins and the
     difference is reported for a revision.
@@ -618,6 +628,16 @@ the GPU atlas. `[Must-match]`
 - **No-hex (layer 6).** Each object without a hex that the reference path
   draws, in its order, with the mode chosen as for layers 1 and 2 but light
   source `fixed` at 65536. `[Must-match]`
+- **Cursor (layer 7, revision 4).** The active in-world cursor of SPEC-014 section
+  3.27: the movement hex cursor, the action arrow and crosshair art, in whichever mode
+  it is in. Nothing is drawn after it, so no door, container, critter, roof, outline
+  or floating text ever covers it. `[Must-match]`
+  - The art and the AP text use the mode chosen as for layers 1 and 2, with the light
+    SPEC-014 section 3.27 gives, and neither is split by the player cutout.
+  - The movement outline is drawn like an outline (layer 4's rules). It is not an
+    entry of the outline list, so it takes no place among the 100.
+  - The cursor is outside the roof peek, the shroud and the outline list, and the
+    reference path draws these in this same order, so both canvases stay equal.
 - **Unlit scenes (revisions 2 and 3).** An unlit scene is a refresh that the
   reference path draws without a light (no light buffer and no ambient). The
   shell always passes a light, so unlit scenes arise only in tools and tests.
@@ -1026,7 +1046,7 @@ is reported for a spec revision. `[Safe rule]`
    device is lost, the session uses the reference path to its end. This is
    logged once, and the setting is not changed. `[Safe rule]`
 2. **Refused refresh.** A refresh is refused for an unexpected state: a
-   layer 7 item, a field outside its domain, two equal keys, an unknown mode
+   layer 7 item outside its ranks (section 2.1), a field outside its domain, two equal keys, an unknown mode
    or light source, a level above 128, a texture limit, a full atlas, an
    upload error, a draw no mode can express (section 3.2), a shroud draw
    the `remap` recorder cannot express or a remap source value above its
@@ -1057,7 +1077,8 @@ difference that only follows a refusal. `[Safe rule]`
    world and the reference rules, never from GPU output. `[Must-match]`
 4. `cargo xtask capture-gallery && git diff --exit-code docs/assets` passes
    on the default path. No file under `docs/assets` is re-recorded for this
-   spec. `[Must-match]`
+   spec, apart from what SPEC-020 section 3's gallery authorization allows for the
+   cursor layer (revision 4). `[Must-match]`
 
 ### 3.14 Module Placement
 
@@ -1212,7 +1233,7 @@ adapter` and pass, unless the environment variable `VAULT_REQUIRE_GPU` is
 
 - **T1. Sort keys.** The key function gives every row of `sort-keys.tsv`
   (revision 2: `rev2/sort-keys.tsv`), and every row of
-  `rev3/highlight-positions.tsv`. Layer 7, a hex of 40000, a floor rank
+  `rev3/highlight-positions.tsv`. A layer 7 item with a primary other than 0 or a cursor rank above 3, a hex of 40000, a floor rank
   of 10000, a roof rank of 10000 given as a roof square (not as the shroud),
   a part of 5 in layers 1 to 3, a part of 1 in layer 0, a part of 2 in layer
   4, a list index of 2^29 and an outline position of 2^29 are each refused
@@ -1324,6 +1345,13 @@ adapter` and pass, unless the environment variable `VAULT_REQUIRE_GPU` is
   counters, the scenarios of T8, T10 and T17 record zero refusals for each of
   the four causes of section 3.16, and for a gray level above 7. Forcing a
   state that stays refused (T12, and a peek cap) still falls back.
+
+- **T20. The cursor is the top layer (revision 4).** On a scene with a door, a
+  container, a critter and a roof on the cursor's hex, plus an outline, a floating
+  text and an object with no hex over it, in each cursor mode: every cursor pixel
+  survives to the final canvas on both paths, the canvases are equal, and every key
+  of `rev4/cursor-layer.tsv` sorts after every other key of the refresh. A list index
+  does not count the cursor.
 
 ## 5. Synthetic Test Fixtures (Hex / Text)
 
@@ -1767,6 +1795,15 @@ Revision 3 adds:
   parity test for each refusal, modeled on SPEC-021 section 3.9. The default
   render path does not change (D-7).
 
+- **D-42 (owner instruction, brief of 2026-11-01).** The active in-world cursor is
+  always composited after everything else in a refresh, on both render paths.
+- **D-43 (Team A default).** The cursor uses reserved layer 7, because the key layout
+  has room and no other key's form changes. This withdraws "an item of layer 7 is
+  refused".
+- **D-44 (Team A default).** The cursor leaves the hex lists, so it no longer takes
+  two places (revision 3's measured rule). Draw order among objects does not change.
+  The movement outline leaves the list of 100 and draws with the cursor.
+
 ## 7. Clean-Room Verification Checklist
 
 - [x] Zero C/C++ code snippets or struct definitions included.
@@ -1794,5 +1831,6 @@ Revision 3 adds:
   40-character hexadecimal string, and no code listing. No engine Rust code was
   read.
 - [x] Team A computed every vector in section 5 from this spec with a
-  throwaway script that is not committed.
+  throwaway script that is not committed. Revision 4's layer 7 keys were computed
+  the same way, and no engine Rust code was read.
 - [x] Decisions separate owner instructions from Team A defaults.
