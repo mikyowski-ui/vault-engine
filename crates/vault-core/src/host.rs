@@ -168,6 +168,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub presentation_rng: crate::ParkMiller,
     /// The debugger holds the world between frames.
     pub debug_paused: bool,
+    /// The procedure the debugger is stepping: the world stays frozen, and
+    /// saving is refused, until it ends.
+    pub debug_vm: Option<Vm>,
     /// SPEC-008 §3.10: while music is disabled, requests are recorded but
     /// nothing plays; re-enabling plays the last recorded track.
     pub music_enabled: bool,
@@ -394,6 +397,7 @@ impl<A: WorldAssets> WorldHost<A> {
             vm_observer: None,
             presentation_rng: crate::ParkMiller::seeded(1).expect("a positive seed"),
             debug_paused: false,
+            debug_vm: None,
             music_enabled: true,
             last_music: None,
             script_messages: Default::default(),

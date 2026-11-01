@@ -616,3 +616,78 @@ fn characterization_fallout1_encounter() {
     }
     rows.check();
 }
+
+/// The bot's fixture loads on both editions, its doors read as written, and
+/// stepping on each exit grid walks the campaign to the world map.
+#[test]
+fn the_campaign_fixture_loads_and_its_exits_join_up() {
+    use vault_core::{fallout2::Fallout2World, world::Transition};
+    use vault_fixtures::campaign::{self, Edition};
+    for edition in [Edition::Fallout1, Edition::Fallout2] {
+        let dir = synthetic_corpus();
+        campaign::write_campaign(dir.path(), edition);
+        let mut preview = crate::map_preview::test_support::load(dir.path(), "maps/synthetic.map");
+        if edition == Edition::Fallout2 {
+            let tables = preview.host.load_fallout2_tables().unwrap();
+            let start = tables.maps.match_name(b"artemple.map");
+            preview.host.world.fallout2 = Some(Box::new(Fallout2World::new_game(tables, start)));
+        }
+        preview.host.load_map(&campaign::start(edition)).unwrap();
+        preview.image().unwrap();
+        let world = &preview.host.world;
+        let find = |id: u32| {
+            world
+                .iter()
+                .find(|(_, object)| object.raw.id == id)
+                .unwrap_or_else(|| panic!("object {id}"))
+                .0
+        };
+        for (id, locked) in [
+            (campaign::PLAIN_DOOR, false),
+            (campaign::LOCKED_DOOR, true),
+            (campaign::SCRIPTED_DOOR, true),
+        ] {
+            let lock = world.get(find(id)).unwrap().lock().unwrap();
+            assert_eq!(lock.0 & campaign::LOCKED as u32 != 0, locked, "door {id}");
+        }
+        let jammed = world
+            .get(find(campaign::JAMMED_DOOR))
+            .unwrap()
+            .lock()
+            .unwrap();
+        assert_ne!(jammed.0 & campaign::JAMMED as u32, 0);
+        for id in [
+            campaign::CONTAINER,
+            campaign::FRIEND,
+            campaign::FOE,
+            campaign::PISTOL,
+            campaign::AMMUNITION,
+            campaign::DYNAMITE,
+            campaign::PLASTIC,
+            campaign::DRUG,
+            campaign::EXIT_GRID,
+        ] {
+            find(id);
+        }
+        let request = |preview: &mut MapPreview, map: i32| {
+            preview.host.request_transition(Transition {
+                map,
+                elevation: 0,
+                hex: campaign::ENTRY,
+                facing: 0,
+            });
+            preview.host.process_transition().unwrap();
+            preview.image().unwrap();
+            preview.host.world.effects.clear();
+            preview.host.world.map.header.map_number
+        };
+        for (_, _, number) in campaign::maps(edition).into_iter().skip(1) {
+            assert_eq!(request(&mut preview, number), number);
+        }
+        request(&mut preview, -2);
+        assert!(
+            matches!(preview.screen, Screen::World(_) | Screen::World2(_)),
+            "the last exit opens the world map"
+        );
+    }
+}
