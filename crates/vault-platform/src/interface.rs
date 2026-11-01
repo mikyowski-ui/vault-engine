@@ -11,17 +11,28 @@ use vault_core::{
     },
 };
 
+/// What this session has already said.
+static NOTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn noted() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<String>> {
+    NOTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// SPEC-019 §2.2 rule 3 and §2.3: one diagnostic per missing art name or
 /// message per session.
 pub(crate) fn note_once(key: &str, what: &str) {
-    static NOTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
-        std::sync::Mutex::new(std::collections::BTreeSet::new());
-    let mut noted = NOTED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if noted.insert(key.to_owned()) {
+    if noted().insert(key.to_owned()) {
         tracing::warn!(name = key, "{what}");
     }
+}
+
+/// A warm switch ends the session, so a new one says everything again
+/// (SPEC-020 §2.5).
+pub(crate) fn forget_notes() {
+    noted().clear();
 }
 use vault_formats::{Font, FrmArchive, Palette};
 use vault_render::{IndexedImage, TextStyle};

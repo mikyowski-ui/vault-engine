@@ -54,6 +54,34 @@ impl Preset {
     }
 }
 
+/// SPEC-020 §2.6 `hotkey_hints`: the hotkey toasts once, every session, or
+/// never. `once` becomes `off` when the list is finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HotkeyHints {
+    #[default]
+    Once,
+    Always,
+    Off,
+}
+
+impl HotkeyHints {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "once" => Some(Self::Once),
+            "always" => Some(Self::Always),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::Always => "always",
+            Self::Off => "off",
+        }
+    }
+}
+
 /// Both games, in profile order.
 pub const GAMES: [GameProfile; 2] = [GameProfile::Fallout1, GameProfile::Fallout2];
 
@@ -275,6 +303,11 @@ pub struct Config {
     pub render_path: Option<RenderPath>,
     /// `sfall` under `[scripting]` (SPEC-024b §3.1): opt-in sfall mode.
     pub sfall: Option<bool>,
+    /// SPEC-020 §2.4: the edition a player last chose, kept as written, so
+    /// that any other text counts as no choice.
+    pub last_played: Option<String>,
+    /// SPEC-020 §2.6: the hotkey toasts.
+    pub hotkey_hints: Option<HotkeyHints>,
     /// Keys this engine does not know, in file order: ignored, but kept
     /// so that a rewrite does not lose them.
     pub unknown: Vec<(String, Value)>,
@@ -526,6 +559,16 @@ impl Config {
                     format!("`render_path` is \"reference\" or \"instanced\", not \"{text}\"")
                 })?);
             }
+            "last_played" => match value {
+                Value::String(text) => self.last_played = Some(text),
+                other => self.unknown.push((key.to_owned(), other)),
+            },
+            "hotkey_hints" => {
+                let text = string(value)?;
+                self.hotkey_hints = Some(HotkeyHints::parse(&text).ok_or_else(|| {
+                    format!("`hotkey_hints` is \"once\", \"always\" or \"off\", not \"{text}\"")
+                })?);
+            }
             "game_speed" => {
                 let expects = "`game_speed` is 1.0, 1.5 or 2.0";
                 let factor = value.number().ok_or_else(|| expects.to_owned())?;
@@ -637,6 +680,12 @@ impl Config {
         if let Some(path) = self.render_path {
             line("render_path", quote(path.name()));
         }
+        if let Some(text) = &self.last_played {
+            line("last_played", quote(text));
+        }
+        if let Some(hints) = self.hotkey_hints {
+            line("hotkey_hints", quote(hints.name()));
+        }
         for (key, value) in &self.unknown {
             line(
                 key,
@@ -715,6 +764,32 @@ impl Config {
             .to_toml()
             .map_err(|error| format!("{}: {error}", path.display()))?;
         write_replacing(path, text.as_bytes())
+    }
+
+    /// SPEC-023 §3.10 rule 5: the settings at `path` as one batch with one
+    /// put, so a failed write leaves the old file whole. The error says
+    /// why, for a diagnostic (rule 6): the session goes on.
+    pub fn commit(&self, path: &Path) -> Result<(), String> {
+        use crate::storage::{Namespace, StorageBackend, StorageOp};
+        let failed = |error: &dyn fmt::Display| format!("{}: {error}", path.display());
+        let base = path.parent().unwrap_or(Path::new(""));
+        let text = self
+            .clone()
+            .relative_from(base)
+            .to_toml()
+            .map_err(|error| failed(&error))?;
+        let (storage, key) =
+            crate::storage::config_file(path).ok_or_else(|| failed(&"not a settings file"))?;
+        storage
+            .commit(Namespace::Config, &[StorageOp::put(key, text.as_bytes())])
+            .map_err(|error| failed(&error))
+    }
+
+    /// SPEC-020 §2.4: `game`, on `paths`, becomes the active game, as a
+    /// choice does. It sets `game`; [`Self::last_played`] is the caller's.
+    pub fn choose_game(&mut self, game: GameProfile, paths: GamePaths) {
+        self.switch_game(game);
+        self.set_paths(paths);
     }
 
     /// Read a settings file, its relative paths resolved against its
@@ -822,7 +897,7 @@ impl Config {
     }
 }
 
-const KNOWN: [&str; 19] = [
+const KNOWN: [&str; 21] = [
     "master_dat",
     "critter_dat",
     "data_root",
@@ -842,6 +917,8 @@ const KNOWN: [&str; 19] = [
     "game_speed",
     "render_path",
     "load_order",
+    "last_played",
+    "hotkey_hints",
 ];
 
 /// A float as TOML writes it: always with a fraction or an exponent, so it

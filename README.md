@@ -51,9 +51,19 @@ The launcher finds your installs, or you browse to `MASTER.DAT`. It
 switches between *Fallout* and *Fallout 2*, and picks the `vanilla` or
 `enhanced` preset.
 
+With one game installed, it boots at once. With both, the **boot menu** asks
+which, and after that a 3-second banner starts the one you last played, unless
+you press a key to switch. Naming anything on the command line skips both, so
+scripted runs are unchanged.
+
+**`Alt+L`** switches between *Fallout* and *Fallout 2* in the same window, without
+restarting. It warns first, because unsaved progress is lost, and `Esc` goes back
+exactly where you were. Short hints teach the main keys the first time you play.
+
 **Hotkeys:** `Alt+V` widescreen · mouse wheel zoom · hold `Alt` roof peek ·
 `Alt+F` game speed · `Alt+H` combat info · `F6`/`F7` quick save/load · `F9`
-debugger. All but `F6`/`F7` and `F9` are enhanced-preset features.
+debugger · `Alt+L` switch game. All but `F6`/`F7`, `F9` and `Alt+L` are
+enhanced-preset features.
 
 ## Crates
 

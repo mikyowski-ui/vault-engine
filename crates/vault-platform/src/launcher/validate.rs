@@ -259,6 +259,72 @@ pub fn data_root(path: &Path, standalone: bool, game: GameProfile) -> Check {
     Check::ok(format!("folder, {entries} entries"))
 }
 
+/// The three checks of one game's paths: the data folder, then the
+/// databases in that game's format.
+pub fn install(
+    master: Option<&Path>,
+    critter: Option<&Path>,
+    root: Option<&Path>,
+    game: GameProfile,
+) -> [Check; 3] {
+    let databases = master.is_some() || critter.is_some();
+    let root_check = match root {
+        None => Check::unset("optional: loose files read before the archives"),
+        Some(root) => data_root(root, !databases, game),
+    };
+    let root = root.filter(|_| root_check.is_ok());
+    let required = |other: &str| Check {
+        state: State::Bad,
+        text: format!("required with {other}"),
+    };
+    let [master_check, critter_check] = if game == GameProfile::Fallout2 {
+        // SPEC-018 §2: the install folder holding MASTER.DAT is listed
+        // for its archives, which are opened, and the master database
+        // as mounted must hold the required members.
+        match master {
+            Some(path) => fallout2(path, critter, root),
+            None => [
+                Check {
+                    state: State::Bad,
+                    text: "required: Fallout 2 reads MASTER.DAT and CRITTER.DAT".into(),
+                },
+                Check::unset("found beside MASTER.DAT"),
+            ],
+        }
+    } else {
+        [
+            match (master, critter) {
+                (Some(path), _) => self::master(path, root, game),
+                (None, Some(_)) => required("CRITTER.DAT"),
+                (None, None) => Check::unset("not set: the data folder alone is the game data"),
+            },
+            match (critter, master) {
+                (Some(path), _) => self::critter(path, game),
+                (None, Some(_)) => required("MASTER.DAT"),
+                (None, None) => Check::unset("not set"),
+            },
+        ]
+    };
+    [master_check, critter_check, root_check]
+}
+
+/// Whether [`install`]'s checks can start the game, or the first reason
+/// they cannot.
+pub fn install_ready(checks: &[Check; 3]) -> Result<(), String> {
+    const NAMES: [&str; 3] = ["MASTER.DAT", "CRITTER.DAT", "Data folder"];
+    if let Some((name, check)) = NAMES
+        .iter()
+        .zip(checks)
+        .find(|(_, check)| check.state == State::Bad)
+    {
+        return Err(format!("{name}: {}.", check.text));
+    }
+    if checks.iter().all(|check| check.state == State::Unset) {
+        return Err("Name MASTER.DAT and CRITTER.DAT, or a data folder.".into());
+    }
+    Ok(())
+}
+
 /// A VFS path below `root`, matched one component at a time without
 /// regard to ASCII case (as the loose mount reads it).
 pub fn find_loose(root: &Path, path: &str) -> Option<PathBuf> {

@@ -351,17 +351,7 @@ impl Launcher {
     /// Whether the game data and the mod stack can start the game, or the
     /// first reason they cannot.
     pub fn ready(&self) -> Result<(), String> {
-        const NAMES: [&str; 3] = ["MASTER.DAT", "CRITTER.DAT", "Data folder"];
-        if let Some((name, check)) = NAMES
-            .iter()
-            .zip(&self.checks)
-            .find(|(_, check)| check.state == State::Bad)
-        {
-            return Err(format!("{name}: {}.", check.text));
-        }
-        if self.checks.iter().all(|check| check.state == State::Unset) {
-            return Err("Name MASTER.DAT and CRITTER.DAT, or a data folder.".into());
-        }
+        validate::install_ready(&self.checks)?;
         if self.mods.broken {
             return Err("Mods: the load order cannot be read.".into());
         }
@@ -749,42 +739,8 @@ impl Launcher {
     fn revalidate(&mut self) {
         let [master, critter, root] = Field::ALL.map(|field| self.path(field));
         let game = self.config.active_game();
-        let databases = master.is_some() || critter.is_some();
-        self.checks[2] = match &root {
-            None => Check::unset("optional: loose files read before the archives"),
-            Some(root) => validate::data_root(root, !databases, game),
-        };
-        let root = root.filter(|_| self.checks[2].is_ok());
-        let required = |other: &str| Check {
-            state: State::Bad,
-            text: format!("required with {other}"),
-        };
-        if game == GameProfile::Fallout2 {
-            // SPEC-018 §2: the install folder holding MASTER.DAT is listed
-            // for its archives, which are opened, and the master database
-            // as mounted must hold the required members.
-            [self.checks[0], self.checks[1]] = match &master {
-                Some(master) => validate::fallout2(master, critter.as_deref(), root.as_deref()),
-                None => [
-                    Check {
-                        state: State::Bad,
-                        text: "required: Fallout 2 reads MASTER.DAT and CRITTER.DAT".into(),
-                    },
-                    Check::unset("found beside MASTER.DAT"),
-                ],
-            };
-            return;
-        }
-        self.checks[0] = match (&master, &critter) {
-            (Some(master), _) => validate::master(master, root.as_deref(), game),
-            (None, Some(_)) => required("CRITTER.DAT"),
-            (None, None) => Check::unset("not set: the data folder alone is the game data"),
-        };
-        self.checks[1] = match (&critter, &master) {
-            (Some(critter), _) => validate::critter(critter, game),
-            (None, Some(_)) => required("MASTER.DAT"),
-            (None, None) => Check::unset("not set"),
-        };
+        self.checks =
+            validate::install(master.as_deref(), critter.as_deref(), root.as_deref(), game);
     }
 
     /// The Game toggle: the fields are kept as the old game's profile and

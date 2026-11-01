@@ -68,6 +68,7 @@ pub(crate) mod party;
 mod pipboy;
 mod pointer;
 mod qol;
+pub(crate) use qol::{BAYER, MESSAGE_FADE_MS};
 mod saveload;
 pub(crate) mod scene_render;
 pub(crate) use scene_render::SharedRenderer;

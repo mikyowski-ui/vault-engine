@@ -49,7 +49,8 @@ const BAR_GAP: i32 = 2;
 /// stay below it, so they never animate.
 const CYCLING: u8 = 229;
 /// The 4x4 ordered (Bayer) matrix the message dissolves through.
-const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+pub(crate) const BAYER: [[u8; 4]; 4] =
+    [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
 pub(crate) const QUICK_SAVED: &[u8] = b"Quick Saved.";
 pub(crate) const QUICK_LOADED: &[u8] = b"Quick Loaded.";
@@ -204,6 +205,16 @@ impl MapPreview {
             step: 0,
         });
         self.pointer.redraw = true;
+    }
+    /// SPEC-020 §2.6: whether a hotkey toast may show: the map screen, free
+    /// of combat, dialogue, the F9 panel and any HUD message. Every other
+    /// screen, a movie's included, is not the map.
+    pub(crate) fn hints_ready(&self) -> bool {
+        matches!(self.screen, Screen::Map)
+            && !self.host.world.combat
+            && !self.host.world.dialogue.open
+            && !self.debug_enabled()
+            && self.qol_state.message.is_none()
     }
     /// The message's dissolve step at `now`: 0 shown whole, 16 gone.
     fn message_step(since: u64, now: u64) -> u8 {

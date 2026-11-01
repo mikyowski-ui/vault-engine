@@ -160,6 +160,9 @@ pub struct Mixer {
     /// SPEC-012 §3.8 the movie level v: `trunc(0.94 x music_volume)`, or 0
     /// while music is off; kept even when no movie plays.
     movie_level: i32,
+    /// SPEC-020 §2.5: the whole output is stopped: every voice and stream
+    /// keeps its place and plays nothing.
+    held: bool,
 }
 impl Default for Mixer {
     fn default() -> Self {
@@ -168,10 +171,16 @@ impl Default for Mixer {
             streams: Vec::new(),
             master: sfx::FULL_VOLUME,
             movie_level: sfx::music_level(vault_core::ui::options::DEFAULT_VOLUME),
+            held: false,
         }
     }
 }
 impl Mixer {
+    /// Stop or resume the whole output, without touching any channel's own
+    /// pause.
+    pub fn set_held(&mut self, held: bool) {
+        self.held = held;
+    }
     /// Start a mono voice at SPEC-010 §3.13 `level`. Speech, music and
     /// library slots replace their previous voice; an effect beyond the
     /// limit is refused.
@@ -376,7 +385,7 @@ impl Mixer {
     /// the sum is clamped to [-1, 1].
     pub fn fill(&mut self, out: &mut [f32], channels: usize, rate: u32) {
         out.fill(0.0);
-        if channels == 0 || rate == 0 {
+        if channels == 0 || rate == 0 || self.held {
             return;
         }
         let (master, movie) = (self.master, self.movie_level);
@@ -844,6 +853,12 @@ impl Audio {
     pub fn handle(&self) -> AudioHandle {
         self.handle.clone()
     }
+    /// SPEC-020 §2.5: stop or resume everything the output plays.
+    pub fn hold(&self, held: bool) {
+        if let Some(mut mixer) = self.handle.lock() {
+            mixer.set_held(held);
+        }
+    }
 }
 
 #[cfg(feature = "audio")]
@@ -926,6 +941,28 @@ mod tests {
 
     fn tone(length: usize) -> Arc<[i16]> {
         (0..length).map(|index| (index as i16) * 100).collect()
+    }
+    /// SPEC-020 §2.5: the selector stops the whole output, every voice
+    /// keeping its place, and a channel's own pause survives it.
+    #[test]
+    fn spec020_holding_the_output_stops_everything_where_it_is() {
+        let mut mixer = Mixer::default();
+        assert!(mixer.play(tone(64), FULL, Channel::Effect, false));
+        let mut heard = [0.0; 8];
+        mixer.fill(&mut heard, 1, MIXER_RATE);
+        let position = mixer.position(Channel::Effect);
+        mixer.set_held(true);
+        let mut held = [1.0; 8];
+        mixer.fill(&mut held, 1, MIXER_RATE);
+        assert_eq!(held, [0.0; 8], "silence");
+        assert_eq!(mixer.position(Channel::Effect), position, "its place");
+        mixer.set_paused(Channel::Effect, true);
+        mixer.set_held(false);
+        assert!(mixer.paused(Channel::Effect), "its own pause stays");
+        mixer.set_paused(Channel::Effect, false);
+        let mut resumed = [0.0; 8];
+        mixer.fill(&mut resumed, 1, MIXER_RATE);
+        assert!(resumed.iter().any(|sample| *sample != 0.0), "it plays on");
     }
     fn close(out: &[f32], expected: &[f32]) -> bool {
         out.len() == expected.len()

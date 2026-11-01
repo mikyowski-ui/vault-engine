@@ -1,4 +1,5 @@
 mod audio;
+mod boot;
 mod config;
 mod editor_screen;
 mod enhanced;
@@ -19,6 +20,7 @@ mod spec024c_tests;
 // backend, and the rest is for hosts without OS paths and for the tests.
 #[cfg_attr(not(test), allow(dead_code))]
 mod storage;
+mod toast;
 mod touch;
 
 #[cfg(test)]
@@ -208,6 +210,18 @@ impl Args {
             || preview.preview_frm.is_some()
             || preview.preview_map.is_some()
             || preview.play_movie.is_some()
+    }
+    /// SPEC-020 §2.4: a start that the boot selector may answer. Display
+    /// flags do not stop it from being one, and no replay, smoke test or
+    /// named game or asset ever is.
+    fn zero_argument(&self) -> bool {
+        self.game_profile.is_none()
+            && !self.launcher
+            && !self.smoke_test
+            && self.replay_inputs.is_none()
+            && !self.names_asset()
+            && !self.names_source()
+            && self.preview.critter_dat.is_none()
     }
     /// The command line names the asset source.
     fn names_source(&self) -> bool {
@@ -400,6 +414,55 @@ fn start(
     Ok((launch, session, audio))
 }
 
+/// SPEC-020 §2.5: what a warm switch keeps of a command line. Only flags
+/// that a zero-argument start may carry cross it, so `--sfall`,
+/// `--master-dat`, `--mod-list` and `--record-inputs` do not.
+fn switch_args(shown: &Args) -> Args {
+    let mut args = Args::try_parse_from(["vault-platform"]).expect("no flags parse");
+    args.scaling = shown.scaling;
+    args.fullscreen = shown.fullscreen;
+    args.touch_ui = shown.touch_ui;
+    args.preset = shown.preset;
+    args.viewport = shown.viewport;
+    args.zoom = shown.zoom;
+    args.render_path = shown.render_path;
+    args.no_audio = shown.no_audio;
+    args
+}
+
+/// SPEC-020 §2.4 what a start does, and the installs it found: `None` for
+/// any start the command line names, which runs exactly as it always has.
+fn boot_plan(
+    args: &Args,
+    config: Option<&config::Config>,
+    parses: bool,
+    dirs: &config::PerGame<Vec<PathBuf>>,
+) -> Option<(boot::Decision, boot::Installs)> {
+    if !args.zero_argument() {
+        return None;
+    }
+    let none = config::Config::default();
+    let config = config.unwrap_or(&none);
+    let found = boot::discover(config, dirs);
+    let shown = config::PerGame {
+        fallout1: found.fallout1.is_ok(),
+        fallout2: found.fallout2.is_ok(),
+    };
+    let decision = boot::decide(parses, shown, config.last_played.as_deref());
+    Some((decision, found))
+}
+
+/// SPEC-020 §2.6 a session's toasts: none when the setting says so, and the
+/// seventh hint only with both editions found.
+fn session_toasts(config: Option<&config::Config>) -> Option<toast::HotkeyToasts> {
+    let setting = boot::hint_setting(config);
+    (setting != config::HotkeyHints::Off).then(|| {
+        let both =
+            config.is_some_and(|config| boot::both_found(config, &config::standard_data_dirs()));
+        toast::HotkeyToasts::new(both)
+    })
+}
+
 /// The command line the launcher's Play starts from: the one it was shown
 /// for, its display flags dropped (the launcher showed them as its own
 /// choices and saved what it launches with), debug on for Launch with
@@ -540,6 +603,8 @@ enum ShellHotkey {
     Viewport,
     /// Alt+F, with the enhanced preset only: the next game speed.
     GameSpeed,
+    /// Alt+L: the warm switch (SPEC-020 §2.5), under both presets.
+    Switch,
 }
 
 /// The `enhanced` preset's shell hotkey `key` is with Alt held or not:
@@ -557,6 +622,7 @@ fn shell_hotkey(key: KeyCode, alt: bool, enhanced: bool) -> Option<ShellHotkey> 
         KeyCode::F11 => Some(ShellHotkey::Fullscreen),
         KeyCode::Enter | KeyCode::NumpadEnter if alt => Some(ShellHotkey::Fullscreen),
         KeyCode::KeyS if alt => Some(ShellHotkey::Scaling),
+        KeyCode::KeyL if alt => Some(ShellHotkey::Switch),
         KeyCode::KeyV if alt && enhanced => Some(ShellHotkey::Viewport),
         _ => None,
     }
@@ -607,6 +673,19 @@ impl InputLog {
         tracing::warn!(%error, "input log stopped: it cannot be written");
         self.0 = None;
     }
+}
+
+/// SPEC-020 §2.5 a session stopped under the selector: what it needs when
+/// it resumes at the same step, as if the selector had never opened.
+struct Stopped {
+    since: Instant,
+    /// The scaling when it stopped: a change while open is logged on close.
+    scaling: ScalingMode,
+    /// The pointer it last saw.
+    pointer: Option<[f64; 2]>,
+    /// Events it has to see when it resumes: releases of what was held,
+    /// modifiers, focus and resizes.
+    held_back: Vec<WindowEvent>,
 }
 
 #[derive(Default)]
@@ -678,6 +757,25 @@ struct Shell {
     /// The `enhanced` preset's game speed (`None` under Vanilla): logged
     /// when the game starts at another speed than 1.0, and on every Alt+F.
     game_speed: Option<enhanced::GameSpeed>,
+    /// SPEC-020 §2.4 the pre-boot screen, or the selector over a session.
+    boot: Option<boot::Screen>,
+    /// The settings and installs the pre-boot screens choose from.
+    boot_config: Option<config::Config>,
+    boot_found: Option<boot::Installs>,
+    /// The session under the selector.
+    stopped: Option<Stopped>,
+    /// Buttons pressed on a boot screen: their releases stay with it.
+    boot_buttons: Vec<MouseButton>,
+    /// What a warm switch keeps of the command line; `None` where there is
+    /// no warm switch.
+    switch_base: Option<Box<Args>>,
+    /// The last composed frame, without a toast. It lets a toast or a closed
+    /// selector show again without asking the session for anything.
+    frame: Option<IndexedImage>,
+    /// SPEC-020 §2.6 this session's hints.
+    toasts: Option<toast::HotkeyToasts>,
+    /// The list's end turns `hotkey_hints` off.
+    hints_once: bool,
 }
 
 /// An enhanced frame, its layout, its side panels tiled to that layout,
@@ -791,6 +889,24 @@ fn enhanced_layers<'a>(shown: &'a EnhancedShown, pointer: Option<[f64; 2]>) -> V
     layers
 }
 
+/// A hint's plate as a layer, at its place in the interface frame.
+fn toast_layer<'a>(plate: &'a IndexedImage, shown: &EnhancedShown) -> Layer<'a> {
+    let scale = shown.layout.ui_scale;
+    let [left, top, _, _] = shown.layout.ui_rect;
+    let [x, y] = toast::plate_origin(shown.frame.ui.width(), plate);
+    Layer {
+        image: plate,
+        rect: [
+            left + x as f32 * scale,
+            top + y as f32 * scale,
+            plate.width() as f32 * scale,
+            plate.height() as f32 * scale,
+        ],
+        transparent: Some(0),
+        sharp: true,
+    }
+}
+
 impl Shell {
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl Into<AppError>) {
         let error = error.into();
@@ -805,9 +921,10 @@ impl Shell {
         self.record(command);
     }
     /// [`Self::log`], which writes no window state: a session's records
-    /// are the same with no window.
+    /// are the same with no window. SPEC-020 §2.4 and §2.5: a boot screen
+    /// writes nothing, before a game or over one.
     fn record(&mut self, command: InputCommand) {
-        if self.launcher.is_some() {
+        if self.launcher.is_some() || self.boot.is_some() {
             return;
         }
         let Some(log) = &mut self.input_log.0 else {
@@ -908,6 +1025,9 @@ impl Shell {
         }
     }
     fn flush_log(&mut self, _event_loop: &ActiveEventLoop) {
+        self.flush_records();
+    }
+    fn flush_records(&mut self) {
         use std::io::Write;
         if let Some(Err(error)) = self.input_log.0.as_mut().map(|log| log.flush()) {
             self.input_log.stop(&error);
@@ -947,16 +1067,13 @@ impl Shell {
         };
         match preview.image() {
             Ok(image) => {
-                if let Some(renderer) = &mut self.renderer {
-                    let palette = preview.display_override().unwrap_or_else(|| {
-                        self.display
-                            .as_ref()
-                            .map_or_else(|| preview.palette().rgba8(), |display| display.entries)
-                    });
-                    renderer.set_image(&image, &palette);
-                }
+                let palette = self.palette();
+                self.show_frame(image, &palette);
                 // The composed frame already shows the cursor where it is.
                 self.pointer_moved = false;
+                let Some(preview) = &self.session else {
+                    return;
+                };
                 let title = preview.title();
                 if title != self.title {
                     window.set_title(&title);
@@ -969,6 +1086,81 @@ impl Shell {
         }
         if let Some(pointer) = self.pointer {
             self.log_hover(event_loop, pointer);
+        }
+    }
+    /// A composed frame on the screen, with the shown hint over a copy, so
+    /// that the frame itself never holds a toast (SPEC-020 §2.6).
+    fn show_frame(&mut self, image: IndexedImage, palette: &[[u8; 4]; 256]) {
+        let plate = self.toast_plate(palette);
+        if let Some(renderer) = &mut self.renderer {
+            match &plate {
+                Some(plate) => renderer.set_image(&toast::over(&image, plate), palette),
+                None => renderer.set_image(&image, palette),
+            }
+        }
+        self.frame = Some(image);
+    }
+    /// The hint showing, as a plate in `palette`'s nearest colors.
+    fn toast_plate(&self, palette: &[[u8; 4]; 256]) -> Option<IndexedImage> {
+        let toasts = self.toasts.as_ref()?;
+        let (_, step) = toasts.shown()?;
+        Some(toast::plate(
+            toasts.text()?,
+            step,
+            toast::Inks::nearest(palette),
+        ))
+    }
+    /// One frame of the hints: the timer runs on the shell clock, and only
+    /// reads the session. A changed hint redraws what is already composed.
+    fn tick_toasts(&mut self, window: &Window, now: u64) {
+        let ready = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.hints_ready());
+        let Some(toasts) = &mut self.toasts else {
+            return;
+        };
+        let changed = toasts.tick(now, ready);
+        if toasts.take_finished() {
+            self.finish_hints();
+        }
+        if changed {
+            self.redraw_toast(window);
+        }
+    }
+    /// The hint changed: the same frame again, with it or without it.
+    fn redraw_toast(&mut self, window: &Window) {
+        if self.shown.is_none()
+            && let Some(frame) = self.frame.take()
+        {
+            let palette = self.palette();
+            self.show_frame(frame, &palette);
+        }
+        window.request_redraw();
+    }
+    /// A key press ends the hint that names it (it changes no key's action).
+    fn toast_key(&mut self, window: &Window, key: KeyCode, alt: bool) {
+        if self
+            .toasts
+            .as_mut()
+            .is_some_and(|toasts| toasts.key(key, alt))
+        {
+            self.redraw_toast(window);
+        }
+    }
+    /// The list is finished: `once` becomes `off`, in one commit. A failure
+    /// is a diagnostic, and the session goes on (SPEC-020 §2.6).
+    fn finish_hints(&mut self) {
+        self.toasts = None;
+        if !std::mem::take(&mut self.hints_once) {
+            return;
+        }
+        let Some(path) = config::find(&config::search_dirs()) else {
+            tracing::warn!("hotkey_hints not saved: there is no settings file");
+            return;
+        };
+        if let Err(error) = boot::commit_hints(&path, config::HotkeyHints::Off) {
+            tracing::warn!(%error, "hotkey_hints not saved");
         }
     }
     /// The enhanced presentation's refresh: the next redraw builds the
@@ -1044,9 +1236,7 @@ impl Shell {
                     match preview.image() {
                         Ok(image) => {
                             let palette = self.palette();
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.set_image(&image, &palette);
-                            }
+                            self.show_frame(image, &palette);
                         }
                         Err(error) => self.fail(event_loop, error),
                     }
@@ -1054,12 +1244,20 @@ impl Shell {
                 }
             }
         }
+        let palette = self.palette();
+        let plate = self.toast_plate(&palette);
         let (Some(shown), Some(preview)) = (&self.shown, &self.session) else {
             return false;
         };
-        let palette = self.palette();
         if let Some(renderer) = &mut self.renderer {
-            renderer.set_layers(&enhanced_layers(shown, self.pointer), &palette);
+            let mut layers = enhanced_layers(shown, self.pointer);
+            if let Some(plate) = &plate {
+                // Over the interface, under the pointer's art.
+                let cursor = shown.frame.cursor.is_some() && self.pointer.is_some();
+                let at = layers.len() - usize::from(cursor);
+                layers.insert(at, toast_layer(plate, shown));
+            }
+            renderer.set_layers(&layers, &palette);
         }
         // The frame draws its own pointer art: the OS pointer hides then.
         window.set_cursor_visible(shown.frame.cursor.is_none() && preview.system_cursor());
@@ -1079,6 +1277,7 @@ impl Shell {
             .is_some_and(|settings| settings.viewport == enhanced::ViewportMode::Unlocked);
         let wanted = widescreen
             && self.launcher.is_none()
+            && self.boot.is_none()
             && self
                 .session
                 .as_mut()
@@ -1213,14 +1412,8 @@ impl Shell {
         let Some(image) = preview.pointer_frame() else {
             return;
         };
-        if let Some(renderer) = &mut self.renderer {
-            let palette = preview.display_override().unwrap_or_else(|| {
-                self.display
-                    .as_ref()
-                    .map_or_else(|| preview.palette().rgba8(), |display| display.entries)
-            });
-            renderer.set_image(&image, &palette);
-        }
+        let palette = self.palette();
+        self.show_frame(image, &palette);
     }
     /// G-31 / SPEC-014 §3.28: the action menu's release moves the system
     /// pointer to the frame pixel the preview asks for (where supported).
@@ -1311,15 +1504,28 @@ impl Shell {
         if repeat {
             return self.shell_keys.contains(&key);
         }
-        let Some(hotkey) = shell_hotkey(key, self.alt, self.enhanced.is_some())
-            .or_else(|| qol_hotkey(key, self.alt, self.game_speed.is_some()))
+        let hotkey = shell_hotkey(key, self.alt, self.enhanced.is_some())
+            .or_else(|| qol_hotkey(key, self.alt, self.game_speed.is_some()));
+        // No session, or a smoke test, has no warm switch (SPEC-020 §2.5).
+        let switches = self.session.is_some() && !self.smoke_test;
+        let Some(hotkey) = hotkey.filter(|hotkey| *hotkey != ShellHotkey::Switch || switches)
         else {
             return false;
         };
         if !self.shell_keys.contains(&key) {
             self.shell_keys.push(key);
         }
+        // The session under the selector takes no key of its own.
+        if self.stopped.is_some()
+            && matches!(hotkey, ShellHotkey::Viewport | ShellHotkey::GameSpeed)
+        {
+            return true;
+        }
         match hotkey {
+            ShellHotkey::Switch => {
+                self.switch_key(event_loop, window);
+                return true;
+            }
             ShellHotkey::Fullscreen => {
                 let fullscreen = window.fullscreen().is_none();
                 window.set_fullscreen(fullscreen.then_some(Fullscreen::Borderless(None)));
@@ -1352,6 +1558,9 @@ impl Shell {
     /// so hover runs again and the drawn cursor follows, and the next click
     /// acts where the cursor shows.
     fn viewport_changed(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        if self.boot.is_some() {
+            return self.refresh_boot(window);
+        }
         if let Some(pointer) = self.pointer {
             self.log_hover(event_loop, pointer);
             self.refresh_pointer(window);
@@ -1612,8 +1821,31 @@ impl Shell {
         window: &Window,
         event: WindowEvent,
     ) -> Option<WindowEvent> {
+        // What the session under the selector must still see.
+        let original = self.stopped.is_some().then(|| event.clone());
+        if self.stopped.is_some() {
+            match &event {
+                WindowEvent::Focused(_) | WindowEvent::ModifiersChanged(_) => {
+                    self.hold_back(original.clone());
+                }
+                WindowEvent::Resized(size) => {
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.resize(size.width, size.height);
+                    }
+                    self.hold_back(original);
+                    window.request_redraw();
+                    return None;
+                }
+                _ => {}
+            }
+        }
         let input = match event {
             WindowEvent::CloseRequested => {
+                // A session's log ends as at any quit.
+                if self.session.is_some() {
+                    self.boot = None;
+                    self.record(InputCommand::Quit);
+                }
                 event_loop.exit();
                 return None;
             }
@@ -1628,8 +1860,23 @@ impl Shell {
                     return None;
                 };
                 let pressed = event.state == ElementState::Pressed;
-                if self.shell_key(event_loop, window, key, pressed, event.repeat) || !pressed {
+                if self.shell_key(event_loop, window, key, pressed, event.repeat) {
                     return None;
+                }
+                if !pressed {
+                    // Pressed before the selector opened: the session
+                    // has to see it go.
+                    self.hold_back(original);
+                    return None;
+                }
+                if self.boot.is_some() {
+                    if event.repeat {
+                        return None;
+                    }
+                    // Its release stays with the shell, even once closed.
+                    if self.stopped.is_some() {
+                        self.shell_keys.push(key);
+                    }
                 }
                 launcher::LauncherInput::Key {
                     key,
@@ -1648,6 +1895,33 @@ impl Shell {
             WindowEvent::CursorLeft { .. } => {
                 self.pointer = None;
                 self.virtual_pointer.left();
+                return None;
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } if self.boot.is_some() => {
+                self.boot_buttons.push(button);
+                match self.pixel() {
+                    Some(pixel) if button == MouseButton::Left => {
+                        launcher::LauncherInput::Press(pixel)
+                    }
+                    // The banner stops for any button, anywhere.
+                    _ if matches!(self.boot, Some(boot::Screen::Banner(_))) => {
+                        launcher::LauncherInput::Press([-1, -1])
+                    }
+                    _ => return None,
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button,
+                ..
+            } if self.boot.is_some() => {
+                if !self.take_boot_button(button) {
+                    self.hold_back(original);
+                }
                 return None;
             }
             WindowEvent::MouseInput {
@@ -1679,7 +1953,7 @@ impl Shell {
                     touch::TouchContext::default(),
                 );
                 for action in actions {
-                    if self.launcher.is_none() {
+                    if self.launcher.is_none() && self.boot.is_none() {
                         break;
                     }
                     let input = match action {
@@ -1717,6 +1991,9 @@ impl Shell {
         window: &Window,
         input: launcher::LauncherInput,
     ) {
+        if self.boot.is_some() {
+            return self.boot_input(event_loop, window, &input);
+        }
         let Some(launcher) = self.launcher.as_mut() else {
             return;
         };
@@ -1757,8 +2034,25 @@ impl Shell {
             game = config::game_name(session.edition()),
             "launcher: starting the game"
         );
+        self.enter_session(event_loop, window, (launch, session, audio), &config);
+    }
+
+    /// A started session takes over the window, whichever way it started:
+    /// the launcher's Play, a boot screen's choice, or a warm switch.
+    fn enter_session(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        (launch, session, audio): (Launch, session::SessionRuntime, Option<audio::Audio>),
+        config: &config::Config,
+    ) {
         self.launcher = None;
+        self.boot = None;
+        self.boot_config = None;
+        self.boot_found = None;
         self.pending = None;
+        self.toasts = session_toasts(Some(config));
+        self.hints_once = boot::hint_setting(Some(config)) == config::HotkeyHints::Once;
         self._audio = audio;
         self.display = Some(DisplayPalette::new(session.palette(), session.brightness()));
         self.session = Some(session);
@@ -1767,7 +2061,7 @@ impl Shell {
         self.scaling = launch.scaling;
         self.enhanced = launch.enhanced;
         self.touch_ui = launch.touch_ui;
-        self.game_speed = launch_game_speed(&launch, Some(&config));
+        self.game_speed = launch_game_speed(&launch, Some(config));
         if let Some(renderer) = &mut self.renderer {
             renderer.set_scaling(self.scaling);
         }
@@ -1786,6 +2080,303 @@ impl Shell {
         self.log_session_records();
         self.refresh_preview(event_loop, window);
     }
+
+    /// A boot screen on the window.
+    fn refresh_boot(&mut self, window: &Window) {
+        let now = self.now();
+        let Some(screen) = &self.boot else {
+            return;
+        };
+        let title = screen.title();
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_image(&screen.image(now), &launcher::palette());
+        }
+        if title != self.title {
+            window.set_title(&title);
+            self.title = title;
+        }
+        window.request_redraw();
+    }
+
+    /// One input on a boot screen, and what it asks for.
+    fn boot_input(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        input: &launcher::LauncherInput,
+    ) {
+        let selector = self
+            .boot_config
+            .as_ref()
+            .zip(self.boot_found.as_ref())
+            .map(|(config, found)| boot::Selector::new(config, found.clone(), None));
+        let Some(screen) = self.boot.as_mut() else {
+            return;
+        };
+        let action = match screen {
+            // A key or a button stops the countdown (SPEC-020 §2.4).
+            boot::Screen::Banner(_) => {
+                if let Some(selector) = selector.filter(|_| boot::Banner::stops(input)) {
+                    *screen = boot::Screen::Selector(selector);
+                }
+                None
+            }
+            boot::Screen::Selector(selector) => selector.handle(input),
+        };
+        match action {
+            None => self.refresh_boot(window),
+            Some(boot::BootAction::Leave) if self.stopped.is_some() => {
+                self.close_switch(event_loop, window);
+            }
+            Some(boot::BootAction::Leave) => event_loop.exit(),
+            Some(boot::BootAction::Choose(game)) => self.choose_edition(event_loop, window, game),
+        }
+    }
+
+    /// The selector's choice boots, with `game` and `last_played` set in
+    /// one commit.
+    fn choose_edition(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        game: vault_core::GameProfile,
+    ) {
+        if self.stopped.is_none() {
+            let paths = self
+                .boot_found
+                .as_ref()
+                .and_then(|found| found.get(game).clone().ok());
+            if let Some(paths) = paths {
+                self.boot_edition(event_loop, window, game, paths, true);
+            }
+            return;
+        }
+        // 1. Validate first: a failure costs the running session nothing.
+        let dirs = config::search_dirs();
+        let settings = config::find(&dirs)
+            .map(|path| config::Config::load(&path))
+            .transpose()
+            .map_err(|error| error.to_string());
+        let found = settings.and_then(|settings| {
+            let settings = settings.unwrap_or_default();
+            boot::find_edition(&settings, &config::standard_data_dirs(), game)
+                .map(|paths| (settings, paths))
+        });
+        let (settings, paths) = match found {
+            Ok(found) => found,
+            Err(reason) => {
+                if let Some(boot::Screen::Selector(selector)) = &mut self.boot {
+                    selector.fail(game, reason);
+                }
+                return self.refresh_boot(window);
+            }
+        };
+        // 2. Tear down. 3. Boot.
+        self.end_session();
+        self.boot_config = Some(settings);
+        self.pending = self.switch_base.clone();
+        self.boot_edition(event_loop, window, game, paths, true);
+    }
+
+    /// SPEC-020 §2.5 step 2: the session ends as at quit. Its log ends, and
+    /// the world, its programs, its hooks, its decoded assets and its `Vfs`
+    /// go with it. Only the window, the renderer and the storage stay.
+    fn end_session(&mut self) {
+        self.boot = None;
+        self.stopped = None;
+        self.record(InputCommand::Quit);
+        self.flush_records();
+        self.input_log = InputLog::default();
+        self.session = None;
+        self._audio = None;
+        self.display = None;
+        self.shown = None;
+        self.enhanced_dirty = false;
+        self.backdrop_key = None;
+        self.frame = None;
+        self.toasts = None;
+        self.repeat = input::KeyRepeat::default();
+        self.touch = touch::TouchGestures::new(self.touch.slop);
+        self.pointer_moved = false;
+        interface::forget_notes();
+    }
+
+    /// Boot `game` on the boot settings, through the same path as Play. A
+    /// failed boot opens the launcher, showing why. `commits` records the
+    /// choice; the banner's own boot writes nothing.
+    fn boot_edition(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        game: vault_core::GameProfile,
+        paths: config::GamePaths,
+        commits: bool,
+    ) {
+        let (Some(mut settings), Some(pending)) = (self.boot_config.take(), self.pending.take())
+        else {
+            return;
+        };
+        settings.choose_game(game, paths);
+        if commits {
+            settings.last_played = Some(config::game_name(game).to_owned());
+            if let Err(error) = boot::commit_choice(&settings, &config::search_dirs()) {
+                tracing::warn!(%error, "the choice of game was not saved");
+            }
+        }
+        let mut args = (*pending).clone();
+        let origin = session::SessionOrigin::Launcher;
+        let reason = match start(&mut args, Some(&settings), origin) {
+            Ok((launch, Some(session), audio)) => {
+                tracing::info!(game = config::game_name(game), "boot: starting the game");
+                return self.enter_session(event_loop, window, (launch, session, audio), &settings);
+            }
+            Ok((_, None, _)) => "the settings name no game data".to_owned(),
+            Err(error) => {
+                tracing::error!(%error, "the chosen game did not start");
+                error.to_string()
+            }
+        };
+        self.boot = None;
+        let problem = format!("The game did not start: {reason}");
+        self.launcher = launcher_for(&pending, Some(&settings), Some(problem)).map(Box::new);
+        self.pending = Some(pending);
+        self.refresh_launcher(window);
+    }
+
+    /// Alt+L: the selector over the session, or closing it again. A session
+    /// from memory discovered nothing, so it only says so (case S12).
+    fn switch_key(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        if self.stopped.is_some() {
+            return self.close_switch(event_loop, window);
+        }
+        self.toast_key(window, KeyCode::KeyL, true);
+        let Some(session) = &self.session else {
+            return;
+        };
+        if session.memory_mounted() {
+            tracing::warn!("Alt+L: this session's data is in memory, with nothing to switch to");
+            return;
+        }
+        let running = session.edition();
+        let dirs = config::search_dirs();
+        let settings = config::find(&dirs)
+            .and_then(|path| config::Config::load(&path).ok())
+            .unwrap_or_default();
+        let found = boot::discover(&settings, &config::standard_data_dirs());
+        self.stop_session(boot::Selector::new(&settings, found, Some(running)));
+        window.set_cursor_visible(true);
+        self.refresh_boot(window);
+    }
+
+    /// The session stops at this step boundary: nothing runs, is logged or
+    /// is timed until it resumes, and its audio holds (SPEC-020 §2.5).
+    fn stop_session(&mut self, selector: boot::Selector) {
+        self.boot = Some(boot::Screen::Selector(selector));
+        self.stopped = Some(Stopped {
+            since: Instant::now(),
+            scaling: self.scaling,
+            pointer: self.pointer,
+            held_back: Vec::new(),
+        });
+        if let Some(audio) = &self._audio {
+            audio.hold(true);
+        }
+    }
+
+    /// The session resumes at the same step: the frame clock skips the
+    /// time the selector took, what it missed arrives now, and the frame
+    /// comes back without asking it for one.
+    fn resume_session(&mut self) -> Option<Stopped> {
+        let stopped = self.stopped.take()?;
+        self.boot = None;
+        if let Some(started) = &mut self.started {
+            *started += stopped.since.elapsed();
+        }
+        if let Some(audio) = &self._audio {
+            audio.hold(false);
+        }
+        Some(stopped)
+    }
+
+    /// The selector closes with no switch (cases S2 to S4).
+    fn close_switch(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        let Some(stopped) = self.resume_session() else {
+            return;
+        };
+        if self.scaling != stopped.scaling {
+            self.log_scaling();
+        }
+        if let Some(frame) = self.frame.take() {
+            let palette = self.palette();
+            self.show_frame(frame, &palette);
+        }
+        if let Some(preview) = &self.session {
+            let title = preview.title();
+            window.set_title(&title);
+            self.title = title;
+            window.set_cursor_visible(preview.system_cursor());
+        }
+        let moved = std::mem::replace(&mut self.pointer, stopped.pointer);
+        if moved != stopped.pointer {
+            match moved {
+                Some(point) => self.pointer_to(event_loop, window, point),
+                None => self.pointer_leave(event_loop, window),
+            }
+        }
+        for event in stopped.held_back {
+            self.window_event(event_loop, window.id(), event);
+        }
+        window.request_redraw();
+    }
+
+    /// An event the session under the selector has to see when it resumes.
+    fn hold_back(&mut self, event: Option<WindowEvent>) {
+        if let (Some(stopped), Some(event)) = (&mut self.stopped, event) {
+            stopped.held_back.push(event);
+        }
+    }
+
+    /// Whether `button`'s press happened on a boot screen.
+    fn take_boot_button(&mut self, button: MouseButton) -> bool {
+        match self.boot_buttons.iter().position(|held| *held == button) {
+            Some(at) => {
+                self.boot_buttons.swap_remove(at);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// One frame of a boot screen: the banner counts down on the wall
+    /// clock, and boots its edition when the time is up.
+    fn boot_tick(&mut self, event_loop: &ActiveEventLoop) {
+        let now = self.now();
+        let Some(boot::Screen::Banner(banner)) = &mut self.boot else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        };
+        let before = banner.seconds(now);
+        let due = banner.tick(now);
+        let (edition, changed) = (banner.edition, banner.seconds(now) != before);
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        if due {
+            let paths = self
+                .boot_found
+                .as_ref()
+                .and_then(|found| found.get(edition).clone().ok());
+            if let Some(paths) = paths {
+                return self.boot_edition(event_loop, &window, edition, paths, false);
+            }
+        }
+        if changed {
+            self.refresh_boot(&window);
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(50),
+        ));
+    }
 }
 
 impl ApplicationHandler for Shell {
@@ -1799,10 +2390,11 @@ impl ApplicationHandler for Shell {
             .map(|monitor| [monitor.size().width, monitor.size().height]);
         let [width, height] = initial_window_size(monitor);
         let attributes = Window::default_attributes()
-            .with_title(match (&self.session, &self.launcher) {
-                (Some(preview), _) => preview.title(),
-                (None, Some(launcher)) => launcher.title(),
-                (None, None) => "Vault Engine — Indexed Color Test".to_owned(),
+            .with_title(match (&self.session, &self.launcher, &self.boot) {
+                (Some(preview), ..) => preview.title(),
+                (None, Some(launcher), _) => launcher.title(),
+                (None, None, Some(screen)) => screen.title(),
+                (None, None, None) => "Vault Engine — Indexed Color Test".to_owned(),
             })
             .with_inner_size(PhysicalSize::new(width, height))
             // H2: the frame is never down-sampled in a window that keeps
@@ -1826,6 +2418,7 @@ impl ApplicationHandler for Shell {
                 height: size.height,
             },
         );
+        let mut first_frame = None;
         let renderer = (|| -> AppResult<Renderer> {
             if let Some(preview) = &mut self.session {
                 let image = preview.image()?;
@@ -1834,12 +2427,22 @@ impl ApplicationHandler for Shell {
                         .as_ref()
                         .map_or_else(|| preview.palette().rgba8(), |display| display.entries)
                 });
-                Ok(pollster::block_on(Renderer::new_with_image(
+                let renderer = pollster::block_on(Renderer::new_with_image(
                     window.clone(),
                     size.width,
                     size.height,
                     &image,
                     &palette,
+                ))?;
+                first_frame = Some(image);
+                Ok(renderer)
+            } else if let Some(screen) = &self.boot {
+                Ok(pollster::block_on(Renderer::new_with_image(
+                    window.clone(),
+                    size.width,
+                    size.height,
+                    &screen.image(0),
+                    &launcher::palette(),
                 ))?)
             } else if let Some(launcher) = &self.launcher {
                 Ok(pollster::block_on(Renderer::new_with_image(
@@ -1861,6 +2464,7 @@ impl ApplicationHandler for Shell {
             Ok(mut renderer) => {
                 renderer.set_scaling(self.scaling);
                 self.renderer = Some(renderer);
+                self.frame = first_frame;
                 self.log_session_records();
             }
             Err(error) => {
@@ -1885,6 +2489,11 @@ impl ApplicationHandler for Shell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // SPEC-020 §2.4 and §2.5: a boot screen has no game frame, and the
+        // session under the selector takes no step.
+        if self.boot.is_some() {
+            return self.boot_tick(event_loop);
+        }
         // The F9 overlay's commands follow the inputs that committed them.
         self.drain_debug(event_loop);
         // The commands logged since the last pass.
@@ -1944,6 +2553,9 @@ impl ApplicationHandler for Shell {
                 display.cycler.enabled = preview.palette_cycling();
                 display.cycler.poll(now, &mut display.entries) || replaced
             });
+        if let Some(window) = self.window.clone() {
+            self.tick_toasts(&window, now);
+        }
         if changed {
             if let Some(window) = self.window.clone() {
                 self.refresh_preview(event_loop, &window);
@@ -1973,7 +2585,18 @@ impl ApplicationHandler for Shell {
         else {
             return;
         };
-        let event = if self.launcher.is_some() {
+        // A button pressed on the selector, released once it has closed.
+        if let WindowEvent::MouseInput {
+            state: ElementState::Released,
+            button,
+            ..
+        } = &event
+            && self.boot.is_none()
+            && self.take_boot_button(*button)
+        {
+            return;
+        }
+        let event = if self.launcher.is_some() || self.boot.is_some() {
             match self.launcher_event(event_loop, &window, event) {
                 Some(event) => event,
                 None => return,
@@ -2019,6 +2642,7 @@ impl ApplicationHandler for Shell {
                         preview.key_up(key);
                     }
                 } else if !event.repeat {
+                    self.toast_key(&window, key, self.alt);
                     let key = self
                         .session
                         .as_mut()
@@ -2116,9 +2740,11 @@ impl ApplicationHandler for Shell {
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                // The enhanced layers draw the cursor themselves.
-                let enhanced = self.present_enhanced(event_loop, &window);
-                if std::mem::take(&mut self.pointer_moved) && !enhanced {
+                // A boot screen is on the window already. The enhanced
+                // layers draw the cursor themselves.
+                let boot = self.boot.is_some();
+                let enhanced = !boot && self.present_enhanced(event_loop, &window);
+                if std::mem::take(&mut self.pointer_moved) && !enhanced && !boot {
                     self.present_pointer();
                 }
                 if !enhanced {
@@ -2226,16 +2852,51 @@ fn run(mut args: Args) -> AppResult<()> {
         Err(error) if bare => (None, Some(error.to_string())),
         Err(error) => return Err(error),
     };
-    let launcher = bare
+    let mut config = config;
+    let plan = boot_plan(
+        &args,
+        config.as_ref(),
+        problem.is_none(),
+        &config::standard_data_dirs(),
+    );
+    // SPEC-020 §2.4: one edition found boots at once, whichever the
+    // settings last named. The choice is not recorded.
+    if let Some((boot::Decision::Start(game), found)) = &plan
+        && let Ok(paths) = found.get(*game)
+    {
+        let settings = config.get_or_insert_default();
+        if settings.active_game() != *game || !settings.has_game_data() {
+            settings.choose_game(*game, paths.clone());
+        }
+    }
+    let screen = plan.as_ref().and_then(|(decision, _)| match decision {
+        boot::Decision::Banner(game) => Some(boot::Screen::Banner(boot::Banner::new(*game))),
+        boot::Decision::Selector => plan.as_ref().map(|(_, found)| {
+            let none = config::Config::default();
+            let settings = config.as_ref().unwrap_or(&none);
+            boot::Screen::Selector(boot::Selector::new(settings, found.clone(), None))
+        }),
+        boot::Decision::Launcher | boot::Decision::Start(_) => None,
+    });
+    let launcher = (bare && screen.is_none())
         .then(|| launcher_for(&args, config.as_ref(), problem))
         .flatten();
     let input_log = InputLog::open(args.record_inputs.as_deref())?;
     let mut shell = Shell {
         smoke_test: args.smoke_test,
         input_log,
+        switch_base: (!args.smoke_test).then(|| Box::new(switch_args(&args))),
         ..Default::default()
     };
-    if let Some(launcher) = launcher {
+    if let Some(screen) = screen {
+        let shown = resolve_launch(&mut args.clone(), config.as_ref());
+        shell.scaling = shown.scaling;
+        shell.touch_ui = shown.touch_ui;
+        shell.boot = Some(screen);
+        shell.boot_config = config;
+        shell.boot_found = plan.map(|(_, found)| found);
+        shell.pending = Some(Box::new(args));
+    } else if let Some(launcher) = launcher {
         let shown = resolve_launch(&mut args.clone(), config.as_ref());
         shell.scaling = shown.scaling;
         shell.touch_ui = shown.touch_ui;
@@ -2252,6 +2913,12 @@ fn run(mut args: Args) -> AppResult<()> {
         shell.fullscreen = launch.fullscreen;
         shell.touch_ui = launch.touch_ui;
         shell.game_speed = launch_game_speed(&launch, config.as_ref());
+        shell.toasts = if args.smoke_test {
+            None
+        } else {
+            session_toasts(config.as_ref())
+        };
+        shell.hints_once = boot::hint_setting(config.as_ref()) == config::HotkeyHints::Once;
         shell._audio = audio;
         shell.display = session
             .as_ref()
@@ -2311,6 +2978,10 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "warm_switch_tests.rs"]
+mod warm_switch_tests;
 
 #[cfg(test)]
 mod tests {

@@ -332,6 +332,9 @@ pub enum KeyPress {
 pub struct SessionRuntime {
     origin: SessionOrigin,
     edition: GameProfile,
+    /// The `Vfs` came from memory (SPEC-023 §3.15), so nothing was
+    /// discovered and nothing can be switched to (SPEC-020 §2.5).
+    memory_mounted: bool,
     preview: AssetPreview,
 }
 
@@ -349,6 +352,7 @@ impl SessionRuntime {
             .take()
             .unwrap_or_else(|| default_storage(origin, &args));
         args.storage = Some(storage);
+        let memory_mounted = args.data.is_some();
         let Some(preview) = args.load()? else {
             return Ok(None);
         };
@@ -360,12 +364,35 @@ impl SessionRuntime {
         Ok(Some(Self {
             origin,
             edition,
+            memory_mounted,
             preview,
         }))
     }
     /// The validated edition the session runs.
     pub fn edition(&self) -> GameProfile {
         self.edition
+    }
+    /// The screen a game shows, as `--debug` titles it.
+    #[cfg(test)]
+    pub fn stage(&self) -> Option<String> {
+        match &self.preview {
+            AssetPreview::Game(game) => Some(game.title()),
+            _ => None,
+        }
+    }
+    /// Whether the session's data came from memory (SPEC-020 §2.5).
+    pub fn memory_mounted(&self) -> bool {
+        self.memory_mounted
+    }
+    /// SPEC-020 §2.6: whether a hotkey toast may show and its timer run:
+    /// the map screen, free of combat, dialogue, windows, movies, the F9
+    /// panel and any HUD message. It only reads the session.
+    pub fn hints_ready(&self) -> bool {
+        match &self.preview {
+            AssetPreview::Map(map) => map.hints_ready(),
+            AssetPreview::Game(game) => game.hints_ready(),
+            AssetPreview::Sprite(_) | AssetPreview::Movie(_) => false,
+        }
     }
     /// Open the audio output a world or a movie plays through (`device`:
     /// a real output device, else a silent one) and attach it. Sprites need

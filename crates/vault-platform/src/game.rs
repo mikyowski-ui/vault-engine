@@ -1898,6 +1898,10 @@ impl Game {
     pub fn world_shown(&self) -> bool {
         matches!(self.stage, Stage::World(_) | Stage::Load(_))
     }
+    /// SPEC-020 §2.6: only a world in play shows hints, never a menu.
+    pub fn hints_ready(&self) -> bool {
+        matches!(&self.stage, Stage::World(world) if world.hints_ready())
+    }
     pub fn release(&mut self, point: Option<[i32; 2]>, right: bool) -> bool {
         // A left release ends the held button's down art.
         let held = if right { None } else { self.held.take() };

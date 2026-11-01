@@ -216,6 +216,8 @@ pub struct Replay {
     repeat: KeyRepeat,
     /// The logged display scaling (integer until a `scaling` record).
     scaling: vault_render::ScalingMode,
+    /// Alt is held, as the log says.
+    alt: bool,
     checkpoints: Option<Checkpoints>,
     /// The `state_hash` at the start of each step's presentation (T15).
     #[cfg(test)]
@@ -228,6 +230,11 @@ impl Replay {
     #[cfg(test)]
     pub fn new(session: SessionRuntime) -> AppResult<Self> {
         Self::with_checkpoints(session, CheckpointOptions::default())
+    }
+    /// The screen the session's game shows.
+    #[cfg(test)]
+    pub fn stage(&self) -> Option<String> {
+        self.session.stage()
     }
 
     /// [`Self::new`] with a checkpoint stream, when `options` asks for one.
@@ -257,6 +264,7 @@ impl Replay {
             commands: 0,
             last: None,
             stopped: false,
+            alt: false,
             stack_checked: false,
             timed: None,
             repeat: KeyRepeat::default(),
@@ -586,6 +594,11 @@ impl Replay {
                 else {
                     return Ok(());
                 };
+                // SPEC-020 §2.5 case S13: a replay has no shell key, and the
+                // desktop never logs this one, so it has no effect here.
+                if key == KeyCode::KeyL && self.alt {
+                    return Ok(());
+                }
                 if !timed {
                     // An older desktop applied every press, OS repeats too,
                     // and left at any Escape it did not consume.
@@ -701,7 +714,10 @@ impl Replay {
                 control,
                 alt,
                 ..
-            } => self.session.set_modifiers([shift, control, alt]),
+            } => {
+                self.alt = alt;
+                self.session.set_modifiers([shift, control, alt]);
+            }
             InputCommand::Quit => self.stopped = true,
             // The desktop applied the command right after logging it, then
             // drew the frame.

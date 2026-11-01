@@ -250,7 +250,7 @@ the palette-resolved colours only in a thin band at each texel edge, so pixels
 stay crisp while scrolling. `integer` keeps whole-pixel scaling with a border.
 Pointer mapping, the cursor warp and replay all use the same integer-snapped
 viewport. **F11** or **Alt+Enter** toggles borderless fullscreen. The shell
-keeps these keys (and, under `preset = "enhanced"`, **Alt+V** and
+keeps these keys and **Alt+L** (and, under `preset = "enhanced"`, **Alt+V** and
 **Alt+F**), and F10 stays the game's quit confirmation (SPEC-014 §3.17).
 The window opens at 1280×960, or at the largest multiple of 640×480 that
 fits a smaller monitor.
@@ -305,6 +305,66 @@ format. What is found is written to a new `vault-engine.toml`, the game named
 by `--game-profile` (else the first found) active. Command-line flags always
 win over the file. When that still names no game data that validates, the
 launcher opens instead (below).
+
+### Boot menu and Alt+L
+
+SPEC-020 §2.4 to §2.6. With no game named, the engine looks for both editions
+first: each one's paths in `vault-engine.toml`, then the install locations above,
+validated as the launcher validates them. It reads directory tables only, and it
+counts the enabled layers of `mod_list` without mounting or enabling any.
+
+| Found | What happens |
+| --- | --- |
+| Settings do not parse, or neither edition | The launcher |
+| One edition | It boots at once, with no menu |
+| Both, and `last_played` names one | A banner: `Starting Fallout 2 in 3. Press any key to switch.` |
+| Both, and no `last_played`, or any other text | The boot menu, which waits |
+
+A start that names anything skips all of this, so a headless or CI run is
+unchanged: `--game-profile`, `--launcher`, `--game`, any `--preview-*`,
+`--play-movie`, `--smoke-test`, `--replay-inputs`, `--master-dat`, `--critter-dat`
+or `--corpus-dir`. Display flags such as `--scaling` or `--preset` do not count as
+naming one. There is no `--edition` flag: `--game-profile` is that flag.
+
+**The boot menu** reads `Found Fallout 1 and Fallout 2. Pick one.` It has one row
+per edition, showing its enabled-mod count, or `not found` for an edition it cannot
+use. **1** or **2**, or a click, chooses at once. The arrow keys and the pointer move
+the highlight, and **Enter** chooses it. **Esc** or closing the window quits, and
+F11, Alt+Enter and Alt+S work as in the launcher. A choice sets `game` and
+`last_played` in one commit, and a boot that fails opens the launcher, showing why.
+
+**The banner** boots its edition after 3 seconds and writes nothing. Any key or
+mouse button stops it and opens the boot menu, Enter included. Pointer movement, a
+lone modifier and the keys above do not. Neither screen appears in a replay, a smoke
+test or a gallery capture, and neither writes to a `--record-inputs` log.
+
+**Alt+L** opens the same menu over a running session, titled `Switch game. Unsaved
+progress is lost.`, on every screen, under both presets and both editions. The game
+never receives the key and it is not logged. While the menu is open nothing runs, is
+logged or is timed, and audio holds. **Esc**, **Alt+L**, or the edition already
+running closes it, and the session resumes at the same step, so a cancelled Alt+L
+changes no log, checkpoint or state. Choosing the other edition validates it first,
+and a failure shows on its row with the session untouched. Then the session ends as
+at quit, with nothing saved: its log ends, and the world, its scripts, its decoded
+assets and its `Vfs` go with it. The new one is a cold start of that edition, and is
+not recorded. Only the window, the renderer and the storage carry over. Of the
+command line, only `--scaling`, `--fullscreen`, `--touch-ui`, `--preset`, `--viewport`,
+`--zoom`, `--render-path` and `--no-audio` cross a switch, so a session started with
+`--sfall` or `--master-dat` does not pass them on: the settings file and manifests
+decide. Alt+L does nothing in a replay or a smoke test, and a session whose data
+is in memory writes one diagnostic.
+
+**Hotkey hints.** A short amber plate near the top of the window teaches the keys,
+one at a time, on the map only: `F1: Help`, `I: Inventory`, `S: Skilldex`, `P: Pip-Boy`,
+`Z: Wait (Pip-Boy clock)`, `F9: Debugger`, then `Alt+L: Switch game` when both editions
+are found. The first shows 2 seconds after the map first appears. Each stays 4
+seconds, dissolves over 0.5 and leaves a 1-second gap. The timer stops during combat,
+dialogue, any window, a movie and the F9 panel, and a HUD message hides a hint until
+it has gone. Pressing the shown hint's key ends it, and changes nothing about that
+key. `hotkey_hints` in `vault-engine.toml` is `once`, the default, `always` or `off`,
+and `once` becomes `off` when the list is finished. The shell draws a hint over a copy
+of the frame, so it is in no screenshot, digest, state hash, save or log, and it never
+shows in a replay, a smoke test or a gallery capture.
 
 ### Render path
 
@@ -372,7 +432,9 @@ opens when:
 - the binary starts with no asset named (no `--game`, `--preview-*`,
   `--play-movie` or `--smoke-test`) and `vault-engine.toml` is missing, fails
   to parse (the error shows in the status line, and Save replaces the file),
-  or names game data that does not validate; or
+  or names game data that does not validate, and the boot menu has no edition
+  to offer ([Boot menu and Alt+L](#boot-menu-and-altl));
+- a game chosen on the boot menu does not start; or
 - `--launcher` is given. Display flags given with it (`--scaling`,
   `--fullscreen`, `--touch-ui`, `--preset`, `--viewport`, `--zoom`,
   `--no-audio`) pre-set its choices.
