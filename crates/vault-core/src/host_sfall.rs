@@ -135,6 +135,7 @@ impl<A: WorldAssets> WorldHost<A> {
             sfall.last_targets.clear();
         }
         self.sfall_clear_tables();
+        self.restore_calendar();
         self.sfall_setup_owed();
     }
     /// The screens' `get_game_mode` bits, from the shell.

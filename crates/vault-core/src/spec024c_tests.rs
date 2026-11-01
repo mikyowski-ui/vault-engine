@@ -2,15 +2,19 @@
 //! tables. Everything here is `oracle/SPEC-024c/`'s synthetic data.
 use crate::{
     CharacterSheet, GameProfile, StatContext, WorldHost, WorldState, sfall::GlobalKey,
-    sfall_ini::IniFiles, spec024_tests::sfall_host, state_hash::fnv1a64, test_support::TestAssets,
-    ui::sheet::sheet_gcd,
+    sfall_startup::StartupOptions, spec024_tests::sfall_host, state_hash::fnv1a64,
+    test_support::TestAssets, ui::sheet::sheet_gcd,
 };
+use std::sync::Arc;
 use vault_formats::{GcdFile, SheetAppearance};
 use vault_vm::sfall::SfallValue;
 
 const VECTORS: &str = include_str!("../../../oracle/SPEC-024c/gcd-vectors.tsv");
 const EFFECT: &str = include_str!("../../../oracle/SPEC-024c/gcd-effect.tsv");
 const LAYOUT: &str = include_str!("../../../oracle/SPEC-024c/gcd-layout.tsv");
+const DDRAW: &str = include_str!("../../../oracle/SPEC-024c/ddraw-vectors.tsv");
+const DDRAW_FILE: &str = include_str!("../../../oracle/SPEC-024c/fixture-ddraw.ini");
+const DDRAW_EXPECTED: &str = include_str!("../../../oracle/SPEC-024c/fixture-ddraw-expected.tsv");
 
 /// `gcd-gN.hex`: spaced bytes, in lines.
 fn hex(text: &str) -> Vec<u8> {
@@ -152,16 +156,6 @@ fn the_words_change_no_stat_and_no_hash() {
     assert_eq!(hash(of(&sheets[4])), hash(of(&sheets[2])));
 }
 
-/// A writable folder that holds one `ddraw.ini`.
-struct Folder(Vec<u8>);
-impl IniFiles for Folder {
-    fn read(&self, file: &str) -> Option<Vec<u8>> {
-        (file == "ddraw.ini").then(|| self.0.clone())
-    }
-    fn write(&mut self, _file: &str, _text: &[u8]) -> Result<(), String> {
-        Ok(())
-    }
-}
 /// §6.1 test 3: A1 to A6.
 #[test]
 fn t3_each_effect_vector_gives_its_global_and_its_stored_style() {
@@ -173,8 +167,8 @@ fn t3_each_effect_vector_gives_its_global_and_its_stored_style() {
             style: style.unwrap(),
         });
         let (mut host, _) = sfall_host();
-        let ini = format!("[Misc]\nEnableHeroAppearanceMod={mode}\n").into_bytes();
-        host.set_sfall_ini_files(Box::new(Folder(ini)));
+        let ini = format!("[Misc]\nEnableHeroAppearanceMod={mode}\n");
+        host.apply_startup(Arc::new(StartupOptions::parse(ini.as_bytes())), None);
         if !sfall {
             host.sfall = None;
             host.world.sfall = None;
@@ -202,9 +196,8 @@ fn t3_each_effect_vector_gives_its_global_and_its_stored_style() {
 #[test]
 fn the_global_is_in_the_sidecar_and_in_the_hash() {
     let (mut host, _): (WorldHost<TestAssets>, _) = sfall_host();
-    host.set_sfall_ini_files(Box::new(Folder(
-        b"[Misc]\nEnableHeroAppearanceMod=1\n".to_vec(),
-    )));
+    let ini = b"[Misc]\nEnableHeroAppearanceMod=1\n";
+    host.apply_startup(Arc::new(StartupOptions::parse(ini)), None);
     let before = host.world.sfall_hash();
     host.sfall_take_sheet(Some(SheetAppearance { race: 0, style: 2 }));
     assert_ne!(host.world.sfall_hash(), before);
@@ -212,4 +205,165 @@ fn the_global_is_in_the_sidecar_and_in_the_hash() {
     let read = crate::sfall::SfallWorld::from_sidecar(&sidecar).unwrap();
     let key = GlobalKey::Text(*b"HApStyle");
     assert_eq!(read.globals.get(&key), Some(&SfallValue::Int(2)));
+}
+
+/// A vector's field of `options`, and every diagnostic reading it can give.
+fn field(options: &StartupOptions, name: &str) -> (String, usize) {
+    const WORLD: [i32; 2] = [1400, 1800];
+    let exists = |path: &str| path == "maps/v13ent.map" || path == "maps/artemple.map";
+    let start = options.new_game_start("maps/artemple.map", exists, WORLD);
+    let holds = |name: &str| ["hmjmps", "hfjmps", "hmwarr"].contains(&name);
+    let (models, model_notes) = options.checked_models(holds);
+    let notes = options.notes.len() + start.notes.len() + model_notes.len();
+    let or_unchanged =
+        |model: &Option<String>| model.clone().unwrap_or_else(|| "unchanged".to_owned());
+    let text = match name {
+        "starting_map" => {
+            let stem = start.map.strip_prefix("maps/").unwrap_or(&start.map);
+            stem.strip_suffix(".map").unwrap_or(stem).to_owned()
+        }
+        "movie_2" => options
+            .movie(2)
+            .unwrap_or(crate::fallout2::MOVIES[2])
+            .to_owned(),
+        "start_tick" => options
+            .start_ticks
+            .unwrap_or(crate::fallout2::START_TICKS)
+            .to_string(),
+        "start_date" => {
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            let (year, day) = options.calendar();
+            let [month, day, year] = crate::host_save::calendar_date(0, year, day);
+            format!("{day} {} {year}", MONTHS[usize::from(month) - 1])
+        }
+        "world_pos" => start
+            .world_pos
+            .map_or("start area".to_owned(), |[x, y]| format!("{x},{y}")),
+        "version" => String::from_utf8(
+            options
+                .version
+                .clone()
+                .unwrap_or_else(|| crate::ui::fallout2::MENU_VERSION.as_bytes().to_vec()),
+        )
+        .unwrap(),
+        "premades" => {
+            options
+                .premades
+                .as_ref()
+                .map_or("combat,stealth,diplomat".to_owned(), |premades| {
+                    let names: Vec<&str> = premades.iter().map(|(name, _)| name.as_str()).collect();
+                    names.join(",")
+                })
+        }
+        "male_start" => or_unchanged(&models.start[0]),
+        "male_default" => or_unchanged(&models.default[0]),
+        "menu_offset" => format!("{},{}", options.menu_offset[0], options.menu_offset[1]),
+        "menu_colour" => options
+            .menu_colour
+            .map_or("unchanged".to_owned(), |colour| {
+                let reach = if colour.version_only {
+                    "version only"
+                } else {
+                    "version and copyright"
+                };
+                format!("palette index {}, {reach}", colour.index)
+            }),
+        other => panic!("{other}"),
+    };
+    (text, notes)
+}
+/// §6.1 test 4: every row, with its diagnostic count.
+#[test]
+fn t4_every_startup_vector_gives_its_value_and_its_diagnostics() {
+    let mut rows = 0;
+    for line in DDRAW.lines().skip(1) {
+        let cells: Vec<&str> = line.split('\t').collect();
+        let options = match cells[1] {
+            "(no file)" => StartupOptions::default(),
+            text => StartupOptions::parse(text.replace('|', "\n").as_bytes()),
+        };
+        let (value, notes) = field(&options, cells[2]);
+        assert_eq!(value, cells[3], "{line}");
+        assert_eq!(notes.to_string(), cells[4], "{line}");
+        rows += 1;
+    }
+    assert_eq!(rows, 47);
+}
+/// §6.1 test 4: the whole block.
+#[test]
+fn t4_the_whole_startup_block_gives_everything_it_should() {
+    let options = StartupOptions::parse(DDRAW_FILE.as_bytes());
+    for line in DDRAW_EXPECTED.lines().skip(1) {
+        let (name, expected) = line.split_once('\t').unwrap();
+        if name == "diagnostics" {
+            assert_eq!(field(&options, "world_pos").1.to_string(), expected);
+        } else {
+            assert_eq!(field(&options, name).0, expected, "{line}");
+        }
+    }
+}
+/// §3.2: the key and the section fold case, and -1 is unset, not invalid.
+#[test]
+fn numeric_keys_take_minus_1_as_unset_and_forms_are_checked() {
+    let no_notes = [
+        "[Misc]\nStartXPos=-1\nStartYPos=-1\n",
+        "[Misc]\nStartYear=-1\nStartMonth=-1\nStartDay=-1\n",
+        "[Misc]\nMainMenuFontColour=-1\n",
+        "[Misc]\nMovie33=whatever.mve\n",
+    ];
+    for text in no_notes {
+        let options = StartupOptions::parse(text.as_bytes());
+        assert_eq!(options.notes, Vec::<String>::new(), "{text}");
+        assert_eq!(options.calendar(), (2241, 205), "{text}");
+    }
+    for text in [
+        "[Misc]\nStartYear=old\n",
+        "[Misc]\nStartYear=-2\n",
+        "[Misc]\nStartDay=31\nStartMonth=8\n",
+        "[Misc]\nMovie3=elder\n",
+        "[Misc]\nMainMenuFontColour=xyz\n",
+        "[Misc]\nMainMenuOffsetX=left\n",
+        "[Misc]\nStartXPos=x\nStartYPos=2\n",
+        "[Misc]\nVersionString=100%\n",
+        "[Misc]\nVersionString=1234567890123456789012345678901234567890123456789012345678901234\n",
+        "[Misc]\nPremadePaths=a\n",
+        "[Misc]\nPremadePaths=twelve_bytes,b\nPremadeFIDs=1,2\n",
+    ] {
+        let options = StartupOptions::parse(text.as_bytes());
+        assert_eq!(options.notes.len(), 1, "{text}: {:?}", options.notes);
+    }
+}
+/// §3.6: Et Tu's values, and a load keeps the file's calendar.
+#[test]
+fn the_calendar_counts_forward_from_the_files_date() {
+    let (mut host, _) = sfall_host();
+    let text = b"[Misc]\nStartYear=2161\nStartMonth=11\nStartDay=4\nStartTime=721\n";
+    let startup = Arc::new(StartupOptions::parse(text));
+    host.apply_startup(startup, None);
+    assert_eq!(host.world.clock.ticks, 264600);
+    assert_eq!(host.world.game_date(), [12, 5, 2161]);
+    // It is the session's, so a load gets it back.
+    let state = host.world.fallout2.as_deref_mut().unwrap();
+    state.calendar = (
+        crate::fallout2::CALENDAR_YEAR,
+        crate::fallout2::CALENDAR_DAY,
+    );
+    host.sfall_restored();
+    assert_eq!(host.world.game_date(), [12, 5, 2161]);
+}
+/// §3.5: `play_gmovie` uses the index's file, and its flags.
+#[test]
+fn play_gmovie_uses_the_files_movie() {
+    let (mut host, _) = sfall_host();
+    let text = b"[Misc]\nMovie3=ovrintro.mve\n";
+    host.apply_startup(Arc::new(StartupOptions::parse(text)), None);
+    host.world.effects.clear();
+    host.play_gmovie(2);
+    let played = host.world.effects.iter().find_map(|effect| match effect {
+        crate::WorldEffect::Movie(request) => Some((request.path.clone(), request.flags)),
+        _ => None,
+    });
+    assert_eq!(played, Some(("art/cuts/ovrintro.mve".to_owned(), 0x0b)));
 }

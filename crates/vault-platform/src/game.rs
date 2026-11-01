@@ -18,6 +18,7 @@ use vault_core::{
     CharacterSheet, WorldEffect,
     assets::{VfsWorldAssets, WorldAssets},
     movie::{self, MovieRequest},
+    sfall_startup::{NewGameStart, StartupOptions},
     stats::StatContext,
     ui::{
         Rect,
@@ -32,6 +33,14 @@ use vault_core::{
 use vault_formats::{MAX_ASSET_BYTES, Palette, Vfs, credits, rix::Splash};
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
+
+/// One premade the selection screen offers (SPEC-024c §3.10).
+struct PremadeChoice {
+    sheet: String,
+    bio: String,
+    portrait: String,
+    id: String,
+}
 
 /// What follows a movie.
 enum Next {
@@ -153,6 +162,10 @@ pub struct Game {
     pub touch_ui: bool,
     /// SPEC-024b §3.1: every world of this session runs in sfall mode.
     pub sfall: bool,
+    /// SPEC-024c §3: `ddraw.ini`'s startup overrides, under sfall mode.
+    pub startup: Option<Arc<StartupOptions>>,
+    /// SPEC-018 §6.6 step 1's result for those.
+    new_game_start: Option<NewGameStart>,
     /// SPEC-024a: the session's scripted mods, which outlive each world.
     pub mod_session: Option<Arc<vault_core::host_mods::ModSession>>,
     /// Where `set_ini_setting` writes (SPEC-024b §4.5).
@@ -283,6 +296,8 @@ impl Game {
             enhanced: None,
             touch_ui: false,
             sfall: false,
+            startup: None,
+            new_game_start: None,
             mod_session: None,
             sfall_files: None,
             game_speed: Default::default(),
@@ -355,10 +370,16 @@ impl Game {
     }
     /// §3.1 step 9: iplogo, then intro, on every start; then the menu.
     fn start_movies(&mut self) {
-        for (path, flags) in flow::START_MOVIES {
-            self.movies.push_back((path.to_owned(), flags, Next::Menu));
+        for (index, (path, flags)) in flow::START_MOVIES.into_iter().enumerate() {
+            let path = self.movie_path(index, path);
+            self.movies.push_back((path, flags, Next::Menu));
         }
         self.next_movie_or(Next::Menu);
+    }
+    /// SPEC-024c §3.5 the file of movie index `index`: `MovieN`'s, or `path`.
+    fn movie_path(&self, index: usize, path: &str) -> String {
+        let chosen = self.startup.as_deref().and_then(|s| s.movie(index));
+        chosen.map_or_else(|| path.to_owned(), |file| format!("art/cuts/{file}"))
     }
     /// Play `path` (missing movies are skipped), then continue with `next`.
     fn play_movie(&mut self, path: &str, flags: u32, next: Next) {
@@ -488,6 +509,8 @@ impl Game {
     fn enter_world(&mut self, sheet: CharacterSheet) {
         match self.world_with(sheet) {
             Ok(mut world) => {
+                // SPEC-024c §3.8: the new game's art, by gender.
+                world.host.apply_start_model();
                 // SPEC-018 §6.6 step 4: the completed hand-off prints the
                 // script gate's notice.
                 world.host.fallout2_notice();
@@ -585,6 +608,15 @@ impl Game {
             Ok(None) => return self.refuse("data/vault13.gam did not open".into()),
             Err(error) => return self.refuse(format!("data/vault13.gam: {error}")),
         }
+        // SPEC-024c §3.4: `StartingMap` is tested here, before anything
+        // changes, as the world's size is for §3.7.
+        self.new_game_start = self.startup.as_ref().map(|startup| {
+            startup.new_game_start(
+                vault_core::fallout2::START_MAP,
+                |path| host.assets.available(path.as_bytes()),
+                tables.worldmap.world_size(),
+            )
+        });
         self.fallout2 = Some(tables);
         self.last_error = None;
         true
@@ -601,24 +633,36 @@ impl Game {
         let sfall = self.sfall;
         let mod_session = self.mod_session.clone();
         let appearance = sheet.read_words.map(|(_, appearance)| appearance);
-        let path = if fallout2.is_some() {
-            vault_core::fallout2::START_MAP
-        } else {
-            flow::NEW_GAME_MAP
+        let startup = self.startup.clone();
+        let start = self.new_game_start.clone();
+        let start_ticks = startup.as_deref().and_then(|startup| startup.start_ticks);
+        let path = match &start {
+            Some(start) if fallout2.is_some() => start.map.clone(),
+            _ if fallout2.is_some() => vault_core::fallout2::START_MAP.to_owned(),
+            _ => flow::NEW_GAME_MAP.to_owned(),
         };
+        let map = path.clone();
         // SPEC-018 §6.6 step 3: the Fallout 2 world state is installed after
         // the reset and before the start map's load.
         let mut world =
-            MapPreview::with_setup(assets, path, sheet, self.seed, self.preset, |host| {
+            MapPreview::with_setup(assets, &path, sheet, self.seed, self.preset, |host| {
                 if let Some(tables) = fallout2 {
-                    host.begin_fallout2_game(tables);
+                    host.begin_fallout2_game_on(tables, &map);
                 }
                 crate::session::start_sfall(host, sfall);
                 crate::session::start_mods(host, mod_session);
+                if let Some(startup) = startup {
+                    let start = start
+                        .unwrap_or_else(|| startup.new_game_start(&map, |_| true, [i32::MAX; 2]));
+                    for note in start.notes {
+                        host.world.diagnostic(note);
+                    }
+                    host.apply_startup(startup, start.world_pos);
+                }
                 // SPEC-024c §2.4: after the world state, before setup.
                 host.sfall_take_sheet(appearance);
             })?;
-        world.host.world.clock.ticks = flow::START_TICKS;
+        world.host.world.clock.ticks = start_ticks.unwrap_or(flow::START_TICKS);
         world.audio = self.audio.clone();
         world.save_root = self.save_root.clone();
         world.storage = self.storage.clone();
@@ -660,16 +704,51 @@ impl Game {
             world.set_game_speed(speed);
         }
     }
+    /// SPEC-024c §3.10: `PremadePaths` and `PremadeFIDs`, or §3.7's three.
+    fn premade_choice(&self, index: usize) -> PremadeChoice {
+        let listed = self.startup.as_deref().and_then(|s| s.premades.as_ref());
+        match listed.and_then(|list| list.get(index)) {
+            Some((name, fid)) => PremadeChoice {
+                sheet: format!("premade/{name}.gcd"),
+                bio: format!("premade/{name}.bio"),
+                portrait: self.assets.interface_art(fid & 0xfff).unwrap_or_default(),
+                id: String::new(),
+            },
+            None => {
+                let premade = flow::PREMADES[index % flow::PREMADES.len()];
+                PremadeChoice {
+                    sheet: premade.sheet.to_owned(),
+                    bio: premade.bio.to_owned(),
+                    portrait: premade.portrait.to_owned(),
+                    id: premade.id.to_owned(),
+                }
+            }
+        }
+    }
+    pub(crate) fn premade_count(&self) -> usize {
+        let listed = self.startup.as_deref().and_then(|s| s.premades.as_ref());
+        listed.map_or(flow::PREMADES.len(), Vec::len)
+    }
     fn premade(&self, index: usize) -> CharacterSheet {
         self.assets
-            .gcd(flow::PREMADES[index].sheet)
+            .gcd(&self.premade_choice(index).sheet)
             .map(|gcd| CharacterSheet::from_gcd(&gcd, StatContext::default()))
             .unwrap_or_default()
+    }
+    /// SPEC-024c §3.9 a main menu button's place.
+    fn menu_rect(&self, index: usize) -> Rect {
+        let rect = ui2::menu_button(index);
+        let [x, y] = self.menu_offset();
+        Rect::new(rect.x + x, rect.y + y, rect.w, rect.h)
+    }
+    fn menu_offset(&self) -> [i32; 2] {
+        self.startup.as_deref().map_or([0, 0], |s| s.menu_offset)
     }
     fn menu_choice(&mut self, choice: MenuChoice) {
         match choice {
             MenuChoice::Intro => {
-                self.play_movie("art/cuts/intro.mve", flow::ATTRACT_INTRO_FLAGS, Next::Menu)
+                let path = self.movie_path(1, "art/cuts/intro.mve");
+                self.play_movie(&path, flow::ATTRACT_INTRO_FLAGS, Next::Menu)
             }
             MenuChoice::NewGame => {
                 if !self.prepare_fallout2() {
@@ -785,13 +864,15 @@ impl Game {
     /// Take the selected (or edited) character into the game: the
     /// `ovrintro` movie, then the world.
     fn start_game(&mut self, sheet: CharacterSheet) {
-        // SPEC-018 §6.4: Fallout 2's hand-off plays `elder.mve`.
+        // SPEC-018 §6.4: Fallout 2's hand-off plays index 2, `elder.mve`.
         let (path, flags) = if self.fallout2.is_some() {
-            vault_core::fallout2::NEW_GAME_MOVIE
+            let (path, flags) = vault_core::fallout2::NEW_GAME_MOVIE;
+            (self.movie_path(2, path), flags)
         } else {
-            flow::NEW_GAME_MOVIE
+            let (path, flags) = flow::NEW_GAME_MOVIE;
+            (path.to_owned(), flags)
         };
-        self.play_movie(path, flags, Next::NewGame(Box::new(sheet)));
+        self.play_movie(&path, flags, Next::NewGame(Box::new(sheet)));
     }
     fn selection_action(&mut self, action: SelectionAction) {
         let context = StatContext::default();
@@ -826,7 +907,7 @@ impl Game {
                 } else {
                     -1
                 };
-                self.selection = flow::cycle(self.selection, step, flow::PREMADES.len());
+                self.selection = flow::cycle(self.selection, step, self.premade_count());
                 self.sheet = self.premade(self.selection);
             }
             SelectionAction::QuitConfirm => self.enter_menu(),
@@ -1358,7 +1439,7 @@ impl Game {
         {
             let bio = self
                 .vfs
-                .read_bounded(flow::PREMADES[self.selection].bio, MAX_ASSET_BYTES)
+                .read_bounded(&self.premade_choice(self.selection).bio, MAX_ASSET_BYTES)
                 .unwrap_or_default();
             self.bio = Some((self.selection, bio));
         }
@@ -1380,7 +1461,7 @@ impl Game {
                 return world.image();
             }
             Stage::Menu { .. } if rules.six_button_menu => {
-                draw_menu2(&painter, &mut image, held);
+                draw_menu2(&painter, &mut image, held, self.startup.as_deref());
             }
             Stage::Menu { .. } => {
                 painter.blit_opaque(&mut image, flow::MENU_BACKGROUND, 0, [0, 0]);
@@ -1458,10 +1539,10 @@ impl Game {
     }
     fn draw_selection(&self, painter: &Painter, image: &mut IndexedImage, held: Option<Rect>) {
         painter.blit_opaque(image, flow::SELECTION_BACKGROUND, 0, [0, 0]);
-        let premade = flow::PREMADES[self.selection];
+        let premade = self.premade_choice(self.selection);
         // The portrait with every odd row left out (the scan-line effect),
         // clipped to the monitor window (SPEC-019 §3.3 places Fallout 2's).
-        if let Some(art) = painter.art(premade.portrait)
+        if let Some(art) = painter.art(&premade.portrait)
             && let Some(frame) = art.frame(0, 0)
         {
             let (w, h) = (i32::from(frame.width), i32::from(frame.height));
@@ -1723,8 +1804,9 @@ impl Game {
                     palette: &self.palette,
                 };
                 let mask = painter.art(flow::MENU_BUTTON_ART.0);
-                let pressed = ui2::menu_button_at(point).filter(|i| {
-                    let rect = ui2::menu_button(*i);
+                let [dx, dy] = self.menu_offset();
+                let pressed = ui2::menu_button_at([point[0] - dx, point[1] - dy]).filter(|i| {
+                    let rect = self.menu_rect(*i);
                     mask.as_ref()
                         .and_then(|art| art.frame(0, 0))
                         .is_none_or(|frame| {
@@ -1736,7 +1818,7 @@ impl Game {
                         })
                 });
                 if let Some(i) = pressed {
-                    self.held = Some(ui2::menu_button(i));
+                    self.held = Some(self.menu_rect(i));
                     self.menu_poll2(ui2::MenuInput::Press(i));
                 }
                 true
@@ -1831,7 +1913,7 @@ impl Game {
                 true
             }
             Stage::Menu { .. } if rules.six_button_menu => {
-                if let Some(i) = (0..6).find(|i| over == Some(ui2::menu_button(*i))) {
+                if let Some(i) = (0..6).find(|i| over == Some(self.menu_rect(*i))) {
                     self.menu_poll2(ui2::MenuInput::Release(i));
                 }
                 held.is_some()
@@ -1933,37 +2015,62 @@ impl Game {
 /// SPEC-019 §3.2 Fallout 2's main menu: `mainmenu.frm`, six buttons at
 /// (30, 19 + 41i) with their `misc.msg` 9 + i labels (or the engine
 /// strings) centered on x = 126 in font 104, the copyright `misc.msg` 20
-/// (none when missing) and the version text.
-fn draw_menu2(painter: &Painter, image: &mut IndexedImage, held: Option<Rect>) {
+/// (none when missing) and the version text. These are defaults, which
+/// `startup` can change (SPEC-024c §3.9).
+fn draw_menu2(
+    painter: &Painter,
+    image: &mut IndexedImage,
+    held: Option<Rect>,
+    startup: Option<&StartupOptions>,
+) {
     painter.blit_opaque(image, flow::MENU_BACKGROUND, 0, [0, 0]);
+    let [dx, dy] = startup.map_or([0, 0], |startup| startup.menu_offset);
     for (i, fallback) in ui2::text::MENU.iter().enumerate() {
         let rect = ui2::menu_button(i);
+        let rect = Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h);
         let (up, down) = flow::MENU_BUTTON_ART;
         let art = if held == Some(rect) { down } else { up };
         painter.blit(image, art, 0, [rect.x, rect.y]);
         let label = painter.message_or("misc.msg", 9 + i as i32, fallback);
-        let origin = ui2::menu_label(i, painter.width(104, &label));
-        painter.text(image, 104, flow::MENU_LABEL_COLOR, &label, origin, 200);
+        let [x, y] = ui2::menu_label(i, painter.width(104, &label));
+        painter.text(
+            image,
+            104,
+            flow::MENU_LABEL_COLOR,
+            &label,
+            [x + dx, y + dy],
+            200,
+        );
     }
+    let colour = startup.and_then(|startup| startup.menu_colour);
+    let text = |image: &mut IndexedImage, colour: Option<u8>, text: &[u8], at: [i32; 2], limit| {
+        match colour {
+            Some(index) => painter.text_indexed(image, 100, index, text, at, limit),
+            None => painter.text(image, 100, flow::MENU_TEXT_COLOR, text, at, limit),
+        };
+    };
     let copyright = painter.message("misc.msg", ui2::MENU_COPYRIGHT_ID);
     if copyright.is_empty() {
         crate::interface::note_once("misc.msg 20", "no copyright line");
     } else {
-        painter.text(
+        let [x, y] = flow::MENU_COPYRIGHT;
+        let [dx, dy] = startup.map_or([0, 0], |startup| startup.credits_offset);
+        let index = colour.filter(|colour| !colour.version_only);
+        text(
             image,
-            100,
-            flow::MENU_TEXT_COLOR,
+            index.map(|colour| colour.index),
             &copyright,
-            flow::MENU_COPYRIGHT,
+            [x + dx, y + dy],
             625,
         );
     }
-    let version = ui2::MENU_VERSION.as_bytes();
+    let version = startup
+        .and_then(|startup| startup.version.as_deref())
+        .unwrap_or(ui2::MENU_VERSION.as_bytes());
     let [right, y] = flow::MENU_VERSION_RIGHT;
-    painter.text(
+    text(
         image,
-        100,
-        flow::MENU_TEXT_COLOR,
+        colour.map(|colour| colour.index),
         version,
         [right - painter.width(100, version), y],
         200,

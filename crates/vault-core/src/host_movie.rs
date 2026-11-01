@@ -88,7 +88,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 .diagnostic(format!("play_gmovie: movie {index} is outside 0-16"));
             return false;
         };
-        let path = format!("art/cuts/{file}");
+        // SPEC-024c §3.5: everything that uses an index uses its file.
+        let chosen = self
+            .startup
+            .as_deref()
+            .and_then(|startup| startup.movie(index as usize));
+        let path = format!("art/cuts/{}", chosen.unwrap_or(file));
         if !self.assets.available(path.as_bytes()) {
             self.world.diagnostic(format!("{path}: movie not found"));
             return false;

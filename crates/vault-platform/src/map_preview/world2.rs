@@ -335,7 +335,21 @@ impl MapPreview {
         let world = World2Screen::new(state);
         self.show_world2(world, true);
     }
+    /// The world map's view, while it shows.
+    #[cfg(test)]
+    pub(crate) fn world2_view(&self) -> Option<[i32; 2]> {
+        match &self.screen {
+            Screen::World2(world) => Some(world.kit.view),
+            _ => None,
+        }
+    }
     fn show_world2(&mut self, mut world: World2Screen, opening: bool) {
+        // SPEC-024c §3.7: `ViewXPos` and `ViewYPos` set the first view.
+        if let Some([x, y]) = self.host.take_first_view()
+            && let Some(state) = self.state2()
+        {
+            world.kit.view = view::centered([x + 247, y + 242], state.world_size());
+        }
         if let Err(error) = self.host.fallout2_build_world_map(opening) {
             self.status = error.to_string().into_bytes();
         }

@@ -65,6 +65,7 @@ pub mod routing;
 pub mod sequence;
 pub mod sfall;
 pub mod sfall_ini;
+pub mod sfall_startup;
 pub mod skills;
 pub mod state_hash;
 pub mod stats;

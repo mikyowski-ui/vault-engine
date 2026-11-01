@@ -489,6 +489,33 @@ pub(crate) fn start_sfall<A: vault_core::assets::WorldAssets>(
     }
 }
 
+/// SPEC-024c §3.1: `ddraw.ini`, under sfall mode, by SPEC-024b §4.5's lookup
+/// (the `Vfs` layers, then the writable folder), then the install folder,
+/// with the name compared without case. With no file, every default.
+pub(crate) fn read_startup(
+    vfs: &dyn vault_formats::Vfs,
+    writable: Option<&Path>,
+    install: Option<&Path>,
+) -> Arc<vault_core::sfall_startup::StartupOptions> {
+    use vault_core::sfall_startup::{FILE, StartupOptions};
+    let in_folder = |folder: &Path| {
+        let path = crate::launcher::validate::find_loose(folder, FILE)?;
+        std::fs::read(path).ok()
+    };
+    let bytes = vfs
+        .read_bounded(FILE, vault_formats::fallout2::text::MAX_FILE)
+        .ok()
+        .or_else(|| writable.and_then(in_folder))
+        .or_else(|| install.and_then(in_folder));
+    let options = bytes.map_or_else(StartupOptions::default, |bytes| {
+        StartupOptions::parse(&bytes)
+    });
+    for note in &options.notes {
+        tracing::warn!(%note, "ddraw.ini");
+    }
+    Arc::new(options)
+}
+
 /// Manifest scripting for a world's host, likewise (SPEC-024a §2.1).
 pub(crate) fn start_mods<A: vault_core::assets::WorldAssets>(
     host: &mut vault_core::WorldHost<A>,

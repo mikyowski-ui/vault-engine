@@ -771,6 +771,14 @@ impl PreviewArgs {
         crate::mods::mod_session(&crate::mods::layer_dirs(mods), storage, !self.headless)
             .map_err(|error| format!("mod_list: {error}").into())
     }
+    /// SPEC-024c §3.1: read once, under sfall mode only. With the mode off
+    /// the file is never opened.
+    fn startup(&self, vfs: &dyn Vfs) -> Option<Arc<vault_core::sfall_startup::StartupOptions>> {
+        self.sfall.then(|| {
+            let install = self.master_dat.as_deref().and_then(Path::parent);
+            crate::session::read_startup(vfs, self.sfall_files().as_deref(), install)
+        })
+    }
     pub fn load(&self) -> AppResult<Option<AssetPreview>> {
         let mod_session = self.mod_session()?;
         let language = self.language.as_deref().unwrap_or("english");
@@ -778,8 +786,10 @@ impl PreviewArgs {
         // One world-canvas renderer for the session's worlds.
         let renderer = crate::map_preview::SharedRenderer::new(self.render_path);
         if self.game {
+            let source = self.source()?;
+            let startup = self.startup(source.as_ref());
             let mut game = crate::game::Game::new(
-                self.source()?,
+                source,
                 language,
                 self.resolved_seed(),
                 save_root,
@@ -794,6 +804,7 @@ impl PreviewArgs {
             game.enhanced = self.enhanced;
             game.touch_ui = self.touch_ui;
             game.sfall = self.sfall;
+            game.startup = startup;
             game.mod_session = mod_session;
             game.sfall_files = self.sfall_files();
             game.mod_export = self.mod_export.clone();

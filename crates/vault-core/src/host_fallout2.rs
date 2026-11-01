@@ -71,17 +71,18 @@ impl<A: WorldAssets> WorldHost<A> {
     /// world state from the tables, an automap database of 1000 map
     /// numbers, and the table diagnostics.
     pub fn begin_fallout2_game(&mut self, tables: Arc<Fallout2Tables>) {
+        self.begin_fallout2_game_on(tables, fallout2::START_MAP);
+    }
+    /// [`Self::begin_fallout2_game`] on `map`, which SPEC-024c §3.4's
+    /// `StartingMap` can make other than `artemple`.
+    pub fn begin_fallout2_game_on(&mut self, tables: Arc<Fallout2Tables>, map: &str) {
         self.set_game_profile(crate::GameProfile::Fallout2);
-        let start = tables.maps.match_name(
-            fallout2::START_MAP
-                .rsplit('/')
-                .next()
-                .unwrap_or_default()
-                .as_bytes(),
-        );
+        let name = map.rsplit('/').next().unwrap_or_default();
+        let start = tables.maps.match_name(name.as_bytes());
         if start < 0 {
-            self.world
-                .diagnostic("maps/artemple.map has no data/maps.txt record; its map number is -1");
+            self.world.diagnostic(format!(
+                "{map} has no data/maps.txt record; its map number is -1"
+            ));
         }
         for note in &tables.diagnostics {
             self.world.diagnostic(note.to_string());

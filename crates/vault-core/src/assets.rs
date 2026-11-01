@@ -472,6 +472,10 @@ impl VfsWorldAssets {
         lists.insert(path.into(), list.clone());
         list
     }
+    /// The path of `art/intrface/` row `index`.
+    pub fn interface_art(&self, index: i32) -> Result<String, WorldError> {
+        self.art_name("intrface", index)
+    }
     fn art_name(&self, folder: &str, index: i32) -> Result<String, WorldError> {
         if !(0..4096).contains(&index) {
             return Err(WorldError::Invalid(

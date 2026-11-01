@@ -96,10 +96,12 @@ impl crate::WorldState {
     /// The clock's month, day and year: SPEC-018 §6.1's calendar in a
     /// Fallout 2 game, SPEC-005 §3.5's otherwise.
     pub fn game_date(&self) -> [u16; 3] {
-        if self.fallout2.is_some() {
-            game_date(self.clock.ticks)
-        } else {
-            crate::host_save::game_date(self.clock.ticks)
+        match self.fallout2.as_deref() {
+            Some(state) => {
+                let (year, day) = state.calendar;
+                crate::host_save::calendar_date(self.clock.ticks, year, day)
+            }
+            None => crate::host_save::game_date(self.clock.ticks),
         }
     }
 }
@@ -278,6 +280,9 @@ impl<R: RandomSource> ConditionContext for Conditions<'_, R> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fallout2World {
     pub tables: Arc<Fallout2Tables>,
+    /// SPEC-024c §3.6 the year and day of game day 0. The file gives it for
+    /// the whole session, so it is not saved.
+    pub calendar: (u16, u64),
     pub position: [i32; 2],
     /// The current area, or -1.
     pub area: i32,
@@ -349,6 +354,7 @@ impl Fallout2World {
         }
         let start = Self::start_area(&tables, start_map);
         let mut world = Self {
+            calendar: (CALENDAR_YEAR, CALENDAR_DAY),
             position: [0, 0],
             area: start,
             entrance: -1,

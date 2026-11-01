@@ -11,6 +11,7 @@ use crate::{
     host_sfall::SfallValue,
     progression::LEVEL_UP_FLAG,
     sfall::{GlobalKey, UNIQUE_IDS, encounter_flag},
+    sfall_startup::StartupOptions,
     skills,
     world::ObjectRef,
 };
@@ -175,11 +176,65 @@ impl<A: WorldAssets> WorldHost<A> {
             promoted.hero_style = style;
         }
     }
+    /// SPEC-024c §3: the startup overrides on this host, after the world
+    /// state is installed. `world_pos` is the one the new game's check kept.
+    pub fn apply_startup(&mut self, startup: Arc<StartupOptions>, world_pos: Option<[i32; 2]>) {
+        for note in &startup.notes {
+            self.world.diagnostic(note.clone());
+        }
+        let (models, notes) =
+            startup.checked_models(|name| self.assets.art_row(1, name.as_bytes()).is_some());
+        for note in notes {
+            self.world.diagnostic(note);
+        }
+        self.models = models;
+        self.first_view = startup.view_pos;
+        if let Some(state) = self.world.fallout2.as_deref_mut() {
+            state.calendar = startup.calendar();
+            if let Some(position) = world_pos {
+                state.position = position;
+            }
+        }
+        if let Some(ticks) = startup.start_ticks {
+            self.world.clock.set(ticks);
+        }
+        self.startup = Some(startup);
+    }
+    /// §3.6: a load builds a new world state, and the file still gives the
+    /// calendar.
+    pub(crate) fn restore_calendar(&mut self) {
+        let calendar = self.startup.as_deref().map(StartupOptions::calendar);
+        if let (Some(calendar), Some(state)) = (calendar, self.world.fallout2.as_deref_mut()) {
+            state.calendar = calendar;
+        }
+    }
+    /// §3.8 the player's art at a new game, by gender. Unset, the existing
+    /// rule stands.
+    pub fn apply_start_model(&mut self) {
+        let player = self.world.player;
+        let context = self.world.context(player);
+        let female = self
+            .world
+            .get(player)
+            .and_then(|object| object.character.as_ref())
+            .is_some_and(|sheet| sheet.stat(34, context) != 0);
+        let Some(name) = self.models.start[usize::from(female)].clone() else {
+            return;
+        };
+        let row = self.assets.art_row(1, name.as_bytes());
+        if let (Some(row), Some(object)) = (row, self.world.get_mut(player)) {
+            object.raw.art_id = (object.raw.art_id & !0xfff) | u32::from(row);
+        }
+    }
+    /// §3.7 the first world-map view, once.
+    pub fn take_first_view(&mut self) -> Option<[i32; 2]> {
+        self.first_view.take()
+    }
     /// `EnableHeroAppearanceMod` of `ddraw.ini`.
-    fn hero_appearance_mode(&mut self) -> i32 {
-        self.ini_file("ddraw.ini")
-            .and_then(|file| file.get("Misc", "EnableHeroAppearanceMod"))
-            .map_or(0, |value| sfall::atoi(value.as_bytes()))
+    fn hero_appearance_mode(&self) -> i32 {
+        self.startup
+            .as_deref()
+            .map_or(0, |startup| startup.hero_appearance)
     }
     /// A word of §4.11, with its operands read by class.
     pub(crate) fn sfall_promoted(

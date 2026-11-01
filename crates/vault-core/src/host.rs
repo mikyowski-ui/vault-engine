@@ -179,6 +179,12 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     pub chain_observer: Option<Box<dyn FnMut(i32) + Send>>,
     /// The screens' `get_game_mode` bits, as the shell last set them.
     pub(crate) screens: u32,
+    /// SPEC-024c §3: the session's startup overrides, under sfall mode.
+    pub startup: Option<std::sync::Arc<crate::sfall_startup::StartupOptions>>,
+    /// §3.8 the models `critters.lst` holds.
+    pub(crate) models: crate::sfall_startup::PlayerModels,
+    /// §3.7 the first world-map view, until it is taken.
+    pub(crate) first_view: Option<[i32; 2]>,
 }
 impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn prototype(&self, pid: u32) -> Result<std::sync::Arc<vault_formats::Prototype>, WorldError> {
@@ -372,6 +378,9 @@ impl<A: WorldAssets> WorldHost<A> {
             mod_session: None,
             chain_observer: None,
             screens: 0,
+            startup: None,
+            models: Default::default(),
+            first_view: None,
         }
     }
     /// SPEC-008 §3.10 a music request: the track is recorded as the last

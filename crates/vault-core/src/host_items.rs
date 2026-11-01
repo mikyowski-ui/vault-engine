@@ -184,10 +184,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 .as_ref()
                 .is_some_and(|sheet| sheet.stat(34, self.world.context(player)) != 0)
         });
-        let default = self
-            .assets
-            .art_row(1, JUMPSUITS[usize::from(female)])
-            .unwrap_or(0);
+        // SPEC-024c §3.8: `MaleDefaultModel` and `FemaleDefaultModel`.
+        let gender = usize::from(female);
+        let name = self.models.default[gender]
+            .as_ref()
+            .map_or(JUMPSUITS[gender], |name| name.as_bytes());
+        let default = self.assets.art_row(1, name).unwrap_or(0);
         self.world.default_player_art = default;
         if self.worn_armor(player).is_some() {
             return;
