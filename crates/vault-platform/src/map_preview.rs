@@ -43,13 +43,18 @@ enum DialogueMusic {
 const EGG_ART: u32 = 0x0600_0002;
 
 mod automap;
+mod autoplay_hud;
 mod barter;
+// Called once Wave 2's flags are wired in.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod bot;
 mod called;
 mod camera;
 mod character;
 mod control;
 mod counter;
 pub(crate) mod debug;
+mod debug_ui;
 mod dialog;
 mod elevator;
 mod enhanced;
@@ -230,6 +235,9 @@ pub struct MapPreview {
     startup_fade: bool,
     /// The vault-debug inspector and its overlay, when on.
     debug: Option<debug::DebugOverlay>,
+    /// Watch Mode's bot, when one is playing this session.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) watch: Option<Box<bot::Watch>>,
     /// The map view's light levels.
     /// SPEC-014 §3.34 the inventory figure's facing and when it last
     /// turned; the counter persists between openings.
@@ -634,6 +642,7 @@ impl MapPreview {
             fades: Default::default(),
             startup_fade: false,
             debug: None,
+            watch: None,
             figure: (0, 0),
             held: None,
             held_shown: false,
@@ -1247,6 +1256,7 @@ impl MapPreview {
         self.draw_called(image);
         self.draw_dialog(image);
         self.draw_debug(image);
+        self.draw_autoplay_hud(image);
     }
     /// The last composed frame with the cursor at the pointer's current
     /// place, without composing the scene again. SPEC-014 §3.27: the
@@ -1470,6 +1480,7 @@ impl MapPreview {
         self.choices.clear();
         let mut image = image;
         self.draw_tactical(&mut image, self.view, 1);
+        self.draw_autoplay_world(&mut image, self.view, 1);
         Ok(self.compose_world(image))
     }
     /// The window title: the plain game name, or with the vault-debug
@@ -1543,6 +1554,11 @@ impl MapPreview {
         )
     }
     pub fn step(&mut self, key: KeyCode) -> bool {
+        // Before the fade check and every screen: Space must reach the
+        // takeover, and must not end a combat turn while the bot plays.
+        if self.autoplay_key(key) {
+            return true;
+        }
         self.thaw_view();
         self.enhanced_key_down(key);
         let handled = self.step_key(key);
@@ -1780,6 +1796,15 @@ impl MapPreview {
             return true;
         }
         if self.movie_press() {
+            return true;
+        }
+        // Drawn over everything, so they come before anything that would
+        // swallow the press: a combat lock must not kill the debugger's tabs.
+        if !right && self.autoplay_click(point) {
+            return true;
+        }
+        if !right && self.debug_panel_at(point) {
+            self.debug_panel_press(point);
             return true;
         }
         // The dialog box and the Set Timer window take the left button
@@ -2030,6 +2055,13 @@ impl MapPreview {
                 self.fade_ended();
             }
             return Ok(changed);
+        }
+        // The debugger holds the world, as a dialog box does.
+        if self.host.debug_paused {
+            if local_map {
+                self.host.pause_background(world_now);
+            }
+            return Ok(false);
         }
         let crosshair = self.sync_crosshair();
         // SPEC-010 §3.12: the head updater reads the speech position once

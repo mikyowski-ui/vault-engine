@@ -631,6 +631,9 @@ impl MapPreview {
     /// panel animation defers keys, so it counts toward the 32 events
     /// (§3.21, §3.27). Game input acts on presses only.
     pub fn key_up(&mut self, key: KeyCode) {
+        if self.autoplay_key_up(key) {
+            return;
+        }
         self.enhanced_key_up(key);
         if !self.fade_blocks() && (self.keyboard_locked() || self.bar_blocks()) {
             self.hold_key(HeldKey::Release);

@@ -166,6 +166,8 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// Presentation-only draws (a dead critter's look-at line), apart from
     /// the world's generator so looking never moves its sequence.
     pub presentation_rng: crate::ParkMiller,
+    /// The debugger holds the world between frames.
+    pub debug_paused: bool,
     /// SPEC-008 §3.10: while music is disabled, requests are recorded but
     /// nothing plays; re-enabling plays the last recorded track.
     pub music_enabled: bool,
@@ -391,6 +393,7 @@ impl<A: WorldAssets> WorldHost<A> {
             pending_dialogue: None,
             vm_observer: None,
             presentation_rng: crate::ParkMiller::seeded(1).expect("a positive seed"),
+            debug_paused: false,
             music_enabled: true,
             last_music: None,
             script_messages: Default::default(),
@@ -1329,7 +1332,7 @@ impl<A: WorldAssets> WorldHost<A> {
     /// §3.3 makes a budget boundary alone no termination, so the choice is
     /// the fault, not a pending request). A registration the program left
     /// open is dropped (SPEC-005 0x810E).
-    fn program_faulted(&mut self, vm: &mut Vm, error: &VmError) {
+    pub(crate) fn program_faulted(&mut self, vm: &mut Vm, error: &VmError) {
         vm.status.0 |= VmStatus::ENDED | VmStatus::ERROR;
         if self.building_program == Some(vm.id) {
             self.building_program = None;

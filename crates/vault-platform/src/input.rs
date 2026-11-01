@@ -85,6 +85,16 @@ pub enum InputCommand {
     Debug {
         command: vault_core::debug::DebugCommand,
     },
+    /// An action the autoplay bot took. The shell logs it, then applies it; a
+    /// replay applies the logged record and runs no agent.
+    Bot {
+        action: vault_core::autoplay::BotAction,
+    },
+    /// Watch Mode's bot was handed control or gave it back. Logged so a
+    /// replay does not read the takeover's Space as ending a turn.
+    Autoplay {
+        on: bool,
+    },
     /// The shell's display scaling: logged after the surface and on every
     /// Alt+S, so a replay maps the pointer through the same viewport. A
     /// log without one is replayed with integer scaling.

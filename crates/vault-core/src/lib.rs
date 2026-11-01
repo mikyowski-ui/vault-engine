@@ -2,6 +2,9 @@
 
 pub mod ai;
 pub mod assets;
+pub mod autoplay;
+#[cfg(test)]
+mod autoplay_tests;
 pub mod barter;
 pub mod camera;
 pub mod checkpoints;

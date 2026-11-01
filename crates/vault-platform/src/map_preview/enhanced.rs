@@ -759,6 +759,10 @@ impl MapPreview {
             return false;
         }
         let right = button == PointerButton::Right;
+        // Watch Mode's banner comes first, as it does in `click`.
+        if pressed && !right && at.ui.is_some_and(|ui| self.autoplay_click(ui)) {
+            return true;
+        }
         // The debug overlay's panel takes its own presses (it is drawn on
         // the interface frame over the world).
         if pressed
@@ -1661,6 +1665,7 @@ impl MapPreview {
         }
         let scale = super::qol::overlay_scale(self.enhanced_zoom());
         self.draw_tactical(&mut canvas, view, scale);
+        self.draw_autoplay_world(&mut canvas, view, scale);
         Ok(canvas)
     }
     /// The world behind a window centered over the map

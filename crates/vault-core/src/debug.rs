@@ -18,9 +18,15 @@ pub const MAX_SPAWN: u32 = 100_000;
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum DebugCommand {
     /// `set_global_var` on a campaign variable.
-    SetGlobalVar { index: usize, value: i32 },
+    SetGlobalVar {
+        index: usize,
+        value: i32,
+    },
     /// `set_map_var` on the current map's variable.
-    SetMapVar { index: usize, value: i32 },
+    SetMapVar {
+        index: usize,
+        value: i32,
+    },
     /// `set_local_var` in the script attached to the object with map
     /// object id `object`.
     SetObjectLocalVar {
@@ -36,10 +42,73 @@ pub enum DebugCommand {
         tile: Option<u32>,
     },
     /// Create `quantity` of an item prototype in the player's inventory.
-    SpawnItem { pid: u32, quantity: u32 },
+    SpawnItem {
+        pid: u32,
+        quantity: u32,
+    },
     /// Restore a living critter to its maximum HP and clear its crippled
     /// limbs and blindness.
-    HealCritter { object: u32 },
+    HealCritter {
+        object: u32,
+    },
+    /// A door's state; `None` leaves that part as it is.
+    SetDoor {
+        object: u32,
+        open: Option<bool>,
+        locked: Option<bool>,
+        jammed: Option<bool>,
+    },
+    SetHitPoints {
+        object: u32,
+        value: i32,
+    },
+    SetActionPoints {
+        object: u32,
+        value: i32,
+    },
+    /// How many of `pid` `owner` carries.
+    SetItemCount {
+        owner: u32,
+        pid: u32,
+        count: u32,
+    },
+    /// Run the object's script procedure for `event` (`use_p_proc` and the
+    /// like), with `fixed` as its fixed parameter.
+    FireProc {
+        object: u32,
+        event: i32,
+        fixed: i32,
+    },
+    /// Advance the clock to the next queued event, through `advance_time`.
+    /// Refused in combat, where the queue does not run.
+    FastForwardTimer,
+    /// Move a critter or item to a hex on this map.
+    TeleportObject {
+        object: u32,
+        hex: u32,
+        elevation: u32,
+    },
+    /// Create an object of `pid` on a hex.
+    SpawnObject {
+        pid: u32,
+        hex: u32,
+        elevation: u32,
+    },
+    /// Hold or release the world between frames.
+    SetPaused {
+        on: bool,
+    },
+    /// Load the object's procedure for `event` in a debugger VM, to step it
+    /// from a frame boundary. The world stays frozen until it ends.
+    VmBegin {
+        object: u32,
+        event: i32,
+    },
+    /// `count` instructions of the debugger VM, inside critical sections too.
+    VmStep {
+        count: u32,
+    },
+    VmAbort,
 }
 
 impl std::fmt::Display for DebugCommand {
@@ -67,6 +136,7 @@ impl std::fmt::Display for DebugCommand {
                 write!(formatter, "spawn {quantity} x PID {pid:#010x}")
             }
             Self::HealCritter { object } => write!(formatter, "heal object {object:#x}"),
+            other => write!(formatter, "{other:?}"),
         }
     }
 }
@@ -203,6 +273,8 @@ impl<A: WorldAssets> WorldHost<A> {
                     state.results.0 &= !crate::host_skills::CRIPPLED;
                 }
             }
+            DebugCommand::SetPaused { on } => self.debug_paused = on,
+            _ => return refuse("not implemented"),
         }
         Ok(())
     }

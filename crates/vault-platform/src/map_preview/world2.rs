@@ -469,6 +469,29 @@ impl MapPreview {
     fn city_locked(&self, city: usize) -> bool {
         self.host.fallout2_city_locked(city)
     }
+    /// The bot heads for city `place`.
+    pub(super) fn bot_head_for_city(&mut self, place: usize) -> vault_core::autoplay::BotOutcome {
+        use vault_core::autoplay::BotOutcome;
+        if !self.known_cities().contains(&place) || self.city_locked(place) {
+            return BotOutcome::Refused(format!("city {place} is not open"));
+        }
+        let travelling = self.state2().and_then(|state| state.travel).is_some();
+        self.world_map_head_for::<Fallout2>(place, travelling);
+        BotOutcome::Done
+    }
+    /// The bot enters where the party stands.
+    pub(super) fn bot_enter_city(&mut self) -> vault_core::autoplay::BotOutcome {
+        self.world_map_entry::<Fallout2>(screen::ENTER_MS);
+        vault_core::autoplay::BotOutcome::Done
+    }
+    /// The bot takes the town map's marker `index`.
+    pub(super) fn bot_take_city_marker(
+        &mut self,
+        index: usize,
+    ) -> vault_core::autoplay::BotOutcome {
+        Fallout2::town_choice(self, index);
+        vault_core::autoplay::BotOutcome::Done
+    }
     /// §3.12.3 a town-list row's release: travel to a city the party is
     /// not in, enter the one it is in; a locked city does nothing.
     fn world2_row(&mut self, k: usize) {

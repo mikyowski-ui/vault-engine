@@ -729,6 +729,13 @@ impl Replay {
                     }
                 }
             }
+            InputCommand::Bot { action } => {
+                if let Some(world) = interactive_world(&mut self.session) {
+                    // A refusal is part of the run: the world stands as it did.
+                    let _ = world.apply_bot(&action);
+                }
+            }
+            InputCommand::Autoplay { .. } => {}
             // Focus does not reach the preview; a logged hover is the
             // desktop's output, recomputed here.
             InputCommand::Focus { .. }

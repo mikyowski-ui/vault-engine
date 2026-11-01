@@ -1429,7 +1429,7 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// Close a door with no sound or animation: frame 0, its pass-through
     /// flags and open bit cleared, lighting recomputed.
-    fn close_door_instantly(&mut self, door: ObjectRef) {
+    pub(crate) fn close_door_instantly(&mut self, door: ObjectRef) {
         if let Some(object) = self.world.get_mut(door) {
             object.raw.frame = 0;
             object.raw.flags.0 &=

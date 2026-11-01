@@ -1,4 +1,7 @@
 mod audio;
+// Filled in and called from `main` as Wave 2 lands.
+#[cfg_attr(not(test), allow(dead_code))]
+mod autoplay_runner;
 mod boot;
 mod config;
 mod editor_screen;

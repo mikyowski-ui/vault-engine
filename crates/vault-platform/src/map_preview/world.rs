@@ -442,6 +442,36 @@ impl MapPreview {
             }
         }
     }
+    /// The bot heads for town `place`.
+    pub(super) fn bot_head_for_town(&mut self, place: usize) -> vault_core::autoplay::BotOutcome {
+        use vault_core::autoplay::BotOutcome;
+        if place >= TOWNS.len() || !self.host.world.world_map.town_enabled(place) {
+            return BotOutcome::Refused(format!("town {place} is not known"));
+        }
+        let travelling = self.host.world.world_map.travel.is_some();
+        self.world_map_head_for::<Fallout1>(place, travelling);
+        BotOutcome::Done
+    }
+    /// The bot enters where the party stands.
+    pub(super) fn bot_enter_town(&mut self) -> vault_core::autoplay::BotOutcome {
+        self.world_map_entry::<Fallout1>(screen::ENTER_MS);
+        vault_core::autoplay::BotOutcome::Done
+    }
+    /// The bot takes the town map's marker `index`.
+    pub(super) fn bot_take_town_marker(
+        &mut self,
+        index: usize,
+    ) -> vault_core::autoplay::BotOutcome {
+        use vault_core::autoplay::BotOutcome;
+        let Screen::Town(town) = &self.screen else {
+            return BotOutcome::Refused("no town map is open".to_owned());
+        };
+        if index >= town.buttons.len() {
+            return BotOutcome::Refused(format!("marker {index} is not on the map"));
+        }
+        Fallout1::town_choice(self, index);
+        BotOutcome::Done
+    }
     /// The town of the party's cell.
     fn party_town(&self) -> Option<usize> {
         self.host.world.world_map.cell().and_then(worldmap::town_at)
