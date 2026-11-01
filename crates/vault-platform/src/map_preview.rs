@@ -1917,12 +1917,25 @@ impl MapPreview {
         self.apply_sfall_requests();
         self.host.set_sfall_screens(self.sfall_screens());
         let changed = self.frame(now);
+        let opened = self.open_requested_windows();
         self.show_message_box();
         self.sfall_previews();
         self.host.sfall_end_of_step();
         self.commit_mod_state();
         self.quit_requested |= self.host.sfall_session_closed();
-        changed
+        changed.map(|changed| changed || opened)
+    }
+    /// The barter and loot windows a request waits on. Drawing checks these
+    /// too, for a request made after this step, but a session that never
+    /// draws still has to open them. A blocking fade holds them, as it holds
+    /// the frame. Whether one opened.
+    fn open_requested_windows(&mut self) -> bool {
+        if !matches!(self.screen, Screen::Map) || (self.fade_blocks() && self.fades.freezes()) {
+            return false;
+        }
+        self.check_barter();
+        self.check_loot();
+        !matches!(self.screen, Screen::Map)
     }
     /// SPEC-024a §7.4 and §7.5, at the end of phase 2: the log's new lines
     /// reach the debug log, and each mod with a changed setting its file.

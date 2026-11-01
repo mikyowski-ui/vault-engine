@@ -4195,3 +4195,38 @@ fn characterization_attack() {
     assert!(preview.host.world.critter_state(player).unwrap().ap < spent);
     rows.check();
 }
+
+/// A step opens a requested window whether or not the session draws, so a
+/// headless run and a watched one see the same screens on the same step.
+#[test]
+fn characterization_windows_open_without_drawing() {
+    let run = |drawn: bool| {
+        let dir = corpus();
+        let mut preview = world(dir.path());
+        let player = preview.host.world.player;
+        let npc = npc(&preview);
+        if let Some(ObjectState::Critter(state)) =
+            preview.host.world.get_mut(npc).map(|o| &mut o.raw.state)
+        {
+            state.results.0 |= effect::DEAD;
+        }
+        preview.tick(16).unwrap();
+        preview.host.world.pending_loot = Some(LootRequest {
+            looter: player,
+            target: npc,
+            steal: false,
+        });
+        assert!(preview.tick(32).unwrap(), "the window asks for a redraw");
+        if drawn {
+            preview.image().unwrap();
+        }
+        (
+            matches!(preview.screen, Screen::Loot(_)),
+            preview.host.world.state_hash(),
+            preview.host.world.rng.clone(),
+        )
+    };
+    let (open, ..) = run(false);
+    assert!(open);
+    assert_eq!(run(false), run(true));
+}
