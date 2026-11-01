@@ -7,7 +7,8 @@
 //! hand-off onto `artemple` with its scripts running for a bounded number
 //! of world ticks, with the VM errors by script, procedure and word and the
 //! diagnostics by kind. `--mod-layer` mounts a mod's folders above the
-//! install, so a total conversion's tables are the ones read.
+//! install, so a total conversion's tables are the ones read, and `--sfall`
+//! turns sfall mode on for the word table and the smoke run (SPEC-018 §2.4).
 //!
 //! A report, not an audit category: it never fails the run. Only counts,
 //! file and procedure names, PIDs, word numbers, line numbers and lengths
@@ -24,12 +25,15 @@ use vault_core::{
     CharacterSheet, GameProfile, StatContext, VmObserver, WorldEffect, WorldHost, WorldState,
     assets::{VfsWorldAssets, WorldAssets},
     fallout2::{Fallout2Tables, START_MAP},
+    host_mods::{ModSession, ScriptedMod},
     movie::MoviePolicy,
+    sfall_startup::{self, StartupOptions},
 };
 use vault_formats::{
     LayeredVfs, LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, ModLayer,
-    MsgCatalog, Prototype, Vfs, VfsError,
+    ModManifest, MsgCatalog, Prototype, Vfs, VfsError,
     fallout2::{Fallout2Install, REQUIRED_MEMBERS, missing_members},
+    mod_manifest::MANIFEST,
     validate_asset,
 };
 use vault_vm::{IntProgram, RunOutcome, Vm, VmError, WordSet};
@@ -119,9 +123,61 @@ impl Kinds {
     }
 }
 
+/// SPEC-018 §2.4 rule 4: the scripted layers' session, which turns manifest
+/// scripting on. It writes no setting.
+fn mod_session(layers: &[PathBuf]) -> Option<Arc<ModSession>> {
+    let mut mods = Vec::new();
+    for layer in layers {
+        let Some(bytes) = loose_file(layer, MANIFEST) else {
+            continue;
+        };
+        let parsed = std::str::from_utf8(&bytes)
+            .map_err(|error| error.to_string())
+            .and_then(|text| ModManifest::parse(text).map_err(|error| error.to_string()));
+        match parsed {
+            Ok(manifest) if manifest.scripted() => {
+                mods.push(ScriptedMod::from_manifest(&manifest, &bytes));
+            }
+            Ok(_) => {}
+            Err(error) => println!("Fallout 2 mod manifest refused: {}", kind(&error)),
+        }
+    }
+    (!mods.is_empty()).then(|| Arc::new(ModSession::new(mods, false)))
+}
+
+/// The file `name` directly in `folder`, the name compared without case.
+fn loose_file(folder: &Path, name: &str) -> Option<Vec<u8>> {
+    let entries = std::fs::read_dir(folder).ok()?;
+    let found = entries.flatten().find(|entry| {
+        let file = entry.file_name();
+        file.to_string_lossy().eq_ignore_ascii_case(name)
+    })?;
+    std::fs::read(found.path()).ok()
+}
+
+/// SPEC-024c §3.1: `ddraw.ini`, through the layers, then the install folder.
+fn startup_options(vfs: &dyn Vfs, folder: &Path) -> Arc<StartupOptions> {
+    let bytes = vfs
+        .read_bounded(sfall_startup::FILE, MAX_ASSET_BYTES)
+        .ok()
+        .or_else(|| loose_file(folder, sfall_startup::FILE));
+    let found = bytes.is_some();
+    println!(
+        "Fallout 2 {}: {}",
+        sfall_startup::FILE,
+        if found { "read" } else { "none" }
+    );
+    Arc::new(bytes.map_or_else(StartupOptions::default, |bytes| {
+        StartupOptions::parse(&bytes)
+    }))
+}
+
+/// What the report reads, and the install under any mod layers.
+type Mounted = (Arc<dyn Vfs>, Arc<dyn Vfs>);
+
 /// SPEC-018 §1: the install's databases, with its loose `data` folder as
 /// `data_root` when it has one, and `layers` above them, lowest first.
-fn mount(folder: &Path, layers: &[PathBuf]) -> Result<Arc<dyn Vfs>, Box<dyn Error>> {
+fn mount(folder: &Path, layers: &[PathBuf]) -> Result<Mounted, Box<dyn Error>> {
     let install = Fallout2Install::discover(folder)?;
     let opened = install.open()?;
     println!(
@@ -158,7 +214,7 @@ fn mount(folder: &Path, layers: &[PathBuf]) -> Result<Arc<dyn Vfs>, Box<dyn Erro
     );
     let base: Arc<dyn Vfs> = Arc::new(provider);
     if layers.is_empty() {
-        return Ok(base);
+        return Ok((base.clone(), base));
     }
     let mut mounted = Vec::new();
     for layer in layers {
@@ -170,7 +226,7 @@ fn mount(folder: &Path, layers: &[PathBuf]) -> Result<Arc<dyn Vfs>, Box<dyn Erro
         mounted.push(ModLayer::from_parts(name, Some(loose), None, None));
     }
     println!("Fallout 2 mod layers: {}", mounted.len());
-    Ok(Arc::new(LayeredVfs::new(base, mounted)))
+    Ok((Arc::new(LayeredVfs::new(base.clone(), mounted)), base))
 }
 
 /// `Fallout2Tables::load` over the master database as mounted.
@@ -237,16 +293,71 @@ struct Parsed {
     failed: u64,
 }
 
+/// SPEC-018 §2.4 rule 3: the size of a refused `.pal` that the install
+/// `base` has no file at, so a mod layer serves it, and that is not
+/// `color.pal`.
+fn auxiliary_palette(vfs: &dyn Vfs, base: &dyn Vfs, path: &str) -> Option<usize> {
+    let name = path.rsplit('/').next()?;
+    if name.eq_ignore_ascii_case("color.pal") {
+        return None;
+    }
+    let bytes = vfs.read_bounded(path, MAX_ASSET_BYTES).ok()?;
+    let absent = matches!(
+        base.read_bounded(path, MAX_ASSET_BYTES),
+        Err(VfsError::NotFound(_))
+    );
+    absent.then_some(bytes.len())
+}
+
+/// A map refused over the mod layers that belongs to the install underneath:
+/// the install serves it, no `maps.txt` record names it, and it parses with
+/// the install's own prototypes. A mod that replaces prototypes leaves such
+/// maps behind, and no game reaches them. As SPEC-018 §2.4 does for a
+/// palette, this belongs to the report alone.
+fn leftover_map(
+    vfs: &dyn Vfs,
+    catalog: &LocalPrototypeCatalog,
+    tables: Option<&Fallout2Tables>,
+    path: &str,
+) -> bool {
+    let named = |stem: &str| {
+        tables.is_none_or(|tables| {
+            let mut records = tables.maps.records();
+            records.any(|record| record.stem.eq_ignore_ascii_case(stem))
+        })
+    };
+    let stem = path.rsplit('/').next().and_then(|name| {
+        let (stem, extension) = name.rsplit_once('.')?;
+        extension.eq_ignore_ascii_case("map").then_some(stem)
+    });
+    if stem.is_none_or(named) {
+        return false;
+    }
+    let Ok((bytes, None)) = vfs.read_with_layer(path, MAX_ASSET_BYTES) else {
+        return false;
+    };
+    MapFile::parse_for(&bytes, catalog, GameProfile::Fallout2).is_ok()
+}
+
 /// Every member of a `PARSED` extension under the `fallout2` profile, with
-/// the map and prototype writers' round trips.
-fn parse_all(vfs: &dyn Vfs) -> u64 {
+/// the map and prototype writers' round trips. `words` checks each script,
+/// and `base` is the install under any mod layers.
+fn parse_all(
+    vfs: &dyn Vfs,
+    base: &dyn Vfs,
+    words: &WordSet,
+    tables: Option<&Fallout2Tables>,
+) -> u64 {
     let catalog = LocalPrototypeCatalog::for_game(vfs, GameProfile::Fallout2);
+    let install = (vfs.mod_layers() > 0)
+        .then(|| LocalPrototypeCatalog::for_game(base, GameProfile::Fallout2));
     let mut parsed: BTreeMap<&str, Parsed> = BTreeMap::new();
     let mut failures = Kinds::default();
     let mut map_notes = Kinds::default();
     let mut stops_early = 0_u64;
     let mut short_critters = Vec::new();
     let [mut map_writes, mut pro_writes] = [[0_u64; 2]; 2];
+    let (mut versions, mut auxiliary, mut leftovers) = ([0_u64; 2], 0_u64, 0_u64);
     for path in vfs.files() {
         let Some(extension) = path.extension().filter(|ext| PARSED.contains(ext)) else {
             continue;
@@ -263,6 +374,7 @@ fn parse_all(vfs: &dyn Vfs) -> u64 {
                         for note in &map.diagnostics {
                             map_notes.add(kind(note), None);
                         }
+                        versions[usize::from(map.header.version == 20)] += 1;
                         // The writer is a parse/write fixpoint.
                         let round = map.write().map_err(text).and_then(|first| {
                             let again = MapFile::parse_for(&first, &catalog, GameProfile::Fallout2)
@@ -285,7 +397,7 @@ fn parse_all(vfs: &dyn Vfs) -> u64 {
                         pro_writes[usize::from(!same)] += 1;
                         Ok(())
                     }
-                    "int" => IntProgram::parse_in(&bytes, &WordSet::FALLOUT2, false)
+                    "int" => IntProgram::parse_in(&bytes, words, false)
                         .map(|_| ())
                         .map_err(|error| error.to_string()),
                     "msg" => MsgCatalog::parse(&bytes)
@@ -300,6 +412,23 @@ fn parse_all(vfs: &dyn Vfs) -> u64 {
                         .map_err(text),
                 }
             });
+        if result.is_err()
+            && extension == "pal"
+            && let Some(length) = auxiliary_palette(vfs, base, path.as_str())
+        {
+            println!("auxiliary palette: {path} {length}");
+            auxiliary += 1;
+            continue;
+        }
+        if result.is_err()
+            && extension == "map"
+            && let Some(install) = &install
+            && leftover_map(vfs, install, tables, path.as_str())
+        {
+            println!("leftover map: {path}");
+            leftovers += 1;
+            continue;
+        }
         let entry = parsed.entry(extension).or_default();
         match result {
             Ok(()) => entry.passed += 1,
@@ -319,6 +448,12 @@ fn parse_all(vfs: &dyn Vfs) -> u64 {
             entry.map_or(0, |entry| entry.failed)
         );
     }
+    println!(
+        "Fallout 2 maps: {} version 19, {} version 20",
+        versions[0], versions[1]
+    );
+    println!("Fallout 2 auxiliary palettes: {auxiliary}");
+    println!("Fallout 2 leftover maps: {leftovers}");
     failures.print("Fallout 2 parse failure kind");
     let failed: u64 = parsed.values().map(|entry| entry.failed).sum();
     println!(
@@ -405,9 +540,25 @@ impl VmObserver for Faults {
 
 /// SPEC-018 §6 the new-game hand-off onto the start map, with scripts
 /// running, then `SMOKE_MS` of world ticks.
-fn smoke(vfs: Arc<dyn Vfs>, tables: Arc<Fallout2Tables>) -> Result<(), Box<dyn Error>> {
+fn smoke(
+    vfs: Arc<dyn Vfs>,
+    tables: Arc<Fallout2Tables>,
+    session: Option<Arc<ModSession>>,
+    startup: Option<Arc<StartupOptions>>,
+) -> Result<(), Box<dyn Error>> {
     let assets = VfsWorldAssets::new(vfs, "english")?;
     assets.set_game_profile(GameProfile::Fallout2);
+    // SPEC-024c §3: the file chooses the map, when sfall mode reads one.
+    let start = startup.as_ref().map(|startup| {
+        startup.new_game_start(
+            START_MAP,
+            |path| assets.available(path.as_bytes()),
+            tables.worldmap.world_size(),
+        )
+    });
+    let map = start
+        .as_ref()
+        .map_or_else(|| START_MAP.to_owned(), |start| start.map.clone());
     // SPEC-014 §3.3's first premade, as Play's `t` takes it.
     let sheet = match assets.gcd("premade/combat.gcd") {
         Ok(gcd) => CharacterSheet::from_gcd(&gcd, StatContext::default()),
@@ -416,8 +567,21 @@ fn smoke(vfs: Arc<dyn Vfs>, tables: Arc<Fallout2Tables>) -> Result<(), Box<dyn E
             CharacterSheet::default()
         }
     };
+    let appearance = sheet.read_words.map(|(_, appearance)| appearance);
     let mut host = WorldHost::new(WorldState::new(sheet, 1)?, assets);
-    host.begin_fallout2_game(tables);
+    host.begin_fallout2_game_on(tables, &map);
+    if let Some(startup) = startup {
+        host.enable_sfall()?;
+        let start = start.unwrap_or_else(|| startup.new_game_start(&map, |_| true, [i32::MAX; 2]));
+        for note in start.notes {
+            host.world.diagnostic(note);
+        }
+        host.apply_startup(startup, start.world_pos);
+    }
+    if let Some(session) = session {
+        host.enable_mod_scripts(session);
+    }
+    host.sfall_take_sheet(appearance);
     host.update_player_gender();
     host.movie_policy = MoviePolicy::CompleteImmediately;
     host.load_campaign()?;
@@ -440,11 +604,11 @@ fn smoke(vfs: Arc<dyn Vfs>, tables: Arc<Fallout2Tables>) -> Result<(), Box<dyn E
         }
     };
     let mut handoff = Kinds::default();
-    let loaded = host.load_map(START_MAP);
+    let loaded = host.load_map(&map);
     drain(&mut host, &mut handoff);
     if let Err(error) = loaded {
         println!(
-            "Fallout 2 smoke run: {START_MAP} did not load: {}",
+            "Fallout 2 smoke run: {map} did not load: {}",
             kind(&error.to_string())
         );
         return Ok(());
@@ -533,13 +697,27 @@ fn smoke(vfs: Arc<dyn Vfs>, tables: Arc<Fallout2Tables>) -> Result<(), Box<dyn E
 
 /// The whole report; the last line says whether every member parsed and
 /// round-tripped and the tables loaded.
-pub fn report(folder: &Path, layers: &[PathBuf]) -> Result<(), Box<dyn Error>> {
-    let vfs = mount(folder, layers)?;
+pub fn report(folder: &Path, layers: &[PathBuf], sfall: bool) -> Result<(), Box<dyn Error>> {
+    let session = mod_session(layers);
+    let (words, name) = if sfall {
+        (WordSet::FALLOUT2_SFALL, "fallout2 sfall")
+    } else {
+        (WordSet::FALLOUT2, "fallout2")
+    };
+    let words = words.with_mods(session.is_some());
+    let mods = if session.is_some() {
+        ", with the mod words"
+    } else {
+        ""
+    };
+    println!("Fallout 2 word table: {name}{mods}");
+    let (vfs, base) = mount(folder, layers)?;
     let tables = tables(&*vfs);
-    let failed = parse_all(&*vfs);
+    let failed = parse_all(&*vfs, &*base, &words, tables.as_deref());
+    let startup = sfall.then(|| startup_options(&*vfs, folder));
     let loaded = tables.is_some();
     match tables {
-        Some(tables) => smoke(vfs, tables)?,
+        Some(tables) => smoke(vfs, tables, session, startup)?,
         None => println!("Fallout 2 smoke run: not run (the tables were refused)"),
     }
     println!(

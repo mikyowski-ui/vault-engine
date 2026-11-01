@@ -953,6 +953,40 @@ fn spec024a_mod_words_decode_with_their_names() {
     );
 }
 
+/// SPEC-024b: sfall mode's words past Fallout 2's set show their mnemonics,
+/// with their class. Fallout 2's set still refuses them, and the words below
+/// them keep `ext`.
+#[test]
+fn spec024b_sfall_words_decode_with_their_names() {
+    use crate::decode::{classify_in, decode_in};
+    use vault_vm::{WordSet, sfall::word_row};
+    let words = WordSet::FALLOUT2_SFALL;
+    for word in 0x8184..=0x8281_u16 {
+        let name = word_row(word).unwrap_or_else(|| panic!("{word:#06x}")).name;
+        assert_ne!(name, "invalid", "{word:#06x}");
+        assert_eq!(classify_in(&words, word), Some(OpcodeClass::Game));
+        assert_eq!(classify_in(&WordSet::FALLOUT2, word), None, "{word:#06x}");
+        let instruction = decode_in(&op(word), 0, &words).unwrap();
+        assert_eq!(instruction.class(), OpcodeClass::Game);
+        assert_eq!(instruction.mnemonic(), name);
+        assert_eq!(instruction.text(), format!("{name} {word:#06x}"));
+    }
+    // SPEC-024b's own table, at both ends of a block.
+    for (word, name) in [
+        (0x8200, "fs_size"),
+        (0x8207, "register_hook"),
+        (0x8262, "register_hook_proc"),
+    ] {
+        assert_eq!(decode::mnemonic(word), name);
+    }
+    assert_eq!(decode::mnemonic(0x8183), "ext", "Fallout 2's last");
+    assert_eq!(decode::mnemonic(0x8282), "invalid", "past the set");
+    assert_eq!(classify_in(&words, 0x8282), None);
+    let program = IntProgram::parse_in(&fixture::program(), &words, false).unwrap();
+    let vm = Vm::fragment(program, &op(0x8200)).unwrap();
+    assert_eq!(decode_next(&vm).unwrap().text(), "fs_size 0x8200");
+}
+
 #[test]
 fn hand_built_instructions_with_unregistered_words_do_not_panic() {
     // `decode` never yields such a word; a hand-built instruction is

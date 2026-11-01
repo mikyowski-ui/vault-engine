@@ -3,10 +3,14 @@
 //! chains gain a mod block after the sfall block. This module holds the
 //! session's mods, their settings and log, the setup step of §4.4, and the
 //! words of §7. Nothing here is saved or hashed (§6).
-use crate::{assets::WorldAssets, host::WorldHost, host_sfall::SfallValue};
+use crate::{assets::WorldAssets, host::WorldHost, host_sfall::SfallValue, state_hash::fnv1a64};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
+};
+use vault_formats::{
+    ModManifest,
+    mod_manifest::{self, ModSetting},
 };
 pub use vault_vm::extensions::MOD_API_VERSION;
 use vault_vm::{
@@ -45,6 +49,49 @@ pub struct ScriptedMod {
     pub hooks: Vec<ModHook>,
     /// The `[settings]` values, which fix each key's type.
     pub defaults: BTreeMap<String, SfallValue>,
+}
+impl ScriptedMod {
+    /// The scripted layer `manifest`, read from `bytes`.
+    pub fn from_manifest(manifest: &ModManifest, bytes: &[u8]) -> Self {
+        Self {
+            id: manifest.id.clone().unwrap_or_default(),
+            version: manifest.version.clone().unwrap_or_default(),
+            manifest: fnv1a64(bytes),
+            globals: manifest
+                .global_scripts
+                .iter()
+                .map(|row| ModGlobal {
+                    file: row.file.clone(),
+                    repeat: row.repeat as i32,
+                    kind: row.kind as i32,
+                })
+                .collect(),
+            hooks: manifest
+                .hooks
+                .iter()
+                .filter_map(|row| {
+                    Some(ModHook {
+                        hook: mod_manifest::hook_point(&row.point)?,
+                        file: row.file.clone(),
+                        procedure: row.procedure.clone(),
+                    })
+                })
+                .collect(),
+            defaults: manifest
+                .settings
+                .iter()
+                .map(|(key, setting)| (key.clone(), script_value(setting)))
+                .collect(),
+        }
+    }
+}
+/// A manifest's setting as a script sees it.
+pub fn script_value(setting: &ModSetting) -> SfallValue {
+    match setting {
+        ModSetting::Int(value) => SfallValue::Int(*value),
+        ModSetting::Float(value) => SfallValue::float(*value),
+        ModSetting::Text(text) => SfallValue::text(text.as_bytes()),
+    }
 }
 #[derive(Debug, Default)]
 struct SessionState {

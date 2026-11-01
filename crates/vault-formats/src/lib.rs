@@ -51,12 +51,18 @@ pub enum GameProfile {
 }
 
 impl GameProfile {
-    /// The map version this game's maps carry (SPEC-003 19, SPEC-016 20).
+    /// The map version this game's new maps carry (SPEC-003 19, SPEC-016
+    /// 20).
     pub fn map_version(self) -> i32 {
         match self {
             Self::Fallout1 => 19,
             Self::Fallout2 => 20,
         }
+    }
+    /// SPEC-016 Revision 3: whether this game reads a map of `version`.
+    /// Fallout 2 reads SPEC-003's version 19 as well as its own.
+    pub fn reads_map_version(self, version: i32) -> bool {
+        version == 19 || version == self.map_version()
     }
 }
 pub use fid::{ArtCatalog, Fid, FidError};

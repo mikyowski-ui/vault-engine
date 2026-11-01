@@ -11,10 +11,9 @@ use std::{
     sync::Arc,
 };
 use vault_core::{
-    host_mods::{ModGlobal, ModHook, ModSession, ScriptedMod},
+    host_mods::{ModSession, ScriptedMod, script_value},
     mod_export::Setup,
     sfall::SfallValue,
-    state_hash::fnv1a64,
 };
 use vault_formats::{
     EnhancedOverrides, LayerEntry, LoadOrderPolicy, ModManifest, Vfs,
@@ -160,15 +159,6 @@ fn script_files(manifest: &ModManifest) -> Vec<String> {
     files
 }
 
-/// A manifest's setting as a script sees it.
-fn script_value(setting: &ModSetting) -> SfallValue {
-    match setting {
-        ModSetting::Int(value) => SfallValue::Int(*value),
-        ModSetting::Float(value) => SfallValue::float(*value),
-        ModSetting::Text(text) => SfallValue::text(text.as_bytes()),
-    }
-}
-
 /// A script's value as a setting, for storage.
 fn stored_value(value: &SfallValue) -> ModSetting {
     match value {
@@ -256,37 +246,7 @@ pub fn mod_session(
 }
 
 fn scripted_mod(layer: &ManifestLayer) -> ScriptedMod {
-    let manifest = &layer.manifest;
-    ScriptedMod {
-        id: manifest.id.clone().unwrap_or_default(),
-        version: manifest.version.clone().unwrap_or_default(),
-        manifest: fnv1a64(&layer.bytes),
-        globals: manifest
-            .global_scripts
-            .iter()
-            .map(|row| ModGlobal {
-                file: row.file.clone(),
-                repeat: row.repeat as i32,
-                kind: row.kind as i32,
-            })
-            .collect(),
-        hooks: manifest
-            .hooks
-            .iter()
-            .filter_map(|row| {
-                Some(ModHook {
-                    hook: mod_manifest::hook_point(&row.point)?,
-                    file: row.file.clone(),
-                    procedure: row.procedure.clone(),
-                })
-            })
-            .collect(),
-        defaults: manifest
-            .settings
-            .iter()
-            .map(|(key, setting)| (key.clone(), script_value(setting)))
-            .collect(),
-    }
+    ScriptedMod::from_manifest(&layer.manifest, &layer.bytes)
 }
 
 /// The batch of SPEC-024a §7.4's commit: each changed mod's file, holding

@@ -1849,3 +1849,220 @@ fn spec024_the_sfall_flag_needs_the_report() {
     assert!(!success);
     assert!(errors.contains("--report-script-stack"), "{errors}");
 }
+
+/// A Fallout 2 install with a version 19 map beside its version 20 ones, and
+/// a script that needs sfall mode's table.
+fn sfall_install() -> (tempfile::TempDir, tempfile::TempDir) {
+    let corpus = tempfile::tempdir().unwrap();
+    state::write_corpus(corpus.path());
+    vault_fixtures::fallout2::write_tables(corpus.path());
+    let map = std::fs::read(corpus.path().join("maps/synthetic.map")).unwrap();
+    for (name, number) in [("artemple.map", 2), ("oldmap.map", 3)] {
+        std::fs::write(
+            corpus.path().join("maps").join(name),
+            vault_fixtures::fallout2::named_map(map.clone(), name, 3, 20100, number),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        corpus.path().join("scripts/gl_sfall.int"),
+        state::program(
+            &[],
+            &[(b"start", state::returning(state::instruction(0x8250)))],
+        ),
+    )
+    .unwrap();
+    std::fs::copy(
+        corpus.path().join("color.pal"),
+        corpus.path().join("art/intrface/shared.pal"),
+    )
+    .unwrap();
+    let install = tempfile::tempdir().unwrap();
+    vault_fixtures::dat2::fallout2_install(corpus.path(), install.path(), 2);
+    // The archive builder makes every map version 20, so the loose data
+    // folder holds the version 19 one.
+    let mut old = std::fs::read(corpus.path().join("maps/oldmap.map")).unwrap();
+    old[..4].copy_from_slice(&19_i32.to_be_bytes());
+    std::fs::create_dir_all(install.path().join("data/maps")).unwrap();
+    std::fs::write(install.path().join("data/maps/oldmap.map"), old).unwrap();
+    (corpus, install)
+}
+fn line<'a>(text: &'a str, start: &str) -> &'a str {
+    let found = text.lines().find(|line| line.starts_with(start));
+    found.unwrap_or_else(|| panic!("{start}\n{text}"))
+}
+/// The smoke run's summary.
+fn smoke_line(text: &str) -> &str {
+    let mut lines = text.lines();
+    let found =
+        lines.find(|line| line.starts_with("Fallout 2 smoke run: ") && line.contains("ticks"));
+    found.unwrap_or_else(|| panic!("{text}"))
+}
+/// A layer folder holding `files`.
+fn layer(files: &[(&str, &[u8])]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, bytes) in files {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    dir
+}
+
+/// SPEC-018 §2.4 rules 1 and 2, and 4 for the map: the table is on the first
+/// line, the sfall words pass only with `--sfall`, and both map versions
+/// count under either table.
+#[test]
+fn spec018_the_report_names_its_table_and_counts_both_map_versions() {
+    let (corpus, install) = sfall_install();
+    let folder = install.path().to_str().unwrap();
+    let run = |flags: &[&str]| {
+        let mut flags = flags.to_vec();
+        flags.extend(["--report-fallout2-install", "--fallout2-dir", folder]);
+        audit(corpus.path(), &flags).2
+    };
+    let plain = run(&[]);
+    assert_eq!(plain.lines().next(), Some("Fallout 2 word table: fallout2"));
+    assert!(
+        plain.contains("parse failure: scripts/gl_sfall.int"),
+        "{plain}"
+    );
+    assert!(plain.contains("Fallout 2 install check: failed"), "{plain}");
+    let sfall = run(&["--sfall"]);
+    assert_eq!(
+        sfall.lines().next(),
+        Some("Fallout 2 word table: fallout2 sfall")
+    );
+    assert!(!sfall.contains("parse failure:"), "{sfall}");
+    assert!(sfall.contains("Fallout 2 install check: passed"), "{sfall}");
+    for text in [&plain, &sfall] {
+        let maps = line(text, "Fallout 2 maps: ");
+        assert!(maps.starts_with("Fallout 2 maps: 1 version 19, "), "{maps}");
+    }
+    assert!(sfall.contains("Fallout 2 ddraw.ini: none\n"), "{sfall}");
+    assert!(!plain.contains("ddraw.ini"), "{plain}");
+    // A version outside the two is a failure.
+    let bad = layer(&[("maps/oldmap.map", &18_i32.to_be_bytes())]);
+    let text = run(&["--sfall", "--mod-layer", bad.path().to_str().unwrap()]);
+    assert!(text.contains("parse failure: maps/oldmap.map"), "{text}");
+    assert!(text.contains("Fallout 2 install check: failed"), "{text}");
+}
+
+/// SPEC-018 §2.4 rule 3: a short `.pal` only a mod layer serves is auxiliary
+/// and does not fail the report. One the install has, and `color.pal`, do.
+#[test]
+fn spec018_a_short_palette_in_a_layer_is_auxiliary() {
+    let (corpus, install) = sfall_install();
+    let short: &[u8] = b"short";
+    let aux = layer(&[("art/intrface/egsomeone.pal", short)]);
+    let folder = install.path().to_str().unwrap();
+    let run = |layer: &std::path::Path| {
+        let flags = [
+            "--sfall",
+            "--report-fallout2-install",
+            "--fallout2-dir",
+            folder,
+            "--mod-layer",
+            layer.to_str().unwrap(),
+        ];
+        audit(corpus.path(), &flags).2
+    };
+    let text = run(aux.path());
+    assert!(
+        text.contains("auxiliary palette: art/intrface/egsomeone.pal 5\n"),
+        "{text}"
+    );
+    assert!(text.contains("Fallout 2 auxiliary palettes: 1\n"), "{text}");
+    assert!(text.contains("Fallout 2 install check: passed"), "{text}");
+    // `color.pal` is never auxiliary, wherever it lies.
+    let color = layer(&[("art/color.pal", short)]);
+    let text = run(color.path());
+    assert!(text.contains("parse failure: art/color.pal"), "{text}");
+    assert!(text.contains("Fallout 2 auxiliary palettes: 0\n"), "{text}");
+    assert!(text.contains("Fallout 2 install check: failed"), "{text}");
+    // A path the install also has is not auxiliary, under any name.
+    let shadow = layer(&[("art/intrface/shared.pal", short)]);
+    let text = run(shadow.path());
+    assert!(
+        text.contains("parse failure: art/intrface/shared.pal"),
+        "{text}"
+    );
+    assert!(text.contains("Fallout 2 auxiliary palettes: 0\n"), "{text}");
+    assert!(text.contains("Fallout 2 install check: failed"), "{text}");
+}
+
+/// SPEC-018 §2.4 rule 4: with `--sfall` the smoke run is a sfall session, on
+/// the map `ddraw.ini` chooses, and only with `--sfall`.
+#[test]
+fn spec018_the_sfall_smoke_run_starts_where_the_file_says() {
+    let (corpus, install) = sfall_install();
+    let ini = layer(&[("ddraw.ini", b"[Misc]\nStartingMap=oldmap.map\n")]);
+    let folder = install.path().to_str().unwrap();
+    let run = |sfall: bool| {
+        let mut flags = vec![
+            "--report-fallout2-install",
+            "--fallout2-dir",
+            folder,
+            "--mod-layer",
+            ini.path().to_str().unwrap(),
+        ];
+        if sfall {
+            flags.push("--sfall");
+        }
+        audit(corpus.path(), &flags).2
+    };
+    let text = run(true);
+    assert!(text.contains("Fallout 2 ddraw.ini: read\n"), "{text}");
+    let smoke = smoke_line(&text);
+    assert!(
+        smoke.starts_with("Fallout 2 smoke run: OLDMAP.SAV"),
+        "{smoke}"
+    );
+    let plain = run(false);
+    let smoke = smoke_line(&plain);
+    assert!(
+        smoke.starts_with("Fallout 2 smoke run: ARTEMPLE.SAV"),
+        "{smoke}"
+    );
+}
+
+/// A map the install owns, that no record names, parses with the install's
+/// prototypes although the layer's break it, and is only listed. A record
+/// naming it, or a layer serving it, makes it a failure again.
+#[test]
+fn spec018_a_leftover_map_is_listed_and_a_named_one_still_fails() {
+    let (corpus, install) = sfall_install();
+    let folder = install.path().to_str().unwrap();
+    let run = |layers: &[&std::path::Path]| {
+        let mut flags = vec![
+            "--sfall".to_owned(),
+            "--report-fallout2-install".to_owned(),
+            "--fallout2-dir".to_owned(),
+            folder.to_owned(),
+        ];
+        for layer in layers {
+            flags.push("--mod-layer".to_owned());
+            flags.push(layer.to_str().unwrap().to_owned());
+        }
+        let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+        audit(corpus.path(), &flags).2
+    };
+    // The prototypes the maps need are gone from this layer's view.
+    let broken: &[(&str, &[u8])] = &[("proto/scenery/scenery.lst", b"none.pro\n")];
+    let protos = layer(broken);
+    let text = run(&[protos.path()]);
+    assert!(text.contains("leftover map: maps/oldmap.map\n"), "{text}");
+    assert!(!text.contains("parse failure: maps/oldmap.map"), "{text}");
+    let named = format!(
+        "{}\n[Map 76]\nlookup_name=Kept\nmap_name=oldmap\n",
+        vault_fixtures::fallout2::MAPS
+    );
+    let table = layer(&[("data/maps.txt", named.as_bytes())]);
+    let text = run(&[protos.path(), table.path()]);
+    assert!(!text.contains("leftover map: maps/oldmap.map"), "{text}");
+    assert!(text.contains("parse failure: maps/oldmap.map"), "{text}");
+    assert!(text.contains("Fallout 2 install check: failed"), "{text}");
+    // With no layer, nothing is a leftover.
+    let text = run(&[]);
+    assert!(text.contains("Fallout 2 leftover maps: 0\n"), "{text}");
+}

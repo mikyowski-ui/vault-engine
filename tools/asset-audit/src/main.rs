@@ -38,6 +38,11 @@ const VALIDATED: [&str; 17] = [
 
 #[derive(Parser)]
 #[command(about = "Count and optionally validate assets in a loose game directory")]
+#[command(group(
+    clap::ArgGroup::new("sfall_report")
+        .args(["report_script_stack", "report_fallout2_install"])
+        .multiple(true)
+))]
 struct Args {
     /// Unpacked directory containing art/, data/, color.pal, fonts, etc.
     /// Required by every mode except `--dump-vm-trace`.
@@ -205,8 +210,10 @@ struct Args {
     /// under `scripts/` of `--fallout2-dir`, or else of `--corpus-dir`, a
     /// mod's folder included, with sfall mode's table instead. No
     /// `scripts.lst` is needed. The Fallout 2 audit itself keeps the
-    /// `fallout2` table (SPEC-017 Decision 46).
-    #[arg(long, requires = "report_script_stack")]
+    /// `fallout2` table (SPEC-017 Decision 46). SPEC-018 §2.4: with
+    /// `--report-fallout2-install`, sfall mode's word table, and a smoke run
+    /// that is a sfall session.
+    #[arg(long, requires = "sfall_report")]
     sfall: bool,
     /// SPEC-017 §8.1: a Fallout 2 install folder (its `MASTER.DAT`,
     /// `CRITTER.DAT` and `patch000.dat`, mounted as SPEC-018 §1 says) whose
@@ -1135,7 +1142,7 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
     if args.report_fallout2_install
         && let Some(folder) = &args.fallout2_dir
     {
-        fallout2::report(folder, &args.mod_layer)?;
+        fallout2::report(folder, &args.mod_layer, args.sfall)?;
     }
     if args.validate_saves {
         failures.run("Saves", "save check(s)", || {

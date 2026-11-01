@@ -825,8 +825,11 @@ fn corpus_every_map_parses() {
     assert!(failures.is_empty(), "{} maps failed", failures.len());
 }
 
+/// SPEC-016 Revision 3: `fallout2` reads version 19 as well as version 20,
+/// `fallout1` only 19, and any other version is refused. A map keeps its
+/// version and its bytes.
 #[test]
-fn spec016_version_20_maps_read_only_under_fallout2() {
+fn spec016_fallout2_reads_versions_19_and_20_and_fallout1_only_19() {
     let fallout1 = fixture::empty_map();
     let mut fallout2 = fallout1.clone();
     fixture::word(&mut fallout2, 0, 20);
@@ -840,14 +843,34 @@ fn spec016_version_20_maps_read_only_under_fallout2() {
     assert_eq!(format!("{same:?}"), format!("{:?}", classic.header));
     // Written back, it keeps version 20 and its bytes.
     assert_eq!(map.write().unwrap(), fallout2);
-    // One layout per profile: each game refuses the other's version.
+    // Fallout 1 still refuses version 20.
     let error = MapFile::parse(&fallout2, &lookup).unwrap_err().to_string();
     assert!(error.contains("version 20"), "{error}");
-    let error = MapFile::parse_for(&fallout1, &lookup, GameProfile::Fallout2)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("version 19"), "{error}");
+    // Fallout 2 reads the unchanged fixture, with no diagnostic, and it stays
+    // version 19, written back as the same bytes.
+    let kept = MapFile::parse_for(&fallout1, &lookup, GameProfile::Fallout2).unwrap();
+    assert_eq!(kept.header.version, 19);
+    assert!(kept.diagnostics.is_empty(), "{:?}", kept.diagnostics);
+    assert_eq!(
+        format!("{:?}", kept.header),
+        format!("{:?}", classic.header)
+    );
+    assert_eq!(kept.write().unwrap(), fallout1);
+    // Any other version is refused, naming it and what is read.
+    for version in [18, 21] {
+        let mut other = fallout1.clone();
+        fixture::word(&mut other, 0, version);
+        let error = MapFile::parse_for(&other, &lookup, GameProfile::Fallout2)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("version {version}")), "{error}");
+        assert!(error.contains("version 19 or 20"), "{error}");
+        assert!(MapFile::parse(&other, &lookup).is_err());
+    }
+    assert!(GameProfile::Fallout2.reads_map_version(19));
+    assert!(!GameProfile::Fallout1.reads_map_version(20));
     assert_eq!(GameProfile::default().map_version(), 19);
+    assert_eq!(GameProfile::Fallout2.map_version(), 20, "a new map's");
 }
 
 #[test]
@@ -956,6 +979,31 @@ fn spec016_fallout2_ladder_records_carry_a_destination_map() {
     // Fallout 1: SPEC-003's one-word, 92-byte record.
     let (fallout1, length) = map(19, &[destination]);
     assert_eq!(length, 92);
+    // SPEC-016 Revision 3: the version word, not the profile, chose that
+    // record. Under `fallout2` a version 19 ladder is 92 bytes too, the
+    // object after it parses, and it stays on this map.
+    let parsed = MapFile::parse_for(&fallout1, &lookup, GameProfile::Fallout2).unwrap();
+    let [ladder, second] = &parsed.objects.elevations[0][..] else {
+        panic!("{:?}", parsed.objects.elevations[0].len())
+    };
+    assert_eq!(
+        ladder.state,
+        ObjectState::Other {
+            word: 0,
+            detail: ObjectDetail::Ladder {
+                map: None,
+                destination: PackedLocation(destination as u32),
+            },
+        }
+    );
+    assert_eq!((second.id, second.hex), (2, Some(20101)));
+    assert_eq!(parsed.write().unwrap(), fallout1);
+    let mut misread = fallout1.clone();
+    fixture::word(&mut misread, 0, 20);
+    assert!(
+        MapFile::parse_for(&misread, &lookup, GameProfile::Fallout2).is_err(),
+        "the same bytes as version 20 fail at that object"
+    );
     let parsed = MapFile::parse(&fallout1, &lookup).unwrap();
     assert_eq!(
         parsed.objects.elevations[0][0].state,

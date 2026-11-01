@@ -271,7 +271,8 @@ default, or `instanced`; see [Render path](#render-path)).
 Under `fallout2` the data is read in Fallout 2's formats:
 - SPEC-015 archives, mounted as SPEC-018 §1 says: an optional
   `patch000.dat` over `MASTER.DAT`, and `CRITTER.DAT` for critter art;
-- SPEC-016 version 20 maps (with Fallout 2's two-word ladder records) and
+- SPEC-016 version 20 maps (with Fallout 2's two-word ladder records), version 19
+  maps with SPEC-003's one-word ladders (a mod's), and
   416-byte critter prototypes (412-byte ones are read with damage type 0).
 
 `--game-profile fallout2 --preview-map MAP` previews a Fallout 2 map. Under
@@ -1193,9 +1194,18 @@ lengths are printed. It is a report, not a category, and never fails the
 run; it ends with `Fallout 2 install check: passed` or `failed`. `--mod-layer
 <folder>`, repeated with the lowest first, mounts a mod's folders over the
 install, so a total conversion's tables are the ones read, and the report lists
-each map record that shares a lower record's file. A mod's maps and scripts are
-still parsed with the plain `fallout2` rules, so a mod that needs sfall words
-ends `failed` with its tables clean.
+each map record that shares a lower record's file. `--sfall` turns sfall mode on
+for the report (SPEC-018 §2.4). Its first line names the word table: `fallout2`,
+which a mod needing sfall words fails with its tables clean, or `fallout2 sfall`,
+with the mod words added when a layer is scripted. Maps of version 19 and 20 both
+parse, and the report counts each. A short `.pal` that only a mod layer serves is
+listed as `auxiliary palette: <path> <bytes>`, unless it is `color.pal`. A map the
+install owns, that no `maps.txt` record names, and that parses with the install's
+own prototypes is listed as `leftover map: <path>`: a mod that replaces prototypes
+leaves such maps behind, and no game reaches them. That last rule is the report's
+own, and neither listing fails the report. With `--sfall` the smoke run is a sfall
+session: it reads `ddraw.ini`, so `StartingMap` chooses its map, and a scripted
+layer turns manifest scripting on.
 
 `--validate-exits` checks every distinct exit grid destination of each map
 (map 0 and -1 open the world and town maps and need no tile) and every
@@ -3717,8 +3727,6 @@ Sfall mode (SPEC-024b), against the spec's boundaries:
 - `HOOK_USEOBJ` runs for the player's use of a map object and for a critter's use of
   an inventory item in the shell's item paths; `HOOK_ENCOUNTER` event 1 runs for
   the drop to terrain and for entering an area.
-- The F9 trace shows the words from `0x8184` to `0x8281` as `invalid`, although they
-  run. Only the display is wrong, and the mod words above have their names.
 
 Explosives (SPEC-013 R1-rev9), on real data:
 
@@ -3731,9 +3739,6 @@ Explosives (SPEC-013 R1-rev9), on real data:
 
 SPEC-024c, on real data:
 
-- Fallout Et Tu has its tables, start and premades working, but 14 of the 93 maps in
-  its `maps.txt` are version 19, the Fallout 1 format. SPEC-016 refuses that version
-  under the `fallout2` profile, so entering one of those maps fails.
 - `ddraw.ini` applies to a `--game` session, not to `--preview-map`.
 - A replay finds `ddraw.ini` in the `Vfs` layers or the install folder. It has no
   writable folder to look in.

@@ -357,8 +357,9 @@ impl MapFile {
     pub fn parse(bytes: &[u8], prototypes: &impl PrototypeLookup) -> Result<Self, ParseError> {
         Self::parse_for(bytes, prototypes, crate::GameProfile::Fallout1)
     }
-    /// A map of `game`'s version only (SPEC-003 19, SPEC-016 20; the same
-    /// layout).
+    /// A map of a version `game` reads (SPEC-003 19, SPEC-016 20). The
+    /// version word chooses the record layout, and `prototypes` are `game`'s
+    /// whichever it is (SPEC-016 Revision 3).
     pub fn parse_for(
         bytes: &[u8],
         prototypes: &impl PrototypeLookup,
@@ -366,12 +367,21 @@ impl MapFile {
     ) -> Result<Self, ParseError> {
         let mut r = Reader::new(bytes, "MAP")?;
         let version = r.be_i32()?;
-        if version != game.map_version() {
+        if !game.reads_map_version(version) {
+            let read = match game {
+                crate::GameProfile::Fallout1 => "19",
+                crate::GameProfile::Fallout2 => "19 or 20",
+            };
             return Err(r.error(format!(
-                "map version {version}; {game:?} maps are version {}",
-                game.map_version()
+                "map version {version}; {game:?} maps are version {read}"
             )));
         }
+        // A version 19 ladder keeps SPEC-003's one word under either game.
+        let game = if version == crate::GameProfile::Fallout2.map_version() {
+            crate::GameProfile::Fallout2
+        } else {
+            crate::GameProfile::Fallout1
+        };
         let name = r.take(16)?.try_into().expect("fixed name");
         let entry_hex = r.be_i32()?;
         if !(0..40000).contains(&entry_hex) {

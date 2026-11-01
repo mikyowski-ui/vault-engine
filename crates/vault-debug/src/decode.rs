@@ -1,7 +1,11 @@
 //! Read-only SPEC-004 instruction decoding for inspection. Nothing here
 //! executes or mutates a VM.
 use std::fmt;
-use vault_vm::{Vm, WordSet, extensions::MOD_WORDS, sfall::mod_row};
+use vault_vm::{
+    Vm, WordSet,
+    extensions::MOD_WORDS,
+    sfall::{mod_row, word_row},
+};
 
 /// Which SPEC-004 §3.7 registration range an instruction word falls in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -153,13 +157,15 @@ impl Instruction {
         self.address + self.length()
     }
     /// The word's class; `decode` accepted it for its word set, so the
-    /// widest set (Fallout 2's, with the mod words) classifies it.
+    /// widest set (sfall mode's, with the mod words) classifies it.
     pub fn class(&self) -> OpcodeClass {
-        classify_in(&WordSet::FALLOUT2.with_mods(true), self.word).unwrap_or(OpcodeClass::Invalid)
+        classify_in(&WordSet::FALLOUT2_SFALL.with_mods(true), self.word)
+            .unwrap_or(OpcodeClass::Invalid)
     }
     /// A short mnemonic for core and push words; extensions, whose catalogs
-    /// SPEC-004 defers, are `lib`/`ext` with their word, and a mod word has
-    /// its name from SPEC-024a §7.3.
+    /// SPEC-004 defers, are `lib`/`ext` with their word, and a mod word or a
+    /// word past Fallout 2's set has its name from SPEC-024a §7.3 or
+    /// SPEC-024b.
     pub fn mnemonic(&self) -> &'static str {
         mnemonic(self.word)
     }
@@ -204,7 +210,12 @@ impl fmt::Display for Instruction {
 
 /// Short names for the SPEC-004 §2.6 core instruction table and §2.5 pushes.
 pub fn mnemonic(word: u16) -> &'static str {
-    if let Some(row) = mod_row(word) {
+    if let Some(row) = mod_row(word).or_else(|| {
+        (0x8184..=*WordSet::FALLOUT2_SFALL.words.end())
+            .contains(&word)
+            .then(|| word_row(word))
+            .flatten()
+    }) {
         return row.name;
     }
     match word {
