@@ -903,6 +903,56 @@ fn spec017_words_decode_in_a_fallout2_program() {
     assert_eq!(decode_next(&vm).unwrap().word, 0x8157);
 }
 
+/// SPEC-024a §7.3: under manifest scripting the debugger names the mod
+/// words, and without it they stay refused. The next word of a running
+/// program is what the F9 page shows.
+#[test]
+fn spec024a_mod_words_decode_with_their_names() {
+    use crate::decode::{classify_in, decode_in};
+    use vault_vm::WordSet;
+    let words = WordSet::FALLOUT2.with_mods(true);
+    for (word, name) in [
+        (0x8300, "mod_api_version"),
+        (0x8301, "mod_get_setting"),
+        (0x8302, "mod_set_setting"),
+        (0x8303, "mod_log"),
+        (0x8304, "mod_register_hook"),
+        (0x8305, "mod_hook_id"),
+        (0x8306, "mod_get_hook_arg"),
+        (0x8307, "mod_set_hook_arg"),
+        (0x8308, "mod_set_hook_return"),
+        (0x8309, "mod_game_mode"),
+    ] {
+        assert_eq!(classify_in(&words, word), Some(OpcodeClass::Game));
+        assert_eq!(classify_in(&WordSet::FALLOUT2, word), None, "{word:#06x}");
+        assert_eq!(decode::classify(word), None, "{word:#06x}");
+        let instruction = decode_in(&op(word), 0, &words).unwrap();
+        assert_eq!(instruction.class(), OpcodeClass::Game);
+        assert_eq!(instruction.mnemonic(), name);
+        assert_eq!(instruction.text(), format!("{name} {word:#06x}"));
+    }
+    for word in [0x82ff, 0x830a] {
+        assert_eq!(classify_in(&words, word), None, "{word:#06x}");
+        assert_eq!(
+            decode_in(&op(word), 0, &words),
+            Err(DecodeError::Invalid { address: 0, word })
+        );
+    }
+    let program = IntProgram::parse_in(&fixture::program(), &words, false).unwrap();
+    let vm = Vm::fragment(program, &op(0x8309)).unwrap();
+    assert_eq!(decode_next(&vm).unwrap().text(), "mod_game_mode 0x8309");
+    // A word in no catalog keeps its old rendering.
+    let bogus = Instruction {
+        address: 0,
+        word: 0x830a,
+        immediate: None,
+    };
+    assert_eq!(
+        (bogus.class(), bogus.mnemonic()),
+        (OpcodeClass::Invalid, "invalid")
+    );
+}
+
 #[test]
 fn hand_built_instructions_with_unregistered_words_do_not_panic() {
     // `decode` never yields such a word; a hand-built instruction is

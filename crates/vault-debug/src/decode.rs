@@ -1,7 +1,7 @@
 //! Read-only SPEC-004 instruction decoding for inspection. Nothing here
 //! executes or mutates a VM.
 use std::fmt;
-use vault_vm::{Vm, WordSet};
+use vault_vm::{Vm, WordSet, extensions::MOD_WORDS, sfall::mod_row};
 
 /// Which SPEC-004 §3.7 registration range an instruction word falls in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -13,7 +13,8 @@ pub enum OpcodeClass {
     /// `0x804C`-`0x80A0`, the general interpreter library.
     Library,
     /// `0x80A1`-`0x8155`, game-specific extensions (to `0x8183` in a
-    /// Fallout 2 program, SPEC-017 §2.1).
+    /// Fallout 2 program, SPEC-017 §2.1), and SPEC-024a §7.3's
+    /// `0x8300`-`0x8309` under manifest scripting.
     Game,
     /// A word outside every registered range. `decode` never produces one
     /// (it reports `DecodeError::Invalid`); only an `Instruction` built by
@@ -70,7 +71,8 @@ pub fn classify(word: u16) -> Option<OpcodeClass> {
 }
 /// [`classify`] for a program of word set `words`: its host words run to
 /// the set's last word (`0x8183` for Fallout 2's, whose 42 reserved words
-/// decode and fail closed when run, SPEC-017 §4).
+/// decode and fail closed when run, SPEC-017 §4), and a set with manifest
+/// scripting on has SPEC-024a's words too.
 pub fn classify_in(words: &WordSet, word: u16) -> Option<OpcodeClass> {
     if word & 0x3ff == 1 {
         return (word & 0x8000 != 0).then_some(OpcodeClass::Push);
@@ -79,6 +81,7 @@ pub fn classify_in(words: &WordSet, word: u16) -> Option<OpcodeClass> {
         0x8000..=0x804b => Some(OpcodeClass::Core),
         0x804c..=0x80a0 => Some(OpcodeClass::Library),
         word if (0x80a1..=*words.words.end()).contains(&word) => Some(OpcodeClass::Game),
+        word if words.mods && MOD_WORDS.contains(&word) => Some(OpcodeClass::Game),
         _ => None,
     }
 }
@@ -150,12 +153,13 @@ impl Instruction {
         self.address + self.length()
     }
     /// The word's class; `decode` accepted it for its word set, so the
-    /// widest set (Fallout 2's) classifies it.
+    /// widest set (Fallout 2's, with the mod words) classifies it.
     pub fn class(&self) -> OpcodeClass {
-        classify_in(&WordSet::FALLOUT2, self.word).unwrap_or(OpcodeClass::Invalid)
+        classify_in(&WordSet::FALLOUT2.with_mods(true), self.word).unwrap_or(OpcodeClass::Invalid)
     }
     /// A short mnemonic for core and push words; extensions, whose catalogs
-    /// SPEC-004 defers, are `lib`/`ext` with their word.
+    /// SPEC-004 defers, are `lib`/`ext` with their word, and a mod word has
+    /// its name from SPEC-024a §7.3.
     pub fn mnemonic(&self) -> &'static str {
         mnemonic(self.word)
     }
@@ -200,6 +204,9 @@ impl fmt::Display for Instruction {
 
 /// Short names for the SPEC-004 §2.6 core instruction table and §2.5 pushes.
 pub fn mnemonic(word: u16) -> &'static str {
+    if let Some(row) = mod_row(word) {
+        return row.name;
+    }
     match word {
         0xc001 => "push.int",
         0xc801 => "push.int.q",

@@ -802,6 +802,11 @@ impl Shell {
     /// Launcher input is never game input: the log starts with the game
     /// (its surface and scaling first, as a direct start writes them).
     fn log(&mut self, _event_loop: &ActiveEventLoop, command: InputCommand) {
+        self.record(command);
+    }
+    /// [`Self::log`], which writes no window state: a session's records
+    /// are the same with no window.
+    fn record(&mut self, command: InputCommand) {
         if self.launcher.is_some() {
             return;
         }
@@ -812,64 +817,67 @@ impl Shell {
             self.input_log.stop(&*error);
         }
     }
+    /// What a session logs after its surface, in the order a replay reads
+    /// them. Both surface sites come here, so the two cannot differ.
+    fn log_session_records(&mut self) {
+        self.log_scaling();
+        self.log_enhanced();
+        self.log_touch_ui();
+        self.start_game_speed();
+        self.log_mod_stack();
+    }
     /// The display scaling reaches the log, so a replay maps the pointer
     /// through the same viewport.
-    fn log_scaling(&mut self, event_loop: &ActiveEventLoop) {
+    fn log_scaling(&mut self) {
         let aspect_fit = self.scaling == ScalingMode::AspectFit;
-        self.log(event_loop, InputCommand::Scaling { aspect_fit });
+        self.record(InputCommand::Scaling { aspect_fit });
     }
     /// An enhanced session's settings reach the log after the surface and
     /// scaling, so a replay presents the same layers; a Vanilla session
     /// logs nothing here.
-    fn log_enhanced(&mut self, event_loop: &ActiveEventLoop) {
+    fn log_enhanced(&mut self) {
         if let Some(settings) = self.enhanced {
-            self.log(
-                event_loop,
-                InputCommand::Enhanced {
-                    settings: settings.into(),
-                },
-            );
+            self.record(InputCommand::Enhanced {
+                settings: settings.into(),
+            });
         }
     }
     /// A touch UI session logs that it is one after the surface, scaling
     /// and enhanced records, so a replay shows the pill bar; a session
     /// without it logs nothing here.
-    fn log_touch_ui(&mut self, event_loop: &ActiveEventLoop) {
+    fn log_touch_ui(&mut self) {
         if self.touch_ui {
-            self.log(event_loop, InputCommand::TouchUi { enabled: true });
+            self.record(InputCommand::TouchUi { enabled: true });
         }
     }
     /// SPEC-024a §2.3: a scripted session logs its mod stack last of the
     /// session records, and before the first tick. Any other logs nothing.
-    fn log_mod_stack(&mut self, event_loop: &ActiveEventLoop) {
+    fn log_mod_stack(&mut self) {
         let session = self
             .session
             .as_ref()
             .and_then(|session| session.mod_session());
         if let Some(session) = session {
-            self.log(event_loop, input::mod_stack_record(&session));
+            self.record(input::mod_stack_record(&session));
         }
     }
     /// The session's game speed, when it is not 1.0: logged after the
     /// other session records, then applied, as a replay applies it; 1.0
     /// (and Vanilla) logs nothing here.
-    fn start_game_speed(&mut self, event_loop: &ActiveEventLoop) {
+    fn start_game_speed(&mut self) {
         if let Some(speed) = self
             .game_speed
             .filter(|speed| *speed != enhanced::GameSpeed::Normal)
         {
-            self.apply_game_speed(event_loop, speed);
+            self.apply_game_speed(speed);
         }
     }
     /// Log the game speed, then give it to the preview.
-    fn apply_game_speed(&mut self, event_loop: &ActiveEventLoop, speed: enhanced::GameSpeed) {
+    fn apply_game_speed(&mut self, speed: enhanced::GameSpeed) {
         self.game_speed = Some(speed);
-        self.log(
-            event_loop,
-            InputCommand::GameSpeed {
-                speed: speed.factor(),
-            },
-        );
+        self.record(InputCommand::GameSpeed {
+            speed: speed.factor(),
+        });
         if let Some(preview) = &mut self.session {
             preview.set_game_speed(speed);
         }
@@ -1326,13 +1334,13 @@ impl Shell {
                     scaling = config::scaling_name(self.scaling),
                     "scaling mode changed"
                 );
-                self.log_scaling(event_loop);
+                self.log_scaling();
             }
             ShellHotkey::Viewport => self.toggle_viewport(event_loop, window),
             ShellHotkey::GameSpeed => {
                 let speed = self.game_speed.unwrap_or_default().next();
                 tracing::info!(speed = speed.label(), "game speed changed");
-                self.apply_game_speed(event_loop, speed);
+                self.apply_game_speed(speed);
                 self.refresh_preview(event_loop, window);
             }
         }
@@ -1775,11 +1783,7 @@ impl Shell {
                 height: size.height,
             },
         );
-        self.log_scaling(event_loop);
-        self.log_enhanced(event_loop);
-        self.log_touch_ui(event_loop);
-        self.start_game_speed(event_loop);
-        self.log_mod_stack(event_loop);
+        self.log_session_records();
         self.refresh_preview(event_loop, window);
     }
 }
@@ -1857,11 +1861,7 @@ impl ApplicationHandler for Shell {
             Ok(mut renderer) => {
                 renderer.set_scaling(self.scaling);
                 self.renderer = Some(renderer);
-                self.log_scaling(event_loop);
-                self.log_enhanced(event_loop);
-                self.log_touch_ui(event_loop);
-                self.start_game_speed(event_loop);
-                self.log_mod_stack(event_loop);
+                self.log_session_records();
             }
             Err(error) => {
                 self.fail(event_loop, error);

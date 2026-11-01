@@ -1190,7 +1190,12 @@ new-game hand-off onto `artemple` with its scripts running for 60 seconds of
 world time, listing VM errors by script, procedure and word and the
 diagnostics by kind. Only counts, names, PIDs, word and line numbers and
 lengths are printed. It is a report, not a category, and never fails the
-run; it ends with `Fallout 2 install check: passed` or `failed`.
+run; it ends with `Fallout 2 install check: passed` or `failed`. `--mod-layer
+<folder>`, repeated with the lowest first, mounts a mod's folders over the
+install, so a total conversion's tables are the ones read, and the report lists
+each map record that shares a lower record's file. A mod's maps and scripts are
+still parsed with the plain `fallout2` rules, so a mod that needs sfall words
+ends `failed` with its tables clean.
 
 `--validate-exits` checks every distinct exit grid destination of each map
 (map 0 and -1 open the world and town maps and need no tile) and every
@@ -3447,6 +3452,69 @@ asset-audit --corpus-dir mods/mymod --report-script-stack --sfall
 
 That check knows the mod words below as well.
 
+## Mod premades, startup keys and tables (SPEC-024c)
+
+SPEC-024c is what a total conversion needs to start. Character sheets and the
+table rules below hold in every session. The `ddraw.ini` keys and `HApStyle`
+need sfall mode.
+
+**Character sheets.** A `.gcd` is read by its exact length, per file, under either
+profile: 428 bytes (SPEC-006), 432 (SPEC-018 §6.3), or 440, which is the 432-byte
+layout, then a race word at `0x1B0` and an appearance style word at `0x1B4`. Any
+other length is refused before any player state changes, and file names compare
+without case. SAVE keeps a sheet's length.
+
+Taking a 440-byte sheet in a new game, with sfall mode on and
+`EnableHeroAppearanceMod` at 1 or 2, sets sfall global `HApStyle` and the stored
+style of `set_hero_style` to the style word, before session setup, so `game_loaded`
+already sees them. The stored style changes no art, and the race word has no effect.
+A mod's global script can test the global: that is how `fo1_new_premades` gives a
+premade its starting items.
+
+**`ddraw.ini`.** Under sfall mode the session reads the file once, before the main
+menu: through the `Vfs` layers, the writable folder, then the install folder, with the
+name compared without case. With sfall mode off it is never opened. Only that name is
+read, and only section `[Misc]`. A key that is absent, empty or commented out, or a
+numeric key at -1, takes its default with no diagnostic. A value of the wrong form
+takes its default with one, and never stops the session.
+
+| Key | Effect | Default |
+| --- | --- | --- |
+| `StartingMap` | The new-game map, start area, entrance and city music. An invalid or absent map falls back to the default, with a diagnostic | `artemple` |
+| `Movie1` to `Movie17` | The file of that movie, for every use: startup, the hand-off and `play_gmovie`. Flags stay with the index. `Movie18` and up get a diagnostic | SPEC-018 §6.4's table |
+| `StartYear`, `StartMonth`, `StartDay` | The date of game day 0, with month and day counted from 0. It holds for the session and is not saved | 25 July 2241 |
+| `StartTime` | The reset clock, as `HHMM` | 721 |
+| `StartXPos`, `StartYPos` | The party's world position, as a pair | The start area's |
+| `ViewXPos`, `ViewYPos` | The first world-map view, as a pair | SPEC-019's |
+| `MaleStartModel`, `FemaleStartModel` | The player's art at a new game, from `critters.lst` | The existing rule |
+| `MaleDefaultModel`, `FemaleDefaultModel` | The jumpsuit base names | `hmjmps`, `hfjmps` |
+| `VersionString` | The menu's version text. Up to two `%d`, which become 1 and 2 | `FALLOUT II 1.02d` |
+| `MainMenuOffsetX`, `MainMenuOffsetY` | Moves the six buttons and their labels | 0 |
+| `MainMenuCreditsOffsetX`, `MainMenuCreditsOffsetY` | Moves the copyright line | 0 |
+| `MainMenuFontColour` | The last byte is the palette index of the version and copyright text. Flag 1 limits it to the version | SPEC-019's key |
+| `PremadePaths`, `PremadeFIDs` | Replace the three premades, in order. Both must be set, with equal counts and names of at most 11 bytes | The three |
+| `EnableHeroAppearanceMod` | Gates `HApStyle`, as above | 0 |
+
+Every other key is unread, `Fallout1Behavior` and the engine patches included. The
+file is a replay input and adds no record to a log.
+
+**Table files.** All four grammar files, `maps.txt` and `city.txt` among them, follow
+one header rule. A line that begins with `[` and has a `]` opens a section, named by
+the text before the first `]`, and what follows that `]` is ignored, so `[Map 076] #
+note` opens map 76. `#` is still no comment marker: on a pair line it stays in the
+value. A `[` with no `]` is ignored with a diagnostic and leaves the section open, and
+a `[` later in a line opens nothing, so `color=[x]` stays a pair.
+
+- An 8-item entrance is read from its first seven items. With a hex of -1 and an
+  Integer eighth item it takes no diagnostic, because every reading gives the same
+  entrance. Any other 8-item line keeps its diagnostic.
+- An `ambient_sfx` item holding spaces or tabs is split at them, and each part is read
+  as an item.
+- Two records with one map file and different lookup names are aliases and take no
+  diagnostic. The same name twice, or a missing one, keeps it. Lookups do not change:
+  a number gives the record's own file, and a name gives the lowest number, so an
+  alias shares the lower map's working `.SAV`.
+
 ## Manifest scripting (SPEC-024a)
 
 A mod layer's `vault-mod.toml` can attach `.INT` scripts to the engine's hook points
@@ -3537,7 +3605,8 @@ attach, its global scripts load, and its other scripts load. Registration is not
 scripting on. `0x830A` and up are refused at load, so a script needing a word this
 engine lacks takes the refused path rather than failing partway. Operands follow
 sfall's value model, with sfall mode on or off: a failed operand pops them all, has no
-effect, writes a diagnostic, and the word pushes its default.
+effect, writes a diagnostic, and the word pushes its default. The F9 trace shows these
+words by mnemonic in a program with manifest scripting on.
 
 | Word | Mnemonic | Pop order | Push | Effect |
 | --- | --- | --- | --- | --- |
@@ -3574,7 +3643,7 @@ last the session, on the F9 overlay's read-only **Mod log** page and in the debu
 **Replays.** A replay reads no settings file and no manifest key, so `--mod-list PATH`
 names its load order, as a `mod_list` file does. In a live session the flag wins over
 the settings file. A scripted session logs one record after the other session records
-and before the first tick:
+and before the first tick, on both ways a desktop session starts:
 
 ```json
 {"command_id":7,"kind":"mod_stack","api":1,"mods":[{"id":"cheap-ap","version":"1.0.0","manifest":"EE7C38513A262548","settings":{"ap_cost":"i:1"}}]}
@@ -3631,12 +3700,8 @@ Sfall mode (SPEC-024b), against the spec's boundaries:
 - `encounter_detection`, `set_fo1_hit_chance` and `set_car_intface_art` store their
   setting and change nothing yet. The engine has no Outdoorsman avoidance check to
   skip, no `(PE - 2)` term for the player to lose (§3.5's range term is the only one),
-  and draws no car image to replace. D-58 asked for these anchors to be checked.
-- `set_terrain_name` takes cell coordinates, as its text says, while
-  `get_terrain_name` takes world pixels, as §4.11 says, although §4.12 calls them the
-  same.
-- `HOOK_CARTRAVEL`'s arg0 is the engine's steps, 1 to 4 by SPEC-019 §3.19.3, not the
-  "3 to 8" of §6.19's table.
+  and draws no car image to replace. SPEC-024b §4.12 now says so: they stay stored
+  until the subsystem each needs exists.
 - `create_spatial` gives the record's script ID as its object, because a spatial
   record has no object of its own.
 - A timed `wait` in a hook member now ends the member, as §6.5 asks. Before SPEC-024a
@@ -3652,3 +3717,14 @@ Sfall mode (SPEC-024b), against the spec's boundaries:
 - `HOOK_USEOBJ` runs for the player's use of a map object and for a critter's use of
   an inventory item in the shell's item paths; `HOOK_ENCOUNTER` event 1 runs for
   the drop to terrain and for entering an area.
+- The F9 trace shows the words from `0x8184` to `0x8281` as `invalid`, although they
+  run. Only the display is wrong, and the mod words above have their names.
+
+SPEC-024c, on real data:
+
+- Fallout Et Tu has its tables, start and premades working, but 14 of the 93 maps in
+  its `maps.txt` are version 19, the Fallout 1 format. SPEC-016 refuses that version
+  under the `fallout2` profile, so entering one of those maps fails.
+- `ddraw.ini` applies to a `--game` session, not to `--preview-map`.
+- A replay finds `ddraw.ini` in the `Vfs` layers or the install folder. It has no
+  writable folder to look in.

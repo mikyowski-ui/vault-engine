@@ -291,6 +291,112 @@ fn settings_commit_and_come_back_and_a_bad_line_is_dropped() {
     let session = world.host.mod_session.clone().unwrap();
     assert_eq!(session.settings(0)["ap_cost"], SfallValue::Int(7));
 }
+/// A log the test can read back while the shell holds its writer.
+#[derive(Clone, Default)]
+struct SharedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for SharedLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl SharedLog {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+/// The desktop's start of a log over `session`: its surface, then what both
+/// surface sites call.
+fn desktop_log(session: SessionRuntime, set: impl FnOnce(&mut crate::Shell)) -> SharedLog {
+    let written = SharedLog::default();
+    let mut shell = crate::Shell {
+        input_log: crate::InputLog(Some(Box::new(written.clone()))),
+        session: Some(session),
+        ..Default::default()
+    };
+    set(&mut shell);
+    shell.record(InputCommand::Surface {
+        width: 640,
+        height: 480,
+    });
+    shell.log_session_records();
+    shell.record(InputCommand::Tick { now_ms: 16 });
+    shell.record(InputCommand::Tick { now_ms: 32 });
+    written
+}
+fn kinds(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            value["kind"].as_str().unwrap().to_owned()
+        })
+        .collect()
+}
+/// §2.3 on the desktop path: a live session's stack is logged last of the
+/// session records, its stored settings with it, and a replay of the very
+/// log it wrote takes the same layers and those settings from the record.
+#[test]
+fn the_desktop_logs_its_stack_last_and_a_replay_of_that_log_runs() {
+    let dir = corpus();
+    let root = dir.path();
+    layer(root, "cheap", N1, "gl_cheapap.int", &fixture_program());
+    let mods = order(root, &["cheap"]);
+    let storage = Arc::new(MemoryStorage::new());
+    let ops = [StorageOp::put(SETTINGS, "ap_cost = 7\n")];
+    storage.commit(Namespace::Config, &ops).unwrap();
+    let written = desktop_log(live(root, mods.clone(), storage), |shell| {
+        shell.touch_ui = true;
+        shell.game_speed = Some(crate::enhanced::GameSpeed::Fast);
+    });
+    let text = written.text();
+    assert_eq!(
+        kinds(&text),
+        [
+            "surface",
+            "scaling",
+            "touch_ui",
+            "game_speed",
+            "mod_stack",
+            "tick",
+            "tick"
+        ]
+    );
+    assert!(text.contains(r#""settings":{"ap_cost":"i:7"}"#), "{text}");
+    let mut replay = replay_of(root, mods);
+    replay.run(std::io::Cursor::new(&text)).unwrap();
+    assert_eq!(replay.now, 32);
+    let world = interactive_world(&mut replay.session).unwrap();
+    let player = world.host.world.player;
+    assert_eq!(world.host.hook_fixed_cost(player, 5, 0), 7);
+    let storage = world.storage.clone().unwrap();
+    assert_eq!(storage.read(Namespace::Config, SETTINGS).unwrap(), None);
+}
+/// §2.3: a session with no scripted layer logs no record.
+#[test]
+fn the_desktop_logs_no_stack_without_a_scripted_layer() {
+    let dir = corpus();
+    let root = dir.path();
+    let plain = PreviewArgs {
+        corpus_dir: Some(root.into()),
+        preview_map: Some("maps/synthetic.map".into()),
+        seed: Some(1),
+        headless: true,
+        storage: Some(Arc::new(MemoryStorage::new())),
+        ..Default::default()
+    };
+    let session = SessionRuntime::start(SessionConfig::new(SessionOrigin::CommandLine, plain))
+        .unwrap()
+        .unwrap();
+    let written = desktop_log(session, |_| {});
+    assert_eq!(
+        kinds(&written.text()),
+        ["surface", "scaling", "tick", "tick"]
+    );
+}
+
 /// §10 test 9: a chain never starts while a checkpoint is taken or a frame
 /// composed, with every point attached.
 #[test]
