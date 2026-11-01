@@ -13,26 +13,31 @@ use super::{
     modal_kit::{self, ArrowPress, ItemMenu},
 };
 use crate::{AppResult, interface::Painter};
-/// The engine-drawn Take All, Distance and WIELD buttons and the WIELD
-/// label (window-relative), as the core lays them out.
+#[cfg(test)]
 pub(crate) use vault_core::ui::inventory::{
-    LOOT_DISTANCE as DISTANCE, LOOT_TAKE_ALL as TAKE_ALL, LOOT_WIELD as WIELD,
-    LOOT_WIELD_LABEL as WIELD_LABEL,
+    LOOT_DISTANCE as DISTANCE, LOOT_PORTRAITS, LOOT_WIELD_LABEL as WIELD_LABEL,
 };
+/// Fallout 1's engine-drawn Take All, Distance and WIELD buttons and the
+/// WIELD label (window-relative), as the core lays them out.
+pub(crate) use vault_core::ui::inventory::{LOOT_TAKE_ALL as TAKE_ALL, LOOT_WIELD as WIELD};
 use vault_core::{
-    ObjectRef,
+    GameProfile, ObjectRef,
+    assets::WorldAssets,
     loot::{LootMove, LootSession},
     skills::{self, Counter, ItemEntry},
     ui::{
         ERROR_SOUND, Rect, fallout2 as ui2,
         inventory::{
-            self as layout, LOOT_CYCLE, LOOT_DONE, LOOT_PORTRAITS, LOOT_SCROLL, LootControl,
-            LootView, scroll_list,
+            self as layout, LOOT_CYCLE, LOOT_DONE, LOOT_SCROLL, LootControl, LootRects, LootView,
+            scroll_list,
         },
     },
 };
 use vault_render::IndexedImage;
 use winit::keyboard::KeyCode;
+
+const LOOT_ART: &str = "loot.frm";
+const LOOT_ART_SIZE: [i32; 2] = [537, 376];
 
 /// The open window. SPEC-020 §2.1: its hit boxes are the core's
 /// [`layout::loot_layout`] over a [`LootView`] filled from this state; the
@@ -98,6 +103,15 @@ impl MapPreview {
     }
     /// The loot window over the world for `session`.
     fn show_loot(&mut self, session: vault_core::loot::LootSession) {
+        // SPEC-019 §3.7: other art keeps the rectangles, with one diagnostic.
+        if self.loot_game() == GameProfile::Fallout2
+            && self
+                .painter()
+                .size(LOOT_ART)
+                .is_some_and(|size| size != LOOT_ART_SIZE)
+        {
+            crate::interface::note_once("loot.frm size", "loot.frm is not 537 by 376");
+        }
         self.screen = Screen::Loot(Box::new(LootScreen {
             session,
             offsets: [0, 0],
@@ -129,8 +143,9 @@ impl MapPreview {
             return Ok(image);
         };
         let painter = self.painter();
+        let rects = self.loot_rects();
         let [ox, oy] = skills::LOOT_ORIGIN;
-        painter.blit_opaque(&mut image, "loot.frm", 0, [ox, oy]);
+        painter.blit_opaque(&mut image, LOOT_ART, 0, [ox, oy]);
         for (index, target) in [false, true].into_iter().enumerate() {
             let entries = self.host.loot_items(&screen.session, target);
             for (row, entry) in entries
@@ -139,11 +154,7 @@ impl MapPreview {
                 .take(skills::LOOT_ROWS)
                 .enumerate()
             {
-                let [x, y] = if target {
-                    skills::loot_target_icon(row)
-                } else {
-                    skills::loot_player_icon(row)
-                };
+                let [x, y] = rects.icon(target, row);
                 // G-19: ammunition counts rounds, pack size × (quantity - 1)
                 // plus the front pack (omitted while lifted).
                 let lifted = screen.held.is_some_and(|(_, held, _)| held == entry.0);
@@ -169,11 +180,12 @@ impl MapPreview {
         }
         self.draw_red_button(&painter, &mut image, on_screen(LOOT_DONE));
         if self.take_all_shown(screen) {
-            // SPEC-019 §3.7: Fallout 2's Take All pair at the enhanced
-            // button's place, with the art's own size.
+            // SPEC-019 §3.7: Fallout 2's Take All pair at its own place,
+            // with the art's own size.
+            let at = rects.take_all;
             let take_all = self
                 .take_all_size()
-                .map_or(TAKE_ALL, |size| Rect::at(TAKE_ALL.origin(), size));
+                .map_or(at, |size| Rect::at(at.origin(), size));
             let pressed = self.held == Some(on_screen(take_all));
             let art = self
                 .host
@@ -183,18 +195,19 @@ impl MapPreview {
                 .and_then(|_| painter.role(&ui2::TAKE_ALL[usize::from(pressed)]));
             match art {
                 Some((name, _)) => {
-                    painter.blit(&mut image, name, 0, [ox + TAKE_ALL.x, oy + TAKE_ALL.y]);
+                    painter.blit(&mut image, name, 0, [ox + at.x, oy + at.y]);
                 }
-                None => self.engine_button(&painter, &mut image, TAKE_ALL, b"TAKE ALL"),
+                None => self.engine_button(&painter, &mut image, at, b"TAKE ALL"),
             }
         }
         if screen.session.companion {
             let mode = self.host.companion_distance(screen.session.root);
             let label = format!("DISTANCE: {}", mode.name().to_ascii_uppercase());
-            self.engine_button(&painter, &mut image, DISTANCE, label.as_bytes());
+            let [distance, wield, wield_label] = rects.gear;
+            self.engine_button(&painter, &mut image, distance, label.as_bytes());
             let weapon = self.host.companion_weapon(screen.session.root);
-            let rects = [on_screen(WIELD), on_screen(WIELD_LABEL)];
-            self.draw_wield(&painter, &mut image, rects, weapon);
+            let wield = [on_screen(wield), on_screen(wield_label)];
+            self.draw_wield(&painter, &mut image, wield, weapon);
         }
         if let Some((_, menu)) = &screen.menu {
             self.draw_item_menu(&painter, &mut image, menu);
@@ -229,7 +242,7 @@ impl MapPreview {
         } else {
             (self.host.figure_art(shown, self.active_item(), 3), 3, false)
         };
-        let rect = on_screen(LOOT_PORTRAITS[usize::from(target)].1);
+        let rect = on_screen(self.loot_rects().portraits[usize::from(target)]);
         self.draw_portrait(image, fid, (direction, last), rect);
     }
     pub(super) fn close_loot_screen(&mut self) {
@@ -248,9 +261,23 @@ impl MapPreview {
             _ => Vec::new(),
         }
     }
+    /// The edition the window is laid out for. A session with Fallout 2
+    /// tables is Fallout 2 whatever its assets say.
+    fn loot_game(&self) -> GameProfile {
+        if self.host.world.fallout2.is_some() {
+            GameProfile::Fallout2
+        } else {
+            self.host.assets.game_profile()
+        }
+    }
+    /// The window's rectangles for this edition.
+    fn loot_rects(&self) -> &'static LootRects {
+        layout::loot_rects(self.loot_game())
+    }
     /// What the window shows, for the core layout.
     fn loot_view(&self, screen: &LootScreen) -> LootView {
         LootView {
+            game: self.loot_game(),
             companion: screen.session.companion,
             take_all: self.take_all_shown(screen).then(|| self.take_all_size()),
             bodies: screen.session.bodies.len(),
@@ -504,6 +531,7 @@ impl MapPreview {
     /// The release ends a drag: over the other pane's drop zone it moves
     /// the entry (through the counter for a stack); elsewhere nothing.
     pub(crate) fn loot_release(&mut self, point: Option<[i32; 2]>) -> bool {
+        let rects = self.loot_rects();
         let Screen::Loot(screen) = &mut self.screen else {
             return false;
         };
@@ -524,7 +552,7 @@ impl MapPreview {
         let Some((from_target, _, quantity)) = screen.held else {
             return false;
         };
-        match point.and_then(skills::loot_drop_target) {
+        match point.and_then(|point| rects.drop_target(point)) {
             Some(to_target) if to_target != from_target => {
                 if quantity > 1 {
                     screen.counter = Some((Counter::new(quantity), LootCount::Move(to_target)));
@@ -594,8 +622,7 @@ impl MapPreview {
     fn take_all_shown(&self, screen: &LootScreen) -> bool {
         (self.enhanced_extras() || self.host.world.fallout2.is_some()) && !screen.session.steal
     }
-    /// Fallout 2's Take All art size (the button sits at the enhanced
-    /// one's place); `None` keeps the enhanced button's size.
+    /// Fallout 2's Take All art size; `None` keeps the edition's size.
     fn take_all_size(&self) -> Option<[i32; 2]> {
         let painter = self.painter();
         self.host

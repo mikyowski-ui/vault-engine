@@ -63,7 +63,7 @@ use winit::keyboard::KeyCode;
 mod backdrop_tests;
 #[cfg(test)]
 #[path = "enhanced_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 /// The tile the world canvas is drawn in: the map window's size.
 const TILE: [u32; 2] = [640, 380];

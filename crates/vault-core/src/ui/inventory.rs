@@ -4,7 +4,7 @@
 //! cursor's item menu. Rectangles are screen coordinates; both windows are
 //! at (80, 0).
 use super::{Layout, Rect};
-use crate::skills::ItemEntry;
+use crate::{GameProfile, skills::ItemEntry};
 
 pub const WINDOW: [i32; 2] = [80, 0];
 /// The window art: `invbox.frm` (`intrface.lst` 48, 499 by 377) and the
@@ -397,14 +397,87 @@ pub const LOOT_SCROLL: [(bool, bool, Rect); 4] = [
 ];
 /// An item slot's size in the loot and barter windows.
 pub const SLOT_SIZE: [i32; 2] = [64, 48];
-/// A loot pane's slot `row` (window-relative; `target` is the right pane).
+/// The screen height of a loot list: 6 rows of 48.
+const LOOT_LIST_HEIGHT: i32 = 288;
+/// SPEC-019 §3.7 (Revision 5) and SPEC-013 §3.16: what the loot window
+/// places by edition, window-relative, each pair ordered player, target.
+/// SPEC-020 §2.1 rule 5: this is the one authority, and [`loot_rects`] the
+/// one branch on the edition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LootRects {
+    /// Each list's row 0 button; a row is 48 lower.
+    slots: [[i32; 2]; 2],
+    /// Each list's row 0 icon.
+    icons: [[i32; 2]; 2],
+    /// The portrait boxes, which are also their up-level hot zones.
+    pub portraits: [Rect; 2],
+    /// Take All's place, and its size without art.
+    pub take_all: Rect,
+    /// The companion gear window's Distance, WIELD and WIELD label.
+    pub gear: [Rect; 3],
+}
+const LOOT_RECTS_FALLOUT1: LootRects = LootRects {
+    slots: [[44, 35], [422, 35]],
+    icons: [[48, 39], [426, 41]],
+    portraits: [LOOT_PORTRAITS[0].1, LOOT_PORTRAITS[1].1],
+    take_all: LOOT_TAKE_ALL,
+    gear: [LOOT_DISTANCE, LOOT_WIELD, LOOT_WIELD_LABEL],
+};
+/// Each portrait is outside its list, so no two rectangles overlap (D-34),
+/// and Take All sits midway between the lists (D-35). The gear buttons,
+/// which SPEC-019 does not place, keep their rows under the player portrait.
+const LOOT_RECTS_FALLOUT2: LootRects = LootRects {
+    slots: [[176, 35], [297, 35]],
+    icons: [[180, 39], [301, 41]],
+    portraits: [Rect::new(44, 35, 60, 100), Rect::new(422, 35, 60, 100)],
+    take_all: Rect::new(249, 158, 39, 41),
+    gear: [
+        Rect::new(44, LOOT_DISTANCE.y, LOOT_DISTANCE.w, LOOT_DISTANCE.h),
+        Rect::new(44, LOOT_WIELD.y, LOOT_WIELD.w, LOOT_WIELD.h),
+        Rect::new(
+            44,
+            LOOT_WIELD_LABEL.y,
+            LOOT_WIELD_LABEL.w,
+            LOOT_WIELD_LABEL.h,
+        ),
+    ],
+};
+/// The loot window's rectangles under `game`.
+pub const fn loot_rects(game: GameProfile) -> &'static LootRects {
+    match game {
+        GameProfile::Fallout1 => &LOOT_RECTS_FALLOUT1,
+        GameProfile::Fallout2 => &LOOT_RECTS_FALLOUT2,
+    }
+}
+impl LootRects {
+    /// List `target`'s slot `row`.
+    pub fn slot(&self, target: bool, row: usize) -> Rect {
+        let [x, y] = self.slots[usize::from(target)];
+        Rect::at([x, y + 48 * row as i32], SLOT_SIZE)
+    }
+    /// List `target`'s icon of `row`.
+    pub fn icon(&self, target: bool, row: usize) -> [i32; 2] {
+        let [x, y] = self.icons[usize::from(target)];
+        [x, y + 48 * row as i32]
+    }
+    /// The list whose drop zone holds a screen `point`, its far edges
+    /// included: true for the target's.
+    pub fn drop_target(&self, point: [i32; 2]) -> Option<bool> {
+        [false, true].into_iter().find(|target| {
+            let [x, y] = self.slots[usize::from(*target)];
+            let [x, y] = [
+                x + crate::skills::LOOT_ORIGIN[0],
+                y + crate::skills::LOOT_ORIGIN[1],
+            ];
+            (x..=x + SLOT_SIZE[0]).contains(&point[0])
+                && (y..=y + LOOT_LIST_HEIGHT).contains(&point[1])
+        })
+    }
+}
+/// A Fallout 1 loot pane's slot `row` (window-relative; `target` is the
+/// right pane).
 pub fn loot_slot(target: bool, row: usize) -> Rect {
-    let at = if target {
-        crate::skills::loot_target_slot(row)
-    } else {
-        crate::skills::loot_player_slot(row)
-    };
-    Rect::at(at, SLOT_SIZE)
+    LOOT_RECTS_FALLOUT1.slot(target, row)
 }
 /// A control of the loot window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -432,6 +505,8 @@ pub enum LootControl {
 /// What the loot window shows, for its layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LootView {
+    /// The edition, which chooses the [`LootRects`].
+    pub game: GameProfile,
     /// A companion's gear window (Distance and WIELD).
     pub companion: bool,
     /// Take All is shown (the enhanced preset or Fallout 2, not stealing),
@@ -448,13 +523,16 @@ pub struct LootView {
 /// the cycling arrows (with more than one body), the filled entries
 /// (player pane first) and the portraits.
 pub fn loot_layout(view: &LootView) -> Layout<LootControl> {
+    let rects = loot_rects(view.game);
     let mut layout = Layout::new().with(LootControl::Done, LOOT_DONE);
     if view.companion {
-        layout.push(LootControl::Distance, LOOT_DISTANCE);
-        layout.push(LootControl::Wield, LOOT_WIELD);
+        layout.push(LootControl::Distance, rects.gear[0]);
+        layout.push(LootControl::Wield, rects.gear[1]);
     }
     if let Some(size) = view.take_all {
-        let rect = size.map_or(LOOT_TAKE_ALL, |size| Rect::at(LOOT_TAKE_ALL.origin(), size));
+        let rect = size.map_or(rects.take_all, |size| {
+            Rect::at(rects.take_all.origin(), size)
+        });
         layout.push(LootControl::TakeAll, rect);
     }
     layout.extend(LOOT_SCROLL.iter().map(|(target, up, rect)| {
@@ -478,14 +556,15 @@ pub fn loot_layout(view: &LootView) -> Layout<LootControl> {
         let filled = view.counts[pane].saturating_sub(view.offsets[pane]);
         layout.extend(
             (0..crate::skills::LOOT_ROWS.min(filled))
-                .map(|row| (LootControl::Slot { target, row }, loot_slot(target, row))),
+                .map(|row| (LootControl::Slot { target, row }, rects.slot(target, row))),
         );
     }
-    layout.extend(
-        LOOT_PORTRAITS
-            .iter()
-            .map(|(target, rect)| (LootControl::Portrait { target: *target }, *rect)),
-    );
+    layout.extend([false, true].map(|target| {
+        (
+            LootControl::Portrait { target },
+            rects.portraits[usize::from(target)],
+        )
+    }));
     layout.offset(crate::skills::LOOT_ORIGIN)
 }
 

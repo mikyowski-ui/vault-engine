@@ -811,7 +811,7 @@ fn a_registered_mod_layer_runs_the_camera_demo() {
 
 /// The synthetic world's first item, given to a dead `npc`, and a
 /// non-steal loot window on that corpse.
-pub(super) fn loot_corpse(preview: &mut MapPreview) -> vault_core::ObjectRef {
+pub(in crate::map_preview) fn loot_corpse(preview: &mut MapPreview) -> vault_core::ObjectRef {
     use vault_core::LootRequest;
     use vault_formats::map::ObjectState;
     let player = preview.host.world.player;

@@ -528,31 +528,25 @@ pub fn skill_hotkey(row: u8) -> Option<i32> {
 /// §3.16 loot window layout (window at screen (80, 0)).
 pub const LOOT_ORIGIN: [i32; 2] = [80, 0];
 pub fn loot_player_slot(row: usize) -> [i32; 2] {
-    [44, 35 + 48 * row as i32]
+    fallout1_loot().slot(false, row).origin()
 }
 pub fn loot_target_slot(row: usize) -> [i32; 2] {
-    [422, 35 + 48 * row as i32]
+    fallout1_loot().slot(true, row).origin()
 }
 pub fn loot_player_icon(row: usize) -> [i32; 2] {
-    [48, 39 + 48 * row as i32]
+    fallout1_loot().icon(false, row)
 }
 pub fn loot_target_icon(row: usize) -> [i32; 2] {
-    [426, 41 + 48 * row as i32]
+    fallout1_loot().icon(true, row)
 }
 pub const LOOT_ROWS: usize = 6;
 /// Screen drop zones: the target pane and the player pane.
 pub fn loot_drop_target(point: [i32; 2]) -> Option<bool> {
-    let [x, y] = point;
-    if !(35..=323).contains(&y) {
-        return None;
-    }
-    if (502..=566).contains(&x) {
-        Some(true)
-    } else if (124..=188).contains(&x) {
-        Some(false)
-    } else {
-        None
-    }
+    fallout1_loot().drop_target(point)
+}
+/// Fallout 1's table, which `crate::ui::inventory` owns.
+const fn fallout1_loot() -> &'static crate::ui::inventory::LootRects {
+    crate::ui::inventory::loot_rects(crate::GameProfile::Fallout1)
 }
 /// The quantity label: `x` and the quantity above 1 (capped at 99999);
 /// ammunition counts rounds `pack × (quantity - 1) + front`.

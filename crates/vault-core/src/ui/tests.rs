@@ -1873,6 +1873,172 @@ mod modal_api {
         assert_eq!(offset, 1);
     }
 
+    /// The rows of `tests/fixtures/spec019/loot-layout.tsv` for one edition:
+    /// (element, kind, rectangle).
+    fn loot_rows(profile: &str) -> Vec<(&'static str, &'static str, Rect)> {
+        include_str!("../../../../tests/fixtures/spec019/loot-layout.tsv")
+            .lines()
+            .skip(1)
+            .map(|line| line.split('\t').collect::<Vec<_>>())
+            .filter(|cells| cells[0] == profile)
+            .map(|cells| {
+                let at = |index: usize| cells[index].parse::<i32>().unwrap();
+                let rect = Rect::new(at(3), at(4), at(5), at(6));
+                assert_eq!(
+                    rect.offset(crate::skills::LOOT_ORIGIN).origin(),
+                    [at(7), at(8)]
+                );
+                (cells[1], cells[2], rect)
+            })
+            .collect()
+    }
+    /// What the core's table gives for a fixture element, window-relative.
+    fn loot_rect(game: crate::GameProfile, element: &str) -> Rect {
+        use inventory::{LOOT_CYCLE, LOOT_DONE, LOOT_SCROLL};
+        let rects = inventory::loot_rects(game);
+        let list = |target: bool, rest: &str| -> Rect {
+            let drop = rest == "drop_zone";
+            let row = rest
+                .strip_prefix("row_")
+                .map_or(0, |row| row.parse().unwrap());
+            let slot = rects.slot(target, row);
+            Rect::new(slot.x, slot.y, slot.w, if drop { 288 } else { slot.h })
+        };
+        match element {
+            "window" => Rect::new(0, 0, 537, 376),
+            "player_portrait" => rects.portraits[0],
+            "target_portrait" => rects.portraits[1],
+            "take_all" => rects.take_all,
+            "done" => LOOT_DONE,
+            "body_previous" => LOOT_CYCLE[0].0,
+            "body_next" => LOOT_CYCLE[1].0,
+            "player_scroll_up" => LOOT_SCROLL[0].2,
+            "player_scroll_down" => LOOT_SCROLL[1].2,
+            "target_scroll_up" => LOOT_SCROLL[2].2,
+            "target_scroll_down" => LOOT_SCROLL[3].2,
+            other => match other.split_once('_').unwrap() {
+                ("player", rest) => list(false, rest),
+                ("target", rest) => list(true, rest),
+                _ => panic!("{other}"),
+            },
+        }
+    }
+    /// SPEC-019 §4.19 Vector S: every rectangle of both editions, and under
+    /// Fallout 2 no two boxes meet and each lies inside the window.
+    #[test]
+    fn spec019_vector_s_loot_rectangles_of_both_editions() {
+        use crate::GameProfile::{Fallout1, Fallout2};
+        for (game, name, count) in [(Fallout1, "fallout1", 24), (Fallout2, "fallout2", 25)] {
+            let rows = loot_rows(name);
+            assert_eq!(rows.len(), count, "{name}");
+            for (element, _, rect) in &rows {
+                assert_eq!(loot_rect(game, element), *rect, "{name} {element}");
+            }
+        }
+        let meet = |a: Rect, b: Rect| {
+            a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+        };
+        let boxes: Vec<_> = loot_rows("fallout2")
+            .into_iter()
+            .filter(|(_, kind, _)| *kind == "box")
+            .collect();
+        assert_eq!(boxes.len(), 22);
+        for (index, (element, _, rect)) in boxes.iter().enumerate() {
+            assert!(
+                rect.x >= 0 && rect.y >= 0 && rect.x + rect.w <= 537 && rect.y + rect.h <= 376,
+                "{element}"
+            );
+            for (other, _, second) in &boxes[index + 1..] {
+                assert!(!meet(*rect, *second), "{element} and {other}");
+            }
+        }
+        // Fallout 1 keeps SPEC-013's overlaps: a cycling button on a row.
+        let fallout1 = inventory::loot_rects(Fallout1);
+        assert!(meet(inventory::LOOT_CYCLE[0].0, fallout1.slot(true, 2)));
+        // The companion gear buttons, which SPEC-019 does not place, stay
+        // clear of every box under Fallout 2 too.
+        for rect in inventory::loot_rects(Fallout2).gear {
+            for (element, _, second) in &boxes {
+                assert!(!meet(rect, *second), "{element}");
+            }
+        }
+    }
+    /// §4.19's points, each hit in Fallout 2's slot and not Fallout 1's.
+    #[test]
+    fn spec019_vector_s_loot_hits_and_drops() {
+        use crate::GameProfile::{Fallout1, Fallout2};
+        use inventory::{LootControl, LootView, loot_layout, loot_rects};
+        let view = |game| LootView {
+            game,
+            take_all: Some(None),
+            bodies: 2,
+            counts: [6, 6],
+            ..LootView::default()
+        };
+        let [ox, oy] = crate::skills::LOOT_ORIGIN;
+        let two = loot_layout(&view(Fallout2));
+        let one = loot_layout(&view(Fallout1));
+        let hit = |layout: &Layout<LootControl>, [x, y]: [i32; 2]| layout.hit([ox + x, oy + y]);
+        assert_eq!(hit(&two, [270, 170]), Some(LootControl::TakeAll));
+        assert_eq!(hit(&one, [270, 170]), None, "Fallout 1's Take All is lower");
+        assert_eq!(hit(&one, [270, 245]), Some(LootControl::TakeAll));
+        assert_eq!(hit(&two, [270, 245]), None);
+        assert_eq!(
+            hit(&two, [70, 80]),
+            Some(LootControl::Portrait { target: false })
+        );
+        assert_eq!(
+            hit(&one, [70, 80]),
+            Some(LootControl::Slot {
+                target: false,
+                row: 0
+            })
+        );
+        assert_eq!(
+            hit(&two, [200, 60]),
+            Some(LootControl::Slot {
+                target: false,
+                row: 0
+            })
+        );
+        assert_eq!(
+            hit(&one, [200, 60]),
+            Some(LootControl::Portrait { target: false })
+        );
+        assert_eq!(
+            hit(&two, [450, 80]),
+            Some(LootControl::Portrait { target: true })
+        );
+        // Every box answers for itself: nothing in the order decides.
+        for (control, rect) in two.controls() {
+            let centre = [rect.x + rect.w / 2, rect.y + rect.h / 2];
+            assert_eq!(two.hit(centre), Some(*control), "{control:?}");
+        }
+        // The art's own size stays at Fallout 2's place.
+        let sized = loot_layout(&LootView {
+            take_all: Some(Some([41, 39])),
+            ..view(Fallout2)
+        });
+        assert_eq!(
+            sized.rect(LootControl::TakeAll),
+            Some(Rect::new(329, 158, 41, 39))
+        );
+        let drops = loot_rects(Fallout2);
+        assert_eq!(drops.drop_target([280, 200]), Some(false));
+        assert_eq!(drops.drop_target([400, 200]), Some(true));
+        assert_eq!(drops.drop_target([150, 200]), None, "SPEC-013's zone");
+        assert_eq!(drops.drop_target([280, 324]), None, "below the list");
+        let drops = loot_rects(Fallout1);
+        assert_eq!(drops.drop_target([150, 200]), Some(false));
+        assert_eq!(drops.drop_target([520, 200]), Some(true));
+        assert_eq!(drops.drop_target([280, 200]), None);
+        // Icons sit 2 pixels lower in the target list, as SPEC-013's do.
+        let rects = loot_rects(Fallout2);
+        assert_eq!(rects.icon(false, 1), [180, 87]);
+        assert_eq!(rects.icon(true, 5), [301, 281]);
+        assert_eq!(rects.slot(true, 5), Rect::new(297, 275, 64, 48));
+    }
+
     #[test]
     fn loot_and_barter_layouts() {
         use inventory::{BarterControl, BarterView, LootControl, LootView};
@@ -1916,6 +2082,7 @@ mod modal_api {
         assert!(!layout.contains(LootControl::TakeAll));
         assert!(!layout.contains(LootControl::Cycle { forward: true }));
         let full = inventory::loot_layout(&LootView {
+            game: crate::GameProfile::Fallout1,
             companion: true,
             take_all: Some(Some([90, 25])),
             bodies: 2,

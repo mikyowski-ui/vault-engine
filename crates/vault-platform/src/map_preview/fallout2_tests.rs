@@ -512,3 +512,99 @@ fn spec019_vector_j_dialogue_panel_and_combat_control() {
             .any(|(entry, _)| *entry == item)
     );
 }
+
+/// A plain window, so everything drawn over it can be read back.
+const LOOT_COLOR: u8 = 41;
+/// Whether anything but the window's own color is inside a screen rectangle.
+fn drawn_over(image: &vault_render::IndexedImage, rect: vault_core::ui::Rect) -> bool {
+    (rect.y..rect.y + rect.h)
+        .flat_map(|y| (rect.x..rect.x + rect.w).map(move |x| [x, y]))
+        .any(|point| pixel(image, point) != LOOT_COLOR)
+}
+
+/// SPEC-019 §3.7 on a whole session, against Fallout 1's window: the
+/// portraits and lists are drawn in each edition's slots, Take All answers at
+/// Fallout 2's place, and a drag lands in Fallout 2's drop zones.
+#[test]
+fn spec019_the_fallout2_loot_window_draws_and_answers_in_its_own_slots() {
+    use crate::map_preview::enhanced::tests::loot_corpse;
+    use vault_core::{GameProfile, ui::inventory::loot_rects};
+    let dir = corpus();
+    write_art(dir.path(), &[("loot.frm", 537, 376, LOOT_COLOR)]);
+    // Font 101, for an entry's quantity label: the synthetic item has no art.
+    std::fs::write(dir.path().join("font1.aaf"), state_fixture::preview_aaf()).unwrap();
+    let origin = vault_core::skills::LOOT_ORIGIN;
+    let on_screen = |rect: vault_core::ui::Rect| rect.offset(origin);
+
+    // Each edition's portraits are in its boxes, and not in the other's.
+    let mut one = world(dir.path());
+    loot_corpse(&mut one);
+    let mut two = world(dir.path());
+    fallout2(&mut two);
+    let item = loot_corpse(&mut two);
+    let [drawn_one, drawn_two] = [one.image().unwrap(), two.image().unwrap()];
+    let [rects_one, rects_two] = [GameProfile::Fallout1, GameProfile::Fallout2].map(loot_rects);
+    assert!(drawn_over(&drawn_one, on_screen(rects_one.portraits[1])));
+    assert!(drawn_over(&drawn_two, on_screen(rects_two.portraits[1])));
+    assert!(!drawn_over(&drawn_two, on_screen(rects_one.portraits[1])));
+    // A stack's label is drawn on its list's first row, in each edition.
+    let stacked = |fallout2_game: bool| {
+        let mut preview = world(dir.path());
+        if fallout2_game {
+            fallout2(&mut preview);
+        }
+        loot_corpse(&mut preview);
+        let Screen::Loot(screen) = &preview.screen else {
+            panic!("the window");
+        };
+        let root = screen.session.root;
+        let world = &mut preview.host.world;
+        world.get_mut(root).unwrap().inventory[0].1 = 5;
+        preview.image().unwrap()
+    };
+    let (label_one, label_two) = (stacked(false), stacked(true));
+    assert!(drawn_over(&label_two, on_screen(rects_two.slot(true, 0))));
+    assert!(!drawn_over(&label_two, on_screen(rects_two.slot(true, 1))));
+    assert!(drawn_over(&label_one, on_screen(rects_one.slot(true, 0))));
+    // Take All sits between the lists, on no row and no portrait.
+    assert!(drawn_over(&drawn_two, on_screen(rects_two.take_all)));
+
+    // A drag from the target list, released in Fallout 1's player zone,
+    // moves nothing; released in Fallout 2's, it moves the entry.
+    let row = on_screen(rects_two.slot(true, 0));
+    let press = [row.x + 20, row.y + 20];
+    assert!(two.click(press, false));
+    assert!(two.release(Some([150, 200]), false));
+    assert_ne!(
+        two.host.world.get(item).unwrap().owner,
+        Some(two.host.world.player)
+    );
+    assert!(two.click(press, false));
+    assert!(two.release(Some([280, 200]), false));
+    assert_eq!(
+        two.host.world.get(item).unwrap().owner,
+        Some(two.host.world.player)
+    );
+
+    // Fallout 2's Take All answers at (329, 158); Fallout 1's window has no
+    // button there.
+    let mut other = world(dir.path());
+    fallout2(&mut other);
+    let item = loot_corpse(&mut other);
+    let button = on_screen(rects_two.take_all);
+    let press = [button.x + 20, button.y + 20];
+    assert!(other.click(press, false));
+    other.release(Some(press), false);
+    assert_eq!(
+        other.host.world.get(item).unwrap().owner,
+        Some(other.host.world.player)
+    );
+    let entries = |preview: &MapPreview| match &preview.screen {
+        Screen::Loot(screen) => preview.host.loot_items(&screen.session, true).len(),
+        _ => panic!("the window"),
+    };
+    let held = entries(&one);
+    one.click(press, false);
+    one.release(Some(press), false);
+    assert_eq!(entries(&one), held, "no button under Fallout 1");
+}
